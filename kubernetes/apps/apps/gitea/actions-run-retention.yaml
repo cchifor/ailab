@@ -24,9 +24,17 @@
 #
 # NUMBERS, from the 2026-09-28 canary (25 live deletions, 5 s pace, agentforge tail): ~1 MB of extra
 # WAL per deleted run on top of Gitea's own ~150 KB/s; the replica's slot never dipped below 1.07 GB
-# of headroom, replay lag <= 0.22 s. 300 per execution at a 3 s pace = ~15 min of work per hour,
-# ~330 KB/s extra (on par with the background rate), 21 executions/day = 6,300/day against ~1,934/day
-# ageing in: the ~33 k backlog drains in ~8 days. Re-measure before raising either number.
+# of headroom, replay lag <= 0.22 s. 300 per execution at a 3 s pace = ~15 min of work per hour;
+# DURING that window the extra WAL is ~330 KB/s, i.e. >2x the ~150 KB/s background (the canary's 5 s
+# pace was ~200 KB/s); averaged over the hour it is ~85 KB/s. Size slot headroom on the peak: 330 KB/s
+# for 15 min = ~300 MB against the 1 GB budget. 21 executions/day = 6,300/day against ~1,934/day
+# ageing in: the ~30 k backlog drains in ~8 days. Re-measure before raising either number.
+#
+# JOB SHAPE for that window: ~15 min of pauses + ~600 requests + 12 gate checks = ~20 min. So
+# activeDeadlineSeconds 2700 (a deadline tuned for the 2-minute canary would kill a live run
+# mid-deletion), concurrencyPolicy Forbid (an overrun never overlaps the next hour's execution),
+# backoffLimit 0 + restartPolicy Never (a gate pause is exit 2 = a failed pod; a retry would start a
+# fresh 300 budget, so there is none: one pod, one budget, per execution).
 #
 # SELECTION: runs are listed id DESC; the script walks each repo from the LAST page towards page 1 for at
 # most MAX_PAGES_PER_REPO pages, never stops early on an ineligible page (a rerun keeps its old id), and
@@ -66,8 +74,8 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 0
-      activeDeadlineSeconds: 1500
+      backoffLimit: 0 # one pod = one MAX_DELETES_PER_RUN budget; no retry can re-spend it
+      activeDeadlineSeconds: 2700 # ~20 min of work at 300 x 3 s + requests; 1500 was the canary shape
       template:
         metadata:
           labels:
