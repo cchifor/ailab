@@ -1,5 +1,5 @@
-# dev_worker script tests — the checks that pin the claude-dashboard/tmux-resurrect collision and
-# the cred helper's contract with the openbao-agent sink (ADR 0020).
+# dev_worker script tests — the checks that pin the claude-dashboard/tmux-resurrect collision, the
+# cred helper's contract with the openbao-agent sink (ADR 0020), and the web terminal's gate.
 #
 # WHY THIS EXISTS: the dashboard layout is code that a plugin can silently overwrite. tmux-resurrect
 # restores window names BY INDEX, so a snapshot whose window list has drifted relabels the launcher's
@@ -78,3 +78,15 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/dev_worker/tests/test-platform-helper.sh
+
+      # The web terminal's authentication gate: dw-access-verify's JWT tests plus the Caddyfile
+      # ordering that keeps the shell closed. REQUIRE_PYJWT=1 for the same reason as REQUIRE_TMUX
+      # above: jobs run on the runner hosts, which carry python3-jwt, and a missing library must fail
+      # the gate rather than skip the one section that exercises forged tokens.
+      - name: web terminal gate (JWT validator + Caddyfile shape)
+        shell: bash
+        env:
+          REQUIRE_PYJWT: "1"
+        run: |
+          set -euo pipefail
+          bash ansible/roles/dev_worker/tests/test-web-gate.sh

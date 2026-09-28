@@ -16,3 +16,13 @@ dev_worker_enabled: true
 dev_worker_enable_openbao: true
 # dev_worker_enable_herdr — PILOT, deliberately NOT flipped here: it is per-host in
 # host_vars/dev-worker-4.yml so only that worker runs it (runbook § "herdr pilot").
+
+# Web terminal gate (roles/dev_worker/tasks/web_gate.yml): each worker's Cloudflare Access app AUD tag,
+# which dw-access-verify requires in the tunnel JWT. Not secret (every JWT carries it). Source of
+# truth: `tofu -chdir=kubernetes/infra/cloudflare output dev_worker_access_aud`; the tag changes only
+# if the Access app is recreated, and a stale value fails CLOSED (the tunnel path answers 403).
+dev_worker_web_access_aud:
+  dev-worker-1: "53a76def944b41c2004845841112bd1d8aee23f5a18374d129ab6146ef85cc11"
+  dev-worker-2: "20e908a082e933407d729650cf7ff7f84b30b2a3f465deb4ba86fc71a05aef64"
+  dev-worker-3: "3ae2c98475b46531413a6566f1810f82064dae062a8a56fa1b94630b429c4a36"
+  dev-worker-4: "b20e820377d80090923ee32b3dfa4cbb051a5c852da3460840c7d9fc2bc4057a"

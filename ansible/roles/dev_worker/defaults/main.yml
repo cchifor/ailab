@@ -151,6 +151,29 @@ dev_worker_tmux_continuum_save_interval: "15"
 dev_worker_gh_fleet_repos:
   - cchifor/platform
 
+# ---- web terminal authentication gate (tasks/web_gate.yml, tag web-gate) ----
+# Every path to ttyd is authenticated. Tunnel path: Cloudflare Access's JWT, validated on the worker
+# by dw-access-verify against the team's signing keys and THIS worker's Access app AUD. LAN/Tailscale
+# path: Basic auth, bridged to a cookie (Safari sends no Basic credentials on the WebSocket).
+dev_worker_web_public_host: "{{ inventory_hostname | regex_replace('^dev-worker-', 'dw') }}.chifor.me"
+# The only origins a WebSocket upgrade may come from (the cross-site WebSocket hijacking guard).
+dev_worker_web_origins:
+  - "https://{{ dev_worker_web_public_host }}"
+  - "https://{{ ansible_default_ipv4.address }}"
+  - "https://{{ ansible_hostname }}"
+dev_worker_web_access_team_domain: chifor.cloudflareaccess.com
+# { <inventory_hostname>: <64-hex AUD of that worker's Access app> } — set in group_vars from
+# `tofu -chdir=kubernetes/infra/cloudflare output dev_worker_access_aud`. Not a secret (every JWT
+# carries it). A worker without an entry fails the play before its Caddyfile is touched.
+dev_worker_web_access_aud: {}
+dev_worker_web_verify_port: 7682
+dev_worker_web_lan_user: "{{ dev_worker_admin_user }}"
+# From ansible/secrets/dev-worker.sops.yaml (one fleet credential). The plaintext is only used by the
+# converge self-check; Caddy gets the bcrypt. The cookie secret is 64 hex chars.
+dev_worker_web_lan_password: ""
+dev_worker_web_lan_password_bcrypt: ""
+dev_worker_web_lan_cookie_secret: ""
+
 # ---- firewall (LAN allowed to reach SSH / Caddy HTTPS / node_exporter) ----
 dev_worker_lan_cidr: "192.168.0.0/24"
 

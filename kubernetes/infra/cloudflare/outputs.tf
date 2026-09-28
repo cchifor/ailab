@@ -33,3 +33,11 @@ output "access_idp_redirect_url" {
   description = "Cloudflare's OIDC callback for the Authelia IdP; must match the client's redirect_uris in Authelia."
   value       = one(cloudflare_zero_trust_access_identity_provider.authelia[*].config.redirect_url)
 }
+
+# Each dev-worker terminal's Access AUD tag. The worker-side JWT validator (ansible dev_worker role,
+# web_gate.yml) accepts only tokens minted for its own application, so these values are copied into
+# ansible/group_vars/dev_workers.yml `dev_worker_web_access_aud`. Not sensitive: every JWT carries it.
+output "dev_worker_access_aud" {
+  description = "AUD tag per dev-worker Access application, keyed by ansible inventory hostname."
+  value       = { for k, app in cloudflare_zero_trust_access_application.dev_worker : "dev-worker-${trimprefix(k, "dw")}" => app.aud }
+}

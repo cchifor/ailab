@@ -1,12 +1,65 @@
 # {{ ansible_managed }} (role: dev_worker)
-# Caddy in front of ttyd. tls internal = self-signed via Caddy's local CA (browser shows a
-# trust-on-first-use warning). Reachable by IP or hostname on the LAN.
+# Caddy in front of ttyd — the web terminal, which is a passwordless-sudo shell. EVERY request is
+# authenticated; there is no open path. tls internal = Caddy's local CA (browsers show a
+# trust-on-first-use warning). docs/runbooks/dev-workers.md § "Remote access (web terminals)".
+#
+# One site answers all three names so the gate is chosen by what the request CARRIES, not by the
+# name it used (the tunnel still sends Host: {{ ansible_default_ipv4.address }}):
+#   - Cf-Access-Jwt-Assertion present → Cloudflare Access tunnel path → dw-access-verify must accept
+#     the JWT for THIS worker's Access app, else 403 (a forged header never falls back to Basic);
+#   - otherwise → LAN/Tailscale path → Basic auth, bridged to the dw_lan cookie because Safari does
+#     not send cached Basic credentials on the WebSocket handshake.
+#
+# Everything sits in ONE `route`, which runs in written order. Outside a route Caddy sorts
+# directives and `respond` lands AFTER `handle`, so a 403 written above the proxy would never fire.
 {
   local_certs
 }
-https://{{ ansible_default_ipv4.address }}, https://{{ ansible_hostname }} {
+https://{{ ansible_default_ipv4.address }}, https://{{ ansible_hostname }}, https://{{ dev_worker_web_public_host }} {
   tls internal
-  reverse_proxy 127.0.0.1:7681
+  route {
+    # 1. Cross-site guard (CSWSH). A WebSocket upgrade must come from this worker's own page; a
+    #    missing Origin is refused too. Any other request carrying a foreign Origin is refused.
+    #    Page navigations carry no Origin and pass to the auth step.
+    @must_have_own_origin {
+      header Sec-WebSocket-Key *
+      not {
+{% for origin in dev_worker_web_origins %}
+        header Origin {{ origin }}
+{% endfor %}
+      }
+    }
+    respond @must_have_own_origin 403
+    @foreign_origin {
+      header Origin *
+      not {
+{% for origin in dev_worker_web_origins %}
+        header Origin {{ origin }}
+{% endfor %}
+      }
+    }
+    respond @foreign_origin 403
+
+    # 2a. Tunnel path: validate the Access JWT locally (fails closed: validator down = 502).
+    @access_jwt header Cf-Access-Jwt-Assertion *
+    forward_auth @access_jwt 127.0.0.1:{{ dev_worker_web_verify_port }} {
+      uri /_dw/verify
+    }
+
+    # 2b. LAN/Tailscale path: Basic auth unless the request presents the bridge cookie. The cookie
+    #     is set only on responses that passed Basic auth (route order: basic_auth runs first).
+    @lan_unauthenticated {
+      not header Cf-Access-Jwt-Assertion *
+      not expression `{http.request.cookie.dw_lan} == "{{ dev_worker_web_lan_cookie_secret }}"`
+    }
+    basic_auth @lan_unauthenticated {
+      {{ dev_worker_web_lan_user }} {{ dev_worker_web_lan_password_bcrypt }}
+    }
+    header @lan_unauthenticated Set-Cookie "dw_lan={{ dev_worker_web_lan_cookie_secret }}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=43200"
+
+    # 3. The terminal.
+    reverse_proxy 127.0.0.1:7681
+  }
 }
 :80 {
   redir https://{host}{uri} permanent
