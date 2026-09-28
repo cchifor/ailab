@@ -125,8 +125,11 @@ def base_state(**over):
     return st
 
 
-SLOTS_OK = "in_recovery=f\n_cnpg_infra_pg_5|physical|t|reserved|1083465728|\n"
-SLOTS_LOST = "in_recovery=f\n_cnpg_infra_pg_5|physical|f|lost||wal_removed\n"
+# the real probe concatenates booleans into text, so they read true/false (seen live on the drill);
+# the script also accepts bare psql t/f - both shapes are exercised below
+SLOTS_OK = "in_recovery=false\n_cnpg_infra_pg_5|physical|true|reserved|1083465728|\n"
+SLOTS_LOST = "in_recovery=false\n_cnpg_infra_pg_5|physical|false|lost||wal_removed\n"
+SLOTS_LOST_TF = "in_recovery=f\n_cnpg_infra_pg_5|physical|f|lost||wal_removed\n"
 
 
 def run(name, state, slots, env_over=None):
@@ -165,6 +168,10 @@ def main():
     rc, out, calls, _ = run("healthy", base_state(), SLOTS_OK)
     check("healthy exit 0, no calls", rc == 0 and not calls and "no lost slot" in out, out)
 
+    # bare t/f booleans (psql -At without concatenation) are accepted too
+    rc, out, calls, _ = run("live-tf", base_state(), SLOTS_LOST_TF)
+    check("t/f booleans accepted", rc == 0 and len(calls) == 3, str(calls) + out)
+
     # lost + dry run: decision logged, no mutation
     rc, out, calls, _ = run("dry", base_state(), SLOTS_LOST, {"DRY_RUN": "true"})
     check("dry exit 0, no calls, would-delete", rc == 0 and not calls and "DRY_RUN - would" in out, out)
@@ -198,7 +205,7 @@ def main():
     check("phase not healthy: exit 0, no calls", rc == 0 and not calls and "not acting" in out, out)
 
     # probe saw a standby => exit 3
-    rc, out, calls, _ = run("recovery", base_state(), SLOTS_LOST.replace("in_recovery=f", "in_recovery=t"))
+    rc, out, calls, _ = run("recovery", base_state(), SLOTS_LOST.replace("in_recovery=false", "in_recovery=true"))
     check("in_recovery exit 3, no calls", rc == 3 and not calls, out)
 
     # lost but ACTIVE slot => ignored; slot with a foreign prefix => ignored; logical slot => ignored

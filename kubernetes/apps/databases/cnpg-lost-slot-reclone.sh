@@ -4,8 +4,9 @@
 # Runs as the main container of the cnpg-lost-slot-reclone CronJob (kubernetes/apps/databases/
 # cnpg-lost-slot-reclone.yaml, which holds the why). An init container has already written SLOTS_FILE
 # with the primary's slot state (see probe in that manifest):
-#   line 1:  in_recovery=<t|f>
-#   lines 2+: <slot_name>|<slot_type>|<active t/f>|<wal_status>|<safe_wal_size>|<invalidation_reason>
+#   line 1:  in_recovery=<true|false>
+#   lines 2+: <slot_name>|<slot_type>|<active true/false>|<wal_status>|<safe_wal_size>|<invalidation_reason>
+# (booleans concatenated into text come out as true/false; bare psql -At output would be t/f - both accepted)
 # This script only talks to the Kubernetes API (kubectl, namespaced RBAC). POSIX sh so that
 # scripts/tests/cnpg-lost-slot-reclone-mock.py can drive it with a fake kubectl on PATH.
 #
@@ -42,8 +43,8 @@ pod_role() { k get pod "$1" -o "jsonpath={.metadata.labels.cnpg\.io/instanceRole
 [ -s "$SLOTS_FILE" ] || { echo "probe output $SLOTS_FILE missing or empty"; exit 1; }
 in_recovery=$(sed -n '1s/^in_recovery=//p' "$SLOTS_FILE")
 case "$in_recovery" in
-  f) ;;
-  t) echo "probe reached a server in recovery (rw service mid-switchover) - not acting"; exit 3 ;;
+  f|false) ;;
+  t|true) echo "probe reached a server in recovery (rw service mid-switchover) - not acting"; exit 3 ;;
   *) echo "probe output malformed: first line '$(sed -n 1p "$SLOTS_FILE")'"; exit 1 ;;
 esac
 
@@ -71,6 +72,7 @@ for cluster in $CLUSTERS; do
       exp="$prefix$(printf '%s' "$inst" | tr '-' '_')"
       if [ "$exp" = "$slot" ]; then match="$inst"; n=$((n + 1)); fi
     done
+    case "$active" in t|true) active=t ;; *) active=f ;; esac
     if [ "$stype" = physical ] && [ "$active" != t ]; then all_physical_active=0; fi
     if [ "$wal" = lost ]; then
       any_lost=1
