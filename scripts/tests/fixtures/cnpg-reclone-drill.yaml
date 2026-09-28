@@ -1,0 +1,74 @@
+# Disposable CNPG cluster for drilling cnpg-lost-slot-reclone (plan 2026-09-28, rollout step 2).
+# Applied BY HAND, never listed in a kustomization; delete it (and its PVCs) when the drill is done.
+#
+#   kubectl --context admin@ai apply -f scripts/tests/fixtures/cnpg-reclone-drill.yaml
+#   # break the standby: deny its egress to the primary, churn > 64 MB of WAL on the primary, then
+#   # remove the policy - the standby reconnects and is refused (wal_status=lost), the real symptom.
+#   kubectl --context admin@ai -n databases delete cluster reclone-drill; kubectl -n databases delete pvc -l cnpg.io/cluster=reclone-drill
+#
+# local-path on purpose: no QNAP LUNs for a throwaway (ailab#865/#880), and the drill is about slots,
+# not storage. 64MB slot budget so a few MB of inserts + pg_switch_wal() invalidate the slot quickly.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reclone-drill-slotwatch
+  namespace: databases
+type: kubernetes.io/basic-auth
+stringData:
+  username: slotwatch
+  password: drill-only-not-a-secret
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: reclone-drill
+  namespace: databases
+spec:
+  instances: 2
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11
+  storage:
+    storageClass: local-path
+    size: 1Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 512Mi }
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: preferred
+    topologyKey: kubernetes.io/hostname
+  replicationSlots:
+    highAvailability:
+      enabled: true
+      slotPrefix: _cnpg_
+  postgresql:
+    parameters:
+      max_slot_wal_keep_size: 64MB
+      max_wal_size: 128MB
+  managed:
+    roles:
+      - name: slotwatch
+        ensure: present
+        login: true
+        passwordSecret:
+          name: reclone-drill-slotwatch
+---
+# The break: applied only for the drill window, removed once the slot reports lost.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reclone-drill-isolate-standby
+  namespace: databases
+  annotations:
+    ailab.io/drill: "delete me when the slot is lost; the standby must reconnect and be refused"
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: reclone-drill
+      cnpg.io/instanceRole: replica
+  egressDeny:
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: reclone-drill
+            cnpg.io/instanceRole: primary
+      toPorts:
+        - ports: [{ port: "5432", protocol: TCP }]

@@ -1,0 +1,35 @@
+# SOPS (age): credential for the `slotwatch` managed role declared in infra-pg.yaml (spec.managed.roles).
+# LOGIN only, no grants: pg_replication_slots is readable by every role, which is all the
+# cnpg-lost-slot-reclone CronJob's probe reads (cnpg-lost-slot-reclone.yaml). Rotate by editing the
+# password here (sops), CNPG reconciles the role's password from the Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-slotwatch
+    namespace: databases
+    labels:
+        cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:z0tssYSaIQNY,iv:8C4ph+GX08aZDIvLnI3SkKPmi1kqXTEij86yd/MUf1g=,tag:Q8aAAlvvUevqqd58hvrzFQ==,type:str]
+    password: ENC[AES256_GCM,data:eK0O+vHDWFXk/WpFKRyxsvYR4LDRcRPIf5KOvu1CEoUMBgQwMgmGPg==,iv:KivNcJIo6s9MpGaaRnpGZ9eHTtagYuSrfjFl6l9KvPU=,tag:4vtcARp54i5ku9DbwSybQQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBGQzVack14SmJ1N01DeTVQ
+            ZDVGSkpkbldvYmYzajQ5MnRHOWRodDJweUhNCk5GdUoxWlArRUEzbWYreE5oRHBa
+            amF3RWMzTnlFU1hTNUY0OXFmV3VYbWcKLS0tIDR3U2VmVzM4elZhZmZCUVFWYS9N
+            cG5zdjh2NzJMWmt4am1ncjMxMm5iRGcKM7TAqBEx0LKMJUfYIQ33w8Buc2HIioI7
+            MjibsthrgdkylB7UDGnj6hcLC/VxBgj389NCBX4YamuboRqd8wON/A==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-09-28T08:22:35Z"
+    mac: ENC[AES256_GCM,data:I6tJ3QZi+5ItoSgK2NMnBPdZRtg4btNMU76Lbw1/a5HNIz1LP1dTBGACJn6Y89fGB1XOYG/hTO4SPPUIURbytc+dUBEhb46CgM705W+rcfnIMRb7JKz14D6zpfRr/XO5RBCDQGL8C+fMsPUOREmwsLNV0S3umHEE0iF/5mMOB9M=,iv:IRpfDhr/1YVoG4CVqYDV6QOpd7Nj7VUBCHTV854AfDs=,tag:g5CqEP9JpliCHXv+ULTDqw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

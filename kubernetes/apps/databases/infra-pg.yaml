@@ -66,8 +66,12 @@ spec:
       # went wal_status=lost (228 GB behind), and CNPG 1.24.1 did NOT re-clone it. It sat
       # FATAL-looping on "requested WAL segment ... has already been removed" while the cluster
       # reported `readyInstances: 2, Cluster in healthy state` and the pod stayed 1/1 Ready. Seven
-      # days later there had been no re-clone and no operator action of any kind. Re-cloning is a
-      # MANUAL operation: `kubectl cnpg destroy <cluster> <n> --keep-pvc`.
+      # days later there had been no re-clone and no operator action of any kind. Re-cloning means
+      # deleting the instance's PVC(s) AND pod (= `kubectl cnpg destroy <cluster> <n>` WITHOUT
+      # --keep-pvc; this line used to say `--keep-pvc`, which keeps the stale data directory and
+      # re-creates the same dead standby on it — corrected 2026-09-28, ailab#923). CNPG then joins a
+      # NEW instance number by pg_basebackup. Since 2026-09-28 cnpg-lost-slot-reclone.yaml does this
+      # automatically for a slot with wal_status=lost (DRY_RUN until its drill passes).
       #
       # The cap itself is still right — losing a replica really is better than losing the primary —
       # but it is NOT self-healing, and hitting it is an INCIDENT. PostgresReplicaNotStreaming
@@ -178,6 +182,17 @@ spec:
           - pg_read_all_data
         passwordSecret:
           name: infra-pg-dumper
+      # LOGIN-only probe identity for cnpg-lost-slot-reclone.yaml: it reads pg_is_in_recovery() and
+      # pg_replication_slots through the -rw Service, both readable by any role. Deliberately no
+      # pg_monitor/pg_read_all_stats (those expose other sessions' SQL) and no pods/exec anywhere.
+      - name: slotwatch
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: infra-pg-slotwatch
       - name: authelia
         ensure: present
         login: true
