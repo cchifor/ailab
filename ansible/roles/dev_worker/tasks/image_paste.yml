@@ -1,6 +1,6 @@
 ---
 # Landing zone for files handed to the agents: the web terminal's paste endpoint (dw-upload,
-# web_gate.yml) stores here, and scripts/dw-paste.ps1 scp's here from the Windows workstation
+# web_gate.yml) stores here, and the workstation paste helpers (scripts/dw-paste/) scp here
 # (herdr --remote stages its own files under /tmp and needs nothing from the role).
 # Unconditional — a directory plus an aging rule, useful on every worker. Docs:
 # docs/runbooks/dev-workers.md § "Pasting images from Windows".

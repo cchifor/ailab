@@ -26,8 +26,11 @@
 - name: "/tmp hygiene (tmpfiles.d aging; full loopback cap behind a toggle)"
   ansible.builtin.import_tasks: tmp_hygiene.yml
 
+# Own tag so a tmux.conf change (e.g. the terminal-title marker scripts/dw-paste/ reads) can be rolled
+# out alone: -t tmux.
 - name: tmux config + persistence
   ansible.builtin.import_tasks: tmux.yml
+  tags: [tmux]
 
 - name: Docker engine + compose + oxker
   ansible.builtin.import_tasks: docker.yml
@@ -123,7 +126,7 @@
   when: dev_worker_enable_ttyd | bool
 
 # Landing dir for pasted files: the web terminal's dw-upload (web_gate.yml, next) and
-# scripts/dw-paste.ps1. Before the gate, which starts dw-upload into it. Needs the /workspace mount
+# the workstation helpers in scripts/dw-paste/. Before the gate, which starts dw-upload into it. Needs the /workspace mount
 # (workspace.yml), which the file itself asserts for targeted runs.
 - name: Paste landing dir
   ansible.builtin.import_tasks: image_paste.yml

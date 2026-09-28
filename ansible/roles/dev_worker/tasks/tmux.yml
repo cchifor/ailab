@@ -9,6 +9,34 @@
     dest: "{{ item }}/.tmux.conf"
     mode: "0644"
   loop: "{{ ['/etc/skel'] + (dev_worker_users | map(attribute='home') | list) }}"
+  register: tmux_conf
+
+# The terminal title carries the [user@ip] marker the workstation paste helpers read
+# (scripts/dw-paste/). A running tmux server only reads .tmux.conf at start, so push just these two
+# options into it — re-sourcing the whole file would re-run TPM/resurrect under live sessions. No
+# server running is fine: the next one reads the file.
+- name: Apply the terminal-title settings to running tmux servers
+  ansible.builtin.command:
+    argv:
+      - tmux
+      - set-option
+      - -g
+      - set-titles-string
+      - "#h [#{client_user}@{{ ansible_default_ipv4.address }}] #S:#W"
+      - ;
+      - set-option
+      - -g
+      - set-titles
+      - "on"
+  become: true
+  become_user: "{{ item.name }}"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: tmux_titles
+  changed_when: tmux_titles.rc == 0
+  failed_when: tmux_titles.rc != 0 and not (tmux_titles.stderr is search('no server running|error connecting'))
+  when: tmux_conf.changed
 
 - name: Fix per-user .tmux.conf ownership
   ansible.builtin.file:

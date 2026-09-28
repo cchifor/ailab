@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Does a bracketed-pasted image path still attach as [Image #N] in Claude Code and Codex?
 #
-# Everything that hands files to the agents (the web terminal's paste, scripts/dw-paste.ps1, herdr)
+# Everything that hands files to the agents (the web terminal's paste, scripts/dw-paste/, herdr)
 # relies on that behaviour, and neither CLI promises it: Claude Code self-updates and Codex is only a
 # version floor. Measured 2026-09-28 (Claude Code 2.1.283, codex-cli 0.153.4): a single path attaches
 # in both; a paste holding TWO paths attaches each image in Claude and NOTHING in Codex — hence one
