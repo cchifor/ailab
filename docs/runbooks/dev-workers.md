@@ -797,7 +797,8 @@ triggers Claude Code's auto-attach).
 - `/workspace` mounted: `mountpoint -q /workspace && echo ok`
 - docker: `docker run --rm hello-world`
 - tmux: `tmux ls` shows `main`; the dashboard is the `sessions` session (`claude-dashboard`)
-- ttyd: `https://dw1.chifor.me` (CF Access login) from anywhere, or `https://192.168.0.37/` on LAN/Tailscale (trust the Caddy local-CA cert)
+- ttyd: `https://dwN.chifor.me` (CF Access login) from anywhere, or `https://192.168.0.N/` on
+  LAN/Tailscale (trust the Caddy local-CA cert, then the `c4` web login) — see § "Remote access"
 - metrics: `curl -s localhost:9100/metrics | head`
 - agents (both `c4` + `claude-agent`): `which claude codex` resolve under `~/.npm-global/bin`;
   `claude --version`, `codex --version`; `getfacl ~/.claude ~/.codex` shows c4 `rx`
@@ -813,31 +814,75 @@ triggers Claude Code's auto-attach).
 
 ## Remote access (web terminals)
 
-The ttyd terminals are published as `dw1/dw2/dw3.chifor.me` through the **existing in-cluster
-Cloudflare tunnel**, each gated by a **Cloudflare Access** policy (allow-list = `allow_email`):
+Each worker's ttyd terminal is a **passwordless-sudo shell** (it attaches c4's `main` tmux session).
+Every path to it is authenticated. Until 2026-09-28 the direct LAN path answered anyone on
+192.168.0.0/24 — a LAN shared with cloudlab and its CI runners — with no credentials, and nothing
+checked the WebSocket's Origin (plans/2026-09-28-dw-web-terminal-auth-and-file-paste-plan.md).
 
-- ingress: `kubernetes/apps/apps/edge/cloudflared.yaml` routes `dwN.chifor.me` → `https://192.168.0.3N`
-  (the VM's Caddy; `noTLSVerify` + `httpHostHeader` for the local-CA cert).
-- DNS + Access: `kubernetes/infra/cloudflare/` (`dns.tf` CNAMEs + `access.tf` apps). The DNS records
-  `depends_on` the Access apps, so Access is enforcing **before** any `dwN.chifor.me` resolves — never
-  an unauthenticated window to the passwordless-sudo shell.
+| Path | URL | Authentication |
+|---|---|---|
+| Public (anywhere) | `https://dwN.chifor.me` (Homepage **Dev Workers** tile) | Cloudflare Access login; the worker then validates Access's JWT itself |
+| LAN / Tailscale | `https://192.168.0.N/` (`https://dev-worker-N/`) | web login `c4` + the fleet LAN password, once per browser session |
+| SSH | `ssh c4@192.168.0.N` | unchanged (keys) |
 
-From anywhere: open the Homepage **Dev Workers** tile (or `https://dw1.chifor.me`) → Cloudflare Access
-login → terminal. On the LAN/Tailscale, `https://192.168.0.37/` still works directly.
+**How the gate works** (`ansible/roles/dev_worker/tasks/web_gate.yml`, `templates/Caddyfile.j2`).
+One Caddy site answers all three names, inside a single `route` (written order):
 
-**Apply order:** merge → Flux applies the ingress → `kubectl -n edge rollout restart deploy/cloudflared`
-→ `tofu -chdir=kubernetes/infra/cloudflare apply` (creates Access **then** DNS) → `kubectl -n homepage
-rollout restart deploy/homepage`. The ingress is inert until a `dwN` name resolves (DNS is created only
-by the tofu apply, after Access), so the ingress/cloudflared step ordering is not security-sensitive.
-(The `dev_worker_enable_cloudflared` role toggle — per-VM cloudflared on its own tunnel — is an
-ALTERNATIVE, not used here.)
+1. **Origin guard** — a WebSocket upgrade must carry exactly one of the worker's own origins
+   (`https://dwN.chifor.me`, `https://192.168.0.N`, `https://dev-worker-N`); missing or foreign → 403.
+   Any other request carrying a foreign Origin → 403. This is what stops a page on another site
+   (or a compromised sibling `*.chifor.me` app) from driving the shell with your session.
+2. **Tunnel path** — a request carrying `Cf-Access-Jwt-Assertion` goes to `dw-access-verify`
+   (127.0.0.1:7682, `forward_auth`): RS256 against the team keys
+   (`https://chifor.cloudflareaccess.com/cdn-cgi/access/certs`), `aud` = this worker's Access app,
+   exact issuer, `exp` required. Invalid → 403 (never a fallback to the LAN login); no signing keys
+   → 503; validator down → 502. So a LAN host or a cluster pod cannot get in by inventing the header.
+3. **LAN path** — no JWT header → Basic auth (`c4` + `dev_worker_web_lan_password`). The authenticated
+   response sets `dw_lan` (`Secure; HttpOnly; SameSite=Strict`, 12 h in the browser), and a request
+   presenting it skips the prompt. The cookie is not optional: **Safari/iOS do not send cached Basic
+   credentials on the WebSocket handshake** (ttyd#1437), so without it the terminal would load and
+   never connect on Apple devices.
 
-**Threat model.** The only thing between the internet and a passwordless-sudo shell is the CF Access
-gate, which trusts `allow_email`'s identity + an 8h browser session. So: **enable 2FA on the Access
-login method** (the email account / IdP), treat the Access session cookie as root-equivalent, and
-prefer the LAN/Tailscale path when you can. A compromised `allow_email` mailbox or session cookie =
-shell access for the session window. Consider mTLS / device posture in CF Zero Trust if you want a
-second factor at the edge.
+The tunnel itself is unchanged: cloudflared still sends `Host: 192.168.0.N` with `noTLSVerify`
+(`kubernetes/apps/apps/edge/cloudflared.yaml`), because the gate is chosen by the header a request
+carries, not by the name it used. The dw Access apps set `same_site_cookie_attribute = "lax"`
+(`kubernetes/infra/cloudflare/access.tf`; unset, Cloudflare sends the Access cookie with
+`SameSite=None`).
+
+**The LAN password.** One credential for the fleet, in `ansible/secrets/dev-worker.sops.yaml`:
+`sops -d --extract '["dev_worker_web_lan_password"]' ansible/secrets/dev-worker.sops.yaml` — store it
+in the password manager. The `dw_lan` cookie value is a bearer credential **equal to the password**
+and does **not** expire server-side (the 12 h is only how long the browser keeps it). Rotate the
+password, its bcrypt and the cookie secret **together** (`dev_worker_web_lan_password`,
+`_password_bcrypt`, `_cookie_secret` — the `.example` file says how to mint each), then
+`ansible-playbook dev-workers.yml -t web-gate`; every browser re-prompts once.
+
+**Every converge proves the gate** from the worker itself: no credentials → 401, a forged JWT → 403
+(even with a valid cookie), a cross-site WebSocket → 403 (even with a valid cookie), the LAN
+password → 200 + cookie. The play fails otherwise. Gatus (`Dev workers` group) independently expects
+**401** from each `https://192.168.0.N/` every 2 min and pages via `GatusEndpointDown` if a path
+reopens — it proves the gate is shut, not that the terminal works.
+
+**Rollout / rollback.** `ansible-playbook dev-workers.yml -l dev-worker-N -t web-gate` (the SOPS
+pre_tasks carry the tag). A Caddy reload drops open web terminals; the browser reconnects to the same
+tmux session. **Never roll back to the old Caddyfile** — it is an open root shell on the LAN. If the
+gate misbehaves, contain instead: `sudo systemctl stop caddy` (web terminal off; SSH unaffected),
+fix, re-run `-t web-gate`. If only the tunnel path fails, check `journalctl -u dw-access-verify` (a
+recreated Access app changes its AUD: `tofu -chdir=kubernetes/infra/cloudflare output
+dev_worker_access_aud` → `group_vars/dev_workers.yml`).
+
+**Publishing a new worker** (`dwN.chifor.me`): ingress in `cloudflared.yaml` → `tofu -chdir=
+kubernetes/infra/cloudflare apply` (creates Access **then** DNS — the DNS records `depends_on` the
+Access apps) → add its AUD to `dev_worker_web_access_aud` → converge → `kubectl -n homepage rollout
+restart deploy/homepage`. (The `dev_worker_enable_cloudflared` role toggle — per-VM cloudflared on
+its own tunnel — is an ALTERNATIVE, not used here.)
+
+**Threat model.** Public path: Cloudflare Access (`allow_email` + an 8 h session) and the worker's
+own JWT check; enable 2FA on the Access login method and treat the Access session as
+root-equivalent. LAN path: the fleet password (and the `dw_lan` cookie, which is equivalent).
+Remaining gap: cloudflared → Caddy uses `noTLSVerify`, so an attacker able to intercept traffic on
+the LAN could lift a JWT (a bearer token for its session) — follow-up: `originServerName` +
+`caPool` with the workers' Caddy root CAs.
 
 ## Notes
 

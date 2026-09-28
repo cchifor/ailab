@@ -1,5 +1,6 @@
 ---
 # Section 6 (homelab): web terminal (ttyd, 127.0.0.1:7681) behind Caddy (LAN HTTPS via its local CA).
+# The Caddyfile itself — the authentication gate — is web_gate.yml (tag web-gate).
 - name: Install ttyd {{ dev_worker_ttyd_version }}
   ansible.builtin.get_url:
     url: "https://github.com/tsl0922/ttyd/releases/download/{{ dev_worker_ttyd_version }}/ttyd.x86_64"
@@ -42,13 +43,6 @@
     name: caddy
     state: present
     update_cache: true
-
-- name: Lay down the Caddyfile (reverse proxy ttyd, local-CA HTTPS)
-  ansible.builtin.template:
-    src: Caddyfile.j2
-    dest: /etc/caddy/Caddyfile
-    mode: "0644"
-  notify: Reload caddy
 
 - name: Enable + start ttyd + caddy
   ansible.builtin.systemd:

@@ -430,6 +430,41 @@ data:
         url: tcp://192.168.1.225:443
         interval: 120s
         conditions: ["[CONNECTED] == true"]
+      # --- Dev-worker web terminals: the gate must stay SHUT ---
+      # Each worker's web terminal is a passwordless-sudo shell. Until 2026-09-28 it answered the
+      # whole LAN with no credentials (plans/2026-09-28-dw-web-terminal-auth-and-file-paste-plan.md);
+      # these probes expect 401, so an edit, rollback or hand-restored Caddyfile that reopens it
+      # turns red and pages via GatusEndpointDown. They prove the gate is CLOSED, not that the
+      # terminal works (ttyd down still answers 401) -- that is the converge self-check's job.
+      # insecure: Caddy's local-CA certificate.
+      - name: dev-worker-1 web terminal gate
+        group: Dev workers
+        url: https://192.168.0.8/
+        interval: 120s
+        client:
+          insecure: true
+        conditions: ["[STATUS] == 401"]
+      - name: dev-worker-2 web terminal gate
+        group: Dev workers
+        url: https://192.168.0.9/
+        interval: 120s
+        client:
+          insecure: true
+        conditions: ["[STATUS] == 401"]
+      - name: dev-worker-3 web terminal gate
+        group: Dev workers
+        url: https://192.168.0.10/
+        interval: 120s
+        client:
+          insecure: true
+        conditions: ["[STATUS] == 401"]
+      - name: dev-worker-4 web terminal gate
+        group: Dev workers
+        url: https://192.168.0.11/
+        interval: 120s
+        client:
+          insecure: true
+        conditions: ["[STATUS] == 401"]
       # --- Storage fabric (Thunderbolt 10.55.0.254) ---
       - name: QNAP NFS portal
         group: Storage fabric

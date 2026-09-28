@@ -1,0 +1,154 @@
+---
+# The web terminal's authentication gate (Caddy + dw-access-verify). Until 2026-09-28 the terminal —
+# a passwordless-sudo shell — answered anyone on the LAN with no credentials at all, and had no
+# Origin check against cross-site WebSocket hijacking. This file makes every path authenticated:
+# Cloudflare Access JWT (validated here, at the origin) on the tunnel path, Basic auth + a bridge
+# cookie on the LAN/Tailscale path. Own tag: `-t web-gate` (the playbook's SOPS pre_task carries it).
+# docs/runbooks/dev-workers.md § "Remote access (web terminals)";
+# plans/2026-09-28-dw-web-terminal-auth-and-file-paste-plan.md.
+
+- name: Assert the web gate's inputs
+  ansible.builtin.assert:
+    that:
+      - dev_worker_web_access_aud[inventory_hostname] | default('') is match('^[0-9a-f]{64}$')
+      - dev_worker_web_lan_password | length >= 16
+      - dev_worker_web_lan_password_bcrypt is match('^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$')
+      - dev_worker_web_lan_cookie_secret is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      The web terminal gate needs dev_worker_web_access_aud[{{ inventory_hostname }}] (the dw Access
+      app's AUD tag: `tofu -chdir=kubernetes/infra/cloudflare output dev_worker_access_aud`) in
+      group_vars/dev_workers.yml, and dev_worker_web_lan_password / _password_bcrypt / _cookie_secret
+      in ansible/secrets/dev-worker.sops.yaml. Refusing to touch Caddy without them: the old
+      Caddyfile is an unauthenticated shell, but a half-rendered one could lock out every path.
+    quiet: true
+  no_log: true
+
+- name: Install the validator's Python dependencies
+  ansible.builtin.apt:
+    name: [python3-jwt, python3-cryptography]
+    state: present
+
+- name: Ensure /usr/local/lib/dw-web exists
+  ansible.builtin.file:
+    path: /usr/local/lib/dw-web
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install dw-access-verify
+  ansible.builtin.copy:
+    src: dw_access_verify.py
+    dest: /usr/local/lib/dw-web/dw_access_verify.py
+    owner: root
+    group: root
+    mode: "0644"
+  register: web_gate_verify_code
+
+- name: Install the dw-access-verify unit
+  ansible.builtin.template:
+    src: dw-access-verify.service.j2
+    dest: /etc/systemd/system/dw-access-verify.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: web_gate_verify_unit
+
+# Restarted in-line rather than by handler: the Caddyfile below must not go live until the
+# validator it depends on is running the new code.
+- name: Enable and (re)start dw-access-verify
+  ansible.builtin.systemd:
+    name: dw-access-verify.service
+    enabled: true
+    state: "{{ 'restarted' if (web_gate_verify_code.changed or web_gate_verify_unit.changed) else 'started' }}"
+    daemon_reload: "{{ web_gate_verify_unit.changed }}"
+  # A first-run --check preview never really wrote the unit, so there is nothing to start.
+  when: not (ansible_check_mode and web_gate_verify_unit.changed)
+
+# 200 = the Cloudflare signing keys are cached. Without them the tunnel path answers 503 (LAN is
+# unaffected), so a converge that cannot reach chifor.cloudflareaccess.com stops here, loudly.
+- name: Wait for dw-access-verify to hold the Access signing keys
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ dev_worker_web_verify_port }}/_dw/healthz"
+    status_code: 200
+  register: web_gate_health
+  until: web_gate_health.status == 200
+  retries: 10
+  delay: 3
+  changed_when: false
+  when: not ansible_check_mode
+
+# 0640 root:caddy — it now holds the Basic-auth hash and the bridge cookie secret. `caddy validate`
+# gets throwaway storage: it provisions the tls app, and against the real storage (or root's HOME)
+# it would mint a stray local CA.
+- name: Lay down the Caddyfile (the authenticated web terminal)
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: caddy
+    mode: "0640"
+    validate: >-
+      sh -c 'd=$(mktemp -d) && XDG_DATA_HOME="$d" XDG_CONFIG_HOME="$d" caddy validate --adapter caddyfile --config "$1";
+      rc=$?; rm -rf "$d"; exit $rc' _ %s
+  register: web_gate_caddyfile
+  no_log: true
+
+# A reload drops open terminal WebSockets; the browser reconnects to the same tmux session.
+- name: Reload Caddy onto the new Caddyfile
+  ansible.builtin.systemd:
+    name: caddy
+    state: reloaded
+  when: web_gate_caddyfile.changed
+
+# ---- self-check: the play fails if any path is open --------------------------------------------
+# Sent to the worker's own LAN address: the same URL, Host and (absent) SNI a LAN browser uses.
+# Expected: no credentials 401; a forged Access JWT 403 (a good cookie must not rescue it); a
+# WebSocket upgrade from a foreign Origin 403; the LAN credential 200 + the bridge cookie.
+- name: Self-check — no credentials is refused (401)
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}/"
+    validate_certs: false
+    status_code: 401
+  changed_when: false
+
+- name: Self-check — a forged Access JWT is refused (403), even with a valid LAN cookie
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}/"
+    headers:
+      Cf-Access-Jwt-Assertion: forged.not.valid
+      Cookie: "dw_lan={{ dev_worker_web_lan_cookie_secret }}"
+    validate_certs: false
+    status_code: 403
+  changed_when: false
+  no_log: true
+
+- name: Self-check — a cross-site WebSocket upgrade is refused (403), even with a valid LAN cookie
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}/ws"
+    headers:
+      Connection: Upgrade
+      Upgrade: websocket
+      Sec-WebSocket-Version: "13"
+      Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+      Origin: https://attacker.example
+      Cookie: "dw_lan={{ dev_worker_web_lan_cookie_secret }}"
+    validate_certs: false
+    status_code: 403
+  changed_when: false
+  no_log: true
+
+- name: Self-check — the LAN credential opens the terminal (200) and issues the bridge cookie
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}/"
+    url_username: "{{ dev_worker_web_lan_user }}"
+    url_password: "{{ dev_worker_web_lan_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: web_gate_lan_ok
+  failed_when: >-
+    web_gate_lan_ok.status != 200 or
+    (web_gate_lan_ok.cookies | default({})).get('dw_lan') != dev_worker_web_lan_cookie_secret
+  changed_when: false
+  no_log: true

@@ -1,0 +1,42 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Caddy forward_auth target: validates the Cloudflare Access JWT on the web terminal's tunnel path.
+# Loopback only; no state; no filesystem writes. See files/dw_access_verify.py.
+[Unit]
+Description=dev-worker web terminal: Cloudflare Access JWT validator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=DW_ACCESS_TEAM_DOMAIN={{ dev_worker_web_access_team_domain }}
+Environment=DW_ACCESS_AUD={{ dev_worker_web_access_aud[inventory_hostname] }}
+Environment=DW_ACCESS_LISTEN=127.0.0.1:{{ dev_worker_web_verify_port }}
+ExecStart=/usr/bin/python3 /usr/local/lib/dw-web/dw_access_verify.py
+Restart=always
+RestartSec=2
+
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

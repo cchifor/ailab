@@ -122,6 +122,14 @@
   ansible.builtin.import_tasks: ttyd_caddy.yml
   when: dev_worker_enable_ttyd | bool
 
+# The Caddyfile: every path to the terminal authenticated (Access JWT on the tunnel, Basic + bridge
+# cookie on the LAN) plus the cross-site WebSocket guard. Own tag so it can be rolled out one worker at
+# a time: -l dev-worker-N -t web-gate.
+- name: Web terminal authentication gate (Caddyfile + dw-access-verify)
+  ansible.builtin.import_tasks: web_gate.yml
+  when: dev_worker_enable_ttyd | bool
+  tags: [web-gate]
+
 - name: Cloudflare tunnel
   ansible.builtin.import_tasks: cloudflared.yml
   when: dev_worker_enable_cloudflared | bool

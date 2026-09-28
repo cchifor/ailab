@@ -95,6 +95,12 @@ resource "cloudflare_zero_trust_access_application" "dev_worker" {
   domain           = "${each.value}.chifor.me"
   session_duration = "8h" # short-ish for a root shell; re-auth daily
   policies         = [{ id = cloudflare_zero_trust_access_policy.allow_me.id, precedence = 1 }]
+  # Unset, Cloudflare sends CF_Authorization with SameSite=None: on a WebSocket opened by ANY site the
+  # operator visits. The worker's Caddy also refuses foreign Origins (ansible web_gate.yml); lax stops
+  # the cookie leaving at all on cross-site subrequests while keeping top-level navigation working
+  # (the Access login redirect and the Homepage tile are both top-level). Not strict: CF documents
+  # strict as able to break the Access redirect flow.
+  same_site_cookie_attribute = "lax"
 }
 
 # Cloudflare Access for the in-cluster k8s tools: k8s.chifor.me = Headlamp (read-only cluster

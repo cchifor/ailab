@@ -216,7 +216,7 @@ below covers the original app surface; the rows after it cover the apps that `ac
 
 | Hostname(s) | Backing service | Auth (codified in `access.tf`) | Notes |
 |---|---|---|---|
-| `k8s` / `hubble` / `dw1`–`dw3` | Headlamp / Hubble UI / dev-worker ttyd | `allow_email`, default-deny (`k8s_tools`, `dev_worker`) | Cluster internals + passwordless-sudo shells. Headlamp SA is now read-only (chart cluster-admin binding disabled). |
+| `k8s` / `hubble` / `dw1`–`dw4` | Headlamp / Hubble UI / dev-worker ttyd | `allow_email`, default-deny (`k8s_tools`, `dev_worker`) | Cluster internals + passwordless-sudo shells. Headlamp SA is now read-only (chart cluster-admin binding disabled). The dw apps set `same_site_cookie_attribute = "lax"`, and each worker re-validates the Access JWT against its own app's AUD (output `dev_worker_access_aud`; `docs/runbooks/dev-workers.md` § "Remote access"). |
 | `git.chifor.me` | Gitea | Gitea own auth (OIDC + PAT/SSH); **no Access app** | git CLI can't do the Access browser SSO; `REQUIRE_SIGNIN_VIEW` now blocks anonymous browsing. |
 | `vault.chifor.me` | Vaultwarden | master-password + 2FA; `/admin*` Access-gated (`vault_admin`) | Bitwarden native clients can't do Access SSO; only the dangerous `/admin` surface is gated. |
 | `ntfy.chifor.me` | ntfy | ntfy token auth (deny-all default); **no Access app** | The mobile app's persistent connection would break under the Access browser flow. |
