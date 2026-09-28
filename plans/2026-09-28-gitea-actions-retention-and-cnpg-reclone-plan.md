@@ -237,4 +237,4 @@ verification, never listed in a kustomization).
 - `scripts/cnpg-lost-slot-reclone.sh`, `scripts/tests/cnpg-lost-slot-reclone-mock.py`, `scripts/tests/fixtures/cnpg-reclone-drill.yaml`
 - `docs/runbooks/infra-pg.md` (new: the 30-second check, both jobs, how to stop/suspend, the tridentctl PV cleanup pointer)
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
