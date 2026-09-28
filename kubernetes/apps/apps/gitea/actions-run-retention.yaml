@@ -1,0 +1,120 @@
+# Gitea Actions RUN-HISTORY retention - the piece Gitea itself does not have.
+#
+# WHY THIS EXISTS (ailab#923, 2026-09-28): LOG_RETENTION_DAYS / ARTIFACT_RETENTION_DAYS (14, gitea.yaml)
+# purge logs and artifacts, NOT runs. Run/job/task/step rows are kept forever: on 2026-09-28 the
+# gitea database was 12 GB of infra-pg's 20 Gi data+WAL volume - action_task 5.4 GB (292 k rows
+# back to 2026-07-09), action_run_job 1.2 GB, action_task_step 3.5 M rows - growing at ~1,900
+# runs / ~9,000 jobs per day; 33,045 runs were already older than 14 d (platform 25.4 k). That history
+# is also what the `@midnight` cron.cleanup_actions walks (3.5 M deletes in 01:00-02:30Z that night),
+# which is the burst that pushed infra-pg's replica past its 1 GB slot budget and killed replication.
+#
+# WHAT IT DOES: gitea-actions-run-retention.sh (mounted from the ConfigMap kustomize generates from the
+# file beside this manifest) deletes COMPLETED runs older than RETENTION_DAYS through the Gitea API,
+# oldest first, for every repository of the `cchifor` org (+ EXTRA_REPOS). Gitea 1.26's DeleteRun
+# (services/actions/cleanup.go) deletes run -> jobs -> tasks -> steps -> outputs -> artifact ROWS in one
+# transaction and only then removes log/artifact FILES best-effort (errors just logged). That is why
+# RETENTION_DAYS (16) is LARGER than LOG/ARTIFACT_RETENTION_DAYS (14): the nightly cleanup has already
+# expired the files of anything this job deletes, so the best-effort half is a no-op and nothing can be
+# orphaned on the actions-storage PVC (the trap actions-storage.yaml documents).
+#
+# PACING IS THE POINT. MAX_DELETES_PER_RUN is a GLOBAL budget per execution, DELETE_PAUSE_SECONDS sits
+# between deletions, and a REPLICATION GATE (Prometheus: any firing CNPG*/PostgresReplica* alert, or an
+# unreachable Prometheus, pauses the job - exit 2, fail closed) is checked before the first deletion and
+# every GATE_EVERY deletions. The schedule skips 00-02Z so it never overlaps cron.cleanup_actions. The
+# numbers below are the CANARY numbers; the steady-state ones are set from the measured WAL per deletion
+# (plans/2026-09-28-gitea-actions-retention-and-cnpg-reclone-plan.md, rollout step 3-4).
+#
+# SELECTION: runs are listed id DESC; the script walks each repo from the LAST page towards page 1 for at
+# most MAX_PAGES_PER_REPO pages, never stops early on an ineligible page (a rerun keeps its old id), and
+# re-reads every candidate right before DELETE (status still completed, completed_at still older than the
+# cutoff). Offset pagination is not a snapshot: a run that shifts pages is caught by the next execution.
+#
+# TOKEN: Secret gitea-actions-retention (SOPS) - a PAT of the dedicated NON-ADMIN user `actions-retention`
+# (org team with the Actions unit only; see gitea-actions-retention.sops.yaml.example). It reaches curl
+# through a 600 config file on the tmpfs, never argv. Plain HTTP to the in-cluster service, like
+# ci-rerun-watchdog - Cilium's pod network is the transport boundary.
+#
+# FAILURE POLICY: backoffLimit 0 + restartPolicy Never (a retry would reset the budget), Forbid, 401/403
+# or an uncertain DELETE => exit 1 (KubeJobFailed pages; never "0 deleted, success"). One summary line
+# per execution: `retention: deleted=N already_gone=N skipped_revalidation=N candidates_seen=N ...`.
+# Stop a running execution: `kubectl -n gitea delete job <name>`; stop the schedule: `kubectl -n gitea
+# patch cronjob gitea-actions-run-retention -p '{"spec":{"suspend":true}}'`. A manual run must carry its
+# own env (`kubectl create job --from=cronjob/... --dry-run=client -o yaml`, edit, apply): editing the
+# CronJob never changes a Job that already exists.
+#
+# DRY_RUN=true (the merged default) lists what would be deleted and exits 0. Deleted rows come back as dead
+# tuples that autovacuum reuses in-file: growth stops and the free-space cliff moves out, but the 12 GB
+# does not shrink on disk without a VACUUM FULL / pg_repack window - a separate decision.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gitea-actions-run-retention
+  namespace: gitea
+  labels:
+    app.kubernetes.io/name: gitea-actions-run-retention
+    app.kubernetes.io/part-of: gitea
+spec:
+  schedule: "17 3-23 * * *" # hourly, never inside the 01:00-02:30Z cron.cleanup_actions burst
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 900
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1500
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: gitea-actions-run-retention
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false # talks to Gitea and Prometheus only, never the API server
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: retention
+              image: docker.io/alpine/k8s:1.32.13@sha256:ffb0758383fdd5878419930052e2854afe6c0479303a59edaca4143ce8d3c016
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              env:
+                - name: GITEA_URL
+                  value: "http://gitea-http.gitea.svc.cluster.local:3000"
+                - name: ORG
+                  value: "cchifor"
+                - name: EXTRA_REPOS # space-separated owner/name outside the org, optional
+                  value: ""
+                - name: RETENTION_DAYS # MUST stay > LOG_RETENTION_DAYS / ARTIFACT_RETENTION_DAYS (gitea.yaml: 14)
+                  value: "16"
+                - name: MAX_DELETES_PER_RUN # global per execution; canary value, see the header
+                  value: "25"
+                - name: DELETE_PAUSE_SECONDS
+                  value: "5"
+                - name: MAX_PAGES_PER_REPO
+                  value: "20"
+                - name: GATE_EVERY
+                  value: "25"
+                - name: PROM_URL
+                  value: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+                - name: DRY_RUN
+                  value: "true"
+                - name: GITEA_TOKEN
+                  valueFrom: { secretKeyRef: { name: gitea-actions-retention, key: token } }
+              command: ["/bin/sh", "/opt/retention/gitea-actions-run-retention.sh"]
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: script, mountPath: /opt/retention, readOnly: true }
+          volumes:
+            - name: tmp
+              emptyDir: { medium: Memory, sizeLimit: 16Mi }
+            - name: script
+              configMap: { name: gitea-actions-run-retention-script, defaultMode: 0555 }

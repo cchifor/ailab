@@ -1,0 +1,28 @@
+# SOPS (age): the Gitea PAT the gitea-actions-run-retention CronJob deletes old Actions runs with.
+# Identity = the dedicated NON-ADMIN user `actions-retention`, member of org team `actions-retention`
+# (unit Actions=write, all repos, nothing else). Mint/rotate: see gitea-actions-retention.sops.yaml.example.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-actions-retention
+  namespace: gitea
+type: Opaque
+#
+# PLAINTEXT SHAPE of gitea-actions-retention.sops.yaml - this example is NOT read by kustomize and holds no secret.
+#
+# The identity is deliberately NOT gitea_admin. One-time setup (done 2026-09-28, ailab#923):
+#   1. user:  kubectl --context admin@ai -n gitea exec deploy/gitea -c gitea -- #               gitea admin user create --username actions-retention --email actions-retention@bots.local #                 --random-password --must-change-password=false >/dev/null     # password unused, discarded
+#   2. team:  POST /api/v1/orgs/cchifor/teams  (admin basic auth from the gitea-admin Secret, never a PAT)
+#               {"name":"actions-retention","permission":"write","units":["repo.actions"],
+#                "units_map":{"repo.actions":"write"},"includes_all_repositories":true,"can_create_org_repo":false}
+#             PUT  /api/v1/teams/<id>/members/actions-retention
+#             Proof of scope: GET /orgs/cchifor/repos 200, GET runs 200, DELETE a bogus run 404 (permission
+#             passed), GET /repos/cchifor/platform/contents/README.md 403 (no code access).
+#   3. token (PAT scopes are immutable; a wrong set means a new token), on the workstation:
+#        kubectl --context admin@ai -n gitea exec deploy/gitea -c gitea -- #          gitea admin user generate-access-token -u actions-retention -t actions-run-retention #            --scopes read:organization,write:repository --raw > /some/600/file    # never to the terminal
+#        cp gitea-actions-retention.sops.yaml.example gitea-actions-retention.sops.yaml   # in this directory
+#        (add `stringData:
+  token: <the value>` under `type: Opaque` in an editor - not via a shell command)
+#        sops --encrypt --in-place gitea-actions-retention.sops.yaml   # .sops.yaml's generic rule: data|stringData
+#      `git diff` must show ENC[...] for `token` and nothing else in plaintext. Rotate = repeat step 3 and
+#      delete the old token: gitea admin user delete-access-token -u actions-retention -t actions-run-retention
