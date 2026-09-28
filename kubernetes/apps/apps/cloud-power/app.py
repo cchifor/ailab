@@ -22,7 +22,18 @@ WHY THE SPLIT
 SAFETY - this service can NEVER touch an ai-node
   NODES is a module constant and no request field selects a host: the endpoints take no target
   parameter at all. Adding one would be the bug, so don't.
+
+OFF IS SCHEDULED, NOT IMMEDIATE (plans/2026-09-28-cloud-power-scheduled-drain-plan.md)
+  The hosts also carry the opportunistic Gitea CI runners (cloud-ci-N, ADR 0032). Confirming OFF
+  PAUSES those runners in Gitea (PATCH .../actions/runners/{id} disabled=true: Gitea stops handing
+  them tasks, a running task carries on), waits until no cloud runner has a job in flight, and only
+  then asks the nodes to shut down. Once each paused runner has gone offline it is re-enabled, so
+  the pool is whole again whenever the hosts wake. The schedule lives in the cloud-power-state
+  ConfigMap, so a pod restart resumes it instead of forgetting it (or stranding runners paused).
+  The previous design drained inside the host shutdown with a fixed 10-minute cap and cancelled
+  the long tail (2026-09-24: a job on cloud-ci-3 was cancelled at exactly 10 min).
 """
+import copy
 import hashlib
 import http.client
 import ipaddress
@@ -33,7 +44,9 @@ import socket
 import ssl
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # --- the ONLY hosts this service may act on -------------------------------------------------
@@ -53,6 +66,32 @@ PVE_TOKEN_ID = os.environ.get("PVE_TOKEN_ID", "")
 PVE_TOKEN_SECRET = os.environ.get("PVE_TOKEN_SECRET", "")
 CONFIRM_TTL = int(os.environ.get("CONFIRM_TTL", "30"))
 WOL_URL = os.environ.get("WOL_URL", "http://cloud-power-wol.cloud-power.svc.cluster.local:8127")
+
+# --- the scheduled OFF (MODE=api only) -------------------------------------------------------
+# In-cluster Gitea, not git.chifor.me: that path leaves the cluster through Cloudflare.
+GITEA_URL = os.environ.get("GITEA_URL", "http://gitea-http.gitea.svc.cluster.local:3000")
+GITEA_ORG = os.environ.get("GITEA_ORG", "cchifor")
+GITEA_TOKEN = os.environ.get("GITEA_TOKEN", "")  # org OWNER, scope write:organization
+CLOUD_RUNNER_PREFIX = os.environ.get("CLOUD_RUNNER_PREFIX", "cloud-ci-")
+DRAIN_POLL_SEC = int(os.environ.get("DRAIN_POLL_SEC", "20"))
+# act_runner's job timeout (gitea_runner_job_timeout, 3h) + margin. Past it, nothing that was
+# running when OFF was confirmed can still be alive, so the deadline cannot cut a legitimate job;
+# it only bounds a drain stuck on an unreachable Gitea.
+DRAIN_MAX_SEC = int(os.environ.get("DRAIN_MAX_SEC", "11700"))
+# How long after the shutdown request a host that accepted it (or MAY have: a POST whose reply was
+# lost) may stay up before the OFF stalls. Deliberately past systemd's poweroff.target
+# JobTimeoutSec (30 min, then poweroff-force): by then a host that is still up is not in the middle
+# of shutting down, so CANCEL can hand its runners back without feeding a job to a dying VM.
+OFFLINE_WAIT_SEC = int(os.environ.get("OFFLINE_WAIT_SEC", "2400"))
+# Consecutive all-clear polls before powering off: one poll can straddle the moment a task is
+# being handed out.
+DRAIN_CLEAR_POLLS = int(os.environ.get("DRAIN_CLEAR_POLLS", "2"))
+STATE_NAMESPACE = os.environ.get("STATE_NAMESPACE", "cloud-power")
+STATE_CONFIGMAP = os.environ.get("STATE_CONFIGMAP", "cloud-power-state")
+SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+# Browser origins allowed to POST (CSRF). CANCEL and ON change state without a confirm token.
+ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in
+                   os.environ.get("ALLOWED_ORIGINS", "https://home.chifor.me").split(",") if o.strip()}
 
 # Pinned Proxmox cert fingerprints, "node=AA:BB:...,node2=...". These hosts carry the PVE
 # self-signed cluster certificate and there is no internal CA to validate against, so without
@@ -239,9 +278,14 @@ def shutdown_all():
             pve(n, "/nodes/%s/status" % n["name"], method="POST", data={"command": "shutdown"})
             out.append({"node": n["name"], "result": "shutdown requested"})
             log("shutdown requested: " + n["name"])
+        except PinError as e:
+            # Raised BEFORE anything was sent: the host certainly did not get the request.
+            out.append({"node": n["name"], "result": "REFUSED (not sent): %s" % e})
+            log("shutdown %s NOT SENT: %s" % (n["name"], e))
         except Exception as e:
-            out.append({"node": n["name"], "result": "ERROR: %s" % e})
-            log("shutdown %s FAILED: %s" % (n["name"], e))
+            # The request may have been accepted before the reply was lost: treat as uncertain.
+            out.append({"node": n["name"], "result": "ERROR (outcome unknown): %s" % e})
+            log("shutdown %s FAILED (outcome unknown): %s" % (n["name"], e))
     return out
 
 
@@ -265,6 +309,594 @@ def take_confirm(tok):
     return rec[1]
 
 
+# --- Gitea: pause / resume the cloud runners -------------------------------------------------
+class GiteaError(Exception):
+    def __init__(self, msg, status=None):
+        super().__init__(msg)
+        self.status = status
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib copies the Authorization header onto a redirect, to whatever host it points at.
+    # Nothing this client calls redirects, so a redirect is an error, never a hop.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+RUNNER_FIELDS = ("id", "name", "disabled", "busy", "status")
+JOB_FIELDS = ("runner_name", "name")
+
+
+class Gitea:
+    """The few org-scope calls the drain needs. Every failure RAISES: a caller that could not
+    tell whether a job is running must treat that as 'not drained', never as an all-clear.
+    Compatibility baseline: Gitea 1.26.1 (runner `disabled`/`busy`/`status`, org jobs endpoint).
+    `transport(method, url, headers, body) -> (status, bytes)` is injectable for the tests."""
+
+    def __init__(self, base, org, token, timeout=15, transport=None):
+        self.base = base.rstrip("/")
+        self.org = org
+        self.token = token
+        self.timeout = timeout
+        self.transport = transport or self._urllib
+
+    def _urllib(self, method, url, headers, body):
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with _OPENER.open(req, timeout=self.timeout) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
+            # The message never carries the token (it is a header, not part of the URL).
+            raise GiteaError("%s %s: %s" % (method, url.split("?")[0], type(e).__name__)) from e
+
+    def _call(self, method, path, params=None, body=None):
+        if not self.token:
+            raise GiteaError("no Gitea token configured")
+        url = self.base + "/api/v1" + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        headers = {"Authorization": "token " + self.token, "Accept": "application/json",
+                   "User-Agent": "git/2 cloud-power"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        status, raw = self.transport(method, url, headers, data)
+        if status >= 300:
+            raise GiteaError("%s %s -> HTTP %d" % (method, path, status), status)
+        try:
+            return json.loads(raw or b"null")
+        except ValueError as e:
+            raise GiteaError("%s %s: response is not JSON" % (method, path)) from e
+
+    def _paged(self, path, key, fields, params=None, limit=50, max_pages=40):
+        out = []
+        for page in range(1, max_pages + 1):
+            q = dict(params or {})
+            q.update(page=page, limit=limit)
+            d = self._call("GET", path, q)
+            if not isinstance(d, dict) or not isinstance(d.get(key, []), list):
+                raise GiteaError("%s: unexpected response shape" % path)
+            items = d.get(key) or []
+            for it in items:
+                # A missing field must never read as "not busy" / "no runner": refuse the list.
+                if not isinstance(it, dict) or any(f not in it for f in fields):
+                    raise GiteaError("%s: an item lacks one of %s (API changed?)" % (path, ",".join(fields)))
+            out.extend(items)
+            total = d.get("total_count")
+            if not items or (isinstance(total, int) and len(out) >= total):
+                return out
+        # A truncated list could hide the one runner or job that matters: refuse it.
+        raise GiteaError("%s: more than %d pages, refusing a partial list" % (path, max_pages))
+
+    def runners(self):
+        return self._paged("/orgs/%s/actions/runners" % self.org, "runners", RUNNER_FIELDS)
+
+    def set_disabled(self, runner_id, disabled):
+        self._call("PATCH", "/orgs/%s/actions/runners/%d" % (self.org, int(runner_id)),
+                   body={"disabled": bool(disabled)})
+
+    def running_jobs(self):
+        return self._paged("/orgs/%s/actions/jobs" % self.org, "jobs", JOB_FIELDS,
+                           {"status": "in_progress"})
+
+
+# --- schedule state ConfigMap (the ci-rerun-watchdog transport, not its merge-on-conflict) ----
+class StateError(Exception):
+    pass
+
+
+class StateConflict(StateError):
+    pass
+
+
+class KubeState:
+    """cloud-power-state through the in-cluster API with the projected SA token. Created at
+    runtime, NOT in git, so Flux prune never removes a schedule that is in flight.
+    read() -> (data|None, resourceVersion|None); write(data, rv) -> new rv (rv None creates)."""
+
+    def __init__(self, namespace, name, sa_dir=SA_DIR, timeout=10):
+        self.namespace = namespace
+        self.name = name
+        self.host = "https://%s:%s" % (os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc"),
+                                       os.environ.get("KUBERNETES_SERVICE_PORT", "443"))
+        self.sa_dir = sa_dir
+        self.timeout = timeout
+        self._ctx = None
+
+    def _call(self, method, path, body=None):
+        try:
+            if self._ctx is None:
+                self._ctx = ssl.create_default_context(cafile=os.path.join(self.sa_dir, "ca.crt"))
+            with open(os.path.join(self.sa_dir, "token")) as f:  # re-read: the kubelet rotates it
+                tok = f.read().strip()
+        except OSError as e:
+            raise StateError("service account token/CA unreadable: %s" % e) from e
+        req = urllib.request.Request(
+            self.host + path, data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json",
+                     "Accept": "application/json"}, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
+            raise StateError("%s configmap: %s: %s" % (method, type(e).__name__, e)) from e
+
+    def _path(self, named=True):
+        p = "/api/v1/namespaces/%s/configmaps" % self.namespace
+        return p + "/" + self.name if named else p
+
+    def read(self):
+        status, raw = self._call("GET", self._path())
+        if status == 404:
+            return None, None
+        if status != 200:
+            raise StateError("GET configmap: HTTP %s" % status)
+        obj = json.loads(raw)
+        return dict(obj.get("data") or {}), obj.get("metadata", {}).get("resourceVersion")
+
+    def write(self, data, rv):
+        body = {"apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": self.name, "namespace": self.namespace,
+                             "labels": {"app.kubernetes.io/name": "cloud-power",
+                                        "app.kubernetes.io/managed-by": "cloud-power"}},
+                "data": {k: str(v) for k, v in data.items()}}
+        if rv is None:
+            status, raw = self._call("POST", self._path(named=False), body)
+        else:
+            body["metadata"]["resourceVersion"] = str(rv)
+            status, raw = self._call("PUT", self._path(), body)
+        if status == 409:
+            raise StateConflict("configmap write: HTTP 409 (written by someone else)")
+        if status not in (200, 201):
+            raise StateError("configmap write: HTTP %s" % status)
+        return json.loads(raw).get("metadata", {}).get("resourceVersion")
+
+
+# --- the schedule ----------------------------------------------------------------------------
+class Refused(Exception):
+    """The request is not allowed in the current phase (HTTP 409)."""
+
+
+STATE_VERSION = 1
+# The shut-down hosts must stay unreachable this long, continuously, before their runners are
+# handed back. Two quick misses could be a network blip that also makes the runners look offline;
+# an idle cloud host finishes its shutdown well inside this window.
+HOST_DOWN_SEC = 300
+
+
+def host_up(name):
+    for n in NODES:
+        if n["name"] == name:
+            return node_up(n["ip"])
+    return False
+
+
+class Scheduler:
+    """idle -> draining -> powering_off -> idle; releasing and stalled are the ways back out.
+
+      draining      the owned cloud runners are paused in Gitea; wait until no cloud runner has a
+                    job in flight (DRAIN_CLEAR_POLLS consecutive clear ticks).
+      powering_off  node shutdown sent; an owned runner is re-enabled once every node that accepted
+                    the shutdown is seen down AND Gitea reports the runner offline.
+      stalled       something did not happen in time (drain deadline, a host that stays up, every
+                    shutdown call failed, a stale unsent shutdown). Runners STAY paused; the page
+                    shows why; CANCEL hands them back.
+      releasing     re-enable every owned runner (retried per tick), then idle.
+
+    Transitions are PERSISTED BEFORE THEY ACT, so a restart at any point resumes the same phase
+    and repeats at most an idempotent call (a PATCH to the same value, or a shutdown that is still
+    fresh). Only runners this schedule paused are ever re-enabled: one already disabled when OFF
+    was confirmed is recorded as skipped and left alone."""
+
+    def __init__(self, gitea, store, shutdown_fn, host_up_fn=host_up, clock=time.time,
+                 prefix=CLOUD_RUNNER_PREFIX, drain_max=DRAIN_MAX_SEC, offline_wait=OFFLINE_WAIT_SEC,
+                 clear_polls=DRAIN_CLEAR_POLLS):
+        self.gitea = gitea
+        self.store = store
+        self.shutdown_fn = shutdown_fn
+        self.host_up_fn = host_up_fn
+        self.clock = clock
+        self.prefix = prefix
+        self.drain_max = drain_max
+        self.offline_wait = offline_wait
+        self.clear_polls = clear_polls
+        self.lock = threading.RLock()
+        self.state = None      # the persisted schedule, or None when idle
+        self.last = None       # the last finished schedule's outcome, for the page
+        self.rv = None
+        self.loaded = False
+        self.corrupt = ""      # non-empty: the state could not be trusted; everything refuses
+        self.clear = 0         # consecutive all-clear ticks (in memory: a restart re-counts)
+        self.down_since = None  # since when every shut-down host has been unreachable (in memory)
+        self.inflight = []     # what the drain is waiting for, for the page
+        self.note = ""         # transient condition worth showing (e.g. Gitea unreachable)
+        self.last_tick = None
+        self.view = {"phase": "unknown", "loaded": False}
+
+    # -- persistence ----------------------------------------------------------------------
+    def load(self):
+        with self.lock:
+            data, rv = self.store.read()
+            data = data or {}
+            self.corrupt = ""
+            try:
+                state = json.loads(data["schedule"]) if data.get("schedule") else None
+                last = json.loads(data["last"]) if data.get("last") else None
+            except ValueError:
+                state, last = None, None
+                self.corrupt = "the state ConfigMap does not parse"
+            if state is not None and (not isinstance(state, dict) or state.get("v") != STATE_VERSION):
+                self.corrupt = "unsupported schedule state (v=%r)" % (state.get("v") if isinstance(state, dict) else "?")
+            self.state = None if self.corrupt else state
+            self.last = last
+            self.rv = rv
+            self.loaded = True
+            self.clear = 0
+            self.down_since = None
+            if self.corrupt:
+                log("STATE UNUSABLE, refusing to act until fixed: %s" % self.corrupt)
+            elif self.state:
+                log("RESUMING a %s schedule (by %s)" % (self.state.get("phase"), self.state.get("by")))
+
+    def _save(self):
+        try:
+            self.rv = self.store.write({"schedule": json.dumps(self.state) if self.state else "",
+                                        "last": json.dumps(self.last) if self.last else ""}, self.rv)
+        except StateConflict:
+            # Someone else wrote it. Never overwrite: re-read and re-evaluate on the next tick.
+            self.loaded = False
+            raise
+
+    def _save_quiet(self):
+        try:
+            self._save()
+        except StateError as e:
+            # The in-memory state is ahead of the persisted one; the next tick saves again, and a
+            # restart before that repeats only idempotent calls (see the class docstring).
+            self.note = "state not persisted: %s" % e
+            log("state write FAILED (will retry): %s" % e)
+
+    def publish(self):
+        """An immutable snapshot for /api/status, so a status poll never waits on a tick that is
+        in the middle of a slow Gitea or PVE call."""
+        st = self.state
+        if self.corrupt:
+            phase = "unknown"
+        elif st:
+            phase = st["phase"]
+        else:
+            phase = "idle" if self.loaded else "unknown"
+        v = {"phase": phase, "loaded": self.loaded, "now": self.clock(), "last": self.last,
+             "note": self.corrupt or self.note, "last_tick": self.last_tick}
+        if st:
+            v.update({k: st.get(k) for k in ("by", "at", "deadline", "reason", "powering_off_at",
+                                              "skipped", "stall")})
+            v["runners"] = [r["name"] for r in st.get("runners", [])]
+            if st["phase"] == "draining":
+                v["inflight"] = self.inflight
+        self.view = copy.deepcopy(v)
+        return self.view
+
+    # -- helpers --------------------------------------------------------------------------
+    def _is_cloud(self, name):
+        return bool(name) and name.startswith(self.prefix)
+
+    def inflight_jobs(self, runners=None):
+        """In-flight work on ANY cloud runner (owned or skipped: an operator-disabled runner can
+        still be finishing a job). The job list is authoritative; `busy` (LastActive < 10 s,
+        seen flapping mid-job) only ADDS to it. Raises GiteaError."""
+        jobs = self.gitea.running_jobs()
+        out = [{"runner": j.get("runner_name"), "job": j.get("name") or "?",
+                "started_at": j.get("started_at"), "url": j.get("html_url")}
+               for j in jobs if self._is_cloud(j.get("runner_name"))]
+        if runners is not None:
+            named = {j["runner"] for j in out}
+            out += [{"runner": r.get("name"), "job": "(busy)", "started_at": None, "url": None}
+                    for r in runners
+                    if self._is_cloud(r.get("name")) and r.get("busy") and r.get("name") not in named]
+        return out
+
+    def _finish(self, result, message):
+        self.last = {"at": self.clock(), "result": result, "message": message}
+        self.state = None
+        self.clear = 0
+        self.down_since = None
+        self.inflight = []
+        log("schedule finished: %s - %s" % (result, message))
+        self._save_quiet()
+
+    def _stall(self, message, cancel_after=None):
+        """cancel_after: before this time CANCEL/ON must NOT hand the runners back, because a host
+        may still be shutting down (a runner re-enabled now could take a job and die with it)."""
+        now = self.clock()
+        self.state["phase"] = "stalled"
+        self.state["stall"] = {"at": now, "message": message,
+                               "cancel_after": max(now, cancel_after or now)}
+        self.inflight = []
+        log("STALLED (runners stay paused until CANCEL): %s" % message)
+        self._save_quiet()
+
+    def _to_releasing(self, result, message):
+        self.state["phase"] = "releasing"
+        self.state["outcome"] = {"result": result, "message": message}
+        log("releasing paused runners (%s): %s" % (result, message))
+        self._save_quiet()
+        self._tick_releasing()
+
+    def _require_usable(self):
+        if not self.loaded:
+            self.load()                              # StateError -> the caller answers 503
+        if self.corrupt:
+            raise StateError(self.corrupt)
+
+    # -- operator actions -----------------------------------------------------------------
+    def schedule(self, who):
+        with self.lock:
+            self._require_usable()
+            if self.state:
+                raise Refused("an OFF is already %s" % self.state["phase"])
+            cloud = [r for r in self.gitea.runners() if self._is_cloud(r["name"])]
+            if not cloud:
+                raise Refused("no %s* runner is registered in %s - refusing an OFF that would skip "
+                              "the drain (check CLOUD_RUNNER_PREFIX / GITEA_ORG)"
+                              % (self.prefix, self.gitea.org))
+            targets = [{"id": r["id"], "name": r["name"]} for r in cloud if not r["disabled"]]
+            now = self.clock()
+            self.state = {"v": STATE_VERSION, "phase": "draining", "by": who, "at": now,
+                          "deadline": now + self.drain_max, "runners": targets,
+                          "skipped": [r["name"] for r in cloud if r["disabled"]]}
+            try:
+                self._save()                         # persist BEFORE pausing anything
+            except StateError:
+                self.state = None
+                raise
+            self.clear = 0
+            self.inflight = []
+            self.note = ""
+            for rec in targets:
+                try:
+                    self.gitea.set_disabled(rec["id"], True)
+                except GiteaError as e:
+                    self._to_releasing("error", "could not pause %s (%s); OFF not scheduled"
+                                       % (rec["name"], e))
+                    self.publish()
+                    raise
+            log("OFF SCHEDULED by %s: paused %s (already disabled, left alone: %s)"
+                % (who, ",".join(r["name"] for r in targets) or "-",
+                   ",".join(self.state["skipped"]) or "-"))
+            return self.publish()
+
+    def cancel(self, who):
+        with self.lock:
+            self._require_usable()
+            if not self.state:
+                raise Refused("no OFF is scheduled")
+            phase = self.state["phase"]
+            if phase == "powering_off":
+                raise Refused("the hosts are already shutting down; cancel is no longer possible")
+            if phase == "stalled":
+                after = (self.state.get("stall") or {}).get("cancel_after") or 0
+                if self.clock() < after:
+                    raise Refused("a host may still be shutting down; CANCEL is possible from %s"
+                                  % time.strftime("%H:%M", time.localtime(after)))
+            if phase in ("draining", "stalled"):
+                prev = copy.deepcopy(self.state)
+                self.state["phase"] = "releasing"
+                self.state["outcome"] = {"result": "cancelled", "message": "cancelled by %s" % who}
+                try:
+                    self._save()                     # persist BEFORE re-enabling
+                except StateError:
+                    self.state = prev
+                    raise
+                log("OFF CANCELLED by %s (was %s)" % (who, phase))
+                self._tick_releasing()
+            return self.publish()
+
+    # -- the worker -----------------------------------------------------------------------
+    def tick(self):
+        with self.lock:
+            try:
+                if not self.loaded:
+                    self.load()
+                if self.state and not self.corrupt:
+                    phase = self.state.get("phase")
+                    if phase == "draining":
+                        self._tick_draining()
+                    elif phase == "powering_off":
+                        self._tick_powering_off()
+                    elif phase == "releasing":
+                        self._tick_releasing()
+                    elif phase != "stalled":
+                        self._stall("unknown phase %r in the state ConfigMap" % phase)
+                self.last_tick = self.clock()
+            except StateError as e:
+                self.note = "state ConfigMap: %s" % e
+                log("tick: %s" % e)
+            finally:
+                self.publish()
+
+    def _tick_draining(self):
+        st = self.state
+        now = self.clock()
+        if now >= st["deadline"]:
+            return self._stall("drain deadline reached %ds after OFF was confirmed with work still "
+                               "in flight or Gitea unreadable; hosts left ON" % int(now - st["at"]))
+        try:
+            runners = self.gitea.runners()
+            owned = {r["id"] for r in st["runners"]}
+            for r in runners:
+                if self._is_cloud(r["name"]) and not r["disabled"]:
+                    # Re-enabled mid-drain, or newly registered: the schedule pauses and owns it.
+                    self.gitea.set_disabled(r["id"], True)
+                    if r["id"] not in owned:
+                        st["runners"].append({"id": r["id"], "name": r["name"]})
+                        owned.add(r["id"])
+                        self._save_quiet()
+                    log("runner %s was enabled during the drain; paused it" % r["name"])
+                    self.clear = 0
+            self.inflight = self.inflight_jobs(runners)
+        except GiteaError as e:
+            self.clear = 0
+            self.note = "Gitea: %s - still waiting" % e
+            log("drain poll failed, still waiting: %s" % e)
+            return
+        self.note = ""
+        if self.inflight:
+            self.clear = 0
+            return
+        self.clear += 1
+        if self.clear >= self.clear_polls:
+            self._begin_power_off("drained: no CI job in flight on a cloud runner")
+
+    def _begin_power_off(self, reason):
+        st = self.state
+        prev = copy.deepcopy(st)
+        st.update(phase="powering_off", reason=reason, powering_off_at=self.clock(), shutdown_sent=False)
+        try:
+            self._save()                             # persist BEFORE shutting anything down
+        except StateError:
+            self.state = prev
+            raise
+        log("powering off (%s)" % reason)
+        self.inflight = []
+        self.down_since = None
+        self._send_shutdown()
+
+    def _send_shutdown(self):
+        results = self.shutdown_fn()
+        st = self.state
+        st["shutdown_sent"] = True
+        st["shutdown_results"] = results
+        # Wait for every host that accepted the shutdown OR may have (reply lost). Only a request
+        # that was provably never sent (cert pin refused) or a host already off is not waited for.
+        st["waiting"] = [r["node"] for r in results
+                         if r.get("result") == "shutdown requested"
+                         or str(r.get("result", "")).startswith("ERROR")]
+        if not st["waiting"] and not all(r.get("result") == "already off" for r in results):
+            return self._stall("no node was sent the shutdown: %s"
+                               % "; ".join("%s: %s" % (r.get("node"), r.get("result")) for r in results))
+        self._save_quiet()
+
+    def _tick_powering_off(self):
+        st = self.state
+        now = self.clock()
+        if not st.get("shutdown_sent"):
+            # Resumed between the persisted transition and the recorded results: some nodes may
+            # have been sent the shutdown, others not. NEVER replay it (a host may have gone down
+            # and been woken since); stall, and hold CANCEL until any shutdown would be over.
+            return self._stall("the controller restarted while sending the shutdown; not replaying "
+                               "it. Check the hosts; press OFF again if they are still up",
+                               cancel_after=st["powering_off_at"] + self.offline_wait)
+        waiting = st.get("waiting")
+        if waiting is None:  # a state written before `waiting` existed
+            waiting = [r["node"] for r in st.get("shutdown_results", [])
+                       if r.get("result") == "shutdown requested"]
+        if all(not self.host_up_fn(n) for n in waiting):
+            if self.down_since is None:
+                self.down_since = now
+        else:
+            self.down_since = None
+            if st.get("hosts_down_at"):
+                # They WERE down (confirmed) and one answers again: woken (ON, RTC) before Gitea
+                # noticed the runners offline. The power cycle happened; hand everything back.
+                return self._to_releasing("off", "%s; the hosts were down and have been woken since"
+                                          % (st.get("reason") or "powered off"))
+        dark = self.down_since is not None and now - self.down_since >= HOST_DOWN_SEC
+        if dark and not st.get("hosts_down_at"):
+            st["hosts_down_at"] = now
+            self._save_quiet()
+        if dark:
+            try:
+                by_id = {r["id"]: r for r in self.gitea.runners()}
+            except GiteaError as e:
+                self.note = "Gitea: %s" % e
+                by_id = None
+            if by_id is not None:
+                self.note = ""
+                keep = []
+                for rec in st["runners"]:
+                    r = by_id.get(rec["id"])
+                    if r is None:
+                        log("runner %s no longer registered; nothing to re-enable" % rec["name"])
+                        continue
+                    if r["status"] != "offline":
+                        keep.append(rec)             # Gitea has not seen it stop polling yet
+                        continue
+                    try:
+                        self.gitea.set_disabled(rec["id"], False)
+                        log("runner %s: host down and runner offline; re-enabled for the next boot"
+                            % rec["name"])
+                    except GiteaError as e:
+                        log("re-enabling %s failed (will retry): %s" % (rec["name"], e))
+                        keep.append(rec)
+                if keep != st["runners"]:
+                    st["runners"] = keep
+                    self._save_quiet()
+                if not keep:
+                    return self._finish("off", st.get("reason") or "powered off")
+        if now - st["powering_off_at"] >= self.offline_wait:
+            up = [n for n in waiting if self.host_up_fn(n)]
+            self._stall("%s %ds after the shutdown request (%s still paused)"
+                        % ("host(s) %s still up" % ",".join(up) if up else "runner(s) still online",
+                           self.offline_wait, ",".join(r["name"] for r in st["runners"])))
+
+    def _tick_releasing(self):
+        st = self.state
+        keep = []
+        for rec in st["runners"]:
+            try:
+                self.gitea.set_disabled(rec["id"], False)
+            except GiteaError as e:
+                if e.status == 404:
+                    continue                         # deregistered: nothing to hand back
+                log("re-enabling %s failed (will retry): %s" % (rec["name"], e))
+                keep.append(rec)
+        st["runners"] = keep
+        if keep:
+            self.note = "could not re-enable %s yet; retrying" % ",".join(r["name"] for r in keep)
+            return self._save_quiet()
+        out = st.get("outcome") or {"result": "cancelled", "message": ""}
+        self._finish(out["result"], out["message"])
+
+
+SCHED = None  # the Scheduler, MODE=api only
+
+
+def worker(sched, poll):
+    while True:
+        try:
+            sched.tick()
+        except Exception as e:  # noqa: BLE001 - the loop must survive anything a tick throws
+            log("tick crashed: %r" % e)
+        time.sleep(poll)
+
+
 # --- HTTP -----------------------------------------------------------------------------------
 PAGE = """<!doctype html><meta charset=utf-8><title>Cloud GPU power</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -273,62 +905,105 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Cloud GPU power</title>
     the widget container supplies the card background, rounding and spacing. */
  html,body{margin:0;padding:0;background:transparent;color:#e2e8f0;
    font:13px/1.45 ui-sans-serif,system-ui,sans-serif;overflow:hidden}
- .wrap{padding:.55rem .7rem;display:flex;flex-direction:column;gap:.5rem;height:100%;box-sizing:border-box}
+ .wrap{padding:.55rem .7rem;display:flex;flex-direction:column;gap:.45rem;height:100%;box-sizing:border-box}
  .nodes{display:flex;gap:1rem;flex-wrap:wrap;font-family:ui-monospace,monospace;font-size:.78rem}
  .n{display:flex;align-items:center;gap:.35rem}
  .dot{width:.55rem;height:.55rem;border-radius:50%;background:#64748b;flex:none}
- .row{display:flex;gap:.5rem;align-items:center}
+ .row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
  button{font:inherit;font-weight:700;font-size:.72rem;letter-spacing:.04em;border:0;border-radius:.35rem;
    padding:.34rem 1.15rem;cursor:pointer;color:#fff}
  button:disabled{opacity:.5;cursor:not-allowed}
  #sum{color:#94a3b8;font-size:.75rem}
+ #sched{font-size:.75rem;color:#fbbf24}
  #out{color:#94a3b8;font-size:.7rem;white-space:pre-wrap;overflow:auto;flex:1;min-height:0}
 </style>
 <div class=wrap>
- <div class=row><span id=sum>checking...</span></div>
+ <div class=row><span id=sum>checking...</span><span id=sched></span></div>
  <div class=nodes id=nodes></div>
  <div class=row>
   <button style=background:#16a34a id=bon>ON</button>
   <button style=background:#dc2626 id=boff>OFF</button>
+  <button style="background:#475569;display:none" id=bcancel>CANCEL OFF</button>
  </div>
  <div id=out></div>
 </div>
 <script>
-/* Same-origin: the iframe inherits the Authelia cookie, so these calls are authenticated. */
-const B='/cloud-power',out=document.getElementById('out'),sum=document.getElementById('sum');
+/* Same-origin: the iframe inherits the Authelia cookie, so these calls are authenticated.
+   Everything from Gitea (job and runner names) is rendered with textContent, never innerHTML:
+   a workflow author controls a job name, and this page carries the dashboard session. */
+const B='/cloud-power',$=id=>document.getElementById(id),out=$('out'),sum=$('sum'),sched=$('sched');
+const boff=$('boff'),bcancel=$('bcancel');
+const hm=t=>t?new Date(t*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'?';
+const ago=(t,now)=>t?Math.max(0,Math.round((now-t)/60))+'m':'';
+const iso=s=>s?Date.parse(s)/1000:null;
+let phase='unknown',pending=null,timer=null,showLast=true;
+function jobs(list,now){return(list||[]).map(j=>'  '+j.runner+'  '+j.job+(j.started_at?'  ('+ago(iso(j.started_at),now)+')':'')).join('\\n')}
+function render(s){
+ const c=s.schedule||{};phase=c.phase||'unknown';
+ boff.disabled=phase!=='idle';bcancel.disabled=false;bcancel.style.display=(phase==='draining'||phase==='stalled')?'':'none';
+ const stale=c.last_tick&&c.now-c.last_tick>90?'\\n!! controller has not polled for '+ago(c.last_tick,c.now)+' - check the cloud-power pod':'';
+ if(phase==='draining'){
+  const n=(c.inflight||[]).length;
+  sched.textContent='OFF scheduled '+hm(c.at)+' - '+(n?'waiting for '+n+' CI job'+(n>1?'s':''):'no CI job in flight, powering off shortly');
+  out.textContent='Cloud runners paused: '+((c.runners||[]).join(', ')||'none')+'\\n'+jobs(c.inflight,c.now)
+   +'\\nPowers off when they finish (gives up and stays ON at '+hm(c.deadline)+').'+(c.note?'\\n'+c.note:'')+stale;
+ }else if(phase==='powering_off'){
+  sched.textContent='powering off ('+(c.reason||'')+')';
+  out.textContent='Runners stay paused until their host is down: '+((c.runners||[]).join(', ')||'-')+(c.note?'\\n'+c.note:'')+stale;
+ }else if(phase==='stalled'){
+  sched.textContent='OFF STALLED - hosts may still be on';
+  const ca=(c.stall||{}).cancel_after;bcancel.disabled=!!(ca&&ca>c.now);
+  out.textContent=((c.stall||{}).message||'')+(ca&&ca>c.now?' (CANCEL possible from '+hm(ca)+')':'')+'\\nCloud runners still paused: '+((c.runners||[]).join(', ')||'-')
+   +'\\nCANCEL OFF hands them back to the pool.'+stale;
+ }else if(phase==='releasing'){
+  sched.textContent='re-enabling runners...';out.textContent=(c.note||'')+stale;
+ }else{
+  sched.textContent=phase==='unknown'?'(schedule state unavailable - OFF disabled)':'';
+  if(phase==='unknown'&&c.note&&!pending)out.textContent=c.note;
+  if(showLast&&c.last&&c.now-c.last.at<12*3600&&!pending){
+   out.textContent='last OFF '+hm(c.last.at)+': '+c.last.result+(c.last.message?' - '+c.last.message:'');}
+ }}
 async function refresh(){
  try{const s=await(await fetch(B+'/api/status',{credentials:'same-origin'})).json();
   sum.textContent=s.up+'/'+s.total+' up';
-  document.getElementById('nodes').innerHTML=s.nodes.map(n=>
-   '<span class=n><span class=dot style=background:'+(n.up?'#22c55e':'#64748b')+'></span><span style=color:'+
-   (n.up?'#e2e8f0':'#64748b')+'>'+n.name+'</span></span>').join('');
+  const nodes=$('nodes');nodes.replaceChildren(...s.nodes.map(n=>{
+   const w=document.createElement('span'),d=document.createElement('span'),l=document.createElement('span');
+   w.className='n';d.className='dot';d.style.background=n.up?'#22c55e':'#64748b';
+   l.style.color=n.up?'#e2e8f0':'#64748b';l.textContent=n.name;w.append(d,l);return w}));
+  render(s);
  }catch(e){sum.textContent='unreachable'}}
-document.getElementById('bon').onclick=async()=>{
- out.textContent='sending wake packets...';
- try{await fetch(B+'/api/wake',{method:'POST',credentials:'same-origin'});
-  out.textContent='Magic packets sent. Nodes take about a minute to POST.';sum.textContent='waking...';
- }catch(e){out.textContent='wake failed: '+e}};
-let pending=null,timer=null;
-document.getElementById('boff').onclick=async()=>{
- const b=document.getElementById('boff');
+$('bon').onclick=async()=>{
+ out.textContent='sending wake packets...';showLast=false;
+ try{const r=await fetch(B+'/api/wake',{method:'POST',credentials:'same-origin'});const d=await r.json();
+  if(!r.ok){out.textContent='wake failed: '+(d.error||r.status);return refresh()}
+  out.textContent=(d.cancelled?'Scheduled OFF cancelled, runners re-enabled.\\n':'')+(d.note||'Magic packets sent. Nodes take about a minute to POST.');
+  sum.textContent='waking...';
+ }catch(e){out.textContent='wake failed: '+e}refresh()};
+bcancel.onclick=async()=>{
+ out.textContent='cancelling...';showLast=false;
+ const r=await fetch(B+'/api/shutdown/cancel',{method:'POST',credentials:'same-origin'});const d=await r.json();
+ out.textContent=r.ok?'OFF cancelled; cloud runners re-enabled.':'cancel refused: '+(d.error||'');refresh()};
+boff.onclick=async()=>{
+ showLast=false;
  if(!pending){
   out.textContent='checking what is running...';
   const r=await fetch(B+'/api/shutdown/preflight',{method:'POST',credentials:'same-origin'});
   const p=await r.json();
   if(!r.ok){out.textContent='preflight refused: '+(p.error||'')+'\\n'+(p.errors||[]).join('\\n');return;}
   pending=p.confirm;
-  out.textContent='WILL STOP:\\n'+(p.guests.length?p.guests.map(g=>'  '+g.node+' '+g.type+' '+g.vmid+' '+g.name).join('\\n'):'  (no running guests)')
-   +'\\nClick OFF again within '+p.expires_in+'s to confirm.';
-  b.textContent='CONFIRM';
+  out.textContent=(p.jobs.length?'WILL WAIT FOR '+p.jobs.length+' CI job(s) on cloud runners:\\n'+jobs(p.jobs,Date.now()/1000)+'\\n':'No CI job in flight on the cloud runners.\\n')
+   +'THEN STOPS:\\n'+(p.guests.length?p.guests.map(g=>'  '+g.node+' '+g.type+' '+g.vmid+' '+g.name).join('\\n'):'  (no running guests)')
+   +'\\nCloud runners take no new jobs from the moment you confirm.\\nClick OFF again within '+p.expires_in+'s to schedule.';
+  boff.textContent='CONFIRM';
   clearTimeout(timer);
-  timer=setTimeout(()=>{if(pending){pending=null;b.textContent='OFF';out.textContent='confirmation expired'}},(p.expires_in||30)*1000);
+  timer=setTimeout(()=>{if(pending){pending=null;boff.textContent='OFF';out.textContent='confirmation expired'}},(p.expires_in||30)*1000);
   return;}
- clearTimeout(timer);const tok=pending;pending=null;b.textContent='OFF';
- out.textContent='shutting down...';
+ clearTimeout(timer);const tok=pending;pending=null;boff.textContent='OFF';
+ out.textContent='scheduling...';
  const r=await fetch(B+'/api/shutdown',{method:'POST',credentials:'same-origin',
   headers:{'content-type':'application/json'},body:JSON.stringify({confirm:tok})});
  const d=await r.json();
- out.textContent=(d.results||[]).map(x=>x.node+': '+x.result).join('\\n')||(d.error||JSON.stringify(d));};
+ out.textContent=r.ok?'OFF scheduled.':(d.error||JSON.stringify(d));refresh()};
 refresh();setInterval(refresh,15000);
 </script>
 """
@@ -346,6 +1021,15 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return False
         return any(ip in net for net in ALLOW_FROM)
+
+    def _same_origin(self):
+        """CSRF gate for the state-changing POSTs. Browsers send Sec-Fetch-Site on every fetch and
+        Origin on every POST; a non-browser caller inside the fence (curl from the proxy's
+        network) sends neither and is allowed, as before."""
+        if self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+            return False
+        origin = self.headers.get("Origin")
+        return origin is None or origin.rstrip("/") in ALLOWED_ORIGINS
 
     def _send(self, code, payload, ctype="application/json"):
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
@@ -370,7 +1054,9 @@ class Handler(BaseHTTPRequestHandler):
         if MODE == "wol":
             return self._send(404, {"error": "wol sender exposes only POST /api/wake"})
         if r == "/api/status":
-            return self._send(200, status())
+            s = status()
+            s["schedule"] = SCHED.view if SCHED else None
+            return self._send(200, s)
         if r in ("", "/", "/index.html"):
             # Embedded by Homepage's native iframe widget (services.yaml). Also usable
             # standalone. No X-Frame-Options is set, deliberately, so same-origin framing works.
@@ -382,29 +1068,56 @@ class Handler(BaseHTTPRequestHandler):
         if not self._peer_ok():
             log("DENIED %s from %s" % (r or "/", self.client_address[0]))
             return self._send(403, {"error": "forbidden: caller outside the cluster"})
+        if MODE == "api" and not self._same_origin():
+            log("DENIED cross-site POST %s (Origin=%s Sec-Fetch-Site=%s)"
+                % (r, self.headers.get("Origin"), self.headers.get("Sec-Fetch-Site")))
+            return self._send(403, {"error": "forbidden: cross-site request"})
         who = self.headers.get("X-Forwarded-Email") or self.headers.get("X-Forwarded-User") or "?"
 
         if r == "/api/wake":
             if MODE == "wol":
                 return self._send(200, {"action": "wake", "results": wake_all()})
             log("WAKE by %s from %s" % (who, self.client_address[0]))
+            # ON means "I want the cluster on": a pending OFF is withdrawn first.
+            cancelled = False
+            if SCHED and SCHED.view.get("phase") in ("draining", "stalled"):
+                try:
+                    SCHED.cancel(who + " (ON button)")
+                    cancelled = True
+                except (Refused, StateError) as e:
+                    log("wake: could not cancel the scheduled OFF: %s" % e)
             try:
-                return self._send(200, forward_wake())
+                res = forward_wake()
             except Exception as e:
-                return self._send(502, {"error": "wol sender unreachable: %s" % e})
+                return self._send(502, {"error": "wol sender unreachable: %s" % e, "cancelled": cancelled})
+            res["cancelled"] = cancelled
+            if SCHED and SCHED.view.get("phase") == "powering_off":
+                res["note"] = ("the hosts are still shutting down - a running host ignores the "
+                               "packets; press ON again once they are off")
+            return self._send(200, res)
 
         if MODE == "wol":
             # The hostNetwork half is LAN-reachable, so it must not carry anything destructive.
             return self._send(404, {"error": "wol sender exposes only POST /api/wake"})
 
         if r == "/api/shutdown/preflight":
+            if SCHED.view.get("phase") != "idle":
+                return self._send(409, {"error": "an OFF is already %s (or the schedule state is "
+                                                 "unreadable)" % SCHED.view.get("phase")})
             guests, errors = guests_running()
             if errors:
                 # FAIL CLOSED. An incomplete enumeration shown as "no running guests" would be a
                 # false all-clear, so no token is issued at all.
                 return self._send(503, {"error": "could not enumerate guests; refusing to arm OFF",
                                         "errors": errors})
-            return self._send(200, {"guests": guests, "confirm": new_confirm(guest_sig(guests)),
+            try:
+                jobs = SCHED.inflight_jobs()
+            except GiteaError as e:
+                # The drain cannot work without Gitea, so neither can OFF.
+                return self._send(503, {"error": "cannot read CI jobs from Gitea; refusing to arm OFF",
+                                        "errors": [str(e)]})
+            return self._send(200, {"guests": guests, "jobs": jobs,
+                                    "confirm": new_confirm(guest_sig(guests)),
                                     "expires_in": CONFIRM_TTL})
 
         if r == "/api/shutdown":
@@ -416,18 +1129,36 @@ class Handler(BaseHTTPRequestHandler):
             sig = take_confirm(str(req.get("confirm", "")))
             if sig is None:
                 return self._send(409, {"error": "missing/expired confirmation; run preflight"})
-            # Re-check: the operator confirmed a SPECIFIC set of running guests. If a job started
-            # in the meantime, that confirmation no longer describes reality.
+            # Re-check: the operator confirmed a SPECIFIC set of running guests. If one started
+            # or stopped in the meantime, that confirmation no longer describes reality.
             guests, errors = guests_running()
             if errors:
-                return self._send(503, {"error": "could not re-verify guests; nothing shut down",
+                return self._send(503, {"error": "could not re-verify guests; nothing scheduled",
                                         "errors": errors})
             if guest_sig(guests) != sig:
                 return self._send(409, {"error": "running guests changed since preflight; "
-                                                 "nothing shut down - review and confirm again",
+                                                 "nothing scheduled - review and confirm again",
                                         "guests": guests})
-            log("SHUTDOWN by %s from %s" % (who, self.client_address[0]))
-            return self._send(200, {"action": "shutdown", "results": shutdown_all()})
+            try:
+                view = SCHED.schedule(who)
+            except Refused as e:
+                return self._send(409, {"error": str(e)})
+            except GiteaError as e:
+                return self._send(502, {"error": "could not pause the cloud runners in Gitea; "
+                                                 "nothing scheduled: %s" % e})
+            except StateError as e:
+                return self._send(503, {"error": "could not persist the schedule; nothing "
+                                                 "scheduled: %s" % e})
+            return self._send(202, {"action": "scheduled", "schedule": view})
+
+        if r == "/api/shutdown/cancel":
+            try:
+                view = SCHED.cancel(who)
+            except Refused as e:
+                return self._send(409, {"error": str(e)})
+            except StateError as e:
+                return self._send(503, {"error": "could not persist the cancel; still scheduled: %s" % e})
+            return self._send(200, {"action": "cancelled", "schedule": view})
 
         self._send(404, {"error": "not found"})
 
@@ -442,6 +1173,11 @@ if __name__ == "__main__":
         if missing:
             log("WARNING: no pinned cert fingerprint for %s - those nodes will be REFUSED"
                 % ",".join(missing))
+        if not GITEA_TOKEN:
+            log("WARNING: no Gitea token - OFF will be refused (it cannot pause the runners)")
+        SCHED = Scheduler(Gitea(GITEA_URL, GITEA_ORG, GITEA_TOKEN),
+                          KubeState(STATE_NAMESPACE, STATE_CONFIGMAP), shutdown_all)
+        threading.Thread(target=worker, args=(SCHED, DRAIN_POLL_SEC), daemon=True).start()
     log("listening on :%d base=%s allow=%s" % (PORT, BASE or "/",
                                                ",".join(str(n) for n in ALLOW_FROM)))
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
