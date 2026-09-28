@@ -27,12 +27,14 @@ on:
       - "ansible/roles/dev_worker/tasks/**"
       # the cred-helper test reads the shared agent role's unit + tasks too
       - "ansible/roles/openbao_agent/**"
+      - "scripts/dw-paste/**"
       - ".gitea/workflows/dev-worker-scripts.yaml"
   push:
     branches: [main]
     paths:
       - "ansible/roles/dev_worker/**"
       - "ansible/roles/openbao_agent/**"
+      - "scripts/dw-paste/**"
 
 jobs:
   dev-worker-scripts:
@@ -90,3 +92,12 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/dev_worker/tests/test-web-gate.sh
+
+      # The terminal-title contract with the workstation paste helpers (scripts/dw-paste/): the role's
+      # tmux title carries [user@ip] and all three helpers must still extract it. Drift on either side
+      # fails nowhere else — Ctrl+Shift+V would just paste the laptop path again.
+      - name: dw-paste title contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/dw-paste/test-marker.sh

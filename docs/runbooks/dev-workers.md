@@ -797,12 +797,16 @@ directory quota reserved before reading, 0600 files published without ever repla
 converge proves it end to end through Caddy (the page carries the script; a foreign-Origin upload is
 403; an own-page upload is stored, then deleted).
 
-**SSH from Windows Terminal: `scripts/dw-paste.ps1`.** Copy a screenshot, or copy files in Explorer
-(any type, several at once), then run `powershell -File scripts\dw-paste.ps1` (defaults to
-dev-worker-4; `-SshTarget c4@192.168.0.N` for another). It scp's them to the pastes directory, loads
-one tmux buffer per file and puts the paths on your local clipboard. In the remote tmux, with the
-agent's pane focused, `prefix+]` pastes the first file's path (bracketed) and `prefix+=` picks the
-others. It never pastes on its own: with several clients attached, "the active pane" is ambiguous.
+**SSH (Windows Terminal, macOS, Linux): Ctrl+Shift+V via `scripts/dw-paste/`.** Over SSH the terminal
+itself handles the paste, so a screenshot arrives as the *laptop's* path (the Snipping Tool's
+`…\ScreenClip\{GUID}.png`), which the worker cannot open. Install the helper for your OS once
+(`scripts/dw-paste/README.md`: Windows = logon task + tray icon, macOS = Hammerspoon, Linux = a
+desktop shortcut), then press **Ctrl+Shift+V** (Cmd+Shift+V on a Mac) in the agent's pane: the
+clipboard image or files are scp'd to the pastes directory and each worker path is pasted with the
+terminal's own (bracketed) paste, one per paste, never Enter; the clipboard is restored. Text and
+non-dev-worker windows paste as before. The helper recognises a dev-worker window by the `[user@ip]`
+marker the role's tmux puts in the terminal title (`#h [c4@192.168.0.N] #S:#W`; roll out a title
+change with `-t tmux`).
 
 **herdr remote attach (dev-worker-4).** Install herdr ≥ 0.8.2 on the workstation
 (`powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` — 0.8.2 is the
