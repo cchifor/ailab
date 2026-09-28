@@ -62,9 +62,12 @@ gate() { # returns 0 = deletion allowed, 1 = pause (fail closed on anything unex
   q=$(printf '%s' "$GATE_QUERY" | jq -sRr @uri | tr -d '\r') || return 1
   code=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' "$PROM_URL/api/v1/query?query=$q" || echo 000)
   if [ "$code" != 200 ]; then echo "gate: prometheus HTTP $code - pausing (fail closed)"; return 1; fi
-  # accept only a success envelope with an instant vector: empty vector = no alert, one sample = its value
-  firing=$(jqr 'if .status == "success" and .data.resultType == "vector"
-                then (if (.data.result | length) == 0 then "0" else (.data.result[0].value[1] | tostring) end)
+  # accept only a success envelope whose result is an ARRAY (null|length is 0 in jq - reviewer finding):
+  # an empty array = no alert; exactly one sample with an integer value = that count; anything else pauses
+  firing=$(jqr 'if .status == "success" and .data.resultType == "vector" and (.data.result | type) == "array"
+                then (if (.data.result | length) == 0 then "0"
+                      elif (.data.result | length) == 1 and (.data.result[0].value[1] | type) == "string" and (.data.result[0].value[1] | test("^[0-9]+$")) then .data.result[0].value[1]
+                      else "invalid" end)
                 else "invalid" end' "$body") || firing=invalid
   case "$firing" in
     0) return 0 ;;

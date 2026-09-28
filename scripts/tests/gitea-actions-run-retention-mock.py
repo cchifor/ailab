@@ -298,7 +298,13 @@ def main():
     st, rc, out = scenario("prom-down", down)
     check("prom-down exit 2", rc == 2 and not st.deleted, out[-300:])
     for label, body in (("empty-object", b"{}"), ("error-envelope", b'{"status":"error","errorType":"bad_data"}'),
-                        ("not-json", b"<html>"), ("scalar", b'{"status":"success","data":{"resultType":"scalar","result":[1,"0"]}}')):
+                        ("not-json", b"<html>"), ("scalar", b'{"status":"success","data":{"resultType":"scalar","result":[1,"0"]}}'),
+                        # null|length is 0 in jq: a vector envelope with a missing, null or object result must NOT open the gate
+                        ("missing-result", b'{"status":"success","data":{"resultType":"vector"}}'),
+                        ("null-result", b'{"status":"success","data":{"resultType":"vector","result":null}}'),
+                        ("object-result", b'{"status":"success","data":{"resultType":"vector","result":{}}}'),
+                        ("two-samples", b'{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"0"]},{"metric":{},"value":[1,"0"]}]}}'),
+                        ("non-numeric", b'{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"NaN"]}]}}')):
         def odd(st, body=body):
             two_repos(st); st.prom_body = body
         st, rc, out = scenario("prom-" + label, odd)
