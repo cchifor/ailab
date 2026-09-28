@@ -1,6 +1,6 @@
 # Implementation review — gitea-actions-retention-and-cnpg-reclone — round 1
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
