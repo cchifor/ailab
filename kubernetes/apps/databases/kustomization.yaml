@@ -35,5 +35,6 @@ configMapGenerator:
   # Beside this file because kustomize cannot load files from outside the directory; tests are
   # scripts/tests/cnpg-lost-slot-reclone-mock.py.
   - name: cnpg-lost-slot-reclone-script
+    namespace: databases # the generator does not inherit one; without it Flux rejects the ConfigMap and the WHOLE layer stalls (2026-09-28)
     files:
       - cnpg-lost-slot-reclone.sh

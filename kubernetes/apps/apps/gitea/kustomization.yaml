@@ -44,5 +44,6 @@ configMapGenerator:
   # file because kustomize cannot load files from outside the directory; its tests are
   # scripts/tests/gitea-actions-run-retention-mock.py.
   - name: gitea-actions-run-retention-script
+    namespace: gitea # the generator does not inherit one; without it Flux rejects the ConfigMap and the WHOLE layer stalls (2026-09-28)
     files:
       - gitea-actions-run-retention.sh
