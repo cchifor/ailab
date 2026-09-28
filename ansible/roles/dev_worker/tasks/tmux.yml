@@ -22,7 +22,7 @@
       - set-option
       - -g
       - set-titles-string
-      - "#h [{{ dev_worker_admin_user }}@{{ ansible_default_ipv4.address }}] #S:#W"
+      - "#h [#{client_user}@{{ ansible_default_ipv4.address }}] #S:#W"
       - ;
       - set-option
       - -g

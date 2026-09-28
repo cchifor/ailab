@@ -69,19 +69,26 @@ clip_set() { # <type|text> <file>  — both CLIPBOARD and PRIMARY, so Shift+Inse
 		xclip -selection primary "${t[@]}" -i "$2"
 	fi
 }
-press_paste() { if [ "$WAYLAND" = 1 ]; then wtype -M shift -k Insert -m shift; else xdotool key --clearmodifiers shift+Insert; fi; }
+# wtype needs the virtual-keyboard protocol, which wlroots compositors (sway, Hyprland, ...) have and
+# GNOME's Mutter does not: there it fails, and the failure must be visible rather than a silent no-op.
+press_paste() {
+	if [ "$WAYLAND" = 1 ]; then wtype -M shift -k Insert -m shift; else xdotool key --clearmodifiers shift+Insert; fi ||
+		{ notify "could not send the paste keystroke (on GNOME Wayland wtype is unsupported: use an X11 session or the web terminal)"; return 1; }
+}
 type_space() { if [ "$WAYLAND" = 1 ]; then wtype ' '; else xdotool type --clearmodifiers ' '; fi; }
+focused_window() { xdotool getactivewindow 2>/dev/null || xdotool getwindowfocus 2>/dev/null; }
 
-# The ordinary paste this script stands in for: the clipboard, via PRIMARY + Shift+Insert.
+# The ordinary paste this script stands in for: the clipboard, via PRIMARY + Shift+Insert. With no
+# text on the clipboard there is nothing to paste — and pressing Shift+Insert anyway would paste
+# whatever was last SELECTED (PRIMARY), possibly a command with a newline. So do nothing.
 plain_paste() {
 	local t f
 	t="$(clip_types | grep -m1 -E '^(text/plain;charset=utf-8|UTF8_STRING|text/plain)$' || true)"
-	if [ -n "$t" ]; then
-		f="$(mktemp)"
-		clip_get "$t" >"$f"
-		if [ "$WAYLAND" = 1 ]; then wl-copy --primary <"$f"; else xclip -selection primary -i "$f"; fi
-		rm -f "$f"
-	fi
+	[ -n "$t" ] || return 0
+	f="$(mktemp)"
+	clip_get "$t" >"$f"
+	if [ "$WAYLAND" = 1 ]; then wl-copy --primary <"$f"; else xclip -selection primary -i "$f"; fi
+	rm -f "$f"
 	press_paste
 }
 
@@ -92,13 +99,15 @@ target_of_focus() {
 		[ -r "$HOME/.config/dw-paste/target" ] && head -1 "$HOME/.config/dw-paste/target"
 		return
 	fi
-	local win title pid comm
+	local win title pid exe
 	# getactivewindow needs a window manager (_NET_ACTIVE_WINDOW); fall back to the keyboard focus.
-	win="$(xdotool getactivewindow 2>/dev/null || xdotool getwindowfocus 2>/dev/null)" || return
+	win="$(focused_window)" || return
 	title="$(xdotool getwindowname "$win" 2>/dev/null)"
 	pid="$(xdotool getwindowpid "$win" 2>/dev/null)"
-	comm="$( [ -n "$pid" ] && ps -o comm= -p "$pid" 2>/dev/null)"
-	[[ "$comm" =~ ^($TERMINALS)$ ]] || return
+	# The executable's name, not `ps -o comm=`: the kernel truncates comm to 15 characters, so
+	# gnome-terminal-server would show as "gnome-terminal-" and never match.
+	exe="$( [ -n "$pid" ] && basename "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" 2>/dev/null)"
+	[[ "$exe" =~ ^($TERMINALS)$ ]] || return
 	[[ "$title" =~ $MARKER ]] && echo "${BASH_REMATCH[1]}@${BASH_REMATCH[2]}"
 }
 
@@ -163,13 +172,24 @@ if [ "${#STAGED[@]}" = 0 ]; then plain_paste; exit 0; fi
 SAVED_TYPE="$(clip_types | grep -m1 -xE 'text/uri-list|image/png' || true)"
 [ -n "$SAVED_TYPE" ] && clip_get "$SAVED_TYPE" >"$STAGE/.saved"
 
+START_WIN=""
+[ "$WAYLAND" = 1 ] || START_WIN="$(focused_window)"
 log "upload ${#STAGED[@]} file(s) -> $target"
 if ! remote="$(upload "$target")"; then notify "upload to $target failed (see $LOG)"; exit 1; fi
 while IFS= read -r p; do
+	# The upload took a moment: if focus moved (another window, another worker's terminal), pasting
+	# now would type into the wrong place. Hand the paths over on the clipboard instead. (X11 only:
+	# Wayland does not expose the focused window.)
+	if [ "$WAYLAND" = 0 ] && { [ "$(focused_window)" != "$START_WIN" ] || [ "$(target_of_focus)" != "$target" ]; }; then
+		paste -sd' ' <<<"$remote" >"$STAGE/.paths"
+		clip_set text "$STAGE/.paths"
+		notify "focus changed during the upload; nothing pasted. The worker path(s) are on your clipboard."
+		exit 0
+	fi
 	printf '%s' "$p" >"$STAGE/.path"
 	clip_set text "$STAGE/.path"
 	sleep 0.05
-	press_paste
+	press_paste || exit 1
 	sleep 0.25
 	type_space
 done <<<"$remote"

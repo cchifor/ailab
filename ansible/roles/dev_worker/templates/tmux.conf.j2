@@ -49,8 +49,10 @@ set -g message-style            "fg=#000000,bg=#ffd700,bold"
 # Terminal title = "<host> [<user>@<ip>] <session>:<window>". The [user@ip] marker is what the
 # workstation paste helpers (scripts/dw-paste/) read to know which worker a terminal window is
 # attached to, so Ctrl+Shift+V can upload a clipboard image there. Keep the marker's shape.
+# #{client_user} (tmux >= 3.2) is rendered per attached client: each user's title names that user,
+# whose /workspace/<user>/pastes is where their agents can read the upload.
 set -g set-titles on
-set -g set-titles-string "#h [{{ dev_worker_admin_user }}@{{ ansible_default_ipv4.address }}] #S:#W"
+set -g set-titles-string "#h [#{client_user}@{{ ansible_default_ipv4.address }}] #S:#W"
 
 # Click on the left status segment (hostname / session name) → flat session picker.
 bind -n MouseDown1StatusLeft run-shell "/usr/local/bin/tmux-session-menu"

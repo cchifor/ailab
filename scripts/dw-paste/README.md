@@ -14,6 +14,9 @@ right thing in a terminal attached to a dev-worker:
    path), each followed by a typed space; **never Enter**;
 4. put your clipboard back.
 
+If focus moves to another window (or another worker's tab) while the upload runs, nothing is
+pasted: the worker path(s) are left on your clipboard and a notification says so.
+
 Claude Code and Codex turn a pasted image path into `[Image #N]`; PDFs and documents arrive as a
 path the agent can read. With only text on the clipboard, or in any window that is not a dev-worker
 terminal, Ctrl+Shift+V pastes (or does) exactly what it did before.
@@ -29,7 +32,8 @@ The dev-worker tmux sets the terminal title to
 <host> [<user>@<ip>] <session>:<window>        e.g.  dev-worker-3 [c4@192.168.0.10] main:claude
 ```
 
-(`ansible/roles/dev_worker/templates/tmux.conf.j2`, `set-titles`). The `[user@ip]` marker is the
+(`ansible/roles/dev_worker/templates/tmux.conf.j2`, `set-titles`; the user is tmux's `#{client_user}`, so
+each user's title names them). The `[user@ip]` marker is the
 contract: a focused window of a known terminal app whose title carries it is a dev-worker terminal,
 and the marker says where to upload. No per-machine configuration, and new workers work as soon as
 the role has run on them. Keep the marker's shape if you change the title.
@@ -89,7 +93,12 @@ does the ordinary paste: it copies the clipboard to PRIMARY and presses Shift+In
 terminals and most applications treat as paste.
 
 - **Wayland** does not let a program read another window's title. There the worker comes from
-  `DW_PASTE_TARGET=c4@192.168.0.10` or `~/.config/dw-paste/target`, and any focused window counts.
+  `DW_PASTE_TARGET=c4@192.168.0.10` or `~/.config/dw-paste/target`, any focused window counts,
+  and the focus-change guard cannot run. `wtype` needs the virtual-keyboard protocol, which
+  wlroots compositors (sway, Hyprland, …) have and **GNOME's Mutter does not**. On GNOME Wayland the
+  keystroke fails with a notification, so use an X11 session or the web terminal there.
+- With only an image on the clipboard in a non-dev-worker window, the shortcut does nothing, because
+  there is no text to paste. It never pastes the last *selected* text (PRIMARY) in its place.
 - `--self-test c4@192.168.0.10` uploads the clipboard and prints the paths, with no keystrokes.
 - Log: `~/.cache/dw-paste.log`.
 
@@ -97,10 +106,10 @@ terminals and most applications treat as paste.
 
 | | how | result |
 |---|---|---|
-| Windows | `-SelfTest`/`-Once` against dev-worker-4: a screenshot, and a PDF (spaces/parens in the name) + a PNG copied together; the `-Run` helper registering Ctrl+Shift+V and a second instance exiting | all pass. The keystroke injection into a live Windows Terminal is exercised by the operator's first press, not by an automated test. |
-| Linux X11 | `scripts/dw-paste/test-linux.sh`: Ubuntu container with Xvfb, an xterm titled with the marker, a pane recording raw input, a stand-in scp | 7/7: screenshot and file-list upload; real run → `ESC[200~/workspace/c4/pastes/…png ESC[201~` + typed space, no Enter; clipboard restored; text pastes normally; no upload from an unmarked window |
+| Windows | `-SelfTest`/`-Once` against dev-worker-4: a screenshot, and a PDF (spaces/parens in the name) + a PNG copied together; the `-Run` helper registering Ctrl+Shift+V and a second instance exiting | all pass. The keystroke injection into a live Windows Terminal and the focus guard are exercised by real use, not by an automated test. |
+| Linux X11 | `scripts/dw-paste/test-linux.sh`: Ubuntu container with Xvfb, an xterm titled with the marker, a pane recording raw input, a stand-in scp | 11/11: screenshot and file-list upload; real run → `ESC[200~/workspace/c4/pastes/…png ESC[201~` + typed space, no Enter; clipboard restored; text pastes normally; no upload from an unmarked window; no stale PRIMARY pasted; a `gnome-terminal-server` window (15-char `comm` truncation) recognised; focus moved during a slow upload → nothing pasted, path left on the clipboard |
 | Linux Wayland | — | not tested (needs a compositor) |
-| macOS | `luac5.4 -p` and a load test | syntax and module load only; Hammerspoon's APIs need a Mac |
+| macOS | `luac5.4 -p` and a load test | syntax and module load only; Hammerspoon's APIs need a Mac. File names never reach a shell (copies use Lua I/O). |
 
 ## Troubleshooting
 

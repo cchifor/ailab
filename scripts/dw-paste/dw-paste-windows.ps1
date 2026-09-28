@@ -11,7 +11,8 @@ What a press does:
   - focused window is a terminal whose title has [user@ip], and the clipboard holds an image or
     files: each file is scp'd to /workspace/<user>/pastes/ and its path is pasted, one path per paste
     (Codex only attaches an image when a paste holds exactly one path), each followed by a typed
-    space; never Enter. Your clipboard is restored afterwards.
+    space; never Enter. Your clipboard is restored afterwards. If focus moved to another window
+    while uploading, nothing is pasted: the worker path(s) are left on the clipboard instead.
   - anything else: Ctrl+Shift+V is passed through untouched (the terminal's own text paste, or
     whatever that key does in the focused app).
 
@@ -104,6 +105,7 @@ public static class DwWin {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     const uint KEYUP = 0x2;
+    public static IntPtr ForegroundHandle() { return GetForegroundWindow(); }
     public static string ForegroundTitle() {
         var sb = new StringBuilder(1024);
         GetWindowText(GetForegroundWindow(), sb, sb.Capacity);
@@ -181,8 +183,14 @@ function Send-Payload($payload, [string]$target) {
             $staged += $local
         }
         if (-not $staged) { throw 'nothing to upload' }
-        $out = & scp -q -o BatchMode=yes -o ConnectTimeout=8 $staged "${target}:$remoteDir/" 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "scp to ${target}:$remoteDir failed: $out" }
+        # Windows PowerShell 5.1 turns ANY stderr line of a native command into a terminating error
+        # under ErrorActionPreference=Stop (PSNativeCommandUseErrorActionPreference is pwsh 7.3+), so
+        # a benign ssh warning would abort a successful upload. Judge scp by its exit code only.
+        $eap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $out = & scp -q -o BatchMode=yes -o ConnectTimeout=8 $staged "${target}:$remoteDir/" 2>&1 | Out-String }
+        finally { $ErrorActionPreference = $eap }
+        if ($LASTEXITCODE -ne 0) { throw "scp to ${target}:$remoteDir failed: $($out.Trim())" }
         return @($staged | ForEach-Object { "$remoteDir/" + [IO.Path]::GetFileName($_) })
     } finally {
         # Screenshots and documents regularly hold credentials: never leave the copies in %TEMP%.
@@ -257,6 +265,7 @@ function Save-Clipboard {
 
 $handler = {
     try {
+        $hwnd = [DwWin]::ForegroundHandle()
         $title = [DwWin]::ForegroundTitle()
         $proc = ''
         try { $proc = (Get-Process -Id ([DwWin]::ForegroundPid())).ProcessName } catch { }
@@ -271,7 +280,18 @@ $handler = {
         $label = if ($payload.Files.Count -gt 0) { "$($payload.Files.Count) file(s)" } else { 'screenshot' }
         Write-Log "upload $label -> $target"
         $paths = Send-Payload $payload $target
-        foreach ($p in $paths) { Paste-Path $p }
+        foreach ($p in $paths) {
+            # The upload took a moment: if focus moved (another window, another worker's tab), pasting
+            # now would type into the wrong place. Hand the paths over on the clipboard instead.
+            $nowTitle = [DwWin]::ForegroundTitle()
+            if ([DwWin]::ForegroundHandle() -ne $hwnd -or -not ($nowTitle -match $MarkerRegex) -or "$($Matches[1])@$($Matches[2])" -ne $target) {
+                Invoke-WithClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($paths -join ' ') } | Out-Null
+                Write-Log "focus changed during upload; paths left on the clipboard: $($paths -join ' ')"
+                Show-Note 'Focus changed during the upload: nothing was pasted. The worker path(s) are on your clipboard.' ([System.Windows.Forms.ToolTipIcon]::Warning)
+                return
+            }
+            Paste-Path $p
+        }
         Write-Log ("pasted " + ($paths -join ' '))
         Start-Sleep -Milliseconds 200
         if ($saved) { Invoke-WithClipboardRetry { [System.Windows.Forms.Clipboard]::SetDataObject($saved, $true) } | Out-Null }

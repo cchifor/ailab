@@ -36,14 +36,14 @@ local hotkey
 
 local function log(msg) print("dw-paste: " .. msg) end
 
--- The [user@ip] marker of the focused terminal window, or nil.
+-- The [user@ip] marker of the focused terminal window (and the window's id), or nil.
 local function target()
   local win = hs.window.focusedWindow()
   if not win then return nil end
   local app = win:application()
   if not app or not M.terminals[app:bundleID() or ""] then return nil end
   local user, ip = (win:title() or ""):match("%[([%l_][%w_.-]*)@(%d+%.%d+%.%d+%.%d+)%]")
-  if user then return user, ip end
+  if user then return user, ip, win:id() end
   return nil
 end
 
@@ -64,11 +64,33 @@ local function passThrough()
   hs.timer.doAfter(0.1, function() hotkey:enable() end)
 end
 
--- Local files to upload, staged under a private temp dir with safe, stamped names.
+-- No shell anywhere: file names come from the user's clipboard and may contain $(...) or backticks.
+local function copyFile(src, dest)
+  local fin = io.open(src, "rb")
+  if not fin then return false end
+  local fout = io.open(dest, "wb")
+  if not fout then fin:close(); return false end
+  while true do
+    local block = fin:read(1048576)
+    if not block then break end
+    fout:write(block)
+  end
+  fin:close(); fout:close()
+  return true
+end
+
+local function removeDir(dir)
+  for name in hs.fs.dir(dir) do
+    if name ~= "." and name ~= ".." then os.remove(dir .. "/" .. name) end
+  end
+  hs.fs.rmdir(dir)
+end
+
+-- Local files to upload, staged under a private temp dir with safe, stamped names. macOS's
+-- per-user $TMPDIR is already 0700.
 local function stage()
   local dir = (os.getenv("TMPDIR") or "/tmp/"):gsub("/?$", "/") .. "dw-paste-" .. hs.host.uuid()
   hs.fs.mkdir(dir)
-  hs.execute(string.format("/bin/chmod 700 %q", dir))
   local stamp = os.date("%Y%m%d-%H%M%S")
   local out = {}
   local function add(src, name)
@@ -76,8 +98,7 @@ local function stage()
     if not attr or attr.mode ~= "file" then return end
     if attr.size > M.maxBytes then log("skipping " .. src .. " (over 64 MB)"); return end
     local dest = string.format("%s/dw-paste-%s-%04x-%s", dir, stamp, math.random(0, 0xffff), safeName(name))
-    hs.execute(string.format("/bin/cp %q %q", src, dest))
-    table.insert(out, dest)
+    if copyFile(src, dest) then table.insert(out, dest) end
   end
   local urls = hs.pasteboard.readURL(nil, true)
   if type(urls) == "table" then
@@ -103,12 +124,20 @@ end
 
 -- Paste each path with the terminal's own paste (bracketed, into the focused pane), one per paste,
 -- each followed by a typed space; never Enter. Then put the user's clipboard back.
-local function pastePaths(paths, saved)
+local function pastePaths(paths, saved, user, ip, winId)
   local i = 0
   local function nextOne()
     i = i + 1
     if i > #paths then
       hs.timer.doAfter(0.3, function() if saved then hs.pasteboard.writeAllData(saved) end end)
+      return
+    end
+    -- The upload took a moment: if focus moved (another app, another worker's tab), pasting now
+    -- would type into the wrong place. Hand the paths over on the clipboard instead.
+    local u, a, id = target()
+    if u ~= user or a ~= ip or id ~= winId then
+      hs.pasteboard.setContents(table.concat(paths, " "))
+      hs.alert.show("dw-paste: focus changed during the upload; nothing pasted. The worker path(s) are on your clipboard.", 5)
       return
     end
     hs.pasteboard.setContents(paths[i])
@@ -122,11 +151,11 @@ local function pastePaths(paths, saved)
 end
 
 local function onHotkey()
-  local user, ip = target()
+  local user, ip, winId = target()
   if not user then return passThrough() end
   local files, dir = stage()
   if #files == 0 then
-    hs.execute(string.format("/bin/rm -rf %q", dir))
+    removeDir(dir)
     return passThrough()
   end
   local saved = hs.pasteboard.readAllData()
@@ -136,14 +165,14 @@ local function onHotkey()
   table.insert(args, string.format("%s@%s:%s/", user, ip, remoteDir))
   log(string.format("upload %d file(s) -> %s@%s", #files, user, ip))
   hs.task.new(M.scp, function(code, _, stderr)
-    hs.execute(string.format("/bin/rm -rf %q", dir)) -- screenshots hold credentials: never keep copies
+    removeDir(dir) -- screenshots hold credentials: never keep copies
     if code ~= 0 then
       hs.alert.show("dw-paste: upload failed (" .. (stderr or ""):gsub("%s+$", "") .. ")", 5)
       return
     end
     local remote = {}
     for _, f in ipairs(files) do table.insert(remote, remoteDir .. "/" .. f:match("([^/]+)$")) end
-    pastePaths(remote, saved)
+    pastePaths(remote, saved, user, ip, winId)
   end, args):start()
 end
 

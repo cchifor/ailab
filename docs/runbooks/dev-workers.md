@@ -805,7 +805,7 @@ desktop shortcut), then press **Ctrl+Shift+V** (Cmd+Shift+V on a Mac) in the age
 clipboard image or files are scp'd to the pastes directory and each worker path is pasted with the
 terminal's own (bracketed) paste, one per paste, never Enter; the clipboard is restored. Text and
 non-dev-worker windows paste as before. The helper recognises a dev-worker window by the `[user@ip]`
-marker the role's tmux puts in the terminal title (`#h [c4@192.168.0.N] #S:#W`; roll out a title
+marker the role's tmux puts in the terminal title (`#h [#{client_user}@192.168.0.N] #S:#W`; roll out a title
 change with `-t tmux`).
 
 **herdr remote attach (dev-worker-4).** Install herdr ≥ 0.8.2 on the workstation

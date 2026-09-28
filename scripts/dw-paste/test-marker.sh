@@ -16,7 +16,7 @@ FAILS=0
 ok() { echo "  ok: $1"; }
 bad() { echo "  FAIL: $1"; FAILS=$((FAILS + 1)); }
 
-WANT='#h [{{ dev_worker_admin_user }}@{{ ansible_default_ipv4.address }}] #S:#W'
+WANT='#h [#{client_user}@{{ ansible_default_ipv4.address }}] #S:#W'
 grep -q '^set -g set-titles on$' "$CONF" && ok "tmux.conf.j2 turns set-titles on" || bad "tmux.conf.j2 must 'set -g set-titles on'"
 grep -qF "set -g set-titles-string \"$WANT\"" "$CONF" && ok "tmux.conf.j2 title carries the [user@ip] marker" || bad "tmux.conf.j2 set-titles-string drifted from: $WANT"
 grep -qF "      - \"$WANT\"" "$TASKS" && ok "tmux.yml pushes the same title to running servers" || bad "tmux.yml's live title differs from tmux.conf.j2"
