@@ -167,6 +167,10 @@ dev_worker_web_access_team_domain: chifor.cloudflareaccess.com
 # carries it). A worker without an entry fails the play before its Caddyfile is touched.
 dev_worker_web_access_aud: {}
 dev_worker_web_verify_port: 7682
+# File paste (dw_paste.js on the terminal page -> dw-upload on this port -> the pastes directory).
+dev_worker_web_upload_port: 7683
+dev_worker_web_root: /usr/local/share/dw-web # the served terminal page + /_dw/static/*
+dev_worker_web_pastes_dir: "{{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}/pastes"
 dev_worker_web_lan_user: "{{ dev_worker_admin_user }}"
 # From ansible/secrets/dev-worker.sops.yaml (one fleet credential). The plaintext is only used by the
 # converge self-check; Caddy gets the bcrypt. The cookie secret is 64 hex chars.

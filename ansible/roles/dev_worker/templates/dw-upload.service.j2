@@ -1,0 +1,49 @@
+# {{ ansible_managed }} (role: dev_worker)
+# The web terminal's paste endpoint (files/dw_upload.py): stores pasted/dropped files in the pastes
+# directory for the agents. Loopback only, behind Caddy's web gate. Runs as {{ dev_worker_admin_user }}
+# so the agents own what they are handed; it can write nowhere else.
+[Unit]
+Description=dev-worker web terminal: file paste endpoint
+After=network.target
+# The pastes dir lives on the /workspace data disk: wait for it, or the namespace setup for
+# ReadWritePaths fails at boot. No start limit: a slow mount must not leave the unit failed for good.
+RequiresMountsFor={{ dev_worker_workspace_mount }}
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User={{ dev_worker_admin_user }}
+Group={{ dev_worker_admin_user }}
+UMask=0077
+Environment=DW_UPLOAD_DIR={{ dev_worker_web_pastes_dir }}
+Environment=DW_UPLOAD_ORIGINS={{ dev_worker_web_origins | join(',') }}
+Environment=DW_UPLOAD_LISTEN=127.0.0.1:{{ dev_worker_web_upload_port }}
+ExecStart=/usr/bin/python3 /usr/local/lib/dw-web/dw_upload.py
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths={{ dev_worker_web_pastes_dir }}
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=256M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

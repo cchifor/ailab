@@ -18,11 +18,11 @@
 https://{{ ansible_default_ipv4.address }}, https://{{ ansible_hostname }}, https://{{ dev_worker_web_public_host }} {
   tls internal
   route {
-    # 1. Cross-site guard (CSWSH). A WebSocket upgrade must come from this worker's own page; a
-    #    missing Origin is refused too. Any other request carrying a foreign Origin is refused.
-    #    Page navigations carry no Origin and pass to the auth step.
+    # 1. Cross-site guard (CSWSH/CSRF). A WebSocket upgrade or a file upload must come from this
+    #    worker's own page; a missing Origin is refused too. Any other request carrying a foreign
+    #    Origin is refused. Page navigations carry no Origin and pass to the auth step.
     @must_have_own_origin {
-      header Sec-WebSocket-Key *
+      expression `{http.request.header.Sec-WebSocket-Key} != "" || path('/_dw/upload')`
       not {
 {% for origin in dev_worker_web_origins %}
         header Origin {{ origin }}
@@ -57,8 +57,32 @@ https://{{ ansible_default_ipv4.address }}, https://{{ ansible_hostname }}, http
     }
     header @lan_unauthenticated Set-Cookie "dw_lan={{ dev_worker_web_lan_cookie_secret }}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=43200"
 
-    # 3. The terminal.
-    reverse_proxy 127.0.0.1:7681
+    # 3. File paste (files/dw_paste.js -> files/dw_upload.py). Only reached once authenticated.
+    handle /_dw/upload {
+      request_body {
+        max_size 64MiB
+      }
+      reverse_proxy 127.0.0.1:{{ dev_worker_web_upload_port }}
+    }
+    handle_path /_dw/static/* {
+      root * {{ dev_worker_web_root }}/static
+      header Cache-Control "no-cache"
+      file_server
+    }
+    # The terminal page itself: ttyd's own index with the paste script appended (web_gate.yml),
+    # served from disk so ttyd keeps running untouched.
+    @terminal_page path / /index.html
+    handle @terminal_page {
+      root * {{ dev_worker_web_root }}
+      rewrite * /index.html
+      header Cache-Control "no-store"
+      file_server
+    }
+
+    # 4. The terminal: /token, /ws and anything else ttyd serves.
+    handle {
+      reverse_proxy 127.0.0.1:7681
+    }
   }
 }
 :80 {

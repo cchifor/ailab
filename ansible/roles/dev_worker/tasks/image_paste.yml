@@ -1,7 +1,7 @@
 ---
-# Landing zone for images pasted from the Windows workstation into remote agent sessions:
-# scripts/dw-paste.ps1 scp's clipboard screenshots here and preloads the tmux paste buffer with the
-# path (herdr --remote stages its own files under /tmp and needs nothing from the role).
+# Landing zone for files handed to the agents: the web terminal's paste endpoint (dw-upload,
+# web_gate.yml) stores here, and scripts/dw-paste.ps1 scp's here from the Windows workstation
+# (herdr --remote stages its own files under /tmp and needs nothing from the role).
 # Unconditional — a directory plus an aging rule, useful on every worker. Docs:
 # docs/runbooks/dev-workers.md § "Pasting images from Windows".
 - name: Probe the workspace user dir
@@ -22,7 +22,7 @@
 # 0700: pasted screenshots regularly contain credentials, tokens, and internal UIs.
 - name: Ensure the pastes landing dir exists
   ansible.builtin.file:
-    path: "{{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}/pastes"
+    path: "{{ dev_worker_web_pastes_dir }}"
     state: directory
     owner: "{{ dev_worker_admin_user }}"
     group: "{{ dev_worker_admin_user }}"
@@ -33,6 +33,6 @@
 - name: Age out old pastes (tmpfiles.d, 14d)
   ansible.builtin.copy:
     content: |
-      e {{ dev_worker_workspace_mount }}/{{ dev_worker_admin_user }}/pastes - - - 14d
+      e {{ dev_worker_web_pastes_dir }} - - - 14d
     dest: /etc/tmpfiles.d/dev-worker-pastes.conf
     mode: "0644"

@@ -3,7 +3,8 @@
 # a passwordless-sudo shell — answered anyone on the LAN with no credentials at all, and had no
 # Origin check against cross-site WebSocket hijacking. This file makes every path authenticated:
 # Cloudflare Access JWT (validated here, at the origin) on the tunnel path, Basic auth + a bridge
-# cookie on the LAN/Tailscale path. Own tag: `-t web-gate` (the playbook's SOPS pre_task carries it).
+# cookie on the LAN/Tailscale path. Behind the gate: file paste into the agents (dw-upload +
+# dw_paste.js on the terminal page). Own tag: `-t web-gate` (the playbook's SOPS pre_task carries it).
 # docs/runbooks/dev-workers.md § "Remote access (web terminals)";
 # plans/2026-09-28-dw-web-terminal-auth-and-file-paste-plan.md.
 
@@ -77,6 +78,83 @@
   delay: 3
   changed_when: false
   when: not ansible_check_mode
+
+# ---- file paste: dw-upload + the terminal page that carries dw_paste.js ---------------------------
+# All of it lands BEFORE the Caddyfile, which routes / to the page and /_dw/upload to the service.
+- name: Install dw-upload
+  ansible.builtin.copy:
+    src: dw_upload.py
+    dest: /usr/local/lib/dw-web/dw_upload.py
+    owner: root
+    group: root
+    mode: "0644"
+  register: web_gate_upload_code
+
+- name: Install the dw-upload unit
+  ansible.builtin.template:
+    src: dw-upload.service.j2
+    dest: /etc/systemd/system/dw-upload.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: web_gate_upload_unit
+
+- name: Enable and (re)start dw-upload
+  ansible.builtin.systemd:
+    name: dw-upload.service
+    enabled: true
+    state: "{{ 'restarted' if (web_gate_upload_code.changed or web_gate_upload_unit.changed) else 'started' }}"
+    daemon_reload: "{{ web_gate_upload_unit.changed }}"
+  when: not (ansible_check_mode and web_gate_upload_unit.changed)
+
+- name: Ensure the web root exists
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ dev_worker_web_root }}"
+    - "{{ dev_worker_web_root }}/static"
+
+- name: Install the paste script
+  ansible.builtin.copy:
+    src: dw_paste.js
+    dest: "{{ dev_worker_web_root }}/static/paste.js"
+    owner: root
+    group: root
+    mode: "0644"
+
+# ttyd's own page, fetched straight from ttyd (never through Caddy) so it is always the pinned ttyd's
+# page — a GET of / serves static HTML; only the WebSocket spawns a shell — with the paste script
+# appended before </body>. Spliced on the host: the page is 730 KB of minified JS that has no business
+# passing through Ansible's templating. dw_paste.js drives xterm through window.term (ttyd 1.7.x sets
+# it): a ttyd bump that drops it fails here instead of leaving a page that silently cannot paste.
+- name: Serve ttyd's page with the paste script appended
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp=$(mktemp "{{ dev_worker_web_root }}/.index.XXXXXX")
+    trap 'rm -f "$tmp"' EXIT
+    curl -fsS --max-time 20 http://127.0.0.1:7681/ | python3 -c '
+    import sys
+    page = sys.stdin.read()
+    if "window.term=" not in page or "</body>" not in page:
+        sys.exit("ttyd {{ dev_worker_ttyd_version }} page lacks window.term or </body>; check the new frontend")
+    head, tail = page.rsplit("</body>", 1)
+    sys.stdout.write(head + "<script src=\"/_dw/static/paste.js\" defer></script></body>" + tail)
+    ' > "$tmp"
+    if cmp -s "$tmp" "{{ dev_worker_web_root }}/index.html"; then
+      echo unchanged
+    else
+      chmod 0644 "$tmp"
+      mv -f "$tmp" "{{ dev_worker_web_root }}/index.html"
+      echo changed
+    fi
+  args:
+    executable: /bin/bash
+  register: web_gate_page_splice
+  changed_when: web_gate_page_splice.stdout == 'changed'
 
 # 0640 root:caddy — it now holds the Basic-auth hash and the bridge cookie secret. `caddy validate`
 # gets throwaway storage: it provisions the tls app, and against the real storage (or root's HOME)
@@ -152,3 +230,62 @@
     (web_gate_lan_ok.cookies | default({})).get('dw_lan') != dev_worker_web_lan_cookie_secret
   changed_when: false
   no_log: true
+
+- name: Self-check — the terminal page carries the paste script
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}/"
+    headers:
+      Cookie: "dw_lan={{ dev_worker_web_lan_cookie_secret }}"
+    validate_certs: false
+    return_content: true
+    status_code: 200
+  register: web_gate_page
+  failed_when: >-
+    web_gate_page.status != 200 or
+    '<script src="/_dw/static/paste.js" defer></script>' not in web_gate_page.content or
+    'window.term=' not in web_gate_page.content
+  changed_when: false
+  no_log: true
+
+- name: Self-check — an upload from a foreign Origin is refused (403), even with a valid LAN cookie
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}/_dw/upload?name=selfcheck.txt"
+    method: PUT
+    body: forged
+    headers:
+      Origin: https://attacker.example
+      X-DW-Upload: "1"
+      Cookie: "dw_lan={{ dev_worker_web_lan_cookie_secret }}"
+    validate_certs: false
+    status_code: 403
+  changed_when: false
+  no_log: true
+
+# End to end through Caddy: the same request the page makes. The file is removed right after.
+- name: Self-check — an upload from the worker's own page is stored
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}/_dw/upload?name=web-gate-selfcheck.txt"
+    method: PUT
+    body: "web gate self-check"
+    headers:
+      Origin: "https://{{ ansible_default_ipv4.address }}"
+      X-DW-Upload: "1"
+      Content-Type: text/plain
+      Cookie: "dw_lan={{ dev_worker_web_lan_cookie_secret }}"
+    validate_certs: false
+    status_code: 201
+    return_content: true
+  register: web_gate_upload
+  failed_when: >-
+    web_gate_upload.status != 201 or
+    not (web_gate_upload.json.path | default('')).startswith(dev_worker_web_pastes_dir ~ '/')
+  changed_when: false
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Remove the self-check upload
+  ansible.builtin.file:
+    path: "{{ web_gate_upload.json.path }}"
+    state: absent
+  changed_when: false
+  when: not ansible_check_mode
