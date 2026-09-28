@@ -1,0 +1,48 @@
+# The api pod's ONLY cluster access: its own schedule-state ConfigMap (cloud-power-state), which
+# it creates at first start and rewrites on every schedule transition. The object is deliberately
+# NOT in git: Flux `prune: true` removes only what is in its inventory, so a runtime-created
+# ConfigMap survives reconciles and an OFF that is in flight (runners paused in Gitea, waiting for
+# jobs) survives a pod restart instead of being forgotten with the runners stranded paused.
+#
+# CONTAINMENT, ci-rerun-watchdog/rbac.yaml shape: `create` cannot be resourceName-scoped (the name
+# does not exist yet), so it stands alone and is namespace-wide - the accepted limitation. Everything
+# else is pinned to the one name: get + update (app.py uses GET/POST/PUT only, so no patch).
+# list/watch are absent (the pod reads a known name) and so is delete: losing the record of which
+# runners THIS schedule paused is the one thing the RBAC should make hard.
+#
+# Only the api Deployment uses this ServiceAccount; the hostNetwork wol pod runs as `default` with
+# automountServiceAccountToken: false.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-power
+  namespace: cloud-power
+automountServiceAccountToken: false # opted in per pod (the api Deployment), not by default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloud-power-state
+  namespace: cloud-power
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["cloud-power-state"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloud-power-state
+  namespace: cloud-power
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloud-power-state
+subjects:
+  - kind: ServiceAccount
+    name: cloud-power
+    namespace: cloud-power
