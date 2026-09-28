@@ -764,33 +764,71 @@ live in the agentforge `AGENTS.md`.
   `/etc/systemd/system/herdr.service`, and `~c4/.config/herdr/`. The role installs but — like the
   other optional features — never uninstalls.
 
-## Pasting images from Windows (remote agents)
+## Pasting images and files into agents
 
-Claude Code's native `Ctrl+V` image paste cannot work over plain SSH: on Linux it shells out to
-xclip/wl-paste, which need a display server, and the common Windows X servers forward text only
-(Anthropic closed the OSC-based proposals as not-planned). Everything below therefore works by
-materializing the image as a **remote file** and handing the agent its **path** — a bracketed
-paste of an image path auto-attaches as `[Image #N]` in Claude Code; Codex also attaches pasted
-paths, or takes `codex -i <path>`.
+The agents run on the worker, so a file has to exist **on the worker** before Claude Code or Codex can
+use it. Every path below does the same two things: put the file in `/workspace/c4/pastes/` (0700,
+aged out after 14 days by tmpfiles.d) and paste its **path** into the agent's pane as a bracketed
+paste. A pasted image path becomes `[Image #N]` in both agents; a PDF/document path arrives as text
+and the agent reads it (Claude's Read handles PDFs; `pdftotext` / `pandoc` are installed for Codex
+and for DOCX/ODT). Measured 2026-09-28: **Codex only attaches when the paste holds exactly one path**,
+so every tool here pastes one path per paste. Claude Code's own Ctrl+V cannot work remotely: it reads
+the clipboard with xclip/wl-paste, which need a display on the worker.
 
-**Path 1 — herdr remote attach (dev-worker-4).** Install herdr ≥ 0.8.2 on the workstation
+**Web terminal (`https://dwN.chifor.me` or `https://192.168.0.N/`) — any device, both agents.**
+Focus the agent's pane, then:
+- **Ctrl+V** (Cmd+V on a Mac) with a screenshot or copied files on the clipboard,
+- **drag and drop** files onto the terminal, or
+- the **📎 button** (top right) — the reliable way on iPhone/iPad (Photos, Camera, Files).
+
+Each file uploads (≤ 64 MB, one at a time), and its path is pasted into the focused pane followed
+by a space. **Nothing sends Enter**: add your question and send it yourself. An upload that takes more
+than 3 s is not pasted automatically (you may have switched panes meanwhile): its toast offers
+**Paste path**. Plain-text pastes behave exactly as before. In the web terminal Ctrl+V is the
+browser's paste; `^V` (literal-next) is not available there (it is over SSH). An expired Access session
+shows "your login has expired — reload".
+
+How it works (`ansible/roles/dev_worker`, tag `web-gate`, behind the gate in § "Remote access"):
+Caddy serves ttyd's own page with `files/dw_paste.js` appended (spliced at converge from the running
+ttyd; the converge fails if a ttyd upgrade stops exposing `window.term`), and routes `/_dw/upload` to
+`dw-upload` (`files/dw_upload.py`, 127.0.0.1:7683, runs as c4, can write only the pastes directory):
+strict `Content-Length` framing, the worker's own Origin + an `X-DW-Upload` header, a 2 GiB / 1000-file
+directory quota reserved before reading, 0600 files published without ever replacing one. Each
+converge proves it end to end through Caddy (the page carries the script; a foreign-Origin upload is
+403; an own-page upload is stored, then deleted).
+
+**SSH from Windows Terminal: `scripts/dw-paste.ps1`.** Copy a screenshot, or copy files in Explorer
+(any type, several at once), then run `powershell -File scripts\dw-paste.ps1` (defaults to
+dev-worker-4; `-SshTarget c4@192.168.0.N` for another). It scp's them to the pastes directory, loads
+one tmux buffer per file and puts the paths on your local clipboard. In the remote tmux, with the
+agent's pane focused, `prefix+]` pastes the first file's path (bracketed) and `prefix+=` picks the
+others. It never pastes on its own: with several clients attached, "the active pane" is ambiguous.
+
+**herdr remote attach (dev-worker-4).** Install herdr ≥ 0.8.2 on the workstation
 (`powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` — 0.8.2 is the
-first stable with Windows `--remote`), then attach with `herdr --remote ssh://c4@192.168.0.11`.
-Copy a screenshot, focus the pane running the agent, press `ctrl+v`: herdr ships the PNG over the
-existing SSH connection (16 MiB cap), stages it on the worker under
-`/tmp/herdr-clipboard-images-<uid>/` (0600; deleted when the client disconnects and after 24h — so
-have the agent read it before detaching), and bracket-pastes the path into the pane. No
-server-side config. If the terminal swallows `ctrl+v`, rebind `keys.remote_image_paste` in the
-**local** `%APPDATA%\herdr\config.toml` (e.g. `"ctrl+alt+v"`).
+first stable with Windows `--remote`), attach with `herdr --remote ssh://c4@192.168.0.11`, copy a
+screenshot, focus the agent's pane, press `ctrl+v`: herdr ships the PNG over the SSH connection
+(16 MiB cap), stages it under `/tmp/herdr-clipboard-images-<uid>/` (0600; deleted when the client
+disconnects and after 24 h — have the agent read it before detaching) and bracket-pastes the path. If
+the terminal swallows `ctrl+v`, rebind `keys.remote_image_paste` in the **local**
+`%APPDATA%\herdr\config.toml` (e.g. `"ctrl+alt+v"`).
 
-**Path 2 — plain tmux, any worker: `scripts/dw-paste.ps1`.** Copy a screenshot (or copy an image
-file in Explorer), run `powershell -File scripts\dw-paste.ps1` (defaults to dev-worker-4; override
-with `-SshTarget c4@192.168.0.N`). It saves the clipboard image as PNG (a copied image file is
-uploaded as-is, original extension kept), scp's it to
-`/workspace/c4/pastes/` (created by the role, 0700, aged out after 14 days via tmpfiles.d),
-preloads the remote tmux paste buffer, and puts the same path on the local clipboard. In the
-remote tmux, `prefix+]` pastes the path into the agent prompt (tmux ≥ 3.2 pastes bracketed, which
-triggers Claude Code's auto-attach).
+**Claude only, no infrastructure: Remote Control.** Start the session with `claude --remote-control`
+(or run `/remote-control` in a running one) and continue it from claude.ai/code or the Claude phone
+app, which can attach photos and files directly (other files are downloaded to the worker and passed as
+`@` references). Needs the claude.ai subscription login the workers already use; does nothing for
+Codex; the transcript, attachments included, is stored at Anthropic — mind screenshots of credentials.
+
+**Checks** (manual, on a dev-worker; not in CI — the runners have no Caddy/ttyd/Chromium):
+- `PLAYWRIGHT_NODE_PATH=/workspace/c4/platform/tests/e2e/node_modules bash
+  ansible/roles/dev_worker/tests/e2e-web-paste.sh` — a throwaway copy of the real stack (the role's
+  Caddyfile template, ttyd, dw-upload, a private tmux pane) driven by Chromium: LAN login, the
+  WebSocket, Ctrl+V, clipboard image, text, drag-and-drop order, paperclip, oversize refusal, no Enter.
+  Run it after changing the gate, `dw_paste.js` or `dw_upload.py`, and after a ttyd bump.
+- `bash ansible/roles/dev_worker/tests/check-agent-image-paste.sh` (per-agent trusted dirs via
+  `CLAUDE_DIR` / `CODEX_DIR`) — does a bracketed-pasted image path still attach in both agents? Run it
+  after agent upgrades: Claude self-updates and Codex is only a version floor. It reports NOT RUN
+  instead of answering startup dialogs for you.
 
 ## Verify
 

@@ -142,6 +142,18 @@ always together with the password (runbook).
 - A paste regression script (throwaway `tmux -L`, asserts `[Image #1]` in both agents) to run after
   agent upgrades — Claude self-updates and codex is a floor pin.
 
+### PR 2 as built (deviations from the above)
+
+- **Caddy serves the terminal page** (ttyd's own index, spliced on the host at converge, sanity-checked
+  for `window.term`) instead of `ttyd -I`: ttyd is never restarted, and nothing 730 KB passes through
+  Ansible templating. (A ttyd restart would not have killed tmux — its server lives in
+  claude-dashboard.service — but there is no reason to take it.)
+- **dw-paste.ps1 never auto-pastes**: one automatic tmux buffer per file, loaded in reverse so
+  `prefix+]` pastes the first and `prefix+=` picks the rest (Codex's plan-review finding: named buffers
+  are not what `prefix+]` pastes, and "the most recent client's pane" is ambiguous).
+- Browser coverage is `tests/e2e-web-paste.sh`: a throwaway copy of the real stack driven by Chromium
+  (14 checks), manual on a worker — the CI runners have no Caddy/ttyd/Chromium.
+
 ## Follow-ups (not in these PRs)
 
 - cloudflared → Caddy still uses `noTLSVerify`: an active LAN attacker could intercept the Access
