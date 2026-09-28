@@ -1,5 +1,89 @@
 # Gitea Actions run retention + CNPG lost-slot auto-reclone
 
+## Codex Review
+
+Round 1 (plan-review profile). Comments reference the plan's original line numbers; P1 = resolve before enabling destructive execution, P2 = correctness/coverage/operational reliability.
+
+<!-- codex: [P2] — lines 30–31, 42–49: Repository discovery and budget allocation
+Specify pagination for GET /orgs/cchifor/repos as well as for runs; otherwise repositories beyond its default page can silently escape retention. Deduplicate EXTRA_REPOS against discovered repositories. Define the 200-delete limit as GLOBAL across repositories: applying it per repository invalidates the WAL budget, while exhausting a global budget on the first repository can starve later repositories. A simple rotating repository order or bounded allocation is sufficient; report repositories deferred by the cap. -->
+
+<!-- codex: [P1] — lines 33–34 and 45: Database cascade does not establish artifact-file cleanup
+The verified run-deletion cascade does not, by itself, prove removal of artifact files from the storage backend. ARTIFACT_RETENTION_DAYS and LOG_RETENTION_DAYS govern different cleanup paths, and setting both to 14 does not guarantee their cleanup has completed before this hourly job removes a run. This repository already documents that objects whose database records disappear can become permanently orphaned: kubernetes/apps/apps/gitea/actions-storage.yaml:15–17.
+Verify the Gitea 1.26.1 deletion path for artifact metadata, stored artifact files, offloaded logs, and DBFS logs. Test deletion of a disposable run containing an artifact and logs, including a storage-cleanup failure and retry. If cleanup is asynchronous, verify its durable retry record survives run deletion. API disappearance alone is insufficient evidence. -->
+
+<!-- codex: [P1] — lines 35–40: Credential authority and the “never in argv” guarantee
+Using gitea_admin gives this repository-write token access far beyond the intended retention targets; omitting the admin scope does not make its repository permissions narrow. Prefer a dedicated non-admin identity with access only to the intended repositories.
+An environment variable does not keep a secret out of argv if the script expands it into curl's Authorization header argument. Specify a protected header/config file or stdin-based configuration, disable shell tracing, and ensure error output cannot print credentials. The plaintext HTTP service also needs an explicit transport trust assumption; SOPS protects the committed Secret, not bearer-token traffic inside the cluster. -->
+
+<!-- codex: [P2] — lines 42–43: Backward pagination is safe only under specific mutations
+Deleting items from the current last page does not shift earlier pages, so backward traversal is sound against its OWN deletions in an otherwise unchanged list. Concurrent completions break that guarantee.
+For example, with IDs 150..1 and pages of 50, delete page 3 (50..1). If a new completed run enters at the front, page 2 becomes 101..52 and run 51 moves onto page 3, which has already been visited. It is skipped this execution. Concurrent removals or reruns can also cause previously inspected surviving entries to be encountered again.
+State whether eventual coverage across hourly executions is acceptable. Use a fixed cutoff, deduplicate IDs, handle already-deleted runs, and restart discovery from the current tail each execution. Collecting a bounded candidate list before deletion simplifies execution, but does not make offset pagination a snapshot. Add a test with completions arriving between page reads. -->
+
+<!-- codex: [P1] — lines 44–46: The early-stop condition assumes an unverified sort key
+“Newest-first” does not establish ordering by completed_at. An old run can finish late or be rerun recently; a partial oldest page can therefore contain no eligible runs while the preceding page contains many. Null completion timestamps create the same problem. Stopping at that page can prevent retention indefinitely.
+Remove this early stop unless the endpoint's actual ordering proves it valid. Otherwise use a bounded scan with a documented way to continue coverage, and parse timestamps consistently against one UTC cutoff. Test out-of-order completion times, an ineligible partial tail page, null timestamps, and the exact retention boundary.
+Also revalidate candidates before DELETE and verify how the endpoint handles a run rerun after listing. The current selection-time check alone cannot guarantee “never touch queued/running/waiting.” -->
+
+<!-- codex: [P1] — lines 46–49: The proposed pacing still permits a concentrated WAL burst
+A 0.5-second delay allows approximately two deletions per second: 200 deletions can be concentrated into roughly 100 seconds plus request time. Cascading work varies substantially with jobs, attempts, steps, and DBFS log size; a run-count limit does not bound WAL bytes. Sleeping after a deletion cannot constrain the WAL generated by that individual operation.
+Measure representative small and large deletions before choosing the rate. Observe WAL generation, slot backlog/headroom in bytes, replay throughput, database latency, and delayed autovacuum work. Start with a small canary and substantially spread deletions across the hour; stop when replication or disk headroom deteriorates.
+The current manifest sets max_slot_wal_keep_size to 1GB, not 4GB. At the documented 9.7–12.9 MiB/s peaks, that is only about 80–106 seconds of retained WAL. The hourly schedule also overlaps the existing 01:00–02:30Z cleanup burst, so validation must include that overlap. -->
+
+<!-- codex: [P2] — lines 47–54: Retries can exceed the stated deletion budget
+Define whether “per execution” means a process, Pod, or entire Kubernetes Job. A Pod retry can reset an in-memory counter after earlier deletions committed; default Job retries can therefore exceed the advertised 200-delete cap. Forbid does not prevent retries or manually created Jobs.
+Use an explicit retry policy, such as backoffLimit: 0 for the initial implementation, or preserve the budget across retries. Specify request timeouts, bounded backoff, and behavior for 401/403, 429, 5xx, malformed JSON, and uncertain DELETE outcomes. Authentication/listing failures must not be reported as an empty successful scan. Distinguish successful deletions, already-absent runs, and failures. -->
+
+<!-- codex: [P2] — lines 48–49 and 99: Backlog arithmetic and acceptance criteria conflict
+36,735 total runs does not establish a 35,000-run eligible backlog; runs within the retained 14 days must first be excluded. If 35,000 runs really are already overdue, steady-state aging of roughly 1,600 runs/day leaves only about 3,200/day of net backlog reduction at the maximum deletion rate, making clearance roughly 11 days rather than one week. Other repositories and skipped executions reduce that capacity further.
+Measure the eligible backlog and arrival rate separately. Prefer “no overdue eligible runs beyond the documented processing allowance” over a fixed total_count near 22,000, since totals vary with workload and include runs outside the deletion policy. -->
+
+<!-- codex: [P1] — lines 50–51 and 86–88: Define a staged rollout and cross-job exclusion
+These sections describe different initial DRY_RUN policies and no coordinated activation order. Deploy both in dry-run first. Validate the re-clone positive path in isolation, then enable a small retention canary while automatic re-cloning remains disabled. Observe replication during deletion, subsequent vacuum work, and the nightly cleanup before increasing retention throughput and enabling automatic recovery.
+If retention causes a lost slot, stop retention and investigate rather than letting repeated automatic rebuilds conceal an unsafe deletion rate. Once both jobs are enabled, retention must pause during a rebuild or unsafe replication conditions. Each CronJob's Forbid policy applies only to that CronJob; it does not serialize the two jobs, manual Jobs, or operator activity.
+Create manual test Jobs with the intended DRY_RUN value already in their Pod template. Changing a CronJob afterward does not change an existing Job. Document how to stop an active destructive Job as well as suspend future schedules. -->
+
+<!-- codex: [P2] — lines 53–54 and 102: Restricted PSA verification is incomplete
+The listed security context omits allowPrivilegeEscalation: false, which restricted PSA requires for containers. Explicitly apply the complete context to both jobs, including any init containers. Disable service-account token mounting for retention, which needs no Kubernetes API access.
+Successful CronJob application and “no warnings” do not prove that its Pods will pass enforcement. Create a dry-run-mode execution of each job and verify that its Pod is admitted and the script actually runs under the selected UID, filesystem permissions, and security context. -->
+
+<!-- codex: [P2] — lines 64–65 and 80–85: Namespace-wide recovery exceeds the verified scope
+Only infra-pg's topology, lack of WAL archive, storage layout, and recovery behavior are established here. Automatically applying this destructive procedure to every present or future Cluster in databases makes those assumptions implicit policy for unrelated databases.
+Start with an explicit infra-pg allowlist. Generalize only when another cluster requires it and its recovery conditions have been checked. This also avoids building a generic destructive controller for a single known failure case. -->
+
+<!-- codex: [P1] — lines 66–68 and 77–79: Non-root execution does not constrain database authority
+The caller's UID 65534 does not propagate into kubectl exec; the command runs with the target container's configured identity. Moreover, psql -U postgres obtains PostgreSQL superuser authority. pods/exec permits arbitrary commands, not just the SELECT shown here. Namespace scope still exposes every database Pod in databases, and Cluster patch permission permits spec changes as well as annotations.
+A narrower alternative is a direct SQL connection using a dedicated monitoring login with only the access required to inspect replication state, preferably through the existing read-write service with primary identity rechecked. Provision the required client and credential explicitly; kubectl/curl/jq availability does not establish psql availability in the job image. Remove pods/exec if using this approach, and independently minimize the remaining destructive Kubernetes permissions. Restricted PSA is not a substitute for this authorization boundary. -->
+
+<!-- codex: [P1] — lines 68–71: Treat slot naming as version/configuration-dependent identification
+The observed _cnpg_infra_pg_N names support the default mapping for this cluster, but do not establish an unconditional naming contract. Check CNPG 1.24.1's configured HA slot prefix and naming behavior. Kubernetes Cluster resource names cannot contain underscores, so the proposed underscore-in-cluster-name ambiguity is not a valid Kubernetes naming case.
+Enumerate actual instances owned by the selected Cluster, derive their expected slot names using the verified configuration, and require an exact unique match rather than reverse-parsing an arbitrary slot into a Pod name. Also require a physical slot, active=false, and evidence that the slot belongs to the affected replica; exclude unrelated/logical slots.
+The displayed query selects only slot_name, so it cannot itself verify the required active=false guard. Return all fields used by the decision and distinguish SQL failure from “no lost slots.” -->
+
+<!-- codex: [P1] — lines 64–75 and 80–82: Primary protection has a check-to-delete race
+Cluster phase, currentPrimary, Pod labels, and slot state are separate observations. A switchover can begin after those reads, and status/labels can lag. The inspected Pod can become primary before its PVC deletion is submitted. UID preconditions protect against replacing an object with another object of the same name, but do not prevent the same Pod from being promoted.
+Recheck primary identity, transition state, ownership, and target identity immediately before mutation, and establish an operator-supported way to coordinate destructive instance removal with failover. A job-only lock does not lock out CNPG. Prefer a verified CNPG maintenance/destruction procedure; otherwise document the remaining race rather than claiming the primary can never be touched. -->
+
+<!-- codex: [P1] — lines 72–73: Asynchronous PVC deletion needs an observed completion protocol
+--wait=false confirms acceptance of deletion, not disappearance. PVC protection can keep claims Terminating while a Pod references them, and QNAP detach/provisioning can be slow. Deleting the PVCs and Pod in sequence does not establish when CNPG may recreate or reuse an instance.
+Discover the actual instance claims from ownership and Pod volumes, including optional WAL storage, and record their UIDs and PV names before deletion. Use a verified CNPG 1.24.1 procedure to prevent unsafe recreation during removal. After terminating the old Pod, wait with bounded timeouts for the old Pod and every selected claim to disappear, then verify replacement claims and physical streaming recovery. Waiting for PVC deletion before terminating its consuming Pod can deadlock on PVC protection. A wait alone does not prevent CNPG from racing the removal.
+Define recovery from partial success, stuck finalizers, and provisioning failure; do not blindly repeat the destructive sequence. Also verify the claim that replacement necessarily uses a new instance number.
+Existing guidance conflicts: infra-pg.yaml:70 and plans/2026-09-08-dr-remediation-plan.md:87–92 describe a cnpg destroy procedure with --keep-pvc. Reconcile those instructions against actual 1.24.1 behavior and today's successful procedure; do not assume either description guarantees a fresh clone. -->
+
+<!-- codex: [P1] — lines 74–85: The annotation is neither a lock nor a retry limit
+Writing ailab.io/last-reclone does not change Cluster phase. Reconciliation is asynchronous, and this repository already records misleading healthy status for a broken replica. One re-clone per execution still permits repeated destructive attempts every five minutes, especially after a crash between deletion and annotation.
+Persist and enforce an in-progress marker/cooldown before mutation, define recovery after partial execution, and prevent another attempt until the previous replacement is verified or an operator resolves the failure. Set explicit Job retry and runtime limits.
+Repeated base backups add load to the already-contended primary and NAS, and each Retain volume consumes storage until manually removed. The QNAP runbook §9 also documents attach/detach cost growing with LUN count. Add a finite automatic-attempt budget, capacity checks, and an alert/escalation path. Logging Released PV names alone is insufficient for unattended operation. Keep backend/PV garbage collection outside this change, as proposed. -->
+
+<!-- codex: [P1] — lines 92–101: A healthy no-op and manual commands do not validate the automation
+The healthy-cluster dry run exercises no destructive branch, while today's manual recovery does not test automated identification, guards, retries, or interruption handling. Before activation, exercise the actual script with controlled fixtures and an isolated disposable CNPG cluster.
+Cover at least: primary/replica identity changes, active or unrelated slots, custom slot prefixes, missing Pod or PVC, separate WAL storage, partial deletion, slow PVC finalization, a crash before completion recording, and a second execution during recovery. Prove that unsafe or ambiguous states produce no deletion. Confirm the replacement physically streams and catches up; Ready and Cluster phase are insufficient given the documented incident.
+For retention, record exact candidate IDs and verify those IDs disappear while recent and live runs remain. A shifted last page cannot distinguish successful deletion from concurrent list changes. Include the pagination/completion-order cases above and verify actual artifact/log storage cleanup. -->
+
+<!-- codex: [P2] — lines 97–99: Recovery verification needs byte-based headroom and a longer window
+A streaming connection and lag below 60 seconds do not establish a safe margin against the 1GB slot cap during high WAL throughput. Measure retained/backlogged WAL bytes, replay progress, free space, and WAL generation before, during, and after deletion, including later autovacuum work and nightly cleanup.
+Define what happens when limits are exceeded and how failures or stalled progress become visible after rollout. Job success alone can conceal zero useful deletions or incomplete recovery. Track the last successful scan, overdue backlog, failed recovery, and repeated recovery attempts using the existing monitoring system. -->
+
 ## Context
 
 ailab#923 (2026-09-28, four critical alerts): `infra-pg`'s replica lost its replication slot
@@ -107,4 +191,4 @@ RoleBinding, CronJob every 5 min (`*/5 * * * *`, `Forbid`).
 - `kubernetes/apps/databases/cnpg-lost-slot-reclone.yaml`, `kustomization.yaml`
 - `docs/runbooks/qnap-storage-setup.md` §9 gains one line pointing at the auto-reclone; `docs/runbooks/gitea-*` (if one exists) gains the retention note.
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
