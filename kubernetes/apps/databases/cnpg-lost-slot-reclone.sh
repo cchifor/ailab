@@ -31,12 +31,15 @@ set -eu
 
 : "${NAMESPACE:?}" "${CLUSTERS:?}"
 : "${SLOTS_FILE:=/work/slots.tsv}" "${DRY_RUN:=true}" "${MIN_INTERVAL_SECONDS:=21600}"
-: "${STUCK_AFTER_SECONDS:=2700}" "${DELETE_WAIT_SECONDS:=150}" "${POLL_SECONDS:=5}" "${WORK:=/tmp}"
+: "${STUCK_AFTER_SECONDS:=2700}" "${DELETE_WAIT_SECONDS:=150}" "${POLL_SECONDS:=5}" "${WORK:=/tmp}" "${K_TIMEOUT:=25}"
 IN_PROGRESS=ailab.io/reclone-in-progress
 LAST=ailab.io/last-reclone
 HEALTHY="Cluster in healthy state"
 
-k() { kubectl -n "$NAMESPACE" --request-timeout=20s "$@"; }
+# Bounded with `timeout`, NOT kubectl --request-timeout: that global flag counts as a config override,
+# kubectl then skips the in-cluster fallback and dials localhost:8080 (every execution failed on
+# 2026-09-28 until this was found in a debug pod; the drill had run before the flag was added).
+k() { timeout "$K_TIMEOUT" kubectl -n "$NAMESPACE" "$@"; }
 now() { date -u +%s; }
 ts() { date -u +%FT%TZ; }
 epoch_of() { # 2026-09-28T10:00:00Z -> epoch (GNU date or busybox); non-zero (nothing printed) when unparseable
