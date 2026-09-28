@@ -480,8 +480,11 @@ class KubeState:
             return None, None
         if status != 200:
             raise StateError("GET configmap: HTTP %s" % status)
-        obj = json.loads(raw)
-        return dict(obj.get("data") or {}), obj.get("metadata", {}).get("resourceVersion")
+        try:
+            obj = json.loads(raw)
+            return dict(obj.get("data") or {}), obj.get("metadata", {}).get("resourceVersion")
+        except (ValueError, AttributeError, TypeError) as e:
+            raise StateError("GET configmap: unreadable reply") from e
 
     def write(self, data, rv):
         body = {"apiVersion": "v1", "kind": "ConfigMap",
@@ -498,7 +501,11 @@ class KubeState:
             raise StateConflict("configmap write: HTTP 409 (written by someone else)")
         if status not in (200, 201):
             raise StateError("configmap write: HTTP %s" % status)
-        return json.loads(raw).get("metadata", {}).get("resourceVersion")
+        try:
+            return json.loads(raw).get("metadata", {}).get("resourceVersion")
+        except (ValueError, AttributeError) as e:
+            # The write landed but its reply is unreadable: outcome known, resourceVersion not.
+            raise StateError("configmap write: unreadable reply") from e
 
 
 # --- the schedule ----------------------------------------------------------------------------
@@ -561,6 +568,11 @@ class Scheduler:
         self.note = ""         # transient condition worth showing (e.g. Gitea unreachable)
         self.last_tick = None
         self.dirty = False     # memory is ahead of the ConfigMap: no side effects until it is saved
+        # Operator intent that the ConfigMap may not reflect yet, keyed by the schedule's attempt
+        # id: an OFF the API reported as NOT scheduled must never proceed, and a CANCEL whose write
+        # was unconfirmed is retried. Held in memory only (a restart loses it - accepted).
+        self.rejected = set()
+        self.cancel_wanted = set()
         self.view = {"phase": "unknown", "loaded": False}
 
     # -- persistence ----------------------------------------------------------------------
@@ -704,18 +716,19 @@ class Scheduler:
             # Persisted as `pausing` BEFORE any PATCH and switched to `draining` only once every
             # runner is paused: a restart that finds `pausing` rolls back, so an OFF whose
             # request failed can never be resurrected into a power-off by a later restart.
-            self.state = {"v": STATE_VERSION, "phase": "pausing", "by": who, "at": now,
+            attempt = secrets.token_hex(6)
+            self.state = {"v": STATE_VERSION, "phase": "pausing", "attempt": attempt, "by": who, "at": now,
                           "deadline": now + self.drain_max, "runners": targets,
                           "skipped": [r["name"] for r in cloud if r["disabled"]]}
             try:
                 self._save()
             except StateError as e:
-                # It may have landed as `pausing`; the next tick re-reads it and rolls a stored
-                # `pausing` back (no runner was paused yet, so that re-enable is a no-op).
+                # It may have landed as `pausing`; the next tick re-reads it and rolls it back (no
+                # runner was paused yet, so that re-enable is a no-op).
                 self.state = None
                 self.loaded = False
-                raise StateUncertain("could not confirm the schedule was saved (%s); OFF is not "
-                                     "scheduled unless the dashboard shows it" % e) from e
+                self.rejected.add(attempt)
+                raise StateUncertain("could not save the schedule (%s); OFF not scheduled" % e) from e
             self.clear = 0
             self.inflight = []
             self.note = ""
@@ -731,15 +744,20 @@ class Scheduler:
             try:
                 self._save()
             except StateError as e:
-                # Outcome unknown: the write may have landed (response lost) or not. Do NOT
-                # compensate on a stale resourceVersion; re-read on the next tick: a stored
-                # `draining` IS the operator's OFF and proceeds, a stored `pausing` rolls back.
+                # Outcome unknown: the write may have landed (reply lost) or not, and the in-memory
+                # resourceVersion is stale either way. The API answers "not scheduled", so this
+                # attempt must NEVER proceed: re-read what is stored and roll THIS attempt back
+                # from there; if even that fails, the tick does it once the ConfigMap is readable.
+                self.rejected.add(attempt)
                 self.loaded = False
                 self.dirty = False
+                try:
+                    self._reconcile_intent()
+                except StateError as e2:
+                    log("rollback of an unconfirmed schedule deferred to the next tick: %s" % e2)
                 self.publish()
-                raise StateUncertain("could not confirm the schedule was saved (%s); within one "
-                                     "poll the dashboard shows whether the OFF is scheduled - an "
-                                     "unsaved one rolls back and re-enables the runners" % e) from e
+                raise StateUncertain("could not save the schedule (%s); OFF not scheduled - the "
+                                     "paused runners are being re-enabled" % e) from e
             log("OFF SCHEDULED by %s: paused %s (already disabled, left alone: %s)"
                 % (who, ",".join(r["name"] for r in targets) or "-",
                    ",".join(self.state["skipped"]) or "-"))
@@ -767,16 +785,37 @@ class Scheduler:
                 try:
                     self._save()                     # persist BEFORE re-enabling
                 except StateError as e:
-                    # The cancel may or may not have landed: re-read on the next tick and follow
-                    # what is stored (releasing -> re-enable, draining -> still scheduled).
+                    # The cancel may or may not have landed. Remember it and re-apply it on top of
+                    # whatever is stored once the ConfigMap is readable (no re-enable before then).
                     self.state = prev
                     self.loaded = False
                     self.dirty = False
-                    raise StateUncertain("could not confirm the cancel was saved (%s); the "
-                                         "dashboard shows the outcome within one poll" % e) from e
+                    if prev.get("attempt"):
+                        self.cancel_wanted.add(prev["attempt"])
+                    raise StateUncertain("could not save the cancel (%s); it is retried until it "
+                                         "lands - the runners stay paused until then" % e) from e
                 log("OFF CANCELLED by %s (was %s)" % (who, phase))
                 self._tick_releasing()
             return self.publish()
+
+    def _reconcile_intent(self):
+        """Re-read the ConfigMap and re-apply remembered operator intent to what is ACTUALLY
+        stored: an attempt the API rejected is rolled back, an unconfirmed cancel is re-done."""
+        if not self.loaded:
+            self.load()
+        st = self.state
+        if not st or self.corrupt:
+            return
+        attempt = st.get("attempt")
+        if attempt in self.rejected and st["phase"] in ("pausing", "draining"):
+            self.rejected.discard(attempt)
+            self._to_releasing("error", "the schedule could not be saved; OFF not scheduled")
+        elif attempt in self.cancel_wanted and st["phase"] in ("pausing", "draining", "stalled"):
+            self.cancel_wanted.discard(attempt)
+            st["phase"] = "releasing"
+            st["outcome"] = {"result": "cancelled", "message": "cancelled (retried after a failed write)"}
+            if self._save_quiet():
+                self._tick_releasing()
 
     def cancel_for_wake(self, who):
         """ON means "I want the cluster on". Decided under the same lock as schedule(), on the
@@ -801,7 +840,7 @@ class Scheduler:
         with self.lock:
             try:
                 if not self.loaded:
-                    self.load()
+                    self._reconcile_intent()
                 if self.dirty:
                     self._save()                     # StateError -> nothing else this tick
                     log("state caught up with memory")
@@ -1064,21 +1103,25 @@ async function refresh(){
  }catch(e){sum.textContent='unreachable'}}
 $('bon').onclick=async()=>{
  out.textContent='sending wake packets...';showLast=false;
- try{const r=await fetch(B+'/api/wake',{method:'POST',credentials:'same-origin'});const d=await r.json();
+ try{const r=await fetch(B+'/api/wake',{method:'POST',credentials:'same-origin'});const d=await reply(r);
   if(!r.ok){out.textContent='wake failed: '+(d.error||r.status);return refresh()}
   out.textContent=(d.cancelled?'Scheduled OFF cancelled, runners re-enabled.\\n':'')+(d.note||'Magic packets sent. Nodes take about a minute to POST.');
   sum.textContent='waking...';
  }catch(e){out.textContent='wake failed: '+e}refresh()};
+/* Parse a reply without trusting it to be JSON (oauth2-proxy answers errors with HTML). */
+async function reply(r){let d={};try{d=await r.json()}catch(e){d={error:'HTTP '+r.status}}return d}
 bcancel.onclick=async()=>{
  out.textContent='cancelling...';showLast=false;
- const r=await fetch(B+'/api/shutdown/cancel',{method:'POST',credentials:'same-origin'});const d=await r.json();
- out.textContent=r.ok?'OFF cancelled; cloud runners re-enabled.':'cancel refused: '+(d.error||'');refresh()};
+ try{const r=await fetch(B+'/api/shutdown/cancel',{method:'POST',credentials:'same-origin'});const d=await reply(r);
+  out.textContent=r.ok?'OFF cancelled; cloud runners re-enabled.':'cancel: '+(d.error||r.status);
+ }catch(e){out.textContent='cancel failed: '+e}refresh()};
 boff.onclick=async()=>{
  showLast=false;
  if(!pending){
   out.textContent='checking what is running...';
-  const r=await fetch(B+'/api/shutdown/preflight',{method:'POST',credentials:'same-origin'});
-  const p=await r.json();
+  let r,p;
+  try{r=await fetch(B+'/api/shutdown/preflight',{method:'POST',credentials:'same-origin'});p=await reply(r);}
+  catch(e){out.textContent='preflight failed: '+e;return;}
   if(!r.ok){out.textContent='preflight refused: '+(p.error||'')+'\\n'+(p.errors||[]).join('\\n');return;}
   pending=p.confirm;
   out.textContent=(p.jobs.length?'WILL WAIT FOR '+p.jobs.length+' CI job(s) on cloud runners:\\n'+jobs(p.jobs,Date.now()/1000)+'\\n':'No CI job in flight on the cloud runners.\\n')
@@ -1090,10 +1133,12 @@ boff.onclick=async()=>{
   return;}
  clearTimeout(timer);const tok=pending;pending=null;boff.textContent='OFF';
  out.textContent='scheduling...';
- const r=await fetch(B+'/api/shutdown',{method:'POST',credentials:'same-origin',
-  headers:{'content-type':'application/json'},body:JSON.stringify({confirm:tok})});
- const d=await r.json();
- out.textContent=r.ok?'OFF scheduled.':(d.error||JSON.stringify(d));refresh()};
+ try{const r=await fetch(B+'/api/shutdown',{method:'POST',credentials:'same-origin',
+   headers:{'content-type':'application/json'},body:JSON.stringify({confirm:tok})});
+  const d=await reply(r);
+  out.textContent=r.ok?'OFF scheduled.':(d.error||JSON.stringify(d));
+ }catch(e){out.textContent='could not reach cloud-power ('+e+'); the status below shows whether the OFF is scheduled'}
+ refresh()};
 refresh();setInterval(refresh,15000);
 </script>
 """

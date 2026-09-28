@@ -679,16 +679,34 @@ class AmbiguousWriteTests(Base):
         self.store.write = write
         return orig
 
-    def test_draining_write_landed_reply_lost_proceeds_as_scheduled(self):
+    def test_draining_write_landed_reply_lost_is_rolled_back(self):
         orig = self._land_then_raise_on(2)               # 1 = pausing, 2 = draining
         with self.assertRaises(app.StateUncertain):
             self.s.schedule("op")
         self.store.write = orig
-        self.assertEqual(self.store.schedule()["phase"], "draining")
-        self.tick()
-        self.assertEqual(self.phase(), "draining", "the stored OFF is followed, not contradicted")
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2), "rolled back from the stored state")
+        self.assertEqual(self.phase(), "idle")
+        self.tick(5)
+        self.assertEqual(self.shutdowns, [], "an OFF reported as not scheduled never proceeds")
+
+    def test_rejected_attempt_rolled_back_once_the_configmap_is_readable(self):
+        self.tick()                                      # loaded while the ConfigMap is fine
+        orig = self._land_then_raise_on(2)
+        good_read = self.store.read
+
+        def read_then_break():                           # the outage starts after this schedule's load
+            raise app.StateError("GET configmap: HTTP 503")
+        self.store.read = read_then_break
+        with self.assertRaises(app.StateUncertain):
+            self.s.schedule("op")
+        self.store.write = orig
         self.tick(2)
-        self.assertEqual(len(self.shutdowns), 1)
+        self.assertTrue(self.fg.disabled(1), "nothing can be done while the state is unreadable")
+        self.store.read = good_read
+        self.tick()
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+        self.tick(5)
+        self.assertEqual(self.shutdowns, [])
 
     def test_draining_write_not_landed_rolls_back(self):
         orig = self.store.write
@@ -703,12 +721,11 @@ class AmbiguousWriteTests(Base):
         with self.assertRaises(app.StateUncertain):
             self.s.schedule("op")
         self.store.write = orig
-        self.assertEqual(self.store.schedule()["phase"], "pausing")
-        self.tick(3)
-        self.assertEqual(self.shutdowns, [])
-        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2), "rolled back at once")
         self.assertEqual(self.phase(), "idle")
         self.assertEqual(self.s.last["result"], "error")
+        self.tick(3)
+        self.assertEqual(self.shutdowns, [])
 
     def test_pausing_write_landed_reply_lost_is_rolled_back_by_the_tick(self):
         orig = self._land_then_raise_on(1)
@@ -719,6 +736,30 @@ class AmbiguousWriteTests(Base):
         self.tick()
         self.assertEqual(self.phase(), "idle")
         self.assertIsNone(self.store.schedule())
+
+    def test_cancel_write_not_landed_is_retried(self):
+        self.s.schedule("op")
+        self.store.fail_writes = 1
+        with self.assertRaises(app.StateUncertain):
+            self.s.cancel("op")
+        self.assertTrue(self.fg.disabled(1), "no re-enable before the cancel is durable")
+        self.tick()
+        self.assertFalse(self.fg.disabled(1) or self.fg.disabled(2))
+        self.assertEqual(self.phase(), "idle")
+        self.assertEqual(self.s.last["result"], "cancelled")
+        self.tick(3)
+        self.assertEqual(self.shutdowns, [])
+
+    def test_unreadable_configmap_reply_is_a_state_error(self):
+        class Garbage:
+            def _call(self, method, path, body=None):
+                return 200, b"<html>proxy</html>"
+        ks = app.KubeState("ns", "cm")
+        ks._call = Garbage()._call
+        with self.assertRaises(app.StateError):
+            ks.read()
+        with self.assertRaises(app.StateError):
+            ks.write({"schedule": ""}, "1")
 
     def test_cancel_write_landed_reply_lost_is_honoured(self):
         self.s.schedule("op")
