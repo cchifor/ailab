@@ -5,6 +5,8 @@ namespace: cloud-power
 resources:
   - namespace.yaml
   - secret.sops.yaml # SOPS: PVE API token (cloudpower@pve!ailab, Sys.PowerMgmt + audit only)
+  - secret-gitea.sops.yaml # SOPS: Gitea PAT that pauses/resumes the cloud CI runners (scheduled OFF)
+  - rbac.yaml # SA + Role: the api pod's own schedule-state ConfigMap, nothing else
   - deployment.yaml
   - networkpolicy.yaml # the real boundary: only oauth2-proxy may reach the API pod
 

@@ -4,7 +4,8 @@
 # no new hostname, tunnel route or OIDC client.
 #
 # TWO DEPLOYMENTS, ONE IMAGE, SPLIT BY BLAST RADIUS
-#   cloud-power      MODE=api  normal pod networking. Status + shutdown. Holds the PVE token.
+#   cloud-power      MODE=api  normal pod networking. Status + SCHEDULED shutdown. Holds the PVE
+#                              token and the Gitea token that pauses the cloud CI runners.
 #                              Fenced by networkpolicy.yaml: only oauth2-proxy may reach it.
 #   cloud-power-wol  MODE=wol  hostNetwork. Sends magic packets. Nothing else, no token.
 #
@@ -23,6 +24,11 @@ metadata:
   namespace: cloud-power
 spec:
   replicas: 1
+  # ONE worker drives the scheduled OFF (pause runners -> drain -> power off -> re-enable). A
+  # rolling update would briefly run two; Recreate never does. Writes to the state ConfigMap are
+  # resourceVersion-checked as well, so a stray second worker re-reads instead of overwriting.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: cloud-power
@@ -31,7 +37,11 @@ spec:
       labels:
         app.kubernetes.io/name: cloud-power
     spec:
-      automountServiceAccountToken: false
+      # The token is needed for exactly one object: the runtime-created cloud-power-state
+      # ConfigMap that makes a schedule survive a pod restart (rbac.yaml). The wol pod below keeps
+      # automount off.
+      serviceAccountName: cloud-power
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -61,6 +71,24 @@ spec:
               valueFrom: { secretKeyRef: { name: cloud-power-pve, key: token_id } }
             - name: PVE_TOKEN_SECRET
               valueFrom: { secretKeyRef: { name: cloud-power-pve, key: token_secret } }
+            # --- the scheduled OFF (plans/2026-09-28-cloud-power-scheduled-drain-plan.md) ---
+            # In-cluster Gitea (no Cloudflare hop). The PAT belongs to the org owner, scope
+            # write:organization: pausing a runner needs org OWNER in Gitea 1.26, and there is no
+            # narrower scope. secret-gitea.sops.yaml documents minting and rotation.
+            - { name: GITEA_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000" }
+            - { name: GITEA_ORG, value: "cchifor" }
+            - name: GITEA_TOKEN
+              valueFrom: { secretKeyRef: { name: cloud-power-gitea, key: token } }
+            - { name: CLOUD_RUNNER_PREFIX, value: "cloud-ci-" } # ADR 0032 names; the ONLY runners touched
+            - { name: DRAIN_POLL_SEC, value: "20" }
+            # act_runner's 3h job timeout + 15 min. Reaching it STALLS the OFF (hosts stay on, the
+            # page says why) rather than powering off over a job that may still be running.
+            - { name: DRAIN_MAX_SEC, value: "11700" }
+            # A host that accepted (or may have accepted) the shutdown but is still up after this
+            # long -> stalled. > poweroff.target's 30-min JobTimeoutSec, so by then it is not
+            # mid-shutdown and CANCEL may safely hand its runners back.
+            - { name: OFFLINE_WAIT_SEC, value: "2400" }
+            - { name: ALLOWED_ORIGINS, value: "https://home.chifor.me" } # CSRF gate for the POSTs
           ports:
             - { name: http, containerPort: 8127, protocol: TCP }
           readinessProbe:
