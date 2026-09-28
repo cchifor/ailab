@@ -1,12 +1,5 @@
 # Cloud-power OFF becomes a scheduled, drained power-off
 
-## Codex Review
-
-- Accept the transactional assignment explanation and the home-lab tradeoffs for one worker, internal HTTP, and dashboard access; drop those four round-1 concerns.
-- Distinguish a drain stall from an unresolved host shutdown before allowing CANCEL/ON to restore runners.
-- Revisit release during a shared network outage: host reachability and runner liveness can fail together.
-- Narrow the verification concern to accepted-but-unrecorded shutdowns and hosts that wake within the replay window.
-
 ## Context
 
 The Homepage OFF button (`kubernetes/apps/apps/cloud-power/`, `home.chifor.me/cloud-power/`) powers
@@ -49,9 +42,9 @@ done at the forge, with the guest fully up — no dependence on shutdown orderin
 idle --OFF+confirm--> draining --(no cloud job in flight on 2 polls >= 20 s apart)--> powering_off --(every host that accepted
   |                    |   |                                                            |       shutdown is down AND each owned
   |                    |   +- deadline (3 h 15 min) -> stalled                          |       runner is offline)--> release --> idle
-  |                    +- CANCEL / ON -> releasing -> idle                              +- every shutdown call failed -> stalled
-  +- Gitea/state error, no cloud runner found -> refuse, nothing changed                +- 30 min, a host still up -> stalled
-stalled --CANCEL / ON--> releasing -> idle          (runners stay paused while stalled; the page shows why)
+  |                    +- CANCEL / ON -> releasing -> idle                              +- no node was sent the shutdown -> stalled
+  +- Gitea/state error, no cloud runner found -> refuse, nothing changed                +- 40 min, a host still up -> stalled
+stalled --CANCEL / ON (once no host can still be mid-shutdown)--> releasing -> idle   (runners stay paused while stalled)
 ```
 
 All operator actions (schedule, cancel, wake-cancel) and every worker tick run under ONE lock, so
@@ -84,31 +77,39 @@ after each transition, so a status poll never blocks on a slow Gitea/PVE call.
    jobs" promise, so the schedule goes `stalled` and the page shows why. This also defuses a STALE
    schedule: a pod that was down all night and resumes a `draining` state past its deadline does not
    power the hosts off in the morning.
-4. **Powering off.** Persist `powering_off` (+`shutdown_sent: false`) BEFORE calling the existing
-   `shutdown_all()`, then persist its per-node results. A resume that finds `shutdown_sent: false`
-   re-sends only if the transition is younger than `STALE_SHUTDOWN_SEC`=600 s, otherwise -> `stalled`
-   (never replays an old shutdown against hosts that may have woken since). Every node call failed ->
-   `stalled`. `pve-guests` still stops the (now idle) VMs and the LXCs, and the hosts' RTC hook arms
-   the wake alarm exactly as today.
+4. **Powering off.** Persist `powering_off` (+`shutdown_sent: false`) BEFORE calling
+   `shutdown_all()`, then persist its per-node results. `shutdown_all()` now tells apart a request
+   that was provably never sent (`REFUSED (not sent)` — the cert pin failed before any byte went out)
+   from one whose outcome is unknown (`ERROR (outcome unknown)` — the POST may have been accepted
+   before the reply was lost). The nodes waited for = `shutdown requested` + `ERROR`. None of them
+   (everything refused) -> `stalled` at once, CANCEL allowed immediately. A resume that finds
+   `shutdown_sent: false` (the pod died mid-dispatch, some nodes possibly sent) NEVER replays — a
+   host may have gone down and been woken since — it stalls with CANCEL held until
+   `powering_off_at + OFFLINE_WAIT_SEC`. `pve-guests` still stops the (now idle) VMs and the LXCs, and
+   the hosts' RTC hook arms the wake alarm exactly as today.
 5. **Releasing the runners after the power-off.** A runner is re-enabled only when BOTH (a) every
-   node that answered `shutdown requested` has been observed down (TCP :8006 refused/timeout) on two
-   consecutive ticks, and (b) Gitea reports the runner `offline` (no poll for > 1 min). (a) alone
-   could be pveproxy stopping before the VMs; (b) alone could be a network blip on a running VM;
-   together the VM is gone. Then `idle` with outcome `off`, so the pool is whole again whenever the
-   hosts wake (RTC 08:00 or ON) with no morning coupling. A host still up `OFFLINE_WAIT_SEC`=1800 s
-   after the shutdown call -> `stalled` with the runners still paused (it may yet go down; re-enabling
-   could hand a job to a VM about to die). The operator resolves a stall with CANCEL.
-
-   <!-- codex: A shared network outage can simultaneously make :8006 time out and every runner appear offline, so these two negative observations do not prove the VMs have stopped. If connectivity returns while an accepted shutdown is delayed, a released runner can fetch a job that shutdown then kills; require positive completion evidence or keep ambiguous completion paused for operator verification, and test this sequence. -->
+   waited-for node has been unreachable (TCP :8006) CONTINUOUSLY for `HOST_DOWN_SEC`=300 s, and (b)
+   Gitea reports the runner `offline` (no poll for > 1 min). (a) alone could be pveproxy stopping
+   before the VMs; (b) alone could be a network blip on a running VM; a shared network outage can
+   fake both at once, which is why (a) is five minutes of darkness rather than two polls — an idle
+   cloud host finishes its shutdown well inside that. Once the hosts were confirmed dark, a host that
+   answers again was woken (ON / RTC): the power cycle happened, so every owned runner is released.
+   Then `idle` with outcome `off`, so the pool is whole whenever the hosts wake, with no morning
+   step. A waited-for host still up `OFFLINE_WAIT_SEC`=2400 s after the shutdown call -> `stalled`
+   with the runners still paused. 2400 s is past `poweroff.target`'s 30-min `JobTimeoutSec` (then
+   `poweroff-force`), so a host still up then is not mid-shutdown and CANCEL can hand its runners
+   back without feeding a job to a dying VM. Residual, accepted: a network outage longer than 5 min
+   that ends while a host is STILL shutting down (> 5 min for an idle host) could let a released
+   runner poll once more before its VM stops.
 
 6. **Cancel / ON.** `POST /api/shutdown/cancel` (new) in `draining` or `stalled` persists
-   `releasing` BEFORE re-enabling; refused in `powering_off` (the hosts are going down). `POST
+   `releasing` BEFORE re-enabling; refused in `powering_off` (the hosts are going down) and in a
+   `stalled` whose `cancel_after` has not passed (a host may still be shutting down; the page shows
+   when CANCEL becomes possible). `POST
    /api/wake` also cancels a `draining`/`stalled` schedule first; in `powering_off` it still forwards
    the packets but the page says the hosts are still shutting down (WoL on a running host is a no-op).
    Direct calls to the hostNetwork wol service and the RTC alarm do not touch the schedule — by then
    it has either finished or is `stalled` (deadline), never pending an unexpected shutdown.
-
-   <!-- codex: Preserve the distinction between a drain stall and a stall after shutdown may have started: at 1800 s a slow host can still be shutting down, and the existing shutdown_all() also labels a POST accepted before a response timeout as ERROR. Persist that uncertainty and keep affected runners paused on CANCEL/ON until shutdown completion or verified abort; otherwise the recovery button can hand a new job to a VM that is about to die. -->
 
 7. **Persistence.** The schedule lives in a runtime-created ConfigMap `cloud-power-state` (not in git,
    so Flux prune leaves it), written with resourceVersion. A 409 marks the state unloaded and the
@@ -185,14 +186,14 @@ the same Gitea-level drain is a cloudlab follow-up, noted in the ADR.
    zero cloud runners refused; malformed runner/job objects refused; job on page 3 seen; busy-only
    and job-only in-flight both hold; operator-disabled runner's job holds; Gitea error resets the
    clear count; mid-drain re-enable and new runner are paused and owned; deadline -> stalled;
-   release needs host down AND runner offline; host never down -> stalled with runners paused; all
-   shutdown calls failed -> stalled; cancel from draining/stalled, refused in powering_off; restart
-   mid-drain resumes; restart with unsent shutdown resends when fresh and stalls when stale; 409 ->
+   release needs 5 min of darkness AND runner offline; a network outage shorter than that releases
+   nothing; hosts woken after confirmed darkness release; host never down -> stalled, runners paused,
+   CANCEL allowed; a shutdown whose reply was lost is waited for, never released early, and stalls if
+   the host stays up; nothing sent -> stalled with CANCEL at once; cancel refused in powering_off;
+   restart mid-drain resumes; restart with an unrecorded shutdown never replays it and holds CANCEL
+   until a shutdown would be over; 409 ->
    reload; unreadable/unknown-version state -> OFF refused; concurrent schedule from two threads ->
    exactly one wins; CSRF check.
-
-   <!-- codex: round-2: An exhaustive fault matrix is unnecessary, but reloading the same phase does not cover different external outcomes: add a shutdown POST accepted before its response times out, and a crash after partial shutdown dispatch but before results persist, followed by a host wake inside the 600 s replay window. Assert that unresolved shutdowns cannot release runners and that recovery cannot shut down the newly booted host again; persist-before-act and a freshness cutoff alone do not make shutdown replay idempotent across a wake. -->
-   <!-- opus-pushback: The list above covers each crash boundary the design relies on (persist-then-act means every boundary resumes into a phase already under test) plus the concrete cases named; an exhaustive before/after matrix per call would multiply tests without exercising new code paths. -->
 
 2. `kubectl kustomize kubernetes/apps/apps/cloud-power` renders; manifests CI passes.
 3. Live, after Flux applies (compatibility baseline: Gitea 1.26.1, act_runner 0.6.1):
@@ -214,4 +215,4 @@ the same Gitea-level drain is a cloudlab follow-up, noted in the ADR.
    exercises the pause/re-enable half with brief (seconds) capacity impact; check every owned runner
    ends `disabled: false`.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
