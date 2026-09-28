@@ -55,6 +55,7 @@ metadata:
     app.kubernetes.io/part-of: gitea
 spec:
   schedule: "17 3-23 * * *" # hourly, never inside the 01:00-02:30Z cron.cleanup_actions burst
+  timeZone: Etc/UTC # the exclusion window is UTC; without this the schedule follows the controller's zone
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 900
   successfulJobsHistoryLimit: 3
