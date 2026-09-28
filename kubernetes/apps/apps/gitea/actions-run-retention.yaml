@@ -20,9 +20,21 @@
 # PACING IS THE POINT. MAX_DELETES_PER_RUN is a GLOBAL budget per execution, DELETE_PAUSE_SECONDS sits
 # between deletions, and a REPLICATION GATE (Prometheus: any firing CNPG*/PostgresReplica* alert, or an
 # unreachable Prometheus, pauses the job - exit 2, fail closed) is checked before the first deletion and
-# every GATE_EVERY deletions. The schedule skips 00-02Z so it never overlaps cron.cleanup_actions. The
-# numbers below are the CANARY numbers; the steady-state ones are set from the measured WAL per deletion
-# (plans/2026-09-28-gitea-actions-retention-and-cnpg-reclone-plan.md, rollout step 3-4).
+# every GATE_EVERY deletions. The schedule skips 00-02Z so it never overlaps cron.cleanup_actions.
+#
+# NUMBERS, from the 2026-09-28 canary (25 live deletions, 5 s pace, agentforge tail): ~1 MB of extra
+# WAL per deleted run on top of Gitea's own ~150 KB/s; the replica's slot never dipped below 1.07 GB
+# of headroom, replay lag <= 0.22 s. 300 per execution at a 3 s pace = ~15 min of work per hour;
+# DURING that window the extra WAL is ~330 KB/s, i.e. >2x the ~150 KB/s background (the canary's 5 s
+# pace was ~200 KB/s); averaged over the hour it is ~85 KB/s. Size slot headroom on the peak: 330 KB/s
+# for 15 min = ~300 MB against the 1 GB budget. 21 executions/day = 6,300/day against ~1,934/day
+# ageing in: the ~30 k backlog drains in ~8 days. Re-measure before raising either number.
+#
+# JOB SHAPE for that window: ~15 min of pauses + ~600 requests + 12 gate checks = ~20 min. So
+# activeDeadlineSeconds 2700 (a deadline tuned for the 2-minute canary would kill a live run
+# mid-deletion), concurrencyPolicy Forbid (an overrun never overlaps the next hour's execution),
+# backoffLimit 0 + restartPolicy Never (a gate pause is exit 2 = a failed pod; a retry would start a
+# fresh 300 budget, so there is none: one pod, one budget, per execution).
 #
 # SELECTION: runs are listed id DESC; the script walks each repo from the LAST page towards page 1 for at
 # most MAX_PAGES_PER_REPO pages, never stops early on an ineligible page (a rerun keeps its old id), and
@@ -42,7 +54,7 @@
 # own env (`kubectl create job --from=cronjob/... --dry-run=client -o yaml`, edit, apply): editing the
 # CronJob never changes a Job that already exists.
 #
-# DRY_RUN=true (the merged default) lists what would be deleted and exits 0. Deleted rows come back as dead
+# DRY_RUN=true lists what would be deleted and exits 0 (how it merged; live since the canary). Deleted rows come back as dead
 # tuples that autovacuum reuses in-file: growth stops and the free-space cliff moves out, but the 12 GB
 # does not shrink on disk without a VACUUM FULL / pg_repack window - a separate decision.
 apiVersion: batch/v1
@@ -62,8 +74,8 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 0
-      activeDeadlineSeconds: 1500
+      backoffLimit: 0 # one pod = one MAX_DELETES_PER_RUN budget; no retry can re-spend it
+      activeDeadlineSeconds: 2700 # ~20 min of work at 300 x 3 s + requests; 1500 was the canary shape
       template:
         metadata:
           labels:
@@ -96,18 +108,18 @@ spec:
                   value: ""
                 - name: RETENTION_DAYS # MUST stay > LOG_RETENTION_DAYS / ARTIFACT_RETENTION_DAYS (gitea.yaml: 14)
                   value: "16"
-                - name: MAX_DELETES_PER_RUN # global per execution; canary value, see the header
-                  value: "25"
+                - name: MAX_DELETES_PER_RUN # global per execution; from the canary measurement in the header
+                  value: "300"
                 - name: DELETE_PAUSE_SECONDS
-                  value: "5"
+                  value: "3"
                 - name: MAX_PAGES_PER_REPO
                   value: "20"
                 - name: GATE_EVERY
                   value: "25"
                 - name: PROM_URL
                   value: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
-                - name: DRY_RUN
-                  value: "true"
+                - name: DRY_RUN # false since 2026-09-28 (rollout step 4); auto-reclone stays dry-run until two clean nights
+                  value: "false"
                 - name: GITEA_TOKEN
                   valueFrom: { secretKeyRef: { name: gitea-actions-retention, key: token } }
               command: ["/bin/sh", "/opt/retention/gitea-actions-run-retention.sh"]
