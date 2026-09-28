@@ -18,11 +18,13 @@ and published with link(2), which never replaces an existing file.
 Stdlib only. docs/runbooks/dev-workers.md § "Pasting images and files into agents".
 """
 
+import errno
 import json
 import logging
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 import urllib.parse
@@ -84,16 +86,18 @@ class Store:
                     pass
 
     def _usage(self):
+        # Temp files are left out: every in-flight upload is already counted in full by its
+        # reservation, and a crash's leftovers are removed at startup (cleanup_temps).
         size = count = 0
         for entry in os.scandir(self.dir):
-            if entry.is_file(follow_symlinks=False):
+            if entry.is_file(follow_symlinks=False) and not entry.name.startswith(TMP_PREFIX):
                 size += entry.stat(follow_symlinks=False).st_size
                 count += 1
         return size, count
 
     def reserve(self, nbytes):
         with self._lock:
-            size, count = self._usage()  # temps are on disk too, so they count here
+            size, count = self._usage()
             if size + self._reserved_bytes + nbytes > QUOTA_BYTES:
                 raise Rejected(507, "pastes directory quota exceeded")
             if count + self._reserved_files + 1 > MAX_FILES:
@@ -107,20 +111,28 @@ class Store:
             self._reserved_files -= 1
 
     def store(self, name, nbytes, read):
-        """Write nbytes from read(n) to a temp file, then publish it without replacing anything."""
+        """Write nbytes from read(n) to a temp file, then publish it without replacing anything.
+
+        read(n) returns at most n bytes (b"" = the client stopped) and raises Rejected itself for a
+        stalled or overdue body. A failure of OUR side (disk full, permissions) is a 5xx, not the
+        client's fault.
+        """
         tmp = os.path.join(self.dir, TMP_PREFIX + secrets.token_hex(8))
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            deadline = time.monotonic() + READ_DEADLINE
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            raise server_fault(exc) from exc
+        try:
             remaining = nbytes
             with os.fdopen(fd, "wb") as f:
                 while remaining:
-                    if time.monotonic() > deadline:
-                        raise Rejected(408, "body not received in time")
                     chunk = read(min(CHUNK, remaining))
                     if not chunk:
                         raise Rejected(400, "body shorter than Content-Length")
-                    f.write(chunk)
+                    try:
+                        f.write(chunk)
+                    except OSError as exc:
+                        raise server_fault(exc) from exc
                     remaining -= len(chunk)
             stamp = time.strftime("%Y%m%d-%H%M%S")
             for _ in range(5):
@@ -130,12 +142,19 @@ class Store:
                     return final
                 except FileExistsError:
                     continue
+                except OSError as exc:
+                    raise server_fault(exc) from exc
             raise Rejected(500, "could not pick a free file name")
         finally:
             try:
                 os.unlink(tmp)
             except FileNotFoundError:
                 pass
+
+
+def server_fault(exc):
+    full = exc.errno in (errno.ENOSPC, errno.EDQUOT)
+    return Rejected(507 if full else 500, "the worker could not store the file: " + (exc.strerror or type(exc).__name__))
 
 
 def make_handler(store, origins):
@@ -184,18 +203,35 @@ def make_handler(store, origins):
             if nbytes > MAX_BYTES:
                 return self._reject(413, f"file larger than {MAX_BYTES // (1024 * 1024)} MiB")
             name = safe_name(urllib.parse.parse_qs(url.query).get("name", [""])[0], self.headers.get("Content-Type"))
+            deadline = time.monotonic() + READ_DEADLINE
+
+            def read_some(n):
+                # read1 returns after ONE receive, and the socket timeout never exceeds what is left of
+                # the deadline — so a client trickling a byte now and then cannot hold a slot and a
+                # reservation past READ_DEADLINE (a plain read(n) blocks until n bytes arrive).
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise Rejected(408, "body not received in time")
+                self.connection.settimeout(min(SOCKET_TIMEOUT, left))
+                try:
+                    return self.rfile.read1(n)
+                except (socket.timeout, TimeoutError) as exc:
+                    raise Rejected(408, "body stalled or not received in time") from exc
+                except OSError as exc:
+                    raise Rejected(400, "connection failed mid-body") from exc
+
             if not slots.acquire(blocking=False):
                 return self._reject(503, "too many uploads at once")
             try:
                 store.reserve(nbytes)
                 try:
-                    path = store.store(name, nbytes, self.rfile.read)
+                    path = store.store(name, nbytes, read_some)
                 finally:
                     store.release(nbytes)
             except Rejected as exc:
                 return self._reject(exc.status, exc.reason)
-            except OSError as exc:  # includes socket timeouts mid-body
-                return self._reject(400, f"upload failed: {exc.__class__.__name__}")
+            except OSError as exc:  # anything else on our side: quota scan, directory gone
+                return self._reject(500, f"upload failed: {exc.__class__.__name__}")
             finally:
                 slots.release()
             LOG.info("stored %s bytes=%d", os.path.basename(path), nbytes)

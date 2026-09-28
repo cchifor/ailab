@@ -3,6 +3,7 @@
 Run through tests/test-web-gate.sh. Stdlib only.
 """
 
+import errno
 import http.client
 import importlib.util
 import json
@@ -161,6 +162,69 @@ class UploadTests(ServerTestCase):
         pathlib.Path(keep).write_bytes(b"k")
         self.store.cleanup_temps()
         self.assertEqual(self.files(), ["20260101-000000-abcd-keep.txt"])
+
+
+class DeadlineTests(ServerTestCase):
+    """A trickling body must not outlive READ_DEADLINE (Codex review of #936)."""
+
+    def setUp(self):
+        self._saved = (up.READ_DEADLINE, up.SOCKET_TIMEOUT)
+        up.READ_DEADLINE, up.SOCKET_TIMEOUT = 1.0, 5
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        up.READ_DEADLINE, up.SOCKET_TIMEOUT = self._saved
+
+    def test_trickle_is_cut_at_the_deadline(self):
+        # One byte every 0.3 s: always inside the 5 s inactivity timeout, never done by the 1 s deadline.
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        s.sendall(
+            b"PUT /_dw/upload?name=a.txt HTTP/1.1\r\nHost: x\r\nX-DW-Upload: 1\r\nOrigin: " + ORIGIN.encode()
+            + b"\r\nContent-Length: 100\r\n\r\n"
+        )
+        started = time.monotonic()
+        s.settimeout(0.3)
+        reply = b""
+        while time.monotonic() - started < 8 and not reply:
+            try:
+                s.sendall(b"x")
+            except OSError:
+                pass
+            try:
+                reply = s.recv(4096)
+            except socket.timeout:
+                continue
+        elapsed = time.monotonic() - started
+        s.close()
+        self.assertIn(b" 408 ", reply)
+        self.assertLess(elapsed, 3.0, f"the trickle was served for {elapsed:.1f}s past a 1s deadline")
+        time.sleep(0.2)
+        self.assertEqual(self.files(), [])
+
+
+class ServerFaultTests(ServerTestCase):
+    """Our disk failing is a 5xx, not the client's fault (Claude review of #936)."""
+
+    def test_disk_full_is_507_and_leaves_nothing(self):
+        real_link = up.os.link
+
+        def full(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        up.os.link = full
+        try:
+            status, data = self.put(b"hello")
+        finally:
+            up.os.link = real_link
+        self.assertEqual(status, 507)
+        self.assertIn("could not store", data.get("error", ""))
+        self.assertEqual(self.files(), [])
+
+    def test_quota_does_not_double_count_in_flight_temps(self):
+        # A temp file on disk is already covered by its upload's reservation: _usage() must skip it.
+        pathlib.Path(self.dir, up.TMP_PREFIX + "inflight").write_bytes(b"x" * 1000)
+        self.assertEqual(self.store._usage(), (0, 0))
 
 
 class QuotaTests(ServerTestCase):

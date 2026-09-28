@@ -17,7 +17,10 @@
   "use strict";
 
   var MAX_BYTES = 64 * 1024 * 1024; // must match dw_upload.py MAX_BYTES and Caddy's request_body
-  var AUTO_PASTE_MS = 3000; // a slower upload may finish after focus moved: ask before pasting
+  // Auto-paste only within this long of the user's paste/drop/pick. Measured from THAT action, not
+  // from when a queued file's own upload starts: a file waiting behind a slow one must not paste
+  // itself into whatever pane has focus half a minute later (Codex review of #936).
+  var AUTO_PASTE_MS = 3000;
   var IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
   var hookedTerm = null;
   var queue = Promise.resolve();
@@ -150,8 +153,10 @@
 
   // ---- uploading ----------------------------------------------------------------------------------
   function enqueue(files) {
+    var actionAt = Date.now();
     files.forEach(function (f) {
-      queue = queue.then(function () { return upload(f); }, function () { return upload(f); });
+      var run = function () { return upload(f, actionAt); };
+      queue = queue.then(run, run);
     });
   }
 
@@ -159,12 +164,11 @@
     return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : (n / 1048576).toFixed(1) + " MB";
   }
 
-  function upload(file) {
+  function upload(file, actionAt) {
     var label = (file.name || "clipboard image") + " (" + human(file.size) + ")";
     if (!file.size) { toast(label + ": empty file, not uploaded", "err", 6000); return Promise.resolve(); }
     if (file.size > MAX_BYTES) { toast(label + ": larger than 64 MB, not uploaded", "err", 8000); return Promise.resolve(); }
     var note = toast("Uploading " + label + "…");
-    var started = Date.now();
     return fetch("/_dw/upload?name=" + encodeURIComponent(file.name || ""), {
       method: "PUT",
       body: file,
@@ -187,7 +191,7 @@
           note.set(label + ": upload failed (" + resp.status + (data.error ? ", " + data.error : "") + ")", "err", 12000);
           return;
         }
-        if (Date.now() - started <= AUTO_PASTE_MS && document.hasFocus() && pastePath(data.path)) {
+        if (Date.now() - actionAt <= AUTO_PASTE_MS && document.hasFocus() && pastePath(data.path)) {
           note.set("Pasted " + data.path, "ok", 5000);
         } else {
           note.set("Uploaded " + data.path, "ok");
