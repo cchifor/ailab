@@ -506,6 +506,39 @@ data:
           extra_body:
             top_k: 20
         model_info: { supports_vision: true, max_input_tokens: 229376 }
+      # ---- IMAGE GENERATION: cloud2, Qwen-Image-2.1 (2026-09-29, ADR 0033) ---------------------
+      # Served by qwen-image-api on 192.168.0.28:8190 (LXC 5103): an OpenAI-shaped
+      # /v1/images/generations + /v1/images/edits in front of a loopback ComfyUI on the ONE cloud2
+      # RTX 3090 vLLM does not use (GPU-db1d635e, 4a:00.0). Serving side: git.chifor.me/cchifor/cloudlab
+      # runbook §14. The model id picks the workflow; nothing else of a request reaches the graph.
+      #   qwen-image-2.1       Comfy-Org template, INT8, 40 steps (edits 25)   1024² warm 22.5 s, edit 24.5 s
+      #   qwen-image-2.1-fast  Viggle turbo v0.2.1 LoRA unmerged, 6 steps      1024² warm  4.8 s, edit 12.7 s
+      # (measured 2026-09-29 on the box; 2048² is 113 s / 33 s; peak 22.1 GiB VRAM.) The fast model is
+      # the one for agents; it is weaker on small/dense text (it garbled one line of a 5-line menu the
+      # 40-step model rendered), so Open WebUI's default is the quality id (open-webui.yaml).
+      #
+      # ⚠️ NON-COMMERCIAL: Qwen-Image-2.1 and the Viggle LoRA are under the Qwen Research License
+      # (research/evaluation only). That is why these routes live HERE and are NOT mirrored into
+      # litellm-local.yaml / litellm-vkeys.yaml, which serve the Strive platform's tenant keys.
+      # ⚠️ DAY-ONLY like every cloud route above: cloud2 powers off nightly and these 502 overnight.
+      # ⚠️ ONE GPU, ONE graph at a time: the API admits 4 requests and answers 429 beyond that, on
+      # purpose -- LiteLLM does not propagate client cancels (the NO-CANCEL note above), so an
+      # unbounded queue would let one runaway agent hold the card for everyone.
+      # mode: image_generation keeps both OUT of the chat pickers (gen-litellm-consumers.py `_select`).
+      # The size/n/seed rules are the API's: size WxH, multiples of 16, 256-2752 per side, <=4.23 MP;
+      # n 1-4; b64_json only. Edits with no size follow image 1 at ~1 MP.
+      - model_name: qwen-image-2.1-cloud
+        litellm_params:
+          model: openai/qwen-image-2.1
+          api_base: http://192.168.0.28:8190/v1
+          api_key: "sk-noauth"
+        model_info: { mode: image_generation }
+      - model_name: qwen-image-2.1-fast-cloud
+        litellm_params:
+          model: openai/qwen-image-2.1-fast
+          api_base: http://192.168.0.28:8190/v1
+          api_key: "sk-noauth"
+        model_info: { mode: image_generation }
       # qwen3.8-27b — the quality tier, ON-DEMAND on node1 (.44) :8082 via its own llama-swap
       # instance, in the slot gemma-4 used to hold. 27B DENSE (not MoE), so every token reads all 27B
       # params: a MEASURED 9.3 tok/s vs qwen3.6's ~50. That is inherent to a dense model on a
@@ -1129,7 +1162,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "00545c49be4c"
+        checksum/config: "abd1f60bae7a"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
