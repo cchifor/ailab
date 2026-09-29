@@ -45,12 +45,13 @@ A release is a new directory on `router-releases`, never a change to a mounted o
    - **Before merging**, take a baseline on the release that is still live: `kubectl --context admin@ai -n llm-router exec deploy/llm-router -- sh -c 'cd /app && node scripts/validate-live.mjs --baseline'` (see step 8). If the live release predates the script, copy it in with `kubectl cp` first.
    - Record the result so step 8 can be compared against it.
 8. **Validate end to end on the live pod** (from `router-0.1.0-20260929-subs` on): `kubectl --context admin@ai -n llm-router exec deploy/llm-router -- sh -c 'cd /app && node scripts/validate-live.mjs'`.
-   - It sends real requests through the router's own API as the administrator, who is also the Claude owner: Codex text, streaming, a tool call (never executed), images to a vision model and refused for a non-vision one, and Claude streaming.
+   - It sends real requests through the router's own API as the administrator, who is also the Claude owner: Codex text, streaming, a tool call (never executed), images to a vision model and refused for a non-vision one, Claude streaming, and (from `router-0.1.0-20260929-images` on) one 512x512 image from `qwen-image-2.1-fast-cloud`, checked to be a PNG of that size served by the `qwen-image` account. The step-7 `--baseline` run never includes it (it reports the check as skipped: the older release has no images API). On the first roll that adds it, configure the `qwen-image` account and its routes (admin API) before this step; until then run step 8 with `--skip-images "image routes not configured yet"`.
    - Each check names the account and model that actually answered, taken from the request's trajectory.
-   - At most 8 small requests and 2 minutes. It restores the one setting it changes (`visionModels` on `codex-2`).
+   - At most 9 small requests and 3 minutes. It restores the one setting it changes (`visionModels` on `codex-2`).
    - Exit code 0 means all checks passed. Compare the output with the baseline from step 7.
    - **If the run is interrupted** (the exec is killed, or the pod restarts) before it prints its summary, the temporary `visionModels` setting may still be in place. Check `codex-2`'s `visionModels` in `GET /admin/v1/config`. If it differs from before the run, put it back with `update_account` in the chat, or revert that config change from the history (`config_history`, then `revert_config`).
    - **Never run it on the staging pod:** Codex logins must be used by one router only.
+   - **cloud2 is off at night** (Qwen-Image is day-only, ADR 0033). An unreachable image server FAILS the image check: a firewall, route or deployment fault looks the same. When the server is off on purpose, say so: `--skip-images "cloud2 powered off (night)"` reports the check as skipped, with that reason.
 
 ### Why a staged release rather than a new OCI image?
 

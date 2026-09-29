@@ -155,12 +155,18 @@ spec:
             # so a client cannot supply its own value through the tunnel. api-keys uses it the same way for the
             # public agent access requests (/agent/v1/*: per-address limits), and publicUrl for the public skill
             # (/agent/skill.md) and approved keys' replies: never the request's Host header.
+            # api-openai imageProxy: an image generation (POST /v1/images/generations) sends nothing until the image
+            # is ready, and Cloudflare's edge gives the origin 100 s (then a bare 524 that SDKs retry, replaying the
+            # generation). Requests carrying cf-ray (set by the edge on every request; all ingress is the edge
+            # cloudflared, see the NetworkPolicy) get a 90 s whole-request deadline, so the router answers first:
+            # 504 with x-should-retry: false. In-pod callers (validate-live) keep the route's own deadline.
             - name: ROUTER_PLUGIN_CONFIG
               value: >-
                 {"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
                 "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
                 "server-registration":{"clientAddressHeader":"cf-connecting-ip"},
-                "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"}}
+                "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"},
+                "api-openai":{"imageProxy":{"header":"cf-ray","deadlineMs":90000}}}
           # Probe routes come from the router's kernel (packages/kernel/index.ts):
           # GET /health (liveness, {status:"ok"}) and GET /ready (200 when every
           # required plugin is active and storage answers, 503 otherwise).
@@ -200,13 +206,13 @@ spec:
                 - ALL
           volumeMounts:
             # One immutable release directory per rollout, built from one llm-router commit:
-            # router-0.1.0-20260929-subs = dsh/llm-router main@05bfecf (never rewritten in place;
+            # router-0.1.0-20260929-images = dsh/llm-router main@0727181 (never rewritten in place;
             # a new build gets a new directory). Swapping it replaces the pod safely: the
             # Deployment is `strategy: Recreate` and the SQLite volume (llm-router-data) is RWO
             # iSCSI, so the old pod has stopped before the new one opens the database.
             - name: releases
               mountPath: /app
-              subPath: router-0.1.0-20260929-subs
+              subPath: router-0.1.0-20260929-images
               readOnly: true
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
