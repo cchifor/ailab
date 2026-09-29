@@ -60,7 +60,7 @@
       "addLabels": ["no-automerge"]
     },
     {
-      "description": "EVERY LiteLLM update (version, digest, any type) waits for a human. The gateway fronts every LLM call, and litellm-route-contract proves only the behaviour it covers: #917 (main-stable = v1.103.0) passed review from both personas, yet it silently turned the chatgpt-chat handler's missing-usage error into a completion carrying estimated usage. Since 2026-09-29 the image is pinned by release tag (v1.101.0@sha256), so these PRs name real versions. No groupName: nothing is grouped.",
+      "description": "EVERY LiteLLM update (version, digest, any type) waits for a human. The gateway fronts every LLM call, and litellm-route-contract proves only the behaviour it covers: #917 (main-stable = v1.103.0) passed review from both personas, yet it silently turned the chatgpt-chat handler's missing-usage error into a completion carrying estimated usage. Since 2026-09-29 the image is pinned by release tag (v1.101.0@sha256), so these PRs name real versions. No matchUpdateTypes on purpose: pin, pinDigest, replacement and rollback PRs carry the label too. Nothing re-enables automerge: no later rule matches this package, the extended presets (config:recommended, :semanticCommits) do not set it, and the bot's global config (kubernetes/apps/apps/renovate) runs with automerge OFF. The merge gate is the reviewbot honouring `no-automerge`. No groupName: nothing is grouped.",
       "matchPackageNames": ["ghcr.io/berriai/litellm"],
       "automerge": false,
       "addLabels": ["no-automerge"]
