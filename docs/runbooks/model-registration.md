@@ -166,3 +166,27 @@ not from a dev-worker.
   anything users pick interactively.
 - **Comments inside `config.yaml` change the checksum.** That is correct (the pod re-reads the
   file), just not obvious: a comment-only edit rolls LiteLLM.
+
+## 7. Image routes (`mode: image_generation`)
+
+The same one edit registers an image model; the differences are what the generator and the
+consumers do with it (first case: Qwen-Image-2.1 on cloud2, ADR 0033, 2026-09-29).
+
+- **Set `model_info.mode: image_generation`.** The generator then leaves the route out of dsh and
+  the Local group. It still shows in Open WebUI's *External* group, because that connection
+  discovers LiteLLM's whole `/v1/models`, which lists every route regardless of mode (the
+  embedding routes already show there). Selecting it for chat fails; that is cosmetic.
+- **Open WebUI reaches image routes through its image settings, not the picker:**
+  `IMAGE_GENERATION_ENGINE=openai` + `IMAGE_GENERATION_MODEL=<model_name>` (and the `IMAGE_EDIT_*`
+  twins) in `open-webui.yaml`, pointed at LiteLLM. Env is authoritative there
+  (`ENABLE_PERSISTENT_CONFIG=false`), so the admin UI cannot change them persistently.
+- **`drop_params: true` is load-bearing.** Open WebUI sends `response_format: b64_json`; LiteLLM
+  400s that for an `openai/` custom model ("Setting `response_format` is not supported") unless
+  `litellm_settings.drop_params` is on. It is, globally — do not turn it off without re-testing.
+- **Probe by content, not status.** For Qwen-Image the serving repo ships
+  `scripts/image-api-test.py`: it asks for a random number on a sign and has a vision model read it
+  back. Through LiteLLM, the call agents make is
+  `POST /v1/images/generations {"model":"qwen-image-2.1-fast-cloud","prompt":"…","size":"1024x1024"}`
+  (edits: multipart `POST /v1/images/edits` with `image` or `image[]`), answered as `b64_json`.
+- **License before registration.** Check the model's license against the consumers. Qwen-Image-2.1
+  is non-commercial, so it is on the main LiteLLM only and never in `litellm-local` / `litellm-vkeys`.
