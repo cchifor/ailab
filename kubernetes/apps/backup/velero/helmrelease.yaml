@@ -129,7 +129,14 @@ spec:
       # hour) while ensuring a wedged object store is REPORTED as a failed backup inside its own
       # window rather than straddling the next one. The requirement is that a dead USB disk costs us
       # backups and an alert -- not four silent hours.
-      fsBackupTimeout: 90m
+      # 90m -> 150m (2026-09-29). The dailies had crept to 63/74/90/75 min and the 09-28 run hit the
+      # 90m wall exactly ("failed to wait PVBs processed ... context deadline exceeded" at 03:30:35):
+      # 13 pods -- strive-pg-8/10/11, trueswarm(-admin)-pg, vaultwarden, valkey -- got NO volume
+      # copy, and the chain went 36h without a success (VeleroBackupStale). The largest single cost
+      # was infra-pg's two data volumes (~15 GB re-read in 32-41 min), now skipped in
+      # volume-policy.yaml, so healthy runs should fall well under an hour again. 150m keeps ~3x
+      # headroom over that and still bounds a wedged object store inside the 24h window.
+      fsBackupTimeout: 150m
       # Raised from the `velero server` defaults (qps=20, burst=30) because those defaults are what
       # made the 2026-09-09 post-recovery backup PartiallyFailed. Every one of its 37 errors was the
       # same message -- "failed to list node-<n> pods: client rate limiter Wait returned an error:

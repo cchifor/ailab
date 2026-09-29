@@ -91,6 +91,14 @@ spec:
       # comfortable inside the 2Gi limit with mostly-idle app pools. Postmaster param — this
       # change costs one automated rolling restart (replica-first + switchover blip).
       max_connections: "200"
+      # 5s (CNPG's default) -> 30s (2026-09-29). The standby's volume is qnap-iscsi and stalls for
+      # tens of seconds under heavy reads/writes (Velero reading it; a 3.7k rows/s gitea burst whose
+      # checkpoint took 44s to fsync). At 5s the primary kills the walsender on every stall ("terminating
+      # walsender process due to replication timeout"), PostgresReplicaNotStreaming pages, and the
+      # gitea retention job's replica gate pauses. 30s rides out those stalls; a genuinely dead peer is
+      # still detected in 30s. Reload-only (sighup) -- no restart.
+      wal_sender_timeout: 30s
+      wal_receiver_timeout: 30s
       # NOT declared here: the `gitea` role runs with `synchronous_commit = off` (ALTER ROLE,
       # 2026-08-05) — CNPG has no per-role GUCs, so this lives only in the DB. Rationale: the
       # Actions-log path commits fsync-bound WAL over iSCSI and Gitea tolerates losing <1s of acked

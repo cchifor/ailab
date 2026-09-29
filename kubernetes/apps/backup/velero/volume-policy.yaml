@@ -13,7 +13,22 @@
 # whole class in one place, including Jobs nobody has written yet, rather than annotating every
 # ephemeral pod in two repos.
 #
-# PVC-backed volumes are untouched: this matches volumeTypes: [emptyDir] only.
+# PVC-backed volumes are untouched by that rule: it matches volumeTypes: [emptyDir] only.
+#
+# infra-pg's data PVCs are ALSO skipped (2026-09-29), by PVC label (pvcLabels, Velero >= 1.15; we run
+# 1.18.1). Three reasons, all measured:
+#   1. Useless as a backup. Kopia copies a RUNNING Postgres data directory file by file over 30-40
+#      minutes, with no pg_backup_start -- that is not a consistent image, and a restore of it is at
+#      best crash recovery with torn pages. The real recovery path is the nightly pg_dump of every
+#      database to postgres-dumps (databases/infra-pg-dump-cronjob.yaml), whose holder pod keeps that
+#      volume mounted precisely so Velero DOES back it up.
+#   2. It is what blew the fsBackupTimeout. ~15 GB re-read every night (the replica in 32-41 min),
+#      the largest single item in the daily; the 09-28 daily died at the 90m wall because of it.
+#   3. It knocks the replica offline. Reading infra-pg-5's volume saturates its iSCSI disk (sde on
+#      cp2, 100% util) and the standby misses the replication timeout: 09-29 02:03-02:45Z, 20+
+#      "terminating walsender process due to replication timeout" -> PostgresReplicaNotStreaming.
+# Scoped to cnpg.io/cluster=infra-pg ONLY. strive-pg / trueswarm-pg have no logical dump in this repo,
+# so for them the fs copy is still the only copy -- do not widen this without adding one.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -26,5 +41,10 @@ data:
       - conditions:
           volumeTypes:
             - emptyDir
+        action:
+          type: skip
+      - conditions:
+          pvcLabels:
+            cnpg.io/cluster: infra-pg
         action:
           type: skip
