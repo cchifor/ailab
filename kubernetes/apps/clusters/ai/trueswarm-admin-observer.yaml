@@ -1,3 +1,9 @@
+# Project-scoped observer grant (ADR 0028, amendment 2026-09-29): read-only Flux status for the
+# Trueswarm deployment, for the dev-worker slot(s) whose agent works on it. `get` by resourceNames
+# only: no list/watch (resourceNames cannot restrict list), no Secrets, no other Flux object. The
+# in-namespace half of this grant (trueswarm, trueswarm-admin, trueswarm-recovery and the VAP
+# ClusterRoleBinding) lives in the cchifor/trueswarm-admin repo's deploy/*/observer.yaml and must
+# name the SAME slots. Runbook: docs/runbooks/dev-worker-platform-access.md (Project-scoped grants).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -52,4 +58,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: platform-dw4
+  namespace: platform-access
+- kind: ServiceAccount
+  name: platform-dw2
   namespace: platform-access

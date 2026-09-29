@@ -44,6 +44,28 @@ platform env                                 # slot, postgres role, file paths (
   integration notification digest platform_managed tms sentinel`, SELECT only, plus `pg_monitor`
   (`pg_stat_activity`, `pg_stat_statements`, …).
 
+### Project-scoped grants (per slot, not every worker)
+
+Some slots also hold a narrow, purpose-named grant for one application (ADR 0028, amendment
+2026-09-29). These grants have **no Secrets, no ConfigMaps, no exec, no port-forward, and no writes**.
+Flux objects are readable **by name only**: `get kustomization <name>` works, but listing them is
+denied.
+
+| Project | Slots | Namespaces | Flux (`flux-system`, get by name) | Defined in |
+|---|---|---|---|---|
+| Trueswarm | `platform-dw2`, `platform-dw4` | `trueswarm`, `trueswarm-admin`, `trueswarm-recovery`, plus `get` on the 5 `trueswarm-executor-*` ValidatingAdmissionPolicies | Kustomizations `trueswarm`, `trueswarm-git-auth`, `trueswarm-admin*`, `trueswarm-platform-*`; GitRepositories `trueswarm`, `trueswarm-admin`; Jobs `trueswarm{,-admin}-git-bootstrap`, `trueswarm-admin-executor-bootstrap` | ailab `kubernetes/apps/clusters/ai/trueswarm{,-admin}-observer.yaml` **and** `cchifor/trueswarm-admin` `deploy/{platform,foundation,recovery-foundation,security}/observer.yaml` (+ `deploy/platform/backup-observer.yaml`) |
+
+```sh
+platform kubectl -n trueswarm-admin get deploy,jobs,clusters.postgresql.cnpg.io,backups.postgresql.cnpg.io
+platform kubectl -n trueswarm logs job/<migration-job>
+platform kubectl -n flux-system get kustomization trueswarm-admin-migration -o wide   # by name; a bare `get kustomizations` is denied
+```
+
+The worker needs nothing new for this. It is the same ServiceAccount and the same
+`~/.platform/kubeconfig`, RBAC is evaluated per request, and a `-n` you pass overrides the helper's
+default `strive-ailab`. The Trueswarm databases are NOT reachable: there is no pg-sync role and no
+port-forward.
+
 ### What is not, and why (do not work around these — ask)
 
 1. **Secrets and exec are denied.** `get secrets`, `pods/exec`, `pods/attach` all fail, as does every
@@ -229,6 +251,7 @@ the same live set, and retired slots must appear in both `RETIRED_SLOTS` lists:
 | 6 | `kubernetes/apps/infrastructure/helmtest/namespaces.yaml` (+ `rbac.yaml`, `networkpolicy.yaml`) | the per-slot namespace tree |
 | 7 | `kubernetes/infra/dev-workers/variables.tf` | the map key |
 | 8 | `inventory/hosts.yml` | the host |
+| 9 | project-scoped grants: `kubernetes/apps/clusters/ai/*-observer.yaml` (CI-checked), and the **`cchifor/trueswarm-admin`** repo's `deploy/*/observer.yaml` + `deploy/*/backup-observer.yaml` (NOT CI-checked from here) | drop the slot's subject; re-home the grant if the project's agent moves |
 
 ```bash
 python3 scripts/check-slot-enumerations.py   # prints every enumeration and its set; exits 1 on a DIFF
@@ -241,7 +264,10 @@ own `RETIRED_SLOTS` step. Both are idempotent — a re-run reports the same conv
 ## Escalation (when observe-only is genuinely not enough)
 
 Open a PR adding a **purpose-named** Role + RoleBinding for **one slot**, in
-`platform-access/rbac.yaml`, with the reason and a removal date in the PR body. Do not widen
+`platform-access/rbac.yaml` (or, for one application's Flux status, next to that application's
+`clusters/ai/*.yaml`, like the Trueswarm grants above), with the reason and a removal date in the
+PR body. Reuse the application's own narrow observer Role, never `dev-worker-platform-observer`,
+in a namespace whose workloads hold credentials the worker must not reach by port-forward. Do not widen
 `dev-worker-platform-observer`, and do not add `secrets`, `pods/exec` or a write verb to it — that
 ClusterRole is bound to every worker at once, and the ansible health check asserts those exact
 denials on every playbook run (it would go red, which is the point).

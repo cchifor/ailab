@@ -1,6 +1,6 @@
 # ADR 0028 — Read-only platform access for dev-worker agents: observe the cluster, read the databases
 
-**Status:** PROPOSED (2026-09-21). Implementation on `feat/dev-worker-platform-access`; plan and
+**Status:** PROPOSED (2026-09-21). Amended 2026-09-29 (project-scoped observer grants, below). Implementation on `feat/dev-worker-platform-access`; plan and
 codex review trail in `plans/2026-09-21-dev-worker-platform-access-plan.md`.
 **Relates to:** ADR 0021 (the agent credential plane and the sync-owned KV class this extends, and
 whose Tier A this widens), 0020 (per-VM AppRole + agent-rendered files), 0019 (OpenBao as the estate
@@ -225,6 +225,70 @@ subtree. Every slot-bearing file says so, so nobody "completes" the list.
   because a pod in `strive-ailab` cannot mount ns `openbao`'s TLS Secret). CI `cmp`s them.
 - **A worker with no platform fields is normal, not broken.** A fresh slot, a wiped vault or a failed
   sync simply means no platform stanzas and a `debug` message on the next playbook run.
+
+## Amendment 2026-09-29 — project-scoped observer grants (Trueswarm)
+
+**Trigger.** The Trueswarm agent moved from dev-worker-4 to dev-worker-2 and reported
+`platform-dw2` denied in `trueswarm`, `trueswarm-admin` and their Flux status. That was a **scope
+extension, not a regression**: `platform-dw2` had never been bound there (`git log -S platform-dw2`
+in ailab, `cchifor/trueswarm` and `cchifor/trueswarm-admin`; the live RoleBindings). The Trueswarm
+deployment (2026-09-25/26) had given `platform-dw4` its own grants, which this ADR never recorded.
+
+**What a project-scoped grant is.** It is the escalation shape from Decision 2: a purpose-named Role
+and a binding for the slot(s) whose agent works on that project. It is not
+`dev-worker-platform-observer`. That ClusterRole carries `configmaps` and `pods/portforward`, and a
+forward into the Trueswarm Admin workspace reaches its databases. The Trueswarm grants hold
+`get/list/watch` on workloads, `pods/log`, events, services, PVCs, Jobs/CronJobs, the CNPG
+`clusters/backups/scheduledbackups`, and (in `trueswarm-admin` and `trueswarm-recovery`)
+certificates and network policies. They grant **no Secrets, no ConfigMaps, no exec/attach, no
+port-forward, and no write**.
+
+| Where | Object | Grants | Lives in |
+|---|---|---|---|
+| `flux-system` | Roles `trueswarm-observer`, `trueswarm-admin-observer` | `get` by `resourceNames` on the 13 Trueswarm Kustomizations, the 2 GitRepositories and the 3 bootstrap Jobs | ailab `kubernetes/apps/clusters/ai/trueswarm{,-admin}-observer.yaml` |
+| `trueswarm` | Roles `trueswarm-observer`, `trueswarm-backup-observer` | rollout, CNPG backups, Jobs, `pods/log` | `trueswarm-admin` repo `deploy/platform/{observer,backup-observer}.yaml` |
+| `trueswarm-recovery` | Role `deployment-observer` | as above, plus certificates and network policies | `trueswarm-admin` repo `deploy/recovery-foundation/observer.yaml` |
+| `trueswarm-admin` | Role `deployment-observer` | as above | `trueswarm-admin` repo `deploy/foundation/observer.yaml` |
+| cluster | ClusterRole `trueswarm-admission-observer` | `get` by `resourceNames` on 5 `trueswarm-executor-*` ValidatingAdmissionPolicies | `trueswarm-admin` repo `deploy/security/observer.yaml` |
+
+**Slots: `platform-dw2` and `platform-dw4`.** These grants are not uniform. The other slots have
+no Trueswarm work, and the admin workspace is the most sensitive application on the estate.
+`platform-dw4` stays until the operator confirms its Trueswarm work has ended. Remove it then.
+
+**Two deliberate exceptions to the base boundary, and why.**
+
+1. **The Flux objects are read by name, never listed.** `resourceNames` cannot restrict
+   `list`/`watch`, so the Roles grant only `get`. `kubectl get kustomization trueswarm-admin`
+   works. `kubectl get kustomizations` and `flux get ks` without a name are denied, because they
+   would expose every other tenant's Flux status. The GitRepository `get` exposes a `secretRef`
+   NAME and the SSH URL. It exposes no credential, and it lets the agent tell "source did not
+   fetch" apart from "apply failed".
+2. **One cluster-scoped grant.** `trueswarm-admission-observer` is a ClusterRoleBinding, against
+   Decision 2's "nothing cluster-scoped". It is kept because it is `get` on five named,
+   secret-free admission policies, and those are what explain an executor Job's admission denial
+   during backup and migration verification. No other cluster-scoped grant to a dev-worker SA is
+   acceptable without its own amendment.
+
+**Security observation, not fixed here.** The in-namespace half is authored in an application repo
+(`cchifor/trueswarm-admin`). That repo has no independent merge gate: it needs 0 approvals, merges
+as the shared `chifor` identity the workers also hold, and its CI does not inspect RBAC. Its Flux
+Kustomizations set no `spec.serviceAccountName`, so they apply with kustomize-controller's own
+cluster-wide identity. That is how it created a ClusterRoleBinding. In practice a worker holding
+the PAT could widen its own grant through that repo. That is the ADR 0021 §5 posture (workers
+already hold the PAT), but it means the boundary in that repo is enforced by discipline, not by
+ailab's review. Follow-ups: give app-repo Kustomizations a namespace-scoped
+`spec.serviceAccountName`, and/or move dev-worker-identity RBAC for app namespaces into ailab under
+a dedicated Kustomization.
+
+**Enforcement.** `scripts/check-slot-enumerations.py` fails CI if any uncommented
+`platform-dw<N>` token under `kubernetes/apps/` (any spelling: quoted, flow-style, a `kind: User`
+subject) names a slot that is not live, so a retirement
+cannot leave the ailab half behind. The `trueswarm-admin` half is outside that scan and is a named
+row in the runbook's retire checklist.
+
+**Database access** to `trueswarm-pg` / `trueswarm-admin-pg` is NOT part of this. The pg-sync
+(Decision 3) covers `strive-pg` only. Extending it is its own decision, with its own exclusions for
+the admin workspace.
 
 ## Follow-ups
 
