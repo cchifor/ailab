@@ -7,7 +7,7 @@ terraform {
     }
     talos = {
       source  = "siderolabs/talos"
-      version = "~> 0.11" # pin == infra/versions.tf; secrets come from infra/ remote state
+      version = "~> 0.12" # pin == infra/versions.tf; secrets come from infra/ remote state
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"

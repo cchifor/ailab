@@ -10,7 +10,7 @@ terraform {
     # (talos-agent join reuses talos_machine_secrets.this) — see talos.tf. Pin == infra/versions.tf.
     talos = {
       source  = "siderolabs/talos"
-      version = "~> 0.11"
+      version = "~> 0.12"
     }
   }
 }
