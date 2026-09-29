@@ -191,13 +191,16 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+          # Memory: the process idles at ~185 MiB; image jobs in the Assistant add at most 512 MiB at their maximum
+          # sizes (llm-router tests/image-memory.test.ts, enforced ceiling; measured 341-419 MiB on Linux), and a
+          # Claude Code run adds ~190 MiB. 1280Mi keeps that worst case (~890 MiB) under ~70% of the limit.
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 384Mi
             limits:
               cpu: "2"
-              memory: 768Mi
+              memory: 1280Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -206,13 +209,13 @@ spec:
                 - ALL
           volumeMounts:
             # One immutable release directory per rollout, built from one llm-router commit:
-            # router-0.1.0-20260930-assistant = dsh/llm-router main@a69d0f1 (never rewritten in place;
+            # router-0.1.0-20260930-images2 = dsh/llm-router main@1970f18 (never rewritten in place;
             # a new build gets a new directory). Swapping it replaces the pod safely: the
             # Deployment is `strategy: Recreate` and the SQLite volume (llm-router-data) is RWO
             # iSCSI, so the old pod has stopped before the new one opens the database.
             - name: releases
               mountPath: /app
-              subPath: router-0.1.0-20260930-assistant
+              subPath: router-0.1.0-20260930-images2
               readOnly: true
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
