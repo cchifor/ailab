@@ -200,3 +200,81 @@ tests:
                 gitea_runner_cleanup_last_run_seconds series exists for it — the cleanup timer has never
                 written its beacon or the node_exporter textfile collector is off. Check
                 `systemctl status gitea-runner-cleanup.timer` and --collector.textfile.directory.
+
+  # ---------------------------------------- CloudlabAsleep: off for the night, then the 15m wake window
+  # up: minutes 0-19 on, 20-60 off, 61+ on. Boot time: a day before t=0, then 3660s (minute 61).
+  - interval: 1m
+    name: CloudlabAsleep fires while every host is off and for 15m after boot, then clears
+    input_series:
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x19 0+0x40 1+0x40"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1+0x19 0+0x40 1+0x40"
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "-86400+0x60 3660+0x40"
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "-86400+0x60 3660+0x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudlabAsleep
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CloudlabAsleep
+        exp_alerts:
+          - exp_labels:
+              severity: none
+            exp_annotations:
+              summary: "cloudlab is powered off or still booting (inhibits TargetDown for its scrape jobs)"
+      - eval_time: 70m
+        alertname: CloudlabAsleep
+        exp_alerts:
+          - exp_labels:
+              severity: none
+            exp_annotations:
+              summary: "cloudlab is powered off or still booting (inhibits TargetDown for its scrape jobs)"
+      - eval_time: 80m
+        alertname: CloudlabAsleep
+        exp_alerts: []
+
+  # ---------------------------------------- CloudlabAsleep is FINITE: a failure to wake (or any all-hosts
+  # outage) stops muting TargetDown once no host has been up for 11h (review finding on #950).
+  - interval: 1m
+    name: all hosts down longer than 11h no longer counts as asleep
+    input_series:
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x60 0+0x780"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1+0x60 0+0x780"
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "-86400+0x840"
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "-86400+0x840"
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: CloudlabAsleep
+        exp_alerts:
+          - exp_labels:
+              severity: none
+            exp_annotations:
+              summary: "cloudlab is powered off or still booting (inhibits TargetDown for its scrape jobs)"
+      - eval_time: 13h
+        alertname: CloudlabAsleep
+        exp_alerts: []
+
+  # ---------------------------------------- a SINGLE host rebooting (maintenance) must not mute anything
+  - interval: 1m
+    name: one host rebooting while the others stay up does not count as asleep
+    input_series:
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x40"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1+0x40"
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "-86400+0x40"
+      # cloud3 rebooted at t=10m
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "-86400+0x10 600+0x30"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CloudlabAsleep
+        exp_alerts: []

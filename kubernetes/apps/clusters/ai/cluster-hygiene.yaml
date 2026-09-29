@@ -1,0 +1,20 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cluster-hygiene
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # Kyverno CLEANUP policies (garbage the control plane never collects). Same placement reason as
+  # storage-policies: the kyverno.io CRDs arrive with platform-kyverno, which dependsOn
+  # infrastructure, so these cannot live in any layer below it.
+  dependsOn:
+    - name: platform-kyverno
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/cluster-hygiene
+  prune: true
+  wait: true

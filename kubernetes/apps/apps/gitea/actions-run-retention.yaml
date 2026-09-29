@@ -75,6 +75,13 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0 # one pod = one MAX_DELETES_PER_RUN budget; no retry can re-spend it
+      # A gate PAUSE exits 2 (a Failed Job, by design above), and failedJobsHistoryLimit keeps the
+      # newest 3 failed Jobs FOREVER on a schedule that rarely fails -- so KubeJobFailed stayed up for
+      # a single benign pause (2026-09-28 21:17Z, replica alert firing) while every later hourly run
+      # completed. Same trap and fix as renovate/cronjob.yaml. 12h keeps a failed pod for inspection
+      # well past the next several executions; a PERSISTENT failure makes a fresh failed Job every
+      # hour, so the alert still holds. Applies to Jobs created after this lands.
+      ttlSecondsAfterFinished: 43200
       activeDeadlineSeconds: 2700 # ~20 min of work at 300 x 3 s + requests; 1500 was the canary shape
       template:
         metadata:

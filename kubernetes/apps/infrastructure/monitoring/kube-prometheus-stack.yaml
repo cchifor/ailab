@@ -69,6 +69,10 @@ spec:
       rules:
         kubeApiserverBurnrate: false
         kubeApiserverSlos: false
+      # Replaced, not dropped: platform-rules.yaml restates this pair over UNARY calls only (a closing
+      # LeaseKeepAlive/Watch stream counted as 100% failure and paged critical; see that file).
+      disabled:
+        etcdHighNumberOfFailedGRPCRequests: true
     alertmanager:
       alertmanagerSpec:
         priorityClassName: platform-critical
@@ -78,7 +82,7 @@ spec:
         storage: {} # ephemeral
         secrets:
           - ntfy-auth # mounted at /etc/alertmanager/secrets/ntfy-auth/ -> password_file for the ntfy receiver
-      # Route every alert to the self-hosted ntfy (push to phone); drop the always-firing Watchdog.
+      # Route every alert to the self-hosted ntfy (push to phone); drop the inhibition-only alerts.
       config:
         route:
           receiver: ntfy
@@ -87,13 +91,43 @@ spec:
           group_interval: 5m
           repeat_interval: 4h
           routes:
+            # Watchdog is always firing; InfoInhibitor and CloudlabAsleep exist only as inhibit_rules
+            # SOURCES. Upstream says InfoInhibitor "should be routed to a null receiver" — it wasn't,
+            # and on 2026-09-28/29 it was 65 of the 126 pushes in 12h (a firing+resolved pair every
+            # time any namespace gained or lost an info alert, e.g. a CPUThrottlingHigh blip).
             - receiver: "null"
-              matchers: ['alertname = "Watchdog"']
+              matchers: ['alertname =~ "Watchdog|InfoInhibitor|CloudlabAsleep"']
+        # Setting inhibit_rules REPLACES the chart's default list (Helm merges maps, not lists), so the
+        # chart's four defaults are restated verbatim first; only the last rule is ours.
+        inhibit_rules:
+          - source_matchers: ['severity = "critical"']
+            target_matchers: ['severity =~ "warning|info"']
+            equal: [namespace, alertname]
+          - source_matchers: ['severity = "warning"']
+            target_matchers: ['severity = "info"']
+            equal: [namespace, alertname]
+          - source_matchers: ['alertname = "InfoInhibitor"']
+            target_matchers: ['severity = "info"']
+            equal: [namespace]
+          - target_matchers: ['alertname = "InfoInhibitor"']
+          # The generic TargetDown for cloudlab's scrape jobs while cloudlab is powered off or
+          # booting (CloudlabAsleep, ci-runners-cloud-rules.yaml): it paged every night the GPU
+          # cluster was scheduled OFF. No `equal` — the source carries no job/namespace labels.
+          - source_matchers: ['alertname = "CloudlabAsleep"']
+            target_matchers:
+              - 'alertname = "TargetDown"'
+              - 'job =~ "cloud-node|ci-runner-cloud|cloud-pve"'
+        # `?template=alertmanager` = ntfy's built-in Alertmanager template (ntfy >= 2.14; we run 2.28):
+        # a real title ("🚨 Alert: <name>") and a plain-text body instead of the raw webhook JSON the
+        # phone showed until 2026-09-29 — and payloads over ntfy's 4 KB message limit arrived as an
+        # unreadable `attachment.json`. Verified on a scratch topic before this change. NB: with a
+        # built-in template ntfy IGNORES `priority=` (tested: p=4 alone -> 4; with template -> default),
+        # so a separate high-priority receiver for criticals would silently do nothing.
         receivers:
           - name: "null"
           - name: ntfy
             webhook_configs:
-              - url: http://ntfy.monitoring.svc.cluster.local/ailab-alerts
+              - url: http://ntfy.monitoring.svc.cluster.local/ailab-alerts?template=alertmanager
                 send_resolved: true
                 http_config:
                   basic_auth:
@@ -217,6 +251,12 @@ spec:
               - { target_label: fabric, replacement: iscsi }
     grafana:
       priorityClassName: platform-critical
+      # Explicit, not the monitoring LimitRange default (512Mi): a replica peaked at 511 MiB in the
+      # week to 2026-09-29 and MonitoringContainerNearMemoryLimit went pending. cpu limit kept at the
+      # LimitRange's 500m so only memory changes.
+      resources:
+        requests: { cpu: 50m, memory: 256Mi }
+        limits: { cpu: 500m, memory: 768Mi }
       admin:
         existingSecret: grafana-admin
         userKey: admin-user

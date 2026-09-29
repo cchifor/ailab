@@ -88,6 +88,9 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/trueswarm-admin-executor-bootstrap",
         "./kubernetes/apps/qnap-storage",
         "./kubernetes/apps/storage-policies",
+        # 2026-09-29 — Kyverno cleanup policies (terminated ReplicaSet pods), after platform-kyverno
+        # for the same CRD-ordering reason as storage-policies. Added deliberately.
+        "./kubernetes/apps/cluster-hygiene",
         "./kubernetes/apps/infrastructure/testpool",
     }
 )
