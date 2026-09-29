@@ -79,9 +79,24 @@ cluster:
   # restart etcd: the EtcdSpec updates live, but the process keeps its old flags until the next boot,
   # and Talos refuses `service etcd restart` ("doesn't support restart operation via API"). Roll
   # such a change with one controlled reboot per CP, `talosctl etcd status` 3/3 in-sync between.
+  #
+  # heartbeat-interval / election-timeout 100/1000ms (etcd defaults) -> 250/2500ms (2026-09-29).
+  # Once #598's metrics existed they showed ~80 leader changes in the 41h after the 09-27 roll (21 in
+  # 12h), WAL fsync p99 35-59ms with 0.5-1.7s spikes on cp1/cp2 (etcd wants ~10ms), and 200-550 failed
+  # heartbeats per member. Each host's single consumer NVMe is shared by its CP VM, two or three CI
+  # runners and (node1) the registry LXC; the fsync spikes line up with runner write bursts. A leader
+  # whose raft loop is stuck in fsync for >1s misses heartbeats and its followers call an election:
+  # every such election fails in-flight Txn/Range with Unavailable (etcdHighNumberOfFailedGRPCRequests),
+  # "leader changed" (the 09-29 Velero partial failure) and lease-renewal timeouts. 250/2500 keeps
+  # etcd's recommended 10x ratio and rides out stalls up to ~2.5s; the cost is that a truly dead leader
+  # is replaced in ~2.5s instead of ~1s, immaterial here. Runner disk writes are also capped
+  # (runners/main.tf `speed`). The real fix is a disk etcd does not share (planned, not in this change).
+  # ALL THREE members must run the same values: roll per the note above, one CP at a time.
   etcd:
     extraArgs:
       listen-metrics-urls: http://${node_ip}:2381
+      heartbeat-interval: "250"
+      election-timeout: "2500"
   controllerManager:
     extraArgs:
       bind-address: 0.0.0.0
