@@ -61,7 +61,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: af-sbx-provision-tenant-zero-platform-dev-790cfd85e6 # suffix = sha256(image+args)[:10] — recompute on edit (header)
+  name: af-sbx-provision-tenant-zero-platform-dev-6894333052 # suffix = sha256(image+args)[:10] — recompute on edit (header)
   namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
   annotations:
     # Backstop for a forgotten suffix recompute (see CONTENT-ADDRESSED NAME in the header): recreate
