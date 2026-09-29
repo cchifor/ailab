@@ -49,6 +49,8 @@
 #     body = the args block-scalar text EXACTLY AS IT APPEARS IN THIS FILE (raw, still YAML-indented,
 #     only the trailing newline stripped — NOT dedented); then:
 #     printf '%s\n---\n%s' "<image>" "$body" | sha256sum | cut -c1-10
+#   A suffix can be all decimal digits (~1% of sha256 prefixes, (10/16)^10); that is not a sign of a
+#   wrong recipe. scripts/check-inline-hashes.py (CI, manifests job) is the arbiter.
 #
 # CORRECTION (2026-07-28): this header previously claimed a per-object force annotation was "not
 #   supported by this Flux". That was WRONG — `kustomize.toolkit.fluxcd.io/force` has shipped since Flux
