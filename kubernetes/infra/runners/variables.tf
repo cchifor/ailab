@@ -113,25 +113,6 @@ variable "runner_memory_floating_mib" {
   type        = number
   default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/platform#620
 }
-variable "runner_disk_write_mbps" {
-  description = <<-EOT
-    Sustained write cap (MB/s) on each runner's root disk, so CI bursts cannot starve the co-located
-    Talos control plane's etcd fsyncs (2026-09-29).
-    120 -> 250 the same day: at 120 (near the observed 5-min peak of 100-130 MiB/s) runner IO pressure
-    rose 0.05 -> 0.25 and fleet write throughput halved (110 -> 54 MiB/s) — CI got visibly slower,
-    while the etcd win came from the heartbeat/election change (0 leader changes after the roll).
-    250 keeps only a ceiling on pathological bursts.
-  EOT
-  type        = number
-  default     = 250
-}
-
-variable "runner_disk_write_burst_mbps" {
-  description = "Burst write ceiling (MB/s) above runner_disk_write_mbps, PVE's default 1s burst window."
-  type        = number
-  default     = 500
-}
-
 variable "runner_rootfs_gb" {
   description = <<-EOT
     Runner root disk (GB). 200, was 120 — 120 was not enough and the shortfall was reding CI jobs.

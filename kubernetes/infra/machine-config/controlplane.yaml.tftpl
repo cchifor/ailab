@@ -89,8 +89,14 @@ cluster:
   # every such election fails in-flight Txn/Range with Unavailable (etcdHighNumberOfFailedGRPCRequests),
   # "leader changed" (the 09-29 Velero partial failure) and lease-renewal timeouts. 250/2500 keeps
   # etcd's recommended 10x ratio and rides out stalls up to ~2.5s; the cost is that a truly dead leader
-  # is replaced in ~2.5s instead of ~1s, immaterial here. Runner disk writes are also capped
-  # (runners/main.tf `speed`). The real fix is a disk etcd does not share (planned, not in this change).
+  # is replaced in ~2.5s instead of ~1s, immaterial here.
+  # Runner disk writes are deliberately NOT capped (2026-09-29, the same day). A PVE write cap on the
+  # runners (runners/main.tf `speed`, #951) was tried alongside this: at 120 MB/s it raised runner IO
+  # pressure 0.05 -> 0.25 and halved fleet write throughput (110 -> 54 MiB/s), and 250/500 was only a
+  # burst ceiling. It was removed (#953) because these timeouts alone held etcd at 0 leader changes in
+  # the hour after it went, with WAL fsync p99 ~50ms on cp1/cp2 (7ms cp3). IF leader churn returns
+  # (etcd_server_leader_changes_seen_total), a high burst-only ceiling is the next lever — measured
+  # peaks were 100-130 MiB/s per runner over 5 min. The real fix is a disk etcd does not share.
   # ALL THREE members must run the same values: roll per the note above, one CP at a time.
   etcd:
     extraArgs:

@@ -62,15 +62,6 @@ resource "proxmox_virtual_environment_vm" "runner" {
     size         = var.runner_rootfs_gb # cloud-init growpart expands the root fs to fill this
     iothread     = true
     discard      = "on"
-
-    # Write cap (2026-09-29). Two or three runners share each host's single NVMe with that host's
-    # Talos CP, and their write bursts (5-min peaks 100-130 MiB/s each, far higher instantaneously)
-    # were stalling etcd's WAL fsync into leader elections — see controlplane.yaml.tftpl. Reads are
-    # left uncapped. PVE applies throttle-only disk changes to a running VM live (no reboot).
-    speed {
-      write           = var.runner_disk_write_mbps
-      write_burstable = var.runner_disk_write_burst_mbps
-    }
   }
 
   network_device {
