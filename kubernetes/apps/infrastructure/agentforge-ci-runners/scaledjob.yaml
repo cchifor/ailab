@@ -151,8 +151,9 @@ spec:
               seccompProfile: { type: RuntimeDefault }
           # ── dind: the PRIVILEGED docker:dind sidecar (image builds / job containers) ──────────────────
           - name: dind
-            # PLACEHOLDER digest — pin the real docker:dind image @sha256 (see header) before enabling.
-            image: docker.io/library/docker@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0
+            # tag@digest, NEVER a bare @sha256: with no tag Renovate compares against `latest` (the #899 TEI
+            # outage). 29.8.1-dind resolved on Docker Hub 2026-09-29 (same digest as 29-dind / dind / latest).
+            image: docker.io/library/docker:29.8.1-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0
             # Run dockerd, then watch the sentinel and exit when the runner is done (graceful pod teardown
             # WITHOUT a shared PID namespace). Insecure TCP on loopback only (the pod netns is isolated by
             # Kata + the CNP); NO TLS dir so the runner can reach tcp://127.0.0.1:2375.
