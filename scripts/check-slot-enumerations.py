@@ -16,7 +16,7 @@ that was dropped is an ERROR here, never a source that quietly leaves the compar
 It also checks the PROJECT-SCOPED grants (ADR 0028, amendment 2026-09-29): a purpose-named Role
 bound to one or two slots (e.g. clusters/ai/trueswarm-observer.yaml) is not an enumeration of every
 slot, so it cannot join the equality comparison — but it must never name a slot that is not live.
-Every uncommented `name: platform-dw<N>` under kubernetes/apps/ must be a live slot, so retiring a
+Every uncommented `platform-dw<N>` token under kubernetes/apps/ must be a live slot, so retiring a
 slot fails CI until its per-project bindings are removed too. (Grants authored in OTHER repos, e.g.
 cchifor/trueswarm-admin deploy/*/observer.yaml, are outside this scan: the runbook's retire
 checklist names them.)
@@ -130,16 +130,18 @@ def retired_sets():
 
 
 def platform_sa_references():
-    """(file:line, slot) for every uncommented `name: platform-dw<N>` under kubernetes/apps/.
+    """(file:line, slot) for every uncommented `platform-dw<N>` token under kubernetes/apps/.
 
-    Structured on purpose: only a YAML `name:` field (a subject, or the SA's own metadata) counts,
-    never prose, so a comment that mentions a retired slot is not a false positive. Comment text is
-    stripped before matching (`#` after whitespace or at line start, as YAML defines it)."""
+    Deliberately NOT tied to one YAML spelling: a subject can be `name: platform-dw7`,
+    `name: "platform-dw7"`, `name:   platform-dw7`, a flow mapping, a `resourceNames` entry or a
+    `kind: User` subject `system:serviceaccount:platform-access:platform-dw7` — every one of them
+    grants, so every one is counted. Only comment text is excluded (a `#` at line start or after
+    whitespace, as YAML defines a comment), so prose about a retired slot is not a false positive."""
     refs = []
     for path in sorted(list(APPS.rglob("*.yaml")) + list(APPS.rglob("*.yml"))):
         for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             code = re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
-            for n in re.findall(r"\bname: platform-dw(\d+)\b", code):
+            for n in re.findall(r"\bplatform-dw(\d+)\b", code):
                 refs.append(("%s:%d" % (path.relative_to(ROOT).as_posix(), no), int(n)))
     return refs
 
@@ -167,7 +169,7 @@ def main():
 
     refs = platform_sa_references()
     if not refs:
-        print("EMPTY   no `name: platform-dw<N>` under kubernetes/apps/ (platform-access/rbac.yaml "
+        print("EMPTY   no `platform-dw<N>` under kubernetes/apps/ (platform-access/rbac.yaml "
               "changed shape?)")
         bad = True
     stale = [(where, n) for where, n in refs if n not in ref_live]

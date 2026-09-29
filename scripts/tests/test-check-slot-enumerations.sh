@@ -31,6 +31,7 @@ FILES=(
   kubernetes/infra/dev-workers/variables.tf
   inventory/hosts.yml
   kubernetes/apps/clusters/ai/trueswarm-observer.yaml
+  kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
 )
 for f in "${FILES[@]}"; do
   mkdir -p "$WORK/$(dirname "$f")"
@@ -111,13 +112,35 @@ restore kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.
 restore kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
 
 echo "[E] a project-scoped grant must name only live slots"
+# 99 is far above any slot ever provisioned (dev-worker-1..6, vmids 4201-4206), so it is never live;
+# using it keeps these fixtures independent of whichever slots are live or retired at the time.
 edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
-  's.replace("  name: platform-dw2\n", "  name: platform-dw7\n", 1)'
+  's.replace("  name: platform-dw2\n", "  name: platform-dw99\n", 1)'
 expect_fail "a per-project RoleBinding naming a retired slot" "STALE"
 restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml
 
 edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
-  's + "# name: platform-dw7 (a comment, not a subject)\n"'
+  's.replace("  name: platform-dw2\n", "  name: " + chr(34) + "platform-dw99" + chr(34) + "\n", 1)'
+expect_fail "a QUOTED retired-slot subject name" "STALE"
+restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml
+
+edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
+  's.replace("  name: platform-dw2\n", "  name:    platform-dw99\n", 1)'
+expect_fail "a retired-slot subject with extra whitespace" "STALE"
+restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml
+
+edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
+  's.replace("- kind: ServiceAccount\n  name: platform-dw2\n  namespace: platform-access\n", "- { apiGroup: rbac.authorization.k8s.io, kind: User, name: system:serviceaccount:platform-access:platform-dw99 }\n", 1)'
+expect_fail "a retired slot as a kind: User subject" "STALE"
+restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml
+
+edit kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml \
+  's.replace("  name: platform-dw2\n", "  name: platform-dw99\n", 1)'
+expect_fail "the admin observer's RoleBinding naming a non-live slot" "STALE"
+restore kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
+
+edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
+  's + "# name: platform-dw99 (a comment, not a subject)\n"'
 run_check || fail "a COMMENT naming a non-live slot must not fail the check"
 echo "  ok  a comment naming a non-live slot is ignored"
 restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml

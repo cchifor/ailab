@@ -281,7 +281,8 @@ ailab's review. Follow-ups: give app-repo Kustomizations a namespace-scoped
 a dedicated Kustomization.
 
 **Enforcement.** `scripts/check-slot-enumerations.py` fails CI if any uncommented
-`name: platform-dw<N>` under `kubernetes/apps/` names a slot that is not live, so a retirement
+`platform-dw<N>` token under `kubernetes/apps/` (any spelling: quoted, flow-style, a `kind: User`
+subject) names a slot that is not live, so a retirement
 cannot leave the ailab half behind. The `trueswarm-admin` half is outside that scan and is a named
 row in the runbook's retire checklist.
 
