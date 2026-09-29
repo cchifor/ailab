@@ -8,7 +8,9 @@
 #   C. a REFORMATTED/REMOVED source fails rather than dropping out of the comparison (a deleted
 #      RoleBinding, a deleted env entry, a reflowed `for _n in (...)` line);
 #   D. a slot that is both live and retired fails;
-#   E. a project-scoped grant naming a slot that is not live fails (and a comment naming one does not).
+#   E. a project-scoped grant naming a slot that is not live fails (and a comment naming one does not);
+#   F. and the inverse: a COMPLETE retirement (every live list, both RETIRED_SLOTS lists, the
+#      per-project subjects) goes green — the stale scan must never make a correct retirement red.
 # The checker is run against a COPY of the tree, so nothing here can touch the working repo.
 # No docker, no cluster, no network. Exit non-zero on the first broken expectation.
 set -uo pipefail
@@ -144,6 +146,48 @@ edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
 run_check || fail "a COMMENT naming a non-live slot must not fail the check"
 echo "  ok  a comment naming a non-live slot is ignored"
 restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml
+
+echo "[F] a complete retirement of slot 4 passes"
+RBAC=kubernetes/apps/infrastructure/platform-access/rbac.yaml
+PGSYNC=kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
+K8STOKEN=kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml
+PROVISION=kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml
+TEP=kubernetes/apps/infrastructure/testpool/tep-access.yaml
+HELMTEST=kubernetes/apps/infrastructure/helmtest/namespaces.yaml
+TOFU=kubernetes/infra/dev-workers/variables.tf
+INVENTORY=inventory/hosts.yml
+TS=kubernetes/apps/clusters/ai/trueswarm-observer.yaml
+TSA=kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
+# edit_all <file> <old> <new> <expected count>: replace every occurrence, asserting how many there were
+edit_all() {
+  "$PY" - "$WORK/$1" "$2" "$3" "$4" <<'PY' || fail "[F] fixture edit did not match: $1"
+import io, sys
+path, old, new, n = sys.argv[1], sys.argv[2].encode().decode("unicode_escape"), sys.argv[3].encode().decode("unicode_escape"), int(sys.argv[4])
+s = io.open(path, encoding="utf-8", newline="").read()
+if s.count(old) != n:
+    sys.exit("%s: expected %d x %r, found %d" % (path, n, old, s.count(old)))
+io.open(path, "w", encoding="utf-8", newline="").write(s.replace(old, new))
+PY
+}
+edit_all "$RBAC" 'apiVersion: v1\nkind: ServiceAccount\nmetadata: { name: platform-dw4, namespace: platform-access }\nautomountServiceAccountToken: false\n---\n' '' 1
+edit_all "$RBAC" ', "platform-dw4"' '' 1
+edit_all "$RBAC" '  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }\n' '' 3
+edit_all "$PGSYNC" 'value: "1 2 3 4"' 'value: "1 2 3"' 2
+edit_all "$PGSYNC" 'value: "5 6"' 'value: "4 5 6"' 2
+edit_all "$K8STOKEN" 'for _n in (1, 2, 3, 4):' 'for _n in (1, 2, 3):' 1
+edit_all "$PROVISION" 'for host in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4; do' 'for host in dev-worker-1 dev-worker-2 dev-worker-3; do' 1
+edit_all "$PROVISION" 'RETIRED_SLOTS="dev-worker-5 dev-worker-6"' 'RETIRED_SLOTS="dev-worker-4 dev-worker-5 dev-worker-6"' 1
+edit_all "$TEP" 'metadata: { name: tep-dw4, namespace: testpool }' 'metadata: { name: tep-retired, namespace: testpool }' 1
+edit_all "$HELMTEST" 'kind: Namespace\nmetadata:\n  name: helmtest-dw4\n' 'kind: Namespace\nmetadata:\n  name: helmtest-retired\n' 1
+edit_all "$TOFU" '"dev-worker-4" = {' '"retired-4" = {' 1
+edit_all "$INVENTORY" '        dev-worker-4:\n' '' 1
+edit_all "$TS" '- kind: ServiceAccount\n  name: platform-dw4\n  namespace: platform-access\n' '' 1
+edit_all "$TSA" '- kind: ServiceAccount\n  name: platform-dw4\n  namespace: platform-access\n' '' 1
+run_check || fail "a complete retirement of slot 4 must pass"
+grep -q "live slots (reference): \[1, 2, 3\]" "$WORK/.out" || fail "[F] the retirement did not take effect"
+grep -q "retired slots (reference): \[4, 5, 6\]" "$WORK/.out" || fail "[F] slot 4 is not recorded as retired"
+echo "  ok  retiring slot 4 everywhere goes green (live [1, 2, 3], retired [4, 5, 6])"
+for f in "$RBAC" "$PGSYNC" "$K8STOKEN" "$PROVISION" "$TEP" "$HELMTEST" "$TOFU" "$INVENTORY" "$TS" "$TSA"; do restore "$f"; done
 
 run_check || fail "the tree must pass again after every fixture is restored"
 echo "test-check-slot-enumerations: OK (mismatch, removal, reformat and live/retired overlap all fail closed)"
