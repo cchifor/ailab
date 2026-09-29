@@ -303,3 +303,11 @@ spec:
         - {protocol: TCP, port: 11434}
         - {protocol: TCP, port: 1234}
         - {protocol: TCP, port: 8000}
+    # cloud2 qwen-image-api (Qwen-Image-2.1, ADR 0033), one host and one port: the router's image routes
+    # (OpenAI-shaped POST /v1/images/generations). Deliberately NOT in the discovery scan above: the
+    # router's image account is configured by hand, and /v1/models there carries no modality.
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.28/32
+      ports:
+        - {protocol: TCP, port: 8190}
