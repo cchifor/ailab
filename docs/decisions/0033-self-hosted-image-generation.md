@@ -65,9 +65,14 @@ model garbled one line of the same 5-line menu, which is why it is not Open WebU
   with it. Burn-in was clean; `ImageApiFailing`/`ImageApiDown` (cloudlab monitoring) watch it, and
   rollback is `systemctl disable --now qwen-image-api comfyui`.
 - **Day-only**, like every cloud route: the image button errors while the `pve` cluster is off.
-- **Cosmetic.** Open WebUI's External connection discovers everything LiteLLM's `/v1/models` lists, so
-  the two image ids appear in the chat picker's External group, as the embedding routes already do.
-  Selecting one for chat fails; hide them per-model in Open WebUI's admin if that matters.
+- **The image ids are in the chat picker, and that is made to work.** Open WebUI's External connection
+  discovers everything LiteLLM's `/v1/models` lists, so both ids appear in the picker's External group,
+  and Open WebUI 0.11.3 has no per-connection exclude list to hide them. Recorded here first as
+  "cosmetic"; on 2026-09-29 a user picked `qwen-image-2.1-fast-cloud` and got a LiteLLM 404, because
+  LiteLLM forwards chat to an image route regardless of `mode` and the API had no chat endpoint. Since
+  cloudlab#27 the API answers `/v1/chat/completions`: the last user message is the prompt, an attached
+  image makes it an edit, and the image returns in `delta.images`, which Open WebUI stores as a file on
+  the reply. So picking an image model in the chat is a second, equally valid way to use it.
 - **ComfyUI nightly churn** is contained by pinning its commit, the torch build and every weight's
   sha256 in `host/install-comfyui-cloud2.sh`; an upgrade is a deliberate bump plus
   `scripts/image-api-test.py`, whose oracle is a vision model reading back a random number painted

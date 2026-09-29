@@ -175,7 +175,12 @@ consumers do with it (first case: Qwen-Image-2.1 on cloud2, ADR 0033, 2026-09-29
 - **Set `model_info.mode: image_generation`.** The generator then leaves the route out of dsh and
   the Local group. It still shows in Open WebUI's *External* group, because that connection
   discovers LiteLLM's whole `/v1/models`, which lists every route regardless of mode (the
-  embedding routes already show there). Selecting it for chat fails; that is cosmetic.
+  embedding routes already show there), and LiteLLM forwards `/chat/completions` to it regardless of
+  mode too. **So a route in `mode: image_generation` WILL be picked as a chat model** — its backend
+  must answer chat or users get a LiteLLM 404. Qwen-Image's API does (cloudlab#27): the prompt makes
+  an image, an attached image makes an edit, and the image returns in `delta.images`
+  (`data:image/png;base64`), which Open WebUI 0.11 stores as a file on the reply and LiteLLM 1.101
+  passes through.
 - **Open WebUI reaches image routes through its image settings, not the picker:**
   `IMAGE_GENERATION_ENGINE=openai` + `IMAGE_GENERATION_MODEL=<model_name>` (and the `IMAGE_EDIT_*`
   twins) in `open-webui.yaml`, pointed at LiteLLM. Env is authoritative there
