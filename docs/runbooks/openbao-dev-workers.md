@@ -623,6 +623,14 @@ without the codex stanza and restarts the agent; it does not touch an existing `
 workers were unhooked by hand the same day (backups `/etc/openbao-agent/agent.hcl.pre-codex-manual.*`),
 so the converge only replaces a hand-edited file with the same content.
 
+**What catches a stale login:** a worker whose `~/.codex/auth.json` is still the old rendered
+projection (`refresh_token` empty) keeps working only while the app-server daemon holds a login in
+memory — dev-worker-3's state above. The converge fails on it (`Refuse a stale rendered codex
+projection`, deliberately outside the verify block so the rollback cannot re-render the shared
+login), and `validate-codex-host.sh` FAILs with `expected=host-owned`. The validator takes the
+expectation from the host's own `agent.hcl`: a template for the user's `auth.json` means
+`projection`, none means `host-owned`.
+
 **Back to the shared login:** set `dev_worker_codex_host_owned_login: false` (group_vars or per host)
 and converge. Only once seat a works again (re-seed per the section below) — otherwise the agent
 replaces working host logins with a revoked token.

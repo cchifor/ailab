@@ -9,8 +9,9 @@
 # "projection(no-refresh-token)" is the OpenBao-rendered shared login (reviewer-2's target state —
 # docs/runbooks/openbao-dev-workers.md § "The shared codex login"); "host-owned(refresh-token)" is a
 # login made on the host — expected on the dev workers since 2026-09-29 (§ "Host-owned codex
-# logins"), unexpected on reviewer-2. OK/FAIL comes from the real `codex exec` either way. Exit 1
-# if any host FAILs or is unreachable.
+# logins"). Each host FAILs when its login kind differs from what its own agent.hcl renders
+# (expected=...), otherwise OK/FAIL comes from the real `codex exec`. Exit 1 if any host FAILs or is
+# unreachable.
 #
 #   scripts/validate-codex-fleet.sh                  # all six workers + reviewer-2
 #   scripts/validate-codex-fleet.sh dev-worker-3     # one host (any inventory pattern)

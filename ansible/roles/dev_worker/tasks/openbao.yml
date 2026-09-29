@@ -444,6 +444,33 @@
           not run the remaining workers until this is understood
           (docs/runbooks/openbao-dev-workers.md, "kubeconfig cutover").
 
+# Host-owned logins: the agent renders no ~/.codex/auth.json and the verify step no longer reads it,
+# so a projection the agent rendered BEFORE the switch (refresh_token "") survives on disk. It works
+# only while codex's app-server daemon still holds a login in memory; the next daemon restart or
+# reboot reads the revoked file (dev-worker-3, 2026-09-29). Deliberately OUTSIDE the verify block:
+# a failure in there fires the rescue, which restores the backed-up agent.hcl -- the one that renders
+# the revoked shared login. A MISSING auth.json passes: that host simply has not been logged in yet.
+- name: Refuse a stale rendered codex projection on a host-owned worker
+  when:
+    - dev_worker_codex_host_owned_login | bool
+    - not ansible_check_mode
+  ansible.builtin.shell: |
+    set -eu
+    stale=""
+    {% for user in dev_worker_users %}
+    f="{{ user.home }}/.codex/auth.json"
+    if [ -s "$f" ] && python3 - "$f" <<'PY'
+    import json, sys
+    t = json.load(open(sys.argv[1])).get("tokens") or {}
+    sys.exit(0 if t.get("access_token") and t.get("refresh_token", "") == "" else 1)
+    PY
+    then stale="$stale $f"; fi
+    {% endfor %}
+    [ -z "$stale" ] || { echo "stale OpenBao-rendered codex login (no refresh_token):$stale -- as that user run 'codex login --device-auth' then 'codex app-server daemon restart' (docs/runbooks/openbao-dev-workers.md, Host-owned codex logins)" >&2; exit 1; }
+  args:
+    executable: /bin/bash
+  changed_when: false
+
 # Duplicated from git_forge.yml on purpose: that file yields ~/.git-credentials to the agent when
 # this plumbing is on (and skips itself entirely), but the file is useless without the store helper
 # configured, so whichever path writes the credential must also set this.

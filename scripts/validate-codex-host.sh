@@ -7,7 +7,8 @@
 #   1. ~/.codex/auth.json exists and is parseable — and whether it is the OpenBao-rendered
 #      projection (refresh_token EMPTY; the whole point of docs/runbooks/openbao-dev-workers.md
 #      § "The shared codex login") or a login made on the host that carries a refresh token
-#      (host-owned: the dev workers since 2026-09-29, § "Host-owned codex logins");
+#      (host-owned: the dev workers since 2026-09-29, § "Host-owned codex logins") — and whether
+#      that matches what the host's /etc/openbao-agent/agent.hcl says it should hold (FAIL if not);
 #   2. how many days the access token has left;
 #   3. a REAL `codex exec` round-trip to the API with a fixed prompt, checking the reply.
 # --dangerously-bypass-approvals-and-sandbox: the prompt uses no tools, so there is nothing to sandbox.
@@ -34,6 +35,17 @@ kind = "projection(no-refresh-token)" if t.get("refresh_token", "") == "" else "
 print(f"{kind} access_token_left={left:.1f}d last_refresh={str(d.get('last_refresh',''))[:10]}")
 PY
 ) || { echo "$h FAIL user=$u unreadable $f"; exit 1; }
+
+# What this host is CONFIGURED to hold: the bao agent renders the login only when its agent.hcl has a
+# template for this user's auth.json (dev workers: dev_worker_codex_host_owned_login=false; reviewers:
+# pr_reviewer_enable_openbao). Otherwise the login is one the operator made on the host. A mismatch
+# FAILs even when the live exec below would pass: a stale projection on a host-owned worker keeps
+# answering only while the app-server daemon holds a login in memory (dev-worker-3, 2026-09-29).
+if grep -qs "destination *= *\"$f\"" /etc/openbao-agent/agent.hcl; then want=projection; else want=host-owned; fi
+case "$auth" in
+  "$want"*|API-KEY*|UNKNOWN-SHAPE*) ;;
+  *) echo "$h FAIL user=$u $auth expected=$want"; exit 1 ;;
+esac
 
 # A LOGIN shell for the user: codex is an npm global under the user's own prefix (~/.npm-global/bin
 # on the dev workers, /usr/bin on the reviewers), reachable through the user's profile PATH, not
