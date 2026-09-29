@@ -161,6 +161,11 @@ spec:
                 "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
                 "server-registration":{"clientAddressHeader":"cf-connecting-ip"},
                 "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"}}
+            # Turns on the admin-bridge plugin (POST /register/admin-bridge) shipped in this release: Trueswarm
+            # Admin's EdDSA assertions, verified with the public key in admin-bridge.yaml. Unset = plugin inert.
+            # Rollback that keeps the release: remove this variable and the admin-bridge mount/volume.
+            - name: ADMIN_BRIDGE_VERIFY_KEY
+              value: /admin-bridge/public.pem
           # Probe routes come from the router's kernel (packages/kernel/index.ts):
           # GET /health (liveness, {status:"ok"}) and GET /ready (200 when every
           # required plugin is active and storage answers, 503 otherwise).
@@ -212,6 +217,9 @@ spec:
               mountPath: /data # SQLite file + WAL/SHM sidecars
             - name: tmp
               mountPath: /tmp
+            - name: admin-bridge
+              mountPath: /admin-bridge
+              readOnly: true
       volumes:
         - name: releases
           persistentVolumeClaim:
@@ -222,6 +230,9 @@ spec:
             claimName: llm-router-data
         - name: tmp
           emptyDir: {}
+        - name: admin-bridge
+          configMap:
+            name: admin-bridge-verifier
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -12,3 +12,4 @@ kind: Kustomization
 #   * The "edge" namespace label and the Cloudflare tunnel in edge-connector.
 resources:
   - router.yaml
+  - admin-bridge.yaml # verifier ConfigMap the router mounts (rendered and applied before the Deployment; kubelet waits for it)

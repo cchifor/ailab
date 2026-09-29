@@ -66,6 +66,32 @@ The exact deployed release, including production `node_modules`, was exported as
 - AILab `main` is protected. The deployment agent cannot push/merge main. Merge the deployment PR through the existing review gate; Flux then adopts the application resources and rolls the tunnel. Do not suspend shared reconciliation or patch the live tunnel to evade that gate.
 - Before the PR merges, the application can be healthy internally while the public hostname returns the tunnel's catch-all 404. DNS creation alone does not expose the origin.
 
+## Trueswarm Admin bridge
+
+The `admin-bridge` plugin (`POST /register/admin-bridge`) has shipped in every release since
+`dsh/llm-router@a2a3b20e` (router PR #42). It is inert until `ADMIN_BRIDGE_VERIFY_KEY` names a
+public key. `router.yaml` sets it to `/admin-bridge/public.pem`, mounted from the
+`admin-bridge-verifier` ConfigMap (`admin-bridge.yaml`). The router never shares its administrator
+token with Admin.
+
+- **What it accepts:**
+  - EdDSA assertions with `iss=trueswarm-admin` and `aud=llm-router-admin-bridge`
+  - `role` administrator or operator (operator: `models`/`complete` only)
+  - a lifetime of at most 60 s
+  - `scope` equal to the body's `action`
+  - a `binding` = sha256 of `POST`, the path, and sha256 of the JSON body
+
+  There is no nonce store, so an identical request can be replayed inside its 60 s window.
+- **Keys:** the private half is `trueswarm-admin/admin-router-bridge` (`private.pem`). Check a
+  rotation by comparing `openssl pkey -pubout -outform DER | sha256sum` of both halves; the value
+  on 2026-09-29 starts `5cc3b92459c5c98b`. A non-Ed25519 key makes the router refuse to start.
+- **Claude seat:** the optional `ADMIN_BRIDGE_CLAUDE_SEAT_URL` / `_TOKEN_REF` stay unset, so the
+  `claude-seat` provider is not offered.
+- **Rollback without a release change:** remove the env var and the `admin-bridge` mount/volume.
+  One Recreate roll.
+- **Admin side:** the Admin app must mount `admin-router-bridge` and know the router URL. That lives
+  in the trueswarm-admin repo, not here.
+
 ## Verification and operations
 
 ```sh
