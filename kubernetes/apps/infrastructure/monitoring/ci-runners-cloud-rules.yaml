@@ -98,17 +98,24 @@ spec:
         # TargetDown is not: it paged every night the cluster was powered off (09-28 20:14Z ->
         # 09-29 05:02Z, ~20 pushes/night), which is exactly the "muted by Friday" failure above.
         # Two states count as asleep:
-        #   - every cloud host unscrapeable (the scheduled OFF);
-        #   - any host booted <15m ago. TargetDown has been PENDING/FIRING all night under the
-        #     inhibition, so the moment the hosts answer it would page for the runners/pve-exporter
-        #     that come up 1-3 minutes later. 15m covers the observed 3-minute wake with margin.
+        #   - every cloud host unscrapeable, BUT only while at least one was up within the last 11h.
+        #     The OFF is operator-scheduled at runtime (cloud-power keeps it in a ConfigMap and exports
+        #     no metric), so Prometheus cannot tell a planned OFF from an outage. The bound makes the
+        #     mute FINITE: the observed OFF lasts ~9h (09-28 20:14Z -> 09-29 05:02Z), so a failure to
+        #     wake, or any all-hosts outage, un-mutes TargetDown after at most 11h instead of never.
+        #     An unplanned outage inside that window is the accepted cost; closing it needs cloud-power
+        #     to export its schedule state (follow-up).
+        #   - EVERY reporting host booted <15m ago (max, not min — a single-host maintenance reboot must
+        #     not mute TargetDown for the other hosts' targets). TargetDown has been PENDING/FIRING all
+        #     night under the inhibition, so the moment the hosts answer it would page for the
+        #     runners/pve-exporter that come up 1-3 minutes later; 15m covers the 3-minute wake.
         # A host that stays up but whose runner never returns is still caught by
         # CloudCIRunnerDownWhileHostUp above, which this does not inhibit.
         - alert: CloudlabAsleep
           expr: >-
-            (max(cloud_host:up) == 0)
+            (max(cloud_host:up) == 0 and max(max_over_time(cloud_host:up[11h])) == 1)
               or
-            (min(time() - node_boot_time_seconds{job="cloud-node"}) < 900)
+            (max(time() - node_boot_time_seconds{job="cloud-node"}) < 900)
           for: 2m
           labels: { severity: none }
           annotations:

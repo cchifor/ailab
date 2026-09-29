@@ -45,6 +45,8 @@ spec:
       - key: "{{ target.status.phase }}"
         operator: AnyIn
         value: [Failed, Succeeded]
-      - key: "{{ target.metadata.ownerReferences[0].kind || '' }}"
+      # The CONTROLLER owner, not ownerReferences[0]: list order is not guaranteed and other tooling
+      # can append references.
+      - key: "{{ target.metadata.ownerReferences[?controller].kind | [0] || '' }}"
         operator: Equals
         value: ReplicaSet
