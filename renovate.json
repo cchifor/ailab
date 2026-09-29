@@ -77,11 +77,9 @@
       "allowedVersions": "/^1\\.(30|31|32)\\./"
     },
     {
-      "description": "The OpenBao server (the `openbao` Helm chart, whose appVersion IS the server) and the provision-Job CLI images (quay.io/openbao/openbao, each pinned to the server's version per its Job comment) move as ONE PR. Split, Renovate opened the CLI bump alone (#938: 2.7.0 against a 2.6.2 server) and never the chart. A server upgrade restarts the single-replica secrets store, so it never auto-merges: a human schedules it.",
-      "matchPackageNames": ["openbao", "quay.io/openbao/openbao"],
-      "groupName": "openbao (server chart + provision-job CLIs)",
-      "automerge": false,
-      "addLabels": ["no-automerge"]
+      "description": "Hold the OpenBao provision-Job CLI images (quay.io/openbao/openbao) at the SERVER's minor, 2.6.x -- each Job's comment pins the CLI to the server's version. The server is the `openbao` Flux HelmRelease chart (0.29.4 = 2.6.2), and Renovate does NOT track it: the flux manager is not configured beyond its gotk-components default, so no chart PR has ever been opened. A group would therefore still produce a CLI-only bump (#938: 2.7.0 against a 2.6.2 server). Lift this bound in the same PR that bumps the chart (a human-scheduled restart of the single-replica secrets store).",
+      "matchPackageNames": ["quay.io/openbao/openbao"],
+      "allowedVersions": "/^2\\.6\\./"
     }
   ]
 }
