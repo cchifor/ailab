@@ -578,7 +578,59 @@ Only once all six are done: delete `ansible/secrets/tep-tokens.sops.yaml`,
 `dev_worker_enable_openbao: false` no longer provisions a kubeconfig at all** — the flag is a
 staged-rollout switch, not a supported steady state (ADR 0021).
 
+## Host-owned codex logins (dev workers, since 2026-09-29)
+
+**The dev workers no longer render the shared login below.** `dev_worker_codex_host_owned_login`
+(role default `true`) drops the codex `template {}` from each worker's `agent.hcl`, so the bao agent
+never touches `~/.codex/auth.json` and each host keeps the login the operator made on it. The shared
+login still exists and reviewer-2's `codexrun` still renders it; only the dev workers left it.
+
+**Why:** seat a (the shared login) was revoked server-side on 2026-09-21 and again on 2026-09-29
+(~09:49Z, `token_revoked`), which took every worker down at once; a `codex login` made on a worker
+was overwritten by the agent within minutes, so no host could be fixed by hand. Operator decision,
+"for now". A per-host access-token projection from the reviewer seats (no refresh token on any host)
+is designed on branch `feat/dw2-codex-seat-b` (`plans/2026-09-29-dev-worker-2-codex-seat-b-plan.md`)
+and is the likely successor.
+
+**State on 2026-09-29:**
+
+| host | account | notes |
+|---|---|---|
+| dev-worker-1 | operator's choice at login | device login started 19:11 |
+| dev-worker-2 | `realjaysage@gmail.com` (seat b's account) | verified `codex exec` 17:16 |
+| dev-worker-3 | `constantin.chifor@strive.us` (seat c's account) | login held only in the running app-server daemon's memory; the file on disk was the revoked seat-a projection. A daemon restart or reboot needs a fresh login. |
+| dev-worker-4 | `constantin.chifor@strive.us` (seat c's account) | verified `codex exec` 17:17 |
+
+A host login on a reviewer seat's ACCOUNT is its own device-auth session with its own refresh token —
+not a copy of the reviewer's — so the two refresh independently. They do share the account's usage
+window with the reviewbot rotation (and, for seat b, dsh).
+
+**Logging a worker in** (as the worker user, `c4`):
+
+```bash
+codex login --device-auth            # prints the URL + one-time code; sign in with the account
+codex app-server daemon restart      # REQUIRED: codex >= 0.158's managed daemon pins the account it
+                                     # started with ("Skipping auth reload due to account id mismatch")
+codex login status && codex exec --skip-git-repo-check -s read-only "Reply with exactly PONG"
+```
+
+Two traps, both hit on 2026-09-29: `codex login` DELETES the existing `auth.json` when it starts, so
+never start one "just to get a code" on a host whose login works; and a TUI opened before the daemon
+restart stays attached to the old daemon — restart the TUI too.
+
+**Rollout of the change itself:** `ansible-playbook dev-workers.yml -t openbao` rewrites `agent.hcl`
+without the codex stanza and restarts the agent; it does not touch an existing `auth.json`. The four
+workers were unhooked by hand the same day (backups `/etc/openbao-agent/agent.hcl.pre-codex-manual.*`),
+so the converge only replaces a hand-edited file with the same content.
+
+**Back to the shared login:** set `dev_worker_codex_host_owned_login: false` (group_vars or per host)
+and converge. Only once seat a works again (re-seed per the section below) — otherwise the agent
+replaces working host logins with a revoked token.
+
 ## The shared codex login (one `codex login` for the whole estate)
+
+> **Dev workers: superseded 2026-09-29** by § "Host-owned codex logins" above. Still how reviewer-2
+> gets its codex login.
 
 Every dev worker and reviewer-2 (the codex persona) runs codex on the SAME ChatGPT login, and
 nobody runs `codex login` on a host — ever. How it hangs together:
@@ -601,8 +653,10 @@ scripts/validate-codex-fleet.sh dev-worker-3    # any inventory pattern
 ```
 
 Per host it runs a real `codex exec` round-trip as the codex user and reports which login the CLI
-used: `projection(no-refresh-token)` is the target state; `HAS-REFRESH-TOKEN(hand-copied)` means the
-ansible rollout has not replaced that host's file yet (and that host can still revoke the family).
+used: `projection(no-refresh-token)` is the rendered shared login (reviewer-2's target state);
+`host-owned(refresh-token)` is a login made on the host itself — the expected state of a dev worker
+since 2026-09-29 (§ "Host-owned codex logins"), and on a host that renders the shared login a sign
+the rollout has not replaced a hand-copied file yet (and that host can still revoke the family).
 
 **Why the refresh token must never reach a host.** OpenAI refresh tokens are single-use and rotate
 on every refresh. Two copies of one login that both refresh revoke the entire family: that is
@@ -688,7 +742,7 @@ restart `openbao-agent` on the workers to force a fresh login that picks it up.
 | Connection refused / timeout to `openbao.lan.chifor.me:30820` | `/etc/hosts` block missing (see the row above), or all three nodes down, or the Service was removed. | `getent hosts openbao.lan.chifor.me`; `kubectl --context admin@ai -n openbao get svc openbao-lan`. |
 | `openbao-lan` has **no endpoints** | The vault is **sealed** — the `openbao-active` label is absent, by design (a sealed vault is unreachable rather than answering 503s). | Unseal: check the unsealer Deployment (`docs/runbooks/openbao-recovery.md`). |
 | Agent dies and stays dead | `exit_on_retry_failure = true` on template rendering — a missing KV path is fatal by design. | `journalctl -u openbao-agent`; usually `af/dev-workers/common` is missing its field → check the provision Job ran. Since 2026-09-12 also: `permission denied` / 404 on `af/data/dev-workers/codex-auth` → the host's policy predates the codex grant, or the projection was never published (the daily provision Job rewrites policies; a CronJob run publishes the projection — kick either). |
-| codex on a host says `401` / `token expired`, but nobody ran `codex login` | The shared login stopped rotating: `af-codex-refresh` has been failing (its `401` = OpenAI revoked the family; anything else = OpenBao/CAS). Hosts hold an access token that lasts ~10 days past the last good rotation. | `kubectl -n agentforge-broker get jobs`; logs of the last `af-codex-refresh-*`. On `401` re-seed per § "The shared codex login". Never `codex login` on a host — the agent overwrites it within minutes anyway. |
+| codex on reviewer-2 (or a worker with `dev_worker_codex_host_owned_login: false`) says `401` / `token expired`, but nobody ran `codex login` | The shared login stopped rotating: `af-codex-refresh` has been failing (its `401` = OpenAI revoked the family; anything else = OpenBao/CAS). Hosts hold an access token that lasts ~10 days past the last good rotation. | `kubectl -n agentforge-broker get jobs`; logs of the last `af-codex-refresh-*`. On `401` re-seed per § "The shared codex login". Never `codex login` on a host — the agent overwrites it within minutes anyway. |
 | Token silently expires | Should be impossible: the role issues **periodic** tokens, whose TTL resets on renewal (ADR 0020 — the antidote to the 2026-08-25 768h lockout). If it happens anyway, the role lost `token_period`. | `bao read auth/approle/role/<host>` and compare with the provision script. |
 | Provision Job red, `CreateContainerConfigError` | `openbao-breakglass-token` missing, or its data key is not `root_token`. | `kubectl --context admin@ai -n openbao get secret openbao-breakglass-token -o jsonpath='{.data}'` piped through a key-name print — **never** `-o yaml`. |
 

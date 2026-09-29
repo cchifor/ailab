@@ -257,12 +257,13 @@
     mode: "0640"
   notify: Restart openbao-agent
 
-# ONE codex login for the estate (2026-09-12): every user's ~/.codex/auth.json is rendered from the
-# af/dev-workers/codex-auth projection through the shared role's codex-auth.ctmpl (refresh_token
-# already stripped server-side; this host cannot read the oauth document at all, so it can never
-# rotate the family — the af-codex-refresh CronJob is the only refresher).
-# `codex login` on a worker is therefore never needed again, and would only be overwritten by the
-# next render.
+# With dev_worker_codex_host_owned_login (the default since 2026-09-29) the agent renders NO codex
+# login: each host owns the one the operator made with `codex login --device-auth`, and the CLI
+# refreshes it. Set to false for the previous design -- ONE codex login for the estate (2026-09-12):
+# every user's ~/.codex/auth.json rendered from the af/dev-workers/codex-auth projection through the
+# shared role's codex-auth.ctmpl (refresh_token already stripped server-side; this host cannot read
+# the oauth document at all, so it can never rotate the family — the af-codex-refresh CronJob is the
+# only refresher); a `codex login` on a worker is then overwritten by the next render.
 # The agent creates a missing destination directory itself — as root — and codex needs to write
 # its own sessions/config next to auth.json, so the directory has to exist user-owned first.
 - name: Ensure each user's ~/.codex exists
@@ -326,9 +327,11 @@
         {% for user in dev_worker_users %}
         [ -s "{{ user.home }}/.git-credentials" ] || { echo "{{ user.home }}/.git-credentials missing/empty" >&2; exit 1; }
         {% endfor %}
+        {% if not dev_worker_codex_host_owned_login | bool %}
         # 3b. the shared codex login rendered for every user: user-owned 0600, valid JSON with an
         #     access_token that has more than a day left and NO refresh_token (the stripping is the
         #     whole safety property — a host must never be able to rotate the shared family).
+        #     Skipped for host-owned logins: the agent renders none; the login belongs to the operator.
         {% for user in dev_worker_users %}
         f="{{ user.home }}/.codex/auth.json"
         [ -s "$f" ] || { echo "$f not rendered" >&2; exit 1; }
@@ -344,6 +347,7 @@
         assert left > 24 * 3600, f"access_token has only {left/3600:.1f}h left"
         PY
         {% endfor %}
+        {% endif %}
         {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
         # 4. post-cutover only. Mode and existence alone would happily accept the OLD SOPS-written
         #    ~/.tep/kubeconfig sitting at the same path, so each one is also used for a live call.

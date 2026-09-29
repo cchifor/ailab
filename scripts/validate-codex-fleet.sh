@@ -4,11 +4,12 @@
 # (ansible `script` module, as root) and prints its one-line verdict per host:
 #
 #   dev-worker-1 OK   user=c4 projection(no-refresh-token) access_token_left=8.9d
-#   reviewer-2   FAIL user=codexrun HAS-REFRESH-TOKEN(hand-copied) access_token_left=-2.1d rc=1 ...
+#   reviewer-2   FAIL user=codexrun host-owned(refresh-token) access_token_left=-2.1d rc=1 ...
 #
-# "projection(no-refresh-token)" is the OpenBao-rendered shared login (the target state —
-# docs/runbooks/openbao-dev-workers.md § "The shared codex login"); "HAS-REFRESH-TOKEN" means the
-# host still runs on a hand-copied auth.json that the ansible rollout has not replaced yet. Exit 1
+# "projection(no-refresh-token)" is the OpenBao-rendered shared login (reviewer-2's target state —
+# docs/runbooks/openbao-dev-workers.md § "The shared codex login"); "host-owned(refresh-token)" is a
+# login made on the host — expected on the dev workers since 2026-09-29 (§ "Host-owned codex
+# logins"), unexpected on reviewer-2. OK/FAIL comes from the real `codex exec` either way. Exit 1
 # if any host FAILs or is unreachable.
 #
 #   scripts/validate-codex-fleet.sh                  # all six workers + reviewer-2

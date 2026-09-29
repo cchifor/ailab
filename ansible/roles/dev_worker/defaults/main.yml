@@ -68,6 +68,17 @@ dev_worker_codex_reasoning_effort: "xhigh"
 # else, including null / a blank value, fails the play (tasks/codex.yml validates it once).
 dev_worker_codex_sandbox_network: true
 
+# ---- Codex login ownership (tasks/openbao.yml, templates/openbao-agent.hcl.j2) ----
+# true (since 2026-09-29): each worker OWNS its codex login. The bao agent renders NO
+# ~/.codex/auth.json; the operator runs `codex login --device-auth` on the host, with the ChatGPT
+# account that host should use, and the CLI refreshes that login itself. Why: the estate's shared
+# login (seat a, published to af/dev-workers/codex-auth by the af-codex-refresh CronJob) was revoked
+# server-side on 2026-09-21 and again on 2026-09-29, taking every worker down at once, and a login
+# made on a worker was overwritten by the agent within minutes. Operator decision, "for now" --
+# docs/runbooks/openbao-dev-workers.md § "Host-owned codex logins".
+# false = the previous design: every user's auth.json is rendered from the shared projection.
+dev_worker_codex_host_owned_login: true
+
 # ---- feature toggles ----
 dev_worker_install_docker: true
 dev_worker_install_toolchains: true

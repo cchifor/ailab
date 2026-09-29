@@ -53,6 +53,7 @@ template {
   error_on_missing_key = true
 }
 
+{% if not dev_worker_codex_host_owned_login | bool %}
 // The shared codex login — ACCESS-TOKEN-ONLY (see codex-auth.ctmpl: the projection this host may
 // read carries no refresh_token, so it can never rotate the estate's one login). Same root-render +
 // chown dance.
@@ -63,6 +64,7 @@ template {
   command     = "chown {{ user.name }}:{{ user.name }} {{ user.home }}/.codex/auth.json"
   error_on_missing_key = true
 }
+{% endif %}
 {% endfor %}
 {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
 

@@ -6,7 +6,8 @@
 # What it checks, as the user codex runs as on this host (dev workers: c4; reviewers: codexrun):
 #   1. ~/.codex/auth.json exists and is parseable — and whether it is the OpenBao-rendered
 #      projection (refresh_token EMPTY; the whole point of docs/runbooks/openbao-dev-workers.md
-#      § "The shared codex login") or a hand-copied login that still carries a refresh token;
+#      § "The shared codex login") or a login made on the host that carries a refresh token
+#      (host-owned: the dev workers since 2026-09-29, § "Host-owned codex logins");
 #   2. how many days the access token has left;
 #   3. a REAL `codex exec` round-trip to the API with a fixed prompt, checking the reply.
 # --dangerously-bypass-approvals-and-sandbox: the prompt uses no tools, so there is nothing to sandbox.
@@ -29,7 +30,7 @@ if not t.get("access_token"):
     print("API-KEY(not the shared login)" if d.get("OPENAI_API_KEY") else "UNKNOWN-SHAPE"); sys.exit(0)
 p = t["access_token"].split(".")[1]; p += "=" * (-len(p) % 4)
 left = (json.loads(base64.urlsafe_b64decode(p))["exp"] - time.time()) / 86400
-kind = "projection(no-refresh-token)" if t.get("refresh_token", "") == "" else "HAS-REFRESH-TOKEN(hand-copied)"
+kind = "projection(no-refresh-token)" if t.get("refresh_token", "") == "" else "host-owned(refresh-token)"
 print(f"{kind} access_token_left={left:.1f}d last_refresh={str(d.get('last_refresh',''))[:10]}")
 PY
 ) || { echo "$h FAIL user=$u unreadable $f"; exit 1; }
