@@ -83,6 +83,7 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/platform-access",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
+        "./kubernetes/apps/cloudlab-bootstrap",
         "./kubernetes/apps/trueswarm-bootstrap",
         "./kubernetes/apps/trueswarm-admin-bootstrap",
         "./kubernetes/apps/trueswarm-admin-executor-bootstrap",
@@ -256,13 +257,18 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin")},
+            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "platform")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "muse-stream")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "trueswarm")]))
+        # cloudlab shares a PATH with a directory in this repo (./kubernetes/apps/infrastructure/
+        # monitoring); only the resolved url says it is not this repo.
+        self.assertEqual(sources[("flux-system", "cloudlab")],
+                         "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/cloudlab.git")
+        self.assertFalse(mp.is_this_repo(sources[("flux-system", "cloudlab")]))
         self.assertEqual(
             sources[("flux-system", "trueswarm-admin")],
             "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/trueswarm-admin.git",

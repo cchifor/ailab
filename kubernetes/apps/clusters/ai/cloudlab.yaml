@@ -1,0 +1,58 @@
+# cchifor/cloudlab -- the `pve` GPU cluster's repo -- ships the Prometheus scrape configs, alert
+# rules and Grafana dashboard for its hosts and engines, but Prometheus and Grafana live HERE. This
+# pair makes this cluster's Flux reconcile that directory from the cloudlab repo.
+#
+# WHY IT MOVED HERE (2026-09-29). cloudlab carried an apply-once-by-hand kubernetes/flux/cloudlab-source.yaml
+# for this, and it was never applied: the monitoring objects in `monitoring` were hand-applied on
+# 2026-08-18 and 2026-09-29, and everything added since 2026-08-18 without a hand-apply was simply
+# not live -- including the cloud-vllm scrape and its PrometheusRule (VLLMEngineDown,
+# VLLMSpecDecodeAcceptanceCollapse), written after the 2026-09-10 silent-garbage incident. That
+# file would not have worked as written either: it used https to a private repo with no credentials.
+# Declaring the source here, beside the other private-Gitea sources (muse-stream, trueswarm-admin),
+# puts it under GitOps like they are: in-cluster Gitea over SSH with a read-only deploy key
+# (cloudlab-git-auth.yaml).
+#
+# TAKEOVER, checked before merge with `kubectl diff --server-side` against the rendered directory:
+# the 12 hand-applied objects are content-identical (only kubectl's last-applied annotation differs)
+# and are adopted as-is; the 4 new objects are exactly the cloud-vllm Service, Endpoints,
+# ServiceMonitor and PrometheusRule. `prune: true` only ever removes objects this Kustomization
+# applied itself.
+#
+# The directory's one secret (cloud-pve-exporter-auth) is SOPS-encrypted to the SAME age recipient
+# as this repo (checked: both .sops.yaml name age1nfa6...), so sops-age decrypts it.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: cloudlab
+  namespace: flux-system
+spec:
+  interval: 5m
+  url: ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/cloudlab.git
+  ref:
+    branch: main
+  secretRef:
+    name: cloudlab-deploy-key
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cloudlab-monitoring
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 5m
+  dependsOn:
+    - name: cloudlab-git-auth
+  sourceRef:
+    kind: GitRepository
+    name: cloudlab
+  # A path in the CLOUDLAB repo. ailab happens to have a directory with the same name; this is not it
+  # (scripts/manifest-paths.py resolves the sourceRef and skips this one as external).
+  path: ./kubernetes/apps/infrastructure/monitoring
+  prune: true
+  wait: false
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
