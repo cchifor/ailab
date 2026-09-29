@@ -179,12 +179,16 @@ consumers do with it (first case: Qwen-Image-2.1 on cloud2, ADR 0033, 2026-09-29
   mode too. **So a route in `mode: image_generation` WILL be picked as a chat model** — its backend
   must answer chat or users get a LiteLLM 404. Qwen-Image's API does (cloudlab#27): the prompt makes
   an image, an attached image makes an edit, and the image returns in `delta.images`
-  (`data:image/png;base64`), which Open WebUI 0.11 stores as a file on the reply and LiteLLM 1.101
-  passes through.
-- **Open WebUI reaches image routes through its image settings, not the picker:**
-  `IMAGE_GENERATION_ENGINE=openai` + `IMAGE_GENERATION_MODEL=<model_name>` (and the `IMAGE_EDIT_*`
-  twins) in `open-webui.yaml`, pointed at LiteLLM. Env is authoritative there
-  (`ENABLE_PERSISTENT_CONFIG=false`), so the admin UI cannot change them persistently.
+  (`data:image/png;base64`), which Open WebUI stores as a file on the reply and LiteLLM passes
+  through — observed 2026-09-29 on Open WebUI 0.11.3 and LiteLLM 1.101.0 (the digest pinned in
+  `litellm.yaml`). The rule itself does not depend on those versions; re-check the pass-through
+  when either is bumped (cloudlab `scripts/image-api-test.py` covers the backend side).
+- **Open WebUI has two entry points to an image route.** The chat picker (previous bullet), and its
+  dedicated image controls — the Image toggle in the message box and image editing — which are
+  configured by its image settings: `IMAGE_GENERATION_ENGINE=openai` +
+  `IMAGE_GENERATION_MODEL=<model_name>` (and the `IMAGE_EDIT_*` twins) in `open-webui.yaml`, pointed
+  at LiteLLM. Env is authoritative there (`ENABLE_PERSISTENT_CONFIG=false`), so the admin UI cannot
+  change those settings persistently.
 - **`drop_params: true` is load-bearing.** Open WebUI sends `response_format: b64_json`; LiteLLM
   400s that for an `openai/` custom model ("Setting `response_format` is not supported") unless
   `litellm_settings.drop_params` is on. It is, globally — do not turn it off without re-testing.
