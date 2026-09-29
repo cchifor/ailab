@@ -200,3 +200,38 @@ tests:
                 gitea_runner_cleanup_last_run_seconds series exists for it — the cleanup timer has never
                 written its beacon or the node_exporter textfile collector is off. Check
                 `systemctl status gitea-runner-cleanup.timer` and --collector.textfile.directory.
+
+  # ---------------------------------------- CloudlabAsleep: off for the night, then the 15m wake window
+  # up: minutes 0-19 on, 20-60 off, 61+ on. Boot time: a day before t=0, then 3660s (minute 61).
+  - interval: 1m
+    name: CloudlabAsleep fires while every host is off and for 15m after boot, then clears
+    input_series:
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1+0x19 0+0x40 1+0x40"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1+0x19 0+0x40 1+0x40"
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "-86400+0x60 3660+0x40"
+      - series: 'node_boot_time_seconds{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "-86400+0x60 3660+0x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudlabAsleep
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CloudlabAsleep
+        exp_alerts:
+          - exp_labels:
+              severity: none
+            exp_annotations:
+              summary: "cloudlab is powered off or still booting (inhibits TargetDown for its scrape jobs)"
+      - eval_time: 70m
+        alertname: CloudlabAsleep
+        exp_alerts:
+          - exp_labels:
+              severity: none
+            exp_annotations:
+              summary: "cloudlab is powered off or still booting (inhibits TargetDown for its scrape jobs)"
+      - eval_time: 80m
+        alertname: CloudlabAsleep
+        exp_alerts: []

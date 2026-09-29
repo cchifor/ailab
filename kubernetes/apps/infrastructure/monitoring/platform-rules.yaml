@@ -108,3 +108,32 @@ spec:
               for the maintenance window rather than dismissing it — an operator who learns to
               ignore this alert has lost the only signal that distinguishes a planned roll from an
               etcd stall.
+    # The chart's etcdHighNumberOfFailedGRPCRequests pair, restated with `grpc_type="unary"` (the
+    # originals are switched off via defaultRules.disabled in kube-prometheus-stack.yaml). Upstream
+    # divides failed by handled PER METHOD, including the long-lived streams, and a stream is "handled"
+    # exactly once — when it ends. LeaseKeepAlive/Watch streams end rarely and, during a leader change,
+    # with Unavailable/Unknown, so one closing stream reads as 100% failure: that is what fired the
+    # CRITICAL on 192.168.0.41 three times on 2026-09-29. Unary calls (Range/Txn/Put/...) are one
+    # request each, so their ratio means what the alert says. Thresholds, windows and text unchanged.
+    - name: etcd-grpc-unary
+      rules:
+        - alert: etcdHighNumberOfFailedGRPCRequests
+          expr: >-
+            100 * sum without (grpc_type, grpc_code) (rate(grpc_server_handled_total{grpc_type="unary",grpc_code=~"Unknown|FailedPrecondition|ResourceExhausted|Internal|Unavailable|DataLoss|DeadlineExceeded",job=~".*etcd.*"}[5m]))
+              / sum without (grpc_type, grpc_code) (rate(grpc_server_handled_total{grpc_type="unary",job=~".*etcd.*"}[5m]))
+              > 1
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "etcd cluster has high number of failed grpc requests."
+            description: 'etcd cluster "{{ $labels.job }}": {{ $value }}% of unary requests for {{ $labels.grpc_method }} failed on etcd instance {{ $labels.instance }}.'
+        - alert: etcdHighNumberOfFailedGRPCRequests
+          expr: >-
+            100 * sum without (grpc_type, grpc_code) (rate(grpc_server_handled_total{grpc_type="unary",grpc_code=~"Unknown|FailedPrecondition|ResourceExhausted|Internal|Unavailable|DataLoss|DeadlineExceeded",job=~".*etcd.*"}[5m]))
+              / sum without (grpc_type, grpc_code) (rate(grpc_server_handled_total{grpc_type="unary",job=~".*etcd.*"}[5m]))
+              > 5
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "etcd cluster has high number of failed grpc requests."
+            description: 'etcd cluster "{{ $labels.job }}": {{ $value }}% of unary requests for {{ $labels.grpc_method }} failed on etcd instance {{ $labels.instance }}.'
