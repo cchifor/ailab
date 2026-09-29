@@ -16,6 +16,26 @@ data:
     cache-file: "/var/cache/ntfy/cache.db"
     cache-duration: "12h"
     attachment-cache-dir: "/var/cache/ntfy/attachments"
+  # Named template for Alertmanager (receiver URL ?template=ailab-alertmanager, kube-prometheus-stack.yaml).
+  # BOUNDED BY CONSTRUCTION — every emitted field is truncated: severity 12 B, summary 240 B (newlines
+  # flattened), instance/pod 80 B each, title alertname 80 B / namespace 40 B; at most 8 alert lines, then
+  # "…and N more". Worst case ~3.5 KB, under ntfy's 4 KB limit. Why it matters: ntfy REJECTS a rendered
+  # message over 4 KB with HTTP 400 ("message or title is too large after replacing template") and
+  # Alertmanager treats 400 as unrecoverable, so the notification is DROPPED — the built-in `alertmanager`
+  # template prints full descriptions and dropped a 3-alert CIRunnerBuildCacheHigh group on 2026-09-29.
+  # Tested (ntfy inline-template mode, scratch topic): real group 311 B; 11 hostile alerts (1 KB+ multiline
+  # multibyte summaries, 500-char labels) 3469 B; empty common alertname -> "Alerts". `trunc` cuts bytes,
+  # so a multibyte character at the cut renders as U+FFFD — cosmetic, ntfy accepts it.
+  # ORDERING: this must be LIVE (ntfy restarted onto it) BEFORE the receiver URL names it — an unknown
+  # template is also an HTTP 400 drop. Hence the URL switch ships in a separate, later PR.
+  ailab-alertmanager.yml: |
+    title: |-
+      {{ if eq .status "firing" }}🔥{{ else }}✅{{ end }} {{ trunc 80 (or .commonLabels.alertname "Alerts") }}{{ with .commonLabels.namespace }} ({{ trunc 40 . }}){{ end }}{{ if gt (len .alerts) 1 }} ×{{ len .alerts }}{{ end }}
+    message: |-
+      {{- range $i, $a := .alerts }}{{ if lt $i 8 }}{{ if $i }}
+      {{ end }}{{ if eq $a.status "firing" }}•{{ else }}✓{{ end }} [{{ trunc 12 (or $a.labels.severity "none") }}] {{ trunc 240 (replace "\n" " " (or $a.annotations.summary $a.annotations.description $a.labels.alertname "")) }}{{ with $a.labels.instance }} — {{ trunc 80 . }}{{ end }}{{ with $a.labels.pod }} — {{ trunc 80 . }}{{ end }}{{ end }}{{ end }}
+      {{- if gt (len .alerts) 8 }}
+      …and {{ sub (len .alerts) 8 }} more{{ end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -54,6 +74,10 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: ntfy
+      annotations:
+        # subPath mounts never refresh and templates load at startup: bump this whenever
+        # ailab-alertmanager.yml changes so the pod restarts onto the new template.
+        ailab.io/ntfy-template-rev: "1"
     spec:
       containers:
         - name: ntfy
@@ -134,6 +158,8 @@ spec:
                     exit 1
           volumeMounts:
             - { name: config, mountPath: /etc/ntfy/server.yml, subPath: server.yml }
+            # ntfy reads named templates from --template-dir (default /etc/ntfy/templates) at startup.
+            - { name: config, mountPath: /etc/ntfy/templates/ailab-alertmanager.yml, subPath: ailab-alertmanager.yml }
             - { name: data, mountPath: /var/lib/ntfy }
             - { name: cache, mountPath: /var/cache/ntfy }
           resources:
