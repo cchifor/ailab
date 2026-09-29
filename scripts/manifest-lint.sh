@@ -11,7 +11,7 @@
 # PATH DISCOVERY is delegated to scripts/manifest-paths.py, which RESOLVES every Kustomization's
 # sourceRef against the GitRepository objects the tree declares and excludes only those whose
 # resolved url is a different repo AND that are on its reviewed allowlist (agentforge-tenants,
-# platform, muse-stream) — every other non-local shape is a non-zero exit there; see that script's docstring.
+# platform, muse-stream, trueswarm, trueswarm-admin, cloudlab) — every other non-local shape is a non-zero exit there; see that script's docstring.
 # Every path it prints is proven (verify_buildable) to contain a kustomization.yaml before this
 # script ever shells out to docker. It prints which parser it used (PyYAML, or the strict stdlib
 # fallback that is what the CI runner has) to stderr, so the log shows it.

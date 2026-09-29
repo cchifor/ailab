@@ -1,0 +1,23 @@
+# The root clusters/ai reconciliation has no SOPS decryption. Keep the encrypted read-only key for
+# cchifor/cloudlab in its own decrypting Kustomization, as muse-stream-git-auth.yaml does.
+# The key is a Gitea DEPLOY key on cchifor/cloudlab, read-only (registered 2026-09-29, title
+# "flux (ailab cluster) - read-only"); rotating it = new key there + re-encrypt the secret here.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cloudlab-git-auth
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/cloudlab-bootstrap
+  prune: true
+  wait: true
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
