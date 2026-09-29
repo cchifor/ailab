@@ -7,7 +7,8 @@
 #   B. a MISMATCHED enumeration fails (one slot removed from each source in turn);
 #   C. a REFORMATTED/REMOVED source fails rather than dropping out of the comparison (a deleted
 #      RoleBinding, a deleted env entry, a reflowed `for _n in (...)` line);
-#   D. a slot that is both live and retired fails.
+#   D. a slot that is both live and retired fails;
+#   E. a project-scoped grant naming a slot that is not live fails (and a comment naming one does not).
 # The checker is run against a COPY of the tree, so nothing here can touch the working repo.
 # No docker, no cluster, no network. Exit non-zero on the first broken expectation.
 set -uo pipefail
@@ -29,6 +30,7 @@ FILES=(
   kubernetes/apps/infrastructure/helmtest/namespaces.yaml
   kubernetes/infra/dev-workers/variables.tf
   inventory/hosts.yml
+  kubernetes/apps/clusters/ai/trueswarm-observer.yaml
 )
 for f in "${FILES[@]}"; do
   mkdir -p "$WORK/$(dirname "$f")"
@@ -107,6 +109,18 @@ edit kubernetes/apps/infrastructure/platform-access/pg-sync.yaml \
 expect_fail "slot 4 listed as both live and retired" "both live and retired"
 restore kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml
 restore kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
+
+echo "[E] a project-scoped grant must name only live slots"
+edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
+  's.replace("  name: platform-dw2\n", "  name: platform-dw7\n", 1)'
+expect_fail "a per-project RoleBinding naming a retired slot" "STALE"
+restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml
+
+edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
+  's + "# name: platform-dw7 (a comment, not a subject)\n"'
+run_check || fail "a COMMENT naming a non-live slot must not fail the check"
+echo "  ok  a comment naming a non-live slot is ignored"
+restore kubernetes/apps/clusters/ai/trueswarm-observer.yaml
 
 run_check || fail "the tree must pass again after every fixture is restored"
 echo "test-check-slot-enumerations: OK (mismatch, removal, reformat and live/retired overlap all fail closed)"

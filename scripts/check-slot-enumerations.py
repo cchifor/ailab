@@ -13,8 +13,17 @@ FAIL-CLOSED, and that is the whole point: every source below is MANDATORY and so
 that stops matching because a file was reformatted, a RoleBinding that was deleted, or an env entry
 that was dropped is an ERROR here, never a source that quietly leaves the comparison.
 
+It also checks the PROJECT-SCOPED grants (ADR 0028, amendment 2026-09-29): a purpose-named Role
+bound to one or two slots (e.g. clusters/ai/trueswarm-observer.yaml) is not an enumeration of every
+slot, so it cannot join the equality comparison — but it must never name a slot that is not live.
+Every uncommented `name: platform-dw<N>` under kubernetes/apps/ must be a live slot, so retiring a
+slot fails CI until its per-project bindings are removed too. (Grants authored in OTHER repos, e.g.
+cchifor/trueswarm-admin deploy/*/observer.yaml, are outside this scan: the runbook's retire
+checklist names them.)
+
 Run from the repo root (CI: .gitea/workflows/manifests.yaml). Exit 1 on any disagreement, on a
-source that yields nothing, or on a slot that is both live and retired.
+source that yields nothing, on a slot that is both live and retired, or on a platform-dw<N>
+reference to a slot that is not live.
 """
 import re
 import sys
@@ -30,6 +39,7 @@ TEP = ROOT / "kubernetes/apps/infrastructure/testpool/tep-access.yaml"
 HELMTEST_NS = ROOT / "kubernetes/apps/infrastructure/helmtest/namespaces.yaml"
 TOFU = ROOT / "kubernetes/infra/dev-workers/variables.tf"
 INVENTORY = ROOT / "inventory/hosts.yml"
+APPS = ROOT / "kubernetes/apps"
 
 # One RoleBinding of the observer ClusterRole per platform namespace (platform-access/rbac.yaml),
 # and one env block per workload in pg-sync.yaml (the CronJob and the bootstrap Job).
@@ -119,6 +129,21 @@ def retired_sets():
     return out
 
 
+def platform_sa_references():
+    """(file:line, slot) for every uncommented `name: platform-dw<N>` under kubernetes/apps/.
+
+    Structured on purpose: only a YAML `name:` field (a subject, or the SA's own metadata) counts,
+    never prose, so a comment that mentions a retired slot is not a false positive. Comment text is
+    stripped before matching (`#` after whitespace or at line start, as YAML defines it)."""
+    refs = []
+    for path in sorted(list(APPS.rglob("*.yaml")) + list(APPS.rglob("*.yml"))):
+        for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            code = re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
+            for n in re.findall(r"\bname: platform-dw(\d+)\b", code):
+                refs.append(("%s:%d" % (path.relative_to(ROOT).as_posix(), no), int(n)))
+    return refs
+
+
 def main():
     live, retired = live_sets(), retired_sets()
     bad = False
@@ -139,6 +164,18 @@ def main():
     for name, slots in retired.items():
         bad |= slots != ref_retired
         print("  %s %-58s %s" % ("ok  " if slots == ref_retired else "DIFF", name, sorted(slots)))
+
+    refs = platform_sa_references()
+    if not refs:
+        print("EMPTY   no `name: platform-dw<N>` under kubernetes/apps/ (platform-access/rbac.yaml "
+              "changed shape?)")
+        bad = True
+    stale = [(where, n) for where, n in refs if n not in ref_live]
+    print("platform-dw<N> references under kubernetes/apps/: %d, slots %s"
+          % (len(refs), sorted(set(n for _, n in refs))))
+    for where, n in stale:
+        print("  STALE %s names platform-dw%d, which is not a live slot" % (where, n))
+        bad = True
 
     both = ref_live & ref_retired
     if both:
