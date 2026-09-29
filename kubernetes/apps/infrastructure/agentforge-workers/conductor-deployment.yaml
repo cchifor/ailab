@@ -166,6 +166,14 @@ spec:
             # Startup refuses it unset: a conductor that watches no deploy repo must say so.
             - name: AF_CONDUCT_PLATFORM_REPO
               value: "cchifor/agentforge-platform"
+            # Deploy-lane PR cap, 10 (engine default) -> 20 (2026-09-29). A PR past the cap is a
+            # declared UNKNOWN, so the pass is `incomplete` and forge_conduct_last_pass_timestamp
+            # never advances: when Renovate opened ailab#948 (the 11th open PR) at 04:05Z every pass
+            # from then on was `incomplete=[pull=1]` and ForgeConductBlind fired at 3h+ although the
+            # conductor was healthy (~3s passes, 0 failed). ~4 reads per PR, so 20 PRs is ~86 of the
+            # 400-request pass budget (AF_CONDUCT_MAX_REQUESTS_PER_PASS) — the sweep keeps its share.
+            - name: AF_CONDUCT_MAX_PRS_PER_PASS
+              value: "20"
             # The probe port. Distinct from AF_METRICS_PORT — see the header.
             - name: AF_CONDUCT_PORT
               value: "8720"

@@ -1,0 +1,50 @@
+# Delete terminated pods left behind by ReplicaSets, once a day.
+#
+# WHY (2026-09-29). The one-at-a-time control-plane reboots of 2026-09-27 (PR #893) left 35 Failed
+# ("Pod was terminated in response to imminent node shutdown", exit 143) and 104 Succeeded pod
+# objects owned by ReplicaSets. Every one had already been REPLACED — the ReplicaSet does not count a
+# terminated pod — but nothing deletes the husk: the pod GC in kube-controller-manager only acts above
+# --terminated-pod-gc-threshold, default 12500, which this estate never reaches. So every planned
+# reboot adds a screenful of `Error` pods to `kubectl get pods -A`, burying the ones that matter.
+#
+# SCOPE, deliberately narrow:
+#   - ReplicaSet-owned only. Job pods are bounded by each Job's ttlSecondsAfterFinished / history
+#     limits, and a failed Job's pod is the KubeJobFailed evidence. StatefulSet and DaemonSet
+#     controllers already replace-and-delete their own failed pods.
+#   - Daily at 06:30Z, not continuously, so an eviction (DiskPressure, node shutdown) stays visible
+#     for up to a day before it is swept.
+# Lowering --terminated-pod-gc-threshold instead was rejected: it needs a Talos machine-config change
+# rolled across all three control planes, and it would also reap Job pods regardless of owner.
+#
+# RBAC: the cleanup controller only deletes what it is granted; its ClusterRole aggregates any
+# ClusterRole labelled rbac.kyverno.io/aggregate-to-cleanup-controller=true. Without this grant the
+# policy is refused at admission (Kyverno checks the controller can delete the matched kind).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:cleanup-controller:terminated-pods
+  labels:
+    rbac.kyverno.io/aggregate-to-cleanup-controller: "true"
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+---
+apiVersion: kyverno.io/v2
+kind: ClusterCleanupPolicy
+metadata:
+  name: terminated-replicaset-pods
+spec:
+  schedule: "30 6 * * *"
+  match:
+    any:
+      - resources:
+          kinds: [Pod]
+  conditions:
+    all:
+      - key: "{{ target.status.phase }}"
+        operator: AnyIn
+        value: [Failed, Succeeded]
+      - key: "{{ target.metadata.ownerReferences[0].kind || '' }}"
+        operator: Equals
+        value: ReplicaSet
