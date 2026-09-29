@@ -425,9 +425,10 @@ into `/share/ZFS2_DATA/.tbnet-offload/` with one root cron line (every minute â€
 iSCSI 2-4 ms on all three CPs.
 
 ```bash
-# verify (NAS side): all three must say off
-python scripts/qnap-ssh.py --sudo 'for i in tbtbr0 tbtnet0p0 tbtnet1p0; do echo -n "$i "; ethtool -k $i | grep -E "^(tcp-seg|generic-seg)" | tr "
-" " "; echo; done'
+# verify (NAS side): every Thunderbolt port must say off (ports discovered, not hard-coded)
+python scripts/qnap-ssh.py --sudo 'for i in tbtbr0 $(ls /sys/class/net | grep -E "^tbtnet[0-9]+p[0-9]+$"); do echo -n "$i "; ethtool -k $i | grep -E "^(tcp-seg|generic-seg)" | tr "\n" " "; echo; done'
+# the enforcer logs at ERROR every minute if it cannot disable them:
+python scripts/qnap-ssh.py --sudo 'grep tbnet-offload /var/log/messages | tail -5'
 # verify (host side): must NOT grow during iSCSI load
 python scripts/node-ssh.py 192.168.0.2 "nstat -az IpFragFails"
 ```

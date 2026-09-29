@@ -52,7 +52,9 @@ REMOTE_CMD="
   if [ \"\$DRY\" = 1 ]; then
     echo '  (dry run) would replace them with the single line above'
   else
-    cp -f \"\$CT\" \"\$CT.bak-\$(date +%Y%m%d%H%M%S)\"
+    # One rolling backup: the installer is meant to be re-run, and timestamped copies would pile up on
+    # the QNAP's small flash-backed config partition.
+    cp -f \"\$CT\" \"\$CT.bak-tbnet-offload\"
     grep -v 'tbnet-offload' \"\$CT\" > \"\$CT.new\" || true
     printf '%s\n' '$CRON_LINE' >> \"\$CT.new\"
     mv -f \"\$CT.new\" \"\$CT\"
@@ -62,10 +64,15 @@ REMOTE_CMD="
   fi
 
   echo
-  echo '== 3. enforce once now, and show the result =='
+  echo '== 3. enforce once now, and ASSERT the result =='
   [ \"\$DRY\" = 1 ] || /bin/sh '$BASE/enforce.sh'
+  bad=0
   for i in tbtbr0 \$(ls /sys/class/net | grep -E '^tbtnet[0-9]+p[0-9]+\$'); do
     printf '  %s: ' \"\$i\"; ethtool -k \"\$i\" | grep -E '^(tcp-segmentation-offload|generic-segmentation-offload):' | tr '\n' ' '; echo
+    if ethtool -k \"\$i\" | grep -qE '^(tcp-segmentation-offload|generic-segmentation-offload): on'; then bad=1; fi
   done
+  # The only supported deploy path must fail loudly, not print a bad state and exit 0.
+  if [ \"\$DRY\" != 1 ] && [ \"\$bad\" = 1 ]; then echo 'FATAL: TSO/GSO still ON on a Thunderbolt port'; exit 1; fi
+  echo '  OK'
 "
 printf '%s' "$REMOTE_CMD" | python scripts/qnap-ssh.py --sudo

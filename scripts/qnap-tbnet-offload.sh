@@ -15,13 +15,18 @@
 #
 # Every minute, not only at boot: a Thunderbolt link flap or re-plug re-creates tbtnetNpM with default
 # (on) offloads, and QNAP has no supported boot hook that survives firmware updates. Idempotent and
-# silent when already correct; it logs (syslog tag tbnet-offload) only when it changes something.
+# silent when already correct; logs (syslog tag tbnet-offload) when it changes something, and at
+# ERROR every minute if it cannot.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 for i in tbtbr0 $(ls /sys/class/net 2>/dev/null | grep -E '^tbtnet[0-9]+p[0-9]+$'); do
   [ -e "/sys/class/net/$i" ] || continue
   if ethtool -k "$i" 2>/dev/null | grep -qE '^(tcp-segmentation-offload|generic-segmentation-offload): on'; then
-    if ethtool -K "$i" tso off gso off 2>/dev/null; then
+    if ethtool -K "$i" tso off gso off 2>/dev/null        && ! ethtool -k "$i" 2>/dev/null | grep -qE '^(tcp-segmentation-offload|generic-segmentation-offload): on'; then
       logger -t tbnet-offload "disabled tso/gso on $i" 2>/dev/null || true
+    else
+      # Loud on purpose: a firmware update can make the feature `on [fixed]` or move ethtool, and a
+      # silent retry loop would let the exact iSCSI slowdown this prevents return unnoticed.
+      logger -p user.err -t tbnet-offload "FAILED to disable tso/gso on $i - cp1/cp2 iSCSI will crawl (runbook qnap-storage-setup.md section 10)" 2>/dev/null || true
     fi
   fi
 done
