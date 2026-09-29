@@ -32,17 +32,29 @@ spec:
     # to an existing cluster) and worst case is DB ~5GiB + max_wal_size 4GB + slot retention on a
     # 9.76GiB usable volume — ~20-30 min of stalled-replica churn from volume-full. Thin LUN, so the
     # NAS only pays for actual writes.
-    size: 20Gi
+    # 20Gi -> 40Gi (2026-09-29, INCIDENT). The "DB ~5GiB" assumption above no longer held: gitea alone
+    # is 12 GB (action_task TOAST 5.1 GB + dbfs_data 3 GB of Actions logs), so DB + max_wal_size 4GB
+    # + slot retention filled the volume and BOTH instances refused to start ("Detected low-disk space
+    # condition, avoid starting the instance") from ~09:30Z — Gitea, Authelia, Grafana, LiteLLM, Open
+    # WebUI and the AgentForge CP all lost their database. The two PVCs were expanded to 40Gi by hand
+    # during the incident (online, Trident + NodeExpandVolume, ~40s); this line records it so CNPG's
+    # spec matches. Post-recovery usage: 19G of 40G. Expansion is one-way — never lower this number.
+    size: 40Gi
     storageClass: qnap-iscsi
   resources:
-    requests: { cpu: 500m, memory: 2Gi }
+    requests: { cpu: 500m, memory: 4Gi }
     # req=lim on memory (predictable QoS). No cpu limit — and the databases LimitRange deliberately
     # sets no default cpu LIMIT either (LimitRange defaulting is per-resource: it would silently
     # inject one into any container omitting it, as strive-ailab's LimitRange does to strive-pg today).
     # 512Mi -> 2Gi (2026-08-05 RCA): the cgroup limit caps the page cache too, so at 512Mi the 3.5GiB
     # gitea DB was effectively uncached and every read hit qnap-iscsi (a 98MB-table count(*) took 8.2s
     # under CI load; Gitea itself OOMed from the resulting request pileup).
-    limits: { memory: 2Gi }
+    # 2Gi -> 4Gi (2026-09-29): gitea is now 12 GB and the 2Gi cgroup (page cache included) left its
+    # hot set uncached — active gitea queries sat in IO:DataFileRead and routine count(*)s took 7-8s.
+    # (The 180-420ms LUN latency seen that day was a separate fault — the NAS sending TSO frames over
+    # Thunderbolt that ai-node1/2 could not forward; fixed at the NAS, scripts/qnap-tbnet-offload.sh.)
+    # Goes with shared_buffers 1GB below.
+    limits: { memory: 4Gi }
   postgresql:
     parameters:
       # Defaults (128MB/1GB) were sized for MB-scale DBs. shared_buffers 512MB keeps the gitea hot set
@@ -50,7 +62,7 @@ spec:
       # write path (~2.3MiB/s WAL, fsync-heavy) stops re-triggering full-page writes every few minutes;
       # wal_compression shrinks those FPIs before they cross the iSCSI wire. All three verified against
       # the 2026-08-05 forge-slowness RCA; changing shared_buffers costs one automated rolling restart.
-      shared_buffers: 512MB
+      shared_buffers: 1GB # 512MB -> 1GB with the 4Gi limit (2026-09-29); ~25% of memory, rest is page cache
       max_wal_size: 4GB
       wal_compression: zstd
       # Default is -1 (unlimited): a stalled/diverged replica slot pins WAL until the volume fills —

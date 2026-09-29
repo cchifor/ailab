@@ -22,7 +22,13 @@ spec:
     - port: http
       path: /metrics
       scheme: http
-      interval: 30s
+      # 30s -> 4m (2026-09-29). Every scrape runs Gitea's statistics collector: a full count(*) over
+      # commit_status, comment, issue, ... — measured 7-8s EACH against the 12 GB gitea DB on
+      # qnap-iscsi, evicting the cache Gitea's real requests need. No alert reads gitea_* series
+      # (gitea-rules.yaml uses up/kube-state/container metrics), and these are slow-moving counts.
+      # 4m, not 5m: Prometheus' 5m lookback would make every series flicker absent at exactly 5m.
+      interval: 4m
+      scrapeTimeout: 60s
       bearerTokenSecret:
         name: gitea-metrics
         key: token

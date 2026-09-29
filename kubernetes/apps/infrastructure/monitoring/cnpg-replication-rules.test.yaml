@@ -204,3 +204,35 @@ tests:
       - eval_time: 31m
         alertname: CNPGClusterHasNoStreamingReplica
         exp_alerts: []
+
+  # ------------------------------------------------------- CNPGVolumeNearlyFull (2026-09-29 disk-full outage)
+  - interval: 1m
+    name: a CNPG volume over 85% for 10m pages; a non-CNPG PVC at 95% does not
+    input_series:
+      - series: 'kubelet_volume_stats_used_bytes{namespace="databases", persistentvolumeclaim="infra-pg-5"}'
+        values: "80+0x5 90+0x20"
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="databases", persistentvolumeclaim="infra-pg-5"}'
+        values: "100+0x25"
+      - series: 'kubelet_volume_stats_used_bytes{namespace="databases", persistentvolumeclaim="postgres-dumps"}'
+        values: "95+0x25"
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="databases", persistentvolumeclaim="postgres-dumps"}'
+        values: "100+0x25"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CNPGVolumeNearlyFull
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CNPGVolumeNearlyFull
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: databases
+              persistentvolumeclaim: infra-pg-5
+            exp_annotations:
+              summary: "CNPG volume databases/infra-pg-5 is 90% full"
+              description: >-
+                A Postgres data/WAL volume is over 85% full. A WAL surge (lagging checkpoints, a retained
+                slot) can take it to 100% within hours, and CNPG then refuses to start the instance
+                ("Detected low-disk space condition") — on 2026-09-29 that took down both infra-pg instances.
+                Expand now: raise spec.storage.size in the Cluster manifest (qnap-iscsi expands online; the
+                PVCs can be patched directly during an incident), then find what grew.
