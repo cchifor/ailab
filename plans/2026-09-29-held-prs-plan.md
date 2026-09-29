@@ -186,4 +186,4 @@ and none of them will ever merge on its own. Facts established on 2026-09-29:
   - the rollback path is written down
 - **C:** the tracking issue exists and is linked from #835. No infra change.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
