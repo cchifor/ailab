@@ -406,6 +406,32 @@ are ailab#880's scope (NAS-side LUN/target removal). Do not flip them back to `D
 pod; `scripts/airlock-recycle-sandbox.sh` runs airlock's own teardown → deploy with a tenant
 member's session and verifies the new pod.
 
+## 10. Thunderbolt TSO/GSO must stay OFF on the NAS (2026-09-29)
+
+**Symptom it prevents:** iSCSI from the Thunderbolt-tier CPs (cp1/cp2) at 150-420 ms and ~6 MB/s while the
+same LUN from cp3 (ethernet) answers in single-digit ms. Host-to-NAS ping is 0.2 ms and host-local transfers
+are fast, so it looks like "the NAS" or "the LUN" — it is neither.
+
+**Mechanism:** `tbtbr0` (members `tbtnet0p0`/`tbtnet1p0`) runs MTU 65522 with TSO/GSO on, so the NAS sends
+up-to-64 KB frames over Thunderbolt. ai-node1/2 receive each as one oversized packet (`dmesg`: "thunderbolt0:
+Driver has suspect GRO implementation"). Fine for the host itself, but the hosts **route** the CP VMs' iSCSI
+(ADR 0011, VM MTU 1500): a DF packet bigger than the VM bridge MTU is dropped + ICMP frag-needed →
+`nstat IpFragFails` climbs (60.6M on node1) → TCP retransmits. Disabling GRO on the host side does nothing:
+the frames are built at the NAS.
+
+**Fix (as code):** `scripts/qnap-tbnet-offload.sh`, installed by `bash scripts/qnap-tbnet-offload-install.sh`
+into `/share/ZFS2_DATA/.tbnet-offload/` with one root cron line (every minute — a link flap/re-plug re-creates
+`tbtnetNpM` with offloads on). Measured after: 700 KB GET from a cp1 pod 0.495 s → 0.009 s, IpFragFails +0,
+iSCSI 2-4 ms on all three CPs.
+
+```bash
+# verify (NAS side): all three must say off
+python scripts/qnap-ssh.py --sudo 'for i in tbtbr0 tbtnet0p0 tbtnet1p0; do echo -n "$i "; ethtool -k $i | grep -E "^(tcp-seg|generic-seg)" | tr "
+" " "; echo; done'
+# verify (host side): must NOT grow during iSCSI load
+python scripts/node-ssh.py 192.168.0.2 "nstat -az IpFragFails"
+```
+
 ## Open items this audit did NOT close
 
 | Gap | Why it is still open |
