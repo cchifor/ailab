@@ -58,6 +58,30 @@
       "matchUpdateTypes": ["digest"],
       "automerge": false,
       "addLabels": ["no-automerge"]
+    },
+    {
+      "description": "The pg-sync CronJobs (kubernetes/apps/infrastructure/platform-access/pg-sync.yaml) run the CNPG operand image of the PLATFORM's strive-pg Cluster (16.9), not infra-pg's, so they must not ride the infra-pg group or its 17.x hold. #948 proposed 16.9 -> 17.11 through that group and failed CI with exit 127: the 17.11 image ships no python3, which is the CronJob's entrypoint. Held to 16.x in a group of its own; scripts/tests/test-platform-pg-sync.sh still gates every 16.x minor on python3 + psycopg2 being present. strive-pg is managed by the platform repo, so lift this bound only when that Cluster moves to 17. Must stay AFTER the two infra-pg rules above: later packageRules override earlier ones.",
+      "matchFileNames": ["kubernetes/apps/infrastructure/platform-access/pg-sync.yaml"],
+      "matchPackageNames": ["/^ghcr\\.io\\/cloudnative-pg\\/postgresql(-[a-z0-9]+)?$/"],
+      "groupName": "platform pg-sync (strive-pg operand image)",
+      "allowedVersions": "/^16\\./"
+    },
+    {
+      "description": "Hold talosctl at the cluster's Talos minor (v1.11.x: every node reports Talos v1.11.2, and CLAUDE.md pins talosctl-1112). cri-log-relay drives apid with it, and talosctl is only supported within one minor of the nodes. #932 proposed v1.14.1. Lift this bound in the same change that upgrades Talos.",
+      "matchPackageNames": ["ghcr.io/siderolabs/talosctl"],
+      "allowedVersions": "/^v1\\.11\\./"
+    },
+    {
+      "description": "alpine/k8s is kubectl for in-cluster Jobs (env-reaper, gitea actions-run-retention, cnpg-lost-slot-reclone). kubectl is supported only within one minor of the kube-apiserver (v1.31.4), so hold it to 1.30-1.32. #931 proposed 1.37.1. Move this window in the same change that upgrades Kubernetes.",
+      "matchPackageNames": ["docker.io/alpine/k8s", "alpine/k8s"],
+      "allowedVersions": "/^1\\.(30|31|32)\\./"
+    },
+    {
+      "description": "The OpenBao server (the `openbao` Helm chart, whose appVersion IS the server) and the provision-Job CLI images (quay.io/openbao/openbao, each pinned to the server's version per its Job comment) move as ONE PR. Split, Renovate opened the CLI bump alone (#938: 2.7.0 against a 2.6.2 server) and never the chart. A server upgrade restarts the single-replica secrets store, so it never auto-merges: a human schedules it.",
+      "matchPackageNames": ["openbao", "quay.io/openbao/openbao"],
+      "groupName": "openbao (server chart + provision-job CLIs)",
+      "automerge": false,
+      "addLabels": ["no-automerge"]
     }
   ]
 }
