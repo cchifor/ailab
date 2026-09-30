@@ -28,7 +28,8 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 |---|---|---|---|
 | `.1` | LAN gateway | — | router |
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | — | `inventory/hosts.yml` |
-| `.5 / .6 / .7` | **free (static)** | — | — |
+| `.5 / .6` | 🔒 **cloudlab** CI runner VMs `cloud-ci-7/8` (cloud3, fourth and fifth; placed on measured load 2026-09-30, disks on `local-nvme`) | 6107–6108 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.7` | **free (static)** | — | — |
 | `.8`–`.11` | Dev-worker VMs `dev-worker-1..4` — **slot ≠ vmid** since the 2026-09-23 re-slot: `.10` = `dev-worker-3` = vmid 4204, `.11` = `dev-worker-4` = vmid 4205 | 4201, 4202, 4204, 4205 | `kubernetes/infra/dev-workers/variables.tf` |
 | `.12` | **free (static)** — was `dev-worker-5`; its VM 4205 moved to `.11` as `dev-worker-4` on 2026-09-23 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
 | `.13` | **free (static)** — was `dev-worker-6`, retired 2026-09-21 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
@@ -39,10 +40,11 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.24 / .25` | Reviewer VMs `reviewer-1/2` | 4501–4502 | ⚠️ unmanaged — see note below |
 | `.26` | 🔒 **cloudlab** LXC `cloud-llm-3` | 5101 | `../cloudlab/README.md` |
 | `.27 / .28` | 🔒 **cloudlab** LXCs `cloud-exec-1/2` | 5102–5103 | `../cloudlab/kubernetes/infra/executor-lxc/variables.tf` |
-| `.29` | **free (static)** — was `ci-runner-7`, retired 2026-09-16 | — | — |
-| `.30` | **free (static)** — was `ci-runner-8`, retired 2026-09-12 | — | — |
+| `.29` | 🔒 **cloudlab** CI runner VM `cloud-ci-6` (cloud1, third; added 2026-09-23 evening on measured headroom) — was `ci-runner-7`, retired 2026-09-16 | 6106 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.30` | 🔒 **cloudlab** CI runner VM `cloud-ci-5` (cloud3, third; the sizing gate was met 2026-09-23: 195 GiB available with two runners at ceiling) — was `ci-runner-8`, retired 2026-09-12 | 6105 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.31` | CI runner VM `ci-runner-9` (moved off `.22` on 2026-09-03; moved ai-node2→ai-node1 on 2026-09-07) | 4109 | `kubernetes/infra/runners/variables.tf` |
-| `.32`–`.35` | **free (static)** | — | — |
+| `.32 / .33` | 🔒 **cloudlab** CI runner VMs `cloud-ci-1/2` (cloud1, opportunistic Gitea Actions runners — online only while the cloud cluster is up; ADR 0032) | 6101–6102 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.34 / .35` | 🔒 **cloudlab** CI runner VMs `cloud-ci-3/4` (cloud3, same) — cloudlab's unbuilt Talos-GPU-worker spec had pencilled `.32`–`.34`; it re-reserves elsewhere when built | 6103–6104 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | `kubernetes/infra/env-pool/variables.tf` (adopted 2026-09-21) |
 | `.38` | 🔒 **cloudlab** Windows 11 Pro VM `cloud-win-1` (cloud3; RDP + key-only SSH; admin credential `af/estate/cloudlab-win11`; allocated 2026-09-30). The guest sets the address itself — no cloud-init — from `guest.json` | 6201 | `../cloudlab/kubernetes/infra/windows-vm/guest.json` |
@@ -54,8 +56,8 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.7`, `.12`, `.13`, `.50`** (4 addresses; `.39` went to `talos-env-node-2`
-and `.38` to the cloudlab Windows VM `cloud-win-1` on 2026-09-30; `.29`, `.30` and
+**Free static space: `.7`, `.12`, `.13`, `.50`** (4 addresses; `.38` went to the cloudlab
+Windows VM `cloud-win-1` on 2026-09-30 and `.39` to `talos-env-node-2` (#835); `.29`, `.30` and
 `.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23, `.5`/`.6` on 2026-09-30;
 `.13` freed 2026-09-21 by retiring `dev-worker-6`, `.12` freed 2026-09-23 by the dev-worker re-slot —
 its VM 4205 is `dev-worker-4` on `.11` now).
