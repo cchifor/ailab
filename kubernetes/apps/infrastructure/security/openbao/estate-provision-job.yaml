@@ -101,7 +101,8 @@ data:
       strive-realm:e2e_worker_usernames strive-realm:e2e_worker_password \
       strive-realm:load_persona_username strive-realm:load_persona_password \
       strive-realm:ops_admin_username strive-realm:ops_admin_password \
-      cloudlab-win11:admin_user cloudlab-win11:admin_password cloudlab-win11:product_key"
+      cloudlab-win11:admin_user cloudlab-win11:admin_password cloudlab-win11:product_key \
+      cloudlab-win11:bitlocker_recovery_password cloudlab-win11:bitlocker_recovery_id"
 
     # PASS 1 — the SEED must contain every matrix field, non-empty. This is NOT redundant with pass
     # 2: pass 2 probes LIVE KV after seeding, so a stale live value happily masks a seed that never
