@@ -95,7 +95,7 @@ data:
       # af/dev-workers/common as litellm_diag_key) is issued here and whitelisted to this name.
       #
       # THE TWO ENTRIES ARE A VERBATIM COPY of the main gateway's pair (litellm.yaml, same image
-      # digest on both deployments: ghcr.io/berriai/litellm@sha256:d295634e…) — same `model`,
+      # digest on both deployments: ghcr.io/berriai/litellm@sha256:bd089afd…) — same `model`,
       # `api_base`, sampling params, extra_body and model_info, same order — so a request through
       # this gateway exercises the same proxy version + the same per-route transformation on the
       # same two engines. At the ROUTE level the only difference is the synthetic per-token cost
@@ -191,7 +191,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "422b24ab77f8"
+        checksum/config: "dfdc243bd178"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux
@@ -223,9 +223,9 @@ spec:
             capabilities: { drop: ["ALL"] }
       containers:
         - name: litellm
-          # SAME pin as litellm.yaml (v1.101.0 + digest). Bump the files together; see the pin
+          # SAME pin as litellm.yaml (v1.103.0 + digest). Bump the files together; see the pin
           # comment in litellm.yaml.
-          image: ghcr.io/berriai/litellm:v1.101.0@sha256:d295634e09c648dcdb72c4cc2dd226f5fb87823a73e88cbbed6f205e4deb044b
+          image: ghcr.io/berriai/litellm:v1.103.0@sha256:bd089afdcd35b894b14a93f9743cdc8b591f82da1a38dd43a010a7b0c9de5fd7
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:

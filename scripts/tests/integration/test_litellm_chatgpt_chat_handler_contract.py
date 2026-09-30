@@ -27,6 +27,14 @@ What this proves, in the order the cases run:
   (e) an HTML 403 (the Cloudflare challenge seen live on 2026-09-20), a stream
       truncated before response.completed, a response.incomplete terminal event
       and a refusal item each fail to be a `stop` completion with usable content;
+      a terminal event (response.completed or response.incomplete) whose usage is
+      omitted, null or empty is refused with the handler's own 502 "reported no
+      usage" (never a completion carrying LiteLLM's token ESTIMATE, which 1.103.0
+      substitutes into that event); a block without integer counts, or with valid
+      counts and a malformed `*_tokens_details`, is refused as "unusable", never
+      defaulted -- end to end AND at the handler's post-drain mapping, which a pin
+      whose parser admits such a block would reach; the input/output counts the
+      upstream reported pass through exactly (zero included), with total = input + output;
   (f) the placeholder auth.json builds the Router with no socket attempt, and a
       MISSING file still sends the first call to the device flow (the existing
       guard is unchanged by the handler);
@@ -157,6 +165,36 @@ PLATFORM_REQUEST = {
     },
 }
 ANSWER = '{"answer":"OK","n":7}'
+# `usage=OMIT` leaves the key out of the terminal event; `usage=None` sends `"usage": null`.
+OMIT = object()
+# What the upstream's terminal event carries per fixture kind: the key omitted, null, an empty
+# object, three blocks the upstream REPORTED (all-zero counts; no total; a total that is not
+# input + output), two unusable blocks (a count missing, a count that is not an integer) that
+# must be refused, never defaulted to zero, and two with valid counts but a malformed
+# `*_tokens_details` (a string, a list) that LiteLLM's usage model rejects -- also refused as
+# unusable, by the handler itself (reviewer-claude 50752 on #973).
+USAGE_SHAPES = {"nousage": OMIT, "nullusage": None, "emptyusage": {},
+                "zerousage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "nototalusage": {"input_tokens": 5, "output_tokens": 3},
+                "oddtotalusage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 10},
+                "partialusage": {"input_tokens": 55},
+                "stringusage": {"input_tokens": "55", "output_tokens": 17, "total_tokens": 72},
+                "outdetailsusage": {"input_tokens": 55, "output_tokens": 17, "total_tokens": 72,
+                                    "output_tokens_details": "x"},
+                "indetailsusage": {"input_tokens": 55, "input_tokens_details": ["x"], "output_tokens": 17,
+                                   "total_tokens": 72}}
+# What the caller must get for each REPORTED block, (prompt, completion, total): the upstream's input and
+# output counts exactly, and a total that is ALWAYS input + output -- LiteLLM's usage mapping derives it
+# (measured in 1.101.0 and 1.103.0: a supplied 10 for 5 + 3 comes back 8), from the upstream's own
+# counts, never from an estimate.
+USAGE_REPORTED = {"zerousage": (0, 0, 0), "nototalusage": (5, 3, 8), "oddtotalusage": (5, 3, 8)}
+MISSING_USAGE = "the upstream stream reported no usage"
+UNUSABLE_USAGE = "the upstream stream reported unusable usage"
+# The handler's own 502 per usage-refusal kind (incomplete-nousage: response.incomplete, key omitted).
+USAGE_REFUSALS = {"nousage": MISSING_USAGE, "nullusage": MISSING_USAGE, "emptyusage": MISSING_USAGE,
+                  "incomplete-nousage": MISSING_USAGE,
+                  "partialusage": UNUSABLE_USAGE, "stringusage": UNUSABLE_USAGE,
+                  "outdetailsusage": UNUSABLE_USAGE, "indetailsusage": UNUSABLE_USAGE}
 # Responses-API usage as chatgpt.com reports it; the bridge maps input->prompt, output->completion.
 USAGE = {"input_tokens": 55, "input_tokens_details": {"cached_tokens": 0},
          "output_tokens": 17, "output_tokens_details": {"reasoning_tokens": 6}, "total_tokens": 72}
@@ -259,12 +297,12 @@ def chatgpt_stream(text=ANSWER, model="gpt-5.6-sol", terminal="completed", usage
     if terminal == "incomplete":
         final = {**resp, "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
                  "output": []}
-        if usage is not None:
+        if usage is not OMIT:
             final["usage"] = usage
         events.append({"type": "response.incomplete", "sequence_number": seq, "response": final})
     else:
         final = {**resp, "status": "completed", "completed_at": 2, "output": []}
-        if usage is not None:
+        if usage is not OMIT:
             final["usage"] = usage
         events.append({"type": "response.completed", "sequence_number": seq, "response": final})
     return sse(events)
@@ -319,14 +357,16 @@ def _mock_post(sent, outcome, closed):
         request = httpx.Request("POST", url)
         if kind == "stall":
             await asyncio.sleep(3600)
-        if kind in ("success", "stall-mid", "truncated", "incomplete", "refusal", "nousage"):
+        if kind in ("success", "stall-mid", "truncated", "incomplete", "incomplete-nousage", "refusal", *USAGE_SHAPES):
             payload = {
                 "success": lambda: chatgpt_stream(model=body["model"]),
                 "stall-mid": lambda: chatgpt_stream(model=body["model"]),
                 "truncated": lambda: chatgpt_stream(model=body["model"], terminal="truncated"),
                 "incomplete": lambda: chatgpt_stream(model=body["model"], terminal="incomplete"),
+                "incomplete-nousage": lambda: chatgpt_stream(model=body["model"], terminal="incomplete", usage=OMIT),
                 "refusal": lambda: chatgpt_stream(model=body["model"], refusal="I can't help with that."),
-                "nousage": lambda: chatgpt_stream(model=body["model"], usage=None),
+                **{shape: (lambda usage=usage: chatgpt_stream(model=body["model"], usage=usage))
+                   for shape, usage in USAGE_SHAPES.items()},
             }[kind]()
 
             return httpx.Response(200, stream=_ByteStream(payload, closed, stall_after=256 if kind == "stall-mid" else None),
@@ -478,6 +518,45 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         self.assertEqual(len(self.logger.successes), 1, f"g: {self.logger.successes}")
         self.assertEqual(self.logger.successes[0]["provider"], "chatgpt-chat")
         self.assertIn("gpt-5.6-sol", self.logger.successes[0]["model"])
+
+    async def _case_e_reported_usage(self, kind):
+        """Usage the upstream REPORTED is real usage, whatever its values: zero counts are never
+        refused as missing, and a total that is not input + output is not a reason to refuse (the
+        handler checks provenance, not arithmetic); the caller's total is input + output."""
+        sent, closed, response, error = await self._exercise(f"e-{kind}", kind, PLATFORM_REQUEST)
+        self.assertIsNone(error, f"e-{kind}: {error!r}")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(response.choices[0].message.content, ANSWER)
+        got = (response.usage.prompt_tokens, response.usage.completion_tokens, response.usage.total_tokens)
+        self.assertEqual(got, USAGE_REPORTED[kind], f"e-{kind}: the upstream's usage, exactly")
+        self.assertEqual(closed, ["transport"])
+        print(json.dumps({"case": f"e-{kind}", "usage": list(got)}))
+
+    def _case_e_usage_mapping_guard(self):
+        """The handler's post-drain usage mapping, called directly. In the pinned image LiteLLM's own
+        parser rejects a malformed `*_tokens_details` DURING the drain (the end-to-end cases above
+        prove the handler turns that into its own 502); a pin whose parser admits such a block would
+        reach the handler's mapping call instead. Here: every unusable block is the handler's own 502,
+        raised once (a mapping failure is chained as the cause, never a CustomLLMError re-wrapped),
+        and a reported block still maps to its own counts and details."""
+        module = self.module
+        for kind in (k for k, message in USAGE_REFUSALS.items() if message == UNUSABLE_USAGE):
+            tap = module._UpstreamUsageTap(None)
+            tap.terminal_seen, tap.usage = True, copy.deepcopy(USAGE_SHAPES[kind])
+            with self.assertRaises(module.CustomLLMError, msg=f"e-guard-{kind}") as caught:
+                module._reported_usage(tap)
+            self.assertEqual(caught.exception.status_code, 502, f"e-guard-{kind}")
+            self.assertEqual(caught.exception.message, f"chatgpt-chat: {UNUSABLE_USAGE}", f"e-guard-{kind}")
+            self.assertNotIsInstance(caught.exception.__cause__, module.CustomLLMError, f"e-guard-{kind}: wrapped once")
+            if "details" in kind:  # counts valid: refused by the guard around the mapping, not by the count check
+                self.assertIsNone(module._usage_problem(tap), f"e-guard-{kind}")
+                self.assertIsNotNone(caught.exception.__cause__, f"e-guard-{kind}: the mapping's own error is the cause")
+        tap = module._UpstreamUsageTap(None)
+        tap.terminal_seen, tap.usage = True, copy.deepcopy(USAGE)
+        usage = module._reported_usage(tap)
+        self.assertEqual((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens), (55, 17, 72))
+        self.assertEqual(usage.completion_tokens_details.reasoning_tokens, USAGE["output_tokens_details"]["reasoning_tokens"])
+        print(json.dumps({"case": "e-usage-mapping-guard", "refused": [k for k, m in USAGE_REFUSALS.items() if m == UNUSABLE_USAGE]}))
 
     # (b) -------------------------------------------------------------------------------------
     async def _case_b_dsh_route_unchanged_and_concurrent(self):
@@ -664,11 +743,23 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
     async def _case_e_negative(self, kind):
         sent, closed, response, error = await self._exercise(f"e-{kind}", kind, PLATFORM_REQUEST)
         self.assertEqual(len(sent), 1, f"e-{kind}: one attempt")
-        if kind in ("403html", "truncated", "nousage"):
-            # Measured in the pinned image: the bridge turns a stream truncated before its terminal
-            # event into an error, and the handler refuses a stream whose usage the upstream never
-            # reported (nousage) -- stream_chunk_builder would otherwise back-fill token ESTIMATES
-            # the consumer would record as billed truth.
+        if kind in USAGE_REFUSALS:
+            # The handler refuses a stream whose usage the upstream never reported, with ITS OWN
+            # rejection -- not just any error: 1.103.0's Responses iterator substitutes a token-count
+            # ESTIMATE into the terminal event when usage is absent, and the consumer would record
+            # that estimate as billed truth (ADR 0027). Omitted, null and empty are all "no usage",
+            # on response.completed and on response.incomplete alike; a block without integer counts
+            # is "unusable", never defaulted to zero.
+            self.assertIsNone(response, f"e-{kind}: must not become a completion (got {response!r})")
+            self.assertEqual(type(error).__name__, "BadGatewayError", f"e-{kind}: {error!r}")
+            self.assertEqual(getattr(error, "status_code", None), 502, f"e-{kind}: {error!r}")
+            self.assertIn(USAGE_REFUSALS[kind], str(error), f"e-{kind}: the handler's usage rejection, not another error")
+            self.assertEqual(closed, ["transport"], f"e-{kind}: the upstream transport is closed after the drain")
+            return
+        if kind in ("403html", "truncated"):
+            # A Cloudflare HTML 403 is an error before any stream exists. A stream truncated before
+            # its terminal event ends without an error from the bridge (measured) and is refused by
+            # the handler because no terminal event reported usage.
             self.assertIsNotNone(error, f"e-{kind}: must not become a completion (got {response!r})")
             self.assertIsNone(response)
             return
@@ -685,7 +776,7 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
             # second assertion flips and this note gets retired.
             self.assertEqual(choice.message.content, "", "e-refusal: a refusal never yields answer text")
             self.assertIsNone(getattr(choice.message, "refusal", None),
-                              "e-refusal: 1.101.0 drops the refusal text (measured); revisit on a pin bump")
+                              "e-refusal: the bridge drops the refusal text (measured in 1.101.0 and 1.103.0); revisit on a pin bump")
         print(json.dumps({"case": f"e-{kind}", "finish": choice.finish_reason,
                           "content": (choice.message.content or "")[:40],
                           "refusal": getattr(choice.message, "refusal", None)}))
@@ -739,9 +830,14 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
                 for kind in ("stall", "stall-mid"):
                     with self.subTest(case=f"d-{kind}"):
                         await self._case_d_stall(kind)
-                for kind in ("403html", "truncated", "incomplete", "refusal", "nousage"):
+                for kind in ("403html", "truncated", "incomplete", "refusal", *USAGE_REFUSALS):
                     with self.subTest(case=f"e-{kind}"):
                         await self._case_e_negative(kind)
+                for kind in USAGE_REPORTED:
+                    with self.subTest(case=f"e-{kind}"):
+                        await self._case_e_reported_usage(kind)
+                with self.subTest(case="e-usage-mapping-guard"):
+                    self._case_e_usage_mapping_guard()
                 for kind in ("many-chunks", "oversized-text"):
                     with self.subTest(case=f"e-{kind}"):
                         await self._case_e_bounds(kind)

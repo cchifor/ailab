@@ -19,8 +19,10 @@ retries disabled, under ONE deadline (the proxy's request timeout) that covers t
 the upstream stream is closed in `finally` so a client disconnect or the deadline stops the upstream
 read instead of letting it run on against the subscription. A non-streaming caller gets the chunks
 rebuilt into a normal ModelResponse (`litellm.stream_chunk_builder` over the bridge's own chunks, capped at MAX_CONTENT_BYTES of content,
-usage taken from the upstream's response.completed block and refused when there is none -- LiteLLM's
-stream wrapper would otherwise substitute a token-count estimate);
+usage taken from the upstream's own terminal event as it came off the wire and refused when there is
+none -- LiteLLM substitutes a token-count estimate for a missing block, in the stream wrapper and,
+since 1.103.0, in the Responses iterator's terminal event itself, so nothing LiteLLM hands back after
+parsing can prove where a usage block came from; see _UpstreamUsageTap);
 a streaming caller gets the chunks re-yielded unchanged. The inner call is `no-log` so the proxy's
 spend/metrics logging records the request once, under the outer model name.
 
@@ -64,6 +66,8 @@ from typing import Any
 import litellm
 from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 from litellm.llms.custom_llm import CustomLLM, CustomLLMError
+from litellm.responses.streaming_iterator import ResponsesAPIStreamingIterator
+from litellm.responses.utils import ResponseAPILoggingUtils
 from litellm.types.utils import ModelResponse
 
 PROVIDER = "chatgpt-chat"
@@ -110,6 +114,118 @@ def _transform_with_text(self, model, input, response_api_optional_request_param
 
 ChatGPTResponsesAPIConfig.transform_responses_api_request = _transform_with_text  # type: ignore[method-assign]
 
+# ---- usage provenance: read the upstream's usage off the wire, before LiteLLM can replace it -----
+# LiteLLM 1.103.0's Responses iterator (litellm/responses/streaming_iterator.py, _process_chunk) puts
+# a litellm.token_counter ESTIMATE into a response.completed / response.incomplete event whose usage is
+# absent, and hands that event on; the bridge then maps it like real usage. No marker distinguishes
+# the two. The one place the upstream's own block is still intact is the SSE event stream the
+# iterator reads: ResponsesAPIStreamingIterator.__init__ sets `self.stream_iterator` (an SSEDecoder over
+# the httpx body) and __anext__ reads `sse.data` from it, nothing else touches it -- the same code
+# in 1.101.0 and 1.103.0. The handler taps that attribute on ITS OWN iterator instance, per request.
+# The source check below is a BEST-EFFORT tripwire: a pin bump that renames or rewires those three
+# lines fails the pod start instead of serving estimates, but it cannot prove that nothing reads the
+# event stream before the tap (or rewrites it after). The guarantee is the image-level contract
+# (scripts/tests/integration/test_litellm_chatgpt_chat_handler_contract.py, every usage shape), which
+# CI runs in the manifest's image on every pin change.
+_ITERATOR_SEAM = inspect.getsource(ResponsesAPIStreamingIterator)
+if ("self.stream_iterator = SSEDecoder()" not in _ITERATOR_SEAM
+        or "sse = await self.stream_iterator.__anext__()" not in _ITERATOR_SEAM
+        or "self._process_chunk(sse.data)" not in _ITERATOR_SEAM):
+    raise ImportError(f"{PROVIDER}: ResponsesAPIStreamingIterator no longer reads its SSE events from "
+                      "self.stream_iterator; re-verify the usage tap before serving (ADR 0027)")
+if not callable(getattr(ResponseAPILoggingUtils, "_transform_response_api_usage_to_chat_usage", None)):
+    raise ImportError(f"{PROVIDER}: ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage is gone; "
+                      "re-verify the usage mapping before serving (ADR 0027)")
+
+_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete"})
+MISSING_USAGE = "the upstream stream reported no usage"
+UNUSABLE_USAGE = "the upstream stream reported unusable usage"
+
+
+class _UpstreamUsageTap:
+    """Forwards the upstream's SSE events unchanged and records the `response.usage` of each terminal
+    event (response.completed / response.incomplete) exactly as the upstream sent it, before LiteLLM
+    parses the event. One instance per request, installed on that request's iterator only; the last
+    terminal event read wins, and every terminal event read resets what was recorded."""
+
+    def __init__(self, source: Any) -> None:
+        self._source = source
+        self.terminal_seen = False
+        self.usage: Any = None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        event = await self._source.__anext__()
+        data = getattr(event, "data", None)
+        # Cheap prefilter: most events are text deltas; only a candidate terminal event is parsed.
+        if isinstance(data, str) and ("response.completed" in data or "response.incomplete" in data):
+            self._observe(data)
+        return event
+
+    def _observe(self, data: str) -> None:
+        try:
+            parsed = json.loads(data)
+        except ValueError:
+            return  # not JSON: LiteLLM's own parser decides what that means
+        if not isinstance(parsed, dict) or parsed.get("type") not in _TERMINAL_EVENTS:
+            return
+        response = parsed.get("response")
+        self.terminal_seen = True
+        self.usage = response.get("usage") if isinstance(response, dict) else None
+
+    async def aclose(self) -> None:
+        aclose = getattr(self._source, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
+def _tap_upstream_usage(stream: Any) -> _UpstreamUsageTap:
+    """Install the tap on this request's Responses iterator, before anything reads from it."""
+    upstream = getattr(getattr(stream, "completion_stream", None), "streaming_response", None)
+    if not isinstance(upstream, ResponsesAPIStreamingIterator) or not hasattr(upstream, "stream_iterator"):
+        raise CustomLLMError(status_code=502, message=f"{PROVIDER}: unexpected inner stream shape {type(upstream).__name__}")
+    tap = _UpstreamUsageTap(upstream.stream_iterator)
+    upstream.stream_iterator = tap
+    return tap
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _usage_problem(tap: _UpstreamUsageTap) -> str | None:
+    """Why the upstream's usage cannot be recorded, or None when it can. Omitted, null and an empty
+    object are "no usage"; zero counts the upstream reported are real usage. A block without integer
+    input/output counts (or with a non-integer total) is refused rather than defaulted to zero."""
+    raw = tap.usage if tap.terminal_seen else None
+    if raw is None or (isinstance(raw, dict) and not raw):
+        return MISSING_USAGE
+    if not isinstance(raw, dict) or not (_is_count(raw.get("input_tokens")) and _is_count(raw.get("output_tokens"))):
+        return UNUSABLE_USAGE
+    if raw.get("total_tokens") is not None and not _is_count(raw["total_tokens"]):
+        return UNUSABLE_USAGE
+    return None
+
+
+def _reported_usage(tap: _UpstreamUsageTap) -> Any:
+    """The upstream's usage as a chat Usage, through the same mapping the bridge applies (token
+    details included), checked to carry the upstream's own counts. A block whose counts are valid
+    but which the mapping cannot carry (LiteLLM's ResponseAPIUsage rejects, e.g., a non-object
+    `*_tokens_details`) is "unusable" too: the handler's own 502, never another error."""
+    problem = _usage_problem(tap)
+    if problem is not None:
+        raise CustomLLMError(status_code=502, message=f"{PROVIDER}: {problem}")
+    try:
+        usage = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(tap.usage)
+        counts = (usage.prompt_tokens, usage.completion_tokens)
+    except Exception as exc:  # noqa: BLE001 - any mapping failure is the upstream's malformed block
+        raise CustomLLMError(status_code=502, message=f"{PROVIDER}: {UNUSABLE_USAGE}") from exc
+    if counts != (tap.usage["input_tokens"], tap.usage["output_tokens"]):
+        raise CustomLLMError(status_code=502, message=f"{PROVIDER}: {UNUSABLE_USAGE}")
+    return usage
+
 
 def _inner_kwargs(model: str, messages: list, optional_params: dict | None, timeout: Any) -> dict:
     forwarded = {k: v for k, v in (optional_params or {}).items() if k not in _OWNED_PARAMS}
@@ -118,9 +234,9 @@ def _inner_kwargs(model: str, messages: list, optional_params: dict | None, time
         "messages": messages,
         "stream": True,
         # NO stream_options.include_usage on the inner call: it makes the inner wrapper synthesise a
-        # usage chunk from a token count whether or not the upstream reported usage, which erases the
-        # signal _upstream_reported_usage relies on. A streaming caller's own include_usage is served
-        # by the OUTER wrapper as for any provider.
+        # usage chunk from a token count whether or not the upstream reported usage. The usage a
+        # non-streaming caller gets comes from _UpstreamUsageTap, never from a chunk. A streaming
+        # caller's own include_usage is served by the OUTER wrapper as for any provider.
         # One attempt, explicitly: the outer route's num_retries does not reach a nested call.
         "num_retries": 0,
         "no-log": True,
@@ -196,13 +312,14 @@ def _delta_bytes(chunk: Any) -> int:
     return total
 
 
-async def _close(stream: Any) -> None:
-    """Close the inner wrapper AND the httpx response under it. The wrapper's aclose() reaches the
-    bridge iterator, whose aclose() only closes an `http_response` the bridge never attaches, so an
-    abandoned stream (deadline, client disconnect) would otherwise keep its upstream connection open
-    until garbage collection (measured with a stalling transport)."""
+async def _close(stream: Any, tap: _UpstreamUsageTap | None = None) -> None:
+    """Close the inner wrapper, the usage tap (and the SSE decoder generator under it) AND the httpx
+    response under them. The wrapper's aclose() reaches the bridge iterator, whose aclose() only
+    closes an `http_response` the bridge never attaches, so an abandoned stream (deadline, client
+    disconnect) would otherwise keep its upstream connection open until garbage collection (measured
+    with a stalling transport)."""
     response = getattr(getattr(getattr(stream, "completion_stream", None), "streaming_response", None), "response", None)
-    for target in (stream, response):
+    for target in (stream, tap, response):
         aclose = getattr(target, "aclose", None)
         if aclose is not None:
             try:
@@ -242,16 +359,19 @@ class ChatGPTChat(CustomLLM):
         chunks: list = []
         content_bytes = 0
         stream = None
+        tap = None
         try:
             async with asyncio.timeout(_deadline_seconds(timeout)):
                 stream = await _open_inner_stream(model, messages, optional_params, timeout)
                 # Drain the bridge's own iterator (CustomStreamWrapper.completion_stream), NOT the
-                # wrapper: the wrapper replaces a missing upstream usage with a token-count ESTIMATE
-                # in the same slot it stores a real one, so nothing downstream of it can tell the two
-                # apart. The bridge's terminal chunk carries `usage` iff response.completed did.
+                # wrapper (which adds estimates of its own). Usage is NOT read from the chunks: since
+                # 1.103.0 the bridge's terminal chunk carries an estimate when the upstream sent none.
+                # It is read from the upstream's own terminal event by the tap installed here,
+                # before the first read.
                 raw = getattr(stream, "completion_stream", None)
                 if raw is None or not hasattr(raw, "__aiter__"):
                     raise CustomLLMError(status_code=502, message=f"{PROVIDER}: unexpected inner stream shape {type(stream).__name__}")
+                tap = _tap_upstream_usage(stream)
                 async for chunk in raw:
                     chunks.append(chunk)
                     if len(chunks) > MAX_CHUNKS:
@@ -262,22 +382,33 @@ class ChatGPTChat(CustomLLM):
         except TimeoutError as exc:
             raise litellm.Timeout(message=f"{PROVIDER}: deadline reached before the upstream stream completed",
                                   model=model, llm_provider=PROVIDER) from exc
+        except CustomLLMError:
+            raise
+        except Exception as exc:
+            # A terminal event whose usage is missing or malformed must end in THIS handler's 502,
+            # even if LiteLLM's own parsing of that event raises first -- it does, as an
+            # APIConnectionError, for a block with valid counts and a non-object `*_tokens_details`
+            # (measured in 1.103.0). The same checks as after a clean drain decide.
+            if tap is not None and tap.terminal_seen:
+                try:
+                    _reported_usage(tap)
+                except CustomLLMError as refusal:
+                    raise refusal from exc
+            raise
         finally:
             if stream is not None:
-                await _close(stream)
+                await _close(stream, tap)
         # The consumer records usage as billed truth and fails closed on a missing block, so an
         # estimate must never pass as one: no upstream usage -> an error, not a completion.
-        # KNOWN LOSS (measured 2026-09-20): the bridge in 1.101.0 carries no refusal text on its
-        # chunks, so a refusal item comes back as an EMPTY content with refusal None; the consumer
-        # still fails closed on it (empty content is not its JSON), just not through its refusal
-        # guard. ADR 0027.
-        usage = next((chunk.usage for chunk in reversed(chunks) if getattr(chunk, "usage", None)), None)
-        if usage is None:
-            raise CustomLLMError(status_code=502, message=f"{PROVIDER}: the upstream stream reported no usage")
+        # KNOWN LOSS (measured 2026-09-20, unchanged in 1.103.0): the bridge carries no refusal text
+        # on its chunks, so a refusal item comes back as an EMPTY content with refusal None; the
+        # consumer still fails closed on it (empty content is not its JSON), just not through its
+        # refusal guard. ADR 0027.
+        usage = _reported_usage(tap)
         built = litellm.stream_chunk_builder(chunks, messages=messages)
         if built is None or not getattr(built, "choices", None):
             raise CustomLLMError(status_code=502, message=f"{PROVIDER}: the upstream stream carried no completion")
-        built.usage = usage  # the upstream's block, not the builder's count
+        built.usage = usage  # the upstream's block, not the builder's count and not LiteLLM's estimate
         built.model = model
         return built
 
