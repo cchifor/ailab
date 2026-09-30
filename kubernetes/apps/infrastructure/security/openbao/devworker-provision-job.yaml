@@ -419,9 +419,11 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: provision
-          # The official OpenBao image (bao CLI + busybox sh), pinned to the SERVER's version so the
-          # CLI and the API can never drift; quay.io is where the chart pulls the server from too.
-          image: quay.io/openbao/openbao:2.6.2
+          # Official OpenBao image (bao CLI + busybox sh), pinned to the SERVER's MINOR: the server is the `openbao` HelmRelease chart
+          # (0.29.4 = OpenBao 2.6.2) and renovate.json holds this CLI to 2.6.x, so a patch release
+          # may lead the server but the CLI and the API cannot drift across a minor.
+          # quay.io is where the chart pulls the server from too.
+          image: quay.io/openbao/openbao:2.6.3
           command: ["/bin/sh", "/scripts/provision.sh"]
           env:
             - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
