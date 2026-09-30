@@ -46,7 +46,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 **`docs/network-plan.md` is the IPAM registry — read it before allocating ANY address.** The LAN is
 shared with the `cloudlab` GPU cluster (`.20`–`.22`, `.26`–`.28`), which is invisible to ailab tooling.
-Free static space is only `.7`, `.12`, `.13`, `.39`, `.50` (`.29`, `.30` and `.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23; `.5`/`.6` to cloud-ci-7/8 and `.38` to the cloudlab Windows VM `cloud-win-1` on 2026-09-30 — see `docs/network-plan.md`).
+Free static space is only `.7`, `.12`, `.13`, `.50` (`.39` is reserved for `talos-env-node-2`, #835; `.29`, `.30` and `.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23; `.5`/`.6` to cloud-ci-7/8 and `.38` to the cloudlab Windows VM `cloud-win-1` on 2026-09-30 — see `docs/network-plan.md`).
 
 | Role | IPs | vmid |
 |---|---|---|
