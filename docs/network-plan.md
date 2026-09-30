@@ -28,7 +28,8 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 |---|---|---|---|
 | `.1` | LAN gateway | — | router |
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | — | `inventory/hosts.yml` |
-| `.5 / .6 / .7` | **free (static)** | — | — |
+| `.5 / .6` | 🔒 **cloudlab** CI runner VMs `cloud-ci-7/8` (cloud3, fourth and fifth; placed on measured load 2026-09-30, disks on `local-nvme`) | 6107–6108 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.7` | **free (static)** | — | — |
 | `.8`–`.11` | Dev-worker VMs `dev-worker-1..4` — **slot ≠ vmid** since the 2026-09-23 re-slot: `.10` = `dev-worker-3` = vmid 4204, `.11` = `dev-worker-4` = vmid 4205 | 4201, 4202, 4204, 4205 | `kubernetes/infra/dev-workers/variables.tf` |
 | `.12` | **free (static)** — was `dev-worker-5`; its VM 4205 moved to `.11` as `dev-worker-4` on 2026-09-23 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
 | `.13` | **free (static)** — was `dev-worker-6`, retired 2026-09-21 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
@@ -55,9 +56,9 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.5`–`.7`, `.12`, `.13`, `.39`, `.50`** (7 addresses; `.38` went to the cloudlab
+**Free static space: `.7`, `.12`, `.13`, `.39`, `.50`** (5 addresses; `.38` went to the cloudlab
 Windows VM `cloud-win-1` on 2026-09-30; `.29`, `.30` and
-`.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23;
+`.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23, `.5`/`.6` on 2026-09-30;
 `.13` freed 2026-09-21 by retiring `dev-worker-6`, `.12` freed 2026-09-23 by the dev-worker re-slot —
 its VM 4205 is `dev-worker-4` on `.11` now).
 Nothing else in `.2`–`.50` is available.
