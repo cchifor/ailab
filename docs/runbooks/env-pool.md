@@ -2,7 +2,7 @@
 
 The Talos **workers** that host the leasable Kata DinD environments (`testpool`,
 `kubernetes/apps/infrastructure/testpool/`): `talos-env-node-1` = VM **4401 on ai-node2**,
-`192.168.0.37`; `talos-env-node-2` = VM **4402 on ai-node3**, `192.168.0.38` (parent plan T4,
+`192.168.0.37`; `talos-env-node-2` = VM **4402 on ai-node3**, `192.168.0.39` (parent plan T4,
 added at gate G3b once ai-node3's 24 h memory floor held ≥ 43 GiB with the model idle — the
 dev-worker retirements of 2026-09-21/23 paid for it). Each: 16 GiB fixed / 8 vCPU, label
 `ailab.io/env-pool=true`, taint `dedicated=env:NoSchedule`. The warm pool keeps **2 members, one
