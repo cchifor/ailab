@@ -1,13 +1,5 @@
 # Resolve the four open ailab PRs (#973, #981, #971, #835) and the #975 NAS deploy
 
-## Codex Review
-
-- The dependency ordering is sound: land #973 before reconsidering #981, and retain the #971 and #835 holds.
-- #973’s contracts support the non-streaming usage fix, but streaming usage remains estimated; the verification section incorrectly promises real usage for both.
-- Gateway readiness and low CPU do not establish safe rollout or rollback. Review breaking changes and database migrations before #973, and add bounded rollout, representative request, and recovery checks.
-- The NAS installer has useful mount and checksum guards, but changes more than advertised, accepts unverified SSH host keys, and can finish successfully without a fresh healthy result. Its rollback needs correction.
-- Preserve explicit operator approval for NAS deployment and bridge enablement, separate the NAS work from gateway recovery, and assign owners and follow-up times to deferred work.
-
 ## Context
 
 This follows `plans/2026-09-29-held-prs-plan.md` (branch `plan/held-prs-2026-09-29`, codex-reviewed).
@@ -16,202 +8,265 @@ PR queue was triaged: #975, #977, #978 and #982 were merged after their review f
 and their rollouts were verified (all four OpenBao provision Jobs succeeded on 2.6.3, cri-log-relay is
 Ready on talosctl v1.11.6, and the pg-sync bootstrap Job succeeded on postgres 16.15). Four PRs
 remain. Each is held with `no-automerge`, which the reviewbot honours, so none of them merges without
-a human decision. State as of 2026-09-30 19:20Z:
-<!-- codex: This review checked repository code and locally available PR refs; it did not independently refresh live cluster, CI, approval, or external-repository state. Treat the timestamped observations as a snapshot and refresh the relevant evidence at each execution gate. -->
+a human decision. State as of 2026-09-30 19:20Z. This is a snapshot, so every execution gate below
+refreshes the evidence it depends on.
 
 **#973: `fix(litellm)`: read chatgpt-chat usage off the wire; LiteLLM v1.101.0 → v1.103.0.**
 - Head `603a4257`, mergeable, CI green on all 7 checks, and both reviewer bots APPROVED this head.
-- The last finding (50752, an unguarded usage mapping) is fixed. The gap was wider than reported:
-  v1.103.0's own parser raises `APIConnectionError` during the drain on a malformed `*_tokens_details`,
-  before the post-drain mapping. The handler now converts both paths into its own 502. New contract
-  cases: `e-outdetailsusage`, `e-indetailsusage`, `e-usage-mapping-guard`. The contract passes in the
-  image on v1.103.0 (31 cases) and on v1.101.0. The proxy startup smoke is OK.
-  <!-- codex: These are substantive tests of the non-streaming fix: they exercise real parsing, exact fixture counts, specific refusals, and transport closure; the direct mapping test covers the path the stricter parser prevents reaching. The mocked upstream and network-disabled startup smoke do not establish production authentication, database compatibility, ingress behavior, or whole-gateway upgrade safety. -->
-- Rollout blast radius:
+- The last finding (50752) is fixed. v1.103.0's own parser raises `APIConnectionError` during the drain
+  on a malformed `*_tokens_details`, and the handler now converts both that and the post-drain mapping
+  failure into its own 502. New contract cases: `e-outdetailsusage`, `e-indetailsusage`,
+  `e-usage-mapping-guard`. The contract passes in-image on v1.103.0 (31 cases) and on v1.101.0, and
+  the proxy startup smoke is OK.
+- What the tests prove: the NON-streaming usage fix, against a mocked upstream. They do not prove
+  production auth, DB compatibility, ingress, or whole-gateway upgrade safety. Streaming usage stays
+  ESTIMATED by design (ADR 0027): the streaming contract records completion 9 against the fixture's
+  upstream 17. Only non-streaming guarantees upstream-exact counts.
+- **Breaking-change review for v1.101 → v1.103, done before the merge (2026-09-30):**
+  - *Budget re-check on router fallback targets* (BerriAI/litellm#41379).
+    - Main gateway: it has `fallbacks` and one global `max_budget: 50 # USD` / `30d`. A fallback
+      target is now checked against the same global budget, so this only changes behaviour when that
+      budget is already exhausted, and then the primary is refused too. Inert in normal operation.
+    - `litellm-local`: no `fallbacks` at all, and one virtual key with a budget. Inert.
+  - *config.yaml wins over DB-stored settings* (#41779 and follow-ups). `LiteLLM_Config` has 0 rows,
+    and both proxies are configured only by their mounted config.yaml (`STORE_MODEL_IN_DB=False`).
+    Inert.
+- **DB migrations, reviewed:**
+  - Only `litellm-local` has a `DATABASE_URL`. The main gateway is stateless.
+  - v1.103.0 ships 18 Prisma migrations beyond v1.101.0, taken from `litellm_proxy_extras/migrations`
+    in both images. All are additive: ADD COLUMN, CREATE TABLE, CREATE INDEX.
+  - None adds a `NOT NULL` column without a default.
+  - The one index swap (`scope_jwt_key_mapping_by_issuer`: drops 2 indexes, adds `jwt_issuer TEXT
+    NOT NULL DEFAULT ''` + a unique index) is on `LiteLLM_JWTKeyMapping`, which has 0 rows.
+  - v1.101.0 therefore runs on the migrated schema, so an image rollback is DB-safe. The migrations
+    are not undone, and don't need to be.
+  - The DB is 13 MB.
+- Rollout:
   - `litellm`: 2 replicas, `RollingUpdate maxUnavailable 0 / maxSurge 1`.
-  - `litellm-local`: 1 replica, 25%/25%, which rounds to surge 1 / unavailable 0.
-  - Both roll with zero downtime. The image, `checksum/config` and `checksum/chatgpt-chat` all change.
-  <!-- codex: The rounding is correct, but zero downtime is not guaranteed: both readiness probes check only `/health/liveliness`, so a request-broken pod can become Ready and replace working replicas, including the sole old local pod. Check functional readiness and capacity for both simultaneous surge pods, including memory and database connections; preferred anti-affinity does not guarantee placement on separate nodes. -->
-  <!-- codex: Neither Deployment specifies a drain hook or an extended termination grace period, while the main gateway permits 900-second requests. Existing streams can outlive Kubernetes' default 30-second grace period, so verify the image's shutdown behavior and arrange draining or explicitly accept interrupted requests. -->
-- Load, measured as LiteLLM container CPU over the last 7 days:
-  - busiest 07–12Z and 18–19Z, but tiny even then (max 0.045 cores)
-  - quiet from 20Z to 06Z
-  - no `litellm_*` Prometheus metrics exist, and `LiteLLM_SpendLogs` holds 2 rows for the week, so
-    CPU is the only load signal.
-  <!-- codex: CPU is weak evidence for an I/O-bound proxy: long upstream calls and open streams may consume little CPU, and sparse spend logs do not establish low traffic. Supplement the window decision with available ingress/client request evidence, active work, and memory pressure; 20:00Z is 23:00 in Bucharest, so confirm operator coverage through verification and recovery. -->
-- The PR description's post-merge checks:
-  - both Deployments reach Ready
-  - a smoke completion through `api.chifor.me`, including one non-streaming `gpt-5.6-sol` call, returns usage
+  - `litellm-local`: 1 replica, which rounds to surge 1 / unavailable 0.
+  - The image, `checksum/config` and `checksum/chatgpt-chat` all change.
+  - Readiness probes only hit `/health/liveliness`, so a pod that is Ready but broken for requests
+    can replace a good one. Functional checks per pod are therefore required (step 1.4).
+  - No preStop / extended grace is configured and main allows 900 s requests. A long stream in
+    flight at the switch can be cut. Accepted at a quiet hour; step 1.1 checks for in-flight work first.
+- Load (LiteLLM container CPU, 7 days): busiest 07–12Z and 18–19Z, but tiny (max 0.045 cores), and
+  quiet 20Z–06Z. CPU is a weak signal for an I/O-bound proxy, so step 1.1 also checks live request
+  activity in the pods' logs just before merging.
 
 **#981: Renovate, LiteLLM v1.101.0 → v1.103.1 (`no-automerge` by the renovate.json LiteLLM rule).**
-- `litellm-route-contract` fails, correctly. v1.103.x with the OLD handler reproduces the estimated-usage
-  regression #973 fixes.
-  <!-- codex: This failure establishes incompatibility with the old handler, not compatibility between v1.103.1 and #973's handler. Keeping the PR for regeneration is reasonable; compatibility requires a fresh contract and startup run on its rebased contents and exact target digest. -->
-- reviewer-claude findings:
-  - 51202: the stale `v1.101.0` comment in `litellm-local.yaml`
-  - 51203: the v1.102/1.103 breaking changes, namely the budget re-check on router fallbacks, and
-    config.yaml winning over DB-stored settings
-- A comment on the PR already explains the dependency on #973.
+- `litellm-route-contract` fails because v1.103.x with the OLD handler reproduces the regression #973
+  fixes. That shows incompatibility with the old handler. It says nothing yet about v1.103.1 with
+  #973's handler.
+- reviewer-claude findings: 51202 (a stale version in the `litellm-local.yaml` pin comment) and 51203
+  (the v1.102/1.103 breaking changes).
 
 **#971: `feat(llm-router)`: enable the admin-bridge plugin (held for the owner's explicit go).**
-- It adds a verifier public-key ConfigMap, env `ADMIN_BRIDGE_VERIFY_KEY` and a read-only mount. That
-  turns on an externally reachable, signed-assertion endpoint (`POST /register/admin-bridge`) on the
-  Recreate singleton.
-- It is still unwired on the Admin side, verified live now: the `trueswarm-admin/admin` Deployment
-  mounts no bridge key, has no ROUTER/BRIDGE env, and `admin-config` has no router key. No
-  trueswarm-admin PR mentions the bridge. So nothing would call the endpoint.
-  <!-- codex: This supports holding enablement because no intended caller is ready; it does not mean the public endpoint would receive no requests. Absence of a matching PR is also weaker evidence than runtime wiring, so identify the Admin owner and an explicit readiness signal. -->
-- Residual risk the PR itself names: no `jti`/nonce store, so a signed request can be replayed within its ≤60 s window.
-  <!-- codex: The previous plan establishes that the plugin code already ships in router artifacts; the unmerged change enables it rather than introducing the code. Leaving it disabled is reasonable provided the current artifact rejects bridge requests without the verifier configuration; replay acceptance needs assessment against the actual privileged actions and duplicate side effects. -->
-- It conflicts in `router.yaml`: main rolled the router release six times since the branch point
-  (#974 … `router-0.1.0-20260930-sysmerge`). Its pre-merge proof that the plugin is in the artifact
-  and registered was taken on `router-0.1.0-20260929-subs`, which is no longer live.
+- It adds a verifier key ConfigMap, env `ADMIN_BRIDGE_VERIFY_KEY` and a read-only mount. The plugin
+  code already ships in the router artifacts, so this PR ENABLES a public, signed-assertion endpoint
+  (`POST /register/admin-bridge`) on the Recreate singleton.
+- No intended caller exists (verified live 19:20Z): `trueswarm-admin/admin` mounts no bridge key,
+  and there is no ROUTER/BRIDGE env and no router key in `admin-config`. The endpoint would still be
+  reachable by anyone.
+- The residual risk the PR names: no `jti`/nonce store, so replay is possible within ≤60 s.
+- It conflicts in `router.yaml` (six release rolls since the branch point). Its artifact proof is
+  from `router-0.1.0-20260929-subs`, which is no longer live.
 
 **#835: env-node-2 (parked).**
-- Gated on issue #972 (env-pool restore: golden-v2 + resume), which is still open. golden-v2 has
-  never been built, and `SandboxWarmPool env-std-pool` is at `replicas: 0` (#880).
-- Its IP moved today from `.38` (now cloud-win-1, live) to `.39`, which main reserves (#991).
-  <!-- codex: The allocation is recorded in main's `docs/network-plan.md`, and the PR's Terraform default uses `.39`; this is a reservation for an unbuilt VM, not a completed live IP migration. The older `2026-09-20-env-pool-root-cause-followup-plan.md` still contains executable `.38` instructions and monitoring references, which must be superseded before resuming provisioning. -->
-- It still conflicts in `testpool/sandboxtemplate-std.yaml`: `replicas: 2` here, `0` on main.
+- Gated on issue #972, which is still open. golden-v2 has never been built, and
+  `SandboxWarmPool env-std-pool` is at `replicas: 0` (#880).
+- The IP is `.39`, a reservation for an unbuilt VM (main #991). `.38` is the live cloud-win-1.
+- It still conflicts in `testpool/sandboxtemplate-std.yaml` (`replicas: 2` here, `0` on main).
 
 **#975 follow-up: the versitygw supervisor on the QNAP NAS is not Flux-managed.**
-- #975 merged. Only its alert-rule change shipped, through Flux.
-- The watchdog on the NAS is still the OLD script. That version probes and `mkdir -p`s on tmpfs when
-  the USB is unmounted, which is the incident #975 fixes.
-- The PR says: "Deploy (after merge, operator go only — not done by this PR)". Run from the ops
-  checkout `C:\Users\chifo\work\home\ailab`, which is behind `gitea/main` and has `.env` with the QNAP creds:
-  - `DRY_RUN=1 bash scripts/qnap-versitygw-install.sh`
-  - then `bash scripts/qnap-versitygw-install.sh`
-  - expected verify output: `healthy  http=403, disk=ok`
-- The installer now refuses unless the USB is mounted.
-  <!-- codex: The initial mount-table check prevents the known already-unmounted case, but does not establish disk health or prevent a later disconnect. The installer itself performs synchronous directory checks, `df`, and log reads on the USB, even during dry-run, so run only against healthy storage and inspect remote process state before retrying after an SSH timeout. -->
+- Only the alert-rule change shipped (Flux). The NAS still runs the OLD watchdog.
+- The PR says: "Deploy (after merge, operator go only — not done by this PR)".
 
 ## Approach
 
-<!-- codex: The dependency ordering is sensible, but #975 is not operationally isolated: the recorded USB incident also took Gitea down, potentially removing the merge/Flux recovery path needed for #973. Complete NAS verification before starting the gateway window, or defer NAS work until gateway observation is finished; retain enough operator time for either recovery. -->
+Ordering: #973 tonight, alone. The NAS deploy (5) never shares a window with a gateway change,
+because the recorded USB incident also took Gitea down, which is the gateway's GitOps recovery path.
 
-### 1. #973: merge in tonight's quiet window, then verify and keep a rollback ready
+### 1. #973: merge from 20:00Z, verify each pod, keep a prepared rollback
 
-1. From 20:00Z, re-check that the head is still `603a4257`, CI is green, both approvals are on that
-   head, and it is mergeable. Record the pre-merge image (`v1.101.0@sha256:d295634e…`) and ReplicaSet
-   revisions as the rollback reference.
-   <!-- codex: Before authorizing this bump, resolve the v1.102/v1.103 breaking-change review described under #981; waiting until that PR would review the changes after exposure. Also record the full image digests, current configuration/handler hashes, and baseline request results so recovery has an unambiguous target. -->
-   <!-- codex: `litellm-local.yaml` enables database schema migrations at startup, and the old and new local replicas share that database during rolling deployment. Review the migration delta, establish old/new schema compatibility, and verify a recoverable backup of the LiteLLM database before merging; handler compatibility with v1.101.0 does not prove database downgrade safety. -->
-2. Squash-merge via the API. The `no-automerge` label only stops the bot, and this is the human decision.
-   <!-- codex: Make the API merge conditional on the reviewed head SHA and capture the resulting squash commit SHA. A changed head or intervening relevant main change requires renewed checks rather than relying on the earlier mergeability snapshot. -->
-3. Wait for Flux, then verify:
-   <!-- codex: Specify a bounded rollout deadline and monitor from the start, including Pending/image-pull/init failures, readiness flapping, and `ProgressDeadlineExceeded`; Kubernetes does not automatically roll back a stalled Deployment. The shared `apps` Kustomization has `wait: true` and a five-minute timeout, so verify its applied revision and Ready condition as well as both Deployments. -->
-   - Both Deployments `rolloutStatus` complete, every pod on `v1.103.0@sha256:bd089afd…`, 0 restarts,
-     and the handler's import-time seam check did not fail pod start.
-     <!-- codex: Check desired/updated/available replica counts, endpoint membership, and the expected mounted configuration and handler on each new main-gateway replica. A single load-balanced smoke request can miss a faulty replica, and zero current restarts can hide an already-replaced failed pod, so retain rollout events and terminated-pod evidence. -->
-   - A non-streaming `gpt-5.6-sol` completion through `https://api.chifor.me/v1/chat/completions`
-     returns non-zero usage whose `total_tokens` equals prompt + completion.
-     <!-- codex: Use the real consumer's request shape, including strict JSON schema and reasoning parameters, and validate usable content, finish reason, and bounded latency. Non-zero arithmetic alone also passes fabricated estimates; provenance is established by the fixture contract, while this smoke establishes that the deployed route still works. -->
-   - A streaming completion ends with a usage chunk.
-     <!-- codex: Send `stream_options: {"include_usage": true}` and validate content, terminal finish reason, usage, and the final SSE `[DONE]`, including client-visible stream errors after HTTP 200. The contract explicitly documents estimated streaming usage, so this check must not claim upstream-exact counts. -->
-   - One call to a non-chatgpt route (a local model through `litellm-local`) still answers.
-     <!-- codex: Exercise the main gateway's non-chatgpt routing too, since the local gateway has different routing settings; include the existing Responses API route because the handler changes a shared provider transformation. For `litellm-local`, use an existing restricted virtual key and verify model restrictions and spend accounting, with budget/fallback rejection covered by controlled tests rather than exhausting production quotas. -->
-4. Rollback trigger: any smoke failure, a crash-looping pod, or 5xx in the logs within 15 minutes.
-   <!-- codex: Define immediate rollback for reproducible upgrade failures and a baseline-relative threshold for incidental upstream errors; a single unrelated provider 5xx is not necessarily an upgrade regression. Include timeouts, increased latency, auth/budget 4xx, empty or malformed HTTP-200 responses, and broken SSE streams, which a 5xx-only log scan misses. -->
-   Rollback means a `git revert` PR of the merge commit (image + handler return together), merged
-   immediately. No `kubectl rollout undo`, because Flux would re-apply main.
-   <!-- codex: Reverting the resulting squash commit is a real GitOps rollback, but “merged immediately” assumes available Gitea, CI/review access, conflict-free main, and successful Flux reconciliation. Prepare the exact revert procedure and recovery owner, restore all three image refs plus configuration/handler checksums, explicitly reconcile the revert, and repeat the functional checks; image rollback does not undo database migrations. -->
-   <!-- codex: ReplicaSet revisions alone are insufficient because the ConfigMaps are updated in place, so an old ReplicaSet restart can read new configuration or handler bytes. Keep a documented emergency recovery path for unavailable Git/Flux, with narrowly scoped reconciliation control and subsequent Git convergence, rather than improvising `rollout undo`. -->
+1. **Pre-merge gate (refresh everything):**
+   - The head is still `603a4257`, CI is green on it, both approvals are on it, and it is mergeable.
+   - Record the full pre-merge image digests, `checksum/config` / `checksum/chatgpt-chat`, the
+     ReplicaSet revisions and the main sha.
+   - Check the last 10 min of both LiteLLM Deployments' logs for in-flight or recent requests; if
+     there is an active long stream, wait.
+   - Baseline requests: run the step 1.4 smoke calls once BEFORE the merge, to have a reference
+     (content, finish reason, latency).
+   - `pg_dump -Fc litellm` from infra-pg to local storage as the DB restore point, and verify it with
+     `pg_restore -l`.
+2. **Merge:** squash-merge via the API with `head_commit_id: 603a4257…` so a changed head is refused.
+   Record the squash sha. The `no-automerge` label only stops the bot; this is the human decision.
+3. **Rollout watch (deadline 10 min from Flux applying the sha):**
+   - The `apps` Kustomization (wait: true, 5-min timeout) shows the squash sha applied and is Ready.
+   - Both Deployments reach updated == available == desired, with no `ProgressDeadlineExceeded`.
+   - Every pod is on `v1.103.0@sha256:bd089afd…`, and the endpoints contain only new pods.
+   - Keep the rollout events and any terminated-pod state, so a replaced crash still shows.
+   - The handler's import-time seam check did not fail pod start (logs).
+   - `_prisma_migrations` shows the 18 new rows finished (litellm-local).
+4. **Functional checks, run against EACH new pod (port-forward per pod) and once through
+   `https://api.chifor.me`:**
+   - Main gateway, `gpt-5.6-sol`, non-streaming, in the real consumer's shape (strict
+     `response_format: json_schema` + reasoning params). Checks: valid JSON content, a sane
+     `finish_reason`, latency within 2× the baseline, and usage present with
+     `total = prompt + completion`. Provenance is proven by the contract; this proves the deployed
+     route works.
+   - Main gateway, `gpt-5.6-sol`, streaming with `stream_options.include_usage`. Checks: content, a
+     terminal finish reason, a usage chunk (estimated by design), `[DONE]`, and no in-band error after
+     HTTP 200.
+   - Main gateway, one non-chatgpt route, plus one Responses API call (`/v1/responses`).
+   - `litellm-local`: one local-model completion. Also `GET /key/info` for the existing virtual key
+     (master key, read-only), which proves the DB-backed key store reads after the migrations.
+5. **Rollback triggers (act immediately):**
+   - any functional check failing reproducibly
+   - a crash-loop or a rollout past its deadline
+   - broken SSE or an empty/malformed 200
+   - an auth/budget 4xx on a call that passed in the baseline
+   - a latency regression over 2× the baseline
+   A single upstream-provider 5xx that doesn't reproduce is not a trigger. Re-run the check.
+6. **Rollback procedure (prepared before merging, owner = this operator session):**
+   - **Normal path:** `git revert <squash-sha>` as a PR, then squash-merge it via the API. That
+     restores all three image refs, the handler bytes and the checksums together. Then
+     `flux reconcile kustomization apps --with-source` and re-run step 4.
+   - **Emergency path, if Gitea/Flux is unavailable:**
+     1. `flux suspend kustomization apps`.
+     2. `kustomize build kubernetes/apps/apps/ai` at the recorded pre-merge sha, filtered to the
+        LiteLLM ConfigMaps + Deployments, then `kubectl apply`. That restores config, handler and
+        image together; ReplicaSet `rollout undo` alone would pair old pods with the in-place-updated
+        ConfigMaps.
+     3. Once Git is reachable, land the revert and `flux resume`.
+   - The DB needs no action (additive migrations; the dump is only for disaster).
+7. **Observation:** start the 15-minute window after both rollouts complete. Run step 4 again at its
+   end, and check restarts, memory and Flux status. Re-check once more after the 07Z load start
+   (restarts, logs, a smoke call). Only then is #981 eligible.
 
-### 2. #981: let Renovate rebase it onto the new baseline, then treat it as a normal patch bump
+### 2. #981: keep it open, let Renovate regenerate it, and review the patch delta only
 
-1. After #973 is on main, Renovate rebases #981 to v1.103.0 → v1.103.1. Do not hand-edit before
-   then, because that would stop Renovate from maintaining the branch. If Renovate has not rebased it
-   by the next run, ask for a rebase through the PR's rebase checkbox.
-   <!-- codex: Retaining the PR preserves useful review context, whereas closing it can cause Renovate to suppress that version proposal. Rebase timing is not guaranteed: the CronJob runs every four hours with concurrency forbidden, so inspect the next successful run after #973, request regeneration if necessary, and investigate conflicts or manual-commit detection if it remains stuck. -->
-2. When it is rebased:
-   - The contract must be green: it runs with #973's handler on v1.103.1.
-     <!-- codex: Verify that the branch actually contains #973's handler and tests, still targets v1.103.1, and updates all three image references consistently; Renovate may retarget a later release while the PR waits. Require all relevant CI, startup smoke, and fresh approvals on the final head, not merely the formerly failing contract check. -->
-   - Answer 51202 by fixing the stale comment. By then it is a `v1.103.0` comment that becomes `v1.103.1`.
-     <!-- codex: A human commit after rebase can still stop subsequent Renovate maintenance, contradicting the earlier rationale for avoiding edits. Choose an explicit ownership approach, such as fixing version-specific commentary on main and requesting regeneration, or accepting manual maintenance of the final branch; inspect embedded digest comments too and regenerate checksums if ConfigMap contents change. -->
-   - Answer 51203 with the v1.103.0 → v1.103.1 changelog delta only. The v1.102/1.103 breaking
-     changes are already live via #973. Evidence that config.yaml-over-DB precedence doesn't matter
-     here: the proxy is configured by the mounted config.yaml, and no DB-managed settings are in use
-     (check `LiteLLM_Config` rows).
-     <!-- codex: Limit this review to the patch delta only after linking the completed pre-#973 assessment of the earlier breaking changes; “already live” is not evidence of compatibility. A mounted config and `STORE_MODEL_IN_DB=False` do not establish that DB-managed settings are absent, so inspect the relevant `LiteLLM_Config` entries and effective settings without exposing secrets, and separately assess existing budgets and fallback behavior. -->
-3. Merge in a later quiet window with the same smoke checks as step 1. Not tonight: one gateway change per window.
-   <!-- codex: The later window is sensible if #973 has passed observation, including representative traffic, rather than merely surviving until the next date. Define #981's rollback as reverting its own squash commit to the verified #973/v1.103.0 baseline, with a fresh migration review, so recovery does not inadvertently remove the handler fix. -->
+1. After #973 is on main, **fix the version drift at the source.** In a small PR to main, make the
+   `litellm-local.yaml` pin comment version-agnostic ("SAME pin as litellm.yaml; bump together").
+   That way a Renovate bump can never stale it, and nobody commits on the Renovate branch, whose
+   maintenance a human commit would stop. This answers 51202.
+2. Renovate's CronJob runs every 4 h (concurrency Forbid). After the next successful run, check that
+   #981 is rebased. If not, tick its rebase checkbox, and investigate a conflict or manual-commit
+   detection if it stays stuck.
+3. On the regenerated head, verify:
+   - It contains #973's handler + tests, still targets v1.103.1, and all three image refs agree
+     (tag@digest).
+   - All CI is green, including the contract and the startup smoke, and there are fresh approvals
+     from both bots.
+4. Answer 51203 by linking section 1's breaking-change + migration review (v1.101 → v1.103.0), plus a
+   fresh review of the v1.103.0 → v1.103.1 changelog and migration delta, done the same way.
+5. Merge in a later quiet window, after #973's observation, with step 1's full procedure. Its rollback
+   reverts ITS squash commit to the verified #973/v1.103.0 baseline, which keeps the handler fix.
 
-### 3. #971: do not merge now; keep it held until the Admin side ships
+### 3. #971: hold. Post the evidence and the exact merge preconditions
 
-- Reason: opening an externally reachable endpoint that nothing calls adds attack surface, including
-  the 60 s replay window, with no benefit. The PR already offers "hold it and merge alongside the
-  Admin change". Rebasing now is also wasted work: the router release rolls daily, so a rebase would
-  be stale by the time Admin is ready.
-- Action: comment on #971 with today's evidence (the Admin side is still unwired, the conflict, the
-  stale artifact proof). List the exact merge preconditions:
-  1. the trueswarm-admin change mounting `admin-router-bridge` and configuring the router URL is merged
-     <!-- codex: “Merged” is insufficient: require deployed, verified Admin wiring and a freshly matched public/private key fingerprint. Ship the Admin caller disabled or tolerant of the unavailable endpoint, then enable it after router verification, avoiding an Admin-first outage caused by this ordering. -->
-  2. rebase onto current `router.yaml`, keeping the live release image
-     <!-- codex: Re-run manifest validation and review on the resolved head, preserving current release selection and security settings, then bind artifact evidence to that exact release through merge. A daily release cadence justifies checking near execution, but does not replace checking whether relevant content changed. -->
-  3. re-verify on the then-live artifact that `packages/plugins/admin-bridge` is present and registered
-     <!-- codex: Presence and registration do not verify authorization: test unsigned, tampered, wrong-key/algorithm, wrong issuer/audience, expired/future-dated, missing-claim, and mismatched body/path/action assertions against the selected artifact. Verify administrator/operator action restrictions and that Admin derives signing authority from authenticated server-side permissions rather than caller-supplied roles. -->
-     <!-- codex: Check the public ingress path and direct-origin restrictions, request-size/rate limits, and audit logging that excludes assertions and secrets; a signed endpoint remains exposed to unauthenticated resource-exhaustion attempts. Record how key rotation/revocation reaches a running verifier and invalidates the old signing key. -->
-  4. the owner's go on the replay-window risk, or a nonce store added in the router first
-     <!-- codex: The owner's explicit go remains required for enabling this public endpoint even if a nonce store is added; the current “or” silently drops that existing gate. If replay is accepted, document which actions can be duplicated and why their impact is acceptable; otherwise require atomic replay rejection with retention and restart behavior defined for the assertion lifetime. -->
-  <!-- codex: Add a coordinated Recreate maintenance window, preflight the ConfigMap/key mount, and verify a real Admin-signed request plus existing router API-key traffic after rollout. Predefine rollback by removing bridge enablement while preserving the current release, since a bad key or startup failure takes down the singleton and unrelated router functionality. -->
-- Keep `no-automerge`.
+- Reason: enabling a public endpoint that no intended caller uses adds exposure (including the
+  replay window) for no benefit. The PR itself offers "hold it and merge alongside the Admin change".
+  Rebasing now is wasted work, because the router release rolls daily.
+- Comment on #971 with today's evidence and these preconditions, ALL required:
+  1. **Admin side deployed and verified.** The caller is tolerant of, or disabled against, the router
+     endpoint until the router side is verified. The key fingerprint freshly matched
+     (public ConfigMap ↔ Admin's private key).
+  2. **Rebase and validate.** Rebase onto the current `router.yaml` keeping the live release image.
+     Re-run manifest CI and bot review on the resolved head, and bind the artifact evidence to that
+     exact release.
+  3. **Test the selected artifact's authorization:**
+     - the plugin is present and registered
+     - unsigned, tampered, wrong-key/alg, wrong iss/aud, expired/future, missing-claim and
+       body/path/action-mismatch assertions are all rejected
+     - operator-role restrictions hold
+     - Admin derives the role from server-side authz
+  4. **Exposure review:** the ingress path, direct-origin restriction, size/rate limits, audit logs
+     without assertions, and how key rotation/revocation reaches the verifier.
+  5. **The owner's explicit go.** It is required regardless of any nonce store. It must either
+     accept the replay window, with the duplicable actions listed, or require atomic replay
+     rejection first.
+  6. **A Recreate maintenance window.** Preflight the ConfigMap/mount. After the roll, a real
+     Admin-signed request works and existing API-key traffic still works. Rollback = remove the env
+     + mount while keeping the release.
+- Keep `no-automerge`. Owner: the #971 author and the platform owner. Next check: when trueswarm-admin
+  ships the bridge caller.
 
-### 4. #835: no change. It stays parked behind #972 (gate unmet)
+### 4. #835: no change. It stays parked behind #972
 
-- The IP fix and the `.39` reservation are already done. Nothing else is actionable until golden-v2
-  exists and the pool is back at 1.
-  <!-- codex: Holding the combined PR is correct, but golden-v2 plus one replica is only part of the recorded gate: retain storage cleanup, source-volume retention, registry-pull recovery, a measured lease/release/refill cycle, demand evidence, and the ai-node3 G3b memory-headroom requirement. Preserve the staged infrastructure-before-pool-expansion ordering and recheck the reserved address and VM ID at execution. -->
-  <!-- codex: An infrastructure-only node-preparation split could technically proceed without golden-v2 if independently justified and capacity-safe, while keeping the pool paused; it would not unblock the broken storage/image path. With no demonstrated need for that extra work, parking this PR is the proportionate decision rather than bypassing #972 or merely resolving the replicas conflict. -->
+- #972's gate is the whole list in that issue, not just golden-v2:
+  - storage cleanup
+  - source-volume retention
+  - registry-pull recovery (#865/#879)
+  - a measured lease/release/refill cycle
+  - demand evidence
+  - the ai-node3 G3b memory headroom
+  - `.39` and vmid 4402 re-checked at execution
+- An infra-only split is possible but has no demonstrated need.
+- Owner: the #972 assignee. Next check: when #972 closes.
+<!-- codex: The older `2026-09-20-env-pool-root-cause-followup-plan.md` still contains executable `.38` instructions and monitoring references, which must be superseded before resuming provisioning. -->
+<!-- opus-pushback: `plans/` are dated historical records that CLAUDE.md says not to rewrite, and #835's own branch (env-pool variables.tf, runbook, dashboard selector) plus main's IPAM now say `.39`. Execution follows #835's branch, not the 09-20 plan. The right guard is a note on #972/#835 that the 09-20 plan's `.38` is superseded, not an edit to the old plan. -->
 
-### 5. #975: deploy the supervisor to the NAS now (dry run first)
+### 5. #975 NAS deploy: ESCALATED. It needs the operator's explicit go, in its own window
 
-<!-- codex: Replace the unconditional “now” execution gate with the operator go explicitly required by the merged PR, unless that authorization is already recorded for this deployment. The completed code review and merge authorize neither an inferred NAS maintenance window nor an assumption that the operator is available. -->
-
-- Reason: the NAS still runs the version with the tmpfs-litter bug. The fix is merged, tested
-  (91/91, promtool OK) and reviewed by both bots. The installer is idempotent: it copies and
-  md5-verifies the script, reconciles one cron line, and runs it once. It also now refuses when the
-  USB isn't mounted.
-  <!-- codex: The temporary-file checksum check followed by rename is useful protection against a corrupt copy, but the 91 tests chiefly cover watchdog behavior and installer input guards, not a real NAS install transaction. Idempotence does not provide transaction rollback or concurrency control, so save the deployed script and durable/live crontabs and ensure no competing installer or cron editor is running. -->
-  <!-- codex: Cron reconciliation removes every line containing `versitygw`, not just a uniquely identified watchdog entry, and restarts the NAS-wide cron daemon while ignoring restart failure. Review all matched lines, preserve unrelated jobs, and verify both `/etc/config/crontab` and the loaded root crontab plus scheduler operation after apply. -->
-  <!-- codex: `scripts/qnap-ssh.py` uses Paramiko `AutoAddPolicy` without loading trusted host keys, so even dry-run sends NAS credentials to an unauthenticated SSH host. Pin and verify the NAS host key through the deployment helper; the MD5 comparison checks transferred bytes but does not establish host authenticity. -->
-1. `git -C C:/Users/chifo/work/home/ailab pull --ff-only gitea main`. It has only untracked files,
-   which do not block a fast-forward.
-   <!-- codex: Untracked files can block a fast-forward when incoming tracked paths would overwrite them, and pulling updates whichever branch is currently checked out. Verify branch/upstream and the resulting commit contains #975, preserve `.env`, and stop on checkout conflicts rather than assuming the working tree is deployable. -->
-2. `DRY_RUN=1 bash scripts/qnap-versitygw-install.sh`: read the preview, which should show only the
-   script copy + cron reconcile.
-   <!-- codex: The preview also includes retirement of an on-USB watchdog and possible old-log preservation/truncation; apply invokes the supervisor, which may restart an unresponsive gateway. Review those effects explicitly, including the fact that failed tail preservation is ignored before truncation, rather than accepting a two-operation summary. -->
-   <!-- codex: Specify the supported Bash environment and execute from the verified ops checkout: the inline environment assignment is not PowerShell syntax, and the preceding `git -C` command does not change the shell's working directory. Confirm that this environment resolves the intended Python/Paramiko installation and checkout-local `.env` without printing credentials. -->
-3. Apply, and expect `healthy  http=403, disk=ok`. Then confirm the cron line and that
-   `VersitygwProbeFailed` / `VersitygwProbeStale` are not firing.
-   <!-- codex: HTTP 403 is the expected unauthenticated S3-root response, and the actual status file includes a timestamp and tab-separated fields. However, the watchdog treats any non-000 HTTP code as “answering” and disables TLS verification for this local probe, so even “healthy” does not prove authenticated S3 or certificate validity. -->
-   <!-- codex: The installer catches watchdog failure and can exit successfully after printing an old status; an existing lock can also make the watchdog exit without writing a new one. Require a post-install status timestamp, inspect maintenance/lock state without deleting live locks, and observe a subsequent scheduled run; `restarted` can be a legitimate first result before a later fresh `healthy`. -->
-   <!-- codex: Confirm a successful post-deploy scheduled `versitygw-probe` PUT/GET/content-verify/DELETE cycle and its updated CronJob success timestamp, then check the loaded alert rules and their source metrics after evaluation. Alert absence immediately after apply can reflect old success or pending timers, and ad-hoc overlapping probes would contend for the probe's fixed object path. -->
-   <!-- codex: Installing the supervisor does not move an already-running gateway's stdout file descriptor off USB; the installer documents that this occurs on the next gateway restart. Record that residual risk and verify the destination at a separately justified restart, rather than claiming the installation completed log relocation. -->
-4. Rollback: re-run the installer from the previous main commit (`git worktree` at the pre-#975 sha).
-   <!-- codex: This reinstalls the known tmpfs bug and removes the installer's mount guard, while “previous main” need not match the script actually deployed before this operation. Pin a verified recovery artifact and restore the captured script/cron state if necessary, prefer a forward fix retaining the mount guard, and keep the already-deployed Flux alert correction. -->
-   <!-- codex: A new worktree does not inherit the untracked `.env`, so this rollback command is incomplete even when the chosen revision is correct. Specify secure credential availability and post-recovery checks, and recognize that rerunning the installer cannot undo truncated logs, gateway restarts, or other completed side effects. -->
+The merged PR requires "operator go only"; merge and review do not grant it. When the go is given,
+use this procedure (never in the same window as a gateway change):
+1. **Workspace.** In Git Bash, `cd` into the ops checkout `C:\Users\chifo\work\home\ailab`. Confirm
+   the branch is `main` tracking `gitea/main`, then `git pull --ff-only`. Stop on any checkout
+   conflict. Confirm HEAD contains #975, and that `.env` + Python/Paramiko resolve without printing
+   credentials.
+2. **Pin the NAS host key first.** `scripts/qnap-ssh.py` uses Paramiko `AutoAddPolicy`, so compare
+   the NAS host key fingerprint against a trusted record (QNAP UI / console) before sending
+   credentials, and fix the helper to load known hosts. That fix is its own PR.
+3. **Capture state for recovery:**
+   - the deployed watchdog script (and its md5)
+   - `/etc/config/crontab` and the loaded root crontab
+   - the current status file and any lock / maintenance state
+   Check that no other installer or cron editor is running, and that the USB is mounted and healthy.
+4. **`DRY_RUN=1 bash scripts/qnap-versitygw-install.sh`** and review EVERY effect:
+   - the script copy
+   - the cron reconcile, which removes every line containing `versitygw`, so list and preserve any
+     unrelated ones
+   - the on-USB watchdog retirement
+   - old-log preservation/truncation
+   - that apply runs the supervisor once, which may restart an unresponsive gateway
+5. **Apply**, then require:
+   - a status line with a post-install timestamp (`healthy`, or `restarted` followed by a fresh
+     `healthy` on the next scheduled run)
+   - the lock state inspected, never deleted while live
+   - both crontabs correct, with unrelated lines intact, and the scheduler running
+   - the deployed md5 == the repo's
+   Then a successful scheduled `versitygw-probe` PUT/GET/verify/DELETE cycle (the CronJob's last
+   success time updates), and the loaded alert rules plus source metrics evaluated. Do not start an
+   ad-hoc overlapping probe.
+6. **Residual:** the running gateway's stdout stays on USB until its next restart (as documented).
+   Note it, and verify at a separately justified restart.
+7. **Recovery:** a forward fix that keeps the mount guard. As a last resort, restore the captured
+   script and crontab. Never re-install the pre-#975 script, which has the tmpfs bug and no mount
+   guard. `.env` has to be provided explicitly to any other worktree. Truncated logs and gateway
+   restarts can't be undone.
 
 ## Critical files
 
-- None on this branch beyond this plan. Actions happen on PR branches, via the Gitea API, and on the NAS.
-- #981 branch `renovate/ghcr.io-berriai-litellm-1.x`: `kubernetes/apps/apps/ai/litellm-local.yaml` comment (step 2).
+- `kubernetes/apps/apps/ai/litellm-local.yaml`: the version-agnostic pin comment (step 2.1, a small PR to main).
+- #971, #835: comments only. No branch edits.
+- `scripts/qnap-ssh.py`: host-key pinning (step 5.2, its own PR, only when the NAS deploy is approved).
 - `scripts/qnap-versitygw-install.sh` / `scripts/qnap-versitygw-watchdog.sh`: deployed, not edited (step 5).
 
 ## Verification
 
-- **1:** both LiteLLM Deployments are Ready on v1.103.0 with 0 restarts, non-streaming and streaming
-  chatgpt-chat smoke calls return real usage, a local-model call answers, and there are no 5xx in
-  15 min of logs.
-  <!-- codex: Correct “non-streaming and streaming ... real usage”: at `603a4257`, the streaming contract explicitly records an estimated completion count of 9 against the upstream fixture's 17, and the wire-usage tap is used only by non-streaming completion. Exact upstream input/output counts are the non-streaming guarantee; streaming verification establishes successful delivery and the documented usage behavior. -->
-  <!-- codex: Start the observation interval after both rollouts complete and exercise a known set of representative requests during it, covering each new replica and relevant client path. Check latency, stream completion, memory/restart trends, Flux status, and DB-backed key/accounting behavior, then assign follow-up through the next normal load period; fifteen quiet minutes with no 5xx is only an initial smoke result. -->
-- **2:** #981's contract is green after Renovate's rebase, both findings are answered, and it merges
-  in its own window with the same smoke checks.
-- **3:** the #971 comment is posted, and the label and hold are unchanged.
-- **4:** no action.
-  <!-- codex: For both held PRs, record an owner and a next check tied to Admin readiness or #972 progress, preserving the labels and dependency links. This keeps “hold” and “parked” as tracked decisions without expanding tonight's scope into bridge implementation or pool restoration. -->
-- **5:** the installer verify prints `healthy  http=403, disk=ok`, the NAS cron line points at the new
-  script (md5 matches the repo), and no versitygw alert is firing.
-  <!-- codex: Acceptance additionally requires the approved deployed revision, a fresh supervisor status, an observed cron execution, and a successful post-deploy authenticated S3 probe with current metrics. Confirm unrelated cron jobs remain intact and the corrected Flux alert rules remain loaded; neither installer exit zero nor a historical healthy line establishes this. -->
+- **1:** the `apps` Kustomization is applied at the squash sha and Ready. Both Deployments reach
+  updated == available == desired on v1.103.0, with the endpoints on new pods only. The 18 migrations
+  are applied. Each pod passes:
+  - non-streaming usage present and additive
+  - streaming delivery with an (estimated) usage chunk and `[DONE]`
+  - a non-chatgpt route and `/v1/responses`
+  - a local model and `/key/info`
+  After the 15-min observation, the checks are re-run with no restarts. They are re-checked after 07Z.
+- **2:** the version-agnostic comment is on main. The regenerated #981 head contains #973's handler,
+  its three refs agree, all CI is green, fresh approvals are in, and 51202/51203 are answered. It is
+  merged in its own window with step 1's procedure.
+- **3:** the #971 comment is posted with the six preconditions, owner and next check. The label is unchanged.
+- **4:** a note is posted on #835/#972 that the 09-20 plan's `.38` is superseded, with owner and next check.
+- **5:** not executed without the operator's go. When executed: the step 5.5 acceptance, all of it.
 
 <!-- codex-review-status: complete -->
