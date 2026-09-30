@@ -46,7 +46,7 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.34 / .35` | 🔒 **cloudlab** CI runner VMs `cloud-ci-3/4` (cloud3, same) — cloudlab's unbuilt Talos-GPU-worker spec had pencilled `.32`–`.34`; it re-reserves elsewhere when built | 6103–6104 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | `kubernetes/infra/env-pool/variables.tf` (adopted 2026-09-21) |
-| `.38` | 🔒 **cloudlab** Windows 11 Pro VM `cloud-win-1` (cloud2; RDP + key-only SSH; admin credential `af/estate/cloudlab-win11`; allocated 2026-09-30). The guest sets the address itself — no cloud-init — from `guest.json` | 6201 | `../cloudlab/kubernetes/infra/windows-vm/guest.json` |
+| `.38` | 🔒 **cloudlab** Windows 11 Pro VM `cloud-win-1` (cloud3; RDP + key-only SSH; admin credential `af/estate/cloudlab-win11`; allocated 2026-09-30). The guest sets the address itself — no cloud-init — from `guest.json` | 6201 | `../cloudlab/kubernetes/infra/windows-vm/guest.json` |
 | `.39` | **free (static)** | — | — |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
