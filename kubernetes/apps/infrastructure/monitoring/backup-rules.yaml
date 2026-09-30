@@ -207,9 +207,19 @@ spec:
           # a CRITICAL alert firing for an hour after the object store recovered. An alert that
           # reports an outage that is over is training to ignore it.
           #
-          # Comparing timestamps makes recovery self-clearing: kube_job_status_completion_time is
-          # only set on SUCCESS, so as soon as one probe passes, the right-hand side moves past the
-          # stale failure and the alert resolves — while the failed Jobs stay in place for triage.
+          # Comparing timestamps makes recovery self-clearing: as soon as one probe passes, the
+          # right-hand side moves past the stale failure and the alert resolves — while the failed
+          # Jobs stay in place for triage.
+          #
+          # The right-hand side is the CRONJOB's last success, NOT the Jobs' completion times. It
+          # used to be max(kube_job_status_completion_time{job_name=~"versitygw-probe-.*"}), and on
+          # 2026-09-29 that made this alert RESOLVE ITSELF an hour into a 6.5h outage (fired
+          # 12:06-12:46 UTC, then silent while every probe kept failing): ttlSecondsAfterFinished:
+          # 3600 deletes the last SUCCESSFUL Job an hour after it finished, its completion_time
+          # series disappears, and a comparison against an empty vector returns nothing. Only the
+          # warning-level Stale alert was left. The CronJob's status.lastSuccessfulTime is set from
+          # the successful Job's completionTime and outlives the Job, so it stays comparable for
+          # the whole outage. Both sides are max()'d so the comparison is label-free.
           #
           # If a probe has NEVER succeeded the right-hand side has no series and this cannot fire.
           # That gap is deliberate and covered by VersitygwProbeStale's absent() clause below, which
@@ -221,7 +231,7 @@ spec:
               (kube_job_status_failed{namespace="talos-backup", job_name=~"versitygw-probe-.*"} > 0)
             )
             >
-            max(kube_job_status_completion_time{namespace="talos-backup", job_name=~"versitygw-probe-.*"})
+            max(kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"})
           for: 2m
           labels: { severity: critical }
           annotations:
@@ -236,6 +246,11 @@ spec:
               `dmesg | grep -iE 'usb|jbd2|ext4'` — a stalled USB bridge leaves the ext4 journal
               thread in D-state and every read on that filesystem hangs. Restarting versitygw does
               NOT fix that; the device needs a reset or a replug.
+              If the NAS supervisor status (/share/ZFS2_DATA/.versitygw-supervisor/state/status)
+              says disk-missing, the disk fell off the USB bus and is not mounted at all: re-seat
+              it (runbook qnap-storage-setup.md section 8). If it says gwdir-missing, the disk is
+              mounted and answering but the versitygw directory is not on it (wiped or replaced
+              disk): not a USB wedge, so skip the dmesg hunt and see the same runbook section.
         - alert: VersitygwProbeStale
           expr: |
             (time() - kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"}) > 1800

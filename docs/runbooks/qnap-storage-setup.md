@@ -259,28 +259,48 @@ it was watching** — and cron ran it every 3 minutes with no mutual exclusion:
 |---|---|
 | Source of truth | `scripts/qnap-versitygw-watchdog.sh` (in git — **do not hand-edit the NAS copy**) |
 | Installer | `scripts/qnap-versitygw-install.sh` (idempotent; `DRY_RUN=1` to preview) |
-| Tests | `just test-versitygw-watchdog` (41 cases, run under WSL) |
+| Tests | `just test-versitygw-watchdog` (91 cases, run under WSL) |
 | Deployed to | `/share/ZFS2_DATA/.versitygw-supervisor/` — the **internal** pool, never the USB |
 | Cron | `*/3 * * * * /bin/bash /share/ZFS2_DATA/.versitygw-supervisor/watchdog.sh` |
 | Retired | `<USB>/versitygw/watchdog.sh.retired` (kept for reference; nothing invokes it) |
 
 The installer refuses to run if the supervisor base resolves to the same block device as the gateway,
-so a symlink or remount can never quietly re-arm the original bug.
+so a symlink or remount can never quietly re-arm the original bug. It also refuses if the USB is not
+mounted at `VGW_MOUNT` (default `/share/external/DEV3302_2`) — checked in `/proc/mounts`, because a
+bare "does the directory exist" check is fooled by exactly the 2026-09-29 litter described below.
+Before it contacts the NAS at all, it refuses the same `VGW_MOUNT`/`VGW_DIR` spellings the supervisor
+refuses (`/`, a trailing slash, a `VGW_DIR` outside `VGW_MOUNT`), so a typo reads as a config error
+rather than as "the USB disk is missing".
 
 ### How it decides
 
 It probes the **disk before** deciding anything, because that determines whether a restart is even
-capable of helping:
+capable of helping. "The disk" is identified by its **mountpoint**: `VGW_DIR` must resolve, in
+`/proc/mounts` (never `statfs`, which blocks on a wedged USB), to exactly `VGW_MOUNT`. The device
+name is deliberately *not* pinned — a re-enumerated USB disk can come back as `sdc` instead of `sdb`.
 
 | Disk | Gateway answers | Action |
 |---|---|---|
+| not mounted | either | `disk-missing` — **never probe, never restart, create nothing under `VGW_DIR`**, raise a QuLog event |
+| mounted, but `VGW_DIR` absent | either | `gwdir-missing` — never restart (there is no `start.sh`), create nothing, raise a QuLog event |
 | ok | yes | nothing (`healthy`); restart ledger cleared |
 | ok | no | stop the stale process, restart, confirm it answers — up to **3 times per 30 min** |
 | ok | no, budget spent | `restart-budget-exhausted` — stop trying, raise a QuLog event |
 | bad | either | `disk-unhealthy` / `disk-wedged` — **never restart**, raise a QuLog event |
 
 A restart that never answers is also reaped, and if its startup is itself stuck on the USB the
-status is `start-wedged`.
+status is `start-wedged`. The mount is re-checked right before a stop/restart, so a disk that
+disappears after the probe passed still ends in `disk-missing`, not an `exec` off the bare mountpoint.
+
+**Why `disk-missing` exists (2026-09-29).** The USB disk dropped off the bus (`usb4-port1: Cannot
+enable. Maybe the USB cable is bad?`) and QTS unmounted it, leaving `/share/external/DEV3302_2` an
+empty directory on the `/share` **tmpfs**. The supervisor of the time had no notion of "mounted": the
+same-device guard resolved `VGW_DIR` to that tmpfs (not the base's device, so it passed), and the
+disk probe's `mkdir -p` *created* `VGW_DIR/.health` in RAM and read its own write back — `disk=ok`
+for ~6.5 h while it "restarted" a `start.sh` that did not exist (`execvp: No such file or directory`
+in `versitygw.log`) until `restart-budget-exhausted`. Had a `start.sh` existed there, it would have
+served an empty S3 store out of RAM. The probe now creates only `.health` itself (no `-p`), and
+nothing under `VGW_DIR` is touched unless the mount is present.
 
 **A restart cannot repair uninterruptible disk I/O**, so a bad disk suppresses restarts entirely;
 retrying would only add more processes that hang. The supervisor **never reboots the NAS** — it is
@@ -314,7 +334,10 @@ Two subtleties worth knowing before changing any of it:
   into one `awk` looks equivalent but is not: the shell expands the glob before `awk` opens
   anything, so a process exiting in between makes `awk` exit non-zero, which reads as "the group is
   gone" and releases an abandoned probe's lock while its D-state child is still alive.
-  `PROC_ROOT` exists solely so this is unit-testable; never set it in operation.
+  `PROC_ROOT` exists solely so this is unit-testable; never set it in operation. Likewise
+  `VGW_MOUNTS_FILE`, which lets the tests feed a synthetic mount table while the process scanners
+  keep reading the real `/proc`. The two are independent: `PROC_ROOT` alone does not move the mount
+  table, which stays `/proc/mounts`.
 
 ### Triage
 
@@ -326,9 +349,52 @@ python scripts/qnap-ssh.py --sudo "tail -40 /share/ZFS2_DATA/.versitygw-supervis
 A `disk-wedged` status means **storage intervention**, not a restart: the USB bridge has stopped
 answering and only re-seating the device (or a NAS reboot, which is an operator decision) clears it.
 
+A `disk-missing` status means the disk is **not mounted at all** — it needs **physical attention**:
+
+```bash
+python scripts/qnap-ssh.py --sudo "grep DEV3302_2 /proc/mounts; cat /proc/partitions | grep sd"
+python scripts/qnap-ssh.py --sudo "dmesg | grep -iE 'usb|sd[b-z]' | tail -20"
+```
+
+- `usb usbN-portM: Cannot enable. Maybe the USB cable is bad?` repeating, and only `sda` in
+  `/proc/partitions` → the device has fallen off the bus. **Re-seat the USB cable / power-cycle the
+  enclosure.** Nothing on the supervisor's side can help, and a hand remount is not the fix. (A NAS
+  reboot is an operator decision, as for `disk-wedged`.)
+- On re-attach, QTS re-enumerates (`sdb: sdb1 sdb2`, `EXT4-fs (sdb2): recovery complete`) and mounts
+  it back at `/share/external/DEV3302_2` by itself. The next cron run (≤ 3 min) sees the mount, probes
+  it, and restarts the gateway; the restart ledger was not charged while the disk was missing.
+- If it comes back under a **different** `/share/external/DEV33xx_y` name, the status stays
+  `disk-missing` on purpose — the supervisor's `VGW_DIR`/`VGW_MOUNT` defaults (which the cron line
+  runs with) name `DEV3302_2`. Find out why it moved before re-pointing anything; a disk that
+  silently changes path is itself a finding.
+- **Litter from before this fix:** the old probe left `versitygw/.health/` on the `/share` tmpfs under
+  the empty mountpoint. The re-mounted disk hides it; it lives in RAM, is a few bytes, and disappears
+  at the next NAS reboot. Nothing to clean up.
+
+A `gwdir-missing` status means the disk **is** mounted and answering — the probe listed its root —
+but `VGW_DIR` is not on it. This is **not** a USB wedge; do not go hunting for D-state in `dmesg`.
+Look at what is actually on the mount:
+
+```bash
+python scripts/qnap-ssh.py --sudo "grep DEV3302_2 /proc/mounts; ls -la /share/external/DEV3302_2/"
+```
+
+- An empty or unfamiliar filesystem → the disk was wiped or replaced, or a **different** disk now
+  sits at that mountpoint. The S3 data went with it: that is a restore/re-provisioning decision for
+  an operator, not something the supervisor attempts (it creates nothing there).
+- `versitygw/` there when you look → the next run (≤ 3 min) probes it normally; `watchdog.log` shows
+  when it reappeared.
+- If the mount root could **not** be listed either, the status is `disk-unhealthy` with
+  `mountroot-unreadable` instead — `[ -d ]` is false on an I/O error too, so absence alone is never
+  taken as proof that the disk is fine.
+
 This supervisor is **not** what pages you. Detection and alerting are cluster-side: the
 `versitygw-probe` CronJob (§ `kubernetes/apps/backup/talos-backup/versitygw-probe.yaml`)
 does an authenticated PUT → GET → verify → DELETE every 10 minutes and raises `VersitygwProbeFailed`.
+That alert compares the newest failed probe against the **CronJob's** last success, not against the
+probe Jobs' completion times: on 2026-09-29 the Job-based form went silent an hour into the outage,
+when `ttlSecondsAfterFinished: 3600` deleted the last successful Job, leaving only the warning-level
+`VersitygwProbeStale`.
 The split is deliberate — cluster-side answers *"is the object store usable?"*, the NAS-side answers
 *"can a local restart fix it?"*. The NAS-side check stops short of a signed S3 round-trip on purpose:
 the NAS ships **bash 3.2.57 with no `flock`, `timeout`, or `pgrep`**, and hand-rolling SigV4 there

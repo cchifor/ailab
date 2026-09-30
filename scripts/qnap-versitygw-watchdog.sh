@@ -37,6 +37,9 @@
 #      uninterruptible disk I/O; it just adds another process that hangs. So the disk is probed
 #      FIRST and a bad disk suppresses the restart entirely. Restarts are also budgeted
 #      (MAX_RESTARTS in RESTART_WINDOW) so a crash-looping binary reports instead of spinning.
+#      "The disk" means the USB MOUNT, not whatever directory happens to sit at its path: if
+#      VGW_MOUNT is not a live mountpoint the status is `disk-missing` and nothing under $VGW_DIR
+#      is created, probed or started (see "is the USB disk even MOUNTED?" below).
 #
 #   4. NEVER REBOOT THE NAS. It is shared infrastructure (Talos etcd backups, Velero, the pve-nfs
 #      export). Escalation is a log line and a QuLog event, not a reboot.
@@ -56,6 +59,7 @@ set -u
 #--- configuration ------------------------------------------------------------------------------
 BASE="${VGW_SUPERVISOR_BASE:-/share/ZFS2_DATA/.versitygw-supervisor}"  # INTERNAL pool. Never /share/external.
 VGW_DIR="${VGW_DIR:-/share/external/DEV3302_2/versitygw}"              # on the USB disk, by design
+VGW_MOUNT="${VGW_MOUNT:-/share/external/DEV3302_2}"  # the USB disk's MOUNTPOINT; VGW_DIR must be under it
 VGW_URL="${VGW_URL:-https://127.0.0.1:7070/}"
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-8}"      # curl self-bounds; a socket wait is killable, unlike D-state
 DISK_TIMEOUT="${DISK_TIMEOUT:-20}"     # deadline before the disk-probe child is abandoned
@@ -81,6 +85,12 @@ CURL="${CURL:-/sbin/curl}"
 # Overridable ONLY so the /proc scanners below can be unit-tested against a synthetic tree.
 # Nothing in normal operation should ever set this.
 PROC_ROOT="${PROC_ROOT:-/proc}"
+# Same, for the mount table alone. The tests need the REAL /proc for the process scanners while
+# feeding a synthetic mount table, so the two cannot share one override. Never set in operation.
+# The default is the literal /proc/mounts, NOT $PROC_ROOT/mounts: a synthetic PROC_ROOT has no
+# mount table, so deriving it would turn every such run into disk-missing and silently stop it
+# exercising whatever it was meant to test.
+MOUNTS_FILE="${VGW_MOUNTS_FILE:-/proc/mounts}"
 
 #--- logging ------------------------------------------------------------------------------------
 rotate() {  # $1 = logfile. Size-capped so an unbounded log can never fill the internal pool.
@@ -118,6 +128,21 @@ case "$BASE" in
     echo "FATAL: supervisor base '$BASE' is on the external disk it watches -- refusing" >&2
     exit 1 ;;
 esac
+# The mount check below compares VGW_MOUNT to /proc/mounts LITERALLY, so it must be spelled the way
+# the kernel spells it: absolute, no trailing slash, and never "/" (which is always mounted and would
+# make the check vacuous). VGW_DIR must live under it, or passing that check would prove nothing
+# about the directory actually probed and started.
+case "$VGW_MOUNT" in
+  /|*/|[!/]*|'')
+    echo "FATAL: VGW_MOUNT '$VGW_MOUNT' must be an absolute mountpoint, not '/', with no trailing slash" >&2
+    exit 1 ;;
+esac
+case "$VGW_DIR" in
+  "$VGW_MOUNT"|"$VGW_MOUNT"/*) : ;;
+  *)
+    echo "FATAL: VGW_DIR '$VGW_DIR' is not under VGW_MOUNT '$VGW_MOUNT' -- refusing" >&2
+    exit 1 ;;
+esac
 mkdir -p "$STATE" 2>/dev/null || { echo "FATAL: cannot create $STATE" >&2; exit 1; }
 
 # Resolve a path's backing device WITHOUT touching that path's filesystem.
@@ -131,15 +156,20 @@ mkdir -p "$STATE" 2>/dev/null || { echo "FATAL: cannot create $STATE" >&2; exit 
 # This compares the configured paths literally; it does not resolve symlinks (readlink -f would
 # stat the target, which is the thing we must not do here). The installer does the thorough,
 # statfs-based check at install time, when the disk is known healthy.
-dev_of_path() {
-  awk -v p="$1" '
-    { dev = $1; mp = $2 }
+#
+# `>=`, not `>`: when two mounts are STACKED on the same mountpoint, /proc/mounts lists them in
+# mount order and the LAST one is the one a path lookup actually reaches.
+mount_of_path() {  # $1 = path, $2 = field (1 = device, 2 = mountpoint). Empty if the table is unreadable.
+  awk -v p="$1" -v f="$2" '
+    { mp = $2 }
     mp == "/" || index(p "/", mp "/") == 1 {
-      if (length(mp) > n) { n = length(mp); d = dev }
+      if (length(mp) >= n) { n = length(mp); r = $f }
     }
-    END { print d }
-  ' "$PROC_ROOT/mounts" 2>/dev/null
+    END { print r }
+  ' "$MOUNTS_FILE" 2>/dev/null
 }
+dev_of_path() { mount_of_path "$1" 1; }
+mp_of_path()  { mount_of_path "$1" 2; }
 
 # Prove the base is on a different block device than the gateway's disk. A symlink or a remount
 # could otherwise quietly put our lock and logs back onto the USB, re-arming the original bug.
@@ -378,6 +408,37 @@ case "${http_code:-000}" in
   *)      http_ok=yes ;;
 esac
 
+#--- is the USB disk even MOUNTED? -----------------------------------------------------------------
+# 2026-09-29: the USB disk fell off the bus (dmesg: `usb4-port1: Cannot enable. Maybe the USB cable
+# is bad?`) and QTS unmounted it, leaving $VGW_MOUNT an empty directory on the /share TMPFS. Every
+# check this script had still passed: dev_of_path resolved $VGW_DIR to that tmpfs, which is not the
+# base's device, and probe B's `mkdir -p` then CREATED $VGW_DIR/.health in RAM and read its own
+# write back. So it logged `disk=ok` for 6.5h while "restarting" a start.sh that did not exist,
+# until the restart budget ran out -- and had a start.sh existed there, it would have started a
+# gateway serving an empty S3 store from RAM.
+#
+# So the disk's identity is its MOUNTPOINT: the mount that backs $VGW_DIR must be $VGW_MOUNT
+# verbatim. Not a device name -- a re-enumerated USB disk can come back as sdc instead of sdb, and
+# that is fine. Read from /proc/mounts only, never statfs, for the wedge-safety reason given at
+# dev_of_path. An unreadable table resolves to nothing and therefore also counts as missing: when
+# the supervisor cannot tell, it must not touch the path.
+#
+# A missing disk is not something a restart, a probe or a kill can help with -- it needs a human
+# at the NAS. Report it and touch nothing under $VGW_DIR: no probe, no mkdir, no restart, no
+# restart-ledger entry (a re-seated disk should get its full restart budget).
+disk_missing() {  # $1 = the mountpoint $VGW_DIR resolved to instead; exits
+  set_status disk-missing \
+    "USB disk NOT MOUNTED: $VGW_DIR is not on the $VGW_MOUNT mount in /proc/mounts (it resolves to '${1:-<mount table unreadable>}', http=${http_code:-none}); NOT probing, NOT restarting. Physical attention: dmesg 'Cannot enable' = re-seat the USB cable/disk"
+  event 2 "USB disk not mounted at $VGW_MOUNT; versitygw not probed or restarted -- the disk needs physical attention (re-seat)"
+  exit 0
+}
+require_mount() {
+  local mp
+  mp=$(mp_of_path "$VGW_DIR")
+  [ "$mp" = "$VGW_MOUNT" ] || disk_missing "$mp"
+}
+require_mount
+
 #--- probe B: is the DISK underneath actually usable? ---------------------------------------------
 # The only place this script touches the USB, and it is fenced. Runs as a child so the parent keeps
 # control when the filesystem wedges. Probes $VGW_DIR/.health -- the same ext4 filesystem as the S3
@@ -399,7 +460,17 @@ set -m
   hdir="$VGW_DIR/.health"
   f="$hdir/probe.$$"
   stamp="probe-$(date +%s)-$$"
-  mkdir -p "$hdir" 2>/dev/null || { echo "mkdir-failed" > "$PROBE_RESULT"; exit 1; }
+  # $VGW_DIR itself absent from a MOUNTED disk (wiped, replaced, or the wrong disk at the mountpoint)
+  # is not a sick disk, and must not be reported as one: that would send triage hunting for D-state
+  # in dmesg. But `[ -d ]` is also false on EIO, so it only counts as gwdir-missing if the mount
+  # root can still be listed; otherwise the filesystem is not answering and it stays disk-unhealthy.
+  if [ ! -d "$VGW_DIR" ]; then
+    if ls -a "$VGW_MOUNT" >/dev/null 2>&1; then r=gwdir-missing; else r=mountroot-unreadable; fi
+    echo "$r" > "$PROBE_RESULT"; exit 1
+  fi
+  # NOT `mkdir -p`: creating parents is exactly how the 2026-09-29 probe built a fake $VGW_DIR on
+  # tmpfs. Only .health itself may be created, and only inside a $VGW_DIR that already exists.
+  [ -d "$hdir" ] || mkdir "$hdir" 2>/dev/null || { echo "mkdir-failed" > "$PROBE_RESULT"; exit 1; }
   printf '%s' "$stamp" > "$f" 2>/dev/null || { echo "write-failed" > "$PROBE_RESULT"; exit 1; }
   got=$(cat "$f" 2>/dev/null)
   rm -f "$f" 2>/dev/null
@@ -456,6 +527,16 @@ rm -f "$PROBE_RESULT" 2>/dev/null
 if [ "$disk_result" = ok ]; then disk_ok=yes; else disk_ok=no; fi
 
 #--- decide ---------------------------------------------------------------------------------------
+if [ "$disk_result" = gwdir-missing ]; then
+  # An unmount racing the probe also leaves $VGW_DIR absent, and that is disk-missing, so re-check
+  # the mount first. What remains is a healthy mount that simply does not hold the gateway: no
+  # start.sh to run, so no restart, and nothing is created under $VGW_MOUNT to "repair" it.
+  require_mount
+  set_status gwdir-missing \
+    "$VGW_MOUNT is mounted and answers, but $VGW_DIR does not exist on it (http=${http_code:-none}); NOT restarting -- the disk was wiped or replaced, or a different disk is mounted there. Not a USB wedge: check what is on the mount"
+  event 2 "$VGW_DIR missing from the mounted disk at $VGW_MOUNT; versitygw not restarted -- wiped or replaced disk?"
+  exit 0
+fi
 if [ "$disk_ok" = no ]; then
   # Invariant 3: the disk is the problem, so a restart is not the answer. Report and stop.
   set_status disk-unhealthy "disk probe failed ($disk_result, http=${http_code:-none}); NOT restarting -- storage intervention required"
@@ -489,6 +570,10 @@ if [ "$recent" -ge "$MAX_RESTARTS" ]; then
   exit 0
 fi
 
+# The mount was checked before probe B, but that was up to DISK_TIMEOUT seconds ago. /proc is cheap,
+# so check again before stopping anything, and once more right before exec'ing start.sh from it.
+require_mount
+
 # Reap an unresponsive-but-present process before starting a replacement, so we never end up with
 # two gateways contending for :7070. Safe to signal: we only get here with a HEALTHY disk, so the
 # process is not in uninterruptible sleep. TERM, grace, then KILL.
@@ -505,6 +590,7 @@ if ps w 2>/dev/null | grep -q '[v]ersitygw --port :7070'; then
   sleep 1
 fi
 
+require_mount
 printf '%s\n' "$now" >> "$ATTEMPTS"
 # stdout goes to the INTERNAL log. The old watchdog appended to $VGW_DIR/versitygw.log on the USB,
 # which had grown to 478 MB unrotated and -- worse -- made the gateway block on its own logging the

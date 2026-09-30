@@ -29,6 +29,9 @@ tests:
         values: "1100+0x30"
       - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29000000"}'
         values: "0+0x30"
+      # ...which the CronJob controller records as its last success.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"}'
+        values: "1100+0x30"
       # The current probe, which failed. No completion_time — kube-state-metrics only sets it on success.
       - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29000600"}'
         values: "1600+0x30"
@@ -52,6 +55,11 @@ tests:
                 `dmesg | grep -iE 'usb|jbd2|ext4'` — a stalled USB bridge leaves the ext4 journal
                 thread in D-state and every read on that filesystem hangs. Restarting versitygw does
                 NOT fix that; the device needs a reset or a replug.
+                If the NAS supervisor status (/share/ZFS2_DATA/.versitygw-supervisor/state/status)
+                says disk-missing, the disk fell off the USB bus and is not mounted at all: re-seat
+                it (runbook qnap-storage-setup.md section 8). If it says gwdir-missing, the disk is
+                mounted and answering but the versitygw directory is not on it (wiped or replaced
+                disk): not a USB wedge, so skip the dmesg hunt and see the same runbook section.
 
   # ------------------------------------------------------- REGRESSION: recovery must clear it
   # The failed Job is deliberately still present, exactly as it is in the cluster for up to an hour
@@ -72,13 +80,59 @@ tests:
         values: "2300+0x30"
       - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29001200"}'
         values: "0+0x30"
+      - series: 'kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"}'
+        values: "2300+0x30"
     alert_rule_test:
       - eval_time: 11m
         alertname: VersitygwProbeFailed
         exp_alerts: []
 
+  # --------------------------------- REGRESSION (2026-09-29): a LONG outage must keep paging
+  # An hour into an outage the last SUCCESSFUL Job has been deleted by ttlSecondsAfterFinished, so
+  # no kube_job_status_completion_time series is left for any probe — only failed Jobs, which keep
+  # being created every 10 minutes. The CronJob still remembers its last success. The superseded
+  # right-hand side, max(kube_job_status_completion_time), is EMPTY here, so that form returns
+  # nothing and fails this test: the alert went silent at 12:46 UTC while the store stayed down.
+  - interval: 1m
+    name: an outage outliving the successful Job's TTL keeps paging
+    input_series:
+      # The last success was ~90 minutes before the current failure; its Job is long gone.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="talos-backup", cronjob="versitygw-probe"}'
+        values: "100+0x30"
+      - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29005400"}'
+        values: "5400+0x30"
+      - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29005400"}'
+        values: "1+0x30"
+      - series: 'kube_job_status_start_time{namespace="talos-backup", job_name="versitygw-probe-29006000"}'
+        values: "6000+0x30"
+      - series: 'kube_job_status_failed{namespace="talos-backup", job_name="versitygw-probe-29006000"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: VersitygwProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "versitygw object store failed a read/write round-trip"
+              description: >-
+                The versitygw probe could not complete PUT -> GET -> verify -> DELETE against
+                192.168.1.225:7070. The object store is NOT usable even if it is still accepting
+                connections — that exact combination (listening, unable to serve) is what caused the
+                2026-09-08 outage. Velero, the Talos etcd snapshots and the off-site sync all depend on
+                it and will fail until it is fixed; they are bounded by their own deadlines so they
+                will report rather than hang. Check the USB disk on the QNAP first:
+                `dmesg | grep -iE 'usb|jbd2|ext4'` — a stalled USB bridge leaves the ext4 journal
+                thread in D-state and every read on that filesystem hangs. Restarting versitygw does
+                NOT fix that; the device needs a reset or a replug.
+                If the NAS supervisor status (/share/ZFS2_DATA/.versitygw-supervisor/state/status)
+                says disk-missing, the disk fell off the USB bus and is not mounted at all: re-seat
+                it (runbook qnap-storage-setup.md section 8). If it says gwdir-missing, the disk is
+                mounted and answering but the versitygw directory is not on it (wiped or replaced
+                disk): not a USB wedge, so skip the dmesg hunt and see the same runbook section.
+
   # --------------------------------------------- the deliberate gap, and what actually covers it
-  # If a probe has NEVER succeeded there is no completion_time to compare against, so
+  # If a probe has NEVER succeeded there is no last-success time to compare against, so
   # VersitygwProbeFailed cannot fire. That is by design — VersitygwProbeStale's absent() clause is
   # the alert for "no successful round-trip", and this asserts the handoff really happens rather
   # than leaving a silent hole between the two rules.

@@ -19,8 +19,26 @@ cd "$(dirname "$0")/.."
 
 BASE="${VGW_SUPERVISOR_BASE:-/share/ZFS2_DATA/.versitygw-supervisor}"
 VGW_DIR="${VGW_DIR:-/share/external/DEV3302_2/versitygw}"
+VGW_MOUNT="${VGW_MOUNT:-/share/external/DEV3302_2}"
 SCHEDULE="${SCHEDULE:-*/3 * * * *}"
 DRY_RUN="${DRY_RUN:-0}"
+
+# The watchdog's own config refusals, mirrored so they surface HERE, before the NAS is touched, with
+# the right message. Otherwise a trailing-slash VGW_MOUNT fails the /proc/mounts precondition below
+# as "the USB disk is missing", and a VGW_DIR outside VGW_MOUNT makes that precondition prove nothing
+# about the directory the steps below then check, retire the old watchdog in, and truncate a log in.
+# Keep these identical to the two case statements in the watchdog.
+case "$VGW_MOUNT" in
+  /|*/|[!/]*|'')
+    echo "FATAL: VGW_MOUNT '$VGW_MOUNT' must be an absolute mountpoint, not '/', with no trailing slash" >&2
+    exit 1 ;;
+esac
+case "$VGW_DIR" in
+  "$VGW_MOUNT"|"$VGW_MOUNT"/*) : ;;
+  *)
+    echo "FATAL: VGW_DIR '$VGW_DIR' is not under VGW_MOUNT '$VGW_MOUNT' -- refusing" >&2
+    exit 1 ;;
+esac
 
 SRC=scripts/qnap-versitygw-watchdog.sh
 [ -f "$SRC" ] || { echo "missing $SRC" >&2; exit 1; }
@@ -45,7 +63,12 @@ REMOTE_CMD="
   DRY=$DRY_RUN
 
   echo '== preconditions =='
-  [ -d '$VGW_DIR' ] || { echo \"FATAL: $VGW_DIR not found -- is the USB disk mounted?\"; exit 1; }
+  # The MOUNT first, from /proc/mounts. A bare [ -d ] is not proof: on 2026-09-29 the old probe's
+  # mkdir -p recreated $VGW_DIR on the /share tmpfs under the unmounted mountpoint, so the directory
+  # existed while the disk did not -- and df below would then have compared against that tmpfs.
+  awk -v m='$VGW_MOUNT' '\$2 == m { f = 1 } END { exit !f }' /proc/mounts \
+    || { echo \"FATAL: $VGW_MOUNT is not mounted -- the USB disk is missing (runbook qnap-storage-setup.md section 8, disk-missing)\"; exit 1; }
+  [ -d '$VGW_DIR' ] || { echo \"FATAL: $VGW_DIR not found on the mounted USB disk\"; exit 1; }
   # The whole point of W3 is that the supervisor does not live on the disk it watches. Prove it
   # here too, so a mis-set BASE fails the INSTALL rather than silently re-arming the original bug.
   case '$BASE' in /share/external/*) echo 'FATAL: BASE is on the external disk'; exit 1 ;; esac

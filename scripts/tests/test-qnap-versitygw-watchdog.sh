@@ -8,7 +8,8 @@
 #
 # Run on Linux (WSL is fine): bash scripts/tests/test-qnap-versitygw-watchdog.sh
 # The suite needs two DIFFERENT filesystems to exercise the same-device guard honestly, so it puts
-# the supervisor base on /tmp and the fake "USB" on /dev/shm.
+# the supervisor base on /tmp and the fake "USB" on /dev/shm -- which is therefore also the USB's
+# mountpoint (VGW_MOUNT) for every case that does not supply its own synthetic mount table.
 set -u
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/qnap-versitygw-watchdog.sh"
@@ -24,6 +25,11 @@ check(){ # check <desc> <expected-substring> <actual>
 ROOT=$(mktemp -d /tmp/vgwtest.XXXXXX)
 USBROOT=$(mktemp -d /dev/shm/vgwusb.XXXXXX)
 trap 'chmod -R u+rwx "$USBROOT" 2>/dev/null; rm -rf "$ROOT" "$USBROOT"' EXIT
+# The supervisor refuses to probe unless the directory it watches sits on VGW_MOUNT exactly as
+# /proc/mounts spells it. /dev/shm is a real tmpfs mountpoint on Linux/WSL, and every fake USB dir
+# below is created under it.
+grep -q '^[^ ]* /dev/shm ' /proc/mounts || { echo "precondition: /dev/shm is not a mountpoint here"; exit 1; }
+export VGW_MOUNT=/dev/shm
 
 # --- stubs -------------------------------------------------------------------------------------
 # curl stub: prints whatever $ROOT/http_code says. "000" is curl's own value for "no response",
@@ -99,6 +105,230 @@ chmod 700 "$USBROOT/sickdisk"
 check "unwritable disk is reported as disk-unhealthy" "disk-unhealthy" "$(status_of)"
 [ ! -f "$ROOT/started" ] && ok "NO restart attempted while the disk is bad" \
   || bad "NO restart attempted while the disk is bad" "start.sh ran — this is the 2026-09-08 bug"
+
+echo
+echo "== the disk is its MOUNT: an unmounted USB is disk-missing, never a probe target =="
+# 2026-09-29: the USB dropped off the bus and QTS unmounted it, leaving the mountpoint an empty dir
+# on the /share tmpfs. The old probe `mkdir -p`'d $VGW_DIR/.health there, read its own write back,
+# reported disk=ok for 6.5h and kept "restarting" a start.sh that no longer existed. These cases
+# feed SYNTHETIC mount tables (VGW_MOUNTS_FILE) so "mounted" and "not mounted" are decided by the
+# table alone -- the fake USB directory exists and is writable in both, exactly like the tmpfs
+# directory under the real unmounted mountpoint.
+mk_mounts() { # mk_mounts <file> <dev> <mountpoint> [<dev> <mountpoint> ...]
+  local f=$1; shift
+  : > "$f"
+  while [ $# -ge 2 ]; do printf '%s %s ext4 rw 0 0\n' "$1" "$2" >> "$f"; shift 2; done
+}
+mk_mounts "$ROOT/mounts.present" /dev/root / tmpfs /dev /dev/sdb2 /dev/shm
+mk_mounts "$ROOT/mounts.renamed" /dev/root / tmpfs /dev /dev/sdc2 /dev/shm
+mk_mounts "$ROOT/mounts.absent"  /dev/root / tmpfs /dev
+# A mkdir spy: records every mkdir aimed anywhere under the fake USB, then does the real thing.
+mkdir -p "$ROOT/spybin"
+cat > "$ROOT/spybin/mkdir" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in *"$SPY_ROOT"*) echo "$*" >> "$CTL_DIR/usb_mkdirs" ;; esac
+exec /bin/mkdir "$@"
+STUB
+chmod +x "$ROOT/spybin/mkdir"
+SPY="PATH=$ROOT/spybin:$PATH"
+
+# The full incident shape: gateway down, start.sh present and runnable -- everything a restart
+# needs except the disk actually being mounted. Pre-fix this RESTARTED.
+CASE=missing; reset_case $CASE
+echo 000 > "$ROOT/http_code"; mk_start "$USBROOT/missing" up
+rm -f "$ROOT/usb_mkdirs"
+run missing VGW_MOUNTS_FILE="$ROOT/mounts.absent" "$SPY" SPY_ROOT="$USBROOT"
+check "USB mount absent => disk-missing" "disk-missing" "$(status_of)"
+[ ! -f "$ROOT/started" ] && ok "…and NO restart while the disk is not mounted" \
+  || bad "no restart while unmounted" "start.sh ran -- the 2026-09-29 bug"
+[ ! -e "$USBROOT/missing/.health" ] && ok "…and the probe does not create .health under the bare mountpoint" \
+  || bad "no .health on an unmounted path" ".health created -- the probe ran against tmpfs"
+[ ! -s "$ROOT/usb_mkdirs" ] && ok "…and no mkdir is attempted anywhere under the mountpoint" \
+  || bad "no mkdir under the mountpoint" "mkdir called: $(cat "$ROOT/usb_mkdirs")"
+[ ! -s "$ROOT/$CASE/state/attempts" ] && ok "…and the restart ledger is untouched" \
+  || bad "restart ledger untouched" "attempts=$(cat "$ROOT/$CASE/state/attempts")"
+[ ! -d "$ROOT/$CASE/state/lock" ] && ok "…and the lock is released" || bad "lock released on disk-missing" "lock still held"
+check "…and the status names the fix (a physical re-seat)" "re-seat" "$(cut -f3 "$ROOT/$CASE/state/status" 2>/dev/null)"
+
+# The literal post-unmount state: the gateway directory does not exist at all, only the mountpoint.
+# `mkdir -p` would have recreated it; nothing may.
+CASE=missingdir; reset_case $CASE
+echo 000 > "$ROOT/http_code"
+rm -rf "$USBROOT/missingdir"
+run missingdir VGW_MOUNTS_FILE="$ROOT/mounts.absent"
+check "USB absent and the gateway dir gone => disk-missing" "disk-missing" "$(status_of)"
+[ ! -e "$USBROOT/missingdir" ] && ok "…and the gateway directory is not re-created on the bare mountpoint" \
+  || bad "gateway dir not re-created" "$USBROOT/missingdir exists -- litter on the rootfs"
+
+# A gateway that still ANSWERS (the process outlived its disk, or something else is on :7070) must
+# not make an unmounted disk read as healthy.
+CASE=missing403; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/missing403" no
+run missing403 VGW_MOUNTS_FILE="$ROOT/mounts.absent"
+check "USB absent while the gateway still answers => disk-missing, not healthy" "disk-missing" "$(status_of)"
+
+# The device NAME is not the identity: a USB disk that re-enumerates comes back as sdc instead of
+# sdb. Mounted at the right place, it is healthy -- and the spy proves the probe really ran through
+# it, so the "no mkdir" assertion above is not vacuous.
+CASE=renamed; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/renamed" no
+rm -f "$ROOT/usb_mkdirs"
+run renamed VGW_MOUNTS_FILE="$ROOT/mounts.renamed" "$SPY" SPY_ROOT="$USBROOT"
+check "mount present under a different device name => healthy" "healthy" "$(status_of)"
+grep -q "renamed/.health" "$ROOT/usb_mkdirs" 2>/dev/null && ok "…and the probe ran on it (the mkdir spy saw .health)" \
+  || bad "spy saw the probe" "no .health mkdir recorded -- the spy is not in the path, so the no-mkdir check proves nothing"
+grep -qE '(^| )-p( |$)' "$ROOT/usb_mkdirs" 2>/dev/null && bad "probe never uses mkdir -p" "$(cat "$ROOT/usb_mkdirs")" \
+  || ok "…and the probe creates .health without -p (it cannot invent parents)"
+
+# Something ELSE mounted deeper, between VGW_MOUNT and VGW_DIR: the gateway dir is not on the USB.
+CASE=nested; reset_case $CASE
+echo 000 > "$ROOT/http_code"; mk_start "$USBROOT/nested" up
+mk_mounts "$ROOT/mounts.nested" /dev/root / tmpfs /dev /dev/sdb2 /dev/shm /dev/loop7 "$USBROOT/nested"
+run nested VGW_MOUNTS_FILE="$ROOT/mounts.nested"
+check "a different filesystem mounted over the gateway dir => disk-missing" "disk-missing" "$(status_of)"
+[ ! -f "$ROOT/started" ] && ok "…and no restart" || bad "no restart on a nested mount" "start.sh ran"
+
+# Cannot read the mount table => cannot prove the disk is there => do not touch it.
+CASE=nomounts; reset_case $CASE
+echo 000 > "$ROOT/http_code"; mk_start "$USBROOT/nomounts" up
+run nomounts VGW_MOUNTS_FILE="$ROOT/does-not-exist"
+check "an unreadable mount table fails safe (disk-missing)" "disk-missing" "$(status_of)"
+[ ! -f "$ROOT/started" ] && ok "…and no restart" || bad "no restart on unreadable mounts" "start.sh ran"
+
+# The disk vanishes AFTER the probe passed. The mkdir spy swaps the live table to "absent" the
+# moment the probe creates .health, so the probe succeeds against a mounted disk and the restart
+# decision then meets an unmounted one. start.sh must not be exec'd off the bare mountpoint.
+CASE=unmountrace; reset_case $CASE
+echo 000 > "$ROOT/http_code"; mk_start "$USBROOT/unmountrace" up
+mkdir -p "$ROOT/swapbin"
+cat > "$ROOT/swapbin/mkdir" <<'STUB'
+#!/usr/bin/env bash
+/bin/mkdir "$@"; rc=$?
+case "$*" in *.health*) cp "$CTL_DIR/mounts.absent" "$CTL_DIR/mounts.live" ;; esac
+exit $rc
+STUB
+chmod +x "$ROOT/swapbin/mkdir"
+cp "$ROOT/mounts.present" "$ROOT/mounts.live"
+run unmountrace VGW_MOUNTS_FILE="$ROOT/mounts.live" PATH="$ROOT/swapbin:$PATH"
+if [ ! -d "$USBROOT/unmountrace/.health" ]; then
+  bad "an unmount after the probe blocks the restart" "precondition not met: the probe never ran, so this proves nothing"
+else
+  check "an unmount between the probe and the restart => disk-missing" "disk-missing" "$(status_of)"
+  [ ! -f "$ROOT/started" ] && ok "…and start.sh is NOT exec'd off the bare mountpoint" \
+    || bad "no restart after a late unmount" "start.sh ran"
+fi
+
+# The disk IS mounted and answering, but the gateway directory is not on it (a wiped or replaced
+# disk). That is not a sick disk: reporting it as disk-unhealthy (mkdir-failed) sent triage hunting
+# for D-state in dmesg. Real /proc/mounts here, so the mount check genuinely passes.
+CASE=gwdirmissing; reset_case $CASE
+echo 000 > "$ROOT/http_code"
+rm -rf "$USBROOT/gwdirmissing"
+run gwdirmissing
+check "mounted disk without the gateway dir => gwdir-missing, not disk-unhealthy" "gwdir-missing" "$(status_of)"
+[ ! -e "$USBROOT/gwdirmissing" ] && ok "…and the gateway directory is not created on the mount" \
+  || bad "gateway dir not created" "$USBROOT/gwdirmissing exists"
+[ ! -s "$ROOT/$CASE/state/attempts" ] && ok "…and no restart is attempted (the ledger is untouched)" \
+  || bad "no restart on gwdir-missing" "attempts=$(cat "$ROOT/$CASE/state/attempts")"
+
+# ...unless the mount went away under the probe: an unmount racing it also leaves the directory
+# absent, and that is still disk-missing. The ls spy swaps the live table to "absent" at the moment
+# the probe lists the mount root, so only the parent's re-check can tell the two apart.
+CASE=gwdirrace; reset_case $CASE
+echo 000 > "$ROOT/http_code"
+rm -rf "$USBROOT/gwdirrace"
+mkdir -p "$ROOT/lsswapbin"
+cat > "$ROOT/lsswapbin/ls" <<'STUB'
+#!/usr/bin/env bash
+cp "$CTL_DIR/mounts.absent" "$CTL_DIR/mounts.live"
+exec /bin/ls "$@"
+STUB
+chmod +x "$ROOT/lsswapbin/ls"
+cp "$ROOT/mounts.present" "$ROOT/mounts.live"
+run gwdirrace VGW_MOUNTS_FILE="$ROOT/mounts.live" PATH="$ROOT/lsswapbin:$PATH"
+if ! cmp -s "$ROOT/mounts.live" "$ROOT/mounts.absent"; then
+  bad "an unmount under the probe is disk-missing, not gwdir-missing" "precondition not met: the ls spy never ran, so this proves nothing"
+else
+  check "an unmount under the probe is disk-missing, not gwdir-missing" "disk-missing" "$(status_of)"
+fi
+
+# `[ -d ]` is false on EIO too, so absence alone is not proof the disk is fine. If the mount root
+# cannot be listed either, the filesystem is not answering: that stays disk-unhealthy.
+CASE=gwdirio; reset_case $CASE
+echo 000 > "$ROOT/http_code"
+rm -rf "$USBROOT/gwdirio"
+mkdir -p "$ROOT/lsfailbin"
+cat > "$ROOT/lsfailbin/ls" <<'STUB'
+#!/usr/bin/env bash
+echo "ls: cannot open directory: Input/output error" >&2
+exit 2
+STUB
+chmod +x "$ROOT/lsfailbin/ls"
+run gwdirio PATH="$ROOT/lsfailbin:$PATH"
+check "gateway dir absent AND the mount root unlistable => disk-unhealthy" "disk-unhealthy" "$(status_of)"
+check "…naming the failed listing" "mountroot-unreadable" "$(cut -f3 "$ROOT/$CASE/state/status" 2>/dev/null)"
+
+# Configuration that would make the mount check meaningless is refused outright.
+CASE=cfgoutside; reset_case $CASE
+run cfgoutside VGW_MOUNT=/share/external/DEV3302_2
+check "VGW_DIR outside VGW_MOUNT is refused" "not under VGW_MOUNT" "$OUT"
+[ "$RC" = 1 ] && ok "…and exits non-zero" || bad "…and exits non-zero" "rc=$RC"
+CASE=cfgroot; reset_case $CASE
+run cfgroot VGW_MOUNT=/
+check "VGW_MOUNT=/ is refused (always mounted, so the check would be vacuous)" "must be an absolute mountpoint" "$OUT"
+CASE=cfgslash; reset_case $CASE
+run cfgslash VGW_MOUNT=/dev/shm/
+check "a trailing slash on VGW_MOUNT is refused (it would never match /proc/mounts)" "must be an absolute mountpoint" "$OUT"
+
+# PROC_ROOT (the process scanners' hook) and VGW_MOUNTS_FILE (the mount table's) are independent. A
+# run that points PROC_ROOT at a synthetic tree -- which has no mounts file -- must still read the
+# real mount table; when it defaulted to $PROC_ROOT/mounts, every such run collapsed into
+# disk-missing and silently stopped exercising whatever it was meant to test. (With no live /proc
+# entries the probe's group looks gone at once, so the verdict is healthy or disk-unhealthy
+# depending on whether the probe had finished; either proves the mount check passed.)
+CASE=procroot; reset_case $CASE
+echo 403 > "$ROOT/http_code"; mk_start "$USBROOT/procroot" no
+mkdir -p "$ROOT/procroot-fakeproc"
+run procroot PROC_ROOT="$ROOT/procroot-fakeproc"
+case "$(status_of)" in
+  healthy|disk-unhealthy) ok "a synthetic PROC_ROOT alone does not drag the mount table along" ;;
+  *) bad "a synthetic PROC_ROOT alone does not drag the mount table along" \
+         "status '$(status_of)' -- the mount table was read from \$PROC_ROOT/mounts" ;;
+esac
+
+echo
+echo "== the installer refuses the same configuration, before touching the NAS =="
+# The installer ships to the NAS through `python scripts/qnap-ssh.py`; a stub python records any
+# attempt to connect, so each refusal is also proven to happen BEFORE the NAS is contacted.
+# DRY_RUN=1 regardless, so a stub that failed to shadow the real python could still change nothing.
+INSTALLER="$(dirname "$SCRIPT")/qnap-versitygw-install.sh"
+mkdir -p "$ROOT/sshbin"
+cat > "$ROOT/sshbin/python" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+echo "$*" >> "$CTL_DIR/ssh_calls"
+STUB
+chmod +x "$ROOT/sshbin/python"
+install_run() { # install_run [env assignments...] -> populates $OUT and $RC
+  rm -f "$ROOT/ssh_calls"
+  OUT=$(env -u VGW_MOUNT CTL_DIR="$ROOT" PATH="$ROOT/sshbin:$PATH" DRY_RUN=1 "$@" bash "$INSTALLER" 2>&1)
+  RC=$?
+}
+install_run VGW_MOUNT=/share/external/DEV3302_2/
+check "installer: a trailing-slash VGW_MOUNT is a config error, not 'the USB disk is missing'" \
+  "must be an absolute mountpoint" "$OUT"
+[ "$RC" = 1 ] && [ ! -e "$ROOT/ssh_calls" ] && ok "…and it exits 1 without contacting the NAS" \
+  || bad "…and it exits 1 without contacting the NAS" "rc=$RC ssh=$(cat "$ROOT/ssh_calls" 2>/dev/null)"
+install_run VGW_DIR=/share/external/DEV3302_1/versitygw
+check "installer: a VGW_DIR outside VGW_MOUNT is refused" "not under VGW_MOUNT" "$OUT"
+[ "$RC" = 1 ] && [ ! -e "$ROOT/ssh_calls" ] && ok "…and it exits 1 without contacting the NAS" \
+  || bad "…and it exits 1 without contacting the NAS" "rc=$RC ssh=$(cat "$ROOT/ssh_calls" 2>/dev/null)"
+install_run VGW_MOUNT=/
+check "installer: VGW_MOUNT=/ is refused" "must be an absolute mountpoint" "$OUT"
+# The defaults must pass and really reach the stub, or "without contacting the NAS" proves nothing.
+install_run
+[ "$RC" = 0 ] && [ -s "$ROOT/ssh_calls" ] && ok "installer: the default configuration passes and reaches the (stubbed) NAS" \
+  || bad "installer: defaults pass" "rc=$RC ssh=$(cat "$ROOT/ssh_calls" 2>/dev/null) out: $OUT"
 
 echo
 echo "== a slow/hung probe must not pile up =="
