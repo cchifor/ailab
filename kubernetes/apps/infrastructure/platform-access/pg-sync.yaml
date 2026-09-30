@@ -701,7 +701,7 @@ spec:
             - name: sync
               # The CNPG operand image the platform's Cluster runs (python3 + psycopg2 bundled with
               # barman-cloud, verified 2026-09-21) — psycopg2's protocol stays in step with the server.
-              image: ghcr.io/cloudnative-pg/postgresql:16.9
+              image: ghcr.io/cloudnative-pg/postgresql:16.15
               imagePullPolicy: IfNotPresent
               command: ["python3", "-u", "/scripts/sync.py"]
               env:
@@ -794,7 +794,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sync
-          image: ghcr.io/cloudnative-pg/postgresql:16.9
+          image: ghcr.io/cloudnative-pg/postgresql:16.15
           imagePullPolicy: IfNotPresent
           command: ["python3", "-u", "/scripts/sync.py"]
           env:
