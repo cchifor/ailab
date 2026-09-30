@@ -46,7 +46,7 @@ COPY --from=docker.io/library/docker:29.8-cli@sha256:018edbc908e08fcc9dbf029c812
 COPY --from=docker.io/library/docker:29.8-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca \
      /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-buildx \
      /usr/local/libexec/docker/cli-plugins/
-COPY --from=ghcr.io/astral-sh/uv:0.12.20 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.21 /uv /uvx /usr/local/bin/
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
