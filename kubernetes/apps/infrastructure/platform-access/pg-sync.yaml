@@ -699,8 +699,12 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: sync
-              # The CNPG operand image the platform's Cluster runs (python3 + psycopg2 bundled with
-              # barman-cloud, verified 2026-09-21) — psycopg2's protocol stays in step with the server.
+              # The CNPG operand image LINE the platform's strive-pg Cluster runs (python3 + psycopg2
+              # bundled with barman-cloud). The Cluster is on 16.9 and is managed by the platform repo;
+              # renovate.json holds this image to 16.x, the same major, so a client minor may lead the
+              # server but the libpq protocol cannot drift. Every 16.x bump must pass
+              # scripts/tests/test-platform-pg-sync.sh (manifests CI) under this exact image; 16.15 did
+              # on 2026-09-30 (#982).
               image: ghcr.io/cloudnative-pg/postgresql:16.15
               imagePullPolicy: IfNotPresent
               command: ["python3", "-u", "/scripts/sync.py"]
