@@ -1,5 +1,13 @@
 # Resolve the four open ailab PRs (#973, #981, #971, #835) and the #975 NAS deploy
 
+## Codex Review
+
+- Most round-one issues are resolved. The remaining preflight gaps concern matching the rollback revision to live state and treating request logs as traffic evidence, not proof that streams have drained.
+- Flux reads this repository from GitHub, so rollout and recovery need a bounded source-update wait, explicit cluster context, prepared recovery manifests, and confirmation that the revert reached Flux before resuming.
+- The local smoke still needs tenant-key authentication/accounting coverage; the verification matrix must distinguish main-gateway and local-gateway checks.
+- A single latency sample is too noisy for automatic rollback, and repeating the full per-pod matrix adds little during observation; reuse for #981 also needs refreshed release-specific values and the remaining digest-comment cleanup.
+- NAS recovery still contradicts itself by allowing restoration of the captured vulnerable watchdog while forbidding that version. The section 4 pushback is accepted; the existing supersession note resolves the historical `.38` concern.
+
 ## Context
 
 This follows `plans/2026-09-29-held-prs-plan.md` (branch `plan/held-prs-2026-09-29`, codex-reviewed).
@@ -85,6 +93,7 @@ refreshes the evidence it depends on.
 
 Ordering: #973 tonight, alone. The NAS deploy (5) never shares a window with a gateway change,
 because the recorded USB incident also took Gitea down, which is the gateway's GitOps recovery path.
+<!-- codex: Keeping separate windows is sensible, but `gotk-sync.yaml` now sources ailab from the GitHub mirror; Gitea's loss blocks publishing a new revert, not ongoing Flux reconciliation. Correct that distinction because an emergency live rollback can still be overwritten while Gitea is down. -->
 
 ### 1. #973: merge from 20:00Z, verify each pod, keep a prepared rollback
 
@@ -92,8 +101,10 @@ because the recorded USB incident also took Gitea down, which is the gateway's G
    - The head is still `603a4257`, CI is green on it, both approvals are on it, and it is mergeable.
    - Record the full pre-merge image digests, `checksum/config` / `checksum/chatgpt-chat`, the
      ReplicaSet revisions and the main sha.
+     <!-- codex: Confirm that this main SHA's LiteLLM manifests match the currently applied Flux revision and live image/configuration hashes before choosing it as the rollback baseline. Latest main alone can contain an unapplied change, so restoring it would not necessarily restore the state just tested. -->
    - Check the last 10 min of both LiteLLM Deployments' logs for in-flight or recent requests; if
      there is an active long stream, wait.
+     <!-- codex: A 900-second request can start outside this ten-minute slice, and HTTP access logs do not reliably show when an SSE stream finishes. Treat these logs as recent-traffic evidence, check known active consumers where possible, and retain the explicit interruption acceptance rather than treating quiet logs as proof of draining. -->
    - Baseline requests: run the step 1.4 smoke calls once BEFORE the merge, to have a reference
      (content, finish reason, latency).
    - `pg_dump -Fc litellm` from infra-pg to local storage as the DB restore point, and verify it with
@@ -101,6 +112,7 @@ because the recorded USB incident also took Gitea down, which is the gateway's G
 2. **Merge:** squash-merge via the API with `head_commit_id: 603a4257…` so a changed head is refused.
    Record the squash sha. The `no-automerge` label only stops the bot; this is the human decision.
 3. **Rollout watch (deadline 10 min from Flux applying the sha):**
+   <!-- codex: Add a bounded merge-to-source/apply wait as well: a stale GitHub mirror or failed source fetch never starts the current deadline. Use the GitRepository artifact and the Kustomization's attempted revision/events to detect application starting; `lastAppliedRevision` plus Ready is completion evidence, not the timer's start. -->
    - The `apps` Kustomization (wait: true, 5-min timeout) shows the squash sha applied and is Ready.
    - Both Deployments reach updated == available == desired, with no `ProgressDeadlineExceeded`.
    - Every pod is on `v1.103.0@sha256:bd089afd…`, and the endpoints contain only new pods.
@@ -120,6 +132,7 @@ because the recorded USB incident also took Gitea down, which is the gateway's G
    - Main gateway, one non-chatgpt route, plus one Responses API call (`/v1/responses`).
    - `litellm-local`: one local-model completion. Also `GET /key/info` for the existing virtual key
      (master key, read-only), which proves the DB-backed key store reads after the migrations.
+     <!-- codex: Specify that the completion uses the existing restricted virtual key, then verify its model restriction and the resulting spend update after the accounting flush. A master-key `/key/info` read alone leaves round one's tenant authentication/accounting check unresolved; no production quota exhaustion is needed. -->
 5. **Rollback triggers (act immediately):**
    - any functional check failing reproducibly
    - a crash-loop or a rollout past its deadline
@@ -127,21 +140,27 @@ because the recorded USB incident also took Gitea down, which is the gateway's G
    - an auth/budget 4xx on a call that passed in the baseline
    - a latency regression over 2× the baseline
    A single upstream-provider 5xx that doesn't reproduce is not a trigger. Re-run the check.
+   <!-- codex: One baseline sample and a 2× latency cutoff are too sensitive to provider variability and local-model cold starts; repeat the same bounded request under comparable conditions before rolling back for latency alone. Give each smoke call an explicit overall deadline, including SSE completion, so a hanging check cannot wait indefinitely or consume the proxy's full 900-second timeout. -->
 6. **Rollback procedure (prepared before merging, owner = this operator session):**
+   <!-- codex: Bind all cluster commands in this procedure to `--context admin@ai`, with `-n flux-system` for Flux objects and `-n ai` for LiteLLM resources; CLAUDE.md says the default context is a different cluster. Also spell out `flux resume kustomization apps` rather than the incomplete `flux resume`. -->
    - **Normal path:** `git revert <squash-sha>` as a PR, then squash-merge it via the API. That
      restores all three image refs, the handler bytes and the checksums together. Then
      `flux reconcile kustomization apps --with-source` and re-run step 4.
+     <!-- codex: Set a short recovery deadline for the revert PR and reconciliation, with escalation to the emergency path if CI/review queues or source convergence exceed it even when Gitea is reachable. After either recovery path, verify the restored rollout and endpoint membership before re-running the functional checks. -->
    - **Emergency path, if Gitea/Flux is unavailable:**
      1. `flux suspend kustomization apps`.
      2. `kustomize build kubernetes/apps/apps/ai` at the recorded pre-merge sha, filtered to the
         LiteLLM ConfigMaps + Deployments, then `kubectl apply`. That restores config, handler and
         image together; ReplicaSet `rollout undo` alone would pair old pods with the in-place-updated
         ConfigMaps.
+        <!-- codex: Before merging, save the rendered recovery bundle locally with an explicit allowlist of `ai/litellm-config`, `ai/litellm-local-config`, and the two Deployments, and record the apply command. This removes checkout/build/filter decisions from the outage path and excludes unrelated AI resources and encrypted Secrets; confirm suspension before applying the ConfigMaps and then the Deployments. -->
      3. Once Git is reachable, land the revert and `flux resume`.
+        <!-- codex: Keep `apps` suspended until the revert is mirrored to GitHub and the refreshed `flux-system` GitRepository artifact contains it; merging to Gitea alone does not establish that. Otherwise resuming can immediately reapply the failed version from the cached source artifact. -->
    - The DB needs no action (additive migrations; the dump is only for disaster).
 7. **Observation:** start the 15-minute window after both rollouts complete. Run step 4 again at its
    end, and check restarts, memory and Flux status. Re-check once more after the 07Z load start
    (restarts, logs, a smoke call). Only then is #981 eligible.
+   <!-- codex: The initial per-pod suite is proportionate given the weak readiness probes, but repeating the full provider/endpoint matrix after fifteen minutes adds little for three unchanged pods. A short main-gateway non-streaming/streaming smoke plus a local virtual-key call and the listed health checks is sufficient for observation; repeat the full suite if pods change or an anomaly appears. -->
 
 ### 2. #981: keep it open, let Renovate regenerate it, and review the patch delta only
 
@@ -149,6 +168,7 @@ because the recorded USB incident also took Gitea down, which is the gateway's G
    `litellm-local.yaml` pin comment version-agnostic ("SAME pin as litellm.yaml; bump together").
    That way a Renovate bump can never stale it, and nobody commits on the Renovate branch, whose
    maintenance a human commit would stop. This answers 51202.
+   <!-- codex: The mirrored-route description inside `litellm-local.yaml`'s `config.yaml` also embeds the current image digest (`bd089afd…` after #973), which Renovate's image-ref update will leave stale. Include that still-unresolved round-one cleanup, regenerate `checksum/config`, and account for the resulting local-pod rollout when scheduling the source-fix PR. -->
 2. Renovate's CronJob runs every 4 h (concurrency Forbid). After the next successful run, check that
    #981 is rebased. If not, tick its rebase checkbox, and investigate a conflict or manual-commit
    detection if it stays stuck.
@@ -161,6 +181,7 @@ because the recorded USB incident also took Gitea down, which is the gateway's G
    fresh review of the v1.103.0 → v1.103.1 changelog and migration delta, done the same way.
 5. Merge in a later quiet window, after #973's observation, with step 1's full procedure. Its rollback
    reverts ITS squash commit to the verified #973/v1.103.0 baseline, which keeps the handler fix.
+   <!-- codex: Before reusing section 1, substitute #981's full reviewed head SHA, target image digest, current rollback baseline, and actual migration delta. Its hardcoded `603a4257`, v1.103.0, and eighteen new migrations are #973-specific and cannot be used as #981's merge or acceptance gates. -->
 
 ### 3. #971: hold. Post the evidence and the exact merge preconditions
 
@@ -203,8 +224,6 @@ because the recorded USB incident also took Gitea down, which is the gateway's G
   - `.39` and vmid 4402 re-checked at execution
 - An infra-only split is possible but has no demonstrated need.
 - Owner: the #972 assignee. Next check: when #972 closes.
-<!-- codex: The older `2026-09-20-env-pool-root-cause-followup-plan.md` still contains executable `.38` instructions and monitoring references, which must be superseded before resuming provisioning. -->
-<!-- opus-pushback: `plans/` are dated historical records that CLAUDE.md says not to rewrite, and #835's own branch (env-pool variables.tf, runbook, dashboard selector) plus main's IPAM now say `.39`. Execution follows #835's branch, not the 09-20 plan. The right guard is a note on #972/#835 that the 09-20 plan's `.38` is superseded, not an edit to the old plan. -->
 
 ### 5. #975 NAS deploy: ESCALATED. It needs the operator's explicit go, in its own window
 
@@ -244,6 +263,7 @@ use this procedure (never in the same window as a gateway change):
    script and crontab. Never re-install the pre-#975 script, which has the tmpfs bug and no mount
    guard. `.env` has to be provided explicitly to any other worktree. Truncated logs and gateway
    restarts can't be undone.
+   <!-- codex: The context says the captured deployed watchdog is precisely the old vulnerable version, so restoring that capture contradicts “Never re-install the pre-#975 script.” Name a verified recovery artifact that retains the mount guard and compatible cron entries, or make a forward fix the only supported script recovery. -->
 
 ## Critical files
 
@@ -261,6 +281,7 @@ use this procedure (never in the same window as a gateway change):
   - streaming delivery with an (estimated) usage chunk and `[DONE]`
   - a non-chatgpt route and `/v1/responses`
   - a local model and `/key/info`
+  <!-- codex: Split “Each pod passes” by Deployment: the two main pods get the main-route checks, and the local pod gets the local-model/key checks. `api.chifor.me` routes only to the main gateway, so public-ingress checks cannot verify the local gateway; use its normal LAN/Service path for that coverage. -->
   After the 15-min observation, the checks are re-run with no restarts. They are re-checked after 07Z.
 - **2:** the version-agnostic comment is on main. The regenerated #981 head contains #973's handler,
   its three refs agree, all CI is green, fresh approvals are in, and 51202/51203 are answered. It is
