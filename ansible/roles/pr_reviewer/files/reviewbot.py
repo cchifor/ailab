@@ -784,12 +784,14 @@ class RateLimited(RuntimeError):
     "model" (one tier on this seat - the (seat, model) pair parks and the same tier is tried
     on the next seat). `model` is the tier that was asked for."""
 
-    def __init__(self, message, reset_at=None, scope="account", model=None, unserveable=False):
+    def __init__(self, message, reset_at=None, scope="account", model=None, unserveable=False,
+                 reason="limit"):
         super().__init__(message)
         self.reset_at = reset_at
         self.scope = scope
         self.model = model
         self.unserveable = unserveable
+        self.reason = reason            # "limit", or "login": the seat cannot authenticate
 
 
 class ModelError(RuntimeError):
@@ -803,6 +805,43 @@ class ModelError(RuntimeError):
 # required`). MODEL-scoped and parked for MAX_PARK_S: without this every PR would burn its
 # attempts against a name that never answers.
 MODEL_404_RE = re.compile(r"issue with the selected model|does not support this model", re.I)
+
+# A seat whose LOGIN is gone. The CLI answers `Not logged in · Please run /login` (exit 1,
+# subtype=success) without ever reaching the model, in about a second, on every tier. It used to
+# be a ModelError: no park, the ladder walked fable -> opus -> sonnet on the SAME seat, and the
+# PR paid an attempt. Because selection is tier-major, the dead seat was also the FIRST choice
+# whenever the healthy seats had their top tier spent - it was the only seat not known to be out
+# of fable - so on 2026-10-01 one seat whose .credentials.json had been rewritten without tokens
+# (2026-09-29) quarantined platform#1842 and ailab#1005 while seats a and c could serve.
+# Account-scoped now: the seat parks for MAX_PARK_S and the same call moves to the next seat;
+# the hourly probe clears the park as soon as a re-login makes the seat answer.
+# Judged on the PARSED envelope's `result`, never on llm_error_text(): that string embeds
+# model-authored text, so any search over it - even one anchored on `result=` - matches a review
+# that quotes `result=Not logged in ...` mid-prose (reviewer-codex on ailab#1011). The result must
+# START with the CLI's message and be short, as the CLI's own one-liner is; a review is neither.
+# The worst a spoof could still do is park one seat until the next probe, an hour at most.
+LOGIN_DEAD_RE = re.compile(r"(?:Not logged in|Invalid API key)\b[^\n]{0,40}/login\b", re.I)
+LOGIN_DEAD_MAX_LEN = 120
+
+
+def login_dead(stdout):
+    """True when the CLI's JSON envelope says the seat is not logged in. Must never raise: it
+    runs on the error path, like llm_error_text()."""
+    try:
+        env = json.loads(stdout or "")
+    except Exception:
+        return False
+    res = env.get("result") if isinstance(env, dict) else None
+    if not isinstance(res, str):
+        return False
+    res = res.strip()
+    return len(res) <= LOGIN_DEAD_MAX_LEN and bool(LOGIN_DEAD_RE.match(res))
+# The usage probe's own verdicts on a seat that cannot authenticate: no credential file at all,
+# or a 401 that one keepalive did not cure (see _poll_seat). NOT a 403 - that is a token-file
+# seat answering without the user:profile scope, which serves reviews fine and is blind to usage
+# by design (docs/runbooks/dev-workers.md, "Seats on reviewer-1").
+PROBE_NO_CREDENTIAL_RE = re.compile(r"^no credential under ")
+PROBE_UNAUTHORIZED_RE = re.compile(r"\bHTTP 401\b")
 
 
 def parse_reset(text):
@@ -1325,11 +1364,13 @@ def _poll_seat(s, now):
     # Shielded like the probe and apply_usage around it, so one seat's sqlite hiccup does
     # not skip the poll for the rest. keepalive() answers None when a review's CLI holds
     # the seat; nothing to re-probe then.
+    renew_failed = False
     if keepalive_enabled() and not doc.get("ok") and credential_expired(doc, now):
         try:
             ran = keepalive(s)
         except Exception as e:
             ran = None
+            renew_failed = True
             bump_meta(f"seat_keepalive_failures_total.{s['name']}")
             log(f"usage: seat '{s['name']}' keepalive failed: {e}")
         if ran is not None:
@@ -1342,6 +1383,7 @@ def _poll_seat(s, now):
             if doc.get("ok"):
                 log(f"usage: seat '{s['name']}' login renewed by the keepalive")
             else:
+                renew_failed = True
                 bump_meta(f"seat_keepalive_failures_total.{s['name']}")
                 log(f"usage: seat '{s['name']}' still failing after the keepalive: {doc.get('error')}")
     try:
@@ -1350,6 +1392,15 @@ def _poll_seat(s, now):
         log(f"usage: applying seat '{s['name']}' failed: {e}")
     if not doc.get("ok"):
         log(f"usage: seat '{s['name']}' probe failed: {doc.get('error')}")
+        # apply_usage parks nothing on a failed probe - right for a network blip or a 401 the
+        # CLI will refresh on its next run. Not for these two, which no run can cure: without a
+        # park the seat stays selectable, and tier-major selection then PREFERS it whenever the
+        # live seats have their top tier spent (2026-10-01).
+        err = str(doc.get("error") or "")
+        if PROBE_NO_CREDENTIAL_RE.search(err):
+            park_dead_login(s["name"], "no credential file")
+        elif renew_failed and PROBE_UNAUTHORIZED_RE.search(err):
+            park_dead_login(s["name"], "401 after the keepalive")
 
 
 def usage_ticker():
@@ -1562,6 +1613,26 @@ def park(reset_at, seat=None):
     return SEAT_PARKED_UNTIL[seat]
 
 
+def park_dead_login(seat, why):
+    """Park a seat that cannot authenticate, for MAX_PARK_S. The same lossless park as a spent
+    window - no attempt consumed, the queue kept - with its own journal line, because the remedy
+    is a re-login, not waiting. It does not wait the 6 h out once fixed: the hourly usage probe
+    clears a seat park as soon as the seat answers with windows below 100% (apply_usage), and a
+    restart forgets parks. Counted on the transition into parked, like the API's parks, so
+    ReviewbotSeatNeverServes sees a dead seat without the hourly re-park inflating it."""
+    global RATE_LIMITED_UNTIL
+    now = time.time()
+    with park_lock:
+        was = SEAT_PARKED_UNTIL.get(seat, 0.0)
+        SEAT_PARKED_UNTIL[seat] = max(was, now + MAX_PARK_S)
+        RATE_LIMITED_UNTIL = all_parked_until()
+    if was <= now:
+        bump_meta(f"seat_parks_total.{seat}")
+    log(f"seat '{seat}' login unusable ({why}); parked {MAX_PARK_S // 3600}h until a probe "
+        f"answers - re-login the seat (queue left intact)")
+    return SEAT_PARKED_UNTIL[seat]
+
+
 class ExpensiveFailure(RuntimeError):
     """A non-deadline failure that still consumed most of the attempt's wall-clock budget.
 
@@ -1621,6 +1692,8 @@ def run_llm(title, desc, diff_text, rubric=""):
                         bump_meta("llm_primary_failed_total")
                     park_model(seat, model, e.reset_at,
                                unserveable=getattr(e, "unserveable", False))
+                elif getattr(e, "reason", "limit") == "login":
+                    park_dead_login(seat, "the CLI answered Not logged in")
                 else:
                     park(e.reset_at, seat=seat)
                 # 2. Nowhere to move -> re-raise the ORIGINAL exception. A sibling class here
@@ -1646,7 +1719,8 @@ def run_llm(title, desc, diff_text, rubric=""):
                 #    change is counted where it is committed (use_model).
                 if nxt[0] != seat:
                     bump_meta("llm_seat_switches_total")
-                what = "model-limited" if e.scope == "model" else "rate-limited"
+                what = ("logged out" if getattr(e, "reason", "limit") == "login"
+                        else "model-limited" if e.scope == "model" else "rate-limited")
                 log(f"seat '{seat}' {what} on '{model or '(account default)'}'; switching to "
                     f"seat '{nxt[0]}' model '{nxt[1] or '(account default)'}' with {left:.0f}s "
                     f"of the shared budget left")
@@ -1976,6 +2050,9 @@ def _run_llm(title, desc, diff_text, rubric, started, seat, model):
                                       model=model, unserveable=True)
                 if RATE_LIMIT_RE.search(raw):
                     raise RateLimited(scrub(raw), parse_reset(raw), scope="account", model=model)
+                if login_dead(r.stdout):
+                    raise RateLimited(scrub(raw), time.time() + MAX_PARK_S, scope="account",
+                                      model=model, reason="login")
                 raise ModelError(scrub(raw))
             envelope = json.loads(r.stdout)
             text = envelope.get("result", "")

@@ -4958,5 +4958,191 @@ class CredentialKeepaliveTest(unittest.TestCase):
         self.assertEqual("0", got['reviewbot_llm_seat_keepalives_total{persona="test",seat="c"}'],
                          "zero for every seat, like seat_parks_total")
 
+# ── a seat whose login is dead (2026-10-01) ──────────────────────────────────────────────────
+# The CLI's answer when the seat's .credentials.json holds no usable token, verbatim from
+# reviewer-1's journal on every attempt between 11:12 and 12:00 UTC.
+CLAUDE_LOGGED_OUT_ENVELOPE = json.dumps({
+    "type": "result", "subtype": "success", "is_error": True,
+    "result": "Not logged in · Please run /login", "usage": {"output_tokens": 0}})
+
+
+class DeadLoginSeatTest(unittest.TestCase):
+    """A seat that cannot authenticate parks like a spent one and the same call moves on.
+
+    THE INCIDENT: seat b's credential file was rewritten without tokens on 2026-09-29. Seats a and
+    c had their fable tier spent, so tier-major selection chose (b, fable) for every review - b
+    was the only seat not KNOWN to be out of fable. `Not logged in` was a ModelError: no park,
+    the ladder walked fable -> opus -> sonnet on b, and the PR paid an attempt. platform#1842 and
+    ailab#1005 quarantined in under an hour while seat a could have served every one of them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = _ladder_module(self.tmp.name)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        self.runs = []
+
+    def _runner(self, logged_out):
+        answer = _review_envelope()
+
+        def run(args, **kw):
+            CP = self.m.subprocess.CompletedProcess
+            if args[0] != "sudo":
+                return CP(args, 0, "", "")
+            user, verb = args[3], args[4]
+            if verb == "mktemp":
+                return CP(args, 0, f"/tmp/reviewbot-llm-{user}\n", "")
+            if verb.startswith("HOME=") and args[5] != self.m.USAGE_PROBE:
+                model = args[args.index("--model") + 1] if "--model" in args else ""
+                self.runs.append((user, model))
+                if user in logged_out:
+                    return CP(args, 1, CLAUDE_LOGGED_OUT_ENVELOPE, "")
+                return CP(args, 0, answer, "")
+            if verb == "cat":
+                return CP(args, 1, "", "no such file")
+            return CP(args, 0, "", "")
+        return run
+
+    def test_the_cli_message_is_recognised_and_review_prose_is_not(self):
+        def env(result, subtype="success"):
+            return json.dumps({"type": "result", "subtype": subtype, "is_error": True,
+                               "result": result})
+        self.assertTrue(self.m.login_dead(CLAUDE_LOGGED_OUT_ENVELOPE))
+        self.assertTrue(self.m.login_dead(env("Invalid API key · Please run /login")))
+        for label, stdout in {
+            # reviewer-codex on ailab#1011: an anchor on `result=` inside llm_error_text() still
+            # matched this, because that string embeds the model's own text.
+            "the literal diagnostic quoted mid-prose": env(
+                "The test expects result=Not logged in · Please run /login", "error_max_turns"),
+            "the message quoted inside a review": env(
+                "This PR documents the Not logged in · Please run /login message."),
+            "a review that merely starts with it": env(
+                "Not logged in · Please run /login is now parked by reviewbot. " + "x" * 200),
+            "a weekly limit": CLAUDE_WEEKLY_ENVELOPE,
+            "a fable limit": CLAUDE_FABLE_ENVELOPE,
+            "not JSON": "Not logged in · Please run /login",
+            "a non-string result": json.dumps({"result": ["Not logged in /login"]}),
+        }.items():
+            with self.subTest(label=label):
+                self.assertFalse(self.m.login_dead(stdout), label)
+
+    def test_the_incident_a_dead_seat_first_in_line_is_parked_and_the_review_still_lands(self):
+        now = real_time.time()
+        self.m.MODEL_PARKED_UNTIL[("a", "fable")] = now + 3600
+        self.m.MODEL_PARKED_UNTIL[("c", "fable")] = now + 3600
+        self.m.use_seat("b")
+        self.m.subprocess.run = self._runner({"runb"})
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runb", "fable"), ("runa", "opus")], self.runs,
+                         "one refused call on the dead seat, then a live seat on the next tier - "
+                         "not opus and sonnet on the same dead seat")
+        self.assertTrue(self.m.seat_parked("b"))
+        self.assertGreater(self.m.SEAT_PARKED_UNTIL["b"], now + self.m.MAX_PARK_S - 60)
+        self.assertEqual(("a", "opus"), (self.m.CURRENT_SEAT, self.m.CURRENT_MODEL))
+
+    def test_a_dead_seat_is_not_retried_while_parked(self):
+        self.m.subprocess.run = self._runner({"runa"})
+        self.m.run_llm("t", "d", "diff")
+        self.m.run_llm("t", "d", "diff")
+        self.assertEqual([("runa", "fable"), ("runb", "fable"), ("runb", "fable")], self.runs)
+
+    def test_every_seat_logged_out_parks_the_worker_and_consumes_no_attempt(self):
+        self.m.subprocess.run = self._runner({"runa", "runb", "runc"})
+        head = "b" * 40
+        self.m.enqueue("o/r", 1, head, "webhook")
+        self.m.review_job = lambda *a: self.m.run_llm("t", "d", "diff")
+        self.m.worker_once()
+        c = self.m.db()
+        state, attempts = c.execute("SELECT state, attempts FROM jobs WHERE head_sha=?",
+                                    (head,)).fetchone()
+        c.close()
+        self.assertEqual("retry", state, "a dead login is not the PR's fault")
+        self.assertEqual(0, attempts)
+        self.assertEqual(3, len(self.runs), "one call per seat, then the whole worker parks")
+        self.assertEqual(0, self.m.seats_available())
+
+    def test_the_park_is_counted_once_per_transition(self):
+        self.m.park_dead_login("b", "test")
+        self.m.park_dead_login("b", "test")
+        c = self.m.db()
+        v = c.execute("SELECT v FROM meta WHERE k='seat_parks_total.b'").fetchone()
+        c.close()
+        self.assertEqual(1.0, float(v[0]))
+
+
+class DeadLoginProbeTest(unittest.TestCase):
+    """The hourly probe parks a seat it can PROVE cannot authenticate, and only that; a later
+    probe that answers clears the park without a restart."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = _ladder_module(self.tmp.name, usage_poll_s=3600)
+        self.addCleanup(setattr, self.m, "RATE_LIMITED_UNTIL", 0.0)
+        self.now = real_time.time()
+        self.cli = []
+
+    def _ok(self):
+        return {"ok": True, "error": "", "account": {"uuid": "u", "email": "e@x.test"},
+                "limits": [{"kind": "weekly_all", "model": "", "percent": 10.0,
+                            "resets_at": self.now + 3000, "active": False}],
+                "credential": {"source": "login", "expires_at": self.now + 3600}}
+
+    def _failed(self, error, source="login", expires_at=None):
+        return {"ok": False, "error": error, "account": {}, "limits": [],
+                "credential": {"source": source, "expires_at": expires_at}}
+
+    def _install(self, docs_b):
+        served = list(docs_b)
+
+        def probe(seat, timeout=30):
+            name = seat["name"] if isinstance(seat, dict) else seat
+            if name != "b":
+                return self._ok()
+            return served.pop(0) if len(served) > 1 else served[0]
+        self.m.probe_usage = probe
+
+        def run(args, **kw):
+            self.cli.append(args)
+            return self.m.subprocess.CompletedProcess(args, 0, "{}", "")
+        self.m.subprocess.run = run
+        self.addCleanup(setattr, self.m.subprocess, "run", _REAL_RUN)
+
+    def test_no_credential_parks_the_seat_and_a_re_login_unparks_it(self):
+        self._install([self._failed(
+            "no credential under /home/runb/.claude (oauth-token or .credentials.json)",
+            source="none")])
+        self.m.poll_usage(self.now)
+        self.assertTrue(self.m.seat_parked("b"))
+        self.assertNotEqual("b", (self.m.active_choice() or ("",))[0],
+                            "the poll's climb must not land on the dead seat")
+        self._install([self._ok()])
+        self.m.poll_usage(self.now + 3600)
+        self.assertFalse(self.m.seat_parked("b", self.now + 3600), "fixed seat back within a poll")
+
+    def test_a_401_the_keepalive_could_not_cure_parks_the_seat(self):
+        self._install([self._failed("profile: HTTP 401; usage: HTTP 401",
+                                    expires_at=self.now - 100)])
+        self.m.poll_usage(self.now)
+        self.assertEqual(1, len(self.cli), "the keepalive ran first")
+        self.assertTrue(self.m.seat_parked("b"))
+
+    def test_what_a_run_can_still_cure_or_never_breaks_serving_does_not_park(self):
+        cases = {
+            "a 401 on a login not yet expired (no keepalive tried; a review run will refresh or "
+            "fail it)": self._failed("profile: HTTP 401; usage: HTTP 401",
+                                     expires_at=self.now + 3600),
+            "a token-file seat's 403 - it serves, it is only blind to usage":
+                self._failed("profile: HTTP 403; usage: HTTP 403", source="token"),
+            "a network blip": self._failed("URLError: <urlopen error timed out>"),
+        }
+        for label, doc in cases.items():
+            with self.subTest(label=label):
+                self.m.SEAT_PARKED_UNTIL["b"] = 0.0
+                self._install([doc])
+                self.m.poll_usage(self.now)
+                self.assertFalse(self.m.seat_parked("b"), label)
+
+
 if __name__ == "__main__":
     unittest.main()
