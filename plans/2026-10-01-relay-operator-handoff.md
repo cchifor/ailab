@@ -1,11 +1,11 @@
-# Relay operator requests
+# Relay operator handoff — 2026-10-01
 
 The requested endpoint is `https://relay.chifor.me`. The application and release are ready; cluster staging, DNS publication, and protected-main approval are pending. The deployment uses the existing llm-router pattern.
 
 - Deployment PR: <https://git.chifor.me/cchifor/ailab/pulls/1010>
 - Application: <https://git.chifor.me/cchifor/relay-platform>
 - Release archive and checksum: <https://git.chifor.me/cchifor/relay-platform/releases/tag/v0.1.0>
-- Deployment and migration sequence: [relay.md](relay.md)
+- Deployment and migration sequence: [Relay runbook](../docs/runbooks/relay.md)
 
 ## Request 1: namespace-scoped deployment access
 
@@ -67,3 +67,11 @@ The desired tunnel route is `relay.chifor.me` → `http://relay.relay.svc.cluste
 ## Expected operator response
 
 Return only the deployment kubeconfig path and expiry, namespace/storage readiness, Cloudflare record ID, and PR review status. Never return secret contents.
+
+## Resolution during rollout
+
+The operator created the namespace and scoped identity (ServiceAccount in separate `relay-deploy` namespace), supplied a kubeconfig expiring 2026-10-02T18:20:00Z, and created DNS record `d01f099abc5e5a85c6c5bef5791c8e41`. The temporary Role was extended for ConfigMaps and batch Jobs/CronJobs to stage database bootstrap and backup resources. These grants remain confined to `relay`.
+
+Review findings were addressed: each Secret has its own encryption/MAC; DNS has an import block; the bootstrap superuser is separate from runtime/migration identities; nightly logical backups have a continuously mounted dump volume and a successful live restore drill; the runbook documents post-merge recovery. Release/data staging and internal checks are complete. Public verification follows merge.
+
+After public verification, the operator must delete the out-of-band `relay-deployer` Role and RoleBinding in `relay`, and the `relay-deploy` namespace. The scoped deployer cannot remove these resources itself. Remove the local kubeconfig afterward. Do not delete the application namespace or its PVCs.

@@ -1,6 +1,6 @@
 # Relay
 
-Pending access and publication prerequisites are listed in the [operator handoff](relay-operator-handoff.md).
+The initial operator handoff is archived in [the deployment record](../../plans/2026-10-01-relay-operator-handoff.md).
 
 Relay follows the existing llm-router topology: Cloudflare proxied CNAME → the locally managed ailab tunnel → `relay.relay.svc.cluster.local:80`, with the app handling browser/connector authentication. The public origin is `https://relay.chifor.me`; it is intentionally free of interactive Cloudflare Access challenges so connector WebSockets can authenticate using their own credentials.
 
@@ -57,7 +57,7 @@ Each of the four Secret resources is encrypted as a separate SOPS document/file.
 
 To test a fresh backup, create a Job from the CronJob and wait for completion. Check `SHA256SUMS`, then restore the archive into a **separate disposable database** as the migration role with `--no-owner --no-acl --exit-on-error`. Compare row counts and verify runtime grants and RLS before considering it restorable. A successful `pg_restore --list` alone is insufficient. Clean up the disposable database after the comparison.
 
-This is daily logical recovery, not PITR. A first local restore drill passed with the real workspace snapshot and reduced privileges. The first live dump/restore and Velero capture must be verified separately; a mounted PVC alone is not proof of an offsite backup.
+This is daily logical recovery, not PITR. Both the local role-isolation drill and the first live dump/restore passed with the real workspace snapshot. The dump at `20261001T185600Z` restored into a disposable database with matching row counts, all nine forced-RLS tables, and `relay_migrator` ownership. The disposable database was then removed. A subsequent Velero capture is still to be verified; a mounted PVC alone is not proof of an offsite backup.
 
 ## Recovery
 
@@ -80,4 +80,8 @@ Publication status must be verified from live cluster/DNS checks; preparing thes
 - [Application CI](https://git.chifor.me/cchifor/relay-platform/actions/runs/56308) passed: type checks, formatting, production build, Rust tests, and integration/browser tests.
 - AILab manifest lint passed: 33 Kustomization paths, 732 rendered resources, zero invalid resources or errors; 83 resources skipped by the repository's existing schema exclusions. Inline-hash and Flux Job annotation checks passed.
 - The exact release archive passed a Docker smoke test with the pinned runtime images, PostgreSQL UID 70, Node UID 1000, read-only roots, dropped capabilities, and no privilege escalation. Migration, bootstrap, readiness, unauthenticated rejection, login, secure cookies, and all five builtin plugins succeeded.
-- These checks do not establish cluster storage, tunnel reachability, or public DNS readiness. Keep the deployment PR in draft until the release and existing data are staged and the destination passes its internal checks.
+- Cluster staging completed: all four PVCs bound, release SHA verified before extraction, migration completed, and Relay/PostgreSQL/backup holder are Ready.
+- Existing data matched after migration: zero agents/connectors, one conversation, two messages, five plugin records. The local service is stopped; private rollback snapshot is on dev-worker-2 at `.data/cutover/20261001T185511Z`.
+- Live pre-exposure checks passed: health/readiness, SPA, public skill, unauthenticated 401, secure login cookies, all five plugins, browser WebSocket welcome, and a real `gpt-6-luna` Assistant response. A deployment-verification conversation was added after the preserved data was checked.
+- A Job created from the backup CronJob completed; the archive passed SHA verification and a full restore drill. Nightly scheduling is enabled.
+- Public tunnel/HTTPS/browser/connector verification follows merge. The first Velero capture and deletion of the out-of-band deployer identity are operator follow-ups.
