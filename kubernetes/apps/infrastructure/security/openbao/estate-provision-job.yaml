@@ -180,7 +180,7 @@ spec:
           # Official OpenBao image (bao CLI + busybox sh), pinned to the SERVER's MINOR: the server is the `openbao` HelmRelease chart
           # (0.29.4 = OpenBao 2.6.2) and renovate.json holds this CLI to 2.6.x, so a patch release
           # may lead the server but the CLI and the API cannot drift across a minor.
-          image: quay.io/openbao/openbao:2.6.3
+          image: quay.io/openbao/openbao:2.6.4
           command: ["/bin/sh", "/scripts/provision.sh"]
           env:
             # The headless per-pod name publishes not-ready addresses: a sealed-but-up pod yields a
