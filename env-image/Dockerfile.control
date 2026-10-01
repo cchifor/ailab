@@ -41,9 +41,9 @@
 # /usr/local/libexec/docker/cli-plugins/"`).
 FROM docker.io/library/node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 
-COPY --from=docker.io/library/docker:29.8-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca \
+COPY --from=docker.io/library/docker:29.8-cli@sha256:b1805116a6a86cc591b5d5f60a910a0715cdcc9d18d866ad68b1457ead25c35c \
      /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=docker.io/library/docker:29.8-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca \
+COPY --from=docker.io/library/docker:29.8-cli@sha256:b1805116a6a86cc591b5d5f60a910a0715cdcc9d18d866ad68b1457ead25c35c \
      /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-buildx \
      /usr/local/libexec/docker/cli-plugins/
 COPY --from=ghcr.io/astral-sh/uv:0.12.21 /uv /uvx /usr/local/bin/
