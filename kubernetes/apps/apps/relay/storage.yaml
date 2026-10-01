@@ -5,6 +5,8 @@ metadata:
   namespace: relay
   labels:
     app.kubernetes.io/part-of: relay
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes:
   - ReadWriteMany
@@ -20,6 +22,8 @@ metadata:
   namespace: relay
   labels:
     app.kubernetes.io/part-of: relay
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes:
   - ReadWriteOnce
@@ -35,6 +39,8 @@ metadata:
   namespace: relay
   labels:
     app.kubernetes.io/part-of: relay
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes:
   - ReadWriteOnce

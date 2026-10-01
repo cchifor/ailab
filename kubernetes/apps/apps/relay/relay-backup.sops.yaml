@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: relay-backup
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+type: Opaque
+stringData:
+  PGPASSWORD: ENC[AES256_GCM,data:IOJjYYp7m+eys2iOAU7y0Huwj1Jzik+Qaj14zlvy6ijdruQ0LM7UqlySUTxg50KT,iv:/vmVoogQfPkRnJ2WbK10Tt5vLxSr0Y+Nv4Dc38uvI08=,tag:Or2GUYn81lQUnrFv43Sn1Q==,type:str]
+sops:
+  age:
+  - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    enc: '-----BEGIN AGE ENCRYPTED FILE-----
+
+      YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA2VVhudmxzMExkYnJ3WUlY
+
+      cUxNTmpDUzFGQ2RvbUloZVNlY2paV2dOQVMwCm13TWY2M3pUc0R2VFRkc1JpYVU4
+
+      WlFZTHorZk5kK2hhVmpEcEpuWWxPMTAKLS0tIHhPL3RzZCt0YWRKNnB4WHd5QU5v
+
+      Ui9CQzV0dlRYS3hkUy9aMzNsWThkMjgKOqwEGE/7h8apkmibxVrdwrXIQWGCf+KR
+
+      W8F47LIAErbtoDftu+lEiYWq5ivWtp4ARr2liLUTy3ZAfV/r1ZKVmQ==
+
+      -----END AGE ENCRYPTED FILE-----
+
+      '
+  lastmodified: '2026-10-01T18:47:42Z'
+  mac: ENC[AES256_GCM,data:IhU8fxlqXuf+9GIMgwnXaOQcnfOCV6g263U4I1+qh57RtlufVGSrBUhfhEzMmeG2wpaDGzslEtcNx9SHrSOi5Ad+bN4UnqYKRCaAtp0ZPcjvS1BLpaA41t0LZ+sxprm0y65EtV8vU4FDFeVsrPOajuih2HsP50Qfeik2Ngz2hOs=,iv:bYB5s5ZCgUavkI02/MOT5tzCjzt8uFBjxVoIX1b3SEI=,tag:V2eYPHDnlfxiSJkoQlRf3Q==,type:str]
+  encrypted_regex: ^(data|stringData)$
+  version: 3.12.2

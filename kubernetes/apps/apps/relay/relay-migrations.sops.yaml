@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: relay-migrations
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+type: Opaque
+stringData:
+  DATABASE_URL: ENC[AES256_GCM,data:M5d1WYOCMlEtge6NnP6KAchqs2D6zUMSYswop9KbleuJE+fVe+3etKON116rua+Q7y7omP0dXpkL9Rgu0y7wc+7rkTkwbDRaddQDG0eT2UaBNyi5VEmQuaxnHOB/gvDqNeH3HEdCgOQjCWse2qvQNEkMzvv+Pyc1dmZMww==,iv:IWIhQv3BMsX7viQLh+MWCnh5/RJ7Rx1nR8KCGbcgUf0=,tag:i7MIngvOICee/+NYwzIg9w==,type:str]
+  APP_DATABASE_URL: ENC[AES256_GCM,data:B4M82fbupkJeP2JTBh/Je46PW+Zw20T0MUrzhgTGTiraTuKaAa0pXux4pgSG3uyZCDuK1dF8pQLb6XPVuOLR+bXzpCQjt+xXZo+BYhpdpuSzPK0OObfmy9G30fs8zVW7z7I8VIwVNsN8zS+wxLMTyP6D,iv:6CWpJg/50HTiZxkB7RI/YZXZxQBa+s0C+NvIk2Ge6Co=,tag:RJmzbvOUL1SWY1gBpveU1w==,type:str]
+  RELAY_APP_DB_PASS: ENC[AES256_GCM,data:HIcM5wPEU15RyrMoIAAsmyPMhp1C00p6abskG2pqB6e1+Gr1Kvu1TuiCAw==,iv:K0UfdUhwRxI629PkCDFxCKK0mLaZkuRWWHogDFbJTZY=,tag:C5eq+3FdQmZ8/nebUHt7eQ==,type:str]
+sops:
+  age:
+  - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+    enc: '-----BEGIN AGE ENCRYPTED FILE-----
+
+      YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBodU4xbGI4Q2Q4ZWRCUFV5
+
+      QXZSdlpDYXdrQ01OWDZyOGgvb3Y4a0gyNG1vCnE5Z004SjFFck12eUhXM1dqVWkv
+
+      WHQ1N0FYTEJWdmJBM2RFYzJUdDd3MUUKLS0tIEdxMVRFMm5pcktxZFRHNXJtR3Za
+
+      c3ZKZklpcDFGNFY5UDI3WWd1c2F0cnMKUGy0NJScf8sIVB4hEZ+L+SfgHoe6crmg
+
+      Xlsv6KBetDmzzPsVjMwkTJRsIRHBltA2Is2MV79vxticHjjAH+19pg==
+
+      -----END AGE ENCRYPTED FILE-----
+
+      '
+  lastmodified: '2026-10-01T18:47:42Z'
+  mac: ENC[AES256_GCM,data:7U4/9T332vVSYYMctSpw7dze0zLyHSDxK3kAQMouDR6AyBefJtYDCDDs/IN7pBIBud2OAFtMcILvUt+gt1eYQFyFxUagosM3kTiM7tF6YrpzcgMYzMdAKtSXXIgxlnXCy6iz+Y/Fxx5Qj9E8dX1v6wO4RFK8+zi/bCylkx6oydc=,iv:owHd5f/ntS+wCWAWosZuNauYUpHazqLYQPDINxESMZg=,tag:wx7M/5sXGTn8Jq9Pz0al5Q==,type:str]
+  encrypted_regex: ^(data|stringData)$
+  version: 3.12.2

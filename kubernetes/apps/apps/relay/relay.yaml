@@ -54,10 +54,10 @@ spec:
       initContainers:
       - image: docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
         workingDir: /app
-        envFrom: &id001
+        envFrom:
         - secretRef:
-            name: relay-secrets
-        env: &id002
+            name: relay-migrations
+        env:
         - name: NODE_ENV
           value: production
         - name: RELAY_HOST
@@ -72,13 +72,13 @@ spec:
           value: https://router.chifor.me/v1
         - name: RELAY_LLM_MODEL
           value: gpt-6-luna
-        securityContext: &id003
+        securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:
             drop:
             - ALL
-        volumeMounts: &id004
+        volumeMounts:
         - name: releases
           mountPath: /app
           subPath: relay-0.1.0-20261001
@@ -102,10 +102,39 @@ spec:
       containers:
       - image: docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
         workingDir: /app
-        envFrom: *id001
-        env: *id002
-        securityContext: *id003
-        volumeMounts: *id004
+        envFrom:
+        - secretRef:
+            name: relay-secrets
+        env:
+        - name: NODE_ENV
+          value: production
+        - name: RELAY_HOST
+          value: 0.0.0.0
+        - name: RELAY_PORT
+          value: '8788'
+        - name: RELAY_URL
+          value: https://relay.chifor.me
+        - name: RELAY_DATA_DIR
+          value: /data
+        - name: RELAY_LLM_URL
+          value: https://router.chifor.me/v1
+        - name: RELAY_LLM_MODEL
+          value: gpt-6-luna
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: releases
+          mountPath: /app
+          subPath: relay-0.1.0-20261001
+          readOnly: true
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
         name: relay
         command:
         - node

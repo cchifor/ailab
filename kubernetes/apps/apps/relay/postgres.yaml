@@ -30,6 +30,8 @@ spec:
     metadata:
       labels:
         app: relay-postgres
+      annotations:
+        backup.velero.io/backup-volumes-excludes: database
     spec:
       automountServiceAccountToken: false
       tolerations:
@@ -54,7 +56,7 @@ spec:
           containerPort: 5432
         env:
         - name: POSTGRES_USER
-          value: relay_owner
+          value: postgres
         - name: POSTGRES_DB
           value: relay
         - name: PGDATA
@@ -82,7 +84,7 @@ spec:
             command:
             - pg_isready
             - -U
-            - relay_owner
+            - postgres
             - -d
             - relay
           periodSeconds: 3
@@ -92,7 +94,7 @@ spec:
             command:
             - pg_isready
             - -U
-            - relay_owner
+            - postgres
             - -d
             - relay
           periodSeconds: 5
@@ -101,7 +103,7 @@ spec:
             command:
             - pg_isready
             - -U
-            - relay_owner
+            - postgres
             - -d
             - relay
           periodSeconds: 10
@@ -112,6 +114,12 @@ spec:
           mountPath: /var/run/postgresql
         - name: tmp
           mountPath: /tmp
+        - name: bootstrap
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+        envFrom:
+        - secretRef:
+            name: relay-postgres
       volumes:
       - name: database
         persistentVolumeClaim:
@@ -120,3 +128,7 @@ spec:
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      - name: bootstrap
+        configMap:
+          name: relay-postgres-bootstrap
+          defaultMode: 365

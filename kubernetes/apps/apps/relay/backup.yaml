@@ -1,0 +1,261 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: relay-postgres-dumps
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: qnap-iscsi
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-backup-script
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+data:
+  dump.sh: |
+    #!/bin/sh
+    set -eu
+    umask 077
+    STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+    STAGE="/dumps/.staging-$STAMP"
+    FINAL="/dumps/$STAMP"
+    cleanup() { [ ! -d "$STAGE" ] || rm -rf "$STAGE"; }
+    trap cleanup EXIT
+    trap 'exit 1' INT TERM
+    # Writers have a 30-minute deadline; only abandoned staging older than 2h is swept.
+    find /dumps -maxdepth 1 -type d -name '.staging-*' -mmin +120 -exec rm -rf {} +
+    AVAIL_KB=$(df -Pk /dumps | awk 'NR==2 {print $4}')
+    [ "$AVAIL_KB" -ge 204800 ] || { echo 'Less than 200 MiB free; keeping previous backups'; exit 1; }
+    mkdir "$STAGE"
+    pg_dump --format=custom --file="$STAGE/relay.dump" --lock-wait-timeout=30000
+    pg_restore --list "$STAGE/relay.dump" > "$STAGE/relay.toc"
+    ( cd "$STAGE" && sha256sum relay.dump > SHA256SUMS )
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$STAGE/COMPLETE"
+    sync
+    mv "$STAGE" "$FINAL"
+    echo "Published logical backup $STAMP"
+    # Prune only completed generations, after successful publication; keep the newest 7.
+    for dir in /dumps/20*; do
+      [ ! -f "$dir/COMPLETE" ] || printf '%s\n' "$dir"
+    done | sort -r | awk 'NR > 7' | while IFS= read -r old; do rm -rf "$old"; done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-dumps-holder
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: relay-dumps-holder
+  template:
+    metadata:
+      labels:
+        app: relay-dumps-holder
+      annotations:
+        backup.velero.io/backup-volumes: dumps
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: agent
+        effect: NoSchedule
+      containers:
+      - name: holder
+        image: docker.io/library/postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        command:
+        - sh
+        - -c
+        - trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 5m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: dumps
+          mountPath: /dumps
+          readOnly: true
+      volumes:
+      - name: dumps
+        persistentVolumeClaim:
+          claimName: relay-postgres-dumps
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: relay-postgres-dump
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  schedule: 15 0 * * *
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: relay-backup
+          annotations:
+            backup.velero.io/backup-volumes-excludes: dumps
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          tolerations:
+          - key: dedicated
+            operator: Equal
+            value: agent
+            effect: NoSchedule
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    app: relay-dumps-holder
+                topologyKey: kubernetes.io/hostname
+          containers:
+          - name: dump
+            image: docker.io/library/postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+            command:
+            - sh
+            - /scripts/dump.sh
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: '1'
+                memory: 512Mi
+            env:
+            - name: PGHOST
+              value: relay-postgres.relay.svc.cluster.local
+            - name: PGUSER
+              value: relay_backup
+            - name: PGDATABASE
+              value: relay
+            - name: PGCONNECT_TIMEOUT
+              value: '15'
+            envFrom:
+            - secretRef:
+                name: relay-backup
+            volumeMounts:
+            - name: dumps
+              mountPath: /dumps
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: dumps
+            persistentVolumeClaim:
+              claimName: relay-postgres-dumps
+          - name: scripts
+            configMap:
+              name: relay-backup-script
+          - name: tmp
+            emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-backup
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app: relay-backup
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress: []
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: relay-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-dumps-holder
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app: relay-dumps-holder
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress: []
+  egress: []
