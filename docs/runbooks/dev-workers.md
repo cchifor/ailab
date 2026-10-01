@@ -516,6 +516,16 @@ haiku --max-turns 1 --output-format json`.
 If `ReviewbotUsageProbeFailing` fires, the seat's login is what needs attention (401 = expired
 or revoked, 403 = a token file without `user:profile`) — re-login as above.
 
+**A seat whose login is dead parks itself** (since 2026-10-01). The CLI's `Not logged in ·
+Please run /login` is account-scoped: the seat parks for 6 h (`seat '<x>' login unusable (...);
+parked 6h` in the journal) and the same review moves on to the next seat — it used to walk the
+model ladder on the dead seat and charge the PR, which quarantined platform#1842 and ailab#1005
+while two healthy seats sat idle. The hourly probe does the same for a seat with no credential
+file or a 401 its keepalive could not cure, and clears the park the first time the seat answers,
+so a re-login (above) is picked up within the hour without a restart. A 403 never parks: that is
+a token-file seat, which serves. `ReviewbotUsageProbeFailing` still fires for the dead seat, and
+it is now a capacity warning rather than an outage — but the re-login is still yours to do.
+
 `~/.claude/projects` under each seat grows by one directory per review — the CLI keys them by
 working directory and reviewbot hands it a fresh tmpdir every run; c4's held 1 926 on
 2026-09-18. Pre-existing behaviour, now per seat; harmless until the disk says otherwise.
