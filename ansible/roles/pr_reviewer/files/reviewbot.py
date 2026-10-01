@@ -815,11 +815,27 @@ MODEL_404_RE = re.compile(r"issue with the selected model|does not support this 
 # (2026-09-29) quarantined platform#1842 and ailab#1005 while seats a and c could serve.
 # Account-scoped now: the seat parks for MAX_PARK_S and the same call moves to the next seat;
 # the hourly probe clears the park as soon as a re-login makes the seat answer.
-# ANCHORED ON `result=` - the head of the envelope's result, where the CLI writes its own
-# message - so a review that merely quotes this text cannot park a seat (llm_error_text puts
-# model-authored text in the same field; see LimitScopeTest). The worst a spoof could do is park
-# one seat until the next probe, an hour at most.
-LOGIN_DEAD_RE = re.compile(r"\bresult=(?:Not logged in|Invalid API key)\b[^\[]{0,40}/login\b", re.I)
+# Judged on the PARSED envelope's `result`, never on llm_error_text(): that string embeds
+# model-authored text, so any search over it - even one anchored on `result=` - matches a review
+# that quotes `result=Not logged in ...` mid-prose (reviewer-codex on ailab#1011). The result must
+# START with the CLI's message and be short, as the CLI's own one-liner is; a review is neither.
+# The worst a spoof could still do is park one seat until the next probe, an hour at most.
+LOGIN_DEAD_RE = re.compile(r"(?:Not logged in|Invalid API key)\b[^\n]{0,40}/login\b", re.I)
+LOGIN_DEAD_MAX_LEN = 120
+
+
+def login_dead(stdout):
+    """True when the CLI's JSON envelope says the seat is not logged in. Must never raise: it
+    runs on the error path, like llm_error_text()."""
+    try:
+        env = json.loads(stdout or "")
+    except Exception:
+        return False
+    res = env.get("result") if isinstance(env, dict) else None
+    if not isinstance(res, str):
+        return False
+    res = res.strip()
+    return len(res) <= LOGIN_DEAD_MAX_LEN and bool(LOGIN_DEAD_RE.match(res))
 # The usage probe's own verdicts on a seat that cannot authenticate: no credential file at all,
 # or a 401 that one keepalive did not cure (see _poll_seat). NOT a 403 - that is a token-file
 # seat answering without the user:profile scope, which serves reviews fine and is blind to usage
@@ -2034,7 +2050,7 @@ def _run_llm(title, desc, diff_text, rubric, started, seat, model):
                                       model=model, unserveable=True)
                 if RATE_LIMIT_RE.search(raw):
                     raise RateLimited(scrub(raw), parse_reset(raw), scope="account", model=model)
-                if LOGIN_DEAD_RE.search(raw):
+                if login_dead(r.stdout):
                     raise RateLimited(scrub(raw), time.time() + MAX_PARK_S, scope="account",
                                       model=model, reason="login")
                 raise ModelError(scrub(raw))

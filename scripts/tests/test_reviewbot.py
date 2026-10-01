@@ -4964,8 +4964,6 @@ class CredentialKeepaliveTest(unittest.TestCase):
 CLAUDE_LOGGED_OUT_ENVELOPE = json.dumps({
     "type": "result", "subtype": "success", "is_error": True,
     "result": "Not logged in · Please run /login", "usage": {"output_tokens": 0}})
-LOGGED_OUT_JOURNAL = ("llm exit 1: subtype=success result=Not logged in · Please run /login "
-                      "[stderr: empty]")
 
 
 class DeadLoginSeatTest(unittest.TestCase):
@@ -5006,18 +5004,27 @@ class DeadLoginSeatTest(unittest.TestCase):
         return run
 
     def test_the_cli_message_is_recognised_and_review_prose_is_not(self):
-        self.assertTrue(self.m.LOGIN_DEAD_RE.search(LOGGED_OUT_JOURNAL))
-        self.assertTrue(self.m.LOGIN_DEAD_RE.search(
-            "llm exit 1: subtype=success result=Invalid API key · Please run /login"))
-        for prose in ("llm exit 1: subtype=error_max_turns result=The wrapper now handles "
-                      "'Not logged in · Please run /login' by parking the seat",
-                      "This PR documents the Not logged in · Please run /login message"):
-            with self.subTest(prose=prose[:40]):
-                self.assertIsNone(self.m.LOGIN_DEAD_RE.search(prose),
-                                  "only the CLI's own result head may park a seat")
-        for limit in (CLAUDE_WEEKLY_ENVELOPE, CLAUDE_FABLE_ENVELOPE):
-            with self.subTest(limit=limit[:40]):
-                self.assertIsNone(self.m.LOGIN_DEAD_RE.search(limit))
+        def env(result, subtype="success"):
+            return json.dumps({"type": "result", "subtype": subtype, "is_error": True,
+                               "result": result})
+        self.assertTrue(self.m.login_dead(CLAUDE_LOGGED_OUT_ENVELOPE))
+        self.assertTrue(self.m.login_dead(env("Invalid API key · Please run /login")))
+        for label, stdout in {
+            # reviewer-codex on ailab#1011: an anchor on `result=` inside llm_error_text() still
+            # matched this, because that string embeds the model's own text.
+            "the literal diagnostic quoted mid-prose": env(
+                "The test expects result=Not logged in · Please run /login", "error_max_turns"),
+            "the message quoted inside a review": env(
+                "This PR documents the Not logged in · Please run /login message."),
+            "a review that merely starts with it": env(
+                "Not logged in · Please run /login is now parked by reviewbot. " + "x" * 200),
+            "a weekly limit": CLAUDE_WEEKLY_ENVELOPE,
+            "a fable limit": CLAUDE_FABLE_ENVELOPE,
+            "not JSON": "Not logged in · Please run /login",
+            "a non-string result": json.dumps({"result": ["Not logged in /login"]}),
+        }.items():
+            with self.subTest(label=label):
+                self.assertFalse(self.m.login_dead(stdout), label)
 
     def test_the_incident_a_dead_seat_first_in_line_is_parked_and_the_review_still_lands(self):
         now = real_time.time()
