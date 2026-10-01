@@ -16,3 +16,4 @@ resources:
   - dsh # DeepSeek Harness agent UI at dsh.chifor.me (models via LiteLLM)
   - llm-router # bearer-authenticated router at router.chifor.me; no live accounts by default
   - ci-rerun-watchdog # re-runs Gitea Actions jobs lost with a cloud CI runner (shadow mode first)
+  - relay # own-auth agent workspace at relay.chifor.me

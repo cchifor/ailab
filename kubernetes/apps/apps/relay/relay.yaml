@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  selector:
+    app: relay
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: relay
+  template:
+    metadata:
+      labels:
+        app: relay
+      annotations:
+        chifor.me/release: relay-0.1.0-20261001
+        chifor.me/source-commit: ed1631f88a3501a65915ac7608dc55a25d5ceb21
+        chifor.me/release-sha256: 35f9759c1dd9eb1c8787404008f9db4e0b30a9a21b33e9b2beb4f25d2326f56d
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: agent
+        effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      - image: docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
+        workingDir: /app
+        envFrom: &id001
+        - secretRef:
+            name: relay-secrets
+        env: &id002
+        - name: NODE_ENV
+          value: production
+        - name: RELAY_HOST
+          value: 0.0.0.0
+        - name: RELAY_PORT
+          value: '8788'
+        - name: RELAY_URL
+          value: https://relay.chifor.me
+        - name: RELAY_DATA_DIR
+          value: /data
+        - name: RELAY_LLM_URL
+          value: https://router.chifor.me/v1
+        - name: RELAY_LLM_MODEL
+          value: gpt-6-luna
+        securityContext: &id003
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts: &id004
+        - name: releases
+          mountPath: /app
+          subPath: relay-0.1.0-20261001
+          readOnly: true
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+        name: migrate
+        command:
+        - sh
+        - -c
+        - node dist/scripts/migrate.js && node dist/scripts/bootstrap.js
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+      containers:
+      - image: docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
+        workingDir: /app
+        envFrom: *id001
+        env: *id002
+        securityContext: *id003
+        volumeMounts: *id004
+        name: relay
+        command:
+        - node
+        - dist/server/main.js
+        ports:
+        - name: http
+          containerPort: 8788
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 1536Mi
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+      volumes:
+      - name: releases
+        persistentVolumeClaim:
+          claimName: relay-releases
+          readOnly: true
+      - name: data
+        persistentVolumeClaim:
+          claimName: relay-data
+      - name: tmp
+        emptyDir: {}

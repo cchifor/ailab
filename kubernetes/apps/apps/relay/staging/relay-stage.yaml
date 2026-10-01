@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: relay-stage
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+    app: relay-stage
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  tolerations:
+  - key: dedicated
+    operator: Equal
+    value: agent
+    effect: NoSchedule
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - image: docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
+    workingDir: /tmp
+    envFrom:
+    - secretRef:
+        name: relay-secrets
+    env:
+    - name: NODE_ENV
+      value: production
+    - name: RELAY_HOST
+      value: 0.0.0.0
+    - name: RELAY_PORT
+      value: '8788'
+    - name: RELAY_URL
+      value: https://relay.chifor.me
+    - name: RELAY_DATA_DIR
+      value: /data
+    - name: RELAY_LLM_URL
+      value: https://router.chifor.me/v1
+    - name: RELAY_LLM_MODEL
+      value: gpt-6-luna
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+    volumeMounts:
+    - name: releases
+      mountPath: /releases
+    - name: data
+      mountPath: /data
+    - name: tmp
+      mountPath: /tmp
+    name: stage
+    command:
+    - sh
+    - -c
+    - sleep 43200
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: '1'
+        memory: 512Mi
+  volumes:
+  - name: releases
+    persistentVolumeClaim:
+      claimName: relay-releases
+  - name: data
+    persistentVolumeClaim:
+      claimName: relay-data
+  - name: tmp
+    emptyDir: {}

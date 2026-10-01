@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-postgres
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  selector:
+    app: relay-postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: relay-postgres
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  serviceName: relay-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: relay-postgres
+  template:
+    metadata:
+      labels:
+        app: relay-postgres
+    spec:
+      automountServiceAccountToken: false
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: agent
+        effect: NoSchedule
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: postgres
+        image: docker.io/library/postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        ports:
+        - name: postgres
+          containerPort: 5432
+        env:
+        - name: POSTGRES_USER
+          value: relay_owner
+        - name: POSTGRES_DB
+          value: relay
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: relay-postgres
+              key: password
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 1Gi
+        startupProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - relay_owner
+            - -d
+            - relay
+          periodSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - relay_owner
+            - -d
+            - relay
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - relay_owner
+            - -d
+            - relay
+          periodSeconds: 10
+        volumeMounts:
+        - name: database
+          mountPath: /var/lib/postgresql/data
+        - name: run
+          mountPath: /var/run/postgresql
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: database
+        persistentVolumeClaim:
+          claimName: relay-postgres-data
+      - name: run
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
