@@ -50,7 +50,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: postgres
-        image: docker.io/library/postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        image: docker.io/library/postgres@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
         ports:
         - name: postgres
           containerPort: 5432
