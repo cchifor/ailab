@@ -118,14 +118,23 @@ spec:
               the Proxmox node) — a guest on a node above ~80% used cannot inflate and is stuck at its
               floor. A cold-cache build faults heavily but does NOT swap in, which is why both halves
               have to be true here.
+        # /workspace is its own disk (scsi1) and holds the agents' worktrees AND the docker/containerd
+        # data-root, so it is the one that fills. This rule watched only "/" until 2026-10-01, when
+        # dev-worker-3's /workspace reached 100% (agent unable to run any command) and dev-worker-2's
+        # sat at 0.7% free, both silently — ~42 GB on each was node_modules/.venv/target in worktrees
+        # idle for weeks, which the dev-worker-deps-prune timer (role dev_worker) now removes daily.
         - alert: DevWorkerDiskFilling
           expr: |
-            node_filesystem_avail_bytes{job="dev-worker-node",mountpoint="/"}
-              / node_filesystem_size_bytes{job="dev-worker-node",mountpoint="/"} < 0.12
+            node_filesystem_avail_bytes{job="dev-worker-node",mountpoint=~"/|/workspace"}
+              / node_filesystem_size_bytes{job="dev-worker-node",mountpoint=~"/|/workspace"} < 0.12
           for: 15m
           labels: { severity: warning }
           annotations:
-            summary: "Dev worker {{ $labels.instance }} root filesystem <12% free"
+            summary: "Dev worker {{ $labels.instance }} {{ $labels.mountpoint }} <12% free"
             description: >-
-              {{ $labels.instance }} root fs is under 12% free for >15m. Unlike the CI runners there is
-              no cleanup timer here — check /workspace, the docker data-root, and ~/.cache by hand.
+              {{ $labels.instance }} {{ $labels.mountpoint }} is under 12% free for >15m. At 100% the
+              agent on it cannot start any command, cleanup included. On the worker: `cleanup --dry-run`
+              (docker: stale stacks, images, volumes, build cache) and `sudo cleanup --no-docker --deps
+              --dry-run` (dependency dirs in idle worktrees), then rerun without --dry-run. The daily
+              dev-worker-deps-prune timer only takes worktrees idle for 14+ days; what remains is live
+              work or docker state — `docker system df`, then `du -xh --max-depth=2` on the mount.
