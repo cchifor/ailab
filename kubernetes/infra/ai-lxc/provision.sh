@@ -59,6 +59,11 @@ VIDEO_GID="${VIDEO_GID:-44}"
 # node serves — identical to the direct-mode args. See docs/runbooks/ai-model-swap.md + models.yaml.
 SWAP="${SWAP:-}"
 TTL="${TTL:-900}"                       # idle seconds before llama-swap unloads the model (0 = never)
+# How long llama-swap waits for a cold model to answer /health before failing the request. 180 s is
+# ~2.5x the slowest measured qwen3.8-27b cold load (28 s node2, 72 s node3, 2026-09-16). It used to
+# be a hard-coded 900 from the 120-122B era; on 2026-10-01 a load wedged in the amdgpu driver and a
+# real request waited the whole 900 s for an empty reply. Raise it per node for a bigger model.
+SWAP_HEALTH_TIMEOUT="${SWAP_HEALTH_TIMEOUT:-180}"
 # MODELS_JSON (SWAP multi-model): a jq array of objects, each
 #   {alias,gguf,ctx,parallel,extra,ttl,stage_from,mmproj,cache_k,cache_v}
 # lets ONE node's llama-swap serve SEVERAL models (loaded one-at-a-time, switched on request). When set,
@@ -299,7 +304,7 @@ if [ -n "$SWAP" ]; then
   cat >${SWAP_CONF_DIR}/config.yaml <<HDR
 # Rendered by provision.sh (SWAP=true). Intent/source-of-truth: kubernetes/infra/ai-lxc/models.yaml.
 # llama-swap loads ONE model at a time on this node's iGPU, switching on request. ttl 0 = pin.
-healthCheckTimeout: 900   # seconds to wait for a cold model to become healthy (a 120-122B load is minutes)
+healthCheckTimeout: ${SWAP_HEALTH_TIMEOUT}   # seconds to wait for a cold model to answer /health (provision.sh SWAP_HEALTH_TIMEOUT)
 logLevel: info
 models:
 HDR

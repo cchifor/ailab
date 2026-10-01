@@ -126,7 +126,10 @@ models:
   # BOTH STAY LAZY (ttl 1800). Pinning either (ttl 0) costs 22.45 GiB permanently and NO node in the
   # estate can hold that at its weekly floor without displacing something. llama-swap keeps :8082
   # listening either way, so the ENDPOINT is always-on and a failover always lands somewhere; the
-  # only cost is a cold load, bounded by healthCheckTimeout 900 and litellm request_timeout 900.
+  # only cost is a cold load, bounded by llama-swap's healthCheckTimeout (provision.sh
+  # SWAP_HEALTH_TIMEOUT, 180 s since 2026-10-01; it was 900) and litellm request_timeout 900. A load
+  # that wedges in the amdgpu driver (the 512 MiB page-table budget below) now fails its caller at
+  # 180 s instead of 900, and AILlmGpuPageTableExhausted pages (monitoring/ai-llm-gpu-rules.yaml).
   qwen3.8-27b:
     nodes: [ai-node2, ai-node3]   # ctid 5002 / .45 and ctid 5003 / .46, both on :8082
     instance: qwen38              # INSTANCE=qwen38 -> its own unit + /etc/llama-swap-qwen38/

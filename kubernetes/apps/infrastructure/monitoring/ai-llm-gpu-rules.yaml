@@ -1,0 +1,43 @@
+# The AI LLM nodes' iGPU page-table budget (ai-llm-1/2/3, job ai-llm-node: node_exporter + the
+# amdgpu sysfs textfile from kubernetes/infra/ai-lxc/amdgpu-textfile.sh).
+#
+# Every node carves 512 MiB of "VRAM" in BIOS (UMA frame buffer, AMD's recommended 0.5 GB), and on
+# this silicon that carve holds the GPU page tables for a model's GTT mapping, not the weights. A
+# qwen3.8-27b load peaks at 392-503 MiB of it (kubernetes/infra/ai-lxc/models.yaml), and a load
+# that needs more gets ENOMEM (`amdgpu_gem_va_ioctl ... Couldn't update BO_VA (-12)`) and wedges
+# llama-server in D state in drm_suballoc_new. Nothing frees it short of a host reboot
+# (docs/runbooks/node-maintenance.md), and llama-swap keeps answering /health, so the LiteLLM
+# router never notices. On 2026-10-01 node2 sat at 512/512 for 10+ hours before anyone looked;
+# a real request had waited 15 min for an empty reply. node3 peaked at 511/512 the same week.
+#
+# A healthy load touches its peak for seconds and settles; a wedge pins VRAM at 100% for good.
+# Hence `>= total` held for 10m: longer than any measured cold load (72 s), and no false positive
+# from node2's ordinary 503 MiB (98%) peak.
+# Fixtures: ai-llm-gpu-rules.test.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-llm-gpu
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ai-llm-gpu
+      rules:
+        - alert: AILlmGpuPageTableExhausted
+          expr: >-
+            amdgpu_vram_used_bytes{job="ai-llm-node"}
+              >= on (job, instance, card) amdgpu_vram_total_bytes{job="ai-llm-node"}
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.instance }}: iGPU page-table VRAM exhausted for 10m — llama-server load wedged"
+            description: >-
+              The 512 MiB UMA carve on {{ $labels.instance }} has been 100% used for 10 minutes: a
+              model load ran out of GPU page-table space (dmesg `BO_VA (-12)`) and llama-server is
+              stuck in D state. Requests routed to this backend hang until llama-swap's
+              healthCheckTimeout. Withdraw this node's deployment from LiteLLM (litellm.yaml and
+              litellm-local.yaml, as on 2026-09-21 and 2026-10-01), then reboot the host with the
+              wedged-LXC sequence in docs/runbooks/node-maintenance.md. A plain reboot hangs.
