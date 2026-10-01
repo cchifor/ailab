@@ -35,6 +35,7 @@ spec:
         chifor.me/release: relay-0.1.0-20261001
         chifor.me/source-commit: ed1631f88a3501a65915ac7608dc55a25d5ceb21
         chifor.me/release-sha256: 35f9759c1dd9eb1c8787404008f9db4e0b30a9a21b33e9b2beb4f25d2326f56d
+        backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
@@ -165,6 +166,29 @@ spec:
             path: /health
             port: http
           periodSeconds: 10
+      - name: backup-holder
+        image: docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
+        command:
+        - node
+        - -e
+        - setInterval(()=>{},3600000)
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: dumps
+          mountPath: /dumps
+          readOnly: true
       volumes:
       - name: releases
         persistentVolumeClaim:
@@ -175,3 +199,6 @@ spec:
           claimName: relay-data
       - name: tmp
         emptyDir: {}
+      - name: dumps
+        persistentVolumeClaim:
+          claimName: relay-postgres-dumps
