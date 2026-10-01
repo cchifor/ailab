@@ -1,0 +1,317 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: relay-postgres-dumps
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: qnap-iscsi
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-backup-script
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+data:
+  dump.sh: |
+    #!/bin/sh
+    set -eu
+    umask 077
+    STAGE="/dumps/.staging-$POD_UID"
+    cleanup() { rc=$?; if [ "$rc" != 0 ]; then rm -rf "$STAGE"; fi; }
+    trap cleanup EXIT
+    trap 'exit 1' INT TERM
+    find /dumps -maxdepth 1 -type d -name '.staging-*' -mmin +120 -exec rm -rf {} +
+    AVAIL_KB=$(df -Pk /dumps | awk 'NR==2 {print $4}')
+    [ "$AVAIL_KB" -ge 204800 ] || { echo 'Less than 200 MiB free; keeping previous backups'; exit 1; }
+    mkdir "$STAGE"
+    pg_dump --format=custom --file="$STAGE/relay.dump" --lock-wait-timeout=30000
+    pg_restore --list "$STAGE/relay.dump" > "$STAGE/relay.toc"
+    # Extract the exact plugin rows from THIS archive, never from a later live query.
+    pg_restore --data-only --table=plugin_states --file="$STAGE/plugin-states.sql" "$STAGE/relay.dump"
+  publish.mjs: |
+    import { readFile, writeFile, mkdir, rename, readdir, rm, stat, open } from 'node:fs/promises';
+    import { createReadStream } from 'node:fs';
+    import { createHash } from 'node:crypto';
+    import { execFileSync } from 'node:child_process';
+    import { join } from 'node:path';
+
+    const root = process.env.DUMP_ROOT ?? '/dumps';
+    const artifacts = process.env.ARTIFACT_ROOT ?? '/artifacts/plugins';
+    if (!/^[a-zA-Z0-9-]+$/.test(process.env.POD_UID ?? '')) throw Error('Missing safe pod UID');
+    const stage = join(root, '.staging-' + process.env.POD_UID);
+    const canonical = value => JSON.stringify(value, (_key, v) =>
+      v && typeof v === 'object' && !Array.isArray(v)
+        ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
+    const decode = value => value.replace(/\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|.)/g, (_m, c) =>
+      /^[0-7]/.test(c) ? String.fromCharCode(parseInt(c, 8)) :
+      c[0] === 'x' ? String.fromCharCode(parseInt(c.slice(1), 16)) :
+      ({ b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v' }[c] ?? c));
+    async function durable(path, content) {
+      await writeFile(path, content, { mode: 0o600, flag: 'wx' });
+      const f = await open(path, 'r');
+      try { await f.sync(); } finally { await f.close(); }
+    }
+    async function digest(path) {
+      const h = createHash('sha256');
+      for await (const bytes of createReadStream(path)) h.update(bytes);
+      return h.digest('hex');
+    }
+    try {
+      const sql = await readFile(join(stage, 'plugin-states.sql'), 'utf8');
+      const refs = new Map();
+      let columns, inside = false, found = false, rows = 0;
+      const add = (sha, manifest) => {
+        if (!/^[0-9a-f]{64}$/.test(sha) || !manifest || typeof manifest !== 'object')
+          throw Error('Invalid artifact reference');
+        if (refs.has(sha) && canonical(refs.get(sha)) !== canonical(manifest))
+          throw Error('Conflicting artifact reference');
+        refs.set(sha, manifest);
+      };
+      for (const line of sql.split('\n')) {
+        if (line.startsWith('COPY public.plugin_states (')) {
+          if (found) throw Error('Duplicate plugin COPY section');
+          found = true;
+          inside = true;
+          columns = line.slice(line.indexOf('(') + 1, line.indexOf(')')).split(', ');
+          continue;
+        }
+        if (!inside) continue;
+        if (line === '\\.') { inside = false; continue; }
+        const fields = line.split('\t');
+        if (fields.length !== columns.length) throw Error('Invalid plugin COPY row');
+        const row = Object.fromEntries(columns.map((key, i) => [key, fields[i] === '\\N' ? null : decode(fields[i])]));
+        add(row.sha256, JSON.parse(row.manifest));
+        if (row.previous) {
+          const previous = JSON.parse(row.previous);
+          add(previous.sha256, previous.manifest);
+        }
+        rows++;
+      }
+      if (!found || inside) throw Error('Incomplete plugin COPY section');
+      await mkdir(join(stage, 'plugins'), { mode: 0o700 });
+      const files = ['relay.dump', 'relay.toc'];
+      for (const [sha, manifest] of refs) {
+        const path = join(artifacts, sha, 'index.mjs');
+        const info = await stat(path);
+        if (!info.isFile() || info.size > 1024 * 1024) throw Error('Invalid plugin source file');
+        const source = await readFile(path, 'utf8');
+        if (createHash('sha256').update(canonical(manifest) + '\n' + source).digest('hex') !== sha)
+          throw Error('Plugin integrity mismatch: ' + sha);
+        const dir = join(stage, 'plugins', sha);
+        await mkdir(dir, { mode: 0o700 });
+        await durable(join(dir, 'index.mjs'), source);
+        await durable(join(dir, 'manifest.json'), JSON.stringify(manifest));
+        files.push('plugins/' + sha + '/index.mjs', 'plugins/' + sha + '/manifest.json');
+      }
+      const metadata = {
+        formatVersion: 1, createdAt: new Date().toISOString(),
+        pluginRows: rows, artifactHashes: [...refs.keys()].sort(),
+      };
+      await durable(join(stage, 'recovery.json'), JSON.stringify(metadata, null, 2) + '\n');
+      files.push('recovery.json');
+      await rm(join(stage, 'plugin-states.sql'));
+      const sums = [];
+      for (const file of files.sort()) sums.push(await digest(join(stage, file)) + '  ' + file);
+      await durable(join(stage, 'SHA256SUMS'), sums.join('\n') + '\n');
+      await durable(join(stage, 'COMPLETE'), metadata.createdAt + '\n');
+      execFileSync('sync');
+      const name = metadata.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z') + '-' + process.env.POD_UID;
+      await rename(stage, join(root, name));
+      execFileSync('sync');
+      console.log('Published coordinated recovery generation ' + name + ' (' + refs.size + ' verified artifacts)');
+      const complete = [];
+      for (const entry of await readdir(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^20[0-9]{6}T[0-9]{6}Z-[a-zA-Z0-9-]+$/.test(entry.name)) continue;
+        try {
+          await stat(join(root, entry.name, 'COMPLETE'));
+          await stat(join(root, entry.name, 'recovery.json'));
+          complete.push(entry.name);
+        } catch {}
+      }
+      for (const old of complete.sort().reverse().slice(7)) await rm(join(root, old), { recursive: true });
+    } catch (error) {
+      await rm(stage, { recursive: true, force: true });
+      throw error;
+    }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: relay-postgres-dump
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  schedule: 15 0 * * *
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: relay-backup
+          annotations:
+            backup.velero.io/backup-volumes-excludes: dumps,artifacts
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          tolerations:
+          - key: dedicated
+            operator: Equal
+            value: agent
+            effect: NoSchedule
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    app: relay
+                topologyKey: kubernetes.io/hostname
+          containers:
+          - name: artifacts
+            image: docker.io/library/node@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2
+            command:
+            - node
+            - /scripts/publish.mjs
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: '1'
+                memory: 512Mi
+            env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            volumeMounts:
+            - name: dumps
+              mountPath: /dumps
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: artifacts
+              mountPath: /artifacts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: dumps
+            persistentVolumeClaim:
+              claimName: relay-postgres-dumps
+          - name: scripts
+            configMap:
+              name: relay-backup-script
+          - name: tmp
+            emptyDir: {}
+          - name: artifacts
+            persistentVolumeClaim:
+              claimName: relay-data
+          initContainers:
+          - name: database
+            image: docker.io/library/postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+            command:
+            - sh
+            - /scripts/dump.sh
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: '1'
+                memory: 512Mi
+            env:
+            - name: PGHOST
+              value: relay-postgres.relay.svc.cluster.local
+            - name: PGUSER
+              value: relay_backup
+            - name: PGDATABASE
+              value: relay
+            - name: PGCONNECT_TIMEOUT
+              value: '15'
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            envFrom:
+            - secretRef:
+                name: relay-backup
+            volumeMounts:
+            - name: dumps
+              mountPath: /dumps
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-backup
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app: relay-backup
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress: []
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: relay-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
