@@ -344,5 +344,274 @@ class HelpersTest(unittest.TestCase):
         self.assertFalse(cl.confirm(yes=False, interactive=True, ask=lambda: "no"))
 
 
+# ----------------------------------------------------------------------------- --deps (worktree deps)
+#
+# Real directory trees in a tempdir; ages are set with os.utime. Linux-only where the code is
+# (O_NOFOLLOW, /proc), which is where CI and the workers run.
+
+import os
+import stat
+import tempfile
+import time
+from unittest import mock
+
+LINUX = hasattr(os, "O_NOFOLLOW") and os.path.isdir("/proc/self")
+DAY = 86400
+
+
+def write(path, text="x"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def age_tree(path, days):
+    """Set every mtime under `path` (and `path`) to `days` ago, children before parents."""
+    t = time.time() - days * DAY
+    for d, dirs, files in os.walk(path, topdown=False):
+        for n in files + dirs:
+            os.utime(os.path.join(d, n), (t, t), follow_symlinks=False)
+    os.utime(path, (t, t))
+
+
+def make_repo(path, *, linked_from=None):
+    """A main checkout (.git dir) or, with linked_from, a linked worktree (.git file)."""
+    os.makedirs(path, exist_ok=True)
+    if linked_from:
+        gd = os.path.join(linked_from, ".git", "worktrees", os.path.basename(path))
+        write(os.path.join(gd, "HEAD"), "ref: refs/heads/x\n")
+        write(os.path.join(path, ".git"), f"gitdir: {gd}\n")
+    else:
+        write(os.path.join(path, ".git", "HEAD"), "ref: refs/heads/main\n")
+    write(os.path.join(path, "src", "main.py"))
+    return path
+
+
+@unittest.skipUnless(LINUX, "Linux-only code path")
+class DepsTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self._tmp.name)
+        self.user = os.path.join(self.root, "u")
+        self.now = datetime.now(timezone.utc)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def cutoff(self, days=14):
+        return (self.now - timedelta(days=days)).timestamp()
+
+    def find(self, **kw):
+        return cl.find_worktrees([self.root], min_uid=0, **kw)
+
+    # discovery
+
+    def test_discovery_finds_main_linked_and_nested_worktrees_but_not_caches(self):
+        repo = make_repo(os.path.join(self.user, "platform"))
+        linked = make_repo(os.path.join(self.user, ".worktrees", "wt1"), linked_from=repo)
+        nested = make_repo(os.path.join(repo, ".claude", "worktrees", "x"), linked_from=repo)
+        make_repo(os.path.join(self.user, ".cache", "pkg"))                 # SKIP_NAMES
+        make_repo(os.path.join(repo, "node_modules", "dep"))               # inside a dep dir
+        self.assertEqual(self.find(), sorted([repo, linked, nested]))
+
+    def test_discovery_never_enters_container_storage(self):
+        repo = make_repo(os.path.join(self.user, "platform"))
+        storage = os.path.join(self.user, "containerd-root")
+        make_repo(os.path.join(storage, "snapshots", "1", "fs", "app"))
+        self.assertEqual(self.find(excluded={storage}), [repo])
+
+    def test_discovery_walks_only_user_owned_top_level_dirs(self):
+        make_repo(os.path.join(self.user, "platform"))
+        uid = os.stat(self.user).st_uid
+        self.assertEqual(cl.find_worktrees([self.root], min_uid=uid + 1), [])
+
+    # activity
+
+    def test_idle_worktree_lists_its_dep_dirs(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, "node_modules", "a", "index.js"))
+        write(os.path.join(wt, "apps", "web", "node_modules", "b", "index.js"))
+        write(os.path.join(wt, ".venv", "pyvenv.cfg"))
+        write(os.path.join(wt, "Cargo.toml"))
+        write(os.path.join(wt, "target", "debug", "bin"))
+        age_tree(wt, 30)
+        w = cl.scan_worktree(wt, self.cutoff())
+        self.assertIsNotNone(w.last_activity)
+        self.assertEqual(sorted(os.path.relpath(d, wt) for d in w.deps),
+                         [".venv", "apps/web/node_modules", "node_modules", "target"])
+
+    def test_only_real_dep_dirs_count(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, ".venv", "notes.txt"))        # no pyvenv.cfg: someone's dir
+        write(os.path.join(wt, "target", "report.html"))     # no Cargo.toml beside it
+        os.makedirs(os.path.join(self.root, "elsewhere", "node_modules"))
+        os.symlink(os.path.join(self.root, "elsewhere", "node_modules"),
+                   os.path.join(wt, "node_modules"))
+        age_tree(wt, 30)
+        self.assertEqual(cl.scan_worktree(wt, self.cutoff()).deps, ())
+
+    def test_any_recent_file_or_git_activity_makes_it_fresh(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, "node_modules", "a", "index.js"))
+        age_tree(wt, 30)
+        write(os.path.join(wt, "src", "deep", "new.py"))
+        self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
+        age_tree(wt, 30)
+        write(os.path.join(wt, ".git", "index"))
+        self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
+
+    def test_a_reinstalled_dep_dir_is_activity(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, "node_modules", "a", "index.js"))
+        age_tree(wt, 30)
+        os.utime(os.path.join(wt, "node_modules"))
+        self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
+
+    def test_nested_worktrees_are_judged_separately(self):
+        parent = make_repo(os.path.join(self.user, "platform"))
+        write(os.path.join(parent, "node_modules", "a", "i.js"))
+        child = make_repo(os.path.join(parent, ".claude", "worktrees", "x"), linked_from=parent)
+        write(os.path.join(child, "node_modules", "b", "i.js"))
+        age_tree(parent, 30)
+        write(os.path.join(child, "src", "new.py"))          # only the child is active
+        p = cl.scan_worktree(parent, self.cutoff())
+        self.assertEqual(p.deps, (os.path.join(parent, "node_modules"),))
+        self.assertIsNone(cl.scan_worktree(child, self.cutoff()).last_activity)
+
+    def test_an_unreadable_tree_counts_as_in_use(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, "node_modules", "a", "index.js"))
+        age_tree(wt, 30)
+        real = os.scandir
+
+        def flaky(p):
+            if p.endswith("/src"):
+                raise PermissionError(13, "denied", p)
+            return real(p)
+        with mock.patch.object(cl.os, "scandir", flaky):
+            self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
+
+    # planning
+
+    def idle(self, name="wt"):
+        wt = make_repo(os.path.join(self.user, name))
+        write(os.path.join(wt, "node_modules", "a", "index.js"))
+        age_tree(wt, 30)
+        return wt, cl.scan_worktree(wt, self.cutoff())
+
+    def test_plan_pins_each_dir_by_inode(self):
+        wt, w = self.idle()
+        plan, refused = cl.plan_deps([w], 14, self.now, set(), set())
+        self.assertEqual(refused, [])
+        [a] = plan
+        nm = os.path.join(wt, "node_modules")
+        st = os.lstat(nm)
+        self.assertEqual(a.ids, [nm])
+        self.assertEqual(a.fingerprint, frozenset({(nm, st.st_dev, st.st_ino)}))
+        self.assertGreater(a.size, 0)
+
+    def test_in_use_worktrees_are_not_planned(self):
+        wt, w = self.idle()
+        for busy, binds in (({os.path.join(wt, "src")}, set()),            # a shell's cwd
+                            ({os.path.join(wt, "node_modules", "a", "x.so")}, set()),  # mapped
+                            (set(), {os.path.join(wt, "src")}),             # bind of a subdir
+                            (set(), {self.user})):                          # bind of a parent
+            self.assertEqual(cl.plan_deps([w], 14, self.now, busy, binds)[0], [], (busy, binds))
+        # A process elsewhere in the same home, or a bind of "/", does not pin it.
+        plan, _ = cl.plan_deps([w], 14, self.now, {self.user, os.path.join(self.user, "other")},
+                               {"/"})
+        self.assertEqual(len(plan), 1)
+
+    def test_dep_dirs_holding_a_checkout_or_a_mount_are_refused(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, "node_modules", "linked", ".git", "HEAD"))
+        write(os.path.join(wt, "apps", "x", "node_modules", "a", "i.js"))
+        age_tree(wt, 30)
+        w = cl.scan_worktree(wt, self.cutoff())
+        mounted = os.path.join(wt, "apps", "x", "node_modules", "a")
+        plan, refused = cl.plan_deps([w], 14, self.now, set(), set(), mounts={mounted})
+        self.assertEqual(plan, [])
+        self.assertEqual(sorted(why for _, why in refused),
+                         ["contains a git checkout", "has a mount inside"])
+
+    # removal
+
+    def remove(self, action):
+        return cl.remove_deps(action, 14, self.now, set(), set(), set())
+
+    def test_removal_takes_only_the_dep_dirs(self):
+        wt, w = self.idle()
+        write(os.path.join(wt, "untracked.txt"))
+        age_tree(wt, 30)
+        [a] = cl.plan_deps([cl.scan_worktree(wt, self.cutoff())], 14, self.now, set(), set())[0]
+        self.assertEqual(self.remove(a), 1)
+        self.assertEqual(sorted(os.listdir(wt)), [".git", "src", "untracked.txt"])
+
+    def test_worktree_touched_after_the_plan_is_skipped_whole(self):
+        wt, w = self.idle()
+        [a] = cl.plan_deps([w], 14, self.now, set(), set())[0]
+        write(os.path.join(wt, "src", "new.py"))
+        self.assertIsNone(self.remove(a))
+        self.assertTrue(os.path.isdir(os.path.join(wt, "node_modules")))
+
+    def test_process_appearing_after_the_plan_skips_it(self):
+        wt, w = self.idle()
+        [a] = cl.plan_deps([w], 14, self.now, set(), set())[0]
+        self.assertIsNone(cl.remove_deps(a, 14, self.now, {wt}, set(), set()))
+        self.assertTrue(os.path.isdir(os.path.join(wt, "node_modules")))
+
+    def test_a_replaced_dir_is_not_the_planned_one(self):
+        wt, w = self.idle()
+        [a] = cl.plan_deps([w], 14, self.now, set(), set())[0]
+        nm = os.path.join(wt, "node_modules")
+        os.rename(nm, os.path.join(self.root, "old-nm"))
+        write(os.path.join(nm, "fresh", "i.js"))
+        age_tree(wt, 30)                                   # even with an old mtime
+        self.assertEqual(self.remove(a), 0)
+        self.assertTrue(os.path.isfile(os.path.join(nm, "fresh", "i.js")))
+
+    def test_a_symlink_swapped_into_the_path_is_not_followed(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, "apps", "web", "node_modules", "a", "i.js"))
+        age_tree(wt, 30)
+        [a] = cl.plan_deps([cl.scan_worktree(wt, self.cutoff())], 14, self.now, set(), set())[0]
+        victim = os.path.join(self.root, "victim")
+        write(os.path.join(victim, "node_modules", "keep.txt"))
+        os.rename(os.path.join(wt, "apps"), os.path.join(self.root, "apps-moved"))
+        os.makedirs(os.path.join(wt, "apps"))
+        os.symlink(victim, os.path.join(wt, "apps", "web"))
+        age_tree(wt, 30)
+        nm = os.path.join(wt, "apps", "web", "node_modules")
+        st = os.lstat(os.path.join(self.root, "apps-moved", "web", "node_modules"))
+        with self.assertRaises(OSError):
+            cl.remove_dep_dir(nm, (st.st_dev, st.st_ino))
+        self.assertTrue(os.path.isfile(os.path.join(victim, "node_modules", "keep.txt")))
+
+    # CLI
+
+    def test_no_docker_without_deps_has_nothing_to_do(self):
+        self.assertEqual(cl.main(["--no-docker"]), 2)
+
+    @unittest.skipIf(LINUX and os.geteuid() == 0, "the root check cannot fail as root")
+    def test_deps_removal_needs_root(self):
+        with mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
+            self.assertEqual(cl.main(["--deps", "--y", "--no-docker"]), 2)
+
+    def test_no_docker_dry_run_never_runs_docker(self):
+        calls = []
+        with mock.patch.object(cl, "sh", side_effect=lambda a, check=True: calls.append(a)), \
+                mock.patch.object(cl.shutil, "which", return_value=None):
+            rc = cl.main(["--no-docker", "--deps", "--dry-run", "--deps-roots", self.root])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    def test_failed_docker_ps_is_not_no_containers(self):
+        r = mock.Mock(returncode=1, stdout="", stderr="Cannot connect")
+        with mock.patch.object(cl, "sh", return_value=r), \
+                mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
+            with self.assertRaises(RuntimeError):
+                cl.bind_mount_sources()
+
+
 if __name__ == "__main__":
     unittest.main()

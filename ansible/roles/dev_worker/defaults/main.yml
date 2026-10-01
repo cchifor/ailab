@@ -315,3 +315,9 @@ dev_worker_helmtest_namespace: "helmtest-{{ inventory_hostname | regex_replace('
 # Weekly buildx prune (tasks/docker.yml): keep at most this much build cache, evicting least
 # recently used records. A size cap, because the age filter is a no-op on buildx 0.37.
 dev_worker_buildx_cache_max: "20GB"
+
+# Daily `cleanup --deps` (tasks/cleanup.yml): remove node_modules / .venv / Rust target from git
+# worktrees under /workspace and /home that nothing has touched for this many days and no process
+# or running container is using. Source, git state and untracked files are never touched.
+dev_worker_deps_prune_enabled: true
+dev_worker_deps_prune_days: 14

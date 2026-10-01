@@ -834,6 +834,31 @@ Codex; the transcript, attachments included, is stored at Anthropic — mind scr
   after agent upgrades: Claude self-updates and Codex is only a version floor. It reports NOT RUN
   instead of answering startup dialogs for you.
 
+## Disk full (`/workspace` or `/`)
+
+`/workspace` is its own disk (scsi1) and holds both the agents' worktrees and the docker/containerd
+data-root, so it is the one that fills. At 100% the agent cannot start any command — cleanup
+included — and has to ask for help. `DevWorkerDiskFilling` fires at <12% free on `/` or `/workspace`
+(before 2026-10-01 it watched `/` only, which is how dev-worker-3 reached 100% and dev-worker-2 0.7%
+free without a page).
+
+What reclaims it, safest first (`cleanup` is the role's tool, `ansible/roles/dev_worker/files/cleanup`):
+
+1. `sudo cleanup --no-docker --deps --dry-run`, then without `--dry-run` — node_modules, `.venv`
+   (with `pyvenv.cfg`) and Rust `target` (beside a `Cargo.toml`) in git worktrees under `/workspace`
+   and `/home` idle for 14+ days (`--deps-days N`). Never source, git state or untracked files; a
+   worktree any process or running container is using is skipped, as is a dep dir holding a `.git`
+   or a mount. This was ~42 GB per worker on 2026-10-01. The `dev-worker-deps-prune` timer runs it
+   daily at ~03:30 (`journalctl -u dev-worker-deps-prune`; disable with
+   `dev_worker_deps_prune_enabled: false`).
+2. `cleanup --dry-run`, then `cleanup` — docker: stale compose stacks, old stopped containers,
+   unused images and anonymous volumes, build cache beyond 10 GB. `--caches` adds npm/uv/Playwright.
+3. What is left is live work: `du -xh --max-depth=2 /workspace | sort -rh | head`. Deleting whole
+   worktrees is the owner's call, not the operator's.
+
+If the disk is at 100%, `docker builder prune -af` is the quickest few GB to get the agent moving
+again (build cache only; nothing running depends on it).
+
 ## Verify
 
 - `/workspace` mounted: `mountpoint -q /workspace && echo ok`

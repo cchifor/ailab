@@ -3,7 +3,8 @@
 # Shows a table of exactly what it will remove (stale compose stacks, old stopped containers,
 # unused images and anonymous volumes, old build cache; tool caches only with --caches), asks
 # yes/no, then removes exactly that. `cleanup --y` skips the question; `cleanup --dry-run` only
-# shows the plan. Tested by scripts/tests/test_dev_worker_cleanup.py.
+# shows the plan; `sudo cleanup --deps` adds dependency dirs (node_modules, .venv, Rust target) in
+# git worktrees idle for 14+ days. Tested by scripts/tests/test_dev_worker_cleanup.py.
 # Own tag so it can be rolled out alone: --tags cleanup.
 - name: Install the cleanup tool
   ansible.builtin.copy:
@@ -12,3 +13,51 @@
     owner: root
     group: root
     mode: "0755"
+
+# Daily --deps pass: the dependency dirs of worktrees nobody has touched for
+# dev_worker_deps_prune_days. Docker is left to the buildx-prune timer (tasks/docker.yml) and to
+# people — auto-removing stacks and images is a separate decision. Why it exists: on 2026-10-01
+# dev-worker-3's /workspace hit 100% (its agent could not start any command) and dev-worker-2's sat
+# at 0.7% free, each carrying ~42 GB of node_modules/.venv/target in worktrees idle for weeks.
+# Root, because only root sees every process's cwd/open/mapped files in /proc, which is how the tool
+# proves nothing is using a worktree; it refuses --deps removal otherwise.
+- name: Install the deps-prune unit + timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - dest: dev-worker-deps-prune.service
+      content: |
+        [Unit]
+        Description=Remove dependency dirs from git worktrees idle {{ dev_worker_deps_prune_days }}+ days
+        After=docker.service local-fs.target
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/cleanup --y --no-docker --deps --deps-days {{ dev_worker_deps_prune_days }}
+        Nice=19
+        IOSchedulingClass=idle
+        TimeoutStartSec=2h
+    - dest: dev-worker-deps-prune.timer
+      content: |
+        [Unit]
+        Description=Daily dependency-dir prune of idle git worktrees
+
+        [Timer]
+        OnCalendar=*-*-* 03:30
+        RandomizedDelaySec=30m
+        Persistent=true
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd
+
+- name: "Deps-prune timer {{ 'enabled' if dev_worker_deps_prune_enabled | bool else 'disabled' }}"
+  ansible.builtin.systemd:
+    name: dev-worker-deps-prune.timer
+    enabled: "{{ dev_worker_deps_prune_enabled | bool }}"
+    state: "{{ 'started' if dev_worker_deps_prune_enabled | bool else 'stopped' }}"
+    daemon_reload: true
