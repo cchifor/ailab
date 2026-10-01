@@ -153,7 +153,7 @@ spec:
           - name: dind
             # tag@digest, NEVER a bare @sha256: with no tag Renovate compares against `latest` (the #899 TEI
             # outage). 29.8.1-dind resolved on Docker Hub 2026-09-29 (same digest as 29-dind / dind / latest).
-            image: docker.io/library/docker:29.8.2-dind@sha256:eb37f58646a901dc7727cf448cae36daaefaba79de33b5058dab79aa4c04aefb
+            image: docker.io/library/docker:29.8.2-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1
             # Run dockerd, then watch the sentinel and exit when the runner is done (graceful pod teardown
             # WITHOUT a shared PID namespace). Insecure TCP on loopback only (the pod netns is isolated by
             # Kata + the CNP); NO TLS dir so the runner can reach tcp://127.0.0.1:2375.
