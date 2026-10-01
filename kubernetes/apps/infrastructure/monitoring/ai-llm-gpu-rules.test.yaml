@@ -32,7 +32,7 @@ tests:
       - series: 'amdgpu_vram_total_bytes{job="ai-llm-node", instance="192.168.0.44:9100", card="0"}'
         values: "536870912x44"
     alert_rule_test:
-      # 9m after the wedge began: still pending.
+      # 8m after the wedge began at 5m (x4 expands to t=0..4m): still pending.
       - eval_time: 13m
         alertname: AILlmGpuPageTableExhausted
         exp_alerts: []
