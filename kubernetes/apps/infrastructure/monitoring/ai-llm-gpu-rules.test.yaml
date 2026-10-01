@@ -1,0 +1,85 @@
+# `promtool test rules` fixtures for ai-llm-gpu-rules.yaml. Run by scripts/rules-lint.sh on every PR,
+# after `promtool check rules`.
+#
+# Replays 2026-10-01 on node2 (.45): VRAM pinned at 512/512 MiB after a wedged load, against
+# node3 (.46) doing an ordinary cold load that peaks at 503 MiB (98%) and settles, and node1 (.44)
+# idle at 147 MiB. Only the wedge may page.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule under the manifest's basename.
+rule_files:
+  - ai-llm-gpu-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: a wedged load pins VRAM at 100% and pages after 10m; a 98% load peak and an idle node never do
+    input_series:
+      # node2: idle 147 MiB, then the load runs the carve to 512/512 at 5m and never comes back.
+      - series: 'amdgpu_vram_used_bytes{job="ai-llm-node", instance="192.168.0.45:9100", card="0"}'
+        values: "154140672x4 536870912x40"
+      - series: 'amdgpu_vram_total_bytes{job="ai-llm-node", instance="192.168.0.45:9100", card="0"}'
+        values: "536870912x44"
+      # node3: a healthy cold load peaks at 503 MiB for 2 minutes, then settles while loaded.
+      - series: 'amdgpu_vram_used_bytes{job="ai-llm-node", instance="192.168.0.46:9100", card="0"}'
+        values: "154140672x4 527433728x2 450000000x38"
+      - series: 'amdgpu_vram_total_bytes{job="ai-llm-node", instance="192.168.0.46:9100", card="0"}'
+        values: "536870912x44"
+      # node1: no managed model, idle.
+      - series: 'amdgpu_vram_used_bytes{job="ai-llm-node", instance="192.168.0.44:9100", card="0"}'
+        values: "154140672x44"
+      - series: 'amdgpu_vram_total_bytes{job="ai-llm-node", instance="192.168.0.44:9100", card="0"}'
+        values: "536870912x44"
+    alert_rule_test:
+      # 9m after the wedge began: still pending.
+      - eval_time: 13m
+        alertname: AILlmGpuPageTableExhausted
+        exp_alerts: []
+      # Past the 10m hold: node2 only.
+      - eval_time: 20m
+        alertname: AILlmGpuPageTableExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ai-llm-node
+              instance: "192.168.0.45:9100"
+              card: "0"
+            exp_annotations:
+              summary: "192.168.0.45:9100: iGPU page-table VRAM exhausted for 10m — llama-server load wedged"
+              description: >-
+                The 512 MiB UMA carve on 192.168.0.45:9100 has been 100% used for 10 minutes: a
+                model load ran out of GPU page-table space (dmesg `BO_VA (-12)`) and llama-server is
+                stuck in D state. Requests routed to this backend hang until llama-swap's
+                healthCheckTimeout. Withdraw this node's deployment from LiteLLM (litellm.yaml and
+                litellm-local.yaml, as on 2026-09-21 and 2026-10-01), then reboot the host with the
+                wedged-LXC sequence in docs/runbooks/node-maintenance.md. A plain reboot hangs.
+
+  - interval: 1m
+    name: a wedge that clears (host rebooted, carve back to idle) resolves the alert
+    input_series:
+      - series: 'amdgpu_vram_used_bytes{job="ai-llm-node", instance="192.168.0.45:9100", card="0"}'
+        values: "536870912x20 154140672x20"
+      - series: 'amdgpu_vram_total_bytes{job="ai-llm-node", instance="192.168.0.45:9100", card="0"}'
+        values: "536870912x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AILlmGpuPageTableExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ai-llm-node
+              instance: "192.168.0.45:9100"
+              card: "0"
+            exp_annotations:
+              summary: "192.168.0.45:9100: iGPU page-table VRAM exhausted for 10m — llama-server load wedged"
+              description: >-
+                The 512 MiB UMA carve on 192.168.0.45:9100 has been 100% used for 10 minutes: a
+                model load ran out of GPU page-table space (dmesg `BO_VA (-12)`) and llama-server is
+                stuck in D state. Requests routed to this backend hang until llama-swap's
+                healthCheckTimeout. Withdraw this node's deployment from LiteLLM (litellm.yaml and
+                litellm-local.yaml, as on 2026-09-21 and 2026-10-01), then reboot the host with the
+                wedged-LXC sequence in docs/runbooks/node-maintenance.md. A plain reboot hangs.
+      - eval_time: 30m
+        alertname: AILlmGpuPageTableExhausted
+        exp_alerts: []
