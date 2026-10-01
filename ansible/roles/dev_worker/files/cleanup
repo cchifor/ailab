@@ -792,16 +792,21 @@ def remove_dep_dir(path, ident):
 def remove_deps(action, days, now, busy, binds, mounts):
     """Re-judge the worktree right before deleting — it may have been picked up since the scan —
     with the CALLER's fresh `busy`/`binds`/`mounts`, then remove exactly the planned dep dirs that
-    the fresh scan still finds, as the same inodes. Returns how many were removed; None = the whole
-    worktree was skipped."""
+    the fresh scan still finds, as the same inodes, and that inspect_dep still clears. The re-inspect
+    matters: scan_worktree does not look inside dep dirs, and a checkout cloned into
+    node_modules/a after the plan leaves node_modules' own inode and mtime unchanged (review, #1005).
+    Returns how many were removed; None = the whole worktree was skipped."""
     w = scan_worktree(action.label, (now - timedelta(days=days)).timestamp())
     if w.last_activity is None or in_use(action.label, busy, binds):
         return None
     idents = {p: (dev, ino) for p, dev, ino in action.fingerprint or ()}
     removed = 0
     for d in action.ids:
-        if (d in w.deps and d in idents and under(d, action.label)
-                and not any(under(m, d) for m in mounts) and remove_dep_dir(d, idents[d])):
+        if not (d in w.deps and d in idents and under(d, action.label)):
+            continue
+        if any(under(m, d) for m in mounts) or inspect_dep(d)[2] is not None:
+            continue
+        if remove_dep_dir(d, idents[d]):
             removed += 1
     return removed
 

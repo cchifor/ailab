@@ -560,6 +560,17 @@ class DepsTest(unittest.TestCase):
         self.assertIsNone(cl.remove_deps(a, 14, self.now, {wt}, set(), set()))
         self.assertTrue(os.path.isdir(os.path.join(wt, "node_modules")))
 
+    def test_a_checkout_cloned_into_a_dep_dir_after_the_plan_is_kept(self):
+        wt, w = self.idle()
+        [a] = cl.plan_deps([w], 14, self.now, set(), set())[0]
+        nm = os.path.join(wt, "node_modules")
+        before = os.lstat(nm)
+        write(os.path.join(nm, "a", ".git", "HEAD"))      # inside node_modules/a: nm untouched
+        write(os.path.join(nm, "a", "work.py"))
+        os.utime(nm, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(self.remove(a), 0)
+        self.assertTrue(os.path.isfile(os.path.join(nm, "a", "work.py")))
+
     def test_a_replaced_dir_is_not_the_planned_one(self):
         wt, w = self.idle()
         [a] = cl.plan_deps([w], 14, self.now, set(), set())[0]
