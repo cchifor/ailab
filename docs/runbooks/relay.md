@@ -8,7 +8,7 @@ The authoritative manifests live in `cchifor/ailab`, directory `kubernetes/apps/
 
 ## Release payload
 
-`relay-0.1.0-20261001` is a versioned, immutable release containing compiled server/UI code and the production dependencies extracted from the tested `relay-platform:0.1.0` image. It is mounted read-only under a digest-pinned Node 22.23 runtime. There is no package installation at startup.
+`relay-0.1.2-20261001` is a versioned, immutable release containing compiled server/UI code, the production dependencies, and public connector downloads extracted from the tested `relay-platform:0.1.2` image. It is mounted read-only under a digest-pinned Node 22.23 runtime. There is no package installation at startup.
 
 - `relay-releases`: 2 GiB RWX `nfs-csi`, code only.
 - `relay-data`: 2 GiB RWO `qnap-iscsi`, plugin artifacts.
@@ -87,3 +87,21 @@ Publication status must be verified from live cluster/DNS checks; preparing thes
 - Public tunnel/HTTPS/browser/connector verification follows merge. The first Velero capture and deletion of the out-of-band deployer identity are operator follow-ups.
 
 Backup publisher regression checks are reproducible with `RELAY_NODE_BIN=/path/to/node22 python3 scripts/tests/test-relay-backup.py`. They cover COPY escaping, both current/rollback artifact versions, independence from later source deletion, missing/corrupt source rejection, preservation of earlier complete generations, empty registries, and seven-generation retention.
+
+## Connector downloads release 0.1.2
+
+[Relay v0.1.2](https://git.chifor.me/cchifor/relay-platform/releases/tag/v0.1.2) adds public Linux x86-64 and ARM64 static connector binaries, a checksum-verifying per-user installer, and guided Install → Enroll → Share panes onboarding. Source commit: `41786bbb071ca3fd884d37dd5f8d135cc1d75c72`. Runtime archive: `relay-0.1.2-20261001.tar.gz`; SHA-256: `2c99aec856ac0b1a7643b991142482181bcc57a76f751addda8da8109e840f17`. The archive includes the exact connector assets published by the successful tag CI job.
+
+Unauthenticated bootstrap routes are `/install.sh`, `/downloads/connector/manifest.json`, and `/downloads/connector/<version>/{relay-connector-linux-amd64,relay-connector-linux-arm64,SHA256SUMS,manifest.json,install.sh}`. They serve only packaged release files and remain independent of optional feature plugins. Missing artifacts return 404 rather than SPA HTML. Root metadata/installer use no-cache; versioned downloads are immutable. SHA-256 detects mismatch/corruption; HTTPS supplies origin trust, not an independent publisher signature. No forge credentials or Rust toolchain are needed on agent hosts.
+
+CI verified 19 integration/browser checks, 2 Rust tests, actual x86-64 and emulated ARM64 enrollment/tmux output/control, and clean installation/reinstallation as UID 1000 on Ubuntu 22.04 and Alpine 3.21. CI databases now use isolated containers and dynamically assigned loopback ports. Public HTTPS acceptance runs after Flux rollout.
+
+Release annotations and both application/migration subPaths advance together. Image references also restore the validated Node 22.23.0 and PostgreSQL 17.11 images, with explicit version/flavor tags plus digests. There are no schema, Secret, PVC, DNS, or tunnel changes. Roll back to `relay-0.1.0-20261001` with its original annotations if needed; schema compatibility is unchanged. Keep prior connector version directories inside subsequent archives when retaining pinned public download URLs. Stage new release directories before changing the Deployment; never replace a mounted directory in place.
+
+### Runtime version guard
+
+While this release was staged, automated digest-only PRs #1014 and #1015 resolved the tagless image references against latest PostgreSQL 18.6 and Node 26.10. PostgreSQL refused the existing major-17 data directory, leaving the migration container unable to reach the database. These manifests restore the last tested digests and add explicit `17.11-alpine` / `22.23.0-bookworm-slim` tags. Relay-scoped Renovate rules restrict updates to PostgreSQL 17.x and Node 22.x, grouping PostgreSQL server/dump-tool updates. Changing these major bounds requires runtime acceptance or a planned database upgrade/restore rehearsal. Do not reinitialize or delete the database PVC to resolve a version mismatch.
+
+### Release storage capacity
+
+The release PVC requests 2 GiB. After staging on 2026-10-01, `du -sk` reported 70,210 KiB for 0.1.0 and 79,519 KiB for 0.1.2: approximately 146 MiB total, or 7.2% of that budget. The NFS `df` result describes the shared export, so it is not used as the PVC budget. Before staging, compare existing `du -sk /releases/*` usage plus the new archive's extracted size against that budget. Retain the active release and the previous validated rollback release. Additional historical runtime directories can be removed by an operator only after their archive and checksum are verified in Gitea and no pod mounts them. Keep at most three connector versions in the next runtime archive; older pinned public URLs are retired explicitly. Long-term archive retention belongs in the release repository, rather than accumulating every runtime directory on the PVC.
