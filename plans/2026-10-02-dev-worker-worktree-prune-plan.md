@@ -1,5 +1,12 @@
 # Dev-worker stale-worktree prune + daily buildx cap
 
+## Codex Review
+
+- The revised checks and report-first rollout address the main round-1 concerns.
+- Reject `file://` remotes in both preservation rules; they do not establish an off-host copy.
+- Correct the HEAD-reflog documentation and acknowledge that new edits can race removal.
+- Add timeout escalation so an ignored SIGTERM does not indefinitely delay the deps step.
+
 ## Context
 
 The dev-workers' `/workspace` (125 GB, scsi1) holds both the agents' git worktrees and the
@@ -89,6 +96,8 @@ A broken/moved registration is reported, not touched.
    Both read LOCAL remote-tracking refs: the guarantee is "was on the forge as of the last fetch",
    no network call. Documented as such.
 
+<!-- codex: The proposed scheme:// test also accepts file:///local/repo.git, so a local-only repository can satisfy either preservation rule. Use an explicit allowlist of supported network schemes plus scp-style SSH, reject file://, and cover file:// remotes in the tests for both rules. -->
+
 **Removal**: plan fingerprint = (dev, ino) of the worktree dir + HEAD OID. Right before each one,
 re-run every check with fresh /proc, container and mount state, require the same fingerprint, then
 `git worktree remove <path>` (run in the common dir, no `--force`) as the owner, so git itself
@@ -119,6 +128,8 @@ and the deps pass skips worktrees planned for whole removal; execution never add
   `dev_worker_worktree_prune_merged_days: 3`.
 - `tasks/docker.yml`: `docker-buildx-prune.timer` daily (`*-*-* 03:00`, `RandomizedDelaySec=30m`).
 
+<!-- codex: Plain timeout 45m sends SIGTERM and can wait indefinitely if the command ignores it. Add a short --kill-after grace period, and verify that any service-level TimeoutStartSec permits the bounded worktree step plus the deps step; otherwise the claimed isolation of the existing deps run does not hold. -->
+
 ### C. Docs
 
 `docs/runbooks/dev-workers.md` § Disk full: the worktree pass (both rules, the 3-day merged
@@ -126,6 +137,8 @@ threshold, disposable-ignored list, `git worktree lock <path>` as the opt-out, r
 what is and is not recoverable: commits on branches yes; uncommitted work is never removed; the
 worktree's HEAD reflog and non-disposable ignored files are never removed either — the worktree is
 kept instead), buildx daily with a best-effort target. The tool's docstring and the task comments.
+
+<!-- codex: The HEAD-reflog promise contradicts Removal: git worktree remove deletes that reflog, and no check here keeps worktrees with reflog-only history. Document the intended loss explicitly, including that earlier detached/rebased commits referenced only by that reflog can become unreachable and later be garbage-collected. Retaining branch refs does not preserve all reflog-only history. -->
 
 ## Critical files
 
@@ -158,19 +171,7 @@ kept instead), buildx daily with a best-effort target. The tool's docstring and 
 
 ## Residual risks pushed back on
 
-<!-- codex: Root does not guarantee complete /proc visibility, and busy_paths() currently ignores permission/read failures while mount_points() returns an empty set on failure. Distinguish normal process-exit races from unavailable safety evidence and fail closed on the latter. -->
-<!-- opus-pushback: This is the evidence model --deps shipped with in #1005 after two review rounds; per-process read errors are overwhelmingly exit races, and on these hosts root sees every pid (no hidepid). A worktree also has to be idle 3+ days AND clean AND merged before /proc even matters, so a fail-closed rewrite of the shared helpers is out of scope here. -->
-
-<!-- codex: Path strings from other mount namespaces and bind aliases need not identify the host worktree path, and querying the default Docker daemon misses rootless Docker or other runtimes. State and verify the supported deployment assumptions instead of treating these helpers as proof that every user of the tree is visible. -->
-<!-- opus-pushback: Accepted as a documented assumption, not new code: dev-workers run one rootful dockerd (role-managed) and no rootless runtime; the runbook states it. Containers that bind a worktree are now refused whether running or stopped. -->
-
-<!-- codex: The cleanup lock excludes only other cleanup removals, and neither repeated checks nor unforced Git removal closes the race with an agent starting work during recursive deletion. Establish coordination that agents honor, or explicitly resolve this residual risk before enabling unattended removal. -->
+<!-- codex: round-2: A cross-agent locking protocol is disproportionate here, but the stated acceptance rests on an incorrect claim: an agent can write new uncommitted files after the final checks, including Git's own cleanliness check, and recursive removal can delete them. Those edits are not already merged or on the forge. git worktree lock is an opt-out before removal, not protection once deletion has begun. Accept the narrow race for this deployment, but document its possible loss of newly written work before enabling remove mode and qualify the runbook's absolute "uncommitted work is never removed" promise. -->
 <!-- opus-pushback: Resolved as an accepted residual: the window is the seconds of one `git worktree remove` on a worktree idle 3+ days, re-checked immediately before; anything an agent could lose in that window is already merged or on the forge. `git worktree lock` is the documented opt-out. A cross-agent locking protocol is disproportionate. -->
 
-<!-- codex: Root-side path walks remain vulnerable to component replacement; require directory-fd-based, no-follow traversal before trusting user-writable paths. -->
-<!-- opus-pushback: Root never deletes or writes here — it only lstat()s and reads one-line regular files; every deletion is git running as the owner, who can only remove what they could remove anyway. A swapped component can at worst mislead a check into "kept". The FIFO/symlink metadata hazard is fixed (regular-file check before open). -->
-
-<!-- codex: Report inspection failures separately even when idleness cannot be established; the current last_activity=None conflates activity with unreadability. -->
-<!-- opus-pushback: An unreadable tree already counts as in use (kept), and the Kept list is deliberately limited to worktrees idle past --worktree-days so the daily report stays readable (dw1: ~30 dirty worktrees aged 3-14 days would otherwise drown it). -->
-
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
