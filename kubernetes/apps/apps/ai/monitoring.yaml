@@ -5,7 +5,8 @@
 # ServiceMonitors carry `release: kube-prometheus-stack` so the operator selects them.
 ---
 # Scrape-only headless service fronting the LXC node_exporters (.45 node2, .46 node3; .44 ai-llm-1
-# was destroyed 2026-10-02, see kubernetes/infra/ai-lxc/variables.tf).
+# was retired 2026-10-02 and is dropped here BEFORE the container stops, see
+# kubernetes/infra/ai-lxc/variables.tf).
 apiVersion: v1
 kind: Service
 metadata:

@@ -114,9 +114,10 @@ variable "lxc_template_file" {
 }
 
 # ---- One privileged GPU LXC per model host (node2, node3) ----
-# ai-llm-1 (ai-node1, ctid 5001, .44) was DESTROYED 2026-10-02: it had served nothing since its qwen3.8
+# ai-llm-1 (ai-node1, ctid 5001, .44) was RETIRED 2026-10-02: it had served nothing since its qwen3.8
 # instance moved to node2 on 2026-09-16, and node1 needed the RAM for ballooning
-# (plans/2026-10-02-balloon-headroom-plan.md). .44 is free again in docs/network-plan.md.
+# (plans/2026-10-02-balloon-headroom-plan.md). Dropping it from this map is what makes the next
+# `tofu apply` destroy it; .44 stays RESERVED in docs/network-plan.md until that apply has run.
 # IPs .45/.46 (static-reserved block, adjacent to the Talos nodes .41-.43). The original .51-.53
 # were abandoned because .51+ is the router's DHCP pool — see the inline note below + docs/network-plan.md.
 variable "ai_llm_nodes" {

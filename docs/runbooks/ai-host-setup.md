@@ -32,8 +32,9 @@ ssh root@192.168.0.2 'bash -s' < scripts/fetch-models.sh qwen3.6    # daily driv
 
 # 2. Create the LXCs (device passthrough + /models bind mount). Uses root@pam (see gotcha #1).
 #    Two since 2026-10-02: ai-llm-2 (node2) + ai-llm-3 (node3). ai-llm-1 (node1, ctid 5001, .44) was
-#    DESTROYED that day -- it had served nothing since its qwen3.8 instance moved to node2 on 2026-09-16,
-#    and node1 needed the RAM (plans/2026-10-02-balloon-headroom-plan.md).
+#    RETIRED that day and is destroyed by the next apply -- it had served nothing since its qwen3.8
+#    instance moved to node2 on 2026-09-16, and node1 needed the RAM
+#    (plans/2026-10-02-balloon-headroom-plan.md).
 cp kubernetes/infra/terraform.tfvars kubernetes/infra/ai-lxc/terraform.tfvars   # then set pve_password
 tofu -chdir=kubernetes/infra/ai-lxc init
 tofu -chdir=kubernetes/infra/ai-lxc apply

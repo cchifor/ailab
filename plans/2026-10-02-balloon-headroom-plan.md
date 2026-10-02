@@ -45,7 +45,7 @@ floor are paid for.
 - **Not levers:** Talos CPs (cp1 is 95% requested by pods); runner count (each of the 8 was busy ~160 h
   of 336 h, queue wait p50 264 s / p95 1695 s).
 
-## Phase 1 — live, no reboots (DONE 2026-10-02)
+## Phase 1 — live, no reboots (items 1-3 done 2026-10-02; item 4 completes after the merge)
 
 1. **TTM pool capped at 1 GiB on all three hosts:** `page_pool_size` set at runtime, drained through
    debugfs `page_pool_shrink`, and `ttm.page_pool_size=262144` added to GRUB. node2 `MemAvailable`
@@ -53,12 +53,14 @@ floor are paid for.
 2. **`KSM_THRES_COEF=40`** in `/etc/ksmtuned.conf` on all three. `run=1` everywhere after one interval.
 3. **`shares: 3000`** on dev-workers 4201/4202/4204/4205, outside tofu (bpg has no attribute for it).
    See `docs/runbooks/dev-workers.md`.
-4. **ai-llm-1 (ctid 5001, .44) destroyed.** It had served nothing since 2026-09-16. This PR removes it
+4. **ai-llm-1 (ctid 5001, .44) retired.** It had served nothing since 2026-09-16. This PR removes it
    from `ai-lxc` and from the `ai-llm-node` scrape endpoints first; `pct stop` + `tofu apply` follow
-   the merge, so the target disappears before the container does.
+   the merge, so the target disappears before the container does. `.44` stays RESERVED in
+   `docs/network-plan.md` until the destroy has run, then a follow-up PR frees it.
 
-Open: the TTM cap is verified for draining, not yet for a fresh unload. After the next qwen3.8
-idle-unload on node2 or node3, `/sys/kernel/debug/ttm/page_pool` `total` must stay <= 262144.
+Verified on a fresh cycle (node3, 2026-10-02): a cold qwen3.8-27b load took 70 s (23.8 GiB of GTT)
+and after `/unload` the pool held 261912 pages (<= the 262144 cap), with `MemAvailable` back to
+45.1 GiB. Before the cap, the same unload left ~23 GiB in the pool.
 
 ## Phase 2 — rolling worker reboots, one at a time (no control planes)
 
