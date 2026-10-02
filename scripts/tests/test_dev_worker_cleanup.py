@@ -735,14 +735,61 @@ class WorktreesTest(unittest.TestCase):
         self.age(wt, 5)
         self.assertEqual(self.plan(wt), ([], []))
 
-    def test_a_custom_merge_driver_voids_the_merge_proof(self):
+    def test_a_custom_merge_driver_voids_the_merge_proof_but_not_the_stale_rule(self):
         wt = self.worktree("feat", push=False)
         self.squash_merge("feat.py")
         git(self.repo, "config", "merge.ours.driver", "true")
         self.age(wt, 5)
         self.assertEqual(self.plan(wt), ([], []))
+        pushed = self.worktree("pushed")
+        self.age(pushed, 40)
+        self.assertEqual(self.rules(self.plan(pushed)[0]), [(pushed, "stale")])
+
+    def test_only_regenerable_ignored_paths_are_disposable(self):
+        wt = self.worktree("feat")
+        write(os.path.join(wt, "Cargo.toml"))
+        for entry in ("node_modules/", "apps/web/dist/", "dist-portable/", "npm-debug.log",
+                      "a/b/x.pyc", "pkg.egg-info/", ".coverage", ".coverage.host.1.x",
+                      "test-results-diag/", "target/"):
+            self.assertTrue(cl.disposable(wt, entry), entry)
+        for entry in (".env", "dist-backup/", "archive.log/", "local.db", "secrets/",
+                      "venv/"):                                       # no pyvenv.cfg
+            self.assertFalse(cl.disposable(wt, entry), entry)
+
+    def test_an_old_in_place_dependency_write_does_not_block_the_stale_rule(self):
+        wt = self.worktree("feat")
+        dep = os.path.join(wt, "node_modules", "a", "i.js")
+        write(dep)
         self.age(wt, 40)
-        self.assertIn("custom merge driver", dict(self.plan(wt)[1])[wt])
+        t = time.time() - 35 * DAY                       # newer than the shallow scan saw...
+        os.utime(dep, (t, t))                            # ...but still past the 30-day rule
+        self.assertEqual(self.rules(self.plan(wt)[0]), [(wt, "stale")])
+
+    def test_a_worktree_vanishing_or_a_git_timeout_mid_plan_does_not_abort_the_scan(self):
+        gone, slow, fine = (self.worktree(n) for n in ("gone", "slow", "fine"))
+        for p in (gone, slow, fine):
+            self.age(p, 40)
+        real_inspect, real_git = cl.inspect_worktree, cl.GIT
+
+        def vanish(path, cutoff):
+            r = real_inspect(path, cutoff)
+            if path == gone:
+                _shutil.rmtree(path)
+            return r
+
+        def stall(uid, args, cwd):
+            if cwd == slow and args[:1] == ["symbolic-ref"]:
+                raise _sp.TimeoutExpired(args, 300)
+            return real_git(uid, args, cwd)
+        with mock.patch.object(cl, "inspect_worktree", vanish), mock.patch.object(cl, "GIT", stall):
+            plan, kept = self.plan(gone, slow, fine)
+        self.assertEqual(self.rules(plan), [(fine, "stale")])
+        self.assertEqual(sorted(dict(kept)), sorted([gone, slow]))
+
+    def test_all_lists_every_worktree_row(self):
+        plan = [cl.Action("worktree", f"/w/{i}", "merged, b", "5d", 1) for i in range(12)]
+        self.assertEqual(len(cl.display_rows(plan, True)), 12)
+        self.assertEqual(len(cl.display_rows(plan, False)), cl.IMAGE_ROWS + 1)   # + "N more"
 
     def test_a_local_path_remote_proves_nothing(self):
         wt = self.worktree("feat", push=False)

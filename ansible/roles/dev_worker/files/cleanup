@@ -859,12 +859,14 @@ NOBODY = 65534
 # workers' worktrees actually hold, 2026-10-02). Anything else ignored (.env, a local database,
 # secrets/) keeps the worktree.
 DISPOSABLE = frozenset({"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-                        ".tox", ".nox", ".hypothesis", ".coverage", "dist", "build", "out", ".next",
-                        ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".vite", "coverage",
-                        "htmlcov", "playwright-report", "test-results", ".failure-context",
-                        ".terraform", ".eslintcache", "auto-imports.d.ts", "components.d.ts"})
-DISPOSABLE_PREFIXES = (".coverage.", "test-results-", "dist-")
-DISPOSABLE_SUFFIXES = (".pyc", ".tsbuildinfo", ".log", ".egg-info")
+                        ".tox", ".nox", ".hypothesis", ".coverage", "dist", "dist-portable", "build",
+                        "out", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".vite",
+                        "coverage", "htmlcov", "playwright-report", "test-results",
+                        ".failure-context", ".terraform", ".eslintcache", "auto-imports.d.ts",
+                        "components.d.ts"})
+DISPOSABLE_PREFIXES = (".coverage.", "test-results-")
+DISPOSABLE_DIR_SUFFIXES = (".egg-info",)
+DISPOSABLE_FILE_SUFFIXES = (".pyc", ".tsbuildinfo", ".log")     # a FILE only: never `archive.log/`
 # A remote proves "it is on the forge" only when it is one: a local path or file:// remote is
 # another directory on this disk.
 NETWORK_URL = re.compile(r"^((https?|ssh|git)://|[^/\s@]+@[^/\s:]+:)")
@@ -1002,10 +1004,12 @@ def inspect_worktree(path, cutoff):
 def disposable(path, entry):
     """An ignored path git listed (relative; a dir ends with "/") that a tool would regenerate."""
     parts = entry.rstrip("/").split("/")
+    if not entry.endswith("/") and parts[-1].endswith(DISPOSABLE_FILE_SUFFIXES):
+        return True
     for i, name in enumerate(parts):
         parent = os.path.join(path, *parts[:i])
         if name in DISPOSABLE or name.startswith(DISPOSABLE_PREFIXES) or \
-                name.endswith(DISPOSABLE_SUFFIXES):
+                name.endswith(DISPOSABLE_DIR_SUFFIXES):
             return True
         if name in (".venv", "venv") and os.path.isfile(os.path.join(parent, name, "pyvenv.cfg")):
             return True
@@ -1119,13 +1123,16 @@ def judge_worktree(w, days, merged_days, now, busy, claims, mounts):
         return "merged", None, head
     if idle <= timedelta(days=days):
         return no
-    if drivers:
-        return None, "custom merge driver configured", None
     if not any(git_out(uid, ["for-each-ref", "--contains", head, "--count=1",
                              "--format=%(refname)", f"refs/remotes/{r}/"], w.path)
                for r in remotes):
         return None, "HEAD is not on any remote branch", None
     return "stale", None, head
+
+
+def rule_cutoff(rule, days, merged_days, now):
+    """The idle threshold a rule demands, as a timestamp: nothing in the tree may be newer."""
+    return (now - timedelta(days=merged_days if rule == "merged" else days)).timestamp()
 
 
 def plan_worktrees(worktrees, days, merged_days, now, busy, claims, mounts):
@@ -1137,16 +1144,17 @@ def plan_worktrees(worktrees, days, merged_days, now, busy, claims, mounts):
         try:
             rule, problem, head = judge_worktree(w, days, merged_days, now, busy, claims, mounts)
             if rule:
-                size, problem = inspect_worktree(w.path, w.last_activity.timestamp())
+                size, problem = inspect_worktree(w.path, rule_cutoff(rule, days, merged_days, now))
+            if rule and not problem:
+                st = os.lstat(w.path)
+                branch = git_out(st.st_uid, ["symbolic-ref", "-q", "--short", "HEAD"], w.path)
+                plan.append(Action("worktree", w.path, f"{rule}, {branch or 'detached'}",
+                                   fmt_age(now - w.last_activity), size, [w.path],
+                                   fingerprint=frozenset({(st.st_dev, st.st_ino, head)})))
+                continue
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-            rule, problem = None, str(e)
-        if rule and not problem:
-            st = os.lstat(w.path)
-            branch = git_out(st.st_uid, ["symbolic-ref", "-q", "--short", "HEAD"], w.path)
-            plan.append(Action("worktree", w.path, f"{rule}, {branch or 'detached'}",
-                               fmt_age(now - w.last_activity), size, [w.path],
-                               fingerprint=frozenset({(st.st_dev, st.st_ino, head)})))
-        elif problem and w.last_activity and now - w.last_activity > timedelta(days=days):
+            problem = str(e)
+        if problem and w.last_activity and now - w.last_activity > timedelta(days=days):
             kept.append((w.path, problem))
     return plan, kept
 
@@ -1164,7 +1172,7 @@ def remove_worktree(action, days, merged_days, now, busy, claims, mounts):
     rule, _, head = judge_worktree(w, days, merged_days, now, busy, claims, mounts)
     if not rule or action.fingerprint != frozenset({(st.st_dev, st.st_ino, head)}):
         return None
-    if inspect_worktree(path, w.last_activity.timestamp())[1] is not None:
+    if inspect_worktree(path, rule_cutoff(rule, days, merged_days, now))[1] is not None:
         return None
     link, _ = linked_worktree(path)
     r = GIT(st.st_uid, ["worktree", "remove", path], link.common)
