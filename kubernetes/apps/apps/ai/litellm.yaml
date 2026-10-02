@@ -887,6 +887,10 @@ data:
       # kubernetes/infra/ai-lxc/models.yaml, CORRECTED 2026-10-02). A stuck load now fails at 180 s,
       # and AILlmGpuPageTableExhausted pages (#1012). Restored after a verified load on .45:
       # `Reply with exactly: OK` -> `OK stop`, carve 149/512 MiB, dmesg clean.
+      # IF IT RECURS (a hang is still not parked by the router): withdraw this block from BOTH files and
+      # re-stamp the checksums. Reboot the host with docs/runbooks/node-maintenance.md's wedged-LXC
+      # sequence. Restore only after a greedy `Reply with exactly: OK` on .45 returns `OK stop` with dmesg
+      # clean: the block goes back BYTE-IDENTICAL to node3's except api_base, ABOVE node3's, in both files.
       - model_name: qwen3.8-27b-ailab
         litellm_params:
           model: openai/qwen3.8-27b-ailab
@@ -1175,7 +1179,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "88421c61313f"
+        checksum/config: "4fead844c878"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
