@@ -156,3 +156,38 @@ data PVCs, PostgreSQL, backup scheduling, DNS and tunnel routes are unchanged.
 
 Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/runs/57525):
 `registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31`.
+
+
+## Terminal geometry release 0.2.1
+
+The tag CI builds and verifies the application and both portable connectors,
+then publishes the application image and a `deployment-images-<run>.json`
+receipt on the Relay release. Both application and migration containers use
+that exact digest. Existing 0.1.2/0.2.0 connector downloads remain available.
+
+Terminal rendering is isolated from legacy card CSS. A single terminal uses
+one full-width grid column. Fit view changes the browser font size while
+preserving the worker's grid; minimum-size overflow remains scrollable. Fit
+pane uses measured cell dimensions and requires the existing control lease.
+For a single-pane window it resizes the window; split windows use pane-local
+resizing and report the actual accepted dimensions. The connector broadcasts
+local tmux layout changes with a fresh snapshot; the browser applies geometry
+and output in order, and subscriptions use the latest stored dimensions.
+
+No schema, Secret, volume or router changes are required. Rollback pins the
+previous verified Relay image in both containers through a reviewed PR. The
+existing coordinated backups remain valid. Upgrade an existing worker using
+the public installer and restart only its connector process, preserving its
+state file and tmux session; app deployment does not replace worker processes.
+
+Acceptance covers right-edge column rulers, Unicode, desktop/mobile rendering,
+view-only zoom without worker resize, control leases, two viewers, external and
+rapid local resizes, reconnect geometry, and keyboard focus after Fit pane.
+
+Release CI: https://git.chifor.me/cchifor/relay/actions/runs/57676
+
+Source: `0fb09ca14732e9addaeacda8e63c94bba46ef431`.
+
+Image: `registry.chifor.me/relay/control-plane@sha256:ffd2fd664bc013ffe03a679cc5811c09011585ba03683f0dd3810c52a941a03c`.
+
+Rollback image: `registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31`.
