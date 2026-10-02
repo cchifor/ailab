@@ -22,7 +22,7 @@ Manifests: `kubernetes/apps/apps/llm-router/` (wired into the apps Kustomization
 - The application OCI image is pinned by digest in `router.yaml`; its CI receipt records the unchanged Node 26.10.0 base digest used for this release.
 - Requests 100m CPU/384Mi memory; limits 2 CPU/1280Mi memory (Assistant image jobs: see the comment in router.yaml). May schedule on the existing `dedicated=agent` worker pool; no existing taints, cordons or workloads were changed.
 - `llm-router-data`: 5Gi RWO `qnap-iscsi`, mounted at `/data`, SQLite `/data/router.sqlite`. **Never move WAL onto NFS.**
-- `router-releases`: 2Gi RWX `nfs-csi`, **application code only**, one versioned directory per release (`router-0.1.0-<date>-<name>`), the live one mounted read-only at `/app` via `subPath`. All production dependencies were installed from the frozen pnpm lockfile before deployment. There is no dependency install at startup.
+- `router-releases`: 2Gi RWX `nfs-csi`, retained for legacy release archives and rollback only. It is no longer mounted into the live router. The CI-built OCI image carries application code and frozen production dependencies; there is no dependency install at startup.
 - NetworkPolicy admits :8787 only from `edge` cloudflared pods. Egress permits cluster DNS, public HTTPS (RFC1918 excluded), seat hosts in the namespace on :8791, and the mgmt LAN `192.168.0.0/24` on the model-server ports only (8080, 8081, 8082, 18020, 11434, 1234, 8000).
 
 ### Legacy staged-release procedure
@@ -134,3 +134,15 @@ a live directory or run a second control plane against the same database.
 
 Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/runs/57525):
 `registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e`.
+
+The registry permits anonymous OCI pulls (`ansible/roles/registry_zot` read
+policy). The exact router digest was exported with regctl using empty registry
+and Docker credential configurations, verifying the manifest, config and all
+layers; no imagePullSecret is required.
+
+The dated backup init container is temporary. After public acceptance, remove
+`backup-before-relay` through a follow-up reviewed PR, preserving its completed
+backup on the data PVC. That cleanup prevents future restarts from depending on
+an old backup's retention or integrity. The cleanup causes one more Recreate
+rollout; verify readiness again. Retain the recovery generation until a newer
+consistent backup is validated, then prune deliberately during maintenance.
