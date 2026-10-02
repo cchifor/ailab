@@ -72,7 +72,7 @@ SWAP_HEALTH_TIMEOUT="${SWAP_HEALTH_TIMEOUT:-180}"
 LLAMA_ENV="${LLAMA_ENV:-}"
 LLAMA_ENV_PREFIX=""; [ -n "$LLAMA_ENV" ] && LLAMA_ENV_PREFIX="env ${LLAMA_ENV} "
 # MODELS_JSON (SWAP multi-model): a jq array of objects, each
-#   {alias,gguf,ctx,parallel,extra,ttl,stage_from,mmproj,cache_k,cache_v}
+#   {alias,gguf,ctx,parallel,extra,ttl,stage_from,mmproj,cache_k,cache_v,env}
 # lets ONE node's llama-swap serve SEVERAL models (loaded one-at-a-time, switched on request). When set,
 # it OVERRIDES the single MODEL/MODEL_ALIAS. Used on node3 (qwen3.5-122b + gpt-oss-120b). See models.yaml.
 MODELS_JSON="${MODELS_JSON:-}"
@@ -326,7 +326,9 @@ HDR
       _mm="$(printf '%s' "$_m" | jq -r '.mmproj // empty')"; _mmf=""; [ -n "$_mm" ] && _mmf="--mmproj ${_mm}"
       _ck="$(printf '%s' "$_m" | jq -r '.cache_k // empty')"; _cv="$(printf '%s' "$_m" | jq -r '.cache_v // empty')"
       _kv=""; [ -n "$_ck" ] && _kv="--cache-type-k ${_ck}"; [ -n "$_cv" ] && _kv="${_kv} --cache-type-v ${_cv}"
-      _env="$(printf '%s' "$_m" | jq -r '.env // ""')"; _envp=""; [ -n "$_env" ] && _envp="env ${_env} "
+      # A model's own .env wins; without one it inherits the global LLAMA_ENV, so `--env LLAMA_ENV=...`
+      # cannot be a silent no-op on a MODELS_JSON node (review #1026).
+      _env="$(printf '%s' "$_m" | jq -r '.env // ""')"; _envp="$LLAMA_ENV_PREFIX"; [ -n "$_env" ] && _envp="env ${_env} "
       cat >>${SWAP_CONF_DIR}/config.yaml <<ENTRY
   "${_a}":
     cmd: >

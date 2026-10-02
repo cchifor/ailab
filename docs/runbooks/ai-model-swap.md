@@ -138,7 +138,10 @@ the same `INSTANCE=qwen38 SWAP=true` call, plus **`--env LLAMA_ENV=GGML_VK_PREFE
 which has been required since 2026-10-02. Without it, llama.cpp parks ~333 MiB of buffers in the 512 MiB UMA
 carve, the driver runs out of room for GPU page tables (`BO_VA (-12)`), and llama-server wedges in D state
 until a host reboot (models.yaml, CORRECTED 2026-10-02). llama-swap's cold-load bound is
-`SWAP_HEALTH_TIMEOUT` (default 180 s).
+`SWAP_HEALTH_TIMEOUT` (default 180 s). `lxc-exec.py` splits each `--env` on its FIRST `=` and shell-quotes
+the value, so `LLAMA_ENV=GGML_VK_PREFER_HOST_MEMORY=1` arrives intact. Several space-separated pairs must
+reach it as ONE argument: `--env "LLAMA_ENV=A=1 B=2"`. Under `MODELS_JSON` a model's own `env` key wins,
+and without one it inherits `LLAMA_ENV`.
 
 `MODELS_JSON` (a jq array) overrides the single `MODEL` and lets one node's llama-swap serve several
 models. Omit staging (`stage_from`/`MODEL_STAGE_SRC`) + point `gguf`/`MODEL` at `/models/...` to serve
