@@ -113,8 +113,11 @@ variable "lxc_template_file" {
   default = "debian-13-standard_13.1-2_amd64.tar.zst"
 }
 
-# ---- One privileged GPU LXC per physical host ----
-# IPs .44/.45/.46 (static-reserved block, adjacent to the Talos nodes .41-.43). The original .51-.53
+# ---- One privileged GPU LXC per model host (node2, node3) ----
+# ai-llm-1 (ai-node1, ctid 5001, .44) was DESTROYED 2026-10-02: it had served nothing since its qwen3.8
+# instance moved to node2 on 2026-09-16, and node1 needed the RAM for ballooning
+# (plans/2026-10-02-balloon-headroom-plan.md). .44 is free again in docs/network-plan.md.
+# IPs .45/.46 (static-reserved block, adjacent to the Talos nodes .41-.43). The original .51-.53
 # were abandoned because .51+ is the router's DHCP pool — see the inline note below + docs/network-plan.md.
 variable "ai_llm_nodes" {
   type = map(object({
@@ -127,7 +130,6 @@ variable "ai_llm_nodes" {
     # IPs moved from .51-.53 into the static-reserved block (.2-.50, outside the router's DHCP pool) to
     # end an IP conflict — the router had leased .53 to a DHCP client (an MXCHIP IoT device). See
     # docs/runbooks/ai-host-setup.md. Adjacent to the Talos nodes (.41-.43).
-    "ai-llm-1" = { node_name = "ai-node1", vm_id = 5001, ip = "192.168.0.44", hostname = "ai-llm-1" }
     "ai-llm-2" = { node_name = "ai-node2", vm_id = 5002, ip = "192.168.0.45", hostname = "ai-llm-2" }
     "ai-llm-3" = { node_name = "ai-node3", vm_id = 5003, ip = "192.168.0.46", hostname = "ai-llm-3" }
   }

@@ -113,6 +113,15 @@ with the co-located workers pinned near their 4 GiB floor for that session. If a
 `node_pressure_memory`, prefer unloading its heavyweight (or shortening its llama-swap TTL) over
 starving a worker.
 
+**Balloon shares (2026-10-02, set outside tofu).** All four workers carry `shares: 3000` (`qm set
+<vmid> --shares 3000`); runners keep the default 1000. When pvestatd grows guests it serves the ones
+under memory pressure first (guest free memory <= 25% of the floor) and splits the rest of its goal by
+`shares` (`PVE::AutoBalloon::compute_alg1`), so an interactive worker gets 3x a runner's slice of
+the headroom. Nothing restarts: `shares` is a fast-plug option. bpg/proxmox has **no** attribute for
+it (`memory.shared` is the PVE `shared` setting, a different thing) and never sends it, so `tofu apply`
+leaves it alone, but a recreated VM comes back at the default. Reapply it after any rebuild. Context:
+`plans/2026-10-02-balloon-headroom-plan.md`.
+
 ## Provision
 
 ```bash

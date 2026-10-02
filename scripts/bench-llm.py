@@ -39,7 +39,6 @@ DEFAULT_OUT = REPO_ROOT / "bench" / "results"
 
 # LXC endpoint <-> Proxmox host map (mgmt LAN). card0 sysfs lives on the host.
 NODES = {
-    "node1": {"host": "192.168.0.2", "lxc": "192.168.0.44"},
     "node2": {"host": "192.168.0.3", "lxc": "192.168.0.45"},
     "node3": {"host": "192.168.0.4", "lxc": "192.168.0.46"},
 }
