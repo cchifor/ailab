@@ -953,10 +953,16 @@ def container_claims():
     if not ids:
         return set()
     r = sh(["docker", "inspect", *ids], check=False)
-    if r.returncode != 0:
+    errors = [line for line in (r.stderr or "").splitlines() if line.strip()]
+    if r.returncode != 0 and not (errors and all("No such object" in e for e in errors)):
         raise RuntimeError("docker inspect failed; refusing to guess which worktrees containers use")
+    try:
+        found = json.loads(r.stdout)    # a container gone since `ps` is simply not in the output
+    except ValueError:
+        raise RuntimeError("docker inspect printed no JSON; refusing to guess which worktrees "
+                           "containers use")
     out = set()
-    for d in json.loads(r.stdout):
+    for d in found:
         out |= {m["Source"] for m in d.get("Mounts") or []
                 if m.get("Type") == "bind" and m.get("Source")}
         wd = ((d.get("Config") or {}).get("Labels") or {}).get(WORKDIR)
@@ -986,6 +992,10 @@ def inspect_worktree(path, cutoff):
                 rel = os.path.relpath(e.path, path)
                 if e.name == ".git" and d != path:
                     return total, f"contains another checkout ({os.path.dirname(rel)})"
+                if e.name == "HEAD" and d != path and os.path.isdir(os.path.join(d, "objects")) \
+                        and os.path.isdir(os.path.join(d, "refs")):
+                    # A bare repository (a mirror under an ignored build/): its own history.
+                    return total, f"contains a git repository ({os.path.dirname(rel)})"
                 st = e.stat(follow_symlinks=False)
                 if st.st_dev != top.st_dev:
                     return total, "has a mount inside"
@@ -1175,6 +1185,8 @@ def remove_worktree(action, days, merged_days, now, busy, claims, mounts):
     if inspect_worktree(path, rule_cutoff(rule, days, merged_days, now))[1] is not None:
         return None
     link, _ = linked_worktree(path)
+    if not link:                                    # its .git changed since the judgement
+        return None
     r = GIT(st.st_uid, ["worktree", "remove", path], link.common)
     return "" if r.returncode == 0 else ((r.stderr or r.stdout).strip().splitlines() or ["failed"])[-1]
 

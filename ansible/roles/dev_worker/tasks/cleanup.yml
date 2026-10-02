@@ -30,7 +30,8 @@
 # worktree's owner, never root.
 - name: Check the worktree-prune mode
   ansible.builtin.assert:
-    that: dev_worker_worktree_prune_mode in ['off', 'report', 'remove']
+    # `| string | lower`: an unquoted `off` is YAML 1.1 boolean false — accept it as off.
+    that: (dev_worker_worktree_prune_mode | string | lower) in ['off', 'false', 'report', 'remove']
     fail_msg: "dev_worker_worktree_prune_mode must be off, report or remove (a typo must not mean remove)"
 
 - name: Install the deps-prune unit + timer

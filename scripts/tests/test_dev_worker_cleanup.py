@@ -858,6 +858,29 @@ class WorktreesTest(unittest.TestCase):
         for p, why in cases.items():
             self.assertIn(why, got.get(p, ""), p)
 
+    def test_a_bare_repository_under_an_ignored_build_dir_is_kept(self):
+        wt = self.worktree("feat")
+        write(os.path.join(self.repo, ".git", "info", "exclude"), "build/\n")   # ignored, disposable
+        git(self.root, "init", "-q", "--bare", os.path.join(wt, "build", "mirror.git"))
+        self.age(wt, 40)
+        plan, kept = self.plan(wt)
+        self.assertEqual(plan, [])
+        self.assertIn("contains a git repository (build/mirror.git)", dict(kept)[wt])
+
+    def test_a_dot_git_changed_between_judgement_and_removal_skips_it(self):
+        wt = self.worktree("feat")
+        self.age(wt, 40)
+        [a], _ = self.plan(wt)
+        real = cl.linked_worktree
+        calls = []
+
+        def flip(path):                                  # fine for the re-judge, broken after
+            calls.append(path)
+            return real(path) if len(calls) == 1 else (None, "unreadable .git")
+        with mock.patch.object(cl, "linked_worktree", flip):
+            self.assertIsNone(self.removal(a))
+        self.assertTrue(os.path.isdir(wt))
+
     def test_a_shallow_repository_is_kept(self):
         wt = self.worktree("feat")
         write(os.path.join(self.repo, ".git", "shallow"), "0" * 40 + "\n")
@@ -1024,6 +1047,19 @@ class WorktreesTest(unittest.TestCase):
                 mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
             self.assertEqual(cl.container_claims(), {"/w/one", "/w/two"})
         self.assertIn("-aq", sh.call_args_list[0].args[0])
+
+    def test_a_container_gone_between_ps_and_inspect_does_not_abort(self):
+        ps = mock.Mock(returncode=0, stdout="a\nb\n", stderr="")
+        inspect = mock.Mock(returncode=1, stderr="Error: No such object: b\n", stdout=json.dumps([
+            {"Mounts": [{"Type": "bind", "Source": "/w/one"}], "Config": {"Labels": {}}}]))
+        with mock.patch.object(cl, "sh", side_effect=[ps, inspect]), \
+                mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
+            self.assertEqual(cl.container_claims(), {"/w/one"})
+        other = mock.Mock(returncode=1, stderr="Cannot connect to the Docker daemon\n", stdout="[]")
+        with mock.patch.object(cl, "sh", side_effect=[ps, other]), \
+                mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
+            with self.assertRaises(RuntimeError):
+                cl.container_claims()
 
 
 if __name__ == "__main__":
