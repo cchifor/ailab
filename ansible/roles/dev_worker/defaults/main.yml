@@ -312,7 +312,7 @@ dev_worker_openbao_kubeconfig_cutover: false
 # the CLAUDE.md block below; the authoritative value is inside the kubeconfig the sync mints.
 dev_worker_helmtest_namespace: "helmtest-{{ inventory_hostname | regex_replace('^dev-worker-', 'dw') }}"
 
-# Weekly buildx prune (tasks/docker.yml): keep at most this much build cache, evicting least
+# Daily buildx prune (tasks/docker.yml): keep at most this much build cache, evicting least
 # recently used records. A size cap, because the age filter is a no-op on buildx 0.37.
 dev_worker_buildx_cache_max: "20GB"
 
@@ -321,3 +321,13 @@ dev_worker_buildx_cache_max: "20GB"
 # or running container is using. Source, git state and untracked files are never touched.
 dev_worker_deps_prune_enabled: true
 dev_worker_deps_prune_days: 14
+
+# The same timer's first step, `cleanup --worktrees`: whole LINKED git worktrees (never a main
+# clone) that are clean (no changes, no untracked files), not in use, and either already merged into
+# the remote default branch and idle merged_days, or idle prune_days with HEAD on a remote branch.
+# Removed with `git worktree remove` (no --force) as the owner; branch refs are kept.
+# report = log what it would remove (--dry-run) · remove = remove it · off = skip the step
+# (an unquoted `off` is YAML false, which also means off).
+dev_worker_worktree_prune_mode: report
+dev_worker_worktree_prune_days: 30
+dev_worker_worktree_prune_merged_days: 3

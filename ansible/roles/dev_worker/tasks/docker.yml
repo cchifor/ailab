@@ -125,10 +125,12 @@
     label: "{{ item.dest }}"
   notify: Reload systemd
 
-# Section 15: weekly buildx cache prune so containerd's overlayfs snapshotter doesn't grow unbounded.
+# Section 15: daily buildx cache prune so containerd's overlayfs snapshotter doesn't grow unbounded.
 # Size-capped, NOT age-filtered: `buildx prune --filter=until=168h` removes nothing on buildx 0.37 /
 # BuildKit 0.33 — this timer logged "Total: 0B" every week while 20+ GB of cache sat unused on every
 # worker (found 2026-09-23). --max-used-space evicts least-recently-used records above the cap.
+# Daily, not weekly (2026-10-02): agents rebuild enough between Sundays to double the cap — dev-worker-1
+# sat at 38 GB five days after a run, and one run of this unit took it to 25.8 GB.
 # Own tag so it can be rolled out alone: --tags buildx_prune.
 - name: Install docker buildx-prune unit + timer
   tags: [buildx_prune]
@@ -150,10 +152,11 @@
     - dest: docker-buildx-prune.timer
       content: |
         [Unit]
-        Description=Weekly docker buildx prune
+        Description=Daily docker buildx prune
 
         [Timer]
-        OnCalendar=Sun 03:00
+        OnCalendar=*-*-* 03:00
+        RandomizedDelaySec=30m
         Persistent=true
         Unit=docker-buildx-prune.service
 
