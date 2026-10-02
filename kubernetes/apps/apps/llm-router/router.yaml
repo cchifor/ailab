@@ -120,25 +120,6 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
-      # Recreate stops the previous router before this opens SQLite. The helper
-      # publishes a verified backup plus the existing key/config on the data PVC.
-      # Temporary rollout gate: remove in a reviewed cleanup PR after acceptance.
-      # Registry permits anonymous OCI pull; exact image/layers verified without credentials.
-      initContainers:
-        - name: backup-before-relay
-          image: registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e
-          command: [node, /app/deploy/backup-router.mjs]
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-          resources:
-            requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: "1", memory: 512Mi}
-          volumeMounts:
-            - {name: data, mountPath: /data}
-            - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
           image: registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e
