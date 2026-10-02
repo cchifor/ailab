@@ -861,10 +861,39 @@ What reclaims it, safest first (`cleanup` is the role's tool, `ansible/roles/dev
    or a mount. This was ~42 GB per worker on 2026-10-01. The `dev-worker-deps-prune` timer runs it
    daily at ~03:30 (`journalctl -u dev-worker-deps-prune`; disable with
    `dev_worker_deps_prune_enabled: false`).
-2. `cleanup --dry-run`, then `cleanup` — docker: stale compose stacks, old stopped containers,
+2. `sudo cleanup --no-docker --worktrees --dry-run`, then without `--dry-run` — whole **linked**
+   worktrees (`.git` is a file; main clones and submodules are never touched) that hold nothing git
+   does not already have, and either
+   - **merged**: idle 3+ days (`--merged-days`) and merging HEAD into a network remote's default
+     branch would not change it — squash merges count; or
+   - **stale**: idle 30+ days (`--worktree-days`) and HEAD is on a network remote's branch.
+
+   "Nothing to lose" means: no changes, no untracked files, no assume-unchanged/skip-worktree
+   entries, no merge/rebase/cherry-pick/bisect in progress, no worktree-private refs, not locked,
+   not shallow, no nested checkout, no file modified within the idle window (dependency dirs
+   included), no process, mount or container (running or stopped, compose working dir included)
+   using it, and only regenerable ignored files (node_modules, .venv, build/dist/out, coverage and
+   test output, caches — the `DISPOSABLE` list in the tool). A `.env` or any other ignored file
+   keeps the worktree. Remotes count only with a network URL (`https`, `ssh`, `git@host:`), and
+   only as of their last fetch: no network call is made.
+
+   Removal is `git worktree remove` without `--force`, run as the worktree's owner (never root), so
+   git refuses anything dirty a second time. **What survives:** branch refs and everything on the
+   forge. **What does not:** the working copy, its regenerable ignored files, and the worktree's
+   HEAD reflog — commits only that reflog referenced (an earlier detached HEAD, a pre-rebase state)
+   become unreachable and are eventually garbage-collected; and anything written into the worktree
+   during the seconds of the removal itself, after the last check (accepted). To keep a worktree,
+   `git worktree lock <path>` before the run. Worktrees idle 30+ days that do not qualify are printed
+   as `Kept worktree … — <reason>`: that list is the owner's to settle. The `dev-worker-deps-prune`
+   timer runs this step first (`journalctl -u dev-worker-deps-prune`); `dev_worker_worktree_prune_mode`
+   is `report` (logs the plan only) until a week of reports has been checked, then `remove`; `off`
+   skips it. Assumes one rootful dockerd per worker and no rootless container runtime.
+3. `cleanup --dry-run`, then `cleanup` — docker: stale compose stacks, old stopped containers,
    unused images and anonymous volumes, build cache beyond 10 GB. `--caches` adds npm/uv/Playwright.
-3. What is left is live work: `du -xh --max-depth=2 /workspace | sort -rh | head`. Deleting whole
-   worktrees is the owner's call, not the operator's.
+   The `docker-buildx-prune` timer prunes the build cache toward 20 GB daily (weekly until
+   2026-10-02, which let dev-worker-1 reach 38 GB). It is a best-effort target, not a hard cap:
+   records still in use are kept.
+4. What is left is live work: `du -xh --max-depth=2 /workspace | sort -rh | head`.
 
 If the disk is at 100%, `docker builder prune -af` is the quickest few GB to get the agent moving
 again (build cache only; nothing running depends on it).

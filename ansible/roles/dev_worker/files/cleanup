@@ -9,7 +9,8 @@ Shows a table of exactly what it will remove, asks yes/no, then removes exactly 
   cleanup --caches        also empty tool caches (npm, uv, old Playwright browsers)
   cleanup --stale-days 7  treat stacks idle for 7+ days as stale (default 14)
   sudo cleanup --deps     also remove dependency dirs in idle git worktrees (needs root)
-  cleanup --no-docker     skip every docker category (with --deps: only the worktree pass)
+  sudo cleanup --worktrees  also remove whole linked worktrees that are clean and merged/stale
+  cleanup --no-docker     skip every docker category (with --deps/--worktrees: only those)
 
 Removed by default:
   * stale compose stacks: nothing in the stack created or started for --stale-days, or its
@@ -26,6 +27,12 @@ Opt-in (--deps, root only): node_modules, .venv (with pyvenv.cfg) and Rust targe
   Cargo.toml) inside git worktrees under /workspace and /home that nothing has touched for
   --deps-days (default 14) and no process or running container is using. Only those dirs:
   never source, git state or untracked files. The dev-worker-deps-prune timer runs it daily.
+Opt-in (--worktrees, root only): whole LINKED worktrees (never a main clone) with no changes, no
+  untracked files and only regenerable ignored files, that nothing is using, and that are either
+  merged into a network remote's default branch (squash merges included) and idle --merged-days
+  (default 3), or idle --worktree-days (default 30) with HEAD on a network remote's branch.
+  `git worktree remove` without --force, run as the owner; branch refs stay, the worktree's HEAD
+  reflog goes. Worktrees idle that long but not safe are listed as "Kept", with why.
 
 Installed by ansible (roles/dev_worker, tasks/cleanup.yml); source of truth is the ailab repo.
 """
@@ -98,7 +105,8 @@ class Options:
 
 @dataclass
 class Action:
-    kind: str                   # stack | container | image | volume | buildcache | cache
+    kind: str                   # stack | container | image | volume | buildcache | cache | deps
+                                # | worktree
     label: str
     detail: str
     age: str
@@ -116,6 +124,7 @@ CATEGORY = {
     "buildcache": "Build cache",
     "cache": "Tool cache (--caches)",
     "deps": "Idle worktree deps",
+    "worktree": "Stale worktree",
 }
 
 
@@ -478,17 +487,31 @@ def has_git(path):
     return os.path.lexists(os.path.join(path, ".git"))
 
 
+def read_line(path):
+    """The first line of a REGULAR file, at most 4 KiB; None for anything else. Runs as root over
+    user-writable trees: a FIFO named .git would hang a plain open(), a symlink would be followed."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return data.decode(errors="replace").split("\n", 1)[0].strip()
+
+
 def git_dir(worktree):
     """The worktree's git dir: `.git` itself, or the `gitdir:` a linked worktree's .git file names."""
     dotgit = os.path.join(worktree, ".git")
-    if os.path.isdir(dotgit):
+    if os.path.isdir(dotgit) and not os.path.islink(dotgit):
         return dotgit
-    try:
-        with open(dotgit) as f:
-            line = f.readline().strip()
-    except OSError:
-        return None
-    if not line.startswith("gitdir:"):
+    line = read_line(dotgit)
+    if not line or not line.startswith("gitdir:"):
         return None
     return os.path.normpath(os.path.join(worktree, line[len("gitdir:"):].strip()))
 
@@ -811,6 +834,343 @@ def remove_deps(action, days, now, busy, binds, mounts):
     return removed
 
 
+# ----------------------------------------------------------------------------- stale worktrees
+#
+# --worktrees: whole LINKED git worktrees (`.git` is a file) that hold nothing git does not already
+# have. Agents create one per task and never remove it: on 2026-10-02 dev-worker-3 carried 190.
+# Removal is `git worktree remove` WITHOUT --force, run as the worktree's owner, so git itself
+# refuses a dirty, untracked, locked or submodule worktree a second time; the branch ref is never
+# touched. What goes is the working copy, its DISPOSABLE ignored files (dependency and build output)
+# and the worktree's HEAD reflog. Main clones and submodules are never candidates. Root only reads
+# here (lstat, one-line metadata files); every write is git running as the owner.
+
+IN_PROGRESS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge",
+               "rebase-apply", "sequencer", "index.lock")
+# A built environment, nothing inherited (no GIT_DIR, GIT_INDEX_FILE…). Status must not refresh the
+# index: that write would be "activity" to the next scan. Replacement objects would let the
+# repository rewrite what the merge proof sees.
+GIT_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0",
+           "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1"}
+# fsmonitor and hooks are the owner's code.
+GIT_OPTS = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+MIN_UID = 1000                          # regular accounts only; never a service account's tree
+NOBODY = 65534
+# Ignored content a worktree may lose: what a tool regenerates (the list grew from what the
+# workers' worktrees actually hold, 2026-10-02). Anything else ignored (.env, a local database,
+# secrets/) keeps the worktree.
+DISPOSABLE = frozenset({"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+                        ".tox", ".nox", ".hypothesis", ".coverage", "dist", "build", "out", ".next",
+                        ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".vite", "coverage",
+                        "htmlcov", "playwright-report", "test-results", ".failure-context",
+                        ".terraform", ".eslintcache", "auto-imports.d.ts", "components.d.ts"})
+DISPOSABLE_PREFIXES = (".coverage.", "test-results-", "dist-")
+DISPOSABLE_SUFFIXES = (".pyc", ".tsbuildinfo", ".log", ".egg-info")
+# A remote proves "it is on the forge" only when it is one: a local path or file:// remote is
+# another directory on this disk.
+NETWORK_URL = re.compile(r"^((https?|ssh|git)://|[^/\s@]+@[^/\s:]+:)")
+
+
+@dataclass(frozen=True)
+class Link:
+    gitdir: str                         # <common>/worktrees/<id>
+    common: str                         # the main clone's .git
+
+
+def linked_worktree(path):
+    """(Link, None) for a linked worktree whose admin dir points back at it, else (None, why).
+    (None, None): not a linked worktree at all (a submodule's .git file points into .git/modules)."""
+    dotgit = os.path.join(path, ".git")
+    gd = git_dir(path)
+    if not gd or gd == dotgit:
+        return None, None if gd else "unreadable .git"
+    if os.path.basename(os.path.dirname(gd)) != "worktrees":
+        return None, None
+    back = read_line(os.path.join(gd, "gitdir"))
+    if not back or os.path.normpath(os.path.join(gd, back)) != dotgit:
+        return None, "admin dir does not point back (run `git worktree repair`)"
+    rel = read_line(os.path.join(gd, "commondir"))
+    common = os.path.dirname(os.path.dirname(gd))
+    if not rel or os.path.normpath(os.path.join(gd, rel)) != common:
+        return None, "unexpected commondir"
+    return Link(gd, common), None
+
+
+def account(uid):
+    """The owner's passwd entry when it is a regular account, else None."""
+    import pwd  # Linux only; imported here so the tests import this file anywhere
+    if uid < MIN_UID or uid == NOBODY:
+        return None
+    try:
+        return pwd.getpwuid(uid)
+    except KeyError:
+        return None
+
+
+def run_git(uid, args, cwd):
+    """git as the worktree's owner, never as root: root running git in a user's repo would run that
+    user's fsmonitor, hooks and config with root's rights. Root drops to the owner with runuser; a
+    non-root dry run can only ask about its own worktrees."""
+    import pwd  # Linux only; imported here so the tests import this file anywhere
+    try:
+        pw = pwd.getpwuid(uid)
+    except KeyError:
+        raise RuntimeError(f"uid {uid} has no account")
+    env = dict(GIT_ENV, HOME=pw.pw_dir, USER=pw.pw_name)
+    cmd = ["git", *GIT_OPTS, *args]
+    if os.geteuid() == 0 and uid != 0:
+        # Absolute: the PATH above is the one git gets, and runuser lives in /usr/sbin.
+        runuser = shutil.which("runuser", path="/usr/sbin:/usr/bin:/sbin:/bin")
+        if not runuser:
+            raise RuntimeError("runuser not found")
+        cmd = [runuser, "-u", pw.pw_name, "--", *cmd]
+    elif os.geteuid() != uid:
+        raise RuntimeError("owned by another user (run with sudo)")
+    return subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, timeout=300)
+
+
+GIT = run_git                           # tests run git as themselves
+
+
+def git_out(uid, args, cwd):
+    """stdout of a git call; None when it failed (callers treat that as "not proven")."""
+    r = GIT(uid, args, cwd)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def container_claims():
+    """Paths ANY container — running or stopped — bind-mounts or was composed from (its compose
+    working_dir label). A stopped stack whose directory vanished would later look orphaned to
+    `cleanup`, which then removes its named volumes."""
+    if not shutil.which("docker"):
+        return set()
+    ps = sh(["docker", "ps", "-aq", "--no-trunc"], check=False)
+    if ps.returncode != 0:
+        raise RuntimeError("docker ps -a failed; refusing to guess which worktrees containers use")
+    ids = ps.stdout.split()
+    if not ids:
+        return set()
+    r = sh(["docker", "inspect", *ids], check=False)
+    if r.returncode != 0:
+        raise RuntimeError("docker inspect failed; refusing to guess which worktrees containers use")
+    out = set()
+    for d in json.loads(r.stdout):
+        out |= {m["Source"] for m in d.get("Mounts") or []
+                if m.get("Type") == "bind" and m.get("Source")}
+        wd = ((d.get("Config") or {}).get("Labels") or {}).get(WORKDIR)
+        if wd:
+            out.add(wd)
+    return out
+
+
+def inspect_worktree(path, cutoff):
+    """(bytes, problem) for the whole tree — dependency dirs included, no depth limit, lstat only —
+    walked the way the removal will delete it. Refused: another checkout inside (a gitignored clone
+    would go with it), a mount, an entry owned by someone else (the owner's removal would fail half
+    way), or anything modified after `cutoff` (a write deep in node_modules leaves the dir's own
+    mtime alone, so scan_worktree cannot see it)."""
+    try:
+        top = os.lstat(path)
+    except OSError:
+        return 0, "unreadable"
+    total = 0
+    stack = [path]
+    try:
+        while stack:
+            d = stack.pop()
+            with os.scandir(d) as it:
+                entries = list(it)
+            for e in entries:
+                rel = os.path.relpath(e.path, path)
+                if e.name == ".git" and d != path:
+                    return total, f"contains another checkout ({os.path.dirname(rel)})"
+                st = e.stat(follow_symlinks=False)
+                if st.st_dev != top.st_dev:
+                    return total, "has a mount inside"
+                if st.st_uid != top.st_uid:
+                    return total, f"{rel} is owned by uid {st.st_uid}"
+                if st.st_mtime > cutoff:
+                    return total, f"{rel} modified recently"
+                total += st.st_blocks * 512
+                if stat.S_ISDIR(st.st_mode):
+                    stack.append(e.path)
+    except OSError:
+        return total, "unreadable"
+    return total, None
+
+
+def disposable(path, entry):
+    """An ignored path git listed (relative; a dir ends with "/") that a tool would regenerate."""
+    parts = entry.rstrip("/").split("/")
+    for i, name in enumerate(parts):
+        parent = os.path.join(path, *parts[:i])
+        if name in DISPOSABLE or name.startswith(DISPOSABLE_PREFIXES) or \
+                name.endswith(DISPOSABLE_SUFFIXES):
+            return True
+        if name in (".venv", "venv") and os.path.isfile(os.path.join(parent, name, "pyvenv.cfg")):
+            return True
+        if name == "target" and os.path.isfile(os.path.join(parent, "Cargo.toml")):
+            return True
+    return False
+
+
+def network_remotes(uid, path):
+    out = git_out(uid, ["config", "--get-regexp", r"^remote\..*\.url$"], path) or ""
+    names = set()
+    for line in out.splitlines():
+        key, _, url = line.partition(" ")
+        if NETWORK_URL.match(url.strip()):
+            names.add(key[len("remote."):-len(".url")])
+    return sorted(names)
+
+
+def default_branches(uid, path, remotes):
+    """Each network remote's default branch: `refs/remotes/<r>/HEAD`'s target, else <r>/main, else
+    <r>/master — fully qualified."""
+    out = git_out(uid, ["for-each-ref", "--format=%(refname) %(symref)", "refs/remotes"], path)
+    if out is None:
+        return []
+    refs = dict((line.split(" ") + [""])[:2] for line in out.splitlines() if line)
+    heads = []
+    for r in remotes:
+        base = f"refs/remotes/{r}/"
+        target = refs.get(base + "HEAD")
+        if target and target.startswith(base) and target in refs:
+            heads.append(target)
+        elif base + "main" in refs:
+            heads.append(base + "main")
+        elif base + "master" in refs:
+            heads.append(base + "master")
+    return heads
+
+
+def merged_into(uid, path, ref, head):
+    """True when merging HEAD into `ref` would not change `ref`'s tree: everything the worktree's
+    branch did is already there. Catches squash merges (how Gitea merges here), which an ancestry
+    check misses. Exit 0 is clean, 1 a conflict, anything else an error: only 0 counts."""
+    r = GIT(uid, ["merge-tree", "--write-tree", ref, head], path)
+    if r.returncode != 0:
+        return False
+    tree = r.stdout.split("\n", 1)[0].strip()
+    return bool(tree) and tree == git_out(uid, ["rev-parse", "--verify", "-q", f"{ref}^{{tree}}"],
+                                          path)
+
+
+def judge_worktree(w, days, merged_days, now, busy, claims, mounts):
+    """(rule, problem, head): rule is "merged" or "stale" when the worktree may go; otherwise problem
+    says why not, or is None when it simply is not idle long enough / is not a linked worktree."""
+    no = (None, None, None)
+    if w.last_activity is None:
+        return no
+    idle = now - w.last_activity
+    if idle <= timedelta(days=merged_days):
+        return no
+    if os.path.isdir(os.path.join(w.path, ".git")):
+        return no                                   # a main clone: never a candidate
+    link, why = linked_worktree(w.path)
+    if not link:
+        return None, why, None
+    if in_use(w.path, busy, claims) or any(under(m, w.path) for m in mounts):
+        return None, "in use", None
+    uid = os.lstat(w.path).st_uid
+    if account(uid) is None or os.lstat(link.common).st_uid != uid:
+        return None, "not owned by one regular account", None
+    if not read_line(os.path.join(link.gitdir, "HEAD")):
+        return None, "unreadable HEAD", None
+    for name in IN_PROGRESS:
+        if os.path.lexists(os.path.join(link.gitdir, name)):
+            return None, f"{name} in progress", None
+    if os.path.lexists(os.path.join(link.gitdir, "locked")):
+        return None, "locked", None
+    if any(files for _, _, files in os.walk(os.path.join(link.gitdir, "refs"))):
+        return None, "has worktree-private refs", None
+    if os.path.lexists(os.path.join(link.common, "shallow")):
+        return None, "shallow repository", None
+    listed = git_out(uid, ["worktree", "list", "--porcelain"], w.path) or ""
+    if f"worktree {w.path}" not in listed.splitlines():
+        return None, "git does not list it as a worktree", None
+    head = git_out(uid, ["rev-parse", "--verify", "-q", "HEAD"], w.path)
+    if not head:
+        return None, "no commit checked out", None
+    status = git_out(uid, ["status", "--porcelain=v1", "--untracked-files=all"], w.path)
+    if status is None:
+        return None, "git status failed", None
+    if status:
+        return None, f"uncommitted changes ({len(status.splitlines())} paths)", None
+    flags = git_out(uid, ["ls-files", "-v"], w.path)
+    if flags is None:
+        return None, "git ls-files failed", None
+    if any(line[:1].islower() or line[:1] == "S" for line in flags.splitlines()):
+        return None, "assume-unchanged or skip-worktree entries", None
+    ignored = git_out(uid, ["ls-files", "--others", "--ignored", "--exclude-standard",
+                            "--directory"], w.path)
+    if ignored is None:
+        return None, "git ls-files failed", None
+    for entry in ignored.splitlines():
+        if not disposable(w.path, entry):
+            return None, f"ignored {entry} may matter", None
+    remotes = network_remotes(uid, w.path)
+    r = GIT(uid, ["config", "--get-regexp", r"^merge\..*\.driver$"], w.path)
+    if r.returncode not in (0, 1):                  # 1 = no such key
+        return None, "git config failed", None
+    drivers = r.returncode == 0 and r.stdout.strip()
+    if not drivers and any(merged_into(uid, w.path, ref, head)
+                           for ref in default_branches(uid, w.path, remotes)):
+        return "merged", None, head
+    if idle <= timedelta(days=days):
+        return no
+    if drivers:
+        return None, "custom merge driver configured", None
+    if not any(git_out(uid, ["for-each-ref", "--contains", head, "--count=1",
+                             "--format=%(refname)", f"refs/remotes/{r}/"], w.path)
+               for r in remotes):
+        return None, "HEAD is not on any remote branch", None
+    return "stale", None, head
+
+
+def plan_worktrees(worktrees, days, merged_days, now, busy, claims, mounts):
+    """One action per removable worktree; `kept` lists those idle past `days` that are not, with
+    why — the owner's to-do list. Younger worktrees that are merely unmerged are neither: they are
+    still somebody's work."""
+    plan, kept = [], []
+    for w in worktrees:
+        try:
+            rule, problem, head = judge_worktree(w, days, merged_days, now, busy, claims, mounts)
+            if rule:
+                size, problem = inspect_worktree(w.path, w.last_activity.timestamp())
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            rule, problem = None, str(e)
+        if rule and not problem:
+            st = os.lstat(w.path)
+            branch = git_out(st.st_uid, ["symbolic-ref", "-q", "--short", "HEAD"], w.path)
+            plan.append(Action("worktree", w.path, f"{rule}, {branch or 'detached'}",
+                               fmt_age(now - w.last_activity), size, [w.path],
+                               fingerprint=frozenset({(st.st_dev, st.st_ino, head)})))
+        elif problem and w.last_activity and now - w.last_activity > timedelta(days=days):
+            kept.append((w.path, problem))
+    return plan, kept
+
+
+def remove_worktree(action, days, merged_days, now, busy, claims, mounts):
+    """Re-judge with the CALLER's fresh state right before removing — it may have been picked up,
+    changed or replaced since the scan — then `git worktree remove` (no --force) as the owner.
+    Returns None when it no longer qualifies, else git's error text ("" = removed)."""
+    path = action.label
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    w = scan_worktree(path, (now - timedelta(days=merged_days)).timestamp())
+    rule, _, head = judge_worktree(w, days, merged_days, now, busy, claims, mounts)
+    if not rule or action.fingerprint != frozenset({(st.st_dev, st.st_ino, head)}):
+        return None
+    if inspect_worktree(path, w.last_activity.timestamp())[1] is not None:
+        return None
+    link, _ = linked_worktree(path)
+    r = GIT(st.st_uid, ["worktree", "remove", path], link.common)
+    return "" if r.returncode == 0 else ((r.stderr or r.stdout).strip().splitlines() or ["failed"])[-1]
+
+
 # ----------------------------------------------------------------------------- output
 
 IMAGE_ROWS = 10
@@ -834,7 +1194,7 @@ def display_rows(plan, show_all):
             anon.append(a)
         elif a.kind == "image":
             images.append(a)
-        elif a.kind == "deps":
+        elif a.kind in ("deps", "worktree"):
             deps.append(a)
         else:
             rows.append([CATEGORY[a.kind], a.label, a.detail, a.age, fmt_size(a.size)])
@@ -851,14 +1211,15 @@ def display_rows(plan, show_all):
     if rest:
         rows.append([CATEGORY["image"], f"… {len(rest)} more images", "cleanup --dry-run --all lists them",
                      "", fmt_size(sum(a.size or 0 for a in rest))])
-    deps.sort(key=lambda a: a.size or 0, reverse=True)
-    for a in deps[:IMAGE_ROWS]:
-        rows.append([CATEGORY["deps"], a.label, a.detail, a.age, fmt_size(a.size)])
-    rest = deps[IMAGE_ROWS:]
-    if rest:
-        rows.append([CATEGORY["deps"], f"… {len(rest)} more worktrees",
-                     "cleanup --dry-run --all lists them", "",
-                     fmt_size(sum(a.size or 0 for a in rest))])
+    for kind in ("deps", "worktree"):
+        acts = sorted((a for a in deps if a.kind == kind), key=lambda a: a.size or 0, reverse=True)
+        for a in acts[:IMAGE_ROWS]:
+            rows.append([CATEGORY[kind], a.label, a.detail, a.age, fmt_size(a.size)])
+        rest = acts[IMAGE_ROWS:]
+        if rest:
+            rows.append([CATEGORY[kind], f"… {len(rest)} more worktrees",
+                         "cleanup --dry-run --all lists them", "",
+                         fmt_size(sum(a.size or 0 for a in rest))])
     order = list(CATEGORY.values())
     return sorted(rows, key=lambda r: order.index(r[0]))
 
@@ -906,7 +1267,8 @@ def summary(plan):
         parts.append(f"{n['stack']} stale stack(s) ({ctrs} containers)")
     for k, word in (("container", "stopped container(s)"), ("image", "image(s)"),
                     ("volume", "volume(s)"), ("cache", "tool cache(s)"),
-                    ("deps", "idle worktree(s)' dependency dirs")):
+                    ("deps", "idle worktree(s)' dependency dirs"),
+                    ("worktree", "stale worktree(s)")):
         if n[k]:
             parts.append(f"{n[k]} {word}")
     if n["buildcache"]:
@@ -948,12 +1310,28 @@ def still_planned(action, fresh_plan):
     return all(i in ids for i in action.ids)
 
 
-def execute(plan, fresh_plan, deps_days=None):
+def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=None):
     failures = skipped = 0
     for i, a in enumerate(plan, 1):
         if not still_planned(a, fresh_plan):
             print(f"  – {i:>3} {CATEGORY[a.kind]}: {a.label} — changed since the scan, skipped")
             skipped += 1
+            continue
+        if a.kind == "worktree":
+            try:
+                err = remove_worktree(a, worktree_days, merged_days, datetime.now(timezone.utc),
+                                      busy_paths(), container_claims(), mount_points())
+            except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                err = str(e)
+            if err is None:
+                print(f"  – {i:>3} {CATEGORY[a.kind]}: {a.label} — in use or changed since the scan, "
+                      "skipped")
+                skipped += 1
+            elif err:
+                print(f"  ✗ {i:>3} {CATEGORY[a.kind]}: {a.label} — {err}")
+                failures += 1
+            else:
+                print(f"  ✓ {i:>3} {CATEGORY[a.kind]}: {a.label}")
             continue
         if a.kind == "deps":
             # Fresh /proc, container and mount state for EVERY worktree, right before its removal:
@@ -1041,9 +1419,16 @@ def parse_args(argv):
                    help="worktree idle threshold for --deps (default 14)")
     p.add_argument("--deps-roots", default=",".join(DEPS_ROOTS),
                    help=f"comma-separated dirs searched for worktrees (default {','.join(DEPS_ROOTS)})")
+    p.add_argument("--worktrees", action="store_true",
+                   help="also remove whole linked git worktrees that are clean and merged or "
+                        "stale (root only)")
+    p.add_argument("--worktree-days", type=int, default=30,
+                   help="idle threshold for a clean worktree whose HEAD is on a remote (default 30)")
+    p.add_argument("--merged-days", type=int, default=3,
+                   help="idle threshold for a clean worktree already merged (default 3)")
     p.add_argument("--no-docker", action="store_true",
                    help="skip every docker category (docker is still asked which paths running "
-                        "containers mount, when --deps runs)")
+                        "containers mount, when --deps or --worktrees runs)")
     return p.parse_args(argv)
 
 
@@ -1068,13 +1453,20 @@ def main(argv=None):
     if docker and not shutil.which("docker"):
         print("cleanup: docker not found (use --no-docker)", file=sys.stderr)
         return 2
-    if not docker and not args.deps:
-        print("cleanup: --no-docker leaves nothing to do without --deps", file=sys.stderr)
+    walk = args.deps or args.worktrees
+    if not docker and not walk:
+        print("cleanup: --no-docker leaves nothing to do without --deps or --worktrees",
+              file=sys.stderr)
         return 2
-    if args.deps and not args.dry_run and os.geteuid() != 0:
+    if min(args.deps_days, args.worktree_days, args.merged_days) < 1 \
+            or args.merged_days > args.worktree_days:
+        print("cleanup: day thresholds must be >= 1, and --merged-days <= --worktree-days",
+              file=sys.stderr)
+        return 2
+    if walk and not args.dry_run and os.geteuid() != 0:
         # Without root, /proc hides other users' processes, so "nothing is using it" is unknowable.
-        print("cleanup: --deps removes only as root (sudo cleanup --deps); --dry-run works as any "
-              "user", file=sys.stderr)
+        print("cleanup: --deps and --worktrees remove only as root (sudo cleanup --deps); "
+              "--dry-run works as any user", file=sys.stderr)
         return 2
     lock = None
     if not args.dry_run and os.geteuid() == 0:
@@ -1088,7 +1480,7 @@ def main(argv=None):
     root = docker_root() if docker else None
     watched = []
     seen = set()
-    for p in ["/"] + ([root] if root else []) + (deps_roots if args.deps else []):
+    for p in ["/"] + ([root] if root else []) + (deps_roots if walk else []):
         try:
             dev = os.stat(p).st_dev
         except OSError:
@@ -1097,32 +1489,46 @@ def main(argv=None):
             seen.add(dev)
             watched.append(p)
     print(f"cleanup on {os.uname().nodename}   disk: " + "   ".join(map(disk_line, watched)))
+    if args.worktrees and os.geteuid() != 0:
+        print("Not root: other users' processes are invisible, so the in-use check is partial, and "
+              "only your own worktrees are judged.")
     boots = boot_times() if docker else ()
-    excluded = container_roots() if args.deps else set()
+    excluded = container_roots() if walk else set()
 
     def scan():
-        plan, refused = [], []
+        plan, refused, kept = [], [], []
         if docker:
             print("Scanning docker state…", flush=True)
             plan += build_plan(load_containers(), load_images(), load_volumes(), build_cache_bytes(),
                                load_tool_caches() if opts.caches else [], opts,
                                datetime.now(timezone.utc), boot_times=boots)
-        if args.deps:
+        if walk:
             print(f"Scanning git worktrees under {', '.join(deps_roots)}…", flush=True)
             now = datetime.now(timezone.utc)
-            dplan, refused = plan_deps(load_worktrees(deps_roots, args.deps_days, now, excluded),
-                                       args.deps_days, now, busy_paths(), bind_mount_sources(),
-                                       mount_points())
-            plan += dplan
-        return plan, refused
+            busy, binds, mounts = busy_paths(), bind_mount_sources(), mount_points()
+            going = set()
+            if args.worktrees:
+                wplan, kept = plan_worktrees(
+                    load_worktrees(deps_roots, args.merged_days, now, excluded),
+                    args.worktree_days, args.merged_days, now, busy, container_claims(), mounts)
+                plan += wplan
+                going = {a.label for a in wplan}
+            if args.deps:
+                found = [w for w in load_worktrees(deps_roots, args.deps_days, now, excluded)
+                         if w.path not in going]  # no point pruning what goes whole
+                dplan, refused = plan_deps(found, args.deps_days, now, busy, binds, mounts)
+                plan += dplan
+        return plan, refused, kept
 
     try:
-        plan, refused = scan()
+        plan, refused, kept = scan()
     except RuntimeError as e:
         print(f"cleanup: {e}", file=sys.stderr)
         return 1
     for d, why in refused:
         print(f"Not touching {d}: {why}.")
+    for d, why in kept:
+        print(f"Kept worktree idle {args.worktree_days}+ days: {d} — {why}.")
     if not plan:
         print("Nothing to clean up.")
         return 0
@@ -1141,11 +1547,12 @@ def main(argv=None):
         return 0
     before = {p: shutil.disk_usage(p).used for p in watched}
     try:
-        fresh, _ = scan()
+        fresh, _, _ = scan()
     except RuntimeError as e:
         print(f"cleanup: {e}", file=sys.stderr)
         return 1
-    failures, skipped = execute(plan, fresh, args.deps_days)
+    failures, skipped = execute(plan, fresh, args.deps_days, args.worktree_days,
+                                args.merged_days)
     freed = sum(before[p] - shutil.disk_usage(p).used for p in watched)
     print(f"Done: {len(plan) - failures - skipped} ok, {failures} failed, {skipped} skipped. "
           f"Freed {fmt_size(max(freed, 0))}.")

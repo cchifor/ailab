@@ -13,6 +13,7 @@ The tool's contract, pinned here:
   * Without --y it needs an interactive yes; a non-interactive run without --y removes nothing.
 """
 import importlib.machinery
+import json
 import importlib.util
 import pathlib
 import unittest
@@ -622,6 +623,360 @@ class DepsTest(unittest.TestCase):
                 mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
             with self.assertRaises(RuntimeError):
                 cl.bind_mount_sources()
+
+
+# ----------------------------------------------------------------------------- --worktrees
+#
+# Real git (2.43 in CI and on the workers): a bare repo the clone pushes to, linked worktrees made
+# with `git worktree add`, real `git worktree remove`. `origin` carries a NETWORK url (pushes go to
+# the bare repo through pushurl): a local-path remote proves nothing. git runs as the test user
+# (run_git runs it directly when the caller owns the tree).
+
+import shutil as _shutil
+import subprocess as _sp
+
+HAVE_GIT = _shutil.which("git") is not None
+GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main",
+          "-c", "commit.gpgsign=false", "-c", "protocol.file.allow=always"]
+
+
+def git(cwd, *args):
+    r = _sp.run(["git", *GIT_ID, *args], cwd=cwd, capture_output=True, text=True)
+    if r.returncode:
+        raise AssertionError(f"git {args}: {r.stderr}")
+    return r.stdout.strip()
+
+
+@unittest.skipUnless(LINUX and HAVE_GIT, "Linux + git")
+class WorktreesTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self._tmp.name)
+        self.user = os.path.join(self.root, "u")
+        self.now = datetime.now(timezone.utc)
+        self._uid = mock.patch.object(cl, "MIN_UID", 0)
+        self._uid.start()
+        self.bare = os.path.join(self.root, "remote.git")
+        git(self.root, "init", "-q", "--bare", self.bare)
+        self.repo = os.path.join(self.user, "platform")
+        os.makedirs(self.user)
+        git(self.user, "clone", "-q", self.bare, self.repo)
+        git(self.repo, "config", "remote.origin.url", "https://forge.invalid/cchifor/platform.git")
+        git(self.repo, "config", "remote.origin.pushurl", self.bare)
+        write(os.path.join(self.repo, "app.py"), "a\n")
+        write(os.path.join(self.repo, ".gitignore"), "node_modules/\n.env\n*.log\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "init")
+        git(self.repo, "push", "-q", "origin", "HEAD:main")
+        git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    def tearDown(self):
+        self._uid.stop()
+        self._tmp.cleanup()
+
+    def worktree(self, name, *, push=True, change=True):
+        wt = os.path.join(self.user, ".worktrees", name)
+        git(self.repo, "worktree", "add", "-q", "-b", name, wt)
+        if change:
+            write(os.path.join(wt, f"{name}.py"), "x\n")
+            git(wt, "add", "-A")
+            git(wt, "commit", "-qm", name)
+        if push:
+            git(wt, "push", "-q", "origin", name)
+        return wt
+
+    def squash_merge(self, *files):
+        for f in files:
+            write(os.path.join(self.repo, f), "x\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "squash (#1)")
+        git(self.repo, "push", "-q", "origin", "HEAD:main")
+
+    def age(self, wt, days):
+        age_tree(wt, days)
+        age_tree(cl.git_dir(wt), days)
+
+    def plan(self, *paths, busy=frozenset(), claims=frozenset(), mounts=frozenset()):
+        ws = [cl.scan_worktree(p, (self.now - timedelta(days=3)).timestamp()) for p in paths]
+        return cl.plan_worktrees(ws, 30, 3, self.now, set(busy), set(claims), set(mounts))
+
+    def rules(self, plan):
+        return [(a.label, a.detail.split(",")[0]) for a in plan]
+
+    # planning
+
+    def test_clean_pushed_worktree_idle_30_days_is_stale(self):
+        wt = self.worktree("feat")
+        write(os.path.join(wt, "node_modules", "a", "i.js"))       # disposable ignored
+        write(os.path.join(wt, "npm-debug.log"))
+        self.age(wt, 40)
+        plan, kept = self.plan(wt)
+        self.assertEqual(self.rules(plan), [(wt, "stale")])
+        self.assertEqual(kept, [])
+        self.assertGreater(plan[0].size, 0)
+
+    def test_unmerged_worktree_idle_less_than_30_days_is_left_alone_silently(self):
+        wt = self.worktree("feat")
+        self.age(wt, 20)
+        self.assertEqual(self.plan(wt), ([], []))
+
+    def test_squash_merged_worktree_goes_after_3_days(self):
+        wt = self.worktree("feat", push=False)
+        self.squash_merge("feat.py")
+        self.age(wt, 5)
+        self.assertEqual(self.rules(self.plan(wt)[0]), [(wt, "merged")])
+
+    def test_partly_merged_worktree_is_not_merged(self):
+        wt = self.worktree("feat", push=False)
+        write(os.path.join(wt, "more.py"), "y\n")
+        git(wt, "add", "-A")
+        git(wt, "commit", "-qm", "more")
+        self.squash_merge("feat.py")                                  # only the first commit
+        self.age(wt, 5)
+        self.assertEqual(self.plan(wt), ([], []))
+
+    def test_a_custom_merge_driver_voids_the_merge_proof(self):
+        wt = self.worktree("feat", push=False)
+        self.squash_merge("feat.py")
+        git(self.repo, "config", "merge.ours.driver", "true")
+        self.age(wt, 5)
+        self.assertEqual(self.plan(wt), ([], []))
+        self.age(wt, 40)
+        self.assertIn("custom merge driver", dict(self.plan(wt)[1])[wt])
+
+    def test_a_local_path_remote_proves_nothing(self):
+        wt = self.worktree("feat", push=False)
+        git(self.repo, "remote", "add", "fork", self.bare)
+        git(wt, "push", "-q", "fork", "feat")
+        git(self.repo, "fetch", "-q", "fork")
+        self.age(wt, 40)
+        plan, kept = self.plan(wt)
+        self.assertEqual(plan, [])
+        self.assertIn("not on any remote branch", dict(kept)[wt])
+
+    def test_a_file_url_remote_proves_nothing_for_either_rule(self):
+        git(self.repo, "config", "remote.origin.url", "file://" + self.bare)
+        merged = self.worktree("merged", push=False)
+        self.squash_merge("merged.py")
+        stale = self.worktree("stale")
+        self.age(merged, 5)
+        self.age(stale, 40)
+        plan, kept = self.plan(merged, stale)
+        self.assertEqual(plan, [])
+        self.assertIn("not on any remote branch", dict(kept)[stale])
+        self.assertTrue(cl.NETWORK_URL.match("git@git.chifor.me:cchifor/ailab.git"))
+        self.assertTrue(cl.NETWORK_URL.match("https://git.chifor.me/cchifor/ailab.git"))
+        self.assertFalse(cl.NETWORK_URL.match("/srv/repo.git"))
+
+    def test_unsafe_worktrees_are_kept_with_the_reason(self):
+        cases = {}
+
+        def case(name, why, push=True):
+            cases[self.worktree(name, push=push)] = why
+            return list(cases)[-1]
+
+        wt = case("dirty", "uncommitted changes")
+        write(os.path.join(wt, "app.py"), "changed\n")
+        wt = case("untracked", "uncommitted changes")
+        write(os.path.join(wt, "notes.txt"))
+        wt = case("dotenv", "ignored .env may matter")
+        write(os.path.join(wt, ".env"), "TOKEN=x\n")
+        wt = case("assumed", "assume-unchanged")
+        git(wt, "update-index", "--assume-unchanged", "app.py")
+        write(os.path.join(wt, "app.py"), "hidden edit\n")
+        wt = case("skipped", "skip-worktree")
+        git(wt, "update-index", "--skip-worktree", "app.py")
+        case("local", "HEAD is not on any remote branch", push=False)
+        wt = case("rebasing", "rebase-merge in progress")
+        os.makedirs(os.path.join(cl.git_dir(wt), "rebase-merge"))
+        wt = case("picking", "sequencer in progress")
+        os.makedirs(os.path.join(cl.git_dir(wt), "sequencer"))
+        wt = case("locked", "locked")
+        git(self.repo, "worktree", "lock", wt)
+        wt = case("bisect", "worktree-private refs")
+        write(os.path.join(cl.git_dir(wt), "refs", "bisect", "bad"), "0" * 40 + "\n")
+        wt = case("nested", "contains another checkout")
+        git(self.root, "init", "-q", os.path.join(wt, "node_modules", "dep"))  # an ignored clone
+        wt = case("fresh-dep", "modified recently")
+        write(os.path.join(wt, "node_modules", "a", "i.js"))
+        case("busy", "in use")
+        case("composed", "in use")
+        for p in cases:
+            self.age(p, 40)
+        os.utime(os.path.join(self.user, ".worktrees", "fresh-dep", "node_modules", "a", "i.js"))
+        plan, kept = self.plan(*cases, busy={os.path.join(self.user, ".worktrees", "busy", "x")},
+                               claims={os.path.join(self.user, ".worktrees", "composed")})
+        self.assertEqual(plan, [])
+        got = dict(kept)
+        for p, why in cases.items():
+            self.assertIn(why, got.get(p, ""), p)
+
+    def test_a_shallow_repository_is_kept(self):
+        wt = self.worktree("feat")
+        write(os.path.join(self.repo, ".git", "shallow"), "0" * 40 + "\n")
+        self.age(wt, 40)
+        self.assertIn("shallow", dict(self.plan(wt)[1])[wt])
+
+    def test_main_clone_and_submodule_are_never_candidates_nor_reported(self):
+        sub = os.path.join(self.repo, "vendor", "lib")
+        write(os.path.join(self.repo, ".git", "modules", "lib", "HEAD"), "ref: refs/heads/main\n")
+        write(os.path.join(sub, ".git"), "gitdir: ../../.git/modules/lib\n")
+        self.age(self.repo, 40)
+        self.assertEqual(self.plan(self.repo, sub), ([], []))
+
+    def test_a_fifo_or_symlink_dot_git_is_never_opened(self):
+        fifo = os.path.join(self.user, "fifo")
+        os.makedirs(fifo)
+        os.mkfifo(os.path.join(fifo, ".git"))                # open() would block forever
+        link = os.path.join(self.user, "link")
+        os.makedirs(link)
+        write(os.path.join(self.root, "elsewhere"), "gitdir: /etc\n")
+        os.symlink(os.path.join(self.root, "elsewhere"), os.path.join(link, ".git"))
+        for p in (fifo, link):
+            age_tree(p, 40)
+        plan, kept = self.plan(fifo, link)
+        self.assertEqual(plan, [])
+        self.assertEqual(sorted(dict(kept).values()), ["unreadable .git", "unreadable .git"])
+
+    def test_moved_worktree_is_not_touched(self):
+        wt = self.worktree("feat")
+        moved = os.path.join(self.user, "moved")
+        os.rename(wt, moved)
+        self.age(moved, 40)
+        plan, kept = self.plan(moved)
+        self.assertEqual(plan, [])
+        self.assertIn("does not point back", dict(kept)[moved])
+
+    def test_inspection_does_not_touch_the_index(self):
+        wt = self.worktree("feat")
+        self.age(wt, 40)
+        index = os.path.join(cl.git_dir(wt), "index")
+        before = os.lstat(index).st_mtime_ns
+        self.plan(wt)
+        self.assertEqual(os.lstat(index).st_mtime_ns, before)
+
+    def test_as_root_git_runs_as_the_owner_through_an_absolute_runuser(self):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append((cmd, kw))
+            return _sp.CompletedProcess(cmd, 0, "", "")
+        import pwd
+        nobody = pwd.getpwnam("nobody")                       # any uid but root's
+        with mock.patch.object(cl.os, "geteuid", return_value=0), \
+                mock.patch.object(cl.subprocess, "run", run), \
+                mock.patch.dict(os.environ, {"GIT_DIR": "/elsewhere"}):
+            cl.run_git(nobody.pw_uid, ["status"], self.repo)
+        [(cmd, kw)] = calls
+        self.assertTrue(os.path.isabs(cmd[0]) and cmd[0].endswith("/runuser"), cmd)
+        self.assertEqual(cmd[1:5], ["-u", "nobody", "--", "git"])
+        self.assertIn("core.fsmonitor=false", cmd)
+        self.assertEqual(kw["env"]["HOME"], nobody.pw_dir)
+        self.assertEqual(kw["env"]["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertNotIn("GIT_DIR", kw["env"])
+        self.assertIs(kw["stdin"], _sp.DEVNULL)
+
+    def test_nobody_and_service_accounts_are_not_regular_owners(self):
+        with mock.patch.object(cl, "MIN_UID", 1000):
+            self.assertIsNone(cl.account(0))
+            self.assertIsNone(cl.account(999))
+            self.assertIsNone(cl.account(65534))
+
+    # removal
+
+    def removal(self, a, busy=frozenset(), claims=frozenset()):
+        return cl.remove_worktree(a, 30, 3, self.now, set(busy), set(claims), set())
+
+    def test_removal_deletes_the_worktree_but_keeps_the_branch_and_siblings(self):
+        wt = self.worktree("feat")
+        sibling = self.worktree("other")
+        write(os.path.join(wt, "node_modules", "a", "i.js"))
+        self.age(wt, 40)
+        [a], _ = self.plan(wt)
+        self.assertEqual(self.removal(a), "")
+        self.assertFalse(os.path.exists(wt))
+        self.assertIn("feat", git(self.repo, "branch", "--list", "feat"))
+        self.assertNotIn(wt, git(self.repo, "worktree", "list"))
+        self.assertEqual(git(sibling, "status", "--porcelain"), "")
+
+    def test_worktree_made_dirty_after_the_plan_is_kept(self):
+        wt = self.worktree("feat")
+        self.age(wt, 40)
+        [a], _ = self.plan(wt)
+        write(os.path.join(wt, "notes.txt"))
+        self.age(wt, 40)                                     # even with old mtimes
+        self.assertIsNone(self.removal(a))
+        self.assertTrue(os.path.isfile(os.path.join(wt, "notes.txt")))
+
+    def test_worktree_picked_up_after_the_plan_is_kept(self):
+        wt = self.worktree("feat")
+        self.age(wt, 40)
+        [a], _ = self.plan(wt)
+        self.assertIsNone(self.removal(a, busy={wt}))
+        self.assertIsNone(self.removal(a, claims={wt}))
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_replaced_worktree_dir_or_moved_head_is_not_the_planned_one(self):
+        wt = self.worktree("feat")
+        self.age(wt, 40)
+        [a], _ = self.plan(wt)
+        git(wt, "checkout", "-q", "--detach", "main")       # HEAD moved, still clean + on remote
+        self.age(wt, 40)
+        self.assertIsNone(self.removal(a))
+        self.assertTrue(os.path.isdir(wt))
+
+    # CLI
+
+    def test_bad_thresholds_are_refused(self):
+        for extra in (["--merged-days", "40"], ["--worktree-days", "0"], ["--deps-days", "0"]):
+            self.assertEqual(cl.main(["--no-docker", "--worktrees", "--dry-run", *extra]), 2)
+
+    def test_no_docker_worktrees_dry_run_lists_and_removes_nothing(self):
+        wt = self.worktree("feat")
+        self.age(wt, 40)
+        with mock.patch.object(cl.shutil, "which", return_value=None), \
+                mock.patch.object(cl, "container_roots", return_value=set()), \
+                mock.patch.object(cl, "find_worktrees", return_value=[self.repo, wt]):
+            rc = cl.main(["--no-docker", "--worktrees", "--dry-run", "--deps-roots", self.root])
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_combined_run_does_not_also_plan_deps_of_a_worktree_going_whole(self):
+        wt = self.worktree("feat")
+        write(os.path.join(wt, "node_modules", "a", "i.js"))
+        self.age(wt, 40)
+        seen = []
+        real = cl.plan_deps
+
+        def spy(worktrees, *a, **kw):
+            seen.extend(w.path for w in worktrees)
+            return real(worktrees, *a, **kw)
+        with mock.patch.object(cl.shutil, "which", return_value=None), \
+                mock.patch.object(cl, "container_roots", return_value=set()), \
+                mock.patch.object(cl, "find_worktrees", return_value=[wt]), \
+                mock.patch.object(cl, "plan_deps", spy):
+            rc = cl.main(["--no-docker", "--worktrees", "--deps", "--dry-run",
+                          "--deps-roots", self.root])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [])
+
+    def test_failed_docker_ps_is_not_no_containers(self):
+        r = mock.Mock(returncode=1, stdout="", stderr="Cannot connect")
+        with mock.patch.object(cl, "sh", return_value=r), \
+                mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
+            with self.assertRaises(RuntimeError):
+                cl.container_claims()
+
+    def test_stopped_containers_and_compose_workdirs_claim_their_paths(self):
+        ps = mock.Mock(returncode=0, stdout="a\nb\n", stderr="")
+        inspect = mock.Mock(returncode=0, stderr="", stdout=json.dumps([
+            {"Mounts": [{"Type": "bind", "Source": "/w/one"}, {"Type": "volume", "Source": "/v"}],
+             "Config": {"Labels": {}}},
+            {"Mounts": [], "Config": {"Labels": {cl.WORKDIR: "/w/two"}}}]))
+        with mock.patch.object(cl, "sh", side_effect=[ps, inspect]) as sh, \
+                mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
+            self.assertEqual(cl.container_claims(), {"/w/one", "/w/two"})
+        self.assertIn("-aq", sh.call_args_list[0].args[0])
 
 
 if __name__ == "__main__":

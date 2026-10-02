@@ -4,7 +4,8 @@
 # unused images and anonymous volumes, old build cache; tool caches only with --caches), asks
 # yes/no, then removes exactly that. `cleanup --y` skips the question; `cleanup --dry-run` only
 # shows the plan; `sudo cleanup --deps` adds dependency dirs (node_modules, .venv, Rust target) in
-# git worktrees idle for 14+ days. Tested by scripts/tests/test_dev_worker_cleanup.py.
+# git worktrees idle for 14+ days; `sudo cleanup --worktrees` whole linked worktrees that are clean
+# and merged or long idle. Tested by scripts/tests/test_dev_worker_cleanup.py.
 # Own tag so it can be rolled out alone: --tags cleanup.
 - name: Install the cleanup tool
   ansible.builtin.copy:
@@ -21,6 +22,17 @@
 # at 0.7% free, each carrying ~42 GB of node_modules/.venv/target in worktrees idle for weeks.
 # Root, because only root sees every process's cwd/open/mapped files in /proc, which is how the tool
 # proves nothing is using a worktree; it refuses --deps removal otherwise.
+#
+# First step, --worktrees (dev_worker_worktree_prune_mode): whole linked worktrees agents left
+# behind (dev-worker-3 had 190 on 2026-10-02). In `report` mode it only logs the plan (--dry-run).
+# `-` and its own `timeout` (TERM, then KILL 2 min later) so a failing, contended or hung worktree
+# step never stops the deps step; TimeoutStartSec leaves the deps step 73+ min. git runs as each
+# worktree's owner, never root.
+- name: Check the worktree-prune mode
+  ansible.builtin.assert:
+    that: dev_worker_worktree_prune_mode in ['off', 'report', 'remove']
+    fail_msg: "dev_worker_worktree_prune_mode must be off, report or remove (a typo must not mean remove)"
+
 - name: Install the deps-prune unit + timer
   ansible.builtin.copy:
     dest: "/etc/systemd/system/{{ item.dest }}"
@@ -30,11 +42,14 @@
     - dest: dev-worker-deps-prune.service
       content: |
         [Unit]
-        Description=Remove dependency dirs from git worktrees idle {{ dev_worker_deps_prune_days }}+ days
+        Description=Remove stale git worktrees, then dependency dirs from worktrees idle {{ dev_worker_deps_prune_days }}+ days
         After=docker.service local-fs.target
 
         [Service]
         Type=oneshot
+        {% if dev_worker_worktree_prune_mode in ['report', 'remove'] %}
+        ExecStart=-/usr/bin/timeout --kill-after=2m 45m /usr/local/bin/cleanup --y --no-docker --worktrees --worktree-days {{ dev_worker_worktree_prune_days }} --merged-days {{ dev_worker_worktree_prune_merged_days }}{{ ' --dry-run' if dev_worker_worktree_prune_mode == 'report' else '' }}
+        {% endif %}
         ExecStart=/usr/local/bin/cleanup --y --no-docker --deps --deps-days {{ dev_worker_deps_prune_days }}
         Nice=19
         IOSchedulingClass=idle
