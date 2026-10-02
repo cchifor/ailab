@@ -1,12 +1,5 @@
 # Dev-worker stale-worktree prune + daily buildx cap
 
-## Codex Review
-
-- The revised checks and report-first rollout address the main round-1 concerns.
-- Reject `file://` remotes in both preservation rules; they do not establish an off-host copy.
-- Correct the HEAD-reflog documentation and acknowledge that new edits can race removal.
-- Add timeout escalation so an ignored SIGTERM does not indefinitely delay the deps step.
-
 ## Context
 
 The dev-workers' `/workspace` (125 GB, scsi1) holds both the agents' git worktrees and the
@@ -87,7 +80,8 @@ A broken/moved registration is reported, not touched.
      upstream default branch: `git merge-tree --write-tree <R> HEAD` exits 0 (1 = conflict, else
      error — both "not merged") and its first line equals `<R>^{tree}`. `<R>` = the target of
      `refs/remotes/<r>/HEAD`, else `refs/remotes/<r>/main`, `…/master`, fully qualified, for remotes
-     whose URL is a network URL (`scheme://` or `user@host:`) — a local-path remote proves nothing.
+     whose URL is a network URL — `https://`, `http://`, `ssh://`, `git://` or scp-style `user@host:` —
+     a local path or `file://` remote proves nothing (tested for both rules).
      Refused when any `merge.*.driver` is configured (a custom driver can return "ours" and hide
      changes). Detects squash merges, which is how Gitea merges here. `--write-tree` writes the
      merged tree's objects into the repo (loose, small, gc'd); accepted and documented.
@@ -95,8 +89,6 @@ A broken/moved registration is reported, not touched.
      of such a network remote (`git for-each-ref --contains HEAD refs/remotes/<r>/`).
    Both read LOCAL remote-tracking refs: the guarantee is "was on the forge as of the last fetch",
    no network call. Documented as such.
-
-<!-- codex: The proposed scheme:// test also accepts file:///local/repo.git, so a local-only repository can satisfy either preservation rule. Use an explicit allowlist of supported network schemes plus scp-style SSH, reject file://, and cover file:// remotes in the tests for both rules. -->
 
 **Removal**: plan fingerprint = (dev, ino) of the worktree dir + HEAD OID. Right before each one,
 re-run every check with fresh /proc, container and mount state, require the same fingerprint, then
@@ -119,26 +111,26 @@ and the deps pass skips worktrees planned for whole removal; execution never add
 
 - `tasks/cleanup.yml`: assert `dev_worker_worktree_prune_mode in [off, report, remove]`. The
   `dev-worker-deps-prune.service` gains a FIRST step for the worktree pass unless mode is `off`:
-  `ExecStart=-/usr/bin/timeout 45m /usr/local/bin/cleanup --y --no-docker --worktrees …` plus
+  `ExecStart=-/usr/bin/timeout --kill-after=2m 45m /usr/local/bin/cleanup --y --no-docker --worktrees …` plus
   `--dry-run` in `report` mode. `-` + its own `timeout`: a failing, contended or hung worktree pass
-  never stops the existing `--deps` step that follows. `dev_worker_deps_prune_enabled` still
+  never stops the existing `--deps` step that follows; the unit's `TimeoutStartSec=2h` leaves
+  ≥73 min for it (it takes seconds to minutes today). `dev_worker_deps_prune_enabled` still
   enables the timer for both; `mode: off` disables only the new step.
 - `defaults/main.yml`: `dev_worker_worktree_prune_mode: report` (→ `remove` in a follow-up PR after
   a week of reviewed reports), `dev_worker_worktree_prune_days: 30`,
   `dev_worker_worktree_prune_merged_days: 3`.
 - `tasks/docker.yml`: `docker-buildx-prune.timer` daily (`*-*-* 03:00`, `RandomizedDelaySec=30m`).
 
-<!-- codex: Plain timeout 45m sends SIGTERM and can wait indefinitely if the command ignores it. Add a short --kill-after grace period, and verify that any service-level TimeoutStartSec permits the bounded worktree step plus the deps step; otherwise the claimed isolation of the existing deps run does not hold. -->
-
 ### C. Docs
 
 `docs/runbooks/dev-workers.md` § Disk full: the worktree pass (both rules, the 3-day merged
 threshold, disposable-ignored list, `git worktree lock <path>` as the opt-out, report → remove,
-what is and is not recoverable: commits on branches yes; uncommitted work is never removed; the
-worktree's HEAD reflog and non-disposable ignored files are never removed either — the worktree is
-kept instead), buildx daily with a best-effort target. The tool's docstring and the task comments.
-
-<!-- codex: The HEAD-reflog promise contradicts Removal: git worktree remove deletes that reflog, and no check here keeps worktrees with reflog-only history. Document the intended loss explicitly, including that earlier detached/rebased commits referenced only by that reflog can become unreachable and later be garbage-collected. Retaining branch refs does not preserve all reflog-only history. -->
+what is and is not recoverable: commits on branches and the forge stay; a worktree with
+uncommitted, untracked or non-disposable ignored files is kept; the worktree's HEAD reflog IS
+deleted, so commits that only it referenced (an earlier detached HEAD, a pre-rebase state) become
+unreachable and are eventually garbage-collected; and work written into the worktree during the
+seconds of the removal itself — after the last check — can be lost (accepted residual, below)),
+buildx daily with a best-effort target. The tool's docstring and the task comments.
 
 ## Critical files
 
@@ -169,9 +161,15 @@ kept instead), buildx daily with a best-effort target. The tool's docstring and 
 5. Next morning: the deps step still ran (its freed bytes vs the previous day), the report's
    duration and candidate count, and `docker buildx du` after the buildx run.
 
-## Residual risks pushed back on
+## Residual risks
 
-<!-- codex: round-2: A cross-agent locking protocol is disproportionate here, but the stated acceptance rests on an incorrect claim: an agent can write new uncommitted files after the final checks, including Git's own cleanliness check, and recursive removal can delete them. Those edits are not already merged or on the forge. git worktree lock is an opt-out before removal, not protection once deletion has begun. Accept the narrow race for this deployment, but document its possible loss of newly written work before enabling remove mode and qualify the runbook's absolute "uncommitted work is never removed" promise. -->
-<!-- opus-pushback: Resolved as an accepted residual: the window is the seconds of one `git worktree remove` on a worktree idle 3+ days, re-checked immediately before; anything an agent could lose in that window is already merged or on the forge. `git worktree lock` is the documented opt-out. A cross-agent locking protocol is disproportionate. -->
+- **Removal race (accepted, documented).** Work an agent writes into a worktree after the final
+  checks — git's own included — and during the seconds of the recursive delete can be lost. The
+  worktree has been idle 3+ days and is re-checked immediately before; `git worktree lock` opts a
+  worktree out before removal (not during). No cross-agent locking protocol. The runbook states it.
+- Process visibility (`busy_paths` read errors = exit races; no hidepid here), mount namespaces
+  and rootless runtimes (one rootful dockerd per worker), root-side path swaps (root only reads),
+  and the Kept-list scope (idle ≥ `--worktree-days` only) were raised in round 1 and settled in
+  round 2.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
