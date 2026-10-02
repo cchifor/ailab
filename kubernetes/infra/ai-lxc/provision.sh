@@ -64,8 +64,15 @@ TTL="${TTL:-900}"                       # idle seconds before llama-swap unloads
 # be a hard-coded 900 from the 120-122B era; on 2026-10-01 a load wedged in the amdgpu driver and a
 # real request waited the whole 900 s for an empty reply. Raise it per node for a bigger model.
 SWAP_HEALTH_TIMEOUT="${SWAP_HEALTH_TIMEOUT:-180}"
+# Extra environment for llama-server, space-separated KEY=VAL (MODELS_JSON: a per-model .env).
+# Rendered as an `env KEY=VAL ...` prefix on the llama-swap cmd, and as Environment= lines in the
+# direct unit. The qwen3.8 instances need GGML_VK_PREFER_HOST_MEMORY=1: without it llama.cpp's Vulkan
+# backend parks ~333 MiB of its own buffers in the 512 MiB UMA carve and leaves the driver no room
+# for GPU page tables (models.yaml, measured 2026-10-02).
+LLAMA_ENV="${LLAMA_ENV:-}"
+LLAMA_ENV_PREFIX=""; [ -n "$LLAMA_ENV" ] && LLAMA_ENV_PREFIX="env ${LLAMA_ENV} "
 # MODELS_JSON (SWAP multi-model): a jq array of objects, each
-#   {alias,gguf,ctx,parallel,extra,ttl,stage_from,mmproj,cache_k,cache_v}
+#   {alias,gguf,ctx,parallel,extra,ttl,stage_from,mmproj,cache_k,cache_v,env}
 # lets ONE node's llama-swap serve SEVERAL models (loaded one-at-a-time, switched on request). When set,
 # it OVERRIDES the single MODEL/MODEL_ALIAS. Used on node3 (qwen3.5-122b + gpt-oss-120b). See models.yaml.
 MODELS_JSON="${MODELS_JSON:-}"
@@ -262,6 +269,7 @@ fi
 # Only pin the RADV ICD if we actually found it (an empty path would load NO driver -> CPU).
 ICD_LINE=""
 [ -n "$RADV_ICD" ] && ICD_LINE="Environment=VK_ICD_FILENAMES=${RADV_ICD}"
+LLAMA_ENV_LINES=""; for _kv in $LLAMA_ENV; do LLAMA_ENV_LINES="${LLAMA_ENV_LINES}Environment=${_kv}\n"; done   # direct unit only
 MMPROJ_FLAG=""
 [ -n "$MMPROJ" ] && MMPROJ_FLAG="--mmproj ${MMPROJ}"
 # Optional KV-cache quantization (halves KV memory at q8_0, near-lossless with flash-attn).
@@ -318,10 +326,13 @@ HDR
       _mm="$(printf '%s' "$_m" | jq -r '.mmproj // empty')"; _mmf=""; [ -n "$_mm" ] && _mmf="--mmproj ${_mm}"
       _ck="$(printf '%s' "$_m" | jq -r '.cache_k // empty')"; _cv="$(printf '%s' "$_m" | jq -r '.cache_v // empty')"
       _kv=""; [ -n "$_ck" ] && _kv="--cache-type-k ${_ck}"; [ -n "$_cv" ] && _kv="${_kv} --cache-type-v ${_cv}"
+      # A model's own .env wins; without one it inherits the global LLAMA_ENV, so `--env LLAMA_ENV=...`
+      # cannot be a silent no-op on a MODELS_JSON node (review #1026).
+      _env="$(printf '%s' "$_m" | jq -r '.env // ""')"; _envp="$LLAMA_ENV_PREFIX"; [ -n "$_env" ] && _envp="env ${_env} "
       cat >>${SWAP_CONF_DIR}/config.yaml <<ENTRY
   "${_a}":
     cmd: >
-      ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
+      ${_envp}${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
       -m ${_g} -a ${_a}
       -ngl 99 -c ${_c} --parallel ${_p}
       --flash-attn ${FA_MODE} ${SAMPLING_FLAGS} ${REASONING_FLAG} --jinja --metrics ${_kv} ${_mmf} ${_e}
@@ -334,7 +345,7 @@ ENTRY
     cat >>${SWAP_CONF_DIR}/config.yaml <<ENTRY
   "${MODEL_ALIAS}":
     cmd: >
-      ${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
+      ${LLAMA_ENV_PREFIX}${BIN}/llama-server --host 127.0.0.1 --port \${PORT}
       -m ${MODEL} -a ${MODEL_ALIAS}
       -ngl 99 -c ${CTX} --parallel ${PARALLEL}
       --flash-attn ${FA_MODE} ${SAMPLING_FLAGS} ${REASONING_FLAG} --jinja --metrics ${KV_FLAGS} ${MMPROJ_FLAG} ${EXTRA_ARGS}
@@ -381,6 +392,7 @@ Wants=network-online.target
 User=llama
 Environment=LD_LIBRARY_PATH=${BIN}
 ${ICD_LINE}
+$(printf '%b' "$LLAMA_ENV_LINES")
 ExecStart=${BIN}/llama-server --host 0.0.0.0 --port ${PORT} \\
   -m ${MODEL} -a ${MODEL_ALIAS} \\
   -ngl 99 -c ${CTX} --parallel ${PARALLEL} \\
