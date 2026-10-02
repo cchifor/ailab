@@ -93,3 +93,23 @@ That was the recorded release-gate evidence #900 asked for. The Job, its kustomi
 extra `llm-router-preflight` value in the NetworkPolicy selector were removed on 2026-09-29, once the
 result was recorded here. For another run, re-add it from #901 under a new versioned Job name.
 
+
+## Relay Assistant API release (2026-10-02)
+
+Candidate `router-0.1.0-20261002-relay` contains merged source
+`0013627e5c6511b21066ea8dea803ab4fde9f96a` (PR #65). It preserves the
+current `/clear` behavior and adds eligible model/route capability metadata and
+authenticated, bounded PNG edits at `/v1/images/edits`. No database, identity,
+provider or routing configuration changes are required.
+
+The [release archive and checksum](https://git.chifor.me/dsh/llm-router/releases/tag/relay-api-20261002)
+include a clean production build, scripts and frozen production dependencies.
+SHA-256: `de1067351cc7bf5af27226de45fcc27b3e816700d0d07e6078f7fd530771bd49`.
+All 931 tests, typecheck and build passed. Stage and verify this archive using the
+release procedure above before merging the subPath change. Namespace deployment
+access, a current SQLite backup, staging smoke, baseline and live validation are
+required; preparing this change alone does not prove rollout. The previous
+`router-0.1.0-20261002-clear` directory remains the rollback target.
+
+Deploy this API release before Relay 0.2.0, then confirm the existing Relay
+inference key can read `/v1/models` and `/v1/routes` with `x-agent-id: relay-assistant`.
