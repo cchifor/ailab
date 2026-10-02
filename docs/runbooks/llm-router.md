@@ -140,9 +140,9 @@ policy). The exact router digest was exported with regctl using empty registry
 and Docker credential configurations, verifying the manifest, config and all
 layers; no imagePullSecret is required.
 
-The dated backup init container is temporary. After public acceptance, remove
-`backup-before-relay` through a follow-up reviewed PR, preserving its completed
-backup on the data PVC. That cleanup prevents future restarts from depending on
-an old backup's retention or integrity. The cleanup causes one more Recreate
-rollout; verify readiness again. Retain the recovery generation until a newer
-consistent backup is validated, then prune deliberately during maintenance.
+The dated `backup-before-relay` init container is removed after public acceptance.
+The completed recovery generation remains on the data PVC, while future
+restarts no longer depend on its retention or integrity. The cleanup causes
+one more Recreate rollout; verify readiness again. Retain the recovery
+generation until a newer consistent backup is validated, then prune deliberately
+during maintenance.
