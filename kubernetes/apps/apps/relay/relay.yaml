@@ -32,9 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.1.2-20261001
-        chifor.me/source-commit: 41786bbb071ca3fd884d37dd5f8d135cc1d75c72
-        chifor.me/release-sha256: 2c99aec856ac0b1a7643b991142482181bcc57a76f751addda8da8109e840f17
+        chifor.me/release: relay-0.2.0-ci-20261002
+        chifor.me/source-commit: e82a1222d4eab1d410ad67bcf017ada2f2856f12
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -53,7 +52,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-      - image: docker.io/library/node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+      - image: registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31
         workingDir: /app
         envFrom:
         - secretRef:
@@ -80,10 +79,6 @@ spec:
             drop:
             - ALL
         volumeMounts:
-        - name: releases
-          mountPath: /app
-          subPath: relay-0.1.2-20261001
-          readOnly: true
         - name: data
           mountPath: /data
         - name: tmp
@@ -101,7 +96,7 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      - image: docker.io/library/node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+      - image: registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31
         workingDir: /app
         envFrom:
         - secretRef:
@@ -128,10 +123,6 @@ spec:
             drop:
             - ALL
         volumeMounts:
-        - name: releases
-          mountPath: /app
-          subPath: relay-0.1.2-20261001
-          readOnly: true
         - name: data
           mountPath: /data
         - name: tmp
@@ -190,10 +181,6 @@ spec:
           mountPath: /dumps
           readOnly: true
       volumes:
-      - name: releases
-        persistentVolumeClaim:
-          claimName: relay-releases
-          readOnly: true
       - name: data
         persistentVolumeClaim:
           claimName: relay-data

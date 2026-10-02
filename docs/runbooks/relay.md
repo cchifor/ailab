@@ -105,3 +105,54 @@ While this release was staged, automated digest-only PRs #1014 and #1015 resolve
 ### Release storage capacity
 
 The release PVC requests 2 GiB. After staging on 2026-10-01, `du -sk` reported 70,210 KiB for 0.1.0 and 79,519 KiB for 0.1.2: approximately 146 MiB total, or 7.2% of that budget. The NFS `df` result describes the shared export, so it is not used as the PVC budget. Before staging, compare existing `du -sk /releases/*` usage plus the new archive's extracted size against that budget. Retain the active release and the previous validated rollback release. Additional historical runtime directories can be removed by an operator only after their archive and checksum are verified in Gitea and no pod mounts them. Keep at most three connector versions in the next runtime archive; older pinned public URLs are retired explicitly. Long-term archive retention belongs in the release repository, rather than accumulating every runtime directory on the PVC.
+
+## Worker approvals and Assistant parity: 0.2.0 CI image
+
+Gitea CI in [cchifor/relay](https://git.chifor.me/cchifor/relay) publishes the
+validated runtime as `registry.chifor.me/relay/control-plane`, then a reviewed
+Flux change pins its digest in both the migration and application containers.
+The image uses the existing Node 22.23.3 runtime digest, includes production
+code/dependencies and public downloads, and needs no package installation or
+code PVC mount at startup. Previous directories remain on `relay-releases`;
+retain that PVC and the coordinated backup for recovery.
+
+Application source is `e82a1222d4eab1d410ad67bcf017ada2f2856f12`, merged in PR #1.
+CI verifies the candidate runtime archive SHA-256, then replaces its connector
+files with the canonical artifacts from the successful v0.2.0 tag workflow.
+The [release page](https://git.chifor.me/cchifor/relay/releases/tag/v0.2.0)
+contains a `deployment-images-<run>.json` receipt with image digests, input
+archive hashes, source commits and public connector hashes. The image digest
+identifies the final payload; the older runtime archive alone does not contain
+the canonical tag-job connector bytes.
+
+Worker agents follow `/skills/platform-connect/SKILL.md`, install the connector,
+and run its join flow. Pending hosts appear live in Agents → Connector hosts for
+administrator authorization or blocking. Connector 0.2.0 waits for approval and
+retains its private host identity; existing approved host credentials survive.
+Legacy enrollment endpoints return 410. Version 0.1.2 downloads remain available.
+The app opens Assistant, renames Overview to Status (`#/status`, with legacy
+redirects), and moves Plugins into Settings.
+
+Deploy [router API support, AILab #1032](https://git.chifor.me/cchifor/ailab/pulls/1032)
+first and verify Relay's existing inference key can discover eligible tool
+routes with `x-agent-id: relay-assistant`. No router administrator credential is
+provided to Relay.
+
+Migration 002 adds host access state, workspace revisions and persisted
+Assistant turns/events/preferences/images. Its revoked-host update runs per
+tenant under the non-bypass schema owner. Coordinated recovery generation
+`20261002T161029Z-ed959ab0-da66-4ddc-bce3-f2337cf80b06` passed every checksum and
+a complete restore/migration rehearsal as `relay_migrator`: 1 agent, 1 connector,
+3 conversations, 6 messages and 5 plugins preserved, all 14 tenant tables with
+forced RLS. Refresh the coordinated backup before rollout if data changed.
+
+After the normal protected-main review and Flux rollout, verify migration init,
+readiness, login, new SPA, public skill and canonical connector manifest, host
+approval/blocking, and Assistant streaming. Recreate keeps one control plane.
+Keep `relay-0.1.2-20261001` and its backup. Rolling only the old application back
+does not restore legacy enrollment state; freeze writes and perform coordinated
+database/plugin recovery when a complete rollback is needed. Existing Secrets,
+data PVCs, PostgreSQL, backup scheduling, DNS and tunnel routes are unchanged.
+
+Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/runs/57525):
+`registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31`.
