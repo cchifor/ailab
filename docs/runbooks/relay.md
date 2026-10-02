@@ -105,3 +105,45 @@ While this release was staged, automated digest-only PRs #1014 and #1015 resolve
 ### Release storage capacity
 
 The release PVC requests 2 GiB. After staging on 2026-10-01, `du -sk` reported 70,210 KiB for 0.1.0 and 79,519 KiB for 0.1.2: approximately 146 MiB total, or 7.2% of that budget. The NFS `df` result describes the shared export, so it is not used as the PVC budget. Before staging, compare existing `du -sk /releases/*` usage plus the new archive's extracted size against that budget. Retain the active release and the previous validated rollback release. Additional historical runtime directories can be removed by an operator only after their archive and checksum are verified in Gitea and no pod mounts them. Keep at most three connector versions in the next runtime archive; older pinned public URLs are retired explicitly. Long-term archive retention belongs in the release repository, rather than accumulating every runtime directory on the PVC.
+
+## Worker approvals and Assistant parity: 0.2.0 candidate
+
+`relay-0.2.0-20261002` is built from `cchifor/relay@e82a1222d4eab1d410ad67bcf017ada2f2856f12`.
+The repository is now named [cchifor/relay](https://git.chifor.me/cchifor/relay).
+[Release archive and connector assets](https://git.chifor.me/cchifor/relay/releases/tag/v0.2.0).
+Runtime SHA-256: `f60b8178e3f3c4271382355332154720de2587c310ff9cde4ee83defc75fa821`. Both application and migration containers
+advance together, retaining the pinned Node runtime and existing Secret/PVC configuration.
+
+Worker agents follow `/skills/platform-connect/SKILL.md`, install the connector,
+and run its join flow. Pending hosts appear live in Agents → Connector hosts for
+an administrator to authorize or block. Connector 0.2.0 waits for approval and
+retains its private host identity; existing approved host credentials survive.
+Legacy enrollment endpoints return 410. Version 0.1.2 downloads remain in the
+archive alongside 0.2.0. The app opens Assistant, renames Overview to Status
+(`#/status`, with legacy redirects), and moves Plugins into Settings.
+
+Deploy [router API support, AILab #1032](https://git.chifor.me/cchifor/ailab/pulls/1032)
+first and verify the existing Relay inference key can discover eligible tool
+routes with `x-agent-id: relay-assistant`. Relay's Assistant uses its existing
+scoped inference credential, never the router administrator token.
+
+Migration 002 is additive: host access state, workspace revision and persisted
+Assistant turns/events/preferences/images. It preserves revoked hosts using
+tenant-scoped updates under the non-bypass migration account. A pre-rollout
+coordinated backup completed as
+`20261002T161029Z-ed959ab0-da66-4ddc-bce3-f2337cf80b06`. All checksums passed.
+The archive restored into a disposable production-cluster database and migration
+002 ran as `relay_migrator`, preserving 1 agent, 1 connector, 3 conversations,
+6 messages and 5 plugin records. All 14 tenant tables retain forced RLS; the
+disposable database was removed. Take a fresh coordinated backup if rollout is
+delayed or the workspace changes materially.
+
+Before merging, verify the immutable directory is fully staged and its archive
+checksum matches; remove the temporary release-staging pod, then use the normal
+protected-main review and Flux rollout. Preparing this change does not prove
+public rollout. Verify migration init success, readiness, login, public skill
+and download manifest, host approval/blocking, model discovery, and Assistant
+streaming after deployment. Keep `relay-0.1.2-20261001` and its backup as recovery
+material. Rolling the UI alone back after migration does not restore enrollment
+state; a full rollback requires coordinated database/plugin recovery with
+writes frozen, following the recovery procedure above.

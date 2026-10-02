@@ -32,9 +32,9 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.1.2-20261001
-        chifor.me/source-commit: 41786bbb071ca3fd884d37dd5f8d135cc1d75c72
-        chifor.me/release-sha256: 2c99aec856ac0b1a7643b991142482181bcc57a76f751addda8da8109e840f17
+        chifor.me/release: relay-0.2.0-20261002
+        chifor.me/source-commit: e82a1222d4eab1d410ad67bcf017ada2f2856f12
+        chifor.me/release-sha256: f60b8178e3f3c4271382355332154720de2587c310ff9cde4ee83defc75fa821
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -82,7 +82,7 @@ spec:
         volumeMounts:
         - name: releases
           mountPath: /app
-          subPath: relay-0.1.2-20261001
+          subPath: relay-0.2.0-20261002
           readOnly: true
         - name: data
           mountPath: /data
@@ -130,7 +130,7 @@ spec:
         volumeMounts:
         - name: releases
           mountPath: /app
-          subPath: relay-0.1.2-20261001
+          subPath: relay-0.2.0-20261002
           readOnly: true
         - name: data
           mountPath: /data
