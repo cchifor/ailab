@@ -64,9 +64,19 @@ data:
       # RESTORED the same day after the host reboot, verified with a smoke request on .45 before the
       # entry went back. The full record, including why a GPU reset and a plain host reboot both
       # fail to clear that state, is on the same route in litellm.yaml.
-      # NODE2 DEPLOYMENT WITHDRAWN AGAIN 2026-10-01 (ENOMEM on an idle-reload under ai-node2 RAM
-      # pressure; llama-server wedged in drm_suballoc_new, requests hung 15 min). The record and the
-      # restore procedure are on the same route in litellm.yaml; it goes back in both files together.
+      # NODE2 WITHDRAWN 2026-10-01, RESTORED 2026-10-02. The cause was llama.cpp buffers in the 512 MiB
+      # UMA carve, NOT host RAM as #1004 said; it is fixed by GGML_VK_PREFER_HOST_MEMORY=1 (#1026).
+      # The full record, and the withdraw/restore procedure, are on the same route in litellm.yaml.
+      - model_name: qwen3.8-27b-ailab
+        litellm_params:
+          model: openai/qwen3.8-27b-ailab
+          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1   # ai-llm-2 / node2 / .45
+          api_key: "sk-noauth"
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000001
+        model_info:
+          supports_vision: true
+          max_input_tokens: 49152
       - model_name: qwen3.8-27b-ailab
         litellm_params:
           model: openai/qwen3.8-27b-ailab
@@ -184,7 +194,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "e57840edb679"
+        checksum/config: "a34aa9a45e23"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

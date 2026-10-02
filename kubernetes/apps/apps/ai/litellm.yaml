@@ -875,21 +875,30 @@ data:
       # headroom, not as load-spreading: its value is that one node going down or going slow no longer
       # takes the on-prem qwen3.8 route with it -- with the caveat the 2026-09-18 wedge proved, that
       # "going slow" only covers a backend that still ERRORS; one that hangs is not parked.
-      # NODE2 DEPLOYMENT WITHDRAWN AGAIN 2026-10-01 -- same wedge signature as 2026-09-18 (record
-      # above), different trigger. llama-swap idle-unloads this model after ttl 1800 s; the reload at
-      # 07:27:43Z needed ~26-30 GiB of GTT (system RAM on this iGPU) while ai-node2 had 10-14 GiB
-      # free (its VMs hold ~93 GiB resident: talos-cp2 22, ci-runner-2/-10/-5 16/13/13,
-      # env-node-1 14). amdgpu returned ENOMEM (`amdgpu_gem_va_ioctl ... Couldn't update BO_VA
-      # (-12)`, also at 2026-09-30 19:38Z) and llama-server wedged in D state in drm_suballoc_new,
-      # holding 22 GiB of GTT; `task llama-server blocked for more than 614 seconds`. A HANG IS
-      # NOT A FAILED CALL, so least-busy kept sending it work: a real request at 07:41:31Z ran
-      # llama-swap's full healthCheckTimeout (15 min) to an empty 200. Until node2 is repaired the
-      # route is node3 ALONE. RESTORE (as on 2026-09-21): after docs/runbooks/node-maintenance.md,
-      # and only once `curl http://192.168.0.45:8082/v1/chat/completions` answers a fixed greedy
-      # prompt with content and dmesg is clean, re-add the node2 block BYTE-IDENTICAL to node3's
-      # except api_base (http://llm-qwen38.ai.svc.cluster.local:8082/v1, ai-llm-2 / node2 / .45),
-      # ABOVE node3's, in this file and litellm-local.yaml, then re-stamp the checksums. Fix the
-      # trigger first (RAM headroom on ai-node2, or ttl 0 to keep the model resident), or it recurs.
+      # NODE2 WITHDRAWN 2026-10-01, RESTORED 2026-10-02. Same wedge signature as 2026-09-18 (record
+      # above): a reload at 07:27:43Z hit `amdgpu_gem_va_ioctl ... Couldn't update BO_VA (-12)` and
+      # llama-server sat in D state in drm_suballoc_new until ai-node2 was rebooted (the forced reboot
+      # hung as node-maintenance.md warns; it needed a manual reset). A real request ran llama-swap's
+      # then-900 s healthCheckTimeout to an empty 200.
+      # CORRECTED CAUSE: the withdrawal (#1004) blamed host RAM pressure, and that was WRONG. llama.cpp's
+      # Vulkan backend parked ~333 MiB of its own buffers in the 512 MiB UMA carve and left the driver
+      # no room for GPU page tables. Fixed on both nodes by GGML_VK_PREFER_HOST_MEMORY=1 (#1026: peak
+      # carve 482 -> 149 MiB, generation speed unchanged, prompt processing ~18% slower;
+      # kubernetes/infra/ai-lxc/models.yaml, CORRECTED 2026-10-02). A stuck load now fails at 180 s,
+      # and AILlmGpuPageTableExhausted pages (#1012). Restored after a verified load on .45:
+      # `Reply with exactly: OK` -> `OK stop`, carve 149/512 MiB, dmesg clean.
+      # IF IT RECURS (a hang is still not parked by the router): withdraw this block from BOTH files and
+      # re-stamp the checksums. Reboot the host with docs/runbooks/node-maintenance.md's wedged-LXC
+      # sequence. Restore only after a greedy `Reply with exactly: OK` on .45 returns `OK stop` with dmesg
+      # clean: the block goes back BYTE-IDENTICAL to node3's except api_base, ABOVE node3's, in both files.
+      - model_name: qwen3.8-27b-ailab
+        litellm_params:
+          model: openai/qwen3.8-27b-ailab
+          api_base: http://llm-qwen38.ai.svc.cluster.local:8082/v1   # ai-llm-2 / node2 / .45
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+        model_info: { supports_vision: true, max_input_tokens: 49152 }
       - model_name: qwen3.8-27b-ailab
         litellm_params:
           model: openai/qwen3.8-27b-ailab
@@ -1170,7 +1179,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "fd4df9acd940"
+        checksum/config: "4fead844c878"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
