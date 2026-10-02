@@ -51,7 +51,8 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.39` | **RESERVED** for Talos env-node `talos-env-node-2` (ai-node3; NOT built — #835 is parked behind #972, gate G3b). Held here so the address can't be handed out again while the PR waits: its first claim, `.38`, was only in the unmerged branch and went to `cloud-win-1` (#987) | 4402 (reserved — no VM yet) | #835 → `kubernetes/infra/env-pool/variables.tf` |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
-| `.44 / .45 / .46` | AI LLM LXCs `ai-llm-1/2/3` | 5001–5003 | `kubernetes/infra/ai-lxc/variables.tf` |
+| `.44` | **RESERVED (retiring)** — AI LLM LXC `ai-llm-1`, removed from tofu and from scraping 2026-10-02 (#1034). Still owns the address until the post-merge `pct stop` + `tofu apply` destroys it; freed by a follow-up PR only once `pct status 5001` reports no container | 5001 | `plans/2026-10-02-balloon-headroom-plan.md` |
+| `.45 / .46` | AI LLM LXCs `ai-llm-2/3` | 5002–5003 | `kubernetes/infra/ai-lxc/variables.tf` |
 | `.47 / .48 / .49` | Talos agent-node VMs `agent-node-1/2/3` (ADR 0019) | 4301–4303 | `kubernetes/infra/agent-nodes/variables.tf` |
 | `.50` | **free (static)** | — | — |
 | `.51`–`.254` | router DHCP pool | — | router |

@@ -1,4 +1,4 @@
-# The AI LLM nodes' iGPU page-table budget (ai-llm-1/2/3, job ai-llm-node: node_exporter + the
+# The AI LLM nodes' iGPU page-table budget (ai-llm-2/3, job ai-llm-node: node_exporter + the
 # amdgpu sysfs textfile from kubernetes/infra/ai-lxc/amdgpu-textfile.sh).
 #
 # Every node carves 512 MiB of "VRAM" in BIOS (UMA frame buffer, AMD's recommended 0.5 GB). Without

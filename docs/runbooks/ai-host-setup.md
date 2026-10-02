@@ -30,13 +30,16 @@ QNAP NFS store.
 ssh root@192.168.0.2 'bash -s' < scripts/fetch-models.sh qwen3.6    # daily driver; or: gpt-oss | qwen3.5 | gemma4 | all
 #    (`daily` still fetches the retired qwen3-30b-a3b GGUF, kept on NFS for revert.)
 
-# 2. Create the 3 LXCs (device passthrough + /models bind mount). Uses root@pam (see gotcha #1).
+# 2. Create the LXCs (device passthrough + /models bind mount). Uses root@pam (see gotcha #1).
+#    Two since 2026-10-02: ai-llm-2 (node2) + ai-llm-3 (node3). ai-llm-1 (node1, ctid 5001, .44) was
+#    RETIRED that day and is destroyed by the next apply -- it had served nothing since its qwen3.8
+#    instance moved to node2 on 2026-09-16, and node1 needed the RAM
+#    (plans/2026-10-02-balloon-headroom-plan.md).
 cp kubernetes/infra/terraform.tfvars kubernetes/infra/ai-lxc/terraform.tfvars   # then set pve_password
 tofu -chdir=kubernetes/infra/ai-lxc init
 tofu -chdir=kubernetes/infra/ai-lxc apply
 
 # 3. Provision each LXC (llama.cpp Vulkan + node_exporter + amdgpu metrics)
-python scripts/lxc-exec.py 192.168.0.2 5001
 python scripts/lxc-exec.py 192.168.0.3 5002
 python scripts/lxc-exec.py 192.168.0.4 5003
 
@@ -129,11 +132,14 @@ tofu -chdir=kubernetes/infra/ai-lxc apply     # in-place memory update (no CT re
 ### Kernel cmdline (GRUB — `proxmox-boot-tool` is NOT in use here)
 Append to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then `update-grub`:
 ```
-ttm.pages_limit=33554432 amdgpu.gttsize=131072
+ttm.pages_limit=33554432 amdgpu.gttsize=131072 ttm.page_pool_size=262144
 ```
 - `ttm.pages_limit=33554432` (×4 KiB = **128 GiB**) — **required.** Default is ~50% of visible RAM
   (~63 GiB post-carve), short of the 122B's ~72 GiB. Raises the ceiling (a cap, not a reservation).
 - `amdgpu.gttsize=131072` (=128 GiB) — belt-and-suspenders; deprecated on recent kernels (may be a no-op).
+- `ttm.page_pool_size=262144` (×4 KiB = **1 GiB**) — **required since 2026-10-02**, see
+  [TTM page pool cap](#ttm-page-pool-cap-2026-10-02) below. Without it the pool defaults to half of RAM
+  (16376767 pages, 62.5 GiB) and keeps a whole unloaded model's GTT pages hostage.
 - **Do NOT add `amd_iommu=off` initially.** It is safe here (verified: no VFIO, no `hostpci` passthrough on
   any node) but changes a 2nd variable, and IOMMU is on today with GTT already working (node3 spills 8 GiB).
   Add it **only if** the after-run shows large-GTT allocation failures or a big *prefill* regression, then
@@ -141,9 +147,58 @@ ttm.pages_limit=33554432 amdgpu.gttsize=131072
 
 Per-node target (append — node3 carries extra thunderbolt params, preserve them):
 ```
-node1/node2:  GRUB_CMDLINE_LINUX_DEFAULT="quiet ttm.pages_limit=33554432 amdgpu.gttsize=131072"
-node3:        GRUB_CMDLINE_LINUX_DEFAULT="quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0 ttm.pages_limit=33554432 amdgpu.gttsize=131072"
+node1/node2:  GRUB_CMDLINE_LINUX_DEFAULT="quiet ttm.pages_limit=33554432 amdgpu.gttsize=131072 ttm.page_pool_size=262144"
+node3:        GRUB_CMDLINE_LINUX_DEFAULT="quiet thunderbolt.host_reset=false pcie_aspm=off thunderbolt.clx=0 ttm.pages_limit=33554432 amdgpu.gttsize=131072 ttm.page_pool_size=262144"
 ```
+
+### TTM page pool cap (2026-10-02)
+
+**Symptom.** node2 and node3 sat at PVE's 80% auto-balloon target with every model *unloaded*
+(`mem_info_gtt_used` 17 MiB), so pvestatd kept their ballooned guests near their floors. ~29 GiB per
+node was in no `/proc/meminfo` bucket (not anon, cache, slab or page tables); 23 GiB of it was this pool.
+
+**Cause.** amdgpu allocates GTT through TTM's page pool. When llama-swap idle-unloads a model, the
+freed write-combined pages go back to that pool rather than to the kernel, up to `page_pool_size`
+(default: half of RAM). Pool pages are not counted in `MemAvailable`, and PVE computes host usage as
+`MemTotal - MemAvailable`, so pvestatd treats them as used. They are freed only by the pool's
+shrinker under real memory pressure, which pvestatd never lets build up because it squeezes the
+guests first. Measured 2026-10-02 in `/sys/kernel/debug/ttm/page_pool` (`total` row): **node2
+6050282 pages (23.1 GiB), node3 6034391 (23.0 GiB)**, from one qwen3.8-27b load each (22.45 GiB).
+node1, with no model since 2026-09-16, held 15 MiB.
+
+**Fix.** Cap the pool at 1 GiB. Freed GTT pages above the cap go straight back to the kernel; the cost
+is that the next cold load allocates fresh write-combined pages instead of reusing the pool (seconds,
+against a ~74 s load). Live, no reboot (`page_pool_size` is read on every free):
+
+```bash
+echo 262144 > /sys/module/ttm/parameters/page_pool_size
+# drain what is already pooled: each read of page_pool_shrink frees one ~512-page batch
+while [ "$(awk '/^total/{print $3}' /sys/kernel/debug/ttm/page_pool)" -gt 262144 ]; do
+  for i in $(seq 20); do cat /sys/kernel/debug/ttm/page_pool_shrink >/dev/null; done
+done
+awk '/^total/' /sys/kernel/debug/ttm/page_pool      # expect <= 262144
+```
+
+Result 2026-10-02: node2 `MemAvailable` 24.8 -> 47.0 GiB, node3 24.1 -> 45.9 GiB, about 4 s per node.
+Persisted on all three hosts with the GRUB parameter above (`/etc/default/grub.bak-20261002` is the
+pre-change copy).
+
+### KSM threshold (2026-10-02)
+
+`ksmtuned` (package `ksm-control-daemon`) stops KSM whenever `MemFree+Buffers+Cached` exceeds
+`KSM_THRES_COEF`% of RAM, default **20%**. That is the same line pvestatd steers to (80% used), so KSM
+flapped off exactly when the hosts were full: all three nodes had `run=0` on 2026-10-02, while node2's
+earlier run had saved 13 GiB. Set on every host:
+
+```bash
+cp -a /etc/ksmtuned.conf /etc/ksmtuned.conf.bak-20261002
+sed -i 's/^# *KSM_THRES_COEF=.*/KSM_THRES_COEF=40/' /etc/ksmtuned.conf
+systemctl restart ksmtuned
+cat /sys/kernel/mm/ksm/run      # 1 after the first 60 s monitor interval
+```
+
+Cost: ksmd CPU. node1 measured 9 CPU-hours in 45 days of uptime under the old setting (~0.8% of one
+of 32 threads).
 
 ### Per-node procedure (root on the Proxmox host unless noted)
 
