@@ -105,6 +105,9 @@ spec:
     metadata:
       labels:
         app: llm-router
+      annotations:
+        chifor.me/source-commit: 0013627e5c6511b21066ea8dea803ab4fde9f96a
+        chifor.me/release: router-relay-api-20261002
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -117,9 +120,26 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
+      # Recreate stops the previous router before this opens SQLite. The helper
+      # publishes a verified backup plus the existing key/config on the data PVC.
+      initContainers:
+        - name: backup-before-relay
+          image: registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e
+          command: [node, /app/deploy/backup-router.mjs]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
-          image: docker.io/library/node@sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0
+          image: registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -208,24 +228,13 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            # One immutable release directory per rollout, built from one llm-router commit:
-            # router-0.1.0-20261002-relay = dsh/llm-router main@0013627 (never rewritten in place;
-            # a new build gets a new directory). Swapping it replaces the pod safely: the
-            # Deployment is `strategy: Recreate` and the SQLite volume (llm-router-data) is RWO
-            # iSCSI, so the old pod has stopped before the new one opens the database.
-            - name: releases
-              mountPath: /app
-              subPath: router-0.1.0-20261002-relay
-              readOnly: true
+            # Code is carried by the digest-pinned CI image. Previous NFS
+            # releases remain on router-releases for rollback; no code mount.
             - name: data
               mountPath: /data # SQLite file + WAL/SHM sidecars
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: releases
-          persistentVolumeClaim:
-            claimName: router-releases
-            readOnly: true
         - name: data
           persistentVolumeClaim:
             claimName: llm-router-data

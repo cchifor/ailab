@@ -19,15 +19,15 @@ Enter it at the SPA; do not put it in a URL. It is privileged for both managemen
 Manifests: `kubernetes/apps/apps/llm-router/` (wired into the apps Kustomization).
 
 - One replica, `Recreate`; non-root UID/GID 1000, restricted Pod Security, dropped capabilities, no service-account token, read-only root filesystem, `/tmp` emptyDir.
-- Node runtime pinned to `docker.io/library/node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6` (Node 24.21.0 at deployment).
+- The application OCI image is pinned by digest in `router.yaml`; its CI receipt records the unchanged Node 26.10.0 base digest used for this release.
 - Requests 100m CPU/384Mi memory; limits 2 CPU/1280Mi memory (Assistant image jobs: see the comment in router.yaml). May schedule on the existing `dedicated=agent` worker pool; no existing taints, cordons or workloads were changed.
 - `llm-router-data`: 5Gi RWO `qnap-iscsi`, mounted at `/data`, SQLite `/data/router.sqlite`. **Never move WAL onto NFS.**
 - `router-releases`: 2Gi RWX `nfs-csi`, **application code only**, one versioned directory per release (`router-0.1.0-<date>-<name>`), the live one mounted read-only at `/app` via `subPath`. All production dependencies were installed from the frozen pnpm lockfile before deployment. There is no dependency install at startup.
 - NetworkPolicy admits :8787 only from `edge` cloudflared pods. Egress permits cluster DNS, public HTTPS (RFC1918 excluded), seat hosts in the namespace on :8791, and the mgmt LAN `192.168.0.0/24` on the model-server ports only (8080, 8081, 8082, 18020, 11434, 1234, 8000).
 
-### Releasing a new version
+### Legacy staged-release procedure
 
-A release is a new directory on `router-releases`, never a change to a mounted one.
+For the current Gitea CI image flow, see the Relay Assistant API image release below. The earlier PVC-based release procedure remains available for recovery: a staged release is a new directory on `router-releases`, never a change to a mounted one.
 
 1. **Build** `dist` from the merged `dsh/llm-router` main after **deleting `dist/` first**. The web build does not empty it, and old bundles pile up.
 2. **Package** it: tar a directory named `router-0.1.0-<date>-<name>` containing `dist/`, `package.json`, `pnpm-lock.yaml` and `scripts/` (step 8 runs `scripts/validate-live.mjs` from the release; a release without it needs the script copied into the pod's `/tmp`).
@@ -94,22 +94,43 @@ extra `llm-router-preflight` value in the NetworkPolicy selector were removed on
 result was recorded here. For another run, re-add it from #901 under a new versioned Job name.
 
 
-## Relay Assistant API release (2026-10-02)
+## Relay Assistant API image release (2026-10-02)
 
-Candidate `router-0.1.0-20261002-relay` contains merged source
-`0013627e5c6511b21066ea8dea803ab4fde9f96a` (PR #65). It preserves the
-current `/clear` behavior and adds eligible model/route capability metadata and
-authenticated, bounded PNG edits at `/v1/images/edits`. No database, identity,
-provider or routing configuration changes are required.
+Gitea CI in `cchifor/relay` now publishes the runtime through the existing
+organization registry identity. The input archive contains merged router source
+`0013627e5c6511b21066ea8dea803ab4fde9f96a` (PR #65), a clean build and frozen
+production dependencies. CI verifies archive SHA-256
+`de1067351cc7bf5af27226de45fcc27b3e816700d0d07e6078f7fd530771bd49`, the source
+marker, the offline production smoke, and the backup helper on the exact runtime
+image. The runtime stays on the current Node 26.10.0 digest; this rollout does
+not change its Node version. Image digests and source provenance are attached to
+[Relay v0.2.0](https://git.chifor.me/cchifor/relay/releases/tag/v0.2.0) in the
+`deployment-images-<run>.json` CI receipt.
 
-The [release archive and checksum](https://git.chifor.me/dsh/llm-router/releases/tag/relay-api-20261002)
-include a clean production build, scripts and frozen production dependencies.
-SHA-256: `de1067351cc7bf5af27226de45fcc27b3e816700d0d07e6078f7fd530771bd49`.
-All 931 tests, typecheck and build passed. Stage and verify this archive using the
-release procedure above before merging the subPath change. Namespace deployment
-access, a current SQLite backup, staging smoke, baseline and live validation are
-required; preparing this change alone does not prove rollout. The previous
-`router-0.1.0-20261002-clear` directory remains the rollback target.
+The reviewed Flux Deployment runs the published image directly, with no code PVC
+mount or package installation. `router-releases` and its previous
+`router-0.1.0-20261002-clear` directory remain available for rollback. Persistent
+SQLite, the existing authentication Secret, provider credentials and network
+policy retain their current locations and ownership.
 
-Deploy this API release before Relay 0.2.0, then confirm the existing Relay
-inference key can read `/v1/models` and `/v1/routes` with `x-agent-id: relay-assistant`.
+The Recreate strategy stops the old process before the `backup-before-relay`
+init container runs. It uses SQLite VACUUM INTO to create
+`/data/backups/pre-relay-api-20261002/router.sqlite`, copies `router.secrets.key`
+and any `plugins.yml`, checks SQLite integrity and SHA-256, and atomically
+publishes a COMPLETE marker. Retries verify the completed generation; corruption
+fails startup. It does not contact providers or need a Kubernetes API token.
+The backup remains on the data PVC and is local rollback material, not proof of
+an offsite backup. Preserve the external authentication Secret separately.
+
+This release preserves `/clear` and adds eligible model/route capabilities and
+bounded authenticated PNG edits at `/v1/images/edits`. There is no router schema
+or credential change. After normal protected-main review and Flux rollout,
+verify public readiness, the new SPA assets and authenticated capability
+discovery with Relay's existing scoped key (`x-agent-id: relay-assistant`), then
+roll Relay. A failed init backup keeps the new router stopped: inspect storage
+and restore only through the established recovery procedure. Application rollback
+uses the previous Node image and code subPath via a reviewed PR; never rewrite
+a live directory or run a second control plane against the same database.
+
+Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/runs/57525):
+`registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e`.
