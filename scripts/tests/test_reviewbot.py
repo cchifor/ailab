@@ -2274,7 +2274,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
     The behavioural enqueue tests use repos=["o/kept"], so restoring cchifor/review-bot-fixture to
     the role defaults would leave them green. This is the test that would actually go red."""
 
-    EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
+    EXPECTED = ["cchifor/forge", "cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
                 "cchifor/agentforge-platform", "cchifor/dsh-team-conductor"]
 
     @staticmethod
