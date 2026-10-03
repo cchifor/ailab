@@ -125,7 +125,8 @@ and agentforge-platform already differ in how they cancel a stream (Codex).
     entry from its pipeline.
   - Relay (cchifor/relay#7):
     - write the fork record (rule A6: source repository and exact commit, date, owner, sync policy);
-    - vendor the web core in place of its copied logic, and keep its views;
+    - vendor the web core in place of its copied logic, and keep its views; from then on, run the scheduled
+      pin-move job (B4) like any consumer;
     - triage three bugs fixed in the router;
     - run the monthly fork review (B4).
   - Platform: the scheduled pin-move job for `services/harness` (B4; owner: the harness).
