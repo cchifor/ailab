@@ -140,6 +140,13 @@ policy). The exact router digest was exported with regctl using empty registry
 and Docker credential configurations, verifying the manifest, config and all
 layers; no imagePullSecret is required.
 
+The dated `backup-before-relay` init container is removed after public acceptance.
+The completed recovery generation remains on the data PVC, while future
+restarts no longer depend on its retention or integrity. The cleanup causes
+one more Recreate rollout; verify readiness again. Retain the recovery
+generation until a newer consistent backup is validated, then prune deliberately
+during maintenance.
+
 ### Router image `router-0.1.0-20261003-ui` (2026-10-03)
 
 Web UI fixes only: scrollbars without arrow buttons (llm-router #69); History closes
@@ -155,13 +162,6 @@ branch `router-image-20261003-ui` names it (router entry only). Published by
 `registry.chifor.me/llm-router/router@sha256:083ef7c7f931358b53e404b68b49c14a16d33eb6ecbcd55dd7e0968512cdb74b`
 (receipt `deployment-images-58874.json`). Before the roll: a verified backup in
 `/data/backups/pre-ui-20261003` (VACUUM INTO, integrity ok, key and plugins.yml) and a
-`validate-live --baseline` (4/4). Rollback: the previous digest `sha256:12697b84...`
+`validate-live --baseline` (4/4). Rollback: the previous digest
+`registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e`
 (run 57525) with source-commit `0013627e5c6511b21066ea8dea803ab4fde9f96a`.
-
-
-The dated `backup-before-relay` init container is removed after public acceptance.
-The completed recovery generation remains on the data PVC, while future
-restarts no longer depend on its retention or integrity. The cleanup causes
-one more Recreate rollout; verify readiness again. Retain the recovery
-generation until a newer consistent backup is validated, then prune deliberately
-during maintenance.
