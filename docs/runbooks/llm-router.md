@@ -140,6 +140,25 @@ policy). The exact router digest was exported with regctl using empty registry
 and Docker credential configurations, verifying the manifest, config and all
 layers; no imagePullSecret is required.
 
+### Router image `router-0.1.0-20261003-ui` (2026-10-03)
+
+Web UI fixes only: scrollbars without arrow buttons (llm-router #69); History closes
+on a press outside it, and a long page no longer slides the app up (#75). Source:
+llm-router `release/router-20261003-ui` at `867272e581aa5d6357a7abadf6220ede922918ae`,
+which is the live `0013627` plus those PRs' commits only: the later unreleased `main`
+work (#66-#68, #70-#72, #76-#78) is not in it. The runtime archive
+`router-0.1.0-20261003-ui.tar.gz` (SHA-256
+`f6d748ec2c11f79ba8b0316f196622a0f3789ec75eb8cb9aa2b4f84723166010`, the same layout as
+`router-0.1.0-20261002-relay`) is a v0.2.0 release asset; `releases.json` on the relay
+branch `router-image-20261003-ui` names it (router entry only). Published by
+[Gitea CI run 58874](https://git.chifor.me/cchifor/relay/actions/runs/58874):
+`registry.chifor.me/llm-router/router@sha256:083ef7c7f931358b53e404b68b49c14a16d33eb6ecbcd55dd7e0968512cdb74b`
+(receipt `deployment-images-58874.json`). Before the roll: a verified backup in
+`/data/backups/pre-ui-20261003` (VACUUM INTO, integrity ok, key and plugins.yml) and a
+`validate-live --baseline` (4/4). Rollback: the previous digest `sha256:12697b84...`
+(run 57525) with source-commit `0013627e5c6511b21066ea8dea803ab4fde9f96a`.
+
+
 The dated `backup-before-relay` init container is removed after public acceptance.
 The completed recovery generation remains on the data PVC, while future
 restarts no longer depend on its retention or integrity. The cleanup causes
