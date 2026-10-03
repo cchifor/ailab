@@ -226,10 +226,11 @@ def pve(node, path, method="GET", data=None, timeout=15.0, deadline=None):
     # indefinitely. A watchdog shuts the socket down at the deadline, which fails whatever read
     # is blocked, wherever it is (reviewer-codex on #1049).
     expired = threading.Event()
+    held = {}   # the socket, kept even after http.client hands it to a Connection: close response
 
     def _expire():
         expired.set()
-        sock = conn.sock
+        sock = held.get("sock") or conn.sock
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -242,6 +243,7 @@ def pve(node, path, method="GET", data=None, timeout=15.0, deadline=None):
         watchdog.start()
     try:
         conn.connect()
+        held["sock"] = conn.sock
         der = conn.sock.getpeercert(binary_form=True)
         got = ":".join("%02X" % b for b in hashlib.sha256(der).digest())
         if got != expected:

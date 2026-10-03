@@ -1763,6 +1763,10 @@ class PveDeadlineTests(unittest.TestCase):
     def test_chunked_framing(self):
         self.dribble(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", b"1\r\n \r\n" * 1000)
 
+    def test_body_of_a_connection_close_response(self):
+        # http.client clears conn.sock for these and hands the socket to the response object.
+        self.dribble(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", b" " * 4096)
+
     def test_body(self):
         self.dribble(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n", b" " * 4096)
 
