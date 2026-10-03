@@ -15,14 +15,18 @@ retain both personas, author allowlists and all CI/current-head requirements.
    and review posting after activation.
 2. The `self-hosted-hv` organization runner pool now serves this repository. A temporary
    repository-scoped `forge-workspace-runner` supplements it while that pool is busy.
-   Stop the temporary runner once the organization pool is serving Forge reliably.
+   The Forge implementation agent owns that temporary registration. Stop its daemon
+   and remove its registration after a Forge quality run succeeds on an organization
+   runner with the temporary daemon stopped, or at the end of the implementation
+   session if earlier. Do not leave an offline temporary registration behind.
 3. Main protection requires `forge-quality / forge-quality (pull_request)`, an
    up-to-date branch, two reviewer approvals and stale-approval dismissal. Direct
    push, force push and administrator merge override are disabled. Only the reviewer
    identities are in approval/merge allowlists. Preserve these settings.
 4. After this PR merges, run `ansible-playbook reviewers.yml -t reviewbot` from the
    `ansible/` directory using normal encrypted variables and inventory. The existing
-   `ansible/reviewers.yml` playbook includes `role: pr_reviewer`, whose defaults in
+   `ansible/reviewers.yml` playbook applies `tags: [reviewbot]` directly to
+   `role: pr_reviewer`; this is the tag selected by the command. Its defaults in
    `ansible/roles/pr_reviewer/defaults/main.yml` contain the allowlist.
 5. Confirm `/etc/reviewbot/config.json` on both hosts contains `cchifor/forge` in `repos`.
    `ansible/roles/pr_reviewer/templates/config.json.j2` maps `pr_reviewer_repos` to that
