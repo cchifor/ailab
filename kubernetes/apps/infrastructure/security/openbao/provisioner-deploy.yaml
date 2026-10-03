@@ -177,9 +177,19 @@ spec:
             - { name: tls, mountPath: /tls, readOnly: true }
             # Operator kid-policy file (agentforge-capability-kids ConfigMap), read-only.
             - { name: capability-kids, mountPath: /etc/agentforge/capability-kids, readOnly: true }
+          # MEMORY HEADROOM (2026-10-03). The working set sits at ~125 MiB (a fresh pod reaches that
+          # within minutes) and pinned at the old 128Mi limit from 10-02 02:00. A Python process at
+          # its cgroup limit is not OOM-killed: the kernel evicts its page cache instead (1 MiB
+          # left), so it re-read its own interpreter/site-packages from disk — ~690 major faults/s
+          # and 30-110 MB/s of reads on its node's root disk. On talos-cp1 that is the disk etcd
+          # fsyncs to, on ai-node1's NVMe shared with three CI runners: it made cp1 the etcd outlier
+          # (WAL-fsync p99 doubled vs cp2/cp3 under the same runner write bursts; 13 leader changes
+          # on 10-03). The CFS throttling and the failing /metrics scrape (CPUThrottlingHigh,
+          # ForgeProvisionerTargetDown) were the same stall. The request now reflects the measured
+          # steady state; the limit leaves 3x headroom.
           resources:
-            requests: { cpu: 10m, memory: 48Mi }
-            limits: { cpu: 250m, memory: 128Mi }
+            requests: { cpu: 10m, memory: 160Mi }
+            limits: { cpu: 250m, memory: 384Mi }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
