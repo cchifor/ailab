@@ -181,10 +181,12 @@ spec:
           # within minutes) and pinned at the old 128Mi limit from 10-02 02:00. A Python process at
           # its cgroup limit is not OOM-killed: the kernel evicts its page cache instead (1 MiB
           # left), so it re-read its own interpreter/site-packages from disk — ~690 major faults/s
-          # and 30-110 MB/s of reads on its node's root disk (on talos-cp1, the disk etcd fsyncs to).
-          # Removing those reads did NOT fix cp1's slow etcd: its WAL-fsync p99 tracks the CI-runner
-          # write load on ai-node1's shared NVMe (55 ms at <=13 MB/s of runner writes, 213 ms at
-          # >=58 MB/s; 24 h at 5 m, 2026-10-03) and stayed the worst CP after the reads stopped.
+          # and 30-110 MB/s of reads on the root disk of whichever node it runs on (when that is a
+          # control-plane node, the disk etcd fsyncs to). Removing those reads from talos-cp1 did
+          # NOT fix cp1's slow etcd: cp1 is a VM whose disk lives on ai-node1's single NVMe, which
+          # also backs three CI-runner VMs, and its WAL-fsync p99 tracks their write load (55 ms at
+          # <=13 MB/s of runner writes, 213 ms at >=58 MB/s; 24 h at 5 m, 2026-10-03). cp1 stayed
+          # the worst CP after the reads stopped.
           # The CFS throttling and the failing /metrics scrape (CPUThrottlingHigh,
           # ForgeProvisionerTargetDown) were this stall. The request now reflects the measured
           # steady state; the limit leaves 3x headroom.
