@@ -29,7 +29,7 @@ Manifests: `kubernetes/apps/apps/llm-router/` (wired into the apps Kustomization
 
 For the current Gitea CI image flow, see the Relay Assistant API image release below. The earlier PVC-based release procedure remains available for recovery: a staged release is a new directory on `router-releases`, never a change to a mounted one.
 
-1. **Build** `dist` from the merged `dsh/llm-router` main after **deleting `dist/` first**. The web build does not empty it, and old bundles pile up.
+1. **Build** `dist` from the merged `cchifor/llm-router` main after **deleting `dist/` first**. The web build does not empty it, and old bundles pile up.
 2. **Package** it: tar a directory named `router-0.1.0-<date>-<name>` containing `dist/`, `package.json`, `pnpm-lock.yaml` and `scripts/` (step 8 runs `scripts/validate-live.mjs` from the release; a release without it needs the script copied into the pod's `/tmp`).
 3. **Stage** it:
    - Start the staging pod: `kubectl --context admin@ai apply -f kubernetes/apps/apps/llm-router/staging/router-stage.yaml`. It is not in the Flux kustomization.

@@ -144,7 +144,7 @@ spec:
                 secretKeyRef:
                   name: llm-router-auth
                   key: admin-token
-            # Model servers on the LAN (dsh/llm-router discovery-network): the only network the router may
+            # Model servers on the LAN (cchifor/llm-router discovery-network): the only network the router may
             # scan is the mgmt LAN, on the model-server ports below (the same list as the egress rule), and
             # these known servers are checked on every full scan: cloudlab vLLM (.28:18020) and llama-swap
             # (.26:8080), the AI LXCs' llama-swap (.45/.46:8082). Nothing becomes an account without an
@@ -279,7 +279,7 @@ spec:
       ports:
         - protocol: TCP
           port: 443
-    # Claude subscription seat hosts (dsh/llm-router seat-host, port 8791):
+    # Claude subscription seat hosts (cchifor/llm-router seat-host, port 8791):
     # the chat's Claude sign-in hands the setup-token to the seat host
     # (PUT /credential) and inference goes there. Seat hosts run in this
     # namespace with this label; LAN addresses stay blocked above (except the model-server rule below).
