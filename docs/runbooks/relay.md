@@ -322,3 +322,54 @@ clean connector installation passed in Gitea release CI. Chromium verified
 the favicon declaration, SVG MIME type, exact bytes and image decoding.
 After rollout, verify public health/readiness, `/favicon.svg` against the
 source asset, the document favicon link, and retained connector manifests.
+
+
+## Persistent host and terminal workspace release 0.3.0
+
+Source: `dafe4de8ccbcdfa4f4a11fdc99972b9481c26ea3` ([Relay PR #8](https://git.chifor.me/cchifor/relay/pulls/8)).
+Release CI: https://git.chifor.me/cchifor/relay/actions/runs/61038
+
+Image: `registry.chifor.me/relay/control-plane@sha256:1ce1e70eadaccf0f07c92de408f623c2492cc507651004ed3dccf512bf3bf420`.
+
+Provenance: `deployment-images-61038.json` on the
+[Relay v0.3.0 release](https://git.chifor.me/cchifor/relay/releases/tag/v0.3.0).
+Both application and migration containers use this exact digest. The image
+retains all connector downloads from v0.1.2 through v0.2.3.
+
+Agents and pending host approvals share one searchable table with host details,
+label editing, overflow actions and a top-right connection skill link. Agent
+rows open the focused terminal. Matrix remains available alongside pane and
+full tmux views. Native tmux uses a private observer client and the existing
+control lease. Image/file uploads are bounded, host-private and insert a quoted
+path without submitting Enter. Activity gains filtering and event details;
+Status remains the separate live-health view. Assistant, all existing themes
+and Settings → Appearance are preserved. Workspace settings are removed.
+
+The updated Connect skill installs a Linux systemd user service with verified
+lingering, discovering recognized agents across current and future sessions.
+Approval covers the account and configured tmux sockets; expanding the scope
+requires fresh approval. Existing remote connector processes keep working and
+are not replaced by application deployment. Upgrade a worker through the new
+skill to enable persistent host connections and the new terminal/upload modes.
+
+Migration 003 adds host approval and agent display metadata. A full baseline
+restore/rehearsal preserved existing records, restricted migrator ownership
+and all 14 forced-RLS tables. The rollout gate above captures and verifies a
+fresh coordinated backup before this migration. Local validation passed 56
+application/browser tests and seven Rust tests, real service restart checks,
+ARM64 integration under QEMU and clean Ubuntu/Alpine installation; tag CI
+repeated build, integration/browser and portable connector checks. The backup
+gate passed 11 regression tests plus a real restricted dump/restore under the
+exact pinned images.
+
+After normal Flux reconciliation, verify the new manifest/source and UI assets,
+health/readiness, isolated host approval, Matrix and focused/full tmux control,
+exact uploaded bytes, service restart/reconnection, Activity and preserved
+Appearance/Assistant pages. Remove only the acceptance host's service/socket
+and block its generated host identity after verification.
+
+Rollback image: `registry.chifor.me/relay/control-plane@sha256:c82acd6168d96285dd565c59fefe584b7456c0d046880aa81d23fff3689433a9`.
+Restore that digest in both containers and the v0.2.3 source/release annotations
+through a reviewed PR. The migration is additive; leave its columns in place
+for an application rollback. Database restoration is reserved for a recovery
+that actually requires it, using matching dump and plugin artifacts.
