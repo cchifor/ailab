@@ -220,6 +220,26 @@ def pve(node, path, method="GET", data=None, timeout=15.0, deadline=None):
     ctx.check_hostname = False           # cert CN is the node name, we connect by IP
     ctx.verify_mode = ssl.CERT_NONE      # self-signed cluster CA; the pin below is the real check
     conn = http.client.HTTPSConnection(ip, 8006, context=ctx, timeout=timeout)
+    # `deadline` is a WALL-CLOCK bound on the whole exchange. Socket timeouts only bound each
+    # read, so a peer dribbling bytes - in the TLS handshake, the status line, the headers, the
+    # chunked framing or the body - could otherwise hold the caller (the worker thread)
+    # indefinitely. A watchdog shuts the socket down at the deadline, which fails whatever read
+    # is blocked, wherever it is (reviewer-codex on #1049).
+    expired = threading.Event()
+
+    def _expire():
+        expired.set()
+        sock = conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+    watchdog = None
+    if deadline is not None:
+        watchdog = threading.Timer(max(0.0, deadline - time.time()), _expire)
+        watchdog.daemon = True
+        watchdog.start()
     try:
         conn.connect()
         der = conn.sock.getpeercert(binary_form=True)
@@ -233,36 +253,23 @@ def pve(node, path, method="GET", data=None, timeout=15.0, deadline=None):
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         conn.request(method, "/api2/json" + path, body=body, headers=headers)
         r = conn.getresponse()
-        if deadline is None:
-            raw = r.read()
-        else:
-            # The socket timeout bounds each read, not the total: a peer dribbling bytes could
-            # hold the caller (the worker thread) indefinitely. read(n) would keep reading until
-            # it has n bytes, so read1() - at most one underlying read, returning what arrived -
-            # with the socket timeout capped to what is left of the budget, checked per chunk.
-            chunks, size = [], 0
-            while True:
-                left = deadline - time.time()
-                if left <= 0:
-                    raise TimeoutError("PVE %s %s: response not complete within the budget" % (method, path))
-                conn.sock.settimeout(left)
-                b = r.read1(16384)
-                if not b:
-                    break
-                size += len(b)
-                if size > 1 << 20:
-                    raise ValueError("PVE %s %s: response larger than 1 MiB" % (method, path))
-                chunks.append(b)
-            raw = b"".join(chunks)
+        raw = r.read((1 << 20) + 1)
+        if len(raw) > 1 << 20:
+            raise ValueError("PVE %s %s: response larger than 1 MiB" % (method, path))
         if r.status >= 400:
             # PVE puts the cause in the reason phrase ("no quorum", "does not exist", ...).
             reason = (r.reason or "")[:200]
             raise PVEHTTPError("PVE %s %s -> HTTP %d %s" % (method, path, r.status, reason),
                                r.status, reason)
         return json.loads(raw or b"{}").get("data")
+    except Exception as e:
+        if expired.is_set():
+            raise TimeoutError("PVE %s %s: not complete within the time budget" % (method, path)) from e
+        raise
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         conn.close()
-
 
 def guests_running():
     """Running LXCs/VMs - what an OFF click would actually stop.

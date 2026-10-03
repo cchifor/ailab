@@ -1685,10 +1685,11 @@ class MirrorRound2Tests(unittest.TestCase):
 
 
 class PveDeadlineTests(unittest.TestCase):
-    """reviewer-codex on #1049: a real HTTP peer dribbling one byte at a time, through the real
-    http.client response object (whose read(n) would wait for all n bytes)."""
+    """reviewer-codex on #1049: a real HTTP peer dribbling one byte every 50 ms - in the status
+    line, the headers, the chunked framing or the body - through the real http.client objects.
+    The budget must bound the WHOLE exchange, not each read."""
 
-    def test_a_dribbling_response_is_cut_at_the_deadline(self):
+    def dribble(self, prefix, drip):
         import hashlib
         import socket as _s
         import time as _t
@@ -1699,13 +1700,19 @@ class PveDeadlineTests(unittest.TestCase):
         stop = threading.Event()
 
         def serve():
-            c, _ = srv.accept()
-            c.recv(65536)
-            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
             try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                c.recv(65536)
+                c.sendall(prefix)
                 while not stop.is_set():
-                    c.sendall(b" ")
-                    _t.sleep(0.05)
+                    for ch in drip:
+                        if stop.is_set():
+                            break
+                        c.sendall(bytes([ch]))
+                        _t.sleep(0.05)
             except OSError:
                 pass
             finally:
@@ -1739,13 +1746,25 @@ class PveDeadlineTests(unittest.TestCase):
             t0 = _t.time()
             with self.assertRaises(TimeoutError):
                 app.pve({"name": "t", "ip": "127.0.0.1"}, "/pools/x", timeout=5, deadline=_t.time() + 0.5)
-            self.assertLess(_t.time() - t0, 2, "the budget bounds the whole response, not each read")
+            self.assertLess(_t.time() - t0, 2, "the budget bounds the whole exchange")
         finally:
             stop.set()
             srv.close()
             app.http.client.HTTPSConnection = old[0]
             app.PVE_FINGERPRINTS.clear()
             app.PVE_FINGERPRINTS.update(old[1])
+
+    def test_status_line(self):
+        self.dribble(b"", b"HTTP/1.1 200 OK" + b" " * 4096)
+
+    def test_headers(self):
+        self.dribble(b"HTTP/1.1 200 OK\r\n", b"X-Slow: " + b"a" * 4096)
+
+    def test_chunked_framing(self):
+        self.dribble(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", b"1\r\n \r\n" * 1000)
+
+    def test_body(self):
+        self.dribble(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n", b" " * 4096)
 
 
 class WolMacTests(unittest.TestCase):
