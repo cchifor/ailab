@@ -1,86 +1,78 @@
 # Implementation review - cloud-power-auto-on-off (ailab) - round 1
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- Blocking failures remain: a settings save can bypass pending CANCEL/rejection rollback, and ON can succeed immediately before Auto OFF starts.
-- Resuming persisted `claimed` slots deviates from the plan’s one-attempt guarantee and permits retries after restart.
-- Pool reconciliation can overwrite newer settings, falsely report them applied, and block cancellation during the final drain.
-- All 110 existing tests passed; additional read-only, in-memory fault injection reproduced the failures below.
-- No new CSRF, MODE=wol routing, token-pinning, or DOM HTML-injection bypass was identified; persistence, concurrency, and policy reporting remain the principal concerns.
+<!-- codex-impl-review-status: complete -->
 
 ## Findings
 
 ### Settings saves bypass pending cancellation and rejection rollback
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1144, kubernetes/apps/apps/cloud-power/app.py:1262  
 **Severity:** blocker
-<!-- codex: After a CANCEL write fails, set_auto() calls _require_usable(), reloads the still-draining schedule and sets loaded=True without reconciling cancel_wanted; subsequent ticks skip _reconcile_intent() and power off, and the same failure reproduces for a rejected schedule whose draining write landed but rollback was deferred. Reconcile remembered operator intent before accepting settings changes, and make tick honor pending intent independently of loaded. -->
+**Accepted, fixed in d47e6336:** reproduced; `_require_usable()` and `tick()` reconcile whenever intent is pending, a repeated CANCEL reports the landed one (test_settings_save_after_an_unconfirmed_cancel_still_cancels).
 
 ### ON succeeds while an Auto OFF claim remains executable
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1118, kubernetes/apps/apps/cloud-power/app.py:1194  
 **Severity:** blocker
-<!-- codex: If the slot claim write fails, dirty=True makes _auto_off_due() return None, so ON succeeds without consuming the slot and the next successful tick starts Auto OFF; a durable claimed slot also escapes suppression because its key already equals auto.off.slot, while a failed suppression write is silently ignored by _save_quiet(). Determine suppression independently of trigger eligibility, consume unfinished claims, and return an explicit uncertain/failure response unless suppression is durable. -->
+**Accepted, fixed in d47e6336:** reproduced; `_consume_slot()` sees the due slot regardless of trigger eligibility (unsaved claims included), ON persists it durably or fails 503 (test_on_after_a_failed_claim_write_*, test_on_fails_when_the_withdrawal_cannot_be_saved).
 
 ### Persisted claims can retry failed attempts after restart
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1216, kubernetes/apps/apps/cloud-power/app.py:1246, kubernetes/apps/apps/cloud-power/app.py:1157  
 **Severity:** important
-<!-- codex: When schedule() fails before its first write, such as on the initial Gitea GET, and saving the failure result also fails, storage retains claimed and a restart calls schedule() again for the same slot; disabling and re-enabling an existing claimed slot also starts it immediately because set_auto() leaves its result unchanged. Restore the plan’s rule that an already-persisted claim consumes the attempt, including claims recovered after ambiguous writes, and let settings changes terminally consume any current unfinished claim. -->
+**Accepted, fixed in d47e6336:** a claim this process did not make is a spent attempt; a settings change finishes an unfinished claim (test_a_claim_left_by_a_previous_controller_is_never_retried, test_reenabling_inside_the_window_never_fires).
 
 ### CANCEL can be followed immediately by a new Auto OFF
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1058, kubernetes/apps/apps/cloud-power/app.py:1269  
 **Severity:** important
-<!-- codex: Start a manual OFF before 22:00, then successfully CANCEL at 22:00:05 before the worker’s first due-slot tick: cancel() finishes and clears the schedule without consuming the slot, so the next tick immediately schedules Auto OFF again. Consume the due slot atomically with cancellation and preserve that suppression through deferred cancel_wanted reconciliation, which can also finish before _tick_auto_off() runs. -->
+**Accepted, fixed in d47e6336:** CANCEL consumes the due slot in its own write (test_cancel_at_the_slot_does_not_start_an_auto_off).
 
 ### Auto result failures do not stop the phase machine
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1208, kubernetes/apps/apps/cloud-power/app.py:1269  
 **Severity:** important
-<!-- codex: _auto_result() can encounter a 409 and set loaded=False, yet tick continues into the old draining state: when another writer has cancelled and released that schedule, _tick_draining() re-pauses its previously owned runners, then the next reload finds no schedule and leaves those runners stranded, as reproduced with an injected result-write conflict. Stop processing immediately whenever automation leaves state unloaded or dirty, and reconcile before allowing further Gitea or shutdown effects. -->
+**Accepted, fixed in d47e6336:** tick() skips the phase machine when automation left the state unloaded/dirty (test_a_conflicting_result_write_stops_the_tick_and_never_refires).
 
 ### The final pool push blocks ON until shutdown starts
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1325, kubernetes/apps/apps/cloud-power/app.py:1846, kubernetes/apps/apps/cloud-power/app.py:1755  
 **Severity:** important
-<!-- codex: tick holds Scheduler.lock throughout pre_power_off(), including waiting for PoolMirror.lock and all PVE calls, so an ON/CANCEL arriving during that push cannot withdraw the drain before _begin_power_off() runs; wait=20/30 limits only lock acquisition, and repeated eight-second calls across nodes can exceed the promised total budget substantially. Perform reconciliation outside Scheduler.lock with an overall deadline, then reacquire the lock and revalidate the schedule, cancellation intent and drain conditions before transitioning. -->
+**Accepted, fixed in d47e6336:** the in-lock push is gone: a bounded gate (<= 3 ticks) waits for MIRROR.settled() while the worker pushes outside the scheduler lock; every mirror attempt has a 20 s PVE budget (PolicyGateTests).
 
 ### Older mirror requests can overwrite a newer saved policy
 **Location:** kubernetes/apps/apps/cloud-power/app.py:385, kubernetes/apps/apps/cloud-power/app.py:1459, kubernetes/apps/apps/cloud-power/app.py:1755  
 **Severity:** important
-<!-- codex: The desired string is captured before acquiring PoolMirror.lock, so request A can capture Auto ON disabled, request B can save and apply enabled, and delayed A can subsequently acquire the lock and write disabled back; an in-flight attempt can similarly finish after the scheduler has become uncertain. Associate mirror work with a durable settings generation, discard superseded queued work and reconcile changes arriving during an attempt before treating the latest policy as applied. -->
+**Accepted, fixed in d47e6336:** desired_fn is evaluated inside the mirror lock from the published snapshot (test_a_queued_attempt_pushes_the_latest_setting).
 
 ### Applied status can describe the previous settings
 **Location:** kubernetes/apps/apps/cloud-power/app.py:389, kubernetes/apps/apps/cloud-power/app.py:426, kubernetes/apps/apps/cloud-power/app.py:1569  
 **Severity:** important
-<!-- codex: When a new Auto ON setting is saved while the mirror lock remains busy, sync() can time out without updating desired, and view() still returns applied=True for the previous policy; the page then combines that flag with the newly saved enabled/time values and falsely promises the new wake behavior. Invalidate application status when the saved policy changes and calculate applied against the current durable policy or generation, including timeout responses and status snapshots. -->
+**Accepted, fixed in d47e6336:** `applied` compares the last read with the CURRENT desired value (test_applied_follows_the_current_setting_not_the_last_attempt).
 
 ### Failed read-back preserves a policy already known to be obsolete
 **Location:** kubernetes/apps/apps/cloud-power/app.py:403, kubernetes/apps/apps/cloud-power/app.py:412  
 **Severity:** important
-<!-- codex: After previously verifying ON, a later GET can read an externally changed OFF comment, followed by an unsuccessful PUT and failed read-back; because verified is updated only after the entire sequence, it remains ON and applied stays true despite positive evidence that the pool differed, which the page’s applied branch hides. Record every successful read immediately and invalidate the verification when a write or read-back leaves the current policy uncertain. -->
+**Accepted, fixed in d47e6336:** every successful read is recorded at once; a write makes it unknown until read back (test_a_failed_read_back_is_uncertain_not_the_old_value).
 
 ### An empty stored value writes defaults into PVE
 **Location:** kubernetes/apps/apps/cloud-power/app.py:694, kubernetes/apps/apps/cloud-power/app.py:1187  
 **Severity:** important
-<!-- codex: parse_auto() treats a present auto="" exactly like an absent key, so a damaged or partially restored ConfigMap silently produces a valid default Auto ON policy and the worker overwrites an existing disabled pool policy with auto-on=1 wake=08:00. Distinguish missing keys from present invalid strings, preserve the latter verbatim and suspend both automation and mirroring until explicitly repaired, as the plan requires. -->
+**Accepted, fixed in d47e6336:** only an ABSENT key means defaults; an empty string is invalid and preserved (test_empty_stored_value_is_invalid_not_default).
 
 ### Invalid result timestamps break otherwise independent manual actions
 **Location:** kubernetes/apps/apps/cloud-power/app.py:715, kubernetes/apps/apps/cloud-power/app.py:925  
 **Severity:** important
-<!-- codex: A stored result_at of 1e100 passes validation but raises OverflowError in local_label(), causing every publish() to fail and potentially breaking HTTP responses after manual OFF/CANCEL has already changed state, instead of isolating unreadable automation settings. Validate finite, representable timestamps and keep status formatting defensive so corrupt automation metadata cannot disrupt the existing scheduler API. -->
+**Accepted, fixed in d47e6336:** result_at must be finite and < 2100; local_label never raises (test_unrepresentable_timestamps_*).
 
 ### The tests miss the claimed persistence guarantees
 **Location:** scripts/tests/test_cloud_power.py:951, scripts/tests/test_cloud_power.py:962, scripts/tests/test_cloud_power.py:1043, scripts/tests/test_cloud_power.py:1181  
 **Severity:** important
-<!-- codex: The restart-after-claim test actually restarts after a complete tick and cancellation, the lost-claim test injects a write that never lands, the Refused test would pass with repeated scheduling attempts because it never counts them, and the DST grace test’s interval does not cross the clock change. Add operation-count assertions and fault injection at each claim/schedule/result boundary with landed and unlanded writes, actual intermediate restarts, pending operator intent, concurrent mirror requests and scheduler ticks crossing DST boundaries. -->
+**Accepted, fixed in d47e6336:** added AutoReviewRegressionTests (operation counts, landed-reply-lost claim, restart with an inherited claim, DST ticks through the scheduler), mirror concurrency and the policy gate; 7 of them fail on 2ceafe77.
 
 ### Polling can overwrite a time edit before change fires
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1559, kubernetes/apps/apps/cloud-power/app.py:1591  
 **Severity:** nit
-<!-- codex: edited becomes true only in onchange, so a status poll arriving while the operator is still editing a time field can reset its value before the browser commits the change event, contrary to the promised protection for pending edits. Track input/focus state and reject stale poll responses, then render the confirmed stored value after the save completes. -->
+**Accepted, fixed in d47e6336:** a time field is protected from focus/first keystroke; blur without a change hands it back to the poll.
 
 ### The standing shutdown warning is hidden in a tooltip
 **Location:** kubernetes/apps/apps/cloud-power/app.py:1496, kubernetes/apps/apps/cloud-power/app.py:1584  
 **Severity:** important
-<!-- codex: The warning that Auto OFF stops every non-CI guest without asking appears only in a title tooltip and transient text after saving, so an operator using touch or keyboard can enable the standing shutdown policy without seeing the safeguard that justified omitting manual preflight. Put the warning visibly beside the switch before enabling it, and show the actual configured time zone visibly rather than only hard-coding Europe/Bucharest in the tooltip. -->
+**Accepted, fixed in d47e6336:** the row itself shows 'next Sat 22:00 EEST - drains CI jobs, then stops EVERY VM/LXC'; the zone is in every label.
 
 ## Diff stat
 
