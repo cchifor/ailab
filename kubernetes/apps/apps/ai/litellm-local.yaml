@@ -226,7 +226,7 @@ spec:
             capabilities: { drop: ["ALL"] }
       containers:
         - name: litellm
-          # SAME pin as litellm.yaml (v1.103.0 + digest). Bump the files together; see the pin
+          # SAME pin as litellm.yaml (tag + digest). Bump the files together; see the pin
           # comment in litellm.yaml.
           image: ghcr.io/berriai/litellm:v1.103.2@sha256:f63fb81b831b170ec16851e23c36ac5bf52ef106b271406429524a2ed730bbfd
           command: ["litellm"]

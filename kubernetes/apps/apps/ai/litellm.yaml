@@ -1200,7 +1200,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: litellm
-          # Pinned as RELEASE TAG + DIGEST: v1.103.0 = this digest (resolved on ghcr 2026-09-29). It
+          # Pinned as RELEASE TAG + DIGEST (the current pair is the image line; Renovate moves it). v1.103.0
           # replaced v1.101.0 (sha256:d295634e..., run since 2026-07-08, first pinned as `main-stable`)
           # once chatgpt_chat.py stopped trusting LiteLLM's parsed usage: 1.103.0 puts a token-count
           # estimate into a Responses terminal event that carries none (ADR 0027 amendment). The release
