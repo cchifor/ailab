@@ -1685,37 +1685,52 @@ class MirrorRound2Tests(unittest.TestCase):
 
 
 class PveDeadlineTests(unittest.TestCase):
+    """reviewer-codex on #1049: a real HTTP peer dribbling one byte at a time, through the real
+    http.client response object (whose read(n) would wait for all n bytes)."""
+
     def test_a_dribbling_response_is_cut_at_the_deadline(self):
         import hashlib
+        import socket as _s
         import time as _t
         der = b"fake-cert"
+        srv = _s.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        stop = threading.Event()
+
+        def serve():
+            c, _ = srv.accept()
+            c.recv(65536)
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
+            try:
+                while not stop.is_set():
+                    c.sendall(b" ")
+                    _t.sleep(0.05)
+            except OSError:
+                pass
+            finally:
+                c.close()
+        threading.Thread(target=serve, daemon=True).start()
+        port = srv.getsockname()[1]
 
         class Sock:
+            """The pinned TLS socket, minus TLS: exposes the cert and delegates the rest."""
+            def __init__(self, real):
+                self._real = real
+
             def getpeercert(self, binary_form=False):
                 return der
 
-        class Resp:
-            status, reason = 200, "OK"
+            def __getattr__(self, name):
+                return getattr(self._real, name)
 
-            def read(self, n=-1):
-                _t.sleep(0.05)
-                return b" "                          # forever, one byte at a time
-
-        class Conn:
-            def __init__(self, *a, **k):
-                self.sock = Sock()
+        class Conn(app.http.client.HTTPConnection):
+            def __init__(self, host, port_, context=None, timeout=None):
+                super().__init__("127.0.0.1", port, timeout=timeout)
 
             def connect(self):
-                pass
-
-            def request(self, *a, **k):
-                pass
-
-            def getresponse(self):
-                return Resp()
-
-            def close(self):
-                pass
+                super().connect()
+                self.sock = Sock(self.sock)
 
         old = (app.http.client.HTTPSConnection, dict(app.PVE_FINGERPRINTS))
         app.http.client.HTTPSConnection = Conn
@@ -1723,9 +1738,11 @@ class PveDeadlineTests(unittest.TestCase):
         try:
             t0 = _t.time()
             with self.assertRaises(TimeoutError):
-                app.pve({"name": "t", "ip": "127.0.0.1"}, "/pools/x", deadline=_t.time() + 0.3)
-            self.assertLess(_t.time() - t0, 2)
+                app.pve({"name": "t", "ip": "127.0.0.1"}, "/pools/x", timeout=5, deadline=_t.time() + 0.5)
+            self.assertLess(_t.time() - t0, 2, "the budget bounds the whole response, not each read")
         finally:
+            stop.set()
+            srv.close()
             app.http.client.HTTPSConnection = old[0]
             app.PVE_FINGERPRINTS.clear()
             app.PVE_FINGERPRINTS.update(old[1])

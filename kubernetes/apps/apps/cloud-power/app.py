@@ -237,12 +237,16 @@ def pve(node, path, method="GET", data=None, timeout=15.0, deadline=None):
             raw = r.read()
         else:
             # The socket timeout bounds each read, not the total: a peer dribbling bytes could
-            # hold the caller (the worker thread) indefinitely. Enforce the deadline per chunk.
+            # hold the caller (the worker thread) indefinitely. read(n) would keep reading until
+            # it has n bytes, so read1() - at most one underlying read, returning what arrived -
+            # with the socket timeout capped to what is left of the budget, checked per chunk.
             chunks, size = [], 0
             while True:
-                if time.time() > deadline:
+                left = deadline - time.time()
+                if left <= 0:
                     raise TimeoutError("PVE %s %s: response not complete within the budget" % (method, path))
-                b = r.read(16384)
+                conn.sock.settimeout(left)
+                b = r.read1(16384)
                 if not b:
                     break
                 size += len(b)
