@@ -3,56 +3,48 @@
 ## Scope
 
 The operator requested the existing reviewer-claude/reviewer-codex automation for
-`chifor/forge`. The repository is private and user-owned. Add only this repository to
-the central allowlist; retain both personas, the existing author allowlist and all CI,
-current-head and branch-protection requirements. No repository transfer is needed.
+`cchifor/forge`. The private repository was relocated into the cchifor organization
+on 2026-10-03. Its repository ID (117), PRs, branch protections and repository-scoped
+runner registration were preserved. Add only this repository to the central allowlist;
+retain both personas, author allowlists and all CI/current-head requirements.
 
 ## Prerequisites and activation
 
-1. Give `reviewer-claude` and `reviewer-codex` **write** collaborator access to
-   `chifor/forge`. Confirm both identities can read PRs and post reviews.
-2. Ensure the repository has an eligible Actions runner. Its workflow initially selects
-   `self-hosted-hv`; an org-only runner cannot serve a user-owned repository. Configure
-   the repository's `RUNNER_LABEL` for an available instance/repository runner if needed.
-3. Configure main protection using the actual successful `forge-quality` status context,
-   an up-to-date head, two reviewer approvals, stale-approval dismissal and reviewer-only
-   approval/merge whitelists. Verify with a deliberately failing disposable PR.
-4. After this onboarding PR merges, run `ansible-playbook reviewers.yml -t reviewbot`
-   from the `ansible/` directory with the normal encrypted variables and inventory.
-   The existing `ansible/reviewers.yml` playbook includes `role: pr_reviewer`, whose
-   defaults in `ansible/roles/pr_reviewer/defaults/main.yml` contain this allowlist. Do not overwrite unrelated
-   live configuration or bypass an interrupted reviewer invocation.
-5. Confirm both services load `chifor/forge` in the rendered `repos` key. The role
-   template `ansible/roles/pr_reviewer/templates/config.json.j2` maps the Ansible
-   variable `pr_reviewer_repos` to that JSON key in `/etc/reviewbot/config.json`. Then observe the first PR through
-   review and merge. Polling discovers new heads within `pr_reviewer_reconcile_s` (300
-   seconds by default). The existing **cchifor organization hooks do not cover this
-   user-owned repository**. Polling is the explicit delivery mechanism here; repo-scoped
-   authenticated hooks may be added independently for lower latency.
+1. Confirm `reviewer-claude` and `reviewer-codex` retain **write** access after the
+   transfer. Both received collaborator access before transfer; verify PR reading
+   and review posting after activation.
+2. The `self-hosted-hv` organization runner pool now serves this repository. A temporary
+   repository-scoped `forge-workspace-runner` supplements it while that pool is busy.
+   Stop the temporary runner once the organization pool is serving Forge reliably.
+3. Main protection requires `forge-quality / forge-quality (pull_request)`, an
+   up-to-date branch, two reviewer approvals and stale-approval dismissal. Direct
+   push, force push and administrator merge override are disabled. Only the reviewer
+   identities are in approval/merge allowlists. Preserve these settings.
+4. After this PR merges, run `ansible-playbook reviewers.yml -t reviewbot` from the
+   `ansible/` directory using normal encrypted variables and inventory. The existing
+   `ansible/reviewers.yml` playbook includes `role: pr_reviewer`, whose defaults in
+   `ansible/roles/pr_reviewer/defaults/main.yml` contain the allowlist.
+5. Confirm `/etc/reviewbot/config.json` on both hosts contains `cchifor/forge` in `repos`.
+   `ansible/roles/pr_reviewer/templates/config.json.j2` maps `pr_reviewer_repos` to that
+   JSON key. Existing cchifor org webhooks provide delivery; reconciliation also polls
+   each `/repos/{repo}/pulls` endpoint every 300 seconds by default.
+6. Observe [Forge PR #1](https://git.chifor.me/cchifor/forge/pulls/1) through review and
+   reviewer-owned merge. Record its final head, CI status and both persona verdicts.
 
 ## Verification and rollback
 
-Record the Forge PR URL/head, successful CI status, both persona verdicts at that head,
-and the reviewer identity that merged it. An allowlist edit alone does not prove live
-activation. Investigate `ReviewbotReconcileRepoFailing` if either reviewer cannot read
-the repository. The existing org-hook assertions still protect existing org delivery;
-they do not attest this repository's polling delivery.
+Forge's initial committed Stage 1 head passed the actual quality workflow. The
+[isolated failing PR #2](https://git.chifor.me/cchifor/forge/pulls/2) used the same
+required CI context and admin-override block with no approval requirement. CI failed
+at `ddc689203ceb574cfcb40aed4391d6a4e122b6d2`, and a normal merge attempt returned HTTP
+405, `Not all required status checks successful`. It was closed without merging.
+Main protection remains in place; the probe did not modify main.
 
-To stop new Forge reviews, remove `chifor/forge` from the allowlist through a reviewed PR
-and converge both hosts. Remove collaborator grants only after that change is active,
-so the reconciler does not repeatedly request an inaccessible private repository.
+Allowlist source alone does not prove live activation. Investigate
+`ReviewbotReconcileRepoFailing` if either reviewer cannot read the repo. The role's
+existing org-hook assertions check `pr_reviewer_org: cchifor` and the persona event
+subscriptions. No exception or review-policy change is introduced by this onboarding.
 
-## Why polling-only admission works
-
-`ansible/roles/pr_reviewer/tasks/main.yml` reads the fixed
-`/orgs/{{ pr_reviewer_org }}/hooks` endpoint and asserts the persona hook's events.
-It does not iterate `pr_reviewer_repos` or assert a hook per repository. No hook
-assertion exemption is required or introduced for Forge.
-
-`enqueue()` in `ansible/roles/pr_reviewer/files/reviewbot.py` checks exact repository
-membership without an organization-prefix restriction. `reconciler()` iterates
-`CFG["repos"]` and calls `/repos/{repo}/pulls?state=open&limit=50`, then enqueues each
-head. Its per-repository failure gauge records API/poll failures, not absent webhook
-deliveries. A successful Forge poll therefore clears that gauge normally; an access
-failure remains an actionable alert. This is why both collaborator grants precede
-activation, and why observing an actual review is still required.
+To stop new Forge reviews, remove `cchifor/forge` from the allowlist through a reviewed
+PR and converge both hosts. Remove collaborator grants only after that change is
+active, so the reconciler does not poll an inaccessible private repository.

@@ -26,13 +26,10 @@ pr_reviewer_required_hook_events:
 # repo since the same change — but it still stops admission and keeps
 # ReviewbotReconcileRepoFailing from firing on a repo we deleted on purpose.
 pr_reviewer_repos:
-  # Forge onboarding (2026-10-03, operator requested): private user-owned repo.
-  # Grant both reviewer identities write access before converging this allowlist.
-  # Reconcile polling covers this repo; cchifor org webhooks do not cover chifor.
-  # tasks/main.yml checks the fixed pr_reviewer_org hooks, not pr_reviewer_repos.
-  # reviewbot.py reconciler polls /repos/{repo}/pulls and alerts on API failures;
-  # it does not require a webhook delivery for each configured repository.
-  - chifor/forge
+  # Forge onboarding (2026-10-03, operator requested). Repository was relocated
+  # into cchifor; both reviewer identities have write access. Existing org hooks
+  # and reconciliation polling cover its PRs without changing review policy.
+  - cchifor/forge
   - cchifor/ailab
   - cchifor/agentforge
   - cchifor/platform
