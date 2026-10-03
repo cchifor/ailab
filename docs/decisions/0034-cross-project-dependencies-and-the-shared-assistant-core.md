@@ -29,9 +29,9 @@ component, maybe in a repository of shared components, or we should wait"*. The 
 |---|---|---|---|---|
 | `cchifor/llm-router` | Assistant page, plus a framework-free web core (U12) | React | router chat wire (`SessionView`, `AgentEvent`, `ChatInput`, `PanelView`, `PendingInteraction`) over SSE | the reference; very active |
 | `cchifor/platform` `apps/web/src/features/ai_chat` | ~16k lines | Vue | AG-UI (deepagent) | retiring for the harness (Track W) |
-| `cchifor/platform` `services/harness` | vendors llm-router's server core (main) and web core (`feat/web-harness-wire`); a 1:1 Vue port of the router's Assistant page is planned | Vue | router chat wire | active |
+| `cchifor/platform` `services/harness` | vendors llm-router's server core (on platform `main`) and web core (on the platform branch `feat/web-harness-wire`), both pinned to llm-router `main` (`fd1f669`); a 1:1 Vue port of the router's Assistant page is planned | Vue | router chat wire | active |
 | `cchifor/agentforge-platform` `webapp/src/features/chat` | a lift of platform's chat | Vue | AG-UI | dormant since 2026-08-02 |
-| `cchifor/relay` `web/src/chat` | a copy of the router's React UI (2026-10-02) | React | router chat wire | already missing router fixes (#69, #75) |
+| `cchifor/relay` `web/src/chat` | a copy of the router's React UI (relay `b2c9936`, 2026-10-02 13:48Z, before router `/clear` at 13:14Z was included: most likely router `7448ea8`; Relay records the exact source) | React | router chat wire | already missing router fixes (#69, #75) |
 | `cchifor/trueswarm-admin` | Svelte Assistant | Svelte | its own (`ChatView`, `TraceEvent`) | active; resembles the router only in look and feel |
 
 Codex also found a chat component in platform's app-runner, a terminal chat in deepagent, and per-framework UI
@@ -83,7 +83,7 @@ and agentforge-platform already differ in how they cancel a stream (Codex).
 2. **Not shared now:** UI components and views. Each product keeps its own UI on its own framework, because
    products need specific behaviour:
    - the router's React page;
-   - Relay's React UI, now an owned fork (rule A6);
+   - Relay's React UI, now an owned fork (rule A6): Relay writes its fork record (C);
    - platform's Vue port;
    - trueswarm-admin's Svelte UI.
 
@@ -95,6 +95,14 @@ and agentforge-platform already differ in how they cancel a stream (Codex).
 4. **Distribution now:** pinned-commit vendoring with the platform tooling, which this ADR adopts as the estate rule
    (platform ADR-022). Every pin move records its validation: the conformance kit, the boundary and wire-equality
    tests, the consumer's suite.
+
+   `--check` only proves the copy matches its pin. It cannot see that upstream has moved on, so it stays green on a
+   stale pin. **Discovery of upstream fixes:**
+   - Each consumer runs a scheduled job, weekly and on every llm-router release tag. It compares the pin with
+     llm-router `main` and opens a pin-move PR (rule A5), or an issue when the move needs work.
+   - Owner: the consumer's owning session (platform: the harness; Relay: if it vendors the core).
+   - Declared forks (rule A6) get the same cadence as a review: once a month, the fork's owner looks at upstream
+     fixes in the forked area (llm-router PRs touching those paths) and decides which apply.
 5. **Protocol:** the router chat wire gets an explicit version and a changelog of additive and breaking changes.
    AG-UI (agentforge-platform) and trueswarm-admin's protocol stay independent, with adapters at the boundaries. No
    forced convergence.
@@ -115,8 +123,12 @@ and agentforge-platform already differ in how they cancel a stream (Codex).
   - llm-router publishes its own image from tags (`images.yml`) with a push user scoped to `llm-router/**`
     (the `registry_zot_scoped_push_users` pattern). After one release through that path, Relay drops the router
     entry from its pipeline.
-  - Relay: hand-off issue (vendor the web core in place of its copied logic, keep its views as an owned fork, triage
-    three bugs fixed in the router).
+  - Relay (cchifor/relay#7):
+    - write the fork record (rule A6: source repository and exact commit, date, owner, sync policy);
+    - vendor the web core in place of its copied logic, and keep its views;
+    - triage three bugs fixed in the router;
+    - run the monthly fork review (B4).
+  - Platform: the scheduled pin-move job for `services/harness` (B4; owner: the harness).
   - Platform: notice of the new upstream URL.
   - A version field on the router chat wire.
 
@@ -133,4 +145,5 @@ and agentforge-platform already differ in how they cancel a stream (Codex).
 - **Risks and mitigations:**
   - The router's application model becoming an estate dependency: the consumer reviewer and the documented boundary.
   - Pins mistaken for compatibility: the wire version and compatibility tests.
-  - Fixes stranded in copies or old pins: the consumers' `--check` in CI and a sync cadence.
+  - Fixes stranded in copies or old pins: the consumers' scheduled pin-move job and the forks' monthly review (B4).
+    `--check` only guards the copy's integrity.
