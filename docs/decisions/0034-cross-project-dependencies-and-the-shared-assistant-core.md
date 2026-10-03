@@ -1,6 +1,6 @@
 # ADR 0034 — Cross-project dependencies: one owner per deliverable; the Assistant core is shared, its UIs are not
 
-**Status:** PROPOSED (2026-10-03), owner-directed: *"Provide the best approach to address these accidental
+**Status:** ACCEPTED (2026-10-03), owner-approved on cchifor/ailab#1044; owner-directed: *"Provide the best approach to address these accidental
 interdependencies … recommend the best approach to avoid interdependencies that can disrupt or negatively affect the
 project's development"* and *"analyze the existing repos … if we should implement the assistant as a shared reusable
 component, maybe in a repository of shared components, or we should wait"*. The analysis was cross-validated with Codex.
