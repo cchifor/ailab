@@ -1,0 +1,17 @@
+---
+# dev-worker-1 — vmid 4201 on ai-node1, ballooned between a 12 GiB floor and a 16 GiB ceiling
+# (kubernetes/infra/dev-workers/variables.tf).
+#
+# Raises the tmux slice cap from the role's 6G (sized for a 12 GiB worker whose tmux steady state was
+# ~200 MB). On 2026-10-03 one orchestrating Claude Code session drove several builders in parallel
+# from a single pane. Their pytest integration runs, vitest workers and headless Chrome all count
+# against this slice, which hit 6G 30 times that day (memory.events oom_kill). A memcg OOM kills the
+# largest SINGLE task. Once the ~200 MB node workers were each smaller, that task was `claude` itself
+# (~700 MB), so the orchestrator died at 22:32. OOMPolicy=continue kept the pane alive, but not the
+# agent.
+#
+# 9G still leaves ~3 GiB for the containers, dockerd and the system at the 12 GiB balloon floor, and
+# ~7 GiB at the ceiling. The cap stays a real ceiling: a single runaway still dies inside the slice
+# before global pressure picks a victim elsewhere. Raising it buys headroom. It does not stop the
+# agent from being the largest task when the slice does fill.
+dev_worker_tmux_memory_max: "9G"
