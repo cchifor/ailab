@@ -253,4 +253,4 @@ Reverting cloudlab alone restores the old hook, which ignores the pool.
 - cloudlab: `test_cloud_arm_rtc_wake.sh` locally (Git Bash + python3) and on cloud3.
 - Live: Rollout steps 1-4.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
