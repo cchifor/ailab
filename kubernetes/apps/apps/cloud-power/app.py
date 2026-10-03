@@ -208,7 +208,7 @@ class PVEHTTPError(RuntimeError):
         self.reason = reason
 
 
-def pve(node, path, method="GET", data=None, timeout=15.0):
+def pve(node, path, method="GET", data=None, timeout=15.0, deadline=None):
     """Call the Proxmox API with certificate pinning. The token is written to the socket only
     AFTER the presented certificate matches the pin, so a spoofed host never receives it."""
     name, ip = node["name"], node["ip"]
@@ -233,7 +233,23 @@ def pve(node, path, method="GET", data=None, timeout=15.0):
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         conn.request(method, "/api2/json" + path, body=body, headers=headers)
         r = conn.getresponse()
-        raw = r.read()
+        if deadline is None:
+            raw = r.read()
+        else:
+            # The socket timeout bounds each read, not the total: a peer dribbling bytes could
+            # hold the caller (the worker thread) indefinitely. Enforce the deadline per chunk.
+            chunks, size = [], 0
+            while True:
+                if time.time() > deadline:
+                    raise TimeoutError("PVE %s %s: response not complete within the budget" % (method, path))
+                b = r.read(16384)
+                if not b:
+                    break
+                size += len(b)
+                if size > 1 << 20:
+                    raise ValueError("PVE %s %s: response larger than 1 MiB" % (method, path))
+                chunks.append(b)
+            raw = b"".join(chunks)
         if r.status >= 400:
             # PVE puts the cause in the reason phrase ("no quorum", "does not exist", ...).
             reason = (r.reason or "")[:200]
@@ -341,7 +357,8 @@ def _pool_call(method, path, data=None, deadline=None):
             errs.append("%s unreachable" % n["name"])
             continue
         try:
-            return pve(n, path, method=method, data=data, timeout=8 if left is None else min(8, left))
+            return pve(n, path, method=method, data=data, timeout=8 if left is None else min(8, left),
+                       deadline=deadline)
         except PinError as e:
             errs.append("%s: %s" % (n["name"], e))
         except PVEHTTPError as e:
@@ -401,6 +418,7 @@ class PoolMirror:
         self.verified = None        # the comment last READ from PVE; None = unknown/uncertain
         self.verified_at = None
         self.attempted_for = None   # the desired value of the last attempt
+        self.inflight_for = None    # the desired value of the attempt running right now
         self.last_attempt_at = None
         self.error = ""
 
@@ -422,11 +440,16 @@ class PoolMirror:
                 if now - self.last_attempt_at < gap:
                     return
             self.attempted_for, self.last_attempt_at = desired, now
+            self.inflight_for = desired
             deadline = time.time() + self.budget_sec
             try:
                 cur = self.get_fn(deadline=deadline)
                 self.verified, self.verified_at = cur, self.clock()
                 if cur != desired:
+                    if self.desired_fn() != desired:
+                        # Superseded while reading: never write an obsolete policy. The next
+                        # sync sees attempted_for != desired and pushes the new one at once.
+                        return
                     log("auto-on policy: pool comment %r -> %r" % (cur, desired))
                     self.verified = None             # uncertain until it is read back
                     set_err = None
@@ -447,12 +470,17 @@ class PoolMirror:
                 self.error = "%s: %s" % (type(e).__name__, e)
                 log("auto-on policy NOT applied: %r" % e)
         finally:
+            self.inflight_for = None
             self.lock.release()
 
     def settled(self):
-        """Nothing left to push: no durable policy to push, or the pool was read equal to it."""
+        """Nothing left to push: no durable policy to push, or the pool was read equal to it AND
+        no attempt for an older policy is still running (it could write that policy later)."""
         d = self.desired_fn()
-        return d is None or d == self.verified
+        if d is None:
+            return True
+        inflight = self.inflight_for
+        return (inflight is None or inflight == d) and d == self.verified
 
     def view(self):
         d = self.desired_fn()
@@ -751,9 +779,13 @@ def parse_auto(raw):
         if not isinstance(off["result"], str):
             raise ValueError("auto.off.result invalid")
         ra = off["result_at"]
-        if ra is not None and (isinstance(ra, bool) or not isinstance(ra, (int, float))
-                               or not math.isfinite(ra) or not 0 <= ra < _MAX_TS):
-            raise ValueError("auto.off.result_at invalid")
+        if ra is not None:
+            if isinstance(ra, bool) or not isinstance(ra, (int, float)):
+                raise ValueError("auto.off.result_at invalid")
+            if isinstance(ra, float) and not math.isfinite(ra):
+                raise ValueError("auto.off.result_at invalid")
+            if not 0 <= ra < _MAX_TS:                # int compare: no float conversion, no overflow
+                raise ValueError("auto.off.result_at invalid")
     except (ValueError, KeyError, TypeError) as e:
         return None, str(e)
     return a, ""
@@ -914,7 +946,20 @@ class Scheduler:
             elif self.state:
                 log("RESUMING a %s schedule (by %s)" % (self.state.get("phase"), self.state.get("by")))
 
+    def _merge_decided_slot(self):
+        """A slot decided in THIS process (ON / CANCEL / a settings change consumed it, or the
+        attempt finished) rides every state write, so a reload that replaced memory - a 409, a
+        lost reply, a reconciled CANCEL - can never write the slot back as open."""
+        key = self._auto_slot_now()
+        res = self.auto_acted.get(key) if key else None
+        if res is None or res in AUTO_UNFINISHED or self.auto is None:
+            return
+        off = self.auto["off"]
+        if off["slot"] != key or off["result"] != res:
+            off.update(slot=key, result=res, result_at=self.clock())
+
     def _save(self):
+        self._merge_decided_slot()
         try:
             self.rv = self.store.write({"schedule": json.dumps(self.state) if self.state else "",
                                         "last": json.dumps(self.last) if self.last else "",
@@ -1032,6 +1077,10 @@ class Scheduler:
             # Re-applies a rejected attempt / an unconfirmed CANCEL on top of what is stored: a
             # plain load() here would mark the state loaded and let the next tick skip them.
             self._reconcile_intent()                 # StateError -> the caller answers 503
+            if not self.loaded or (self.dirty and (self.rejected or self.cancel_wanted)):
+                # The re-applied intent is not stored yet: acting on top of it could be undone by
+                # a restart. The caller answers 503 and the worker keeps retrying it.
+                raise StateError("an earlier OFF/CANCEL is still being saved; try again in a moment")
         if self.corrupt:
             raise StateError(self.corrupt)
 
@@ -1166,14 +1215,17 @@ class Scheduler:
         self.cancel_wanted &= {attempt}
         if not st:
             return
+        # The remembered intent is dropped only once the transition is DURABLE: a failed write here
+        # (409, outage) must leave it to be re-applied, never forget it.
         if attempt in self.rejected and st["phase"] in ("pausing", "draining"):
-            self.rejected.discard(attempt)
             self._to_releasing("error", "the schedule could not be saved; OFF not scheduled")
+            if self.loaded and not self.dirty:
+                self.rejected.discard(attempt)
         elif attempt in self.cancel_wanted and st["phase"] in ("pausing", "draining", "stalled"):
-            self.cancel_wanted.discard(attempt)
             st["phase"] = "releasing"
             st["outcome"] = {"result": "cancelled", "message": "cancelled (retried after a failed write)"}
             if self._save_quiet():
+                self.cancel_wanted.discard(attempt)
                 self._tick_releasing()
 
     def cancel_for_wake(self, who):
@@ -1219,9 +1271,12 @@ class Scheduler:
                     off.update(enabled=enabled, at=at)
                     cur = auto_slot(now, at, self.tz) if (enabled and changed and self.tz) else None
                     if (cur and 0 <= now - cur[1] < self.grace
-                            and (off["slot"] != cur[0] or off["result"] in AUTO_UNFINISHED)):
-                        off.update(slot=cur[0], result="not run: Auto OFF was changed by %s after "
-                                   "this slot began" % who, result_at=now)
+                            and (off["slot"] != cur[0] or off["result"] in AUTO_UNFINISHED)
+                            and self.auto_acted.get(cur[0]) in (None,) + AUTO_UNFINISHED):
+                        res = "not run: Auto OFF was changed by %s after this slot began" % who
+                        off.update(slot=cur[0], result=res, result_at=now)
+                        self.auto_acted[cur[0]] = res
+                        self.auto_claimed.discard(cur[0])
                 prev = (self.auto, self.auto_raw, self.auto_error)
                 self.auto, self.auto_raw, self.auto_error = base, None, ""
                 try:
@@ -1271,19 +1326,24 @@ class Scheduler:
 
     def _consume_slot(self, reason, persist):
         """Make sure the slot inside its window now (if any) never fires. persist: 'durable'
-        (_save, raises), 'quiet' (_save_quiet) or 'none' (the caller's own write carries it).
-        A slot already decided - acted on by this process, or finished in the ConfigMap - stays."""
+        (_save unless the decision is provably stored, raises), 'quiet' (_save_quiet) or 'none'
+        (the caller's own write carries it - _merge_decided_slot makes sure). A slot already
+        decided - here, or finished in the ConfigMap - keeps its outcome."""
         key = self._auto_slot_now()
-        if key is None or key in self.auto_acted:
+        if key is None:
             return
         off = self.auto["off"]
-        if off["slot"] == key and off["result"] not in AUTO_UNFINISHED:
-            return
-        self.auto_acted[key] = reason
-        off.update(slot=key, result=reason, result_at=self.clock())
-        if persist == "durable":
-            self._save()
-        elif persist == "quiet":
+        if key not in self.auto_acted:
+            if off["slot"] == key and off["result"] not in AUTO_UNFINISHED:
+                self.auto_acted[key] = off["result"]     # finished before: keep that outcome
+            else:
+                self.auto_acted[key] = reason
+            self.auto_claimed.discard(key)
+        stored = (off["slot"] == key and off["result"] == self.auto_acted[key]
+                  and self.loaded and not self.dirty)
+        if persist == "durable" and not stored:
+            self._save()                                 # merges the decision; raises
+        elif persist == "quiet" and not stored:
             self._save_quiet()
 
     def _auto_result(self, key, res):
@@ -1308,6 +1368,10 @@ class Scheduler:
                 self._save_quiet()
             return
         if off["slot"] == key:
+            if off["result"] not in AUTO_UNFINISHED:     # finished (here or before): never act
+                self.auto_acted[key] = off["result"]
+                self.auto_claimed.discard(key)
+                return
             if key not in self.auto_claimed:
                 if off["result"] in AUTO_UNFINISHED:
                     st = self.state
@@ -1328,7 +1392,7 @@ class Scheduler:
 
     def _auto_off_act(self, key, at):
         # Never a second attempt in this process, whatever schedule() raises or persists.
-        self.auto_acted[key] = "failed: interrupted"
+        self.auto_acted[key] = "starting"
         st = self.state
         if st:
             res = ("scheduled" if str(st.get("by", "")).startswith("auto-off")
@@ -1386,7 +1450,8 @@ class Scheduler:
     def _tick_draining(self):
         st = self.state
         now = self.clock()
-        if now >= st["deadline"]:
+        waiting_for_policy = self.policy_waits > 0 and self.clear >= self.clear_polls
+        if now >= st["deadline"] and not waiting_for_policy:
             return self._stall("drain deadline reached %ds after OFF was confirmed with work still "
                                "in flight or Gitea unreadable; hosts left ON" % int(now - st["at"]))
         try:

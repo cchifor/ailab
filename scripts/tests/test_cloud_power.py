@@ -1565,6 +1565,172 @@ class AutoEndpointTests(AutoBase):
         self.assertIsNone(self.store.data)
 
 
+class AutoReviewRound2Tests(AutoBase):
+    """codex impl-review round 2: each test is the reproduction codex described."""
+
+    def fail_nth_write(self, nth, how="lost"):
+        """how: 'lost' = not written; 'conflict' = 409 (someone else wrote)."""
+        orig, n = self.store.write, {"i": 0}
+
+        def write(data, rv):
+            n["i"] += 1
+            if n["i"] in (nth if isinstance(nth, tuple) else (nth,)):
+                if how == "conflict":
+                    self.store.rv = (self.store.rv or 0) + 1
+                    raise app.StateConflict("configmap write: HTTP 409")
+                raise app.StateError("configmap write: HTTP 500")
+            return orig(data, rv)
+        self.store.write = write
+        return orig
+
+    def restart(self):
+        self.s = self.new_auto_sched()
+
+    def test_a_conflict_while_reapplying_a_cancel_keeps_the_intent(self):
+        self.s.schedule("op")
+        self.fail_nth_write(1)                       # the CANCEL write: not landed
+        with self.assertRaises(app.StateUncertain):
+            self.s.cancel("op")
+        self.fail_nth_write(1, "conflict")           # the reconciliation write: 409
+        with self.assertRaises(app.StateError):
+            self.s.set_auto("on", True, "08:00", "op")
+        self.tick(10)
+        self.assertEqual(self.phase(), "idle")
+        self.assertEqual(self.shutdowns, [])
+
+    def test_a_repeated_cancel_is_not_reported_done_while_unsaved(self):
+        self.s.schedule("op")
+        self.store.down = True
+        with self.assertRaises(app.StateError):
+            self.s.cancel("op")
+        with self.assertRaises(app.StateError):
+            self.s.cancel("op")                      # still not stored: no false success
+        self.store.down = False
+        self.tick(5)
+        self.assertEqual(self.phase(), "idle")
+        self.assertEqual(self.shutdowns, [])
+
+    def test_a_retried_on_persists_the_withdrawal(self):
+        self.enable_off()
+        self.at(22, 0, 5)
+        self.fail_nth_write(1)                       # ON's withdrawal: not landed
+        with self.assertRaises(app.StateError):
+            self.s.cancel_for_wake("op")
+        self.s.cancel_for_wake("op")                 # retried: must make it durable
+        self.restart()
+        self.tick(10)
+        self.assertIsNone(self.s.state)
+        self.assertEqual(self.stored_auto()["off"]["result"], "not run: ON pressed by op")
+
+    def test_a_settings_change_beats_a_claim_that_hit_a_conflict(self):
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.fail_nth_write(1, "conflict")           # the claim
+        self.s.tick()
+        self.s.set_auto("off", False, "22:00", "op")
+        self.s.set_auto("off", True, "22:00", "op")
+        self.tick(10)
+        self.assertIsNone(self.s.state)
+
+    def test_a_retried_cancel_keeps_the_slot_consumed_across_a_restart(self):
+        self.enable_off()
+        self.at(21, 55)
+        self.s.schedule("op")
+        self.at(22, 0, 5)
+        self.fail_nth_write(1)                       # the first CANCEL: not landed
+        with self.assertRaises(app.StateUncertain):
+            self.s.cancel("op")
+        self.s.cancel("op")                          # retried successfully
+        self.restart()                               # before the worker's next tick
+        self.tick(10)
+        self.assertEqual(self.phase(), "idle")
+        self.assertIn("cancelled by op", self.stored_auto()["off"]["result"])
+
+    def test_the_policy_wait_never_turns_a_finished_drain_into_a_stall(self):
+        self.s = self.new_auto_sched(policy_ready=lambda: False, policy_wait_ticks=3)
+        self.s.drain_max = 50                        # deadline lands inside the policy wait
+        self.s.schedule("op")
+        self.tick(6)
+        self.assertNotEqual(self.phase(), "stalled")
+        self.assertEqual(len(self.shutdowns), 1)
+
+    def test_integer_overflow_in_a_timestamp_is_invalid_not_a_crash(self):
+        good = app.default_auto()
+        raw = json.dumps(good).replace('"result_at": null', '"result_at": 1' + "0" * 400)
+        a, err = app.parse_auto(raw)
+        self.assertIsNone(a)
+        self.assertTrue(err)
+
+
+class MirrorRound2Tests(unittest.TestCase):
+    def test_an_obsolete_attempt_never_writes_and_holds_the_gate(self):
+        pool, clock, want = FakePool("auto-on=1 wake=08:00"), Clock(), {"v": "auto-on=1 wake=08:00"}
+        m = app.PoolMirror(lambda: want["v"], pool.get, pool.set, clock=clock)
+        m.sync()
+        self.assertTrue(m.settled())
+        want["v"] = "auto-on=0 wake=08:00"
+        pool.gate = threading.Event()
+        pool.deadlines = []
+        t = threading.Thread(target=m.sync)
+        t.start()                                    # blocked inside its GET
+        while not pool.deadlines:
+            pass
+        want["v"] = "auto-on=1 wake=08:00"           # re-enabled while it is in flight
+        self.assertFalse(m.settled(), "an in-flight attempt for an older policy could still write it")
+        pool.gate.set()
+        t.join(5)
+        self.assertEqual(pool.comment, "auto-on=1 wake=08:00", "the obsolete value was never written")
+        self.assertEqual(pool.sets, 0)
+        self.assertTrue(m.settled())
+
+
+class PveDeadlineTests(unittest.TestCase):
+    def test_a_dribbling_response_is_cut_at_the_deadline(self):
+        import hashlib
+        import time as _t
+        der = b"fake-cert"
+
+        class Sock:
+            def getpeercert(self, binary_form=False):
+                return der
+
+        class Resp:
+            status, reason = 200, "OK"
+
+            def read(self, n=-1):
+                _t.sleep(0.05)
+                return b" "                          # forever, one byte at a time
+
+        class Conn:
+            def __init__(self, *a, **k):
+                self.sock = Sock()
+
+            def connect(self):
+                pass
+
+            def request(self, *a, **k):
+                pass
+
+            def getresponse(self):
+                return Resp()
+
+            def close(self):
+                pass
+
+        old = (app.http.client.HTTPSConnection, dict(app.PVE_FINGERPRINTS))
+        app.http.client.HTTPSConnection = Conn
+        app.PVE_FINGERPRINTS["t"] = ":".join("%02X" % b for b in hashlib.sha256(der).digest())
+        try:
+            t0 = _t.time()
+            with self.assertRaises(TimeoutError):
+                app.pve({"name": "t", "ip": "127.0.0.1"}, "/pools/x", deadline=_t.time() + 0.3)
+            self.assertLess(_t.time() - t0, 2)
+        finally:
+            app.http.client.HTTPSConnection = old[0]
+            app.PVE_FINGERPRINTS.clear()
+            app.PVE_FINGERPRINTS.update(old[1])
+
+
 class WolMacTests(unittest.TestCase):
     def test_macs_match_cloudlab_wol_py_when_present(self):
         wol = pathlib.Path(__file__).resolve().parents[3] / "cloudlab" / "scripts" / "wol.py"
