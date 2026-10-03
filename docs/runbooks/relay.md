@@ -87,6 +87,14 @@ backup Job, Secret change, additional RBAC, or protection bypass. A backup error
 holds the replacement Pod in init and leaves the service unavailable until the
 cause is fixed through the appropriate reviewed change or authorized recovery.
 
+The shared `apps` Kustomization can temporarily report NotReady when backup work
+exceeds its five-minute health timeout. Flux retries after one minute; this does
+not terminate the Pod or restart the backup. The Deployment's progress deadline
+also reports status without cancelling init work. An already-running scheduled
+backup can delay attachment of the RWO volumes on another node until that Job
+finishes (its deadline is 30 minutes). Inspect actual init progress before
+treating those transient health reports as a failed migration.
+
 Do not accept an old Pod's health response as rollout evidence. Check the
 expected new release's public connector manifest and UI assets along with
 `/ready`. When cluster observation is available, inspect the new Pod's image ID,
