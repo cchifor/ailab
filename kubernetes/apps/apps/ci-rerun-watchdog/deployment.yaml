@@ -50,7 +50,7 @@ spec:
             # pr_reviewer_repos (ansible/roles/pr_reviewer/defaults/main.yml). Org repos with
             # Actions that are NOT listed here are exported as ci_rerun_watchdog_unlisted_repos.
             - name: REPOS
-              value: "cchifor/ailab,cchifor/agentforge,cchifor/platform,cchifor/agentforge-platform,cchifor/dsh-team-conductor"
+              value: "cchifor/ailab,cchifor/agentforge,cchifor/platform,cchifor/agentforge-platform,cchifor/dsh-team-conductor,cchifor/forge"
             - { name: SCAN_INTERVAL, value: "60" }
             - { name: LOOKBACK_SECONDS, value: "7200" }
             # A failed job correlates with its runner's loss when it ended no earlier than this
