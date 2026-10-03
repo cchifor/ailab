@@ -74,6 +74,9 @@ jobs:
       - name: Flux-managed Jobs carry kustomize.toolkit.fluxcd.io/force (the pin-pr guard)
         run: python3 scripts/pin-image-digests.py --check-job-force-annotations
 
+      - name: Relay pre-migration backup and restore gate under pinned images
+        run: python3 scripts/tests/test-relay-rollout-backup.py
+
       - name: Local embedding serving and route contracts
         run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak
 

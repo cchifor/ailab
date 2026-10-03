@@ -52,6 +52,86 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
+      # Recreate stops the old application before this snapshot. Migration is
+      # unreachable unless the existing coordinated backup pipeline succeeds.
+      - name: backup-database
+        image: docker.io/library/postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        command:
+        - timeout
+        - '1800'
+        - sh
+        - /scripts/dump.sh
+        env:
+        - name: PGHOST
+          value: relay-postgres.relay.svc.cluster.local
+        - name: PGUSER
+          value: relay_backup
+        - name: PGDATABASE
+          value: relay
+        - name: PGCONNECT_TIMEOUT
+          value: '15'
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        envFrom:
+        - secretRef:
+            name: relay-backup
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        volumeMounts:
+        - name: dumps
+          mountPath: /dumps
+        - name: backup-scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      - name: backup-artifacts
+        image: docker.io/library/node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+        command:
+        - node
+        - /scripts/rollout-publish.mjs
+        env:
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        volumeMounts:
+        - name: dumps
+          mountPath: /dumps
+        - name: data
+          mountPath: /artifacts
+          readOnly: true
+        - name: backup-scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
       - image: registry.chifor.me/relay/control-plane@sha256:c82acd6168d96285dd565c59fefe584b7456c0d046880aa81d23fff3689433a9
         workingDir: /app
         envFrom:
@@ -87,7 +167,7 @@ spec:
         command:
         - sh
         - -c
-        - node dist/scripts/migrate.js && node dist/scripts/bootstrap.js
+        - test -s /tmp/relay-pre-migration-backup.json && node dist/scripts/migrate.js && node dist/scripts/bootstrap.js
         resources:
           requests:
             cpu: 100m
@@ -189,3 +269,6 @@ spec:
       - name: dumps
         persistentVolumeClaim:
           claimName: relay-postgres-dumps
+      - name: backup-scripts
+        configMap:
+          name: relay-backup-script

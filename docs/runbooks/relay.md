@@ -59,6 +59,62 @@ To test a fresh backup, create a Job from the CronJob and wait for completion. C
 
 This is daily logical recovery, not PITR. Both the local role-isolation drill and the first live dump/restore passed with the real workspace snapshot. The initial dump restored into a disposable database with matching row counts, all nine forced-RLS tables, and `relay_migrator` ownership. After artifact coordination was added, generation `20261001T191324Z-aab52654-4658-4f07-af64-34cfbf01a255` captured the database and five verified artifact versions together. Its checksums passed and it was restored into an isolated PostgreSQL/runtime environment; login and all five plugins passed using only that generation's files. Disposable restore databases were removed. A subsequent Velero capture is still to be verified; a mounted PVC alone is not proof of an offsite backup.
 
+### Backup-gated GitOps rollouts
+
+Every new Relay Pod now captures a coordinated recovery generation before its
+migration init container can start. The single-replica `Recreate` strategy stops
+the old control plane before the replacement Pod runs these steps:
+
+1. `backup-database` uses the existing read-only `relay_backup` identity and
+   unchanged `dump.sh` to capture PostgreSQL and extract that archive's plugin
+   references. Its attempt has a 30-minute timeout.
+2. `backup-artifacts` uses the existing credential-free `publish.mjs`, with
+   read-only access to the plugin volume. The rollout wrapper preserves the
+   original dump inputs across init retries, verifies every published checksum
+   and the complete file inventory, and writes
+   `/tmp/relay-pre-migration-backup.json` with the generation name, Pod UID and
+   archive SHA-256. A publishing attempt has a 30-minute timeout.
+3. `migrate` requires that receipt before migration and bootstrap. Application
+   containers start only after all three init containers succeed. The runtime
+   has neither the backup credential nor a mount of the backup volume.
+
+This permits a fresh backup and deployment entirely through the normal reviewed
+GitOps change when an imperative deployment kubeconfig is unavailable. Pin the
+receipt's application image digest in both `migrate` and `relay`, update the
+release/source annotations, and merge only after the protected-main review and
+CI gates pass. Flux continues its normal reconciliation; there is no manual
+backup Job, Secret change, additional RBAC, or protection bypass. A backup error
+holds the replacement Pod in init and leaves the service unavailable until the
+cause is fixed through the appropriate reviewed change or authorized recovery.
+
+Do not accept an old Pod's health response as rollout evidence. Check the
+expected new release's public connector manifest and UI assets along with
+`/ready`. When cluster observation is available, inspect the new Pod's image ID,
+all three successful init statuses, and `backup-artifacts` logs. They identify
+the exact verified generation; the receipt is also readable from that Pod's
+`/tmp` volume. Readiness of the expected replacement Pod proves the backup and
+migration gate succeeded in order. It does **not** prove a fresh live restore
+drill or a later offsite Velero capture. The existing restore procedure remains
+the verification for those claims.
+
+Retries for the same Pod reuse and rehash its original completed generation;
+they cannot silently replace a corrupted publication or accept another Pod's
+backup. A new Pod UID captures a new dump. Ordinary application-container
+restarts do not repeat the init sequence. The seven-generation retention limit
+is shared with scheduled backups, so seven retained generations may cover less
+than seven days after frequent rollouts. Failed Pod retries retain
+`.rollout-source-<pod-uid>` on the dump PVC to preserve their original snapshot;
+an operator may remove an abandoned source only after confirming that its Pod
+has terminated and the snapshot is no longer required. Low storage or missing
+artifacts fail closed and require repair; never skip the gate to force rollout.
+
+Run `python3 scripts/tests/test-relay-rollout-backup.py` as the unprivileged CI
+runner or developer. It uses only disposable Docker fixtures and the exact
+digest-pinned PostgreSQL and Node images: read-only roots, dropped capabilities,
+read-only backup-role enforcement, real dump/restore with migrator ownership,
+plugin hashes, publication retry, corruption rejection and retention. The
+always-on `manifests` workflow runs it before a deployment change can merge.
+
 ## Recovery
 
 For a failed first rollout, restore the local service and keep the public route unmerged until fixed. For subsequent rollouts, preserve the previous release directory and change the Deployment subPath back only when its schema is compatible. Restore PostgreSQL and plugin artifacts from the same backup point when a schema rollback is required. Do not run two control planes against the same database.
