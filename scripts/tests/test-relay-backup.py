@@ -183,6 +183,21 @@ class RolloutPublisherTest(PublisherTest):
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(self.receipt.exists())
 
+    def test_failed_publisher_error_survives_a_corrupt_publication_probe(self):
+        self.prepare("failed-publisher")
+        self.script.write_text(
+            "import { mkdir } from 'node:fs/promises';\n"
+            "import { join } from 'node:path';\n"
+            "await mkdir(join(process.env.DUMP_ROOT, '20261003T120000Z-' + process.env.POD_UID));\n"
+            "console.error('Original publisher failure'); process.exit(42);\n"
+        )
+        failed = self.publish("failed-publisher")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(self.receipt.exists())
+        self.assertIn("Post-failure backup verification:", failed.stderr)
+        self.assertIn("Original publisher failure", failed.stderr)
+        self.assertIn("status: 42", failed.stderr)
+
 
 class RolloutWiringTest(unittest.TestCase):
     def test_backup_gates_migration_without_exposing_credentials_to_runtime(self):
@@ -199,6 +214,12 @@ class RolloutWiringTest(unittest.TestCase):
         self.assertNotIn("envFrom", artifacts)
         self.assertTrue(next(v for v in artifacts["volumeMounts"] if v["name"] == "data")["readOnly"])
         self.assertIn("test -s /tmp/relay-pre-migration-backup.json", migrate["command"][-1])
+        for container in [artifacts, migrate]:
+            self.assertIn({"name": "tmp", "mountPath": "/tmp"}, container["volumeMounts"])
+        self.assertIn({"name": "tmp", "emptyDir": {}}, pod["volumes"])
+        config = next(d for d in DOCS if d["kind"] == "ConfigMap")
+        volume = next(v for v in pod["volumes"] if v["name"] == "backup-scripts")
+        self.assertEqual(volume["configMap"]["name"], config["metadata"]["name"])
         runtime = next(c for c in pod["containers"] if c["name"] == "relay")
         self.assertEqual(runtime["envFrom"], [{"secretRef": {"name": "relay-secrets"}}])
         self.assertNotIn("dumps", [v["name"] for v in runtime["volumeMounts"]])

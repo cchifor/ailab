@@ -359,7 +359,7 @@ fresh coordinated backup before this migration. Local validation passed 56
 application/browser tests and seven Rust tests, real service restart checks,
 ARM64 integration under QEMU and clean Ubuntu/Alpine installation; tag CI
 repeated build, integration/browser and portable connector checks. The backup
-gate passed 11 regression tests plus a real restricted dump/restore under the
+gate passed 12 regression tests plus a real restricted dump/restore under the
 exact pinned images.
 
 After normal Flux reconciliation, verify the new manifest/source and UI assets,

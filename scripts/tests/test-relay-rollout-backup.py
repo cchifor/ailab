@@ -26,8 +26,8 @@ fixture_user = f"{os.getuid()}:{os.getgid()}"
 assert os.getuid() != 0, "Run the restricted backup fixture as an unprivileged user"
 
 
-def docker(*args, data=None, check=True):
-    result = subprocess.run(["docker", *args], input=data, capture_output=True, timeout=90)
+def docker(*args, data=None, check=True, timeout=90):
+    result = subprocess.run(["docker", *args], input=data, capture_output=True, timeout=timeout)
     if check and result.returncode:
         raise RuntimeError("Docker fixture failed: " + result.stderr.decode(errors="replace")[-2500:])
     return result
@@ -37,6 +37,10 @@ def sql(statement, database_name="relay", role="postgres", check=True):
     return docker("exec", "-i", name, "psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-U", role,
                   "-d", database_name, data=statement.encode(), check=check)
 
+
+# Separate network fetch time from the bounded fixture commands on cold runners.
+for image in [database["image"], artifacts["image"]]:
+    docker("pull", image, timeout=300)
 
 with tempfile.TemporaryDirectory(prefix="relay-rollout-backup-") as temporary:
     temporary = Path(temporary)
@@ -100,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix="relay-rollout-backup-") as temporary:
             wrapper.write_text("#!/bin/sh\ncase_root=${DUMP_ROOT%/dumps}\nexec docker run --rm --network none --user " + fixture_user +
                                " --read-only --cap-drop ALL --security-opt no-new-privileges -v \"$case_root:$case_root\" -e DUMP_ROOT -e ARTIFACT_ROOT -e POD_UID -e BACKUP_PUBLISHER -e BACKUP_RECEIPT " + artifacts["image"] + " node \"$@\"\n")
             wrapper.chmod(0o700)
-            subprocess.run(["python3", str(gate_tests)], env={**os.environ, "RELAY_NODE_BIN": str(wrapper)}, check=True, timeout=90)
+            subprocess.run(["python3", str(gate_tests)], env={**os.environ, "RELAY_NODE_BIN": str(wrapper)}, check=True, timeout=300)
         print("PASS: restricted pre-migration dump, artifact gate, checksum validation, real restore and retry invariants")
     finally:
         docker("rm", "-f", name, check=False)

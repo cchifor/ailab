@@ -48,7 +48,8 @@ jobs:
     # `self-hosted-hv`, and nothing answers `ubuntu-latest` (a job asking for it queues forever
     # rather than failing). Fall back to the real pool label if RUNNER_LABEL is ever unset.
     runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
-    timeout-minutes: 15
+    # Includes separate cold-image pulls and the containerized backup suite.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 

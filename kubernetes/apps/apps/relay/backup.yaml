@@ -214,7 +214,11 @@ data:
       catch (error) {
         // A process may stop after atomic publication but before returning.
         // Only a complete, independently rehashed generation permits success.
-        proof = await completed();
+        try { proof = await completed(); }
+        catch (verificationError) {
+          console.error('Post-failure backup verification: ' + verificationError.message);
+          throw error;
+        }
         if (!proof) throw error;
       }
       proof ??= await completed();
