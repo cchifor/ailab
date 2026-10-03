@@ -1208,7 +1208,7 @@ spec:
           # opaque digest moves of the `main-stable` moving tag (#917). A bare digest would make it
           # track `latest` (#899). Every LiteLLM update carries `no-automerge` (renovate.json): a human
           # merges gateway upgrades. Bump the three refs together (litellm-local.yaml, litellm-vkeys.yaml).
-          image: ghcr.io/berriai/litellm:v1.103.0@sha256:bd089afdcd35b894b14a93f9743cdc8b591f82da1a38dd43a010a7b0c9de5fd7
+          image: ghcr.io/berriai/litellm:v1.103.2@sha256:f63fb81b831b170ec16851e23c36ac5bf52ef106b271406429524a2ed730bbfd
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
