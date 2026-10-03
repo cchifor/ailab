@@ -2,7 +2,8 @@
 """Exercise the production publisher with pg_restore COPY format and adversarial artifacts.
 
 Run: RELAY_NODE_BIN=/path/to/node python3 scripts/tests/test-relay-backup.py
-Requires PyYAML and Node 22. The separate live drill tests pg_dump/restore and DB roles.
+Requires PyYAML and Node 22. test-relay-rollout-backup.py also exercises real
+pg_dump/restore and DB roles under the deployment's pinned container images.
 """
 import hashlib
 import json
@@ -17,6 +18,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 DOCS = list(yaml.safe_load_all((REPO / "kubernetes/apps/apps/relay/backup.yaml").read_text()))
 SCRIPT = next(d for d in DOCS if d["kind"] == "ConfigMap")["data"]["publish.mjs"]
+ROLLOUT_SCRIPT = next(d for d in DOCS if d["kind"] == "ConfigMap")["data"]["rollout-publish.mjs"]
 NODE = os.environ.get("RELAY_NODE_BIN", "node")
 
 
@@ -113,6 +115,115 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(len(self.completed()), 7)
         for generation in self.completed():
             self.assertEqual(json.loads((generation / "recovery.json").read_text())["artifactHashes"], [])
+
+
+class RolloutPublisherTest(PublisherTest):
+    """The same publisher invariants plus init-container failure/retry semantics."""
+
+    def setUp(self):
+        super().setUp()
+        self.gate = self.root / "rollout-publish.mjs"
+        self.gate.write_text(ROLLOUT_SCRIPT)
+        self.receipt = self.root / "receipt.json"
+
+    def publish(self, uid):
+        return subprocess.run(
+            [NODE, str(self.gate)],
+            env={**os.environ, "DUMP_ROOT": str(self.dumps), "ARTIFACT_ROOT": str(self.artifacts),
+                 "POD_UID": uid, "BACKUP_PUBLISHER": str(self.script), "BACKUP_RECEIPT": str(self.receipt)},
+            capture_output=True, text=True,
+        )
+
+    def test_failed_artifact_publication_preserves_snapshot_for_same_pod_retry(self):
+        self.prepare("retry")
+        artifact = self.artifacts / self.old_sha / "index.mjs"
+        original = artifact.read_bytes()
+        artifact.unlink()
+        failed = self.publish("retry")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(self.receipt.exists())
+        saved = self.dumps / ".rollout-source-retry"
+        self.assertEqual((saved / "relay.dump").read_bytes(), b"archive fixture")
+        self.assertTrue((saved / "plugin-states.sql").is_file())
+        artifact.write_bytes(original)
+        recovered = self.publish("retry")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertFalse(saved.exists())
+        self.assertEqual(len(self.completed()), 1)
+        proof = json.loads(self.receipt.read_text())
+        self.assertEqual(proof["podUid"], "retry")
+        self.assertEqual(proof["dumpSha256"], hashlib.sha256(b"archive fixture").hexdigest())
+
+    def test_retry_after_publication_reuses_verified_generation_without_pruning_again(self):
+        self.prepare("idempotent")
+        self.assertEqual(self.publish("idempotent").returncode, 0)
+        proof = self.receipt.read_text()
+        shutil.rmtree(self.artifacts)
+        self.receipt.unlink()
+        result = self.publish("idempotent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.receipt.read_text(), proof)
+        self.assertEqual(len(self.completed()), 1)
+
+    def test_corrupt_completed_generation_blocks_retry_and_clears_old_receipt(self):
+        self.prepare("tamper")
+        self.assertEqual(self.publish("tamper").returncode, 0)
+        generation, = self.completed()
+        (generation / "relay.dump").write_bytes(b"corrupted archive")
+        failed = self.publish("tamper")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(self.receipt.exists())
+        self.assertTrue(generation.exists())
+
+    def test_receipt_from_another_pod_cannot_satisfy_the_backup_gate(self):
+        self.prepare("other-pod")
+        self.assertEqual(self.publish("other-pod").returncode, 0)
+        # A suffix match would accidentally accept other-pod when current UID is pod.
+        failed = self.publish("pod")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(self.receipt.exists())
+
+    def test_failed_publisher_error_survives_a_corrupt_publication_probe(self):
+        self.prepare("failed-publisher")
+        self.script.write_text(
+            "import { mkdir } from 'node:fs/promises';\n"
+            "import { join } from 'node:path';\n"
+            "await mkdir(join(process.env.DUMP_ROOT, '20261003T120000Z-' + process.env.POD_UID));\n"
+            "console.error('Original publisher failure'); process.exit(42);\n"
+        )
+        failed = self.publish("failed-publisher")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(self.receipt.exists())
+        self.assertIn("Post-failure backup verification:", failed.stderr)
+        self.assertIn("Original publisher failure", failed.stderr)
+        self.assertIn("status: 42", failed.stderr)
+
+
+class RolloutWiringTest(unittest.TestCase):
+    def test_backup_gates_migration_without_exposing_credentials_to_runtime(self):
+        docs = list(yaml.safe_load_all((REPO / "kubernetes/apps/apps/relay/relay.yaml").read_text()))
+        deployment = next(d for d in docs if d["kind"] == "Deployment")
+        self.assertEqual(deployment["spec"]["replicas"], 1)
+        self.assertEqual(deployment["spec"]["strategy"]["type"], "Recreate")
+        pod = deployment["spec"]["template"]["spec"]
+        self.assertEqual(pod["securityContext"]["runAsUser"], 1000)
+        self.assertFalse(pod["automountServiceAccountToken"])
+        self.assertEqual([c["name"] for c in pod["initContainers"]], ["backup-database", "backup-artifacts", "migrate"])
+        database, artifacts, migrate = pod["initContainers"]
+        self.assertEqual(database["envFrom"], [{"secretRef": {"name": "relay-backup"}}])
+        self.assertNotIn("envFrom", artifacts)
+        self.assertTrue(next(v for v in artifacts["volumeMounts"] if v["name"] == "data")["readOnly"])
+        self.assertIn("test -s /tmp/relay-pre-migration-backup.json", migrate["command"][-1])
+        for container in [artifacts, migrate]:
+            self.assertIn({"name": "tmp", "mountPath": "/tmp"}, container["volumeMounts"])
+        self.assertIn({"name": "tmp", "emptyDir": {}}, pod["volumes"])
+        config = next(d for d in DOCS if d["kind"] == "ConfigMap")
+        volume = next(v for v in pod["volumes"] if v["name"] == "backup-scripts")
+        self.assertEqual(volume["configMap"]["name"], config["metadata"]["name"])
+        runtime = next(c for c in pod["containers"] if c["name"] == "relay")
+        self.assertEqual(runtime["envFrom"], [{"secretRef": {"name": "relay-secrets"}}])
+        self.assertNotIn("dumps", [v["name"] for v in runtime["volumeMounts"]])
+        self.assertEqual(runtime["image"], migrate["image"])
 
 
 if __name__ == "__main__":

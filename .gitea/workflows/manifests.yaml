@@ -48,7 +48,8 @@ jobs:
     # `self-hosted-hv`, and nothing answers `ubuntu-latest` (a job asking for it queues forever
     # rather than failing). Fall back to the real pool label if RUNNER_LABEL is ever unset.
     runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
-    timeout-minutes: 15
+    # Includes separate cold-image pulls and the containerized backup suite.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
@@ -73,6 +74,9 @@ jobs:
       # the same function (and output) agentforge's pin-pr runs.
       - name: Flux-managed Jobs carry kustomize.toolkit.fluxcd.io/force (the pin-pr guard)
         run: python3 scripts/pin-image-digests.py --check-job-force-annotations
+
+      - name: Relay pre-migration backup and restore gate under pinned images
+        run: python3 scripts/tests/test-relay-rollout-backup.py
 
       - name: Local embedding serving and route contracts
         run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak

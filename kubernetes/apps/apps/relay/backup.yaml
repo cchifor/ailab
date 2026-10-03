@@ -144,6 +144,93 @@ data:
       await rm(stage, { recursive: true, force: true });
       throw error;
     }
+  rollout-publish.mjs: |
+    // A deployment init retry must reuse the captured pre-migration snapshot.
+    // The CronJob publisher removes failed staging trees, so keep its three
+    // immutable input files separately and hardlink a new attempt on this PVC.
+    import { readFile, writeFile, mkdir, rename, readdir, rm, link, open, stat } from 'node:fs/promises';
+    import { createReadStream } from 'node:fs';
+    import { createHash } from 'node:crypto';
+    import { execFileSync } from 'node:child_process';
+    import { join } from 'node:path';
+
+    const uid = process.env.POD_UID;
+    if (!/^[a-zA-Z0-9-]+$/.test(uid ?? '')) throw Error('Missing safe pod UID');
+    const root = process.env.DUMP_ROOT ?? '/dumps';
+    const source = join(root, '.rollout-source-' + uid);
+    const stage = join(root, '.staging-' + uid);
+    const receipt = process.env.BACKUP_RECEIPT ?? '/tmp/relay-pre-migration-backup.json';
+    const publisher = process.env.BACKUP_PUBLISHER ?? '/scripts/publish.mjs';
+    const inputs = ['relay.dump', 'relay.toc', 'plugin-states.sql'];
+
+    async function digest(path) {
+      const hash = createHash('sha256');
+      for await (const bytes of createReadStream(path)) hash.update(bytes);
+      return hash.digest('hex');
+    }
+    async function completed() {
+      const candidates = (await readdir(root, { withFileTypes: true }))
+        .filter(entry => entry.isDirectory() && new RegExp('^20[0-9]{6}T[0-9]{6}Z-' + uid + '$').test(entry.name))
+        .map(entry => entry.name).sort().reverse();
+      if (!candidates.length) return null;
+      // An existing generation for this exact Pod must verify; never silently
+      // replace a corrupted publication with a different recovery point.
+      const generation = candidates[0];
+      const directory = join(root, generation);
+      const complete = (await readFile(join(directory, 'COMPLETE'), 'utf8')).trim();
+      const metadata = JSON.parse(await readFile(join(directory, 'recovery.json'), 'utf8'));
+      if (metadata.formatVersion !== 1 || metadata.createdAt !== complete || !Array.isArray(metadata.artifactHashes))
+        throw Error('Invalid rollout backup metadata');
+      const required = new Set(['relay.dump', 'relay.toc', 'recovery.json']);
+      for (const hash of metadata.artifactHashes) {
+        if (!/^[0-9a-f]{64}$/.test(hash)) throw Error('Invalid backup artifact hash');
+        required.add('plugins/' + hash + '/index.mjs');
+        required.add('plugins/' + hash + '/manifest.json');
+      }
+      let dumpSha;
+      for (const line of (await readFile(join(directory, 'SHA256SUMS'), 'utf8')).trim().split('\n')) {
+        const match = /^([0-9a-f]{64})  (.+)$/.exec(line);
+        if (!match || !required.delete(match[2])) throw Error('Unexpected or duplicate backup checksum entry');
+        if (await digest(join(directory, match[2])) !== match[1]) throw Error('Backup checksum verification failed');
+        if (match[2] === 'relay.dump') dumpSha = match[1];
+      }
+      if (required.size || !dumpSha) throw Error('Backup checksum inventory is incomplete');
+      return { generation, createdAt: metadata.createdAt, dumpSha256: dumpSha, podUid: uid };
+    }
+    await rm(receipt, { force: true });
+    let proof = await completed();
+    if (!proof) {
+      try { await rename(stage, source); }
+      catch (error) {
+        // On retry the saved snapshot exists; rename refuses to replace a
+        // nonempty directory. Prove the input survived before clearing work.
+        if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
+        for (const name of inputs) if (!(await stat(join(source, name))).isFile()) throw Error('Missing saved rollout snapshot');
+      }
+      await rm(stage, { recursive: true, force: true });
+      await mkdir(stage, { mode: 0o700 });
+      for (const name of inputs) await link(join(source, name), join(stage, name));
+      try { execFileSync(process.execPath, [publisher], { stdio: 'inherit', timeout: 1800000 }); }
+      catch (error) {
+        // A process may stop after atomic publication but before returning.
+        // Only a complete, independently rehashed generation permits success.
+        try { proof = await completed(); }
+        catch (verificationError) {
+          console.error('Post-failure backup verification: ' + verificationError.message);
+          throw error;
+        }
+        if (!proof) throw error;
+      }
+      proof ??= await completed();
+      if (!proof) throw Error('Publisher did not create a completed rollout backup');
+    }
+    await writeFile(receipt, JSON.stringify(proof) + '\n', { mode: 0o600 });
+    const file = await open(receipt, 'r');
+    try { await file.sync(); } finally { await file.close(); }
+    await rm(source, { recursive: true, force: true });
+    await rm(stage, { recursive: true, force: true });
+    execFileSync('sync');
+    console.log('Pre-migration recovery generation verified: ' + proof.generation);
 ---
 apiVersion: batch/v1
 kind: CronJob

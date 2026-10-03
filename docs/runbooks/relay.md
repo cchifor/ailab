@@ -59,6 +59,70 @@ To test a fresh backup, create a Job from the CronJob and wait for completion. C
 
 This is daily logical recovery, not PITR. Both the local role-isolation drill and the first live dump/restore passed with the real workspace snapshot. The initial dump restored into a disposable database with matching row counts, all nine forced-RLS tables, and `relay_migrator` ownership. After artifact coordination was added, generation `20261001T191324Z-aab52654-4658-4f07-af64-34cfbf01a255` captured the database and five verified artifact versions together. Its checksums passed and it was restored into an isolated PostgreSQL/runtime environment; login and all five plugins passed using only that generation's files. Disposable restore databases were removed. A subsequent Velero capture is still to be verified; a mounted PVC alone is not proof of an offsite backup.
 
+### Backup-gated GitOps rollouts
+
+Every new Relay Pod now captures a coordinated recovery generation before its
+migration init container can start. The single-replica `Recreate` strategy stops
+the old control plane before the replacement Pod runs these steps:
+
+1. `backup-database` uses the existing read-only `relay_backup` identity and
+   unchanged `dump.sh` to capture PostgreSQL and extract that archive's plugin
+   references. Its attempt has a 30-minute timeout.
+2. `backup-artifacts` uses the existing credential-free `publish.mjs`, with
+   read-only access to the plugin volume. The rollout wrapper preserves the
+   original dump inputs across init retries, verifies every published checksum
+   and the complete file inventory, and writes
+   `/tmp/relay-pre-migration-backup.json` with the generation name, Pod UID and
+   archive SHA-256. A publishing attempt has a 30-minute timeout.
+3. `migrate` requires that receipt before migration and bootstrap. Application
+   containers start only after all three init containers succeed. The runtime
+   has neither the backup credential nor a mount of the backup volume.
+
+This permits a fresh backup and deployment entirely through the normal reviewed
+GitOps change when an imperative deployment kubeconfig is unavailable. Pin the
+receipt's application image digest in both `migrate` and `relay`, update the
+release/source annotations, and merge only after the protected-main review and
+CI gates pass. Flux continues its normal reconciliation; there is no manual
+backup Job, Secret change, additional RBAC, or protection bypass. A backup error
+holds the replacement Pod in init and leaves the service unavailable until the
+cause is fixed through the appropriate reviewed change or authorized recovery.
+
+The shared `apps` Kustomization can temporarily report NotReady when backup work
+exceeds its five-minute health timeout. Flux retries after one minute; this does
+not terminate the Pod or restart the backup. The Deployment's progress deadline
+also reports status without cancelling init work. An already-running scheduled
+backup can delay attachment of the RWO volumes on another node until that Job
+finishes (its deadline is 30 minutes). Inspect actual init progress before
+treating those transient health reports as a failed migration.
+
+Do not accept an old Pod's health response as rollout evidence. Check the
+expected new release's public connector manifest and UI assets along with
+`/ready`. When cluster observation is available, inspect the new Pod's image ID,
+all three successful init statuses, and `backup-artifacts` logs. They identify
+the exact verified generation; the receipt is also readable from that Pod's
+`/tmp` volume. Readiness of the expected replacement Pod proves the backup and
+migration gate succeeded in order. It does **not** prove a fresh live restore
+drill or a later offsite Velero capture. The existing restore procedure remains
+the verification for those claims.
+
+Retries for the same Pod reuse and rehash its original completed generation;
+they cannot silently replace a corrupted publication or accept another Pod's
+backup. A new Pod UID captures a new dump. Ordinary application-container
+restarts do not repeat the init sequence. The seven-generation retention limit
+is shared with scheduled backups, so seven retained generations may cover less
+than seven days after frequent rollouts. Failed Pod retries retain
+`.rollout-source-<pod-uid>` on the dump PVC to preserve their original snapshot;
+an operator may remove an abandoned source only after confirming that its Pod
+has terminated and the snapshot is no longer required. Low storage or missing
+artifacts fail closed and require repair; never skip the gate to force rollout.
+
+Run `python3 scripts/tests/test-relay-rollout-backup.py` as the unprivileged CI
+runner or developer. It uses only disposable Docker fixtures and the exact
+digest-pinned PostgreSQL and Node images: read-only roots, dropped capabilities,
+read-only backup-role enforcement, real dump/restore with migrator ownership,
+plugin hashes, publication retry, corruption rejection and retention. The
+always-on `manifests` workflow runs it before a deployment change can merge.
+
 ## Recovery
 
 For a failed first rollout, restore the local service and keep the public route unmerged until fixed. For subsequent rollouts, preserve the previous release directory and change the Deployment subPath back only when its schema is compatible. Restore PostgreSQL and plugin artifacts from the same backup point when a schema rollback is required. Do not run two control planes against the same database.
@@ -258,3 +322,54 @@ clean connector installation passed in Gitea release CI. Chromium verified
 the favicon declaration, SVG MIME type, exact bytes and image decoding.
 After rollout, verify public health/readiness, `/favicon.svg` against the
 source asset, the document favicon link, and retained connector manifests.
+
+
+## Persistent host and terminal workspace release 0.3.0
+
+Source: `dafe4de8ccbcdfa4f4a11fdc99972b9481c26ea3` ([Relay PR #8](https://git.chifor.me/cchifor/relay/pulls/8)).
+Release CI: https://git.chifor.me/cchifor/relay/actions/runs/61038
+
+Image: `registry.chifor.me/relay/control-plane@sha256:1ce1e70eadaccf0f07c92de408f623c2492cc507651004ed3dccf512bf3bf420`.
+
+Provenance: `deployment-images-61038.json` on the
+[Relay v0.3.0 release](https://git.chifor.me/cchifor/relay/releases/tag/v0.3.0).
+Both application and migration containers use this exact digest. The image
+retains all connector downloads from v0.1.2 through v0.2.3.
+
+Agents and pending host approvals share one searchable table with host details,
+label editing, overflow actions and a top-right connection skill link. Agent
+rows open the focused terminal. Matrix remains available alongside pane and
+full tmux views. Native tmux uses a private observer client and the existing
+control lease. Image/file uploads are bounded, host-private and insert a quoted
+path without submitting Enter. Activity gains filtering and event details;
+Status remains the separate live-health view. Assistant, all existing themes
+and Settings → Appearance are preserved. Workspace settings are removed.
+
+The updated Connect skill installs a Linux systemd user service with verified
+lingering, discovering recognized agents across current and future sessions.
+Approval covers the account and configured tmux sockets; expanding the scope
+requires fresh approval. Existing remote connector processes keep working and
+are not replaced by application deployment. Upgrade a worker through the new
+skill to enable persistent host connections and the new terminal/upload modes.
+
+Migration 003 adds host approval and agent display metadata. A full baseline
+restore/rehearsal preserved existing records, restricted migrator ownership
+and all 14 forced-RLS tables. The rollout gate above captures and verifies a
+fresh coordinated backup before this migration. Local validation passed 56
+application/browser tests and seven Rust tests, real service restart checks,
+ARM64 integration under QEMU and clean Ubuntu/Alpine installation; tag CI
+repeated build, integration/browser and portable connector checks. The backup
+gate passed 12 regression tests plus a real restricted dump/restore under the
+exact pinned images.
+
+After normal Flux reconciliation, verify the new manifest/source and UI assets,
+health/readiness, isolated host approval, Matrix and focused/full tmux control,
+exact uploaded bytes, service restart/reconnection, Activity and preserved
+Appearance/Assistant pages. Remove only the acceptance host's service/socket
+and block its generated host identity after verification.
+
+Rollback image: `registry.chifor.me/relay/control-plane@sha256:c82acd6168d96285dd565c59fefe584b7456c0d046880aa81d23fff3689433a9`.
+Restore that digest in both containers and the v0.2.3 source/release annotations
+through a reviewed PR. The migration is additive; leave its columns in place
+for an application rollback. Database restoration is reserved for a recovery
+that actually requires it, using matching dump and plugin artifacts.
