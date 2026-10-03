@@ -4,8 +4,9 @@
 # no new hostname, tunnel route or OIDC client.
 #
 # TWO DEPLOYMENTS, ONE IMAGE, SPLIT BY BLAST RADIUS
-#   cloud-power      MODE=api  normal pod networking. Status + SCHEDULED shutdown. Holds the PVE
-#                              token and the Gitea token that pauses the cloud CI runners.
+#   cloud-power      MODE=api  normal pod networking. Status + SCHEDULED shutdown + Auto OFF/ON.
+#                              Holds the PVE token and the Gitea token that pauses the cloud CI
+#                              runners.
 #                              Fenced by networkpolicy.yaml: only oauth2-proxy may reach it.
 #   cloud-power-wol  MODE=wol  hostNetwork. Sends magic packets. Nothing else, no token.
 #
@@ -89,6 +90,16 @@ spec:
             # mid-shutdown and CANCEL may safely hand its runners back.
             - { name: OFFLINE_WAIT_SEC, value: "2400" }
             - { name: ALLOWED_ORIGINS, value: "https://home.chifor.me" } # CSRF gate for the POSTs
+            # --- Auto OFF / Auto ON (plans/2026-10-03-cloud-power-auto-on-off-plan.md) ---
+            # Switches + times live in the cloud-power-state ConfigMap (key `auto`), set from the
+            # page. Times are wall clock in the HOSTS' zone; an unusable zone disables Auto OFF.
+            # Auto ON is mirrored into the comment of PVE pool `cloud-power`, which each host's
+            # cloud-arm-rtc-wake hook reads at shutdown (cloudlab) - needs the CloudPowerAutoOn
+            # role on /pool/cloud-power (cloudlab scripts/provision-host.sh).
+            - { name: AUTO_TZ, value: "Europe/Bucharest" }
+            # A slot fires only this long after its time; a controller that was down at 22:00
+            # does not power the cluster off in the small hours.
+            - { name: AUTO_OFF_GRACE_SEC, value: "3600" }
           ports:
             - { name: http, containerPort: 8127, protocol: TCP }
           readinessProbe:

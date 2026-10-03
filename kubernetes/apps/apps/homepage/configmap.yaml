@@ -234,12 +234,12 @@ data:
     # so this renders in-flow, aligned with every other section, and updates on a pod restart.
     - Cloud GPU:
         - Power:
-            description: cloud1/2/3 · Wake-on-LAN + Proxmox shutdown
+            description: cloud1/2/3 · Wake-on-LAN + Proxmox shutdown · Auto OFF/ON
             icon: mdi-server-network
             widget:
               type: iframe
               name: cloudpower
               src: /cloud-power/
-              classes: h-32 sm:h-32 md:h-32 lg:h-32 xl:h-32 2xl:h-32
+              classes: h-48 sm:h-48 md:h-48 lg:h-48 xl:h-48 2xl:h-48 # 2 rows of Auto OFF/ON controls
               allowScrolling: "yes"
               referrerPolicy: same-origin

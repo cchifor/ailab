@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the scheduled OFF in kubernetes/apps/apps/cloud-power/app.py.
+"""Unit tests for the scheduled OFF and Auto OFF/ON in kubernetes/apps/apps/cloud-power/app.py.
 
 No network: Gitea is a transport-level fake (so the REAL request building, pagination and response
 validation run under test), the state ConfigMap is an in-memory store with resourceVersion
@@ -862,6 +862,486 @@ class StatusEndpointTests(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
             app.SCHED, app.status, app.ALLOW_FROM = old
+
+
+# --- Auto OFF / Auto ON (plans/2026-10-03-cloud-power-auto-on-off-plan.md) ------------------------
+try:
+    BUC = app.zoneinfo.ZoneInfo("Europe/Bucharest")
+except Exception:  # noqa: BLE001 - no tz database on this machine: the DST cases are skipped
+    BUC = None
+FIXED = app.datetime.timezone(app.datetime.timedelta(hours=3))
+
+
+def local(y, mo, d, h, mi, s=0, tz=None):
+    return app.datetime.datetime(y, mo, d, h, mi, s, tzinfo=tz or BUC or FIXED).timestamp()
+
+
+class AutoBase(Base):
+    TZ = None
+
+    def setUp(self):
+        super().setUp()
+        self.clock.t = local(2026, 10, 3, 12, 0, tz=self.tz())
+        self.s = self.new_auto_sched()
+
+    def tz(self):
+        return self.TZ or BUC or FIXED
+
+    def new_auto_sched(self, **kw):
+        def shutdown():
+            self.shutdowns.append(self.clock())
+            return [dict(r) for r in self.shutdown_result]
+        kw.setdefault("tz", self.tz())
+        return app.Scheduler(app.Gitea("http://gitea:3000", ORG, "T", transport=self.fg), self.store,
+                             shutdown, host_up_fn=lambda n: self.hosts[n], clock=self.clock,
+                             prefix="cloud-ci-", drain_max=11700, offline_wait=2400, clear_polls=2, **kw)
+
+    def at(self, h, mi, s=0, day=3, month=10):
+        self.clock.t = local(2026, month, day, h, mi, s, tz=self.tz())
+
+    def stored_auto(self):
+        return json.loads(self.store.data["auto"])
+
+    def enable_off(self, at="22:00"):
+        self.s.set_auto("off", True, at, "op@x")
+
+    def by(self):
+        return (self.s.state or {}).get("by")
+
+
+class AutoOffTests(AutoBase):
+    def test_absent_settings_are_the_safe_defaults_and_nothing_fires(self):
+        self.store.data = {"schedule": "", "last": ""}
+        self.store.rv = 1
+        self.s = self.new_auto_sched()
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.assertIsNone(self.s.state)
+        a = self.s.view["auto"]
+        self.assertEqual((a["off"]["enabled"], a["off"]["at"], a["on"]["enabled"], a["on"]["at"]),
+                         (False, "22:00", True, "08:00"))
+
+    def test_fires_once_in_its_slot_through_the_button_path(self):
+        self.enable_off()
+        self.at(21, 59, 50)
+        self.s.tick()
+        self.assertIsNone(self.s.state, "not before its time")
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.assertEqual((self.phase(), self.by()), ("draining", "auto-off 22:00"))
+        self.assertTrue(self.fg.disabled(1) and self.fg.disabled(2), "the same pause as the button")
+        a = self.stored_auto()["off"]
+        self.assertEqual((a["slot"], a["result"]), ("2026-10-03T22:00", "scheduled"))
+        self.s.cancel("op")
+        n = len(self.fg.patches)
+        self.tick(30)
+        self.assertEqual(self.phase(), "idle", "a cancelled auto-off is never re-fired in its window")
+        self.assertEqual(len(self.fg.patches), n)
+
+    def test_grace_window_bounds(self):
+        self.enable_off()
+        self.at(23, 0, 0)                            # elapsed == grace: too late
+        self.s.tick()
+        self.assertIsNone(self.s.state)
+        self.at(22, 59, 59)
+        self.s = self.new_auto_sched()
+        self.s.tick()
+        self.assertEqual(self.by(), "auto-off 22:00")
+
+    def test_restart_after_the_claim_never_fires_twice(self):
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.s.tick()
+        n = len(self.fg.patches)
+        self.s.cancel("op")
+        self.s = self.new_auto_sched()               # controller restart, same ConfigMap
+        self.tick(5)
+        self.assertEqual(self.phase(), "idle")
+        self.assertEqual(len(self.fg.patches), n + 3, "only CANCEL's three re-enables")
+
+    def test_claim_write_lost_then_flushed_acts_exactly_once(self):
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.store.fail_writes = 1
+        self.s.tick()
+        self.assertIsNone(self.s.state, "nothing acts before the claim is durable")
+        self.assertEqual(self.fg.patches, [])
+        self.tick()
+        self.assertEqual(self.by(), "auto-off 22:00")
+        self.assertEqual(self.stored_auto()["off"]["result"], "scheduled")
+
+    def test_claim_conflict_rereads_then_acts_once(self):
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.store.conflicts = 1
+        self.s.tick()
+        self.assertIsNone(self.s.state)
+        self.tick()
+        self.assertEqual(self.by(), "auto-off 22:00")
+
+    def test_manual_off_in_flight_consumes_the_slot(self):
+        self.enable_off()
+        self.at(21, 55)
+        self.s.schedule("op@x")
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.assertEqual(self.stored_auto()["off"]["result"], "not run: an OFF was already draining")
+        self.s.cancel("op@x")
+        self.tick(30)
+        self.assertEqual(self.phase(), "idle", "cancelling the manual OFF does not unleash the auto one")
+
+    def test_on_inside_the_window_consumes_the_slot(self):
+        self.enable_off()
+        self.at(22, 0, 5)
+        self.s.cancel_for_wake("op@x")               # before the worker's first tick in the slot
+        self.tick(10)
+        self.assertIsNone(self.s.state)
+        self.assertEqual(self.stored_auto()["off"]["result"], "not run: ON pressed by op@x")
+
+    def test_on_during_an_auto_off_drain_cancels_it(self):
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.s.tick()
+        cancelled, _ = self.s.cancel_for_wake("op@x")
+        self.assertTrue(cancelled)
+        self.tick(10)
+        self.assertEqual(self.phase(), "idle")
+
+    def test_settings_change_inside_the_window_never_fires(self):
+        self.at(22, 10)
+        self.enable_off("22:00")
+        self.tick(5)
+        self.assertIsNone(self.s.state)
+        self.assertIn("changed by op@x", self.stored_auto()["off"]["result"])
+        self.at(22, 0, 10, day=4)                    # but tomorrow's slot does
+        self.s.tick()
+        self.assertEqual(self.by(), "auto-off 22:00")
+
+    def test_moving_the_time_into_the_past_window_never_fires(self):
+        self.enable_off("23:00")
+        self.at(22, 30)
+        self.s.set_auto("off", True, "22:15", "op@x")
+        self.tick(5)
+        self.assertIsNone(self.s.state)
+
+    def test_disabling_leaves_an_off_in_flight_alone(self):
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.s.set_auto("off", False, "22:00", "op@x")
+        self.assertEqual(self.phase(), "draining", "CANCEL stops a drain, the switch does not")
+
+    def test_no_host_answering_is_recorded_not_acted_on(self):
+        self.enable_off()
+        self.hosts = {"cloud1": False, "cloud2": False, "cloud3": False}
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.assertIsNone(self.s.state)
+        self.assertEqual(self.fg.patches, [])
+        self.assertIn("no host answered", self.stored_auto()["off"]["result"])
+
+    def test_refused_is_recorded_and_not_retried(self):
+        self.enable_off()
+        self.fg.runners = {3: runner(3, "ci-runner-1")}
+        self.at(22, 0, 10)
+        self.tick(5)
+        self.assertIsNone(self.s.state)
+        self.assertTrue(self.stored_auto()["off"]["result"].startswith("failed: no cloud-ci-* runner"))
+
+    def test_gitea_error_is_recorded_and_not_retried(self):
+        self.enable_off()
+        self.fg.fail[("GET", "/orgs/")] = "transport"
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.assertTrue(self.stored_auto()["off"]["result"].startswith("failed:"))
+        del self.fg.fail[("GET", "/orgs/")]
+        self.tick(5)
+        self.assertIsNone(self.s.state, "one attempt per slot")
+
+    def test_crash_inside_schedule_is_reported_not_retried(self):
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.s.tick()
+        # Simulate a stored `starting` claim whose OFF never got going (crash before pausing).
+        st = json.loads(self.store.data["auto"])
+        st["off"]["result"] = "starting"
+        self.store.data = {"schedule": "", "last": "", "auto": json.dumps(st)}
+        self.s = self.new_auto_sched()
+        self.tick()
+        self.assertIsNone(self.s.state)
+        self.assertIn("restarted while starting", self.stored_auto()["off"]["result"])
+
+    def test_slot_before_midnight_fires_after_midnight(self):
+        self.enable_off("23:50")
+        self.at(0, 10, day=4)
+        self.s.tick()
+        self.assertEqual(self.by(), "auto-off 23:50")
+        self.assertEqual(self.stored_auto()["off"]["slot"], "2026-10-03T23:50")
+
+    def test_no_time_zone_disables_auto_off(self):
+        self.s = self.new_auto_sched(tz=None, tz_error="AUTO_TZ unusable")
+        self.enable_off()
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.assertIsNone(self.s.state)
+        self.assertEqual(self.s.view["auto"]["tz_error"], "AUTO_TZ unusable")
+
+    def test_status_view_labels_the_next_slot_in_local_time(self):
+        self.enable_off()
+        self.at(12, 0)
+        self.s.tick()
+        off = self.s.view["auto"]["off"]
+        self.assertEqual(off["next_label"], "Sat 22:00")
+        self.assertEqual(off["next_at"], local(2026, 10, 3, 22, 0, tz=self.tz()))
+
+
+class AutoSettingsTests(AutoBase):
+    def test_round_trips_with_the_schedule(self):
+        self.s.set_auto("on", False, "07:30", "op@x")
+        self.s.schedule("op@x")                      # a schedule write must not drop the settings
+        a = self.stored_auto()
+        self.assertEqual(a["on"], {"enabled": False, "at": "07:30"})
+        self.assertEqual(self.store.schedule()["phase"], "draining")
+
+    def test_conflict_reapplies_only_the_requested_change(self):
+        self.s.set_auto("on", False, "07:30", "op@x")
+        other = json.loads(self.store.data["auto"])
+        other["off"]["enabled"] = True               # someone else saved Auto OFF meanwhile
+        self.store.data = dict(self.store.data, auto=json.dumps(other))
+        self.store.rv += 1
+        self.s.set_auto("on", True, "09:00", "op@x")
+        a = self.stored_auto()
+        self.assertEqual((a["on"]["at"], a["off"]["enabled"]), ("09:00", True))
+
+    def test_ambiguous_write_is_not_reported_saved(self):
+        self.store.fail_writes = 1
+        with self.assertRaises(app.StateUncertain):
+            self.s.set_auto("on", False, "08:00", "op@x")
+        self.assertIsNone(self.s.auto_on_desired(), "an unconfirmed value is never mirrored")
+        self.s.tick()                                # re-reads what is actually stored
+        self.assertEqual(self.s.auto_on_desired(), "auto-on=1 wake=08:00")
+
+    def test_refused_while_unsaved_state_is_pending(self):
+        self.s.dirty = True
+        with self.assertRaises(app.StateError):
+            self.s.set_auto("on", False, "08:00", "op@x")
+
+    def test_invalid_stored_value_is_preserved_and_suspends_automation(self):
+        self.store.data = {"schedule": "", "last": "", "auto": "{not json"}
+        self.store.rv = 1
+        self.s = self.new_auto_sched()
+        self.at(22, 0, 10)
+        self.s.tick()
+        self.assertIsNone(self.s.state)
+        self.assertIsNone(self.s.auto_on_desired(), "never a default in place of an unreadable value")
+        self.s.schedule("op@x")                      # manual OFF is unaffected
+        self.assertEqual(self.store.data["auto"], "{not json", "written back verbatim")
+        self.assertIn("parse", self.s.view["auto"]["error"])
+        self.s.cancel("op@x")
+        self.s.set_auto("on", True, "08:00", "op@x")  # an explicit save replaces it
+        self.assertEqual(self.stored_auto()["on"], {"enabled": True, "at": "08:00"})
+
+    def test_unknown_version_and_bad_shapes_are_invalid(self):
+        good = app.default_auto()
+        for bad in ({**good, "v": 2}, {**good, "extra": 1},
+                    {**good, "on": {"enabled": "yes", "at": "08:00"}},
+                    {**good, "on": {"enabled": True, "at": "8:00"}},
+                    {**good, "on": {"enabled": True, "at": "08:00\n"}},
+                    {**good, "off": {**good["off"], "slot": "yesterday"}}):
+            a, err = app.parse_auto(json.dumps(bad))
+            self.assertIsNone(a, bad)
+            self.assertTrue(err)
+
+    def test_hhmm_is_strict_ascii(self):
+        for ok in ("00:00", "08:00", "23:59"):
+            self.assertTrue(app.valid_hhmm(ok))
+        for bad in ("24:00", "8:00", "08:60", "08:00\n", "٠٨:00", "", None, 800):
+            self.assertFalse(app.valid_hhmm(bad), repr(bad))
+
+
+@unittest.skipIf(BUC is None, "no Europe/Bucharest tz data on this machine")
+class AutoDstTests(unittest.TestCase):
+    def test_spring_forward_gap_resolves_to_a_real_instant(self):
+        # 2026-03-29: 03:00 EET -> 04:00 EEST. 03:30 does not exist; fold=0 = 01:30 UTC.
+        ts = app._slot_ts(app.datetime.date(2026, 3, 29), "03:30", BUC)
+        utc = app.datetime.datetime(2026, 3, 29, 1, 30, tzinfo=app.datetime.timezone.utc).timestamp()
+        self.assertEqual(ts, utc)
+        key, slot = app.auto_slot(ts + 60, "03:30", BUC)
+        self.assertEqual((key, slot), ("2026-03-29T03:30", ts))
+
+    def test_repeated_autumn_hour_is_one_slot_at_its_first_occurrence(self):
+        # 2026-10-25: 04:00 EEST -> 03:00 EET. 03:30 happens twice; fold=0 = 00:30 UTC.
+        first = app._slot_ts(app.datetime.date(2026, 10, 25), "03:30", BUC)
+        utc = app.datetime.datetime(2026, 10, 25, 0, 30, tzinfo=app.datetime.timezone.utc).timestamp()
+        self.assertEqual(first, utc)
+        k1, _ = app.auto_slot(first + 10, "03:30", BUC)
+        k2, s2 = app.auto_slot(first + 3610, "03:30", BUC)   # the second 03:30 on the wall clock
+        self.assertEqual((k1, k2, s2), ("2026-10-25T03:30", "2026-10-25T03:30", first))
+
+    def test_grace_is_measured_in_real_seconds_across_the_change(self):
+        # 02:30 EEST on 2026-10-25 is 23:30 UTC; an hour of real time later is 03:30 EEST (first).
+        slot = app._slot_ts(app.datetime.date(2026, 10, 25), "02:30", BUC)
+        self.assertEqual(app.auto_slot(slot + 3599, "02:30", BUC)[1], slot)
+
+
+class FakePool:
+    def __init__(self, comment=""):
+        self.comment = comment
+        self.gets = self.sets = 0
+        self.fail_get = self.fail_set = None
+        self.set_lands = True
+
+    def get(self):
+        self.gets += 1
+        if self.fail_get:
+            raise app.PoolError(self.fail_get)
+        return self.comment
+
+    def set(self, c):
+        self.sets += 1
+        if self.set_lands:
+            self.comment = c
+        if self.fail_set:
+            raise app.PoolError(self.fail_set)
+
+
+class PoolMirrorTests(unittest.TestCase):
+    def setUp(self):
+        self.pool, self.clock = FakePool("auto-on=1 wake=08:00"), Clock()
+        self.m = app.PoolMirror(self.pool.get, self.pool.set, clock=self.clock, retry_sec=60, verify_sec=300)
+
+    def test_no_desired_value_no_call(self):
+        self.m.sync(None)
+        self.assertEqual(self.pool.gets, 0)
+        self.assertFalse(self.m.view()["applied"])
+
+    def test_writes_and_reads_back(self):
+        self.m.sync("auto-on=0 wake=08:00")
+        self.assertEqual(self.pool.comment, "auto-on=0 wake=08:00")
+        self.assertEqual(self.pool.gets, 2, "read, write, READ BACK")
+        self.assertTrue(self.m.view()["applied"])
+
+    def test_lost_put_reply_is_trusted_only_after_the_read_back(self):
+        self.pool.fail_set = "HTTP timeout"
+        self.m.sync("auto-on=0 wake=08:00")
+        self.assertTrue(self.m.view()["applied"])
+        self.pool.set_lands = False
+        self.m.sync("auto-on=1 wake=09:00")
+        v = self.m.view()
+        self.assertFalse(v["applied"])
+        self.assertEqual((v["error"], v["verified_policy"]), ("HTTP timeout", "auto-on=0 wake=08:00"))
+
+    def test_retry_and_verify_cadence(self):
+        self.pool.fail_get = "cloud1 unreachable"
+        self.m.sync("auto-on=0 wake=08:00")
+        self.clock.t += 30
+        self.m.sync("auto-on=0 wake=08:00")
+        self.assertEqual(self.pool.gets, 1, "a failing mirror does not hammer PVE every tick")
+        self.pool.fail_get = None
+        self.clock.t += 31
+        self.m.sync("auto-on=0 wake=08:00")
+        self.assertTrue(self.m.view()["applied"])
+        n = self.pool.gets
+        self.clock.t += 200
+        self.m.sync("auto-on=0 wake=08:00")
+        self.assertEqual(self.pool.gets, n, "verified: re-checked every 300 s, not every tick")
+        self.clock.t += 101
+        self.m.sync("auto-on=0 wake=08:00")
+        self.assertEqual(self.pool.gets, n + 1)
+
+    def test_a_new_desired_value_is_pushed_at_once(self):
+        self.m.sync("auto-on=1 wake=08:00")
+        self.m.sync("auto-on=0 wake=08:00")
+        self.assertEqual(self.pool.comment, "auto-on=0 wake=08:00")
+
+    def test_comment_format_is_what_the_host_hook_parses(self):
+        self.assertEqual(app.auto_on_comment({"enabled": False, "at": "07:05"}), "auto-on=0 wake=07:05")
+
+
+class PrePowerOffTests(AutoBase):
+    def test_a_failing_policy_push_never_blocks_the_power_off(self):
+        def boom():
+            raise RuntimeError("pve down")
+        self.s = self.new_auto_sched(pre_power_off=boom)
+        self.s.schedule("op")
+        self.tick(2)
+        self.assertEqual(self.phase(), "powering_off")
+        self.assertEqual(len(self.shutdowns), 1)
+
+    def test_the_policy_is_pushed_before_the_shutdown(self):
+        order = []
+        self.s = self.new_auto_sched(pre_power_off=lambda: order.append(("push", len(self.shutdowns))))
+        self.s.schedule("op")
+        self.tick(2)
+        self.assertEqual(order, [("push", 0)])
+
+
+class AutoEndpointTests(AutoBase):
+    def setUp(self):
+        super().setUp()
+        import http.server
+        self.pool = FakePool()
+        self.old = (app.SCHED, app.MIRROR, app.ALLOW_FROM, app.MODE, app.status)
+        app.SCHED, app.MIRROR = self.s, app.PoolMirror(self.pool.get, self.pool.set, clock=self.clock)
+        app.ALLOW_FROM = [app.ipaddress.ip_network("127.0.0.1/32")]
+        app.status = lambda: {"nodes": [], "up": 0, "total": 3, "state": "off"}
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        app.SCHED, app.MIRROR, app.ALLOW_FROM, app.MODE, app.status = self.old
+
+    def post(self, body, headers=None):
+        import urllib.request as ur
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        req = ur.Request("http://127.0.0.1:%d%s/api/auto" % (self.srv.server_address[1], app.BASE),
+                         data=data, method="POST", headers=dict({"Content-Type": "application/json"}, **(headers or {})))
+        try:
+            with ur.urlopen(req, timeout=5) as r:
+                return r.status, json.load(r)
+        except app.urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_saves_and_mirrors_auto_on(self):
+        code, body = self.post({"kind": "on", "enabled": False, "at": "07:45"})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.pool.comment, "auto-on=0 wake=07:45")
+        self.assertTrue(body["auto_on"]["applied"])
+        self.assertEqual(self.stored_auto()["on"], {"enabled": False, "at": "07:45"})
+
+    def test_rejects_malformed_bodies(self):
+        for bad in ({"kind": "off", "enabled": "true", "at": "22:00"},
+                    {"kind": "both", "enabled": True, "at": "22:00"},
+                    {"kind": "off", "enabled": True, "at": "22:00", "pool": "other"},
+                    {"kind": "off", "enabled": True, "at": "2200"},
+                    ["off", True, "22:00"], b"not json", b"x" * 2000):
+            code, _ = self.post(bad)
+            self.assertEqual(code, 400, bad)
+        self.assertIsNone(self.store.data)
+
+    def test_cross_site_refused(self):
+        code, _ = self.post({"kind": "off", "enabled": True, "at": "22:00"},
+                            {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(code, 403)
+        self.assertIsNone(self.store.data)
+
+    def test_the_hostnetwork_wol_half_does_not_serve_it(self):
+        app.MODE = "wol"
+        code, _ = self.post({"kind": "on", "enabled": False, "at": "08:00"})
+        self.assertEqual(code, 404)
+        self.assertIsNone(self.store.data)
+
+
+class WolMacTests(unittest.TestCase):
+    def test_macs_match_cloudlab_wol_py_when_present(self):
+        wol = pathlib.Path(__file__).resolve().parents[3] / "cloudlab" / "scripts" / "wol.py"
+        if not wol.exists():
+            self.skipTest("no sibling cloudlab checkout")
+        import re
+        hosts = dict(re.findall(r'"(cloud[0-9])":\s*\("([0-9a-f:]{17})"', wol.read_text(encoding="utf-8")))
+        self.assertEqual({n["name"]: n["mac"] for n in app.NODES}, hosts)
 
 
 if __name__ == "__main__":
