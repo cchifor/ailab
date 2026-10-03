@@ -229,3 +229,32 @@ coverage, and 30 page/viewport visual checks. Tag CI additionally verifies
 clean connector installation and the immutable image. After Flux rollout,
 verify public health/readiness, exact UI/font assets, palette colors and saved
 appearance, plus checksums for current and retained connector downloads.
+
+
+## Browser tab icon release 0.2.3
+
+Relay now declares a local SVG favicon using the same blue terminal symbol as
+the navigation rail. It is served on the sign-in page and all app routes.
+
+Source: `a389d2b031df1c8cc11b00539c6ce1c7bfd260db` (Relay PR #6).
+Release CI: https://git.chifor.me/cchifor/relay/actions/runs/59190
+
+Image: `registry.chifor.me/relay/control-plane@sha256:c82acd6168d96285dd565c59fefe584b7456c0d046880aa81d23fff3689433a9`.
+
+Provenance: `deployment-images-59190.json` on the
+[Relay v0.2.3 release](https://git.chifor.me/cchifor/relay/releases/tag/v0.2.3).
+
+Rollback image: `registry.chifor.me/relay/control-plane@sha256:d78f03bbb963ae1ba75425c00d0a81f6997cf4e49ea9ae82b9e7979b7cb707ec`.
+
+Both application and migration containers use the same verified digest.
+This release adds only the favicon and release metadata; no schema, Secret,
+volume, route or connector behavior changes are required. Existing workers
+need no restart or upgrade. The image retains all existing pinned connector
+downloads (v0.1.2, v0.2.0, v0.2.1 and v0.2.2) alongside v0.2.3.
+Rollback restores the v0.2.2 digest in both containers through a reviewed PR.
+
+Validation: build, typecheck, formatting, 29 application/browser checks and
+clean connector installation passed in Gitea release CI. Chromium verified
+the favicon declaration, SVG MIME type, exact bytes and image decoding.
+After rollout, verify public health/readiness, `/favicon.svg` against the
+source asset, the document favicon link, and retained connector manifests.
