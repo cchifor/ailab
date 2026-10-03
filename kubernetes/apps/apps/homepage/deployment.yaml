@@ -26,7 +26,7 @@ spec:
         # ConfigMap, invisible on the dashboard, pod 7d22h old. Bump this whenever the config
         # changes; it is the rollout trigger. (cloudflared carries the same annotation for the
         # same reason, and cloud-power documents the trap for app code.)
-        chifor.me/config-revision: "2026-09-07-dsh-tile"
+        chifor.me/config-revision: "2026-10-03-cloud-power-auto"
       labels:
         app.kubernetes.io/name: homepage
     spec:
