@@ -39,6 +39,7 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -325,17 +326,22 @@ def auto_on_comment(on):
     return "auto-on=%d wake=%s" % (1 if on["enabled"] else 0, on["at"])
 
 
-def _pool_call(method, path, data=None):
+def _pool_call(method, path, data=None, deadline=None):
     """One PVE call against the first node that answers. /etc/pve is cluster-wide, so any node
     serves the pool; a node that answers but has lost quorum refuses the WRITE, and the next one
-    is tried. Every error is classified so the page can say WHY the policy is not applied."""
+    is tried. `deadline` (epoch s) bounds the whole call across nodes. Every error is classified so
+    the page can say WHY the policy is not applied."""
     errs = []
     for n in NODES:
-        if not node_up(n["ip"], timeout=1.5):
+        left = None if deadline is None else deadline - time.time()
+        if left is not None and left <= 1:
+            errs.append("time budget spent")
+            break
+        if not node_up(n["ip"], timeout=1.5 if left is None else min(1.5, left)):
             errs.append("%s unreachable" % n["name"])
             continue
         try:
-            return pve(n, path, method=method, data=data, timeout=8)
+            return pve(n, path, method=method, data=data, timeout=8 if left is None else min(8, left))
         except PinError as e:
             errs.append("%s: %s" % (n["name"], e))
         except PVEHTTPError as e:
@@ -350,70 +356,90 @@ def _pool_call(method, path, data=None):
     raise PoolError("; ".join(errs) or "no node configured")
 
 
-def pool_get_comment():
-    d = _pool_call("GET", "/pools/%s" % AUTO_POOL)
+def pool_get_comment(deadline=None):
+    d = _pool_call("GET", "/pools/%s" % AUTO_POOL, deadline=deadline)
     if not isinstance(d, dict):
         raise PoolError("unreadable pool reply")
     c = d.get("comment")
     return c if isinstance(c, str) else ""
 
 
-def pool_set_comment(comment):
-    _pool_call("PUT", "/pools", data={"poolid": AUTO_POOL, "comment": comment})
+def pool_set_comment(comment, deadline=None):
+    _pool_call("PUT", "/pools", data={"poolid": AUTO_POOL, "comment": comment}, deadline=deadline)
+
+
+def desired_from_view(view):
+    """The Auto ON pool comment the hosts should read, from a PUBLISHED Scheduler snapshot (lock
+    free) - or None while the settings are not durably known (not loaded, unsaved, unreadable):
+    the mirror never writes a default standing in for an unknown value, nor an unconfirmed one."""
+    v = view or {}
+    a = v.get("auto") or {}
+    if not v.get("loaded") or v.get("dirty") or a.get("error") or not isinstance(a.get("on"), dict):
+        return None
+    return auto_on_comment(a["on"])
 
 
 class PoolMirror:
-    """Keeps the pool comment equal to the desired Auto ON policy. The desired value comes only
-    from settings the Scheduler has durably saved; the mirror never invents one. `applied` means
-    a READ-BACK matched - a PUT whose reply was lost is not trusted until it is read back. This
+    """Keeps the pool comment equal to the desired Auto ON policy.
+
+    `desired_fn` is evaluated INSIDE the mirror lock, so an attempt that waited for the lock pushes
+    the latest durable policy, never the one that was current when it queued. `applied` compares
+    the last READ of the pool with the CURRENT desired value: a PUT whose reply was lost is not
+    trusted until it is read back, and a new setting is "not applied" until a read shows it. This
     proves what the hosts WILL read at their next shutdown, not what any RTC holds right now."""
 
-    def __init__(self, get_fn=pool_get_comment, set_fn=pool_set_comment, clock=time.time,
-                 retry_sec=60, verify_sec=300):
+    def __init__(self, desired_fn, get_fn=pool_get_comment, set_fn=pool_set_comment, clock=time.time,
+                 retry_sec=60, verify_sec=300, budget_sec=20):
+        self.desired_fn = desired_fn
         self.get_fn = get_fn
         self.set_fn = set_fn
         self.clock = clock
         self.retry_sec = retry_sec
         self.verify_sec = verify_sec
+        self.budget_sec = budget_sec
         self.lock = threading.Lock()
-        self.desired = None
-        self.verified = None        # the comment last READ from PVE
+        self.verified = None        # the comment last READ from PVE; None = unknown/uncertain
         self.verified_at = None
+        self.attempted_for = None   # the desired value of the last attempt
         self.last_attempt_at = None
         self.error = ""
 
-    def sync(self, desired, force=False, wait=0):
-        """One reconcile step. Never raises. `wait` > 0 blocks that long for a concurrent attempt."""
-        if desired is None:
-            return
+    def sync(self, force=False, wait=0):
+        """One reconcile step, bounded by budget_sec of PVE time. Never raises. `wait` > 0 blocks
+        that long for a concurrent attempt to finish."""
         got = self.lock.acquire(timeout=wait) if wait else self.lock.acquire(blocking=False)
         if not got:
             return
         try:
+            desired = self.desired_fn()
+            if desired is None:
+                return
             now = self.clock()
-            if desired != self.desired:
-                self.desired = desired
+            if desired != self.attempted_for:
                 force = True
             if not force and self.last_attempt_at is not None:
                 gap = self.retry_sec if self.verified != desired else self.verify_sec
                 if now - self.last_attempt_at < gap:
                     return
-            self.last_attempt_at = now
+            self.attempted_for, self.last_attempt_at = desired, now
+            deadline = time.time() + self.budget_sec
             try:
-                cur = self.get_fn()
-                set_err = None
+                cur = self.get_fn(deadline=deadline)
+                self.verified, self.verified_at = cur, self.clock()
                 if cur != desired:
                     log("auto-on policy: pool comment %r -> %r" % (cur, desired))
+                    self.verified = None             # uncertain until it is read back
+                    set_err = None
                     try:
-                        self.set_fn(desired)
+                        self.set_fn(desired, deadline=deadline)
                     except PoolError as e:
                         set_err = e                  # it may still have landed: read back
-                    cur = self.get_fn()
-                self.verified, self.verified_at = cur, self.clock()
-                if cur == desired:
-                    self.error = ""
-                else:
-                    self.error = str(set_err) if set_err else "pool still reads %r after the write" % cur
+                    cur = self.get_fn(deadline=deadline)
+                    self.verified, self.verified_at = cur, self.clock()
+                    if cur != desired:
+                        self.error = str(set_err) if set_err else "pool still reads %r after the write" % cur
+                        return
+                self.error = ""
             except PoolError as e:
                 self.error = str(e)
                 log("auto-on policy NOT applied: %s" % e)
@@ -423,11 +449,16 @@ class PoolMirror:
         finally:
             self.lock.release()
 
+    def settled(self):
+        """Nothing left to push: no durable policy to push, or the pool was read equal to it."""
+        d = self.desired_fn()
+        return d is None or d == self.verified
+
     def view(self):
-        return {"applied": self.desired is not None and self.verified == self.desired,
-                "desired": self.desired, "verified_policy": self.verified,
-                "verified_at": self.verified_at, "last_attempt_at": self.last_attempt_at,
-                "error": self.error}
+        d = self.desired_fn()
+        return {"applied": d is not None and self.verified == d, "desired": d,
+                "verified_policy": self.verified, "verified_at": self.verified_at,
+                "last_attempt_at": self.last_attempt_at, "error": self.error}
 
 
 def new_confirm(sig):
@@ -687,12 +718,19 @@ def default_auto():
             "on": {"enabled": True, "at": "08:00"}}
 
 
+AUTO_UNFINISHED = ("claimed", "starting")   # auto.off.result of a slot whose attempt is not over
+_MAX_TS = 4102444800                          # 2100-01-01: anything later is not a real timestamp
+
+
 def parse_auto(raw):
-    """(settings, error). Absent -> defaults. Present but invalid -> (None, why): the caller keeps
-    the raw value, does NOT substitute defaults (that could silently re-enable an Auto ON the
-    operator switched off) and suspends the automation until a valid value is saved."""
-    if not raw:
+    """(settings, error). ABSENT key -> defaults. Present but invalid - including an EMPTY string,
+    which this code never writes - -> (None, why): the caller keeps the raw value, does NOT
+    substitute defaults (that could silently re-enable an Auto ON the operator switched off) and
+    suspends the automation until a valid value is saved."""
+    if raw is None:
         return default_auto(), ""
+    if not raw:
+        return None, "automation settings are empty"
     try:
         a = json.loads(raw)
     except ValueError:
@@ -713,7 +751,8 @@ def parse_auto(raw):
         if not isinstance(off["result"], str):
             raise ValueError("auto.off.result invalid")
         ra = off["result_at"]
-        if ra is not None and (isinstance(ra, bool) or not isinstance(ra, (int, float))):
+        if ra is not None and (isinstance(ra, bool) or not isinstance(ra, (int, float))
+                               or not math.isfinite(ra) or not 0 <= ra < _MAX_TS):
             raise ValueError("auto.off.result_at invalid")
     except (ValueError, KeyError, TypeError) as e:
         return None, str(e)
@@ -761,7 +800,13 @@ def auto_next(now, at, tz, claimed, grace=AUTO_OFF_GRACE_SEC):
 
 
 def local_label(ts, tz):
-    return datetime.datetime.fromtimestamp(ts, tz).strftime("%a %H:%M") if ts and tz else None
+    """'Sat 22:00 EEST' - the zone abbreviation is shown, so the page never reads as browser time."""
+    if not ts or tz is None:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(ts, tz).strftime("%a %H:%M %Z")
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 class Scheduler:
@@ -789,7 +834,7 @@ class Scheduler:
     def __init__(self, gitea, store, shutdown_fn, host_up_fn=host_up, clock=time.time,
                  prefix=CLOUD_RUNNER_PREFIX, drain_max=DRAIN_MAX_SEC, offline_wait=OFFLINE_WAIT_SEC,
                  clear_polls=DRAIN_CLEAR_POLLS, tz=None, tz_error="", grace=AUTO_OFF_GRACE_SEC,
-                 pre_power_off=None):
+                 policy_ready=None, policy_wait_ticks=3):
         self.gitea = gitea
         self.store = store
         self.shutdown_fn = shutdown_fn
@@ -823,13 +868,21 @@ class Scheduler:
         if tz is None and not self.tz_error:
             self.tz_error = "no time zone configured: Auto OFF is disabled"
         self.grace = grace
-        self.pre_power_off = pre_power_off   # Auto ON: push the policy once more before shutdown
+        # Auto ON policy gate before a power-off: policy_ready() says whether the pool holds the
+        # current policy; if not, the power-off waits up to policy_wait_ticks while the worker
+        # pushes it OUTSIDE this lock, then proceeds anyway (never keeps the cluster up).
+        self.policy_ready = policy_ready
+        self.policy_wait_ticks = policy_wait_ticks
+        self.policy_waits = 0
+        self.push_policy = False
         self.auto = default_auto()
         self.auto_raw = None
         self.auto_error = ""
-        # Slots this process already acted on (or that ON / a settings change consumed), with
-        # their outcome. Memory only: it stops a second attempt when a result write is lost.
+        # Slots this process decided (acted on, or ON / CANCEL consumed) with their outcome, and
+        # slots this process CLAIMED. Memory only: a claim found in the ConfigMap that this
+        # process did not make is a spent attempt (restart, lost write) and is never retried.
         self.auto_acted = {}
+        self.auto_claimed = set()
         self.view = {"phase": "unknown", "loaded": False}
 
     # -- persistence ----------------------------------------------------------------------
@@ -975,8 +1028,10 @@ class Scheduler:
             self._tick_releasing()
 
     def _require_usable(self):
-        if not self.loaded:
-            self.load()                              # StateError -> the caller answers 503
+        if not self.loaded or self.rejected or self.cancel_wanted:
+            # Re-applies a rejected attempt / an unconfirmed CANCEL on top of what is stored: a
+            # plain load() here would mark the state loaded and let the next tick skip them.
+            self._reconcile_intent()                 # StateError -> the caller answers 503
         if self.corrupt:
             raise StateError(self.corrupt)
 
@@ -1010,6 +1065,7 @@ class Scheduler:
                 self.rejected.add(attempt)
                 raise StateUncertain("could not save the schedule (%s); OFF not scheduled" % e) from e
             self.clear = 0
+            self.policy_waits = 0
             self.inflight = []
             self.note = ""
             for rec in targets:
@@ -1057,8 +1113,11 @@ class Scheduler:
 
     def cancel(self, who):
         with self.lock:
-            self._require_usable()
+            retried = bool(self.cancel_wanted)
+            self._require_usable()                   # re-applies an earlier unconfirmed CANCEL
             if not self.state:
+                if retried:
+                    return self.publish()            # that CANCEL has now landed: same outcome
                 raise Refused("no OFF is scheduled")
             phase = self.state["phase"]
             if phase == "powering_off":
@@ -1071,6 +1130,9 @@ class Scheduler:
                     raise Refused("a host may still be shutting down; CANCEL is possible from %s"
                                   % time.strftime("%H:%M", time.localtime(after)))
             if phase in ("draining", "stalled"):
+                # A slot due now must not start an Auto OFF right after this CANCEL; the cancel's
+                # own write below carries it (memory keeps it if that write fails).
+                self._consume_slot("not run: an OFF was cancelled by %s" % who, persist="none")
                 prev = copy.deepcopy(self.state)
                 self.state["phase"] = "releasing"
                 self.state["outcome"] = {"result": "cancelled", "message": "cancelled by %s" % who}
@@ -1096,9 +1158,14 @@ class Scheduler:
         if not self.loaded:
             self.load()
         st = self.state
-        if not st or self.corrupt:
+        if self.corrupt:
             return
-        attempt = st.get("attempt")
+        attempt = st.get("attempt") if st else None
+        # Intent about an attempt that is no longer the stored one is moot: forget it.
+        self.rejected &= {attempt}
+        self.cancel_wanted &= {attempt}
+        if not st:
+            return
         if attempt in self.rejected and st["phase"] in ("pausing", "draining"):
             self.rejected.discard(attempt)
             self._to_releasing("error", "the schedule could not be saved; OFF not scheduled")
@@ -1115,13 +1182,10 @@ class Scheduler:
         Returns (cancelled, note). Raises StateError when a pending OFF could not be withdrawn."""
         with self.lock:
             self._require_usable()
-            key = self._auto_off_due()
-            if key and self.auto["off"]["slot"] != key and key not in self.auto_acted:
-                # ON at 22:00:05 must not be followed by an Auto OFF a tick later.
-                res = "not run: ON pressed by %s" % who
-                self.auto_acted[key] = res
-                self.auto["off"].update(slot=key, result=res, result_at=self.clock())
-                self._save_quiet()
+            # ON at 22:00:05 must not be followed by an Auto OFF a tick later - including a slot
+            # whose claim is still unsaved. Durable, or ON fails (StateError -> 503), exactly like
+            # a pending OFF that cannot be withdrawn.
+            self._consume_slot("not run: ON pressed by %s" % who, persist="durable")
             phase = self.state["phase"] if self.state else "idle"
             if phase in ("draining", "stalled"):
                 try:
@@ -1138,8 +1202,8 @@ class Scheduler:
     def set_auto(self, kind, enabled, at, who):
         """Save ONE setting (kind 'off' or 'on') on top of what is stored. A change never fires
         the slot it lands in: enabling Auto OFF, or moving it to a time that already passed inside
-        the grace window, consumes that slot. Disabling it leaves an OFF already in flight alone
-        (CANCEL does that). Raises StateError / StateUncertain (-> 503)."""
+        the grace window, consumes that slot (in the same write). Disabling it leaves an OFF
+        already in flight alone (CANCEL does that). Raises StateError / StateUncertain (-> 503)."""
         with self.lock:
             self._require_usable()
             if self.dirty:
@@ -1154,9 +1218,10 @@ class Scheduler:
                     changed = (off["enabled"], off["at"]) != (enabled, at)
                     off.update(enabled=enabled, at=at)
                     cur = auto_slot(now, at, self.tz) if (enabled and changed and self.tz) else None
-                    if cur and 0 <= now - cur[1] < self.grace and off["slot"] != cur[0]:
-                        res = "not run: Auto OFF was changed by %s after this slot began" % who
-                        off.update(slot=cur[0], result=res, result_at=now)   # same write
+                    if (cur and 0 <= now - cur[1] < self.grace
+                            and (off["slot"] != cur[0] or off["result"] in AUTO_UNFINISHED)):
+                        off.update(slot=cur[0], result="not run: Auto OFF was changed by %s after "
+                                   "this slot began" % who, result_at=now)
                 prev = (self.auto, self.auto_raw, self.auto_error)
                 self.auto, self.auto_raw, self.auto_error = base, None, ""
                 try:
@@ -1166,39 +1231,60 @@ class Scheduler:
                     # Not written. Re-read and re-apply THIS change on top of the fresh state.
                     self.auto, self.auto_raw, self.auto_error = prev
                     if attempt == 2:
+                        self.publish()
                         raise StateError("the state changed concurrently twice; nothing saved")
-                    self.load()
+                    self._reconcile_intent()
                     if self.corrupt:
                         raise StateError(self.corrupt)
                 except StateError as e:
                     # May have landed. Never report it as saved or mirror it: re-read first.
                     self.loaded = False
                     self.dirty = False
+                    self.publish()                   # the mirror reads loaded=False: hands off
                     raise StateUncertain("could not confirm the setting was saved (%s); the page "
                                          "shows what is actually stored" % e) from e
             log("AUTO-%s set by %s: %s at %s" % (kind.upper(), who,
                                                   "enabled" if enabled else "disabled", at))
             return self.publish()
 
-    def auto_on_desired(self):
-        """The pool comment the hosts should read, or None while the settings are not durably
-        known (never a default standing in for an unreadable value, never an unsaved one)."""
-        with self.lock:
-            if not self.loaded or self.dirty or self.auto is None:
-                return None
-            return auto_on_comment(self.auto["on"])
+    def take_policy_push(self):
+        """The power-off gate asked the worker for an immediate pool push (consumed once)."""
+        f, self.push_policy = self.push_policy, False
+        return f
 
-    def _auto_off_due(self):
-        """The key of the Auto OFF slot inside its grace window right now, or None."""
+    def _auto_slot_now(self):
+        """The key of the Auto OFF slot inside its grace window right now, or None. Independent of
+        whether the worker may ACT on it - suppression (ON, CANCEL) must see it regardless."""
         a = self.auto
-        if (self.corrupt or a is None or self.tz is None or not self.loaded or self.dirty
-                or not a["off"]["enabled"]):
+        if a is None or self.tz is None or not a["off"]["enabled"]:
             return None
         now = self.clock()
         cur = auto_slot(now, a["off"]["at"], self.tz)
         if cur is None or not (0 <= now - cur[1] < self.grace):
             return None
         return cur[0]
+
+    def _auto_off_due(self):
+        if self.corrupt or not self.loaded or self.dirty:
+            return None
+        return self._auto_slot_now()
+
+    def _consume_slot(self, reason, persist):
+        """Make sure the slot inside its window now (if any) never fires. persist: 'durable'
+        (_save, raises), 'quiet' (_save_quiet) or 'none' (the caller's own write carries it).
+        A slot already decided - acted on by this process, or finished in the ConfigMap - stays."""
+        key = self._auto_slot_now()
+        if key is None or key in self.auto_acted:
+            return
+        off = self.auto["off"]
+        if off["slot"] == key and off["result"] not in AUTO_UNFINISHED:
+            return
+        self.auto_acted[key] = reason
+        off.update(slot=key, result=reason, result_at=self.clock())
+        if persist == "durable":
+            self._save()
+        elif persist == "quiet":
+            self._save_quiet()
 
     def _auto_result(self, key, res):
         off = self.auto["off"] if self.auto is not None else None
@@ -1209,48 +1295,55 @@ class Scheduler:
             self._save_quiet()
 
     def _tick_auto_off(self):
+        """ONE attempt per slot. The claim is saved BEFORE anything acts; a claim this process did
+        not make (restart, a write whose reply was lost and then re-read) is a spent attempt."""
         key = self._auto_off_due()
         if key is None:
             return
         off = self.auto["off"]
-        if off["slot"] == key and off["result"] not in ("claimed", "starting"):
-            return                                   # this slot is done
-        if off["slot"] != key:
-            if key in self.auto_acted:               # consumed (ON, settings) but not persisted
-                off.update(slot=key, result=self.auto_acted[key], result_at=self.clock())
+        now = self.clock()
+        if key in self.auto_acted:                   # decided here: only make the outcome stick
+            if off["slot"] != key or off["result"] != self.auto_acted[key]:
+                off.update(slot=key, result=self.auto_acted[key], result_at=now)
                 self._save_quiet()
-                return
-            off.update(slot=key, result="claimed", result_at=self.clock())
+            return
+        if off["slot"] == key:
+            if key not in self.auto_claimed:
+                if off["result"] in AUTO_UNFINISHED:
+                    st = self.state
+                    mine = st and str(st.get("by", "")).startswith("auto-off")
+                    res = ("scheduled" if mine else "not run: this attempt was interrupted "
+                           "(controller restart or a lost write); not retried")
+                    self.auto_acted[key] = res
+                    off.update(result=res, result_at=now)
+                    self._save_quiet()
+                return                               # finished, or now finished: never again
+            # claimed by THIS process and the claim is durable now (a dirty flush): act below
+        else:
+            off.update(slot=key, result="claimed", result_at=now)
+            self.auto_claimed.add(key)
             self._save()                             # durable claim BEFORE acting; raises -> stop
             log("AUTO-OFF slot %s claimed" % key)
-        if key in self.auto_acted:                   # acted already; only the result is missing
-            return self._auto_result(key, self.auto_acted[key])
-        if off["result"] == "starting":
-            # A previous controller died inside schedule(): whatever it left is the outcome.
-            st = self.state
-            mine = st and str(st.get("by", "")).startswith("auto-off")
-            return self._auto_result(key, "scheduled" if mine else
-                                     "failed: the controller restarted while starting the OFF")
         self._auto_result(key, self._auto_off_act(key, off["at"]))
 
     def _auto_off_act(self, key, at):
-        st = self.state
-        if st:
-            if str(st.get("by", "")).startswith("auto-off"):
-                return "scheduled"
-            return "not run: an OFF was already %s" % st.get("phase")
-        if not any(self.host_up_fn(n["name"]) for n in NODES):
-            return "not run: no host answered (already off?)"
         # Never a second attempt in this process, whatever schedule() raises or persists.
         self.auto_acted[key] = "failed: interrupted"
-        self.auto["off"]["result"] = "starting"     # rides schedule()'s first state write
-        try:
-            self.schedule("auto-off %s" % at)
-            res = "scheduled"
-        except (Refused, GiteaError, StateError) as e:
-            res = "failed: %s" % e
-        except Exception as e:  # noqa: BLE001 - recorded, never retried
-            res = "failed: %r" % e
+        st = self.state
+        if st:
+            res = ("scheduled" if str(st.get("by", "")).startswith("auto-off")
+                   else "not run: an OFF was already %s" % st.get("phase"))
+        elif not any(self.host_up_fn(n["name"]) for n in NODES):
+            res = "not run: no host answered (already off?)"
+        else:
+            self.auto["off"]["result"] = "starting"  # rides schedule()'s first state write
+            try:
+                self.schedule("auto-off %s" % at)
+                res = "scheduled"
+            except (Refused, GiteaError, StateError) as e:
+                res = "failed: %s" % e
+            except Exception as e:  # noqa: BLE001 - recorded, never retried
+                res = "failed: %r" % e
         self.auto_acted[key] = res
         log("AUTO-OFF slot %s: %s" % (key, res))
         return res
@@ -1259,7 +1352,7 @@ class Scheduler:
     def tick(self):
         with self.lock:
             try:
-                if not self.loaded:
+                if not self.loaded or self.rejected or self.cancel_wanted:
                     self._reconcile_intent()
                 if self.dirty:
                     self._save()                     # StateError -> nothing else this tick
@@ -1267,7 +1360,9 @@ class Scheduler:
                 # BEFORE the phase machine: a drain that finishes in this tick must not look like
                 # an idle cluster to a slot that is due now.
                 self._tick_auto_off()
-                if self.state and not self.corrupt:
+                # A result write that conflicted (unloaded) or failed (dirty) means memory is not
+                # what is stored: no Gitea or shutdown effect until the next tick has re-read it.
+                if self.loaded and not self.dirty and self.state and not self.corrupt:
                     phase = self.state.get("phase")
                     if phase == "pausing":
                         self._to_releasing("error", "the schedule was never confirmed (a state "
@@ -1322,15 +1417,27 @@ class Scheduler:
             return
         self.clear += 1
         if self.clear >= self.clear_polls:
-            if self.pre_power_off is not None:
-                # Best effort and contained: a failure means the hosts read whatever policy the
-                # pool already holds. It must never keep the cluster up or wedge the transition.
-                try:
-                    self.pre_power_off()
-                except Exception as e:  # noqa: BLE001
-                    log("auto-on policy push before power-off failed (the pool's current policy "
-                        "applies): %r" % e)
+            if not self._policy_settled():
+                if self.policy_waits < self.policy_wait_ticks:
+                    # The hosts read the Auto ON policy as they go down: give the worker a few
+                    # ticks to push the current one (outside this lock), then go regardless.
+                    self.policy_waits += 1
+                    self.push_policy = True
+                    self.note = ("making sure the hosts have the current Auto ON policy before "
+                                 "powering off (%d/%d)" % (self.policy_waits, self.policy_wait_ticks))
+                    return
+                log("powering off although the Auto ON policy is not confirmed in the pool: the "
+                    "hosts apply whatever it currently holds")
             self._begin_power_off("drained: no CI job in flight on a cloud runner")
+
+    def _policy_settled(self):
+        if self.policy_ready is None:
+            return True
+        try:
+            return bool(self.policy_ready())
+        except Exception as e:  # noqa: BLE001 - the gate never keeps the cluster up
+            log("auto-on policy check failed: %r" % e)
+            return True
 
     def _begin_power_off(self, reason):
         st = self.state
@@ -1456,7 +1563,7 @@ def worker(sched, poll, mirror=None):
             log("tick crashed: %r" % e)
         if mirror is not None:
             # Outside the scheduler lock: a slow PVE node never delays ON/CANCEL or the drain.
-            mirror.sync(sched.auto_on_desired())
+            mirror.sync(force=sched.take_policy_push())
         time.sleep(poll)
 
 
@@ -1493,7 +1600,7 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Cloud GPU power</title>
   <button style=background:#dc2626 id=boff>OFF</button>
   <button style="background:#475569;display:none" id=bcancel>CANCEL OFF</button>
  </div>
- <div class=auto title="Every day, Europe/Bucharest time. Auto OFF drains cloud CI jobs only: every other VM/LXC on the cluster is stopped without asking.">
+ <div class=auto>
   <label><input type=checkbox id=aoff>Auto OFF</label><input type=time id=aoffat required><span id=aoffs class=st></span></div>
  <div class=auto title="Shutdown-time wake policy: each host programs its RTC alarm from this as it powers off. A change made while the hosts are off applies from their NEXT shutdown.">
   <label><input type=checkbox id=aon>Auto ON</label><input type=time id=aonat required><span id=aons class=st></span></div>
@@ -1563,7 +1670,8 @@ function renderAuto(s){
   A.on.st.textContent='';return}
  const off=a.off,on=a.on;if(!off||!on)return;
  A.off.st.className=a.tz_error?'warn':'st';
- A.off.st.textContent=(a.tz_error?a.tz_error:(off.enabled?'next '+(off.next_label||'?'):'disabled'))
+ A.off.st.textContent=(a.tz_error?a.tz_error:(off.enabled?'next '+(off.next_label||'?')
+   +' - drains CI jobs, then stops EVERY VM/LXC':'disabled ('+a.tz+')'))
   +(off.result?' - last '+(off.result_label||'')+': '+off.result:'');
  let t;
  if(m.applied)t=on.enabled?'applied: hosts wake at '+on.at+' after each shutdown'
@@ -1588,6 +1696,10 @@ async function saveAuto(k){
  refresh()}
 for(const k of ['off','on']){
  A[k].cb.onchange=()=>{edited[k]=true;saveAuto(k)};
+ /* A time being typed is protected from the status poll from the first keystroke/focus, not
+    only once the browser commits it; leaving the field unchanged hands it back to the poll. */
+ A[k].t.onfocus=A[k].t.oninput=()=>{edited[k]=true};
+ A[k].t.onblur=()=>{if(!busy[k])setTimeout(()=>{if(!busy[k])edited[k]=false},0)};
  A[k].t.onchange=()=>{edited[k]=true;if(A[k].t.value)saveAuto(k)}}
 $('bon').onclick=async()=>{
  out.textContent='sending wake packets...';showLast=false;
@@ -1752,7 +1864,7 @@ class Handler(BaseHTTPRequestHandler):
             if req["kind"] == "on" and MIRROR is not None:
                 # Saved first; mirrored outside the scheduler lock, bounded. A failure here leaves
                 # the setting saved and the worker retrying - the answer says which.
-                MIRROR.sync(SCHED.auto_on_desired(), force=True, wait=20)
+                MIRROR.sync(force=True, wait=20)
                 mirror = MIRROR.view()
             return self._send(200, {"action": "saved", "schedule": view, "auto_on": mirror})
 
@@ -1839,11 +1951,10 @@ if __name__ == "__main__":
         tz, tz_err = load_tz(AUTO_TZ)
         if tz_err:
             log("WARNING: " + tz_err)
-        MIRROR = PoolMirror()
+        MIRROR = PoolMirror(lambda: desired_from_view(SCHED.view if SCHED else None))
         SCHED = Scheduler(Gitea(GITEA_URL, GITEA_ORG, GITEA_TOKEN),
                           KubeState(STATE_NAMESPACE, STATE_CONFIGMAP), shutdown_all,
-                          tz=tz, tz_error=tz_err,
-                          pre_power_off=lambda: MIRROR.sync(SCHED.auto_on_desired(), force=True, wait=30))
+                          tz=tz, tz_error=tz_err, policy_ready=MIRROR.settled)
         threading.Thread(target=worker, args=(SCHED, DRAIN_POLL_SEC, MIRROR), daemon=True).start()
     log("listening on :%d base=%s allow=%s" % (PORT, BASE or "/",
                                                ",".join(str(n) for n in ALLOW_FROM)))
