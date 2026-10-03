@@ -256,6 +256,11 @@ def pve(node, path, method="GET", data=None, timeout=15.0, deadline=None):
         conn.request(method, "/api2/json" + path, body=body, headers=headers)
         r = conn.getresponse()
         raw = r.read((1 << 20) + 1)
+        if expired.is_set():
+            # On Linux the watchdog's shutdown() makes a blocked read return EOF rather than
+            # fail, which http.client happily parses as a short response. Anything read after
+            # the deadline is a TIMEOUT, never data (CI caught this; Windows raised instead).
+            raise TimeoutError("PVE %s %s: not complete within the time budget" % (method, path))
         if len(raw) > 1 << 20:
             raise ValueError("PVE %s %s: response larger than 1 MiB" % (method, path))
         if r.status >= 400:
