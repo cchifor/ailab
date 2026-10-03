@@ -2275,7 +2275,8 @@ class AllowlistDefaultsTest(unittest.TestCase):
     the role defaults would leave them green. This is the test that would actually go red."""
 
     EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
-                "cchifor/agentforge-platform", "cchifor/dsh-team-conductor"]
+                "cchifor/agentforge-platform", "cchifor/dsh-team-conductor",
+                "cchifor/forge"]
 
     @staticmethod
     def _parse_repos(text):

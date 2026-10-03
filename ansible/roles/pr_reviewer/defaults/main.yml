@@ -53,6 +53,13 @@ pr_reviewer_repos:
   # the CI DEFINITION from changing without a human - it does not make the CI leg independent
   # of the author.
   - cchifor/dsh-team-conductor
+  # forge joined 2026-10-03 (operator-directed): transferred from the operator's personal
+  # `chifor` namespace into this org so the org webhooks, the hook assertion and the org runners
+  # cover it. Both reviewer identities have write; main is protected with 2 required approvals
+  # whitelisted to them, the merge whitelist names only them, and `forge-quality` is a required
+  # check - so a PR merges only through the reviewers. Its PRs are authored by `chifor`, already a
+  # merge author, so nothing below changes for it.
+  - cchifor/forge
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
 # its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
