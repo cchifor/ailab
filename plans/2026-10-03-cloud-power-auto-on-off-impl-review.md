@@ -1,6 +1,6 @@
 # Implementation review - cloud-power-auto-on-off (ailab) - round 1
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
@@ -84,3 +84,78 @@
  scripts/tests/test_cloud_power.py                | 482 +++++++++++++++++++-
  5 files changed, 1022 insertions(+), 17 deletions(-)
 ```
+
+---
+
+# Implementation review - cloud-power-auto-on-off (ailab) - round 2
+
+
+
+## Round-1 fixes
+
+- Settings saves bypass pending cancellation and rejection rollback: INCOMPLETE: a reconciliation conflict discards cancellation intent and allows shutdown.
+- ON succeeds while an Auto OFF claim remains executable: INCOMPLETE: repeated ON can succeed with its slot suppression still unpersisted.
+- Persisted claims can retry failed attempts after restart: verified.
+- CANCEL can be followed immediately by a new Auto OFF: INCOMPLETE: a successful cancellation retry can leave its slot suppression unpersisted across restart.
+- Auto result failures do not stop the phase machine: verified.
+- The final pool push blocks ON until shutdown starts: INCOMPLETE: the replacement gate can strand a drained schedule, and its mirror deadline does not bound HTTP reads.
+- Older mirror requests can overwrite a newer saved policy: INCOMPLETE: an in-flight request can still write an obsolete policy while the new gate reports settled.
+- Applied status can describe the previous settings: verified.
+- Failed read-back preserves a policy already known to be obsolete: verified.
+- An empty stored value writes defaults into PVE: verified.
+- Invalid result timestamps break otherwise independent manual actions: INCOMPLETE: sufficiently large integer timestamps raise an uncaught OverflowError during loading.
+- The tests miss the claimed persistence guarantees: verified.
+- Polling can overwrite a time edit before change fires: verified.
+- The standing shutdown warning is hidden in a tooltip: verified.
+
+## Findings
+
+### Failed reconciliation discards cancellation intent
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:1173  
+**Severity:** blocker  
+**Accepted, fixed in 1fb39394:** intent is dropped only after its transition is durable; _require_usable raises while it is unsaved (test_a_conflict_while_reapplying_a_cancel_keeps_the_intent, test_a_repeated_cancel_is_not_reported_done_while_unsaved).
+
+### Repeated ON succeeds without durable slot suppression
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:1277  
+**Severity:** blocker  
+**Accepted, fixed in 1fb39394:** _consume_slot checks the decision is stored and writes it otherwise, also when decided earlier; _save merges decided slots (test_a_retried_on_persists_the_withdrawal).
+
+### A retained claim overrides a completed slot
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:1311  
+**Severity:** important  
+**Accepted, fixed in 1fb39394:** a finished stored result beats a remembered claim; settings changes discard the claim (test_a_settings_change_beats_a_claim_that_hit_a_conflict).
+
+### Retried CANCEL loses the consumed slot across restart
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:1174  
+**Severity:** important  
+**Accepted, fixed in 1fb39394:** _merge_decided_slot in _save carries the CANCEL's consumed slot into the reconciliation write (test_a_retried_cancel_keeps_the_slot_consumed_across_a_restart).
+
+### The policy wait can permanently stall a drained cluster
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:1421  
+**Severity:** important  
+**Accepted, fixed in 1fb39394:** the drain deadline does not apply while a completed drain waits for the policy (test_the_policy_wait_never_turns_a_finished_drain_into_a_stall).
+
+### An obsolete mirror attempt can pass the shutdown gate
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:414, kubernetes/apps/apps/cloud-power/app.py:455  
+**Severity:** important  
+**Accepted, fixed in 1fb39394:** the attempt re-checks desired before PUT and settled() is false while an older attempt is in flight (test_an_obsolete_attempt_never_writes_and_holds_the_gate).
+
+### The mirror budget does not bound response reads
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:344, kubernetes/apps/apps/cloud-power/app.py:236  
+**Severity:** important  
+**Accepted, fixed in 1fb39394:** pve() takes the deadline and enforces it per response chunk, body capped at 1 MiB (test_a_dribbling_response_is_cut_at_the_deadline).
+
+### Large integer timestamps still break manual controls
+
+**Location:** kubernetes/apps/apps/cloud-power/app.py:755  
+**Severity:** important  
+**Accepted, fixed in 1fb39394:** ints are range-checked directly, only floats go through isfinite (test_integer_overflow_in_a_timestamp_is_invalid_not_a_crash).
+
+Round 2 is the last round (convergence rule): every finding was accepted and fixed; nothing is disputed.
