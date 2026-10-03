@@ -191,3 +191,41 @@ Source: `0fb09ca14732e9addaeacda8e63c94bba46ef431`.
 Image: `registry.chifor.me/relay/control-plane@sha256:ffd2fd664bc013ffe03a679cc5811c09011585ba03683f0dd3810c52a941a03c`.
 
 Rollback image: `registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31`.
+
+
+## UI refinement release 0.2.2
+
+Relay 0.2.2 refines typography, spacing, dashboard layout and mobile controls,
+using self-hosted Inter. Existing Harness and Router colors and saved appearance
+preferences are preserved. Clarity is an optional slate and soft blue palette
+in Settings → Appearance, with light, dark and system modes.
+
+Source: `28b204b87a4f75dc2085092a230bcd3cc2009dcb` (Relay PRs #4 and #5).
+Release CI: https://git.chifor.me/cchifor/relay/actions/runs/58900
+
+Image: `registry.chifor.me/relay/control-plane@sha256:d78f03bbb963ae1ba75425c00d0a81f6997cf4e49ea9ae82b9e7979b7cb707ec`.
+
+Provenance: `deployment-images-58900.json` on the
+[Relay v0.2.2 release](https://git.chifor.me/cchifor/relay/releases/tag/v0.2.2).
+
+Rollback image: `registry.chifor.me/relay/control-plane@sha256:ffd2fd664bc013ffe03a679cc5811c09011585ba03683f0dd3810c52a941a03c`.
+
+The release changes presentation and appearance selection, plus synchronized
+release version metadata. Backend, terminal and connector behavior, database
+schemas, Secrets, volumes and routes are unchanged. Existing workers need no
+connector restart or upgrade. Both application and migration containers must
+use the same receipt image digest. Rollback pins the verified 0.2.1 image in
+both containers; no database rollback is required.
+
+This image retains all three previously deployed connector versions (v0.1.2,
+v0.2.0 and v0.2.1) alongside v0.2.2. This deliberately exceeds the old archive's
+three-version retention target to keep every existing pinned download URL
+working during the UI-only rollout. These files live in the immutable image,
+not the release PVC; retiring old URLs requires a separate explicit change.
+
+Validation before publication: typecheck, formatting, production build,
+29 application/browser checks, two Rust tests, unchanged-palette regression
+coverage, and 30 page/viewport visual checks. Tag CI additionally verifies
+clean connector installation and the immutable image. After Flux rollout,
+verify public health/readiness, exact UI/font assets, palette colors and saved
+appearance, plus checksums for current and retained connector downloads.
