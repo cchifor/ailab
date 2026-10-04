@@ -3,6 +3,9 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest.mock import patch
+import io
+import json
 
 _MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "ci-queue-stats.py"
 _spec = importlib.util.spec_from_file_location("ci_queue_stats", _MOD_PATH)
@@ -60,7 +63,7 @@ class Render(unittest.TestCase):
         s = cqs.summarize([], days=7)
         s["days"] = 7
         out = cqs.render(s)
-        self.assertIn("0 completed jobs", out)
+        self.assertIn("0 jobs", out)
         self.assertIn("no samples", out)
 
     def test_unset_timestamps_render_not_typeerror(self):
@@ -101,6 +104,62 @@ class Paged(unittest.TestCase):
         cqs.get = lambda token, path, params=None: pages[params["page"]]
         try:
             self.assertEqual(len(cqs.paged("t", "/x", "jobs")), 45)
+        finally:
+            cqs.get = orig
+
+class Readiness(unittest.TestCase):
+    def test_cli_recognizes_rerun_attempt_without_dispatch_override(self):
+        run = {'id': 1, 'run_attempt': 2, 'path': 'ci.yml@main'}
+        jobs = [{'id': 2, 'created_at': '2026-09-01T00:00:00Z', 'started_at': '2026-10-04T10:11:00Z', 'completed_at': '2026-10-04T10:12:00Z', 'status': 'completed', 'conclusion': 'success'}]
+        output = io.StringIO()
+        with patch.dict(cqs.os.environ, {'GITEA_TOKEN': 'test-only'}), patch.object(cqs, 'runs_since', return_value=[run]), patch.object(cqs, 'paged', return_value=jobs), patch('sys.stdout', output):
+            self.assertEqual(cqs.main(['--json', '--repos', 'o/r']), 0)
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary['wait_s']['n'], 0)
+        self.assertEqual(summary['runner_wait_s']['n'], 0)
+        self.assertEqual(summary['run_s']['p50'], 60)
+
+    def test_scan_bound_returns_partial_rows_with_explicit_error(self):
+        with patch.object(cqs, 'get', return_value={'workflow_runs': [{'id': 1, 'started_at': '2026-10-04T10:00:00Z'}]}):
+            with self.assertRaises(cqs.RunScanLimit) as raised:
+                cqs.runs_since('t', 'o/r', 0, max_pages=1)
+        self.assertEqual(len(raised.exception.runs), 1)
+
+    def test_dependencies_are_not_runner_wait(self):
+        t = '2026-10-04T10:'
+        run = {'id': 1}
+        job = {'id': 2, 'created_at': t+'00:00Z', 'started_at': t+'11:00Z', 'completed_at': t+'12:00Z', 'conclusion': 'success'}
+        row = cqs.job_row('o/r', run, job, [{'completed_at': t+'10:00Z'}])
+        s = cqs.summarize([row], 1)
+        self.assertEqual(s['wait_s']['p50'], 660)
+        self.assertEqual(s['runner_wait_s']['p50'], 60)
+        self.assertEqual(s['dependency_wait_s']['p50'], 600)
+
+    def test_unknown_readiness_does_not_become_zero(self):
+        row = cqs.job_row('o/r', {'id': 1}, {'id': 2, 'created_at': '2026-10-04T10:00:00Z', 'started_at': '2026-10-04T10:11:00Z'})
+        self.assertIsNone(cqs.summarize([row], 1)['runner_wait_s']['p50'])
+
+    def test_rerun_dispatch_replaces_original_creation(self):
+        row = cqs.job_row('o/r', {'id': 1}, {'id': 2, 'created_at': '2026-09-01T00:00:00Z', 'started_at': '2026-10-04T10:11:00Z'}, [], '2026-10-04T10:10:00Z')
+        self.assertEqual(cqs.summarize([row], 1)['runner_wait_s']['p50'], 60)
+
+    def test_cancelled_cost_is_counted_and_clock_skew_not_negative(self):
+        s = cqs.summarize([{'created': 1, 'started': 0, 'completed': 60, 'runner': '', 'conclusion': 'cancelled'}], 1)
+        self.assertEqual(s['runner_minutes'], 1)
+        self.assertEqual(s['outcomes']['cancelled'], 1)
+        self.assertEqual(s['wait_s']['n'], 0)
+
+    def test_known_rerun_without_dispatch_has_unknown_queue(self):
+        row = cqs.job_row('o/r', {'id': 1}, {'id': 2, 'created_at': '2026-09-01T00:00:00Z', 'started_at': '2026-10-04T10:11:00Z'}, [], known_rerun=True)
+        self.assertIsNone(row['created'])
+        self.assertEqual(cqs.summarize([row], 1)['wait_s']['n'], 0)
+
+    def test_old_run_does_not_hide_later_page_recent_rerun(self):
+        pages = {1: {'workflow_runs': [{'id': 30, 'started_at': '2026-09-01T00:00:00Z'}]}, 2: {'workflow_runs': [{'id': 20, 'started_at': '2026-10-04T00:00:00Z'}]}, 3: {'workflow_runs': []}}
+        orig = cqs.get
+        cqs.get = lambda token, path, params: pages[params['page']]
+        try:
+            self.assertEqual([r['id'] for r in cqs.runs_since('t', 'o/r', cqs.parse_ts('2026-10-01T00:00:00Z'))], [20])
         finally:
             cqs.get = orig
 
