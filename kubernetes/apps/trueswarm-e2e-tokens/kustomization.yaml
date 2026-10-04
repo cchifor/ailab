@@ -10,8 +10,14 @@ resources:
 # The script is a real file so scripts/tests/test_trueswarm_e2e_token_sync.py can import it. Hash
 # suffix ON (unlike the pg-sync CA): kustomize rewrites the CronJob and Job references, so a script
 # edit changes the bootstrap Job's template and its force annotation re-runs it at once.
+#
+# The generator name MUST differ from every RBAC resourceName in rbac.yaml: kustomize's nameReference
+# rewrites a Role's resourceNames that match a generated object to its HASHED name. Named after the
+# Lease, it silently turned `get/update leases/trueswarm-e2e-token-sync` into a grant on
+# `trueswarm-e2e-token-sync-<hash>` and every run died with "read of lease ... HTTP 403" (2026-10-04).
+# Pinned by scripts/tests/test_trueswarm_e2e_token_sync.py.
 configMapGenerator:
-  - name: trueswarm-e2e-token-sync
+  - name: trueswarm-e2e-token-sync-script
     namespace: openbao
     files:
       - token_sync.py
