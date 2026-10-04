@@ -260,6 +260,70 @@ check $? "the play asserts the effective policy, not just the file content"
 [ "$(grep -c 'not ansible_check_mode' "$TASKS")" -ge 2 ]
 check $? "the read-back and its assert are both skipped under --check"
 
+# ---------------------------------------------------------------------------
+# [C] who dies: the agent's commands before the agent (dev-worker-1, 2026-10-03/04)
+# ---------------------------------------------------------------------------
+# The cap decides WHERE, the policy decides whether the pane survives, and neither one decides WHO.
+# A cgroup OOM kills the largest task. With dozens of ~250 MB test workers, that task was `claude`
+# itself (~700 MB), at 6G and again at 9G. These checks run the REAL rendered script under BASH_ENV,
+# which is exactly how Claude Code's bash picks it up.
+echo "[C] agent commands outrank the agent for the OOM killer"
+ENV_TMPL="$ROLE/templates/agent-shell-env.sh.j2"
+SETTINGS_TMPL="$ROLE/templates/claude-managed-settings.json.j2"
+ADJ="$(sed -n 's/^dev_worker_agent_oom_score_adj: \([0-9]\+\)$/\1/p' "$DEFAULTS")"
+if [ -z "$ADJ" ] || [ ! -r "$ENV_TMPL" ]; then
+	bad "agent shell env template and dev_worker_agent_oom_score_adj default exist"
+else
+	ENV_SH="$WORK/agent-shell-env.sh"
+	sed "s/{{ dev_worker_agent_oom_score_adj }}/$ADJ/g; /ansible_managed/d" "$ENV_TMPL" >"$ENV_SH"
+	if [ ! -w /proc/self/oom_score_adj ]; then
+		skip "no writable /proc/self/oom_score_adj (not Linux) — cannot drive the real script"
+	else
+		caller="$(cat /proc/self/oom_score_adj)"
+		got="$(BASH_ENV="$ENV_SH" bash -c 'cat /proc/self/oom_score_adj')"
+		[ "$got" = "$ADJ" ]
+		check $? "a bash started under BASH_ENV raises itself to $ADJ (got $got)"
+
+		# Inheritance is the whole point: the kill victim is a grandchild (node, pytest), never the
+		# bash the Bash tool started.
+		got="$(BASH_ENV="$ENV_SH" bash -c 'sh -c "cat /proc/self/oom_score_adj"')"
+		[ "$got" = "$ADJ" ]
+		check $? "its descendants inherit $ADJ (got $got)"
+
+		[ "$(cat /proc/self/oom_score_adj)" = "$caller" ]
+		check $? "the caller (the agent) keeps its own value ($caller)"
+
+		# Never lowers. Lowering needs CAP_SYS_RESOURCE, and a process that chose more keeps it.
+		hi=$((ADJ + 100)); [ "$hi" -gt 1000 ] && hi=1000
+		got="$(bash -c "echo $hi > /proc/self/oom_score_adj && BASH_ENV='$ENV_SH' bash -c 'cat /proc/self/oom_score_adj'")"
+		[ "$got" = "$hi" ]
+		check $? "an already-higher value is left alone ($hi -> $got)"
+
+		# It is sourced INTO the caller's shell: no output, no leftover variable, and nothing that
+		# breaks a `set -euo pipefail` script.
+		out="$(BASH_ENV="$ENV_SH" bash -c 'set -euo pipefail; echo "${__dw_oom_adj-unset}"' 2>&1)"
+		[ "$out" = "unset" ]
+		check $? "silent, leaves no variable behind, safe under set -euo pipefail (got: $out)"
+	fi
+fi
+
+grep -q '"BASH_ENV": "{{ dev_worker_agent_shell_env_path }}"' "$SETTINGS_TMPL" 2>/dev/null
+check $? "managed settings point Claude Code's BASH_ENV at the script"
+
+# Managed settings, not the user's settings.json: that file belongs to the user (claude_statusline.yml
+# merges a single key into it), and the managed file outranks it, so a user edit cannot disarm this.
+grep -q 'dest: /etc/claude-code/managed-settings\.json' "$TASKS" &&
+	grep -q 'validate: python3 -m json.tool %s' "$TASKS"
+check $? "lands in /etc/claude-code/managed-settings.json, JSON-validated before it replaces the file"
+
+# The raised value must clear claude's own 0 by a margin that beats size: at 500 a child gains half the
+# cgroup's limit, so a 250 MB worker outranks a 700 MB agent.
+[ -n "$ADJ" ] && [ "$ADJ" -ge 300 ] && [ "$ADJ" -le 1000 ]
+check $? "dev_worker_agent_oom_score_adj is in [300,1000] (got ${ADJ:-unset})"
+
+grep -q 'Assert agent commands outrank the agent' "$TASKS"
+check $? "the play asserts the raised value in the kernel, not just the file content"
+
 echo
 echo "passed=$PASS failed=$FAIL not-run=$SKIP"
 [ "$FAIL" -eq 0 ]

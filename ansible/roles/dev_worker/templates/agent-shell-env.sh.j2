@@ -1,0 +1,17 @@
+# {{ ansible_managed }} (role: dev_worker)
+# Sourced via BASH_ENV by every non-interactive bash that Claude Code starts: Bash tool commands,
+# hooks and the status line. BASH_ENV is set in /etc/claude-code/managed-settings.json, so it is only
+# in the environment of `claude` and its descendants. A plain login, a tmux pane and a cron job do
+# not see it.
+#
+# It raises this shell's oom_score_adj, and everything the command starts inherits it. Under memory
+# pressure the kernel then kills a test worker before it kills the agent that started it. See
+# dev_worker_agent_oom_score_adj in defaults/main.yml for the incident and the arithmetic.
+#
+# This file is sourced into the caller's shell, so it must not print, must not exit, and must not
+# leave variables behind. It never lowers the value: that needs CAP_SYS_RESOURCE, and a process
+# that already chose more (headless Chrome uses 300) keeps its own.
+if read -r __dw_oom_adj < /proc/self/oom_score_adj 2>/dev/null && [ "$__dw_oom_adj" -lt {{ dev_worker_agent_oom_score_adj }} ] 2>/dev/null; then
+	echo {{ dev_worker_agent_oom_score_adj }} > /proc/self/oom_score_adj 2>/dev/null || :
+fi
+unset __dw_oom_adj

@@ -136,3 +136,69 @@
   loop_control:
     label: "{{ item.item }}"
   when: not ansible_check_mode
+
+# ---- who dies: the agent's commands before the agent (dev-worker-1, 2026-10-03/04) ----
+# The slice cap decides WHERE a kill happens, and OOMPolicy=continue decides that the pane survives
+# it. Neither one decides WHO dies. The kernel picks the largest task, and once an orchestrating
+# session fans out into dozens of ~250 MB test workers, that task is `claude` (~700 MB). It killed the
+# agent at 6G and again at 9G. Every non-interactive bash Claude Code starts now sources a script
+# that raises its oom_score_adj, so the commands outrank the agent that launched them.
+# Managed settings rather than the user's settings.json: those belong to the user (see
+# claude_statusline.yml), and the managed file outranks them, so a user edit cannot quietly disarm
+# this. It reaches the interactive sessions and the claude-job@/agentforge units alike. A running
+# `claude` reads it only at start, so sessions that are already open keep the old behaviour until
+# they are restarted.
+- name: Ensure the dev-worker lib dir
+  ansible.builtin.file:
+    path: "{{ dev_worker_agent_shell_env_path | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Install the agent shell env (raises oom_score_adj for every command Claude Code runs)
+  ansible.builtin.template:
+    src: agent-shell-env.sh.j2
+    dest: "{{ dev_worker_agent_shell_env_path }}"
+    mode: "0644"
+
+- name: Ensure the Claude Code managed-settings dir
+  ansible.builtin.file:
+    path: /etc/claude-code
+    state: directory
+    mode: "0755"
+
+- name: Point Claude Code's shells at it (BASH_ENV via managed settings)
+  ansible.builtin.template:
+    src: claude-managed-settings.json.j2
+    dest: /etc/claude-code/managed-settings.json
+    mode: "0644"
+    validate: python3 -m json.tool %s
+
+# Prove it in the kernel rather than in the file: a child bash started with BASH_ENV must report
+# the raised value, and the caller must not. Run as the admin user, because that is who runs
+# `claude`. Skipped under --check for the same reason as the read-back above, since the script is
+# not written yet.
+- name: Read back oom_score_adj through the agent shell env (child, then caller)
+  become: true
+  become_user: "{{ dev_worker_admin_user }}"
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -c
+      - BASH_ENV={{ dev_worker_agent_shell_env_path }} bash -c 'cat /proc/self/oom_score_adj'; cat /proc/self/oom_score_adj
+  changed_when: false
+  when: not ansible_check_mode
+  register: dev_worker_agent_oom_probe
+
+- name: Assert agent commands outrank the agent for the OOM killer
+  ansible.builtin.assert:
+    that:
+      - dev_worker_agent_oom_probe.stdout_lines | length == 2
+      - dev_worker_agent_oom_probe.stdout_lines[0] | int >= dev_worker_agent_oom_score_adj
+      - dev_worker_agent_oom_probe.stdout_lines[1] | int < dev_worker_agent_oom_score_adj
+    fail_msg: >-
+      oom_score_adj read back as {{ dev_worker_agent_oom_probe.stdout_lines | default([]) }}
+      (child, caller); expected child >= {{ dev_worker_agent_oom_score_adj }} and the caller below
+      it. Without this, a test fan-out in a Claude Code pane gets the agent killed instead of a
+      test worker (the dev-worker-1 2026-10-03/04 failure).
+    quiet: true
+  when: not ansible_check_mode
