@@ -20,8 +20,9 @@ admin Access gate). Operator how-to: `docs/runbooks/trueswarm-e2e-tokens.md`.
   operator-supplied `ADMIN_E2E_STORAGE_STATE`.
 - **The two apps authenticate differently.**
   - `trueswarm.chifor.me` has no Cloudflare gate. It runs its own Authelia OIDC login (`one_factor`,
-    implicit consent). A human session is a `credentials` row, accepted as the `trueswarm_session`
-    cookie **or** as `Authorization: Bearer`.
+    implicit consent). A human session is a `credentials` row, accepted only as the
+    `trueswarm_session` cookie (`authenticate()` refuses a session sent as `Authorization: Bearer`:
+    "Browser sessions must use cookies"); cookie-authenticated writes also send `x-trueswarm-csrf: 1`.
   - `trueswarm-admin.chifor.me` is behind Cloudflare Access: dedicated IdP, named email, RFC 8176
     `mfa` claim, 1 h session. The origin verifies `Cf-Access-Jwt-Assertion` itself, then runs its own
     OIDC login with `trueswarm_admin_mfa` (`two_factor`). Admin sessions are bound to the Access

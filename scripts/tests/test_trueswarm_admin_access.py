@@ -62,6 +62,8 @@ import os,sys,pathlib
 args=sys.argv[1:]
 cmd=args[1]
 with open(os.environ['FIXTURE_CALLS'],'a') as out:out.write(cmd+'\\n')
+if cmd=='plan':
+ with open(os.environ['FIXTURE_CALLS']+'.plan-args','w') as out:out.write(' '.join(args))
 assert os.environ['TF_VAR_enable_trueswarm_admin']=='true'
 assert os.environ['TF_VAR_publish_trueswarm_admin']==os.environ.get('FIXTURE_PUBLISH','false')
 if cmd=='plan':
@@ -260,6 +262,7 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         # The shape a real provider-5 plan has: full before/after for the application, the new policy's
         # id unknown until apply, the human policy's id known on its no-op change.
         resources[1]['change']['before'] = resources[1]['change']['after'] = {'id': 'human-policy-id', 'decision': 'allow'}
+        resources.pop()  # targeted plan: the DNS record is not in it
         common = {'aud': AUDIENCE, 'domain': 'trueswarm-admin.chifor.me', 'allowed_idps': ['idp-id'],
                   'session_duration': '1h', 'auto_redirect_to_identity': True}
         human = {'id': 'human-policy-id', 'precedence': 1}
@@ -267,11 +270,14 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         app['actions'] = ['update']
         app['before'] = dict(common, policies=[dict(human)])
         app['after'] = dict(common, policies=[dict(human), {'precedence': 2}])
-        app['after_unknown'] = {'policies': [{}, {'id': True}]}
+        app['after_unknown'] = {'policies': [{}, {'id': True}], 'allowed_idps': [False],
+                                'destinations': [{}], 'self_hosted_domains': [False]}
         token = self.resource('x', address='cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[0]')
         token['change']['after'], token['change']['after_unknown'] = {'name': 'trueswarm-admin-e2e'}, {'id': True, 'client_id': True}
         policy = self.resource('x', address='cloudflare_zero_trust_access_policy.trueswarm_admin_e2e[0]')
-        policy['change']['after'] = {'decision': 'non_identity', 'include': [{'service_token': {}}]}
+        policy['change']['after'] = {'decision': 'non_identity', 'require': None, 'exclude': None, 'include': [
+            dict({k: None for k in ('everyone', 'email', 'any_valid_service_token', 'group', 'ip', 'login_method')},
+                 service_token={})]}
         policy['change']['after_unknown'] = {'id': True, 'include': [{'service_token': {'token_id': True}}]}
         resources += [token, policy]
         ailab = self.root / 'ailab'
@@ -312,17 +318,51 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         self.assertEqual(before, self.git('rev-parse', 'HEAD'))
         self.assertEqual('', self.git('status', '--porcelain'))
 
-    def test_e2e_rejects_changes_to_the_human_gate_or_dns(self):
-        for index in (0, 1, 3):  # identity provider, human policy, DNS record
+    def test_e2e_rejects_changes_to_the_human_gate(self):
+        for index in (0, 1):  # identity provider, human policy
             with self.subTest(index=index):
                 resources = self.e2e_fixture()
                 resources[index]['change']['actions'] = ['update']
                 self.plan.write_text(json.dumps({'resource_changes': resources}))
                 self.assert_refused_before_apply('--apply-e2e-access')
 
-    def test_e2e_requires_the_published_dns_record(self):
+    def with_dns(self, change):
         resources = self.e2e_fixture()
-        self.plan.write_text(json.dumps({'resource_changes': resources[:3] + resources[4:]}))
+        resources.append({'address': 'cloudflare_dns_record.trueswarm_admin[0]', 'mode': 'managed', 'change': change})
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+
+    def test_e2e_accepts_the_dns_record_untouched(self):
+        self.with_dns({'actions': ['no-op']})
+        self.assertEqual(self.run_helper('--apply-e2e-access').returncode, 0)
+
+    def test_e2e_refuses_a_changed_dns_record(self):
+        self.with_dns({'actions': ['update']})
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_refuses_importing_the_dns_record(self):
+        self.with_dns({'actions': ['no-op'], 'importing': {'id': 'zone/record'}})
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_plans_only_its_own_resources(self):
+        self.e2e_fixture()
+        self.assertEqual(self.run_helper('--apply-e2e-access').returncode, 0)
+        args = (self.root / 'calls.plan-args').read_text().split()
+        self.assertEqual(sorted(a for a in args if a.startswith('-target=')), [
+            '-target=cloudflare_zero_trust_access_application.trueswarm_admin',
+            '-target=cloudflare_zero_trust_access_identity_provider.trueswarm_admin',
+            '-target=cloudflare_zero_trust_access_policy.trueswarm_admin',
+            '-target=cloudflare_zero_trust_access_policy.trueswarm_admin_e2e',
+            '-target=cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e'])
+
+    def test_other_modes_do_not_target(self):
+        self.assertEqual(self.run_helper().returncode, 0)
+        self.assertNotIn('-target', (self.root / 'calls.plan-args').read_text())
+
+    def test_an_unrelated_import_is_a_change_in_every_mode(self):
+        resources = self.e2e_fixture()
+        resources.append({'address': 'cloudflare_dns_record.tunnel["relay"]', 'mode': 'managed',
+                          'change': {'actions': ['no-op'], 'importing': {'id': 'zone/record'}}})
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
         self.assert_refused_before_apply('--apply-e2e-access')
 
     def test_e2e_rejects_creating_or_replacing_the_application(self):
@@ -398,6 +438,9 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
 
     def test_e2e_rejects_a_widened_or_identity_e2e_policy(self):
         for change in ({'decision': 'allow'}, {'include': [{'everyone': {}}]},
+                       {'include': [{'everyone': {}, 'service_token': {}}]},
+                       {'include': [{'any_valid_service_token': {}, 'service_token': {}}]},
+                       {'require': [{'email': {'email': 'x@y.z'}}]},
                        {'include': [{'service_token': {}}, {'email': {'email': 'x@y.z'}}]}):
             with self.subTest(change=change):
                 resources = self.e2e_fixture()

@@ -43,7 +43,21 @@ if [[ "$1" == --apply-e2e-access ]]; then
   sync="$ailab_root/kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml"
   [[ -z "$(git -C "$ailab_root" status --porcelain -- "$seeds" "$sync")" ]] || { echo "Commit or discard local changes to the seed file and token-sync.yaml first." >&2; exit 1; }
 fi
-tofu -chdir="$cloudflare_root" plan -input=false -out="$plan_dir/access.plan"
+targets=()
+if [[ "$1" == --apply-e2e-access ]]; then
+  # Plan ONLY the e2e additions (and, by dependency, the gate they attach to). Pending work owned by
+  # someone else in this shared state (e.g. a DNS-record import) is neither applied nor allowed to
+  # block this; it stays visible in a plain `tofu plan`. The guard below still checks every address.
+  # The IdP and human policy are targeted EXPLICITLY (not left to the dependency graph) so the guard's
+  # "both present and unchanged" check never depends on how the provider wires references.
+  targets=(-target=cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e
+           -target=cloudflare_zero_trust_access_policy.trueswarm_admin_e2e
+           -target=cloudflare_zero_trust_access_application.trueswarm_admin
+           -target=cloudflare_zero_trust_access_identity_provider.trueswarm_admin
+           -target=cloudflare_zero_trust_access_policy.trueswarm_admin)
+fi
+# ${targets[@]+...}: an empty array under `set -u` is "unbound" on bash < 4.4 (macOS ships 3.2).
+tofu -chdir="$cloudflare_root" plan -input=false ${targets[@]+"${targets[@]}"} -out="$plan_dir/access.plan"
 tofu -chdir="$cloudflare_root" show -json "$plan_dir/access.plan" > "$plan_dir/access.json"
 python3 - "$plan_dir/access.json" "$1" "$admin_checkout/deploy/ailab/workloads.yaml" <<'PYGUARD'
 import hashlib,json,pathlib,re,sys
@@ -59,7 +73,8 @@ changes=plan.get('resource_changes',[])
 unexpected=[]
 for resource in changes:
     actions=resource['change']['actions']
-    if actions==['no-op'] or resource.get('mode')=='data':continue
+    # An import shows as ['no-op'] with change.importing set: it still writes state, so it counts.
+    if (actions==['no-op'] and not resource['change'].get('importing')) or resource.get('mode')=='data':continue
     if resource['address'] not in allowed or 'delete' in actions:unexpected.append(resource['address'])
 if unexpected:raise SystemExit('Refusing unrelated changes/deletions: '+', '.join(unexpected))
 def gitops_audience_matches(audience):
@@ -72,9 +87,12 @@ if e2e:
     def blank(v):
         return v in (None,'',False) or v==[] or v=={}
     by={r['address']:r['change'] for r in changes}
-    stay=(gates-{APP})|{DNS}
-    if any(a not in by or by[a]['actions']!=['no-op'] for a in stay):
-        raise SystemExit('E2E mode requires the existing IdP, human policy and published DNS record, all unchanged')
+    if any(a not in by or by[a]['actions']!=['no-op'] for a in gates-{APP}):
+        raise SystemExit('E2E mode requires the existing IdP and human policy, both unchanged')
+    # The DNS record is outside the targeted plan (it depends on the application, not the reverse);
+    # if a future provider pulls it in, it must still be untouched.
+    if DNS in by and (by[DNS]['actions']!=['no-op'] or by[DNS].get('importing')):
+        raise SystemExit('E2E mode must not change or import the published DNS record')
     if APP not in by or by[APP]['actions'] not in (['update'],['no-op']):
         raise SystemExit('E2E mode may only update the existing Access application in place')
     app=by[APP]
@@ -112,8 +130,10 @@ if e2e:
         raise SystemExit('The added application policy id is unknown but no e2e policy is being created')
     pafter,plater=policy.get('after') or {},policy.get('after_unknown') or {}
     include=pafter.get('include') or []
+    # Provider 5 lists every selector in an include entry, null except the one set. Only null means
+    # unset: an EMPTY object is meaningful (`everyone = {}` admits everyone), so it must be refused.
     token_id=(by[TOKEN].get('after') or {}).get('id')
-    if pafter.get('decision')!='non_identity' or len(include)!=1 or set(include[0])-{'service_token'} \
+    if pafter.get('decision')!='non_identity' or len(include)!=1 or {k for k,v in include[0].items() if v is not None}-{'service_token'} \
             or any(not blank(pafter.get(k)) for k in ('exclude','require')):
         raise SystemExit('The e2e policy must be non_identity and include only the e2e service token')
     ref=(include[0].get('service_token') or {}).get('token_id')
