@@ -417,3 +417,42 @@ Rollback restores `registry.chifor.me/relay/control-plane@sha256:1ce1e70eadaccf0
 in both containers, `relay-0.3.0-ci-20261003` and source
 `dafe4de8ccbcdfa4f4a11fdc99972b9481c26ea3` through a reviewed GitOps PR.
 No database restore or connector restart is required to roll back this UI release.
+
+
+## Agent deletion and sorting release 0.3.3
+
+Source: `05a07dc4d373f028388309adc7b635af4a7d4d8d` ([Relay PR #10](https://git.chifor.me/cchifor/relay/pulls/10)).
+Image: `registry.chifor.me/relay/control-plane@sha256:5ad2ab3aada9784875c652fda59fcfdb89994bf14ad1a0b987b8a8804b50a3f3` in both the application and migration containers.
+Provenance: [deployment-images-63803.json](https://git.chifor.me/cchifor/relay/releases/download/v0.3.3/deployment-images-63803.json),
+from successful [release CI 63803](https://git.chifor.me/cchifor/relay/actions/runs/63803).
+All previous pinned connector downloads, including v0.3.1, are retained.
+
+Administrators can confirm **Agents → ⋯ → Delete agent…** to remove the Relay
+record and saved-layout references. Viewers and control leases are closed;
+the host, tmux process, other agents, and historical Activity events remain.
+Migration 004 adds the tenant-isolated `agent_tombstones` table with forced RLS
+and grants the existing runtime role access. Deleted pane identities are
+suppressed during both automatic discovery and explicit registration; new panes
+can register normally. The existing coordinated backup gate runs before the
+additive migration. Connector behavior is unchanged and hosts need no upgrade.
+
+Column headers now cycle ascending, descending, then unsorted. The third click
+restores default attention-first ordering, removes explicit sort parameters,
+and displays the two-arrow icon. Menus fit short/mobile viewports.
+
+Validation includes permissions and tenant boundaries, lease/layout cleanup,
+retained audit history, suppression across app/host restarts, stale broker-work
+fencing, and migration under a restricted non-bypass owner. Real API,
+PostgreSQL, Rust connector and tmux Playwright coverage verifies deletion,
+cancellation, viewer restrictions, another browser's immediate update,
+desktop/mobile layouts, preserved worker processes and all five sort cycles.
+Production acceptance opens and cancels Delete on existing records; it must
+not delete users' agents merely to verify the UI. Check exact release/assets,
+health/readiness, retained downloads and browser errors after reconciliation.
+
+Rollback pins `registry.chifor.me/relay/control-plane@sha256:d089449d0185dfa86b751f21017d6810f3d16afabb978689f78a0c942ab1c2df`
+in both containers and restores `relay-0.3.1-ci-20261004` with source
+`1a94684350342a41c5a95c8e742a86a49261af3e` through a reviewed PR. Keep migration
+004's table in place; do not restore an older database just to roll back the
+application. Older code does not honor deletion suppression, so a previously
+deleted pane may be rediscovered while running the old release.
