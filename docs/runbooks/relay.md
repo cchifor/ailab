@@ -456,3 +456,44 @@ in both containers and restores `relay-0.3.1-ci-20261004` with source
 004's table in place; do not restore an older database just to roll back the
 application. Older code does not honor deletion suppression, so a previously
 deleted pane may be rediscovered while running the old release.
+
+
+## Host deletion release 0.3.4
+
+Source: `2e02ba4c281de754065a77ac221b3352474b2536` ([Relay PR #11](https://git.chifor.me/cchifor/relay/pulls/11)).
+Image: `registry.chifor.me/relay/control-plane@sha256:6469aa151ecc13ec7f3fedaeb8de9c103fd41f9ad37f3878fad6a81a51dacb23` in both the application and migration containers.
+Provenance: [deployment-images-64003.json](https://git.chifor.me/cchifor/relay/releases/download/v0.3.4/deployment-images-64003.json),
+from successful [release CI 64003](https://git.chifor.me/cchifor/relay/actions/runs/64003).
+All previous published connector downloads through v0.3.3 are retained.
+
+Administrators can confirm **Agents → ⋯ → Delete host…** on a host or one of
+its agent rows. Deletion removes the registration, associated agents, leases
+and saved-layout entries, closes viewers and revokes connector access.
+Worker processes and tmux sessions keep running; historical Activity remains
+filterable by the removed host. Empty approved/blocked hosts are labeled
+**Registered host** instead of **Host access request**.
+
+Migration 005 adds `connector_tombstones` with forced tenant RLS and grants
+the existing runtime role access. It stores only deleted installation IDs,
+credential hashes and deletion times. Enrollment retries serialize with host
+deletion and reject either a retired ID or credential. To reconnect intentionally,
+use a fresh connector `--state` path and request new administrator approval.
+Hosts require no connector upgrade. The existing coordinated database/artifact
+backup and verification gate runs before this additive migration.
+
+Validation covers roles and tenant boundaries, reviewed revisions, all host
+states, lease/layout cleanup, retained audit history, concurrent retries,
+restart suppression and restricted-role migration. Real API/PostgreSQL/Rust/tmux
+Playwright tests delete empty and live hosts on desktop/mobile, verify
+cancellation and viewer restrictions, immediate cross-browser removal,
+unchanged tmux process IDs, and a rejected access request from the restarted
+connector. Production acceptance cancels existing-host confirmations and checks
+health/readiness, exact release/UI/download hashes, labels and sort cycles.
+It must not delete user hosts merely to validate the release.
+
+Rollback pins `registry.chifor.me/relay/control-plane@sha256:5ad2ab3aada9784875c652fda59fcfdb89994bf14ad1a0b987b8a8804b50a3f3`
+in both containers and restores `relay-0.3.3-ci-20261004` with source
+`05a07dc4d373f028388309adc7b635af4a7d4d8d` through a reviewed PR. Leave migration
+005 in place; do not restore an old database merely to roll back code. Older
+code ignores connector tombstones, so a deleted installation could reappear
+as a pending request during rollback; approval is still required.
