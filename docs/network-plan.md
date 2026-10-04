@@ -29,10 +29,10 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.1` | LAN gateway | — | router |
 | `.2 / .3 / .4` | Proxmox hosts `ai-node1/2/3` | — | `inventory/hosts.yml` |
 | `.5 / .6` | 🔒 **cloudlab** CI runner VMs `cloud-ci-7/8` (cloud3, fourth and fifth; placed on measured load 2026-09-30, disks on `local-nvme`) | 6107–6108 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
-| `.7` | **free (static)** | — | — |
+| `.7` | 🔒 **cloudlab** CI runner VM `cloud-ci-12` (cloud3, sixth; placed on measured load 2026-10-04, disk on `local-nvme`) | 6112 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.8`–`.11` | Dev-worker VMs `dev-worker-1..4` — **slot ≠ vmid** since the 2026-09-23 re-slot: `.10` = `dev-worker-3` = vmid 4204, `.11` = `dev-worker-4` = vmid 4205 | 4201, 4202, 4204, 4205 | `kubernetes/infra/dev-workers/variables.tf` |
-| `.12` | **free (static)** — was `dev-worker-5`; its VM 4205 moved to `.11` as `dev-worker-4` on 2026-09-23 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
-| `.13` | **free (static)** — was `dev-worker-6`, retired 2026-09-21 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | — | — |
+| `.12` | 🔒 **cloudlab** CI runner VM `cloud-ci-13` (cloud3, seventh; 2026-10-04, disk on `local-nvme`) — was `dev-worker-5` until the 2026-09-23 re-slot | 6113 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.13` | 🔒 **cloudlab** CI runner VM `cloud-ci-9` (cloud2, first; cloud2's BIOS SVM was enabled 2026-10-04) — was `dev-worker-6`, retired 2026-09-21 | 6109 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.14`–`.18` | CI runner VMs `ci-runner-1..5` (GitHub + Gitea Actions) | 4101–4105 | `kubernetes/infra/runners/variables.tf` |
 | `.19` | CI runner VM `ci-runner-6` | 4106 | `kubernetes/infra/runners/variables.tf` |
 | `.20 / .21 / .22` | 🔒 **cloudlab** GPU hosts `cloud1/2/3` (bare metal, static) | — | `../cloudlab/inventory/hosts.yml` |
@@ -51,19 +51,19 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.39` | **RESERVED** for Talos env-node `talos-env-node-2` (ai-node3; NOT built — #835 is parked behind #972, gate G3b). Held here so the address can't be handed out again while the PR waits: its first claim, `.38`, was only in the unmerged branch and went to `cloud-win-1` (#987) | 4402 (reserved — no VM yet) | #835 → `kubernetes/infra/env-pool/variables.tf` |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
-| `.44` | **free (static)** — was AI LLM LXC `ai-llm-1` (5001), destroyed 2026-10-02 (`tofu apply` after #1034; config and disk gone, no ping reply) | — | — |
+| `.44` | 🔒 **cloudlab** CI runner VM `cloud-ci-10` (cloud2, second; 2026-10-04) — was AI LLM LXC `ai-llm-1` (5001), destroyed 2026-10-02 | 6110 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.45 / .46` | AI LLM LXCs `ai-llm-2/3` | 5002–5003 | `kubernetes/infra/ai-lxc/variables.tf` |
 | `.47 / .48 / .49` | Talos agent-node VMs `agent-node-1/2/3` (ADR 0019) | 4301–4303 | `kubernetes/infra/agent-nodes/variables.tf` |
-| `.50` | **free (static)** | — | — |
+| `.50` | 🔒 **cloudlab** CI runner VM `cloud-ci-11` (cloud2, third; 2026-10-04, disk on `local-nvme`) | 6111 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.7`, `.12`, `.13`, `.44`, `.50`** (5 addresses; `.44` freed 2026-10-02 by
-destroying `ai-llm-1`; `.38` went to the cloudlab
-Windows VM `constantin-win-01` on 2026-09-30 and `.39` is reserved for `talos-env-node-2` (#835); `.29`, `.30` and
-`.32`–`.35` went to the cloudlab CI runner VMs on 2026-09-23, `.5`/`.6` on 2026-09-30;
-`.13` freed 2026-09-21 by retiring `dev-worker-6`, `.12` freed 2026-09-23 by the dev-worker re-slot —
-its VM 4205 is `dev-worker-4` on `.11` now).
-Nothing else in `.2`–`.50` is available.
+**Free static space: none** (since 2026-10-04, when the last five — `.7`, `.12`, `.13`, `.44`, `.50` —
+went to the cloudlab CI runner VMs `cloud-ci-9..13`; `.29`, `.30` and `.32`–`.35` went to cloud runners
+on 2026-09-23, `.5`/`.6` on 2026-09-30; `.38` to the cloudlab Windows VM `constantin-win-01` on
+2026-09-30; `.39` is reserved for `talos-env-node-2` (#835)).
+Nothing in `.2`–`.50` is available. The next static address needs either a release (a retired guest's
+row going back to free) or a deliberate shrink of the router's DHCP pool — never an address from `.51`+
+while the router can still lease it.
 
 > **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+
 > can be leased to a random client — exactly the collision that pushed the AI LXCs off `.51`–`.53`

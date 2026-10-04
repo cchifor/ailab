@@ -259,8 +259,11 @@ agent-nodes** (`kubernetes/infra/agent-nodes`, now live at .47/.48/.49). `infra/
 
 ## 9. Cloud opportunistic runners (`cloud-ci-N` on the cloudlab cluster — ADR 0032)
 
-Extra act_runners on the **cloudlab** Proxmox cluster (cloud1/cloud3 today; cloud2 once its BIOS SVM
-is really on), same label and same roles as the pool above, so they take the same jobs. The cloud
+Extra act_runners on the **cloudlab** Proxmox cluster (cloud1, cloud2 and cloud3 — 12 active since
+2026-10-04, plus cloud-ci-6 in quarantine), same label and same roles as the pool above, so they take
+the same jobs. cloud2 hosts runners only since its BIOS SVM was enabled on 2026-10-04 (Gigabyte TRX40
+AORUS MASTER: Tweaker → Advanced CPU Settings → SVM Mode, **default Disabled** — a CMOS clear or
+Load Optimized Defaults turns it off again; the cloudlab runbook has the check). The cloud
 hosts are **powered off at night by a human**, so these runners are `offline` in Gitea for hours
 every day **by design** — nothing registers or deregisters at runtime: act_runner registration is
 persistent, Gitea only hands a task to a runner that polls, and a runner is `offline` one minute
