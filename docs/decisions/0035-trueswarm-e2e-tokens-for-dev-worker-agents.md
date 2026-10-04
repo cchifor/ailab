@@ -68,7 +68,7 @@ token, when anything is missing, or when `FORCE_ROTATE=1`. A rotated slot's old 
 one hour, so an in-flight run survives.
 
 **Failure handling.** Both Secret writes are compare-and-swap on `resourceVersion`, so a concurrent run
-exits before publishing anything. A run that dies between the two writes self-heals on the next run.
+exits before publishing anything. A Kubernetes Lease serialises whole runs (CronJob, bootstrap Job, hand-made Jobs) from the first read through OpenBao publication, and expires after 20 minutes, longer than the Job deadline, so a killed run frees it. Under it, a publication fence re-reads the Secrets and publishes only tokens that are still each app's current one. A run that dies between the two writes self-heals on the next run.
 Nothing ever logs a token or a hash. The vault login is k8s-auth role `trueswarm-e2e-sync`, sharing the
 `k8stoken-sync` policy for the same reason `platform-pg-sync` does.
 

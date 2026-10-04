@@ -161,6 +161,7 @@ def config_from_env(env):
         "force": env.get("FORCE_ROTATE", "0") == "1",
         "role": env.get("ADMIN_ROLE", "operator"),
         "access_ids": env.get("ADMIN_ACCESS_CLIENT_IDS", "").split(),
+        "lease_namespace": env.get("LEASE_NAMESPACE", "openbao"),
     }
     if not cfg["live"]:
         sys.exit("LIVE_SLOTS is empty; refusing to run")
@@ -182,7 +183,69 @@ def read_secret(k8s, ns):
     sys.exit(f"read of {ns}/{SECRET_NAME} returned HTTP {st}")
 
 
-def sync(cfg, k8s, bao, sleep, now, log):
+LEASE_NAME = "trueswarm-e2e-token-sync"
+# Longer than the Job's activeDeadlineSeconds (900): a run that is still alive always holds the lease,
+# and a run killed mid-flight frees it by expiry without an operator.
+LEASE_SECONDS = 1200
+
+
+def _lease_path(ns, name=""):
+    return f"/apis/coordination.k8s.io/v1/namespaces/{ns}/leases" + (f"/{name}" if name else "")
+
+
+def acquire_lease(k8s, ns, holder, now):
+    """Take the run lease or exit. Returns the resourceVersion we hold it at."""
+    spec = {"holderIdentity": holder, "leaseDurationSeconds": LEASE_SECONDS,
+            "acquireTime": _micro(now), "renewTime": _micro(now)}
+    st, obj = k8s(_lease_path(ns, LEASE_NAME))
+    if st == 404:
+        st, obj = k8s(_lease_path(ns), "POST", {"apiVersion": "coordination.k8s.io/v1", "kind": "Lease",
+                                              "metadata": {"name": LEASE_NAME, "namespace": ns}, "spec": spec})
+    elif st == 200:
+        cur = obj.get("spec") or {}
+        renewed = _parse_micro(cur.get("renewTime"))
+        if cur.get("holderIdentity") and renewed is not None and renewed + int(cur.get("leaseDurationSeconds") or 0) > now:
+            sys.exit(f"another run ({cur['holderIdentity']}) holds the {LEASE_NAME} lease; nothing done, retry later")
+        obj["spec"] = spec
+        st, obj = k8s(_lease_path(ns, LEASE_NAME), "PUT", obj)  # resourceVersion carried: a CAS
+    else:
+        sys.exit(f"read of lease {ns}/{LEASE_NAME} returned HTTP {st}")
+    if st == 409:
+        sys.exit(f"lost the race for the {LEASE_NAME} lease; nothing done, retry later")
+    if st not in (200, 201):
+        sys.exit(f"could not take lease {ns}/{LEASE_NAME}: HTTP {st}")
+    return obj
+
+
+def release_lease(k8s, ns, held, log):
+    """Best effort: a failed release only delays the next run until LEASE_SECONDS pass."""
+    held["spec"]["holderIdentity"] = None
+    st, _ = k8s(_lease_path(ns, LEASE_NAME), "PUT", held)
+    if st not in (200, 201):
+        log(f"lease release returned HTTP {st}; it expires on its own")
+
+
+def _micro(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime(t))
+
+
+def _parse_micro(value):
+    if not value:
+        return None
+    import calendar
+    return calendar.timegm(time.strptime(value[:19], "%Y-%m-%dT%H:%M:%S"))
+
+
+def sync(cfg, k8s, bao, sleep, now, log, holder="run"):
+    """One run, serialised by a Lease. Everything between taking and releasing it is `_sync`."""
+    held = acquire_lease(k8s, cfg["lease_namespace"], holder, now)
+    try:
+        _sync(cfg, k8s, bao, sleep, now, log)
+    finally:
+        release_lease(k8s, cfg["lease_namespace"], held, log)
+
+
+def _sync(cfg, k8s, bao, sleep, now, log):
     """One run. `k8s(path, method, payload)` and `bao(path, method, payload, ctype)` return
     (status, json); they are injected so the tests can interleave two runs against one fake cluster."""
     mount, slots = cfg["mount"], [f"dev-worker-{n}" for n in cfg["live"]]
@@ -266,14 +329,13 @@ def sync(cfg, k8s, bao, sleep, now, log):
     # ---- Publish to OpenBao, only after the apps can accept the new tokens ----------------------
     log(f"waiting {cfg['propagation']}s for kubelet to refresh the mounted Secrets")
     sleep(cfg["propagation"])
-    # PUBLICATION FENCE. The CAS above only orders the Secret WRITES. A run that wrote its Secrets and
-    # paused here can be overtaken: a second run reads those Secrets while OpenBao still holds the old
-    # tokens, rotates again and publishes. Publishing now would put OUR tokens in OpenBao while the
-    # apps hold the other run's as current (ours only as a 1 h overlap). So re-read, and publish only
-    # if every token this run minted is still its app's current one; otherwise the later run owns
-    # publication and this one stops. The remaining window (another run writing its Secrets between
-    # this check and the PATCH below) cannot leave a wrong final state: that run must itself sleep
-    # `propagation` before publishing, so its tokens reach OpenBao after ours and match its Secrets.
+    # PUBLICATION FENCE, a second layer under the run Lease. The Lease is what serialises runs: the
+    # Secret CAS above orders only the writes, and without the Lease a run overtaken during this wait
+    # (or stalled between the check below and its PATCH) could publish over a later run's tokens,
+    # leaving its own only as 1 h overlap entries. The fence still re-reads both Secrets and
+    # publishes only if every token this run minted is still its app's CURRENT one, so a Lease that
+    # expired under a hung run (LEASE_SECONDS > the Job's activeDeadlineSeconds makes that a kill, not
+    # a pause) cannot publish stale tokens either.
     reread = {app: read_secret(k8s, ns)[1] for app, (ns, _, _, _) in APPS.items()}
     for app, slot, digest in fence:
         tokens = (reread[app].get(slot) or {}).get("tokens") or []
@@ -319,7 +381,8 @@ def main():
     def k8s(path, method="GET", payload=None):
         return call(f"{K8S}{path}", k8s_ctx, method, payload, sa_jwt)
 
-    sync(cfg, k8s, bao, time.sleep, int(time.time()), lambda line: print(line, flush=True))
+    holder = os.environ.get("HOSTNAME", "unknown-pod")
+    sync(cfg, k8s, bao, time.sleep, int(time.time()), lambda line: print(line, flush=True), holder)
 
 
 if __name__ == "__main__":

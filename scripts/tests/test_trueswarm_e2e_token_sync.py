@@ -195,6 +195,8 @@ class FakeCluster:
         self.kv_writes = 0
 
     def k8s(self, path, method="GET", payload=None):
+        if "/leases" in path:
+            return self.lease_api(method, payload)
         parts = path.strip("/").split("/")  # api v1 namespaces <ns> secrets [<name>]
         ns = parts[3]
         if method == "GET":
@@ -210,6 +212,20 @@ class FakeCluster:
         obj["metadata"]["resourceVersion"] = str(self.rv)
         self.secrets[ns] = obj
         return (201 if method == "POST" else 200), obj
+
+    lease = None
+
+    def lease_api(self, method, payload):
+        if method == "GET":
+            return (200, json.loads(json.dumps(self.lease))) if self.lease else (404, {})
+        if method == "POST" and self.lease:
+            return 409, {}
+        if method == "PUT" and (not self.lease or payload["metadata"].get("resourceVersion") != self.lease["metadata"]["resourceVersion"]):
+            return 409, {}
+        self.rv += 1
+        self.lease = json.loads(json.dumps(payload))
+        self.lease["metadata"]["resourceVersion"] = str(self.rv)
+        return (201 if method == "POST" else 200), json.loads(json.dumps(self.lease))
 
     def bao(self, path, method="GET", payload=None, ctype="application/json"):
         slot = path.rsplit("/", 1)[1]
@@ -258,9 +274,10 @@ class SyncRuns(unittest.TestCase):
         admin = {p["name"]: p for p in fake.doc("trueswarm-admin")["principals"]}
         self.assertEqual(admin["dev-worker-4"]["role"], "operator")
         self.assertEqual(admin["dev-worker-4"]["access_client_ids"], ["svc.access"])
-        rv, writes = fake.rv, fake.kv_writes
+        versions = lambda: {ns: o["metadata"]["resourceVersion"] for ns, o in fake.secrets.items()}  # noqa: E731
+        before, writes = versions(), fake.kv_writes
         ts.sync(cfg(), fake.k8s, fake.bao, lambda s: self.fail("a no-op run must not wait"), NOW + 60, quiet)
-        self.assertEqual((fake.rv, fake.kv_writes), (rv, writes))
+        self.assertEqual((versions(), fake.kv_writes), (before, writes))
 
     def test_overtaken_run_does_not_publish_over_the_later_one(self):
         """Codex #1059: run A writes its Secrets and pauses; run B reads them while OpenBao still holds
@@ -268,11 +285,11 @@ class SyncRuns(unittest.TestCase):
         fake = FakeCluster()
 
         def a_pauses(_):
-            ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW + 1, quiet)  # run B, start to finish
+            with self.assertRaises(SystemExit) as refused:  # run B, while A holds the lease
+                ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW + 1, quiet, "run-b")
+            self.assertIn("holds the", str(refused.exception))
 
-        with self.assertRaises(SystemExit) as stopped:
-            ts.sync(cfg(), fake.k8s, fake.bao, a_pauses, NOW, quiet)
-        self.assertIn("later run replaced", str(stopped.exception))
+        ts.sync(cfg(), fake.k8s, fake.bao, a_pauses, NOW, quiet, "run-a")
         fake.assert_consistent(self, SLOTS)
 
     def test_overtaken_rotation_of_existing_tokens_keeps_the_later_one(self):
@@ -281,10 +298,10 @@ class SyncRuns(unittest.TestCase):
         later = NOW + 8 * DAY  # both runs find the tokens due
 
         def a_pauses(_):
-            ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, later + 1, quiet)
+            with self.assertRaises(SystemExit):
+                ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, later + 1, quiet, "run-b")
 
-        with self.assertRaises(SystemExit):
-            ts.sync(cfg(), fake.k8s, fake.bao, a_pauses, later, quiet)
+        ts.sync(cfg(), fake.k8s, fake.bao, a_pauses, later, quiet, "run-a")
         fake.assert_consistent(self, SLOTS)
 
     def test_run_dying_between_its_two_writes_self_heals(self):
@@ -305,7 +322,7 @@ class SyncRuns(unittest.TestCase):
         real = fake.k8s
 
         def racing_k8s(path, method="GET", payload=None):
-            if method == "PUT":
+            if method == "PUT" and "/secrets/" in path:
                 real(path, "PUT", dict(payload, metadata=dict(payload["metadata"])))  # someone else wins
             return real(path, method, payload)
 
@@ -322,6 +339,62 @@ class SyncRuns(unittest.TestCase):
         ts.sync(cfg(live=[1]), fake.k8s, fake.bao, lambda s: None, NOW + 60, quiet)
         for ns in ("trueswarm", "trueswarm-admin"):
             self.assertEqual([p["name"] for p in fake.doc(ns)["principals"]], ["dev-worker-1"])
+
+
+    def test_a_run_between_the_fence_and_the_publish_is_refused(self):
+        """Codex #1059 (second round): A passes the fence, stalls before its OpenBao PATCH; B runs to
+        completion; A resumes. The lease must keep B out, so A's publication is the final state."""
+        fake = FakeCluster()
+        real_bao = fake.bao
+        state = {"b_tried": False}
+
+        def stalling_bao(path, method="GET", payload=None, ctype="application/json"):
+            if method in ("PATCH", "POST") and not state["b_tried"]:
+                state["b_tried"] = True
+                with self.assertRaises(SystemExit):
+                    ts.sync(cfg(), fake.k8s, real_bao, lambda s: None, NOW + 300, quiet, "run-b")
+            return real_bao(path, method, payload, ctype)
+
+        ts.sync(cfg(), fake.k8s, stalling_bao, lambda s: None, NOW, quiet, "run-a")
+        self.assertTrue(state["b_tried"])
+        fake.assert_consistent(self, SLOTS)
+
+    def test_the_fence_still_stops_a_run_whose_lease_was_taken_over(self):
+        """Second layer: if the lease expired under a hung run and another run took over and rotated,
+        the hung run must not publish when it wakes up."""
+        fake = FakeCluster()
+
+        def hung(_):
+            fake.lease["spec"]["renewTime"] = ts._micro(NOW - 10 * ts.LEASE_SECONDS)  # expired
+            ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW + 1, quiet, "run-b")
+
+        with self.assertRaises(SystemExit) as stopped:
+            ts.sync(cfg(), fake.k8s, fake.bao, hung, NOW, quiet, "run-a")
+        self.assertIn("later run replaced", str(stopped.exception))
+        fake.assert_consistent(self, SLOTS)
+
+    def test_lease_is_released_after_success_and_failure_and_an_expired_one_is_taken(self):
+        fake = FakeCluster()
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW, quiet, "run-a")
+        self.assertIsNone(fake.lease["spec"]["holderIdentity"])
+
+        def die(_):
+            raise RuntimeError("killed")
+
+        with self.assertRaises(RuntimeError):
+            ts.sync(cfg(force=True), fake.k8s, fake.bao, die, NOW + 60, quiet, "run-b")
+        self.assertIsNone(fake.lease["spec"]["holderIdentity"])
+        fake.lease["spec"].update(holderIdentity="crashed-pod", renewTime=ts._micro(NOW - 2 * ts.LEASE_SECONDS))
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW + 120, quiet, "run-c")
+        fake.assert_consistent(self, SLOTS)
+
+    def test_a_live_lease_held_elsewhere_stops_the_run_before_any_read_or_write(self):
+        fake = FakeCluster()
+        fake.lease_api("POST", {"metadata": {"name": "x"}, "spec": {
+            "holderIdentity": "other-pod", "leaseDurationSeconds": ts.LEASE_SECONDS, "renewTime": ts._micro(NOW - 5)}})
+        with self.assertRaises(SystemExit):
+            ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW, quiet, "run-a")
+        self.assertEqual((fake.secrets, fake.kv), ({}, {}))
 
 
 if __name__ == "__main__":

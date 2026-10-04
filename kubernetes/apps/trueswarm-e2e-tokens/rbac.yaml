@@ -18,6 +18,31 @@ metadata:
     app.kubernetes.io/component: credential-sync
     app.kubernetes.io/part-of: agentforge
 ---
+# The run Lease (token_sync.py acquire_lease): it serialises the CronJob, the bootstrap Job and any
+# hand-made Job end to end, Secret writes through OpenBao publication. Same create/named-update shape.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: openbao
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["trueswarm-e2e-token-sync"]
+    verbs: ["get", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: openbao
+subjects:
+  - { kind: ServiceAccount, name: trueswarm-e2e-token-sync, namespace: openbao }
+roleRef: { kind: Role, name: trueswarm-e2e-token-sync, apiGroup: rbac.authorization.k8s.io }
+---
 # `create` cannot be narrowed by resourceNames (the name is not known to RBAC until the object
 # exists), so it is granted on secrets in these two namespaces; get/update are pinned to the one
 # Secret. No list/watch, no delete, no other resource: the sync can never READ another Secret here.
