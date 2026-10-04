@@ -251,7 +251,8 @@ the same live set, and retired slots must appear in both `RETIRED_SLOTS` lists:
 | 6 | `kubernetes/apps/infrastructure/helmtest/namespaces.yaml` (+ `rbac.yaml`, `networkpolicy.yaml`) | the per-slot namespace tree |
 | 7 | `kubernetes/infra/dev-workers/variables.tf` | the map key |
 | 8 | `inventory/hosts.yml` | the host |
-| 9 | project-scoped grants: `kubernetes/apps/clusters/ai/*-observer.yaml` (CI-checked), and the **`cchifor/trueswarm-admin`** repo's `deploy/*/observer.yaml` + `deploy/*/backup-observer.yaml` (NOT CI-checked from here) | drop the slot's subject; re-home the grant if the project's agent moves |
+| 9 | `kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml` (ADR 0035) | `LIVE_SLOTS` — **in both the CronJob and the bootstrap Job**; the next run drops the slot from both app Secrets |
+| 10 | project-scoped grants: `kubernetes/apps/clusters/ai/*-observer.yaml` (CI-checked), and the **`cchifor/trueswarm-admin`** repo's `deploy/*/observer.yaml` + `deploy/*/backup-observer.yaml` (NOT CI-checked from here) | drop the slot's subject; re-home the grant if the project's agent moves |
 
 ```bash
 python3 scripts/check-slot-enumerations.py   # prints every enumeration and its set; exits 1 on a DIFF

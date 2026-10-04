@@ -85,7 +85,56 @@ resource "cloudflare_zero_trust_access_application" "trueswarm_admin" {
   session_duration          = "1h"
   allowed_idps              = [cloudflare_zero_trust_access_identity_provider.trueswarm_admin[0].id]
   auto_redirect_to_identity = true
-  policies                  = [{ id = cloudflare_zero_trust_access_policy.trueswarm_admin[0].id, precedence = 1 }]
+  # The human MFA policy stays first. The e2e service-token policy (ADR 0035) is appended only when
+  # enable_trueswarm_admin_e2e is set, so the default plan of the adopted install is unchanged.
+  policies = concat(
+    [{ id = cloudflare_zero_trust_access_policy.trueswarm_admin[0].id, precedence = 1 }],
+    [for p in cloudflare_zero_trust_access_policy.trueswarm_admin_e2e : { id = p.id, precedence = 2 }],
+  )
+}
+
+# ---- Dev-worker e2e service token (ADR 0035) ---------------------------------------------------------
+# Machines cannot complete the human MFA login above, so the dev-worker agents' Playwright runs pass
+# Access with ONE shared service token (CF-Access-Client-Id/-Secret headers). Passing Access is all it
+# does: the admin app then requires a per-worker e2e bearer token (minted and rotated in-cluster by
+# trueswarm-e2e-token-sync), binds the session to this token's client id, caps the role at operator,
+# and can never grant the fresh MFA that sensitive operations require. Shared rather than per-slot so
+# adding or retiring a worker never needs a Cloudflare change; per-worker identity and revocation live
+# in the app tokens. Apply ONLY with `scripts/trueswarm-admin-access.sh --apply-e2e-access`, which
+# also seeds the credential into af/dev-workers/common through devworker-seeds.sops.yaml.
+variable "enable_trueswarm_admin_e2e" {
+  type        = bool
+  description = "Create the dev-worker e2e service token and its non_identity policy on the admin Access application (ADR 0035)."
+  default     = false
+}
+
+resource "cloudflare_zero_trust_access_service_token" "trueswarm_admin_e2e" {
+  count      = var.enable_trueswarm_admin && var.enable_trueswarm_admin_e2e ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "trueswarm-admin-e2e"
+  # Long-lived on purpose: it is only the edge pass. Rotation = taint + re-run the helper; the
+  # per-worker app tokens behind it rotate every 14 days on their own.
+  duration = "forever"
+}
+
+resource "cloudflare_zero_trust_access_policy" "trueswarm_admin_e2e" {
+  count      = var.enable_trueswarm_admin && var.enable_trueswarm_admin_e2e ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "Trueswarm dev-worker e2e service token"
+  decision   = "non_identity"
+  include    = [{ service_token = { token_id = cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[0].id } }]
+}
+
+output "trueswarm_admin_e2e_access_client_id" {
+  description = "CF-Access-Client-Id of the dev-worker e2e service token (null until enable_trueswarm_admin_e2e)."
+  value       = one(cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[*].client_id)
+  sensitive   = true
+}
+
+output "trueswarm_admin_e2e_access_client_secret" {
+  description = "CF-Access-Client-Secret of the dev-worker e2e service token (null until enable_trueswarm_admin_e2e)."
+  value       = one(cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[*].client_secret)
+  sensitive   = true
 }
 
 resource "cloudflare_dns_record" "trueswarm_admin" {

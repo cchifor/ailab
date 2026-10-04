@@ -13,6 +13,10 @@ ROOT = Path(__file__).resolve().parents[2]
 AUDIENCE = 'a' * 64
 CLIENT_SECRET = 'fixture-only-never-log-this-secret'
 TUNNEL = 'd2452442-efae-4056-ac82-a5c348033971'
+CF_CLIENT_ID = 'abc123def456.access'
+CF_SECRET = 'fixture-cf-service-token-secret-never-log'
+SEEDS = 'kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml'
+SYNC = 'kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml'
 
 
 class AccessApplyHelper(unittest.TestCase):
@@ -46,7 +50,13 @@ class AccessApplyHelper(unittest.TestCase):
         self.calls = self.root / 'calls'
         self.plan = self.root / 'plan.json'
         self.plan.write_text(json.dumps({'resource_changes': [self.resource('application')]}))
-        self.stub('sops', '#!/usr/bin/env python3\nprint('+repr(CLIENT_SECRET)+')\n')
+        self.stub('sops', '''#!/usr/bin/env python3
+import sys,pathlib
+args=sys.argv[1:]
+if '--extract' in args:print('''+repr(CLIENT_SECRET)+''')
+elif args[0] in ('decrypt','encrypt'):print(pathlib.Path(args[-1]).read_text(),end='')
+else:raise SystemExit('Unexpected sops call')
+''')
         self.stub('tofu', '''#!/usr/bin/env python3
 import os,sys,pathlib
 args=sys.argv[1:]
@@ -57,11 +67,13 @@ assert os.environ['TF_VAR_publish_trueswarm_admin']==os.environ.get('FIXTURE_PUB
 if cmd=='plan':
  pathlib.Path(next(a.split('=',1)[1] for a in args if a.startswith('-out='))).write_text('sensitive-plan-fixture')
 elif cmd=='show':print(pathlib.Path(os.environ['FIXTURE_PLAN']).read_text())
+elif cmd=='output' and args[-1]=='trueswarm_admin_e2e_access_client_id':print(os.environ['FIXTURE_CF_CLIENT_ID'],end='')
+elif cmd=='output' and args[-1]=='trueswarm_admin_e2e_access_client_secret':print(os.environ['FIXTURE_CF_SECRET'],end='')
 elif cmd=='output':print(os.environ['FIXTURE_AUDIENCE'],end='')
 elif cmd!='apply':raise SystemExit('Unexpected command')
 ''')
         self.env = {k:v for k,v in os.environ.items() if k not in ('CI','GITHUB_ACTIONS','GITEA_ACTIONS') and not k.startswith('GIT_')}
-        self.env.update(PATH=str(self.bin)+':'+os.environ['PATH'], TRUESWARM_ADMIN_CHECKOUT=str(self.admin), CLOUDFLARE_API_TOKEN='fixture-token', FIXTURE_CALLS=str(self.calls), FIXTURE_PLAN=str(self.plan), FIXTURE_AUDIENCE=AUDIENCE, TMPDIR=str(self.root))
+        self.env.update(PATH=str(self.bin)+':'+os.environ['PATH'], TRUESWARM_ADMIN_CHECKOUT=str(self.admin), CLOUDFLARE_API_TOKEN='fixture-token', FIXTURE_CALLS=str(self.calls), FIXTURE_PLAN=str(self.plan), FIXTURE_AUDIENCE=AUDIENCE, FIXTURE_CF_CLIENT_ID=CF_CLIENT_ID, FIXTURE_CF_SECRET=CF_SECRET, TMPDIR=str(self.root))
 
     def git(self, *args, cwd=None):
         return run_process(['git', *args], cwd=cwd or self.admin, check=True, text=True, capture_output=True).stdout.strip()
@@ -77,6 +89,7 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
     def run_helper(self, mode="--apply-access"):
         result = run_process(['bash', str(self.script), mode], env=self.env, text=True, capture_output=True)
         self.assertNotIn(CLIENT_SECRET, result.stdout+result.stderr)
+        self.assertNotIn(CF_SECRET, result.stdout+result.stderr)
         self.assertFalse(list(self.root.glob('tmp.*/access.plan')), 'sensitive temporary plan was left behind')
         return result
 
@@ -232,3 +245,184 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         self.plan.write_text(json.dumps({'resource_changes':resources}))
         r=self.run_helper('--publish-dns')
         self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
+    # ---- --apply-e2e-access (ADR 0035) -------------------------------------------------------------
+    def e2e_fixture(self):
+        """The live, published gate plus the e2e additions; and an ailab git tree holding the seed file
+        (plaintext here: the sops stub's "crypto" is the identity) and token-sync.yaml."""
+        if getattr(self, '_e2e_ready', False):
+            # Repeat call inside a subTest loop: same plan, git fixtures already in place.
+            resources = [self.resource(kind, actions=['no-op']) for kind in ['identity_provider', 'policy', 'application']]
+            resources.append(self.resource('application', address='cloudflare_dns_record.trueswarm_admin[0]'))
+        else:
+            resources = self.publication_fixture()
+        resources[-1]['change']['actions'] = ['no-op']
+        # The shape a real provider-5 plan has: full before/after for the application, the new policy's
+        # id unknown until apply, the human policy's id known on its no-op change.
+        resources[1]['change']['before'] = resources[1]['change']['after'] = {'id': 'human-policy-id', 'decision': 'allow'}
+        common = {'aud': AUDIENCE, 'domain': 'trueswarm-admin.chifor.me', 'allowed_idps': ['idp-id'],
+                  'session_duration': '1h', 'auto_redirect_to_identity': True}
+        human = {'id': 'human-policy-id', 'precedence': 1}
+        app = resources[2]['change']
+        app['actions'] = ['update']
+        app['before'] = dict(common, policies=[dict(human)])
+        app['after'] = dict(common, policies=[dict(human), {'precedence': 2}])
+        app['after_unknown'] = {'policies': [{}, {'id': True}]}
+        token = self.resource('x', address='cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[0]')
+        token['change']['after'], token['change']['after_unknown'] = {'name': 'trueswarm-admin-e2e'}, {'id': True, 'client_id': True}
+        policy = self.resource('x', address='cloudflare_zero_trust_access_policy.trueswarm_admin_e2e[0]')
+        policy['change']['after'] = {'decision': 'non_identity', 'include': [{'service_token': {}}]}
+        policy['change']['after_unknown'] = {'id': True, 'include': [{'service_token': {'token_id': True}}]}
+        resources += [token, policy]
+        ailab = self.root / 'ailab'
+        if getattr(self, '_e2e_ready', False):
+            self.plan.write_text(json.dumps({'resource_changes': resources}))
+            return resources
+        self._e2e_ready = True
+        (ailab / SEEDS).parent.mkdir(parents=True, exist_ok=True)
+        (ailab / SEEDS).write_text('# header comment that must survive\napiVersion: v1\nkind: Secret\nstringData:\n    common.json: \'{"gitea_pat":"pat-fixture"}\'\n    other.json: \'{"k":"v"}\'\n')
+        (ailab / SYNC).parent.mkdir(parents=True, exist_ok=True)
+        (ailab / SYNC).write_text('a:\n  - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }\nb:\n  - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }\n')
+        self.git('init', '-b', 'main', cwd=ailab)
+        self.git('-c', 'user.email=f@x', '-c', 'user.name=f', 'add', '.', cwd=ailab)
+        self.git('-c', 'user.email=f@x', '-c', 'user.name=f', 'commit', '-m', 'fixture', cwd=ailab)
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        return resources
+
+    def test_e2e_applies_then_seeds_common_and_the_sync(self):
+        self.e2e_fixture()
+        r = self.run_helper('--apply-e2e-access')
+        self.assertEqual(r.returncode, 0, r.stdout+r.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ['plan', 'show', 'apply', 'output', 'output'])
+        import yaml
+        seeds = (self.root / 'ailab' / SEEDS).read_text()
+        self.assertTrue(seeds.startswith('# header comment that must survive\n'))
+        doc = yaml.safe_load(seeds)
+        common = json.loads(doc['stringData']['common.json'])
+        self.assertEqual(common, {'gitea_pat': 'pat-fixture', 'trueswarm_admin_access_client_id': CF_CLIENT_ID,
+                                  'trueswarm_admin_access_client_secret': CF_SECRET})
+        self.assertEqual(doc['stringData']['other.json'], '{"k":"v"}')
+        self.assertEqual((self.root / 'ailab' / SYNC).read_text().count('value: "%s"' % CF_CLIENT_ID), 2)
+        self.assertFalse(list(self.root.glob('tmp.*/seeds.yaml')), 'plaintext seed document was left behind')
+
+    def test_e2e_never_commits_or_touches_the_private_checkout(self):
+        self.e2e_fixture()
+        before = self.git('rev-parse', 'HEAD')
+        self.assertEqual(self.run_helper('--apply-e2e-access').returncode, 0)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD'))
+        self.assertEqual('', self.git('status', '--porcelain'))
+
+    def test_e2e_rejects_changes_to_the_human_gate_or_dns(self):
+        for index in (0, 1, 3):  # identity provider, human policy, DNS record
+            with self.subTest(index=index):
+                resources = self.e2e_fixture()
+                resources[index]['change']['actions'] = ['update']
+                self.plan.write_text(json.dumps({'resource_changes': resources}))
+                self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_requires_the_published_dns_record(self):
+        resources = self.e2e_fixture()
+        self.plan.write_text(json.dumps({'resource_changes': resources[:3] + resources[4:]}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_creating_or_replacing_the_application(self):
+        for actions in (['create'], ['delete', 'create']):
+            with self.subTest(actions=actions):
+                resources = self.e2e_fixture()
+                resources[2]['change']['actions'] = actions
+                self.plan.write_text(json.dumps({'resource_changes': resources}))
+                self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_a_different_audience(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['aud'] = 'b' * 64
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_requires_the_human_policy_first(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['policies'] = [{'precedence': 2}, {'precedence': 1}]
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_unrelated_resources_and_deleting_its_own(self):
+        resources = self.e2e_fixture()
+        resources.append(self.resource('x', address='cloudflare_zero_trust_access_service_token.api[0]'))
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+        resources = self.e2e_fixture()
+        resources[-1]['change']['actions'] = ['delete']
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_refuses_local_edits_to_the_files_it_writes(self):
+        self.e2e_fixture()
+        sync = self.root / 'ailab' / SYNC
+        sync.write_text(sync.read_text() + '# local edit\n')
+        self.assert_refused_before_apply('--apply-e2e-access')
+        self.assertFalse(self.calls.exists())
+
+    def test_e2e_rejects_any_other_application_field_change(self):
+        for field, value in [('allowed_idps', ['idp-id', 'otp']), ('session_duration', '24h'),
+                             ('auto_redirect_to_identity', False), ('domain', 'other.chifor.me')]:
+            with self.subTest(field=field):
+                resources = self.e2e_fixture()
+                resources[2]['change']['after'][field] = value
+                self.plan.write_text(json.dumps({'resource_changes': resources}))
+                self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_application_field_going_unknown(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after_unknown']['allowed_idps'] = True
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_a_substituted_human_policy(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['policies'][0]['id'] = 'someone-elses-policy'
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_added_policy_that_is_not_the_planned_one(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['policies'][1]['id'] = 'an-existing-permissive-policy'
+        resources[2]['change']['after_unknown'] = {'policies': [{}, {}]}
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_inline_rule_in_the_policy_list(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['policies'][1]['include'] = [{'everyone': {}}]
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_a_widened_or_identity_e2e_policy(self):
+        for change in ({'decision': 'allow'}, {'include': [{'everyone': {}}]},
+                       {'include': [{'service_token': {}}, {'email': {'email': 'x@y.z'}}]}):
+            with self.subTest(change=change):
+                resources = self.e2e_fixture()
+                resources[-1]['change']['after'].update(change)
+                self.plan.write_text(json.dumps({'resource_changes': resources}))
+                self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_e2e_policy_pointing_at_another_token(self):
+        resources = self.e2e_fixture()
+        resources[-1]['change']['after']['include'] = [{'service_token': {'token_id': 'api-token-id'}}]
+        resources[-1]['change']['after_unknown'] = {'id': True}
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rerun_with_everything_in_place_is_accepted(self):
+        resources = self.e2e_fixture()
+        app = resources[2]['change']
+        app['actions'] = ['no-op']
+        app['after']['policies'][1]['id'] = 'e2e-policy-id'
+        app['before']['policies'].append({'id': 'e2e-policy-id', 'precedence': 2})
+        app['after_unknown'] = {}
+        resources[-2]['change'] = {'actions': ['no-op'], 'before': {'id': 'tok'}, 'after': {'id': 'tok'}}
+        resources[-1]['change'] = {'actions': ['no-op'], 'before': {}, 'after': {
+            'id': 'e2e-policy-id', 'decision': 'non_identity', 'include': [{'service_token': {'token_id': 'tok'}}]}}
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        r = self.run_helper('--apply-e2e-access')
+        self.assertEqual(r.returncode, 0, r.stdout+r.stderr)
+

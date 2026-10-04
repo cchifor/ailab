@@ -183,6 +183,18 @@ data:
       token_ttl=15m \
       token_max_ttl=30m
 
+    # trueswarm-e2e-token-sync (ADR 0035) — the THIRD sync-owned writer to the same per-slot
+    # documents: per-slot Trueswarm e2e bearer tokens, published as
+    # af/dev-workers/<slot>.{trueswarm,trueswarm_admin}_e2e_{token,valid_until}
+    # (kubernetes/apps/trueswarm-e2e-tokens/, ns openbao). Shares the k8stoken-sync policy for the
+    # pg-sync reason above: a KV write grant on exactly the live slots' documents is all it needs.
+    bao write auth/kubernetes/role/trueswarm-e2e-sync \
+      bound_service_account_names=trueswarm-e2e-token-sync \
+      bound_service_account_namespaces=openbao \
+      token_policies=k8stoken-sync \
+      token_ttl=15m \
+      token_max_ttl=30m
+
     # ---- Retired slots (plans/2026-09-21-retire-dev-workers-3-6-plan.md) -----------------------
     # This Job is the ONE owner of a retired worker's revocation: declarative, re-run daily by Flux,
     # idempotent (an object that is already gone is skipped, so every re-run converges to "absent").

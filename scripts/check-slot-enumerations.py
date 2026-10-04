@@ -35,6 +35,7 @@ K8STOKEN = ROOT / "kubernetes/apps/infrastructure/security/openbao/k8stoken-sync
 PROVISION = ROOT / "kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml"
 PA_RBAC = ROOT / "kubernetes/apps/infrastructure/platform-access/rbac.yaml"
 PA_PGSYNC = ROOT / "kubernetes/apps/infrastructure/platform-access/pg-sync.yaml"
+E2E_SYNC = ROOT / "kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml"
 TEP = ROOT / "kubernetes/apps/infrastructure/testpool/tep-access.yaml"
 HELMTEST_NS = ROOT / "kubernetes/apps/infrastructure/helmtest/namespaces.yaml"
 TOFU = ROOT / "kubernetes/infra/dev-workers/variables.tf"
@@ -108,6 +109,9 @@ def live_sets():
 
     out["platform-access/pg-sync.yaml: LIVE_SLOTS"] = env_values(
         read(PA_PGSYNC), "LIVE_SLOTS", "platform-access/pg-sync.yaml")
+    # ADR 0035: the Trueswarm e2e token sync (CronJob + bootstrap Job, same two-copy shape as pg-sync).
+    out["trueswarm-e2e-tokens/token-sync.yaml: LIVE_SLOTS"] = env_values(
+        read(E2E_SYNC), "LIVE_SLOTS", "trueswarm-e2e-tokens/token-sync.yaml")
 
     out["testpool/tep-access.yaml: ServiceAccounts"] = ints(
         re.findall(r"^metadata: \{ name: tep-dw(\d+), namespace: testpool \}", read(TEP), re.M))
