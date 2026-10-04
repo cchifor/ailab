@@ -26,13 +26,21 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "kubernetes" / "apps" / "apps" / "auth" / "configuration.yml"
 ACCESS_CALLBACK_HOST = "cloudflareaccess.com/cdn-cgi/access/callback"
 
-# Apps that sit BEHIND a Cloudflare Access gate and run their own Authelia login as well.
+# Apps that sit BEHIND a Cloudflare Access gate and run their own Authelia login as well. Nothing in
+# configuration.yml marks an app client as gated (the gate is in kubernetes/infra/cloudflare), so
+# this cannot be auto-discovered like the gate IdPs above: ADD THE CLIENT HERE when you put another
+# app with its own Authelia login behind Access, or this test will not catch the omission.
 GATED_APP_CLIENTS = {"trueswarm-admin"}
 
 
 def clients():
     config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-    return {c["client_id"]: c for c in config["identity_providers"]["oidc"]["clients"]}
+    listed = config["identity_providers"]["oidc"]["clients"]
+    by_id = {c["client_id"]: c for c in listed}
+    # A duplicate client_id would silently shadow its earlier entry here (Authelia rejects it at
+    # startup, but fail loudly in CI rather than check only one of the two).
+    assert len(by_id) == len(listed), "duplicate client_id in configuration.yml"
+    return by_id
 
 
 class TwoGateConsent(unittest.TestCase):
