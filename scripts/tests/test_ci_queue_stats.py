@@ -3,6 +3,9 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest.mock import patch
+import io
+import json
 
 _MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "ci-queue-stats.py"
 _spec = importlib.util.spec_from_file_location("ci_queue_stats", _MOD_PATH)
@@ -105,6 +108,23 @@ class Paged(unittest.TestCase):
             cqs.get = orig
 
 class Readiness(unittest.TestCase):
+    def test_cli_recognizes_rerun_attempt_without_dispatch_override(self):
+        run = {'id': 1, 'run_attempt': 2, 'path': 'ci.yml@main'}
+        jobs = [{'id': 2, 'created_at': '2026-09-01T00:00:00Z', 'started_at': '2026-10-04T10:11:00Z', 'completed_at': '2026-10-04T10:12:00Z', 'status': 'completed', 'conclusion': 'success'}]
+        output = io.StringIO()
+        with patch.dict(cqs.os.environ, {'GITEA_TOKEN': 'test-only'}), patch.object(cqs, 'runs_since', return_value=[run]), patch.object(cqs, 'paged', return_value=jobs), patch('sys.stdout', output):
+            self.assertEqual(cqs.main(['--json', '--repos', 'o/r']), 0)
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary['wait_s']['n'], 0)
+        self.assertEqual(summary['runner_wait_s']['n'], 0)
+        self.assertEqual(summary['run_s']['p50'], 60)
+
+    def test_scan_bound_returns_partial_rows_with_explicit_error(self):
+        with patch.object(cqs, 'get', return_value={'workflow_runs': [{'id': 1, 'started_at': '2026-10-04T10:00:00Z'}]}):
+            with self.assertRaises(cqs.RunScanLimit) as raised:
+                cqs.runs_since('t', 'o/r', 0, max_pages=1)
+        self.assertEqual(len(raised.exception.runs), 1)
+
     def test_dependencies_are_not_runner_wait(self):
         t = '2026-10-04T10:'
         run = {'id': 1}

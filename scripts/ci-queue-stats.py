@@ -59,9 +59,17 @@ def get(token, path, params=None):
         return json.load(r)
 
 
-def runs_since(token, repo, cutoff):
+class RunScanLimit(RuntimeError):
+    def __init__(self, runs, pages):
+        super().__init__(f'run-list scan truncated at {pages} pages; older reruns may be missing')
+        self.runs = runs
+
+
+def runs_since(token, repo, cutoff, max_pages=100):
     out, page = [], 1
     while True:
+        if page > max_pages:
+            raise RunScanLimit(out, max_pages)
         d = get(token, f"/repos/{repo}/actions/runs", {"page": page, "limit": 50})
         batch = d.get("workflow_runs") or []
         for r in batch:
@@ -86,6 +94,8 @@ def percentile(xs, p):
 
 def job_row(repo, run, job, dependencies=None, dispatch_at=None, known_rerun=False):
     """Normalize one attempt. None dependencies means unknown; [] means confirmed root."""
+    attempt = run.get('run_attempt')
+    known_rerun = known_rerun or (isinstance(attempt, int) and attempt > 1)
     created = parse_ts(dispatch_at) if dispatch_at or known_rerun else parse_ts(job.get("created_at"))
     started, completed = parse_ts(job.get("started_at")), parse_ts(job.get("completed_at"))
     ready = None
@@ -96,6 +106,7 @@ def job_row(repo, run, job, dependencies=None, dispatch_at=None, known_rerun=Fal
     return {"repo": repo, "run_id": run["id"], "source_revision": run.get("head_sha"),
             "run_attempt": run.get("run_attempt"), "job_id": job["id"], "name": job.get("name"),
             "event": run.get("event"), "workflow": run.get("path"),
+            "dependency_count": len(dependencies) if dependencies is not None else None,
             "status": job.get("status"), "conclusion": job.get("conclusion"),
             "created": created, "ready": ready, "started": started, "completed": completed,
             "creation_source": "observed-dispatch" if dispatch_at else "rerun-dispatch-unknown" if known_rerun else "api-job-created; may predate rerun",
@@ -158,6 +169,8 @@ def render(s):
     lines.append("  outcomes: " + json.dumps(s['outcomes'], sort_keys=True))
     if s.get("skipped_repos"):
         lines.append("  skipped repos: " + ", ".join(s["skipped_repos"]))
+    if s.get('scan_truncated_repos'):
+        lines.append('  INCOMPLETE scans: ' + ', '.join(s['scan_truncated_repos']))
     return chr(10).join(lines)
 
 
@@ -169,13 +182,16 @@ def main(argv):
     ap.add_argument("--dependency-map", help='JSON: repository -> workflow filename -> job name -> dependency job names')
     ap.add_argument("--dispatches", help='JSON: repository -> run id -> observed dispatch timestamp; use for reruns')
     ap.add_argument("--records", help='write normalized job records as JSON for reproducible analysis')
+    ap.add_argument("--max-run-pages", type=int, default=100, help='bounded run-list scan per repository; reaching the limit explicitly marks the measurement incomplete')
     a = ap.parse_args(argv)
+    if a.max_run_pages < 1:
+        ap.error('--max-run-pages must be positive')
     token = os.environ.get("GITEA_TOKEN") or os.environ.get("AF_GITEA_TOKEN")
     if not token:
         print("GITEA_TOKEN (read:repository) is required", file=sys.stderr)
         return 2
     cutoff = time.time() - a.days * 86400
-    jobs, skipped = [], []
+    jobs, skipped, truncated = [], [], []
     def read_map(path):
         if not path:
             return {}
@@ -184,7 +200,13 @@ def main(argv):
     dependency_map, dispatches = read_map(a.dependency_map), read_map(a.dispatches)
     for repo in [r.strip() for r in a.repos.split(",") if r.strip()]:
         try:
-            for run in runs_since(token, repo, cutoff):
+            try:
+                runs = runs_since(token, repo, cutoff, a.max_run_pages)
+            except RunScanLimit as error:
+                runs = error.runs
+                truncated.append(f'{repo}: {error}')
+                print('warning: ' + truncated[-1], file=sys.stderr)
+            for run in runs:
                 run_jobs = paged(token, f"/repos/{repo}/actions/runs/{run['id']}/jobs", "jobs")
                 workflow = (run.get('path') or '').split('@', 1)[0].rsplit('/', 1)[-1]
                 graph = dependency_map.get(repo, {}).get(workflow, {})
@@ -206,10 +228,13 @@ def main(argv):
             print(f"warning: skipping {skipped[-1]}", file=sys.stderr)
     s = summarize(jobs, a.days)
     s["skipped_repos"] = skipped
+    s['scan_truncated_repos'] = truncated
+    s['measurement_complete'] = not skipped and not truncated
     s["days"] = a.days
     s["measured_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     s["schema_version"] = 1
     s["wait_s_definition"] = "created-to-started scheduling delay, including dependency waiting; not runner queue time"
+    s['dependency_wait_s_definition'] = 'all jobs with known dependencies, including zero wait for confirmed roots; filter dependency_count > 0 for dependent-job-only percentiles'
     if a.records:
         with open(a.records, 'w') as stream:
             json.dump(jobs, stream, indent=2)
