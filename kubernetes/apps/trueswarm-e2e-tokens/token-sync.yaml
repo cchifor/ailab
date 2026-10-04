@@ -1,0 +1,158 @@
+# trueswarm-e2e-token-sync — per-slot bearer tokens that let each dev-worker agent run Playwright
+# against the LIVE Trueswarm and Trueswarm Admin without a human login (ADR 0035). The script is
+# token_sync.py next to this file (configMapGenerator in kustomization.yaml); its docstring is the
+# contract. Operator how-to: docs/runbooks/trueswarm-e2e-tokens.md.
+#
+# STEADY STATE: daily. A token lives 14 days and is re-minted once under 7 days are left, so a week of
+# missed runs expires nothing, and a re-run is a no-op (which is what makes the bootstrap Job's
+# reap-and-re-apply loop and `kubectl create job --from=cronjob/...` always safe). A failed run
+# surfaces through the stack's existing KubeJobFailed rule.
+#
+# THE SLOT LIST (LIVE_SLOTS, both copies below) is one of the enumerations
+# scripts/check-slot-enumerations.py compares in CI. Retiring a slot = drop it from LIVE_SLOTS: the next
+# run removes it from both app Secrets (its token stops working within a kubelet refresh), and the
+# devworker-provision retirement purge deletes its OpenBao subtree.
+#
+# ADMIN_ACCESS_CLIENT_IDS is the Cloudflare Access service-token client ID (not a secret) that
+# trueswarm-admin requires on an e2e login. Empty = admin e2e login refused for every slot (fail
+# closed); trueswarm itself does not use it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: trueswarm-e2e-token-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+spec:
+  schedule: "41 3 * * *"
+  timeZone: Etc/UTC
+  # Serialises this CronJob against itself only; the script's resourceVersion CAS on the Secrets is
+  # what makes it safe against the bootstrap Job or a hand-made one.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 4
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: trueswarm-e2e-token-sync
+            app.kubernetes.io/part-of: agentforge
+        spec:
+          restartPolicy: OnFailure
+          enableServiceLinks: false
+          serviceAccountName: trueswarm-e2e-token-sync
+          # The projected SA token authenticates to the kube-apiserver (the two Secrets) and to OpenBao
+          # (k8s auth). Nothing here mounts a Secret except the public OpenBao CA.
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: sync
+              image: mirror.gcr.io/library/python:3.14-slim
+              command: ["python3", "-u", "/scripts/token_sync.py"]
+              env:
+                - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+                - { name: BAO_CACERT, value: "/tls/ca.crt" }
+                - { name: BAO_ROLE, value: "trueswarm-e2e-sync" }
+                - { name: BAO_KV_MOUNT, value: "af" }
+                - { name: LIVE_SLOTS, value: "1 2 3 4" }
+                - { name: ADMIN_ROLE, value: "operator" }
+                - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }
+              volumeMounts:
+                - { name: tls, mountPath: /tls, readOnly: true }
+                - { name: script, mountPath: /scripts, readOnly: true }
+              resources:
+                requests: { cpu: 10m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
+                seccompProfile: { type: RuntimeDefault }
+          volumes:
+            - name: tls
+              secret:
+                secretName: openbao-tls
+                items: [{ key: ca.crt, path: ca.crt }]
+            - name: script
+              configMap:
+                name: trueswarm-e2e-token-sync
+                defaultMode: 0555
+---
+# BOOTSTRAP / RECOVERY RUN, the openbao-k8stoken-sync pattern: applying a CronJob does not run it, so
+# this gives a fresh cluster (or a re-seeded vault) its first tokens without waiting for 03:41. The force
+# annotation lets an edit to the template (including the script, via the hashed ConfigMap name)
+# delete+recreate the Job instead of failing "field is immutable"; ttlSecondsAfterFinished reaps it
+# and Flux re-applies it, which is also the retry path while the vault role or the app namespaces are
+# not there yet.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trueswarm-e2e-token-sync-bootstrap
+  namespace: openbao
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: trueswarm-e2e-token-sync
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trueswarm-e2e-token-sync
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      serviceAccountName: trueswarm-e2e-token-sync
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sync
+          image: mirror.gcr.io/library/python:3.14-slim
+          command: ["python3", "-u", "/scripts/token_sync.py"]
+          env:
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            - { name: BAO_ROLE, value: "trueswarm-e2e-sync" }
+            - { name: BAO_KV_MOUNT, value: "af" }
+            - { name: LIVE_SLOTS, value: "1 2 3 4" }
+            - { name: ADMIN_ROLE, value: "operator" }
+            - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items: [{ key: ca.crt, path: ca.crt }]
+        - name: script
+          configMap:
+            name: trueswarm-e2e-token-sync
+            defaultMode: 0555

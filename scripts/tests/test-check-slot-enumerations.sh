@@ -28,6 +28,7 @@ FILES=(
   kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml
   kubernetes/apps/infrastructure/platform-access/rbac.yaml
   kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
+  kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml
   kubernetes/apps/infrastructure/testpool/tep-access.yaml
   kubernetes/apps/infrastructure/helmtest/namespaces.yaml
   kubernetes/infra/dev-workers/variables.tf
@@ -94,6 +95,16 @@ edit kubernetes/apps/infrastructure/platform-access/pg-sync.yaml \
 expect_fail "the CronJob and bootstrap Job disagreeing on LIVE_SLOTS" "disagree on LIVE_SLOTS"
 restore kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
 
+edit kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml \
+  's.replace(chr(34) + "1 2 3 4" + chr(34), chr(34) + "1 2 3" + chr(34))'
+expect_fail "the e2e token sync dropping a live slot from both copies" "DIFF"
+restore kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml
+
+edit kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml \
+  's.replace(chr(34) + "1 2 3 4" + chr(34), chr(34) + "1 2 3" + chr(34), 1)'
+expect_fail "the e2e token sync CronJob and bootstrap Job disagreeing" "disagree on LIVE_SLOTS"
+restore kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml
+
 edit kubernetes/apps/infrastructure/platform-access/pg-sync.yaml \
   's.replace("                - { name: RETIRED_SLOTS, value: " + chr(34) + "5 6" + chr(34) + " }", "", 1)'
 expect_fail "one RETIRED_SLOTS env entry deleted" "RETIRED_SLOTS env entries, expected 2"
@@ -158,6 +169,7 @@ TOFU=kubernetes/infra/dev-workers/variables.tf
 INVENTORY=inventory/hosts.yml
 TS=kubernetes/apps/clusters/ai/trueswarm-observer.yaml
 TSA=kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
+E2E=kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml
 # edit_all <file> <old> <new> <expected count>: replace every occurrence, asserting how many there were
 edit_all() {
   "$PY" - "$WORK/$1" "$2" "$3" "$4" <<'PY' || fail "[F] fixture edit did not match: $1"
@@ -183,11 +195,12 @@ edit_all "$TOFU" '"dev-worker-4" = {' '"retired-4" = {' 1
 edit_all "$INVENTORY" '        dev-worker-4:\n' '' 1
 edit_all "$TS" '- kind: ServiceAccount\n  name: platform-dw4\n  namespace: platform-access\n' '' 1
 edit_all "$TSA" '- kind: ServiceAccount\n  name: platform-dw4\n  namespace: platform-access\n' '' 1
+edit_all "$E2E" '{ name: LIVE_SLOTS, value: "1 2 3 4" }' '{ name: LIVE_SLOTS, value: "1 2 3" }' 2
 run_check || fail "a complete retirement of slot 4 must pass"
 grep -q "live slots (reference): \[1, 2, 3\]" "$WORK/.out" || fail "[F] the retirement did not take effect"
 grep -q "retired slots (reference): \[4, 5, 6\]" "$WORK/.out" || fail "[F] slot 4 is not recorded as retired"
 echo "  ok  retiring slot 4 everywhere goes green (live [1, 2, 3], retired [4, 5, 6])"
-for f in "$RBAC" "$PGSYNC" "$K8STOKEN" "$PROVISION" "$TEP" "$HELMTEST" "$TOFU" "$INVENTORY" "$TS" "$TSA"; do restore "$f"; done
+for f in "$RBAC" "$PGSYNC" "$K8STOKEN" "$PROVISION" "$TEP" "$HELMTEST" "$TOFU" "$INVENTORY" "$TS" "$TSA" "$E2E"; do restore "$f"; done
 
 run_check || fail "the tree must pass again after every fixture is restored"
 echo "test-check-slot-enumerations: OK (mismatch, removal, reformat and live/retired overlap all fail closed)"

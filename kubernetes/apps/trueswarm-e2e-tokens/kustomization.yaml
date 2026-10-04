@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Trueswarm e2e bearer tokens for the dev-worker agents (ADR 0035). Reconciled by the DEDICATED
+# clusters/ai/trueswarm-e2e-tokens.yaml Flux Kustomization (wait:false, no decryption — nothing here is
+# a secret: every token is minted by the sync from cluster state, never seeded from git).
+resources:
+  - rbac.yaml # SA openbao/trueswarm-e2e-token-sync + Secret write Roles in ns trueswarm and trueswarm-admin
+  - token-sync.yaml # CronJob + bootstrap Job: per-slot tokens -> app Secrets (hashes) -> af/dev-workers/<slot>
+
+# The script is a real file so scripts/tests/test_trueswarm_e2e_token_sync.py can import it. Hash
+# suffix ON (unlike the pg-sync CA): kustomize rewrites the CronJob and Job references, so a script
+# edit changes the bootstrap Job's template and its force annotation re-runs it at once.
+configMapGenerator:
+  - name: trueswarm-e2e-token-sync
+    namespace: openbao
+    files:
+      - token_sync.py
+    options:
+      labels:
+        app.kubernetes.io/name: trueswarm-e2e-token-sync
+        app.kubernetes.io/part-of: agentforge

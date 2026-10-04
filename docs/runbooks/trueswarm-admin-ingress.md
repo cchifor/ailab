@@ -70,8 +70,12 @@ requires both the dedicated IdP and the RFC 8176 `mfa` authentication-method cla
 Authelia includes this claim after multi-factor login (including verified passkeys).
 See [Authelia AMR values](https://www.authelia.com/reference/guides/authentication-method-references/)
 and [Cloudflare OIDC MFA requirements](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/mfa-requirements/).
-Access selects only its dedicated OIDC IdP;
-one-time PIN and shared service-token bypasses are not enabled for this application.
+Access selects only its dedicated OIDC IdP, and one-time PIN is not enabled for this application.
+Since 2026-10-04 one `non_identity` policy (precedence 2, after the human MFA policy) admits a single
+dev-worker e2e service token. It only passes the edge: the app then requires a per-worker e2e bearer
+token, caps the role at operator and never grants the fresh MFA that sensitive operations need
+([ADR 0035](../decisions/0035-trueswarm-e2e-tokens-for-dev-worker-agents.md),
+[runbook](trueswarm-e2e-tokens.md)). It is applied only by `--apply-e2e-access`.
 
 ## Publication and browser qualification
 

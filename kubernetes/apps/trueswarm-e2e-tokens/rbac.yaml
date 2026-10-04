@@ -1,0 +1,68 @@
+# trueswarm-e2e-token-sync identity (ADR 0035). It runs in ns openbao (it mounts openbao-tls and logs
+# in to OpenBao as k8s-auth role `trueswarm-e2e-sync`, created by devworker-provision-job.yaml with the
+# shared k8stoken-sync policy) and writes ONE Secret, `trueswarm-e2e-tokens`, in each Trueswarm app
+# namespace. That Secret holds SHA-256 digests only; the tokens themselves exist only in the workers'
+# own OpenBao documents.
+#
+# Why this lives in ailab and not in cchifor/trueswarm-admin: the Secret says which slots may log in
+# and with which admin role. ADR 0028's amendment records that the app repo has no independent merge
+# gate, so a worker holding the shared PAT could widen its own grant there. Here it takes an ailab
+# review — and the admin app separately refuses any role above operator for an e2e principal.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: trueswarm-e2e-token-sync
+    app.kubernetes.io/component: credential-sync
+    app.kubernetes.io/part-of: agentforge
+---
+# `create` cannot be narrowed by resourceNames (the name is not known to RBAC until the object
+# exists), so it is granted on secrets in these two namespaces; get/update are pinned to the one
+# Secret. No list/watch, no delete, no other resource: the sync can never READ another Secret here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: trueswarm
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["trueswarm-e2e-tokens"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: trueswarm
+subjects:
+  - { kind: ServiceAccount, name: trueswarm-e2e-token-sync, namespace: openbao }
+roleRef: { kind: Role, name: trueswarm-e2e-token-sync, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: trueswarm-admin
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["trueswarm-e2e-tokens"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trueswarm-e2e-token-sync
+  namespace: trueswarm-admin
+subjects:
+  - { kind: ServiceAccount, name: trueswarm-e2e-token-sync, namespace: openbao }
+roleRef: { kind: Role, name: trueswarm-e2e-token-sync, apiGroup: rbac.authorization.k8s.io }

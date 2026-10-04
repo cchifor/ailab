@@ -1,0 +1,24 @@
+# Trueswarm e2e bearer tokens for the dev-worker agents (ADR 0035): the token sync (ns openbao) and its
+# two Secret-write Roles in the Trueswarm app namespaces. DEDICATED Kustomization, wait:false, no
+# decryption — nothing here is a secret.
+#
+# No dependsOn, on purpose (the platform-access reasoning): the Roles land in namespaces the
+# cchifor/trueswarm-admin Kustomizations create, and the vault role in `openbao`. Coupling this to
+# either would let an unrelated Trueswarm or vault failure freeze it, and coupling `openbao` to the
+# Trueswarm namespaces would be worse. A missing namespace is an apply error retried every
+# retryInterval; a missing vault role is a failed bootstrap Job that Flux re-creates.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: trueswarm-e2e-tokens
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/trueswarm-e2e-tokens
+  prune: true
+  wait: false
