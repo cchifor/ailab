@@ -370,6 +370,12 @@ identity_providers:
         client_name: Trueswarm Administration
         client_secret: $pbkdf2-sha512$310000$GNbycIYtofsPw9IaA9krGw$k6tJofdlSeEmn0TQlapLn6puaIoc6OVdJfQCtlVCPCi8wXUydn5UKav2gDz8V0AlxDJTgx3MTiMx3/IOLnQSQQ
         authorization_policy: trueswarm_admin_mfa
+        # The SECOND OIDC round trip of every admin visit (Access gate first, then this app), so it
+        # must be silent, like every first-party client. Without it Authelia defaults to an explicit
+        # consent screen on every login — half of the "it asks me twice" (2026-10-03). MFA is not
+        # weakened: trueswarm_admin_mfa still demands two_factor before any consent is evaluated.
+        # Pinned by scripts/tests/test_authelia_oidc_consent.py.
+        consent_mode: implicit
         claims_policy: cloudflare_id_token
         public: false
         require_pkce: true
@@ -386,6 +392,10 @@ identity_providers:
         client_name: Trueswarm administrator access gate
         client_secret: $pbkdf2-sha512$310000$SmJ/oJLDViJVZLSxenifdw$1OMIFnl5/UF74BWkkbLxRnOZ9QyYL7bl.wCPVdPz7mw.wcKxvHxEVjMT1fx1V7y0AP1P53uPK1Gi3fgZFSCDOg
         authorization_policy: trueswarm_admin_mfa
+        # An Access IdP, like `cloudflare-access` above: no consent prompt between the two gates.
+        # Access re-checks hourly (session_duration 1h), so an explicit screen here was a click per
+        # hour. Pinned by scripts/tests/test_authelia_oidc_consent.py.
+        consent_mode: implicit
         public: false
         require_pkce: true
         pkce_challenge_method: S256
