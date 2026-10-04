@@ -349,6 +349,8 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         args = (self.root / 'calls.plan-args').read_text().split()
         self.assertEqual(sorted(a for a in args if a.startswith('-target=')), [
             '-target=cloudflare_zero_trust_access_application.trueswarm_admin',
+            '-target=cloudflare_zero_trust_access_identity_provider.trueswarm_admin',
+            '-target=cloudflare_zero_trust_access_policy.trueswarm_admin',
             '-target=cloudflare_zero_trust_access_policy.trueswarm_admin_e2e',
             '-target=cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e'])
 

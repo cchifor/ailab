@@ -48,11 +48,16 @@ if [[ "$1" == --apply-e2e-access ]]; then
   # Plan ONLY the e2e additions (and, by dependency, the gate they attach to). Pending work owned by
   # someone else in this shared state (e.g. a DNS-record import) is neither applied nor allowed to
   # block this; it stays visible in a plain `tofu plan`. The guard below still checks every address.
+  # The IdP and human policy are targeted EXPLICITLY (not left to the dependency graph) so the guard's
+  # "both present and unchanged" check never depends on how the provider wires references.
   targets=(-target=cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e
            -target=cloudflare_zero_trust_access_policy.trueswarm_admin_e2e
-           -target=cloudflare_zero_trust_access_application.trueswarm_admin)
+           -target=cloudflare_zero_trust_access_application.trueswarm_admin
+           -target=cloudflare_zero_trust_access_identity_provider.trueswarm_admin
+           -target=cloudflare_zero_trust_access_policy.trueswarm_admin)
 fi
-tofu -chdir="$cloudflare_root" plan -input=false "${targets[@]}" -out="$plan_dir/access.plan"
+# ${targets[@]+...}: an empty array under `set -u` is "unbound" on bash < 4.4 (macOS ships 3.2).
+tofu -chdir="$cloudflare_root" plan -input=false ${targets[@]+"${targets[@]}"} -out="$plan_dir/access.plan"
 tofu -chdir="$cloudflare_root" show -json "$plan_dir/access.plan" > "$plan_dir/access.json"
 python3 - "$plan_dir/access.json" "$1" "$admin_checkout/deploy/ailab/workloads.yaml" <<'PYGUARD'
 import hashlib,json,pathlib,re,sys
