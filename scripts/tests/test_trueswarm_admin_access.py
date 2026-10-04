@@ -286,7 +286,7 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
             return resources
         self._e2e_ready = True
         (ailab / SEEDS).parent.mkdir(parents=True, exist_ok=True)
-        (ailab / SEEDS).write_text('# header comment that must survive\napiVersion: v1\nkind: Secret\nstringData:\n    common.json: \'{"gitea_pat":"pat-fixture"}\'\n    other.json: \'{"k":"v"}\'\n')
+        (ailab / SEEDS).write_text('# header comment — that must survive\napiVersion: v1\nkind: Secret\nstringData:\n    common.json: \'{"gitea_pat":"pat-fixture"}\'\n    other.json: \'{"k":"v"}\'\n', encoding='utf-8')
         (ailab / SYNC).parent.mkdir(parents=True, exist_ok=True)
         (ailab / SYNC).write_text('a:\n  - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }\nb:\n  - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }\n')
         self.git('init', '-b', 'main', cwd=ailab)
@@ -301,8 +301,8 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         self.assertEqual(r.returncode, 0, r.stdout+r.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ['plan', 'show', 'apply', 'output', 'output'])
         import yaml
-        seeds = (self.root / 'ailab' / SEEDS).read_text()
-        self.assertTrue(seeds.startswith('# header comment that must survive\n'))
+        seeds = (self.root / 'ailab' / SEEDS).read_text(encoding='utf-8')
+        self.assertTrue(seeds.startswith('# header comment — that must survive\n'), seeds[:60])
         doc = yaml.safe_load(seeds)
         common = json.loads(doc['stringData']['common.json'])
         self.assertEqual(common, {'gitea_pat': 'pat-fixture', 'trueswarm_admin_access_client_id': CF_CLIENT_ID,
@@ -469,3 +469,14 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         r = self.run_helper('--apply-e2e-access')
         self.assertEqual(r.returncode, 0, r.stdout+r.stderr)
 
+
+
+class HelperEncoding(unittest.TestCase):
+    def test_every_embedded_read_is_utf8(self):
+        """The helper runs on the Windows operator workstation, where a bare read_text() decodes with
+        cp1252: the first live --apply-e2e-access turned the seed file's em dashes into mojibake
+        (2026-10-04). Every read in the helper's embedded Python must name its encoding."""
+        import re
+        helper = (ROOT / 'scripts/trueswarm-admin-access.sh').read_text(encoding='utf-8')
+        self.assertIn("read_text(encoding='utf-8')", helper)
+        self.assertEqual(re.findall(r"read_text\((?!encoding='utf-8')[^)]*\)", helper), [])
