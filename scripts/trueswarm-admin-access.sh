@@ -78,7 +78,7 @@ for resource in changes:
     if resource['address'] not in allowed or 'delete' in actions:unexpected.append(resource['address'])
 if unexpected:raise SystemExit('Refusing unrelated changes/deletions: '+', '.join(unexpected))
 def gitops_audience_matches(audience):
-    text=pathlib.Path(sys.argv[3]).read_text()
+    text=pathlib.Path(sys.argv[3]).read_text(encoding='utf-8')
     audiences=re.findall(r'(?m)^  ACCESS_AUDIENCE: (.+)$',text)
     return len(audiences)==1 and audiences[0] in (audience,json.dumps(audience))
 if e2e:
@@ -148,7 +148,7 @@ elif publishing:
     audience=existing['cloudflare_zero_trust_access_application.trueswarm_admin[0]']['after'].get('aud','')
     if not re.fullmatch(r'[A-Za-z0-9_-]{20,256}',audience):
         raise SystemExit('The existing Access application has no valid audience')
-    text=pathlib.Path(sys.argv[3]).read_text()
+    text=pathlib.Path(sys.argv[3]).read_text(encoding='utf-8')
     if not gitops_audience_matches(audience):
         raise SystemExit('Private GitOps audience does not match the existing Access application')
     markers=re.findall(r'(?m)^\s+trueswarm\.chifor\.me/access-config: (.+)$',text)
@@ -186,7 +186,7 @@ import yaml
 seeds,sync=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2])
 cid,secret=os.environ['TS_E2E_CLIENT_ID'],os.environ['TS_E2E_CLIENT_SECRET']
 if not re.fullmatch(r'[A-Za-z0-9._-]{8,200}',cid) or len(secret)<16:raise SystemExit('Cloudflare returned an unusable service token')
-text=seeds.read_text()
+text=seeds.read_text(encoding='utf-8')
 common=json.loads(yaml.safe_load(text)['stringData']['common.json'])
 common.update(trueswarm_admin_access_client_id=cid,trueswarm_admin_access_client_secret=secret)
 # Replace only the common.json scalar (single line or block) so every comment in the file survives.
@@ -197,7 +197,7 @@ end=start+1
 while end<len(lines) and (not lines[end].strip() or len(lines[end])-len(lines[end].lstrip())>indent):end+=1
 lines[start:end]=[' '*indent+'common.json: '+json.dumps(json.dumps(common,separators=(',',':')))]
 open(seeds,'w',encoding='utf-8',newline='\n').write('\n'.join(lines))
-body,count=re.subn(r'\{ name: ADMIN_ACCESS_CLIENT_IDS, value: "[^"]*" \}','{ name: ADMIN_ACCESS_CLIENT_IDS, value: "%s" }'%cid,sync.read_text())
+body,count=re.subn(r'\{ name: ADMIN_ACCESS_CLIENT_IDS, value: "[^"]*" \}','{ name: ADMIN_ACCESS_CLIENT_IDS, value: "%s" }'%cid,sync.read_text(encoding='utf-8'))
 if count!=2:raise SystemExit('Expected ADMIN_ACCESS_CLIENT_IDS in the CronJob and the bootstrap Job')
 open(sync,'w',encoding='utf-8',newline='\n').write(body)
 PYSEED
@@ -211,9 +211,9 @@ fi
 tofu -chdir="$cloudflare_root" output -raw trueswarm_admin_access_audience > "$plan_dir/audience"
 python3 - "$admin_checkout/deploy/ailab/workloads.yaml" "$plan_dir/audience" <<'PY'
 import hashlib,json,pathlib,re,sys
-path=pathlib.Path(sys.argv[1]);audience=pathlib.Path(sys.argv[2]).read_text().strip()
+path=pathlib.Path(sys.argv[1]);audience=pathlib.Path(sys.argv[2]).read_text(encoding='utf-8').strip()
 if not re.fullmatch(r'[A-Za-z0-9_-]{20,256}',audience):raise SystemExit('Cloudflare returned an invalid audience')
-content,count=re.subn(r'(?m)^(  ACCESS_AUDIENCE: ).+$',lambda m:m[1]+json.dumps(audience),path.read_text())
+content,count=re.subn(r'(?m)^(  ACCESS_AUDIENCE: ).+$',lambda m:m[1]+json.dumps(audience),path.read_text(encoding='utf-8'))
 if count!=1:raise SystemExit('Expected exactly one private deployment audience setting')
 content,count=re.subn(r'(?m)^(\s+trueswarm\.chifor\.me/access-config: ).+$',lambda m:m[1]+hashlib.sha256(audience.encode()).hexdigest()[:16],content)
 if count!=1:raise SystemExit('Expected exactly one admin rollout marker')

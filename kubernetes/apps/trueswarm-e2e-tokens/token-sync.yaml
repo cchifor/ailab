@@ -66,7 +66,7 @@ spec:
                 - { name: BAO_KV_MOUNT, value: "af" }
                 - { name: LIVE_SLOTS, value: "1 2 3 4" }
                 - { name: ADMIN_ROLE, value: "operator" }
-                - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }
+                - { name: ADMIN_ACCESS_CLIENT_IDS, value: "7b5042d19f73ec07164a4a7d4561bc7b.access" }
               volumeMounts:
                 - { name: tls, mountPath: /tls, readOnly: true }
                 - { name: script, mountPath: /scripts, readOnly: true }
@@ -135,7 +135,7 @@ spec:
             - { name: BAO_KV_MOUNT, value: "af" }
             - { name: LIVE_SLOTS, value: "1 2 3 4" }
             - { name: ADMIN_ROLE, value: "operator" }
-            - { name: ADMIN_ACCESS_CLIENT_IDS, value: "" }
+            - { name: ADMIN_ACCESS_CLIENT_IDS, value: "7b5042d19f73ec07164a4a7d4561bc7b.access" }
           volumeMounts:
             - { name: tls, mountPath: /tls, readOnly: true }
             - { name: script, mountPath: /scripts, readOnly: true }
