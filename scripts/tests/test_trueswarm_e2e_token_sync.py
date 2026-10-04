@@ -12,7 +12,9 @@ Run:
 
     python3 -m unittest scripts.tests.test_trueswarm_e2e_token_sync -v
 """
+import base64
 import importlib.util
+import json
 import pathlib
 import re
 import unittest
@@ -37,7 +39,7 @@ def entry_for(token, not_after):
 
 class PlanSlot(unittest.TestCase):
     def plan(self, published, until, entry, force=False):
-        return ts.plan_slot(published, until, entry, NOW, VALIDITY, ROTATE_BEFORE, OVERLAP, force)
+        return ts.plan_slot(published, until, entry, NOW, ROTATE_BEFORE, force)
 
     def test_steady_state_keeps(self):
         tok = "tse2e.dev-worker-4.x"
@@ -181,6 +183,145 @@ class Manifests(unittest.TestCase):
         self.assertIn("bound_service_account_names=trueswarm-e2e-token-sync", body)
         self.assertIn("bound_service_account_namespaces=openbao", body)
         self.assertIn("token_policies=k8stoken-sync", body)
+
+
+class FakeCluster:
+    """Just enough of the Kubernetes Secret API (resourceVersion CAS) and OpenBao KV-v2 for sync()."""
+
+    def __init__(self):
+        self.secrets = {}  # ns -> obj with metadata.resourceVersion
+        self.kv = {}  # slot -> data dict
+        self.rv = 0
+        self.kv_writes = 0
+
+    def k8s(self, path, method="GET", payload=None):
+        parts = path.strip("/").split("/")  # api v1 namespaces <ns> secrets [<name>]
+        ns = parts[3]
+        if method == "GET":
+            return (200, json.loads(json.dumps(self.secrets[ns]))) if ns in self.secrets else (404, {})
+        if method == "POST":
+            if ns in self.secrets:
+                return 409, {}
+        elif method == "PUT":
+            if ns not in self.secrets or payload["metadata"]["resourceVersion"] != self.secrets[ns]["metadata"]["resourceVersion"]:
+                return 409, {}
+        self.rv += 1
+        obj = json.loads(json.dumps(payload))
+        obj["metadata"]["resourceVersion"] = str(self.rv)
+        self.secrets[ns] = obj
+        return (201 if method == "POST" else 200), obj
+
+    def bao(self, path, method="GET", payload=None, ctype="application/json"):
+        slot = path.rsplit("/", 1)[1]
+        if method == "GET":
+            return (200, {"data": {"data": dict(self.kv[slot])}}) if slot in self.kv else (404, {})
+        if method == "POST":
+            if slot in self.kv:
+                return 400, {}
+            self.kv[slot] = dict(payload["data"])
+        elif method == "PATCH":
+            if slot not in self.kv:
+                return 404, {}
+            self.kv[slot].update(payload["data"])
+        self.kv_writes += 1
+        return 200, {}
+
+    def doc(self, ns):
+        return json.loads(base64.b64decode(self.secrets[ns]["data"]["tokens.json"]))
+
+    def assert_consistent(self, case, slots):
+        """Every published token is its app's CURRENT token (tokens[0]) and is still valid."""
+        for app, (ns, field, _, _) in ts.APPS.items():
+            entries = {p["name"]: p for p in self.doc(ns)["principals"]}
+            case.assertEqual(sorted(entries), sorted(slots))
+            for slot in slots:
+                token = self.kv[slot][f"{field}_e2e_token"]
+                case.assertEqual(entries[slot]["tokens"][0]["sha256"], ts.sha256_hex(token), f"{app}/{slot}")
+                case.assertEqual(entries[slot]["tokens"][0]["not_after"], int(self.kv[slot][f"{field}_e2e_valid_until"]))
+
+
+def cfg(**over):
+    c = ts.config_from_env({"LIVE_SLOTS": "1 4", "ADMIN_ACCESS_CLIENT_IDS": "svc.access"})
+    c.update(over)
+    return c
+
+
+SLOTS = ["dev-worker-1", "dev-worker-4"]
+quiet = lambda line: None  # noqa: E731
+
+
+class SyncRuns(unittest.TestCase):
+    def test_first_run_publishes_consistent_tokens_and_a_rerun_is_a_noop(self):
+        fake = FakeCluster()
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW, quiet)
+        fake.assert_consistent(self, SLOTS)
+        admin = {p["name"]: p for p in fake.doc("trueswarm-admin")["principals"]}
+        self.assertEqual(admin["dev-worker-4"]["role"], "operator")
+        self.assertEqual(admin["dev-worker-4"]["access_client_ids"], ["svc.access"])
+        rv, writes = fake.rv, fake.kv_writes
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: self.fail("a no-op run must not wait"), NOW + 60, quiet)
+        self.assertEqual((fake.rv, fake.kv_writes), (rv, writes))
+
+    def test_overtaken_run_does_not_publish_over_the_later_one(self):
+        """Codex #1059: run A writes its Secrets and pauses; run B reads them while OpenBao still holds
+        nothing/the old tokens, rotates again and publishes; A must not then overwrite B in OpenBao."""
+        fake = FakeCluster()
+
+        def a_pauses(_):
+            ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW + 1, quiet)  # run B, start to finish
+
+        with self.assertRaises(SystemExit) as stopped:
+            ts.sync(cfg(), fake.k8s, fake.bao, a_pauses, NOW, quiet)
+        self.assertIn("later run replaced", str(stopped.exception))
+        fake.assert_consistent(self, SLOTS)
+
+    def test_overtaken_rotation_of_existing_tokens_keeps_the_later_one(self):
+        fake = FakeCluster()
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW, quiet)
+        later = NOW + 8 * DAY  # both runs find the tokens due
+
+        def a_pauses(_):
+            ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, later + 1, quiet)
+
+        with self.assertRaises(SystemExit):
+            ts.sync(cfg(), fake.k8s, fake.bao, a_pauses, later, quiet)
+        fake.assert_consistent(self, SLOTS)
+
+    def test_run_dying_between_its_two_writes_self_heals(self):
+        fake = FakeCluster()
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW, quiet)
+
+        def die(_):
+            raise RuntimeError("pod killed during the propagation wait")
+
+        with self.assertRaises(RuntimeError):
+            ts.sync(cfg(force=True), fake.k8s, fake.bao, die, NOW + 60, quiet)
+        # OpenBao still holds the old tokens; the apps hold new current + old as a 1 h overlap.
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW + 120, quiet)
+        fake.assert_consistent(self, SLOTS)
+
+    def test_concurrent_secret_write_is_refused_before_anything_is_published(self):
+        fake = FakeCluster()
+        real = fake.k8s
+
+        def racing_k8s(path, method="GET", payload=None):
+            if method == "PUT":
+                real(path, "PUT", dict(payload, metadata=dict(payload["metadata"])))  # someone else wins
+            return real(path, method, payload)
+
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW, quiet)
+        writes = fake.kv_writes
+        with self.assertRaises(SystemExit) as stopped:
+            ts.sync(cfg(force=True), racing_k8s, fake.bao, lambda s: None, NOW + 60, quiet)
+        self.assertIn("changed under this run", str(stopped.exception))
+        self.assertEqual(fake.kv_writes, writes)
+
+    def test_retired_slot_is_dropped_from_both_secrets(self):
+        fake = FakeCluster()
+        ts.sync(cfg(), fake.k8s, fake.bao, lambda s: None, NOW, quiet)
+        ts.sync(cfg(live=[1]), fake.k8s, fake.bao, lambda s: None, NOW + 60, quiet)
+        for ns in ("trueswarm", "trueswarm-admin"):
+            self.assertEqual([p["name"] for p in fake.doc(ns)["principals"]], ["dev-worker-1"])
 
 
 if __name__ == "__main__":

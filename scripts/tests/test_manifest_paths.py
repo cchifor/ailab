@@ -87,6 +87,8 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/trueswarm-bootstrap",
         "./kubernetes/apps/trueswarm-admin-bootstrap",
         "./kubernetes/apps/trueswarm-admin-executor-bootstrap",
+        # 2026-10-04 — ADR 0035: the per-worker Trueswarm e2e token sync (ns openbao) + its Secret Roles.
+        "./kubernetes/apps/trueswarm-e2e-tokens",
         "./kubernetes/apps/qnap-storage",
         "./kubernetes/apps/storage-policies",
         # 2026-09-29 — Kyverno cleanup policies (terminated ReplicaSet pods), after platform-kyverno

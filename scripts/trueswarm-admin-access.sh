@@ -67,19 +67,59 @@ def gitops_audience_matches(audience):
     audiences=re.findall(r'(?m)^  ACCESS_AUDIENCE: (.+)$',text)
     return len(audiences)==1 and audiences[0] in (audience,json.dumps(audience))
 if e2e:
+    def unknown(x):
+        return x is True or (isinstance(x,dict) and any(unknown(v) for v in x.values())) or (isinstance(x,list) and any(unknown(v) for v in x))
+    def blank(v):
+        return v in (None,'',False) or v==[] or v=={}
     by={r['address']:r['change'] for r in changes}
     stay=(gates-{APP})|{DNS}
     if any(a not in by or by[a]['actions']!=['no-op'] for a in stay):
         raise SystemExit('E2E mode requires the existing IdP, human policy and published DNS record, all unchanged')
     if APP not in by or by[APP]['actions'] not in (['update'],['no-op']):
         raise SystemExit('E2E mode may only update the existing Access application in place')
-    after=by[APP].get('after') or {}
+    app=by[APP]
+    before,after,later=app.get('before') or {},app.get('after') or {},app.get('after_unknown') or {}
     audience=after.get('aud','')
     if not re.fullmatch(r'[A-Za-z0-9_-]{20,256}',audience) or not gitops_audience_matches(audience):
         raise SystemExit('The Access application audience does not match private GitOps; refusing to touch a different gate')
-    precedences=[p.get('precedence') for p in after.get('policies') or []]
-    if precedences!=[1,2]:
-        raise SystemExit('Expected the human MFA policy at precedence 1 and the e2e policy at 2, got %r'%precedences)
+    # Everything except the policy list must be identical AND known after the update: allowed_idps,
+    # session settings, domain, auto-redirect... A computed timestamp may legitimately go unknown.
+    drift=sorted(k for k in set(before)|set(after)|set(later) if k not in ('policies','updated_at')
+                 and (unknown(later.get(k)) or before.get(k)!=after.get(k)))
+    if drift:
+        raise SystemExit('E2E mode may change only the application policy list; the plan also changes: '+', '.join(drift))
+    human_id=(by['cloudflare_zero_trust_access_policy.trueswarm_admin[0]'].get('before') or {}).get('id')
+    bp,ap,up=before.get('policies') or [],after.get('policies') or [],later.get('policies') or []
+    up=up+[None]*(2-len(up))
+    if not human_id or not bp or bp[0].get('id')!=human_id or bp[0].get('precedence')!=1:
+        raise SystemExit('The live application does not have the human MFA policy at precedence 1')
+    if len(ap)!=2 or ap[0]!=bp[0] or unknown(up[0]):
+        raise SystemExit('The human MFA policy must stay attached at precedence 1, unchanged')
+    E2EP='cloudflare_zero_trust_access_policy.trueswarm_admin_e2e[0]'
+    TOKEN='cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[0]'
+    if E2EP not in by or TOKEN not in by:
+        raise SystemExit('E2E mode expects the e2e service token and its policy in the plan')
+    added,added_later=ap[1],(up[1] or {})
+    if added.get('precedence')!=2 or any(not blank(v) for k,v in added.items() if k not in ('id','precedence')) \
+            or any(unknown(v) for k,v in added_later.items() if k!='id'):
+        raise SystemExit('The added application policy must be a bare reference (id, precedence 2), not an inline rule')
+    policy=by[E2EP]
+    policy_id=(policy.get('after') or {}).get('id')
+    if added.get('id') is not None:
+        if added['id']!=policy_id:
+            raise SystemExit('The added application policy is not the planned e2e policy')
+    elif not (added_later.get('id') is True and policy['actions']==['create']):
+        raise SystemExit('The added application policy id is unknown but no e2e policy is being created')
+    pafter,plater=policy.get('after') or {},policy.get('after_unknown') or {}
+    include=pafter.get('include') or []
+    token_id=(by[TOKEN].get('after') or {}).get('id')
+    if pafter.get('decision')!='non_identity' or len(include)!=1 or set(include[0])-{'service_token'} \
+            or any(not blank(pafter.get(k)) for k in ('exclude','require')):
+        raise SystemExit('The e2e policy must be non_identity and include only the e2e service token')
+    ref=(include[0].get('service_token') or {}).get('token_id')
+    ref_later=((plater.get('include') or [{}])[0].get('service_token') or {}).get('token_id')
+    if not ((ref is not None and ref==token_id) or (ref is None and ref_later is True and by[TOKEN]['actions']==['create'])):
+        raise SystemExit('The e2e policy must reference the planned e2e service token')
     print('Plan guard passed: only the dev-worker e2e service token, its policy and the application policy list change.')
 elif publishing:
     existing={r['address']:r['change'] for r in changes if r['address'] in gates}
@@ -136,10 +176,10 @@ indent=len(lines[start])-len(lines[start].lstrip())
 end=start+1
 while end<len(lines) and (not lines[end].strip() or len(lines[end])-len(lines[end].lstrip())>indent):end+=1
 lines[start:end]=[' '*indent+'common.json: '+json.dumps(json.dumps(common,separators=(',',':')))]
-seeds.write_text('\n'.join(lines),newline='\n')
+open(seeds,'w',encoding='utf-8',newline='\n').write('\n'.join(lines))
 body,count=re.subn(r'\{ name: ADMIN_ACCESS_CLIENT_IDS, value: "[^"]*" \}','{ name: ADMIN_ACCESS_CLIENT_IDS, value: "%s" }'%cid,sync.read_text())
 if count!=2:raise SystemExit('Expected ADMIN_ACCESS_CLIENT_IDS in the CronJob and the bootstrap Job')
-sync.write_text(body,newline='\n')
+open(sync,'w',encoding='utf-8',newline='\n').write(body)
 PYSEED
   sops encrypt --filename-override "$seeds" --input-type yaml --output-type yaml "$plan_dir/seeds.yaml" > "$plan_dir/seeds.enc"
   mv "$plan_dir/seeds.enc" "$seeds"

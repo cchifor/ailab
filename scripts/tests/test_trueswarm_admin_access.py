@@ -257,11 +257,23 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         else:
             resources = self.publication_fixture()
         resources[-1]['change']['actions'] = ['no-op']
+        # The shape a real provider-5 plan has: full before/after for the application, the new policy's
+        # id unknown until apply, the human policy's id known on its no-op change.
+        resources[1]['change']['before'] = resources[1]['change']['after'] = {'id': 'human-policy-id', 'decision': 'allow'}
+        common = {'aud': AUDIENCE, 'domain': 'trueswarm-admin.chifor.me', 'allowed_idps': ['idp-id'],
+                  'session_duration': '1h', 'auto_redirect_to_identity': True}
+        human = {'id': 'human-policy-id', 'precedence': 1}
         app = resources[2]['change']
         app['actions'] = ['update']
-        app['after'] = {'aud': AUDIENCE, 'policies': [{'precedence': 1}, {'precedence': 2}]}
-        resources.append(self.resource('x', address='cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[0]'))
-        resources.append(self.resource('x', address='cloudflare_zero_trust_access_policy.trueswarm_admin_e2e[0]'))
+        app['before'] = dict(common, policies=[dict(human)])
+        app['after'] = dict(common, policies=[dict(human), {'precedence': 2}])
+        app['after_unknown'] = {'policies': [{}, {'id': True}]}
+        token = self.resource('x', address='cloudflare_zero_trust_access_service_token.trueswarm_admin_e2e[0]')
+        token['change']['after'], token['change']['after_unknown'] = {'name': 'trueswarm-admin-e2e'}, {'id': True, 'client_id': True}
+        policy = self.resource('x', address='cloudflare_zero_trust_access_policy.trueswarm_admin_e2e[0]')
+        policy['change']['after'] = {'decision': 'non_identity', 'include': [{'service_token': {}}]}
+        policy['change']['after_unknown'] = {'id': True, 'include': [{'service_token': {'token_id': True}}]}
+        resources += [token, policy]
         ailab = self.root / 'ailab'
         if getattr(self, '_e2e_ready', False):
             self.plan.write_text(json.dumps({'resource_changes': resources}))
@@ -349,4 +361,68 @@ elif cmd!='apply':raise SystemExit('Unexpected command')
         sync.write_text(sync.read_text() + '# local edit\n')
         self.assert_refused_before_apply('--apply-e2e-access')
         self.assertFalse(self.calls.exists())
+
+    def test_e2e_rejects_any_other_application_field_change(self):
+        for field, value in [('allowed_idps', ['idp-id', 'otp']), ('session_duration', '24h'),
+                             ('auto_redirect_to_identity', False), ('domain', 'other.chifor.me')]:
+            with self.subTest(field=field):
+                resources = self.e2e_fixture()
+                resources[2]['change']['after'][field] = value
+                self.plan.write_text(json.dumps({'resource_changes': resources}))
+                self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_application_field_going_unknown(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after_unknown']['allowed_idps'] = True
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_a_substituted_human_policy(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['policies'][0]['id'] = 'someone-elses-policy'
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_added_policy_that_is_not_the_planned_one(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['policies'][1]['id'] = 'an-existing-permissive-policy'
+        resources[2]['change']['after_unknown'] = {'policies': [{}, {}]}
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_inline_rule_in_the_policy_list(self):
+        resources = self.e2e_fixture()
+        resources[2]['change']['after']['policies'][1]['include'] = [{'everyone': {}}]
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_a_widened_or_identity_e2e_policy(self):
+        for change in ({'decision': 'allow'}, {'include': [{'everyone': {}}]},
+                       {'include': [{'service_token': {}}, {'email': {'email': 'x@y.z'}}]}):
+            with self.subTest(change=change):
+                resources = self.e2e_fixture()
+                resources[-1]['change']['after'].update(change)
+                self.plan.write_text(json.dumps({'resource_changes': resources}))
+                self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rejects_an_e2e_policy_pointing_at_another_token(self):
+        resources = self.e2e_fixture()
+        resources[-1]['change']['after']['include'] = [{'service_token': {'token_id': 'api-token-id'}}]
+        resources[-1]['change']['after_unknown'] = {'id': True}
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        self.assert_refused_before_apply('--apply-e2e-access')
+
+    def test_e2e_rerun_with_everything_in_place_is_accepted(self):
+        resources = self.e2e_fixture()
+        app = resources[2]['change']
+        app['actions'] = ['no-op']
+        app['after']['policies'][1]['id'] = 'e2e-policy-id'
+        app['before']['policies'].append({'id': 'e2e-policy-id', 'precedence': 2})
+        app['after_unknown'] = {}
+        resources[-2]['change'] = {'actions': ['no-op'], 'before': {'id': 'tok'}, 'after': {'id': 'tok'}}
+        resources[-1]['change'] = {'actions': ['no-op'], 'before': {}, 'after': {
+            'id': 'e2e-policy-id', 'decision': 'non_identity', 'include': [{'service_token': {'token_id': 'tok'}}]}}
+        self.plan.write_text(json.dumps({'resource_changes': resources}))
+        r = self.run_helper('--apply-e2e-access')
+        self.assertEqual(r.returncode, 0, r.stdout+r.stderr)
 
