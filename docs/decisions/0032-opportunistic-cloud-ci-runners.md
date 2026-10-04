@@ -115,8 +115,10 @@ Advanced CPU Settings → SVM Mode).
    (Samsung 970 EVO Plus) and one on `local-nvme`. That pool fills its Kingston NV2 first, so the
    write load is split across two drives.
 2. **cloud3: cloud-ci-12/13** (6112/6113; `.7`/`.12`) as its sixth and seventh. Measurement supersedes
-   the earlier "a sixth is CPU-bound" note. Over the week the host's CPU peaked at 15 of 64 threads
-   at p99 (37 %), CPU pressure was 1.6 % at p99, and steal was about zero. MemAvailable was 91 GiB
+   the earlier "a sixth is CPU-bound" note. Over the week the host's CPU was 37 % busy at p99,
+   measured as 1 − idle (which counts iowait). Doing real work (user + system), it used 15 of 64
+   threads at p99, about 24 % (a separate p99). CPU pressure was 1.6 % at p99, and steal was about
+   zero. MemAvailable was 91 GiB
    at its lowest, which leaves ≥ ~43 GiB after two more at ceiling. Both disks go on `local-nvme`.
    On cloud3's boot NVMe, where cloud-ci-3/4/5 live, guest write latency is 21–27 ms at p99. On
    `local-nvme` (cloud-ci-7/8) it is 7–8 ms.
@@ -127,7 +129,7 @@ Advanced CPU Settings → SVM Mode).
 - **No static addresses left.** The ailab IPAM block has none free. The next one needs a release or
   a router DHCP-pool shrink.
 - **Keep-or-revert gates**, checked after two busy days:
-  - host CPU p99 < 50 %;
+  - host CPU p99 < 50 %, measured as 1 − idle (the conservative one of the two figures above);
   - host MemAvailable never below 30 GiB;
   - in-guest write latency p99 < 15 ms;
   - cloud-llm-3 serving unaffected.
