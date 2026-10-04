@@ -60,7 +60,7 @@ class Render(unittest.TestCase):
         s = cqs.summarize([], days=7)
         s["days"] = 7
         out = cqs.render(s)
-        self.assertIn("0 completed jobs", out)
+        self.assertIn("0 jobs", out)
         self.assertIn("no samples", out)
 
     def test_unset_timestamps_render_not_typeerror(self):
@@ -101,6 +101,45 @@ class Paged(unittest.TestCase):
         cqs.get = lambda token, path, params=None: pages[params["page"]]
         try:
             self.assertEqual(len(cqs.paged("t", "/x", "jobs")), 45)
+        finally:
+            cqs.get = orig
+
+class Readiness(unittest.TestCase):
+    def test_dependencies_are_not_runner_wait(self):
+        t = '2026-10-04T10:'
+        run = {'id': 1}
+        job = {'id': 2, 'created_at': t+'00:00Z', 'started_at': t+'11:00Z', 'completed_at': t+'12:00Z', 'conclusion': 'success'}
+        row = cqs.job_row('o/r', run, job, [{'completed_at': t+'10:00Z'}])
+        s = cqs.summarize([row], 1)
+        self.assertEqual(s['wait_s']['p50'], 660)
+        self.assertEqual(s['runner_wait_s']['p50'], 60)
+        self.assertEqual(s['dependency_wait_s']['p50'], 600)
+
+    def test_unknown_readiness_does_not_become_zero(self):
+        row = cqs.job_row('o/r', {'id': 1}, {'id': 2, 'created_at': '2026-10-04T10:00:00Z', 'started_at': '2026-10-04T10:11:00Z'})
+        self.assertIsNone(cqs.summarize([row], 1)['runner_wait_s']['p50'])
+
+    def test_rerun_dispatch_replaces_original_creation(self):
+        row = cqs.job_row('o/r', {'id': 1}, {'id': 2, 'created_at': '2026-09-01T00:00:00Z', 'started_at': '2026-10-04T10:11:00Z'}, [], '2026-10-04T10:10:00Z')
+        self.assertEqual(cqs.summarize([row], 1)['runner_wait_s']['p50'], 60)
+
+    def test_cancelled_cost_is_counted_and_clock_skew_not_negative(self):
+        s = cqs.summarize([{'created': 1, 'started': 0, 'completed': 60, 'runner': '', 'conclusion': 'cancelled'}], 1)
+        self.assertEqual(s['runner_minutes'], 1)
+        self.assertEqual(s['outcomes']['cancelled'], 1)
+        self.assertEqual(s['wait_s']['n'], 0)
+
+    def test_known_rerun_without_dispatch_has_unknown_queue(self):
+        row = cqs.job_row('o/r', {'id': 1}, {'id': 2, 'created_at': '2026-09-01T00:00:00Z', 'started_at': '2026-10-04T10:11:00Z'}, [], known_rerun=True)
+        self.assertIsNone(row['created'])
+        self.assertEqual(cqs.summarize([row], 1)['wait_s']['n'], 0)
+
+    def test_old_run_does_not_hide_later_page_recent_rerun(self):
+        pages = {1: {'workflow_runs': [{'id': 30, 'started_at': '2026-09-01T00:00:00Z'}]}, 2: {'workflow_runs': [{'id': 20, 'started_at': '2026-10-04T00:00:00Z'}]}, 3: {'workflow_runs': []}}
+        orig = cqs.get
+        cqs.get = lambda token, path, params: pages[params['page']]
+        try:
+            self.assertEqual([r['id'] for r in cqs.runs_since('t', 'o/r', cqs.parse_ts('2026-10-01T00:00:00Z'))], [20])
         finally:
             cqs.get = orig
 
