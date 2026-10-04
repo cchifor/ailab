@@ -515,7 +515,9 @@ panels += [
 # Two scrape jobs, one pool: the 8 always-on ailab runner VMs (job="ci-runner-node") and the
 # opportunistic cloud-ci-N VMs on the cloudlab cluster (job="ci-runner-cloud", ADR 0032), which are
 # OFF at night by design — so "Up" is split: the ailab count has a floor (red below 8), the cloud
-# count is informational (0 every night is normal). Per-runner panels carry `nodename` (set by the
+# count is blue at 0 (every night, normal), orange while only part of the 12 active cloud runners
+# answer (a host missing or a VM down while its host is up) and green at all 12 (cloud1 x2, cloud2 x3,
+# cloud3 x7 since 2026-10-04; cloud-ci-6 quarantined — ADR 0032 amendment 2026-10-04). Per-runner panels carry `nodename` (set by the
 # cloud scrape's Endpoints hostname; empty on the ailab job) beside the instance IP.
 RUNNERS = 'job=~"ci-runner-node|ci-runner-cloud"'
 RUNNERS_AILAB = 'job="ci-runner-node"'
@@ -525,8 +527,8 @@ panels.append(row("CI Runners (host node_exporter: ailab 24/7 + cloud opportunis
 panels += [
     stat("ailab Runners Up", 0, 87, 4, 4, f'count(up{{{RUNNERS_AILAB}}} == 1) or vector(0)',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 8}]),
-    stat("Cloud Runners Up", 4, 87, 4, 4, f'count(up{{{RUNNERS_CLOUD}}} == 1) or vector(0)',
-         steps=[{"color": "blue", "value": None}, {"color": "green", "value": 1}]),
+    stat("Cloud Runners Up (of 12)", 4, 87, 4, 4, f'count(up{{{RUNNERS_CLOUD}}} == 1) or vector(0)',
+         steps=[{"color": "blue", "value": None}, {"color": "orange", "value": 1}, {"color": "green", "value": 12}]),
     stat("Runner Cores", 8, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}) or vector(0)'),
     stat("Runner Memory", 12, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}}) or vector(0)', unit="bytes", decimals=1),
     stat("Fleet CPU Used", 16, 87, 4, 4,
