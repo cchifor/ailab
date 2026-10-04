@@ -1,4 +1,4 @@
-# trueswarm-e2e-token-sync â€” per-slot bearer tokens that let each dev-worker agent run Playwright
+# trueswarm-e2e-token-sync — per-slot bearer tokens that let each dev-worker agent run Playwright
 # against the LIVE Trueswarm and Trueswarm Admin without a human login (ADR 0035). The script is
 # token_sync.py next to this file (configMapGenerator in kustomization.yaml); its docstring is the
 # contract. Operator how-to: docs/runbooks/trueswarm-e2e-tokens.md.
