@@ -154,6 +154,19 @@ dev_worker_tmux_memory_max: "6G"
 #     reclaim loop on every pane in the slice on its way to MemoryMax anyway. A single hard ceiling
 #     kills the offender immediately instead of degrading every other pane first.
 dev_worker_tmux_memory_swap_max: "0"
+# oom_score_adj for every command Claude Code runs. The cap above decides WHERE a kill happens; this
+# decides WHO dies. A cgroup OOM kills the task with the highest badness, which is roughly its RSS. On
+# dev-worker-1 (2026-10-03/04) one orchestrating session's builders ran vitest and pytest in
+# parallel: up to 32 node workers of ~250 MB each inside the slice. Each worker was smaller than
+# `claude` (~700 MB), so the kernel killed the agent itself, at both 6G and 9G. Raising the cap
+# does not fix this, because the fan-out just grows to fill it.
+# The role sets BASH_ENV (agent-shell-env.sh.j2) for Claude Code through managed settings, so every
+# non-interactive bash it starts raises its own oom_score_adj, and every descendant inherits the
+# value. At 500, a child's badness gains half the cgroup's limit (~4.5 GiB at 9G), so any agent
+# command outranks `claude`, which stays at 0. Raising needs no privilege. The script never lowers
+# a value, because that needs CAP_SYS_RESOURCE.
+dev_worker_agent_oom_score_adj: 500
+dev_worker_agent_shell_env_path: /usr/local/lib/dev-worker/agent-shell-env.sh
 
 # ---- tmux persistence (NEW vs homelab) ----
 dev_worker_tmux_continuum_save_interval: "15"
