@@ -373,3 +373,47 @@ Restore that digest in both containers and the v0.2.3 source/release annotations
 through a reviewed PR. The migration is additive; leave its columns in place
 for an application rollback. Database restoration is reserved for a recovery
 that actually requires it, using matching dump and plugin artifacts.
+
+
+## Workspace UI release 0.3.1
+
+Source: `1a94684350342a41c5a95c8e742a86a49261af3e`, [Relay PR #9](https://git.chifor.me/cchifor/relay/pulls/9).
+Image: `registry.chifor.me/relay/control-plane@sha256:d089449d0185dfa86b751f21017d6810f3d16afabb978689f78a0c942ab1c2df`.
+Provenance: [deployment-images-63408.json](https://git.chifor.me/cchifor/relay/releases/download/v0.3.1/deployment-images-63408.json),
+produced by [release CI 63408](https://git.chifor.me/cchifor/relay/actions/runs/63408).
+Both the application and migration containers use this digest. The image keeps
+all previously served pinned connector downloads, including v0.3.0.
+
+This release gives every workspace page browser scrolling and a shared Back
+button with linked breadcrumbs. Status cards open agent terminals directly;
+the old agent detail modal and Latest Activity panel are removed. Matrix,
+focused pane and native tmux views have compact terminal headers. Agents and
+Activity use search and removable filter chips while preserving their detailed
+rows and actions; Agents sort through column headers. Scrollbar thumbs hide
+while idle. Browser history restores filters and native tmux selections.
+
+There are no new database migrations or connector behavior changes. Existing
+host processes require no upgrade. The existing Recreate and coordinated
+backup gate still run before migration and application startup; no Secret,
+RBAC, tunnel, PVC or backup policy changes are part of this release.
+
+Local validation passed typecheck, formatting, build and seven suites (55 tests
+passed; optional user-service and ARM64 checks skipped locally). Real API,
+PostgreSQL, Rust connector and tmux Playwright coverage includes breadcrumbs,
+Back, matrix/focused/native views, control, host review, table filters/sorting,
+Activity pagination and live snapshots, and document scrolling at 390, 768
+and 1440 pixels. Tag CI additionally builds and checks both portable connector
+architectures and clean installation.
+
+After Flux reconciliation, verify health/readiness together with the v0.3.1
+public manifest, expected source, new UI asset hashes, and retained downloads.
+Run authenticated Playwright checks for shared breadcrumbs and Back, Status
+terminal links, matrix/focused views, table filters/sorting, Activity details,
+and responsive scrolling. Readiness of the expected release demonstrates the
+ordered backup/migration gate completed; detailed generation logs, a fresh
+live restore drill and offsite backup capture need separate observation.
+
+Rollback restores `registry.chifor.me/relay/control-plane@sha256:1ce1e70eadaccf0f07c92de408f623c2492cc507651004ed3dccf512bf3bf420`
+in both containers, `relay-0.3.0-ci-20261003` and source
+`dafe4de8ccbcdfa4f4a11fdc99972b9481c26ea3` through a reviewed GitOps PR.
+No database restore or connector restart is required to roll back this UI release.
