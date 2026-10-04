@@ -172,8 +172,20 @@ class Manifests(unittest.TestCase):
     def test_configmap_generator_ships_the_tested_file(self):
         k = yaml.safe_load((TREE / "kustomization.yaml").read_text(encoding="utf-8"))
         gen = k["configMapGenerator"][0]
-        self.assertEqual(gen["name"], "trueswarm-e2e-token-sync")
+        self.assertEqual(gen["name"], "trueswarm-e2e-token-sync-script")
         self.assertEqual(gen["files"], ["token_sync.py"])
+
+    def test_no_rbac_resource_name_collides_with_a_generated_name(self):
+        """kustomize rewrites Role resourceNames that match a generated object to its hashed name;
+        a collision turned the Lease grant into a grant on the script ConfigMap (live, 2026-10-04)."""
+        k = yaml.safe_load((TREE / "kustomization.yaml").read_text(encoding="utf-8"))
+        generated = {g["name"] for g in k.get("configMapGenerator", []) + k.get("secretGenerator", [])}
+        names = set()
+        for doc in yaml.safe_load_all((TREE / "rbac.yaml").read_text(encoding="utf-8")):
+            for rule in (doc or {}).get("rules", []):
+                names.update(rule.get("resourceNames", []))
+        self.assertIn(ts.LEASE_NAME, names)
+        self.assertEqual(generated & names, set())
 
     def test_vault_role_exists(self):
         provision = (ROOT / "kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml").read_text(encoding="utf-8")

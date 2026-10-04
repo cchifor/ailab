@@ -85,7 +85,7 @@ spec:
                 items: [{ key: ca.crt, path: ca.crt }]
             - name: script
               configMap:
-                name: trueswarm-e2e-token-sync
+                name: trueswarm-e2e-token-sync-script
                 defaultMode: 0555
 ---
 # BOOTSTRAP / RECOVERY RUN, the openbao-k8stoken-sync pattern: applying a CronJob does not run it, so
@@ -154,5 +154,5 @@ spec:
             items: [{ key: ca.crt, path: ca.crt }]
         - name: script
           configMap:
-            name: trueswarm-e2e-token-sync
+            name: trueswarm-e2e-token-sync-script
             defaultMode: 0555
