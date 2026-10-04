@@ -95,3 +95,45 @@ for the paths that do not go through the button (PVE UI, `poweroff`, the CLI); m
 scope exists for runner pause) and a ServiceAccount limited to its own state ConfigMap. The watchdog
 (decision 4) should see no loss-correlated failures from a button OFF; it still covers hard power
 loss and the non-button paths.
+
+## Amendment 2026-10-04 — cloud2 joins; 12 active cloud runners, placed on measured load
+
+**Why.** Measured over 2026-09-27 → 10-04 (Prometheus at 5 min; the Gitea DB). On the busy days
+(Mon 09-28, Tue 09-29, Sat 10-03) jobs used 255–270 runner-hours of the ~328 the pool offers (8 × 24 h
+plus 7 cloud runners × ~19.5 h). Jobs with no `needs:` waited p50 4–13 min and p90 12–37 min to start.
+On quiet days the p50 was under 30 s. The gap between one task and the next on a runner is 1 s at
+p50, so the waiting comes from capacity, not dispatch overhead. `platform` is 91 % of runner-hours.
+Each cloud runner VM uses p99 4.4 of 8 vCPU and at most 10.7 GiB of its 24 GiB (14 d at 30 s). cloud2
+(Threadripper 3990X, 128 threads, 125 GiB) ran no runners: its BIOS had SVM disabled and locked
+(`VM_CR` = 0x18). A site visit on 2026-10-04 enabled it (Gigabyte TRX40 AORUS MASTER, Tweaker →
+Advanced CPU Settings → SVM Mode).
+
+**Decision.**
+1. **cloud2: cloud-ci-9/10/11** (6109–6111; `.13`/`.44`/`.50`), at the same size as the rest. On paper
+   cloud2 is now full: 48 GiB for cloud-exec-2 + 3 × 24 + 5 = 125 GiB. Measured MemAvailable was
+   108 GiB at its lowest, which leaves ≥ ~36 GiB with all three at ceiling. Two disks go on `local-lvm`
+   (Samsung 970 EVO Plus) and one on `local-nvme`. That pool fills its Kingston NV2 first, so the
+   write load is split across two drives.
+2. **cloud3: cloud-ci-12/13** (6112/6113; `.7`/`.12`) as its sixth and seventh. Measurement supersedes
+   the earlier "a sixth is CPU-bound" note. Over the week the host's CPU peaked at 15 of 64 threads
+   at p99 (37 %), CPU pressure was 1.6 % at p99, and steal was about zero. MemAvailable was 91 GiB
+   at its lowest, which leaves ≥ ~43 GiB after two more at ceiling. Both disks go on `local-nvme`.
+   On cloud3's boot NVMe, where cloud-ci-3/4/5 live, guest write latency is 21–27 ms at p99. On
+   `local-nvme` (cloud-ci-7/8) it is 7–8 ms.
+3. The cloud pool grows from 7 to **12 active runners** (cloud-ci-6 stays quarantined), so the
+   daytime pool is 8 + 12 = 20. Expected busy-day utilisation drops from ~82 % to ~61 %.
+
+**Consequences.**
+- **No static addresses left.** The ailab IPAM block has none free. The next one needs a release or
+  a router DHCP-pool shrink.
+- **Keep-or-revert gates**, checked after two busy days:
+  - host CPU p99 < 50 %;
+  - host MemAvailable never below 30 GiB;
+  - in-guest write latency p99 < 15 ms;
+  - cloud-llm-3 serving unaffected.
+
+  Rolling back one runner is `started = false` in cloudlab `runner_nodes`.
+- **Host I/O pressure is not a usable gate here.** On cloud1/cloud3 the host's I/O PSI reads ~90 %
+  at p90 while the disks are ~6 % busy at p50 and no task is blocked on I/O. Judge disks by
+  in-guest latency instead.
+- **Watch NVMe wear.** cloud3's boot NV3 wrote 14.5 TB that week. Check SMART `percentage_used`.
