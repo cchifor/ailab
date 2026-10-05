@@ -1,7 +1,0 @@
----
-# Reserve one existing always-on VM for short discovery/gate jobs. Apply only
-# after forge-level disable and authoritative host drain (see the runbook).
-# Keeping self-hosted-hv here would let long Python/E2E jobs occupy the reserve.
-gitea_runner_label: ci-short
-gitea_runner_label_schema: host
-gitea_runner_capacity: 1
