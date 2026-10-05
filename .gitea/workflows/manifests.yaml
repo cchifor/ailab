@@ -111,6 +111,18 @@ jobs:
           set -euo pipefail
           bash scripts/tests/test-platform-pg-sync.sh
 
+      # The harness service's strive-pg role + database (infrastructure/strive-pg-harness/): the
+      # bootstrap Job's script under its OWN image against a throwaway Postgres (absent/short Secret,
+      # create, no-op re-run, drift repair, rotation, adopt, no password or verifier in any log), and
+      # the OpenBao provision script under ITS image against a real `bao server -dev` (create once,
+      # operator-owned value, drift refusal, soft-delete, least privilege). Docker required, no soft skip.
+      - name: strive-pg harness role bootstrap + OpenBao provision under their Job images
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-strive-pg-harness-bootstrap.sh
+          bash scripts/tests/test-strive-pg-harness-provision.sh
+
       # Every dev-worker slot enumeration in the repo (AppRoles, both credential syncs, the per-slot
       # ServiceAccounts in three trees, tofu, inventory) must name the same live and retired slots —
       # a slot retirement that misses one file fails here, not as a red sync a day later.

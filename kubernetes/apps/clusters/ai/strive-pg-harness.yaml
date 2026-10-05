@@ -1,0 +1,26 @@
+# The harness service's Postgres role + database on the platform's strive-pg cluster (an ESO-rendered
+# password Secret and an idempotent bootstrap Job, both in ns strive-ailab). DEDICATED Kustomization,
+# wait:false: the ExternalSecret is not Ready until OpenBao holds af/strive/pg-harness, and a
+# not-Ready object must never gate a layer. No decryption -- nothing here is a secret.
+#
+# dependsOn external-secrets so the ESO CRDs exist (the openbao-canary reasoning). Nothing on the
+# platform side: strive-ailab and strive-pg-superuser come from the platform repo's own
+# Kustomizations, and a missing one is an apply error / a Pending pod retried every retryInterval,
+# not something to freeze this tree behind (the platform-access reasoning).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: strive-pg-harness
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 5m
+  dependsOn:
+    - name: external-secrets
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/strive-pg-harness
+  prune: true
+  wait: false

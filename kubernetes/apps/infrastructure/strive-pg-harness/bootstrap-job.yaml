@@ -1,0 +1,84 @@
+# strive-pg-harness-bootstrap -- creates the harness service's login role and database on strive-pg
+# and keeps them in shape (bootstrap.py, mounted from the content-hashed ConfigMap kustomization.yaml
+# generates). Idempotent: a re-run changes nothing unless something drifted.
+#
+# RE-RUN LOOP: ttlSecondsAfterFinished reaps the Job (Complete or Failed) and Flux re-applies it on
+# the next reconcile (interval 10m), so it runs roughly every 25 minutes. That loop is what makes it
+# converge after the ESO Secret first appears, after a password rotation in OpenBao, and after a
+# strive-pg rebuild -- with no `kubectl create job` by hand. The kustomize force annotation is the
+# immutable-Job wedge guard: an edit to the script (a new ConfigMap name), the image or the env
+# deletes and recreates THIS Job instead of failing the whole Kustomization.
+#
+# CREDENTIALS: the CNPG-generated strive-pg-superuser Secret (the platform Cluster sets
+# enableSuperuserAccess: true), mounted the same way the platform repo's strive-pg-init-databases
+# Job and ailab's openbao-platform-pg-sync mount it; and the ESO-rendered strive-pg-harness Secret,
+# `optional: true` so the pod starts (and does nothing) before ESO has rendered it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: strive-pg-harness-bootstrap
+  namespace: strive-ailab
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: strive-pg-harness
+    app.kubernetes.io/component: bootstrap
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: strive-pg-harness
+        app.kubernetes.io/component: bootstrap
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # talks only to Postgres, never to kube-apiserver or OpenBao
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap
+          # The CNPG operand image LINE strive-pg runs (python3 + psycopg2), the same tag as
+          # platform-access/pg-sync.yaml so one renovate bump moves both; 16.x = the server's major.
+          image: ghcr.io/cloudnative-pg/postgresql:16.15
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-u", "/scripts/bootstrap.py"]
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: PGHOST, value: strive-pg-rw.strive-ailab.svc.cluster.local } # the PRIMARY; the script refuses a replica
+            - { name: PGPORT, value: "5432" }
+            - { name: PGDATABASE, value: postgres }
+            - { name: PGSSLMODE, value: require }
+            - { name: PGCONNECT_TIMEOUT, value: "10" }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: strive-pg-superuser, key: username } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: strive-pg-superuser, key: password } }
+            - { name: HARNESS_ROLE, value: harness }
+            - { name: HARNESS_DATABASE, value: harness }
+            - name: HARNESS_PASSWORD
+              valueFrom: { secretKeyRef: { name: strive-pg-harness, key: password, optional: true } }
+          volumeMounts:
+            - { name: script, mountPath: /scripts, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: script
+          configMap:
+            name: strive-pg-harness-bootstrap-script
+            defaultMode: 0555
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

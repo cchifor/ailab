@@ -94,3 +94,51 @@ unreachable Prometheus — pauses it (exit 2). Identity: the non-admin Gitea use
   with a `VACUUM FULL`/`pg_repack` window (separate decision).
 - Rate changes (`MAX_DELETES_PER_RUN`, `DELETE_PAUSE_SECONDS`) go through git, from measured WAL per
   deletion (`pg_current_wal_lsn()` before/after a canary; slot `safe_wal_size` must not dip during it).
+
+## strive-pg (the PLATFORM's cluster, not this one): the harness role and database
+
+`strive-pg` in ns `strive-ailab` is the Strive platform's CNPG cluster. Its Cluster CR belongs to the
+platform repo (`deploy/components/cnpg-cluster/`, Flux Kustomization `platform-cnpg`); ailab never
+patches it. The one database object ailab does keep there is the harness service's login role and
+database (owner runbook step 12 of the platform's 2026-10 modularization program):
+
+| Object | Where it comes from |
+|---|---|
+| OpenBao `af/strive/pg-harness`, field `password` | created ONCE (48 random hex characters) by Job `openbao-strive-pg-harness-provision` (`security/openbao/strive-pg-harness-provision-job.yaml`), which also owns policy + k8s-auth role `af-app-strive-pg-harness`. Operator-owned after creation. |
+| Secret `strive-pg-harness` (key `password`) in `strive-ailab` | ExternalSecret `strive-pg-harness` via SecretStore `strive-pg-harness-store` (`infrastructure/strive-pg-harness/eso.yaml`). |
+| Role `harness` (LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION) and database `harness` OWNER harness | Job `strive-pg-harness-bootstrap` (`infrastructure/strive-pg-harness/bootstrap.py`), as the CNPG superuser. Idempotent; reaped after 15 min and re-applied by Flux, so it re-converges about every 25 min. |
+
+Why a Job and not the Cluster's `managed.roles` or a CNPG `Database`: the Cluster is the platform
+repo's object (a second Flux owner would fight it), `managed.roles` leaves `app` in
+`pending-reconciliation` on this cluster today, and the `Database` CRD needs CNPG >= 1.25 (the
+operator is 1.24.1). `kustomization.yaml` in that directory has the long form.
+
+Check it:
+
+```sh
+kubectl -n strive-ailab get externalsecret strive-pg-harness          # SecretSynced / Ready=True
+kubectl -n strive-ailab logs job/strive-pg-harness-bootstrap         # "role harness ..." / "database harness present, owner harness"
+platform psql -d postgres -c "select rolname, rolsuper, rolbypassrls, rolcanlogin from pg_roles where rolname='harness'"
+platform psql -d postgres -c "select datname, pg_get_userbyid(datdba) from pg_database where datname='harness'"
+```
+
+Before the provision Job has run, the ExternalSecret is not Ready and the bootstrap Job logs
+"not rendered yet" and changes nothing. Both are harmless: the `strive-pg-harness` Flux
+Kustomization is `wait: false`.
+
+**Wiring the harness service to it (the owner's H9.1 database step).** The platform's harness chart
+reads its DSN from its own Secret, `harness-secrets` key `database-url` (a Flux-decrypted SOPS file
+in the platform repo for ailab). Read the password once with a breakglass/root token,
+`bao kv get -mount=af -field=password strive/pg-harness`, and set
+`database-url: postgres://harness:<password>@strive-pg-rw.strive-ailab.svc.cluster.local:5432/harness`.
+The value is hex, so it needs no URL-escaping.
+
+**Rotating.** `bao kv patch -mount=af strive/pg-harness password=-` (value on stdin), then update
+`harness-secrets` in the same change. ESO refreshes within 1 h and the next bootstrap run sets the
+new password (it only writes one when the current Secret value does not already log in). Until the
+DSN matches, the harness cannot connect.
+
+**After an OpenBao wipe** the provision Job GENERATES A NEW value and the bootstrap Job writes it into
+Postgres, which breaks the harness DSN. Put the old value back first (it is in `harness-secrets`):
+`bao kv put -mount=af strive/pg-harness password=-` before the provision Job runs, or `bao kv patch`
+it after; the bootstrap Job then converges back. `openbao-recovery.md` lists this path.

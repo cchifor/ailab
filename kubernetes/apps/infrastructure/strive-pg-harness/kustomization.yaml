@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The harness service's Postgres login role + database on the platform's strive-pg cluster (owner
+# runbook step 12 of cchifor/platform's 2026-10-05 modularization program; recommendation §2).
+# Reconciled by the DEDICATED clusters/ai/strive-pg-harness.yaml Flux Kustomization (wait:false):
+# until OpenBao holds af/strive/pg-harness the ExternalSecret below is not Ready, and a not-Ready
+# object must never gate a layer (the 2026-09-10 dsh-codex wedge, apps/dsh/openbao-eso.yaml).
+#
+# WHY NOT THE CLUSTER'S managed.roles, AND WHY NOT A CNPG `Database`:
+#   * strive-pg's Cluster CR is owned by the `platform-cnpg` Flux Kustomization out of the EXTERNAL
+#     cchifor/platform repo (deploy/components/cnpg-cluster/cluster.yaml). A second Flux
+#     Kustomization applying the same object fights it field by field under the same
+#     kustomize-controller field manager, and either one's prune could delete the Cluster. ailab
+#     does not patch it (same rule as monitoring/strive-pg-podmonitor.yaml). Even there,
+#     managed.roles is not reliable on this cluster: its managedRolesStatus shows `app` in
+#     pending-reconciliation, which is why the platform's own init Job sets the app password by SQL.
+#   * the `Database` CRD ships in CNPG >= 1.25; the operator is 1.24.1 (platform repo
+#     cnpg-operator chart 0.22.1; `databases.postgresql.cnpg.io` is absent from the API). Applying
+#     one fails dry-run and takes the whole layer down with it (databases/kustomization.yaml, the
+#     00dd55a outage).
+# So the role and the database come from an idempotent Job run as the CNPG superuser -- the same
+# Secret, mounted the same way, as the platform's strive-pg-init-databases Job and ailab's
+# openbao-platform-pg-sync -- with the role's password from an ESO-rendered Secret.
+resources:
+  - eso.yaml # SA + OpenBao CA Certificate + SecretStore + ExternalSecret -> Secret strive-pg-harness
+  - bootstrap-job.yaml # the idempotent role + database Job (re-applied after its TTL)
+
+configMapGenerator:
+  # Content-hashed name: editing bootstrap.py renames the ConfigMap, and the Job's force annotation
+  # recreates the Job against it -- the SQL change re-runs without anyone deleting anything. Tested
+  # by scripts/tests/test-strive-pg-harness-bootstrap.sh under the Job's own image.
+  - name: strive-pg-harness-bootstrap-script
+    namespace: strive-ailab # the generator does not inherit one; without it the WHOLE layer stalls (databases/kustomization.yaml, 2026-09-28)
+    files:
+      - bootstrap.py
