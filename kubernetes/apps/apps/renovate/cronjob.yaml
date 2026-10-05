@@ -43,7 +43,7 @@ spec:
               # minor could change behaviour with no commit: the 44.x that started calling
               # GET /orgs/{org} (needs read:organization) failed every run from 09-16 to 09-27.
               # Renovate proposes its own bumps through a PR now, like every other image here.
-              image: renovate/renovate:44.133.0@sha256:05c512c35c764ef6a179e69c3b30567eca254d67f13a0143479fe3c84852c67a
+              image: renovate/renovate:44.134.1@sha256:79138db6b794ea9e00b52f3012e3d3912653214f3166bea537689196e5e91e21
               envFrom:
                 - secretRef:
                     name: renovate-credentials # RENOVATE_TOKEN + RENOVATE_GITHUB_COM_TOKEN
