@@ -11,6 +11,8 @@
 #   4. the policy changed by hand: REFUSED before the policy or the role is rewritten.
 #   5. the document soft-deleted: a loud failure carrying the CLI's own message, no new value.
 #   6. the role's token can read the password and nothing else (a sibling path is denied).
+#   3b. a namespace selector / audience / CIDRs added to the ROLE by hand are cleared by the next run
+#      (a role write keeps omitted fields, so the Job must write them empty).
 # Requires docker. Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -72,6 +74,16 @@ printf '%s' "operator-chosen-0123456789abcdef" | bao kv patch -mount=af strive/p
 run || fail "run after operator rotation"
 [ "$(pw)" = "operator-chosen-0123456789abcdef" ] || fail "the Job overwrote an operator-set value"
 echo "3: operator-set value -> kept"
+
+# 3b. login-widening drift on the ROLE (a role write is an update that keeps omitted fields): a
+# namespace selector, an audience and CIDRs added by hand are all cleared by the next run.
+bao write auth/kubernetes/role/af-app-strive-pg-harness bound_service_account_namespace_selector='{"matchLabels":{"any":"ns"}}' audience=other token_bound_cidrs=10.0.0.0/8 >/dev/null
+[ -n "$(bao read -field=bound_service_account_namespace_selector auth/kubernetes/role/af-app-strive-pg-harness)" ] || fail "test setup: selector not set"
+run || { cat /tmp/run.$N >&2; fail "run after role drift"; }
+[ -z "$(bao read -field=bound_service_account_namespace_selector auth/kubernetes/role/af-app-strive-pg-harness)" ] || fail "the namespace selector survived a run"
+[ -z "$(bao read -field=audience auth/kubernetes/role/af-app-strive-pg-harness 2>/dev/null)" ] || fail "the audience survived a run"
+bao read -field=token_bound_cidrs auth/kubernetes/role/af-app-strive-pg-harness | grep -qx '\[\]' || fail "token_bound_cidrs survived a run"
+echo "3b: role drift (namespace selector, audience, CIDRs) -> cleared"
 
 # 6. (before the drift case mutates the policy) the role's policy reads the password and nothing else
 printf '%s' x | bao kv put -mount=af strive/other password=- >/dev/null

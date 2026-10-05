@@ -81,6 +81,8 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # ADR 0028 — the dev-worker platform access plane (per-slot observer SAs + the
         # openbao-platform-pg-sync CronJob). Added deliberately, same reason as helmtest above.
         "./kubernetes/apps/infrastructure/platform-access",
+        # 2026-10-05 — the harness service's strive-pg role + database (ESO password + bootstrap Job).
+        "./kubernetes/apps/infrastructure/strive-pg-harness",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",

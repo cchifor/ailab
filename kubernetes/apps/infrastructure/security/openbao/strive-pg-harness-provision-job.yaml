@@ -21,8 +21,9 @@
 # Secret turns this Job red rather than skipping silently.
 #
 # THE OWNERSHIP CONTRACT, stated because it cuts both ways:
-#   * GIT OWNS THE POLICY AND THE ROLE WHOLE. `bao policy write` and `bao write` REPLACE; a grant or
-#     binding changed by hand is reverted on the next run. An emergency change must suspend this Job
+#   * GIT OWNS THE POLICY AND THE ROLE WHOLE. `bao policy write` replaces the policy; the role write
+#     spells out every login-deciding field, empty ones included (a role write is an update that
+#     keeps omitted fields). A grant or binding changed by hand is reverted on the next run. An emergency change must suspend this Job
 #     (or the `openbao` Kustomization) AND land in git before reconciliation resumes.
 #   * THE JOB DOES NOT OWN THE KV CONTENTS after creating them (-cas=0, no patch fallback).
 #   * A WIPE LOSES THE VALUE, and this Job then GENERATES A NEW ONE, which the bootstrap Job writes
@@ -116,10 +117,20 @@ data:
     # ---- 3. The auth role, WRITTEN and OWNED WHOLE --------------------------------------------
     # The shape af-app-litellm and af-app-dsh have live: the ServiceAccount's uid as the entity
     # alias, a 1h token, the policy attached through token_policies (a role's NAME does not attach
-    # the same-named policy). `bao write` REPLACES the role, so every setting is spelled out.
+    # the same-named policy). `bao write` on an EXISTING role is an UPDATE, not a replace: a field
+    # left out keeps its live value (measured against openbao 2.6.4: `audience` and
+    # `token_bound_cidrs` survive a rewrite that omits them). So every setting that decides WHO may
+    # log in is written explicitly, including the empty ones -- above all
+    # bound_service_account_namespace_selector, which would otherwise let the same ServiceAccount
+    # NAME log in from any namespace a hand-added selector matches. (2.6.4 happens to clear the
+    # selector already whenever bound_service_account_namespaces is written; that is version
+    # behaviour this file does not rely on, hence the explicit "" AND the read-back below.)
     bao write "$ROLE" \
       bound_service_account_names="$ESO_SA" \
       bound_service_account_namespaces="$ESO_NS" \
+      bound_service_account_namespace_selector="" \
+      audience="" \
+      token_bound_cidrs="" \
       token_policies="$APP_POLICY" \
       token_ttl=1h \
       alias_name_source=serviceaccount_uid
@@ -139,6 +150,14 @@ data:
     }
     role_field_has bound_service_account_namespaces "$ESO_NS" || {
       echo "$ROLE is not bound to namespace $ESO_NS after writing; aborting" >&2
+      exit 1
+    }
+    sel="$(bao read -field=bound_service_account_namespace_selector "$ROLE")" || {
+      echo "cannot read back $ROLE's namespace selector; aborting" >&2
+      exit 1
+    }
+    [ -z "$sel" ] || {
+      echo "$ROLE still carries a namespace selector after writing; aborting" >&2
       exit 1
     }
     echo "$ROLE written: $ESO_SA@$ESO_NS carries $APP_POLICY"
