@@ -1,0 +1,252 @@
+# Provisions the OpenBao side of the harness service's Postgres password (infrastructure/
+# strive-pg-harness/): the ESO SecretStore in ns strive-ailab reads ONE document, and three vault
+# objects make that path exist. This Job owns them declaratively, the way chatgpt-provision-job.yaml
+# owns af-app-litellm -- nothing here is a hand ceremony that a wipe forgets:
+#   * policy `af-app-strive-pg-harness`   read on af/data/strive/pg-harness, nothing else.
+#   * k8s auth role `af-app-strive-pg-harness`   bound to ServiceAccount strive-pg-harness-eso in ns
+#                                         strive-ailab. WRITTEN, not asserted: no ceremony ever
+#                                         created it, and every setting it needs is in this file.
+#   * KV `af/strive/pg-harness`           created ONCE with field `password`: 48 hex characters from
+#                                         /dev/urandom (URL-safe, so the harness DSN needs no
+#                                         escaping). Never written again -- the operator owns the value
+#                                         from then on (rotation: `bao kv patch`, docs/runbooks/infra-pg.md).
+#
+# WHY A GENERATED VALUE AND NOT "THE OWNER STORES ONE": an ExternalSecret whose document does not
+# exist is not Ready forever, and a role whose password nobody has chosen is a step somebody forgets.
+# Generating it here makes the whole chain converge on its own; the owner only READS the value once,
+# to write the harness DSN into the platform's harness-secrets.
+#
+# AUTH: the openbao-breakglass-token Secret, for the same reason the sibling provision Jobs need it --
+# the scoped provisioner token cannot write policies or auth roles. `optional: false` so an absent
+# Secret turns this Job red rather than skipping silently.
+#
+# THE OWNERSHIP CONTRACT, stated because it cuts both ways:
+#   * GIT OWNS THE POLICY AND THE ROLE WHOLE. `bao policy write` and `bao write` REPLACE; a grant or
+#     binding changed by hand is reverted on the next run. An emergency change must suspend this Job
+#     (or the `openbao` Kustomization) AND land in git before reconciliation resumes.
+#   * THE JOB DOES NOT OWN THE KV CONTENTS after creating them (-cas=0, no patch fallback).
+#   * A WIPE LOSES THE VALUE, and this Job then GENERATES A NEW ONE, which the bootstrap Job writes
+#     into Postgres -- the harness's DSN breaks until it is re-pointed or the old value is put back.
+#     docs/runbooks/openbao-recovery.md (GENERATED-ONCE row) has the order.
+#   * REMOVING THIS FILE FROM GIT DOES NOT UNDO ITS WRITES. Rollback has to address the OpenBao
+#     objects explicitly.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-strive-pg-harness-provision-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-strive-pg-harness-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+data:
+  provision.sh: |
+    #!/bin/sh
+    # Idempotent and fail-closed: `set -eu`, no blanket `|| true`. NEVER echo credential material.
+    # A POLICY is not a credential, so the previous policy IS printed before it is replaced -- that
+    # log line is the audit trail and the recovery source if this Job ever writes the wrong thing.
+    set -eu
+
+    APP_POLICY=af-app-strive-pg-harness
+    ROLE=auth/kubernetes/role/af-app-strive-pg-harness
+    KV_PATH=strive/pg-harness
+    ESO_SA=strive-pg-harness-eso
+    ESO_NS=strive-ailab
+
+    bao token lookup >/dev/null || {
+      echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
+      exit 1
+    }
+
+    # ---- 1. Drift guard, BEFORE replacing anything -------------------------------------------
+    # Whole-document comparison after stripping full-line comments, then every whitespace
+    # character (chatgpt-provision-job.yaml has the reasoning). The policy has no pre-ownership
+    # form: nothing created it before this Job, so the only document it may find is its own output.
+    #
+    # THE MAINTENANCE RULE, which no test can enforce because it spans git revisions: when the
+    # heredoc below changes, the live vault holds the OUTGOING desired form, so a Job that only
+    # updated APP_DESIRED refuses every run from then on. On ANY policy change here, do all three:
+    #   1. edit the heredoc;
+    #   2. set APP_DESIRED to the new normalised form (the unit test pins this pair);
+    #   3. set APP_BASELINE to the OUTGOING APP_DESIRED.
+    normalise() {
+      sed -e 's/^[[:space:]]*#.*$//' | tr -d '[:space:]'
+    }
+    APP_BASELINE='path"af/data/strive/pg-harness"{capabilities=["read"]}'
+    APP_DESIRED='path"af/data/strive/pg-harness"{capabilities=["read"]}'
+
+    # An unreadable policy must NOT look like an absent one: absence is established from the
+    # policy LIST, and once the policy is known to exist the read must succeed or the Job stops.
+    POLICY_LIST="$(bao policy list -format=json)" || {
+      echo "cannot list policies; aborting rather than writing blind" >&2
+      exit 1
+    }
+    if echo "$POLICY_LIST" | grep -q "\"${APP_POLICY}\""; then
+      prev="$(bao policy read "$APP_POLICY")" || {
+        echo "policy $APP_POLICY exists but could not be read; aborting rather than writing blind" >&2
+        exit 1
+      }
+      echo "--- existing policy $APP_POLICY (replaced below; kept here as the audit trail) ---"
+      echo "$prev"
+      echo "--- end existing policy ---"
+      prev_norm="$(printf '%s\n' "$prev" | normalise)"
+      if [ "$prev_norm" != "$APP_BASELINE" ] && [ "$prev_norm" != "$APP_DESIRED" ]; then
+        echo "REFUSING: policy $APP_POLICY does not match the reviewed baseline or the desired" >&2
+        echo "document. Something changed it outside git. Reconcile strive-pg-harness-provision-job.yaml" >&2
+        echo "with the policy printed above before letting this Job run again." >&2
+        exit 1
+      fi
+      echo "policy $APP_POLICY matches a reviewed form; safe to replace"
+    else
+      echo "policy $APP_POLICY absent (fresh vault, or first run); creating it"
+    fi
+
+    # ---- 2. The policy ------------------------------------------------------------------------
+    # `read` on the DATA endpoint only: ESO's `data[].remoteRef` reads KV-v2 data and never
+    # enumerates or fetches metadata.
+    bao policy write "$APP_POLICY" - <<'EOF'
+    path "af/data/strive/pg-harness" { capabilities = ["read"] }
+    EOF
+    bao policy read "$APP_POLICY" | grep -q 'af/data/strive/pg-harness' || {
+      echo "policy $APP_POLICY did not contain its grant after writing; aborting" >&2
+      exit 1
+    }
+    echo "policy $APP_POLICY written and verified"
+
+    # ---- 3. The auth role, WRITTEN and OWNED WHOLE --------------------------------------------
+    # The shape af-app-litellm and af-app-dsh have live: the ServiceAccount's uid as the entity
+    # alias, a 1h token, the policy attached through token_policies (a role's NAME does not attach
+    # the same-named policy). `bao write` REPLACES the role, so every setting is spelled out.
+    bao write "$ROLE" \
+      bound_service_account_names="$ESO_SA" \
+      bound_service_account_namespaces="$ESO_NS" \
+      token_policies="$APP_POLICY" \
+      token_ttl=1h \
+      alias_name_source=serviceaccount_uid
+    # Read back the three settings that decide WHO logs in and WHAT they may read -- each an EXACT
+    # LIST-ELEMENT MATCH, not a substring. Each field prints a bracketed, space-separated list on ONE
+    # line with no trailing newline, so it is unwrapped into lines before an anchored match.
+    role_field_has() {
+      bao read -field="$1" "$ROLE" | tr -d '[]' | tr ' ' '\n' | grep -qx "$2"
+    }
+    role_field_has token_policies "$APP_POLICY" || {
+      echo "$ROLE does not carry policy $APP_POLICY after writing; aborting" >&2
+      exit 1
+    }
+    role_field_has bound_service_account_names "$ESO_SA" || {
+      echo "$ROLE is not bound to ServiceAccount $ESO_SA after writing; aborting" >&2
+      exit 1
+    }
+    role_field_has bound_service_account_namespaces "$ESO_NS" || {
+      echo "$ROLE is not bound to namespace $ESO_NS after writing; aborting" >&2
+      exit 1
+    }
+    echo "$ROLE written: $ESO_SA@$ESO_NS carries $APP_POLICY"
+
+    # ---- 4. Create the KV document, ONCE, with a generated password ----------------------------
+    # -cas=0 writes only when no version history exists; once the document exists every later run
+    # skips it. A SOFT-DELETED current version is not an absent one, and `bao kv get` does not
+    # distinguish them by exit code (a `kv delete`d path returns exit 0 with "data": null), so
+    # readability is decided on the DATA, not the exit code.
+    kv_current_readable() {
+      out="$(bao kv get -mount=af -format=json "$1" 2>/dev/null)" || return 1
+      case "$out" in
+        *'"data": null'*) return 1 ;;
+      esac
+      return 0
+    }
+
+    if kv_current_readable "$KV_PATH"; then
+      echo "af/$KV_PATH already exists; its value is operator-owned and left untouched"
+      exit 0
+    fi
+    # 24 random bytes as 48 lowercase hex characters. Handed to the CLI on STDIN (`password=-`),
+    # never on a command line or in a log. The put's output is captured so a failure can be
+    # reported; nothing the CLI prints on a KV write echoes the value.
+    pw="$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')"
+    case "$pw" in
+      ????????????????????????????????????????????????) ;;
+      *) echo "could not generate a 48-character password from /dev/urandom; aborting" >&2; exit 1 ;;
+    esac
+    if put_out="$(printf '%s' "$pw" | bao kv put -cas=0 -mount=af "$KV_PATH" password=- 2>&1)"; then
+      echo "af/$KV_PATH created with a generated password (48 hex characters)"
+    elif kv_current_readable "$KV_PATH"; then
+      echo "af/$KV_PATH created concurrently; leaving it alone"
+    else
+      echo "af/$KV_PATH is neither readable nor creatable (soft-deleted or destroyed?); operator action needed" >&2
+      echo "bao kv put said: $put_out" >&2
+      exit 1
+    fi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-strive-pg-harness-provision
+  namespace: openbao
+  annotations:
+    # WEDGE GUARD -- same rationale as the other provision Jobs (2026-07-28 immutable-Job outage).
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-strive-pg-harness-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: agentforge
+spec:
+  backoffLimit: 6
+  # Reaped after a day, which is also how this re-runs: Flux re-applies the reaped Job, so a policy
+  # change in git converges within a day without anyone running `bao` by hand.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-strive-pg-harness-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: agentforge
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
+      securityContext:
+        # uid 100 / gid 1000 is the `openbao` user baked into the image, NUMERIC because a NAMED
+        # image user cannot satisfy runAsNonRoot.
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          # Official OpenBao image (bao CLI + busybox sh), the same pin as the sibling provision
+          # Jobs: the server's MINOR (renovate.json holds the CLI to 2.6.x).
+          image: quay.io/openbao/openbao:2.6.4
+          command: ["/bin/sh", "/scripts/provision.sh"]
+          env:
+            # The headless per-pod name, not the `openbao` Service: a pod that is up but sealed
+            # fails with a real error rather than a DNS miss.
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-breakglass-token
+                  key: root_token # the live Secret carries no `token` key
+                  optional: false
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: script
+          configMap:
+            name: openbao-strive-pg-harness-provision-script
+            defaultMode: 0555

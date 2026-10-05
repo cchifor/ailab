@@ -1,0 +1,83 @@
+# The harness role's password, from OpenBao through External Secrets -- the estate rule (tokens live
+# in OpenBao) and the shape apps/ai/litellm-chatgpt-eso.yaml and apps/dsh/openbao-eso.yaml use.
+#
+# THE OWNERSHIP CHAIN, so nothing here is hand-made:
+#   af/strive/pg-harness          field `password`. CREATED ONCE, with a generated 48-hex-character
+#                                 value, by security/openbao/strive-pg-harness-provision-job.yaml;
+#                                 the operator owns it from then on (rotate with `bao kv patch`).
+#   policy af-app-strive-pg-harness   read on af/data/strive/pg-harness ONLY -- same Job.
+#   auth/kubernetes/role/af-app-strive-pg-harness   bound to THIS ServiceAccount in THIS namespace --
+#                                 same Job.
+#
+# Not af/estate/*: that subtree is the operator-plane escrow, and nothing (no ESO SecretStore) is
+# granted read on it by design (security/openbao/estate-provision-job.yaml, ACCESS).
+#
+# UNTIL the provision Job has run, the SecretStore cannot log in and the ExternalSecret is not Ready.
+# That is expected and harmless: this tree's Flux Kustomization is wait:false, and the bootstrap Job
+# treats a missing Secret as "nothing to do yet".
+#
+# ns strive-ailab is the platform's namespace; ailab otherwise manages only additive objects there
+# (platform-access/pg-sync.yaml, monitoring/strive-pg-podmonitor.yaml). Every object below has a
+# strive-pg-harness- prefix so nothing can collide with what the platform's umbrella chart renders.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: strive-pg-harness-eso
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: strive-pg-harness
+    app.kubernetes.io/component: credential
+automountServiceAccountToken: false # ESO mints its own token; nothing else may use this SA
+---
+# The CA that signed OpenBao's server cert, materialised locally so the SecretStore can verify TLS --
+# the throwaway-leaf trick every other namespace uses; only the chain is read.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: strive-pg-harness-openbao-ca
+  namespace: strive-ailab
+spec:
+  secretName: strive-pg-harness-openbao-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: openbao-ca-ref
+  dnsNames: ["openbao-ca-ref.strive-ailab.svc"]
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef: { name: ailab-ca, kind: ClusterIssuer, group: cert-manager.io }
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: strive-pg-harness-store
+  namespace: strive-ailab
+spec:
+  provider:
+    vault:
+      server: https://openbao.openbao.svc:8200
+      path: af
+      version: v2
+      auth:
+        kubernetes:
+          mountPath: kubernetes
+          role: af-app-strive-pg-harness
+          serviceAccountRef: { name: strive-pg-harness-eso }
+      caProvider: { type: Secret, name: strive-pg-harness-openbao-tls, key: ca.crt }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: strive-pg-harness
+  namespace: strive-ailab
+spec:
+  # A rotation (`bao kv patch -mount=af strive/pg-harness password=...`) reaches the Secret within
+  # this interval and the database on the bootstrap Job's next run (its TTL loop). The harness
+  # service's own DSN is a separate Secret (the platform's harness-secrets) and must be rotated in
+  # the same change -- see docs/runbooks/infra-pg.md, section "strive-pg (the PLATFORM's cluster ...)".
+  refreshInterval: 1h
+  secretStoreRef: { name: strive-pg-harness-store, kind: SecretStore }
+  target:
+    name: strive-pg-harness
+    creationPolicy: Owner
+  data:
+    - secretKey: password
+      remoteRef: { key: strive/pg-harness, property: password }
