@@ -67,7 +67,7 @@ Secret.
   § "The shared codex login" below. The grant is `read` on the DATA path only (no metadata, no list).
 
 - `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `gitea_repo_pat`,
-  `strive_test_user`, `strive_test_password`, `proxmox_ssh_key`, `litellm_diag_key`,
+  `gitea_package_pat`, `strive_test_user`, `strive_test_password`, `proxmox_ssh_key`, `litellm_diag_key`,
   `litellm_diag_base`, `litellm_diag_models`.
 
   `strive_test_user` / `strive_test_password` (moved here 2026-09-25 from
@@ -97,6 +97,24 @@ Secret.
   It is not rendered into `~/.git-credentials`; that file stays on `gitea_pat`. Rotation works like
   `gitea_pat`: mint a replacement in-pod, re-seed, then revoke the old token by name in the UI
   (Settings → Applications). Token auth cannot revoke itself.
+
+  `gitea_package_pat` (added 2026-10-05) is a third `chifor` Gitea PAT, token name
+  `dev-workers-package-publish`, scopes **`read:repository,write:package`**, for publishing to the
+  private `cchifor` package owner: generic packages under `/api/packages/cchifor/…` and container
+  images at `git.chifor.me/cchifor/…` (`docker login git.chifor.me -u chifor`). The repository read
+  is what cchifor/forge's `scripts/publish-release.py` needs to check repository/owner visibility
+  and download release attachments before it publishes (`FORGE_RELEASE_TOKEN`). It has no user or
+  org scope (`GET /api/v1/user` → 403). Reach it with
+  `cred exec common gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>`. Not rendered into any file.
+  Rotation works like `gitea_repo_pat`.
+  **Shared on purpose, and that is a recorded blast-radius decision:** one compromised worker can
+  publish or re-tag packages and images under `cchifor`. It sits in `common` because the publishing
+  agent is not pinned to a worker, and because every worker already holds `gitea_pat`
+  (`write:repository` on every `cchifor` repo, release attachments included), so a compromised worker
+  could already tamper with what gets published. Consumers pin manifest digests, not tags. If
+  publishing settles on one worker, move the field to that worker's `af/dev-workers/<hostname>` path
+  (seed `<hostname>.json`, drop it from `common.json`, and add it to `MOVED_FIELDS` so the shared copy
+  is stripped from live KV).
 
   `litellm_diag_*` (added 2026-09-22) is the fleet's **LiteLLM diagnostic credential**: a per-org
   VIRTUAL key on the `litellm-local` gateway (LAN NodePort `http://192.168.0.41:30400/v1`, the value
