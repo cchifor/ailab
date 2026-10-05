@@ -12,6 +12,7 @@
 #      handed to `app` -- all repaired by the next run.
 #   6. rotation: a new HARNESS_PASSWORD is applied; the old one no longer logs in.
 #   7. a database that already exists (owned by someone else) before the role does: adopted.
+#   7b. a CREATE ROLE ... PASSWORD that FAILS does not log its statement (and verifier) either.
 #   8. no password ever appears in the script's output or in the server log, although the server
 #      logs EVERY statement (log_statement = all): the session silences logging, and the server only
 #      ever receives a SCRAM verifier.
@@ -129,6 +130,15 @@ expect $N "role harness created"
 expect $N "owner repaired: app -> harness"
 [ "$(owner)" = harness ] || fail "pre-existing database not adopted"
 echo "7: pre-existing database -> adopted"
+
+# 7b. a password statement that FAILS must not log its text either (log_min_error_statement): a
+# reserved role name makes CREATE ROLE ... PASSWORD error out after the verifier was bound.
+if HARNESS_ROLE=pg_harness_reserved HARNESS_DATABASE=harness_reserved HARNESS_PASSWORD="$PW1" python3 -u /w/bootstrap.py >/tmp/run.err 2>&1; then
+  fail "CREATE ROLE with a reserved name must fail"
+fi
+grep -q 'is reserved' /tmp/pg.log || fail "test setup: the server did not log the reserved-name error"
+grep -q 'SCRAM-SHA-256' /tmp/pg.log && fail "a failed password statement wrote its verifier to the server log"
+echo "7b: failed password statement -> nothing of it in the server log"
 
 # 8. no password anywhere it can be read
 for pw in "$PW1" "$PW2"; do

@@ -16,7 +16,8 @@ reap-and-re-apply loop in bootstrap-job.yaml is safe:
   * the password is set only when the one in the ESO-rendered Secret does NOT already log in, and
     then as a client-computed SCRAM verifier (libpq's PQencryptPasswordConn), never cleartext:
     every dev-worker's platform login holds pg_monitor, which shows other sessions' query text in
-    pg_stat_activity. Statement logging is also off for the session;
+    pg_stat_activity. Statement logging is also off for the session, including the statement text
+    a FAILED statement would log (log_min_error_statement);
   * the database is created OWNER harness if absent, and its owner is repaired if it is not;
   * nothing is ever dropped.
 
@@ -81,6 +82,9 @@ def main():
         return 1
     cur.execute("SET log_statement = 'none'")
     cur.execute("SET log_min_duration_statement = -1")
+    # A FAILING statement is logged with its text at log_min_error_statement (default ERROR): a
+    # CREATE/ALTER ROLE that errors would put the verifier in the server log. Only PANIC is above it.
+    cur.execute("SET log_min_error_statement = 'panic'")
 
     role = sql.Identifier(ROLE)
     cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (ROLE,))
