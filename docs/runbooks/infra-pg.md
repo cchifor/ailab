@@ -168,11 +168,21 @@ ExternalSecret refresh overwrites it, so read it BEFORE the next sync, or from t
 `HARNESS_DATABASE_URL`. Recover it WITHOUT echoing it (the password never reaches the terminal):
 
 ```sh
-kubectl --context admin@ai -n strive-ailab get secret strive-pg-harness-dsn -o jsonpath='{.data.database-url}' \
+set -o pipefail
+pw=$(kubectl --context admin@ai -n strive-ailab get secret strive-pg-harness-dsn -o jsonpath='{.data.database-url}' \
   | base64 -d \
-  | python3 -c "import sys,urllib.parse as u; print(u.urlsplit(sys.stdin.read().strip()).password, end='')" \
-  | bao kv put -mount=af strive/pg-harness password=-
+  | python3 -c "
+import sys, urllib.parse as u
+pw = u.urlsplit(sys.stdin.read().strip()).password
+if not pw:
+    sys.exit('no password in the DSN')
+sys.stdout.write(u.unquote(pw))") || { echo 'recovery failed, nothing written' >&2; unset pw; false; }
+[ -n "$pw" ] && printf '%s' "$pw" | bao kv put -mount=af strive/pg-harness password=-
+unset pw
 ```
+
+(`python3` on Linux hosts; use `python` in Git Bash.) The value lives only in the shell variable and
+is never echoed; the step aborts before `bao kv put` when the DSN has no password.
 
 Run it before the provision Job runs (or use `bao kv patch` after); then follow the rotation order above (steps 2-4) so both
 ExternalSecrets, the role and the harness converge. `openbao-recovery.md` lists this path.

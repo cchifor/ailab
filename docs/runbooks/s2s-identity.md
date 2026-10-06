@@ -51,7 +51,8 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
 3. Replace the seed. Either edit the SOPS seed (owner-only; age key in
    `kubernetes/infra/_out/age.agekey`; substitute only the token values, see the snippet in
    `openbao-dev-workers.md`), or patch the live path:
-   `bao kv patch -mount=af dev-workers/common gitea_pat=-` (value on stdin). Do the SOPS edit too, or
+   `bao kv patch -mount=af dev-workers/common gitea_pat=-` (value on stdin; repeat for each of the
+   three fields `gitea_pat`, `gitea_package_pat` and `gitea_repo_pat`, one value each). Do the SOPS edit too, or
    the next seed run restores the old value. Also re-encrypt `ansible/secrets/dev-worker.sops.yaml`.
 4. Ensure `dev_worker_gitea_user: dev-worker-bot` (`ansible/roles/dev_worker/defaults/main.yml`, or
    group/host vars) and converge: reviewers first, then workers (`just dev-workers`, see
@@ -82,9 +83,10 @@ curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/main > kube
 Patch `protected_file_patterns` and append `S2S Authority Guard / guard*` to the EXISTING
 `status_check_contexts` (keep every current entry). Gitea matches with gobwas/glob, `.` and `/` as
 separators, and brace support is unverified, so every brace is EXPANDED into separate patterns. The
-API field is one `;`-separated string; the list, one pattern per line:
+API field is one `;`-separated string; the list, one pattern per line, is the heredoc below (written to the gitignored `_out/`):
 
-```
+```sh
+cat > kubernetes/infra/_out/patterns.txt <<'EOF'
 deploy/helm/values/providers/ailab-s2s-registry.yaml
 deploy/gitops/flux/clusters/ailab/**
 deploy/helm/charts/gatekeeper/**
@@ -108,6 +110,7 @@ scripts/ci/test_check_s2s_authority.py
 scripts/ci/check-ailab-pins.py
 scripts/ci/list-ailab-pins.py
 deploy/secrets/ailab/**
+EOF
 ```
 
 Two patterns go beyond the plan: `deploy/gitops/flux/clusters/ailab/**` (a single listed Flux file
@@ -116,12 +119,22 @@ could otherwise be sidestepped by another file in that directory carrying arbitr
 Expect about 19 owner reviews a month.
 
 ```sh
-PATTERNS=$(paste -sd';' patterns.txt)   # the list above, one per line, no blank line
+PY=python3   # python3 on Linux hosts; use PY=python in Git Bash
+B=kubernetes/infra/_out/main-protection-before.json
+PATTERNS=$(paste -sd';' kubernetes/infra/_out/patterns.txt)
+BODY=$($PY - "$PATTERNS" "$B" <<'PYEOF'
+import json, sys
+before = json.load(open(sys.argv[2], encoding='utf-8'))
+ctx = list(before.get('status_check_contexts') or [])
+if 'S2S Authority Guard / guard*' not in ctx:
+    ctx.append('S2S Authority Guard / guard*')
+print(json.dumps({'protected_file_patterns': sys.argv[1],
+                  'enable_status_check': True,
+                  'status_check_contexts': ctx}))
+PYEOF
+)
 curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: application/json" \
-  $G/branch_protections/main -d "$(python3 -c "import json,sys; print(json.dumps({
-    'protected_file_patterns': sys.argv[1],
-    'enable_status_check': True,
-    'status_check_contexts': ['<every existing context>', 'S2S Authority Guard / guard*']}))" "$PATTERNS")"
+  $G/branch_protections/main -d "$BODY"
 ```
 
 Re-read the rule and diff it against `kubernetes/infra/_out/main-protection-before.json` (only those
