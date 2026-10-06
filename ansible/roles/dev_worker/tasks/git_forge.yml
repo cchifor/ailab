@@ -25,6 +25,9 @@
       loop_control:
         label: "{{ item.name }}"
 
+    - name: Pin the git.chifor.me credential username (shared with the other credential path)
+      ansible.builtin.import_tasks: pin_gitea_username.yml
+
     - name: Write the git.chifor.me credential (per user, 0600)
       # copy(content) owns the whole file — dev-workers use Gitea as the forge, so a single line is the
       # intended state. Add other hosts' creds out-of-band if ever needed.

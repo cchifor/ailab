@@ -1,0 +1,20 @@
+---
+# Pin the git.chifor.me credential username to the forge identity in ~/.gitconfig. Imported (static)
+# by BOTH credential paths, git_forge.yml (SOPS) and openbao.yml (bao agent), so it inherits the
+# importer's tags and `when`, and the two paths cannot drift apart.
+#
+# The credential store matches on username: an out-of-band
+# credential.https://git.chifor.me.username=chifor (found on every worker on 2026-10-06, after the
+# identity split moved ~/.git-credentials to dev-worker-bot) made git skip the stored line and
+# prompt for the owner's password. Owning the key here keeps it equal to the user in the file, and
+# the module (unlike a shell task) reports that drift under --check.
+- name: Pin the git.chifor.me credential username to the forge identity
+  become: true
+  become_user: "{{ item.name }}"
+  community.general.git_config:
+    name: credential.https://git.chifor.me.username
+    scope: global
+    value: "{{ dev_worker_gitea_user }}"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"

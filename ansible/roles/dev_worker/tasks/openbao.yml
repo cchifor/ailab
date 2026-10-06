@@ -484,6 +484,9 @@
   loop_control:
     label: "{{ item.name }}"
 
+- name: Pin the git.chifor.me credential username (shared with the other credential path)
+  ansible.builtin.import_tasks: pin_gitea_username.yml
+
 # credentials.yml already owns this directory; repeated here (like herdr.yml repeats linger/getent)
 # so a `-t openbao` run does not depend on a task file its tag excludes. blockinfile creates the
 # file below but not its parent.
