@@ -329,6 +329,11 @@ dev_worker_helmtest_namespace: "helmtest-{{ inventory_hostname | regex_replace('
 # recently used records. A size cap, because the age filter is a no-op on buildx 0.37.
 dev_worker_buildx_cache_max: "20GB"
 
+# The same daily unit also removes anonymous docker volumes that no container (running or stopped)
+# references — label com.docker.volume.anonymous only, never named volumes. Throwaway test containers
+# removed without -v leave one each (dev-worker-3: 240, 12 GB, on 2026-10-06).
+dev_worker_anon_volume_prune: true
+
 # Daily `cleanup --deps` (tasks/cleanup.yml): remove node_modules / .venv / Rust target from git
 # worktrees under /workspace and /home that nothing has touched for this many days and no process
 # or running container is using. Source, git state and untracked files are never touched.

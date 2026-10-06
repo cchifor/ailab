@@ -901,11 +901,17 @@ What reclaims it, safest first (`cleanup` is the role's tool, `ansible/roles/dev
    unused images and anonymous volumes, build cache beyond 10 GB. `--caches` adds npm/uv/Playwright.
    The `docker-buildx-prune` timer prunes the build cache toward 20 GB daily (weekly until
    2026-10-02, which let dev-worker-1 reach 38 GB). It is a best-effort target, not a hard cap:
-   records still in use are kept.
+   records still in use are kept. The same unit then runs `docker volume prune -f --filter
+   label=com.docker.volume.anonymous` — anonymous volumes no container references; named volumes
+   are never touched (`dev_worker_anon_volume_prune: false` turns it off). Before 2026-10-06 nothing
+   reaped them: test loops that `docker rm` a postgres container without `-v` left one PGDATA volume
+   per run, and dev-worker-3 hit 100% with 240 of them (12.1 GB).
 4. What is left is live work: `du -xh --max-depth=2 /workspace | sort -rh | head`.
 
 If the disk is at 100%, `docker builder prune -af` is the quickest few GB to get the agent moving
-again (build cache only; nothing running depends on it).
+again (build cache only; nothing running depends on it), then `docker volume prune -f --filter
+label=com.docker.volume.anonymous` (unreferenced anonymous volumes; check
+`docker system df` → Local Volumes RECLAIMABLE first).
 
 ## Verify
 
