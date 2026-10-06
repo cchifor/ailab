@@ -18,3 +18,21 @@ spec:
   secretRef:
     name: platform-deploy-key
   url: ssh://git@github.com/cchifor/platform
+  # Ship only what the cluster consumes (2026-10-06, cp1 etcd fsync). The whole repo is a 49 MB
+  # artifact / 144 MB unpacked, and kustomize-controller unpacks it into its /tmp emptyDir for EACH
+  # of the 17 Kustomizations on this source every 10m — ~2.4 GB of writes per 10m on the node-local
+  # disk of whichever CP hosts Flux (talos-cp1), the same disk as etcd's WAL. Those bursts (10-17 MB/s
+  # from kustomize-controller) lined up with cp1's WAL fsync spikes. Kept: deploy/ (every Kustomization
+  # path and both HelmRelease charts, ./deploy/helm and ./deploy/components/hatchet/chart, whose
+  # _helpers.tpl symlinks stay inside deploy/) and tests/load/ (deploy/components/load's
+  # configMapGenerator reads ../../../tests/load/*). Verified before merge: all 17 Kustomization
+  # paths build byte-identical, and both charts render identically, from a deploy/+tests/load/ tree
+  # vs the full tree; the artifact drops to ~0.6 MB / 2 MB unpacked. A new Kustomization or chart
+  # that reads OUTSIDE these paths must be added here (gitignore syntax: re-include a nested dir by
+  # re-including its parent, then excluding the parent's other children).
+  ignore: |
+    /*
+    !/deploy/
+    !/tests/
+    /tests/*
+    !/tests/load/
