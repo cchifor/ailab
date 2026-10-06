@@ -497,3 +497,35 @@ in both containers and restores `relay-0.3.3-ci-20261004` with source
 005 in place; do not restore an old database merely to roll back code. Older
 code ignores connector tombstones, so a deleted installation could reappear
 as a pending request during rollback; approval is still required.
+
+
+## Account menu release 0.3.5
+
+Source: `a78d6f33dcc14c7ecd34b12b1adca23975dea874` ([Relay PR #12](https://git.chifor.me/cchifor/relay/pulls/12)).
+Image: `registry.chifor.me/relay/control-plane@sha256:25640aafcdf4484ebe87c47ebfa9be1a3dc69233dca6b9b6a0df5a97416cb82d` in both the application and migration containers.
+Provenance: [deployment-images-69146.json](https://git.chifor.me/cchifor/relay/releases/download/v0.3.5/deployment-images-69146.json),
+from successful [release CI 69146](https://git.chifor.me/cchifor/relay/actions/runs/69146).
+Previous published connector downloads through v0.3.4 are retained.
+
+The sidebar account button opens Settings, Account and Sign out. Outside clicks
+and Escape dismiss the menu; Escape restores trigger focus. Keyboard navigation,
+collapsed rails, mobile same-route navigation, theme palettes and long names
+are supported. The popup renders outside the scrolling rail to avoid clipping.
+Logout prevents duplicate requests, preserves error reporting and permits retry.
+
+There are no schema or connector behavior changes. Existing workers require no
+upgrade. Preserve the existing single-replica Recreate strategy and coordinated
+backup/migration startup gate. No new secrets, routes, storage or RBAC are needed.
+
+Local verification includes typechecking, production build, repository formatting
+and five real-session browser tests, covering failed and successful logout and
+existing appearance controls. Source and tag CI run the full application and
+connector verification. Production acceptance checks health/readiness, the exact
+source manifest and image UI asset hashes, desktop/mobile navigation, outside
+click and Escape dismissal, and logout of its own newly created test session.
+It must not change existing hosts, agents, conversations or settings.
+
+Rollback restores `registry.chifor.me/relay/control-plane@sha256:6469aa151ecc13ec7f3fedaeb8de9c103fd41f9ad37f3878fad6a81a51dacb23`
+in both containers, release `relay-0.3.4-ci-20261004` and source
+`2e02ba4c281de754065a77ac221b3352474b2536` through a reviewed GitOps change.
+No database restore or worker downgrade is needed for this UI-only rollback.
