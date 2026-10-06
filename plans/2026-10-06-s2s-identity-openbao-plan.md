@@ -162,7 +162,9 @@ gatekeeper loads at startup. Existing SOPS identities are untouched.
 
 ## Owner decisions (required before activation)
 
-**D1. Identity separation (K1′.3).** Both reviewers' position: before Phase 0 can pass, the
+**D1. Identity separation (K1′.3). DECIDED by the owner on 2026-10-06, directly in the planning
+session: split identities first.** The exception path below is not taken. Both reviewers'
+position: before Phase 0 can pass, the
 automation gets its own non-admin Gitea identities, and workers' copies of the owner's
 credentials are removed and revoked.
 - The **only** exception is the owner's **direct** confirmation, given outside the shared login,
