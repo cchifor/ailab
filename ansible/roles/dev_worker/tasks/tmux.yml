@@ -38,6 +38,27 @@
   failed_when: tmux_titles.rc != 0 and not (tmux_titles.stderr is search('no server running|error connecting'))
   when: tmux_conf.changed
 
+# Same reason as the titles above: push only the window-size block into running servers. These are
+# idempotent `set-hook -g` / `set -g` lines (no TPM), so re-reading them is safe. Without this,
+# servers already running keep the frozen-size bug until their next restart.
+- name: Apply the window-size-follows-terminal hooks to running tmux servers
+  ansible.builtin.shell:
+    cmd: >-
+      sed -n '/^# BEGIN window-size-follows-terminal$/,/^# END window-size-follows-terminal$/p'
+      "{{ item.home }}/.tmux.conf" | grep -v '^#' > "$tmpf" && tmux source-file "$tmpf"
+    executable: /bin/bash
+  environment:
+    tmpf: "/tmp/.dw-tmux-wsz-{{ item.name }}"
+  become: true
+  become_user: "{{ item.name }}"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: tmux_window_size
+  changed_when: tmux_window_size.rc == 0
+  failed_when: tmux_window_size.rc != 0 and not (tmux_window_size.stderr is search('no server running|error connecting'))
+  when: tmux_conf.changed
+
 - name: Fix per-user .tmux.conf ownership
   ansible.builtin.file:
     path: "{{ item.home }}/.tmux.conf"

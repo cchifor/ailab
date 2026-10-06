@@ -10,6 +10,23 @@ set -sg escape-time 10
 set -g default-terminal "tmux-256color"
 set -ga terminal-overrides ",xterm-256color:Tc"
 
+# ── window size follows the real terminal (Relay connector, dev-worker-3 2026-10-04) ──
+# relay-connector attaches as a control client with ignore-size and implements the browser's
+# "Fit pane" with `resize-window -x -y`. tmux then sets that SESSION's window-size to `manual` and
+# never resets it. Every window in the session keeps a fixed size, and a terminal that is bigger is
+# filled with dots. (Connector 0.2.2 and 0.3.1 both do this.) These hooks clear the session's
+# override whenever a REAL client attaches, resizes, gains focus or switches session. tmux then
+# falls back to `latest` and the window follows the terminal. Control clients are excluded, so
+# Fit pane still works while only the browser is viewing.
+# Lines between the markers are executed verbatim by tests/test-tmux-window-size.sh.
+# BEGIN window-size-follows-terminal
+set -g window-size latest
+set-hook -g client-attached        'if-shell -F "#{?client_control_mode,0,1}" "set-option -u window-size"'
+set-hook -g client-resized         'if-shell -F "#{?client_control_mode,0,1}" "set-option -u window-size"'
+set-hook -g client-focus-in        'if-shell -F "#{?client_control_mode,0,1}" "set-option -u window-size"'
+set-hook -g client-session-changed 'if-shell -F "#{?client_control_mode,0,1}" "set-option -u window-size"'
+# END window-size-follows-terminal
+
 # vi-style copy mode
 setw -g mode-keys vi
 bind-key -T copy-mode-vi v send-keys -X begin-selection
