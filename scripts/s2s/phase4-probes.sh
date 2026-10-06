@@ -43,6 +43,9 @@ WRONG_AUDIENCE=not-strive-gatekeeper
 TOKEN_TTL=10m
 EXTRAS_CM=gatekeeper-registry-extras
 HELMRELEASE=strive
+# The Flux Kustomization that applies the HelmRelease manifest (deploy/gitops/flux/clusters/ailab/app).
+FLUX_NS=flux-system
+FLUX_KUSTOMIZATION=platform-app
 # A real route of the harness IngressRoute (PathPrefix(/api/harness), gatekeeper-auth BEFORE the
 # rewrite; the harness serves /admin/v1/chat*): unauthenticated it must be 401, never a login 302.
 EDGE_URL=https://strive.place/api/harness/admin/v1/chat
@@ -150,17 +153,41 @@ section() { printf '\n== %s\n' "$*"; }
 redact() { sed -E 's/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/<redacted-jwt>/g'; }
 k() { kubectl --context "$CONTEXT" -n "$NS" "$@"; }
 
-darken_commands() {
+# Freeze = the Flux Kustomization FIRST, then the HelmRelease, then the scale. Both suspends are
+# needed: the Kustomization re-applies the HelmRelease manifest from git and so clears a hand-set
+# HelmRelease suspend within one reconcile (observed 2026-10-06 17:22Z); the HelmRelease suspend
+# stops helm-controller upgrades, which would put the replica count back.
+freeze_commands() {
   cat <<EOF
-  1. Freeze the release (Helm re-applies the replica count on every platform commit, so a bare
-     scale is undone by the next reconcile):
+  1. Freeze the release, the Kustomization first (it re-applies the HelmRelease from git and clears
+     a hand-set HelmRelease suspend; observed 2026-10-06 17:22Z), then the HelmRelease (Helm
+     re-applies the replica count on every platform commit, so a bare scale is undone):
+       kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $FLUX_KUSTOMIZATION --type=merge -p '{"spec":{"suspend":true}}'
        kubectl --context $CONTEXT -n $NS patch helmrelease $HELMRELEASE --type=merge -p '{"spec":{"suspend":true}}'
   2. Stop every harness pod (its projected token dies with the pod; deleting the pod alone does NOT
      revoke: the Deployment is Recreate and brings up a fresh, valid identity):
        kubectl --context $CONTEXT -n $NS scale deployment/$HARNESS_DEPLOY --replicas=0
+EOF
+}
+
+# Resume = scripts/s2s/flux-resume.sh, never by hand. It lands the platform commit through Flux,
+# with a gate at each step: the GitRepository fetched it; the Kustomization applied it; the
+# HelmRelease (un-suspended only if still suspended) upgraded to it. Un-suspending by hand can
+# re-apply a stale HelmRelease and, mid-rollback, bring the harness back before the revert lands.
+resume_commands() {
+  cat <<EOF
+     (never by hand: it gates each step on the commit Flux actually fetched and applied: the source,
+     then the Kustomization, then the HelmRelease only if still suspended; see the script's header)
+       scripts/s2s/flux-resume.sh --after-$1
+EOF
+}
+
+darken_commands() {
+  freeze_commands
+  cat <<EOF
   3. Make it durable: a platform PR setting \`harness.enabled: false\` in
-     deploy/helm/values/providers/ailab.yaml (revert #2092), merged; then resume the release:
-       kubectl --context $CONTEXT -n $NS patch helmrelease $HELMRELEASE --type=merge -p '{"spec":{"suspend":false}}'
+     deploy/helm/values/providers/ailab.yaml (revert #2092), merged. Only AFTER it has merged, resume:
+$(resume_commands revert)
 EOF
 }
 
@@ -282,7 +309,7 @@ mode: revocation drill
      there as INCOMPLETE (exit 3): no probe, no revoke prompt, never a pass.
   2. each replica: a svc-mcp mint with it -> 200
   3. wait (no write) while the owner revokes in another terminal:
-$(darken_commands | sed -n '1,6p')
+$(freeze_commands)
   4. each replica every ${POLL_SECONDS}s, until the held token's own exp (decoded from it, never
      printed): the same mint. PASS when every replica refuses within
      ${REVOCATION_BOUND}s of the pod's removal, never accepts again before the exp, and the last two
@@ -507,7 +534,7 @@ revocation_drill() {
   ((${#FAILURES[@]} == 0)) || return 1
 
   section "Revoke now, in ANOTHER terminal (this script only watches)"
-  darken_commands | sed -n '1,6p'
+  freeze_commands
   info "waiting for pod $hp to be removed (polling every ${POD_POLL_SECONDS}s)"
   while :; do
     now=$(date +%s)
@@ -612,10 +639,9 @@ revocation_drill() {
       bad "revocation: only $streak consecutive refused rounds at the end of the observation (2 needed): the end state was not observed"
     fi
   fi
-  section "Restore (after the drill)"
+  section "Restore, once the drill is over (it lands platform main, then scales the harness to 1)"
+  resume_commands drill
   cat <<EOF
-  kubectl --context $CONTEXT -n $NS patch helmrelease $HELMRELEASE --type=merge -p '{"spec":{"suspend":false}}'
-  kubectl --context $CONTEXT -n $NS scale deployment/$HARNESS_DEPLOY --replicas=1
   then: scripts/s2s/phase4-probes.sh   (the full post-flip check again)
 EOF
 }
