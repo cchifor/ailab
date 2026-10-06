@@ -5,9 +5,7 @@ deference to a decision already taken. Earlier rounds told Codex that design B w
 ignore that framing here. Judge on the merits.
 
 The plan under review is `plans/2026-10-06-s2s-identity-openbao-plan.md`: design B with Codex's
-round-2 inline comments. The platform code is at
-`C:/Users/chifo/AppData/Local/Temp/claude/C--Users-chifo-work-ailab/28ad994b-62ac-44f1-8418-fdb632fe1a57/scratchpad/pmain`
-(gitea main 78c0f56b3).
+round-2 inline comments. The platform code is `cchifor/platform` at gitea main 78c0f56b3.
 
 ## Positions so far
 

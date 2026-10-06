@@ -97,11 +97,14 @@ gatekeeper loads at startup. Existing SOPS identities are untouched.
      2. Check the positive cache. It is keyed by `sha256(token)`, holds the reviewed
         `(username, audiences)`, re-binds the requested `client_id` on every hit, and expires at
         `min(review + 60 s, token exp)` with no sliding.
-     3. Pass the rate limiter: a process-wide semaphore (default 4) and a shared token bucket
-        (default 10/s, bounded burst), both `GatekeeperSettings` fields. It applies only to
-        uncached k8s reviews. On saturation it returns **immediately** and never queues.
-        Preshared clients are unaffected.
-     4. Call **TokenReview**. The HTTPS header carries gatekeeper's own API token, re-read on
+     3. Check the negative cache, keyed by `(sha256(token), client_id)`. A hit returns the
+        cached refusal from a completed review, the same generic 401 or 403, without consuming
+        limiter capacity or calling the API. This is what absorbs replayed refused tokens.
+     4. Pass the rate limiter: a process-wide semaphore (default 4) and a shared token bucket
+        (default 10/s, bounded burst), both `GatekeeperSettings` fields. It applies only to k8s
+        reviews that miss both caches. On saturation it returns **immediately** and never
+        queues. Preshared clients are unaffected.
+     5. Call **TokenReview**. The HTTPS header carries gatekeeper's own API token, re-read on
        each uncached review. The harness token goes only in `spec.token`, with
        `spec.audiences: ["strive-gatekeeper"]`. Keep CA verification and a bounded timeout.
 3. Mapping of results:
@@ -309,6 +312,8 @@ prerequisite is live.
     - expiry at `min(+60 s, exp)` and rejection at `exp`;
     - a rotated token gets a fresh review;
     - the negative cache is never poisoned across clients;
+    - a negative-cache hit returns the cached refusal without calling the API or consuming
+      limiter capacity;
     - rotation of gatekeeper's own token.
   - Delegation issue, exchange and revoke with k8s clients, covering success, failure, outage
     and cross-client grant ownership. The fixture at
