@@ -476,17 +476,29 @@ When the extras gain a second k8s entry, `refuse-second-k8s` runs as well, autom
 - `report-ailab-pin-drift` shows 0 torn. From a platform checkout at main:
   `uv run --quiet python3 scripts/ci/report-ailab-pin-drift.py --count-app-templates --fail-on-torn --fail-on-incoherent`.
 
-**On any failure, darken the harness.** The script prints `DARKEN THE HARNESS` and these commands:
+**On any failure, darken the harness.** The script prints `DARKEN THE HARNESS` and these commands.
+First the freeze, the Kustomization first, then the HelmRelease, then the scale:
 
 ```sh
-# freeze: the Kustomization FIRST, then the HelmRelease, then the scale
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=0
-# durable: a platform PR with `harness.enabled: false` in deploy/helm/values/providers/ailab.yaml
-# (revert #2092), merged; only then resume, the HelmRelease first, then the Kustomization:
-kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
+```
+
+Make it durable with a platform PR setting `harness.enabled: false` in
+`deploy/helm/values/providers/ailab.yaml` (revert #2092). **Only after that PR has merged**, resume.
+This is a separate block, so pasting the freeze never un-freezes.
+
+Resume the Kustomization first, and wait for it to reconcile. Its re-apply of the HelmRelease from
+git clears the hand-set suspend, so Helm upgrades the new spec. Resume the HelmRelease only if it is
+still suspended after that. Resuming the HelmRelease first can upgrade a stale spec and, mid-rollback,
+bring the harness back before the reverted `helmrelease.yaml` is applied.
+
+```sh
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":false}}'
+G=$(kubectl --context admin@ai -n flux-system get kustomization platform-app -o jsonpath='{.metadata.generation}')
+kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="$G" --timeout=10m
+[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
 ```
 
 - **Suspend both, the Kustomization first.** The Flux Kustomization `flux-system/platform-app`
@@ -517,15 +529,23 @@ kubectl --context admin@ai -n flux-system patch kustomization platform-app --typ
 The owner runs these, with `K="kubectl --context admin@ai -n strive-ailab"`.
 
 - Run drills 1, 3 and 4 after the probes pass, in any order. Drill 2 deactivates the harness.
-- Drills 1, 2 and 4 take the harness out of service (steps 1 and 2 of the darken commands). Drill 1
+- Drills 1, 2 and 4 take the harness out of service (the freeze block of the darken commands). Drill 1
   does it first: otherwise the harness would get 401s from the replica that refuses it.
-- **Restore the harness afterwards:**
-  1. Resume the HelmRelease:
-     `$K patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'`.
-  2. Then resume the Kustomization:
-     `kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":false}}'`.
-  3. Then `$K scale deployment/harness --replicas=1` and `$K rollout status deployment/harness`.
-  4. Then the full `scripts/s2s/phase4-probes.sh`.
+- **Restore the harness afterwards** (only once the drill is over):
+  1. Resume the Kustomization first, and wait for it to reconcile.
+  2. Resume the HelmRelease only if it is still suspended.
+  3. Scale back.
+  4. Run the full probes.
+
+```sh
+kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":false}}'
+G=$(kubectl --context admin@ai -n flux-system get kustomization platform-app -o jsonpath='{.metadata.generation}')
+kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="$G" --timeout=10m
+[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
+$K scale deployment/harness --replicas=1
+$K rollout status deployment/harness
+scripts/s2s/phase4-probes.sh
+```
 
 **1. Cold start, and deletion and restore during a roll.** Expected:
 
@@ -581,14 +601,24 @@ file):
   and the extras go with it. The old image has no composite backend, so the image and the config
   revert together.
 
+Freeze, then merge the rollback PR:
+
 ```sh
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
-# merge the rollback PR, then let Flux apply it. Resume the HelmRelease, then the Kustomization:
-# the rollback changes helmrelease.yaml, which only the Kustomization applies.
-$K patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
+```
+
+**Only after the rollback PR has merged**, resume the Kustomization first. It applies the reverted
+`helmrelease.yaml` and, with it, clears the HelmRelease suspend, so Helm upgrades the rolled-back spec
+in one step. Resuming the HelmRelease first would upgrade the stale pre-rollback spec and bring the
+harness back. Then verify:
+
+```sh
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":false}}'
+G=$(kubectl --context admin@ai -n flux-system get kustomization platform-app -o jsonpath='{.metadata.generation}')
+kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="$G" --timeout=10m
+[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
 $K rollout status deployment/gatekeeper --timeout=600s
 scripts/s2s/phase4-probes.sh --expect-refused
 kubectl --context admin@ai get clusterrole,clusterrolebinding strive-ailab-gatekeeper-tokenreview

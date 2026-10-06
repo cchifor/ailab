@@ -685,9 +685,17 @@ def assert_freeze(case, text, scale_to):
     _ordered(case, text, [KS_SUSPEND % "true", HR_SUSPEND % "true", SCALE % scale_to])
 
 
+KS_WAIT = "kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="
+HR_IF_STILL_SUSPENDED = """[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && """
+
+
 def assert_resume(case, text, scale_to=None):
-    """Resume = the HelmRelease first, then the Kustomization, then (after a drill) the scale."""
-    needles = [HR_SUSPEND % "false", KS_SUSPEND % "false"]
+    """Resume = the Kustomization FIRST; wait for it to reconcile (its re-apply of the HelmRelease
+    from git clears the hand-set suspend, so helm-controller upgrades the CONSISTENT new spec); the
+    HelmRelease only if it is still suspended after that; then (after a drill) the scale.
+    Resuming the HelmRelease first could upgrade a stale spec and, mid-rollback, bring the harness
+    back before the reverted helmrelease.yaml is applied."""
+    needles = [KS_SUSPEND % "false", KS_WAIT, HR_IF_STILL_SUSPENDED + HR_SUSPEND % "false"]
     if scale_to is not None:
         needles.append(SCALE % scale_to)
     _ordered(case, text, needles)
@@ -700,34 +708,57 @@ def assert_freeze_then_resume(case, text, scale_to):
 
 
 class RunbookFreezeOrder(unittest.TestCase):
-    """Every freeze in the runbook suspends the Kustomization before the HelmRelease, and every
-    resume releases the HelmRelease before the Kustomization (observed 2026-10-06 17:22Z: a
-    HelmRelease-only suspend was cleared by the next platform-app reconcile)."""
+    """The runbook's freezes suspend the Kustomization before the HelmRelease (observed 2026-10-06
+    17:22Z: a HelmRelease-only suspend was cleared by the next platform-app reconcile). Its resumes
+    release the Kustomization first, wait for it, and touch the HelmRelease only if still
+    suspended. A freeze and a resume never share a code fence, so pasting a freeze never un-freezes."""
+
+    @staticmethod
+    def flux_lines(block):
+        return [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization platform-app" in l or "wait kustomization/platform-app" in l]
 
     def blocks(self):
         text = RUNBOOK.read_text(encoding="utf-8")
         return [b.split("```")[0] for b in text.split("```sh\n")[1:]]
 
-    def test_every_hr_suspend_is_paired_in_order(self):
-        seen = 0
+    def neighbour(self, lines, i, step, block):
+        j = i + step
+        self.assertTrue(0 <= j < len(lines), "no line %+d from %r in:\n%s" % (step, lines[i], block))
+        return lines[j]
+
+    def test_freezes_and_resumes_are_ordered_and_apart(self):
+        freezes = resumes = 0
         for block in self.blocks():
-            lines = [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization platform-app" in l]
+            lines = self.flux_lines(block)
+            has_freeze = any('"suspend":true' in l for l in lines)
+            has_resume = any('"suspend":false' in l for l in lines)
+            self.assertFalse(has_freeze and has_resume, "a freeze and a resume in ONE fence:\n" + block)
             for i, line in enumerate(lines):
                 if "patch helmrelease strive" in line and '"suspend":true' in line:
-                    seen += 1
-                    self.assertTrue(i > 0 and "kustomization platform-app" in lines[i - 1] and '"suspend":true' in lines[i - 1], block)
+                    freezes += 1
+                    before = self.neighbour(lines, i, -1, block)
+                    self.assertTrue("patch kustomization platform-app" in before and '"suspend":true' in before, block)
+                if "patch kustomization platform-app" in line and '"suspend":true' in line:
+                    after = self.neighbour(lines, i, +1, block)
+                    self.assertTrue("patch helmrelease strive" in after and '"suspend":true' in after, block)
+                if "patch kustomization platform-app" in line and '"suspend":false' in line:
+                    resumes += 1
+                    self.assertIn("wait kustomization/platform-app", self.neighbour(lines, i, +1, block), block)
+                    hr = self.neighbour(lines, i, +2, block)
+                    self.assertTrue("patch helmrelease strive" in hr and '"suspend":false' in hr, block)
+                    self.assertIn("= true ] &&", hr, "the HelmRelease is resumed only if still suspended:\n" + block)
                 if "patch helmrelease strive" in line and '"suspend":false' in line:
-                    seen += 1
-                    self.assertTrue(i + 1 < len(lines) and "kustomization platform-app" in lines[i + 1] and '"suspend":false' in lines[i + 1], block)
-                if "kustomization platform-app" in line:
-                    other = lines[i + 1] if '"suspend":true' in line else lines[i - 1]
-                    self.assertIn("patch helmrelease strive", other, block)
-        self.assertGreaterEqual(seen, 6, "expected the darken block and drills 1, 2 and 4 to freeze and resume")
+                    self.assertIn("wait kustomization/platform-app", self.neighbour(lines, i, -1, block), block)
+                    ks = self.neighbour(lines, i, -2, block)
+                    self.assertTrue("patch kustomization platform-app" in ks and '"suspend":false' in ks, block)
+        self.assertGreaterEqual(freezes, 4, "the darken block and drills 1, 2 and 4 freeze")
+        self.assertGreaterEqual(resumes, 3, "the darken resume, the drills' restore and drill 2 resume")
 
-    def test_drills_restore_resumes_both(self):
+    def test_drills_restore_resumes_the_kustomization_first(self):
         text = RUNBOOK.read_text(encoding="utf-8")
-        restore = text[text.index("**Restore the harness afterwards:**") :][:600]
-        self.assertLess(restore.index("HelmRelease"), restore.index("Kustomization"), restore)
+        after = text[text.index("**Restore the harness afterwards**") :]
+        block = after[after.index("```sh\n") + len("```sh\n") :].split("```")[0]
+        assert_resume(self, block.replace("$K ", "kubectl --context admin@ai -n strive-ailab "), scale_to=1)
 
 
 def find_bash():
