@@ -66,7 +66,10 @@ Secret.
   use the token but can never rotate it, and cannot even fetch the refresh token to try. See
   § "The shared codex login" below. The grant is `read` on the DATA path only (no metadata, no list).
 
-- `af/dev-workers/common` — shared across all six. Fields: `gitea_pat`, `gitea_repo_pat`,
+- `af/dev-workers/common` — shared across all six. **Identity (2026-10-06):** `gitea_pat`,
+  `gitea_repo_pat` and `gitea_package_pat` are `dev-worker-bot` tokens (non-admin, org team
+  `automation`), no longer `chifor`'s — the owner identity must never be seeded here (s2s plan D1).
+  Fields: `gitea_pat`, `gitea_repo_pat`,
   `gitea_package_pat`, `strive_test_user`, `strive_test_password`, `proxmox_ssh_key`, `litellm_diag_key`,
   `litellm_diag_base`, `litellm_diag_models`.
 

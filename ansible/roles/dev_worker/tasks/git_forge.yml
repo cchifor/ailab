@@ -1,7 +1,7 @@
 ---
 # Gitea (git.chifor.me) forge access for the dev-worker users. Gitea is the master forge now
 # (ADR 0017), so agents/devs on the worker clone/push private cchifor/* repos over HTTPS. This writes a
-# per-user credential.helper=store + a ~/.git-credentials line using a `chifor` read/write-repository
+# per-user credential.helper=store + a ~/.git-credentials line using a `dev-worker-bot` read/write-repository
 # Gitea token (dev_worker_gitea_token, SOPS). No-op when the token isn't provided. Gitea SSH is
 # in-cluster only (not tunnelled), so HTTPS+token is the access path.
 #

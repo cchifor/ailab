@@ -208,7 +208,10 @@ pr_reviewer_merge_personas: [claude, codex]
 # tags and major versions, which that rubric does not describe. It reviews under the
 # general rubric instead. `no-automerge` remains the per-PR brake for a bump that wants a
 # human — a major runtime bump touching something load-bearing, say.
-pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot]
+# dev-worker-bot: the dev workers' own non-admin identity since 2026-10-06 (ailab plan
+# 2026-10-06-s2s-identity-openbao, owner decision D1), replacing their use of `chifor`. Same
+# treatment chifor-authored worker PRs had; Gitea itself refuses its merges of owner-protected files.
+pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot, dev-worker-bot]
 # Repo-SCOPED merge authors, additive to the global list: {repo: [authors]}. A grant made for
 # ONE repo must not make that author's PRs automerge-eligible in every other allowlisted repo
 # (reviewer-claude on ailab#782: `dsh` has read on two of them, and a fork-PR is one read away).

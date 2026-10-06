@@ -20,9 +20,14 @@ dev_worker_agent_user: "{{ dev_worker_admin_user }}"
 
 # ---- Gitea (git.chifor.me) forge access (ADR 0017 — Gitea is the master forge) ----
 # Configures per-user git credentials so agents/devs can clone/push private cchifor/* repos over HTTPS
-# without prompting. Token = a `chifor` read/write-repository Gitea token; provide it via SOPS
-# (ansible/secrets/dev-worker.sops.yaml -> dev_worker_gitea_token). Empty = skip (no-op).
-dev_worker_gitea_user: chifor
+# without prompting. Token = a `dev-worker-bot` Gitea token (write:repository, write:issue,
+# read:organization, read:user); provide it via SOPS (ansible/secrets/dev-worker.sops.yaml ->
+# dev_worker_gitea_token). Empty = skip (no-op).
+# IDENTITY (2026-10-06, plan 2026-10-06-s2s-identity-openbao D1): workers authenticate as the
+# NON-ADMIN `dev-worker-bot` (member of org team `automation`: write on every cchifor repo, never
+# admin), NOT as the owner `chifor`. Owner-gated merges (protected files) therefore need the owner.
+# Never put a `chifor` token back here or in devworker-seeds.sops.yaml.
+dev_worker_gitea_user: dev-worker-bot
 dev_worker_gitea_token: ""
 
 # ---- /workspace data disk (the blank scsi1 disk the tofu module attaches) ----
