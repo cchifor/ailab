@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""disk-guard — reclaim space on a dev-worker while a disk is actually filling.
+
+Run by dev-worker-disk-guard.timer every few minutes, as root. When a watched filesystem has less
+than --low percent free (what an unprivileged agent can still write: root-reserved blocks do not
+count), it walks a ladder of reclaim steps — regenerable things only, least destructive first — and
+stops as soon as every watched filesystem is back above --target percent free. Between --low and
+--target it does nothing (hysteresis: a disk hovering at the trigger is not pruned on every tick).
+
+  disk-guard                     check, and reclaim if a watched fs is under --low
+  disk-guard --dry-run           print the measurement and the steps it would run, change nothing
+  disk-guard --watch / --watch /workspace --docker-fs /workspace
+
+The ladder (docker steps only when the docker filesystem is the one that is low):
+  1. build-cache   `docker builder prune -af`: all build cache no build is using. Warm cache only;
+                   the next build is slower, nothing else changes.
+  2. anon-volumes  `docker volume prune -f --filter label=com.docker.volume.anonymous`: anonymous
+                   volumes no container (running or stopped) references. Named volumes never.
+  3. docker        `cleanup --y --keep-stacks`: stopped containers that are not part of a compose
+                   stack and finished --stopped-hours ago, images no surviving container uses and
+                   older than --image-days. Compose stacks and named volumes are never touched.
+  4. worktrees     `cleanup --worktrees` (only with --worktrees-remove): whole linked worktrees that
+                   are clean and merged, idle --merged-days; or stale, idle 30 days on a remote.
+  5. deps          `cleanup --deps --deps-days N`: node_modules / .venv / Rust target in worktrees
+                   nothing has touched for N days and nothing is using.
+Busy gate for steps 1-3: ANY docker prune or image removal triggers a containerd GC pass that reaps
+the lease of an in-flight pull or build (measured on the CI runners, 2026-08-08: a job with a prune
+inside it failed ~3x as often — gitea-runner-cleanup.sh). So while a docker client is building,
+pulling or starting something, the docker steps wait for the next tick — unless the docker
+filesystem is under --critical percent free, where one failed build beats ENOSPC failing everything.
+Steps 4-5 do not touch docker and are not gated.
+Steps 3-5 reuse `cleanup` (same role), which re-scans before removing and takes its own lock; when
+the daily timer holds that lock the step is skipped and the next tick retries.
+
+Each run writes dev_worker_disk_guard.prom to the node_exporter textfile directory:
+  dev_worker_disk_guard_last_run_timestamp_seconds, _triggered, _steps_run, _reclaimed_bytes,
+  _exhausted (1 = every step ran and a watched fs is still under --low: what is left is live work,
+  a human has to look), _deferred (1 = docker steps waited for a busy docker), and
+  _free_ratio{mountpoint}. Alerts: DevWorkerDiskGuardExhausted / Stale.
+
+Installed by ansible (roles/dev_worker, tasks/disk_guard.yml); tested by
+scripts/tests/test_dev_worker_disk_guard.py.
+"""
+import argparse
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+
+CLEANUP = "/usr/local/bin/cleanup"
+LOCK = "/run/lock/dev-worker-disk-guard.lock"
+TEXTFILE_DIR = "/var/lib/prometheus/node-exporter"
+PROM = "dev_worker_disk_guard.prom"
+
+# A docker client doing one of these has a pull or build in flight (`run`/`create`/`up` pull a
+# missing image). Basenames, so /usr/bin/docker and the buildx/compose plugins all match.
+DOCKER_CLIENTS = frozenset({"docker", "docker-buildx", "docker-compose", "buildctl"})
+BUSY_VERBS = frozenset({"build", "bake", "pull", "push", "load", "import", "run", "create", "up"})
+
+
+@dataclass(frozen=True)
+class Step:
+    name: str
+    docker: bool            # only worth running when the docker filesystem is low
+    argv: tuple
+    timeout: int            # seconds
+
+
+def ladder(opts):
+    steps = [
+        Step("build-cache", True, ("docker", "builder", "prune", "-af"), 900),
+        Step("anon-volumes", True, ("docker", "volume", "prune", "-f", "--filter",
+                                    "label=com.docker.volume.anonymous"), 600),
+        Step("docker", True, (opts.cleanup, "--y", "--keep-stacks",
+                              "--image-days", str(opts.image_days),
+                              "--stopped-hours", str(opts.stopped_hours),
+                              "--cache-keep-gb", "0"), 1800),
+    ]
+    if opts.worktrees_remove:
+        steps.append(Step("worktrees", False, (opts.cleanup, "--y", "--no-docker", "--worktrees",
+                                               "--merged-days", str(opts.merged_days),
+                                               "--worktree-days", str(opts.worktree_days)), 2700))
+    steps.append(Step("deps", False, (opts.cleanup, "--y", "--no-docker", "--deps",
+                                      "--deps-days", str(opts.deps_days)), 2700))
+    return steps
+
+
+def free_ratio(path):
+    """Free space an unprivileged writer sees (f_bavail), as a fraction of the filesystem."""
+    st = os.statvfs(path)
+    return st.f_bavail / st.f_blocks if st.f_blocks else 1.0
+
+
+def free_bytes(path):
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
+
+
+def docker_busy(proc="/proc"):
+    """What a docker client in flight is doing, or "" when none is: the first matching cmdline."""
+    try:
+        pids = [d for d in os.listdir(proc) if d.isdigit()]
+    except OSError:
+        return ""
+    for pid in pids:
+        try:
+            with open(os.path.join(proc, pid, "cmdline"), "rb") as f:
+                argv = f.read().decode(errors="replace").split("\0")
+        except OSError:
+            continue
+        argv = [a for a in argv if a]
+        if argv and busy_argv(argv):
+            return " ".join(argv)[:120]
+    return ""
+
+
+def busy_argv(argv):
+    if os.path.basename(argv[0]) not in DOCKER_CLIENTS:
+        return False
+    # Any non-flag token: a flag VALUE that happens to be "run" over-matches, which only delays the
+    # docker steps by one tick — the safe direction.
+    return any(a in BUSY_VERBS for a in argv[1:] if not a.startswith("-"))
+
+
+def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=docker_busy):
+    """One check. Returns the metrics dict. Pure apart from `measure`, `avail`, `run` and `busy`,
+    which the tests replace."""
+    run = run or run_step
+    watched = list(dict.fromkeys(opts.watch))
+    ratios = {p: measure(p) for p in watched}
+    low = [p for p in watched if ratios[p] < opts.low / 100]
+    m = {"triggered": 0, "steps_run": 0, "reclaimed_bytes": 0, "exhausted": 0, "deferred": 0,
+         "free_ratio": dict(ratios)}
+    if not low:
+        return m
+    m["triggered"] = 1
+    docker_low = opts.docker_fs in low
+    before = {p: avail(p) for p in watched}
+    log("disk-guard: under {}% free: {} — reclaiming toward {}%".format(
+        opts.low, ", ".join(f"{p} {ratios[p] * 100:.1f}%" for p in low), opts.target))
+
+    def satisfied():
+        return all(measure(p) >= opts.target / 100 for p in low)
+
+    for step in ladder(opts):
+        if step.docker and not docker_low:
+            continue
+        if step.docker:
+            # Re-read before EVERY docker step: the previous one can take minutes.
+            what = busy()
+            if what and measure(opts.docker_fs) >= opts.critical / 100:
+                log(f"disk-guard: {step.name} deferred, docker is busy: {what}")
+                m["deferred"] = 1
+                continue
+            if what:
+                log(f"disk-guard: {opts.docker_fs} under {opts.critical}% — {step.name} runs "
+                    f"through a busy docker: {what}")
+        if opts.dry_run:
+            log(f"disk-guard: would run {step.name}: {' '.join(step.argv)}")
+            continue
+        rc = run(step)
+        m["steps_run"] += 1
+        log(f"disk-guard: {step.name} exit {rc}; " + ", ".join(
+            f"{p} {measure(p) * 100:.1f}% free" for p in low))
+        if satisfied():
+            break
+    after = {p: measure(p) for p in watched}
+    m["free_ratio"] = after
+    m["reclaimed_bytes"] = max(0, sum(avail(p) - before[p] for p in watched))
+    if not opts.dry_run and not m["deferred"] and any(after[p] < opts.low / 100 for p in low):
+        m["exhausted"] = 1
+        log("disk-guard: EXHAUSTED — every step ran and a disk is still under "
+            f"{opts.low}% free; what is left is live work (du -xh --max-depth=2 /workspace)")
+    return m
+
+
+def run_step(step):
+    try:
+        r = subprocess.run(["timeout", "--kill-after=2m", f"{step.timeout}s", *step.argv],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    except OSError as e:
+        print(f"disk-guard: {step.name}: {e}", file=sys.stderr)
+        return 127
+    out = (r.stdout + r.stderr).strip().splitlines()
+    for line in out[-15:]:      # the summary lines; cleanup's whole table goes to the journal too long
+        print(f"  {step.name}: {line}")
+    return r.returncode
+
+
+def render_prom(m, now):
+    lines = [
+        "# HELP dev_worker_disk_guard_last_run_timestamp_seconds When disk-guard last completed.",
+        "# TYPE dev_worker_disk_guard_last_run_timestamp_seconds gauge",
+        f"dev_worker_disk_guard_last_run_timestamp_seconds {int(now)}",
+        "# HELP dev_worker_disk_guard_triggered 1 if the last run found a watched fs under --low.",
+        "# TYPE dev_worker_disk_guard_triggered gauge",
+        f"dev_worker_disk_guard_triggered {m['triggered']}",
+        "# HELP dev_worker_disk_guard_steps_run Reclaim steps the last run executed.",
+        "# TYPE dev_worker_disk_guard_steps_run gauge",
+        f"dev_worker_disk_guard_steps_run {m['steps_run']}",
+        "# HELP dev_worker_disk_guard_reclaimed_bytes Bytes the last run freed.",
+        "# TYPE dev_worker_disk_guard_reclaimed_bytes gauge",
+        f"dev_worker_disk_guard_reclaimed_bytes {m['reclaimed_bytes']}",
+        "# HELP dev_worker_disk_guard_exhausted 1 if every step ran and a fs is still under --low.",
+        "# TYPE dev_worker_disk_guard_exhausted gauge",
+        f"dev_worker_disk_guard_exhausted {m['exhausted']}",
+        "# HELP dev_worker_disk_guard_deferred 1 if docker steps waited for a busy docker client.",
+        "# TYPE dev_worker_disk_guard_deferred gauge",
+        f"dev_worker_disk_guard_deferred {m['deferred']}",
+        "# HELP dev_worker_disk_guard_free_ratio Free fraction (unprivileged) after the last run.",
+        "# TYPE dev_worker_disk_guard_free_ratio gauge",
+    ]
+    for p, r in sorted(m["free_ratio"].items()):
+        lines.append(f'dev_worker_disk_guard_free_ratio{{mountpoint="{p}"}} {r:.4f}')
+    return "\n".join(lines) + "\n"
+
+
+def write_prom(text, directory):
+    """Atomic (rename) so node_exporter never reads half a file. A full root fs makes this fail;
+    the stale timestamp is then what alerts (DevWorkerDiskGuardStale)."""
+    if not os.path.isdir(directory):
+        return
+    tmp = os.path.join(directory, f".{PROM}.{os.getpid()}")
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, os.path.join(directory, PROM))
+    except OSError as e:
+        print(f"disk-guard: cannot write {PROM}: {e}", file=sys.stderr)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def take_lock(path=LOCK):
+    import fcntl  # Linux only; imported here so the tests import this file anywhere
+    f = open(path, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="disk-guard", description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog=__doc__.split("\n\n", 1)[1])
+    p.add_argument("--watch", action="append", default=None,
+                   help="filesystem to watch (repeatable; default / and /workspace)")
+    p.add_argument("--docker-fs", default="/workspace",
+                   help="the watched path whose filesystem holds the docker data-root")
+    p.add_argument("--low", type=float, default=15, help="trigger under this %% free (default 15)")
+    p.add_argument("--target", type=float, default=25, help="stop at this %% free (default 25)")
+    p.add_argument("--critical", type=float, default=5,
+                   help="under this %% free, docker steps run even through a busy docker (default 5)")
+    p.add_argument("--image-days", type=int, default=3)
+    p.add_argument("--stopped-hours", type=int, default=24)
+    p.add_argument("--deps-days", type=int, default=3)
+    p.add_argument("--merged-days", type=int, default=1)
+    p.add_argument("--worktree-days", type=int, default=30)
+    p.add_argument("--worktrees-remove", action="store_true",
+                   help="include the whole-worktree step (dev_worker_worktree_prune_mode: remove)")
+    p.add_argument("--cleanup", default=CLEANUP, help=argparse.SUPPRESS)
+    p.add_argument("--textfile-dir", default=TEXTFILE_DIR)
+    p.add_argument("--dry-run", action="store_true")
+    a = p.parse_args(argv)
+    a.watch = a.watch or ["/", "/workspace"]
+    if not 0 < a.critical < a.low < a.target < 100:
+        p.error("need 0 < --critical < --low < --target < 100")
+    if a.docker_fs not in a.watch:
+        p.error("--docker-fs must be one of the --watch paths")
+    return a
+
+
+def main(argv=None):
+    opts = parse_args(sys.argv[1:] if argv is None else argv)
+    if not opts.dry_run:
+        if os.geteuid() != 0:
+            print("disk-guard: run as root (or --dry-run)", file=sys.stderr)
+            return 2
+        lock = take_lock()
+        if lock is None:
+            print("disk-guard: a previous run is still going")
+            return 0
+    m = guard(opts)
+    if not m["triggered"] and opts.dry_run:
+        print("disk-guard: ok — " + ", ".join(
+            f"{p} {r * 100:.1f}% free" for p, r in m["free_ratio"].items()))
+    if not opts.dry_run:
+        write_prom(render_prom(m, time.time()), opts.textfile_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

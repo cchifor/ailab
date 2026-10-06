@@ -46,6 +46,11 @@
   ansible.builtin.import_tasks: cleanup.yml
   tags: [cleanup]
 
+# After cleanup.yml: the guard drives that tool under disk pressure. Own tag: --tags disk_guard.
+- name: disk-guard (pressure-driven reclaim on / and /workspace)
+  ansible.builtin.import_tasks: disk_guard.yml
+  tags: [disk_guard]
+
 # Deliberately next to the swapfile: both are last-ditch behaviour for a worker that has run out of
 # memory headroom. The swapfile keeps a spike from reaching the OOM-killer; this one makes sure that
 # when the kernel dies anyway, the VM comes back instead of sitting dead and looking `running` to PVE.

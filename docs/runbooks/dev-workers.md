@@ -861,7 +861,22 @@ included — and has to ask for help. `DevWorkerDiskFilling` fires at <12% free 
 (before 2026-10-01 it watched `/` only, which is how dev-worker-3 reached 100% and dev-worker-2 0.7%
 free without a page).
 
-What reclaims it, safest first (`cleanup` is the role's tool, `ansible/roles/dev_worker/files/cleanup`):
+**Automatic, under pressure: `dev-worker-disk-guard`** (`ansible/roles/dev_worker/files/disk-guard`,
+timer every 5 min, since 2026-10-06). When `/` or `/workspace` is under 15% free it walks a ladder —
+unused build cache → unreferenced anonymous volumes → stopped non-compose containers (>24h) and
+images unused 3+ days → merged idle worktrees → deps of worktrees idle 3+ days — and stops at 25%.
+Docker steps wait while a docker client is building/pulling/starting something (a prune's containerd
+GC kills in-flight pulls, measured on the CI runners) unless the disk is under 5%. Compose stacks,
+named volumes, source, git state and untracked files are never touched. `journalctl -u
+dev-worker-disk-guard`, `disk-guard --dry-run`; metrics `dev_worker_disk_guard_*` (textfile),
+alerts `DevWorkerDiskGuardExhausted` (ladder done, still low: live work — a human decides) and
+`DevWorkerDiskGuardStale`. Thresholds: `dev_worker_disk_guard_*` in the role defaults. Why it
+exists: every reclaim before it ran on a calendar, and dev-worker-3's /workspace refilled from 95%
+to 100% within a day on 2026-10-06 (180 anonymous postgres volumes created on 10-04 alone).
+Agents are told the same rules (`docker run --rm`, `docker rm -v`, `compose down -v`) in a managed
+block of `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`.
+
+What reclaims it by hand, safest first (`cleanup` is the role's tool, `ansible/roles/dev_worker/files/cleanup`):
 
 1. `sudo cleanup --no-docker --deps --dry-run`, then without `--dry-run` — node_modules, `.venv`
    (with `pyvenv.cfg`) and Rust `target` (beside a `Cargo.toml`) in git worktrees under `/workspace`
@@ -895,8 +910,7 @@ What reclaims it, safest first (`cleanup` is the role's tool, `ansible/roles/dev
    `git worktree lock <path>` before the run. Worktrees idle 30+ days that do not qualify are printed
    as `Kept worktree … — <reason>`: that list is the owner's to settle. The `dev-worker-deps-prune`
    timer runs this step first (`journalctl -u dev-worker-deps-prune`); `dev_worker_worktree_prune_mode`
-   is `report` (logs the plan only) until a week of reports has been checked, then `remove`; `off`
-   skips it. Assumes one rootful dockerd per worker and no rootless container runtime.
+   is `remove` since 2026-10-06 (`report` = log the plan only, as it did from 10-02; `off` skips it). Assumes one rootful dockerd per worker and no rootless container runtime.
 3. `cleanup --dry-run`, then `cleanup` — docker: stale compose stacks, old stopped containers,
    unused images and anonymous volumes, build cache beyond 10 GB. `--caches` adds npm/uv/Playwright.
    The `docker-buildx-prune` timer prunes the build cache toward 20 GB daily (weekly until

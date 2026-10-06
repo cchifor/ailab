@@ -345,7 +345,22 @@ dev_worker_deps_prune_days: 14
 # the remote default branch and idle merged_days, or idle prune_days with HEAD on a remote branch.
 # Removed with `git worktree remove` (no --force) as the owner; branch refs are kept.
 # report = log what it would remove (--dry-run) · remove = remove it · off = skip the step
-# (an unquoted `off` is YAML false, which also means off).
-dev_worker_worktree_prune_mode: report
+# (an unquoted `off` is YAML false, which also means off). `remove` since 2026-10-06, after 4-5
+# days of clean reports on all four workers (no errors; dw3 40 / 9.8 GB, dw4 51 / 6.2 GB waiting)
+# and the dev-worker-3 disk-full repeat. `remove` also lets disk-guard use the step under pressure.
+dev_worker_worktree_prune_mode: remove
 dev_worker_worktree_prune_days: 30
 dev_worker_worktree_prune_merged_days: 3
+
+# disk-guard (tasks/disk_guard.yml): every interval, if / or /workspace is under `low` percent
+# free, reclaim regenerable things (build cache, anonymous volumes, stopped non-compose containers
+# and unused images, merged worktrees, idle deps) until `target` percent. Docker steps wait while a
+# docker client is pulling/building unless the disk is under `critical`. The image/deps thresholds
+# are tighter than the daily timers' because they only apply under pressure.
+dev_worker_disk_guard_enabled: true
+dev_worker_disk_guard_interval: 5min
+dev_worker_disk_guard_low: 15
+dev_worker_disk_guard_target: 25
+dev_worker_disk_guard_critical: 5
+dev_worker_disk_guard_image_days: 3
+dev_worker_disk_guard_deps_days: 3
