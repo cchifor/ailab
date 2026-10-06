@@ -283,7 +283,7 @@ ADR records them; see "How to record" below). The decisions:
   **Identity boundary:** any pod in `strive-ailab` that runs as ServiceAccount `harness` with a
   projected token for audience `strive-gatekeeper` holds the svc-harness identity.
 
-**D2/D3 acceptance must be recorded BEFORE Phase 3** (decided; the ADR record is still to be written).
+**D2/D3 acceptance must be recorded BEFORE Phase 3.** Done 2026-10-06: both were decided directly by the owner (D2 accepted; D3 restrict pre-flip) and are recorded in platform `docs/decisions/ADR-034-s2s-projected-token-identities.md` (owner-protected).
 
 **How to record, through a non-shared channel.** The acceptance must not be authored from the shared
 `chifor` login that workers could have used. Either (a) commit or approve the ADR text as a distinct
