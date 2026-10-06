@@ -30,9 +30,23 @@ spec:
   # vs the full tree; the artifact drops to ~0.6 MB / 2 MB unpacked. A new Kustomization or chart
   # that reads OUTSIDE these paths must be added here (gitignore syntax: re-include a nested dir by
   # re-including its parent, then excluding the parent's other children).
+  # spec.ignore REPLACES source-controller's default exclusion list, so its non-VCS defaults are
+  # restated last (later rules win): a binary later committed under deploy/ stays out of the artifact.
+  # None match under deploy/ or tests/load/ today, so this changes nothing in the current artifact.
   ignore: |
     /*
     !/deploy/
     !/tests/
     /tests/*
     !/tests/load/
+    *.jpg
+    *.jpeg
+    *.gif
+    *.png
+    *.wmv
+    *.flv
+    *.tar.gz
+    *.zip
+    **/.goreleaser.yml
+    **/.sops.yaml
+    **/.flux.yaml
