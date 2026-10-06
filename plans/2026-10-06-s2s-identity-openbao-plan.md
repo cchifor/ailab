@@ -11,8 +11,9 @@ additions, and this text folds in both reviewers' final corrections.
   F-e′/K1′.2 (the pin-provenance correction), N1 (shared bucket, bounded burst), K1′.3 (strict
   identity separation), K1′.4 (owner acceptance before activation).
 
-The trail is under "Review trail" at the end. Three owner decisions are still open, listed under
-"Owner decisions"; B does not activate before they are made.
+The trail is under "Review trail" at the end. Of the three owner decisions under "Owner
+decisions", D1 is made (split identities first). D2 and D3 are still open, and B does not
+activate before they are made.
 
 Source: dev-worker-1's proposal (2026-10-06), an automatable path for new platform service
 identities on ailab with no SOPS edit, no age key and no checksum bump. First consumer:
