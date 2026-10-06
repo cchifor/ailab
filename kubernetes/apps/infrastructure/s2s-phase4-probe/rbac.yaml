@@ -1,0 +1,65 @@
+# The probe's identity. It can do exactly two things in strive-ailab:
+#   * create a TokenRequest for ServiceAccount `harness` or `default` (the three probe tokens: harness
+#     for strive-gatekeeper, harness for a wrong audience, default for strive-gatekeeper);
+#   * read the Endpoints of Service `gatekeeper` (each replica's pod IP and readiness).
+# No pods, no exec, no secrets, no list, no watch, nothing cluster-scoped.
+#
+# What the TokenRequest grant means: whoever runs a pod as this ServiceAccount can mint a harness
+# token for ANY audience (RBAC cannot narrow the audience), i.e. act as svc-harness towards
+# gatekeeper for 10 minutes. That is the probe's purpose. The same people can already do more: a
+# pod in strive-ailab may simply name serviceAccountName: harness. The Job is the only consumer;
+# the SA itself mounts no token (automountServiceAccountToken: false) and only the Job's pod
+# template opts in.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: s2s-phase4-probe
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: s2s-phase4-probe
+    app.kubernetes.io/component: probe
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: s2s-phase4-probe
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: s2s-phase4-probe
+    app.kubernetes.io/component: probe
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - serviceaccounts/token
+    resourceNames:
+      - harness
+      - default
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+    resourceNames:
+      - gatekeeper
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: s2s-phase4-probe
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: s2s-phase4-probe
+    app.kubernetes.io/component: probe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: s2s-phase4-probe
+subjects:
+  - kind: ServiceAccount
+    name: s2s-phase4-probe
+    namespace: strive-ailab

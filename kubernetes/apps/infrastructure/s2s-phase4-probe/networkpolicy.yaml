@@ -1,0 +1,37 @@
+# Lets the probe pod reach each gatekeeper replica at its pod IP, and nothing else.
+#
+# The platform chart's NetworkPolicy `gatekeeper` admits port 5000 only from Traefik, the
+# allowedClients (pods labelled strive.io/service in a fixed list) and Prometheus. NetworkPolicies
+# are additive (an allow in any policy selecting the pod admits the traffic), so this ailab-owned
+# policy adds ONE source: pods carrying BOTH labels of the probe Job's pod template, same namespace,
+# TCP 5000. Nothing else changes for gatekeeper.
+#
+# Why not borrow an allowedClients label (strive.io/service: <a real service>): every other
+# service's policy that trusts that label would admit the probe too (mcp, integration, ...), and a
+# Service selecting on it could put the probe pod in its Endpoints. Why not a new allowedClients
+# entry: that is a platform values change plus a fleet release for a test-only client, and the
+# allowedClients list is the registry's call graph, which a probe is not part of.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: s2s-phase4-probe-to-gatekeeper
+  namespace: strive-ailab
+  labels:
+    app.kubernetes.io/name: s2s-phase4-probe
+    app.kubernetes.io/component: probe
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: strive
+      app.kubernetes.io/name: gatekeeper
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: s2s-phase4-probe
+              app.kubernetes.io/component: probe
+      ports:
+        - protocol: TCP
+          port: 5000

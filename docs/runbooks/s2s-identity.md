@@ -6,8 +6,10 @@ gatekeeper with its pod's projected token). The design, phases and rationale are
 this page is the checklist and does not repeat them. The DSN side (Phase 1) is in
 [`infra-pg.md`](infra-pg.md), section "strive-pg (the PLATFORM's cluster ...)".
 
-Nothing here is done by automation or by a dev worker. Do not activate (Phase 4) until D1, Phase 0
-and D2/D3 below are complete and recorded.
+Nothing here is done by automation or by a dev worker, with one exception: the in-cluster probe
+Job (Phase 4, "In-cluster Job") re-runs the per-replica probes when a PR bumps its revision, and a
+dev worker reads its logs. Do not activate (Phase 4) until D1, Phase 0 and D2/D3 below are complete
+and recorded.
 
 ## Reference: the TokenReview rule in force
 
@@ -493,8 +495,95 @@ kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge
   valid identity.
 - **Scaling to 0 does.** The projected token is bound to the pod; drill 4 measures how fast.
 
-**Every later roll of an active registry** repeats the pre-flip acceptance and
-`scripts/s2s/phase4-probes.sh --gatekeeper-only`.
+**Every later roll of an active registry** repeats the pre-flip acceptance and the per-replica
+probes: the in-cluster Job below (a PR bumps its revision), or
+`scripts/s2s/phase4-probes.sh --gatekeeper-only` from a workstation.
+
+### In-cluster Job: `s2s-phase4-probe`
+
+The per-replica half of the probes (`--gatekeeper-only`), run by a Job in `strive-ailab` instead of
+by `kubectl exec` from a workstation. A dev worker reads the verdict without exec, secrets or a
+token of its own. Manifests: `kubernetes/apps/infrastructure/s2s-phase4-probe/`, applied by the
+Flux Kustomization `s2s-phase4-probe` (`wait: false`: a failed probe never gates a layer). Program:
+`scripts/s2s/phase4_job.py`, which runs `scripts/s2s/phase4_probe.py` for each replica. Both are
+copied byte for byte into the manifest directory; a test fails on drift.
+
+**What it does.**
+
+1. Reads `endpoints/gatekeeper`. Any not-ready address (a roll in flight), or fewer than 2 ready
+   replicas, fails the run before a token exists.
+2. Makes the same three TokenRequests as the workstation script (600 s, the API minimum), with
+   its own ServiceAccount token. The tokens stay in the process's memory: never argv, env, a file
+   or the log.
+3. Runs every check of the table above against each replica at its pod IP (`http://<IP>:5000`).
+   The extras ConfigMap is mounted in the Job pod, so `registry` compares each replica's loaded
+   `extras_sha` with the ConfigMap as it is now. `OWNTOKEN` is not printed: the Job cannot read
+   gatekeeper's own token. Drill 3 (rotation) stays on the workstation script.
+4. Checks that `base_sha` is the same on every replica, prints a table, and exits 0 only if every
+   replica passed (Job `Complete`). Otherwise the Job is `Failed`; `backoffLimit: 0`, so a failure
+   is never retried into a pass.
+
+**Access, exactly.** ServiceAccount `s2s-phase4-probe`. Its Role allows `create` on
+`serviceaccounts/token` with `resourceNames: [harness, default]`, and `get` on `endpoints` with
+`resourceNames: [gatekeeper]`. Nothing else: no pods, exec, secrets, list or watch. The probe pod
+reaches gatekeeper through the ailab NetworkPolicy `s2s-phase4-probe-to-gatekeeper`. That policy
+selects the gatekeeper pods and admits only pods labelled
+`app.kubernetes.io/name: s2s-phase4-probe` + `app.kubernetes.io/component: probe`, from the same
+namespace, on TCP 5000. NetworkPolicies are additive, so the platform chart's `gatekeeper` policy
+and its `allowedClients` are unchanged. The pod runs as non-root with a read-only root filesystem,
+no privileges and every capability dropped. RBAC cannot narrow a TokenRequest's audience, so
+anyone who can run a pod as this ServiceAccount can act as `svc-harness` for 10 minutes. Anyone who
+can create pods in `strive-ailab` can already do that by naming `serviceAccountName: harness`.
+
+**Trigger: one Flux-applied Job, no CronJob.** After every gatekeeper roll, a PR bumps
+`spec.template.metadata.annotations["probe/revision"]` in `job.yaml` (any new value; the
+convention is `<date>.<n>`). A Job's pod template is immutable, so the apply fails as immutable,
+and the `kustomize.toolkit.fluxcd.io/force` annotation makes Flux delete and recreate the Job.
+That is a new run on the next reconcile (10 min), or at once with
+`flux reconcile kustomization s2s-phase4-probe`. A change to either script renames the generated
+ConfigMap and re-runs the Job the same way. Why no CronJob: a suspended CronJob would be a second
+copy of the pod template to keep in sync, and the PR trigger does not need it. The owner can also
+re-run without a PR:
+
+```sh
+kubectl --context admin@ai -n strive-ailab delete job s2s-phase4-probe
+flux --context admin@ai reconcile kustomization s2s-phase4-probe
+```
+
+`ttlSecondsAfterFinished` is 7 days. When it reaps the Job, Flux re-applies it and it runs again,
+which gives a weekly re-check of the live fleet at the same revision. During a drill that takes the
+harness out of service, a run fails with `FAIL token harness` (the ServiceAccount is gone) or a
+refused mint. That is expected; read it, don't act on it.
+
+**Reading it (dev worker, read-only):**
+
+```sh
+platform kubectl -n strive-ailab get job s2s-phase4-probe        # COMPLETIONS 1/1 = pass; Failed = fail
+platform kubectl -n strive-ailab logs job/s2s-phase4-probe
+```
+
+| Log line | Meaning |
+|---|---|
+| `S2S-PHASE4 namespace=… revision=<r> program_sha256=<h>` | The run's revision (from the pod annotation) and the probe program's hash. Check that `<r>` is the one your PR set. |
+| `S2S-PHASE4 replicas <pod>=http://<ip>:5000 …` | The ready replicas from `endpoints/gatekeeper`, each probed at its own pod IP. |
+| `FAIL endpoints: <pod> is not ready …` / `… N ready gatekeeper replica(s), expected 2` | A roll in flight or a short fleet. Nothing was minted or probed. Re-run after the roll. |
+| `PASS token <name> (TokenRequest sa=… audience=… 600s; never printed)` | One of the three TokenRequests succeeded. `FAIL token <name>: … HTTP 403 reason=Forbidden` means the Role or RoleBinding is missing; `HTTP 404 reason=NotFound` for `harness` means the harness ServiceAccount is gone (a dark harness). |
+| `== replica <pod> <ip>` | The start of one replica's checks. |
+| `  [<pod>] REGISTRY base_sha=… extras_sha=… file_sha=…` | What that replica loaded at boot, and the hash of the ConfigMap mounted in the Job. |
+| `  [<pod>] PASS <check> (…)` / `  [<pod>] FAIL <check>: …` | One row of the table above, for that replica. |
+| `  [<pod>] INFO …` | Context only, never a verdict (for example: svc-harness is the only k8s entry). |
+| `  [<pod>] RESULT pass\|fail` | That replica's own verdict. |
+| `PASS registry-agreement (base_sha … on every replica)` | The base registry is the same everywhere. A `FAIL` means the replicas run different base registries. |
+| `SUMMARY` and the table | One row per replica: `PASS`, or `FAIL` with the failed check ids. |
+| `RESULT pass` / `RESULT fail` (no prefix) | The Job's verdict. It matches the exit code and the Job's `Complete` or `Failed` status. |
+| `FAIL internal: unexpected <Type>` | The program hit an unexpected error. By design it prints no traceback, which could carry request material. Re-run it, or fall back to the workstation script. |
+
+A `FAIL` on a replica means the same as it does from the workstation script: **darken the harness**
+(the commands above). The worker reports it, and the owner darkens.
+
+**First run.** Merging the PR creates the Flux Kustomization and the Job, and the first run starts
+on that reconcile. The owner only has to confirm with
+`flux --context admin@ai get kustomizations s2s-phase4-probe` (Ready) and `get job` as above.
 
 **Reading TokenReview results** (probe output):
 

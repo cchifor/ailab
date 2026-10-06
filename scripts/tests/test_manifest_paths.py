@@ -83,6 +83,8 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/platform-access",
         # 2026-10-05 — the harness service's strive-pg role + database (ESO password + bootstrap Job).
         "./kubernetes/apps/infrastructure/strive-pg-harness",
+        # 2026-10-06 — the S2S Phase 4 probe Job (TokenRequest RBAC + an additive gatekeeper netpol).
+        "./kubernetes/apps/infrastructure/s2s-phase4-probe",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",

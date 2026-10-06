@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# S2S Phase 4 probes as an in-cluster Job (docs/runbooks/s2s-identity.md, "Phase 4: activation
+# checks", "In-cluster Job"): every gatekeeper replica checked from one pod, with no exec and no
+# workstation, so a dev worker can read a roll's verdict with
+#   platform kubectl -n strive-ailab logs job/s2s-phase4-probe
+# Reconciled by the DEDICATED clusters/ai/s2s-phase4-probe.yaml Flux Kustomization (wait:false): a
+# FAILED probe Job is a verdict to read, never something that may gate a layer.
+#
+# ns strive-ailab is the platform's namespace; ailab manages only additive objects there. Every
+# object below is named s2s-phase4-probe* so nothing can collide with what the umbrella chart
+# renders.
+#   rbac.yaml           SA + Role (TokenRequest for harness/default, get endpoints/gatekeeper) + RoleBinding
+#   networkpolicy.yaml  admits ONLY this probe's pod label to gatekeeper :5000 (additive)
+#   job.yaml            the probe run; re-runs when its probe/revision annotation or a script changes
+resources:
+  - rbac.yaml
+  - networkpolicy.yaml
+  - job.yaml
+
+configMapGenerator:
+  # Content-hashed name: editing either script renames the ConfigMap, the Job's pod template
+  # changes with it, and the force annotation recreates the Job, so a script change re-runs the
+  # probe. Both files are byte-identical copies of scripts/s2s/ (kustomize cannot load files from
+  # outside this directory); scripts/s2s/test_phase4_job.py fails on any drift.
+  # The generator does not inherit a namespace; without one the WHOLE layer stalls
+  # (databases/kustomization.yaml, 2026-09-28).
+  - name: s2s-phase4-probe-script
+    namespace: strive-ailab
+    files:
+      - phase4_probe.py
+      - phase4_job.py
