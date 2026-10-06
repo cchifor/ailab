@@ -1,7 +1,8 @@
 # S2S service identities without shared secrets (projected ServiceAccount tokens)
 
-**Status: agreed.** Codex (gpt-6-astra) and Fable each signed design B in alignment round A2
-(2026-10-06), each with its own amendments. In the final check, each accepted the other's
+**Status: finalized.** Codex (gpt-6-astra) and Fable both signed this exact text (`FINAL-SIGN: yes`,
+`REMAINING: none`, 2026-10-06). Earlier, in alignment round A2, each had signed design B with its
+own amendments. In the final check, each accepted the other's
 additions, and this text folds in both reviewers' final corrections.
 - **Fable's additions:** C3′ (base-registry remap and volume overrides), F-e′ (the image
   build workflows), N1 (settings fields, `Retry-After`, a metric), N2 (no `paths:` filter, the
@@ -423,4 +424,4 @@ prerequisite is live.
   - All 12 fixes are applied in this text.
 - Raw answers: `plans/2026-10-06-s2s-identity-alignment*.md`.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
