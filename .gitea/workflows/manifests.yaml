@@ -81,6 +81,18 @@ jobs:
       - name: Local embedding serving and route contracts
         run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak scripts.tests.test_strive_pg_harness_dsn
 
+      # The S2S Phase 4 probes (scripts/s2s/, docs/runbooks/s2s-identity.md): the in-pod verdict
+      # logic against fabricated JWTs and canned gatekeeper answers, then phase4-probes.sh end to end
+      # against stub kubectl/curl and a gatekeeper emulator per replica: every mandatory refusal, the
+      # D3 403s, a fallback or registry drift on ONE replica fails and prints DARKEN, no token is ever
+      # printed, no cluster write is made, --dry-run makes no call at all; the revocation drill
+      # watches until the held token's exp and never counts a missing answer as a refusal; drill 1's
+      # backup lines, run from the runbook, delete nothing without a saved copy. No cluster: the test
+      # refuses to run unless kubectl and curl resolve to its stubs, and points KUBECONFIG at an
+      # empty file and every proxy at a closed port. bash and python3 only (PyYAML optional).
+      - name: S2S Phase 4 probe logic and orchestration (offline)
+        run: python3 -m unittest scripts.s2s.test_phase4_probes
+
       # The env-reaper's shell helpers under the DaemonSet's OWN image (busybox ash, digest-pinned in
       # the manifest) against a synthetic /proc: identity chain, PID reuse, evidence timeout,
       # thread truncation. Same fail-closed shape as manifest-lint (docker required, no soft skip).
