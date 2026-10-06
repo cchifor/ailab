@@ -66,26 +66,72 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
    Applications, or delete the DB rows) and any other owner token copied to workers. Confirm the old
    token now gets 401.
 
-## Phase 0: the owner gate on platform `main`
+## Phase 0: the owner gate on platform `main` (INSTALLED 2026-10-06)
 
-Prerequisite: the platform PR adding the authority guard (`.github/workflows/s2s-authority-guard.yml`
-plus `scripts/ci/check-s2s-authority.py`) is merged. The calls below need a **repo-admin** token for
-`cchifor/platform` (the owner's, held outside the workers). Read the current rule first; Gitea
-applies only the FIRST matching rule, so patch the effective one. Keep the saved copy in the
-gitignored `_out/` directory, not the working directory:
+### Record
+
+Installed on `cchifor/platform` `main` on 2026-10-06 (Gitea 1.26.1), after the authority guard PR
+(`.github/workflows/s2s-authority-guard.yml` plus `scripts/ci/check-s2s-authority.py`) merged.
+
+- **Protected patterns: 26.** The 23 patterns of the plan (brace-expanded) plus
+  `docs/decisions/ADR-034-s2s-projected-token-identities.md`, `scripts/ci/install-uv.sh` and
+  `scripts/ci/with-retry.sh`. The list is below.
+- **Status contexts:** `S2S Authority Guard / guard*` added; the 4 existing contexts kept.
+- **Push:** whitelist `chifor` and `gitea_admin`.
+- **Admin override:** `block_admin_merge_override: false` (the owner path).
+- **Rule JSON:** saved at
+  `home/ailab/kubernetes/infra/_out/platform-main-protection-before-20261006.json` and
+  `platform-main-protection-after-20261006.json` (same directory, gitignored).
+
+Gitea matches with gobwas/glob, `.` and `/` as separators, and brace support is unverified, so every
+brace is EXPANDED into separate patterns. The API field is one `;`-separated string; the list, one
+pattern per line:
+
+```
+deploy/helm/values/providers/ailab-s2s-registry.yaml
+deploy/gitops/flux/clusters/ailab/**
+deploy/helm/charts/gatekeeper/**
+deploy/helm/templates/_helpers.tpl
+infra/gatekeeper/src/app/gatekeeper/service_registry.py
+infra/gatekeeper/src/app/gatekeeper/service_verifier.py
+infra/gatekeeper/src/app/gatekeeper/service_token.py
+infra/gatekeeper/src/app/gatekeeper/tokenreview_verifier.py
+infra/gatekeeper/src/app/gatekeeper/config.py
+infra/gatekeeper/src/app/core/lifecycle.py
+infra/gatekeeper/src/app/core/config/**
+infra/gatekeeper/src/app/main.py
+infra/gatekeeper/src/app/__main__.py
+infra/gatekeeper/src/app/cli/**
+infra/gatekeeper/Dockerfile
+infra/gatekeeper/pyproject.toml
+infra/gatekeeper/uv.lock
+.github/workflows/s2s-authority-guard.yml
+scripts/ci/check-s2s-authority.py
+scripts/ci/test_check_s2s_authority.py
+scripts/ci/check-ailab-pins.py
+scripts/ci/list-ailab-pins.py
+deploy/secrets/ailab/**
+docs/decisions/ADR-034-s2s-projected-token-identities.md
+scripts/ci/install-uv.sh
+scripts/ci/with-retry.sh
+```
+
+Beyond the plan: `deploy/gitops/flux/clusters/ailab/**` (a single listed Flux file could otherwise be
+sidestepped by another file in that directory carrying arbitrary kinds) and
+`deploy/secrets/ailab/**` (a plaintext Secret there could shadow the SOPS `gatekeeper-secrets`).
+Expect about 19 owner reviews a month.
+
+### Re-apply procedure
+
+Use it to restore or extend the rule. It needs a **repo-admin** token for `cchifor/platform` (the
+owner's, held outside the workers). Gitea applies only the FIRST matching rule, so patch the
+effective one. The PATCH MERGES with the live rule: it unions the live `protected_file_patterns` and
+`status_check_contexts` with the documented ones and never replaces them.
 
 ```sh
 G=https://git.chifor.me/api/v1/repos/cchifor/platform
 curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections            # find the effective rule for main
 curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/main > kubernetes/infra/_out/main-protection-before.json
-```
-
-Patch `protected_file_patterns` and append `S2S Authority Guard / guard*` to the EXISTING
-`status_check_contexts` (keep every current entry). Gitea matches with gobwas/glob, `.` and `/` as
-separators, and brace support is unverified, so every brace is EXPANDED into separate patterns. The
-API field is one `;`-separated string; the list, one pattern per line, is the heredoc below (written to the gitignored `_out/`):
-
-```sh
 cat > kubernetes/infra/_out/patterns.txt <<'EOF'
 deploy/helm/values/providers/ailab-s2s-registry.yaml
 deploy/gitops/flux/clusters/ailab/**
@@ -110,25 +156,24 @@ scripts/ci/test_check_s2s_authority.py
 scripts/ci/check-ailab-pins.py
 scripts/ci/list-ailab-pins.py
 deploy/secrets/ailab/**
+docs/decisions/ADR-034-s2s-projected-token-identities.md
+scripts/ci/install-uv.sh
+scripts/ci/with-retry.sh
 EOF
-```
-
-Two patterns go beyond the plan: `deploy/gitops/flux/clusters/ailab/**` (a single listed Flux file
-could otherwise be sidestepped by another file in that directory carrying arbitrary kinds) and
-`deploy/secrets/ailab/**` (a plaintext Secret there could shadow the SOPS `gatekeeper-secrets`).
-Expect about 19 owner reviews a month.
-
-```sh
 PY=python3   # python3 on Linux hosts; use PY=python in Git Bash
 B=kubernetes/infra/_out/main-protection-before.json
-PATTERNS=$(paste -sd';' kubernetes/infra/_out/patterns.txt)
-BODY=$($PY - "$PATTERNS" "$B" <<'PYEOF'
+BODY=$($PY - kubernetes/infra/_out/patterns.txt "$B" <<'PYEOF'
 import json, sys
-before = json.load(open(sys.argv[2], encoding='utf-8'))
-ctx = list(before.get('status_check_contexts') or [])
+want = [l.strip() for l in open(sys.argv[1], encoding='utf-8') if l.strip()]
+live = json.load(open(sys.argv[2], encoding='utf-8'))
+pats = [p for p in (live.get('protected_file_patterns') or '').split(';') if p]
+for p in want:
+    if p not in pats:
+        pats.append(p)
+ctx = list(live.get('status_check_contexts') or [])
 if 'S2S Authority Guard / guard*' not in ctx:
     ctx.append('S2S Authority Guard / guard*')
-print(json.dumps({'protected_file_patterns': sys.argv[1],
+print(json.dumps({'protected_file_patterns': ';'.join(pats),
                   'enable_status_check': True,
                   'status_check_contexts': ctx}))
 PYEOF
@@ -140,23 +185,30 @@ curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: applic
 Re-read the rule and diff it against `kubernetes/infra/_out/main-protection-before.json` (only those
 two fields may change).
 
-### Gate tests (Phase 0 step 5)
+### Gate tests (Phase 0 step 5): results
 
 Gitea 1.26 checks merge preconditions in this order: status checks, approvals, rejected reviews,
 official review requests, outdated branch, protected files. A merge attempt alone therefore cannot
-isolate the protected-files check, so the test is:
+isolate the protected-files check, so protected-file detection is read from the DB instead.
 
-1. Open a throwaway PR (authored by `dev-worker-bot`, label `no-automerge`) touching one file per
-   pattern plus one unprotected control file (`infra/gatekeeper/src/app/gatekeeper/routes.py`).
-2. Read `pull_request.changed_protected_files` from the Gitea DB. It must list every touched
-   protected file and NOT the control.
-3. Show that a direct push to `main` by `dev-worker-bot` is refused (push whitelist: `chifor`,
-   `gitea_admin`) and that `force_merge` by the non-admin bot is refused.
-4. Rely on the real Phase 2a/3 PRs for the end-to-end "Changed protected files" refusal and the
-   owner merge. `block_admin_merge_override` stays false, which is the owner path.
-5. A red guard (introduce a forbidden setting, e.g. `gatekeeper.serviceAuth.composite.enabled: true`
-   in `ailab.yaml`) blocks the merge, and the guard check is reported on that PR.
-6. An unrelated PR (e.g. a README edit) still merges normally through the existing automation.
+1. **Pattern detection.** PRs #2095, #2096 and #2097, authored by `dev-worker-bot` with label
+   `no-automerge`, together touched one file per original pattern plus the unprotected control
+   `infra/gatekeeper/src/app/gatekeeper/routes.py`. All 23 original patterns were flagged in
+   `pull_request.changed_protected_files`, and the control never was. Gitea records at most 10 files
+   per PR, hence 3 PRs.
+2. **Bot merge routes.** Merge, squash, rebase and `force_merge` by the bot all returned 405. Status
+   checks are Gitea's first precondition, so this proves the gate holds but not which check fired
+   (hence item 1).
+3. **Direct push.** A direct push to `main` by `dev-worker-bot` was rejected ("branch main is
+   protected from changing file ...").
+4. **Same permission class.** The reviewer bots that actually merge (`reviewer-codex`,
+   `reviewer-claude`) have the same permission class as `dev-worker-bot` (write, non-admin; verified
+   with the collaborator-permission API).
+5. **End-to-end refusal on a green, bot-approved PR (#2098): <pending, recorded by the operator>.**
+6. Controls still to record: the **owner path** (an admin merge of the Phase 2a/3 PRs) and the
+   **unrelated-PR control** (the next non-protected merge goes through the existing automation).
+7. A red guard (a forbidden setting, e.g. `gatekeeper.serviceAuth.composite.enabled: true` in
+   `ailab.yaml`) blocks the merge, and the guard check is reported on that PR.
 
 If the patterns do not hold, apply the plan's Phase 0 step 7 fallback (`required_approvals >= 1` on
 the effective `main` rule, keeping existing protections) and repeat. Do NOT proceed untested.
@@ -178,6 +230,10 @@ The owner must explicitly accept, in the ADR:
   `protect-ailab-images.yml`, provenance of `ailab`-family tags, and the ailab Flux cluster-admin
   path into `strive-ailab`. Otherwise B does not activate.
 
+  **Platform-side Flux residual:** platform Flux Kustomizations without `serviceAccountName` and
+  cluster-admin controllers apply whatever a bot-approvable path puts in the tree, and
+  `deploy/components/**` is such a route (not a protected pattern).
+
   **Further residuals found at execution (2026-10-06).** Other automation still holds `chifor`
   (site-admin) tokens. Each is an owner-gate bypass path until migrated to a bot identity:
   - `ci-rerun-watchdog` (Secret `ci-rerun-watchdog/ci-rerun-watchdog-gitea`; write:repository and
@@ -193,6 +249,10 @@ The owner must explicitly accept, in the ADR:
   plain-HTTP replay window on the harness-to-gatekeeper hop remain. Either accept deferring a
   per-entry `allowed_grant_types` restriction and transport encryption, or make grant-type
   restriction a pre-flip item.
+  **Identity boundary:** any pod in `strive-ailab` that runs as ServiceAccount `harness` with a
+  projected token for audience `strive-gatekeeper` holds the svc-harness identity.
+
+**D2/D3 acceptance must be recorded BEFORE Phase 3.**
 
 **How to record, through a non-shared channel.** The acceptance must not be authored from the shared
 `chifor` login that workers could have used. Either (a) commit or approve the ADR text as a distinct
@@ -206,7 +266,12 @@ worker's credentials does not count.
 Run after the flip (#2092) lands. Each check targets each gatekeeper pod IP separately (2 replicas),
 not just the Service.
 
-**Pre-flip roll acceptance, per replica:** the effective `extras_sha` equals the rendered hash; the
+**Pre-flip / roll acceptance, per replica:** the effective `extras_sha` equals the rendered hash
+(`extras_sha` is the SHA-256 of the exact ConfigMap data bytes:
+`kubectl -n strive-ailab get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum`;
+it is NOT the pod annotation `checksum/registry-extras`, which hashes the whole rendered template);
+`gatekeeper_service_registry_extras_rejected == 0` and every
+`gatekeeper_service_registry_extras_refused_total{reason}` series is 0; the
 `base_sha` values agree; a preshared mint succeeds (Service plus both pods' `service_token_minted`
 logs); the e2e lane passes; `report-ailab-pin-drift` shows 0 torn.
 
@@ -222,9 +287,10 @@ logs); the e2e lane passes; `report-ailab-pin-drift` shows 0 torn.
 
 **Reading TokenReview results** (probe output):
 
-- A refused token with `status.error` is a generic **401**, not cached. This deviates from the
-  plan's 503 rule and follows Kubernetes' own webhook client.
-- `authenticated=true` together with `status.error`, or a malformed body, is a **503**.
+- A refusal carrying `status.error` is a **503**, uncached (the signed plan's rule; the brief 401
+  deviation was withdrawn).
+- `authenticated=true` together with `status.error`, or a malformed body, is also a **503**.
+- The positive cache holds for at most 60 s, and `exp` is rechecked after the review.
 - Concurrent same-token misses share one review (single-flight).
 
 Every later roll of an active registry repeats the pre-flip and post-flip checks.
