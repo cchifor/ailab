@@ -46,9 +46,11 @@ class Disk:
         return 0
 
 
-def opts(*extra):
-    return dg.parse_args(["--watch", "/", "--watch", "/workspace", "--docker-fs", "/workspace",
-                          *extra])
+def opts(*extra, same_fs=lambda a, b: a == b):
+    o = dg.parse_args(["--watch", "/", "--watch", "/workspace", "--docker-fs", "/workspace",
+                       *extra])
+    o.same_fs = same_fs
+    return o
 
 
 def quiet(*_a, **_k):
@@ -61,6 +63,19 @@ def idle():
 
 def building():
     return "docker buildx build ."
+
+
+class _Shared(dict):
+    """Every key reads and writes the same value: two paths on one filesystem."""
+
+    def __getitem__(self, _k):
+        return dict.__getitem__(self, "/")
+
+    def __setitem__(self, _k, v):
+        dict.__setitem__(self, "/", v)
+
+    def items(self):
+        return [(k, self["/"]) for k in self.keys()]
 
 
 class GuardTest(unittest.TestCase):
@@ -157,6 +172,21 @@ class GuardTest(unittest.TestCase):
             self.assertEqual(dg.docker_busy(proc), "/usr/bin/docker pull pg")
             (pathlib.Path(proc) / "11" / "cmdline").write_bytes(b"docker" + bytes([0]) + b"ps")
             self.assertEqual(dg.docker_busy(proc), "")
+
+    def test_cleanup_lock_held_is_deferred_not_exhausted(self):
+        d = Disk({"/": 0.40, "/workspace": 0.02})
+        def locked(step):
+            d.ran.append(step.name)
+            return dg.LOCKED if step.argv[0].endswith("cleanup") else 0
+        m = dg.guard(opts(), d.measure, d.avail, locked, quiet, idle)
+        self.assertEqual(m["steps_run"], 2)     # build-cache, anon-volumes; cleanup steps locked
+        self.assertEqual((m["deferred"], m["exhausted"]), (1, 0))
+
+    def test_reclaimed_bytes_counted_once_per_filesystem(self):
+        d = Disk({"/": 0.05, "/workspace": 0.05}, gain={"build-cache": {"/": 0.30}})
+        d.free = _Shared(d.free)                # both paths are one filesystem
+        m = dg.guard(opts(same_fs=lambda a, b: True), d.measure, d.avail, d.run, quiet, idle)
+        self.assertEqual(m["reclaimed_bytes"], int(0.35 * 100 * 10**9) - int(0.05 * 100 * 10**9))
 
     def test_argument_validation(self):
         with self.assertRaises(SystemExit):

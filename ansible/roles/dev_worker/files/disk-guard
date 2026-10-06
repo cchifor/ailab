@@ -30,7 +30,7 @@ pulling or starting something, the docker steps wait for the next tick — unles
 filesystem is under --critical percent free, where one failed build beats ENOSPC failing everything.
 Steps 4-5 do not touch docker and are not gated.
 Steps 3-5 reuse `cleanup` (same role), which re-scans before removing and takes its own lock; when
-the daily timer holds that lock the step is skipped and the next tick retries.
+the daily timer holds that lock the step counts as deferred (not run) and the next tick retries.
 
 Each run writes dev_worker_disk_guard.prom to the node_exporter textfile directory:
   dev_worker_disk_guard_last_run_timestamp_seconds, _triggered, _steps_run, _reclaimed_bytes,
@@ -52,6 +52,9 @@ CLEANUP = "/usr/local/bin/cleanup"
 LOCK = "/run/lock/dev-worker-disk-guard.lock"
 TEXTFILE_DIR = "/var/lib/prometheus/node-exporter"
 PROM = "dev_worker_disk_guard.prom"
+# run_step's answer when `cleanup` refused because another run (the daily timer) holds its lock: the
+# step did not run, so it is a deferral, not a step that ran and failed.
+LOCKED = -1
 
 # A docker client doing one of these has a pull or build in flight (`run`/`create`/`up` pull a
 # missing image). Basenames, so /usr/bin/docker and the buildx/compose plugins all match.
@@ -97,6 +100,13 @@ def free_bytes(path):
     return st.f_bavail * st.f_frsize
 
 
+def same_filesystem(a, b):
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
+
+
 def docker_busy(proc="/proc"):
     """What a docker client in flight is doing, or "" when none is: the first matching cmdline."""
     try:
@@ -128,6 +138,7 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
     which the tests replace."""
     run = run or run_step
     watched = list(dict.fromkeys(opts.watch))
+    same = opts.same_fs or same_filesystem
     ratios = {p: measure(p) for p in watched}
     low = [p for p in watched if ratios[p] < opts.low / 100]
     m = {"triggered": 0, "steps_run": 0, "reclaimed_bytes": 0, "exhausted": 0, "deferred": 0,
@@ -160,6 +171,10 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
             log(f"disk-guard: would run {step.name}: {' '.join(step.argv)}")
             continue
         rc = run(step)
+        if rc == LOCKED:
+            log(f"disk-guard: {step.name} deferred, another cleanup run holds its lock")
+            m["deferred"] = 1
+            continue
         m["steps_run"] += 1
         log(f"disk-guard: {step.name} exit {rc}; " + ", ".join(
             f"{p} {measure(p) * 100:.1f}% free" for p in low))
@@ -167,7 +182,9 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
             break
     after = {p: measure(p) for p in watched}
     m["free_ratio"] = after
-    m["reclaimed_bytes"] = max(0, sum(avail(p) - before[p] for p in watched))
+    # One sample per filesystem: two watched paths on one fs would otherwise count its gain twice.
+    distinct = [p for i, p in enumerate(watched) if not any(same(p, q) for q in watched[:i])]
+    m["reclaimed_bytes"] = max(0, sum(avail(p) - before[p] for p in distinct))
     if not opts.dry_run and not m["deferred"] and any(after[p] < opts.low / 100 for p in low):
         m["exhausted"] = 1
         log("disk-guard: EXHAUSTED — every step ran and a disk is still under "
@@ -182,6 +199,8 @@ def run_step(step):
     except OSError as e:
         print(f"disk-guard: {step.name}: {e}", file=sys.stderr)
         return 127
+    if r.returncode == 1 and "another cleanup run holds" in r.stderr:
+        return LOCKED
     out = (r.stdout + r.stderr).strip().splitlines()
     for line in out[-15:]:      # the summary lines; cleanup's whole table goes to the journal too long
         print(f"  {step.name}: {line}")
@@ -269,6 +288,7 @@ def parse_args(argv):
     p.add_argument("--textfile-dir", default=TEXTFILE_DIR)
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args(argv)
+    a.same_fs = None            # tests inject a filesystem-identity function here
     a.watch = a.watch or ["/", "/workspace"]
     if not 0 < a.critical < a.low < a.target < 100:
         p.error("need 0 < --critical < --low < --target < 100")

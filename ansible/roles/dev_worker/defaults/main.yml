@@ -356,7 +356,8 @@ dev_worker_worktree_prune_merged_days: 3
 # free, reclaim regenerable things (build cache, anonymous volumes, stopped non-compose containers
 # and unused images, merged worktrees, idle deps) until `target` percent. Docker steps wait while a
 # docker client is pulling/building unless the disk is under `critical`. The image/deps thresholds
-# are tighter than the daily timers' because they only apply under pressure.
+# are tighter than the daily timers' because they only apply under pressure (merged worktrees go
+# after 1 idle day there; the stale-worktree threshold is dev_worker_worktree_prune_days for both).
 dev_worker_disk_guard_enabled: true
 dev_worker_disk_guard_interval: 5min
 dev_worker_disk_guard_low: 15
