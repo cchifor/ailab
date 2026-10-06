@@ -373,28 +373,128 @@ worker's credentials does not count.
 
 ## Phase 4: activation checks
 
-Run after the flip (#2092) lands. Each check targets each gatekeeper pod IP separately (2 replicas),
-not just the Service.
+Run these after the flip (#2092) lands. The owner runs them from a machine that is not a dev worker, with
+the `admin@ai` context. Every gatekeeper check runs against each replica on its own: the script
+execs into container `gatekeeper` of each pod and drives `http://127.0.0.1:5000` with the pod's
+own python. The gatekeeper NetworkPolicy admits only Traefik and the `allowedClients`, so a
+request to a pod IP from anywhere else would test the NetworkPolicy, not gatekeeper.
 
-**Pre-flip / roll acceptance, per replica:** the effective `extras_sha` equals the rendered hash
-(`extras_sha` is the SHA-256 of the exact ConfigMap data bytes:
-`kubectl -n strive-ailab get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum`;
-it is NOT the pod annotation `checksum/registry-extras`, which hashes the whole rendered template);
-`gatekeeper_service_registry_extras_rejected == 0` and every
-`gatekeeper_service_registry_extras_refused_total{reason}` series is 0; the
-`base_sha` values agree; a preshared mint succeeds (Service plus both pods' `service_token_minted`
-logs); the e2e lane passes; `report-ailab-pin-drift` shows 0 torn.
+**Pre-flip / roll acceptance, per replica:**
 
-**Post-flip probes, per replica IP (mandatory):**
+- The effective `extras_sha` equals the rendered hash. `extras_sha` is the SHA-256 of the exact
+  ConfigMap data bytes:
+  `kubectl -n strive-ailab get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum`.
+  It is NOT the pod annotation `checksum/registry-extras`, which hashes the whole rendered template.
+- `gatekeeper_service_registry_extras_rejected == 0`, and every
+  `gatekeeper_service_registry_extras_refused_total{reason}` series is 0.
+- The `base_sha` values agree.
+- A preshared mint succeeds (Service plus both pods' `service_token_minted` logs).
+- The e2e lane passes.
+- `report-ailab-pin-drift` shows 0 torn.
 
-1. A k8s mint with a complete request; assert `sub` and `azp` in the minted JWT.
-2. Refusals: `svc-deepagent` with the harness Bearer gives 401 (no fallback); a second k8s entry
-   claimed with the harness token gives 401 (precheck, generic message); a wrong-audience token gives
-   401; no token gives 401; a `client_credentials` request from the harness token for a non-`svc-mcp`
-   audience (e.g. `svc-workflow`) gives 403 `unauthorized_client`.
-3. #2092's own checks: Ready, migrate completed, 401 rather than 302, the `@api` journeys, 0 torn.
-4. **On any failure, darken the harness** (scale to 0 or `enabled: false`; deleting the pod does not
-   revoke, because `Recreate` brings up a fresh valid identity).
+Before the flip, check the first three by hand. The probes script below cannot run yet: it mints
+the harness's token, and a dark harness has no ServiceAccount.
+
+```sh
+K="kubectl --context admin@ai -n strive-ailab"
+$K get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum
+for p in $($K get pod -l app.kubernetes.io/name=gatekeeper -o name); do
+  echo "$p"
+  $K exec "$p" -c gatekeeper -- python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5000/metrics',timeout=5).read().decode())" \
+    | grep -E '^gatekeeper_service_registry_(info|extras_rejected|extras_refused_total)'
+done
+```
+
+After the flip, and on every later roll, the probes script checks the same three items per replica
+from the pod's own `/metrics`: its `registry` check and its "Registry agreement" section. The last
+three items stay manual.
+
+### The probes: `scripts/s2s/phase4-probes.sh` (mandatory after the flip)
+
+```sh
+scripts/s2s/phase4-probes.sh --dry-run   # the plan; no cluster or network call
+scripts/s2s/phase4-probes.sh             # exit 0 required; anything else: darken (below)
+```
+
+**Tokens.** The script makes three TokenRequests (`kubectl create token`, 10 minutes, no stored
+object):
+
+- SA `harness` for audience `strive-gatekeeper`;
+- SA `harness` for `not-strive-gatekeeper`;
+- SA `default` for `strive-gatekeeper`.
+
+They stay in shell variables and reach the pod on stdin only. The script never prints a token, and
+it decodes a minted JWT only for the claims it asserts. Gatekeeper logs each probe mint as
+`service_token_minted grant=client_credentials client_id=svc-harness target=svc-mcp tenant=phase4-probe`.
+
+**Per replica.** The program is `scripts/s2s/phase4_probe.py`; its expectations cite gatekeeper at
+platform `ac123f047` line by line. Every request has the harness's own `client_credentials` shape
+(`s2s.ts:297-301,346-348`): the Bearer, and no `client_secret`.
+
+| Check | Request | Expected |
+|---|---|---|
+| `registry` | `GET /metrics` | The loaded `extras_sha` equals the mounted file; `extras_rejected` is 0; every `extras_refused_total` is 0. |
+| `d3-policy` | the mounted extras | `client_credentials` is open for `svc-mcp` only; `k8s_subject` is `system:serviceaccount:strive-ailab:harness`. |
+| `k8s-mint[svc-mcp]` | harness token as `svc-harness`, audience `svc-mcp`, tenant `phase4-probe` | 200, with: `sub` = `azp` = `svc-harness`; `platform_target_service` = `svc-mcp`; the tenant claim; no `act`; `exp - iat` ≤ 300; the scopes the registry grants. The replica must also count a positive-cache miss and an `authenticated` TokenReview, which proves a fresh review on THAT replica. |
+| `d3-refused[<aud>]` | the same request, for each token_exchange-only audience | 403 `unauthorized_client`, `client 'svc-harness' not allowed grant 'client_credentials' for audience '<aud>'`. |
+| `refuse-preshared[svc-deepagent]` | harness Bearer, no secret | 401 (no fallback). |
+| `refuse-unregistered[svc-phase4-unregistered]` | harness Bearer, an unregistered client_id | 401. |
+| `refuse-second-k8s[<id>]` | harness Bearer, another k8s entry (only when the extras have one) | 401 (the `sub` precheck). |
+| `refuse-other-sa` | the `default` SA's token as `svc-harness` | 401 (the `sub` precheck). |
+| `refuse-wrong-audience` | the harness SA's token for the wrong audience | 401 (the `aud` precheck). |
+| `refuse-no-token` | no Authorization header | 401. |
+| `refusals-identical` | | Every refusal has the same body: `{"error":"invalid_client","error_description":"invalid client credentials"}`. |
+
+**Across replicas.** Each loaded `extras_sha` equals the sha256 of ConfigMap
+`gatekeeper-registry-extras` `data.registry.yaml`, and `base_sha` is the same on every replica.
+
+**#2092's checks that the script runs:**
+
+- HelmRelease `strive` is Ready.
+- Exactly one harness pod, Running and Ready, as SA `harness`.
+- Its init container `migrate` is Completed (exit 0).
+- `HARNESS_CLIENT_TOKEN_FILE` is set, and no `HARNESS_CLIENT_SECRET` is.
+- SA and IngressRoute `harness` are present.
+- An unauthenticated `GET https://strive.place/api/harness/admin/v1/chat` answers 401, not a login
+  302.
+
+**The second k8s entry.** The plan's refusal "a second k8s entry claimed with the harness token"
+needs a second `auth_method: k8s` entry, and today `svc-harness` is the only one. Two checks stand
+in for it:
+
+- `refuse-unregistered`: the harness token cannot claim an identity outside the registry.
+- `refuse-other-sa`: another ServiceAccount's valid `strive-gatekeeper` token cannot claim
+  `svc-harness`. This is the same `sub` precheck (`tokenreview_verifier.py:177-178`), from the
+  other side.
+
+When the extras gain a second k8s entry, `refuse-second-k8s` runs as well, automatically.
+
+**Still manual (#2092).** The script prints a reminder for both:
+
+- The `@api` assistant journeys (`tests/e2e/journeys/assistant/api-*.spec.ts`) pass live against
+  `https://strive.place` with the persona, one worker.
+- `report-ailab-pin-drift` shows 0 torn. From a platform checkout at main:
+  `uv run --quiet python3 scripts/ci/report-ailab-pin-drift.py --count-app-templates --fail-on-torn --fail-on-incoherent`.
+
+**On any failure, darken the harness.** The script prints `DARKEN THE HARNESS` and these commands:
+
+```sh
+kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=0
+# durable: a platform PR with `harness.enabled: false` in deploy/helm/values/providers/ailab.yaml
+# (revert #2092), merged; then:
+kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
+```
+
+- **Suspend first.** The HelmRelease uses `reconcileStrategy: Revision`, so every platform commit
+  upgrades the release, and Helm's three-way merge puts `replicas: 1` back. Suspending also freezes
+  every other strive-ailab deploy until the release is resumed.
+- **Deleting the harness pod does not revoke.** The Deployment is `Recreate` and brings up a fresh,
+  valid identity.
+- **Scaling to 0 does.** The projected token is bound to the pod; drill 4 measures how fast.
+
+**Every later roll of an active registry** repeats the pre-flip acceptance and
+`scripts/s2s/phase4-probes.sh --gatekeeper-only`.
 
 **Reading TokenReview results** (probe output):
 
@@ -404,21 +504,158 @@ logs); the e2e lane passes; `report-ailab-pin-drift` shows 0 torn.
 - The positive cache holds for at most 60 s, and `exp` is rechecked after the review.
 - Concurrent same-token misses share one review (single-flight).
 
-Every later roll of an active registry repeats the pre-flip and post-flip checks.
-
 ### Drills (plan, "Verification and drills")
 
-- **Cold start:** extras absent, gatekeeper boots on the base, svc-harness gets 401.
-- **Deletion and restore during a roll:** a pod that already loaded extras keeps them; restoring them
-  needs a roll.
-- **Rollback (not image-only):** darken the harness, revert the image AND the composite and extras
-  config together, then verify a base preshared mint. Keep the `strive-pg-harness-dsn` Secret until no
-  consumer uses it.
-- **Token rotation:** for both the harness token and gatekeeper's own reviewer token, observe a change
-  in token fingerprint (a hash, never the token) and drive an uncached mint past both caches.
-- **Revocation:** owner-run, with a surviving probe holding the old pod's bearer. An old bearer is
-  rejected after `deletionTimestamp` plus the API leeway plus at most 60 s of cache, never later than
-  its `exp`; issued JWTs stop within 300 s of the last mint plus consumer skew; removing the entry
-  gives 401 on each replica after the roll. Test both replica IPs through rejection.
+The owner runs these, with `K="kubectl --context admin@ai -n strive-ailab"`.
+
+- Run drills 1, 3 and 4 after the probes pass, in any order. Drill 2 deactivates the harness.
+- Drills 1, 2 and 4 take the harness out of service (steps 1 and 2 of the darken commands). Drill 1
+  does it first: otherwise the harness would get 401s from the replica that refuses it.
+- **Restore the harness afterwards:** resume the HelmRelease;
+  `$K scale deployment/harness --replicas=1`; `$K rollout status deployment/harness`; then the full
+  `scripts/s2s/phase4-probes.sh`.
+
+**1. Cold start, and deletion and restore during a roll.** Expected:
+
+- A gatekeeper that boots without extras serves only the base, and `svc-harness` gets 401.
+- A pod that already loaded the extras keeps them.
+- Restoring them needs a roll.
+
+```sh
+K="kubectl --context admin@ai -n strive-ailab"
+$K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'   # also keeps Helm off the ConfigMap mid-drill
+$K scale deployment/harness --replicas=0
+scripts/s2s/phase4-probes.sh --gatekeeper-only                            # baseline: PASS on both replicas
+A=$($K get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[0].metadata.name}')
+B=$($K get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[1].metadata.name}')
+# Delete the extras (non-secret: grants only), keeping a copy to restore.
+$K get configmap gatekeeper-registry-extras -o yaml > kubernetes/infra/_out/gatekeeper-registry-extras-drill.yaml
+$K delete configmap gatekeeper-registry-extras
+scripts/s2s/phase4-probes.sh --gatekeeper-only --no-registry-check        # PASS: both pods kept the extras they loaded
+# Cold start: restart A without the ConfigMap (the mount is optional: true).
+$K delete pod "$A"
+$K rollout status deployment/gatekeeper --timeout=300s
+C=$($K get pod -l app.kubernetes.io/name=gatekeeper -o name | sed 's|^pod/||' | grep -vx -e "$A" -e "$B")
+scripts/s2s/phase4-probes.sh --replica "$C" --expect-refused              # PASS: extras_sha empty, svc-harness 401
+scripts/s2s/phase4-probes.sh --replica "$B" --gatekeeper-only --no-registry-check   # PASS: B still serves svc-harness
+# Restore the ConfigMap. There is no reload: C keeps refusing until it is rolled.
+sed -e '/^  resourceVersion:/d' -e '/^  uid:/d' -e '/^  creationTimestamp:/d' \
+  kubernetes/infra/_out/gatekeeper-registry-extras-drill.yaml | $K create -f -
+scripts/s2s/phase4-probes.sh --replica "$C" --expect-refused              # PASS: still refused
+$K rollout restart deployment/gatekeeper
+$K rollout status deployment/gatekeeper --timeout=300s
+scripts/s2s/phase4-probes.sh --gatekeeper-only                            # PASS on both: extras_sha = the ConfigMap again
+```
+
+Then restore the harness (above).
+
+**2. Rollback (not image-only).** This is a real deactivation: it undoes Phases 3 and 4, so run it
+only when the owner chooses to. One platform PR, merged by the owner (it touches the protected Flux
+file):
+
+- `deploy/helm/values/providers/ailab.yaml`:
+  - `harness.enabled: false`;
+  - the gatekeeper `image.digest` back to the pre-Phase-3 pin that the Phase 3 comment records:
+    `sha256:45abbd52fd3ea9985372056490078cec54b0a2964ee88ba8718fe402086aee79` (`sha-19363455156f`).
+- `deploy/gitops/flux/clusters/ailab/app/helmrelease.yaml`: drop the
+  `deploy/helm/values/providers/ailab-s2s-registry.yaml` `valuesFiles` entry. The composite backend
+  and the extras go with it. The old image has no composite backend, so the image and the config
+  revert together.
+
+```sh
+$K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
+$K scale deployment/harness --replicas=0
+# merge the rollback PR, then let Flux apply it:
+$K patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
+$K rollout status deployment/gatekeeper --timeout=600s
+scripts/s2s/phase4-probes.sh --expect-refused
+kubectl --context admin@ai get clusterrole,clusterrolebinding strive-ailab-gatekeeper-tokenreview
+for p in $($K get pod -l app.kubernetes.io/name=gatekeeper -o name); do
+  echo "$p $($K logs "$p" -c gatekeeper --since=30m | grep -c service_token_minted)"
+done
+$K get externalsecret strive-pg-harness-dsn
+```
+
+Expected:
+
+- `--expect-refused` PASSes. SA `harness` is gone, so its cases are skipped; the other-SA and
+  no-token requests get 401 on the preshared backend.
+- The ClusterRole and ClusterRoleBinding are NotFound: the TokenReview RBAC went with composite.
+- The `service_token_minted` count is above 0 on each pod: base preshared mints work. Run the e2e
+  lane if traffic is quiet.
+- The DSN ExternalSecret stays SecretSynced. Do not delete it here; it stays until no consumer uses
+  it.
+
+Re-activation is Phases 3 and 4 again: revert the rollback PR, run the pre-flip acceptance, then the
+flip and the probes.
+
+**3. Token rotation.** Both tokens rotate in place. The kubelet replaces a projected token after
+about 80% of its lifetime, so about 48 minutes for a one-hour token. For each token, observe a
+fingerprint change (12 hex of its sha256, never the token), then drive an uncached mint past both
+caches. A new token digest misses the positive cache (keyed by `sha256(token)`) and the negative
+cache (keyed by `(sha256(token), client_id)`) by construction.
+
+The harness token:
+
+```sh
+hfp() { $K exec deploy/harness -c harness -- node -e 'const c=require("crypto"),f=require("fs");const t=f.readFileSync("/var/run/secrets/tokens/gatekeeper/token","utf8").trim();const p=JSON.parse(Buffer.from(t.split(".")[1],"base64url"));console.log(c.createHash("sha256").update(t).digest("hex").slice(0,12),"iat="+p.iat,"exp="+p.exp)'; }
+gkm() { for p in $($K get pod -l app.kubernetes.io/name=gatekeeper -o name); do echo "$p"; $K exec "$p" -c gatekeeper -- python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5000/metrics',timeout=5).read().decode())" | grep -E '^gatekeeper_tokenreview_(total|cache_total)\{'; done; }
+hfp; gkm   # note the fingerprint and the counters
+# repeat hfp every 5 minutes until the fingerprint changes (about 48 min after its iat), then:
+gkm        # counters before
+# make the harness call gatekeeper: run one @api journey (api-greet) against https://strive.place
+gkm        # after
+```
+
+The harness token passes when:
+
+- the fingerprint changed;
+- the journey passed;
+- after the change, a replica counted a positive-cache miss and an `authenticated` review.
+
+Gatekeeper's own reviewer token. The probes print it per replica as `OWNTOKEN fp=… iat=… exp=…`:
+
+```sh
+scripts/s2s/phase4-probes.sh --gatekeeper-only | grep -E '^== Replica|OWNTOKEN|k8s-mint'   # note each fp
+# re-run until a replica's fp changes (about 48 min after its iat), then once more in full:
+scripts/s2s/phase4-probes.sh --gatekeeper-only
+```
+
+It passes when that replica's `OWNTOKEN fp` changed and its `k8s-mint` PASSes:
+
+- `k8s-mint` counts a fresh TokenReview on that replica. Each run mints a new token, so it misses
+  both caches, and gatekeeper re-reads its own token for every uncached review (GC1).
+- **Caveat:** the API server extends the lifetime of automount tokens (on by default), so the
+  previous own token stays valid after the rotation. This drill shows that rotation is tolerated;
+  it cannot show that the old token was refused.
+
+**4. Revocation, with a surviving probe.**
+
+```sh
+# terminal 1: holds a token bound to the CURRENT harness pod (a TokenRequest with
+# --bound-object-kind Pod, which dies with the pod as its projected token does), checks that
+# both replicas accept it, then watches for the pod to go
+scripts/s2s/phase4-probes.sh --revocation-drill
+# terminal 2, when terminal 1 prints "Revoke now":
+$K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
+$K scale deployment/harness --replicas=0
+```
+
+Terminal 1 then polls each replica every 5 s with the held bearer. It passes when every replica:
+
+- refuses the bearer within 90 s of the pod's removal (`PHASE4_REVOCATION_BOUND`: the 60 s
+  positive cache plus polling);
+- never accepts it again;
+- does both before the token's exp.
+
+The refusal is a **503** `temporarily_unavailable`, not a 401: TokenReview reports the missing pod
+in `status.error`, and gatekeeper never reads that as a verdict (GC4). Then restore the harness.
+
+The other two revocation bounds need no drill of their own:
+
+- **Minted JWTs.** Every one carries `exp - iat` ≤ 300, as `k8s-mint` asserts. With weld-auth's
+  30 s skew, a JWT minted just before the revocation is dead within 330 s.
+- **"Removing the entry gives 401 on each replica after the roll."** This is drill 1's
+  `--expect-refused` on the rolled replica.
 
 Never run these from a worker that holds owner credentials (D1), and never print a token.
