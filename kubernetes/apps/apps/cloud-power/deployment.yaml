@@ -35,6 +35,9 @@ spec:
       app.kubernetes.io/name: cloud-power
   template:
     metadata:
+      annotations:
+        # Bump on every Gitea token rotation: there is no reloader, so this is what rolls the pod.
+        ailab.chifor.me/gitea-token-rotated: "2026-10-06"
       labels:
         app.kubernetes.io/name: cloud-power
     spec:
