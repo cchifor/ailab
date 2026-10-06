@@ -138,7 +138,7 @@ spec:
               If it deferred (docker busy) or exhausted its ladder, look by hand: `cleanup --dry-run`
               (docker: stale stacks, images, volumes, build cache), `docker system df`, then
               `du -xh --max-depth=2` on the mount — what remains is live work.
-        # disk-guard (role dev_worker, files/disk-guard) ran every reclaim step and a filesystem is still
+        # disk-guard (role dev_worker, files/disk-guard) ran every reclaim step CLEANLY and a filesystem is still
         # under its trigger: what is left is live work (worktrees in use, compose stacks, named volumes,
         # recent images) and the disk will reach 100% unless a human frees or grows it. Added after
         # dev-worker-3's /workspace refilled to 100% on 2026-10-06, five days after the 10-01 cleanup.
@@ -154,14 +154,30 @@ spec:
               trigger. What is left is live work. `journalctl -u dev-worker-disk-guard -n 80`, then
               `du -xh --max-depth=2 /workspace | sort -rh | head`, `docker system df -v`; ask the agent
               owner what can go, or grow the scsi1 disk (kubernetes/infra/dev-workers).
+        # Reclaim is being attempted and is not working: a step exits non-zero (docker daemon down,
+        # cleanup crashing, a step timing out) on consecutive runs. Separate from Exhausted on purpose —
+        # a failed step says nothing about whether what is left is live work.
+        - alert: DevWorkerDiskGuardFailing
+          expr: dev_worker_disk_guard_failed_steps{job="dev-worker-node"} > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: disk-guard reclaim steps are failing"
+            description: >-
+              disk-guard on {{ $labels.instance }} triggered (a disk is under its threshold) and
+              {{ $value }} reclaim step(s) exited non-zero on its runs for 15m+, so the disk is not being
+              relieved. `journalctl -u dev-worker-disk-guard -n 120` shows each step's exit code and
+              output; `docker info` and `sudo cleanup --dry-run` reproduce the usual causes.
         # The guard's heartbeat. A stale or missing timestamp means the timer stopped, the tool crashes,
-        # or / is too full for its textfile write — in each case nothing is guarding the disk.
+        # or / is too full for its textfile write — in each case nothing is guarding the disk. The
+        # threshold carries the delay (a healthy run is every ~5 min; one ladder can take tens of
+        # minutes), so `for` is short: it fires ~35 min after the last heartbeat, as the summary says.
         - alert: DevWorkerDiskGuardStale
           expr: |
             (time() - dev_worker_disk_guard_last_run_timestamp_seconds{job="dev-worker-node"}) > 1800
               or (up{job="dev-worker-node"} == 1
                   unless on (instance) dev_worker_disk_guard_last_run_timestamp_seconds{job="dev-worker-node"})
-          for: 30m
+          for: 5m
           labels: { severity: warning }
           annotations:
             summary: "Dev worker {{ $labels.instance }}: disk-guard has not reported for 30m+"

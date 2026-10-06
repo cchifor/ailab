@@ -865,11 +865,14 @@ free without a page).
 timer every 5 min, since 2026-10-06). When `/` or `/workspace` is under 15% free it walks a ladder —
 unused build cache → unreferenced anonymous volumes → stopped non-compose containers (>24h) and
 images unused 3+ days → merged idle worktrees → deps of worktrees idle 3+ days — and stops at 25%.
-Docker steps wait while a docker client is building/pulling/starting something (a prune's containerd
-GC kills in-flight pulls, measured on the CI runners) unless the disk is under 5%. Compose stacks,
+Each step runs only while its own filesystem is still short (a full `/` searches `/home` only, never
+costs `/workspace` a worktree). Docker steps wait while a docker client is building/pulling, or has
+been starting a container for <10 min (a prune's containerd GC kills in-flight pulls, measured on the
+CI runners), unless the disk is under 5%. Compose stacks,
 named volumes, source, git state and untracked files are never touched. `journalctl -u
 dev-worker-disk-guard`, `disk-guard --dry-run`; metrics `dev_worker_disk_guard_*` (textfile),
-alerts `DevWorkerDiskGuardExhausted` (ladder done, still low: live work — a human decides) and
+alerts `DevWorkerDiskGuardExhausted` (ladder ran cleanly, still low: live work — a human decides),
+`DevWorkerDiskGuardFailing` (steps exit non-zero: the guard itself needs fixing) and
 `DevWorkerDiskGuardStale`. Thresholds: `dev_worker_disk_guard_*` in the role defaults. Why it
 exists: every reclaim before it ran on a calendar, and dev-worker-3's /workspace refilled from 95%
 to 100% within a day on 2026-10-06 (180 anonymous postgres volumes created on 10-04 alone).

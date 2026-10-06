@@ -3,13 +3,15 @@
 The guard's contract, pinned here:
   * Above --low on every watched fs it runs nothing (and writes a heartbeat).
   * Under --low it runs the ladder in order and stops as soon as every low fs is >= --target.
-  * Docker steps run only when the docker filesystem is the low one: a full / is not fixed by
-    pruning /workspace's build cache.
+  * A step only runs while ITS filesystem is still short (re-measured before every step): docker
+    steps for the docker fs; the worktree/deps steps search only the roots on a short fs — a full /
+    never costs /workspace a worktree.
   * The whole-worktree step exists only with --worktrees-remove (the role's prune mode).
-  * Every step ran and a fs is still under --low → exhausted=1 (the alert's signal).
+  * Every step ran cleanly and a fs is still under --low → exhausted=1 (the alert's signal). A
+    deferred or failed step is never "exhausted": reclaim did not get its chance.
   * --dry-run runs nothing.
   * While a docker client builds/pulls, docker steps wait (a prune's containerd GC kills in-flight
-    pulls) — unless the docker fs is under --critical. Waiting is not "exhausted".
+    pulls) — unless the docker fs is under --critical. `run`/`create`/`up` count only while young.
 """
 import importlib.machinery
 import importlib.util
@@ -23,15 +25,24 @@ _spec = importlib.util.spec_from_loader("dw_disk_guard", _loader)
 dg = importlib.util.module_from_spec(_spec)
 _loader.exec_module(dg)
 
+# /home lives on /, /workspace is its own disk — the workers' layout.
+FS = {"/": "/", "/home": "/", "/workspace": "/workspace"}
+
+
+def layout(a, b):
+    return FS.get(a, a) == FS.get(b, b)
+
 
 class Disk:
-    """Free fractions per path; each executed step frees `gain[step]` on `fs[step]`."""
+    """Free fractions per path; each executed step frees `gain[step]` on the given paths."""
 
-    def __init__(self, free, gain=None, size=100 * 10**9):
+    def __init__(self, free, gain=None, size=100 * 10**9, rc=None):
         self.free = dict(free)
         self.gain = gain or {}
         self.size = size
+        self.rc = rc or {}
         self.ran = []
+        self.argv = {}
 
     def measure(self, p):
         return self.free[p]
@@ -41,12 +52,13 @@ class Disk:
 
     def run(self, step):
         self.ran.append(step.name)
+        self.argv[step.name] = step.argv
         for p, g in self.gain.get(step.name, {}).items():
             self.free[p] = min(1.0, self.free[p] + g)
-        return 0
+        return self.rc.get(step.name, 0)
 
 
-def opts(*extra, same_fs=lambda a, b: a == b):
+def opts(*extra, same_fs=layout):
     o = dg.parse_args(["--watch", "/", "--watch", "/workspace", "--docker-fs", "/workspace",
                        *extra])
     o.same_fs = same_fs
@@ -65,17 +77,8 @@ def building():
     return "docker buildx build ."
 
 
-class _Shared(dict):
-    """Every key reads and writes the same value: two paths on one filesystem."""
-
-    def __getitem__(self, _k):
-        return dict.__getitem__(self, "/")
-
-    def __setitem__(self, _k, v):
-        dict.__setitem__(self, "/", v)
-
-    def items(self):
-        return [(k, self["/"]) for k in self.keys()]
+def roots_of(argv):
+    return argv[argv.index("--deps-roots") + 1]
 
 
 class GuardTest(unittest.TestCase):
@@ -97,11 +100,27 @@ class GuardTest(unittest.TestCase):
         d = Disk({"/": 0.40, "/workspace": 0.01})
         dg.guard(opts("--worktrees-remove"), d.measure, d.avail, d.run, quiet, idle)
         self.assertEqual(d.ran, ["build-cache", "anon-volumes", "docker", "worktrees", "deps"])
+        self.assertEqual(roots_of(d.argv["deps"]), "/workspace")
 
-    def test_root_fs_low_skips_docker_steps(self):
+    def test_root_fs_low_skips_docker_and_spares_workspace(self):
         d = Disk({"/": 0.05, "/workspace": 0.60})
         dg.guard(opts("--worktrees-remove"), d.measure, d.avail, d.run, quiet, idle)
         self.assertEqual(d.ran, ["worktrees", "deps"])
+        self.assertEqual(roots_of(d.argv["worktrees"]), "/home")
+        self.assertEqual(roots_of(d.argv["deps"]), "/home")
+
+    def test_both_low_walk_steps_search_both(self):
+        d = Disk({"/": 0.05, "/workspace": 0.05})
+        dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle)
+        self.assertEqual(roots_of(d.argv["deps"]), "/workspace,/home")
+
+    def test_docker_steps_stop_once_docker_fs_recovers(self):
+        # Both low; build cache fixes /workspace. The rest of the docker ladder must not run just
+        # because / is still short, and the walk steps then search / only.
+        d = Disk({"/": 0.05, "/workspace": 0.05}, gain={"build-cache": {"/workspace": 0.30}})
+        dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle)
+        self.assertEqual(d.ran, ["build-cache", "deps"])
+        self.assertEqual(roots_of(d.argv["deps"]), "/home")
 
     def test_worktree_step_only_in_remove_mode(self):
         d = Disk({"/": 0.40, "/workspace": 0.01})
@@ -111,7 +130,12 @@ class GuardTest(unittest.TestCase):
     def test_exhausted_when_still_low(self):
         d = Disk({"/": 0.40, "/workspace": 0.02}, gain={"deps": {"/workspace": 0.05}})
         m = dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle)
-        self.assertEqual(m["exhausted"], 1)
+        self.assertEqual((m["exhausted"], m["failed_steps"]), (1, 0))
+
+    def test_failed_step_is_not_exhausted(self):
+        d = Disk({"/": 0.40, "/workspace": 0.02}, rc={"docker": 1})
+        m = dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle)
+        self.assertEqual((m["exhausted"], m["failed_steps"], m["steps_run"]), (0, 1, 4))
 
     def test_between_low_and_target_after_ladder_is_not_exhausted(self):
         d = Disk({"/": 0.40, "/workspace": 0.02}, gain={"deps": {"/workspace": 0.16}})
@@ -152,29 +176,9 @@ class GuardTest(unittest.TestCase):
         dg.guard(opts(), d.measure, d.avail, d.run, quiet, lambda: next(answers))
         self.assertEqual(d.ran, ["build-cache", "docker", "deps"])
 
-    def test_busy_argv(self):
-        for argv in (["/usr/bin/docker", "build", "."], ["docker", "compose", "up", "-d"],
-                     ["/usr/libexec/docker/cli-plugins/docker-buildx", "buildx", "build", "."],
-                     ["docker", "run", "--rm", "postgres"], ["docker", "pull", "x"]):
-            self.assertTrue(dg.busy_argv(argv), argv)
-        for argv in (["docker", "ps"], ["docker", "logs", "-f", "x"], ["dockerd"],
-                     ["containerd-shim-runc-v2", "-namespace", "moby"], ["python3", "run"],
-                     ["docker", "compose", "logs", "-f"]):
-            self.assertFalse(dg.busy_argv(argv), argv)
-
-    def test_docker_busy_reads_proc(self):
-        with tempfile.TemporaryDirectory() as proc:
-            for pid, argv in (("10", ["bash"]), ("11", ["/usr/bin/docker", "pull", "pg"]),
-                              ("self", ["x"])):
-                (pathlib.Path(proc) / pid).mkdir()
-                (pathlib.Path(proc) / pid / "cmdline").write_bytes(
-                    b"".join(a.encode() + bytes([0]) for a in argv))
-            self.assertEqual(dg.docker_busy(proc), "/usr/bin/docker pull pg")
-            (pathlib.Path(proc) / "11" / "cmdline").write_bytes(b"docker" + bytes([0]) + b"ps")
-            self.assertEqual(dg.docker_busy(proc), "")
-
     def test_cleanup_lock_held_is_deferred_not_exhausted(self):
         d = Disk({"/": 0.40, "/workspace": 0.02})
+
         def locked(step):
             d.ran.append(step.name)
             return dg.LOCKED if step.argv[0].endswith("cleanup") else 0
@@ -183,10 +187,53 @@ class GuardTest(unittest.TestCase):
         self.assertEqual((m["deferred"], m["exhausted"]), (1, 0))
 
     def test_reclaimed_bytes_counted_once_per_filesystem(self):
-        d = Disk({"/": 0.05, "/workspace": 0.05}, gain={"build-cache": {"/": 0.30}})
-        d.free = _Shared(d.free)                # both paths are one filesystem
-        m = dg.guard(opts(same_fs=lambda a, b: True), d.measure, d.avail, d.run, quiet, idle)
+        shared = {"v": 0.05}
+
+        def run(step):
+            shared["v"] = 0.35
+            return 0
+        m = dg.guard(opts(same_fs=lambda a, b: True), lambda p: shared["v"],
+                     lambda p: int(shared["v"] * 100 * 10**9), run, quiet, idle)
         self.assertEqual(m["reclaimed_bytes"], int(0.35 * 100 * 10**9) - int(0.05 * 100 * 10**9))
+
+    def test_busy_kind(self):
+        for argv, kind in ((["/usr/bin/docker", "build", "."], "build"),
+                           (["/usr/libexec/docker/cli-plugins/docker-buildx", "buildx", "build", "."],
+                            "build"),
+                           (["docker", "pull", "x"], "build"),
+                           (["docker", "compose", "up", "--build"], "start"),
+                           (["docker", "compose", "build"], "build"),
+                           (["docker", "compose", "up", "-d"], "start"),
+                           (["docker", "run", "--rm", "postgres"], "start"),
+                           (["docker", "ps"], None), (["docker", "logs", "-f", "x"], None),
+                           (["dockerd"], None),
+                           (["containerd-shim-runc-v2", "-namespace", "moby"], None),
+                           (["python3", "run"], None), (["docker", "compose", "logs", "-f"], None)):
+            self.assertEqual(dg.busy_kind(argv), kind, argv)
+
+    def test_docker_busy_reads_proc_and_ages_out_attached_clients(self):
+        ticks = dg.os.sysconf("SC_CLK_TCK") if hasattr(dg.os, "sysconf") else 100
+
+        def proc_with(procs, uptime=10_000):
+            d = tempfile.TemporaryDirectory()
+            root = pathlib.Path(d.name)
+            (root / "uptime").write_text(f"{uptime}.00 1.00\n")
+            for pid, argv, started in procs:
+                (root / pid).mkdir()
+                (root / pid / "cmdline").write_bytes(b"".join(a.encode() + bytes([0]) for a in argv))
+                rest = ["S"] + ["0"] * 18 + [str(int(started * ticks))] + ["0"] * 10
+                (root / pid / "stat").write_text(f"{pid} (my (odd) comm) " + " ".join(rest))
+            (root / "self").mkdir()
+            return d
+
+        with proc_with([("10", ["bash"], 0), ("11", ["/usr/bin/docker", "pull", "pg"], 1)]) as p:
+            self.assertEqual(dg.docker_busy(p), "/usr/bin/docker pull pg")   # builds never age out
+        with proc_with([("12", ["docker", "run", "--rm", "pg"], 9_900)]) as p:
+            self.assertEqual(dg.docker_busy(p), "docker run --rm pg")       # 100 s old: starting
+        with proc_with([("13", ["docker", "compose", "up"], 1_000)]) as p:
+            self.assertEqual(dg.docker_busy(p), "")                         # attached for 2.5 h
+        with proc_with([("14", ["docker", "ps"], 9_999)]) as p:
+            self.assertEqual(dg.docker_busy(p), "")
 
     def test_argument_validation(self):
         with self.assertRaises(SystemExit):
@@ -197,10 +244,11 @@ class GuardTest(unittest.TestCase):
             dg.parse_args(["--watch", "/", "--docker-fs", "/workspace"])
 
     def test_prom_render_and_atomic_write(self):
-        m = {"triggered": 1, "steps_run": 2, "reclaimed_bytes": 5, "exhausted": 0, "deferred": 0,
-             "free_ratio": {"/": 0.5, "/workspace": 0.26}}
+        m = {"triggered": 1, "steps_run": 2, "failed_steps": 0, "reclaimed_bytes": 5,
+             "exhausted": 0, "deferred": 0, "free_ratio": {"/": 0.5, "/workspace": 0.26}}
         text = dg.render_prom(m, 1700000000)
         self.assertIn("dev_worker_disk_guard_last_run_timestamp_seconds 1700000000\n", text)
+        self.assertIn("dev_worker_disk_guard_failed_steps 0\n", text)
         self.assertIn('dev_worker_disk_guard_free_ratio{mountpoint="/workspace"} 0.2600\n', text)
         with tempfile.TemporaryDirectory() as d:
             dg.write_prom(text, d)
