@@ -28,8 +28,8 @@ search only the --roots on a still-short fs (a full / does not cost /workspace a
 Busy gate for steps 1-3: ANY docker prune or image removal triggers a containerd GC pass that reaps
 the lease of an in-flight pull or build (measured on the CI runners, 2026-08-08: a job with a prune
 inside it failed ~3x as often — gitea-runner-cleanup.sh). So while a docker client is building,
-pulling or starting something (starting = a `run`/`create`/`up` younger than 10 min; a container
-attached for hours is not pulling anything), the docker steps wait — unless the docker
+pulling or starting something (starting = a `run`/`create`/`up` younger than 10 min, 60 min with
+`--build`; a container attached for hours is not pulling anything), the docker steps wait — unless the docker
 filesystem is under --critical percent free, where one failed build beats ENOSPC failing everything.
 Steps 4-5 do not touch docker and are not gated.
 Steps 3-5 reuse `cleanup` (same role), which re-scans before removing and takes its own lock; when
@@ -69,6 +69,9 @@ BUILD_VERBS = frozenset({"build", "bake", "pull", "push", "load", "import"})
 # one attached container would hold all docker reclaim off until the disk reached --critical.
 START_VERBS = frozenset({"run", "create", "up"})
 START_WINDOW = 600  # seconds
+# `up --build` / `run --build` build before they start, and a build can outlast 10 min. A longer
+# window, not "busy while it runs": the client stays attached long after the build is done.
+BUILD_START_WINDOW = 3600  # seconds
 # Where the walk steps (worktrees, deps) look; each is only searched while its filesystem is short.
 WALK_ROOTS = ("/workspace", "/home")
 
@@ -118,7 +121,7 @@ def same_filesystem(a, b):
         return False
 
 
-def docker_busy(proc="/proc", start_window=START_WINDOW):
+def docker_busy(proc="/proc", windows=None):
     """What a docker client in flight is doing, or "" when none is: the first matching cmdline."""
     try:
         pids = [d for d in os.listdir(proc) if d.isdigit()]
@@ -132,7 +135,8 @@ def docker_busy(proc="/proc", start_window=START_WINDOW):
                 argv = f.read().decode(errors="replace").split("\0")
             argv = [a for a in argv if a]
             kind = busy_kind(argv) if argv else None
-            if kind == "start" and uptime - started_at(proc, pid) > start_window:
+            window = (windows or WINDOWS).get(kind)
+            if window is not None and uptime - started_at(proc, pid) > window:
                 kind = None
         except (OSError, ValueError, IndexError):
             continue                    # the process exited mid-read
@@ -151,7 +155,8 @@ def started_at(proc, pid):
 
 
 def busy_kind(argv):
-    """"build" (in flight while it runs), "start" (in flight only while starting) or None."""
+    """"build" (in flight while it runs), "build-start" / "start" (in flight only while starting:
+    see WINDOWS) or None."""
     if os.path.basename(argv[0]) not in DOCKER_CLIENTS:
         return None
     # Any non-flag token: a flag VALUE that happens to be "run" over-matches, which only delays the
@@ -160,13 +165,18 @@ def busy_kind(argv):
     if verbs & BUILD_VERBS:
         return "build"
     if verbs & START_VERBS:
-        return "start"
+        return "build-start" if "--build" in argv else "start"
     return None
 
 
-def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=docker_busy):
-    """One check. Returns the metrics dict. Pure apart from `measure`, `avail`, `run` and `busy`,
-    which the tests replace."""
+WINDOWS = {"start": START_WINDOW, "build-start": BUILD_START_WINDOW}   # "build": no window
+
+
+def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=docker_busy,
+          progress=lambda m: None):
+    """One check. Returns the metrics dict. Pure apart from `measure`, `avail`, `run`, `busy` and
+    `progress`, which the tests replace. `progress(m)` is called when a run triggers and after every
+    step, so the heartbeat keeps beating through a ladder that takes longer than the Stale window."""
     run = run or run_step
     watched = list(dict.fromkeys(opts.watch))
     same = opts.same_fs or same_filesystem
@@ -180,6 +190,7 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
     before = {p: avail(p) for p in watched}
     log("disk-guard: under {}% free: {} — reclaiming toward {}%".format(
         opts.low, ", ".join(f"{p} {ratios[p] * 100:.1f}%" for p in low), opts.target))
+    progress(m)
 
     def satisfied():
         return all(measure(p) >= opts.target / 100 for p in low)
@@ -215,6 +226,7 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
         m["steps_run"] += 1
         if rc != 0:
             m["failed_steps"] += 1
+        progress(m)
         log(f"disk-guard: {step.name} exit {rc}; " + ", ".join(
             f"{p} {measure(p) * 100:.1f}% free" for p in low))
         if satisfied():
@@ -355,7 +367,9 @@ def main(argv=None):
         if lock is None:
             print("disk-guard: a previous run is still going")
             return 0
-    m = guard(opts)
+    beat = (lambda m: None) if opts.dry_run else (
+        lambda m: write_prom(render_prom(m, time.time()), opts.textfile_dir))
+    m = guard(opts, progress=beat)
     if not m["triggered"] and opts.dry_run:
         print("disk-guard: ok — " + ", ".join(
             f"{p} {r * 100:.1f}% free" for p, r in m["free_ratio"].items()))

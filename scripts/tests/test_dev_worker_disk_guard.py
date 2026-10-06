@@ -201,7 +201,7 @@ class GuardTest(unittest.TestCase):
                            (["/usr/libexec/docker/cli-plugins/docker-buildx", "buildx", "build", "."],
                             "build"),
                            (["docker", "pull", "x"], "build"),
-                           (["docker", "compose", "up", "--build"], "start"),
+                           (["docker", "compose", "up", "--build"], "build-start"),
                            (["docker", "compose", "build"], "build"),
                            (["docker", "compose", "up", "-d"], "start"),
                            (["docker", "run", "--rm", "postgres"], "start"),
@@ -234,6 +234,17 @@ class GuardTest(unittest.TestCase):
             self.assertEqual(dg.docker_busy(p), "")                         # attached for 2.5 h
         with proc_with([("14", ["docker", "ps"], 9_999)]) as p:
             self.assertEqual(dg.docker_busy(p), "")
+        with proc_with([("15", ["docker", "compose", "up", "--build"], 8_000)]) as p:
+            self.assertEqual(dg.docker_busy(p), "docker compose up --build")   # 33 min: may build
+        with proc_with([("16", ["docker", "compose", "up", "--build"], 5_000)]) as p:
+            self.assertEqual(dg.docker_busy(p), "")                         # 83 min: attached
+
+    def test_heartbeat_on_trigger_and_after_every_step(self):
+        d = Disk({"/": 0.40, "/workspace": 0.02})
+        beats = []
+        dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle,
+                 progress=lambda m: beats.append(m["steps_run"]))
+        self.assertEqual(beats, [0, 1, 2, 3, 4])
 
     def test_argument_validation(self):
         with self.assertRaises(SystemExit):
