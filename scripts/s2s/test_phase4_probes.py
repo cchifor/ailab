@@ -109,7 +109,7 @@ def fake_jwt(claims, sig="fakesig"):
     return "%s.%s.%s" % (b64url({"alg": "RS256", "kid": "test-kid"}), b64url(claims), sig)
 
 
-def sa_token(sa, aud, ttl=600, bound_pod=None):
+def sa_token(sa, aud, ttl=600, bound_pod=None, no_exp=False):
     now = int(time.time())
     claims = {
         "aud": [aud],
@@ -118,6 +118,8 @@ def sa_token(sa, aud, ttl=600, bound_pod=None):
         "exp": now + ttl,
         "jti": str(uuid.uuid4()),
     }
+    if no_exp:
+        del claims["exp"]
     if bound_pod:
         claims["kubernetes.io"] = {"namespace": NS, "pod": {"name": bound_pod}}
     return fake_jwt(claims, sig="fakesig" + uuid.uuid4().hex[:12])
@@ -414,6 +416,7 @@ class Emulator(object):
         self.second_k8s = second_k8s
         self.positive = set()
         self.counters = {"authenticated": 0, "miss": 0}
+        self.after_gone = 0
         self.minted = []
         self.lock = threading.Lock()
         emulator = self
@@ -479,6 +482,10 @@ class Emulator(object):
         if pod:
             gone = os.path.join(self.state_dir, "gone-" + pod)
             if os.path.exists(gone):
+                if "reaccept" in self.faults:
+                    # Refuses the removed pod's bearer twice, then honours it again.
+                    self.after_gone += 1
+                    return self.after_gone > 2
                 delay = 6.0 if "slow_revocation" in self.faults else 0.0
                 if time.time() - os.path.getmtime(gone) >= delay:
                     return False
@@ -737,7 +744,10 @@ def fake_kubectl(argv):
             return not_found("serviceaccounts harness")
         aud = args[args.index("--audience") + 1]
         pod = args[args.index("--bound-object-name") + 1] if "--bound-object-name" in args else None
-        token = sa_token(sa, aud, bound_pod=pod)
+        if pod:  # the revocation drill's held token: its lifetime is the scenario's
+            token = sa_token(sa, aud, ttl=sc.get("held_ttl", 600), bound_pod=pod, no_exp=sc.get("held_no_exp", False))
+        else:
+            token = sa_token(sa, aud)
         with open(os.path.join(state, "tokens.log"), "a", encoding="utf-8") as f:
             f.write(token + "\n")
         return out(token + "\n")
@@ -747,7 +757,18 @@ def fake_kubectl(argv):
         cmd = args[args.index("--") + 1 :]
         if cmd[:2] != ["python", "-c"]:
             return not_found("exec command")
-        local = [sys.executable, "-c"] + cmd[2:] + ["--base-url", replica["url"], "--extras-file", sc["extras_file"], "--own-token-file", sc["own_token_file"]]
+        url = replica["url"]
+        harness_gone = os.path.exists(os.path.join(state, "gone-" + (sc.get("harness") or {}).get("name", "")))
+        if harness_gone and pod in sc.get("unreachable_after_removal", ()):
+            url = "http://127.0.0.1:9"  # nothing listens: the in-pod program gets no HTTP answer
+        if harness_gone and pod in sc.get("flaky_after_removal", ()):
+            counter = os.path.join(state, "flaky-" + pod)
+            count = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
+            with open(counter, "w") as f:
+                f.write(str(count))
+            if count % 2 == 0:
+                url = "http://127.0.0.1:9"  # every other attempt gets no HTTP answer
+        local = [sys.executable, "-c"] + cmd[2:] + ["--base-url", url, "--extras-file", sc["extras_file"], "--own-token-file", sc["own_token_file"]]
         return subprocess.call(local, stdin=sys.stdin)
     with open(os.path.join(state, "calls.log"), "a", encoding="utf-8") as f:
         f.write(json.dumps(["UNEXPECTED"] + argv) + "\n")
@@ -978,23 +999,150 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("harness-refused[svc-mcp] skipped", text)
         self.assertIn("client_secret required", text)
 
+    # The revocation drill observes until the held token's own exp; these scenarios hold a short
+    # token (HELD_TTL) so a run takes seconds, not ten minutes.
+    HELD_TTL = 45
+    DRILL_ENV = {"PHASE4_REMOVAL_MARGIN_SECONDS": "5"}
+
+    def drill(self, **env):
+        extra = dict(self.DRILL_ENV)
+        extra.update(env)
+        started = time.time()
+        rc, text = self.run_script("--revocation-drill", extra_env=extra)
+        return rc, text, time.time() - started
+
+    def single_mints(self, pod):
+        return sum(1 for c in self.calls() if c[0] == "kubectl" and "exec" in c and pod in c and "single" in c)
+
     def test_revocation_drill(self):
-        self.scenario(pod_removal_after=3)
-        rc, text = self.run_script("--revocation-drill")
+        self.scenario(pod_removal_after=3, held_ttl=self.HELD_TTL)
+        rc, text, took = self.drill()
         self.assertEqual(rc, 0, text)
         self.assertIn("accepts the held bearer before the revocation", text)
         for pod in ("gatekeeper-a", "gatekeeper-b"):
             self.assertIn("PASS %s rejected the revoked bearer" % pod, text)
+            self.assertIn("PASS %s never accepted the revoked bearer again before its expiry" % pod, text)
+        self.assertIn("observed until the held token's expiry", text)
+        # It kept polling well past two refused rounds, up to the token's exp.
+        self.assertGreater(self.single_mints("gatekeeper-a"), 4)
+        self.assertGreaterEqual(took, self.HELD_TTL - 15)
         created = [c for c in self.calls() if c[0] == "kubectl" and "create" in c]
         self.assertEqual(len(created), 1)
         self.assertIn("--bound-object-kind", created[0])
         self.assertIn("uid-1", created[0])
 
     def test_revocation_over_the_bound_fails(self):
-        self.scenario(pod_removal_after=2, faults={"gatekeeper-a": ["slow_revocation"]})
-        rc, text = self.run_script("--revocation-drill", extra_env={"PHASE4_REVOCATION_BOUND": "1"})
+        self.scenario(pod_removal_after=2, held_ttl=self.HELD_TTL, faults={"gatekeeper-a": ["slow_revocation"]})
+        rc, text, _ = self.drill(PHASE4_REVOCATION_BOUND="1")
         self.assertEqual(rc, 1, text)
-        self.assertIn("over the 1s bound", text)
+        self.assertIn("gatekeeper-a", text)
+        self.assertIn("the 1s bound", text)
+        self.assertIn("DARKEN THE HARNESS", text)
+
+    def test_revocation_a_connection_failure_is_never_a_refusal(self):
+        # gatekeeper-b answered the baseline mint, then gives no HTTP answer at all: that is not
+        # a refusal of the bearer, and the drill must not pass on it.
+        self.scenario(pod_removal_after=2, held_ttl=self.HELD_TTL, unreachable_after_removal=["gatekeeper-b"])
+        rc, text, _ = self.drill()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("could not observe gatekeeper-b", text)
+        self.assertNotIn("PASS gatekeeper-b rejected the revoked bearer", text)
+        self.assertNotIn("gatekeeper-b: rejected at", text)
+        self.assertIn("PASS gatekeeper-a accepts the held bearer before the revocation", text)
+
+    def test_revocation_intermittent_no_answers_count_for_nothing(self):
+        # gatekeeper-b alternates a refusal and no answer: never two refused rounds in a row, so
+        # the refused-round streak keeps resetting and the end state is never observed as stable.
+        self.scenario(pod_removal_after=2, held_ttl=self.HELD_TTL, flaky_after_removal=["gatekeeper-b"])
+        rc, text, _ = self.drill(PHASE4_MAX_NO_ANSWER="99")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("no answer", text)
+        self.assertIn("consecutive refused rounds", text)
+
+    def test_revocation_a_later_acceptance_fails(self):
+        # gatekeeper-a refuses the removed pod's bearer twice, then accepts it again: two refused
+        # rounds prove nothing, the drill watches until the token's exp.
+        self.scenario(pod_removal_after=2, held_ttl=self.HELD_TTL, faults={"gatekeeper-a": ["reaccept"]})
+        rc, text, _ = self.drill()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("gatekeeper-a: accepted the held bearer AGAIN", text)
+        self.assertIn("DARKEN THE HARNESS", text)
+
+    def test_revocation_needs_the_held_tokens_exp(self):
+        self.scenario(pod_removal_after=2, held_no_exp=True)
+        rc, text, _ = self.drill()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("cannot read the held token's exp", text)
+        self.assertEqual(self.single_mints("gatekeeper-a"), 0)
+
+
+RUNBOOK = HERE.parents[1] / "docs" / "runbooks" / "s2s-identity.md"
+CM_YAML = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: gatekeeper-registry-extras\n  namespace: strive-ailab\ndata:\n  registry.yaml: |\n    services: []\n"
+
+
+def drill1_backup_lines():
+    """Drill 1's lines from `OUT=` through the chained ConfigMap delete, as the runbook has them."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    block = [b for b in text.split("```sh\n")[1:] if "delete configmap gatekeeper-registry-extras" in b.split("```")[0]]
+    if len(block) != 1:
+        raise AssertionError("expected one sh block deleting the extras ConfigMap, found %d" % len(block))
+    lines = block[0].split("```")[0].splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("OUT="))
+    end = next(i for i, line in enumerate(lines) if "delete configmap gatekeeper-registry-extras" in line)
+    while lines[end].rstrip().endswith("\\"):
+        end += 1
+    deletes = [i for i, line in enumerate(lines) if "delete configmap" in line]
+    if deletes != [end]:
+        raise AssertionError("a ConfigMap delete outside the guarded backup chain: lines %r" % deletes)
+    return "\n".join(lines[start : end + 1]) + "\n"
+
+
+@unittest.skipIf(BASH is None, "bash is required (set PHASE4_TEST_BASH)")
+class RunbookDrillBackup(unittest.TestCase):
+    """Drill 1 deletes the extras ConfigMap only after a verified copy is saved under a gitignored _out/."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="phase4-runbook-")
+        self.log = os.path.join(self.dir, "k.log")
+        self.stub = os.path.join(self.dir, "k.sh")
+        with open(self.stub, "w", encoding="utf-8", newline="\n") as f:
+            f.write(
+                'printf "%s\\n" "$*" >> "$K_LOG"\n'
+                'if [ "$1" = get ]; then [ -n "$K_GET_FAIL" ] && exit 1; printf "%s" "$K_CM"; fi\n'
+            )
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def run_lines(self, ignored=True, get_fail=False):
+        repo = os.path.join(self.dir, "repo")
+        os.mkdir(repo)
+        git = ["git", "-C", repo]
+        subprocess.run(git + ["init", "-q"], check=True)
+        if ignored:
+            with open(os.path.join(repo, ".gitignore"), "w", encoding="utf-8", newline="\n") as f:
+                f.write("kubernetes/infra/_out/\n")
+        env = dict(os.environ, K_LOG=self.log, K_CM=CM_YAML, K_GET_FAIL="1" if get_fail else "")
+        script = 'cd "$1" || exit 9\nK="bash %s"\n%s' % (self.stub.replace("\\", "/"), drill1_backup_lines())
+        done = subprocess.run([BASH, "-c", script, "drill", repo.replace("\\", "/")], env=env, capture_output=True, text=True)
+        calls = open(self.log, encoding="utf-8").read().splitlines() if os.path.exists(self.log) else []
+        saved = os.path.join(repo, "kubernetes", "infra", "_out", "gatekeeper-registry-extras-drill.yaml")
+        return done, calls, saved
+
+    def test_a_verified_copy_then_the_delete(self):
+        done, calls, saved = self.run_lines()
+        self.assertTrue(any(c.startswith("delete configmap gatekeeper-registry-extras") for c in calls), done.stderr)
+        with open(saved, encoding="utf-8") as f:
+            self.assertEqual(f.read(), CM_YAML)
+
+    def test_no_copy_no_delete(self):
+        done, calls, _ = self.run_lines(get_fail=True)
+        self.assertFalse(any(c.startswith("delete") for c in calls))
+        self.assertIn("STOP", done.stderr)
+
+    def test_not_a_gitignored_out_no_delete(self):
+        done, calls, _ = self.run_lines(ignored=False)
+        self.assertFalse(any(c.startswith("delete") for c in calls))
 
 
 if __name__ == "__main__":

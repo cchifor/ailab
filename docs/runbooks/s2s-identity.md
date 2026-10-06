@@ -528,9 +528,14 @@ $K scale deployment/harness --replicas=0
 scripts/s2s/phase4-probes.sh --gatekeeper-only                            # baseline: PASS on both replicas
 A=$($K get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[0].metadata.name}')
 B=$($K get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[1].metadata.name}')
-# Delete the extras (non-secret: grants only), keeping a copy to restore.
-$K get configmap gatekeeper-registry-extras -o yaml > kubernetes/infra/_out/gatekeeper-registry-extras-drill.yaml
-$K delete configmap gatekeeper-registry-extras
+# Delete the extras (non-secret: grants only), but ONLY once a copy to restore from is saved. The copy
+# goes to the MAIN checkout's gitignored kubernetes/infra/_out/ (a worktree has none), so run this
+# from an ailab checkout. On "STOP", nothing was deleted: do not go on.
+OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
+git -C "${OUT%/kubernetes/infra/_out}" check-ignore -q kubernetes/infra/_out/x && mkdir -p "$OUT" || OUT=
+SAVE="${OUT:-/nonexistent-ailab-out}/gatekeeper-registry-extras-drill.yaml"
+$K get configmap gatekeeper-registry-extras -o yaml > "$SAVE" && grep -q '^kind: ConfigMap' "$SAVE" \
+  && $K delete configmap gatekeeper-registry-extras || echo "STOP: no verified copy at $SAVE; nothing deleted" >&2
 scripts/s2s/phase4-probes.sh --gatekeeper-only --no-registry-check        # PASS: both pods kept the extras they loaded
 # Cold start: restart A without the ConfigMap (the mount is optional: true).
 $K delete pod "$A"
@@ -539,8 +544,7 @@ C=$($K get pod -l app.kubernetes.io/name=gatekeeper -o name | sed 's|^pod/||' | 
 scripts/s2s/phase4-probes.sh --replica "$C" --expect-refused              # PASS: extras_sha empty, svc-harness 401
 scripts/s2s/phase4-probes.sh --replica "$B" --gatekeeper-only --no-registry-check   # PASS: B still serves svc-harness
 # Restore the ConfigMap. There is no reload: C keeps refusing until it is rolled.
-sed -e '/^  resourceVersion:/d' -e '/^  uid:/d' -e '/^  creationTimestamp:/d' \
-  kubernetes/infra/_out/gatekeeper-registry-extras-drill.yaml | $K create -f -
+sed -e '/^  resourceVersion:/d' -e '/^  uid:/d' -e '/^  creationTimestamp:/d' "$SAVE" | $K create -f -
 scripts/s2s/phase4-probes.sh --replica "$C" --expect-refused              # PASS: still refused
 $K rollout restart deployment/gatekeeper
 $K rollout status deployment/gatekeeper --timeout=300s
@@ -641,12 +645,26 @@ $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
 ```
 
-Terminal 1 then polls each replica every 5 s with the held bearer. It passes when every replica:
+Revoke promptly: the pod must be gone at least 30 s before the held token expires
+(`PHASE4_REMOVAL_MARGIN_SECONDS`).
+
+Terminal 1 then polls each replica every 5 s with the held bearer until the token's own `exp`. The
+script decodes `exp` from the token without printing it. With the 10-minute TokenRequest, the drill
+runs until about 10 minutes after the mint. Observation is capped at 900 s after the mint
+(`PHASE4_MAX_WATCH_SECONDS`); if the `exp` lies beyond the cap, the script says so.
+
+It passes when every replica:
 
 - refuses the bearer within 90 s of the pod's removal (`PHASE4_REVOCATION_BOUND`: the 60 s
   positive cache plus polling);
-- never accepts it again;
-- does both before the token's exp.
+- never accepts it again before the token's expiry: a 200 after the replica's first refusal fails
+  the drill at once;
+- refuses it in each of the last two rounds before the expiry. A round counts only if every
+  replica refused in it; any other round resets the count.
+
+An attempt with no HTTP answer (a transport or exec failure, `MINT 0`) is neither a refusal nor an
+acceptance. Three in a row on one replica fail the drill as "could not observe"
+(`PHASE4_MAX_NO_ANSWER`).
 
 The refusal is a **503** `temporarily_unavailable`, not a 401: TokenReview reports the missing pod
 in `status.error`, and gatekeeper never reads that as a verdict (GC4). Then restore the harness.

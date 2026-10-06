@@ -41,7 +41,6 @@ ALT_SA=default
 AUDIENCE=strive-gatekeeper
 WRONG_AUDIENCE=not-strive-gatekeeper
 TOKEN_TTL=10m
-TOKEN_TTL_SECONDS=600
 EXTRAS_CM=gatekeeper-registry-extras
 HELMRELEASE=strive
 # A real route of the harness IngressRoute (PathPrefix(/api/harness), gatekeeper-auth BEFORE the
@@ -49,6 +48,12 @@ HELMRELEASE=strive
 EDGE_URL=https://strive.place/api/harness/admin/v1/chat
 EXPECTED_REPLICAS=2
 REVOCATION_BOUND=${PHASE4_REVOCATION_BOUND:-90}
+# The revocation drill watches the held bearer until the token's own exp, capped here.
+MAX_WATCH_SECONDS=${PHASE4_MAX_WATCH_SECONDS:-900}
+# ...and needs the pod removed this long before that end, to observe the refusal.
+REMOVAL_MARGIN_SECONDS=${PHASE4_REMOVAL_MARGIN_SECONDS:-30}
+# Consecutive attempts without an HTTP answer on one replica before the drill gives up on it.
+MAX_NO_ANSWER=${PHASE4_MAX_NO_ANSWER:-3}
 POLL_SECONDS=${PHASE4_POLL_SECONDS:-5}
 POD_POLL_SECONDS=${PHASE4_POD_POLL_SECONDS:-2}
 
@@ -76,8 +81,8 @@ usage: scripts/s2s/phase4-probes.sh [options]
   --expect-refused     svc-harness must be REFUSED on each replica (cold-start, deletion and rollback
                        drills); implies --gatekeeper-only
   --no-registry-check  skip the extras-registry acceptance (a drill that deleted the ConfigMap)
-  --revocation-drill   hold a pod-bound harness token, wait while the owner revokes the pod, and time
-                       the rejection on each replica
+  --revocation-drill   hold a pod-bound harness token, wait while the owner revokes the pod, time the
+                       rejection on each replica, and watch every replica until the token expires
   --replica POD        probe only this gatekeeper pod (repeatable); default: every pod
   --tenant ID          tenant_id of the probe mint (default: phase4-probe)
   --dry-run            print the plan; no cluster or network call
@@ -248,8 +253,11 @@ mode: revocation drill
   2. each replica: a svc-mcp mint with it -> 200
   3. wait (no write) while the owner revokes in another terminal:
 $(darken_commands | sed -n '1,6p')
-  4. each replica every ${POLL_SECONDS}s: the same mint until it is refused; PASS when every replica refuses
-     within ${REVOCATION_BOUND}s of the pod's removal and never accepts again, all before the token's exp
+  4. each replica every ${POLL_SECONDS}s, until the held token's own exp (decoded from it; capped at
+     ${MAX_WATCH_SECONDS}s after the mint): the same mint. PASS when every replica refuses within
+     ${REVOCATION_BOUND}s of the pod's removal, never accepts again before the exp, and the last two
+     rounds are refused by every replica. No HTTP answer is never a refusal; ${MAX_NO_ANSWER} in a row
+     on one replica fails the drill (it could not be observed)
 EOF
   else
     cat <<EOF
@@ -412,9 +420,23 @@ single_mint() {
   printf '%s\n' "$out" | tr -d '\r' | sed -n 's/^\(MINT [0-9]* [-a-z_]*\)$/\1/p' | head -n 1
 }
 
+# held_token_exp TOKEN: the token's own `exp` claim, decoded here. Only the number is output, never
+# the token or its claims.
+held_token_exp() {
+  local payload=${1#*.}
+  payload=${payload%%.*}
+  payload=${payload//-/+}
+  payload=${payload//_//}
+  case $((${#payload} % 4)) in
+    2) payload+='==' ;;
+    3) payload+='=' ;;
+  esac
+  printf '%s' "$payload" | base64 -d 2>/dev/null | tr -d '\r\n' | sed -n 's/.*"exp":[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+}
+
 revocation_drill() {
   section "Revocation drill: the held bearer"
-  local hp uid hp_lines t_start held_exp t_del='' t_gone='' now st pod res status code all elapsed
+  local hp uid hp_lines t_start token_exp held_exp capped=0 t_del='' t_gone='' now st pod res status code elapsed
   if ! hp_lines=$(k get pods -l "$HARNESS_LABEL" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}'); then
     bad "revocation: kubectl get pods -l $HARNESS_LABEL failed"
     return 1
@@ -433,8 +455,20 @@ revocation_drill() {
   fi
   t_start=$(date +%s)
   mint_into HELD "$HARNESS_SA" "$AUDIENCE" --bound-object-kind Pod --bound-object-name "$hp" --bound-object-uid "$uid" || return 1
-  held_exp=$((t_start + TOKEN_TTL_SECONDS))
-  info "holding a token bound to pod $hp (uid $uid); it expires by $(date -u -d "@$held_exp" +%H:%M:%SZ 2>/dev/null || echo "+${TOKEN_TTL_SECONDS}s")"
+  # Observe until the token's OWN exp (what the API server issued, not what was asked for),
+  # capped at MAX_WATCH_SECONDS after the mint so a drill always ends.
+  token_exp=$(held_token_exp "$HELD")
+  if [[ ! $token_exp =~ ^[0-9]+$ ]] || ((token_exp <= t_start)); then
+    bad "revocation: cannot read the held token's exp (or it is already past)"
+    return 1
+  fi
+  held_exp=$token_exp
+  if ((held_exp > t_start + MAX_WATCH_SECONDS)); then
+    held_exp=$((t_start + MAX_WATCH_SECONDS))
+    capped=1
+    info "the held token's exp is $((token_exp - t_start))s away; observation is capped at ${MAX_WATCH_SECONDS}s (PHASE4_MAX_WATCH_SECONDS) and does not cover the rest"
+  fi
+  info "holding a token bound to pod $hp (uid $uid); it expires at +$((token_exp - t_start))s ($(date -u -d "@$token_exp" +%H:%M:%SZ 2>/dev/null || echo "epoch $token_exp")); observing until +$((held_exp - t_start))s"
   for pod in "${PODS[@]}"; do
     res=$(single_mint "$pod")
     if [[ $res == "MINT 200 -" ]]; then ok "$pod accepts the held bearer before the revocation"; else bad "$pod: the held bearer before the revocation -> ${res:-no answer}, expected MINT 200"; fi
@@ -446,8 +480,8 @@ revocation_drill() {
   info "waiting for pod $hp to be removed (polling every ${POD_POLL_SECONDS}s)"
   while :; do
     now=$(date +%s)
-    if ((now >= held_exp - 30)); then
-      bad "revocation: pod $hp was not removed before the held token's expiry"
+    if ((now >= held_exp - REMOVAL_MARGIN_SECONDS)); then
+      bad "revocation: pod $hp was not removed ${REMOVAL_MARGIN_SECONDS}s or more before the end of the observation (the held token's expiry)"
       return 1
     fi
     if ! st=$(k get pod "$hp" --ignore-not-found -o jsonpath='{.metadata.uid}{"|"}{.metadata.deletionTimestamp}'); then
@@ -468,51 +502,88 @@ revocation_drill() {
     sleep "$POD_POLL_SECONDS"
   done
 
-  section "Rejection, per replica"
-  # Each attempt is timed by when ITS request was sent: the first refused request bounds the
-  # moment the replica stopped honouring the bearer.
-  declare -A rejected_at=()
-  local rounds_after=0 t_req
+  # Every replica is polled until the held token's expiry. Each attempt is timed by when ITS request
+  # was sent, and is exactly one of:
+  #   - accepted (200): fine before the replica's first refusal, a FAIL after it;
+  #   - refused (any other HTTP status; the expected one is 503, GC4): the first one is held against
+  #     the bound, measured from the pod's removal;
+  #   - no answer (no MINT line, or `MINT 0`: transport or exec failure): neither a refusal nor an
+  #     acceptance. MAX_NO_ANSWER in a row on one replica is a FAIL: it could not be observed.
+  # A round is "refused" when EVERY replica refused in it; any other round resets that streak. The
+  # end state must be observed: the last two rounds before the expiry both refused.
+  section "Rejection, per replica, until the held token's expiry"
+  declare -A refused_at=() silent=()
+  local streak=0 decided=0 all_refused t_req
   while :; do
     now=$(date +%s)
-    if ((now >= held_exp)); then
-      bad "revocation: the held token expired before every replica rejected it"
-      break
-    fi
-    all=1
+    ((now < held_exp)) || break
+    all_refused=1
     for pod in "${PODS[@]}"; do
       t_req=$(date +%s)
       res=$(single_mint "$pod")
+      status='' code=''
       read -r _ status code <<<"$res"
-      if [[ -z $res ]]; then
-        all=0
-        info "$pod: no answer at +$((t_req - t_gone))s after removal"
-      elif [[ $status == 200 ]]; then
-        all=0
-        [[ -n ${rejected_at[$pod]:-} ]] && bad "$pod: accepted the held bearer AGAIN at +$((t_req - t_gone))s after rejecting it"
-      elif [[ -z ${rejected_at[$pod]:-} ]]; then
-        rejected_at[$pod]=$t_req
-        info "$pod: rejected at +$((t_req - t_gone))s after removal ($status $code)"
+      if [[ ! $status =~ ^[1-9][0-9][0-9]$ ]]; then
+        all_refused=0
+        silent[$pod]=$((${silent[$pod]:-0} + 1))
+        info "$pod: no answer at +$((t_req - t_gone))s after removal (${silent[$pod]} in a row; not a refusal)"
+        if ((${silent[$pod]} >= MAX_NO_ANSWER)); then
+          bad "could not observe $pod: ${silent[$pod]} consecutive attempts without an HTTP answer"
+          decided=1
+          break
+        fi
+        continue
+      fi
+      silent[$pod]=0
+      if [[ $status == 200 ]]; then
+        all_refused=0
+        if [[ -n ${refused_at[$pod]:-} ]]; then
+          bad "$pod: accepted the held bearer AGAIN at +$((t_req - t_gone))s after removal, having refused it at +$((${refused_at[$pod]} - t_gone))s"
+          decided=1
+          break
+        fi
+      elif [[ -z ${refused_at[$pod]:-} ]]; then
+        refused_at[$pod]=$t_req
+        info "$pod: refused at +$((t_req - t_gone))s after removal ($status $code)"
       fi
     done
-    if ((all)); then
-      rounds_after=$((rounds_after + 1))
-      ((rounds_after >= 2)) && break
-    fi
+    ((decided)) && break
+    if ((all_refused)); then streak=$((streak + 1)); else streak=0; fi
+    now=$(date +%s)
+    for pod in "${PODS[@]}"; do
+      if [[ -z ${refused_at[$pod]:-} ]] && ((now - t_gone > REVOCATION_BOUND)); then
+        bad "$pod did not refuse the revoked bearer within the ${REVOCATION_BOUND}s bound (not refused at +$((now - t_gone))s after removal)"
+        decided=1
+      fi
+    done
+    ((decided)) && break
     sleep "$POLL_SECONDS"
   done
-  for pod in "${PODS[@]}"; do
-    if [[ -z ${rejected_at[$pod]:-} ]]; then
-      bad "$pod: never rejected the held bearer"
-      continue
-    fi
-    elapsed=$((${rejected_at[$pod]} - t_gone))
-    if ((elapsed <= REVOCATION_BOUND)); then
-      ok "$pod rejected the revoked bearer ${elapsed}s after the pod's removal (bound ${REVOCATION_BOUND}s${t_del:+; deletionTimestamp seen $((t_gone - t_del))s before removal})"
+
+  if ((!decided)); then
+    for pod in "${PODS[@]}"; do
+      if [[ -z ${refused_at[$pod]:-} ]]; then
+        bad "$pod never refused the held bearer before the end of the observation"
+        continue
+      fi
+      elapsed=$((${refused_at[$pod]} - t_gone))
+      if ((elapsed <= REVOCATION_BOUND)); then
+        ok "$pod rejected the revoked bearer ${elapsed}s after the pod's removal (bound ${REVOCATION_BOUND}s${t_del:+; deletionTimestamp seen $((t_gone - t_del))s before removal})"
+      else
+        bad "$pod rejected the revoked bearer ${elapsed}s after the pod's removal, over the ${REVOCATION_BOUND}s bound"
+      fi
+      if ((capped)); then
+        ok "$pod never accepted the revoked bearer again in the ${MAX_WATCH_SECONDS}s observed (the cap; its exp is later)"
+      else
+        ok "$pod never accepted the revoked bearer again before its expiry"
+      fi
+    done
+    if ((streak >= 2)); then
+      ok "observed until the held token's expiry$( ((capped)) && echo " (capped)"): the last $streak rounds were refused by every replica"
     else
-      bad "$pod rejected the revoked bearer ${elapsed}s after the pod's removal, over the ${REVOCATION_BOUND}s bound"
+      bad "revocation: only $streak consecutive refused rounds at the end of the observation (2 needed): the end state was not observed"
     fi
-  done
+  fi
   section "Restore (after the drill)"
   cat <<EOF
   kubectl --context $CONTEXT -n $NS patch helmrelease $HELMRELEASE --type=merge -p '{"spec":{"suspend":false}}'
