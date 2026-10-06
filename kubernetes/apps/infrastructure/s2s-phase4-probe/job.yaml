@@ -55,8 +55,11 @@ spec:
       containers:
         - name: probe
           # Stock python, stdlib only (the cloud-power / ci-rerun-watchdog shape); the extras YAML
-          # is read by phase4_probe.parse_yaml_subset, no PyYAML needed.
-          image: mirror.gcr.io/library/python:3.14-slim
+          # is read by phase4_probe.parse_yaml_subset, no PyYAML needed. DIGEST-PINNED (the OCI
+          # index digest of 3.14-slim on 2026-10-06, the image the tests ran under): the weekly
+          # TTL re-run must not pick up a different interpreter on a fresh node. Re-pin
+          # deliberately: docker buildx imagetools inspect mirror.gcr.io/library/python:3.14-slim
+          image: mirror.gcr.io/library/python:3.14-slim@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2
           imagePullPolicy: IfNotPresent
           command:
             - python3

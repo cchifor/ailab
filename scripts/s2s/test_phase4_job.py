@@ -198,7 +198,9 @@ class JobRun(unittest.TestCase):
         text = out.getvalue()
         for secret in kube.issued + [m for e in getattr(self, "emus", ()) for m in e.minted]:
             self.assertNotIn(secret, text)
-        self.assertNotIn(secret_fragment(kube), text)
+        # No token, and not even a token's signature segment alone.
+        for token in kube.issued:
+            self.assertNotIn(token.rsplit(".", 1)[1], text)
         return rc, text
 
     def summary_row(self, text, pod):
@@ -352,11 +354,6 @@ class JobRun(unittest.TestCase):
         out = io.StringIO()
         self.assertEqual(job.main([], out=out), 2)
         self.assertIn("not in a pod", out.getvalue())
-
-
-def secret_fragment(kube):
-    """The signature part of every issued token: no line may carry even that."""
-    return "\x00".join(t.rsplit(".", 1)[1] for t in kube.issued) or "\x00unused"
 
 
 class EndpointsParsing(unittest.TestCase):
@@ -691,6 +688,7 @@ class Manifests(unittest.TestCase):
         self.assertEqual(sc["allowPrivilegeEscalation"], "false")
         self.assertEqual(sc["privileged"], "false")
         self.assertEqual(sc["capabilities"], {"drop": ["ALL"]})
+        self.assertRegex(container["image"], r"^mirror\.gcr\.io/library/python:3\.14-slim@sha256:[0-9a-f]{64}$")
         self.assertEqual(container["command"][:4], ["python3", "-u", "-B", "/probe/phase4_job.py"])
         self.assertEqual(
             [e for e in container["env"] if e["name"] == "PROBE_REVISION"][0]["valueFrom"]["fieldRef"]["fieldPath"],
