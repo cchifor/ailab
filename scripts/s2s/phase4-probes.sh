@@ -48,7 +48,11 @@ HELMRELEASE=strive
 EDGE_URL=https://strive.place/api/harness/admin/v1/chat
 EXPECTED_REPLICAS=2
 REVOCATION_BOUND=${PHASE4_REVOCATION_BOUND:-90}
-# The revocation drill watches the held bearer until the token's own exp, capped here.
+# The revocation drill holds a token minted with this --duration (the API refuses under 600 s)...
+HELD_TOKEN_SECONDS=${PHASE4_HELD_TOKEN_SECONDS:-600}
+# ...and watches it until its own exp. A drill whose token outlives this cap (after the mint) would
+# leave the rest unwatched, so it stops as INCOMPLETE (exit 3) before any probe. The held duration
+# must be at or below the cap; raise the cap to cover a longer exp the API server issues.
 MAX_WATCH_SECONDS=${PHASE4_MAX_WATCH_SECONDS:-900}
 # ...and needs the pod removed this long before that end, to observe the refusal.
 REMOVAL_MARGIN_SECONDS=${PHASE4_REMOVAL_MARGIN_SECONDS:-30}
@@ -88,7 +92,12 @@ usage: scripts/s2s/phase4-probes.sh [options]
   --dry-run            print the plan; no cluster or network call
   -h, --help           this text
 
-Exit 0 = pass, 1 = a check failed (DARKEN THE HARNESS is printed), 2 = bad invocation.
+Revocation drill knobs: PHASE4_HELD_TOKEN_SECONDS (default 600) is the held token's --duration and
+must be at most PHASE4_MAX_WATCH_SECONDS (default 900), the longest the drill watches. If the API
+server issues a token that outlives the cap, the drill stops as INCOMPLETE before any probe.
+
+Exit 0 = pass, 1 = a check failed (DARKEN THE HARNESS is printed), 2 = bad invocation,
+3 = revocation drill INCOMPLETE (the held token outlives the cap; nothing was probed).
 EOF
 }
 
@@ -117,6 +126,13 @@ done
 if ((REVOCATION && EXPECT_REFUSED)); then
   echo "phase4-probes: --revocation-drill and --expect-refused do not combine" >&2
   exit 2
+fi
+if ((REVOCATION)); then
+  [[ $MAX_WATCH_SECONDS =~ ^[1-9][0-9]*$ ]] || { echo "phase4-probes: PHASE4_MAX_WATCH_SECONDS must be a whole number of seconds" >&2; exit 2; }
+  if [[ ! $HELD_TOKEN_SECONDS =~ ^[1-9][0-9]*$ ]] || ((HELD_TOKEN_SECONDS > MAX_WATCH_SECONDS)); then
+    echo "phase4-probes: PHASE4_HELD_TOKEN_SECONDS (${HELD_TOKEN_SECONDS}) must be a whole number of seconds at most PHASE4_MAX_WATCH_SECONDS (${MAX_WATCH_SECONDS}), so the drill can watch the held token until it expires" >&2
+    exit 2
+  fi
 fi
 for pod in ${REPLICAS[@]+"${REPLICAS[@]}"}; do
   [[ $pod =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo "phase4-probes: not a pod name: $pod" >&2; exit 2; }
@@ -148,6 +164,16 @@ darken_commands() {
 EOF
 }
 
+# incomplete WHAT HOW: the drill cannot reach a verdict; exit 3, never a PASS (and no DARKEN:
+# nothing was found wrong, nothing was verified either).
+incomplete() {
+  section "Result"
+  printf 'INCOMPLETE: %s\n' "$1"
+  printf '  %s\n' "$2"
+  printf '  This is not a pass. Runbook: docs/runbooks/s2s-identity.md, drill 4 (revocation).\n'
+  exit 3
+}
+
 finish() {
   section "Result"
   if ((${#FAILURES[@]})); then
@@ -169,7 +195,8 @@ is_jwt() { [[ $1 =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; }
 mint_into() {
   local __var=$1 sa=$2 aud=$3 __tok
   shift 3
-  if ! __tok=$(k create token "$sa" --audience "$aud" --duration "$TOKEN_TTL" "$@"); then
+  # MINT_DURATION (set `local` by a caller) overrides the default lifetime.
+  if ! __tok=$(k create token "$sa" --audience "$aud" --duration "${MINT_DURATION:-$TOKEN_TTL}" "$@"); then
     bad "token: kubectl create token $sa --audience $aud failed"
     return 1
   fi
@@ -248,13 +275,16 @@ EOF
   if ((REVOCATION)); then
     cat <<EOF
 mode: revocation drill
-  1. the one Ready harness pod; a pod-bound TokenRequest for SA $HARNESS_SA, audience $AUDIENCE, $TOKEN_TTL
-     (--bound-object-kind Pod: it dies with that pod, as the pod's projected token does)
+  1. the one Ready harness pod; a pod-bound TokenRequest for SA $HARNESS_SA, audience $AUDIENCE,
+     --duration ${HELD_TOKEN_SECONDS}s (PHASE4_HELD_TOKEN_SECONDS, at most the ${MAX_WATCH_SECONDS}s cap)
+     (--bound-object-kind Pod: it dies with that pod, as the pod's projected token does).
+     If the issued token outlives PHASE4_MAX_WATCH_SECONDS (${MAX_WATCH_SECONDS}s), the drill stops right
+     there as INCOMPLETE (exit 3): no probe, no revoke prompt, never a pass.
   2. each replica: a svc-mcp mint with it -> 200
   3. wait (no write) while the owner revokes in another terminal:
 $(darken_commands | sed -n '1,6p')
-  4. each replica every ${POLL_SECONDS}s, until the held token's own exp (decoded from it; capped at
-     ${MAX_WATCH_SECONDS}s after the mint): the same mint. PASS when every replica refuses within
+  4. each replica every ${POLL_SECONDS}s, until the held token's own exp (decoded from it, never
+     printed): the same mint. PASS when every replica refuses within
      ${REVOCATION_BOUND}s of the pod's removal, never accepts again before the exp, and the last two
      rounds are refused by every replica. No HTTP answer is never a refusal; ${MAX_NO_ANSWER} in a row
      on one replica fails the drill (it could not be observed)
@@ -436,7 +466,8 @@ held_token_exp() {
 
 revocation_drill() {
   section "Revocation drill: the held bearer"
-  local hp uid hp_lines t_start token_exp held_exp capped=0 t_del='' t_gone='' now st pod res status code elapsed
+  local hp uid hp_lines t_start token_exp held_exp t_del='' t_gone='' now st pod res status code elapsed
+  local MINT_DURATION="${HELD_TOKEN_SECONDS}s" # read by mint_into (dynamic scope)
   if ! hp_lines=$(k get pods -l "$HARNESS_LABEL" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}'); then
     bad "revocation: kubectl get pods -l $HARNESS_LABEL failed"
     return 1
@@ -455,20 +486,20 @@ revocation_drill() {
   fi
   t_start=$(date +%s)
   mint_into HELD "$HARNESS_SA" "$AUDIENCE" --bound-object-kind Pod --bound-object-name "$hp" --bound-object-uid "$uid" || return 1
-  # Observe until the token's OWN exp (what the API server issued, not what was asked for),
-  # capped at MAX_WATCH_SECONDS after the mint so a drill always ends.
+  # Observe until the token's OWN exp (what the API server issued, not what was asked for). A token
+  # that outlives the cap cannot be watched to its end, and a partial watch proves nothing about
+  # the rest: stop now, INCOMPLETE, before any probe and before the owner is asked to revoke.
   token_exp=$(held_token_exp "$HELD")
   if [[ ! $token_exp =~ ^[0-9]+$ ]] || ((token_exp <= t_start)); then
     bad "revocation: cannot read the held token's exp (or it is already past)"
     return 1
   fi
-  held_exp=$token_exp
-  if ((held_exp > t_start + MAX_WATCH_SECONDS)); then
-    held_exp=$((t_start + MAX_WATCH_SECONDS))
-    capped=1
-    info "the held token's exp is $((token_exp - t_start))s away; observation is capped at ${MAX_WATCH_SECONDS}s (PHASE4_MAX_WATCH_SECONDS) and does not cover the rest"
+  if ((token_exp - t_start > MAX_WATCH_SECONDS)); then
+    incomplete "token lifetime not fully observed (exp in $((token_exp - t_start))s > cap ${MAX_WATCH_SECONDS}s)" \
+      "Nothing was probed and nothing was revoked. Re-run with PHASE4_MAX_WATCH_SECONDS=$((token_exp - t_start + 60)) (at least the token's lifetime), or with PHASE4_HELD_TOKEN_SECONDS at or below the cap if the API server honours it."
   fi
-  info "holding a token bound to pod $hp (uid $uid); it expires at +$((token_exp - t_start))s ($(date -u -d "@$token_exp" +%H:%M:%SZ 2>/dev/null || echo "epoch $token_exp")); observing until +$((held_exp - t_start))s"
+  held_exp=$token_exp
+  info "holding a token bound to pod $hp (uid $uid); it expires at +$((token_exp - t_start))s ($(date -u -d "@$token_exp" +%H:%M:%SZ 2>/dev/null || echo "epoch $token_exp")); the drill watches until then"
   for pod in "${PODS[@]}"; do
     res=$(single_mint "$pod")
     if [[ $res == "MINT 200 -" ]]; then ok "$pod accepts the held bearer before the revocation"; else bad "$pod: the held bearer before the revocation -> ${res:-no answer}, expected MINT 200"; fi
@@ -572,14 +603,11 @@ revocation_drill() {
       else
         bad "$pod rejected the revoked bearer ${elapsed}s after the pod's removal, over the ${REVOCATION_BOUND}s bound"
       fi
-      if ((capped)); then
-        ok "$pod never accepted the revoked bearer again in the ${MAX_WATCH_SECONDS}s observed (the cap; its exp is later)"
-      else
-        ok "$pod never accepted the revoked bearer again before its expiry"
-      fi
+      # Reached only after watching to the token's own exp: a capped watch never gets here.
+      ok "$pod never accepted the revoked bearer again before its expiry"
     done
     if ((streak >= 2)); then
-      ok "observed until the held token's expiry$( ((capped)) && echo " (capped)"): the last $streak rounds were refused by every replica"
+      ok "observed until the held token's expiry: the last $streak rounds were refused by every replica"
     else
       bad "revocation: only $streak consecutive refused rounds at the end of the observation (2 needed): the end state was not observed"
     fi

@@ -649,9 +649,17 @@ Revoke promptly: the pod must be gone at least 30 s before the held token expire
 (`PHASE4_REMOVAL_MARGIN_SECONDS`).
 
 Terminal 1 then polls each replica every 5 s with the held bearer until the token's own `exp`. The
-script decodes `exp` from the token without printing it. With the 10-minute TokenRequest, the drill
-runs until about 10 minutes after the mint. Observation is capped at 900 s after the mint
-(`PHASE4_MAX_WATCH_SECONDS`); if the `exp` lies beyond the cap, the script says so.
+script decodes `exp` from the token without printing it.
+
+- **The held token's `--duration`** is `PHASE4_HELD_TOKEN_SECONDS` (default 600 s: the drill runs
+  about 10 minutes after the mint). The API server refuses less than 600 s.
+- **The cap.** The duration must be at or below `PHASE4_MAX_WATCH_SECONDS` (default 900 s), the
+  longest the drill watches. Otherwise the script refuses to start (exit 2).
+- **INCOMPLETE.** If the API server still issues a token that outlives the cap, the drill stops
+  before any probe and before the "Revoke now" prompt. It prints `INCOMPLETE: token lifetime not
+  fully observed (exp in Ns > cap Ms)` and exits **3**. That is never a pass: a partial watch says
+  nothing about the rest of the lifetime. Re-run with `PHASE4_MAX_WATCH_SECONDS` raised to cover the
+  issued lifetime; the message gives a value.
 
 It passes when every replica:
 

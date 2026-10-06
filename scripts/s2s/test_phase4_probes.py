@@ -1030,6 +1030,9 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(created), 1)
         self.assertIn("--bound-object-kind", created[0])
         self.assertIn("uid-1", created[0])
+        # The held token asks for PHASE4_HELD_TOKEN_SECONDS (default 600 s), within the 900 s cap.
+        self.assertEqual(created[0][created[0].index("--duration") + 1], "600s")
+        self.assertEqual(created[0].count("--duration"), 1)
 
     def test_revocation_over_the_bound_fails(self):
         self.scenario(pod_removal_after=2, held_ttl=self.HELD_TTL, faults={"gatekeeper-a": ["slow_revocation"]})
@@ -1067,6 +1070,43 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(rc, 1, text)
         self.assertIn("gatekeeper-a: accepted the held bearer AGAIN", text)
         self.assertIn("DARKEN THE HARNESS", text)
+
+    def test_revocation_a_lifetime_beyond_the_cap_is_incomplete_never_a_pass(self):
+        # The API issued a held token that outlives the observation cap: the rest of its lifetime
+        # would go unwatched, so the drill must not pass. It stops before any probe (the owner is
+        # never asked to revoke for a drill that cannot complete) and exits 3.
+        # Asked for 60 s within a 60 s cap; the "API server" (the fake) issues 120 s anyway.
+        self.scenario(pod_removal_after=2, held_ttl=120)
+        rc, text, took = self.drill(PHASE4_MAX_WATCH_SECONDS="60", PHASE4_HELD_TOKEN_SECONDS="60")
+        self.assertEqual(rc, 3, text)
+        self.assertIn("INCOMPLETE: token lifetime not fully observed (exp in", text)
+        self.assertIn("> cap 60s)", text)
+        self.assertIn("PHASE4_MAX_WATCH_SECONDS", text)
+        self.assertNotIn("ALL CHECKS PASSED", text)
+        self.assertNotIn("PASS gatekeeper-a rejected", text)
+        self.assertNotIn("Revoke now", text)
+        self.assertEqual(self.single_mints("gatekeeper-a"), 0)
+        self.assertLess(took, 60)
+
+    def test_revocation_a_cap_raised_to_cover_the_exp_passes(self):
+        self.scenario(pod_removal_after=2, held_ttl=self.HELD_TTL)
+        rc, text, _ = self.drill(PHASE4_MAX_WATCH_SECONDS=str(self.HELD_TTL + 30), PHASE4_HELD_TOKEN_SECONDS=str(self.HELD_TTL))
+        self.assertEqual(rc, 0, text)
+        self.assertIn("ALL CHECKS PASSED", text)
+        self.assertNotIn("INCOMPLETE", text)
+
+    def test_revocation_a_held_duration_beyond_the_cap_is_refused_upfront(self):
+        self.scenario()
+        rc, text = self.run_script("--revocation-drill", extra_env={"PHASE4_HELD_TOKEN_SECONDS": "1200"})
+        self.assertEqual(rc, 2, text)
+        self.assertIn("PHASE4_HELD_TOKEN_SECONDS", text)
+        self.assertEqual(self.calls(), [])
+        rc, text = self.run_script("--revocation-drill", extra_env={"PHASE4_HELD_TOKEN_SECONDS": "ten"})
+        self.assertEqual(rc, 2, text)
+        self.assertEqual(self.calls(), [])
+        rc, text = self.run_script("--revocation-drill", extra_env={"PHASE4_MAX_WATCH_SECONDS": "0"})
+        self.assertEqual(rc, 2, text)
+        self.assertEqual(self.calls(), [])
 
     def test_revocation_needs_the_held_tokens_exp(self):
         self.scenario(pod_removal_after=2, held_no_exp=True)
