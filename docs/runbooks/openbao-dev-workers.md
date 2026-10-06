@@ -99,8 +99,11 @@ Secret.
   /user/repos` → 403). Reach it with `cred exec common gitea_repo_pat GITEA_TOKEN -- <cmd>`.
   It is not rendered into `~/.git-credentials`; that file stays on `gitea_pat`. Rotation works like
   `gitea_pat`: mint a replacement in-pod (`gitea admin user generate-access-token --username
-  dev-worker-bot ...`), re-seed, then revoke the old token by deleting its `access_token` row (the
-  bot has no usable web login, and token auth cannot revoke itself).
+  dev-worker-bot ...`), re-seed, then revoke the old token. Gitea's token API
+  (`DELETE /api/v1/users/dev-worker-bot/tokens/{name}`) accepts BASIC auth only, never a token, and
+  the bot has no usable password, so either call it as the site admin with the break-glass
+  `gitea_admin` basic auth, or delete the token's `access_token` row (what was done on 2026-10-06).
+  Both are immediate: Gitea re-reads a cached token's row on every use.
 
   `gitea_package_pat` (added 2026-10-05) is a third `dev-worker-bot` Gitea PAT (`chifor`'s until
   2026-10-06), token name `dev-workers-package-20261006`, scopes

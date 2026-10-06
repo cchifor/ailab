@@ -178,9 +178,14 @@ effective one. The PATCH MERGES with the live rule: it unions the live `protecte
 ```sh
 G=https://git.chifor.me/api/v1/repos/cchifor/platform
 # Snapshots and the pattern list live in the MAIN checkout's gitignored kubernetes/infra/_out/ (a git
-# worktree has no _out/), never in the current directory. Run this from inside any ailab checkout.
-OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
-mkdir -p "$OUT"
+# worktree has no _out/), never in the current directory. Run this from inside any AILAB checkout:
+# from a platform checkout the same path would not be gitignored, so refuse anything else.
+case "$(git remote get-url origin 2>/dev/null)" in
+  *cchifor/ailab*) OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out" ;;
+  *) echo "not an ailab checkout: cd into one first" >&2; OUT= ;;
+esac
+[ -n "$OUT" ] && git -C "${OUT%/kubernetes/infra/_out}" check-ignore -q kubernetes/infra/_out/x \
+  && mkdir -p "$OUT" || echo "STOP: _out/ is not a gitignored ailab path" >&2
 B="$OUT/main-protection-before.json"
 curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections            # find the effective rule for main
 RULE=<rule_name of the effective rule from the output above>   # often `main`, but use what the output shows

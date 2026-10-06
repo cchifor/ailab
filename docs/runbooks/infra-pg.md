@@ -159,8 +159,12 @@ env, `bootstrap.py:66`, so a stale env re-applies the OLD value):
    ```sh
    kubectl --context admin@ai -n flux-system annotate kustomization strive-pg-harness \
      reconcile.fluxcd.io/requestedAt="$(date +%s)" --overwrite
-   kubectl --context admin@ai -n strive-ailab get job strive-pg-harness-bootstrap \
-     -o jsonpath='{.metadata.creationTimestamp}{"\n"}'
+   # Flux recreates the Job a few seconds to a few minutes later: poll, do not read once (a read
+   # straight after the annotate shows NotFound, which is not a failure).
+   for i in $(seq 1 60); do
+     ts=$(kubectl --context admin@ai -n strive-ailab get job strive-pg-harness-bootstrap \
+       -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null) && [ -n "$ts" ] && break; sleep 10
+   done; echo "bootstrap Job created at: ${ts:-not yet - check the Kustomization}"
    ```
    Check that the new Job's `creationTimestamp` is after the sync (the `refreshTime` values from step
    2), not the old Job's, then
