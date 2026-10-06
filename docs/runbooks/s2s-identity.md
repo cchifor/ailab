@@ -185,6 +185,29 @@ curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: applic
 Re-read the rule and diff it against `kubernetes/infra/_out/main-protection-before.json` (only those
 two fields may change).
 
+### Rule after the change (2026-10-06, non-secret fields only)
+
+```json
+{
+  "protected_file_patterns": "deploy/helm/values/providers/ailab-s2s-registry.yaml;deploy/gitops/flux/clusters/ailab/**;deploy/helm/charts/gatekeeper/**;deploy/helm/templates/_helpers.tpl;infra/gatekeeper/src/app/gatekeeper/service_registry.py;infra/gatekeeper/src/app/gatekeeper/service_verifier.py;infra/gatekeeper/src/app/gatekeeper/service_token.py;infra/gatekeeper/src/app/gatekeeper/tokenreview_verifier.py;infra/gatekeeper/src/app/gatekeeper/config.py;infra/gatekeeper/src/app/core/lifecycle.py;infra/gatekeeper/src/app/core/config/**;infra/gatekeeper/src/app/main.py;infra/gatekeeper/src/app/__main__.py;infra/gatekeeper/src/app/cli/**;infra/gatekeeper/Dockerfile;infra/gatekeeper/pyproject.toml;infra/gatekeeper/uv.lock;.github/workflows/s2s-authority-guard.yml;scripts/ci/check-s2s-authority.py;scripts/ci/test_check_s2s_authority.py;scripts/ci/check-ailab-pins.py;scripts/ci/list-ailab-pins.py;deploy/secrets/ailab/**;docs/decisions/ADR-034-s2s-projected-token-identities.md;scripts/ci/install-uv.sh;scripts/ci/with-retry.sh",
+  "status_check_contexts": [
+    "CI / ci-gate*",
+    "E2E Preflight / preflight*",
+    "E2E Tests / smoke*",
+    "Contract Tests / contract-gate*",
+    "S2S Authority Guard / guard*"
+  ],
+  "enable_push": true,
+  "push_whitelist_usernames": [
+    "chifor",
+    "gitea_admin"
+  ],
+  "required_approvals": 1,
+  "block_admin_merge_override": false,
+  "enable_status_check": true
+}
+```
+
 ### Gate tests (Phase 0 step 5): results
 
 Gitea 1.26 checks merge preconditions in this order: status checks, approvals, rejected reviews,
@@ -204,7 +227,9 @@ isolate the protected-files check, so protected-file detection is read from the 
 4. **Same permission class.** The reviewer bots that actually merge (`reviewer-codex`,
    `reviewer-claude`) have the same permission class as `dev-worker-bot` (write, non-admin; verified
    with the collaborator-permission API).
-5. **End-to-end refusal on a green, bot-approved PR (#2098, 2026-10-06): CI green with the guard success, 2 approvals (reviewer-codex, reviewer-claude); dev-worker-bot merge via merge, squash, rebase and force_merge -> HTTP 405 "Changed protected files". The PR was closed unmerged.
+5. **End-to-end refusal on a green, bot-approved PR (#2098, 2026-10-06).** CI green with the guard success, 2 approvals (reviewer-codex, reviewer-claude); dev-worker-bot merge via merge, squash, rebase and force_merge -> HTTP 405 "Changed protected files". The PR was closed unmerged.
+   **Added patterns (#2099):** the PR flagged the 3 added patterns (ADR-034, `install-uv.sh`,
+   `with-retry.sh`) and not the control. All 26 patterns are now proven.
 6. Controls still to record: the **owner path** (an admin merge of the Phase 2a/3 PRs) and the
    **unrelated-PR control** (the next non-protected merge goes through the existing automation).
 7. A red guard (a forbidden setting, e.g. `gatekeeper.serviceAuth.composite.enabled: true` in
@@ -222,13 +247,14 @@ or confirm it through a non-shared identity (next section).
 
 ## D2 and D3: owner acceptance records
 
-The owner must explicitly accept, in the ADR:
+The owner decided D2 and D3 directly in the session on 2026-10-06, outside the shared login (the
+ADR records them; see "How to record" below). The decisions:
 
-- **D2, residual bypasses** that stay bot-approvable after Phase 0: unprotected gatekeeper modules
+- **D2: ACCEPTED (2026-10-06), together with the stale-token revocation below.** Residual bypasses that stay bot-approvable after Phase 0: unprotected gatekeeper modules
   (`routes.py`, `helpers.py`, the rest of `infra/gatekeeper/**`), `ailab.yaml` digest pins and `ci.yml`,
   `build.yml` (including `/release-build`), `scripts/ci/reviewed-release-build.py`,
   `protect-ailab-images.yml`, provenance of `ailab`-family tags, and the ailab Flux cluster-admin
-  path into `strive-ailab`. Otherwise B does not activate.
+  path into `strive-ailab`.
 
   **Platform-side Flux residual:** platform Flux Kustomizations without `serviceAccountName` and
   cluster-admin controllers apply whatever a bot-approvable path puts in the tree, and
@@ -241,18 +267,23 @@ The owner must explicitly accept, in the ADR:
   - `cloud-power` (Secret `cloud-power/cloud-power-gitea`; write:organization);
   - `agentforge-ui` (scope `all`; location outside the cluster/OpenBao, unmapped);
   - `reviewbot-hook-check` (read:organization) and `forge-actions-release` (write:package);
-  - about 20 stale per-session `chifor` tokens (e.g. `pr487-*`, `claude-session-*`, `cp-all` with
-    scope `all`).
+  - 20 stale `chifor` tokens unused for 14+ days were **revoked** (ids 9 25 30 31 76 77 84 85 87 100
+    160 161 162 163 176 178 179 180 189 202, including `cp-all` with scope `all`). The 9 remaining
+    `chifor` tokens are a follow-up (migrate to bot identities, then revoke): `cc-admin-20260913`,
+    `ci-rerun-watchdog`, `reviewbot-hook-check`, `forge-actions-release`, `cloud-power-drain`,
+    `cloud-power-drain-pr`, `agentforge-ui`, `cloud-ci-session-20260923`, and the operator's
+    temporary `phase0-setup` (deleted after the owner merges).
 
-  Recommended: migrate these to bot identities and revoke the stale tokens.
-- **D3, svc-harness authority**: the cross-tenant `client_credentials` authority (F1) and the
-  plain-HTTP replay window on the harness-to-gatekeeper hop remain. Either accept deferring a
-  per-entry `allowed_grant_types` restriction and transport encryption, or make grant-type
-  restriction a pre-flip item.
+- **D3: RESTRICT PRE-FLIP (decided 2026-10-06).** Gatekeeper supports a per-audience `grant_types`
+  list. `svc-harness` gets `svc-mcp: [client_credentials, token_exchange]` and `[token_exchange]`
+  for `svc-integration`, `svc-airlock`, `svc-workflow`, `svc-knowledge`, `svc-profile`,
+  `svc-notification` and `svc-digest`. A harness audit found `client_credentials` used only for the
+  `svc-mcp` capability publish; delegation issue and redeem require `token_exchange`. The plain-HTTP
+  replay window on the harness-to-gatekeeper hop remains a follow-up.
   **Identity boundary:** any pod in `strive-ailab` that runs as ServiceAccount `harness` with a
   projected token for audience `strive-gatekeeper` holds the svc-harness identity.
 
-**D2/D3 acceptance must be recorded BEFORE Phase 3.**
+**D2/D3 acceptance must be recorded BEFORE Phase 3** (decided; the ADR record is still to be written).
 
 **How to record, through a non-shared channel.** The acceptance must not be authored from the shared
 `chifor` login that workers could have used. Either (a) commit or approve the ADR text as a distinct
@@ -280,7 +311,8 @@ logs); the e2e lane passes; `report-ailab-pin-drift` shows 0 torn.
 1. A k8s mint with a complete request; assert `sub` and `azp` in the minted JWT.
 2. Refusals: `svc-deepagent` with the harness Bearer gives 401 (no fallback); a second k8s entry
    claimed with the harness token gives 401 (precheck, generic message); a wrong-audience token gives
-   401; no token gives 401.
+   401; no token gives 401; a `client_credentials` request from the harness token for a non-`svc-mcp`
+   audience (e.g. `svc-workflow`) gives 403 `unauthorized_client`.
 3. #2092's own checks: Ready, migrate completed, 401 rather than 302, the `@api` journeys, 0 torn.
 4. **On any failure, darken the harness** (scale to 0 or `enabled: false`; deleting the pod does not
    revoke, because `Recreate` brings up a fresh valid identity).
