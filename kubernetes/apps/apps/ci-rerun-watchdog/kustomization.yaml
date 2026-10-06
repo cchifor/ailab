@@ -4,7 +4,8 @@ kind: Kustomization
 namespace: ci-rerun-watchdog
 resources:
   - namespace.yaml
-  # SOPS (age): the Gitea PAT the watchdog reads runs/jobs/runners with and POSTs reruns with.
+  # SOPS (age): the read-only Gitea PAT the watchdog reads runs/jobs/runners with. It cannot POST
+  # reruns: DRY_RUN=false needs a separate write token (secret.sops.yaml.example).
   # Rotation = mint a new token (secret.sops.yaml.example has the command), re-encrypt, commit.
   - secret.sops.yaml # SOPS (age): Gitea token org-ops-watchdog-20261006 for org-ops-bot (non-admin org owner), scopes read:organization,read:repository
   - rbac.yaml # the state ConfigMap is created at runtime by the pod - not in git (see rbac.yaml)
