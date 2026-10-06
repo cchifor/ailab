@@ -198,7 +198,8 @@ prerequisite is live.
 1. Complete D1.
 2. **Platform PR: the authority guard.** Add `.github/workflows/s2s-authority-guard.yml` and its
    script. This PR merges *before* the protection in step 3 is applied.
-   - It renders the ailab manifests with all three values files.
+   - It renders the ailab manifests with the `valuesFiles` listed in `helmrelease.yaml`: two
+     today, three after Phase 3. `ailab-s2s-registry.yaml` is optional until it is appended.
    - It fails when any of these is set outside `ailab-s2s-registry.yaml`, whether in values
      keys, `env`/`extraEnv`, or rendered volumes/volumeMounts that land a file on either
      registry path:
@@ -207,7 +208,10 @@ prerequisite is live.
      - the `SVC_AUTH_BACKEND`, `SERVICE_REGISTRY_EXTRAS_PATH` or `SERVICE_REGISTRY_PATH` env;
      - the TokenReview audience;
      - `gatekeeper.envFromGatekeeper.secretName`;
-     - `gatekeeper.externalSecret.{enabled,storeRef,refMap.service-registry}`.
+     - `gatekeeper.externalSecret.enabled: true`, `gatekeeper.externalSecret.storeRef`, or
+       `gatekeeper.externalSecret.refMap.service-registry`. The existing
+       `externalSecret: { enabled: false }` at `ailab.yaml:177` is allowed: it is the setting
+       that keeps the SOPS base registry.
    - Fixed chart defaults are allowed.
    - It has no `paths:` filter, so it reports on every PR.
    - On today's `main` (no extras, chart-default backend) it passes.
