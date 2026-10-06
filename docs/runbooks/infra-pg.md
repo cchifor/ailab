@@ -151,9 +151,11 @@ env, `bootstrap.py:66`, so a stale env re-applies the OLD value):
    ```
 3. Re-run the bootstrap Job (it picks up the new password at startup) and confirm it applied
    ("role harness ..." in its log, and no "not rendered yet"):
-   `kubectl --context admin@ai -n strive-ailab delete job strive-pg-harness-bootstrap`; Flux
-   re-applies it (force annotation, `ttlSecondsAfterFinished` loop) with the new Secret in its env.
-   Then `kubectl --context admin@ai -n strive-ailab logs job/strive-pg-harness-bootstrap`.
+   `kubectl --context admin@ai -n strive-ailab delete job strive-pg-harness-bootstrap`. The Job is
+   recreated on the next Flux reconcile (up to 10 min), with the new Secret in its env; or trigger it
+   now by annotating the `strive-pg-harness` Kustomization with `reconcile.fluxcd.io/requestedAt`
+   (a fresh timestamp value). Check that the new Job's `creationTimestamp` is after the sync, then
+   `kubectl --context admin@ai -n strive-ailab logs job/strive-pg-harness-bootstrap`.
 4. Restart the harness and wait for `/ready`.
 
 Until step 3 completes the database still holds the old password, and until step 4 the harness
@@ -163,6 +165,14 @@ holds an old connection; do not skip either.
 Postgres, which breaks the running harness's DSN. Put the old value back first. It is recoverable
 from the live Secret `strive-pg-harness-dsn` (`database-url`, owner-readable) until the next
 ExternalSecret refresh overwrites it, so read it BEFORE the next sync, or from the harness pod's
-`HARNESS_DATABASE_URL`: `bao kv put -mount=af strive/pg-harness password=-` before the provision
-Job runs, or `bao kv patch` it after; then follow the rotation order above (steps 2-4) so both
+`HARNESS_DATABASE_URL`. Recover it WITHOUT echoing it (the password never reaches the terminal):
+
+```sh
+kubectl --context admin@ai -n strive-ailab get secret strive-pg-harness-dsn -o jsonpath='{.data.database-url}' \
+  | base64 -d \
+  | python3 -c "import sys,urllib.parse as u; print(u.urlsplit(sys.stdin.read().strip()).password, end='')" \
+  | bao kv put -mount=af strive/pg-harness password=-
+```
+
+Run it before the provision Job runs (or use `bao kv patch` after); then follow the rotation order above (steps 2-4) so both
 ExternalSecrets, the role and the harness converge. `openbao-recovery.md` lists this path.
