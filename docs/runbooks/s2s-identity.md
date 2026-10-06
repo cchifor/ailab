@@ -204,7 +204,7 @@ isolate the protected-files check, so protected-file detection is read from the 
 4. **Same permission class.** The reviewer bots that actually merge (`reviewer-codex`,
    `reviewer-claude`) have the same permission class as `dev-worker-bot` (write, non-admin; verified
    with the collaborator-permission API).
-5. **End-to-end refusal on a green, bot-approved PR (#2098): <pending, recorded by the operator>.**
+5. **End-to-end refusal on a green, bot-approved PR (#2098, 2026-10-06): CI green with the guard success, 2 approvals (reviewer-codex, reviewer-claude); dev-worker-bot merge via merge, squash, rebase and force_merge -> HTTP 405 "Changed protected files". The PR was closed unmerged.
 6. Controls still to record: the **owner path** (an admin merge of the Phase 2a/3 PRs) and the
    **unrelated-PR control** (the next non-protected merge goes through the existing automation).
 7. A red guard (a forbidden setting, e.g. `gatekeeper.serviceAuth.composite.enabled: true` in
