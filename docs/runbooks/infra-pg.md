@@ -90,10 +90,46 @@ unreachable Prometheus — pauses it (exit 2). Identity: the non-admin Gitea use
   Acceptance = this stays near zero (nothing older than cutoff + 48 h), not a target `total_count`.
 - Stop a running execution: `kubectl -n gitea delete job <job>`; stop the schedule:
   `kubectl -n gitea patch cronjob gitea-actions-run-retention -p '{"spec":{"suspend":true}}'`.
-- Deleted rows come back as dead tuples that autovacuum reuses in-file; the on-disk 12 GB only shrinks
-  with a `VACUUM FULL`/`pg_repack` window (separate decision).
+- Deleted rows come back as dead tuples that autovacuum reuses in-file; the on-disk size only shrinks
+  with a `VACUUM FULL` window — see the next section.
 - Rate changes (`MAX_DELETES_PER_RUN`, `DELETE_PAUSE_SECONDS`) go through git, from measured WAL per
   deletion (`pg_current_wal_lsn()` before/after a canary; slot `safe_wal_size` must not dip during it).
+
+## Reclaiming `action_task` TOAST bloat (2026-10-06)
+
+Gitea keeps a task's log-line offsets in `action_task.log_indexes` and REWRITES the whole value on every
+runner log flush (~1/s) while the task runs. A job that logs 1M lines carries ~4.6 MB of indexes, so it
+leaves GBs of dead TOAST per hour. On 2026-10-06 `action_task` was 20 GB on disk for 1.7 GB of live rows
+and drove `CNPGVolumeNearlyFull` (87%). The source was cchifor/platform's e2e/load jobs printing docker
+compose's TTY progress display (~98% of their 0.3-1.2M lines; fixed there with `--progress=plain`).
+Autovacuum makes dead space reusable in-file but never returns it to the volume.
+
+- Check (primary, database `gitea`):
+  ```sql
+  select pg_size_pretty(pg_total_relation_size('action_task')) as on_disk,
+         (select pg_size_pretty(sum(pg_column_size(t.*))::bigint) from action_task t) as live;
+  -- who logs the most (a repeat offender is a log-spam bug in that repo's workflow, fix it there)
+  select t.id, r.name, j.name, t.log_length from action_task t join repository r on r.id = t.repo_id
+    join action_run_job j on j.id = t.job_id order by t.log_length desc limit 10;
+  ```
+- Reloptions, set live on 2026-10-06 so autovacuum recycles the churn sooner and unthrottled:
+  ```sql
+  ALTER TABLE action_task SET (toast.autovacuum_vacuum_scale_factor = 0.02, toast.autovacuum_vacuum_cost_delay = 0);
+  ```
+  They live in the catalog, not in git: a Gitea migration that recreates `action_task`, or a restore from
+  a logical dump, drops them. Check with `select reloptions from pg_class where oid = (select reltoastrelid
+  from pg_class where relname = 'action_task');` after either and re-apply.
+- Reclaim = `VACUUM FULL action_task` on the PRIMARY. It holds ACCESS EXCLUSIVE on `action_task` for the
+  rewrite (runner log/state calls block, then retry), writes a new copy about the live size, and as much
+  WAL again, which the replica must receive within the 1 GB slot cap. Preconditions: free space ≥ 3x the
+  live size on BOTH instances, the replica streaming, no `CNPG*` alert firing.
+  ```sql
+  SET lock_timeout = '5s';   -- never QUEUE for the lock: a waiting ACCESS EXCLUSIVE blocks every reader behind it
+  SET statement_timeout = '15min';
+  VACUUM (FULL, VERBOSE) action_task;
+  ```
+  Watch `select pg_wal_lsn_diff(sent_lsn, flush_lsn) from pg_stat_replication` and the slot's
+  `safe_wal_size` while it runs. A `lock_timeout` failure is harmless — retry in a quieter minute.
 
 ## strive-pg (the PLATFORM's cluster, not this one): the harness role and database
 
