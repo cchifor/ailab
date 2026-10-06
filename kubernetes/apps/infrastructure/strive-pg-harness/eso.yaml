@@ -88,7 +88,8 @@ spec:
 # This Secret feeds the platform harness's HARNESS_DATABASE_URL. Its ONLY key is `database-url`,
 # enforced by mergePolicy: Replace plus the single template entry (no raw `password` key leaks in).
 # Owned by ailab, replacing the platform's SOPS harness-secrets for this value. Same store, same
-# least-privilege read on af/data/strive/pg-harness; the value is hex, so no URL-escaping is needed.
+# least-privilege read on af/data/strive/pg-harness. The value is 48 hex characters (that invariant
+# is still the rule), so no URL-escaping is needed; `urlquery` in the template is defence-in-depth only.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
@@ -104,7 +105,7 @@ spec:
       engineVersion: v2
       mergePolicy: Replace
       data:
-        database-url: "postgres://harness:{{ .password }}@strive-pg-rw.strive-ailab.svc.cluster.local:5432/harness"
+        database-url: "postgres://harness:{{ .password | urlquery }}@strive-pg-rw.strive-ailab.svc.cluster.local:5432/harness"
   data:
     - secretKey: password
       remoteRef: { key: strive/pg-harness, property: password }

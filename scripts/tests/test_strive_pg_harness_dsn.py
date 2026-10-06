@@ -11,7 +11,7 @@ import yaml
 
 ESO = pathlib.Path(__file__).resolve().parents[2] / "kubernetes/apps/infrastructure/strive-pg-harness/eso.yaml"
 DSN = (
-    "postgres://harness:{{ .password }}"
+    "postgres://harness:{{ .password | urlquery }}"
     "@strive-pg-rw.strive-ailab.svc.cluster.local:5432/harness"
 )
 

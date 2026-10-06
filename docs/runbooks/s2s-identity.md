@@ -131,7 +131,8 @@ effective one. The PATCH MERGES with the live rule: it unions the live `protecte
 ```sh
 G=https://git.chifor.me/api/v1/repos/cchifor/platform
 curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections            # find the effective rule for main
-curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/main > kubernetes/infra/_out/main-protection-before.json
+RULE=<rule_name of the effective rule from the output above>   # often `main`, but use what the output shows
+curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/$RULE > kubernetes/infra/_out/main-protection-before.json
 cat > kubernetes/infra/_out/patterns.txt <<'EOF'
 deploy/helm/values/providers/ailab-s2s-registry.yaml
 deploy/gitops/flux/clusters/ailab/**
@@ -179,7 +180,7 @@ print(json.dumps({'protected_file_patterns': ';'.join(pats),
 PYEOF
 )
 curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: application/json" \
-  $G/branch_protections/main -d "$BODY"
+  $G/branch_protections/$RULE -d "$BODY"
 ```
 
 Re-read the rule and diff it against `kubernetes/infra/_out/main-protection-before.json` (only those
