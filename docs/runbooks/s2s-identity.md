@@ -170,7 +170,8 @@ Expect about 19 owner reviews a month.
 
 ### Re-apply procedure
 
-Use it to restore or extend the rule. It needs a **repo-admin** token for `cchifor/platform` (the
+Use it to restore or extend the rule. If its first lines print `not an ailab checkout` or `STOP`,
+nothing after them may run: `cd` into an ailab checkout and start again. It needs a **repo-admin** token for `cchifor/platform` (the
 owner's, held outside the workers). Gitea applies only the FIRST matching rule, so patch the
 effective one. The PATCH MERGES with the live rule: it unions the live `protected_file_patterns` and
 `status_check_contexts` with the documented ones and never replaces them.
@@ -185,12 +186,14 @@ case "$(git remote get-url origin 2>/dev/null)" in
   *) echo "not an ailab checkout: cd into one first" >&2; OUT= ;;
 esac
 [ -n "$OUT" ] && git -C "${OUT%/kubernetes/infra/_out}" check-ignore -q kubernetes/infra/_out/x \
-  && mkdir -p "$OUT" || echo "STOP: _out/ is not a gitignored ailab path" >&2
-B="$OUT/main-protection-before.json"
+  && mkdir -p "$OUT" || { echo "STOP: _out/ is not a gitignored ailab path; do not run the rest" >&2; OUT=; }
+# Every later use of OUT goes through ${OUT:?}: with OUT cleared above, each command aborts instead of
+# writing to /, and the PATCH is skipped because BODY stays empty.
+B="${OUT:?refused: not a gitignored ailab checkout}/main-protection-before.json"
 curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections            # find the effective rule for main
 RULE=<rule_name of the effective rule from the output above>   # often `main`, but use what the output shows
-curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/$RULE > "$B"
-cat > "$OUT/patterns.txt" <<'EOF'
+curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/$RULE > "${B:?refused}"
+cat > "${OUT:?refused: not a gitignored ailab checkout}/patterns.txt" <<'EOF'
 deploy/helm/values/providers/ailab-s2s-registry.yaml
 deploy/gitops/flux/clusters/ailab/**
 deploy/helm/charts/gatekeeper/**
@@ -219,7 +222,7 @@ scripts/ci/install-uv.sh
 scripts/ci/with-retry.sh
 EOF
 PY=python3   # python3 on Linux hosts; use PY=python in Git Bash
-BODY=$($PY - "$OUT/patterns.txt" "$B" <<'PYEOF'
+BODY=$($PY - "${OUT:?refused}/patterns.txt" "${B:?refused}" <<'PYEOF'
 import json, sys
 want = [l.strip() for l in open(sys.argv[1], encoding='utf-8') if l.strip()]
 live = json.load(open(sys.argv[2], encoding='utf-8'))
@@ -235,7 +238,7 @@ print(json.dumps({'protected_file_patterns': ';'.join(pats),
                   'status_check_contexts': ctx}))
 PYEOF
 )
-curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: application/json" \
+[ -n "$BODY" ] && curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: application/json" \
   $G/branch_protections/$RULE -d "$BODY"
 ```
 
