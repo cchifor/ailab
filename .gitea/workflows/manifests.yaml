@@ -79,7 +79,7 @@ jobs:
         run: python3 scripts/tests/test-relay-rollout-backup.py
 
       - name: Local embedding serving and route contracts
-        run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak
+        run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak scripts.tests.test_strive_pg_harness_dsn
 
       # The env-reaper's shell helpers under the DaemonSet's OWN image (busybox ash, digest-pinned in
       # the manifest) against a synthetic /proc: identity chain, PID reuse, evidence timeout,

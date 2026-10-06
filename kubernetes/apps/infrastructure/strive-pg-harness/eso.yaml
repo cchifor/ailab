@@ -71,13 +71,40 @@ metadata:
 spec:
   # A rotation (`bao kv patch -mount=af strive/pg-harness password=...`) reaches the Secret within
   # this interval and the database on the bootstrap Job's next run (its TTL loop). The harness
-  # service's own DSN is a separate Secret (the platform's harness-secrets) and must be rotated in
-  # the same change -- see docs/runbooks/infra-pg.md, section "strive-pg (the PLATFORM's cluster ...)".
+  # service's DSN is the sibling ExternalSecret strive-pg-harness-dsn below, rendered from the same
+  # OpenBao value; rotate in the order given in docs/runbooks/infra-pg.md (section "strive-pg (the
+  # PLATFORM's cluster ...)").
   refreshInterval: 1h
   secretStoreRef: { name: strive-pg-harness-store, kind: SecretStore }
   target:
     name: strive-pg-harness
     creationPolicy: Owner
+  data:
+    - secretKey: password
+      remoteRef: { key: strive/pg-harness, property: password }
+---
+# The harness service's DSN, rendered from the SAME OpenBao value as the ExternalSecret above, so the
+# role password (bootstrap Job) and the DSN (this Secret) cannot drift apart by hand-editing.
+# This Secret feeds the platform harness's HARNESS_DATABASE_URL. Its ONLY key is `database-url`,
+# enforced by mergePolicy: Replace plus the single template entry (no raw `password` key leaks in).
+# Owned by ailab, replacing the platform's SOPS harness-secrets for this value. Same store, same
+# least-privilege read on af/data/strive/pg-harness; the value is hex, so no URL-escaping is needed.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: strive-pg-harness-dsn
+  namespace: strive-ailab
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: strive-pg-harness-store, kind: SecretStore }
+  target:
+    name: strive-pg-harness-dsn
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      mergePolicy: Replace
+      data:
+        database-url: "postgres://harness:{{ .password }}@strive-pg-rw.strive-ailab.svc.cluster.local:5432/harness"
   data:
     - secretKey: password
       remoteRef: { key: strive/pg-harness, property: password }
