@@ -105,15 +105,19 @@ gatekeeper loads at startup. Existing SOPS identities are untouched.
        each uncached review. The harness token goes only in `spec.token`, with
        `spec.audiences: ["strive-gatekeeper"]`. Keep CA verification and a bounded timeout.
 3. Mapping of results:
-   - A precheck failure, or a completed review with `authenticated=false` or with audiences
-     missing `strive-gatekeeper`, gives a **generic 401**. Every pre-authentication failure
+   - A precheck failure, or a completed review (empty `status.error`) with `authenticated=false`
+     or with audiences missing `strive-gatekeeper`, gives a **generic 401**. Every pre-authentication failure
      shares one message, so registry membership cannot be probed.
    - A completed, authenticated review whose username does not equal the requested entry's
      `k8s_subject` gives **403** `unauthorized_client`. The `sub` precheck normally catches
      this first, so only a mocked review reaches it (C5′).
-   - Any non-2xx from the API (including 401, 403 and 429), a transport error, a timeout, a
-     malformed response, or limiter saturation gives **503** `temporarily_unavailable` with
-     `Retry-After`.
+   - Any of these gives **503** `temporarily_unavailable` with `Retry-After`:
+     - any non-2xx from the API, including 401, 403 and 429;
+     - a 2xx whose `status.error` is non-empty, because the token could not be checked;
+     - a transport error, a timeout, or a malformed response;
+     - limiter saturation.
+
+     The `status.error` check runs **before** `authenticated` is read.
      - Saturation returns that 503 immediately, without waiting for capacity.
      - These outcomes are never cached and never extend a cache entry.
      - Each one increments a metric.
@@ -298,6 +302,8 @@ prerequisite is live.
     - subject mismatch, as a mocked 403;
     - API 401, 403, 429 and 5xx, a timeout and a malformed response, each giving 503 and not
       cached;
+    - HTTP 200 with `authenticated=false` and `status.error` set gives 503, is not cached, and
+      never reaches the negative cache;
     - limiter saturation giving 503;
     - the same token claiming another client is rejected on a cache hit;
     - expiry at `min(+60 s, exp)` and rejection at `exp`;
