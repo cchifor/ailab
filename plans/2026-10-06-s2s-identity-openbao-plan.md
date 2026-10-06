@@ -196,8 +196,9 @@ prerequisite is live.
 
 ### Phase 0: identity separation, the guard, and the owner gate (tested before anything else lands)
 1. Complete D1.
-2. **Platform PR: the authority guard.** Add `.github/workflows/s2s-authority-guard.yml` and its
-   script. This PR merges *before* the protection in step 3 is applied.
+2. **Platform PR: the authority guard.** Add `.github/workflows/s2s-authority-guard.yml` and
+   its script `scripts/ci/check-s2s-authority.py`, following the `scripts/ci/check-ailab-pins.py`
+   convention. This PR merges *before* the protection in step 3 is applied.
    - It renders the ailab manifests with the `valuesFiles` listed in `helmrelease.yaml`: two
      today, three after Phase 3. `ailab-s2s-registry.yaml` is optional until it is appended.
    - It fails when any of these is set outside `ailab-s2s-registry.yaml`, whether in values
@@ -226,7 +227,8 @@ prerequisite is live.
    - `infra/gatekeeper/src/app/{main,__main__}.py`
    - `infra/gatekeeper/src/app/cli/**`
    - `infra/gatekeeper/{Dockerfile,pyproject.toml,uv.lock}`
-   - `.github/workflows/s2s-authority-guard.yml` and its script
+   - `.github/workflows/s2s-authority-guard.yml`
+   - `scripts/ci/check-s2s-authority.py`
    - `scripts/ci/{check,list}-ailab-pins.py`
 
    That is about 9 owner reviews a month: the union of 30-day commits touching this set.
