@@ -126,19 +126,84 @@ Before the provision Job has run, the ExternalSecret is not Ready and the bootst
 "not rendered yet" and changes nothing. Both are harmless: the `strive-pg-harness` Flux
 Kustomization is `wait: false`.
 
-**Wiring the harness service to it (the owner's H9.1 database step).** The platform's harness chart
-reads its DSN from its own Secret, `harness-secrets` key `database-url` (a Flux-decrypted SOPS file
-in the platform repo for ailab). Read the password once with a breakglass/root token,
-`bao kv get -mount=af -field=password strive/pg-harness`, and set
-`database-url: postgres://harness:<password>@strive-pg-rw.strive-ailab.svc.cluster.local:5432/harness`.
-The value is hex, so it needs no URL-escaping.
+**Wiring the harness service to it (the owner's H9.1 database step).** The harness's DSN is the
+Secret `strive-pg-harness-dsn` (key `database-url` ONLY), rendered by ailab's ExternalSecret of the
+same name (`strive-pg-harness/eso.yaml`) from the same OpenBao value as the role password:
+`postgres://harness:<password>@strive-pg-rw.strive-ailab.svc.cluster.local:5432/harness`. The
+platform's harness chart consumes it as `HARNESS_DATABASE_URL`; the SOPS `harness-secrets` is no
+longer the source. Check it: `kubectl --context admin@ai -n strive-ailab get externalsecret
+strive-pg-harness strive-pg-harness-dsn` (both `SecretSynced`). The owner may read the Secret;
+dev workers cannot. Identity activation (S2S, projected tokens) is in
+[`s2s-identity.md`](s2s-identity.md).
 
-**Rotating.** `bao kv patch -mount=af strive/pg-harness password=-` (value on stdin), then update
-`harness-secrets` in the same change. ESO refreshes within 1 h and the next bootstrap run sets the
-new password (it only writes one when the current Secret value does not already log in). Until the
-DSN matches, the harness cannot connect.
+**Rotating the password. The order matters** (the bootstrap Job reads the password from its startup
+env, `bootstrap.py:66`, so a stale env re-applies the OLD value):
+
+1. `bao kv patch -mount=af strive/pg-harness password=-` (value on stdin). Keep the invariant:
+   exactly 48 hex characters (no URL-escaping needed in the DSN).
+2. Force-sync BOTH ExternalSecrets and wait for a FRESH successful reconcile of each (compare
+   `status.refreshTime` before and after, and `Ready=True`):
+   ```sh
+   for es in strive-pg-harness strive-pg-harness-dsn; do
+     kubectl --context admin@ai -n strive-ailab annotate externalsecret $es force-sync=$(date +%s) --overwrite
+   done
+   kubectl --context admin@ai -n strive-ailab get externalsecret strive-pg-harness strive-pg-harness-dsn \
+     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.refreshTime}{"\n"}{end}'
+   ```
+3. Re-run the bootstrap Job (it picks up the new password at startup) and confirm it applied
+   ("role harness ..." in its log, and no "not rendered yet"):
+   `kubectl --context admin@ai -n strive-ailab delete job strive-pg-harness-bootstrap`. The Job is
+   recreated on the next Flux reconcile (up to 10 min), with the new Secret in its env; or trigger it
+   now by annotating the `strive-pg-harness` Kustomization with `reconcile.fluxcd.io/requestedAt`
+   (a fresh timestamp value). Check that the new Job's `creationTimestamp` is after the sync, then
+   `kubectl --context admin@ai -n strive-ailab logs job/strive-pg-harness-bootstrap`.
+4. Restart the harness and wait for `/ready`.
+
+Until step 3 completes the database still holds the old password, and until step 4 the harness
+holds an old connection; do not skip either.
 
 **After an OpenBao wipe** the provision Job GENERATES A NEW value and the bootstrap Job writes it into
-Postgres, which breaks the harness DSN. Put the old value back first (it is in `harness-secrets`):
-`bao kv put -mount=af strive/pg-harness password=-` before the provision Job runs, or `bao kv patch`
-it after; the bootstrap Job then converges back. `openbao-recovery.md` lists this path.
+Postgres, which breaks the running harness's DSN. Put the old value back first. Two places still hold
+it, and only one of them is safe:
+
+- the running harness pod's `HARNESS_DATABASE_URL`, which predates the wipe for as long as the pod has
+  not restarted (PREFERRED);
+- the Secret `strive-pg-harness-dsn` (`database-url`, owner-readable), which is only the old value
+  until the next ExternalSecret refresh. Once the provision Job has re-run and the ExternalSecret has
+  refreshed, the Secret holds the NEW random password, and "recovering" it would write the wrong value
+  back.
+
+The script reads both without echoing, refuses when they differ, and refuses to trust the Secret alone
+unless you confirm it predates the wipe:
+
+```sh
+set -o pipefail
+parse='
+import sys, urllib.parse as u
+pw = u.urlsplit(sys.stdin.read().strip()).password
+if not pw:
+    sys.exit("no password in the DSN")
+sys.stdout.write(u.unquote(pw))'
+pod_pw=$(kubectl --context admin@ai -n strive-ailab exec deploy/harness -- printenv HARNESS_DATABASE_URL 2>/dev/null | python3 -c "$parse") || pod_pw=
+sec_pw=$(kubectl --context admin@ai -n strive-ailab get secret strive-pg-harness-dsn -o jsonpath='{.data.database-url}' | base64 -d | python3 -c "$parse") || sec_pw=
+pw=
+if [ -n "$pod_pw" ] && [ -n "$sec_pw" ] && [ "$pod_pw" != "$sec_pw" ]; then
+  echo 'pod and Secret DSN passwords DIFFER: the Secret was already regenerated. Use the pod value (do not restart the pod) or restore from backup.' >&2
+elif [ -n "$pod_pw" ]; then
+  pw=$pod_pw
+elif [ -n "$sec_pw" ] && [ "${I_CHECKED_SECRET_PREDATES_WIPE:-}" = 1 ]; then
+  pw=$sec_pw
+elif [ -n "$sec_pw" ]; then
+  echo 'only the Secret is readable: set I_CHECKED_SECRET_PREDATES_WIPE=1 once you have confirmed it predates the wipe' >&2
+else
+  echo 'no password recoverable from the pod or the Secret' >&2
+fi
+if [ -n "$pw" ]; then printf '%s' "$pw" | bao kv put -mount=af strive/pg-harness password=-; fi
+unset pw pod_pw sec_pw parse
+```
+
+(`python3` on Linux hosts; use `python` in Git Bash. The deployment name `harness` is the platform
+chart's; adjust if it differs.) The password lives only in shell variables and is never echoed.
+
+Run it before the provision Job runs (or use `bao kv patch` after); then follow the rotation order above (steps 2-4) so both
+ExternalSecrets, the role and the harness converge. `openbao-recovery.md` lists this path.
