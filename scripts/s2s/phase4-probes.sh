@@ -170,20 +170,15 @@ freeze_commands() {
 EOF
 }
 
-# Resume = the Kustomization FIRST, wait for it to reconcile, then the HelmRelease only if it is
-# still suspended. The Kustomization's re-apply of the HelmRelease from git clears the hand-set
-# suspend, so helm-controller upgrades the consistent new spec. Resuming the HelmRelease first could
-# upgrade a stale spec and, mid-rollback, bring the harness back before the reverted
-# helmrelease.yaml is applied.
+# Resume = scripts/s2s/flux-resume.sh, never by hand. It lands the platform commit through Flux,
+# with a gate at each step: the GitRepository fetched it; the Kustomization applied it; the
+# HelmRelease (un-suspended only if still suspended) upgraded to it. Un-suspending by hand can
+# re-apply a stale HelmRelease and, mid-rollback, bring the harness back before the revert lands.
 resume_commands() {
   cat <<EOF
-     (the Kustomization first: its re-apply clears the HelmRelease suspend, so Helm upgrades the new
-     spec from git; resuming the HelmRelease first can upgrade a stale spec and, mid-rollback, bring
-     the harness back before the reverted helmrelease.yaml is applied)
-       kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $FLUX_KUSTOMIZATION --type=merge -p '{"spec":{"suspend":false}}'
-       G=\$(kubectl --context $CONTEXT -n $FLUX_NS get kustomization $FLUX_KUSTOMIZATION -o jsonpath='{.metadata.generation}')
-       kubectl --context $CONTEXT -n $FLUX_NS wait kustomization/$FLUX_KUSTOMIZATION --for=jsonpath='{.status.observedGeneration}'="\$G" --timeout=10m
-       [ "\$(kubectl --context $CONTEXT -n $NS get helmrelease $HELMRELEASE -o jsonpath='{.spec.suspend}')" = true ] && kubectl --context $CONTEXT -n $NS patch helmrelease $HELMRELEASE --type=merge -p '{"spec":{"suspend":false}}'
+     (never by hand: it gates each step on the commit Flux actually fetched and applied: the source,
+     then the Kustomization, then the HelmRelease only if still suspended; see the script's header)
+       scripts/s2s/flux-resume.sh --after-$1
 EOF
 }
 
@@ -191,9 +186,8 @@ darken_commands() {
   freeze_commands
   cat <<EOF
   3. Make it durable: a platform PR setting \`harness.enabled: false\` in
-     deploy/helm/values/providers/ailab.yaml (revert #2092), merged. Only AFTER it has merged, resume, the
-     Kustomization first:
-$(resume_commands)
+     deploy/helm/values/providers/ailab.yaml (revert #2092), merged. Only AFTER it has merged, resume:
+$(resume_commands revert)
 EOF
 }
 
@@ -645,10 +639,9 @@ revocation_drill() {
       bad "revocation: only $streak consecutive refused rounds at the end of the observation (2 needed): the end state was not observed"
     fi
   fi
-  section "Restore, once the drill is over: the Kustomization first, then scale back"
-  resume_commands
+  section "Restore, once the drill is over (it lands platform main, then scales the harness to 1)"
+  resume_commands drill
   cat <<EOF
-       kubectl --context $CONTEXT -n $NS scale deployment/$HARNESS_DEPLOY --replicas=1
   then: scripts/s2s/phase4-probes.sh   (the full post-flip check again)
 EOF
 }

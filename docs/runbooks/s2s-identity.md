@@ -489,16 +489,10 @@ Make it durable with a platform PR setting `harness.enabled: false` in
 `deploy/helm/values/providers/ailab.yaml` (revert #2092). **Only after that PR has merged**, resume.
 This is a separate block, so pasting the freeze never un-freezes.
 
-Resume the Kustomization first, and wait for it to reconcile. Its re-apply of the HelmRelease from
-git clears the hand-set suspend, so Helm upgrades the new spec. Resume the HelmRelease only if it is
-still suspended after that. Resuming the HelmRelease first can upgrade a stale spec and, mid-rollback,
-bring the harness back before the reverted `helmrelease.yaml` is applied.
+Resume with `scripts/s2s/flux-resume.sh`, never by hand (see "Resuming the release" below):
 
 ```sh
-kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":false}}'
-G=$(kubectl --context admin@ai -n flux-system get kustomization platform-app -o jsonpath='{.metadata.generation}')
-kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="$G" --timeout=10m
-[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
+scripts/s2s/flux-resume.sh --after-revert   # optional: --sha <the revert's merge commit on platform main>
 ```
 
 - **Suspend both, the Kustomization first.** The Flux Kustomization `flux-system/platform-app`
@@ -509,6 +503,26 @@ kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=
   three-way merge puts `replicas: 1` back.
 - **What freezing costs.** It freezes every strive-ailab deploy, and everything else that
   `platform-app` applies, until both are resumed.
+- **Resuming the release** is `scripts/s2s/flux-resume.sh`, never a hand-typed un-suspend. Waiting
+  on the Kustomization's `observedGeneration` proves nothing: it also moves when suspend is toggled.
+  If the source still serves the pre-merge artifact, an un-suspended Kustomization re-applies the old
+  HelmRelease and clears its suspend. The script stops (exit 1) at the first gate that does not pass
+  within `PHASE4_RESUME_TIMEOUT_SECONDS` (default 600), and touches nothing after it. Its gates:
+  1. **The target.** `--sha`, else platform main now
+     (`git ls-remote https://git.chifor.me/cchifor/platform.git refs/heads/main`).
+  2. **The source.** It requests a reconcile of GitRepository `flux-system/platform`
+     (`reconcile.fluxcd.io/requestedAt`), then waits until `.status.artifact.revision` is
+     `main@sha1:<target>`. Without `--sha` a later main also counts: main is append-only, so it
+     descends from the target. Nothing is resumed before this.
+  3. **The Kustomization.** It un-suspends `platform-app`, then waits until
+     `.status.lastAppliedRevision` is `main@sha1:<target>` and Ready is True.
+  4. **The HelmRelease.** It un-suspends it only if `.spec.suspend` still reads true (the
+     Kustomization's re-apply normally clears it). Then it waits until Ready is True and
+     `.status.history[0].chartVersion` carries the target's first 12 hex.
+  5. **The end state.** With `--after-revert`, `deployment/harness` must be gone. With
+     `--after-drill`, it scales the harness to 1 and waits for the rollout.
+
+  `--dry-run` prints these exact commands without any call.
 - **Deleting the harness pod does not revoke.** The Deployment is `Recreate` and brings up a fresh,
   valid identity.
 - **Scaling to 0 does.** The projected token is bound to the pod; drill 4 measures how fast.
@@ -531,19 +545,12 @@ The owner runs these, with `K="kubectl --context admin@ai -n strive-ailab"`.
 - Run drills 1, 3 and 4 after the probes pass, in any order. Drill 2 deactivates the harness.
 - Drills 1, 2 and 4 take the harness out of service (the freeze block of the darken commands). Drill 1
   does it first: otherwise the harness would get 401s from the replica that refuses it.
-- **Restore the harness afterwards** (only once the drill is over):
-  1. Resume the Kustomization first, and wait for it to reconcile.
-  2. Resume the HelmRelease only if it is still suspended.
-  3. Scale back.
-  4. Run the full probes.
+- **Restore the harness afterwards** (only once the drill is over). `flux-resume.sh --after-drill`
+  lands the current platform main through the gates described under "Resuming the release", then
+  scales the harness back to 1. Then run the full probes.
 
 ```sh
-kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":false}}'
-G=$(kubectl --context admin@ai -n flux-system get kustomization platform-app -o jsonpath='{.metadata.generation}')
-kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="$G" --timeout=10m
-[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
-$K scale deployment/harness --replicas=1
-$K rollout status deployment/harness
+scripts/s2s/flux-resume.sh --after-drill
 scripts/s2s/phase4-probes.sh
 ```
 
@@ -609,16 +616,13 @@ $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
 ```
 
-**Only after the rollback PR has merged**, resume the Kustomization first. It applies the reverted
-`helmrelease.yaml` and, with it, clears the HelmRelease suspend, so Helm upgrades the rolled-back spec
-in one step. Resuming the HelmRelease first would upgrade the stale pre-rollback spec and bring the
-harness back. Then verify:
+**Only after the rollback PR has merged**, resume with `flux-resume.sh --after-revert`. It proves
+that the source fetched the merge and that the Kustomization applied the reverted `helmrelease.yaml`
+before the HelmRelease can move. Resuming by hand could upgrade the stale pre-rollback spec and bring
+the harness back. It also requires `deployment/harness` to be gone. Then verify:
 
 ```sh
-kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":false}}'
-G=$(kubectl --context admin@ai -n flux-system get kustomization platform-app -o jsonpath='{.metadata.generation}')
-kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="$G" --timeout=10m
-[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":false}}'
+scripts/s2s/flux-resume.sh --after-revert   # optional: --sha <the rollback PR's merge commit>
 $K rollout status deployment/gatekeeper --timeout=600s
 scripts/s2s/phase4-probes.sh --expect-refused
 kubectl --context admin@ai get clusterrole,clusterrolebinding strive-ailab-gatekeeper-tokenreview

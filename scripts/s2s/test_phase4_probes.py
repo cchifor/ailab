@@ -685,37 +685,31 @@ def assert_freeze(case, text, scale_to):
     _ordered(case, text, [KS_SUSPEND % "true", HR_SUSPEND % "true", SCALE % scale_to])
 
 
-KS_WAIT = "kubectl --context admin@ai -n flux-system wait kustomization/platform-app --for=jsonpath='{.status.observedGeneration}'="
-HR_IF_STILL_SUSPENDED = """[ "$(kubectl --context admin@ai -n strive-ailab get helmrelease strive -o jsonpath='{.spec.suspend}')" = true ] && """
+RESUME_REVERT = "scripts/s2s/flux-resume.sh --after-revert"
+RESUME_DRILL = "scripts/s2s/flux-resume.sh --after-drill"
 
 
-def assert_resume(case, text, scale_to=None):
-    """Resume = the Kustomization FIRST; wait for it to reconcile (its re-apply of the HelmRelease
-    from git clears the hand-set suspend, so helm-controller upgrades the CONSISTENT new spec); the
-    HelmRelease only if it is still suspended after that; then (after a drill) the scale.
-    Resuming the HelmRelease first could upgrade a stale spec and, mid-rollback, bring the harness
-    back before the reverted helmrelease.yaml is applied."""
-    needles = [KS_SUSPEND % "false", KS_WAIT, HR_IF_STILL_SUSPENDED + HR_SUSPEND % "false"]
-    if scale_to is not None:
-        needles.append(SCALE % scale_to)
-    _ordered(case, text, needles)
+def assert_resume(case, text, mode):
+    """A resume is scripts/s2s/flux-resume.sh, never a hand-typed un-suspend. That script gates each
+    step on the platform commit Flux actually fetched and applied (test_flux_resume.py)."""
+    case.assertIn(RESUME_REVERT if mode == "revert" else RESUME_DRILL, text)
+    case.assertNotIn('"suspend":false', text, "a hand-typed resume")
 
 
 def assert_freeze_then_resume(case, text, scale_to):
     assert_freeze(case, text, scale_to)
-    tail = text[text.index(SCALE % scale_to) :]
-    assert_resume(case, tail)
+    assert_resume(case, text[text.index(SCALE % scale_to) :], "revert")
 
 
 class RunbookFreezeOrder(unittest.TestCase):
     """The runbook's freezes suspend the Kustomization before the HelmRelease (observed 2026-10-06
-    17:22Z: a HelmRelease-only suspend was cleared by the next platform-app reconcile). Its resumes
-    release the Kustomization first, wait for it, and touch the HelmRelease only if still
-    suspended. A freeze and a resume never share a code fence, so pasting a freeze never un-freezes."""
+    17:22Z: a HelmRelease-only suspend was cleared by the next platform-app reconcile). Every resume
+    is scripts/s2s/flux-resume.sh: no command block un-suspends by hand. A freeze and a resume never
+    share a code fence, so pasting a freeze never un-freezes."""
 
     @staticmethod
     def flux_lines(block):
-        return [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization platform-app" in l or "wait kustomization/platform-app" in l]
+        return [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization platform-app" in l]
 
     def blocks(self):
         text = RUNBOOK.read_text(encoding="utf-8")
@@ -726,39 +720,36 @@ class RunbookFreezeOrder(unittest.TestCase):
         self.assertTrue(0 <= j < len(lines), "no line %+d from %r in:\n%s" % (step, lines[i], block))
         return lines[j]
 
-    def test_freezes_and_resumes_are_ordered_and_apart(self):
+    def test_freezes_are_ordered_and_resumes_are_the_script(self):
         freezes = resumes = 0
         for block in self.blocks():
+            self.assertNotIn('"suspend":false', block, "a hand-typed resume; use flux-resume.sh:\n" + block)
             lines = self.flux_lines(block)
             has_freeze = any('"suspend":true' in l for l in lines)
-            has_resume = any('"suspend":false' in l for l in lines)
+            has_resume = "flux-resume.sh" in block
             self.assertFalse(has_freeze and has_resume, "a freeze and a resume in ONE fence:\n" + block)
+            resumes += block.count("flux-resume.sh --after-")
             for i, line in enumerate(lines):
-                if "patch helmrelease strive" in line and '"suspend":true' in line:
+                if "patch helmrelease strive" in line:
                     freezes += 1
                     before = self.neighbour(lines, i, -1, block)
                     self.assertTrue("patch kustomization platform-app" in before and '"suspend":true' in before, block)
-                if "patch kustomization platform-app" in line and '"suspend":true' in line:
+                if "patch kustomization platform-app" in line:
                     after = self.neighbour(lines, i, +1, block)
                     self.assertTrue("patch helmrelease strive" in after and '"suspend":true' in after, block)
-                if "patch kustomization platform-app" in line and '"suspend":false' in line:
-                    resumes += 1
-                    self.assertIn("wait kustomization/platform-app", self.neighbour(lines, i, +1, block), block)
-                    hr = self.neighbour(lines, i, +2, block)
-                    self.assertTrue("patch helmrelease strive" in hr and '"suspend":false' in hr, block)
-                    self.assertIn("= true ] &&", hr, "the HelmRelease is resumed only if still suspended:\n" + block)
-                if "patch helmrelease strive" in line and '"suspend":false' in line:
-                    self.assertIn("wait kustomization/platform-app", self.neighbour(lines, i, -1, block), block)
-                    ks = self.neighbour(lines, i, -2, block)
-                    self.assertTrue("patch kustomization platform-app" in ks and '"suspend":false' in ks, block)
         self.assertGreaterEqual(freezes, 4, "the darken block and drills 1, 2 and 4 freeze")
-        self.assertGreaterEqual(resumes, 3, "the darken resume, the drills' restore and drill 2 resume")
+        self.assertGreaterEqual(resumes, 3, "the darken resume, drill 2 and the drills' restore resume")
 
-    def test_drills_restore_resumes_the_kustomization_first(self):
+    def test_each_resume_uses_the_right_mode(self):
         text = RUNBOOK.read_text(encoding="utf-8")
-        after = text[text.index("**Restore the harness afterwards**") :]
-        block = after[after.index("```sh\n") + len("```sh\n") :].split("```")[0]
-        assert_resume(self, block.replace("$K ", "kubectl --context admin@ai -n strive-ailab "), scale_to=1)
+        darken = text[text.index("**On any failure, darken the harness.**") :]
+        self.assertIn(RESUME_REVERT, darken[: darken.index("- **Suspend both")])
+        restore = text[text.index("**Restore the harness afterwards**") :]
+        block = restore[restore.index("```sh\n") :].split("```")[1]
+        self.assertIn(RESUME_DRILL, block)
+        self.assertLess(block.index(RESUME_DRILL), block.index("scripts/s2s/phase4-probes.sh"))
+        drill2 = text[text.index("**2. Rollback (not image-only).**") : text.index("**3. Token rotation.**")]
+        self.assertIn(RESUME_REVERT, drill2)
 
 
 def find_bash():
@@ -1118,7 +1109,7 @@ class EndToEnd(unittest.TestCase):
         # restore resumes the HelmRelease, then the Kustomization, then scales back.
         prompt = text[text.index("Revoke now") : text.index("== Rejection")]
         assert_freeze(self, prompt, scale_to=0)
-        assert_resume(self, text[text.index("== Restore") :], scale_to=1)
+        assert_resume(self, text[text.index("== Restore") :], "drill")
         for pod in ("gatekeeper-a", "gatekeeper-b"):
             self.assertIn("PASS %s rejected the revoked bearer" % pod, text)
             self.assertIn("PASS %s never accepted the revoked bearer again before its expiry" % pod, text)
