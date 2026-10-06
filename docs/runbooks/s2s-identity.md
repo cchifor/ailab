@@ -264,19 +264,38 @@ ADR records them; see "How to record" below). The decisions:
   cluster-admin controllers apply whatever a bot-approvable path puts in the tree, and
   `deploy/components/**` is such a route (not a protected pattern).
 
-  **Further residuals found at execution (2026-10-06).** Other automation still holds `chifor`
-  (site-admin) tokens. Each is an owner-gate bypass path until migrated to a bot identity:
-  - `ci-rerun-watchdog` (Secret `ci-rerun-watchdog/ci-rerun-watchdog-gitea`; write:repository and
-    read:admin);
-  - `cloud-power` (Secret `cloud-power/cloud-power-gitea`; write:organization);
-  - `agentforge-ui` (scope `all`; location outside the cluster/OpenBao, unmapped);
-  - `reviewbot-hook-check` (read:organization) and `forge-actions-release` (write:package);
-  - 20 stale `chifor` tokens unused for 14+ days were **revoked** (ids 9 25 30 31 76 77 84 85 87 100
-    160 161 162 163 176 178 179 180 189 202, including `cp-all` with scope `all`). The 9 remaining
-    `chifor` tokens are a follow-up (migrate to bot identities, then revoke): `cc-admin-20260913`,
-    `ci-rerun-watchdog`, `reviewbot-hook-check`, `forge-actions-release`, `cloud-power-drain`,
-    `cloud-power-drain-pr`, `agentforge-ui`, `cloud-ci-session-20260923`, and the operator's
-    temporary `phase0-setup` (deleted after the owner merges).
+  **Further residuals found at execution (2026-10-06), migrated the same day.** Automation that
+  held `chifor` (site-admin) tokens was an owner-gate bypass path; none of it needed site-admin:
+  - `ci-rerun-watchdog`, `cloud-power` and the reviewer webhook check now use `org-ops-bot`. It is a
+    NON-admin member of the org Owners team (team 1), holding three tokens:
+    - `org-ops-watchdog-20261006` with read:organization,read:repository. The watchdog is still in
+      DRY_RUN; its rerun POST will need a separate non-owner write token.
+    - `org-ops-cloud-power-20261006` with write:organization.
+    - `org-ops-hookcheck-20261006` with read:organization.
+  - `forge-actions-release` is replaced by `release-bot`. It sits in team `release` (code and
+    releases read, packages write, `cchifor/forge` only), with token `forge-release-20261006`. It is
+    the forge repo secret `FORGE_RELEASE_TOKEN` plus variable `FORGE_RELEASE_USERNAME`.
+  - Revoked: `agentforge-ui` (scope `all`, held in AgentForge's `gitea_credentials` table and used
+    only by its project wizard, so reconnect a scoped token in the UI if that is needed), and the
+    dead session tokens `cloud-power-drain-pr` and `cloud-ci-session-20260923`. The replaced
+    `ci-rerun-watchdog`, `cloud-power-drain`, `reviewbot-hook-check` and `forge-actions-release`
+    are revoked once their replacements are proven in use.
+  - 20 stale `chifor` tokens unused for 14+ days were revoked earlier (ids 9 25 30 31 76 77 84 85 87
+    100 160 161 162 163 176 178 179 180 189 202, including `cp-all` with scope `all`).
+
+  **Still open (owner credentials and accepted residuals):**
+  - `cc-admin-20260913` is the owner's workstation credential (`~/.git-credentials` and Windows
+    Credential Manager, `chifor@git.chifor.me`). It is interactive, not automation.
+  - The org account `cchifor` (a converted user, uid 2) still owns 21 tokens. One of them is this
+    workstation's default `git.chifor.me` credential, and it likely acts with owner rights on every
+    org repo. Migrating those tokens is the owner's call.
+  - `org-ops-bot` is an org owner. write:organization (cloud-power's runner pause, for which Gitea
+    has no narrower scope) can also manage team membership. That token lives only in the
+    cloud-power api pod, whose ingress is oauth2-proxy-only.
+  - Two read-only tokens on the site-admin `gitea_admin` are held by automation:
+    `af-ci-scaler-2941` (read:admin, `agentforge-ci/agentforge-ci-scaler-token`) and
+    `flux-ailab-read` (read:repository, `flux-system/flux-gitea-auth`).
+  - The operator's temporary `phase0-setup-20261006` is deleted after the Phase 3 owner merge.
 
 - **D3: RESTRICT PRE-FLIP (decided 2026-10-06).** Gatekeeper supports a per-audience `grant_types`
   list. `svc-harness` gets `svc-mcp: [client_credentials, token_exchange]` and `[token_exchange]`

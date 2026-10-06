@@ -28,6 +28,9 @@ spec:
       app.kubernetes.io/name: ci-rerun-watchdog
   template:
     metadata:
+      annotations:
+        # Bump on every Gitea token rotation: there is no reloader, so this is what rolls the pod.
+        ailab.chifor.me/gitea-token-rotated: "2026-10-06"
       labels:
         app.kubernetes.io/name: ci-rerun-watchdog
     spec:
@@ -64,6 +67,8 @@ spec:
             - { name: LOSS_REAP_WINDOW_SECONDS, value: "1200" }
             - { name: MAX_RERUNS_PER_SCAN, value: "3" }
             - { name: MAX_RERUNS_PER_DAY, value: "20" }
+            # The Gitea token is read-only (org-ops-bot, read:organization,read:repository), so the
+            # flip to "false" must also give the rerun POST its own write token (secret.sops.yaml.example).
             - { name: DRY_RUN, value: "true" } # shadow mode: ledger + log line, no POST
             - { name: STATE_CONFIGMAP, value: "ci-rerun-watchdog-state" }
             - name: STATE_NAMESPACE

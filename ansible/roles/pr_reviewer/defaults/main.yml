@@ -256,9 +256,10 @@ pr_reviewer_assert_hook_config: true
 
 # Org-OWNER credential used SOLELY for the webhook read. The reviewer PATs cannot do it
 # (write:issue,write:repository); GET /orgs/<org>/hooks needs read:organization AND org-owner.
-# Minted 2026-09-09 for `chifor` (the org owner) scoped to read:organization ONLY -- it can
-# enumerate org metadata and nothing else; it cannot create, edit or delete a hook, push, or
-# read repository contents. Lives in ansible/secrets/reviewbot.sops.yaml, named to match that
+# Held by `org-ops-bot` (a NON-admin member of the org Owners team; token
+# org-ops-hookcheck-20261006, minted 2026-10-06, replacing chifor's) scoped to read:organization
+# ONLY -- it can enumerate org metadata and nothing else; it cannot create, edit or delete a hook,
+# push, or read repository contents. Lives in ansible/secrets/reviewbot.sops.yaml, named to match that
 # file's encrypted_regex ^(reviewbot_[a-z0-9]+_pat|...)$ so SOPS actually encrypts it.
 # Falls back to '' (not the reviewer PAT) so a missing credential fails the readable-check
 # loudly instead of silently 403ing under a token that was never going to work.
