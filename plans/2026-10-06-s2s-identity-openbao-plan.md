@@ -1,9 +1,17 @@
 # S2S service identities without shared secrets (projected ServiceAccount tokens)
 
-**Status: agreed.** Codex (gpt-6-astra) and Fable both signed design B with every item below,
-in alignment round A2 (2026-10-06). The trail is under "Review trail" at the end. Three owner
-decisions are still open, listed under "Owner decisions"; B does not activate before they are
-made.
+**Status: agreed.** Codex (gpt-6-astra) and Fable each signed design B in alignment round A2
+(2026-10-06), each with its own amendments. In the final check, each accepted the other's
+additions, and this text folds in both reviewers' final corrections.
+- **Fable's additions:** C3′ (base-registry remap and volume overrides), F-e′ (the image
+  build workflows), N1 (settings fields, `Retry-After`, a metric), N2 (no `paths:` filter, the
+  unrelated-PR test), K1′.1 (entry, CLI, settings-loader and dependency files).
+- **Codex's additions:** C3′ (`envFromGatekeeper.secretName`, checks on rendered output),
+  F-e′/K1′.2 (the pin-provenance correction), N1 (shared bucket, bounded burst), K1′.3 (strict
+  identity separation), K1′.4 (owner acceptance before activation).
+
+The trail is under "Review trail" at the end. Three owner decisions are still open, listed under
+"Owner decisions"; B does not activate before they are made.
 
 Source: dev-worker-1's proposal (2026-10-06), an automatable path for new platform service
 identities on ailab with no SOPS edit, no age key and no checksum bump. First consumer:
@@ -18,15 +26,15 @@ Repos: **ailab** (this repo) and **platform** (`cchifor/platform`, gitea main 78
 | F1 | `svc-harness` is a **cross-tenant service authority**. `client_credentials` (`service_token.py:197-245`) mints every granted scope for any caller-supplied `tenant_id`, without a user. The dev registry comment at `service_registry.yaml:306-309` claims otherwise and is wrong. |
 | F2 | The cluster serves **no** OIDC discovery or `/openid/v1/jwks` (NotFound). The SA token issuer is `https://192.168.0.40:6443` (k8s v1.31.4). The JWKS-based `ProjectedSATokenVerifier` cannot be used, so verification goes through **TokenReview**. |
 | F3 | Gatekeeper's SA has automount on. Its token is a kubelet-rotated bound token. |
-| F4 | Under Cilium, egress to the API server needs `toEntities: [kube-apiserver]`; `ipBlock` cannot admit it. Precedent: ailab `apps/ci-rerun-watchdog/api-egress-cilium.yaml`. The platform chart already renders CNPs (`charts/airlock`). No platform chart emits ClusterRoles or ClusterRoleBindings today. |
+| F4 | Under Cilium, egress to the API server needs `toEntities: [kube-apiserver]`; `ipBlock` cannot admit it. Precedent: ailab `kubernetes/apps/apps/ci-rerun-watchdog/api-egress-cilium.yaml`. The platform chart already renders CNPs (`charts/airlock`). No platform chart emits ClusterRoles or ClusterRoleBindings today. |
 | F5 | The harness speaks only `client_secret_post`: `s2s.ts:82` (boot), `:260` (POST guard), `:268` (mint), and `:465-470` (the DELETE revoke). `index.ts:79` warns. It treats 401/403 as a verdict and anything else as `down()` (`s2s.ts:275-283`). Its token cache is `expires_in - 60 s`, so about 240 s (`s2s.ts:226`, `env.ts:48`). |
 | F6 | weld-auth's `S2SClient` supports only `client_secret`, so Python services follow later. |
 | F7 | ESO serves only `external-secrets.io/v1`. `strive-pg-harness-store` is live and already reads `af/data/strive/pg-harness`. |
 | F8 | Gitea is **1.26.1**. Both repos' `main` require 1 approval from anyone; every bot has non-admin **write** permission, and `reviewer-codex` merges PRs. Platform `main` requires the status checks `CI / ci-gate*`, `E2E Preflight / preflight*`, `E2E Tests / smoke*` and `Contract Tests / contract-gate*`; ailab has none. ailab Flux is cluster-admin into `strive-ailab`. |
 | F9 | `owner-ack.md:100-112` records as an accepted residual that **the owner and the dev worker share one Gitea login**. Any Gitea owner gate is circular until that is split. Today's SOPS step is a *real* human gate, because workers do not hold the age key. |
-| F10 | `check-ailab-pins.py` (wired through `ci.yml`; `ailab-pin-guard.yml` is a manual audit) makes a PR-introduced pin resolve to a main-ancestor `sha-` tag **or** an `ailab`-family tag. `ailab`-family tags pass **without** an ancestry check (`:140`). `build.yml` publishes on push to `main` only. It is a retention and ancestry filter, not proof of provenance. |
+| F10 | `check-ailab-pins.py` (wired through `ci.yml`; `ailab-pin-guard.yml` is a manual audit) makes a PR-introduced pin resolve to a main-ancestor `sha-` tag **or** an `ailab`-family tag. `ailab`-family tags pass **without** an ancestry check (`:140-142`). `build.yml` publishes on push to `main`, and also on `/release-build <sha>` comment rebuilds. Those can come from actors including both reviewer bots and rebuild a merged PR's reviewed second parent, gated by the unprotected `scripts/ci/reviewed-release-build.py`. The pin check is a retention and ancestry filter, not proof of provenance. |
 | F11 | The HelmRelease merges `valuesFiles` (`helmrelease.yaml:22-24`). The gatekeeper chart already renders `SVC_AUTH_BACKEND=preshared` from its `env` list, with `extraEnv` appended (`values.yaml:168`, `deployment.yaml:92-103`). The harness chart defaults `secretEnv.HARNESS_CLIENT_SECRET` (`charts/harness/values.yaml:155`). A dark harness renders nothing, including its SA (`Chart.yaml:76`). The harness Deployment is `Recreate`. |
-| F12 | Gatekeeper's readiness checks only Redis (`health.py:57-80`). On ailab it runs 2 replicas with PDB 1 and `maxUnavailable: 0`. `/auth/token` is not on the IngressRoute, and the netpol admits only `allowedClients`. It has no request limiter (`service_token.py:152`). |
+| F12 | Gatekeeper's readiness checks only Redis (`health.py:57-80`). On ailab it runs 2 replicas with PDB `minAvailable: 1` (`ailab.yaml:157`) and a rolling strategy of `maxUnavailable: 0` (`deployment.yaml:19`). `/auth/token` is not on the IngressRoute, and the netpol admits only `allowedClients`. It has no request limiter (`service_token.py:152`). |
 | F13 | Changes in the last 30 days: |
 
 F13 detail:
@@ -61,7 +69,9 @@ gatekeeper loads at startup. Existing SOPS identities are untouched.
    and it is bound to the pod.
 3. `deploy/helm/values/providers/ailab-s2s-registry.yaml` (owner-gated, and appended to the
    HelmRelease `valuesFiles`) holds the entry: `client_id`, `auth_method: k8s`, `k8s_subject`,
-   the audiences and scopes, and `may_act_for_audiences`.
+   the audiences and scopes, and `may_act_for_audiences`. It also holds the composite-backend
+   switch and the TokenReview audience. The required guard rejects any of these set anywhere
+   else.
 4. The gatekeeper chart renders it into ConfigMap `gatekeeper-registry-extras` and adds a
    `checksum/registry-extras` annotation. One Helm upgrade applies the ConfigMap and rolls
    gatekeeper, so there is no cross-controller race.
@@ -85,27 +95,32 @@ gatekeeper loads at startup. Existing SOPS identities are untouched.
      2. Check the positive cache. It is keyed by `sha256(token)`, holds the reviewed
         `(username, audiences)`, re-binds the requested `client_id` on every hit, and expires at
         `min(review + 60 s, token exp)` with no sliding.
-     3. Pass the rate limiter: a process-wide semaphore (default 4) and a token bucket (default
-        10/s, bounded burst), both `GatekeeperSettings` fields.
+     3. Pass the rate limiter: a process-wide semaphore (default 4) and a shared token bucket
+        (default 10/s, bounded burst), both `GatekeeperSettings` fields. It applies only to
+        uncached k8s reviews. On saturation it returns **immediately** and never queues.
+        Preshared clients are unaffected.
      4. Call **TokenReview**. The HTTPS header carries gatekeeper's own API token, re-read on
        each uncached review. The harness token goes only in `spec.token`, with
        `spec.audiences: ["strive-gatekeeper"]`. Keep CA verification and a bounded timeout.
 3. Mapping of results:
-   - A completed review with `authenticated=false`, missing audiences, or a different username,
-     and any precheck failure, gives a **generic 401**. Every pre-authentication failure shares
-     one message, so registry membership cannot be probed.
-   - A completed review whose subject maps to a different k8s client gives 403. Only a mocked
-     review can reach this path.
+   - A precheck failure, or a completed review with `authenticated=false` or with audiences
+     missing `strive-gatekeeper`, gives a **generic 401**. Every pre-authentication failure
+     shares one message, so registry membership cannot be probed.
+   - A completed, authenticated review whose username does not equal the requested entry's
+     `k8s_subject` gives **403** `unauthorized_client`. The `sub` precheck normally catches
+     this first, so only a mocked review reaches it (C5′).
    - Any non-2xx from the API (including 401, 403 and 429), a transport error, a timeout, a
      malformed response, or limiter saturation gives **503** `temporarily_unavailable` with
-     `Retry-After`. These are never cached, never extend a cache entry, and each one increments
-     a metric.
+     `Retry-After`.
+     - Saturation returns that 503 immediately, without waiting for capacity.
+     - These outcomes are never cached and never extend a cache entry.
+     - Each one increments a metric.
    - The negative cache holds only refusals from completed reviews. It is keyed by
      `(sha256(token), client_id)`, has a TTL of at most 10 s, and is a bounded LRU.
 4. The rest is unchanged: audience check, scope intersection, the grant, and a 300 s JWT.
 
 **The DSN.** ExternalSecret `strive-pg-harness-dsn` is added to ailab's existing
-`infrastructure/strive-pg-harness/eso.yaml` on the existing store.
+`kubernetes/apps/infrastructure/strive-pg-harness/eso.yaml` on the existing store.
 - `data.secretKey=password` plus `template.data.database-url`, with `engineVersion: v2` and
   `mergePolicy: Replace`. The only key is `database-url`.
 - No new OpenBao objects.
@@ -158,10 +173,13 @@ Phase 0:
 - unprotected gatekeeper modules (`routes.py`, `helpers.py`, and the rest of
   `infra/gatekeeper/**` outside the protected set);
 - `ailab.yaml` digest pins and `ci.yml`, which carries the pin-check wiring;
-- `build.yml`, `protect-ailab-images.yml` and the provenance of `ailab`-family tags (F10);
+- `build.yml` (including its `/release-build` path), `scripts/ci/reviewed-release-build.py`,
+  `protect-ailab-images.yml` and the provenance of `ailab`-family tags (F10);
 - the ailab Flux cluster-admin path into `strive-ailab`.
 
-The owner accepts these explicitly in the ADR, or B does not activate.
+The owner accepts these explicitly in the ADR, and that acceptance is authored or confirmed
+either through a non-shared identity or by direct confirmation outside the shared login, as in
+D1. Otherwise B does not activate.
 
 **D3. svc-harness authority (X-m).** B bounds how long a credential can be exposed, but leaves
 two things in place:
@@ -176,9 +194,24 @@ encryption, or makes grant-type restriction a **pre-flip** item.
 PRs land strictly in order. Per the reviewbot rule, a dependent PR is not opened before its
 prerequisite is live.
 
-### Phase 0: identity separation and the owner gate (owner actions, then tested)
+### Phase 0: identity separation, the guard, and the owner gate (tested before anything else lands)
 1. Complete D1.
-2. On platform `main`, set `protected_file_patterns` to:
+2. **Platform PR: the authority guard.** Add `.github/workflows/s2s-authority-guard.yml` and its
+   script. This PR merges *before* the protection in step 3 is applied.
+   - It renders the ailab manifests with all three values files.
+   - It fails when any of these is set outside `ailab-s2s-registry.yaml`, whether in values
+     keys, `env`/`extraEnv`, or rendered volumes/volumeMounts that land a file on either
+     registry path:
+     - `gatekeeper.serviceRegistry.extras`;
+     - `gatekeeper.serviceAuth.composite`;
+     - the `SVC_AUTH_BACKEND`, `SERVICE_REGISTRY_EXTRAS_PATH` or `SERVICE_REGISTRY_PATH` env;
+     - the TokenReview audience;
+     - `gatekeeper.envFromGatekeeper.secretName`;
+     - `gatekeeper.externalSecret.{enabled,storeRef,refMap.service-registry}`.
+   - Fixed chart defaults are allowed.
+   - It has no `paths:` filter, so it reports on every PR.
+   - On today's `main` (no extras, chart-default backend) it passes.
+3. On platform `main`, set `protected_file_patterns` to:
    - `deploy/helm/values/providers/ailab-s2s-registry.yaml`
    - `deploy/gitops/flux/clusters/ailab/app/helmrelease.yaml`
    - `deploy/helm/charts/gatekeeper/**`
@@ -192,17 +225,17 @@ prerequisite is live.
    - `.github/workflows/s2s-authority-guard.yml` and its script
    - `scripts/ci/{check,list}-ailab-pins.py`
 
-   That is about 7 owner reviews a month per F13.
-3. Add `S2S Authority Guard / *` to platform `main`'s `status_check_contexts`. The workflow has
-   no `paths:` filter, so it reports on every PR.
-4. **Test it with the real automation identities and every merge route** (merge, squash,
+   That is about 9 owner reviews a month: the union of 30-day commits touching this set.
+4. Add `S2S Authority Guard / *` to platform `main`'s `status_check_contexts`.
+5. **Test it with the real automation identities and every merge route** (merge, squash,
    `force_merge`, direct push):
-   - a bot-approved PR touching each protected pattern family is unmergeable by automation;
+   - a bot-approved PR touching **every installed pattern** is unmergeable by automation on
+     every route;
    - a red guard blocks the merge;
    - an unrelated PR still merges;
    - the owner's merge path works.
-5. Record the version and the results in the runbook.
-6. Fallback if the patterns do not hold: change the **effective** `main` rule (Gitea applies
+6. Record the version and the results in the runbook.
+7. Fallback if the patterns do not hold: change the **effective** `main` rule (Gitea applies
    only the first matching rule) with `required_approvals >= 1`, keeping existing protections,
    and repeat the tests. Do not proceed with an untested gate.
 
@@ -290,25 +323,20 @@ prerequisite is live.
   - `HARNESS_CLIENT_TOKEN_FILE`.
   - A failing render if token mode coexists with `HARNESS_CLIENT_SECRET` from any source:
     `secretEnv`, `config`, `extraEnv` or `_env.tpl`.
-- `helmrelease.yaml`: append `ailab-s2s-registry.yaml` to `valuesFiles`. The new file holds the
-  svc-harness entry, with grants copied from dev `service_registry.yaml:281`.
-- `ailab.yaml`:
+- `helmrelease.yaml`: append `ailab-s2s-registry.yaml` to `valuesFiles`. That protected file
+  holds every authority-bearing setting:
+  - the svc-harness entry, with grants copied from dev `service_registry.yaml:281`;
+  - `gatekeeper.serviceAuth.composite.enabled: true`;
+  - the TokenReview audience.
+- `ailab.yaml` holds only non-authority settings:
   - Pin both new digests.
-  - Enable composite and the CNP.
+  - Enable the CNP (`networkPolicy.ciliumApiserverEgress`).
   - Harness token mode.
   - `secretEnv.HARNESS_CLIENT_SECRET: null`.
   - `HARNESS_DATABASE_URL` from `strive-pg-harness-dsn`.
   - Rewrite the H9.1 comment.
-- `s2s-authority-guard.yml` and its script (required, protected). It fails when any of these is
-  set outside `ailab-s2s-registry.yaml`, in values keys, `env`/`extraEnv`, or rendered
-  volumes/volumeMounts landing a file on either registry path:
-  - `gatekeeper.serviceRegistry.extras`;
-  - the `SVC_AUTH_BACKEND`, `SERVICE_REGISTRY_EXTRAS_PATH` or `SERVICE_REGISTRY_PATH` env;
-  - the TokenReview audience;
-  - `gatekeeper.envFromGatekeeper.secretName` or `refMap.service-registry`.
-
-  It checks the **rendered** ailab manifests with all three values files. Fixed chart defaults
-  are allowed.
+- The Phase 0 guard (required and protected) must pass on this PR's rendered manifests. This
+  PR is its first real input.
 - Grants-parity test (required CI):
   - every extras entry must exist in the dev registry with identical audiences, scopes and
     `may_act_for_audiences`;
@@ -316,10 +344,12 @@ prerequisite is live.
   - it is shown to fail on a new `svc-X` and on each kind of grant drift.
 
   Parity is a drift check, not authorization. Runtime collision refusal stays.
-- `check-harness-chart-contract.sh` renders with `harness.enabled=true` and all three values
-  files, and asserts that no `HARNESS_CLIENT_SECRET` is in the final env.
+- `deploy/helm/scripts/tests/check-harness-chart-contract.sh` renders with
+  `harness.enabled=true` and all three values files, and asserts that no
+  `HARNESS_CLIENT_SECRET` is in the final env.
 - Docs:
-  - `SECRETS.md`: fix the stale "no ESO" line and add a section on secretless identities.
+  - `deploy/secrets/ailab/SECRETS.md`: fix the stale "no ESO" line and add a section on
+    secretless identities.
   - The **ADR** records the decision, F1, D1–D3 as the owner decided them, the residuals, and
     the weld-auth follow-up.
 - **Roll acceptance (pre-flip)**, per gatekeeper replica:
@@ -376,7 +406,15 @@ prerequisite is live.
 - **A2** (new facts F8–F13 included):
   - K1 resolved by the scoped protected set plus D1 and D2;
   - all amendments are additive;
-  - **both signed**: "I endorse B with all items as agreed/amended above as the best solution."
+  - each reviewer signed, with its own amendments: "I endorse B with all items as
+    agreed/amended above as the best solution."
+- **Final check.**
+  - Each reviewer accepted the other's A2 additions.
+  - Fable signed and sent 6 precision fixes.
+  - Codex withheld its signature pending 6 consistency fixes: attribution, 401/403 overlap,
+    immediate 503 on saturation, "every installed pattern", guard installed in Phase 0, and
+    the composite switch moved into the protected file.
+  - All 12 fixes are applied in this text.
 - Raw answers: `plans/2026-10-06-s2s-identity-alignment*.md`.
 
 <!-- codex-review-status: complete -->
