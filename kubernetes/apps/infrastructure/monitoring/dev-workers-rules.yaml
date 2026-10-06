@@ -133,8 +133,57 @@ spec:
             summary: "Dev worker {{ $labels.instance }} {{ $labels.mountpoint }} <12% free"
             description: >-
               {{ $labels.instance }} {{ $labels.mountpoint }} is under 12% free for >15m. At 100% the
-              agent on it cannot start any command, cleanup included. On the worker: `cleanup --dry-run`
-              (docker: stale stacks, images, volumes, build cache) and `sudo cleanup --no-docker --deps
-              --dry-run` (dependency dirs in idle worktrees), then rerun without --dry-run. The daily
-              dev-worker-deps-prune timer only takes worktrees idle for 14+ days; what remains is live
-              work or docker state — `docker system df`, then `du -xh --max-depth=2` on the mount.
+              agent on it cannot start any command, cleanup included. dev-worker-disk-guard (every 5 min,
+              under 15% free) should already be reclaiming: `journalctl -u dev-worker-disk-guard -n 50`.
+              If it deferred (docker busy) or exhausted its ladder, look by hand: `cleanup --dry-run`
+              (docker: stale stacks, images, volumes, build cache), `docker system df`, then
+              `du -xh --max-depth=2` on the mount — what remains is live work.
+        # disk-guard (role dev_worker, files/disk-guard) ran every reclaim step CLEANLY and a filesystem is still
+        # under its trigger: what is left is live work (worktrees in use, compose stacks, named volumes,
+        # recent images) and the disk will reach 100% unless a human frees or grows it. Added after
+        # dev-worker-3's /workspace refilled to 100% on 2026-10-06, five days after the 10-01 cleanup.
+        - alert: DevWorkerDiskGuardExhausted
+          expr: dev_worker_disk_guard_exhausted{job="dev-worker-node"} == 1
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: disk-guard exhausted, disk still filling"
+            description: >-
+              disk-guard on {{ $labels.instance }} ran its whole ladder (build cache, anonymous volumes,
+              old containers + unused images, merged worktrees, idle deps) and a disk is still under its
+              trigger. What is left is live work. `journalctl -u dev-worker-disk-guard -n 80`, then
+              `du -xh --max-depth=2 /workspace | sort -rh | head`, `docker system df -v`; ask the agent
+              owner what can go, or grow the scsi1 disk (kubernetes/infra/dev-workers).
+        # Reclaim is being attempted and is not working: a step exits non-zero (docker daemon down,
+        # cleanup crashing, a step timing out) on consecutive runs. Separate from Exhausted on purpose —
+        # a failed step says nothing about whether what is left is live work.
+        - alert: DevWorkerDiskGuardFailing
+          expr: dev_worker_disk_guard_failed_steps{job="dev-worker-node"} > 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: disk-guard reclaim steps are failing"
+            description: >-
+              disk-guard on {{ $labels.instance }} triggered (a disk is under its threshold) and
+              {{ $value }} reclaim step(s) exited non-zero on its runs for 15m+, so the disk is not being
+              relieved. `journalctl -u dev-worker-disk-guard -n 120` shows each step's exit code and
+              output; `docker info` and `sudo cleanup --dry-run` reproduce the usual causes.
+        # The guard's heartbeat. A stale or missing timestamp means the timer stopped, the tool crashes,
+        # or / is too full for its textfile write — in each case nothing is guarding the disk. The
+        # threshold carries the delay (a healthy run is every ~5 min; one ladder can take tens of
+        # minutes), so `for` is short: it fires ~35 min after the last heartbeat, as the summary says.
+        - alert: DevWorkerDiskGuardStale
+          expr: |
+            (time() - dev_worker_disk_guard_last_run_timestamp_seconds{job="dev-worker-node"}) > 1800
+              or (up{job="dev-worker-node"} == 1
+                  unless on (instance) dev_worker_disk_guard_last_run_timestamp_seconds{job="dev-worker-node"})
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: disk-guard has not reported for 30m+"
+            description: >-
+              No fresh dev_worker_disk_guard_last_run_timestamp_seconds from {{ $labels.instance }}:
+              the dev-worker-disk-guard timer is stopped or failing, or / is too full to write
+              /var/lib/prometheus/node-exporter/dev_worker_disk_guard.prom. `systemctl status
+              dev-worker-disk-guard.timer dev-worker-disk-guard.service`; roll out with
+              `--tags disk_guard`.

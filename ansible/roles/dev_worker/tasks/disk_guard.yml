@@ -1,0 +1,122 @@
+---
+# disk-guard — pressure-driven reclaim (files/disk-guard, tested by
+# scripts/tests/test_dev_worker_disk_guard.py). Every reclaim the workers had before was on a
+# calendar (03:00 buildx cap, 03:30 deps/worktree prune), and nothing reacted to a disk filling
+# between runs: on 2026-10-06 dev-worker-3's /workspace went from 95% to 100% in a day (180
+# anonymous postgres volumes were created on 10-04 alone) and its agent could not start any command.
+# The CI runners solved the same class with disk-gated reclaim (gitea-runner-cleanup.sh §3b/3c).
+#
+# Every dev_worker_disk_guard_interval it measures / and /workspace; under dev_worker_disk_guard_low
+# percent free it walks a ladder of regenerable things (build cache → anonymous volumes → stopped
+# non-stack containers + unused images → merged worktrees → idle deps), least destructive first,
+# and stops at dev_worker_disk_guard_target. Compose stacks, named volumes, source, git state and
+# untracked files are never touched. "Exhausted" (all steps ran, still low) is exported for the
+# DevWorkerDiskGuardExhausted alert: what is left is live work and needs a human.
+# Own tag so it can be rolled out alone: --tags disk_guard.
+- name: Install the disk-guard tool
+  ansible.builtin.copy:
+    src: disk-guard
+    dest: /usr/local/bin/disk-guard
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the disk-guard unit + timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - dest: dev-worker-disk-guard.service
+      content: |
+        [Unit]
+        Description=Reclaim regenerable disk space when / or {{ dev_worker_workspace_mount }} is under {{ dev_worker_disk_guard_low }}% free
+        After=docker.service local-fs.target
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/disk-guard --watch / --watch {{ dev_worker_workspace_mount }} --docker-fs {{ dev_worker_workspace_mount }} --low {{ dev_worker_disk_guard_low }} --target {{ dev_worker_disk_guard_target }} --critical {{ dev_worker_disk_guard_critical }} --image-days {{ dev_worker_disk_guard_image_days }} --deps-days {{ dev_worker_disk_guard_deps_days }} --worktree-days {{ dev_worker_worktree_prune_days }}{{ ' --worktrees-remove' if (dev_worker_worktree_prune_mode | string) == 'remove' else '' }}
+        Nice=10
+        IOSchedulingClass=best-effort
+        IOSchedulingPriority=7
+        TimeoutStartSec=3h
+    - dest: dev-worker-disk-guard.timer
+      content: |
+        [Unit]
+        Description=Check dev-worker disk pressure every {{ dev_worker_disk_guard_interval }}
+
+        [Timer]
+        # OnActiveSec starts the chain when the timer is (re)started on a host that booted long ago;
+        # OnUnitInactiveSec alone only counts from a previous run, so it would never fire the first.
+        OnActiveSec=1min
+        OnBootSec=5min
+        OnUnitInactiveSec={{ dev_worker_disk_guard_interval }}
+        AccuracySec=30s
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd
+
+- name: "Disk-guard timer {{ 'enabled' if dev_worker_disk_guard_enabled | bool else 'disabled' }}"
+  ansible.builtin.systemd:
+    name: dev-worker-disk-guard.timer
+    enabled: "{{ dev_worker_disk_guard_enabled | bool }}"
+    state: "{{ 'started' if dev_worker_disk_guard_enabled | bool else 'stopped' }}"
+    daemon_reload: true
+
+# Prevention, at the source: the agents created the leak (throwaway containers removed without -v),
+# so tell them — in the file each CLI reads at session start. Claude Code reads ~/.claude/CLAUDE.md,
+# Codex ~/.codex/AGENTS.md. A managed block, so the user's own notes in the same file survive;
+# HTML-comment markers because the files are markdown.
+- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
+  ansible.builtin.set_fact:
+    dev_worker_users: >-
+      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
+         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
+          if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  when: dev_worker_users is not defined
+
+# The CLIs' own tasks create these dirs, but a `--tags disk_guard` run skips them.
+- name: Ensure each user's ~/.claude and ~/.codex exist
+  ansible.builtin.file:
+    path: "{{ item.0.home }}/{{ item.1 }}"
+    state: directory
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0700"
+  loop: "{{ dev_worker_users | product(['.claude', '.codex']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+- name: Publish disk hygiene instructions to each agent's instructions file
+  ansible.builtin.blockinfile:
+    path: "{{ item.0.home }}/{{ item.1 }}"
+    marker: "<!-- {mark} ANSIBLE MANAGED - disk hygiene -->"
+    create: true
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0644"
+    block: |
+      ## Disk hygiene (this worker)
+
+      `{{ dev_worker_workspace_mount }}` holds every worktree AND docker's storage. When it fills, every
+      command fails (`No space left on device`), cleanup included — so don't leak:
+
+      - Throwaway containers: `docker run --rm …`. If you started one without `--rm`, remove it with
+        `docker rm -fv <name>` — without `-v` its anonymous volumes (e.g. a postgres data dir) stay
+        behind. In test loops, prefer one long-lived container over one per iteration.
+      - Throwaway compose stacks: `docker compose down -v` when done.
+      - Check before big builds: `df -h {{ dev_worker_workspace_mount }}`, `docker system df`.
+        `cleanup --dry-run` shows what can safely go.
+      - Keep artifacts you must preserve in a git-tracked place or outside worktrees you will delete.
+
+      A disk guard runs every {{ dev_worker_disk_guard_interval }}. Under {{ dev_worker_disk_guard_low }}% free it removes, in order, until {{ dev_worker_disk_guard_target }}%:
+      unused build cache, unreferenced anonymous volumes, stopped non-compose containers older than
+      a day, images unused for {{ dev_worker_disk_guard_image_days }}+ days, merged idle worktrees, and node_modules / .venv / target
+      in worktrees idle {{ dev_worker_disk_guard_deps_days }}+ days. It never touches compose stacks, named volumes, source,
+      git state or untracked files.
+  loop: "{{ dev_worker_users | product(['.claude/CLAUDE.md', '.codex/AGENTS.md']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
