@@ -105,11 +105,10 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
 5. Verify on a worker, per the smoke test in `openbao-dev-workers.md` section (g):
    `for f in gitea_pat gitea_repo_pat gitea_package_pat; do printf '%s ' $f; cred get common $f | wc -c; done`
    (lengths only, all three non-zero), `ls -l ~/.git-credentials` (0600), and
-   `git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD`. Then confirm the identity:
-   `cred exec common gitea_pat T -- sh -c 'curl -s -H "Authorization: token $T" https://git.chifor.me/api/v1/user'`
-   must show `dev-worker-bot` with `is_admin: false` (do not print the token). Only `gitea_pat` can
-   be checked this way: the other two carry no user scope, and their owner is fixed by step 2, which
-   minted them for `dev-worker-bot`.
+   `git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD`. Then confirm the identity of ALL
+   THREE tokens (each was minted with `read:user`):
+   `for f in gitea_pat gitea_repo_pat gitea_package_pat; do printf '%s ' $f; cred exec common $f T -- sh -c 'curl -s -H "Authorization: token $T" https://git.chifor.me/api/v1/user' | python3 -c 'import sys,json; u=json.load(sys.stdin); print(u["login"], "is_admin=%s" % u["is_admin"])'; done`
+   Every line must show `dev-worker-bot is_admin=False` (the token itself is never printed).
 6. **Revoke the `chifor` tokens that the workers held** (all three, one per field; Gitea UI as
    `chifor`: Settings, Applications, or delete the DB rows) and any other owner token copied to
    workers. Confirm each old token now gets 401.

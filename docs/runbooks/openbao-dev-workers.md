@@ -108,8 +108,8 @@ Secret.
   owner: generic packages under `/api/packages/cchifor/…` and container images at
   `git.chifor.me/cchifor/…` (`docker login git.chifor.me -u dev-worker-bot`). The repository read
   is what cchifor/forge's `scripts/publish-release.py` needs to check repository/owner visibility
-  and download release attachments before it publishes (`FORGE_RELEASE_TOKEN`). It has no user or
-  org scope (`GET /api/v1/user` → 403). Reach it with
+  and download release attachments before it publishes (`FORGE_RELEASE_TOKEN`). It has no org scope;
+  its `read:user` only lets `GET /api/v1/user` confirm the identity (`dev-worker-bot`). Reach it with
   `cred exec common gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>`. Not rendered into any file.
   Rotation works like `gitea_repo_pat`.
   **Shared on purpose, and that is a recorded blast-radius decision:** one compromised worker can
