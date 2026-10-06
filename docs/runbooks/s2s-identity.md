@@ -32,11 +32,14 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
   - added `dev-worker-bot` to `pr_reviewer_merge_authors`.
 - Converge order: reviewers first, then workers; the provision Job was re-run.
 - An out-of-band `~/.gitconfig` `credential.https://git.chifor.me.username chifor` existed on the
-  workers. It was repointed to `dev-worker-bot`. Follow-up: manage it with ansible.
+  workers. It was repointed to `dev-worker-bot`, and ansible now owns it on both credential paths
+  (`ansible/roles/dev_worker/tasks/pin_gitea_username.yml`).
 - Revoked the `chifor` tokens with ids 2, 4, 207 and 276 (by deleting the DB rows). The old tokens
   were proven to return 401.
-- Workers 5 and 6 (`.12`/`.13`) are not in the converge inventory and presented changed SSH host
-  keys. They were not touched. Follow-up: confirm what those VMs are now.
+- `.12`/`.13` presented changed SSH host keys and were not touched. Resolved: the dev-worker-5 and
+  dev-worker-6 slots were retired on 2026-09-23 and 2026-09-21. Those addresses now belong to the
+  cloudlab CI runners `cloud-ci-13` (6113) and `cloud-ci-9` (6109), as `docs/network-plan.md`
+  records. The fleet is `dev-worker-1..4` on `.8`–`.11`.
 - Known effects, both by design: the owner-ack `approve-pin` flow on platform can no longer be
   posted as the owner by a worker, and "merge as chifor from a worker" no longer works. The owner
   acknowledges and merges in person, from a non-shared login.
