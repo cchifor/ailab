@@ -101,13 +101,18 @@ Gitea keeps a task's log-line offsets in `action_task.log_indexes` and REWRITES 
 runner log flush (~1/s) while the task runs. A job that logs 1M lines carries ~4.6 MB of indexes, so it
 leaves GBs of dead TOAST per hour. On 2026-10-06 `action_task` was 20 GB on disk for 1.7 GB of live rows
 and drove `CNPGVolumeNearlyFull` (87%). The source was cchifor/platform's e2e/load jobs printing docker
-compose's TTY progress display (~98% of their 0.3-1.2M lines; fixed there with `--progress=plain`).
+compose's TTY progress display (~98% of their 0.3-1.2M lines). Fixed there with `COMPOSE_ANSI: never` in
+the workflow env (platform#2118): compose v2.31, the runners' version, ignores `COMPOSE_PROGRESS`.
 Autovacuum makes dead space reusable in-file but never returns it to the volume.
 
 - Check (primary, database `gitea`):
   ```sql
+  -- cheap: pg_column_size() of a TOASTed column reads only its toast pointer, so this scans the
+  -- ~150 MB heap, never the TOAST. (sum(pg_column_size(t.*)) is exact but detoasts every row: a full
+  -- read of the bloated relation, not something to run on a primary that is short of disk.)
   select pg_size_pretty(pg_total_relation_size('action_task')) as on_disk,
-         (select pg_size_pretty(sum(pg_column_size(t.*))::bigint) from action_task t) as live;
+         pg_size_pretty(pg_relation_size('action_task') + sum(pg_column_size(log_indexes))::bigint) as live_estimate
+    from action_task;
   -- who logs the most (a repeat offender is a log-spam bug in that repo's workflow, fix it there)
   select t.id, r.name, j.name, t.log_length from action_task t join repository r on r.id = t.repo_id
     join action_run_job j on j.id = t.job_id order by t.log_length desc limit 10;
@@ -125,9 +130,12 @@ Autovacuum makes dead space reusable in-file but never returns it to the volume.
   live size on BOTH instances, the replica streaming, no `CNPG*` alert firing.
   ```sql
   SET lock_timeout = '5s';   -- never QUEUE for the lock: a waiting ACCESS EXCLUSIVE blocks every reader behind it
-  SET statement_timeout = '15min';
   VACUUM (FULL, VERBOSE) action_task;
   ```
+  Deliberately no `statement_timeout`: the rewrite reads and writes the LIVE data (it copies live rows
+  and their TOAST, it does not scan the dead space), so its duration follows the live size, not the
+  on-disk size. Cancelling it, by a timeout or by `pg_cancel_backend()`, rolls the whole rewrite back
+  after holding the lock that long: nothing is reclaimed, and the run must be repeated from the start.
   Watch `select pg_wal_lsn_diff(sent_lsn, flush_lsn) from pg_stat_replication` and the slot's
   `safe_wal_size` while it runs. A `lock_timeout` failure is harmless — retry in a quieter minute.
 
