@@ -131,6 +131,13 @@
 # worker (found 2026-09-23). --max-used-space evicts least-recently-used records above the cap.
 # Daily, not weekly (2026-10-02): agents rebuild enough between Sundays to double the cap — dev-worker-1
 # sat at 38 GB five days after a run, and one run of this unit took it to 25.8 GB.
+#
+# Same unit, second step: anonymous volumes no container references. Nothing else reaped them, and
+# throwaway `docker run postgres` test loops (removed without -v) left one PGDATA volume per run:
+# dev-worker-3's /workspace hit 100% on 2026-10-06 with 240 of them (12.1 GB, 180 created in one
+# day), dev-worker-4 had 85 (9 GB). The label filter, not docker's default, keeps it to anonymous
+# volumes: named ones (compose pgdata, signing keys) are never touched even if unreferenced, and a
+# stopped container still references its anonymous volumes. `-` so a failed prune never fails the unit.
 # Own tag so it can be rolled out alone: --tags buildx_prune.
 - name: Install docker buildx-prune unit + timer
   tags: [buildx_prune]
@@ -142,13 +149,16 @@
     - dest: docker-buildx-prune.service
       content: |
         [Unit]
-        Description=Cap docker buildkit cache at {{ dev_worker_buildx_cache_max }} (LRU eviction)
+        Description=Cap docker buildkit cache at {{ dev_worker_buildx_cache_max }} (LRU eviction){{ ', prune unused anonymous volumes' if dev_worker_anon_volume_prune | bool else '' }}
         Requires=docker.service
         After=docker.service
 
         [Service]
         Type=oneshot
         ExecStart=/usr/bin/docker buildx prune -f --max-used-space {{ dev_worker_buildx_cache_max }}
+        {% if dev_worker_anon_volume_prune | bool %}
+        ExecStart=-/usr/bin/docker volume prune -f --filter label=com.docker.volume.anonymous
+        {% endif %}
     - dest: docker-buildx-prune.timer
       content: |
         [Unit]
