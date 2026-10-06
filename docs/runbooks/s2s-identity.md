@@ -1,0 +1,152 @@
+# S2S identities from projected ServiceAccount tokens: owner runbook
+
+Owner-only steps for activating secretless service identities (the harness authenticating to
+gatekeeper with its pod's projected token). The design, phases and rationale are in
+[`plans/2026-10-06-s2s-identity-openbao-plan.md`](../../plans/2026-10-06-s2s-identity-openbao-plan.md);
+this page is the checklist and does not repeat them. The DSN side (Phase 1) is in
+[`infra-pg.md`](infra-pg.md), section "strive-pg (the PLATFORM's cluster ...)".
+
+Nothing here is done by automation or by a dev worker. Do not activate (Phase 4) until D1, Phase 0
+and D2/D3 below are complete and recorded.
+
+## D1. Identity split (Phase 0 step 1)
+
+Today dev workers authenticate to Gitea as `chifor`, the owner: `ansible/roles/dev_worker/defaults/main.yml`
+has `dev_worker_gitea_user: chifor`, and the PAT is OpenBao `af/dev-workers/common` field
+`gitea_pat`, seeded from SOPS `kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml`
+(see [`openbao-dev-workers.md`](openbao-dev-workers.md)). A worker can therefore merge as the owner,
+which defeats any owner-review gate. Split it:
+
+1. As Gitea site admin, create a NON-admin user, e.g. `dev-worker-bot`, and grant it write on only
+   the repos the workers need (`cchifor/ailab`, `cchifor/platform`, ...). Never admin, never owner.
+2. Mint that user's PAT with the scopes the workers use today (the same scope set as the current
+   `gitea_pat`). Keep the value out of the terminal history and out of git.
+3. Replace the seed. Either edit the SOPS seed (owner-only; age key in
+   `kubernetes/infra/_out/age.agekey`; substitute only the `gitea_pat` value, see the snippet in
+   `openbao-dev-workers.md`), or patch the live path:
+   `bao kv patch -mount=af dev-workers/common gitea_pat=-` (value on stdin). Do the SOPS edit too, or
+   the next seed run restores the old value.
+4. Change `dev_worker_gitea_user` to the new username
+   (`ansible/roles/dev_worker/defaults/main.yml`, or group/host vars) and run the playbook:
+   `just dev-workers` (see [`dev-workers.md`](dev-workers.md)). Run it twice; the second run should
+   report near-zero `changed`.
+5. Verify on a worker, per the smoke test in `openbao-dev-workers.md` section (g):
+   `cred get common gitea_pat | wc -c` (length only), `ls -l ~/.git-credentials` (0600), and
+   `git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD`. Then confirm the identity:
+   `cred exec common gitea_pat T -- sh -c 'curl -s -H "Authorization: token $T" https://git.chifor.me/api/v1/user'`
+   must show `dev-worker-bot` with `is_admin: false` (do not print the token).
+6. **Revoke the `chifor` PAT that the workers held** (Gitea UI as `chifor`: Settings, Applications,
+   delete it by name), and any other owner token copied to workers. Confirm the old token now gets 401.
+7. Knock-on effects, by design: the platform owner-ack flow (`platform docs/runbooks/owner-ack.md`)
+   and any "merge as chifor from a worker" procedure (`cred exec common gitea_pat ...` as the owner)
+   stop working. The owner acknowledges and merges in person, from a non-shared login.
+
+## Phase 0: the owner gate on platform `main`
+
+Prerequisite: the platform PR adding the authority guard (`.github/workflows/s2s-authority-guard.yml`
+plus `scripts/ci/check-s2s-authority.py`) is merged. The calls below need a **repo-admin** token for
+`cchifor/platform` (the owner's, held outside the workers). Read the current rule first; Gitea
+applies only the FIRST matching rule, so patch the effective one:
+
+```sh
+G=https://git.chifor.me/api/v1/repos/cchifor/platform
+curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections            # find the effective rule for main
+curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/main > main-protection-before.json
+```
+
+Patch `protected_file_patterns` (the exact list from Phase 0 step 3 of the plan, `;`-separated) and
+append `S2S Authority Guard / *` to the EXISTING `status_check_contexts` (keep every current entry):
+
+```sh
+curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: application/json" \
+  $G/branch_protections/main -d '{
+  "protected_file_patterns": "deploy/helm/values/providers/ailab-s2s-registry.yaml;deploy/gitops/flux/clusters/ailab/app/helmrelease.yaml;deploy/helm/charts/gatekeeper/**;deploy/helm/templates/_helpers.tpl;infra/gatekeeper/src/app/gatekeeper/{service_registry,service_verifier,service_token,tokenreview_verifier,config}.py;infra/gatekeeper/src/app/core/lifecycle.py;infra/gatekeeper/src/app/core/config/**;infra/gatekeeper/src/app/{main,__main__}.py;infra/gatekeeper/src/app/cli/**;infra/gatekeeper/{Dockerfile,pyproject.toml,uv.lock};.github/workflows/s2s-authority-guard.yml;scripts/ci/check-s2s-authority.py;scripts/ci/{check,list}-ailab-pins.py",
+  "enable_status_check": true,
+  "status_check_contexts": ["<every existing context>", "S2S Authority Guard / *"]
+}'
+```
+
+Re-read the rule and diff it against `main-protection-before.json` (only those two fields may
+change). If brace patterns do not behave as globs on this Gitea version, list the files out
+individually.
+
+### Gate tests (Phase 0 step 5)
+
+Use the REAL automation identities (the reviewer bot and `dev-worker-bot`) and EVERY merge route:
+merge, squash, `force_merge`, direct push. On scratch branches:
+
+1. For EVERY installed pattern above: a bot-approved PR touching a file matching it must be
+   unmergeable by automation on every route. Only the owner's approval/merge works.
+2. A red guard (introduce a forbidden setting, e.g. `gatekeeper.serviceAuth.composite.enabled: true`
+   in `ailab.yaml`) blocks the merge, and the guard check is reported on that PR.
+3. An unrelated PR (e.g. a README edit) still merges normally through the existing automation.
+4. The owner's merge path works on a protected-pattern PR.
+
+If the patterns do not hold, apply the plan's Phase 0 step 7 fallback (`required_approvals >= 1` on
+the effective `main` rule, keeping existing protections) and repeat. Do NOT proceed untested.
+
+### Recording the results
+
+Write a dated record in the S2S ADR (the plan's Phase 0 step 6): the Gitea version
+(`curl -s https://git.chifor.me/api/v1/version`), the rule JSON after the change, a table of
+pattern x route -> blocked/allowed, and the red-guard, unrelated-PR and owner-path outcomes. Author
+or confirm it through a non-shared identity (next section).
+
+## D2 and D3: owner acceptance records
+
+The owner must explicitly accept, in the ADR:
+
+- **D2, residual bypasses** that stay bot-approvable after Phase 0: unprotected gatekeeper modules
+  (`routes.py`, `helpers.py`, the rest of `infra/gatekeeper/**`), `ailab.yaml` digest pins and `ci.yml`,
+  `build.yml` (including `/release-build`), `scripts/ci/reviewed-release-build.py`,
+  `protect-ailab-images.yml`, provenance of `ailab`-family tags, and the ailab Flux cluster-admin
+  path into `strive-ailab`. Otherwise B does not activate.
+- **D3, svc-harness authority**: the cross-tenant `client_credentials` authority (F1) and the
+  plain-HTTP replay window on the harness-to-gatekeeper hop remain. Either accept deferring a
+  per-entry `allowed_grant_types` restriction and transport encryption, or make grant-type
+  restriction a pre-flip item.
+
+**How to record, through a non-shared channel.** The acceptance must not be authored from the shared
+`chifor` login that workers could have used. Either (a) commit or approve the ADR text as a distinct
+non-shared owner identity (own device, own credentials, present on no worker), or (b) give a direct
+confirmation outside the shared login (for example a signed commit, or a message to the reviewers
+over a separate channel) and reference it in the ADR. Anything authored through `dev-worker-bot` or a
+worker's credentials does not count.
+
+## Phase 4: activation checks
+
+Run after the flip (#2092) lands. Each check targets each gatekeeper pod IP separately (2 replicas),
+not just the Service.
+
+**Pre-flip roll acceptance, per replica:** the effective `extras_sha` equals the rendered hash; the
+`base_sha` values agree; a preshared mint succeeds (Service plus both pods' `service_token_minted`
+logs); the e2e lane passes; `report-ailab-pin-drift` shows 0 torn.
+
+**Post-flip probes, per replica IP (mandatory):**
+
+1. A k8s mint with a complete request; assert `sub` and `azp` in the minted JWT.
+2. Refusals: `svc-deepagent` with the harness Bearer gives 401 (no fallback); a second k8s entry
+   claimed with the harness token gives 401 (precheck, generic message); a wrong-audience token gives
+   401; no token gives 401.
+3. #2092's own checks: Ready, migrate completed, 401 rather than 302, the `@api` journeys, 0 torn.
+4. **On any failure, darken the harness** (scale to 0 or `enabled: false`; deleting the pod does not
+   revoke, because `Recreate` brings up a fresh valid identity).
+
+Every later roll of an active registry repeats the pre-flip and post-flip checks.
+
+### Drills (plan, "Verification and drills")
+
+- **Cold start:** extras absent, gatekeeper boots on the base, svc-harness gets 401.
+- **Deletion and restore during a roll:** a pod that already loaded extras keeps them; restoring them
+  needs a roll.
+- **Rollback (not image-only):** darken the harness, revert the image AND the composite and extras
+  config together, then verify a base preshared mint. Keep the `strive-pg-harness-dsn` Secret until no
+  consumer uses it.
+- **Token rotation:** for both the harness token and gatekeeper's own reviewer token, observe a change
+  in token fingerprint (a hash, never the token) and drive an uncached mint past both caches.
+- **Revocation:** owner-run, with a surviving probe holding the old pod's bearer. An old bearer is
+  rejected after `deletionTimestamp` plus the API leeway plus at most 60 s of cache, never later than
+  its `exp`; issued JWTs stop within 300 s of the last mint plus consumer skew; removing the entry
+  gives 401 on each replica after the roll. Test both replica IPs through rejection.
+
+Never run these from a worker that holds owner credentials (D1), and never print a token.
