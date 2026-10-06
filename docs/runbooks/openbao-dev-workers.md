@@ -91,22 +91,28 @@ Secret.
   merge patch with `null`, which leaves the sync-owned fields alone), because seed-wins never removes
   a key a seed stops carrying.
 
-  `gitea_repo_pat` (added 2026-09-24) is a second `chifor` Gitea PAT, token name
-  `dev-workers-repo-create`, scopes **`write:organization,write:repository`**, so an agent can
-  create repositories in org `cchifor` (`POST /api/v1/orgs/cchifor/repos`). It deliberately has no
-  `write:user` scope, so it cannot create repos in the personal `chifor` namespace (`POST
+  `gitea_repo_pat` (added 2026-09-24) is a second `dev-worker-bot` Gitea PAT (it was `chifor`'s until
+  the identity split on 2026-10-06), token name `dev-workers-repo-create-20261006`, scopes
+  **`write:organization,write:repository,read:user`**. With it an agent can create repositories in
+  org `cchifor` (`POST /api/v1/orgs/cchifor/repos`; the `automation` team may create org repos). It
+  deliberately has no `write:user` scope, so it cannot create repos in a personal namespace (`POST
   /user/repos` → 403). Reach it with `cred exec common gitea_repo_pat GITEA_TOKEN -- <cmd>`.
   It is not rendered into `~/.git-credentials`; that file stays on `gitea_pat`. Rotation works like
-  `gitea_pat`: mint a replacement in-pod, re-seed, then revoke the old token by name in the UI
-  (Settings → Applications). Token auth cannot revoke itself.
+  `gitea_pat`: mint a replacement in-pod (`gitea admin user generate-access-token --username
+  dev-worker-bot ...`), re-seed, then revoke the old token. Gitea's token API
+  (`DELETE /api/v1/users/dev-worker-bot/tokens/{name}`) accepts BASIC auth only, never a token, and
+  the bot has no usable password, so either call it as the site admin with the break-glass
+  `gitea_admin` basic auth, or delete the token's `access_token` row (what was done on 2026-10-06).
+  Both are immediate: Gitea re-reads a cached token's row on every use.
 
-  `gitea_package_pat` (added 2026-10-05) is a third `chifor` Gitea PAT, token name
-  `dev-workers-package-publish`, scopes **`read:repository,write:package`**, for publishing to the
-  private `cchifor` package owner: generic packages under `/api/packages/cchifor/…` and container
-  images at `git.chifor.me/cchifor/…` (`docker login git.chifor.me -u chifor`). The repository read
+  `gitea_package_pat` (added 2026-10-05) is a third `dev-worker-bot` Gitea PAT (`chifor`'s until
+  2026-10-06), token name `dev-workers-package-20261006`, scopes
+  **`write:package,read:repository,read:user`**, for publishing to the private `cchifor` package
+  owner: generic packages under `/api/packages/cchifor/…` and container images at
+  `git.chifor.me/cchifor/…` (`docker login git.chifor.me -u dev-worker-bot`). The repository read
   is what cchifor/forge's `scripts/publish-release.py` needs to check repository/owner visibility
-  and download release attachments before it publishes (`FORGE_RELEASE_TOKEN`). It has no user or
-  org scope (`GET /api/v1/user` → 403). Reach it with
+  and download release attachments before it publishes (`FORGE_RELEASE_TOKEN`). It has no org scope;
+  its `read:user` only lets `GET /api/v1/user` confirm the identity (`dev-worker-bot`). Reach it with
   `cred exec common gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>`. Not rendered into any file.
   Rotation works like `gitea_repo_pat`.
   **Shared on purpose, and that is a recorded blast-radius decision:** one compromised worker can

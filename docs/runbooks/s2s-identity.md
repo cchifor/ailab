@@ -9,6 +9,40 @@ this page is the checklist and does not repeat them. The DSN side (Phase 1) is i
 Nothing here is done by automation or by a dev worker. Do not activate (Phase 4) until D1, Phase 0
 and D2/D3 below are complete and recorded.
 
+## Reference: the TokenReview rule in force
+
+How gatekeeper's `TokenReviewVerifier` (platform `infra/gatekeeper/src/app/gatekeeper/tokenreview_verifier.py`)
+turns a TokenReview into a response for an `auth_method: k8s` client. It is the signed plan's rule: the
+execution-time amendment that made a `status.error` refusal a 401 was WITHDRAWN. Read probe output and
+the `gatekeeper_tokenreview_*` metrics against this table.
+
+| What gatekeeper saw | Response | Cached |
+|---|---|---|
+| Prechecks fail on the UNVERIFIED token: not a three-part JWT, the audience is missing, `sub` is not the entry's `k8s_subject`, or `exp` is past | generic 401, no API call | no |
+| A 2xx review with a non-empty (or non-string) `status.error`, checked BEFORE `authenticated`, even when `authenticated=true` | **503** `temporarily_unavailable` with `Retry-After` | **never** |
+| A non-2xx from the API (including its own 401, 403 and 429), a transport error, a timeout, a malformed body, an unreadable own token, or limiter saturation | 503 with `Retry-After` | never |
+| A completed review with EMPTY `status.error` and `authenticated` false or omitted, or the audience missing from `status.audiences` | generic 401 (the body an unknown client gets) | negative, per (token, `client_id`), at most 10 s |
+| A completed review that is authenticated, with the audience present, but `status.user.username` is not the entry's `k8s_subject` | 403 `unauthorized_client` | negative, same key and TTL |
+| A completed review that is authenticated, with the audience present and a matching username | success | positive, per token, at most 60 s and never past the token's `exp` |
+
+- **Why a refusal with `status.error` is a 503.** For a genuine client it is almost always a transient
+  authenticator failure. The harness retries a 503 and treats a 401 as final, and a 503 still denies a
+  forged or revoked token.
+- **Only a completed review is cached.** A 503 never writes or extends a cache entry. A negative entry
+  answers without an API call or a limiter slot. Every positive hit re-binds the REQUESTED `client_id`
+  (the reviewed username must equal that entry's `k8s_subject`), and `exp` is rechecked after the
+  review and on every hit: a token that expired meanwhile is the generic 401 and is not cached.
+- **Single-flight.** Concurrent misses for the same token share ONE review (keyed by the token digest;
+  only the leader takes a limiter slot, and nothing queues). A waiter binds its OWN `client_id` to the
+  shared identity: a shared 503 is the waiter's 503, and a shared refusal is its generic 401 or 403,
+  negatively cached under its own key.
+- **The 403 is not reachable live.** The `sub` precheck refuses a mismatched subject first, so only a
+  mocked review produces it.
+- **Metrics.** `gatekeeper_tokenreview_total{outcome}` counts `authenticated`, `refused`, `mismatch` and
+  `unavailable` (the 503s) for reviews past the caches and the limiter;
+  `gatekeeper_tokenreview_limited_total` counts saturation; `gatekeeper_tokenreview_cache_total{cache,result}`
+  counts `positive`/`negative` hits and misses.
+
 ## D1. Identity split (Phase 0 step 1): DONE 2026-10-06
 
 Before D1, dev workers authenticated to Gitea as `chifor`, the owner: `ansible/roles/dev_worker/defaults/main.yml`
@@ -48,26 +82,36 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
 
 1. As Gitea site admin, create a NON-admin user (`dev-worker-bot`) and put it in the org team
    `automation` (write on the repos the workers need; never admin, never owner).
-2. Mint that user's PAT(s) with the scopes the workers use (`gitea admin user generate-access-token
-   --username dev-worker-bot ... --raw`, run in the Gitea pod). Keep the value out of the terminal
-   history and out of git.
-3. Replace the seed. Either edit the SOPS seed (owner-only; age key in
-   `kubernetes/infra/_out/age.agekey`; substitute only the token values, see the snippet in
-   `openbao-dev-workers.md`), or patch the live path:
-   `bao kv patch -mount=af dev-workers/common gitea_pat=-` (value on stdin; repeat for each of the
-   three fields `gitea_pat`, `gitea_package_pat` and `gitea_repo_pat`, one value each). Do the SOPS edit too, or
-   the next seed run restores the old value. Also re-encrypt `ansible/secrets/dev-worker.sops.yaml`.
+2. Mint THREE tokens for that user, one per field of `af/dev-workers/common` (`gitea_pat`,
+   `gitea_repo_pat`, `gitea_package_pat`), each with the scopes `openbao-dev-workers.md` lists for that
+   field (`gitea admin user generate-access-token --username dev-worker-bot ... --raw`, run in the
+   Gitea pod). Keep the values out of the terminal history and out of git.
+3. Replace the seed, ALL THREE fields. Either edit the SOPS seed (owner-only; age key in
+   `kubernetes/infra/_out/age.agekey`; the `common.json` value of
+   `kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml` carries all three; the
+   snippet in `openbao-dev-workers.md` substitutes `gitea_pat` only, so change the other two with
+   `sops` as well), or patch the live path, one field per call with the value on stdin:
+   ```sh
+   for f in gitea_pat gitea_repo_pat gitea_package_pat; do
+     printf '%s (new token, not echoed): ' "$f" >&2; IFS= read -rs v; echo >&2
+     printf '%s' "$v" | bao kv patch -mount=af dev-workers/common "$f=-"
+   done; unset v
+   ```
+   Do the SOPS edit too, or the next seed run restores the old values. Also re-encrypt
+   `ansible/secrets/dev-worker.sops.yaml` (`dev_worker_gitea_token`, the same value as `gitea_pat`).
 4. Ensure `dev_worker_gitea_user: dev-worker-bot` (`ansible/roles/dev_worker/defaults/main.yml`, or
    group/host vars) and converge: reviewers first, then workers (`just dev-workers`, see
    [`dev-workers.md`](dev-workers.md)). Run it twice; the second run should report near-zero `changed`.
 5. Verify on a worker, per the smoke test in `openbao-dev-workers.md` section (g):
-   `cred get common gitea_pat | wc -c` (length only), `ls -l ~/.git-credentials` (0600), and
-   `git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD`. Then confirm the identity:
-   `cred exec common gitea_pat T -- sh -c 'curl -s -H "Authorization: token $T" https://git.chifor.me/api/v1/user'`
-   must show `dev-worker-bot` with `is_admin: false` (do not print the token).
-6. **Revoke the `chifor` token(s) that the workers held** (Gitea UI as `chifor`: Settings,
-   Applications, or delete the DB rows) and any other owner token copied to workers. Confirm the old
-   token now gets 401.
+   `for f in gitea_pat gitea_repo_pat gitea_package_pat; do printf '%s ' $f; cred get common $f | wc -c; done`
+   (lengths only, all three non-zero), `ls -l ~/.git-credentials` (0600), and
+   `git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD`. Then confirm the identity of ALL
+   THREE tokens (each was minted with `read:user`):
+   `for f in gitea_pat gitea_repo_pat gitea_package_pat; do printf '%s ' $f; cred exec common $f T -- sh -c 'curl -s -H "Authorization: token $T" https://git.chifor.me/api/v1/user' | python3 -c 'import sys,json; u=json.load(sys.stdin); print(u["login"], "is_admin=%s" % u["is_admin"])'; done`
+   Every line must show `dev-worker-bot is_admin=False` (the token itself is never printed).
+6. **Revoke the `chifor` tokens that the workers held** (all three, one per field; Gitea UI as
+   `chifor`: Settings, Applications, or delete the DB rows) and any other owner token copied to
+   workers. Confirm each old token now gets 401.
 
 ## Phase 0: the owner gate on platform `main` (INSTALLED 2026-10-06)
 
@@ -126,17 +170,30 @@ Expect about 19 owner reviews a month.
 
 ### Re-apply procedure
 
-Use it to restore or extend the rule. It needs a **repo-admin** token for `cchifor/platform` (the
+Use it to restore or extend the rule. If its first lines print `not an ailab checkout` or `STOP`,
+nothing after them may run: `cd` into an ailab checkout and start again. It needs a **repo-admin** token for `cchifor/platform` (the
 owner's, held outside the workers). Gitea applies only the FIRST matching rule, so patch the
 effective one. The PATCH MERGES with the live rule: it unions the live `protected_file_patterns` and
 `status_check_contexts` with the documented ones and never replaces them.
 
 ```sh
 G=https://git.chifor.me/api/v1/repos/cchifor/platform
+# Snapshots and the pattern list live in the MAIN checkout's gitignored kubernetes/infra/_out/ (a git
+# worktree has no _out/), never in the current directory. Run this from inside any AILAB checkout:
+# from a platform checkout the same path would not be gitignored, so refuse anything else.
+case "$(git remote get-url origin 2>/dev/null)" in
+  *cchifor/ailab*) OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out" ;;
+  *) echo "not an ailab checkout: cd into one first" >&2; OUT= ;;
+esac
+[ -n "$OUT" ] && git -C "${OUT%/kubernetes/infra/_out}" check-ignore -q kubernetes/infra/_out/x \
+  && mkdir -p "$OUT" || { echo "STOP: _out/ is not a gitignored ailab path; do not run the rest" >&2; OUT=; }
+# Every later use of OUT goes through ${OUT:?}: with OUT cleared above, each command aborts instead of
+# writing to /, and the PATCH is skipped because BODY stays empty.
+B="${OUT:?refused: not a gitignored ailab checkout}/main-protection-before.json"
 curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections            # find the effective rule for main
 RULE=<rule_name of the effective rule from the output above>   # often `main`, but use what the output shows
-curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/$RULE > kubernetes/infra/_out/main-protection-before.json
-cat > kubernetes/infra/_out/patterns.txt <<'EOF'
+curl -s -H "Authorization: token $OWNER_TOKEN" $G/branch_protections/$RULE > "${B:?refused}"
+cat > "${OUT:?refused: not a gitignored ailab checkout}/patterns.txt" <<'EOF'
 deploy/helm/values/providers/ailab-s2s-registry.yaml
 deploy/gitops/flux/clusters/ailab/**
 deploy/helm/charts/gatekeeper/**
@@ -165,8 +222,7 @@ scripts/ci/install-uv.sh
 scripts/ci/with-retry.sh
 EOF
 PY=python3   # python3 on Linux hosts; use PY=python in Git Bash
-B=kubernetes/infra/_out/main-protection-before.json
-BODY=$($PY - kubernetes/infra/_out/patterns.txt "$B" <<'PYEOF'
+BODY=$($PY - "${OUT:?refused}/patterns.txt" "${B:?refused}" <<'PYEOF'
 import json, sys
 want = [l.strip() for l in open(sys.argv[1], encoding='utf-8') if l.strip()]
 live = json.load(open(sys.argv[2], encoding='utf-8'))
@@ -182,11 +238,11 @@ print(json.dumps({'protected_file_patterns': ';'.join(pats),
                   'status_check_contexts': ctx}))
 PYEOF
 )
-curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: application/json" \
+[ -n "$BODY" ] && curl -s -X PATCH -H "Authorization: token $OWNER_TOKEN" -H "Content-Type: application/json" \
   $G/branch_protections/$RULE -d "$BODY"
 ```
 
-Re-read the rule and diff it against `kubernetes/infra/_out/main-protection-before.json` (only those
+Re-read the rule and diff it against `$B` (`main-protection-before.json` in the same `_out/`; only those
 two fields may change).
 
 ### Rule after the change (2026-10-06, non-secret fields only)

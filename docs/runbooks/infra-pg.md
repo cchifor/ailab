@@ -155,7 +155,19 @@ env, `bootstrap.py:66`, so a stale env re-applies the OLD value):
    `kubectl --context admin@ai -n strive-ailab delete job strive-pg-harness-bootstrap`. The Job is
    recreated on the next Flux reconcile (up to 10 min), with the new Secret in its env; or trigger it
    now by annotating the `strive-pg-harness` Kustomization with `reconcile.fluxcd.io/requestedAt`
-   (a fresh timestamp value). Check that the new Job's `creationTimestamp` is after the sync, then
+   (a fresh timestamp value):
+   ```sh
+   kubectl --context admin@ai -n flux-system annotate kustomization strive-pg-harness \
+     reconcile.fluxcd.io/requestedAt="$(date +%s)" --overwrite
+   # Flux recreates the Job a few seconds to a few minutes later: poll, do not read once (a read
+   # straight after the annotate shows NotFound, which is not a failure).
+   for i in $(seq 1 60); do
+     ts=$(kubectl --context admin@ai -n strive-ailab get job strive-pg-harness-bootstrap \
+       -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null) && [ -n "$ts" ] && break; sleep 10
+   done; echo "bootstrap Job created at: ${ts:-not yet - check the Kustomization}"
+   ```
+   Check that the new Job's `creationTimestamp` is after the sync (the `refreshTime` values from step
+   2), not the old Job's, then
    `kubectl --context admin@ai -n strive-ailab logs job/strive-pg-harness-bootstrap`.
 4. Restart the harness and wait for `/ready`.
 
