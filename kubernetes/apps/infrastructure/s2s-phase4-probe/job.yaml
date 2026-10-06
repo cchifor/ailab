@@ -69,6 +69,10 @@ spec:
             - --expect-replicas
             - "2"
           env:
+            # Replaced at build time with gatekeeper-ns/'s namespace (kustomization.yaml
+            # replacements); the placeholder is never a namespace, so a broken wiring fails loudly.
+            - name: GATEKEEPER_NAMESPACE
+              value: set-by-kustomize-replacement
             - name: PROBE_REVISION
               valueFrom:
                 fieldRef:
@@ -79,9 +83,8 @@ spec:
             - name: probe
               mountPath: /probe
               readOnly: true
-            - name: registry-extras
-              mountPath: /etc/gatekeeper/registry-extras
-              readOnly: true
+            - name: work
+              mountPath: /work
           resources:
             requests:
               cpu: 10m
@@ -103,9 +106,9 @@ spec:
           configMap:
             name: s2s-phase4-probe-script
             defaultMode: 0444
-        # The same ConfigMap gatekeeper mounts (optional there too): the `registry` check compares
-        # each replica's loaded extras_sha with these bytes, i.e. with the ConfigMap as it is now.
-        - name: registry-extras
-          configMap:
-            name: gatekeeper-registry-extras
-            optional: true
+        # The extras ConfigMap's bytes, fetched through the API (it lives in gatekeeper's
+        # namespace, which a pod here cannot mount from): the `registry` check compares each
+        # replica's loaded extras_sha with them, i.e. with the ConfigMap as it is now.
+        - name: work
+          emptyDir:
+            sizeLimit: 1Mi

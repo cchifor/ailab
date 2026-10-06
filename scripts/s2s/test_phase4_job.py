@@ -129,14 +129,27 @@ LIVE_EXTRAS = """services:
 
 
 class FakeKube(object):
-    """The two calls the Job makes; records them; mints fabricated SA tokens."""
+    """The three calls the Job makes; records them; mints fabricated SA tokens.
 
-    def __init__(self, endpoints=None, token_error=None, endpoints_error=None):
+    extras: the ConfigMap's data.registry.yaml (None = the ConfigMap is absent, a 404).
+    """
+
+    def __init__(self, endpoints=None, token_error=None, endpoints_error=None, extras="default", configmap_error=None):
         self.endpoints_doc = endpoints if endpoints is not None else json.loads(json.dumps(LIVE_ENDPOINTS))
         self.token_error = token_error
         self.endpoints_error = endpoints_error
+        self.extras = t4.extras_text() if extras == "default" else extras
+        self.configmap_error = configmap_error
         self.calls = []
         self.issued = []
+
+    def configmap(self, namespace, name):
+        self.calls.append(("configmap", namespace, name))
+        if self.configmap_error:
+            raise job.KubeError(self.configmap_error[1], self.configmap_error[0])
+        if self.extras is None:
+            raise job.KubeError("GET /x: HTTP 404 reason=NotFound", 404)
+        return {"kind": "ConfigMap", "data": {"registry.yaml": self.extras}}
 
     def endpoints(self, namespace, name):
         self.calls.append(("endpoints", namespace, name))
@@ -176,9 +189,8 @@ class OtherBase(t4.Emulator):
 class JobRun(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="phase4-job-")
-        self.extras = os.path.join(self.dir, "registry.yaml")
-        with open(self.extras, "w", encoding="utf-8", newline="\n") as f:
-            f.write(t4.extras_text())
+        self.work = os.path.join(self.dir, "work")
+        os.mkdir(self.work)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -191,9 +203,9 @@ class JobRun(unittest.TestCase):
         self.emus = (ea, eb)
         return Router({"http://%s:5000" % IP_A: ea.url, "http://%s:5000" % IP_B: eb.url})
 
-    def run_job(self, kube, router, extra_args=()):
+    def run_job(self, kube, router, extra_args=(), gatekeeper_namespace="strive-ailab"):
         out = io.StringIO()
-        argv = ["--extras-file", self.extras, "--revision", "rev-7"] + list(extra_args)
+        argv = ["--gatekeeper-namespace", gatekeeper_namespace, "--work-dir", self.work, "--revision", "rev-7"] + list(extra_args)
         rc = job.main(argv, kube=kube, out=out, http=router)
         text = out.getvalue()
         for secret in kube.issued + [m for e in getattr(self, "emus", ()) for m in e.minted]:
@@ -222,10 +234,14 @@ class JobRun(unittest.TestCase):
         self.assertIn("PASS registry-agreement", text)
         self.assertNotIn("OWNTOKEN", text)  # the Job's token file is its own SA, not gatekeeper's
         self.assertNotIn("gatekeeper's own token", text)  # skipped outright, not attempted
-        # One Endpoints read, then exactly the workstation script's three TokenRequests.
+        # The Endpoints and the extras ConfigMap, then exactly the workstation script's three
+        # TokenRequests.
         self.assertEqual(kube.calls[0], ("endpoints", "strive-ailab", "gatekeeper"))
+        self.assertEqual(kube.calls[1], ("configmap", "strive-ailab", "gatekeeper-registry-extras"))
+        with open(os.path.join(self.work, "registry.yaml"), "rb") as f:
+            self.assertEqual(f.read(), t4.extras_text().encode("utf-8"))  # byte for byte
         self.assertEqual(
-            sorted(kube.calls[1:]),
+            sorted(kube.calls[2:]),
             sorted([
                 ("token", "strive-ailab", "harness", "strive-gatekeeper", 600),
                 ("token", "strive-ailab", "harness", "not-strive-gatekeeper", 600),
@@ -252,15 +268,58 @@ class JobRun(unittest.TestCase):
             self.assertEqual(row[2], "FAIL", fault)
             self.assertIn(check, " ".join(row[3:]), fault)
 
-    def test_the_mounted_configmap_is_the_reference(self):
-        # The ConfigMap changed after both replicas booted: each loaded sha differs from the
-        # Job's mount -> registry FAIL on both ("roll gatekeeper").
-        with open(self.extras, "w", encoding="utf-8", newline="\n") as f:
-            f.write(t4.extras_text([t4.harness_entry(k8s_subject="system:serviceaccount:strive-ailab:other")]))
-        rc, text = self.run_job(FakeKube(), self.emulators())
+    def test_the_configmap_now_is_the_reference(self):
+        # The ConfigMap changed after both replicas booted: each loaded sha differs from what the
+        # Job reads now -> registry FAIL on both ("roll gatekeeper").
+        changed = t4.extras_text([t4.harness_entry(k8s_subject="system:serviceaccount:strive-ailab:other")])
+        rc, text = self.run_job(FakeKube(extras=changed), self.emulators())
         self.assertEqual(rc, 1)
         self.assertIn("roll gatekeeper", text)
         self.assertIn("FAIL d3-policy", text)
+
+    def test_an_absent_configmap_fails_registry(self):
+        # A stale copy from an earlier run must not stand in for the absent ConfigMap.
+        with open(os.path.join(self.work, "registry.yaml"), "w") as f:
+            f.write(t4.extras_text())
+        rc, text = self.run_job(FakeKube(extras=None), self.emulators())
+        self.assertEqual(rc, 1, text)
+        self.assertIn("configmap strive-ailab/gatekeeper-registry-extras is absent", text)
+        self.assertIn("  [%s] FAIL registry" % POD_A, text)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "registry.yaml")))
+
+    def test_a_denied_configmap_read_mints_nothing(self):
+        kube = FakeKube(configmap_error=(403, "GET /x: HTTP 403 reason=Forbidden"))
+        router = self.emulators()
+        rc, text = self.run_job(kube, router)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL extras: GET /x: HTTP 403 reason=Forbidden", text)
+        self.assertEqual([c for c in kube.calls if c[0] == "token"], [])
+        self.assertEqual(router.seen, [])
+
+    def test_gatekeeper_in_its_own_namespace(self):
+        # After the A.2 move: Endpoints and ConfigMap come from strive-gatekeeper, the tokens still
+        # from strive-ailab (where the harness and default ServiceAccounts live).
+        kube = FakeKube()
+        rc, text = self.run_job(kube, self.emulators(), gatekeeper_namespace="strive-gatekeeper")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("namespace=strive-ailab gatekeeper_namespace=strive-gatekeeper", text.splitlines()[0])
+        self.assertEqual(kube.calls[0], ("endpoints", "strive-gatekeeper", "gatekeeper"))
+        self.assertEqual(kube.calls[1], ("configmap", "strive-gatekeeper", "gatekeeper-registry-extras"))
+        self.assertEqual(set(c[1] for c in kube.calls if c[0] == "token"), {"strive-ailab"})
+
+    def test_the_gatekeeper_namespace_is_required(self):
+        saved = os.environ.pop("GATEKEEPER_NAMESPACE", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "GATEKEEPER_NAMESPACE", saved)
+        out = io.StringIO()
+        kube = FakeKube()
+        self.assertEqual(job.main(["--work-dir", self.work], kube=kube, out=out), 2)
+        self.assertIn("GATEKEEPER_NAMESPACE", out.getvalue())
+        self.assertEqual(kube.calls, [])
+        # The env var is how the Job passes it.
+        os.environ["GATEKEEPER_NAMESPACE"] = "strive-gatekeeper"
+        self.addCleanup(os.environ.pop, "GATEKEEPER_NAMESPACE", None)
+        self.assertEqual(job.parse_args([]).gatekeeper_namespace, "strive-gatekeeper")
 
     def test_base_sha_disagreement_fails(self):
         rc, text = self.run_job(FakeKube(), self.emulators(b=OtherBase(self.dir)))
@@ -341,7 +400,7 @@ class JobRun(unittest.TestCase):
                 raise RuntimeError("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.sig-material")
 
         out = io.StringIO()
-        rc = job.main(["--extras-file", self.extras], kube=Boom(), out=out)
+        rc = job.main(["--gatekeeper-namespace", "strive-ailab", "--work-dir", self.work], kube=Boom(), out=out)
         self.assertEqual(rc, 1)
         text = out.getvalue()
         self.assertTrue(text.endswith("FAIL internal: unexpected RuntimeError\nRESULT fail\n"), text)
@@ -352,7 +411,7 @@ class JobRun(unittest.TestCase):
         saved = {k: os.environ.pop(k) for k in ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT") if k in os.environ}
         self.addCleanup(os.environ.update, saved)
         out = io.StringIO()
-        self.assertEqual(job.main([], out=out), 2)
+        self.assertEqual(job.main(["--gatekeeper-namespace", "strive-ailab"], out=out), 2)
         self.assertIn("not in a pod", out.getvalue())
 
 
@@ -504,6 +563,15 @@ class KubeClient(unittest.TestCase):
                 self.kube.token("strive-ailab", "harness", "strive-gatekeeper")
             self.assertNotIn("not a jwt", str(caught.exception))
 
+    def test_configmap_get_and_status(self):
+        path = "/api/v1/namespaces/strive-gatekeeper/configmaps/gatekeeper-registry-extras"
+        self.api.answers[("GET", path)] = (200, {"kind": "ConfigMap", "data": {"registry.yaml": "x: y\n"}})
+        self.assertEqual(self.kube.configmap("strive-gatekeeper", "gatekeeper-registry-extras")["data"], {"registry.yaml": "x: y\n"})
+        self.assertEqual(self.api.requests[-1][:2], ("GET", path))
+        with self.assertRaises(job.KubeError) as caught:
+            self.kube.configmap("strive-gatekeeper", "missing")
+        self.assertEqual(caught.exception.status, 404)
+
     def test_endpoints_get(self):
         path = "/api/v1/namespaces/strive-ailab/endpoints/gatekeeper"
         self.api.answers[("GET", path)] = (200, LIVE_ENDPOINTS)
@@ -630,6 +698,16 @@ def by_kind(docs, kind):
     return found[0]
 
 
+GK_TREE = TREE / "gatekeeper-ns"
+
+
+def script_gk_ns():
+    """GK_NS in phase4-probes.sh: the shared source for gatekeeper's namespace."""
+    lines = [l for l in (HERE / "phase4-probes.sh").read_text(encoding="utf-8").splitlines() if l.startswith("GK_NS=")]
+    assert len(lines) == 1, lines
+    return lines[0].split("=", 1)[1]
+
+
 class Vendored(unittest.TestCase):
     def test_copies_are_byte_identical(self):
         for name in ("phase4_probe.py", "phase4_job.py"):
@@ -637,7 +715,7 @@ class Vendored(unittest.TestCase):
 
     def test_the_generator_ships_both(self):
         kustomization = manifest_docs(TREE / "kustomization.yaml")[0]
-        self.assertEqual(kustomization["resources"], ["rbac.yaml", "networkpolicy.yaml", "job.yaml"])
+        self.assertEqual(kustomization["resources"], ["rbac.yaml", "gatekeeper-ns", "job.yaml"])
         [gen] = kustomization["configMapGenerator"]
         self.assertEqual(gen["name"], "s2s-phase4-probe-script")
         self.assertEqual(gen["namespace"], "strive-ailab")
@@ -649,19 +727,56 @@ class Manifests(unittest.TestCase):
     def setUpClass(cls):
         rbac = manifest_docs(TREE / "rbac.yaml")
         cls.sa, cls.role, cls.binding = by_kind(rbac, "ServiceAccount"), by_kind(rbac, "Role"), by_kind(rbac, "RoleBinding")
-        cls.netpol = by_kind(manifest_docs(TREE / "networkpolicy.yaml"), "NetworkPolicy")
+        gk = manifest_docs(GK_TREE / "rbac.yaml")
+        cls.gk_role, cls.gk_binding = by_kind(gk, "Role"), by_kind(gk, "RoleBinding")
+        cls.gk_kustomization = manifest_docs(GK_TREE / "kustomization.yaml")[0]
+        cls.netpol = by_kind(manifest_docs(GK_TREE / "networkpolicy.yaml"), "NetworkPolicy")
+        cls.kustomization = manifest_docs(TREE / "kustomization.yaml")[0]
         cls.job = by_kind(manifest_docs(TREE / "job.yaml"), "Job")
         cls.pod = cls.job["spec"]["template"]
 
-    def test_role_is_exactly_two_rules(self):
+    def test_token_role_is_exactly_one_rule(self):
         self.assertEqual(
             self.role["rules"],
-            [
-                {"apiGroups": [""], "resources": ["serviceaccounts/token"], "resourceNames": ["harness", "default"], "verbs": ["create"]},
-                {"apiGroups": [""], "resources": ["endpoints"], "resourceNames": ["gatekeeper"], "verbs": ["get"]},
-            ],
+            [{"apiGroups": [""], "resources": ["serviceaccounts/token"], "resourceNames": ["harness", "default"], "verbs": ["create"]}],
         )
         self.assertEqual(self.role["metadata"]["namespace"], "strive-ailab")
+
+    def test_gatekeeper_role_is_exactly_two_gets(self):
+        self.assertEqual(
+            self.gk_role["rules"],
+            [
+                {"apiGroups": [""], "resources": ["endpoints"], "resourceNames": ["gatekeeper"], "verbs": ["get"]},
+                {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": [job.EXTRAS_CM], "verbs": ["get"]},
+            ],
+        )
+        self.assertEqual(self.gk_binding["roleRef"], {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": self.gk_role["metadata"]["name"]})
+        # The subject is pinned to strive-ailab: it must not follow the Role to gatekeeper's namespace.
+        self.assertEqual(self.gk_binding["subjects"], [{"kind": "ServiceAccount", "name": "s2s-phase4-probe", "namespace": "strive-ailab"}])
+
+    def test_gatekeeper_namespace_is_one_line_shared_with_the_script(self):
+        self.assertEqual(self.gk_kustomization["namespace"], script_gk_ns())
+        self.assertEqual(self.gk_kustomization["resources"], ["rbac.yaml", "networkpolicy.yaml"])
+        # No object below sets its own namespace: the kustomization's line is the only one.
+        for name in ("rbac.yaml", "networkpolicy.yaml"):
+            for doc in manifest_docs(GK_TREE / name):
+                self.assertNotIn("namespace", doc["metadata"], name)
+        # The Job's GATEKEEPER_NAMESPACE follows that line through a kustomize replacement...
+        self.assertEqual(
+            self.kustomization["replacements"],
+            [{
+                "source": {"kind": "NetworkPolicy", "name": self.netpol["metadata"]["name"], "fieldPath": "metadata.namespace"},
+                "targets": [{
+                    "select": {"kind": "Job", "name": "s2s-phase4-probe"},
+                    "fieldPaths": ["spec.template.spec.containers.[name=probe].env.[name=GATEKEEPER_NAMESPACE].value"],
+                }],
+            }],
+        )
+        # ...into a placeholder that is never a namespace, so a broken wiring cannot pass silently.
+        [container] = self.pod["spec"]["containers"]
+        env = {e["name"]: e for e in container["env"]}
+        self.assertEqual(container["name"], "probe")
+        self.assertEqual(env["GATEKEEPER_NAMESPACE"]["value"], "set-by-kustomize-replacement")
 
     def test_binding_and_service_account(self):
         self.assertEqual(self.binding["roleRef"], {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "s2s-phase4-probe"})
@@ -696,17 +811,17 @@ class Manifests(unittest.TestCase):
         )
         mounts = {m["name"]: m for m in container["volumeMounts"]}
         volumes = {v["name"]: v for v in pod["volumes"]}
-        self.assertEqual(mounts["probe"]["mountPath"], "/probe")
-        self.assertEqual(volumes["probe"]["configMap"]["name"], "s2s-phase4-probe-script")
-        # The extras are mounted where phase4_probe looks by default, from the ConfigMap gatekeeper reads.
-        self.assertEqual(mounts["registry-extras"]["mountPath"], os.path.dirname(probe.EXTRAS_FILE))
-        self.assertEqual(volumes["registry-extras"]["configMap"], {"name": "gatekeeper-registry-extras", "optional": "true"})
+        self.assertEqual(sorted(mounts), ["probe", "work"])
         self.assertEqual(sorted(mounts), sorted(volumes))
-        self.assertTrue(all(m.get("readOnly") == "true" for m in mounts.values()))
+        self.assertEqual(mounts["probe"]["mountPath"], "/probe")
+        self.assertEqual(mounts["probe"]["readOnly"], "true")
+        self.assertEqual(volumes["probe"]["configMap"]["name"], "s2s-phase4-probe-script")
+        # The extras copy goes to the one writable place, the Job's default --work-dir.
+        self.assertEqual(mounts["work"]["mountPath"], job.parse_args(["--gatekeeper-namespace", "x"]).work_dir)
+        self.assertIn("emptyDir", volumes["work"])
 
     def test_netpol_admits_exactly_the_probe_pod_to_gatekeeper(self):
         spec = self.netpol["spec"]
-        self.assertEqual(self.netpol["metadata"]["namespace"], "strive-ailab")
         self.assertEqual(spec["policyTypes"], ["Ingress"])
         # Selects the gatekeeper Deployment's pods (live labels), not its job pods.
         live_gatekeeper = {"app.kubernetes.io/instance": "strive", "app.kubernetes.io/name": "gatekeeper", "strive.io/service": "gatekeeper"}
@@ -715,8 +830,10 @@ class Manifests(unittest.TestCase):
         self.assertEqual(selector["app.kubernetes.io/name"], "gatekeeper")
         [rule] = spec["ingress"]
         self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": "5000"}])
+        # ONE source: the Job's namespace AND the Job's pod labels (one element = both must match).
         [source] = rule["from"]
-        self.assertEqual(sorted(source), ["podSelector"])  # same namespace only
+        self.assertEqual(sorted(source), ["namespaceSelector", "podSelector"])
+        self.assertEqual(source["namespaceSelector"], {"matchLabels": {"kubernetes.io/metadata.name": self.job["metadata"]["namespace"]}})
         wanted = source["podSelector"]["matchLabels"]
         self.assertTrue(set(wanted.items()) <= set(self.pod["metadata"]["labels"].items()))
         # Not a label any platform policy trusts.

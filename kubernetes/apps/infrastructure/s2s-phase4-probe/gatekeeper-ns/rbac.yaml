@@ -1,0 +1,44 @@
+# The probe's reads in GATEKEEPER's namespace (set by this directory's kustomization.yaml, the one
+# line the A.2 move flips): each replica's pod IP and readiness from the Service's Endpoints, and
+# the registry extras the replicas should have loaded. Two named objects, `get` only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: s2s-phase4-probe-gatekeeper
+  labels:
+    app.kubernetes.io/name: s2s-phase4-probe
+    app.kubernetes.io/component: probe
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+    resourceNames:
+      - gatekeeper
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - gatekeeper-registry-extras
+    verbs:
+      - get
+---
+# The subject stays in strive-ailab whatever namespace this Role lands in.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: s2s-phase4-probe-gatekeeper
+  labels:
+    app.kubernetes.io/name: s2s-phase4-probe
+    app.kubernetes.io/component: probe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: s2s-phase4-probe-gatekeeper
+subjects:
+  - kind: ServiceAccount
+    name: s2s-phase4-probe
+    namespace: strive-ailab

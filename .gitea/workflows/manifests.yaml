@@ -95,8 +95,9 @@ jobs:
       # Endpoints -> replicas (a roll in flight or a short fleet mints nothing), the three
       # TokenRequests, every replica probed at its pod IP against an emulator, one bad replica fails
       # the Job and is named, base_sha agreement, no token or API error body in the log; the stdlib
-      # extras reader against the live document; the vendored copies byte-identical; the Role is
-      # exactly its two rules; the NetworkPolicy admits exactly the Job's pod label on 5000.
+      # extras reader against the live document; the vendored copies byte-identical; each Role is
+      # exactly its rules; the NetworkPolicy admits exactly the Job's pod on 5000; gatekeeper's
+      # namespace is one manifest line equal to GK_NS in phase4-probes.sh (the A.2 cutover).
       - name: S2S Phase 4 probe logic and orchestration (offline)
         run: python3 -m unittest scripts.s2s.test_phase4_probes scripts.s2s.test_phase4_job
 

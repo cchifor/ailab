@@ -1,7 +1,8 @@
-# The probe's identity. It can do exactly two things in strive-ailab:
-#   * create a TokenRequest for ServiceAccount `harness` or `default` (the three probe tokens: harness
-#     for strive-gatekeeper, harness for a wrong audience, default for strive-gatekeeper);
-#   * read the Endpoints of Service `gatekeeper` (each replica's pod IP and readiness).
+# The probe's identity, in strive-ailab (where the harness and `default` ServiceAccounts live).
+# Here it can do exactly one thing: create a TokenRequest for ServiceAccount `harness` or
+# `default` (the three probe tokens: harness for strive-gatekeeper, harness for a wrong audience,
+# default for strive-gatekeeper). Its only other grant is gatekeeper-ns/rbac.yaml, in gatekeeper's
+# namespace: get endpoints/gatekeeper and configmaps/gatekeeper-registry-extras.
 # No pods, no exec, no secrets, no list, no watch, nothing cluster-scoped.
 #
 # What the TokenRequest grant means: whoever runs a pod as this ServiceAccount can mint a harness
@@ -38,14 +39,6 @@ rules:
       - default
     verbs:
       - create
-  - apiGroups:
-      - ""
-    resources:
-      - endpoints
-    resourceNames:
-      - gatekeeper
-    verbs:
-      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

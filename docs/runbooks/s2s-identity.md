@@ -510,26 +510,35 @@ copied byte for byte into the manifest directory; a test fails on drift.
 
 **What it does.**
 
-1. Reads `endpoints/gatekeeper`. Any not-ready address (a roll in flight), or fewer than 2 ready
-   replicas, fails the run before a token exists.
-2. Makes the same three TokenRequests as the workstation script (600 s, the API minimum), with
+1. Reads `endpoints/gatekeeper` in gatekeeper's namespace. Any not-ready address (a roll in
+   flight), or fewer than 2 ready replicas, fails the run before a token exists.
+2. Reads ConfigMap `gatekeeper-registry-extras` through the API, from gatekeeper's namespace, and
+   writes its `data.registry.yaml` byte for byte to an emptyDir. A pod cannot mount another
+   namespace's ConfigMap, and gatekeeper is moving to its own namespace (below).
+3. Makes the same three TokenRequests as the workstation script (600 s, the API minimum), with
    its own ServiceAccount token. The tokens stay in the process's memory: never argv, env, a file
    or the log.
-3. Runs every check of the table above against each replica at its pod IP (`http://<IP>:5000`).
-   The extras ConfigMap is mounted in the Job pod, so `registry` compares each replica's loaded
+4. Runs every check of the table above against each replica at its pod IP (`http://<IP>:5000`).
+   Using that copy, `registry` compares each replica's loaded
    `extras_sha` with the ConfigMap as it is now. `OWNTOKEN` is not printed: the Job cannot read
    gatekeeper's own token. Drill 3 (rotation) stays on the workstation script.
-4. Checks that `base_sha` is the same on every replica, prints a table, and exits 0 only if every
+5. Checks that `base_sha` is the same on every replica, prints a table, and exits 0 only if every
    replica passed (Job `Complete`). Otherwise the Job is `Failed`; `backoffLimit: 0`, so a failure
    is never retried into a pass.
 
-**Access, exactly.** ServiceAccount `s2s-phase4-probe`. Its Role allows `create` on
-`serviceaccounts/token` with `resourceNames: [harness, default]`, and `get` on `endpoints` with
-`resourceNames: [gatekeeper]`. Nothing else: no pods, exec, secrets, list or watch. The probe pod
-reaches gatekeeper through the ailab NetworkPolicy `s2s-phase4-probe-to-gatekeeper`. That policy
-selects the gatekeeper pods and admits only pods labelled
-`app.kubernetes.io/name: s2s-phase4-probe` + `app.kubernetes.io/component: probe`, from the same
-namespace, on TCP 5000. NetworkPolicies are additive, so the platform chart's `gatekeeper` policy
+**Access, exactly.** The Job, its ServiceAccount `s2s-phase4-probe` and its pod are in `strive-ailab`.
+The ServiceAccount has two Roles:
+
+- Role `s2s-phase4-probe` in `strive-ailab`: `create` on `serviceaccounts/token` with
+  `resourceNames: [harness, default]`.
+- Role `s2s-phase4-probe-gatekeeper` in gatekeeper's namespace: `get` on `endpoints` with
+  `resourceNames: [gatekeeper]`, and `get` on `configmaps` with
+  `resourceNames: [gatekeeper-registry-extras]`.
+
+Nothing else: no pods, exec, secrets, list or watch. The probe pod reaches gatekeeper through the
+ailab NetworkPolicy `s2s-phase4-probe-to-gatekeeper`, which lives in gatekeeper's namespace. It
+selects the gatekeeper pods and admits only pods in namespace `strive-ailab` labelled
+`app.kubernetes.io/name: s2s-phase4-probe` + `app.kubernetes.io/component: probe`, on TCP 5000. NetworkPolicies are additive, so the platform chart's `gatekeeper` policy
 and its `allowedClients` are unchanged. The pod runs as non-root with a read-only root filesystem,
 no privileges and every capability dropped. RBAC cannot narrow a TokenRequest's audience, so
 anyone who can run a pod as this ServiceAccount can act as `svc-harness` for 10 minutes. Anyone who
@@ -564,9 +573,10 @@ platform kubectl -n strive-ailab logs job/s2s-phase4-probe
 
 | Log line | Meaning |
 |---|---|
-| `S2S-PHASE4 namespace=… revision=<r> program_sha256=<h>` | The run's revision (from the pod annotation) and the probe program's hash. Check that `<r>` is the one your PR set. |
+| `S2S-PHASE4 namespace=… gatekeeper_namespace=… revision=<r> program_sha256=<h>` | The token namespace, gatekeeper's namespace, the run's revision (from the pod annotation) and the probe program's hash. Check that `<r>` is the one your PR set. |
 | `S2S-PHASE4 replicas <pod>=http://<ip>:5000 …` | The ready replicas from `endpoints/gatekeeper`, each probed at its own pod IP. |
 | `FAIL endpoints: <pod> is not ready …` / `… N ready gatekeeper replica(s), expected 2` | A roll in flight or a short fleet. Nothing was minted or probed. Re-run after the roll. |
+| `S2S-PHASE4 extras configmap=<ns>/gatekeeper-registry-extras sha256=<h>` | The ConfigMap as read now. Every replica's `extras_sha` must equal `<h>`. `INFO configmap … is absent` means there are no extras, and every replica's `registry` check fails. `FAIL extras: … HTTP 403` means the gatekeeper-side Role is missing (for example, the wrong namespace after the move). |
 | `PASS token <name> (TokenRequest sa=… audience=… 600s; never printed)` | One of the three TokenRequests succeeded. `FAIL token <name>: … HTTP 403 reason=Forbidden` means the Role or RoleBinding is missing; `HTTP 404 reason=NotFound` for `harness` means the harness ServiceAccount is gone (a dark harness). |
 | `== replica <pod> <ip>` | The start of one replica's checks. |
 | `  [<pod>] REGISTRY base_sha=… extras_sha=… file_sha=…` | What that replica loaded at boot, and the hash of the ConfigMap mounted in the Job. |
@@ -580,6 +590,16 @@ platform kubectl -n strive-ailab logs job/s2s-phase4-probe
 
 A `FAIL` on a replica means the same as it does from the workstation script: **darken the harness**
 (the commands above). The worker reports it, and the owner darkens.
+
+**Gatekeeper's namespace (the A.2 move).** Gatekeeper's namespace is set in one place for the Job:
+`namespace:` in `kubernetes/apps/infrastructure/s2s-phase4-probe/gatekeeper-ns/kustomization.yaml`.
+That one line moves the gatekeeper-side Role, its RoleBinding and the NetworkPolicy. A kustomize
+replacement copies the same value into the Job's `GATEKEEPER_NAMESPACE`. The workstation script
+has the matching constant `GK_NS` in `scripts/s2s/phase4-probes.sh`, and a test fails while the
+two differ. When gatekeeper moves to `strive-gatekeeper`, change exactly those two lines, in one
+ailab PR, merged after the namespace exists. The env change recreates the Job, so the probe runs
+against the new namespace on that reconcile. The TokenRequest Role, the ServiceAccount, the Job and
+the NetworkPolicy's `namespaceSelector` (`strive-ailab`) do not change.
 
 **First run.** Merging the PR creates the Flux Kustomization and the Job, and the first run starts
 on that reconcile. The owner only has to confirm with

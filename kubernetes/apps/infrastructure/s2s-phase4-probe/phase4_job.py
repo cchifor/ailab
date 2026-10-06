@@ -5,17 +5,27 @@ The Job (kubernetes/apps/infrastructure/s2s-phase4-probe/) runs this file with s
 ServiceAccount s2s-phase4-probe. It is the `--gatekeeper-only` part of scripts/s2s/phase4-probes.sh
 (the workstation script stays the fallback and the only home of the drills):
 
-  1. the gatekeeper Service's Endpoints (`get endpoints/gatekeeper`): every replica's pod IP, and
-     a roll in flight (any not-ready address) or fewer than --expect-replicas is a FAIL before a
-     token exists;
-  2. three TokenRequests (`create serviceaccounts/token`, 600 s, no stored object) with this
+  1. the gatekeeper Service's Endpoints (`get endpoints/gatekeeper` in the GATEKEEPER namespace):
+     every replica's pod IP; a roll in flight (any not-ready address) or fewer than
+     --expect-replicas is a FAIL before a token exists;
+  2. ConfigMap gatekeeper-registry-extras (`get configmaps/gatekeeper-registry-extras`, gatekeeper
+     namespace): its data.registry.yaml is written byte for byte to --work-dir (the bytes the
+     kubelet mounts into gatekeeper), so `registry` compares each replica's loaded extras_sha with
+     the ConfigMap as it is now. Read through the API, not mounted: a pod cannot mount another
+     namespace's ConfigMap, and gatekeeper is moving to its own namespace (A.2);
+  3. three TokenRequests (`create serviceaccounts/token`, 600 s, no stored object) with this
      pod's own kube token: SA harness for strive-gatekeeper, SA harness for not-strive-gatekeeper,
      SA default for strive-gatekeeper -- the same three the workstation script mints;
-  3. per replica, phase4_probe.main() in this process, against http://<pod IP>:<port>
+  4. per replica, phase4_probe.main() in this process, against http://<pod IP>:<port>
      (main(pod_ip_ok=True); the ailab NetworkPolicy s2s-phase4-probe-to-gatekeeper admits this
-     pod's label on that port), with the extras ConfigMap mounted here, so `registry` compares
-     each replica's loaded extras_sha with the ConfigMap as it is NOW;
-  4. base_sha agreement across replicas, then a per-replica PASS/FAIL table.
+     pod's labels from this namespace on that port);
+  5. base_sha agreement across replicas, then a per-replica PASS/FAIL table.
+
+TWO NAMESPACES: --namespace (strive-ailab) holds the harness and `default` ServiceAccounts, so the
+TokenRequests go there; --gatekeeper-namespace (env GATEKEEPER_NAMESPACE, required, no default) is
+where gatekeeper runs. The Job's manifests set it from one line
+(s2s-phase4-probe/gatekeeper-ns/kustomization.yaml), which a test holds equal to GK_NS in
+phase4-probes.sh.
 
 TOKENS stay in this process's memory: never argv, the environment, a file, or the output. They
 reach phase4_probe.main() through an in-memory stdin. Every printed line goes through redact(), and
@@ -43,6 +53,8 @@ import phase4_probe as probe  # noqa: E402  (the same directory, in the repo and
 
 NAMESPACE = "strive-ailab"
 SERVICE = "gatekeeper"
+EXTRAS_CM = "gatekeeper-registry-extras"
+EXTRAS_KEY = "registry.yaml"
 GK_PORT_NAME = "http"
 HARNESS_SA = "harness"
 ALT_SA = "default"
@@ -55,6 +67,10 @@ SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 class KubeError(Exception):
     """An API call that did not succeed. The message never carries a response body."""
+
+    def __init__(self, message, status=None):
+        super(KubeError, self).__init__(message)
+        self.status = status
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -111,13 +127,16 @@ class Kube(object):
         if not 200 <= status < 300:
             reason = parsed.get("reason") if isinstance(parsed, dict) else None
             reason = reason if isinstance(reason, str) and reason.isalnum() else "-"
-            raise KubeError("%s %s: HTTP %d reason=%s" % (method, path, status, reason))
+            raise KubeError("%s %s: HTTP %d reason=%s" % (method, path, status, reason), status)
         if not isinstance(parsed, dict):
             raise KubeError("%s %s: HTTP %d without a JSON object" % (method, path, status))
         return parsed
 
     def endpoints(self, namespace, name):
         return self._call("GET", "/api/v1/namespaces/%s/endpoints/%s" % (namespace, name))
+
+    def configmap(self, namespace, name):
+        return self._call("GET", "/api/v1/namespaces/%s/configmaps/%s" % (namespace, name))
 
     def token(self, namespace, sa, audience, seconds=TOKEN_SECONDS):
         doc = {
@@ -167,6 +186,33 @@ def base_url(ip, port):
     return "http://%s:%d" % (host, port)
 
 
+def fetch_extras(kube, namespace, path, say):
+    """ConfigMap gatekeeper-registry-extras' data.registry.yaml -> `path`, byte for byte.
+
+    Absent (404, or no such key): no file is written and the probe's own `registry` check fails
+    (nothing to compare; svc-harness has no extras). Any other API error is a problem returned.
+    """
+    if os.path.exists(path):
+        os.remove(path)
+    try:
+        doc = kube.configmap(namespace, EXTRAS_CM)
+    except KubeError as exc:
+        if exc.status == 404:
+            say("INFO configmap %s/%s is absent: no extras to compare" % (namespace, EXTRAS_CM))
+            return None
+        return "extras: %s" % exc
+    data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
+    text = data.get(EXTRAS_KEY)
+    if not isinstance(text, str):
+        say("INFO configmap %s/%s has no %s" % (namespace, EXTRAS_CM, EXTRAS_KEY))
+        return None
+    raw = text.encode("utf-8")
+    with open(path, "wb") as f:
+        f.write(raw)
+    say("S2S-PHASE4 extras configmap=%s/%s sha256=%s" % (namespace, EXTRAS_CM, hashlib.sha256(raw).hexdigest()))
+    return None
+
+
 def _registry_field(line, field):
     for part in line.split():
         if part.startswith(field + "="):
@@ -180,11 +226,14 @@ def run(args, kube, out, http=probe.http_request):
 
     with open(probe.__file__, "rb") as f:
         program_sha = hashlib.sha256(f.read()).hexdigest()
-    say("S2S-PHASE4 namespace=%s service=%s revision=%s program_sha256=%s" % (args.namespace, SERVICE, args.revision or "-", program_sha))
+    say(
+        "S2S-PHASE4 namespace=%s gatekeeper_namespace=%s service=%s revision=%s program_sha256=%s"
+        % (args.namespace, args.gatekeeper_namespace, SERVICE, args.revision or "-", program_sha)
+    )
     failures = []
 
     try:
-        replicas, problems = replicas_from_endpoints(kube.endpoints(args.namespace, SERVICE))
+        replicas, problems = replicas_from_endpoints(kube.endpoints(args.gatekeeper_namespace, SERVICE))
     except KubeError as exc:
         replicas, problems = [], [str(exc)]
     if not problems and len(replicas) < args.expect_replicas:
@@ -196,6 +245,13 @@ def run(args, kube, out, http=probe.http_request):
     failures += problems
     if replicas:
         say("S2S-PHASE4 replicas " + " ".join("%s=%s" % (n, base_url(ip, port)) for n, ip, port in replicas))
+
+    extras_file = os.path.join(args.work_dir, EXTRAS_KEY)
+    if not failures:
+        problem = fetch_extras(kube, args.gatekeeper_namespace, extras_file, say)
+        if problem:
+            say("FAIL " + problem)
+            failures.append(problem)
 
     tokens = {}
     if not failures:
@@ -218,7 +274,7 @@ def run(args, kube, out, http=probe.http_request):
                 "--mode", "probe",
                 "--tenant", args.tenant,
                 "--base-url", base_url(ip, port),
-                "--extras-file", args.extras_file,
+                "--extras-file", extras_file,
                 "--own-token-file", "",
             ]
             if not args.registry_check:
@@ -264,10 +320,15 @@ def run(args, kube, out, http=probe.http_request):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog="phase4_job.py", description="S2S Phase 4 probes of every gatekeeper replica, in-cluster")
-    parser.add_argument("--namespace", default=NAMESPACE)
+    parser.add_argument("--namespace", default=NAMESPACE, help="where the harness and default ServiceAccounts live")
+    parser.add_argument(
+        "--gatekeeper-namespace",
+        default=os.environ.get("GATEKEEPER_NAMESPACE", ""),
+        help="where gatekeeper runs (env GATEKEEPER_NAMESPACE; required)",
+    )
     parser.add_argument("--expect-replicas", type=int, default=2)
     parser.add_argument("--tenant", default=probe.DEFAULT_TENANT)
-    parser.add_argument("--extras-file", default=probe.EXTRAS_FILE)
+    parser.add_argument("--work-dir", default="/work", help="writable dir for the extras copy (an emptyDir)")
     parser.add_argument("--revision", default=os.environ.get("PROBE_REVISION", ""))
     parser.add_argument("--no-registry-check", dest="registry_check", action="store_false")
     return parser.parse_args(argv)
@@ -278,6 +339,9 @@ def main(argv=None, kube=None, out=None, http=probe.http_request):
     try:
         args = parse_args(argv)
     except SystemExit:
+        return 2
+    if not args.gatekeeper_namespace:
+        out.write("ERROR --gatekeeper-namespace (env GATEKEEPER_NAMESPACE) is required\n")
         return 2
     try:
         kube = kube or Kube.in_cluster()

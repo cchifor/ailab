@@ -10,13 +10,29 @@ kind: Kustomization
 # ns strive-ailab is the platform's namespace; ailab manages only additive objects there. Every
 # object below is named s2s-phase4-probe* so nothing can collide with what the umbrella chart
 # renders.
-#   rbac.yaml           SA + Role (TokenRequest for harness/default, get endpoints/gatekeeper) + RoleBinding
-#   networkpolicy.yaml  admits ONLY this probe's pod label to gatekeeper :5000 (additive)
-#   job.yaml            the probe run; re-runs when its probe/revision annotation or a script changes
+#   rbac.yaml       SA + Role (TokenRequest for harness/default only) + RoleBinding, strive-ailab
+#   gatekeeper-ns/  in GATEKEEPER's namespace (its kustomization.yaml, the A.2 cutover line):
+#                   Role (get endpoints/gatekeeper, configmaps/gatekeeper-registry-extras) +
+#                   RoleBinding, and the NetworkPolicy admitting ONLY this probe's pod to :5000
+#   job.yaml        the probe run; re-runs when its probe/revision annotation or a script changes
 resources:
   - rbac.yaml
-  - networkpolicy.yaml
+  - gatekeeper-ns
   - job.yaml
+
+# The Job's GATEKEEPER_NAMESPACE is whatever namespace gatekeeper-ns/ put its NetworkPolicy in:
+# one line moves the RBAC, the policy and the Job's lookups together.
+replacements:
+  - source:
+      kind: NetworkPolicy
+      name: s2s-phase4-probe-to-gatekeeper
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          kind: Job
+          name: s2s-phase4-probe
+        fieldPaths:
+          - spec.template.spec.containers.[name=probe].env.[name=GATEKEEPER_NAMESPACE].value
 
 configMapGenerator:
   # Content-hashed name: editing either script renames the ConfigMap, the Job's pod template
