@@ -2110,6 +2110,31 @@ def pr_ok(repo, pr, head_sha):
     return d
 
 
+def open_pulls(repo):
+    """Snapshot every page before processing can merge PRs and shift page offsets.
+
+    A failed/truncated listing fails this repo's sweep instead of publishing a
+    successful partial scan. Deduplicate overlapping pages during concurrent edits;
+    maybe_merge/pr_ok still recheck the current head and eligibility before action.
+    """
+    pulls, seen = [], set()
+    for page in range(1, 1001):
+        batch = api(f"/repos/{repo}/pulls?state=open&limit=50&page={page}")
+        if not isinstance(batch, list):
+            raise ValueError("Invalid open pull request listing")
+        for pr in batch:
+            # Keep malformed entries for the reconciler's existing parse diagnostics.
+            number = pr.get("number") if isinstance(pr, dict) else None
+            if isinstance(number, int):
+                if number in seen:
+                    continue
+                seen.add(number)
+            pulls.append(pr)
+        if len(batch) < 50:
+            return pulls
+    raise RuntimeError("Open pull request pagination exceeded sweep limit")
+
+
 def iter_reviews(repo, pr):
     """All reviews, paginated (long-lived PRs exceed one page and Gitea returns
     oldest-first - unpaginated reads would silently miss the newest markers)."""
@@ -3125,7 +3150,7 @@ def reconciler():
                 # is distinguishable from a single malformed PR, which otherwise look identical.
                 op, at_pr = "list", None
                 try:
-                    for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
+                    for pr in open_pulls(repo):
                         # Reset in SEPARATE statements before touching `pr`. A tuple assignment
                         # evaluates its whole right-hand side FIRST, so `op, at_pr = "parse",
                         # pr.get(...)` raising on a malformed element left the PREVIOUS PR's

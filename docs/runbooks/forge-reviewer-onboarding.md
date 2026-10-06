@@ -52,3 +52,19 @@ subscriptions. No exception or review-policy change is introduced by this onboar
 To stop new Forge reviews, remove `cchifor/forge` from the allowlist through a reviewed
 PR and converge both hosts. Remove collaborator grants only after that change is
 active, so the reconciler does not poll an inaccessible private repository.
+
+## Large stacks of draft PRs
+
+The reconciler must read every page of open PRs before processing the snapshot.
+Forge reached 53 open PRs on 2026-10-06: a first-page-only scan saw PRs #94–#45,
+all drafts, and never revisited approved, green PR #42 on page two. Webhook review
+had succeeded, but the later CI completion needed reconciliation to merge it.
+Pagination preserves the existing current-head, author, persona and CI gates.
+Fetching the snapshot before any merges prevents the reviewer's own merges from
+shifting later page offsets. Concurrent external changes are rechecked before
+acting and picked up by subsequent sweeps. Listing failures mark the repository
+sweep failed rather than reporting a successful incomplete scan.
+
+After the pagination fix merges, deploy the reviewbot role to both reviewer hosts
+with the activation command above. Verify an eligible PR beyond the first page
+is revisited and merged by the reviewer, without changing branch protection.
