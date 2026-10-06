@@ -1930,7 +1930,7 @@ class OpenPullPaginationTest(unittest.TestCase):
 
     def test_full_page_of_drafts_does_not_hide_merge_ready_pr(self):
         pages = [[_pr(n, draft=True) for n in range(94, 44, -1)],
-                 [_pr(44, draft=True), _pr(43, draft=True), _pr(42)]]
+                 [_pr(44, draft=True), _pr(43, draft=True), _pr(42)], []]
         with mock.patch.object(self.m, "api", side_effect=pages) as api, \
                 mock.patch.object(self.m, "existing_marker", return_value=True), \
                 mock.patch.object(self.m, "maybe_merge") as merge, \
@@ -1941,10 +1941,11 @@ class OpenPullPaginationTest(unittest.TestCase):
         merge.assert_called_once_with("o/r", 42)
         self.assertEqual(api.call_args_list, [
             mock.call("/repos/o/r/pulls?state=open&limit=50&page=1"),
-            mock.call("/repos/o/r/pulls?state=open&limit=50&page=2")])
+            mock.call("/repos/o/r/pulls?state=open&limit=50&page=2"),
+            mock.call("/repos/o/r/pulls?state=open&limit=50&page=3")])
 
     def test_collects_all_pages_before_merging_can_shift_offsets(self):
-        pages = [[_pr(n) for n in range(1, 51)], [_pr(51)]]
+        pages = [[_pr(n) for n in range(1, 51)], [_pr(51)], []]
         events = []
         def api(path):
             events.append("read")
@@ -1956,11 +1957,11 @@ class OpenPullPaginationTest(unittest.TestCase):
                 mock.patch("time.sleep", side_effect=_StopLoop):
             with self.assertRaises(_StopLoop):
                 self.m.reconciler()
-        self.assertEqual(events, ["read", "read"] + ["merge"] * 51)
+        self.assertEqual(events, ["read"] * 3 + ["merge"] * 51)
 
     def test_exact_page_and_overlapping_pages(self):
         with mock.patch.object(self.m, "api", side_effect=[
-                [_pr(n) for n in range(50)], [_pr(49), _pr(50)]]):
+                [_pr(n) for n in range(50)], [_pr(49), _pr(50)], []]):
             self.assertEqual(len(self.m.open_pulls("o/r")), 51)
         with mock.patch.object(self.m, "api", side_effect=[
                 [_pr(n) for n in range(50)], []]) as api:
@@ -1990,6 +1991,15 @@ class OpenPullPaginationTest(unittest.TestCase):
         enqueue.assert_not_called()
         self.assertEqual(commit.call_args.args[0], {"o/r": 1})
         self.assertEqual(commit.call_args.kwargs, {"merge_blocked": {}})
+
+    def test_server_page_cap_below_requested_limit(self):
+        # Even one-item pages must not truncate a larger configured repository.
+        with mock.patch.object(self.m, "api", side_effect=[[_pr(1)], [_pr(2)], []]) as api:
+            self.assertEqual([p["number"] for p in self.m.open_pulls("o/r")], [1, 2])
+            self.assertEqual(api.call_count, 3)
+        with mock.patch.object(self.m, "api", return_value=[]) as api:
+            self.assertEqual(self.m.open_pulls("o/r"), [])
+            api.assert_called_once()
 
     def test_runaway_pagination_is_reported_as_failure(self):
         with mock.patch.object(self.m, "api", return_value=[_pr(n) for n in range(50)]):
@@ -2031,7 +2041,7 @@ def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=No
         repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
         if repo in failing:
             raise RuntimeError(f"HTTP Error 404: {repo}")
-        return [_pr(1)]
+        return [_pr(1)] if path.endswith("page=1") else []
 
     def existing_marker(repo, pr, sha):
         if repo in marker_raises:
@@ -2140,6 +2150,8 @@ class ReconcileIsolationTest(unittest.TestCase):
         # happened while parsing the element AFTER #17.
         def api(path, *a, **kw):
             repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+            if not path.endswith("page=1"):
+                return []
             return [_pr(17), "malformed"] if repo == "o/first" else [_pr(1)]
 
         logged = []
@@ -2446,7 +2458,7 @@ def _held_sweep(m, prs, failing=(), verdict_blocked=()):
         repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
         if repo in failing:
             raise RuntimeError("HTTP Error 404: " + repo)
-        return [_pr(n) for n in prs.get(repo, ())]
+        return [_pr(n) for n in prs.get(repo, ())] if path.endswith("page=1") else []
 
     def maybe_merge(repo, pr):
         return "verdicts" if pr in verdict_blocked else None

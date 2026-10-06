@@ -59,7 +59,8 @@ The reconciler must read every page of open PRs before processing the snapshot.
 Forge reached 53 open PRs on 2026-10-06: a first-page-only scan saw PRs #94–#45,
 all drafts, and never revisited approved, green PR #42 on page two. Webhook review
 had succeeded, but the later CI completion needed reconciliation to merge it.
-Pagination preserves the existing current-head, author, persona and CI gates.
+Pagination continues until an empty page, including when Gitea caps the requested
+page size. It preserves the existing current-head, author, persona and CI gates.
 Fetching the snapshot before any merges prevents the reviewer's own merges from
 shifting later page offsets. Concurrent external changes are rechecked before
 acting and picked up by subsequent sweeps. Listing failures mark the repository

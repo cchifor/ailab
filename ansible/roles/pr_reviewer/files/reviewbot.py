@@ -2130,7 +2130,8 @@ def open_pulls(repo):
                     continue
                 seen.add(number)
             pulls.append(pr)
-        if len(batch) < 50:
+        # Gitea may cap the requested page size below 50. Only empty is final.
+        if not batch:
             return pulls
     raise RuntimeError("Open pull request pagination exceeded sweep limit")
 
