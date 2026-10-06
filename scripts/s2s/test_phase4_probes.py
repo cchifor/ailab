@@ -666,6 +666,70 @@ class InProcess(unittest.TestCase):
 # ── Part 2: the bash orchestrator end to end ───────────────────────────────
 
 
+KS_SUSPEND = """kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":%s}}'"""
+HR_SUSPEND = """kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":%s}}'"""
+SCALE = "kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=%d"
+
+
+def _ordered(case, text, needles):
+    positions = []
+    for needle in needles:
+        case.assertIn(needle, text)
+        positions.append(text.index(needle))
+    case.assertEqual(positions, sorted(positions), "out of order: %r" % (needles,))
+
+
+def assert_freeze(case, text, scale_to):
+    """Freeze = the Flux Kustomization first (it re-applies the HelmRelease from git and clears a
+    hand-set suspend), then the HelmRelease (helm-controller upgrades), then the scale."""
+    _ordered(case, text, [KS_SUSPEND % "true", HR_SUSPEND % "true", SCALE % scale_to])
+
+
+def assert_resume(case, text, scale_to=None):
+    """Resume = the HelmRelease first, then the Kustomization, then (after a drill) the scale."""
+    needles = [HR_SUSPEND % "false", KS_SUSPEND % "false"]
+    if scale_to is not None:
+        needles.append(SCALE % scale_to)
+    _ordered(case, text, needles)
+
+
+def assert_freeze_then_resume(case, text, scale_to):
+    assert_freeze(case, text, scale_to)
+    tail = text[text.index(SCALE % scale_to) :]
+    assert_resume(case, tail)
+
+
+class RunbookFreezeOrder(unittest.TestCase):
+    """Every freeze in the runbook suspends the Kustomization before the HelmRelease, and every
+    resume releases the HelmRelease before the Kustomization (observed 2026-10-06 17:22Z: a
+    HelmRelease-only suspend was cleared by the next platform-app reconcile)."""
+
+    def blocks(self):
+        text = RUNBOOK.read_text(encoding="utf-8")
+        return [b.split("```")[0] for b in text.split("```sh\n")[1:]]
+
+    def test_every_hr_suspend_is_paired_in_order(self):
+        seen = 0
+        for block in self.blocks():
+            lines = [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization platform-app" in l]
+            for i, line in enumerate(lines):
+                if "patch helmrelease strive" in line and '"suspend":true' in line:
+                    seen += 1
+                    self.assertTrue(i > 0 and "kustomization platform-app" in lines[i - 1] and '"suspend":true' in lines[i - 1], block)
+                if "patch helmrelease strive" in line and '"suspend":false' in line:
+                    seen += 1
+                    self.assertTrue(i + 1 < len(lines) and "kustomization platform-app" in lines[i + 1] and '"suspend":false' in lines[i + 1], block)
+                if "kustomization platform-app" in line:
+                    other = lines[i + 1] if '"suspend":true' in line else lines[i - 1]
+                    self.assertIn("patch helmrelease strive", other, block)
+        self.assertGreaterEqual(seen, 6, "expected the darken block and drills 1, 2 and 4 to freeze and resume")
+
+    def test_drills_restore_resumes_both(self):
+        text = RUNBOOK.read_text(encoding="utf-8")
+        restore = text[text.index("**Restore the harness afterwards:**") :][:600]
+        self.assertLess(restore.index("HelmRelease"), restore.index("Kustomization"), restore)
+
+
 def find_bash():
     override = os.environ.get("PHASE4_TEST_BASH")
     if override:
@@ -918,8 +982,8 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("gatekeeper-b: refuse-preshared[svc-deepagent]", text)
         self.assertNotIn("gatekeeper-a: refuse-preshared", text)
         self.assertIn("DARKEN THE HARNESS", text)
-        self.assertIn("kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=0", text)
-        self.assertIn("""patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'""", text)
+        darken = text[text.index("DARKEN THE HARNESS") :]
+        assert_freeze_then_resume(self, darken, scale_to=0)
 
     def test_registry_drift_fails(self):
         self.scenario(cm=extras_text([harness_entry(), {"client_id": "svc-new", "auth_method": "k8s", "k8s_subject": "system:serviceaccount:strive-ailab:new"}]))
@@ -947,7 +1011,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertEqual(self.calls(), [])
         self.assertIn("Plan (dry run", text)
-        self.assertIn("scale deployment/harness --replicas=0", text)
+        assert_freeze_then_resume(self, text[text.index("on any failure the script prints DARKEN") :], scale_to=0)
 
     def test_replica_flag(self):
         self.scenario()
@@ -1019,6 +1083,11 @@ class EndToEnd(unittest.TestCase):
         rc, text, took = self.drill()
         self.assertEqual(rc, 0, text)
         self.assertIn("accepts the held bearer before the revocation", text)
+        # The revoke prompt freezes the Kustomization, then the HelmRelease, then scales to 0; the
+        # restore resumes the HelmRelease, then the Kustomization, then scales back.
+        prompt = text[text.index("Revoke now") : text.index("== Rejection")]
+        assert_freeze(self, prompt, scale_to=0)
+        assert_resume(self, text[text.index("== Restore") :], scale_to=1)
         for pod in ("gatekeeper-a", "gatekeeper-b"):
             self.assertIn("PASS %s rejected the revoked bearer" % pod, text)
             self.assertIn("PASS %s never accepted the revoked bearer again before its expiry" % pod, text)
