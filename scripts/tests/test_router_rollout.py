@@ -23,6 +23,7 @@ class RolloutTest(unittest.TestCase):
             'kube_pod_status_ready': [row(pod=POD)],
             'kube_pod_init_container_status_terminated_reason': [row(container='backup'), row(container='migration')],
             'kube_job_status_failed': [row(0)],
+            'kube_job_failed': [row(0)],
             'kube_job_status_succeeded': [row()],
         }
 
@@ -55,6 +56,11 @@ class RolloutTest(unittest.TestCase):
 
     def test_failed_canary_is_terminal_even_if_success_is_present(self):
         self.data['kube_job_status_failed'] = [row()]
+        with self.assertRaisesRegex(RuntimeError, 'canary failed'): self.check()
+
+    def test_deadline_failure_with_no_failed_pods_is_terminal(self):
+        self.data['kube_job_failed'] = [row(condition='true')]
+        self.data['kube_job_status_succeeded'] = []
         with self.assertRaisesRegex(RuntimeError, 'canary failed'): self.check()
 
     def test_cleanup_rollout_checks_image_without_requiring_removed_resources(self):

@@ -62,7 +62,9 @@ def check(query_fn, image, init_names, job):
             raise Pending('Waiting for successful backup/migration init checks')
     if job:
         selector = f'{namespace},job_name={json.dumps(job)}'
-        if any(float(r['value'][1]) > 0 for r in query_fn(f'kube_job_status_failed{{{selector}}}')):
+        failed = query_fn(f'kube_job_failed{{{selector},condition="true"}}')
+        failed += query_fn(f'kube_job_status_failed{{{selector}}}')
+        if any(float(r['value'][1]) > 0 for r in failed):
             raise RuntimeError('Live canary failed; inspect its narrowly scoped Loki logs')
         if not any(float(r['value'][1]) == 1 for r in query_fn(f'kube_job_status_succeeded{{{selector}}}')):
             raise Pending('Waiting for the one-shot Claude/Codex canary')
