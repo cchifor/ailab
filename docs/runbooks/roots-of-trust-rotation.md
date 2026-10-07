@@ -296,71 +296,337 @@ is archived (below); restore it temporarily with `age -d -i <new key> _out/age-r
 
 ---
 
-# 2. The Kubernetes ServiceAccount signing key — decision D7 (a): research and rehearse, never on `admin@ai`
+# 2. The Kubernetes ServiceAccount signing key — decision D7 (a): rehearsed, feasible without downtime
 
-**Status: no tested procedure exists.** Talos `talosctl rotate-ca --kubernetes` rotates the Kubernetes API **CA** only; there is no
-Talos procedure for the ServiceAccount token signing key (Talos 1.11 "CA rotation" docs). This section is a **research and
-rehearsal** procedure, time-boxed to one day including building the cluster. **A recorded outcome of "not feasible without
-downtime" is acceptable.** It never delays the other items of the plan.
+**Status: a tested procedure exists; it has not been run on `admin@ai`.** Rehearsed on 2026-10-07 on a disposable Talos
+1.11.2 / Kubernetes 1.31.4 cluster (3 control planes and 1 worker, `talosctl cluster create` with the docker provisioner on
+dev-worker-1, destroyed afterwards). Done in order, no probe of a client that re-reads its token got a 401 or a 5xx; the only failures were
+refused connections to the one control plane whose kube-apiserver was restarting, while the other two answered every probe. It costs **one
+rolling reboot of the control planes** (step 1) and an overlap of about two hours (step 3). Talos has no procedure of its own:
+`talosctl rotate-ca --kubernetes` rotates the Kubernetes API CA only (Talos 1.11 "CA rotation" docs). A real run needs the go
+decision at the end of this section.
 
-## Why it matters and what depends on it
+## How Talos 1.11 handles the signer and the verifiers (read this first)
 
-- After #2125 (live 2026-10-07) every service-to-service mint depends on **TokenReview of projected ServiceAccount tokens**, and
-  gatekeeper's own automounted token calls TokenReview (finding F-26). Removing the old verifier before every token it signed has
-  been replaced breaks all S2S.
-- TokenReview consumers on `admin@ai` on 2026-10-07 (ClusterRoleBindings to `system:auth-delegator` or to a TokenReview ClusterRole):
-  `keda/keda-metrics-server`, `kube-system/metrics-server`, `openbao/openbao-server` (Kubernetes auth), the OpenBao `k8stoken-sync`
-  role and gatekeeper (`strive-ailab-gatekeeper-tokenreview`). Re-read the list before the rehearsal; it is the verification list.
+- Talos renders both kube-apiserver key files from **`cluster.serviceAccount.key`**: `--service-account-signing-key-file=/system/secrets/kubernetes/kube-apiserver/service-account.key`
+  (the **signer**) and `--service-account-key-file=/system/secrets/kubernetes/kube-apiserver/service-account.pub` (the **verifier set**: the
+  public half of the same key). kube-controller-manager signs legacy token Secrets with `/system/secrets/kubernetes/kube-controller-manager/service-account.key`,
+  the same key. `admin@ai` runs exactly these flags (read on 2026-10-07). **So changing `cluster.serviceAccount.key` swaps the verifier
+  together with the signer**: on that control plane every token signed by the old key fails at once (execution ruling R11). Rehearsed: switching
+  one CP's key alone (no step 1) made it reject a healthy client's one-minute-old token with 401 while the other two accepted it.
+- **`cluster.apiServer.extraArgs` cannot add a verifier.** Talos 1.11.2 denies both `service-account-key-file` and
+  `service-account-signing-key-file` there (`MergeDenied` in `internal/app/machined/pkg/controllers/k8s/control_plane_static_pod.go`). The trap:
+  `talosctl patch mc` **accepts** such a patch ("Applied configuration without a reboot"), then `k8s.ControlPlaneStaticPodController` fails in
+  a loop with `extra arg "service-account-key-file" is not allowed` and stops updating the kube-apiserver static pod, for every later change
+  too, until the entry is removed. Even if it were allowed, extraArgs is a map in 1.11 (one value per flag) and the apiserver does not split
+  this flag on commas.
+- **Two keys in `cluster.serviceAccount.key` do not add a verifier either.** Talos writes `service-account.key` verbatim (both PEM blocks; the
+  apiserver signs with the first) but derives `service-account.pub` from the first key only: `/openid/v1/jwks` listed one `kid`.
+- **What works: a PEM bundle mounted over Talos's `service-account.pub` inside the apiserver pod.** `--service-account-key-file` accepts a
+  file with several public keys. A `cluster.apiServer.extraVolumes` entry bind-mounts a host file at
+  `/system/secrets/kubernetes/kube-apiserver/service-account.pub`; the mount exists only in the pod, Talos keeps writing its own `.pub` on
+  the host, the flag stays Talos's, and the signer keeps following `cluster.serviceAccount.key`. The host file comes from `machine.files`
+  (`op: create`, under `/var`). Talos writes those files **at boot only** (`machine.files` is not in the list `CanApplyImmediate` allows), which
+  is why step 1 reboots each control plane once. Changes under `cluster.*` (the volume, the key) apply without a reboot: Talos restarts the
+  static pods.
+- **Order: the file must exist before the volume.** A volume whose host file is missing makes the runtime create a *directory* at that path,
+  and that control plane's apiserver crash-loops (`runc ... error mounting "/var/.../service-account.pub"`, rehearsed). The directory would then
+  also stop `machine.files` writing the file at the next boot. So step 1 puts the file and the volume **in one patch that takes effect at a
+  boot** (Talos writes the file before kubelet starts). Never add the volume with `--mode=no-reboot` to a node that has not booted with the file.
+- **Apply the step 1 patch once per node.** A merge patch *appends* to `machine.files` and `cluster.apiServer.extraVolumes`: the same patch twice
+  gives two entries (checked with `talosctl machineconfig patch`). Talos names the volume after its mount path, so two volumes on that path make
+  kubelet reject the node's whole static pod set (`invalid pod: ... Duplicate value: "system-secrets-kubernetes-kube-apiserver-service-account-pub"`):
+  that control plane loses kube-apiserver, kube-controller-manager and kube-scheduler (rehearsed by accident, fixed with a JSON patch removing
+  `/cluster/apiServer/extraVolumes/1`). Check for an existing entry before step 1 and before a rollback that re-adds the volume.
+- **A Talos-initiated reboot does not drain.** `apply-config --mode=reboot` and `talosctl reboot` run the reboot sequence (stop pods, reboot);
+  only `talosctl shutdown` and upgrades cordon and drain (`v1alpha1_sequencer.go`). On `admin@ai`, step 1 therefore stages the patch
+  (`--mode=staged`) and reboots through [node-maintenance.md](node-maintenance.md)'s planned procedure. `patch mc --mode=staged` patches the
+  *running* config: a second staged patch replaces the first, and staging a no-op patch un-stages (rehearsed; the staged config shows as
+  MachineConfig `persistent`, the running one as `v1alpha1`).
+- Each control plane's `/openid/v1/jwks` lists exactly its verifier set, and `kid = base64url(sha256(DER SubjectPublicKeyInfo))`. `kid`s are
+  public, so they are the check everywhere below.
+- A legacy token Secret is also checked against the Secret's current value. Re-issuing it (remove `data.token`; the token controller fills it
+  again within seconds) **revokes the old value at once on every control plane**, whatever the verifier set (`Token does not match server's copy`,
+  rehearsed).
+- In Git Bash, `kubectl get --raw /openid/...` and `talosctl read /system/...` need `MSYS_NO_PATHCONV=1`, otherwise the path becomes a
+  Windows path and the API answers `NotFound`.
+
+## What depends on it (`admin@ai`, read-only inventory of 2026-10-07)
+
+- **The cluster:** Talos v1.11.2, Kubernetes v1.31.4, control planes .41, .42 and .43, issuer and `--api-audiences` `https://192.168.0.40:6443`, one
+  RS256 key, `kid` `b1TEXOwB...` on all three control planes' `/openid/v1/jwks`.
+- **TokenReview consumers.** After #2125 every S2S mint depends on TokenReview of projected ServiceAccount tokens, and gatekeeper's own
+  automounted token calls TokenReview (F-26). Consumers (ClusterRoleBindings to `system:auth-delegator` or to a TokenReview ClusterRole):
+  `keda/keda-metrics-server`, `kube-system/metrics-server`, `openbao/openbao-server` (Kubernetes auth), the OpenBao `k8stoken-sync` role and
+  gatekeeper (`strive-ailab-gatekeeper-tokenreview`). Re-read the list before a run:
 
   ```bash
   kubectl --context admin@ai get clusterrolebinding -o json | jq -r '.items[] | select(.roleRef.name=="system:auth-delegator") | .metadata.name + " -> " + ([.subjects[]? | .kind + ":" + (.namespace // "") + "/" + .name] | join(","))'
   kubectl --context admin@ai get clusterrole -o json | jq -r '.items[] | select(any(.rules[]?; (.resources // []) | index("tokenreviews"))) | .metadata.name'
   ```
-- **Legacy `kubernetes.io/service-account-token` Secrets never refresh** and stop working when their signer stops verifying. On
-  2026-10-07 there are four, all in `testpool` (`tep-dw1-token` ... `tep-dw4-token`, consumed by `scripts/tep-render-kubeconfigs.py` and
-  the dev-worker `~/.tep/kubeconfig`). Re-take the inventory: `kubectl --context admin@ai get secrets -A --field-selector type=kubernetes.io/service-account-token -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name`.
-- Projected tokens (the S2S identity, the Kubernetes API client libraries) refresh within about an hour, so they follow a signer
-  switch if the new key is already a verifier.
-- The cluster is `v1.31.4`, issuer `https://192.168.0.40:6443`, one RS256 key at `/openid/v1/jwks`. The key material lives in the OpenTofu
-  state (`talos_machine_secrets` in `kubernetes/infra/`, local state) and in the DR copy `kubernetes/infra/talos-secrets-bundle.sops.yaml`; a
-  rotation that is not written back to both makes a total-loss recovery regenerate the **old** key.
+- **Projected tokens:** 333 pod volumes with the default 3607 s (the apiserver extends these to one year, but kubelet still replaces them at
+  80 % of 3607 s, about 48 minutes), 15 with audience `strive-gatekeeper` and 3600 s (`strive-ailab`), none longer. Re-take:
 
-## The procedure to prove (on a disposable Talos 1.11.2 cluster only)
+  ```bash
+  kubectl --context admin@ai get pods -A -o json | jq -c '[.items[] | . as $p | (.spec.volumes // [])[] | .projected.sources[]? | .serviceAccountToken // empty | {exp: (.expirationSeconds // 3600), aud: (.audience // ""), ns: $p.metadata.namespace}] | group_by([.exp, .aud])[] | {exp: .[0].exp, aud: .[0].aud, pods: length}'
+  ```
+- **Clients that never re-read their token:** `serviceaccount_stale_tokens_total` counts uses of an extended token after its first 3607 s, i.e.
+  a client still holding a token kubelet has already replaced. It rose by **0** on all three control planes over the last 7 days (one event on
+  cp1 between 7 and 8 days ago): today every client re-reads its projected token.
+- **TokenRequest tokens:** `openbao/openbao-k8stoken-sync` (CronJob, `17 3 * * *` UTC) mints **720 h** tokens for the dev workers' `tep`,
+  `helmtest` and `platform` kubeconfigs and publishes them to OpenBao KV; the openbao-agent on each worker renders them to
+  `~/.tep/kubeconfig`, `~/.helmtest/kubeconfig` and `~/.platform/kubeconfig`. Tokens minted before the switch keep the old signature for 30 days
+  unless re-minted. Hand-minted `kubectl create token` tokens are not inventoried.
+- **Legacy `kubernetes.io/service-account-token` Secrets (never refresh): 4**, all in `testpool`: `tep-dw1-token`, `tep-dw2-token`,
+  `tep-dw3-token`, `tep-dw4-token` (ServiceAccounts `tep-dw1` ... `tep-dw4`), declared in git in
+  `kubernetes/apps/infrastructure/testpool/tep-access.yaml` (Flux `testpool`). `serviceaccount_legacy_tokens_total` rose by 3 on cp1 in 7 days,
+  so at least one is still used although the kubeconfigs moved to k8stoken-sync: find who in the audit log before re-issuing (step 3). Re-take:
+  `kubectl --context admin@ai get secrets -A --field-selector type=kubernetes.io/service-account-token -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name`.
+- **Where the key lives:** the OpenTofu state (`talos_machine_secrets.this` in `kubernetes/infra/`, `certs.k8s_serviceaccount.key`) and the DR copy
+  `kubernetes/infra/talos-secrets-bundle.sops.yaml` (`stringData."secrets.yaml"`, `certs.k8sserviceaccount.key`). Worker machine configs
+  (`agent-nodes`, `env-pool`) do not carry it (checked on the rehearsal's worker).
 
-Use `_out/talosctl-1112.exe` (v1.11.2); the system `talosctl` is v1.6.2 and unsafe. Roll **one control plane at a time**, with `talosctl ... etcd status` 3/3 in sync between
-control planes. Never touch `admin@ai` for this.
+## Before a real run: make the change survive `tofu apply` (not rehearsed)
 
-1. **Build** a 3-CP Talos 1.11.2 cluster (the `kubernetes/infra/` module with a different state and names, or `talosctl cluster create` if it runs here) with a workload that
-   authenticates by TokenReview (a copy of the gatekeeper pattern), a projected-token consumer and one legacy token Secret.
-2. **Make the verifier set contain BOTH public keys, independently of the signer, on every control plane.** By default the kube-apiserver verifies with
-   the public half of the key in `cluster.serviceAccount.key`, the same key that signs, so changing that key in step 3 would silently swap the old verifier for the
-   new one and invalidate every old token at once. Break that coupling first. Generate the new RSA key. Two ways to try, **in this order** (both UNVERIFIED, the rehearsal's job):
-   - **(a) A PEM bundle in `cluster.serviceAccount.key`.** kube-apiserver's `--service-account-key-file` accepts a PEM file with several keys (all become verifiers),
-     while `--service-account-signing-key-file` uses the **first** private key. Appending the new private key as a second block makes it a verifier without changing the
-     signer, and reordering the blocks later switches the signer. Prove that Talos accepts a two-block value and writes it unchanged to the file both flags read, and that the
-     apiserver then verifies with both.
-   - **(b) Explicit flags and files:** mount the old and the new public key files (`cluster.apiServer.extraVolumes`) and list both as `--service-account-key-file`
-     (`cluster.apiServer.extraArgs`). Talos may **reject** an `extraArgs` entry that duplicates a flag it sets itself (and this flag is one it sets), and a repeated flag may need a
-     comma-joined value or, on newer Talos, a list: settle both on the rehearsal cluster before relying on this path.
+The control planes' machine config belongs to OpenTofu: `talos_machine_configuration_apply.cp` applies the config generated from
+`talos_machine_secrets.this` plus `machine-config/controlplane.yaml.tftpl`. It does not see a `talosctl patch`, and **the next `just apply`
+re-applies the old key as signer and sole verifier**: after step 4 that is an instant 401, on that control plane, for every token signed since the
+switch. So, before step 1, either:
 
-   Apply to one CP at a time. Check on **each** control plane (address each CP's API server directly, not the VIP): a TokenReview of an old token (a projected token and a legacy Secret
-   token taken before the change) is `authenticated`; the apiserver's arguments or key files show both keys; `/openid/v1/jwks` lists both keys (if it does).
-3. **Switch the signer.** Change `cluster.serviceAccount.key` to the new key (one CP at a time). The verifier set from step 2 is unchanged by this, so old and new tokens
-   both verify throughout the roll. Check after each CP: etcd 3/3; a freshly created TokenRequest has the new `kid`; a TokenReview of an **old-signed** token is still `authenticated` on **every**
-   control plane, the one just switched included, and so is a TokenReview of a new-signed token on each of them; the consumer's projected token refreshes and keeps working.
-4. **Keep the old verifier until every token it signed has been replaced:** projected tokens within about an hour; legacy Secrets never (re-issue them: delete and
-   recreate the Secret, re-run the consumers' renderers). Only then remove **the OLD key specifically** (its block in the bundle, or its file and volume in the flag list; leave the new one;
-   do not just drop "the second entry"), one CP at a time, and check that an old-signed TokenReview is now `authenticated: false` and a new-signed one still `true` on each.
-5. **Record the result in this runbook and in the plan's A5.7 note**: the exact `talosctl` and machine-config patches that worked, the measured downtime per CP and for the
-   workload, what had to be re-issued, and where the new key was written (tfstate and the DR bundle). Or the recorded finding that it cannot be done without
-   downtime and why.
+- **(preferred) carry every step in OpenTofu:** steps 1 and 4 as the `machine.files` and `extraVolumes` block in `controlplane.yaml.tftpl` (public
+  keys only, plain text is fine); step 2 as a second config patch setting `cluster.serviceAccount.key` from a sensitive variable fed from a new
+  SOPS file (`talos_machine_secrets.this` keeps the old key, so this override stays for good); apply one control plane at a time with
+  `-target='talos_machine_configuration_apply.cp["cp1"]'` after a `tofu plan` that shows only that control plane's expected diff (the provider's
+  `apply_mode` defaults to `auto`, which reboots for step 1); or
+- run the steps with `talosctl` as below and freeze every `kubernetes/infra` apply until the template and the variable match and `tofu plan` is clean.
 
-**Rollback (rehearsal):** destroy the disposable cluster. **Rollback (a future real run):** keep the old public key in the explicit verifier list until the very end; the
-reverse of step 3 is to point `cluster.serviceAccount.key` back at the old key, one CP at a time (the verifier list holds both, so nothing it signed is lost); the reverse of step 4 is to re-add the old
-public key file to the list.
+Either way, write the new private key into the DR bundle in the same change (`certs.k8sserviceaccount.key` in the inner `secrets.yaml`, following
+the rules at the top), or a total-loss recovery comes back with the old key.
 
-**Real-cluster gate (out of scope for the rehearsal):** a go decision for `admin@ai` needs the rehearsal's measured downtime, the verified TokenReview-consumer
-list above, an inventory of legacy token Secrets with their owners, and the quiet window rule (no other platform-wide change that day).
+## Procedure (as rehearsed; one control plane at a time)
+
+Setup, workstation, Git Bash. `$W` holds the new private key and witness tokens: restrict it (rules at the top) before step 0.
+
+```bash
+OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
+export TALOSCONFIG="$OUT/talosconfig" MSYS_NO_PATHCONV=1
+T="$OUT/talosctl-1112.exe"; K="kubectl --context admin@ai"; W="$OUT/sa-rotation"
+CPS="192.168.0.41 192.168.0.42 192.168.0.43"; ALL=192.168.0.41,192.168.0.42,192.168.0.43
+declare -A POD=([192.168.0.41]=kube-apiserver-talos-cp1 [192.168.0.42]=kube-apiserver-talos-cp2 [192.168.0.43]=kube-apiserver-talos-cp3)
+b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+kid()    { openssl pkey -pubin -in "$1" -outform DER | openssl dgst -sha256 -binary | b64url; }
+hdr()    { local s; s=$(cut -d. -f1 | tr '_-' '/+'); while [ $(( ${#s} % 4 )) -ne 0 ]; do s="$s="; done; echo "$s" | base64 -d; }
+jwks()   { $K --server "https://$1:6443" get --raw /openid/v1/jwks | jq -c '[.keys[].kid[0:8]]'; }
+signs()  { $K --server "https://$1:6443" -n default create token default --duration=10m | hdr | jq -r '.kid[0:8]'; }
+trv()    { jq -n --rawfile t "$2" '{apiVersion:"authentication.k8s.io/v1",kind:"TokenReview",spec:{token:($t|rtrimstr("\n"))}}' |
+           $K --server "https://$1:6443" create -f - -o jsonpath='{.status.authenticated} {.status.error}{"\n"}'; }
+state()  { for c in $CPS; do echo "$c jwks=$(jwks $c) signs=$(signs $c)"; done; "$T" -n $ALL etcd status; }
+# start time of $1's kube-apiserver container, asked through ANOTHER control plane (the VIP may sit on $1)
+started(){ local o; for o in $CPS; do [ "$o" != "$1" ] && break; done
+           $K --server "https://$o:6443" -n kube-system get pod "${POD[$1]}" -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}'; }
+entries(){ "$T" -n "$1" get mc "$2" -o jsonpath='{.spec}' | grep -c 'sa-verify'; }   # $2 = v1alpha1 (running) or persistent (next boot)
+# resign <token-file> <private-key>: the token's claims re-signed with another key (to test a verifier before anything signs with it)
+resign() { local h p; h=$(printf '{"alg":"RS256","kid":"%s"}' "$(openssl pkey -in "$2" -pubout -outform DER | openssl dgst -sha256 -binary | b64url)" | b64url)
+           p=$(cut -d. -f2 < "$1"); printf '%s.%s.%s\n' "$h" "$p" "$(printf '%s.%s' "$h" "$p" | openssl dgst -sha256 -sign "$2" -binary | b64url)"; }
+```
+
+Never paste a `talosctl ... --dry-run` diff of a control plane anywhere: its context lines print the current private key (`key:` lines).
+
+### Step 0 — the new key, the patches, the witnesses (no cluster change)
+
+```bash
+umask 077; mkdir -p "$W"
+"$T" -n 192.168.0.41 read /system/secrets/kubernetes/kube-apiserver/service-account.pub > "$W/k1.pub"   # public half of the current key
+openssl genrsa -traditional -out "$W/k2.key" 4096          # same form Talos generated: PKCS#1 RSA 4096
+openssl pkey -in "$W/k2.key" -pubout -out "$W/k2.pub"
+echo "k1=$(kid "$W/k1.pub") k2=$(kid "$W/k2.pub")"; state   # k1 = the kid every CP lists and signs with
+# step 1: bundle (old + new public key) written at boot, mounted over Talos's .pub
+{ printf 'machine:\n  files:\n    - op: create\n      path: /var/sa-verify/service-account.pub\n      permissions: 0o444\n      content: |\n'
+  cat "$W/k1.pub" "$W/k2.pub" | sed 's/^/        /'
+  printf 'cluster:\n  apiServer:\n    extraVolumes:\n      - hostPath: /var/sa-verify/service-account.pub\n        mountPath: /system/secrets/kubernetes/kube-apiserver/service-account.pub\n        readonly: true\n'
+} > "$W/step1-verify-k1-k2.yaml"
+printf 'cluster:\n  serviceAccount:\n    key: %s\n' "$(base64 -w0 < "$W/k2.key")" > "$W/step2-sign-k2.yaml"   # secret
+printf '[{"op":"remove","path":"/cluster/apiServer/extraVolumes"}]\n' > "$W/step4-drop-k1.json"
+# old-key witnesses: a TokenRequest token now; it must stay valid until step 4
+$K -n default create token default --duration=48h > "$W/k1-witness.jwt"
+```
+
+`step4-drop-k1.json` removes the whole `extraVolumes` list: correct while this bundle is the only entry (true on 2026-10-07; the template has no
+`apiServer` section). If another volume was added since, remove this entry by its index instead.
+
+### Step 1 — make every control plane verify both keys (one reboot each, signer unchanged)
+
+For each control plane in turn (`cp=192.168.0.41`, then `.42`, then `.43`):
+
+```bash
+"$T" -n $ALL etcd status                                   # 3 members, same raft index, no errors — before EVERY control plane
+entries $cp v1alpha1; entries $cp persistent               # 0 and 0; anything else: stop, the patch would duplicate (above)
+"$T" -n $cp patch mc --patch @"$W/step1-verify-k1-k2.yaml" --mode=staged
+entries $cp persistent                                     # 2 (the file and the volume): staged for the next boot
+# now reboot this control plane the way node-maintenance.md "Planned drain / host reboot" does (its quorum and CNPG
+# checks, talosctl shutdown, which drains and powers off, then qm start <vmid> on the Proxmox host; no host reboot).
+# Apply nothing else to it in between: another patch starts again from the running config and replaces what is staged.
+until [ "$($K --server https://$cp:6443 get --raw /readyz 2>/dev/null)" = ok ]; do sleep 5; done
+entries $cp v1alpha1                                       # 2: running
+state                                                      # $cp: jwks [k1,k2] signs k1; the others unchanged
+for c in $CPS; do echo "$c $(trv $c "$W/k1-witness.jwt")"; done   # true on all three
+```
+
+**Gate before step 2:** every control plane lists both `kid`s, and a token signed by the **new** key is accepted by all three:
+
+```bash
+$K -n default create token default --duration=1h > "$W/witness-1h.jwt"
+resign "$W/witness-1h.jwt" "$W/k2.key" > "$W/k2-test.jwt"
+for c in $CPS; do echo "$c $(trv $c "$W/k2-test.jwt")"; done   # true on all three; "invalid signature" = that CP lacks the bundle
+```
+
+Rehearsal: `--mode=reboot` on each node (the docker provisioner supports neither `talosctl shutdown` nor `talosctl reboot`), 39-47 s from apply
+to a ready apiserver, no drain; the staged path separately (stage, power-cycle the node: the staged file and volume were live after the boot;
+that test patch used a second path on a node that already had the entry, which is how the duplicate-volume failure above was found).
+`/var/sa-verify/service-account.pub` present (`-r--r--r--`, root); the host's own `.pub` unchanged; before the gate, the forged new-key token
+was rejected (`invalid signature`) exactly on the control planes not yet rebooted.
+
+### Step 2 — switch the signer (no reboot)
+
+For each control plane in turn. `/readyz` alone is not enough here: the old pod keeps serving for about 50 s after the apply, so wait for the
+container to be replaced (`started` asks another control plane, because the VIP may sit on the one restarting):
+
+```bash
+before=$(started $cp)
+"$T" -n $cp patch mc --patch @"$W/step2-sign-k2.yaml" --mode=no-reboot
+until s=$(started $cp) && [ -n "$s" ] && [ "$s" != "$before" ]; do sleep 3; done
+until [ "$($K --server https://$cp:6443 get --raw /readyz 2>/dev/null)" = ok ]; do sleep 3; done
+state                                                      # $cp: jwks [k1,k2] signs k2
+$K --server https://$cp:6443 -n default create token default --duration=1h > "$W/k2-from-$cp.jwt"
+for c in $CPS; do echo "$c old=$(trv $c "$W/k1-witness.jwt") new=$(trv $c "$W/k2-from-$cp.jwt")"; done   # all true
+```
+
+A mixed state between control planes is safe: each one verifies both keys. kube-controller-manager restarts first, then kube-apiserver
+(rehearsal: 50-65 s from apply to the new container). Note the time the last control plane switched: step 3 counts from it.
+
+### Step 3 — the overlap: wait until nothing uses an old-key token
+
+All of these, then step 4. Nothing breaks while both keys verify, so the overlap can be as long as needed (a day is fine).
+
+1. **At least 60 minutes since the last switch.** Kubelet replaces 3600/3607 s projected tokens at about 48 minutes (rehearsal: a 600 s token was
+   replaced after 476 s and came back signed by the new key).
+2. **No client still holds a replaced token:** in Prometheus (`port-forward svc/kube-prometheus-stack-prometheus`),
+   `sum by (instance) (increase(serviceaccount_stale_tokens_total{job="apiserver"}[1h]))` is 0 on all three control planes for the hour that
+   starts 61 minutes after the last switch (every old-key token is past its first 3607 s by then, so any use of one counts), which puts step 4
+   at two hours after the last switch at the earliest. If not, the audit log names the client: annotation `authentication.k8s.io/stale-token`
+   (Talos's default audit policy is `Metadata`, which keeps annotations):
+
+   ```bash
+   for c in $CPS; do "$T" -n $c read /var/log/audit/kube/kube-apiserver.log; done | grep stale-token |
+     jq -r '(.annotations["authentication.k8s.io/stale-token"] | split(",")[0]) + " pod=" + ((.user.extra["authentication.kubernetes.io/pod-name"] // []) | join(","))' |
+     sort | uniq -c
+   ```
+   (Rehearsal: the client that read its token once showed up here, and in the metric on all three control planes, 67 s after its token's
+   first 3607 s: `subject: system:serviceaccount:satest:prober pod=prober-frozen`.)
+   Restart that pod (a new pod gets a new token) or fix the client, and wait again.
+3. **TokenRequest tokens:** `$K -n openbao create job --from=cronjob/openbao-k8stoken-sync k8stoken-sync-sa-rotation`, wait for `Complete`, then
+   on each dev worker check that the three kubeconfigs carry the new key (header only):
+   `for f in ~/.tep/kubeconfig ~/.helmtest/kubeconfig ~/.platform/kubeconfig; do yq '.users[0].user.token' $f | cut -d. -f1 | base64 -d 2>/dev/null; echo; done`.
+   Tell the owner that tokens minted by hand before the switch stop working at step 4.
+4. **Legacy Secrets,** only after step 2 is done on **all three** control planes (the controller re-fills a Secret with its own control plane's
+   key; one not yet switched would re-mint an old-key token). First find who uses them: annotation `authentication.k8s.io/legacy-token` in the
+   same audit logs. Then, per Secret, with its consumer ready to take the new value at once (the old value dies on the spot):
+
+   ```bash
+   $K -n testpool patch secret tep-dw1-token --type=json -p '[{"op":"remove","path":"/data/token"}]'
+   $K -n testpool get secret tep-dw1-token -o jsonpath='{.data.token}' | base64 -d | hdr   # kid = new key
+   ```
+   If nothing uses them any more, retiring them from `tep-access.yaml` is better than re-issuing.
+
+### Step 4 — drop the old verifier (no reboot)
+
+For each control plane in turn, with Prometheus open on
+`sum by (instance) (rate(authentication_attempts{job="apiserver",result="error"}[5m]))` (baseline on 2026-10-07: 5 errors in 24 hours on all three
+together):
+
+```bash
+before=$(started $cp)
+"$T" -n $cp patch mc --patch @"$W/step4-drop-k1.json" --mode=no-reboot
+until s=$(started $cp) && [ -n "$s" ] && [ "$s" != "$before" ]; do sleep 3; done
+until [ "$($K --server https://$cp:6443 get --raw /readyz 2>/dev/null)" = ok ]; do sleep 3; done
+state                                                      # $cp: jwks [k2] signs k2
+for c in $CPS; do echo "$c old=$(trv $c "$W/k1-witness.jwt") new=$(trv $c "$W/k2-from-$cp.jwt")"; done
+#   $cp: old=false "[invalid bearer token, invalid signature]", new=true; the others still old=true until rolled
+```
+
+Watch 10 minutes before the next control plane. A rise in the error rate on the control plane just rolled, or
+`$K -n kube-system logs ${POD[$cp]} | grep -c 'Unable to authenticate'` growing, means an old-key holder was missed: roll that control plane
+back (below) and find it (audit log: 401 events carry `sourceIPs` and `userAgent`). The `machine.files` entry stays for now: it is what makes
+this step's rollback a no-reboot change.
+
+### Step 5 — clean up and record
+
+- Drop the `machine.files` entry at the next planned control plane reboot or Talos upgrade (removing it only takes effect at a reboot; the file
+  left on `/var` holds public keys only).
+- Delete `$W/*.jwt`, `$W/k1.pub` and the plain copy of `$W/k2.key` once OpenTofu (or its SOPS file) and the DR bundle hold the new key.
+- Record the old and new `kid`s, the date and the PR numbers (see "After any of these").
+
+## Rollback
+
+| From | Do | Why it is safe |
+|---|---|---|
+| Step 1 (any control plane) | Remove `/cluster/apiServer/extraVolumes` on it (no reboot). The file can stay. | Talos's own `.pub` is the old key again. |
+| Step 2 (any control plane), **before step 4 has started** | Patch `cluster.serviceAccount.key` back to the old key on the switched control planes (no reboot), built like `step2-sign-k2.yaml` from `certs.k8sserviceaccount.key` in the DR bundle or `certs.k8s_serviceaccount.key` in `tofu output -json machine_secrets`. | Every control plane still verifies both keys, so tokens signed either way keep working (rehearsed). |
+| Step 4 (any control plane) | Check `entries $cp v1alpha1` is 1 (the file only), then re-add only the volume (no reboot): `cluster: { apiServer: { extraVolumes: [ { hostPath: /var/sa-verify/service-account.pub, mountPath: /system/secrets/kubernetes/kube-apiserver/service-account.pub, readonly: true } ] } }`. | The file is still on disk because step 4 keeps `machine.files` (rehearsed: the old key verified again after 41 s). |
+
+Do not roll the signer back while any control plane has dropped the old verifier: tokens it then signs fail there (rehearsed). Roll step 4 back on
+every control plane first.
+
+## What breaks if the order is wrong (rehearsed)
+
+- **Switching the signer without step 1** (Talos's default coupling): that control plane accepts only the new key at once. A healthy client
+  whose token was a minute old got 401 there and 201 from the other two; through the VIP or the `kubernetes` Service that is one request in three,
+  then all of them once every control plane is switched, until kubelet replaces every token (up to about 48 minutes) and every client re-reads it:
+  an S2S outage of up to an hour on `admin@ai`.
+- **Dropping the old verifier before the overlap ends:** after step 4 on one control plane, a client still holding an old-key token (a 3607 s token
+  read once at start, the extended kind that stays valid for a year) got 401 from that control plane on every probe and 201 from the two others; an
+  old-key 24 h TokenRequest token failed TokenReview there with `invalid signature`; the rejections showed in `authentication_attempts{result="error"}`
+  and the apiserver log as `Unable to authenticate the request ... invalid signature`.
+- **The volume before the file:** that control plane's apiserver crash-loops and a directory appears where the file should be (above).
+- **The step 1 patch twice:** two volumes on one path, and that control plane runs no control plane static pods at all (above).
+- **A verifier through `extraArgs`:** accepted by `talosctl`, then the static pod controller refuses it and stops updating the apiserver (above).
+
+## Timings (rehearsal; production will be slower)
+
+| Step | Rehearsal (docker nodes) | Expect on `admin@ai` |
+|---|---|---|
+| 1, per control plane | apply to ready 39-47 s | a full reboot with drain, several minutes; one control plane at a time with etcd 3/3 in between |
+| 2, per control plane | apply to new apiserver 50-65 s | about a minute, then the checks |
+| 3 | 600 s tokens replaced after 476 s | two hours at least (item 2's window), plus the k8stoken-sync run and the legacy Secrets |
+| 4, per control plane | apply to new apiserver 43-61 s | about a minute, then 10 minutes of watching |
+
+**Real-cluster gate:** a go decision for `admin@ai` needs the OpenTofu path above reviewed (a clean `tofu plan` per control plane), the
+TokenReview-consumer list re-read, the legacy Secrets' users found, the k8stoken-sync re-run planned, a CP reboot window (step 1), and the quiet
+window rule (no other platform-wide change that day).
+
+## Rehearsal record (2026-10-07)
+
+Cluster `sa-key-research`: `talosctl` v1.11.2 (checksum verified) `cluster create --controlplanes 3 --workers 1 --kubernetes-version 1.31.4` on
+dev-worker-1, destroyed at the end. Old key `TYHsFxe7...`, new key `ZM7Or2rD...`, a third key `O0_bdAMK...` for the "without step 1" test.
+Workload: a ServiceAccount, a legacy token Secret, and two host-network pods probing all three apiservers directly every 15 s with
+SelfSubjectReview: `reload` (600 s projected token, re-read every loop) and `frozen` (3607 s token, read once). Witnesses: a 24 h TokenRequest
+token, a 3607 s projected token and the legacy token, all taken before step 1, checked by TokenReview on each control plane after every change.
+
+- Experiments that failed as predicted: a two-key `cluster.serviceAccount.key` (one `kid` in the JWKS); `extraArgs` `service-account-key-file`
+  (static pod controller error loop).
+- Step 1 on the three control planes, then step 2 on the three: every witness `true` on every control plane after every change; the `reload`
+  probe changed to the new `kid` on its first refresh after the switch; neither probe saw a 401.
+- Legacy Secret re-issued after step 2: new `kid`, the old value rejected everywhere at once.
+- Step 4 on one control plane ("too early"): old-key witnesses `false` there only, the `frozen` probe 401 there only, new-key tokens `true`
+  everywhere. Then the rollbacks of step 4 and of step 2 as in the table; the "without step 1" signer switch (a third key on one control plane)
+  and the missing-file volume, each reverted; the staged path and, by accident, the duplicate volume.
+- After the `frozen` probe's token passed 3607 s: `serviceaccount_stale_tokens_total` and the audit annotation named it (step 3, item 2).
+- Final step 4 on the three control planes: every old-key token `invalid signature` everywhere, new-key tokens `true`, the `reload` probe 201
+  everywhere, the `frozen` probe 401 everywhere.
+- Totals over the 65 minutes: `reload` 703 answers 201, 74 refused connections (restarts), 3 answers 401, all three from the "without step 1"
+  test; `frozen` 657 answers 201, 74 refused, 49 answers 401, all after the deliberate early step 4. etcd: 3 members, same raft index, no errors
+  after every change. Cluster destroyed (`talosctl cluster destroy`: no container, network or volume left) and the Talos image removed from
+  dev-worker-1.
 
 ---
 
