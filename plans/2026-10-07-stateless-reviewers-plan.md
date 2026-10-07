@@ -18,6 +18,8 @@ claude p90 enqueue-to-posted 6.8 min, codex 0.8 min; merges wait for both.
 4. **The forge is the only synchronization point** (PR reviews, plus tags and one file in a
    coordination repository on the same forge). No shared database.
 5. Works on **Gitea and GitHub** (github.com and GitHub Enterprise Server).
+6. **One forge account per kind**, shared by that kind's instances and used by nothing else (markers,
+   pending reviews and approvals are per account).
 
 **Facts measured on Gitea 1.26.1** (`cchifor/primes-lab`, `workstation-bot`; scripts in
 `scripts/spikes/`):
@@ -36,9 +38,9 @@ claude p90 enqueue-to-posted 6.8 min, codex 0.8 min; merges wait for both.
 | **A review POST with an invalid inline position returns 500 and leaves an empty PENDING review that the next POST by the same account absorbs** | Spike 3 (primes-lab#18, closed) |
 
 Review trail: `…-review-r1-fable.md`, `…-review-r1-codex.md`, `…-review-r2.md`, `…-review-r3.md`,
-`…-review-r4.md`, `…-review-a1.md`, `…-review-a2.md`, `…-review-a3.md` (alignment rounds). This
-version (v3.2) applies alignment round 3: rights enumerated by exact-ref walk, a late-landed right is
-always finished (never used), and the operator's cleanup holds a right like any other POST.
+`…-review-r4.md`, `…-review-a1.md`, `…-review-a2.md`, `…-review-a3.md`, `…-review-a4.md`
+(alignment rounds). This version (v3.3, final) applies alignment round 4 and the owner's decision
+that a possibly-sent right is released **only on evidence**, never on elapsed time.
 
 ## Design principle
 
@@ -155,9 +157,15 @@ Messages (claims and rights only):
 `create_owned(name)`: create; **whatever the answer** (201, 409/422, 500, timeout) read the exact ref
 and its object: owned **iff** the object's message nonce is this claim's. The nonce (and on GitHub
 the whole tag object) is fixed per (kind, head, name) for the life of the process. Not found → poll
-for up to `post_margin_s`, then "not owned for now". A tag that lands later carrying my nonce is mine
-(spike 3 shows timed-out creates landing): a work claim becomes my lease; a **publication right is
-finished at once** (consumed + `pubfin`, never sent) so the PR's sequence moves on [a3]. Persistent non-race errors
+for up to `post_margin_s`, then "not owned for now". Each process keeps two in-memory sets of publication rights: **held** (entered the moment
+`create_owned` reads a right back as mine; left only when the right is finished) and **consumed**
+(finished; never sent again). A right carrying my nonce that is **not held** was created by a call
+that reported failure and landed later (spike 3 shows timed-out creates landing): such a
+**late-landed** right is finished at once (consumed + `pubfin`, never sent). A **held** right is never
+finished by a walk — after a POST timeout it stays held and unresolved for the life of the process —
+and is treated like a peer's right by every other code path [a4: Fable, Codex]. A late-landed work
+claim simply becomes my lease. A restart loses both sets; the new process has a new nonce, so its
+predecessor's rights are peers' rights to it. Persistent non-race errors
 (401/403, a 422 that is not "already exists", 5 consecutive not-found) are counted and alerted.
 
 ## 5. Publication (the safety mechanism)
@@ -166,46 +174,63 @@ Every POST of a kind on a PR — a review, an approval upgrade, or the operator'
 through one publication right. In `post_review`, after the existing checks (head unchanged,
 `posting-disabled` absent):
 
-1. Walk the PR's rights. An unresolved right that is **mine** (a late landing) → finish it first (it
-   was never sent). An unresolved right that is **not mine** → wait for it to resolve within the
-   remaining lease budget (polling the exact refs), then repeat; budget exhausted or head moved →
-   `a<N>.rel.pub.<t>` (uncharged) [a3: Codex 1, Fable 5].
-2. `create_owned(pub<G+1>)` (G = highest) with this head and purpose. Not owned → step 1.
-3. **Pre-send checks**, all re-read now: PR open, not draft, head equal to the right's head; for a
-   review, no authenticated marker of this kind at the head; for an approval, a clean marker of this
-   kind at the head **and no APPROVED review by the bot at the head** [a3: Codex 4]; `policy.json`
-   loaded, epoch unchanged; guard findings and verdict recomputed against that policy; **no PENDING
-   review by the bot on the PR** (a failed POST leaves one and the next POST would absorb it —
-   spike 3). A read error is retried within the remaining budget. Any definite failure → finish
-   without sending.
-4. Create `pubsent<G>.<t>` and confirm it **by readback**. Absent → finish without sending.
+1. Walk the PR's rights (resolved rights are immutable and cached; only the frontier is re-read). A
+   **late-landed** right of mine → finish it. Any other unresolved right (a peer's, or one I hold) →
+   wait for it to resolve within the remaining lease budget (polling the exact refs), then repeat;
+   budget exhausted or head moved → `a<N>.rel.pub.<t>` (uncharged).
+2. `create_owned(pub<G+1>)` (G = highest) with this head and purpose; on success it becomes held. Not
+   owned → step 1.
+3. **Pre-send checks**, all re-read now: PR open, not draft, head equal to the right's head (moved →
+   finish, `rel.moved`); for a review, no authenticated marker of this kind at the head; for an
+   approval, a clean marker of this kind at the head and no APPROVED or DISMISSED review by the bot at
+   the head; `policy.json` loaded, epoch unchanged; guard findings and verdict recomputed against that
+   policy; **no PENDING review by the bot on the PR** (spike 3). A read error is retried within the
+   remaining budget. Any definite failure → finish without sending.
+4. Re-read `pubvoid<G>` and `pubfin<G>` (both absent), then create `pubsent<G>.<t>` and confirm it **by
+   readback**. Absent → finish without sending.
 5. **Self-fence:** more than `post_margin_s` (90 s, monotonic) since step 3 → finish without sending.
-6. POST once. 2xx or 4xx → finish; `a<N>.ok.<t>`. 5xx, timeout or crash → nothing: the right stays
-   unresolved until the operator resolves it.
+6. POST once. **2xx** → finish; `a<N>.ok.<t>`. **4xx** (nothing was created) → finish; `a<N>.fail.<t>`
+   (charged, so a persistent refusal exhausts the head instead of looping). **5xx, timeout or crash**
+   → the right stays held and unresolved; resolution needs evidence (below).
 
-**Finishing** = add the right to the in-process consumed set, then write `pubfin<G>`, **retrying the
-write with backoff for the life of the process** (always safe: the right is consumed) [a3: Fable 3].
-Every exit after step 2 that does not POST finishes the right. Once a right is owned the head watcher
+**Finishing** = add the right to the consumed set, then write `pubfin<G>`, retrying the write with
+backoff for the life of the process (always safe: the right is consumed), then drop it from held.
+Every exit after step 2 that does not POST finishes the right. Once a right is held the head watcher
 stops; step 3 re-checks the head.
 
-**State of a PR's publication** (pure function over its rights and its reviews, for this kind):
+**Resolving an unanswered POST — evidence only** (owner decision, a4). A right whose POST got no answer
+is resolved only when one of these is observed, never because time passed:
+
+| Evidence | Meaning | Resolution |
+| --- | --- | --- |
+| Authenticated marker of this kind at the right's head (review), or an APPROVED review by the bot at the head (approval) | The request landed | `pubfin<G>` |
+| A **PENDING review by the bot** on the PR | The request ended without submitting (spike 3: a failed POST leaves one) | Delete it under the held right, then `pubfin<G>` |
+| The operator attests that the **forge process restarted after `pubsent<G>`** (`--forge-restarted`) | In-flight requests died with the process | `pubvoid<G>` (section 9) |
+
+The **owner** checks the first two itself while it lives (every sweep), so most unanswered POSTs
+resolve without an operator. With no evidence the PR stays blocked for this kind and alerts; a human
+resolves it (restart the forge and attest, or review and merge by hand). On GitHub, whether a failed
+POST leaves a pending review is a Phase 0b question; without that evidence, only landing or a human
+resolves it.
+
+**State of a PR's publication** (pure function over its rights and reviews, for this kind; rows are
+evaluated in this order):
 
 | Observed | State |
 | --- | --- |
+| A **PENDING review by the bot** on the PR and no held right of mine for this PR | **ambiguous** (operator), even if the head is done |
 | Authenticated marker of this kind at the current head | head **done** |
-| A **PENDING review by the bot** on the PR | **ambiguous** (operator) [a3: Fable 1] |
 | All rights resolved (or none) | **open** |
 | Unresolved right younger than `pub_grace_s` (600) | **publishing** (skip) |
-| Unresolved right older than `pub_grace_s` | **ambiguous** (operator) |
+| Unresolved right older than `pub_grace_s` | **ambiguous** (alert; the owner may still resolve it on evidence) |
 
 **Exclusivity.** Two POSTs of a kind on one PR at once need two unresolved rights; a right is created
-only when all others are resolved, is owned by one nonce, is sent at most once, and is voided only
-under section 9. **Stated residual:** a crash inside the post window (right owned, no `pubfin`) or a
-failed POST blocks reviews and approvals of that PR for this kind until the operator acts; the alert
-names the PR and the owner instance [a3: Fable 3].
+only when all others are resolved, is owned by one nonce, is sent at most once, and is resolved only on
+a definitive answer or on the evidence above. Hence at most one review per kind per head, with no
+timing assumption. **Stated residual (liveness, not safety):** a POST that got no answer and left no
+evidence blocks that PR for this kind until a human acts; the alert names the PR and the owner.
 
-Approval upgrades carry **no marker** (they are not verdicts); their landing evidence is an APPROVED
-review by the bot at the head.
+Approval upgrades carry **no marker** (they are not verdicts).
 
 ## 6. Work (efficiency)
 
@@ -281,22 +306,21 @@ rebuilds them from the first listing. `maybe_merge` runs on every instance (idem
 
 ## 9. Operator actions
 
-- `--coord-state <repo> <pr>`: publication and work state of the PR and every head.
+- `--coord-state <repo> <pr>`: publication and work state of the PR and every head, including the
+  evidence found for an unresolved right.
 - `--requeue <repo> <pr>`: exhausted current head → `cut<hw+1>`; refuses when leased.
 - `--requeue <repo> <pr> --force`: resolves an ambiguous PR.
   1. **Resolve the unresolved right G, if any:**
-     - definitive (`pubfin<G>` exists): already resolved;
+     - definitive (`pubfin<G>`): nothing to do;
      - never sent (no `pubsent<G>`): require `--owner-stopped <instance>` (printed from the right's
-       message; for a migrated right the legacy service is stopped), then write `pubvoid<G>`;
-     - possibly sent (`pubsent<G>`, no `pubfin<G>`): require `--owner-stopped`, then **wait
-       `pub_void_min_age_s` (3600) on the tool's monotonic clock** and re-read the evidence of landing
-       — a marker of this kind at the right's head for a review, an APPROVED review by the bot for an
-       approval [a3: Codex 4]. Landed → `pubfin<G>`; else `pubvoid<G>`. Run it in the background
-       (`systemd-run`); an interruption restarts the wait. A request the forge commits more than an
-       hour after receipt is the remaining exposure.
-  2. **Clean up under a right of its own:** `create_owned(pub<G+1>)` with `purpose: operator`, so no
-     instance can POST meanwhile; delete the bot's PENDING reviews on the PR; finish the right
-     (`pubfin<G+1>`) [a3: Codex 2, Fable 1]. All rights are then resolved and the PR is open.
+       message; a migrated right's legacy service is stopped by the cut-over), then `pubvoid<G>`;
+     - possibly sent (`pubsent<G>`, no `pubfin<G>`): require **evidence** (section 5): landing
+       evidence → `pubfin<G>`; a bot PENDING review → `pubfin<G>` (deleted in step 2); or
+       `--owner-stopped` **and** `--forge-restarted` (the operator confirms the forge process restarted
+       after the `pubsent` time) → `pubvoid<G>`. No evidence → refuse, and print what would count.
+  2. **Clean up under a right of its own:** `create_owned(pub<G+1>)` with `purpose: operator`; delete
+     the bot's PENDING reviews on the PR; finish the right. All rights are then resolved and the PR is
+     open.
 
 ## 10. Cut-over, rollback and restore
 
@@ -305,9 +329,8 @@ rebuilds them from the first listing. `maybe_merge` runs on every instance (idem
   may be in flight) or `ambiguous POST` quarantine → **one** migrated right `pub<G+1>` (one past any
   existing right) with instance `migrated` and `pubsent<G+1>.<export time>` — or `pubfin<G+1>` when a
   marker of this kind already exists at that head; other quarantines → `fail`/`failt` tags
-  [a3: Fable 6].
-  Deploy the new code (there is no local mode); start. Migrated rights then follow section 9 step 3
-  [a2: Codex 3, Codex 4, Fable 1].
+  [a3: Fable 6]. Migrated rights then follow `--requeue --force` step 1 (section 9).
+  Deploy the new code (there is no local mode); start [a2: Codex 3, Codex 4, Fable 1].
 - **Rollback:** roll forward if at all possible. Emergency return to the old code: stop all instances
   of the kind, run `--import-local` (every `pub` without a marker and every exhausted head → old-style
   quarantined rows), deploy the old code, start one instance.
@@ -356,7 +379,10 @@ PR, owner instance),
 | 2 | Create answers 201/409/422/500/timeout | Readback decides |
 | 3 | Create timed out and landed later | My nonce on readback → a claim is my lease; a right is finished at once |
 | 4 | Owner crashes before `pub` | Lease expires → abandoned (charged); another instance claims |
-| 5 | Owner crashes between `pubsent` and the answer | Ambiguous; operator: owner stopped, then a 1 h monotonic wait |
+| 5 | Owner crashes between `pubsent` and the answer | Ambiguous; resolved only on evidence (landing, a bot pending review, or forge restart attested) |
+| 5a | Owner alive after a POST timeout | Right stays held; the owner resolves it on evidence each sweep; never by time |
+| 5b | My own sweep meets my in-flight right | Held → treated like a peer's (wait/skip), never finished |
+| 5c | Persistent 4xx on the review POST | `fail` (charged) → head exhausted after 5 |
 | 6 | Owner never sent (pre-send check failed) | Consumed + `pubfin`; void at once |
 | 7 | Owner paused before sending | Self-fence (monotonic) → finish, no send |
 | 8 | Review deleted after a 2xx | `pubfin` exists → `--force` voids at once |
@@ -410,7 +436,7 @@ PR, owner instance),
   `--export-coord`, `--import-local`), `forge_gitea.py`, `forge_github.py` (App JWT via the `openssl`
   CLI). The jobs-table queue is removed; SQLite keeps `meta`.
 - Role: `templates/config.json.j2` + `defaults/main.yml` (instance, forge endpoints, `coord_repo`,
-  `lease_s` overhead, `post_margin_s` 90, `pub_grace_s` 600, `pub_void_min_age_s` 3600, `min_llm_s`
+  `lease_s` overhead, `post_margin_s` 90, `pub_grace_s` 600, `min_llm_s`
   120, `poll_s`); `reviewbot.service.j2` (`TimeoutStopSec=120`); `tasks/main.yml` (git, cache
   directory, `GIT_ASKPASS` helper, coordination-repo assertions, unique instance names);
   `group_vars/reviewers_<kind>.yml`; per-instance tokens in `reviewbot.sops.yaml`.
@@ -423,7 +449,8 @@ PR, owner instance),
 ## Verification
 
 1. Pure functions: publication and work state tables, tag names, marker + `v1.cov` parsing, merge gate.
-2. Deterministic interleavings for corner cases 2–9, 11, 21–24, 30 with step-controlled instances.
+2. Deterministic interleavings for corner cases 2–9 (incl. 5a–5c: timeout → own sweep → delayed
+   landing), 11, 21–24, 30 with step-controlled instances.
 3. Randomized simulation: 3 instances, fake LLM, both fake forges, injected pauses, kill -9, SIGTERM,
    lost responses, late-landing creates, pushes, closes. Invariants: never two review markers per
    (kind, head); every open head ends done, ambiguous or exhausted; no merge without every persona
@@ -431,4 +458,4 @@ PR, owner instance),
 4. Live: cut-over metrics for a week; two processes of one kind on 10 simultaneous `primes-lab` PRs,
    then kill one mid-review.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
