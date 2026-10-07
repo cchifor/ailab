@@ -21,6 +21,7 @@ class RolloutTest(unittest.TestCase):
         self.data = {
             'kube_pod_container_info': [row(pod=POD, image_id=IMAGE)],
             'kube_pod_status_ready': [row(pod=POD)],
+            'kube_pod_init_container_info': [row(container='backup'), row(container='migration')],
             'kube_pod_init_container_status_terminated_reason': [row(container='backup'), row(container='migration')],
             'kube_job_status_failed': [row(0)],
             'kube_job_failed': [row(0)],
@@ -51,6 +52,7 @@ class RolloutTest(unittest.TestCase):
     def test_missing_init_or_canary_does_not_pass(self):
         self.data['kube_pod_init_container_status_terminated_reason'].pop()
         with self.assertRaises(rollout.Pending): self.check()
+        self.data['kube_pod_init_container_info'] = []
         self.data['kube_job_status_succeeded'] = []
         with self.assertRaises(rollout.Pending): self.check(init=())
 
@@ -64,7 +66,11 @@ class RolloutTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'canary failed'): self.check()
 
     def test_cleanup_rollout_checks_image_without_requiring_removed_resources(self):
+        self.data['kube_pod_init_container_info'] = []
         self.assertIsNone(self.check(init=(), job=None)['completedCanaryJob'])
+
+    def test_cleanup_waits_for_old_ready_pod_with_same_image_to_be_replaced(self):
+        with self.assertRaises(rollout.Pending): self.check(init=(), job=None)
 
     def test_checked_in_expectation(self):
         image, names, job = rollout.expectation()

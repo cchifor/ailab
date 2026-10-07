@@ -56,6 +56,9 @@ def check(query_fn, image, init_names, job):
     if len(serving) != 1 or serving[0].get('image_id') != image:
         raise Pending('Waiting for one Ready router pod on the expected image')
     pod = serving[0]['pod']
+    configured = {r['metric']['container'] for r in query_fn(f'kube_pod_init_container_info{{{namespace},pod={json.dumps(pod)}}}') if float(r['value'][1]) == 1}
+    if configured != set(init_names):
+        raise Pending('Waiting for the expected init-container composition')
     if init_names:
         done = {r['metric']['container'] for r in query_fn(f'kube_pod_init_container_status_terminated_reason{{{namespace},pod={json.dumps(pod)},reason="Completed"}}') if float(r['value'][1]) == 1}
         if not set(init_names) <= done:
