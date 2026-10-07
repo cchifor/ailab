@@ -1136,4 +1136,4 @@ plan text:
 
 Fable's three sign conditions are folded in. Neither reviewer has read this revision: the two-round cap applies.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
