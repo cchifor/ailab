@@ -317,20 +317,27 @@ control planes. Never touch `admin@ai` for this.
 
 1. **Build** a 3-CP Talos 1.11.2 cluster (the `kubernetes/infra/` module with a different state and names, or `talosctl cluster create` if it runs here) with a workload that
    authenticates by TokenReview (a copy of the gatekeeper pattern), a projected-token consumer and one legacy token Secret.
-2. **Add the new key as a verifier first, on every control plane.** Generate a new RSA key; add it as a second `--service-account-key-file` to the
-   kube-apiserver through `cluster.apiServer.extraArgs` and `cluster.apiServer.extraVolumes` (mounted from a path on the node), apply to
-   one CP at a time. Check: the existing tokens still verify; the API server serves both keys at `/openid/v1/jwks` (if it does).
-3. **Switch the signer.** Change `cluster.serviceAccount.key` to the new key (one CP at a time). During the roll, tokens signed by the old
-   signer and by the new signer both verify (both keys are verifiers). Check after each CP: etcd 3/3; a freshly created TokenRequest has the new `kid`; the
-   consumer's projected token refreshes and keeps working.
+2. **Make the verifier set explicit and independent of the signer, with BOTH public keys, on every control plane.** By default the kube-apiserver
+   verifies with the public half of the key in `cluster.serviceAccount.key`, the same key that signs, so changing that key in step 3 would silently
+   swap the old verifier for the new one and invalidate every old token at once. Break that coupling first. Generate the new RSA key, extract the **old** and the **new**
+   public keys into two files, mount both into the kube-apiserver (`cluster.apiServer.extraVolumes`, from a path on the node) and list **both** as
+   `--service-account-key-file` (`cluster.apiServer.extraArgs`). The rehearsal must settle two Talos questions, because the answer decides the patch: does an `extraArgs` entry for
+   `service-account-key-file` *replace* Talos's own value or add to it, and how is a repeated flag expressed (a comma-joined value or, on newer Talos, a list). Either way, list OLD and NEW
+   explicitly so that the verifier set no longer follows the signer. Apply to one CP at a time. Check on **each** control plane (address each CP's API server directly, not the VIP):
+   a TokenReview of an old token (a projected token and a legacy Secret token taken before the change) is `authenticated`; the apiserver's flags show both files; `/openid/v1/jwks` lists both keys (if it does).
+3. **Switch the signer.** Change `cluster.serviceAccount.key` to the new key (one CP at a time). The verifier set from step 2 is unchanged by this, so old and new tokens
+   both verify throughout the roll. Check after each CP: etcd 3/3; a freshly created TokenRequest has the new `kid`; a TokenReview of an **old-signed** token is still `authenticated` on **every**
+   control plane, the one just switched included, and so is a TokenReview of a new-signed token on each of them; the consumer's projected token refreshes and keeps working.
 4. **Keep the old verifier until every token it signed has been replaced:** projected tokens within about an hour; legacy Secrets never (re-issue them: delete and
-   recreate the Secret, re-run the consumers' renderers). Only then remove the second `--service-account-key-file`.
+   recreate the Secret, re-run the consumers' renderers). Only then remove **the OLD public key specifically** from the `--service-account-key-file` list and its volume (leave the new one;
+   do not just drop "the second file"), one CP at a time, and check that an old-signed TokenReview is now `authenticated: false` and a new-signed one still `true` on each.
 5. **Record the result in this runbook and in the plan's A5.7 note**: the exact `talosctl` and machine-config patches that worked, the measured downtime per CP and for the
    workload, what had to be re-issued, and where the new key was written (tfstate and the DR bundle). Or the recorded finding that it cannot be done without
    downtime and why.
 
-**Rollback (rehearsal):** destroy the disposable cluster. **Rollback (a future real run):** keep the old key as a verifier and as the signer until the very end; the
-reverse of step 3 is to point `cluster.serviceAccount.key` back at it, one CP at a time.
+**Rollback (rehearsal):** destroy the disposable cluster. **Rollback (a future real run):** keep the old public key in the explicit verifier list until the very end; the
+reverse of step 3 is to point `cluster.serviceAccount.key` back at the old key, one CP at a time (the verifier list holds both, so nothing it signed is lost); the reverse of step 4 is to re-add the old
+public key file to the list.
 
 **Real-cluster gate (out of scope for the rehearsal):** a go decision for `admin@ai` needs the rehearsal's measured downtime, the verified TokenReview-consumer
 list above, an inventory of legacy token Secrets with their owners, and the quiet window rule (no other platform-wide change that day).
