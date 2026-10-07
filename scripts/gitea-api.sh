@@ -9,8 +9,9 @@
 #     (`-H @-`), never as an argument, so it is not visible in the process list; no -v, no tracing;
 #   - no redirects (`--max-redirs 0`, `--proto =https`), so the header cannot be replayed elsewhere,
 #     and `-q` first, so no ~/.curlrc can add tracing or URLs; the credential lookup never prompts;
-#   - before the call, GET /user must answer login=workstation-bot with is_admin=false; any other
-#     identity (an owner or admin token in the helper) is refused, and nothing else is sent.
+#   - before the call, GET /user must answer login=workstation-bot with is_admin=false, read from the
+#     parsed JSON's top level (python3 or python; without one it refuses); any other identity (an owner
+#     or admin token in the helper) is refused, and nothing else is sent.
 # Prints `HTTP <status>` and the response body; exits 1 on a 4xx/5xx, 2 on bad input, 3 when no
 # credential resolves, 4 when the identity guard refuses, 5 when curl fails at the transport level
 # (DNS, TLS, connection), whatever curl's own exit code was.
@@ -54,12 +55,28 @@ call() {
   printf 'Authorization: token %s\n' "$token" | curl "${args[@]}" "$ORIGIN$2"
 }
 
-# The guard parses tolerantly (any whitespace, any key order) but stays fail-closed: the login must be
-# exactly $EXPECTED_USER and is_admin must be false, or nothing else is sent.
+# identity_ok FILE: parse the /user JSON and require the TOP-LEVEL login to be exactly $EXPECTED_USER
+# and is_admin to be the boolean false. Text matching would accept the same fields nested deeper.
+# Fails closed: invalid JSON, a non-object, or no working Python interpreter all refuse.
+identity_ok() {
+  local py
+  for py in python3 python; do
+    if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import json' >/dev/null 2>&1; then
+      "$py" -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and d.get("login") == sys.argv[2] and d.get("is_admin") is False else 1)' \
+        "$1" "$EXPECTED_USER"
+      return
+    fi
+  done
+  return 1
+}
+
 code=$(call GET /user) || die 5 "curl transport failure on GET /user"
-if [ "$code" != 200 ] \
-  || ! grep -Eq "\"login\"[[:space:]]*:[[:space:]]*\"$EXPECTED_USER\"" "$out" \
-  || ! grep -Eq '"is_admin"[[:space:]]*:[[:space:]]*false' "$out"; then
+if [ "$code" != 200 ] || ! identity_ok "$out"; then
   die 4 "refusing: the credential is not the non-admin $EXPECTED_USER (GET /user -> HTTP $code)"
 fi
 

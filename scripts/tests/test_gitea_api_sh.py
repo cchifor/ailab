@@ -183,6 +183,23 @@ class GiteaApiShTest(unittest.TestCase):
                             user_json='{"login": "workstation-bot-evil", "is_admin": false}')
         self.assertEqual(r.returncode, 4, r.stderr)
 
+    def test_guard_reads_only_the_top_level_fields(self):
+        # An admin's /user with the bot's fields nested deeper (or in a crafted text field) must be refused:
+        # the guard parses the JSON and checks the top-level login and is_admin only.
+        for user_json in (
+            '{"login":"chifor","is_admin":true,"x":{"login":"workstation-bot","is_admin":false}}',
+            '{"login":"chifor","is_admin":true,"description":"\\"login\\":\\"workstation-bot\\",\\"is_admin\\":false"}',
+        ):
+            r = self.run_script("GET", "/repos/cchifor/ailab", user_json=user_json)
+            self.assertEqual(r.returncode, 4, user_json)
+        # only identity checks were sent, never the requested call
+        self.assertTrue(all(c.endswith("/api/v1/user") for c in self.calls()), self.calls())
+
+    def test_guard_refuses_invalid_json_and_non_boolean_admin(self):
+        for user_json in ('not json', '{"login":"workstation-bot","is_admin":"false"}', '["workstation-bot"]'):
+            r = self.run_script("GET", "/repos/cchifor/ailab", user_json=user_json)
+            self.assertEqual(r.returncode, 4, user_json)
+
     def test_transport_failure_has_its_own_exit_code(self):
         # curl's own codes (1-4 included) must not leak out as the script's documented exit codes.
         r = self.run_script("GET", "/user", FAKE_CURL_EXIT="7")
