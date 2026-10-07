@@ -539,6 +539,58 @@ it is now a capacity warning rather than an outage — but the re-login is still
 working directory and reviewbot hands it a fresh tmpdir every run; c4's held 1 926 on
 2026-09-18. Pre-existing behaviour, now per seat; harmless until the disk says otherwise.
 
+### Router seats: reviews through the LLM router (API key, not a subscription login)
+
+Since 2026-10-07 a seat may be an **API key on the estate's LLM router** (router.chifor.me,
+cchifor/llm-router) instead of a CLI login: an entry in `pr_reviewer_llm_seats` carrying
+`router_url` (reviewbot.py § router seats). The review is one streamed
+`POST /v1/chat/completions` with the same tool-less prompt; the key sits in
+`/etc/reviewbot/router-key` (0600, c4), installed from `reviewbot_<persona>_router_key` in
+`ansible/secrets/reviewbot.sops.yaml` and read per call (a rotated key needs no restart).
+
+| persona | seat | key | route | state |
+|---|---|---|---|---|
+| codex (reviewer-2) | `r` | `key_d7adf31fb93e` | `codex` (round-robin gpt-6-luna + 3x gpt-6-astra) | **serving** |
+| claude (reviewer-1) | none yet | `key_f856495c9b0c` (escrowed) | none: the router's `claude` model answers 429 `CAPACITY_UNAVAILABLE` "No eligible account" | subscription seats a-c serve |
+
+How it behaves - the existing park machinery, unchanged:
+
+- **Preferred, never sticky.** Within a tier a router seat is always tried first; a subscription
+  seat that served while the router was parked hands back as soon as the park lapses.
+- **401** (key wrong/expired/revoked) or an unreadable key file: the seat parks 6 h as a dead
+  login (`seat 'r' login unusable (...)` in the journal). Re-mint the key (below).
+- **403 `ROUTE_NOT_ALLOWED` / 404 `MODEL_NOT_FOUND`**: that (seat, tier) pair parks 6 h; nothing
+  else does. A 403 without the router's code (Cloudflare's 1010 page) is an ordinary failure.
+- **429 reason `busy`**: waited out in place (Retry-After, at most 6 x 30 s). Any other 429 parks
+  the seat until Retry-After (else 15 min) and the review moves to the subscription seats.
+- **5xx / 504 / a stream error chunk / a truncated answer**: an ordinary failure, no park.
+- The usage poller never probes a router seat (no window to read); the router's own console shows
+  its usage per key. **Keep the subscription seats configured on reviewer-2**: the hourly probe
+  is what refreshes the seat logins dsh and LiteLLM read (dsh.md § Codex subscriptions).
+
+**Minting / rotating a key** - never print it; the router's helper writes it to a 0600 file:
+
+```bash
+# on the reviewer, as c4 (the router skill: https://router.chifor.me/agent/skill.md)
+curl -fsS https://router.chifor.me/agent/access.py -o /tmp/router-access.py
+python3 /tmp/router-access.py --url https://router.chifor.me --name "reviewer-<persona> ..."   --purpose "Automated PR code review ..." --key-file ~/.config/llm-router/key
+# -> prints a user code; the router admin approves it (console: Settings, API keys) and picks routes
+```
+
+Then escrow it into `reviewbot.sops.yaml` as `reviewbot_<persona>_router_key` - decrypt, add the
+leaf, re-encrypt with `sops -e --filename-override ansible/secrets/reviewbot.sops.yaml` and
+assert every top-level leaf is `ENC[` (a plain `sops set` writes PLAINTEXT for a key the file's
+stored `encrypted_regex` predates) - deploy `reviewers.yml -t reviewbot`, delete the
+`~/.config/llm-router/key` copy, and have the admin revoke the old key.
+
+**Turning the claude persona over**, once the router can serve Claude (a Claude account signed
+in behind it, and a route on `key_f856495c9b0c`): add the seat at the top of
+`host_vars/reviewer-1.yml` - `{ name: r, sudo_user: "", router_url: "https://router.chifor.me",
+key_file: "{{ pr_reviewer_router_key_file }}", models: { fable: <route>, opus: <route>, sonnet:
+<route> } }` - probe the route first (`curl ... -d '{"model":"<route>",...}'` must answer 200,
+not 429), and deploy `-t reviewbot`. Never point the claude persona at a Codex route: merges rest
+on BOTH personas being clean, and two GPT reviews are not two independent reviews.
+
 ### When a persona is parked on a subscription rate limit
 
 **Do nothing. It self-heals, and the two obvious interventions both make it worse.** This is the
