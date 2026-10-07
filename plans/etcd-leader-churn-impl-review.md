@@ -1,6 +1,13 @@
-# Implementation review — etcd-leader-churn — round 1
+# Implementation review — etcd-leader-churn — round 2
 
 <!-- codex-impl-review-status: complete -->
+
+## Round 2 verdict
+
+- All eight round-1 code/documentation fixes are accepted. The former blocker is resolved: commands, device resolution and mount-target parents are host-controlled; container symlinks are not traversed. The configured unprivileged container has no raw block-device access to forge the metadata consumed by `tune2fs`.
+- Mounting the same ext4 device shares its superblock and journal. The added restrictions apply to the new mount; a container's per-mount read-only restriction remains intact, while a superblock rw/ro mismatch is rejected. Ordinary start/stop races and concurrent mounts do not create independent journals. Concurrent script invocations can still overlap discard work; the documented systemd unit serializes its own starts.
+- One new important issue remains: failed unmounts can leave a host mount behind while reporting success. Fix cleanup status handling and add a failure fixture before unattended use.
+- Both Bash syntax checks, diff whitespace checks and a minimal EXIT-trap reproduction passed. The fixtures were reviewed but not rerun in this read-only workspace; live mount behavior and the pending supervised run's outcome were not independently verified.
 
 ## Findings
 
@@ -59,6 +66,13 @@
 **Severity:** nit
 
 **Resolution (accepted, fixed in aa296a23):** asserts no alert at 9m while cp1 still leads, and no alert at 14m / alert at 16m for continuous leadership. Mutation check: with `for:` removed, the fixture fails at 9m and 14m.
+
+### Failed unmounts are reported as successful service runs
+
+**Location:** `scripts/lxc-fstrim-chunked.sh:78`, `scripts/tests/test-lxc-fstrim-chunked.sh:55`  
+**Severity:** important
+
+<!-- codex: round-2: The EXIT trap preserves the status that caused the shell to exit; a failing command inside it does not replace that status. Consequently, after normal completion or STOP_FILE, an umount failure still produces exit 0 and systemd success. For example, another host process holding a working directory under the temporary mount can cause EBUSY: rmdir is then skipped and the filesystem remains mounted in the host namespace, keeping the LV busy even after the container stops. This is a separate mount path, not an isolated mount namespace that disappears with the script. Replace the trap with explicit cleanup status handling: capture the original status, report unmount/removal failures with the device and mount path, and return nonzero on cleanup failure when the original status was zero, preserving an existing failure otherwise. Remove the directory only after successful unmount. Add an umount-failure fixture asserting a failed run and diagnostic; the current stub always succeeds and cannot detect this defect. Early die calls before mount do not encounter an uninitialized trap, and successful cleanup correctly preserves the existing trim/pressure failure codes. -->
 
 ## Diff stat
 
