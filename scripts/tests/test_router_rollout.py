@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 import io
+import tempfile
 
 SPEC = importlib.util.spec_from_file_location('router_rollout', pathlib.Path(__file__).parents[1] / 'check-router-rollout.py')
 rollout = importlib.util.module_from_spec(SPEC)
@@ -76,6 +77,22 @@ class RolloutTest(unittest.TestCase):
         image, names, job = rollout.expectation()
         self.assertIn('@sha256:', image)
         self.assertEqual(len(image.rsplit(':', 1)[1]), 64)
+
+    def test_canary_expectation_requires_one_job_on_the_same_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            folder = root / 'kubernetes/apps/apps/llm-router'
+            folder.mkdir(parents=True)
+            (folder / 'router.yaml').write_text('image: ' + IMAGE + '\n')
+            canary = folder / 'plugin-settings-canary.yaml'
+            canary.write_text('metadata:\n  name: router-plugin-settings-fixture\nimage: ' + IMAGE + '\n')
+            self.assertEqual(rollout.expectation(root)[2], 'router-plugin-settings-fixture')
+            canary.write_text('metadata:\n  name: router-plugin-settings-fixture\nimage: old\n')
+            with self.assertRaisesRegex(ValueError, 'same pinned release'): rollout.expectation(root)
+            canary.write_text('image: ' + IMAGE + '\n')
+            with self.assertRaisesRegex(ValueError, 'declare'): rollout.expectation(root)
+            (folder / 'other-canary.yaml').write_text('')
+            with self.assertRaisesRegex(ValueError, 'at most one'): rollout.expectation(root)
 
     def test_public_check_requires_authentication_refusal(self):
         for refused in (True, False):

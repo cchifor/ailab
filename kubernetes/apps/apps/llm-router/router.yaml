@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 0057394cf9d606c9648e885fa2f895d0f4362bd4
-        chifor.me/release: router-0.1.0-20261007-shared-routing
+        chifor.me/source-commit: 6ebe437da928efcb50b6bbcfbb187802fb3fa00b
+        chifor.me/release: router-0.1.0-20261007-plugin-settings
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -119,9 +119,48 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
+      # Recreate has stopped the old singleton before either preflight runs.
+      # A failed backup or migration check prevents the application from starting.
+      initContainers:
+        - name: backup-before-plugin-settings
+          image: registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [node, deploy/backup-router.mjs]
+          env:
+            - name: ROUTER_BACKUP_LABEL
+              value: pre-plugin-settings-20261007
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+        - name: check-plugin-settings-migration
+          image: registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [node, deploy/check-router-upgrade.mjs]
+          env:
+            - name: ROUTER_BACKUP_LABEL
+              value: pre-plugin-settings-20261007
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 384Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
-          image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
+          image: registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -253,6 +292,12 @@ spec:
       ports:
         - protocol: TCP
           port: 8787
+    # Temporary read-only settings canary; removed after CI acceptance.
+    - from:
+        - podSelector:
+            matchLabels: {app: llm-router-acceptance}
+      ports:
+        - {protocol: TCP, port: 8787}
   egress:
     # Cluster DNS (kube-dns runs in kube-system).
     - to:

@@ -3,7 +3,7 @@
 Current deployments use Gitea CI and reviewed GitOps changes; no llm-router
 kubeconfig is required or issued. The source is merged in Gitea, mirrored to
 GitHub, then reconciled by Flux. The initial manual deployment notes below are
-historical. See the shared-routing release section for current CI acceptance.
+historical. See the plugin-settings release section for current CI acceptance.
 
 ## Topology and authentication
 
@@ -290,3 +290,56 @@ For a future release, add a new uniquely named canary Job and remove it through
 a CI-reviewed cleanup after recording its result. Retain the verified recovery
 generation until a newer consistent backup has been validated. The existing data PVC, authentication Secret and network
 policy remain in place.
+
+
+## Plugin-settings release (2026-10-07)
+
+`router-0.1.0-20261007-plugin-settings` deploys merged llm-router main
+`6ebe437da928efcb50b6bbcfbb187802fb3fa00b` ([PR #85](https://git.chifor.me/cchifor/llm-router/pulls/85)).
+Plugin rows expand into schema-backed settings; Claude has a live Print/SDK-resume
+selector. Print remains the default. SDK-resume requires Claude CLI 2.1.281 or
+2.1.283; existing accounts must explicitly enable tools. Deployment-owned settings
+remain locked. No provider account, credential or transport selection is changed
+by this rollout. This release includes the agent and web refactors already merged
+on main after the previous focused release; it does not add a SQLite schema migration.
+
+[Source CI 71407](https://git.chifor.me/cchifor/llm-router/actions/runs/71407) passed
+unit/integration, browser, production build and real pinned Claude CLI loopback
+checks. [Image CI 71420](https://git.chifor.me/cchifor/relay/actions/runs/71420) verified
+the frozen production archive, production smoke, the read-only settings canary
+against an offline router, backup integrity and isolated migration fixtures under
+the exact image's non-root/read-only container constraints.
+
+- Image: `registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44`.
+- Runtime: unchanged Node 26.10.0 digest `sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
+- Archive SHA-256: `6f904242d1e22c0ccfe80a3c91fdf4b856e012fea63222be4c8f86713d3f74fe`.
+- [Immutable image receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-71420.json).
+
+After the old singleton stops, `backup-before-plugin-settings` captures SQLite,
+`router.secrets.key` and `plugins.yml` in `/data/backups/pre-plugin-settings-20261007`.
+The next init container checks an isolated copy twice, asserting preserved router
+configuration and encrypted credentials. Neither check starts provider plugins.
+A failure prevents the new process from starting. The external admin Secret is
+retained separately; the local backup is not an offsite recovery guarantee.
+
+The one-shot `router-plugin-settings-20261007` Job waits for this exact release's
+SPA and readiness, then verifies all installed plugins' configuration views,
+ETags, no-store responses, authentication refusal, both Claude transport choices,
+active Print, restart modes, router-owned settings and deployment locks. It makes
+only GET requests and logs no credentials or configuration bodies. Its token
+stays in the existing in-cluster Secret reference. The temporary NetworkPolicies
+allow only DNS and router traffic, with no Kubernetes API access or data mount.
+
+The existing **Router rollout acceptance** CI workflow observes the pinned image,
+successful init checks and canary Job through fresh monitoring samples, plus
+public readiness and unauthenticated management refusal. It needs no kubeconfig.
+After acceptance, remove the dated init containers, canary and temporary ingress
+through a reviewed cleanup PR; preserve the completed backup. Verify the cleanup
+rollout again. Record both CI results here.
+
+Rollback uses a reviewed GitOps change to previous image
+`registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353`
+and its source/release annotations. Before rolling back after any settings edits,
+review the saved `plugins.yml` against the previous version; restore the captured
+composition if necessary, retaining the newer copy for recovery. Stop the singleton
+before restoring persistent files and retain subsequent data deliberately.
