@@ -227,7 +227,8 @@ the cycle closed. Lease start = claim `tagger.date` (Gitea, server-set) or `issu
 1. Skip when this instance cannot serve (all seats parked, `inhibit`, `posting-disabled`, forge
    identity parked).
 2. Read the PR: closed or draft → drop; else head H and base ref.
-3. Publication state of the PR: head done or PR ambiguous → drop (ambiguous counted, alerted per PR);
+3. Walk the PR's rights; an unresolved right of **mine** (a late landing) is finished on sight. Then
+   the publication state: head done or PR ambiguous → drop (ambiguous counted, alerted per PR);
    publishing → later.
 4. Work state of H: exhausted → drop; leased → recheck at lease end; not claimable → at `not_before`.
 5. `create_owned(a<hw+1>)`; not owned → recheck in 60 s.
