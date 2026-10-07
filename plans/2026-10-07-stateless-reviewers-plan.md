@@ -28,6 +28,17 @@ about 60 s after a push while the stale run aborts) [X6].
 | `GET /git/refs/tags/<prefix>` → `{ref, url, object{type: tag, sha}}` only, no message | Spike 2 |
 | `GET /git/tags/{sha}` → message + tagger `Gitea <gitea@fake.local>` + `date` (server time). The tagger is **not** the API user | Spike 2 |
 | `Date` header on 2xx and 404; `cf-cache-status: DYNAMIC` | Spike 2 |
+| Readback by nonce yields exactly one owner per name | Spike 3: 15/15 staggered 20-way rounds |
+| Tag messages round-trip exactly (quotes, backslashes, Unicode, newlines, trailing newline) | Spike 3 |
+| `tagger.date` equals the response `Date` (0.0 s) | Spike 3 |
+| **A create whose client timed out still lands** (5/5, visible 0.2 s later) | Spike 3 |
+| Prefix listing complete at 300 refs; narrower prefixes exact | Spike 3 |
+| Delete racing create: consistent end states; a `201` create can be deleted by a concurrent delete | Spike 3 |
+| **No immutable PR diff over the API**: `GET /compare/{a}...{b}` returns no files; the web `.diff` needs a browser session (HTML login page); `GET /git/commits/{sha}.diff` covers one commit only | Spike 3 |
+| **A review POST with an invalid inline position returns 500 and leaves an empty PENDING review; the next POST by the same account absorbs it** | Spike 3 (temporary PR primes-lab#18, closed) |
+
+Spikes ran on Gitea **1.26.1** (`GET /version`) with the `workstation-bot` account; Phase 0 repeats the
+ownership races with a reviewer bot's token. Spike 3: `scripts/spikes/reviewbot-coord-gitea.py`.
 
 Reviews of this plan: round 1 by Fable (`…-review-r1-fable.md`) and Codex
 (`…-review-r1-codex.md`), round 2 by both (`…-review-r2.md`), the reviewer bots on ailab#1127 and a
@@ -64,8 +75,8 @@ forges.
 | Read PR (state, draft, head, base ref, author, labels, mergeable) | `GET /repos/{o}/{r}/pulls/{n}` | same path; `mergeable` may be `null` (computing) → treat as "not yet", retry |
 | List open PRs | `?state=open&limit=50&page=` | `?state=open&per_page=100` + `Link` pagination; conditional `If-None-Match` (a 304 does not count against the rate limit) |
 | List reviews (markers) | `/reviews?limit=50&page=`, fail closed at the page cap | `/reviews?per_page=100` + `Link`; no cap; ETag |
-| Immutable review diff | compare `merge_base...head` (Phase 0 picks the endpoint) | `GET /repos/{o}/{r}/compare/{base_sha}...{head_sha}` with `Accept: application/vnd.github.diff`; works across forks in one network |
-| Diff too large | (size cap only) | 406, "diff too large" or a 5xx after retries → the **same immutable compare** in JSON form (`files[]` with per-file `patch`). Files beyond the 300-file cap, or without a `patch`, are excluded as `too large` (author-triggered: caps the verdict); if completeness cannot be established, the head is skipped (`coverage=over`). Never `/pulls/{n}/files`, which follows the mutable head [P4] |
+| Immutable review diff | **local git**: fetch base ref + `refs/pull/<n>/head`, verify the head SHA, `git diff <merge_base> <head_sha>` (section 7) | same local-git path; `GET /compare/{base_sha}...{head_sha}` with the diff media type is an optional fast path |
+| Diff too large | size cap on the computed diff | same (local git has no server-side limit); the compare fast path's 406 / 5xx simply falls back to local git. Never `/pulls/{n}/files`, which follows the mutable head [P4] |
 | Post review | `POST …/reviews {commit_id, event: APPROVED\|COMMENT, body, comments[{path, new_position\|old_position}]}` | `POST …/reviews {commit_id, event: APPROVE\|COMMENT, body, comments[{path, line, side: RIGHT\|LEFT}]}`; one invalid comment fails the whole request with 422 (definite, not ambiguous) |
 | Pending reviews (X2) | list `state=PENDING` by the bot | GitHub allows one pending review per user per PR. reviewbot always posts with an `event`, so it never creates a pending review itself; whether a failed POST can leave one is a Phase 0b item. On both forges: delete only a pending review whose id this attempt received; any other pending review by the bot → do not post, ambiguous (section 4 step 3) [P6] |
 | CI green | combined status `success` (non-empty) | **At least one** check run or status must exist [P5]. Check runs of the head, paginated (`per_page=100`, `filter=latest`), every one `completed` with `success`/`neutral`/`skipped`; statuses: combined `success`, or zero statuses **only if** check runs exist. Required check names from `GET /repos/{o}/{r}/rules/branches/{branch}` (and branch protection when readable) must each be present and green. Which commit GitHub attaches PR checks to (head vs test merge commit) is verified in Phase 0b [P5] |
@@ -200,9 +211,9 @@ this kind at this head):
 3. Immediately before the POST: re-list markers — **no authenticated marker of this kind at the
    head** (else `pubx<G>`, `a<N>.done`, stop) [B1, P0]; re-read `pubvoid<G>` (absent), the epoch
    record (unchanged since start) and the mode fence (matches my mode) [R1, R6, R10]; list this account's **PENDING** reviews on
-   the PR: none, or only ones this attempt created (deleted first). A foreign pending review →
-   do not post, treat the head as ambiguous (a failed earlier attempt left partial state that Gitea
-   would merge into this POST) [X2].
+   the PR: none, or only ones this attempt created (deleted first). Any other pending review by the
+   bot → do not post, `pubx<G>`, the head is ambiguous: a failed earlier POST leaves an empty pending
+   review that the next POST by the same account absorbs (spike 3, Gitea 1.26.1) [X2].
 4. Write `pubsent<G>.<t>`; if that write fails, write `pubx<G>` and do not send [P0]. Then POST the
    review — **at most once per held right** (an in-process set of consumed rights).
    Success → `pubok<G>` and `a<N>.done.<t>` (best effort). Exception → `pubx<G>` (best effort) and
@@ -309,11 +320,18 @@ N ≤ 3; `reconcile_s` can be raised per instance if needed.
 Discovery isolates errors **per PR**: one PR that fails to parse or read is logged and counted, and
 the sweep continues with the next [X4].
 
-**Immutable diff.** The review diff is fetched by commit identity, not "the PR's current diff":
-`GET /repos/{o}/{r}/compare/{merge_base}...{head}` (diff form; exact endpoint verified in Phase 0)
-with `merge_base` computed from the PR's base ref and head SHA at claim time, and the review is bound
-to that pair. A head that moves A→B→A during the fetch can no longer make a review certify another
-head's content [X1].
+**Immutable diff (both forges).** The review diff is computed locally from exact commits, because
+Gitea 1.26 has no API for a diff between two fixed commits (spike 3) and one code path is simpler
+than two. Each instance keeps a **disposable** bare partial clone per repository
+(`/var/cache/reviewbot/git/<forge>/<owner>/<name>.git`, `--filter=blob:none`): fetch the base ref and
+`refs/pull/<n>/head` (Gitea and GitHub both publish it), verify the expected head SHA is present
+(`git cat-file -e`), compute `merge_base = git merge-base <base_tip> <head_sha>`, then
+`git diff --no-color <merge_base> <head_sha>` (blobs fetched lazily). A head that moved is detected
+(SHA absent or different) and supersedes the job; an A→B→A move cannot substitute content because
+every step names SHAs [X1, P4]. Deleting the cache only costs a re-fetch, so the instance stays
+stateless. Git authenticates through `GIT_ASKPASS` reading the token file (installation token on
+GitHub), never argv. The raw-size bound applies to the computed diff; the GitHub compare API remains
+an optional adapter fast path, never the authority.
 
 `iter_reviews` **fails closed** when the tenth page is full (more than 500 reviews) instead of
 silently truncating [C20]. The prefix listing is checked for completeness in Phase 0; if it can be
@@ -395,7 +413,8 @@ a URL or argv token; on GitHub it uses the adapter's API token.
      correctness proof; the remaining exposure is a forge that commits a request more than an hour
      after receiving it [B1, P0, P2].
   A `pubok<G>` does not block (the review may have been deleted). `pub_void_min_age_s` is a config
-  key (default 3600).
+  key (default 3600). Voiding also **deletes the bot's PENDING reviews on the PR** (left by a failed
+  POST, spike 3), after the checks above, so the next publisher does not stop on them again [X2].
 - Kill switches unchanged.
 - The Ansible role asserts that instance names are unique per kind, and an instance refuses to start
   when a live claim in the coordination repo carries its name with another health URL [B3].
@@ -446,7 +465,7 @@ wrong, whatever the restored state or the operator's clock [R10, B8, P14].
    `write:repository`): staggered 30-way races × 50 confirming "exactly one git object, readback
    decides"; `git/refs/tags/<prefix>` with 300 matching refs (pagination/truncation);
    `/git/tags/{sha}` message round-trip with quotes, backslashes, Unicode, newlines; `tagger.date`
-   is server time; `git push --delete` of API-created tags with the bot PAT; concurrent delete +
+   is server time (spike 3: yes); `git push --delete` of API-created tags with the bot PAT; concurrent delete +
    create of one name; protected-tag rules absent; side effects per tag (activity feed rows,
    notifications, indexer) acceptable; Gitea version recorded [F17, C30, C31]; how long after a client
 timeout a tag can still appear [R2]; the immutable compare-diff endpoint [X1]; pending-review reuse
@@ -530,7 +549,7 @@ maintenance window** [R9, C30].
 | C47 | Policy changed between sweeps | `policy.json` re-read immediately before each merge | merge |
 | C48 | GitHub `mergeable: null` | Not yet mergeable; retry next sweep | merge |
 | C49 | GitHub diff too large (406) | `/files` fallback; patch-less files excluded, verdict capped | pub |
-| C50 | Invalid inline comment on GitHub (422) | Definite failure, not ambiguous: `pubx`, charged `.fail`; comments are pre-validated by `parse_hunks` | pub |
+| C50 | Invalid inline comment (GitHub 422; **Gitea 500 + leftover PENDING review**, spike 3) | GitHub 422: definite failure, `pubx`, charged `.fail`. Gitea 500: indistinguishable from a server failure → ambiguous; its pending review is removed by the operator's void. Comments are pre-validated by `parse_hunks`, so this should not occur | pub |
 | C51 | GitHub checks vs statuses | CI green needs both rollups (F.2) | merge |
 | C52 | GitHub App approval does not count | Merge left to humans where approvals are required; logged once per head | merge |
 | C53 | Shared rate limit exhausted / secondary limit | Forge identity parked until reset; no claims, no posts | both |
@@ -543,8 +562,13 @@ maintenance window** [R9, C30].
 | C60 | Owner failed before sending | No `pubsent` → `pubx` → void allowed at once | pub |
 | C61 | Lost merge response + retarget | `mergeint` persisted → audit still runs | merge |
 | C62 | Zero CI on a GitHub head | Not green (at least one check required) | merge |
+| C63 | Git cache wiped or corrupt | Re-fetched; no behaviour change (stateless) | pub |
+| C64 | `refs/pull/<n>/head` already moved when fetched | Expected SHA absent → superseded / re-queued | pub |
 
 ## Critical files
+
+- `ansible/roles/pr_reviewer/tasks/main.yml`: git installed, `/var/cache/reviewbot/git` owned by the
+  service user, `GIT_ASKPASS` helper reading the token file.
 
 - `ansible/roles/pr_reviewer/files/`: reviewbot becomes a small stdlib-only package installed by
   the role — `reviewbot.py` (core), `forge_gitea.py`, `forge_github.py` (adapters: API, auth,
@@ -586,4 +610,4 @@ maintenance window** [R9, C30].
 5. **Live:** Phase 0 spike results recorded; Phase 2 one-week comparison; Phase 3 pre-test with two
    processes on 10 simultaneous fixture PRs, then kill one mid-review.
 
-<!-- codex-review-status: finalized -->
+<!-- codex-review-status: complete -->
