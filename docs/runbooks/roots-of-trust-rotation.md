@@ -396,8 +396,9 @@ switch. So, before step 1, either:
 - **(preferred) carry every step in OpenTofu:** steps 1 and 4 as the `machine.files` and `extraVolumes` block in `controlplane.yaml.tftpl` (public
   keys only, plain text is fine); step 2 as a second config patch setting `cluster.serviceAccount.key` from a sensitive variable fed from a new
   SOPS file (`talos_machine_secrets.this` keeps the old key, so this override stays for good); apply one control plane at a time with
-  `-target='talos_machine_configuration_apply.cp["cp1"]'` after a `tofu plan` that shows only that control plane's expected diff (the provider's
-  `apply_mode` defaults to `auto`, which reboots for step 1); or
+  `-target='talos_machine_configuration_apply.cp["cp1"]'` after a `tofu plan` that shows only that control plane's expected diff. Step 1 needs
+  `apply_mode = "staged"` (or `"staged_if_needing_reboot"`) followed by the planned drain and reboot below: the provider's default `auto` would
+  reboot the control plane **undrained** (a Talos-initiated reboot does not drain, above); or
 - run the steps with `talosctl` as below and freeze every `kubernetes/infra` apply until the template and the variable match and `tofu plan` is clean.
 
 Either way, write the new private key into the DR bundle in the same change (`certs.k8sserviceaccount.key` in the inner `secrets.yaml`, following
@@ -447,8 +448,8 @@ echo "k1=$(kid "$W/k1.pub") k2=$(kid "$W/k2.pub")"; state   # k1 = the kid every
 } > "$W/step1-verify-k1-k2.yaml"
 printf 'cluster:\n  serviceAccount:\n    key: %s\n' "$(base64 -w0 < "$W/k2.key")" > "$W/step2-sign-k2.yaml"   # secret
 printf '[{"op":"remove","path":"/cluster/apiServer/extraVolumes"}]\n' > "$W/step4-drop-k1.json"
-# old-key witnesses: a TokenRequest token now; it must stay valid until step 4
-$K -n default create token default --duration=48h > "$W/k1-witness.jwt"
+# old-key witness: a TokenRequest token now (nothing can mint an old-key token after step 2); 168 h covers an overlap of up to a week
+$K -n default create token default --duration=168h > "$W/k1-witness.jwt"
 ```
 
 `step4-drop-k1.json` removes the whole `extraVolumes` list: correct while this bundle is the only entry (true on 2026-10-07; the template has no
@@ -526,7 +527,7 @@ All of these, then step 4. Nothing breaks while both keys verify, so the overlap
    Restart that pod (a new pod gets a new token) or fix the client, and wait again.
 3. **TokenRequest tokens:** `$K -n openbao create job --from=cronjob/openbao-k8stoken-sync k8stoken-sync-sa-rotation`, wait for `Complete`, then
    on each dev worker check that the three kubeconfigs carry the new key (header only):
-   `for f in ~/.tep/kubeconfig ~/.helmtest/kubeconfig ~/.platform/kubeconfig; do yq '.users[0].user.token' $f | cut -d. -f1 | base64 -d 2>/dev/null; echo; done`.
+   `for f in ~/.tep/kubeconfig ~/.helmtest/kubeconfig ~/.platform/kubeconfig; do yq '.users[0].user.token' $f | cut -d. -f1 | tr '_-' '/+' | awk '{while (length($0) % 4) $0 = $0 "="; print}' | base64 -d; echo; done`.
    Tell the owner that tokens minted by hand before the switch stop working at step 4.
 4. **Legacy Secrets,** only after step 2 is done on **all three** control planes (the controller re-fills a Secret with its own control plane's
    key; one not yet switched would re-mint an old-key token). First find who uses them: annotation `authentication.k8s.io/legacy-token` in the
@@ -550,7 +551,8 @@ before=$(started $cp)
 until s=$(started $cp) && [ -n "$s" ] && [ "$s" != "$before" ]; do sleep 3; done
 until [ "$($K --server https://$cp:6443 get --raw /readyz 2>/dev/null)" = ok ]; do sleep 3; done
 state                                                      # $cp: jwks [k2] signs k2
-for c in $CPS; do echo "$c old=$(trv $c "$W/k1-witness.jwt") new=$(trv $c "$W/k2-from-$cp.jwt")"; done
+$K --server https://$cp:6443 -n default create token default --duration=10m > "$W/k2-now.jwt"   # fresh: step 2's 1 h tokens have expired
+for c in $CPS; do echo "$c old=$(trv $c "$W/k1-witness.jwt") new=$(trv $c "$W/k2-now.jwt")"; done
 #   $cp: old=false "[invalid bearer token, invalid signature]", new=true; the others still old=true until rolled
 ```
 
@@ -563,14 +565,17 @@ this step's rollback a no-reboot change.
 
 - Drop the `machine.files` entry at the next planned control plane reboot or Talos upgrade (removing it only takes effect at a reboot; the file
   left on `/var` holds public keys only).
-- Delete `$W/*.jwt`, `$W/k1.pub` and the plain copy of `$W/k2.key` once OpenTofu (or its SOPS file) and the DR bundle hold the new key.
+- Delete `$W` once OpenTofu (or its SOPS file) and the DR bundle hold the new key and no rollback of step 2 can be needed: it holds the new
+  private key twice in plain form (`k2.key`, and base64 in `step2-sign-k2.yaml`), an old-key patch if you built one for a rollback, and the
+  witness tokens (`*.jwt`).
 - Record the old and new `kid`s, the date and the PR numbers (see "After any of these").
 
 ## Rollback
 
 | From | Do | Why it is safe |
 |---|---|---|
-| Step 1 (any control plane) | Remove `/cluster/apiServer/extraVolumes` on it (no reboot). The file can stay. | Talos's own `.pub` is the old key again. |
+| Step 1, staged but not yet rebooted | Un-stage: stage a no-op patch, `printf '[{"op":"test","path":"/version","value":"v1alpha1"}]' > "$W/noop.json"; "$T" -n $cp patch mc --patch @"$W/noop.json" --mode=staged`, then `entries $cp persistent` is 0. | The running config never had the entry (rehearsed). |
+| Step 1, rebooted with it | Remove `/cluster/apiServer/extraVolumes` on it (no reboot). The file can stay. | Talos's own `.pub` is the old key again. |
 | Step 2 (any control plane), **before step 4 has started** | Patch `cluster.serviceAccount.key` back to the old key on the switched control planes (no reboot), built like `step2-sign-k2.yaml` from `certs.k8sserviceaccount.key` in the DR bundle or `certs.k8s_serviceaccount.key` in `tofu output -json machine_secrets`. | Every control plane still verifies both keys, so tokens signed either way keep working (rehearsed). |
 | Step 4 (any control plane) | Check `entries $cp v1alpha1` is 1 (the file only), then re-add only the volume (no reboot): `cluster: { apiServer: { extraVolumes: [ { hostPath: /var/sa-verify/service-account.pub, mountPath: /system/secrets/kubernetes/kube-apiserver/service-account.pub, readonly: true } ] } }`. | The file is still on disk because step 4 keeps `machine.files` (rehearsed: the old key verified again after 41 s). |
 
