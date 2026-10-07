@@ -81,6 +81,9 @@ jobs:
       - name: Local embedding serving and route contracts
         run: python3 -m unittest scripts.tests.test_local_embeddings scripts.tests.test_litellm_platform_routes scripts.tests.test_ready_watchdog scripts.tests.test_env_pool_soak scripts.tests.test_strive_pg_harness_dsn
 
+      - name: Router CI rollout acceptance fails on missing or failed evidence
+        run: python3 -m unittest scripts.tests.test_router_rollout
+
       # The S2S Phase 4 probes (scripts/s2s/, docs/runbooks/s2s-identity.md): the in-pod verdict
       # logic against fabricated JWTs and canned gatekeeper answers, then phase4-probes.sh end to end
       # against stub kubectl/curl and a gatekeeper emulator per replica: every mandatory refusal, the
