@@ -147,7 +147,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "min(up{namespace=\"platform-edge\",service=\"traefik-metrics\"})"
+              "expr": "min(up{namespace=\"platform-edge\",service=\"traefik-metrics\"})",
+              "instant": true,
+              "range": false
             }
           ],
           "description": "up for service traefik-metrics in platform-edge (the platform E1a scrape, live since 2026-10-07). NOT SCRAPED means the target is gone; TraefikScrapeMissing fires after 15 minutes of it."
@@ -1114,7 +1116,9 @@ data:
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "gatus_results_endpoint_success{group=\"Strive edge\"}",
-              "legendFormat": "{{name}}"
+              "legendFormat": "{{name}}",
+              "instant": true,
+              "range": false
             }
           ],
           "description": "Last result per endpoint: Strive JWKS, Strive Keycloak OIDC discovery, Strive apps host. They prove edge-to-origin reachability, not login health. Sub-5m outages are visibility-only (GatusEndpointDown holds 5m)."
