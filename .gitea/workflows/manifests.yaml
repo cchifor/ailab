@@ -95,8 +95,16 @@ jobs:
       # HelmRelease on it, against a stateful fake Flux. No cluster: the test
       # refuses to run unless kubectl and curl resolve to its stubs, and points KUBECONFIG at an
       # empty file and every proxy at a closed port. bash and python3 only (PyYAML optional).
+      #
+      # test_phase4_job: the in-cluster probe Job (kubernetes/apps/infrastructure/s2s-phase4-probe/):
+      # Endpoints -> replicas (a roll in flight or a short fleet mints nothing), the three
+      # TokenRequests, every replica probed at its pod IP against an emulator, one bad replica fails
+      # the Job and is named, base_sha agreement, no token or API error body in the log; the stdlib
+      # extras reader against the live document; the vendored copies byte-identical; each Role is
+      # exactly its rules; the NetworkPolicy admits exactly the Job's pod on 5000; gatekeeper's
+      # namespace is one manifest line equal to GK_NS in phase4-probes.sh (the A.2 cutover).
       - name: S2S Phase 4 probe logic and orchestration (offline)
-        run: python3 -m unittest scripts.s2s.test_phase4_probes scripts.s2s.test_flux_resume
+        run: python3 -m unittest scripts.s2s.test_phase4_probes scripts.s2s.test_phase4_job scripts.s2s.test_flux_resume
 
       # The env-reaper's shell helpers under the DaemonSet's OWN image (busybox ash, digest-pinned in
       # the manifest) against a synthetic /proc: identity chain, PID reuse, evidence timeout,

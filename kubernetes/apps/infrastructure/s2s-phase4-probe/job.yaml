@@ -1,0 +1,114 @@
+# s2s-phase4-probe -- the S2S Phase 4 probes of every gatekeeper replica, in-cluster
+# (scripts/s2s/phase4_job.py driving scripts/s2s/phase4_probe.py; both from the generated
+# ConfigMap). The `--gatekeeper-only` part of scripts/s2s/phase4-probes.sh, which stays the
+# workstation fallback and the home of the drills.
+#
+# READ THE VERDICT (dev worker, read-only):
+#   platform kubectl -n strive-ailab get job s2s-phase4-probe
+#   platform kubectl -n strive-ailab logs job/s2s-phase4-probe
+# Exit 0 (Job Complete) only when every replica passed; any failure is Job Failed (backoffLimit 0:
+# a failed probe is a verdict, never retried into a pass).
+#
+# TRIGGER: bump spec.template.metadata.annotations["probe/revision"] in a PR after every gatekeeper
+# roll. The pod template is immutable, so the apply fails as immutable and the kustomize force
+# annotation makes Flux delete and recreate this Job: a new run, on the next reconcile (interval
+# 10m, or `flux reconcile kustomization s2s-phase4-probe`). A script change renames the generated
+# ConfigMap and re-runs it the same way. The revision is printed on the first log line.
+# Owner's manual re-run without a PR:
+#   kubectl --context admin@ai -n strive-ailab delete job s2s-phase4-probe
+#   flux --context admin@ai reconcile kustomization s2s-phase4-probe
+#
+# ttlSecondsAfterFinished keeps the finished Job and its logs for 7 days. When the TTL reaps it,
+# Flux re-applies it and it runs again: a weekly re-check of the live fleet at the same revision.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: s2s-phase4-probe
+  namespace: strive-ailab
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: s2s-phase4-probe
+    app.kubernetes.io/component: probe
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      annotations:
+        probe/revision: "2026-10-06.1"
+      labels:
+        app.kubernetes.io/name: s2s-phase4-probe
+        app.kubernetes.io/component: probe
+    spec:
+      serviceAccountName: s2s-phase4-probe
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          # Stock python, stdlib only (the cloud-power / ci-rerun-watchdog shape); the extras YAML
+          # is read by phase4_probe.parse_yaml_subset, no PyYAML needed. DIGEST-PINNED (the OCI
+          # index digest of 3.14-slim on 2026-10-06, the image the tests ran under): the weekly
+          # TTL re-run must not pick up a different interpreter on a fresh node. Re-pin
+          # deliberately: docker buildx imagetools inspect mirror.gcr.io/library/python:3.14-slim
+          image: mirror.gcr.io/library/python:3.14-slim@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -u
+            - -B
+            - /probe/phase4_job.py
+            - --expect-replicas
+            - "2"
+          env:
+            # Replaced at build time with gatekeeper-ns/'s namespace (kustomization.yaml
+            # replacements); the placeholder is never a namespace, so a broken wiring fails loudly.
+            - name: GATEKEEPER_NAMESPACE
+              value: set-by-kustomize-replacement
+            - name: PROBE_REVISION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['probe/revision']
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          volumeMounts:
+            - name: probe
+              mountPath: /probe
+              readOnly: true
+            - name: work
+              mountPath: /work
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: probe
+          configMap:
+            name: s2s-phase4-probe-script
+            defaultMode: 0444
+        # The extras ConfigMap's bytes, fetched through the API (it lives in gatekeeper's
+        # namespace, which a pod here cannot mount from): the `registry` check compares each
+        # replica's loaded extras_sha with them, i.e. with the ConfigMap as it is now.
+        - name: work
+          emptyDir:
+            sizeLimit: 1Mi
