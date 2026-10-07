@@ -1,6 +1,6 @@
 # Implementation review — etcd-leader-churn — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Round 2 verdict
 
@@ -72,7 +72,7 @@
 **Location:** `scripts/lxc-fstrim-chunked.sh:78`, `scripts/tests/test-lxc-fstrim-chunked.sh:55`  
 **Severity:** important
 
-<!-- codex: round-2: The EXIT trap preserves the status that caused the shell to exit; a failing command inside it does not replace that status. Consequently, after normal completion or STOP_FILE, an umount failure still produces exit 0 and systemd success. For example, another host process holding a working directory under the temporary mount can cause EBUSY: rmdir is then skipped and the filesystem remains mounted in the host namespace, keeping the LV busy even after the container stops. This is a separate mount path, not an isolated mount namespace that disappears with the script. Replace the trap with explicit cleanup status handling: capture the original status, report unmount/removal failures with the device and mount path, and return nonzero on cleanup failure when the original status was zero, preserving an existing failure otherwise. Remove the directory only after successful unmount. Add an umount-failure fixture asserting a failed run and diagnostic; the current stub always succeeds and cannot detect this defect. Early die calls before mount do not encounter an uninitialized trap, and successful cleanup correctly preserves the existing trim/pressure failure codes. -->
+**Resolution (accepted, fixed in 6685a244):** `cleanup()` captures the original status, logs `cleanup: umount <mnt> (<dev>) failed` with the manual release command, returns 6 when the run had otherwise succeeded (an existing failure code is kept), and removes the directory only after a successful unmount. Fixtures: unmount failure after a clean run gives exit 6, the diagnostic, and the dir kept; after a failed trim it gives exit 5 kept plus the diagnostic (RED 3 failed -> GREEN 47/47). Deployed to ai-node1 and dry-run clean. The supervised real run (10:27-10:32Z) trimmed 8.84 GB in 15 chunks before the automated stop criteria fired on a cp1 WAL p99 of 3461 ms. Attribution to the trim is inconclusive: cp1 hit 807/1518 ms at 10:26-10:27, before the trim started. The weekly timer runs Sundays 03:30Z, in CI-quiet hours.
 
 ## Diff stat
 
