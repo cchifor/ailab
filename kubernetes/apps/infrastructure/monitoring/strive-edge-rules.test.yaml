@@ -1165,7 +1165,7 @@ tests:
         exp_alerts: []
 
   - interval: 1m
-    name: "before AG1a (counters pre-initialised at 0, no gauge) or with no gatekeeper series at all the Redis rules are silent"
+    name: "before AG1a (the two counters pre-initialised at 0, no gauge) the Redis rules are silent"
     input_series:
       # The live state on 2026-10-07: the two counters exist at 0 on every pod, gatekeeper_redis_connected does not.
       - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
@@ -1206,20 +1206,28 @@ tests:
         exp_alerts: []
 
   # ================================================================ StriveTestBypassFromEdge
+  # TIMELINES, for both rules below. promtool starts every series at t=0, and the new-series branch asks
+  # whether a series existed 15m earlier (`offset 15m`), which before t=15m reaches back before the data.
+  # So every fixture whose series must count as PRE-EXISTING evaluates only at 16m or later, and puts its
+  # increments after that. A series that must count as NEW is absent until a mid-run sample (`_x20 1x50`).
+
   - interval: 1m
-    name: "an edge_refused increment pages StriveTestBypassFromEdge, and resolves once the 15m window has passed"
+    name: "an edge_refused increment on a pre-existing series pages StriveTestBypassFromEdge, and resolves once the 15m window has passed"
     input_series:
-      # The series pre-exists at 2 (a non-zero start, so increase() sees every event) and rises once at 10m,
+      # The series pre-exists at 2 (present since t=0, so the new-series branch stays out of it) and rises once at 20m,
       # beside Sentinel's ordinary successful bypass runs, which must not matter.
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
-        values: "2x9 3x50"
+        values: "2x19 3x50"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="success"}'
-        values: "100+5x60"
+        values: "100+5x70"
     alert_rule_test:
-      - eval_time: 9m
+      - eval_time: 16m
         alertname: StriveTestBypassFromEdge
         exp_alerts: []
-      - eval_time: 12m
+      - eval_time: 19m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 22m
         alertname: StriveTestBypassFromEdge
         exp_alerts:
           - exp_labels:
@@ -1232,6 +1240,39 @@ tests:
                 comparing the token. Either a client on the internet is sending the bypass header, or a
                 test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
                 case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 32m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 40m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
+    name: "the FIRST edge_refused of a lazily created series (absent, then 1) pages, and resolves 15m later"
+    input_series:
+      # No edge_refused child exists on this pod until the first refusal: the series appears at value 1, which
+      # increase() cannot see. Only the new-series branch (a series now that did not exist 15m ago) pages it.
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "_x20 1x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="success"}'
+        values: "100+5x70"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
       - eval_time: 22m
         alertname: StriveTestBypassFromEdge
         exp_alerts:
@@ -1247,17 +1288,77 @@ tests:
                 case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
       - eval_time: 30m
         alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 33m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 38m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a first edge_refused on a second pod, beside an old flat series on the first, pages"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "4x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="other",method="test_bypass",status="edge_refused"}'
+        values: "_x25 1x50"
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 45m
+        alertname: StriveTestBypassFromEdge
         exp_alerts: []
 
   - interval: 1m
     name: "edge_refused rising on two pods and two tenants is one alert"
     input_series:
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
-        values: "0x9 2x50"
+        values: "0x19 2x50"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="other",method="test_bypass",status="edge_refused"}'
-        values: "1x9 3x50"
+        values: "1x19 3x50"
     alert_rule_test:
-      - eval_time: 12m
+      - eval_time: 16m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 22m
         alertname: StriveTestBypassFromEdge
         exp_alerts:
           - exp_labels:
@@ -1272,22 +1373,35 @@ tests:
                 case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
 
   - interval: 1m
-    name: "successful and invalid_key bypass runs, a flat or reset edge_refused counter and another job's series do not page"
+    name: "successful and invalid_key bypass runs, a flat, reset or zero edge_refused counter and another job's series do not page"
     input_series:
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="success"}'
-        values: "100+5x60"
+        values: "100+5x70"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="invalid_key"}'
-        values: "1+1x60"
+        values: "1+1x70"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
-        values: "7x60"
+        values: "7x70"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="test_bypass",status="edge_refused"}'
-        values: "5x20 0x40"
+        values: "5x20 0x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "_x20 0x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-eee",tenant_id="strive",method="test_bypass",status="success"}'
+        values: "_x20 3x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-eee",tenant_id="strive",method="test_bypass",status="invalid_key"}'
+        values: "_x20 1x50"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="edge_refused"}'
-        values: "0+1x60"
+        values: "0+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ddd",tenant_id="strive",method="jwt",status="edge_refused"}'
+        values: "_x20 1x50"
       - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-1",tenant_id="strive",method="test_bypass",status="edge_refused"}'
-        values: "0+1x60"
+        values: "0+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-2",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "_x20 1x50"
     alert_rule_test:
-      - eval_time: 12m
+      - eval_time: 16m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 22m
         alertname: StriveTestBypassFromEdge
         exp_alerts: []
       - eval_time: 30m
@@ -1301,7 +1415,7 @@ tests:
     name: "with no test_bypass series at all (the state before AG1a) StriveTestBypassFromEdge is silent"
     input_series:
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="success"}'
-        values: "100+5x60"
+        values: "100+5x70"
       - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
         values: "1x60"
     alert_rule_test:
@@ -1311,27 +1425,18 @@ tests:
 
   # ===================================================================== GatekeeperApiKeyUsed
   - interval: 1m
-    name: "an api_key request with a status other than disabled pages GatekeeperApiKeyUsed, and resolves after 15m"
+    name: "an api_key request with a status other than disabled on a pre-existing series pages GatekeeperApiKeyUsed, and resolves after 15m"
     input_series:
-      # One validated key at 10m (success), on a series that pre-exists at 10.
+      # One validated key at 20m (success), on a series that pre-exists at 10 (present since t=0).
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
-        values: "10x9 11x50"
+        values: "10x19 11x50"
     alert_rule_test:
-      - eval_time: 9m
+      - eval_time: 16m
         alertname: GatekeeperApiKeyUsed
         exp_alerts: []
-      - eval_time: 12m
+      - eval_time: 19m
         alertname: GatekeeperApiKeyUsed
-        exp_alerts:
-          - exp_labels:
-              severity: warning
-            exp_annotations:
-              summary: "gatekeeper looked up an API key although API keys are retired"
-              description: >-
-                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose with a status
-                other than `disabled`: an X-API-Key was validated (accepted or refused), so API_KEYS_ENABLED
-                is not false on at least one pod. Check the gatekeeper env on every pod and that the AG1a
-                pin is still live. The expected `disabled` status (a key sent and ignored) does not page.
+        exp_alerts: []
       - eval_time: 22m
         alertname: GatekeeperApiKeyUsed
         exp_alerts:
@@ -1340,23 +1445,12 @@ tests:
             exp_annotations:
               summary: "gatekeeper looked up an API key although API keys are retired"
               description: >-
-                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose with a status
-                other than `disabled`: an X-API-Key was validated (accepted or refused), so API_KEYS_ENABLED
-                is not false on at least one pod. Check the gatekeeper env on every pod and that the AG1a
-                pin is still live. The expected `disabled` status (a key sent and ignored) does not page.
-      - eval_time: 30m
-        alertname: GatekeeperApiKeyUsed
-        exp_alerts: []
-
-  - interval: 1m
-    name: "a REFUSED key (invalid_key) pages too, and the disabled counter beside it neither adds nor hides anything"
-    input_series:
-      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="invalid_key"}'
-        values: "0x9 1x50"
-      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="disabled"}'
-        values: "0+2x60"
-    alert_rule_test:
-      - eval_time: 12m
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 32m
         alertname: GatekeeperApiKeyUsed
         exp_alerts:
           - exp_labels:
@@ -1364,28 +1458,150 @@ tests:
             exp_annotations:
               summary: "gatekeeper looked up an API key although API keys are retired"
               description: >-
-                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose with a status
-                other than `disabled`: an X-API-Key was validated (accepted or refused), so API_KEYS_ENABLED
-                is not false on at least one pod. Check the gatekeeper env on every pod and that the AG1a
-                pin is still live. The expected `disabled` status (a key sent and ignored) does not page.
-      - eval_time: 30m
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 40m
         alertname: GatekeeperApiKeyUsed
         exp_alerts: []
 
   - interval: 1m
-    name: "only status=disabled, whatever its rate, and other methods' statuses do not page"
+    name: "the FIRST api_key success of a lazily created series (absent, then 1) pages, and resolves 15m later"
+    input_series:
+      # No api_key child exists on this pod until a key is looked up: the series appears at value 1, which
+      # increase() cannot see. Only the new-series branch pages it.
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
+        values: "_x20 1x50"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 30m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 33m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 38m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a first api_key invalid_key (a refused key) on a new series pages too"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="invalid_key"}'
+        values: "_x20 1x50"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 38m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a REFUSED key (invalid_key) on an old series pages too, and the disabled counter beside it neither adds nor hides anything"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="invalid_key"}'
+        values: "0x19 1x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="disabled"}'
+        values: "0+2x70"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 40m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "only status=disabled, old or newly created, whatever its rate, and other methods' statuses do not page"
     input_series:
       # The state AG1a is meant to produce: keys are sent, ignored and counted as disabled.
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="disabled"}'
-        values: "0+3x60"
+        values: "0+3x70"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="api_key",status="disabled"}'
-        values: "5+7x60"
+        values: "5+7x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc",tenant_id="strive",method="api_key",status="disabled"}'
+        values: "_x20 1+4x50"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="success"}'
-        values: "100+9x60"
+        values: "100+9x70"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="invalid_key"}'
-        values: "1+1x60"
+        values: "1+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ddd",tenant_id="strive",method="jwt",status="failed"}'
+        values: "_x20 1x50"
     alert_rule_test:
-      - eval_time: 12m
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
         alertname: GatekeeperApiKeyUsed
         exp_alerts: []
       - eval_time: 30m
@@ -1396,16 +1612,23 @@ tests:
         exp_alerts: []
 
   - interval: 1m
-    name: "a flat or reset api_key counter, another job's series and a missing series do not page"
+    name: "a flat, reset or zero api_key counter, another job's series and a missing series do not page"
     input_series:
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
-        values: "40x60"
+        values: "40x70"
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="api_key",status="success"}'
-        values: "9x20 0x40"
+        values: "9x20 0x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc",tenant_id="strive",method="api_key",status="success"}'
+        values: "_x20 0x50"
       - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-1",tenant_id="strive",method="api_key",status="success"}'
-        values: "0+1x60"
+        values: "0+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-2",tenant_id="strive",method="api_key",status="success"}'
+        values: "_x20 1x50"
     alert_rule_test:
-      - eval_time: 12m
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
         alertname: GatekeeperApiKeyUsed
         exp_alerts: []
       - eval_time: 30m
@@ -1419,7 +1642,7 @@ tests:
     name: "with no api_key series at all (the state before AG1a) GatekeeperApiKeyUsed is silent"
     input_series:
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="success"}'
-        values: "100+5x60"
+        values: "100+5x70"
       - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
         values: "1x60"
     alert_rule_test:
