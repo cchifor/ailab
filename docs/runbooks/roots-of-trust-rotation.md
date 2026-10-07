@@ -399,6 +399,11 @@ kubectl --context admin@ai -n strive-ailab exec deploy/keycloak -- rm -f /tmp/kc
   component, so key providers created in the console are not reverted by the sync job.
 - Key providers (Keycloak 26): `rsa-generated` (RS256 access/ID tokens), `rsa-enc-generated` (RSA-OAEP), `hmac-generated-hs512` (refresh tokens; listed as `hmac-generated` on older
   releases, use the name the Providers tab shows), `aes-generated`.
+- **Which key signs a refresh token (read from the running image, 2026-10-07).** The Keycloak in this cluster is 26.0.0. In its jars, `RefreshToken.getCategory()` is
+  `TokenCategory.INTERNAL`, and `DefaultTokenManager` (which maps a token category to a signature algorithm) holds the `HS512` constant for it, whereas access and ID tokens
+  follow the realm's default signature algorithm (RS256 here). So refresh and offline tokens are signed HS512 with the realm's **HMAC** key, not with the RSA key: retiring the old HMAC
+  provider too early invalidates every refresh token, and so every session that refreshes, even though the RSA key overlap is fine. The refresh check at each step below is the empirical
+  confirmation on this build (a session logged in before the change must still refresh), so run it; if it contradicts this paragraph, trust the check and correct the paragraph.
 
 ## Before step 1 — read the lifetimes (no secrets) and fix the retention
 
