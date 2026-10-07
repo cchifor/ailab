@@ -1,0 +1,6 @@
+# Required status contexts on cchifor/ailab `main`, one glob pattern per line; `#` starts a comment.
+# Read by scripts/gitea-owner-merge.sh, whose gate runs with NO owner credential.
+# NONE today: GET /repos/cchifor/ailab/branches/main (readable by the non-admin workstation-bot) answered
+# enable_status_check=false and no status_check_contexts on 2026-10-07. The gate still requires every
+# context reported at the head to have passed, and refuses if the live protection starts requiring a
+# context that is not listed here.
