@@ -173,7 +173,7 @@ pressure is unreadable, and pauses 15 s between chunks. `touch /run/lxc-fstrim-c
 including during a pressure wait.
 
 Exit codes: 0 done or stopped, 1 volume, geometry or mount problem, 2 bad settings, 3 pressure never
-dropped, 4 pressure unreadable, 5 an fstrim failed, 6 the host-side mount could not be released (`findmnt | grep lxc-fstrim`, then `umount` it by hand). Install on ai-node1 (root, via
+dropped, 4 pressure unreadable, 5 an fstrim failed, 143 stopped by `systemctl stop` (after the in-flight chunk, mount released), 6 the host-side mount could not be released (`findmnt | grep lxc-fstrim`, then `umount` it by hand). Install on ai-node1 (root, via
 `scripts/node-ssh.py`):
 
 ```bash
@@ -185,6 +185,8 @@ Description=Chunked, IO-pressure-guarded fstrim of the registry LXC data volume 
 Type=oneshot
 ExecStart=/usr/local/sbin/lxc-fstrim-chunked.sh 5004 mp0
 Nice=10
+# On stop the script waits for the in-flight FITRIM, then unmounts (exit 143); leave it time to.
+TimeoutStopSec=180
 UNIT
 cat > /etc/systemd/system/registry-lxc-fstrim.timer <<'UNIT'
 [Unit]

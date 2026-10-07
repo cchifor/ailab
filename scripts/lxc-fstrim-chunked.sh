@@ -31,6 +31,7 @@
 #   4 = IO pressure unreadable
 #   5 = an fstrim failed
 #   6 = the run succeeded but the host-side mount could not be released (the volume stays mounted)
+#   143/130 = stopped by SIGTERM/SIGINT (after the in-flight trim/sleep finished and the mount was released)
 # Deploy (ai-node1, via scripts/node-ssh.py): docs/runbooks/registry-cache.md, "Thin-volume trim".
 set -uo pipefail
 
@@ -82,6 +83,7 @@ mount -o rw,nosuid,nodev,noexec "$dev" "$mnt" || { rmdir "$mnt"; die 1 "mount $d
 # failure is the run's failure (exit 6). Remove the directory only after a successful unmount.
 cleanup() {
   local rc=$?
+  rm -f "$outf"
   if umount "$mnt"; then
     rmdir "$mnt" || log "cleanup: rmdir $mnt failed (unmounted; empty dir left behind)"
   else
@@ -90,7 +92,22 @@ cleanup() {
   fi
   exit "$rc"
 }
+# `systemctl stop` SIGTERMs the whole unit. Bash would run the EXIT trap at once, while an in-flight
+# FITRIM (an ioctl, so it cannot die mid-call) still holds the mount: umount gets EBUSY and the mount
+# is left behind (Codex review of #1130). fstrim and sleep therefore run as tracked children
+# (`run_child`), and a TERM/INT waits for the in-flight one before exiting through cleanup.
+child=""
+on_signal() {
+  trap - TERM INT
+  log "terminated by signal - waiting for in-flight ${child:+pid $child }before releasing the mount"
+  [ -n "$child" ] && wait "$child" 2>/dev/null
+  exit "$1"
+}
+run_child() { "$@" & child=$!; wait "$child"; local rc=$?; child=""; return "$rc"; }
+outf="$(mktemp "$MOUNT_BASE/lxc-fstrim-out.XXXXXX")" || { umount "$mnt" && rmdir "$mnt"; die 1 "mktemp under $MOUNT_BASE failed"; }
 trap cleanup EXIT
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
 
 chunk=$(( CHUNK_GB * 1024 * 1024 * 1024 ))
 chunks=$(( (size + chunk - 1) / chunk ))
@@ -106,17 +123,18 @@ for (( i = 0; i < chunks; i++ )); do
     above "$p" "$PSI_MAX" || break
     [ "$waited" -lt "$PSI_WAIT_MAX_S" ] \
       || die 3 "host IO pressure stayed above ${PSI_MAX}% (now $p) for ${waited}s - giving up at chunk $((i + 1)) trimmed_total=$total"
-    sleep "$PAUSE_S"; waited=$(( waited + PAUSE_S ))
+    run_child sleep "$PAUSE_S"; waited=$(( waited + PAUSE_S ))
     stopped && { log "stop file $STOP_FILE present - stopping during the pressure wait before chunk $((i + 1)) trimmed_total=$total"; exit 0; }
   done
   off=$(( i * chunk ))
-  if ! out="$(fstrim -v -o "$off" -l "$chunk" "$mnt" 2>&1)"; then
-    die 5 "fstrim failed at chunk $((i + 1))/$chunks off=$off: $out trimmed_total=$total"
+  if ! run_child fstrim -v -o "$off" -l "$chunk" "$mnt" > "$outf" 2>&1; then
+    die 5 "fstrim failed at chunk $((i + 1))/$chunks off=$off: $(cat "$outf") trimmed_total=$total"
   fi
+  out="$(cat "$outf")"
   bytes="$(sed -nE 's/.*\(([0-9]+) bytes\) trimmed.*/\1/p' <<< "$out")"
   total=$(( total + ${bytes:-0} ))
   log "chunk=$((i + 1))/$chunks off=$off waited=${waited}s psi=$p ${out#*: }"
-  sleep "$PAUSE_S"
+  run_child sleep "$PAUSE_S"
 done
 
 log "end: trimmed_total=$total pool=$(pool)%"

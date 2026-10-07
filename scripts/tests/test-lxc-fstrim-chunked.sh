@@ -56,6 +56,7 @@ cat > "$BIN/umount" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$CTL/umount_calls"
 [ -f "$CTL/umount_fail" ] && { echo "umount: $1: target is busy." >&2; exit 32; }
+[ -f "$CTL/fstrim_running" ] && { echo "umount: $1: target is busy (fstrim in flight)." >&2; exit 32; }
 exit 0
 STUB
 cat > "$BIN/fstrim" <<'STUB'
@@ -63,6 +64,8 @@ cat > "$BIN/fstrim" <<'STUB'
 # fstrim -v -o <bytes> -l <bytes> <dir>; fails on call number $CTL/fail_on if set
 echo "$*" >> "$CTL/fstrim_calls"
 n=$(wc -l < "$CTL/fstrim_calls")
+# slow_trim: an FITRIM that cannot be interrupted (ignores SIGTERM) and holds the mount busy for 2 s
+if [ -f "$CTL/slow_trim" ]; then trap '' TERM; touch "$CTL/fstrim_running"; /bin/sleep 2; rm -f "$CTL/fstrim_running"; fi
 if [ -f "$CTL/fail_on" ] && [ "$n" -ge "$(cat "$CTL/fail_on")" ]; then echo "fstrim: $5: FITRIM ioctl failed: Input/output error" >&2; exit 1; fi
 echo "$5: 1 GiB (1073741824 bytes) trimmed"
 STUB
@@ -79,6 +82,8 @@ if [ -f "$CTL/psi_drop_after" ] && [ "$n" -ge "$(cat "$CTL/psi_drop_after")" ]; 
   echo "some avg10=5.00 avg60=5.00 avg300=5.00 total=1" > "$CTL/psi"
 fi
 if [ -f "$CTL/stop_after" ] && [ "$n" -ge "$(cat "$CTL/stop_after")" ]; then touch "$CTL/stop"; fi
+# block_sleep: a REAL blocking sleep, announced via $CTL/sleeping, for the SIGTERM case
+if [ -f "$CTL/block_sleep" ]; then touch "$CTL/sleeping"; exec /bin/sleep 30; fi
 STUB
 chmod +x "$BIN"/*
 
@@ -155,6 +160,29 @@ echo "== a failed unmount after a failed trim keeps the trim's exit code (5) =="
 new_case bothfail; touch "$CTL/umount_fail"; echo 1 > "$CTL/fail_on"; run
 eq "exit 5 preserved" 5 "$(cat "$CTL/rc")"
 has "still reports the unmount failure" "cleanup: umount" "$(cat "$CTL/out")"
+
+echo "== systemctl stop (SIGTERM to the script and its child, mid-sleep) still unmounts =="
+new_case sigterm; touch "$CTL/block_sleep"
+env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=5 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &
+spid=$!
+for _ in $(seq 1 100); do [ -f "$CTL/sleeping" ] && break; /bin/sleep 0.1; done
+# What systemd's default KillMode=control-group does: SIGTERM to every process of the unit.
+kill -TERM "$spid" $(pgrep -P "$spid") 2>/dev/null
+wait "$spid"; echo $? > "$CTL/rc"
+eq "exits 143 (terminated)" 143 "$(cat "$CTL/rc")"
+eq "unmounted on SIGTERM" 1 "$(calls umount_calls)"
+eq "mount dir removed" 0 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | tr -d ' ')"
+
+echo "== SIGTERM while an uninterruptible fstrim is in flight: waits for it, then unmounts =="
+new_case sigtrim; touch "$CTL/slow_trim"
+env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=5 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &
+spid=$!
+for _ in $(seq 1 100); do [ -f "$CTL/fstrim_running" ] && break; /bin/sleep 0.1; done
+kill -TERM "$spid" $(pgrep -P "$spid") 2>/dev/null
+wait "$spid"; echo $? > "$CTL/rc"
+eq "exits 143 (terminated)" 143 "$(cat "$CTL/rc")"
+eq "only the in-flight chunk ran" 1 "$(calls fstrim_calls)"
+eq "mount released after the trim finished" 0 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "== invalid settings are rejected before anything is mounted (exit 2) =="
 for bad in "CHUNK_GB=-1" "CHUNK_GB=0" "PAUSE_S=0" "PSI_MAX=abc" "PSI_WAIT_MAX_S=x"; do
