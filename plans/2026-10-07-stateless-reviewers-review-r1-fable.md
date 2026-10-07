@@ -7,14 +7,14 @@ substance; the dispositions are in the revised plan.
 | --- | --- | --- | --- |
 | F1 | A `201` is not proof of ownership: Gitea's create-tag can write the git tag for one caller and the release row (201) for another | blocker | **Confirmed by spike 2** (25/25 staggered rounds: the 201 caller never wrote the git tag). Accepted: ownership = nonce in the git tag object's message, read back after every create |
 | F2 | Fencing is not "a few hundred ms" before the POST (up to ~13 API calls at 60 s timeout); a duplicate can also flip a merge because `persona_verdicts` takes the last marker | important | Accepted: time check last, short fencing timeouts, taker grace, strictest-marker-wins |
-| F3 | Crash or failed `.q` write after an ambiguous POST converts it into an automatic retry | important | Accepted: intent tag `.post` before the POST |
+| F3 | Crash or failed `.q` write after an ambiguous POST converts it into an automatic retry | important | Accepted; **superseded** by the `pub<G>` publication right (round 1 revision) — there is no `.post` tag |
 | F4 | Uncharged `.rel` loops can retry a head forever | important | Accepted: lease-expiry exits charged as deadline class; `.rel` capped |
 | F5 | Rollback to `local` / old code re-reviews heads; new marker field breaks the old `MARKER_RE` | important | Accepted: separate coverage comment; quarantine migration both ways |
 | F6 | Duplicate instance names defeat readback; a restarted instance waits out its own dead lease | important | Accepted: per-process nonce; self-release of own-name foreign-nonce leases |
 | F7 | Prefix listing carries no messages; self-reported `issued_at` unverifiable | important | Confirmed by spike 2. Accepted: `tagger.date` (server time) as the lease start; timestamps in outcome names |
-| F8 | `appr` has no lease; a crash holds the merge forever | important | Accepted: `appr` uses the claim shape with a lease |
-| F9 | Sweep leadership contended by muted/slow instances; non-leaders have no candidates | important | Accepted: muted instances do not contend; every instance lists candidates; only merge/janitor are leader-only |
-| F10 | Janitor deletes rewrite history (reopened PRs lose `.q`, caps, resets) and race claims | important | Accepted: janitor only for merged PRs and non-current heads without `.q`; deletes via git push |
+| F8 | `appr` has no lease; a crash holds the merge forever | important | Accepted; **superseded** (R4): `appr` removed, approval upgrades are unlocked and carry no marker |
+| F9 | Sweep leadership contended by muted/slow instances; non-leaders have no candidates | important | Accepted; **superseded**: no sweep leader at all; every instance discovers, merges and runs the janitor |
+| F10 | Janitor deletes rewrite history (reopened PRs lose `.q`, caps, resets) and race claims | important | Accepted; **superseded**: janitor touches only PRs merged more than 7 days ago (there is no `.q` tag; ambiguity is `pub` without a marker) |
 | F11 | `coverage` change makes step 1 not a no-op | nit | Accepted |
 | F12 | Cross-head exclusivity delays a new head by a whole lease | nit | Accepted: owner polls the head during the run and aborts within 60 s |
 | F13 | `server_now` goes stale during local work | nit | Accepted: Date + monotonic elapsed; fail closed without Date |

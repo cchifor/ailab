@@ -1,4 +1,4 @@
-# Stateless reviewers: several instances per kind, coordinated only through Gitea
+# Stateless reviewers: several instances per kind, coordinated only through the forge (Gitea or GitHub)
 
 ## Context
 
@@ -8,8 +8,9 @@ kind would duplicate model runs and miscount convergence rounds. Measured over 7
 claude p90 enqueue-to-posted 6.8 min, codex 0.8 min; merges wait for both.
 
 **Goal.** N instances of one kind on different machines; at most one instance of a kind reviews a
-pull request at a time; instances stateless; **Gitea is the only synchronization point** (PR reviews
-and tags in a coordination repository). No shared database. A local SQLite file MAY stay for
+pull request at a time; instances stateless; **the forge is the only synchronization point** (PR
+reviews and tags in a coordination repository on the same forge). Both **Gitea** and **GitHub**
+(github.com and GitHub Enterprise Server) must be supported (section F). No shared database. A local SQLite file MAY stay for
 telemetry; losing it must never change review behaviour.
 
 Precisely: **posting exclusivity is absolute** (at most one review per kind per PR head, ever);
@@ -29,8 +30,12 @@ about 60 s after a push while the stale run aborts) [X6].
 | `Date` header on 2xx and 404; `cf-cache-status: DYNAMIC` | Spike 2 |
 
 Reviews of this plan: round 1 by Fable (`…-review-r1-fable.md`) and Codex
-(`…-review-r1-codex.md`), round 2 by both (`…-review-r2.md`); dispositions are referenced as
-`[F<n>]`, `[C<n>]`, `[R<n>]` and `[X<n>]` below.
+(`…-review-r1-codex.md`), round 2 by both (`…-review-r2.md`), the reviewer bots on ailab#1127 and a
+forge-portability round (`…-review-r3.md`); dispositions are referenced as `[F<n>]`, `[C<n>]`,
+`[R<n>]`, `[X<n>]` and `[B<n>]` below.
+
+Throughout sections 1–15, "Gitea" names the reference forge; every operation goes through the forge
+adapter of section F, which states the GitHub equivalent.
 
 ## Design principle
 
@@ -38,6 +43,78 @@ Reviews of this plan: round 1 by Fable (`…-review-r1-fable.md`) and Codex
 efficiency.** Leases, attempt counters, clocks and cleanup only decide *who spends model time*;
 if any of them is wrong, the cost is a duplicated model run or a delay, never a second review.
 This removes every clock- and pause-dependent safety argument from round 1 [C1, C2, C8, C9, F2, F3].
+
+## F. Forge portability (Gitea and GitHub)
+
+### F.1 Principle
+
+The review core (coverage planning, prompts, verdicts, rounds, seats, publication logic, claim
+state machine) is forge-agnostic. Everything that touches a forge goes through one adapter
+interface; there is one adapter per forge type, and every repository is addressed as
+`<forge>:<owner>/<name>` (`gitea:cchifor/ailab`, `github:cchifor/x`). The coordination repository
+lives **on the same forge as the PRs it coordinates** (one per forge), so each forge is its own
+synchronization point and no state crosses forges. One instance may serve repositories on several
+forges.
+
+### F.2 Adapter operations
+
+| Operation | Gitea | GitHub |
+| --- | --- | --- |
+| Auth | PAT, `Authorization: token` | **GitHub App per kind** (installation token, auto-refreshed) or machine-user PAT; `Authorization: Bearer` |
+| Read PR (state, draft, head, base ref, author, labels, mergeable) | `GET /repos/{o}/{r}/pulls/{n}` | same path; `mergeable` may be `null` (computing) → treat as "not yet", retry |
+| List open PRs | `?state=open&limit=50&page=` | `?state=open&per_page=100` + `Link` pagination; conditional `If-None-Match` (a 304 does not count against the rate limit) |
+| List reviews (markers) | `/reviews?limit=50&page=`, fail closed at the page cap | `/reviews?per_page=100` + `Link`; no cap; ETag |
+| Immutable review diff | compare `merge_base...head` (Phase 0 picks the endpoint) | `GET /repos/{o}/{r}/compare/{base_sha}...{head_sha}` with `Accept: application/vnd.github.diff`; works across forks in one network |
+| Diff too large | (size cap only) | 406 / "diff too large" → fall back to `GET /pulls/{n}/files` patches; a file without a patch is excluded as `too large` (author-triggered class: caps the verdict) |
+| Post review | `POST …/reviews {commit_id, event: APPROVED\|COMMENT, body, comments[{path, new_position\|old_position}]}` | `POST …/reviews {commit_id, event: APPROVE\|COMMENT, body, comments[{path, line, side: RIGHT\|LEFT}]}`; one invalid comment fails the whole request with 422 (definite, not ambiguous) |
+| Pending reviews (X2) | list `state=PENDING` by the bot | GitHub allows one pending review per user per PR and refuses a new one with 422 → list and delete the bot's pending review first |
+| CI green | combined status `success` | combined status **and** check runs of the head: every check run `completed` with `success`/`neutral`/`skipped`, and combined status `success` or zero statuses (GitHub reports `pending` with `total_count: 0`). Required-check names from branch protection or rulesets when readable |
+| Merge | `POST …/merge {Do: merge, head_commit_id}` | `PUT …/merge {sha: head, merge_method}`; 405 not mergeable, 409 head changed. Repositories using a **merge queue** are out of scope: the bot reviews and approves, a human or the queue merges |
+| Webhook verification | `X-Gitea-Signature` = hex HMAC-SHA256 | `X-Hub-Signature-256` = `sha256=` + hex HMAC-SHA256 |
+| PR events | `pull_request`, `_sync`, `_label`, `_review_request` | `pull_request` with `action` in `opened`, `reopened`, `synchronize`, `ready_for_review`, `edited` (base change), `labeled` |
+| Policy / fence / epoch files | contents API | contents API |
+| **Create-if-absent ref with ownership proof** | `POST /tags {tag_name, target, message}` → status ignored; read back the git tag object's message nonce (spike 2) | `POST /git/tags {tag, message, object, type: commit}` → my tag object SHA (unique: the message holds my nonce); then `POST /git/refs {ref: refs/tags/<name>, sha: <my object>}` → 201 or 422 "Reference already exists"; **owned iff the ref's target SHA equals my object SHA** (read back after any status) |
+| List refs by prefix | `GET /git/refs/tags/<prefix>` | `GET /git/matching-refs/tags/<prefix>` (pagination verified in Phase 0) |
+| Delete a ref (janitor) | `git push --delete` (API delete 404s for tags without a release row) | `DELETE /git/refs/tags/<name>`; confirm absence by listing |
+| Server clock | `Date` header; lease start = tag object `tagger.date` (server-set) | `Date` header; `tagger.date` is **client-supplied** → the claimant writes its `server_now`; others apply the 300 s future-sanity bound. Acceptable because leases are efficiency only |
+| Bot identity for markers | login `reviewer-<kind>` | App: `<app-slug>[bot]`; machine user: its login. Per-kind config `bot_login`; `marker_of` compares against it |
+
+### F.3 GitHub-specific decisions
+
+- **Identity: one GitHub App per kind** (`reviewbot-claude`, `reviewbot-codex`): fine-grained
+  permissions (pull requests write, contents write on the coordination repo only, checks and
+  statuses read, metadata read), its own rate-limit budget per installation, no human seat, and
+  `[bot]` logins that no user can impersonate. All instances of a kind share the App's private key
+  (SOPS) and mint installation tokens independently. Machine users remain a fallback.
+  **To verify in Phase 0:** whether an App's APPROVE counts toward required approvals under the
+  target repositories' branch protection or rulesets; if not, approvals are left to humans (the bots
+  still merge where no human approval is required).
+- **Intake without inbound reachability.** GitHub cannot reach the LAN reviewer VMs. Default:
+  **polling** — every instance lists open PRs with conditional requests every `poll_s` (60 s,
+  jittered); unchanged lists answer 304 and cost no rate limit. Optional: webhooks through a public
+  ingress (Cloudflare tunnel to the receiver) with `X-Hub-Signature-256`; polling stays as the
+  safety net, exactly like the reconciler today.
+- **Rate limits are shared by all instances of a kind** (one App installation, or one user's tokens).
+  The adapter tracks `X-RateLimit-Remaining`/`Reset` per forge identity and slows discovery when
+  below 20 %; a secondary-limit 403/429 with `Retry-After` parks the **forge identity** (not a seat):
+  no claims, no posts, until it clears. Content-creating calls per review: about 4 (work claim, pub,
+  review, outcome), well under the secondary limit of 80 per minute for N ≤ 3.
+- **Base retarget** arrives as `pull_request` `edited` with `changes.base`; it invalidates the base
+  ref check (section 8) exactly as on Gitea.
+- **Fork PRs**: head commits live in the fork but are reachable in the base repository's network;
+  compare `base_sha...head_sha` works. Reviews and merges are unchanged.
+- **Draft PRs, labels (`no-automerge`), HTML comment markers** behave as on Gitea (markers are
+  preserved, unrendered).
+- **Body limit**: 65,536 characters per review body; the adapter truncates the summary and coverage
+  table before the marker, never the marker.
+
+### F.4 Portability invariants
+
+1. The core MUST NOT call a forge API directly; only the adapter does.
+2. Safety MUST rest only on the create-if-absent ref primitive with ownership proven by readback,
+   which both forges provide (with different proofs: message nonce on Gitea, object SHA on GitHub).
+3. Every status-code interpretation that affects safety MUST be adapter-local and covered by the
+   adapter's fake-forge tests.
 
 ## Approach
 
@@ -65,6 +142,7 @@ rb1.<kind>.r<repo_id>.p<pr>.<head_sha40>.<suffix>
 | --- | --- | --- | --- |
 | `pub<G>` | **publication right**, create-if-absent | the instance about to POST | Only the owner of `pub<G>` may post this kind's review for this head. G starts at 1 |
 | `pubok<G>` | outcome, single writer | the `pub<G>` owner | Optional speed-up: the review POST returned success |
+| `pubx<G>` | outcome, single writer | the `pub<G>` owner | The POST failed or was abandoned; this owner will never POST under `pub<G>` again [B4] |
 | `pubvoid<G>` | operator, single writer | `--requeue --force` | The operator confirmed no review from `pub<G>` landed; publication continues at `pub<G+1>` |
 | `a<N>` | **work claim**, create-if-absent | an instance starting attempt N | Lease for model work (efficiency only) |
 | `a<N>.fail.<t>` / `a<N>.failt.<t>` | outcome, single writer | claim owner | Charged ordinary / deadline-class failure at server time `t` |
@@ -72,15 +150,17 @@ rb1.<kind>.r<repo_id>.p<pr>.<head_sha40>.<suffix>
 | `a<N>.done.<t>` | outcome, single writer | claim owner | The attempt published (or skipped with a marker); frees the work lease at once [R11] |
 | `cut<N>` | operator, single writer | `--requeue` | Attempts numbered below N are ignored for caps; numbering continues above the high-water mark [C4] |
 
-Two global tags (not per head): `rb1.<kind>.mode.gitea.<t>` (mode fence, section 12) and
-`rb1.epoch.<n>` (coordination epoch, bumped by the restore procedure, section 14) [R6, R10].
+Two global tags (not per head): `rb1.<kind>.mode.forge.<t>` (mode fence, section 12) and
+`rb1.epoch.<unix time>` (coordination epoch, created by the restore procedure, section 14)
+[R6, R10, B8].
 
 Outcome and operator tags put their timestamp and reason in the **name**, so `head_state` needs no
 message reads for them [F7]. Only `pub<G>` and `a<N>` carry a message:
 
 ```json
 {"v": 1, "kind": "codex", "instance": "reviewer-2b", "nonce": "<boot_id>-<pid>-<uuid4>",
- "repo": "cchifor/ailab", "pr": 1112, "head": "<sha40>", "lease_s": 1200, "cfg": "<policy hash>"}
+ "health": "http://192.168.0.25:8477/healthz", "repo": "gitea:cchifor/ailab", "pr": 1112,
+ "head": "<sha40>", "lease_s": 1200, "cfg": "<policy hash>", "issued": "<server time, GitHub only>"}
 ```
 
 ### 3. Ownership: read back, never trust the status code
@@ -110,8 +190,8 @@ this kind at this head):
    do not post, treat the head as ambiguous (a failed earlier attempt left partial state that Gitea
    would merge into this POST) [X2].
 4. POST the review — **at most once per held right** (an in-process set of consumed rights).
-   Success → `pubok<G>` and `a<N>.done.<t>` (best effort). Exception → nothing more: the head is now
-   ambiguous by construction (below).
+   Success → `pubok<G>` and `a<N>.done.<t>` (best effort). Exception → `pubx<G>` (best effort) and
+   nothing more: the head is now ambiguous by construction (below).
 
 `head_state` of the publication layer:
 
@@ -169,7 +249,9 @@ never stop a current owner, whose post is still governed by publication [C6].
 
 1. Skip if this instance cannot serve (all seats parked, `inhibit` or `posting-disabled`).
 2. `pr_ok`: closed or draft → drop; else head H (and base SHA, section 9).
-3. Publication state of H: done/ambiguous → drop (ambiguous counted); publishing → retry later.
+3. Publication state of H: done → drop. `pub<G>` carries **my** nonce and is not consumed (a create
+   that landed late, section 3) → claim work and go straight to review + publication under the held
+   right [B7]. Otherwise ambiguous → drop (counted); publishing → retry later.
 4. Work state of H: exhausted → drop; leased → `next_check` = lease end; not yet claimable →
    `next_check` = `not_before`.
 5. **Another head of this PR leased** → `next_check` = now + 60 s (re-checked, so an early
@@ -234,11 +316,16 @@ truncated, `head_state` fails closed when the result size equals the page cap [C
   jobs table, so Phase 1 is a true no-op.
 - **Strictest marker wins** in `persona_verdicts`: any authenticated marker of a persona at the head
   with `findings`/`partial`/`skipped` beats `clean` [F2]. With publication, two review markers per
-  (kind, head) cannot occur; approval upgrades only ever add `clean`.
+  (kind, head) cannot occur; approval upgrades carry no marker and never enter `persona_verdicts`
+  [B9].
 - **Base ref.** A marker counts for the merge gate only if its `v1.cov` comment's `base=<ref>`
   equals the PR's current base **ref** (not SHA, which advances on every merge to the target).
   Markers without `v1.cov` (pre-cut-over) are accepted. A retargeted PR therefore waits for a new
-  head, closing the retarget bypass [R12, C21].
+  head [R12, C21]. **Residual [B2]:** neither forge's merge API accepts an expected base, so a
+  retarget timed between the final check and the merge call (about a second) is not prevented. The
+  base ref is re-read immediately before the merge call, and after every merge the PR's base is read
+  again: a mismatch raises `ReviewbotMergedUnreviewedBase` (critical) for a human to revert. This is a
+  detection control, stated as such; a server-enforced fence is not available on Gitea or GitHub.
 - **Boundary.** Merges read verdicts and then merge with `head_commit_id`; only humans can change a
   bot verdict at a head in between (publication forbids a second bot review), and operator edits of
   bot reviews are out of scope [X5].
@@ -265,8 +352,8 @@ batches of 100, continuing past failures and confirming absence through the refs
 does not prove a tag is gone) [X3]; 401/403 alert. Nothing else is ever
 deleted: closed-unmerged PRs (reopenable), old heads (force-push back) and every `pub`/`pubvoid`/
 `cut`/outcome tag of an open PR stay. Concurrent janitors are safe (idempotent deletes of tags no
-one will create again) [F10, C2, C24–C27]. Growth is bounded by caps: at most
-`hw ≤ 5 + 2 + 3 + 10` work claims per head plus their outcomes.
+one will create again) [F10, C2, C24–C27]. Growth is bounded per **cut window**: at most 40 work claims per head between operator cuts
+(`hw - K >= 40` → exhausted), plus their outcomes [B5].
 
 The janitor authenticates to git through `GIT_ASKPASS` reading `/etc/reviewbot/pat`, never a URL or
 argv token.
@@ -275,24 +362,34 @@ argv token.
 
 - `--coord-state <repo> <pr>`: print publication and work state of every head.
 - `--requeue <repo> <pr>`: current head exhausted → write `cut<hw+1>`. Refuses if leased.
-- `--requeue <repo> <pr> --force`: current head ambiguous → write `pubvoid<G>` only when (a) no
-  marker of this kind is visible at the head, and (b) the process named in `pub<G>`'s message
-  (instance, boot id, pid) is **proven gone**: its instance's `/healthz` (extended to report boot id
-  and pid) answers with a different boot id or pid, or the operator passes `--owner-stopped` after
-  stopping that instance (`TimeoutStopSec` then SIGKILL makes death certain). An unreachable owner
-  host → refuse. A `pubok<G>` does not block (the review may have been deleted) [C5, R1, R3].
+- `--requeue <repo> <pr> --force`: current head ambiguous → write `pubvoid<G>` only when **all**
+  hold [C5, R1, R3, B1, B3, B4, B6]:
+  1. no marker of this kind is visible at the head;
+  2. `pub<G>` is older than `pub_void_min_age_s` (3600). A dead client does not stop server-side
+     work: a POST already accepted by the forge could still commit after the client died. Forges
+     finish or abort a request within minutes, so an hour bounds that window; the replacement
+     publisher also repeats the marker check immediately before its own POST [B1];
+  3. the owner can no longer POST under `pub<G>`: it wrote `pubx<G>` (single-writer "right
+     consumed, no further POST from me", written on any POST exception), **or** the health URL
+     recorded in the `pub<G>` message (host:port, not a name lookup) answers with a different boot id
+     or pid, **or** the operator passes `--owner-stopped` after stopping that instance, **or** the
+     right is a migrated one (nonce prefix `migrated-`, instance `migrated`), which has no live owner.
+     An unreachable owner without `pubx` → refuse.
+  A `pubok<G>` does not block (the review may have been deleted).
 - Kill switches unchanged.
+- The Ansible role asserts that instance names are unique per kind, and an instance refuses to start
+  when a live claim in the coordination repo carries its name with another health URL [B3].
 
 ### 12. Modes, migration and rollback
 
-- Config `coordination: local | gitea` (default `local`).
-- **Mode fence.** Cut-over creates `rb1.<kind>.mode.gitea.<t>` in the coordination repo. Code from
+- Config `coordination: local | forge` (default `local`).
+- **Mode fence.** Cut-over creates `rb1.<kind>.mode.forge.<t>` in the coordination repo. Code from
   Phase 1 on checks it at start, every sweep **and immediately before every POST and merge** [R6]: a `local`-mode instance that sees the fence refuses
-  to post or merge and alerts; a `gitea`-mode instance requires it. Old (pre-Phase-1) code cannot
+  to post or merge and alerts; a `forge`-mode instance requires it. Old (pre-Phase-1) code cannot
   run once Phase 1 is everywhere [C18].
-- **Forward (`local` → `gitea`), per kind:** stop the instance (drain), run `--export-coord`
-  (each local `quarantined` row: `ambiguous POST` → `pub1` with a migrated nonce and no `pubok`
-  → ambiguous; exhausted → matching `.fail`/`.failt` tags), create the mode fence, start in `gitea`
+- **Forward (`local` → `forge`), per kind:** stop the instance (drain), run `--export-coord`
+  (each local `quarantined` row: `ambiguous POST` → `pub1` with nonce `migrated-<uuid>` and instance
+  `migrated`, no `pubok` → ambiguous [B6]; exhausted → matching `.fail`/`.failt` tags), create the mode fence, start in `forge` mode
   [C16, F5].
 - **Backward:** stop all instances of the kind, run `--import-local` (every `pub` without a marker,
   whatever its age, and every exhausted head → local `quarantined` rows), delete the mode fence,
@@ -317,10 +414,11 @@ Gitea down: nothing to review. Coordination repository unreachable while PRs wor
 (no model run without a work claim, no post without a publication right) and alert.
 
 **Restore procedure** (runbook) [R10, C36]: stop every reviewer instance first; restore; reconcile
-(`--coord-state` on open PRs); create `rb1.epoch.<n+1>`; start the instances. Each instance records
-the epoch at start and refuses to post or merge when the current epoch differs (checked immediately
-before each POST and merge), so a process that survived the restore cannot act on pre-restore
-ownership.
+(`--coord-state` on open PRs); create `rb1.epoch.<unix time of the restore>` (taken from the
+operator's clock, outside the restored repository, so it can never collide with an epoch the backup
+lacks); start the instances. Each instance records the **full name of the newest epoch tag** at start
+and refuses to post or merge when it differs (checked immediately before each POST and merge), so a
+process that survived the restore cannot act on pre-restore ownership [R10, B8].
 
 ### 15. Rollout
 
@@ -334,11 +432,22 @@ ownership.
 timeout a tag can still appear [R2]; the immutable compare-diff endpoint [X1]; pending-review reuse
 per (account, PR) and its cleanup [X2]; a Gitea restart during a create burst, **only in an approved
 maintenance window** [R9, C30].
-1. **Code, mode `local` default (no-op deploy):** coordination module, publication, work claims,
+0b. **GitHub spike** on a private scratch repository with a test App: concurrent `POST /git/tags` +
+   `POST /git/refs` races (exactly one ref, owner = target SHA; statuses observed);
+   `matching-refs` pagination at 300 refs; tag object `tagger.date` handling; review POST with
+   `line`/`side`; pending-review rule; compare-diff with the diff media type, its size limit and the
+   `/files` fallback; check runs + statuses rollup on a repository with Actions; merge with `sha`
+   and 409 on a moved head; whether an App APPROVE counts toward required approvals; ETag 304 on PR
+   and review lists; rate-limit and secondary-limit headers.
+1. **Forge adapter refactor (no behaviour change):** move every Gitea call behind the adapter
+   (`GiteaForge`), repositories addressed as `gitea:<owner>/<name>` (bare names keep meaning Gitea),
+   existing suites unchanged. Then `GitHubForge` with its fake-forge tests; a GitHub repository can
+   be reviewed in `local` mode by a single instance before coordination exists.
+1b. **Coordination code, mode `local` default (no-op deploy):** coordination module, publication, work claims,
    head watcher, mode fence check, `v1.cov` comment (written in both modes; harmless to old readers),
    strictest-marker merge gate, `iter_reviews` fail-closed, CLI, metrics, alerts. Deploy to both
    kinds.
-2. **Cut over each kind** with its single instance (drain → export → fence → `gitea`). One week of
+2. **Cut over each kind** with its single instance (drain → export → fence → `forge`). One week of
    metrics compared with before.
 3. **Second claude instance.** Pre-test: a second process on reviewer-1 (own `instance`, port,
    router key) against a fixture repository. Then a VM — **blocked on a free LAN address**
@@ -379,7 +488,7 @@ maintenance window** [R9, C30].
 | C28 | Delayed delete after recreation | Merged PRs never get new tags | retention |
 | C29 | More than 500 reviews on a PR | `iter_reviews` fails closed | pub |
 | C30 | Truncated tag listing | Phase 0 measures; fail closed at the page cap | both |
-| C31 | Mixed `local`/`gitea` instances | Mode fence | both |
+| C31 | Mixed `local`/`forge` instances | Mode fence | both |
 | C32 | Policy differs between instances | `policy.json` in the coordination repo is authoritative; mismatch refuses merge/claim/post + alert | merge |
 | C33 | Base retargeted, same head | See C46 | merge |
 | C34 | Repo renamed or transferred | Repo id in names | both |
@@ -396,13 +505,27 @@ maintenance window** [R9, C30].
 | C45 | Push right after a successful publication | `.done` frees the lease; cross-head waits re-checked every 60 s | work |
 | C46 | Base retargeted, same head | Merge gate requires `v1.cov` base ref = current base ref | merge |
 | C47 | Policy changed between sweeps | `policy.json` re-read immediately before each merge | merge |
+| C48 | GitHub `mergeable: null` | Not yet mergeable; retry next sweep | merge |
+| C49 | GitHub diff too large (406) | `/files` fallback; patch-less files excluded, verdict capped | pub |
+| C50 | Invalid inline comment on GitHub (422) | Definite failure, not ambiguous: `pubx`, charged `.fail`; comments are pre-validated by `parse_hunks` | pub |
+| C51 | GitHub checks vs statuses | CI green needs both rollups (F.2) | merge |
+| C52 | GitHub App approval does not count | Merge left to humans where approvals are required; logged once per head | merge |
+| C53 | Shared rate limit exhausted / secondary limit | Forge identity parked until reset; no claims, no posts | both |
+| C54 | Webhooks unreachable (GitHub, LAN) | Polling with ETags is the intake; webhooks optional via ingress | both |
+| C55 | Merge queue repositories | Out of scope: review + approve only | merge |
+| C56 | Retarget between final check and merge | Residual; post-merge base audit alert (B2) | merge |
+| C57 | Same repo name on both forges | Repositories are forge-qualified everywhere | both |
 
 ## Critical files
 
+- `ansible/roles/pr_reviewer/files/`: reviewbot becomes a small stdlib-only package installed by
+  the role — `reviewbot.py` (core), `forge_gitea.py`, `forge_github.py` (adapters: API, auth,
+  webhook verification, event mapping, review/merge/CI/diff, create-owned ref, list/delete refs,
+  clock), GitHub App JWT signing via the `openssl` CLI (no pip dependencies on the VMs).
 - `ansible/roles/pr_reviewer/files/reviewbot.py`: `coord` section (`server_now`, `list_tags`,
   `read_tag`, `create_owned`, `pub_state`, `work_state`, `claim`, `outcome`), publication inside
   `post_review`, head watcher + abortable `run_llm` (stream flag; `Popen` for CLIs), candidate
-  scheduler replacing `worker_once`/`enqueue` in `gitea` mode, `persona_verdicts` strictest-wins,
+  scheduler replacing `worker_once`/`enqueue` in `forge` mode, `persona_verdicts` strictest-wins,
   `iter_reviews` fail-closed, `v1.cov` comment, janitor, CLI (`--coord-state`, `--requeue`,
   `--export-coord`, `--import-local`), mode fence, SIGTERM handler, metrics.
 - `ansible/roles/pr_reviewer/templates/config.json.j2`, `defaults/main.yml`: `coordination`,
@@ -413,6 +536,8 @@ maintenance window** [R9, C30].
 - `ansible/group_vars/reviewers_claude.yml`, `reviewers_codex.yml` (new); host_vars trimmed;
   `inventory/hosts.yml` groups; per-instance PATs in `reviewbot.sops.yaml` (`.sops.yaml` regex).
 - `kubernetes/apps/infrastructure/monitoring/reviewbot-rules.yaml` + `.test.yaml`.
+- `scripts/tests/test_reviewbot_forge.py` (new): one contract test suite run against both fake
+  forges (Gitea and GitHub semantics, including each forge's create-race and status quirks).
 - `scripts/tests/test_reviewbot_coord.py` (new) and a fake Gitea that reproduces the observed
   behaviour (create-if-absent git object; the 201 goes to a different caller than the git writer;
   500 to the rest; no release row → API delete 404).
@@ -428,8 +553,9 @@ maintenance window** [R9, C30].
 3. **Randomized simulation:** 3 processes of one kind, fake LLM, fake Gitea with the observed
    201/500 behaviour, injected pauses, kill -9, SIGTERM, lost responses, pushes, closes: never two
    review markers per (kind, head); every open head ends done, ambiguous or exhausted.
-4. Existing suites unchanged in `local` mode (370 tests).
+4. Existing suites unchanged in `local` mode (370 tests), before and after the adapter refactor.
+5. **Forge contract suite** passes against both fake forges; the GitHub spike results are recorded.
 5. **Live:** Phase 0 spike results recorded; Phase 2 one-week comparison; Phase 3 pre-test with two
    processes on 10 simultaneous fixture PRs, then kill one mid-review.
 
-<!-- codex-review-status: finalized -->
+<!-- codex-review-status: complete -->
