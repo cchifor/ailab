@@ -551,7 +551,7 @@ cchifor/llm-router) instead of a CLI login: an entry in `pr_reviewer_llm_seats` 
 | persona | seat | key | route | state |
 |---|---|---|---|---|
 | codex (reviewer-2) | `r` | `key_d7adf31fb93e` | `codex` (round-robin gpt-6-luna + 3x gpt-6-astra) | **serving** |
-| claude (reviewer-1) | none yet | `key_f856495c9b0c` (escrowed) | none: the router's `claude` model answers 429 `CAPACITY_UNAVAILABLE` "No eligible account" | subscription seats a-c serve |
+| claude (reviewer-1) | `r` | `key_f856495c9b0c` | the ladder's own names: `fable`, `opus`, `sonnet` (router Claude models; a `claude` route = 4x sonnet also exists) | **serving** since 2026-10-07 |
 
 How it behaves - the existing park machinery, unchanged:
 
@@ -583,13 +583,14 @@ assert every top-level leaf is `ENC[` (a plain `sops set` writes PLAINTEXT for a
 stored `encrypted_regex` predates) - deploy `reviewers.yml -t reviewbot`, delete the
 `~/.config/llm-router/key` copy, and have the admin revoke the old key.
 
-**Turning the claude persona over**, once the router can serve Claude (a Claude account signed
-in behind it, and a route on `key_f856495c9b0c`): add the seat at the top of
-`host_vars/reviewer-1.yml` - `{ name: r, sudo_user: "", router_url: "https://router.chifor.me",
-key_file: "{{ pr_reviewer_router_key_file }}", models: { fable: <route>, opus: <route>, sonnet:
-<route> } }` - probe the route first (`curl ... -d '{"model":"<route>",...}'` must answer 200,
-not 429), and deploy `-t reviewbot`. Never point the claude persona at a Codex route: merges rest
-on BOTH personas being clean, and two GPT reviews are not two independent reviews.
+**How the claude persona was turned over** (2026-10-07, after the router gained Claude accounts;
+before that its `claude` model answered 429 "No eligible account"): the seat at the top of
+`host_vars/reviewer-1.yml` is `{ name: r, sudo_user: "", router_url: "https://router.chifor.me",
+key_file: "{{ pr_reviewer_router_key_file }}" }`. It has no `models` map, so every ladder tier
+(`fable`, `opus`, `sonnet`) is requested under its own name, which the router serves as a Claude
+model. Each tier was probed with a real review first (a 429 there means the router has no eligible
+Claude account). Re-probe after any router change. Never point the claude persona at a Codex route:
+merges need BOTH personas clean, and two GPT reviews are not two independent reviews.
 
 ### When a persona is parked on a subscription rate limit
 
