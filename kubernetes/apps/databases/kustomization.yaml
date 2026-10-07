@@ -19,6 +19,7 @@ resources:
   - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)
   - infra-pg-afp-app.sops.yaml # basic-auth creds for afp_app (non-owner, NOBYPASSRLS — app_dsn)
   - infra-pg.yaml
+  - infra-pg-gitea-credential-queries.yaml # CNPG exporter queries over the gitea DB's credential inventory (token/grant/admin counts and ages ONLY, never hashes) — referenced from infra-pg.yaml's spec.monitoring.customQueriesConfigMap next to the default; alerts in monitoring/gitea-credential-rules.yaml. They read the views created by the operator-run one-shot gitea-credential-inventory.sql (NOT a resource, deliberately not listed: the exporter runs as pg_monitor, which cannot read Gitea's tables)
   - infra-pg-slotwatch.sops.yaml # basic-auth creds for the LOGIN-only slotwatch role (managed role in infra-pg.yaml) that cnpg-lost-slot-reclone probes with
   - cnpg-lost-slot-reclone.yaml # CronJob: re-clones an infra-pg replica whose slot went wal_status=lost — CNPG 1.24 never does (ailab#923); DRY_RUN until the drill in the 2026-09-28 plan
   - infra-pg-dumper.sops.yaml # credential for the backup_dumper role declared in infra-pg.yaml (spec.managed.roles) — needs pg_read_all_data AND bypassrls, because per-owner dumps silently missed RLS-protected rows on 2026-09-08

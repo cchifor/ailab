@@ -39,7 +39,16 @@ spec:
     # WebUI and the AgentForge CP all lost their database. The two PVCs were expanded to 40Gi by hand
     # during the incident (online, Trident + NodeExpandVolume, ~40s); this line records it so CNPG's
     # spec matches. Post-recovery usage: 19G of 40G. Expansion is one-way — never lower this number.
-    size: 40Gi
+    # 40Gi -> 60Gi (2026-10-06, CNPGVolumeNearlyFull: 87% on both instances). The growth was NOT data:
+    # action_task was 20 GB on disk for 1.7 GB of live rows, 19 GB of it TOAST. Gitea rewrites a
+    # running task's whole log_indexes value (~4 bytes per log line, so up to 4.6 MB) on every runner
+    # log flush (~1/s), and cchifor/platform's e2e/load jobs logged 0.3-1.2M lines each — ~98% of them
+    # docker compose TTY progress redraws (fixed at the source: COMPOSE_ANSI=never, platform#2118). Autovacuum
+    # could not recycle the dead TOAST as fast as 4-6 such jobs produced it, so the file kept extending
+    # (11 GB used on 09-22 -> 37 GB on 10-06; +9.5 GB overnight 10-03/04). The 09-29 "gitea is 12 GB"
+    # above was the same bloat, read as data. 60Gi is the headroom the one-off `VACUUM FULL action_task`
+    # needs (docs/runbooks/infra-pg.md, "Reclaiming action_task TOAST bloat"), not a growth forecast.
+    size: 60Gi
     storageClass: qnap-iscsi
   resources:
     requests: { cpu: 500m, memory: 4Gi }
@@ -279,6 +288,17 @@ spec:
   # (verified live: strive-pg's operator-generated PodMonitor has produced zero cnpg_* series). The
   # hand-written PodMonitor below (flux-monitoring.yaml precedent) carries the right label; the
   # instance pods expose the metrics port (9187) regardless.
+  monitoring:
+    # The list REPLACES what the operator's defaulting webhook wrote (cnpg-default-monitoring/queries,
+    # which is why the live spec already carried it), so the default entry is restated here: dropping
+    # it would silently stop every cnpg_pg_* family the replication/storage rules read. The second
+    # entry is the Gitea credential inventory (infra-pg-gitea-credential-queries.yaml, rules in
+    # monitoring/gitea-credential-rules.yaml).
+    customQueriesConfigMap:
+      - name: cnpg-default-monitoring
+        key: queries
+      - name: infra-pg-gitea-credential-queries
+        key: queries
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor

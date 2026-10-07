@@ -12,10 +12,9 @@
 #     object and no literal token. Until it exists the pod fails its
 #     startup gate: the app refuses to start without the token (fail
 #     closed, no default credentials).
-#   * Initial rollout uses the digest-pinned public Node image and an operator-staged,
-#     versioned, read-only release on router-releases. See deploy/README.md.
-#     Application dependencies are frozen and installed BEFORE deployment, never at boot.
-#     Dockerfile supports migration to a dedicated OCI image when registry push is authorized.
+#   * CI publishes a digest-pinned OCI image with the verified release and frozen
+#     production dependencies. See docs/runbooks/llm-router.md for provenance,
+#     pre-migration backup, acceptance checks and rollback.
 #   * The "edge" namespace must carry the label name=edge and host the
 #     Cloudflare tunnel pods labeled app.kubernetes.io/name=cloudflared.
 # ============================================================================
@@ -106,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 867272e581aa5d6357a7abadf6220ede922918ae
-        chifor.me/release: router-0.1.0-20261003-ui
+        chifor.me/source-commit: 0057394cf9d606c9648e885fa2f895d0f4362bd4
+        chifor.me/release: router-0.1.0-20261007-shared-routing
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -120,9 +119,48 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
+      # Recreate has stopped the old singleton before either preflight runs.
+      # A failed backup or migration check prevents the application from starting.
+      initContainers:
+        - name: backup-before-shared-routing
+          image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [node, deploy/backup-router.mjs]
+          env:
+            - name: ROUTER_BACKUP_LABEL
+              value: pre-shared-routing-20261007
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+        - name: check-shared-routing-migration
+          image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [node, deploy/check-router-upgrade.mjs]
+          env:
+            - name: ROUTER_BACKUP_LABEL
+              value: pre-shared-routing-20261007
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 384Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
-          image: registry.chifor.me/llm-router/router@sha256:083ef7c7f931358b53e404b68b49c14a16d33eb6ecbcd55dd7e0968512cdb74b
+          image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

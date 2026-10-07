@@ -1922,6 +1922,91 @@ def _pr(number, sha="a" * 40, login="human", draft=False):
             "head": {"sha": sha}}
 
 
+class OpenPullPaginationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+
+    def test_full_page_of_drafts_does_not_hide_merge_ready_pr(self):
+        pages = [[_pr(n, draft=True) for n in range(94, 44, -1)],
+                 [_pr(44, draft=True), _pr(43, draft=True), _pr(42)], []]
+        with mock.patch.object(self.m, "api", side_effect=pages) as api, \
+                mock.patch.object(self.m, "existing_marker", return_value=True), \
+                mock.patch.object(self.m, "maybe_merge") as merge, \
+                mock.patch.object(self.m, "retire_closed_quarantines"), \
+                mock.patch("time.sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                self.m.reconciler()
+        merge.assert_called_once_with("o/r", 42)
+        self.assertEqual(api.call_args_list, [
+            mock.call("/repos/o/r/pulls?state=open&limit=50&page=1"),
+            mock.call("/repos/o/r/pulls?state=open&limit=50&page=2"),
+            mock.call("/repos/o/r/pulls?state=open&limit=50&page=3")])
+
+    def test_collects_all_pages_before_merging_can_shift_offsets(self):
+        pages = [[_pr(n) for n in range(1, 51)], [_pr(51)], []]
+        events = []
+        def api(path):
+            events.append("read")
+            return pages.pop(0)
+        with mock.patch.object(self.m, "api", side_effect=api), \
+                mock.patch.object(self.m, "existing_marker", return_value=True), \
+                mock.patch.object(self.m, "maybe_merge", side_effect=lambda *a: events.append("merge")), \
+                mock.patch.object(self.m, "retire_closed_quarantines"), \
+                mock.patch("time.sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                self.m.reconciler()
+        self.assertEqual(events, ["read"] * 3 + ["merge"] * 51)
+
+    def test_exact_page_and_overlapping_pages(self):
+        with mock.patch.object(self.m, "api", side_effect=[
+                [_pr(n) for n in range(50)], [_pr(49), _pr(50)], []]):
+            self.assertEqual(len(self.m.open_pulls("o/r")), 51)
+        with mock.patch.object(self.m, "api", side_effect=[
+                [_pr(n) for n in range(50)], []]) as api:
+            self.assertEqual(len(self.m.open_pulls("o/r")), 50)
+            self.assertEqual(api.call_count, 2)
+
+    def test_later_page_failure_does_not_return_partial_success(self):
+        with mock.patch.object(self.m, "api", side_effect=[
+                [_pr(n) for n in range(50)], RuntimeError("unavailable")]):
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                self.m.open_pulls("o/r")
+        with mock.patch.object(self.m, "api", return_value={"message": "error"}):
+            with self.assertRaises(ValueError):
+                self.m.open_pulls("o/r")
+
+    def test_later_page_failure_marks_sweep_failed_without_merging(self):
+        with mock.patch.object(self.m, "api", side_effect=[
+                [_pr(n) for n in range(50)], RuntimeError("unavailable")]), \
+                mock.patch.object(self.m, "maybe_merge") as merge, \
+                mock.patch.object(self.m, "enqueue") as enqueue, \
+                mock.patch.object(self.m, "retire_closed_quarantines"), \
+                mock.patch.object(self.m, "commit_sweep") as commit, \
+                mock.patch("time.sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                self.m.reconciler()
+        merge.assert_not_called()
+        enqueue.assert_not_called()
+        self.assertEqual(commit.call_args.args[0], {"o/r": 1})
+        self.assertEqual(commit.call_args.kwargs, {"merge_blocked": {}})
+
+    def test_server_page_cap_below_requested_limit(self):
+        # Even one-item pages must not truncate a larger configured repository.
+        with mock.patch.object(self.m, "api", side_effect=[[_pr(1)], [_pr(2)], []]) as api:
+            self.assertEqual([p["number"] for p in self.m.open_pulls("o/r")], [1, 2])
+            self.assertEqual(api.call_count, 3)
+        with mock.patch.object(self.m, "api", return_value=[]) as api:
+            self.assertEqual(self.m.open_pulls("o/r"), [])
+            api.assert_called_once()
+
+    def test_runaway_pagination_is_reported_as_failure(self):
+        with mock.patch.object(self.m, "api", return_value=[_pr(n) for n in range(50)]):
+            with self.assertRaisesRegex(RuntimeError, "pagination exceeded"):
+                self.m.open_pulls("o/r")
+
+
 class _FaultyConn:
     """A real connection that fails at a chosen point INSIDE commit_sweep().
 
@@ -1956,7 +2041,7 @@ def _sweep(m, failing=(), marker_raises=(), cleanup_raises=False, enqueue_exc=No
         repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
         if repo in failing:
             raise RuntimeError(f"HTTP Error 404: {repo}")
-        return [_pr(1)]
+        return [_pr(1)] if path.endswith("page=1") else []
 
     def existing_marker(repo, pr, sha):
         if repo in marker_raises:
@@ -2065,6 +2150,8 @@ class ReconcileIsolationTest(unittest.TestCase):
         # happened while parsing the element AFTER #17.
         def api(path, *a, **kw):
             repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
+            if not path.endswith("page=1"):
+                return []
             return [_pr(17), "malformed"] if repo == "o/first" else [_pr(1)]
 
         logged = []
@@ -2371,7 +2458,7 @@ def _held_sweep(m, prs, failing=(), verdict_blocked=()):
         repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
         if repo in failing:
             raise RuntimeError("HTTP Error 404: " + repo)
-        return [_pr(n) for n in prs.get(repo, ())]
+        return [_pr(n) for n in prs.get(repo, ())] if path.endswith("page=1") else []
 
     def maybe_merge(repo, pr):
         return "verdicts" if pr in verdict_blocked else None

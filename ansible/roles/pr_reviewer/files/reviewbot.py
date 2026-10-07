@@ -14,6 +14,7 @@ validated, invalid ones demote to the summary. Phase-1 posture (see plan):
 event=COMMENT locked, central allowlist only, runs as the worker user.
 """
 import fnmatch
+import http.client
 import calendar
 import hashlib
 import hmac
@@ -998,6 +999,67 @@ def tier_index(model):
     return MODELS.index(model) if model in MODELS else len(MODELS)
 
 
+# ── router seats ──────────────────────────────────────────────────────────────────────────
+# A seat carrying `router_url` is not a subscription login run through a CLI: it is an API key
+# on the estate's LLM router (cchifor/llm-router at router.chifor.me - an OpenAI-compatible
+# gateway; usage contract at <router_url>/agent/skill.md). The review is one streamed
+# POST /v1/chat/completions with the same prompt the CLIs get, so the posture is unchanged:
+# the model has no tools, never sees the PAT, and never sees the key (it lives in a 0600 file
+# the service user reads per call - `key_file`, default ROUTER_KEY_FILE).
+#
+# Shape: {name, sudo_user: "", router_url, key_file?, model?, models?: {tier: route}}. A tier's
+# router model is models[tier], else `model`, else - with neither configured - the tier name
+# itself. A tier with no route is one this seat does not serve (model_parked says so), which is
+# how a router seat can carry the top tiers while a subscription seat keeps the rest.
+#
+# ROUTER SEATS ARE PREFERRED, NOT STICKY: within a tier active_choice always tries them first.
+# The router balances its own upstream seats, so the stickiness that protects a subscription
+# from synchronised exhaustion has nothing to protect here - and without the preference, one
+# 429 would hand the persona to a subscription seat that then stayed sticky forever.
+ROUTER_KEY_FILE = "/etc/reviewbot/router-key"
+ROUTER_UA = "reviewbot/1"            # Cloudflare answers urllib's default UA with 403 code 1010
+ROUTER_IDLE_TIMEOUT_S = 300          # per-read stall bound; the attempt deadline still governs
+ROUTER_BUSY_RETRIES = 6              # 429 reason=busy: wait Retry-After in place, this many times
+ROUTER_BUSY_MAX_WAIT_S = 30
+
+
+def _seat_cfg(seat):
+    return (SEAT_BY_NAME.get(seat) if isinstance(seat, str) else seat) or {}
+
+
+def is_router_seat(seat):
+    return bool(_seat_cfg(seat).get("router_url"))
+
+
+def router_route(seat, tier):
+    """The router model for one tier on one router seat, or None when the seat does not serve
+    that tier."""
+    s = _seat_cfg(seat)
+    m = s.get("models")
+    if isinstance(m, dict):
+        r = m.get(tier)
+        if isinstance(r, str) and r.strip():
+            return r.strip()
+    r = s.get("model")
+    if isinstance(r, str) and r.strip():
+        return r.strip()
+    if not isinstance(m, dict) and isinstance(tier, str) and tier.strip():
+        return tier.strip()
+    return None
+
+
+def seat_serves(seat, tier):
+    return not is_router_seat(seat) or router_route(seat, tier) is not None
+
+
+def seat_order():
+    """Selection order: router seats first (preferred, see above), then the sticky seat, then
+    the rest in configured order."""
+    routers = [s["name"] for s in SEATS if is_router_seat(s)]
+    rest = [CURRENT_SEAT] + [s["name"] for s in SEATS if s["name"] != CURRENT_SEAT]
+    return routers + [n for n in rest if n not in routers]
+
+
 def use_model(model):
     """The only writer of CURRENT_MODEL - and therefore the only place a model change is
     counted, whichever path committed it (a refusal, a non-limit descent, the poll's climb)."""
@@ -1009,7 +1071,9 @@ def use_model(model):
 
 def model_parked_until(seat, model):
     """When this pair can next be asked: the later of its spent-window park and its
-    unserveable-model park."""
+    unserveable-model park. A tier a router seat has no route for never reopens."""
+    if not seat_serves(seat, model):
+        return float("inf")
     return max(MODEL_PARKED_UNTIL.get((seat, model), 0.0),
                MODEL_UNSERVED_UNTIL.get((seat, model), 0.0))
 
@@ -1036,7 +1100,7 @@ def active_choice(now=None, exclude=()):
     Iterates SEATS and MODELS (lists fixed at import), never the park dicts, so a concurrent
     read from the metrics thread cannot see a mutating sequence."""
     now = time.time() if now is None else now
-    order = [CURRENT_SEAT] + [s["name"] for s in SEATS if s["name"] != CURRENT_SEAT]
+    order = seat_order()
     for m in MODELS:
         for seat in order:
             if seat not in SEAT_BY_NAME or (seat, m) in exclude:
@@ -1057,7 +1121,11 @@ def park_model(seat, model, reset_at, unserveable=False):
     # fact about the INSTALLED CLI, shared by every seat - parking it per seat would pay one
     # doomed 404 per seat before the ladder descended, every time the parks lapsed
     # (reviewer-claude on ailab#781).
-    keys = [(s["name"], model) for s in SEATS] if unserveable else []
+    # A ROUTER seat's unserveable route is a fact about that key's grants on the router, not
+    # about the CLI - so it parks that pair alone, and a CLI refusal never sweeps router seats.
+    router = is_router_seat(seat)
+    keys = ([(s["name"], model) for s in SEATS if not is_router_seat(s)]
+            if unserveable and not router else [])
     if (seat, model) not in keys:
         # ALWAYS the refusing pair too: a seat pruned by a reload between the refusal and this
         # call is not in SEATS, and indexing it below would KeyError inside run_llm's handler
@@ -1072,7 +1140,10 @@ def park_model(seat, model, reset_at, unserveable=False):
     for key in keys:
         bump_meta(f"model_parks_total.{key[0]}.{model}")
     left = deadline - time.time()
-    if unserveable:
+    if unserveable and router:
+        log(f"model '{model}' is not a route router seat '{seat}' may use; parking that pair "
+            f"for {left:.0f}s (queue left intact)")
+    elif unserveable:
         log(f"model '{model or '(account default)'}' cannot be served by the installed CLI "
             f"(refused on seat '{seat}'); parking that model on every seat for {left:.0f}s "
             f"(queue left intact)")
@@ -1338,6 +1409,10 @@ def poll_usage(now=None):
     global RATE_LIMITED_UNTIL
     now = time.time() if now is None else now
     for s in SEATS:
+        # A router seat has no subscription window to read and no login to keep alive: its
+        # limits arrive as 429s on the call itself.
+        if is_router_seat(s):
+            continue
         guard = seat_lock(s["name"]) if probe_needs_seat_lock() else None
         if guard is not None and not guard.acquire(blocking=False):
             log(f"usage: seat '{s['name']}' is serving a review; its probe waits for the next poll")
@@ -1446,11 +1521,9 @@ def active_seat(now=None, exclude=()):
     Iterates SEATS (a list fixed at import), never SEAT_PARKED_UNTIL, so a concurrent read from
     the metrics thread cannot see a mutating sequence."""
     now = time.time() if now is None else now
-    if CURRENT_SEAT not in exclude and seat_usable(CURRENT_SEAT, now):
-        return CURRENT_SEAT
-    for s in SEATS:
-        if s["name"] not in exclude and seat_usable(s["name"], now):
-            return s["name"]
+    for name in seat_order():
+        if name in SEAT_BY_NAME and name not in exclude and seat_usable(name, now):
+            return name
     return None
 
 
@@ -1469,7 +1542,9 @@ def all_parked_until(now=None):
     now = time.time() if now is None else now
     if seats_available(now):
         return 0.0
-    return min(seat_reopens_at(s["name"], now) for s in SEATS)
+    # A seat that serves no tier at all (a router seat whose `models` covers none of them)
+    # never reopens; bound it like any other park rather than deferring work to infinity.
+    return min(min(seat_reopens_at(s["name"], now) for s in SEATS), now + MAX_PARK_S)
 
 
 _SEATS_RESOLVED = False
@@ -1495,6 +1570,16 @@ def resolve_seats():
     if _SEATS_RESOLVED:
         return
     _SEATS_RESOLVED = True
+    # A router seat whose `models` covers none of this persona's tiers can never be chosen.
+    # Dropped (visibly) while another seat remains; kept otherwise, where all_parked_until bounds
+    # the resulting park and the log line below is the diagnosis.
+    idle = [s["name"] for s in SEATS
+            if is_router_seat(s) and not any(router_route(s, m) for m in MODELS)]
+    for name in idle:
+        log(f"seat '{name}': router seat maps none of the tiers {MODELS} to a route - "
+            f"{'dropped from rotation' if len(idle) < len(SEATS) else 'it cannot serve'}")
+    if idle and len(idle) < len(SEATS):
+        _apply_seats([s for s in SEATS if s["name"] not in idle])
     # Nothing to deduplicate with one seat. (This used to return for every kind but codex; the
     # claude persona has rotated since plans/2026-09-18-claude-seat-rotation-plan.md.)
     if len(SEATS) < 2:
@@ -1502,6 +1587,10 @@ def resolve_seats():
     seen, keep = {}, []
     for s in SEATS:
         name, user = s["name"], s.get("sudo_user") or ""
+        # A router seat has no OS user and no account behind it to collapse.
+        if is_router_seat(s):
+            keep.append(s)
+            continue
         # TWO probes, because one return value cannot express both rules. Unreachable (the OS
         # user is missing, or absent from sudoers) means DROP - sticky selection would otherwise
         # keep handing work to a seat that fails as an ordinary error, burning attempts toward
@@ -1693,7 +1782,8 @@ def run_llm(title, desc, diff_text, rubric=""):
                     park_model(seat, model, e.reset_at,
                                unserveable=getattr(e, "unserveable", False))
                 elif getattr(e, "reason", "limit") == "login":
-                    park_dead_login(seat, "the CLI answered Not logged in")
+                    park_dead_login(seat, getattr(e, "why", None)
+                                    or "the CLI answered Not logged in")
                 else:
                     park(e.reset_at, seat=seat)
                 # 2. Nowhere to move -> re-raise the ORIGINAL exception. A sibling class here
@@ -1845,6 +1935,173 @@ def scan_output(seat, text, remaining, pre=None):
             raise RuntimeError("credential material detected in llm output")
 
 
+def _retry_after(headers):
+    """Retry-After in seconds (the router sends delta-seconds), or None."""
+    try:
+        v = float((headers or {}).get("retry-after") or "")
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _router_refusal(status, raw, headers, route, tier):
+    """Classify one refused router call into the exception the rotation already understands.
+    Returns (exception, busy): `busy` is the shared-capacity 429, worth waiting out in place.
+
+    Only the router's OWN error codes park anything: a 403 or 404 without one is something
+    in front of the router (Cloudflare's 1010 block is a 403 HTML page) and parking the route
+    for six hours on it would be wrong."""
+    try:
+        doc = json.loads(raw or b"{}")
+    except ValueError:
+        doc = {}
+    err = doc.get("error") if isinstance(doc, dict) else None
+    err = err if isinstance(err, dict) else {}
+    code = str(err.get("code") or err.get("type") or "")
+    detail = (f"router HTTP {status} {code or '-'}: {str(err.get('message') or '')[:300]} "
+              f"[route {route}, x-request-id {(headers or {}).get('x-request-id', '-')}]")
+    now = time.time()
+    if status == 401:
+        e = RateLimited(detail, now + MAX_PARK_S, scope="account", model=tier, reason="login")
+        e.why = "the router answered 401 - the key is wrong, expired or revoked"
+        return e, False
+    if (status, code) in ((403, "ROUTE_NOT_ALLOWED"), (404, "MODEL_NOT_FOUND")):
+        return RateLimited(detail, now + MAX_PARK_S, scope="model", model=tier,
+                           unserveable=True), False
+    if status == 429:
+        ra = _retry_after(headers)
+        busy = err.get("reason") == "busy"
+        return RateLimited(detail, (now + ra) if ra else None, scope="account", model=tier), busy
+    return ModelError(detail), False
+
+
+def _stream_socket(resp):
+    """The socket under an http.client response, for per-read timeouts; None if unreachable."""
+    try:
+        return resp.fp.raw._sock
+    except AttributeError:
+        return None
+
+
+def _run_router(seat, tier, prompt, remaining):
+    """One review through a router seat: a streamed chat completion, returned as the answer
+    text. Streamed because the router sits behind Cloudflare, which cuts a response that sends
+    nothing for 100 s, and a review runs for minutes. Raises what the rotation understands:
+    RateLimited (401 dead key, 403/404 unserveable route, 429 limit), ModelError (anything
+    else the router or the network did), TimeoutExpired (the attempt deadline, via remaining)."""
+    s = _seat_cfg(seat)
+    route = router_route(seat, tier)
+    try:
+        with io.open(s.get("key_file") or ROUTER_KEY_FILE, encoding="utf-8") as f:
+            key = f.read().strip()
+    except OSError as e:
+        key, why = "", f"{type(e).__name__}"
+    else:
+        why = "empty"
+    if not key:
+        e = RateLimited(f"router key file unusable ({why})", time.time() + MAX_PARK_S,
+                        scope="account", model=tier, reason="login")
+        e.why = f"router key file unusable ({why})"
+        raise e
+    url = str(s["router_url"]).rstrip("/") + "/v1/chat/completions"
+    body = json.dumps({"model": route, "stream": True,
+                       "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+    try:
+        idle = float(s.get("idle_timeout_s") or ROUTER_IDLE_TIMEOUT_S)
+    except (TypeError, ValueError):
+        idle = float(ROUTER_IDLE_TIMEOUT_S)
+    busy_waits = 0
+    while True:
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "Authorization": "Bearer " + key, "Content-Type": "application/json",
+            "Accept": "text/event-stream", "User-Agent": ROUTER_UA})
+        try:
+            resp = urllib.request.urlopen(req, timeout=min(remaining(), idle))
+        except urllib.error.HTTPError as e:
+            try:
+                raw = e.read(65536)
+            except Exception:
+                raw = b""
+            hdrs = {k.lower(): v for k, v in (e.headers or {}).items()}
+            exc, busy = _router_refusal(e.code, raw, hdrs, route, tier)
+            if busy and busy_waits < ROUTER_BUSY_RETRIES:
+                # Every target of the route is serving someone. Seconds, not a park: moving to
+                # a subscription seat over a five-second queue would be the expensive answer.
+                wait = min(_retry_after(hdrs) or 5.0, ROUTER_BUSY_MAX_WAIT_S)
+                if remaining() > wait + CFG.get("llm_seat_switch_min_s", 60):
+                    busy_waits += 1
+                    time.sleep(wait)
+                    continue
+            raise exc from None
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+            remaining()                 # past the deadline this raises TimeoutExpired instead
+            raise ModelError(f"router unreachable: {type(e).__name__}: {e} [route {route}]") from None
+        break
+    # `done` is the stream's own end - `[DONE]` or a finish_reason. EOF without either is a
+    # connection cut short (Cloudflare, the router restarting), and the text so far may still
+    # parse as a complete-looking review: it must never become a merge-gating verdict.
+    parts, usage, finish, done = [], None, None, False
+    with resp:
+        sock = _stream_socket(resp)
+        while True:
+            left = remaining()
+            if sock is not None:
+                try:
+                    sock.settimeout(min(left, idle))
+                except OSError:
+                    pass
+            try:
+                line = resp.readline(1 << 20)
+            except (OSError, http.client.HTTPException) as e:
+                remaining()
+                raise ModelError(f"router stream failed: {type(e).__name__}: {e} "
+                                 f"[route {route}]") from None
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith(b"data:"):
+                continue                # SSE comments (keepalives), event: lines, blanks
+            data = line[5:].strip()
+            if data == b"[DONE]":
+                done = True
+                break
+            try:
+                obj = json.loads(data)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if isinstance(obj.get("error"), dict):
+                # A stream that already started ends with an error chunk (skill.md § Errors).
+                er = obj["error"]
+                raise ModelError(f"router stream error {er.get('code') or er.get('type') or '-'}: "
+                                 f"{str(er.get('message') or '')[:300]} [route {route}]")
+            for ch in obj.get("choices") or []:
+                if not isinstance(ch, dict):
+                    continue
+                c = (ch.get("delta") or {}).get("content")
+                if isinstance(c, str):
+                    parts.append(c)
+                if ch.get("finish_reason"):
+                    finish, done = ch["finish_reason"], True
+            if isinstance(obj.get("usage"), dict):
+                usage = obj["usage"]
+    if usage:
+        try:
+            record_gauge("llm_output_tokens", float(usage.get("completion_tokens") or 0))
+        except (TypeError, ValueError):
+            pass
+    text = "".join(parts)
+    if not done:
+        raise ModelError(f"router stream ended before completion ({len(text)} chars, no "
+                         f"finish_reason or [DONE]) [route {route}]")
+    if finish == "length":
+        raise ModelError(f"router answer truncated (finish_reason=length) [route {route}]")
+    if not text.strip():
+        raise ModelError(f"router returned an empty answer (finish_reason={finish}) [route {route}]")
+    return text
+
+
 def _run_llm(title, desc, diff_text, rubric, started, seat, model):
     # Clock started in run_llm, before any setup: the budget is for the whole operation, and
     # the isolated-user mktemp below is a subprocess that can itself hang.
@@ -1857,6 +2114,12 @@ def _run_llm(title, desc, diff_text, rubric, started, seat, model):
         return left
 
     prompt = rubric + PROMPT.replace("{title}", title).replace("{description}", desc or "") + diff_text
+    # NO scan_output HERE, deliberately: that scan looks for the SEAT's own credential (an
+    # auth.json in the HOME the CLI runs from), which a prompt-injected diff could have the CLI
+    # read into its answer. A router model runs on the router's hosts with no access to this
+    # machine, and the only credential in play - the router key - is never in the prompt.
+    if is_router_seat(seat):
+        return parse_review(_run_router(seat, model, prompt, remaining))
     workdir = tempfile.mkdtemp(prefix="reviewbot-")
     env = {k: v for k, v in os.environ.items() if k not in ("GITEA_TOKEN",)}
     kind = CFG.get("llm_kind", "claude")
@@ -2086,6 +2349,11 @@ def _run_llm(title, desc, diff_text, rubric, started, seat, model):
             os.rmdir(workdir)
         except Exception as e:
             log(f"llm cleanup failed (ignored): {e}")
+    return parse_review(text)
+
+
+def parse_review(text):
+    """The model's answer -> the review object, with marker forgery defused."""
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         raise RuntimeError("llm returned no JSON object")
@@ -2108,6 +2376,32 @@ def pr_ok(repo, pr, head_sha):
     if d["head"]["sha"] != head_sha:
         return {"moved_to": d["head"]["sha"]}
     return d
+
+
+def open_pulls(repo):
+    """Snapshot every page before processing can merge PRs and shift page offsets.
+
+    A failed/truncated listing fails this repo's sweep instead of publishing a
+    successful partial scan. Deduplicate overlapping pages during concurrent edits;
+    maybe_merge/pr_ok still recheck the current head and eligibility before action.
+    """
+    pulls, seen = [], set()
+    for page in range(1, 1001):
+        batch = api(f"/repos/{repo}/pulls?state=open&limit=50&page={page}")
+        if not isinstance(batch, list):
+            raise ValueError("Invalid open pull request listing")
+        for pr in batch:
+            # Keep malformed entries for the reconciler's existing parse diagnostics.
+            number = pr.get("number") if isinstance(pr, dict) else None
+            if isinstance(number, int):
+                if number in seen:
+                    continue
+                seen.add(number)
+            pulls.append(pr)
+        # Gitea may cap the requested page size below 50. Only empty is final.
+        if not batch:
+            return pulls
+    raise RuntimeError("Open pull request pagination exceeded sweep limit")
 
 
 def iter_reviews(repo, pr):
@@ -3125,7 +3419,7 @@ def reconciler():
                 # is distinguishable from a single malformed PR, which otherwise look identical.
                 op, at_pr = "list", None
                 try:
-                    for pr in api(f"/repos/{repo}/pulls?state=open&limit=50"):
+                    for pr in open_pulls(repo):
                         # Reset in SEPARATE statements before touching `pr`. A tuple assignment
                         # evaluates its whole right-hand side FIRST, so `op, at_pr = "parse",
                         # pr.get(...)` raising on a malformed element left the PREVIOUS PR's
