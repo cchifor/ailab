@@ -36,6 +36,7 @@ FAKE_GIT = textwrap.dedent(f"""\
 FAKE_CURL = textwrap.dedent("""\
     #!/usr/bin/env bash
     printf '%s\\n' "$*" >> "$FAKE_LOG/argv"
+    if [ -n "${FAKE_CURL_EXIT:-}" ]; then echo "curl: (7) Failed to connect" >&2; exit "$FAKE_CURL_EXIT"; fi
     out=""; url=""
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -171,6 +172,22 @@ class GiteaApiShTest(unittest.TestCase):
         self.run_script("GET", "/user")
         with open(os.path.join(self.log, "gitenv"), encoding="utf-8") as f:
             self.assertIn("GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never", f.read())
+
+    def test_guard_tolerates_whitespace_and_key_order(self):
+        r = self.run_script("GET", "/repos/cchifor/ailab",
+                            user_json='{"id": 90, "is_admin": false, "login": "workstation-bot"}')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_guard_does_not_match_a_longer_login(self):
+        r = self.run_script("GET", "/repos/cchifor/ailab",
+                            user_json='{"login": "workstation-bot-evil", "is_admin": false}')
+        self.assertEqual(r.returncode, 4, r.stderr)
+
+    def test_transport_failure_has_its_own_exit_code(self):
+        # curl's own codes (1-4 included) must not leak out as the script's documented exit codes.
+        r = self.run_script("GET", "/user", FAKE_CURL_EXIT="7")
+        self.assertEqual(r.returncode, 5, r.stderr)
+        self.assertIn("gitea-api: curl transport failure", r.stderr)
 
     def test_fixed_origin_and_no_redirects(self):
         r = self.run_script("GET", "/user")

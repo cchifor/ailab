@@ -12,7 +12,8 @@
 #   - before the call, GET /user must answer login=workstation-bot with is_admin=false; any other
 #     identity (an owner or admin token in the helper) is refused, and nothing else is sent.
 # Prints `HTTP <status>` and the response body; exits 1 on a 4xx/5xx, 2 on bad input, 3 when no
-# credential resolves, 4 when the identity guard refuses.
+# credential resolves, 4 when the identity guard refuses, 5 when curl fails at the transport level
+# (DNS, TLS, connection), whatever curl's own exit code was.
 #   scripts/gitea-api.sh GET /repos/cchifor/ailab/pulls?state=open
 #   scripts/gitea-api.sh POST /repos/cchifor/ailab/issues/1/comments body.json
 set -euo pipefail
@@ -53,14 +54,16 @@ call() {
   printf 'Authorization: token %s\n' "$token" | curl "${args[@]}" "$ORIGIN$2"
 }
 
-code=$(call GET /user)
+# The guard parses tolerantly (any whitespace, any key order) but stays fail-closed: the login must be
+# exactly $EXPECTED_USER and is_admin must be false, or nothing else is sent.
+code=$(call GET /user) || die 5 "curl transport failure on GET /user"
 if [ "$code" != 200 ] \
-  || ! grep -q "\"login\":\"$EXPECTED_USER\"" "$out" \
-  || ! grep -q '"is_admin":false' "$out"; then
+  || ! grep -Eq "\"login\"[[:space:]]*:[[:space:]]*\"$EXPECTED_USER\"" "$out" \
+  || ! grep -Eq '"is_admin"[[:space:]]*:[[:space:]]*false' "$out"; then
   die 4 "refusing: the credential is not the non-admin $EXPECTED_USER (GET /user -> HTTP $code)"
 fi
 
-code=$(call "$method" "$path" "$body")
+code=$(call "$method" "$path" "$body") || die 5 "curl transport failure on $method $path"
 echo "HTTP $code"
 cat "$out"
 echo
