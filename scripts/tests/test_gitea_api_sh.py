@@ -21,6 +21,11 @@ FAKE_GIT = textwrap.dedent(f"""\
     #!/usr/bin/env bash
     if [ "$1" = credential ] && [ "$2" = fill ]; then
       cat >/dev/null
+      printf 'GIT_TERMINAL_PROMPT=%s GCM_INTERACTIVE=%s\\n' "$GIT_TERMINAL_PROMPT" "$GCM_INTERACTIVE" >> "$FAKE_LOG/gitenv"
+      case "${{FAKE_GIT_MODE:-ok}}" in
+        fail) echo "fatal: could not read Username" >&2; exit 128;;
+        nopass) printf 'protocol=https\\nhost=git.chifor.me\\nusername=workstation-bot\\n'; exit 0;;
+      esac
       printf 'protocol=https\\nhost=git.chifor.me\\nusername=workstation-bot\\npassword={TOKEN}\\n'
       exit 0
     fi
@@ -62,7 +67,7 @@ class GiteaApiShTest(unittest.TestCase):
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write(src)
             os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
-        for f in ("argv", "stdin"):
+        for f in ("argv", "stdin", "gitenv"):
             open(os.path.join(self.log, f), "w").close()
 
     def tearDown(self):
@@ -143,6 +148,29 @@ class GiteaApiShTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("HTTP 404", r.stdout)
         self.assertIn("not found", r.stdout)
+
+    def test_curl_ignores_implicit_config(self):
+        # -q must be curl's FIRST argument, or a ~/.curlrc can add -v/--trace (leaking the header) or extra URLs.
+        r = self.run_script("GET", "/user")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for argv in self.calls():
+            self.assertTrue(argv.startswith("-q "), argv)
+
+    def test_failed_credential_lookup_exits_3_without_calling_curl(self):
+        r = self.run_script("GET", "/user", FAKE_GIT_MODE="fail")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("no credential", r.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_lookup_without_password_exits_3_without_calling_curl(self):
+        r = self.run_script("GET", "/user", FAKE_GIT_MODE="nopass")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_credential_lookup_never_prompts(self):
+        self.run_script("GET", "/user")
+        with open(os.path.join(self.log, "gitenv"), encoding="utf-8") as f:
+            self.assertIn("GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never", f.read())
 
     def test_fixed_origin_and_no_redirects(self):
         r = self.run_script("GET", "/user")
