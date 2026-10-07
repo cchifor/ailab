@@ -34,6 +34,13 @@ resource "talos_machine_configuration_apply" "cp" {
   machine_configuration_input = data.talos_machine_configuration.cp.machine_configuration
   node                        = each.value.ip
   config_patches              = [local.cp_patches[each.key]]
+  # no_reboot (2026-10-07, plans/2026-10-07-etcd-leader-churn-plan.md step B). The default "auto"
+  # reboots any node whose change cannot apply live, and this resource fans out to all three CPs in
+  # one apply. A non-immediate change would therefore reboot the whole control plane at once and lose
+  # etcd quorum. With no_reboot such an apply fails instead. Roll it per node: one controlled
+  # `talosctl shutdown` + `qm start` at a time, with etcd 3/3 in sync between them
+  # (docs/runbooks/node-maintenance.md).
+  apply_mode = "no_reboot"
 
   depends_on = [proxmox_virtual_environment_vm.cp]
 }
