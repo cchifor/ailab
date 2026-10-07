@@ -220,7 +220,16 @@ pr_reviewer_merge_personas: [claude, codex]
 # PARITY, not a new grant: worker PRs were already automerge-eligible as `chifor`. Owner-protected
 # files are a separate control — once that plan's Phase 0 `protected_file_patterns` are applied on a
 # repo, Gitea refuses this NON-admin author's merges of those files; until then they are not.
-pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot, dev-worker-bot]
+# workstation-bot: the owner workstation's non-admin routine identity since 2026-10-07 (ailab plan
+# 2026-10-07-auth-hardening-and-ops, B2, owner decision D10), replacing the workstation's use of the
+# `cchifor` org token. Also parity: `cchifor` is already listed and is removed in that plan's B7.
+# The grant stays GLOBAL after B7 on purpose (plan decision D10, reviewed twice): workstation-bot is
+# in team `automation` (all repositories, write), exactly like the global dev-worker-bot, so a leaked
+# token can already push branches and open PRs in every org repo; and the workstation's sessions work
+# across all the reviewed repos. A repo-scoped entry would add churn per repo without removing a real
+# grant. The brake that matters is unchanged: both personas clean at head, CI green, no
+# `no-automerge`, and owner-protected files refused to this non-admin author.
+pr_reviewer_merge_authors: [cchifor, chifor, agentforge-ci-bot, renovate-bot, dev-worker-bot, workstation-bot]
 # Repo-SCOPED merge authors, additive to the global list: {repo: [authors]}. A grant made for
 # ONE repo must not make that author's PRs automerge-eligible in every other allowlisted repo
 # (reviewer-claude on ailab#782: `dsh` has read on two of them, and a fork-PR is one read away).

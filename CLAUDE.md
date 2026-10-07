@@ -73,5 +73,5 @@ Free static space: **none** since 2026-10-04 (`.7`, `.12`, `.13`, `.44`, `.50` w
 > and re-pin `known_hosts` only after confirming the MAC (`docs/runbooks/dev-workers.md` § IP renumber).
 
 ## Where to look
-`docs/decisions/` = ADRs (living decisions) · `docs/runbooks/` = operations (`ci-runners`, `dev-workers`, `ai-host-setup`, `internet-exposure`) · `plans/` = dated planning records (historical — don't rewrite) · `README.md` = repo overview ·
+`docs/decisions/` = ADRs (living decisions) · `docs/runbooks/` = operations (`ci-runners`, `dev-workers`, `ai-host-setup`, `internet-exposure`, `roots-of-trust-rotation`) · `plans/` = dated planning records (historical — don't rewrite) · `README.md` = repo overview ·
 `scripts/dw-paste/` = workstation helpers (Windows/macOS/Linux) that make Ctrl+Shift+V paste a screenshot or files into a dev-worker agent over SSH — install per its README.

@@ -1,0 +1,24 @@
+name: Router rollout acceptance
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'kubernetes/apps/apps/llm-router/**'
+      - 'scripts/check-router-rollout.py'
+      - '.gitea/workflows/router-acceptance.yaml'
+permissions:
+  contents: read
+concurrency:
+  group: router-rollout-acceptance
+  cancel-in-progress: false
+jobs:
+  acceptance:
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify acceptance checker
+        run: python3 -m unittest scripts.tests.test_router_rollout
+      - name: Observe Flux rollout and in-cluster canary
+        run: python3 scripts/check-router-rollout.py

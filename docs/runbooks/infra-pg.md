@@ -139,6 +139,31 @@ Autovacuum makes dead space reusable in-file but never returns it to the volume.
   Watch `select pg_wal_lsn_diff(sent_lsn, flush_lsn) from pg_stat_replication` and the slot's
   `safe_wal_size` while it runs. A `lock_timeout` failure is harmless — retry in a quieter minute.
 
+## Gitea credential inventory (2026-10-07, auth-hardening plan B5)
+
+`monitoring/gitea-credential-rules.yaml` alerts on counts and ages of Gitea's standing credentials
+(tokens, OAuth2 grants, site admins) that the CNPG exporter reads from two VIEWS in the `gitea`
+database (schema `credential_inventory`), through the custom-queries ConfigMap
+`infra-pg-gitea-credential-queries` (`apps/databases/`). Series: `cnpg_gitea_credentials_*` per `owner`,
+and `cnpg_gitea_site_admins_total`. Counts and ages only, never a token hash, name or id.
+
+- **Why views, not tables:** the exporter runs custom queries as the predefined role `pg_monitor`
+  (`SET ROLE pg_monitor` on its postgres connection), which has no privilege on Gitea's tables. A direct
+  query failed with `permission denied for table user` (SQLSTATE 42501) on 2026-10-07. The views are
+  owned by `postgres` (a view reads its tables with its owner's rights), return aggregates only, and
+  `pg_monitor` has SELECT on them and on nothing else.
+- **Source of truth:** `apps/databases/gitea-credential-inventory.sql`, an operator-run one-shot, idempotent
+  (the header has the `kubectl exec ... psql -f -` command; run it on the PRIMARY). The objects live in
+  the database, so they replicate and are in the nightly dump: a failover or restore needs no re-run.
+- **The allowlist** (`gitea_admin`'s two documented tokens, keyed by id, name and scope) is in that file.
+  Rotating `af-ci-scaler-2941` or `flux-ailab-read` gives the token a new id: edit the `VALUES` list and
+  re-run the file in the same PR that records the rotation, or `GiteaAdminTokenNotAllowlisted` fires.
+- **A Gitea upgrade that fails in a migration** naming `credential_inventory.*` ("cannot alter type of a
+  column used by a view"): `DROP SCHEMA credential_inventory CASCADE;`, finish the upgrade, re-run the file.
+  Until then `GiteaCredentialInventoryMissing` fires after 30 minutes, which is the intended signal.
+- **No series?** `kubectl -n databases logs <primary> -c postgres | grep 'Error collecting user query'`
+  names the failing query; `cnpg_collector_last_collection_error` is 1 while any query fails.
+
 ## strive-pg (the PLATFORM's cluster, not this one): the harness role and database
 
 `strive-pg` in ns `strive-ailab` is the Strive platform's CNPG cluster. Its Cluster CR belongs to the

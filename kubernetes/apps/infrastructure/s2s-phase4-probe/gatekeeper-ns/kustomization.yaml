@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Everything the probe needs in GATEKEEPER's namespace: a Role + RoleBinding (get
+# endpoints/gatekeeper and configmaps/gatekeeper-registry-extras) and the NetworkPolicy admitting
+# the probe pod to gatekeeper :5000.
+#
+# THE CUTOVER LINE. When gatekeeper moves to its own namespace (A.2, platform PR3), change
+# `namespace:` below to strive-gatekeeper, in the same PR as GK_NS in scripts/s2s/phase4-probes.sh
+# (scripts/s2s/test_phase4_job.py fails while the two differ). The parent kustomization copies
+# this namespace into the Job's GATEKEEPER_NAMESPACE (a kustomize replacement), so nothing else
+# changes. Flux creates the objects in the new namespace and prunes the old ones; merge it only
+# once namespace strive-gatekeeper exists.
+namespace: strive-ailab
+resources:
+  - rbac.yaml
+  - networkpolicy.yaml

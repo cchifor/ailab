@@ -3,7 +3,7 @@ kind: Kustomization
 # LLM Router control plane (single-authority, single replica, namespace llm-router).
 # Gitea CI publishes the validated runtime as an immutable OCI image. The old
 # router-releases PVC remains declared for rollback. Runtime SQLite stays on
-# the RWO qnap-iscsi data PVC, with a verified init-container backup before rollout.
+# the RWO qnap-iscsi data PVC. Completed pre-upgrade backups remain on that volume.
 # NOT created here (operator/vault prerequisites):
 #   * Secret llm-router-auth (key admin-token, >= 24 chars) — the pod fails
 #     its startup gate until it exists (fail closed, no default credentials).

@@ -30,7 +30,13 @@ umask 077
 export MSYS_NO_PATHCONV=1
 
 CONTEXT=admin@ai
+# The harness, its ServiceAccount, the `default` SA and HelmRelease `strive` live in NS.
 NS=strive-ailab
+# Gatekeeper's namespace: its pods, Service/Endpoints and ConfigMap gatekeeper-registry-extras. The
+# A.2 move (gatekeeper into its own namespace, platform PR3) flips THIS line to strive-gatekeeper.
+# It is the shared source: scripts/s2s/test_phase4_job.py fails unless the in-cluster probe Job
+# (kubernetes/apps/infrastructure/s2s-phase4-probe/gatekeeper-ns/kustomization.yaml) says the same.
+GK_NS=strive-ailab
 GK_LABEL=app.kubernetes.io/name=gatekeeper
 GK_CONTAINER=gatekeeper
 HARNESS_LABEL=app.kubernetes.io/name=harness
@@ -152,6 +158,7 @@ info() { printf 'INFO %s\n' "$*"; }
 section() { printf '\n== %s\n' "$*"; }
 redact() { sed -E 's/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/<redacted-jwt>/g'; }
 k() { kubectl --context "$CONTEXT" -n "$NS" "$@"; }
+kg() { kubectl --context "$CONTEXT" -n "$GK_NS" "$@"; }
 
 # Freeze = the Flux Kustomization FIRST, then the HelmRelease, then the scale. Both suspends are
 # needed: the Kustomization re-applies the HelmRelease manifest from git and so clears a hand-set
@@ -252,7 +259,7 @@ run_in_pod() {
   {
     printf '%s\n' "$PROG_B64"
     if [[ $mode == single ]]; then printf 'held=%s\n' "$HELD"; else token_lines; fi
-  } | k exec -i "$pod" -c "$GK_CONTAINER" -- python -c "$BOOT" "${args[@]}" 2>&1
+  } | kg exec -i "$pod" -c "$GK_CONTAINER" -- python -c "$BOOT" "${args[@]}" 2>&1
 }
 
 # discover_replicas: fills PODS with the gatekeeper replicas to probe; fails on a roll in flight.
@@ -260,7 +267,7 @@ PODS=()
 discover_replicas() {
   section "Gatekeeper replicas"
   local lines name phase deleting ready all=() good=()
-  if ! lines=$(k get pods -l "$GK_LABEL" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.containerStatuses[?(@.name=="gatekeeper")].ready}{"\n"}{end}'); then
+  if ! lines=$(kg get pods -l "$GK_LABEL" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.containerStatuses[?(@.name=="gatekeeper")].ready}{"\n"}{end}'); then
     bad "replicas: kubectl get pods -l $GK_LABEL failed"
     return 1
   fi
@@ -296,7 +303,7 @@ discover_replicas() {
 print_plan() {
   section "Plan (dry run: no cluster or network call)"
   cat <<EOF
-context $CONTEXT, namespace $NS; in-pod program $PROG (sha256 $PROG_SHA)
+context $CONTEXT, namespace $NS, gatekeeper namespace $GK_NS; in-pod program $PROG (sha256 $PROG_SHA)
 replicas: ${REPLICAS[*]:-every pod of $GK_LABEL (expected $EXPECTED_REPLICAS, all Running and Ready)}
 EOF
   if ((REVOCATION)); then
@@ -391,7 +398,7 @@ registry_agreement() {
   ((REGISTRY_CHECK && !EXPECT_REFUSED)) || return 0
   section "Registry agreement"
   local cm_sha pod base=''
-  if cm_sha=$(k get configmap "$EXTRAS_CM" -o jsonpath='{.data.registry\.yaml}' | sha256sum | cut -d' ' -f1) && [[ -n $cm_sha ]]; then
+  if cm_sha=$(kg get configmap "$EXTRAS_CM" -o jsonpath='{.data.registry\.yaml}' | sha256sum | cut -d' ' -f1) && [[ -n $cm_sha ]]; then
     for pod in "${PODS[@]}"; do
       if [[ ${REG_EXTRAS[$pod]:-} == "$cm_sha" ]]; then
         ok "$pod: loaded extras_sha = sha256(ConfigMap $EXTRAS_CM data.registry.yaml) $cm_sha"
@@ -660,7 +667,7 @@ if ((!GATEKEEPER_ONLY && !REVOCATION)); then
   command -v curl >/dev/null || { echo "phase4-probes: curl not found" >&2; exit 2; }
 fi
 
-printf 'S2S Phase 4 probes: context %s, namespace %s, program sha256 %s\n' "$CONTEXT" "$NS" "$PROG_SHA"
+printf 'S2S Phase 4 probes: context %s, namespace %s, gatekeeper namespace %s, program sha256 %s\n' "$CONTEXT" "$NS" "$GK_NS" "$PROG_SHA"
 
 discover_replicas || true
 # Probe nothing while a roll is in flight or a named replica is missing.
