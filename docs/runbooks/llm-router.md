@@ -343,3 +343,21 @@ and its source/release annotations. Before rolling back after any settings edits
 review the saved `plugins.yml` against the previous version; restore the captured
 composition if necessary, retaining the newer copy for recovery. Stop the singleton
 before restoring persistent files and retain subsequent data deliberately.
+
+
+Production acceptance passed in [CI 71438](https://git.chifor.me/cchifor/ailab/actions/runs/71438)
+after [deployment PR #1128](https://git.chifor.me/cchifor/ailab/pulls/1128), merge
+`245285233b98b97060be199c717a21cc8d44e2ca`. The new pod
+`llm-router-54d8d687dc-fh58k` was Ready on the expected image; both init checks
+completed. Loki recorded the verified `pre-plugin-settings-20261007` backup,
+preserved accounts/routes/encrypted credentials and idempotent restart. The
+one-shot Job passed all 41 plugin settings views at 2026-10-07 13:56:35 UTC,
+with active Print, required authentication and deployment locks. Public readiness
+and management refusal passed too. No production inference or settings writes
+were used by this canary; SDK tools were tested with the real pinned CLIs against
+loopback fixtures in source CI.
+
+The dated init containers, completed canary Job and temporary network allowance
+are removed after that acceptance. The immutable image, persistent backup and
+reusable CI observer remain. The resulting Recreate rollout must pass the same
+Ready/image/public checks with no init containers or canary expected.
