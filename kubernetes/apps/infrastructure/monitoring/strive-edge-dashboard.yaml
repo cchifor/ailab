@@ -205,7 +205,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))"
+              "expr": "sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))",
+              "instant": true,
+              "range": false
             }
           ]
         },
@@ -268,7 +270,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "100 * sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[$__rate_interval])) / sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))"
+              "expr": "100 * sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[$__rate_interval])) / sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))",
+              "instant": true,
+              "range": false
             }
           ],
           "description": "StriveEdge5xxRatioHigh fires above 5% for 10m while traffic exceeds 0.01 req/s."
@@ -332,7 +336,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum(increase(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[10m]))"
+              "expr": "sum(increase(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[10m]))",
+              "instant": true,
+              "range": false
             }
           ],
           "description": "StriveEdge5xxBurst fires at 10 or more in 10 minutes, whatever the ratio."
@@ -392,7 +398,9 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"TraefikScrapeMissing|StriveEdge.*|GatekeeperForwardAuth5xx|GatekeeperHttp5xx|GatekeeperTokenUnavailable|GatekeeperTokenReviewLimited\"}) or vector(0)"
+              "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"TraefikScrapeMissing|StriveEdge.*|GatekeeperForwardAuth5xx|GatekeeperHttp5xx|GatekeeperTokenUnavailable|GatekeeperTokenReviewLimited\"}) or vector(0)",
+              "instant": true,
+              "range": false
             }
           ],
           "description": "Firing alerts of strive-edge-rules.yaml (the rules behind this dashboard)."
