@@ -151,6 +151,78 @@ disk as above, or `skopeo delete` old `agentforge/**` tags by hand (see "Refresh
 tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` then converges the
 new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
+## Thin-volume trim (weekly, ai-node1)
+
+Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never reaches LXC mount
+points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
+377 GB allocated for 170 GB in use. That thin-pool fill measurably slowed the shared consumer QLC
+NVMe that also carries cp1's etcd WAL (plans/2026-10-07-etcd-leader-churn-plan.md).
+
+`scripts/lxc-fstrim-chunked.sh <ctid> <mpN>` (tests: `scripts/tests/test-lxc-fstrim-chunked.sh`, run
+in CI) works **entirely host-side**:
+- It resolves the volume with `pct config` + `pvesm path` and reads its ext4 geometry with `tune2fs`.
+- It mounts it privately (`nosuid,nodev,noexec`; the kernel shares the superblock with the
+  container's mount).
+- It trims with the host's `fstrim`, 8 GiB at a time.
+- It never executes anything from inside the container. The first version ran `df`/`fstrim` through
+  `nsenter -m`, i.e. the container's binaries with host-root credentials. It was withdrawn after the
+  2026-10-07 Codex review.
+
+It waits while host IO pressure (`/proc/pressure/io` some avg10) is above 45%, refuses to trim if
+pressure is unreadable, and pauses 15 s between chunks. `touch /run/lxc-fstrim-chunked.stop` halts it,
+including during a pressure wait.
+
+Exit codes: 0 done or stopped, 1 volume, geometry or mount problem, 2 bad settings, 3 pressure never
+dropped, 4 pressure unreadable, 5 an fstrim failed, 143 stopped by `systemctl stop` (after the in-flight chunk, mount released), 6 the host-side mount could not be released (`findmnt | grep lxc-fstrim`, then `umount` it by hand), 7 another run holds `/run/lxc-fstrim-chunked.lock`. Install on ai-node1 (root, via
+`scripts/node-ssh.py`):
+
+```bash
+install -m 0755 lxc-fstrim-chunked.sh /usr/local/sbin/lxc-fstrim-chunked.sh
+cat > /etc/systemd/system/registry-lxc-fstrim.service <<'UNIT'
+[Unit]
+Description=Chunked, IO-pressure-guarded fstrim of the registry LXC data volume (ct 5004 mp0)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lxc-fstrim-chunked.sh 5004 mp0
+Nice=10
+# On stop the script waits for the in-flight FITRIM, then unmounts (exit 143); leave it time to,
+# and record that deliberate stop as clean rather than a failed unit.
+TimeoutStopSec=180
+SuccessExitStatus=143 130
+UNIT
+cat > /etc/systemd/system/registry-lxc-fstrim.timer <<'UNIT'
+[Unit]
+Description=Weekly registry LXC trim, CI-quiet hours (after the 00:00Z infra-pg dump and 02:00Z Velero)
+[Timer]
+OnCalendar=Sun *-*-* 03:30:00 UTC
+RandomizedDelaySec=15min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
+```
+
+**Verify a run, including that it did not hurt etcd.** A trim is a discard burst on the same drive as
+cp1's etcd WAL.
+- `journalctl -u registry-lxc-fstrim`: one line per chunk, then `end: trimmed_total=<bytes> pool=<%>`.
+  `lvs pve/vm-5004-disk-1 pve/data` should show the drop.
+- Over the run's window, compare with the same-length window before it, per member (Prometheus):
+  - `histogram_quantile(0.5|0.99, sum by (instance, le)(increase(etcd_disk_wal_fsync_duration_seconds_bucket[<window>])))`;
+  - fsyncs over 1.024 s;
+  - `increase(etcd_server_leader_changes_seen_total[<window>])`;
+  - the leader at the time (`etcd_server_is_leader`).
+- **Stop criteria** (touch the stop file):
+  - cp1's WAL fsync p99 above 1 s for 2 consecutive minutes during the run;
+  - any leader change while cp1 leads;
+  - a `ControlPlaneRestartWave`.
+- Recorded supervised run, 2026-10-06 19:24-19:44Z (the same chunk/pressure logic, an earlier
+  version of the script):
+  - 212 GB trimmed; pool 71.6 -> 59.8%; host IO PSI about 33 -> 15%.
+  - cp1 fsync p50 83 -> 10 ms and p99 846 -> 734 ms vs the preceding 12 minutes, while node1 runner
+    writes doubled.
+  - One leader change at about 19:40Z, while cp2 (node2) led. The trim was on node1, so cp1 was only
+    a follower; the trim is not a plausible cause.
+
 ## Capacity recovery, 2026-09-13
 
 Platform main build 32171 repeatedly failed image uploads with `blob upload unknown to registry`.
