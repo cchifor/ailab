@@ -31,8 +31,8 @@ about 60 s after a push while the stale run aborts) [X6].
 
 Reviews of this plan: round 1 by Fable (`…-review-r1-fable.md`) and Codex
 (`…-review-r1-codex.md`), round 2 by both (`…-review-r2.md`), the reviewer bots on ailab#1127 and a
-forge-portability round (`…-review-r3.md`); dispositions are referenced as `[F<n>]`, `[C<n>]`,
-`[R<n>]`, `[X<n>]` and `[B<n>]` below.
+forge-portability round (`…-review-r3.md`) and its review by Fable and Codex (`…-review-r4.md`);
+dispositions are referenced as `[F<n>]`, `[C<n>]`, `[R<n>]`, `[X<n>]`, `[B<n>]` and `[P<n>]` below.
 
 Throughout sections 1–15, "Gitea" names the reference forge; every operation goes through the forge
 adapter of section F, which states the GitHub equivalent.
@@ -65,26 +65,31 @@ forges.
 | List open PRs | `?state=open&limit=50&page=` | `?state=open&per_page=100` + `Link` pagination; conditional `If-None-Match` (a 304 does not count against the rate limit) |
 | List reviews (markers) | `/reviews?limit=50&page=`, fail closed at the page cap | `/reviews?per_page=100` + `Link`; no cap; ETag |
 | Immutable review diff | compare `merge_base...head` (Phase 0 picks the endpoint) | `GET /repos/{o}/{r}/compare/{base_sha}...{head_sha}` with `Accept: application/vnd.github.diff`; works across forks in one network |
-| Diff too large | (size cap only) | 406 / "diff too large" → fall back to `GET /pulls/{n}/files` patches; a file without a patch is excluded as `too large` (author-triggered class: caps the verdict) |
+| Diff too large | (size cap only) | 406, "diff too large" or a 5xx after retries → the **same immutable compare** in JSON form (`files[]` with per-file `patch`). Files beyond the 300-file cap, or without a `patch`, are excluded as `too large` (author-triggered: caps the verdict); if completeness cannot be established, the head is skipped (`coverage=over`). Never `/pulls/{n}/files`, which follows the mutable head [P4] |
 | Post review | `POST …/reviews {commit_id, event: APPROVED\|COMMENT, body, comments[{path, new_position\|old_position}]}` | `POST …/reviews {commit_id, event: APPROVE\|COMMENT, body, comments[{path, line, side: RIGHT\|LEFT}]}`; one invalid comment fails the whole request with 422 (definite, not ambiguous) |
-| Pending reviews (X2) | list `state=PENDING` by the bot | GitHub allows one pending review per user per PR and refuses a new one with 422 → list and delete the bot's pending review first |
-| CI green | combined status `success` | combined status **and** check runs of the head: every check run `completed` with `success`/`neutral`/`skipped`, and combined status `success` or zero statuses (GitHub reports `pending` with `total_count: 0`). Required-check names from branch protection or rulesets when readable |
-| Merge | `POST …/merge {Do: merge, head_commit_id}` | `PUT …/merge {sha: head, merge_method}`; 405 not mergeable, 409 head changed. Repositories using a **merge queue** are out of scope: the bot reviews and approves, a human or the queue merges |
+| Pending reviews (X2) | list `state=PENDING` by the bot | GitHub allows one pending review per user per PR. reviewbot always posts with an `event`, so it never creates a pending review itself; whether a failed POST can leave one is a Phase 0b item. On both forges: delete only a pending review whose id this attempt received; any other pending review by the bot → do not post, ambiguous (section 4 step 3) [P6] |
+| CI green | combined status `success` (non-empty) | **At least one** check run or status must exist [P5]. Check runs of the head, paginated (`per_page=100`, `filter=latest`), every one `completed` with `success`/`neutral`/`skipped`; statuses: combined `success`, or zero statuses **only if** check runs exist. Required check names from `GET /repos/{o}/{r}/rules/branches/{branch}` (and branch protection when readable) must each be present and green. Which commit GitHub attaches PR checks to (head vs test merge commit) is verified in Phase 0b [P5] |
+| Merge | `POST …/merge {Do: merge, head_commit_id}` | `PUT …/merge {sha: head, merge_method}` (per-repo `merge_method`); 405 not mergeable, 409 head changed. Repositories using a **merge queue** are out of scope: the bot reviews and approves, a human or the queue merges |
 | Webhook verification | `X-Gitea-Signature` = hex HMAC-SHA256 | `X-Hub-Signature-256` = `sha256=` + hex HMAC-SHA256 |
-| PR events | `pull_request`, `_sync`, `_label`, `_review_request` | `pull_request` with `action` in `opened`, `reopened`, `synchronize`, `ready_for_review`, `edited` (base change), `labeled` |
+| PR events | `pull_request`, `_sync`, `_label`, `_review_request` | `pull_request` with `action` in `opened`, `reopened`, `synchronize`, `ready_for_review`, `edited` (base change), `labeled`, `review_requested`, `converted_to_draft`, `closed` [P11] |
 | Policy / fence / epoch files | contents API | contents API |
-| **Create-if-absent ref with ownership proof** | `POST /tags {tag_name, target, message}` → status ignored; read back the git tag object's message nonce (spike 2) | `POST /git/tags {tag, message, object, type: commit}` → my tag object SHA (unique: the message holds my nonce); then `POST /git/refs {ref: refs/tags/<name>, sha: <my object>}` → 201 or 422 "Reference already exists"; **owned iff the ref's target SHA equals my object SHA** (read back after any status) |
-| List refs by prefix | `GET /git/refs/tags/<prefix>` | `GET /git/matching-refs/tags/<prefix>` (pagination verified in Phase 0) |
+| **Create-if-absent ref with ownership proof** | `POST /tags {tag_name, target, message}` → status ignored | `POST /git/tags {tag, message, object, type: commit, tagger}` **once per claim** with a frozen payload (fixed `tagger.date`), its SHA kept for every retry; then `POST /git/refs {ref: refs/tags/<name>, sha}` → 201, or 422 "Reference already exists" (the normal race outcome, not an error). If a retry finds the object gone (422 "Object does not exist") it is re-created from the frozen payload, giving the same SHA [P1] |
+| Ownership proof (both forges) | read the exact ref (`GET /git/refs/tags/<name>`), then the object it points at (`GET /git/tags/{sha}`): **owned iff that object's message nonce is mine**. On GitHub, target SHA == my object SHA is a fast path to the same answer | `GET /git/ref/tags/<name>` (singular, exact; `matching-refs` is a string prefix match) then `GET /git/tags/{sha}` [P1, P10] |
+| Single-writer tags without a message (outcomes, operator) | API tag create | lightweight ref to the coordination repo's root commit: one call [P9] |
+| List refs by prefix | `GET /git/refs/tags/<prefix>` | `GET /git/matching-refs/tags/<prefix>`; no documented pagination, so Phase 0b records the truncation threshold and section 7's fail-closed rule uses it [P10] |
 | Delete a ref (janitor) | `git push --delete` (API delete 404s for tags without a release row) | `DELETE /git/refs/tags/<name>`; confirm absence by listing |
-| Server clock | `Date` header; lease start = tag object `tagger.date` (server-set) | `Date` header; `tagger.date` is **client-supplied** → the claimant writes its `server_now`; others apply the 300 s future-sanity bound. Acceptable because leases are efficiency only |
-| Bot identity for markers | login `reviewer-<kind>` | App: `<app-slug>[bot]`; machine user: its login. Per-kind config `bot_login`; `marker_of` compares against it |
+| Server clock | `Date` header; lease start = tag object `tagger.date` (server-set) | `Date` header; `tagger.date` is **client-supplied** → the claimant writes its `server_now`; others apply the 300 s future-sanity bound. Acceptable for **work leases** (efficiency only). Publication gates never rely on it (section 11 uses operator-observed time) [P2] |
+| Bot identity for markers | login `reviewer-<kind>` (+ user id) | App: `<app-slug>[bot]`, `user.type == "Bot"`; machine user: its login. Per-kind config `bot_login` **and** `bot_user_id`; `marker_of` compares the id (renames do not orphan markers) [P12] |
 
 ### F.3 GitHub-specific decisions
 
-- **Identity: one GitHub App per kind** (`reviewbot-claude`, `reviewbot-codex`): fine-grained
-  permissions (pull requests write, contents write on the coordination repo only, checks and
-  statuses read, metadata read), its own rate-limit budget per installation, no human seat, and
-  `[bot]` logins that no user can impersonate. All instances of a kind share the App's private key
+- **Identity: one GitHub App per kind** (`reviewbot-claude`, `reviewbot-codex`): permissions
+  pull requests write; **contents read on every reviewed repository and write wherever the bot
+  merges** (merging, and creating tags/refs in the coordination repository, need `contents: write`;
+  one installation grants one permission set to all its repositories); checks and statuses read;
+  metadata read; administration read only if classic branch protection must be read (rulesets need
+  only metadata) [P3]. Its own rate-limit budget per installation, no human seat, and `[bot]` logins
+  that no user can impersonate. All instances of a kind share the App's private key
   (SOPS) and mint installation tokens independently. Machine users remain a fallback.
   **To verify in Phase 0:** whether an App's APPROVE counts toward required approvals under the
   target repositories' branch protection or rulesets; if not, approvals are left to humans (the bots
@@ -95,10 +100,14 @@ forges.
   ingress (Cloudflare tunnel to the receiver) with `X-Hub-Signature-256`; polling stays as the
   safety net, exactly like the reconciler today.
 - **Rate limits are shared by all instances of a kind** (one App installation, or one user's tokens).
-  The adapter tracks `X-RateLimit-Remaining`/`Reset` per forge identity and slows discovery when
-  below 20 %; a secondary-limit 403/429 with `Retry-After` parks the **forge identity** (not a seat):
-  no claims, no posts, until it clears. Content-creating calls per review: about 4 (work claim, pub,
-  review, outcome), well under the secondary limit of 80 per minute for N ≤ 3.
+  The adapter tracks `X-RateLimit-Remaining`/`Reset` and slows discovery when below 20 %. A
+  secondary-limit 403/429 parks **this instance's use of the forge identity** (each instance only
+  sees its own refusals): wait `Retry-After` when present, otherwise exponential backoff from 60 s
+  to 15 min [P8]. A 304 is exempt from the **primary** limit only. Content-creating calls per review
+  on GitHub: work claim 2 (object + ref), publication 3 (object + ref + `pubsent`), review 1,
+  outcomes 2–3 → about 9; at N = 3 instances and 30 reviews per hour per kind that is ≈ 270 per hour,
+  under the secondary ceilings (80 per minute, 500 per hour) but not by a wide margin; the adapter
+  counts its own content calls and defers claims above 400 per hour [P8].
 - **Base retarget** arrives as `pull_request` `edited` with `changes.base`; it invalidates the base
   ref check (section 8) exactly as on Gitea.
 - **Fork PRs**: head commits live in the fork but are reachable in the base repository's network;
@@ -121,7 +130,7 @@ forges.
 ### 1. Coordination repository
 
 `cchifor/reviewbot-coord`: private, `auto_init` (one commit = the tag target), **no push mirror,
-no webhooks, no Actions, no protected-tag rules**, write access for `reviewer-claude`,
+no webhooks, no Actions, no protected-tag rules (on GitHub: no tag rulesets)**, write access for `reviewer-claude`,
 `reviewer-codex` and the owner only. Created once by hand (runbook); the Ansible role asserts
 private, not a mirror, empty push-mirror list (owner token). Repo ACL is the only authentication of
 tags: the tagger field is always `Gitea`, so it proves nothing [F16, C29].
@@ -135,14 +144,17 @@ before use, at most 120 characters:
 rb1.<kind>.r<repo_id>.p<pr>.<head_sha40>.<suffix>
 ```
 
-`<repo_id>` is Gitea's numeric id (stable across renames). Prefix listings always end in `.` so
+`<repo_id>` is the forge's numeric repository id (stable across renames). Prefix listings always end in `.` so
 `p11.` never matches `p112.` [F17].
 
 | Suffix | Kind of tag | Created by | Meaning |
 | --- | --- | --- | --- |
 | `pub<G>` | **publication right**, create-if-absent | the instance about to POST | Only the owner of `pub<G>` may post this kind's review for this head. G starts at 1 |
 | `pubok<G>` | outcome, single writer | the `pub<G>` owner | Optional speed-up: the review POST returned success |
-| `pubx<G>` | outcome, single writer | the `pub<G>` owner | The POST failed or was abandoned; this owner will never POST under `pub<G>` again [B4] |
+| `pubsent<G>.<t>` | outcome, single writer, **mandatory** | the `pub<G>` owner | Written immediately before sending the POST, with the owner's server time `t`. If this write fails, the owner does not send [P0] |
+| `pubx<G>` | outcome, single writer | the `pub<G>` owner | This owner will never POST under `pub<G>` again (failure, abandonment) [B4] |
+| `pubseen<G>.<t>` | operator, single writer | `--coord-state` / `--requeue` | The operator tool's first observation of an ambiguous `pub<G>`, with **its own** clock [P0, P2] |
+| `mergeint.<base>.<t>` | outcome, single writer | the merging instance | Merge intent: validated base ref (escaped) at time `t`; audited after the merge [P7] |
 | `pubvoid<G>` | operator, single writer | `--requeue --force` | The operator confirmed no review from `pub<G>` landed; publication continues at `pub<G+1>` |
 | `a<N>` | **work claim**, create-if-absent | an instance starting attempt N | Lease for model work (efficiency only) |
 | `a<N>.fail.<t>` / `a<N>.failt.<t>` | outcome, single writer | claim owner | Charged ordinary / deadline-class failure at server time `t` |
@@ -150,9 +162,8 @@ rb1.<kind>.r<repo_id>.p<pr>.<head_sha40>.<suffix>
 | `a<N>.done.<t>` | outcome, single writer | claim owner | The attempt published (or skipped with a marker); frees the work lease at once [R11] |
 | `cut<N>` | operator, single writer | `--requeue` | Attempts numbered below N are ignored for caps; numbering continues above the high-water mark [C4] |
 
-Two global tags (not per head): `rb1.<kind>.mode.forge.<t>` (mode fence, section 12) and
-`rb1.epoch.<unix time>` (coordination epoch, created by the restore procedure, section 14)
-[R6, R10, B8].
+One global tag and one file (not per head): `rb1.<kind>.mode.forge.<t>` (mode fence, section 12) and
+the `epoch` file (a random id, rewritten by the restore procedure, section 14) [R6, R10, B8, P14].
 
 Outcome and operator tags put their timestamp and reason in the **name**, so `head_state` needs no
 message reads for them [F7]. Only `pub<G>` and `a<N>` carry a message:
@@ -162,6 +173,8 @@ message reads for them [F7]. Only `pub<G>` and `a<N>` carry a message:
  "health": "http://192.168.0.25:8477/healthz", "repo": "gitea:cchifor/ailab", "pr": 1112,
  "head": "<sha40>", "lease_s": 1200, "cfg": "<policy hash>", "issued": "<server time, GitHub only>"}
 ```
+
+`health` is absent on migrated rights, which have no live owner [P13].
 
 ### 3. Ownership: read back, never trust the status code
 
@@ -173,8 +186,8 @@ unique across processes (boot id + pid + uuid), so duplicate instance names cann
 found → not owned for now. A tag that lands later with **my** nonce is mine: a work claim simply
 becomes my lease; a publication right that I discover later may be used for **one** POST if I have
 not posted under it (I re-run the review if I no longer hold its body) [R2].
-Persistent non-race failures (401/403/422, or 5 consecutive not-found) increment
-`reviewbot_coord_errors_total{op="create"}` and alert [F14].
+Persistent non-race failures (401/403, a 422 that is not "already exists", or 5 consecutive
+not-found) increment `reviewbot_coord_errors_total{op="create"}` and alert [F14, P9].
 
 ### 4. Publication protocol (the safety mechanism)
 
@@ -184,12 +197,14 @@ this kind at this head):
 1. G = 1 + highest `pubvoid<G'>` (or 1). If `pub<G>` exists and is not mine → **do not post**
    (someone else holds the right; their review is landing or is ambiguous). Release work claim.
 2. `create_owned(pub<G>)`. Not owned → do not post.
-3. Immediately before the POST: re-read `pubvoid<G>` (absent), the epoch (unchanged since start)
-   and the mode fence (matches my mode) [R1, R6, R10]; list this account's **PENDING** reviews on
+3. Immediately before the POST: re-list markers — **no authenticated marker of this kind at the
+   head** (else `pubx<G>`, `a<N>.done`, stop) [B1, P0]; re-read `pubvoid<G>` (absent), the epoch
+   record (unchanged since start) and the mode fence (matches my mode) [R1, R6, R10]; list this account's **PENDING** reviews on
    the PR: none, or only ones this attempt created (deleted first). A foreign pending review →
    do not post, treat the head as ambiguous (a failed earlier attempt left partial state that Gitea
    would merge into this POST) [X2].
-4. POST the review — **at most once per held right** (an in-process set of consumed rights).
+4. Write `pubsent<G>.<t>`; if that write fails, write `pubx<G>` and do not send [P0]. Then POST the
+   review — **at most once per held right** (an in-process set of consumed rights).
    Success → `pubok<G>` and `a<N>.done.<t>` (best effort). Exception → `pubx<G>` (best effort) and
    nothing more: the head is now ambiguous by construction (below).
 
@@ -233,7 +248,7 @@ outcome-less `a<N>` claims):
 - `charged` = `.fail` + `.failt`; `timeouts` = `.failt`; `released` = `.rel` excluding `moved`/`closed`;
   `abandoned` = outcome-less claims whose lease expired.
 - **exhausted** if `timeouts >= 2` or `charged >= 5` or `abandoned >= 3` or `released >= 10`
-  or `hw - K >= 40` (all claims since the last cut, whatever the reason, bounding `moved`/`closed`
+  or `hw - K + 1 >= 40` (all claims since the last cut, whatever the reason, bounding `moved`/`closed`
   churn) [F4, C7, C28, R8]. Exhausted heads are skipped and counted in a gauge; `--requeue` writes `cut<hw+1>`.
 - A claim with a `.done` outcome is finished and never leased [R11].
 - **leased** if the newest outcome-less claim's lease (`tagger.date + lease_s`) has not expired;
@@ -250,8 +265,8 @@ never stop a current owner, whose post is still governed by publication [C6].
 1. Skip if this instance cannot serve (all seats parked, `inhibit` or `posting-disabled`).
 2. `pr_ok`: closed or draft → drop; else head H (and base SHA, section 9).
 3. Publication state of H: done → drop. `pub<G>` carries **my** nonce and is not consumed (a create
-   that landed late, section 3) → claim work and go straight to review + publication under the held
-   right [B7]. Otherwise ambiguous → drop (counted); publishing → retry later.
+   that landed late, section 3) → run the review and publish under the held right **without a work
+   claim and regardless of caps** (the right, not a lease, authorises it) [B7, P13]. Otherwise ambiguous → drop (counted); publishing → retry later.
 4. Work state of H: exhausted → drop; leased → `next_check` = lease end; not yet claimable →
    `next_check` = `not_before`.
 5. **Another head of this PR leased** → `next_check` = now + 60 s (re-checked, so an early
@@ -323,8 +338,12 @@ truncated, `head_state` fails closed when the result size equals the page cap [C
   Markers without `v1.cov` (pre-cut-over) are accepted. A retargeted PR therefore waits for a new
   head [R12, C21]. **Residual [B2]:** neither forge's merge API accepts an expected base, so a
   retarget timed between the final check and the merge call (about a second) is not prevented. The
-  base ref is re-read immediately before the merge call, and after every merge the PR's base is read
-  again: a mismatch raises `ReviewbotMergedUnreviewedBase` (critical) for a human to revert. This is a
+  base ref is re-read immediately before the merge call, and the merging instance first writes
+  `mergeint.<base>.<t>` for the head. The audit runs on every instance's sweep over PRs that carry a
+  `mergeint` and were merged in the last 7 days (discovery lists recently closed PRs for this): a
+  merged base differing from the recorded one raises `ReviewbotMergedUnreviewedBase` (critical) for
+  a human to revert. A lost merge response or a restart cannot skip the audit, because the intent is
+  in the coordination repository [P7]. This is a
   detection control, stated as such; a server-enforced fence is not available on Gitea or GitHub.
 - **Boundary.** Merges read verdicts and then merge with `head_commit_id`; only humans can change a
   bot verdict at a head in between (publication forbids a second bot review), and operator edits of
@@ -347,35 +366,36 @@ author pushes a new head (an empty commit is enough). [C21, R12]
 ### 10. Retention (janitor)
 
 Every instance, once a day with random jitter: for each PR **merged** more than 7 days ago (merged
-PRs can never be reviewed again), delete all its coordination tags with `git push --delete` in
-batches of 100, continuing past failures and confirming absence through the refs listing (an API 404
+PRs can never be reviewed again), delete all its coordination tags through the adapter (Gitea: `git push --delete`; GitHub:
+`DELETE /git/refs`) in batches of 100, continuing past failures and confirming absence through the refs listing (an API 404
 does not prove a tag is gone) [X3]; 401/403 alert. Nothing else is ever
 deleted: closed-unmerged PRs (reopenable), old heads (force-push back) and every `pub`/`pubvoid`/
 `cut`/outcome tag of an open PR stay. Concurrent janitors are safe (idempotent deletes of tags no
 one will create again) [F10, C2, C24–C27]. Growth is bounded per **cut window**: at most 40 work claims per head between operator cuts
-(`hw - K >= 40` → exhausted), plus their outcomes [B5].
+(`hw - K + 1 >= 40` → exhausted), plus their outcomes [B5].
 
-The janitor authenticates to git through `GIT_ASKPASS` reading `/etc/reviewbot/pat`, never a URL or
-argv token.
+On Gitea the janitor authenticates to git through `GIT_ASKPASS` reading `/etc/reviewbot/pat`, never
+a URL or argv token; on GitHub it uses the adapter's API token.
 
 ### 11. Operator actions
 
 - `--coord-state <repo> <pr>`: print publication and work state of every head.
 - `--requeue <repo> <pr>`: current head exhausted → write `cut<hw+1>`. Refuses if leased.
-- `--requeue <repo> <pr> --force`: current head ambiguous → write `pubvoid<G>` only when **all**
-  hold [C5, R1, R3, B1, B3, B4, B6]:
-  1. no marker of this kind is visible at the head;
-  2. `pub<G>` is older than `pub_void_min_age_s` (3600). A dead client does not stop server-side
-     work: a POST already accepted by the forge could still commit after the client died. Forges
-     finish or abort a request within minutes, so an hour bounds that window; the replacement
-     publisher also repeats the marker check immediately before its own POST [B1];
-  3. the owner can no longer POST under `pub<G>`: it wrote `pubx<G>` (single-writer "right
-     consumed, no further POST from me", written on any POST exception), **or** the health URL
-     recorded in the `pub<G>` message (host:port, not a name lookup) answers with a different boot id
-     or pid, **or** the operator passes `--owner-stopped` after stopping that instance, **or** the
-     right is a migrated one (nonce prefix `migrated-`, instance `migrated`), which has no live owner.
-     An unreachable owner without `pubx` → refuse.
-  A `pubok<G>` does not block (the review may have been deleted).
+- `--requeue <repo> <pr> --force`: current head ambiguous → write `pubvoid<G>` only when **all** hold:
+  1. no marker of this kind is visible at the head (re-listed by the tool);
+  2. the owner can no longer **send** under `pub<G>`: it wrote `pubx<G>`, or the health URL recorded
+     in the `pub<G>` message (host:port) answers with a different boot id or pid, or the operator
+     passes `--owner-stopped` after stopping that instance, or the right is migrated (no `health`,
+     instance `migrated`). An unreachable owner without `pubx` → refuse [B3, B4, B6, P13];
+  3. **never sent** (no `pubsent<G>`): nothing can still commit → void allowed now. **Possibly sent**
+     (`pubsent<G>` exists): a POST may still be in flight at the forge. Void only when both
+     `now − t(pubsent) ≥ pub_void_min_age_s` (3600) and the tool's own `pubseen<G>` record (written on
+     its first observation, operator clock) is at least as old. Forges finish or abort a request
+     within minutes, so this is an operational precaution with two independent clocks, not a
+     correctness proof; the remaining exposure is a forge that commits a request more than an hour
+     after receiving it [B1, P0, P2].
+  A `pubok<G>` does not block (the review may have been deleted). `pub_void_min_age_s` is a config
+  key (default 3600).
 - Kill switches unchanged.
 - The Ansible role asserts that instance names are unique per kind, and an instance refuses to start
   when a live claim in the coordination repo carries its name with another health URL [B3].
@@ -414,11 +434,11 @@ Gitea down: nothing to review. Coordination repository unreachable while PRs wor
 (no model run without a work claim, no post without a publication right) and alert.
 
 **Restore procedure** (runbook) [R10, C36]: stop every reviewer instance first; restore; reconcile
-(`--coord-state` on open PRs); create `rb1.epoch.<unix time of the restore>` (taken from the
-operator's clock, outside the restored repository, so it can never collide with an epoch the backup
-lacks); start the instances. Each instance records the **full name of the newest epoch tag** at start
-and refuses to post or merge when it differs (checked immediately before each POST and merge), so a
-process that survived the restore cannot act on pre-restore ownership [R10, B8].
+(`--coord-state` on open PRs); write a **fresh random epoch id** (uuid4) to the coordination
+repository's `epoch` file (contents API, update conditioned on the file's current blob SHA); start the
+instances. Each instance records the epoch id at start and refuses to post or merge when the file's
+id differs (checked immediately before each POST and merge). A random id cannot repeat or sort
+wrong, whatever the restored state or the operator's clock [R10, B8, P14].
 
 ### 15. Rollout
 
@@ -436,9 +456,12 @@ maintenance window** [R9, C30].
    `POST /git/refs` races (exactly one ref, owner = target SHA; statuses observed);
    `matching-refs` pagination at 300 refs; tag object `tagger.date` handling; review POST with
    `line`/`side`; pending-review rule; compare-diff with the diff media type, its size limit and the
-   `/files` fallback; check runs + statuses rollup on a repository with Actions; merge with `sha`
-   and 409 on a moved head; whether an App APPROVE counts toward required approvals; ETag 304 on PR
-   and review lists; rate-limit and secondary-limit headers.
+   compare-JSON fallback (300-file cap); check runs + statuses rollup on a repository with
+   Actions, and **which commit** PR checks attach to; merge with `sha` and 409 on a moved head;
+   whether an App APPROVE counts toward required approvals; ETag 304 on PR and review lists;
+   rate-limit and secondary-limit headers (with and without `Retry-After`); whether a failed review
+   POST can leave a pending review; tag-object retry with a frozen payload gives the same SHA; a
+   server-set creation time for refs, if any [P1, P2, P4, P5, P6, P8].
 1. **Forge adapter refactor (no behaviour change):** move every Gitea call behind the adapter
    (`GiteaForge`), repositories addressed as `gitea:<owner>/<name>` (bare names keep meaning Gitea),
    existing suites unchanged. Then `GitHubForge` with its fake-forge tests; a GitHub repository can
@@ -515,6 +538,11 @@ maintenance window** [R9, C30].
 | C55 | Merge queue repositories | Out of scope: review + approve only | merge |
 | C56 | Retarget between final check and merge | Residual; post-merge base audit alert (B2) | merge |
 | C57 | Same repo name on both forges | Repositories are forge-qualified everywhere | both |
+| C58 | GitHub tag-object retry after a lost ref response | Frozen payload → same SHA; ownership by pointed-object nonce | both |
+| C59 | Owner timed out on a POST that is still in flight | `pubsent` → void only after an hour on two clocks | pub |
+| C60 | Owner failed before sending | No `pubsent` → `pubx` → void allowed at once | pub |
+| C61 | Lost merge response + retarget | `mergeint` persisted → audit still runs | merge |
+| C62 | Zero CI on a GitHub head | Not green (at least one check required) | merge |
 
 ## Critical files
 
@@ -558,4 +586,4 @@ maintenance window** [R9, C30].
 5. **Live:** Phase 0 spike results recorded; Phase 2 one-week comparison; Phase 3 pre-test with two
    processes on 10 simultaneous fixture PRs, then kill one mid-review.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
