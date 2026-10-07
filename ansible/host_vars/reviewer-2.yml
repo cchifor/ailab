@@ -29,7 +29,15 @@ journal_ship_enabled: true
 #
 # pr_reviewer_llm_sudo_user stays set below: it is what the dormant OpenBao import still gates on,
 # and the systemd NoNewPrivileges condition covers both variables.
+#
+# SEAT `r` IS THE LLM ROUTER (2026-10-07; reviewbot.py § router seats, runbook dev-workers.md §
+# "Router seats"): API key key_d7adf31fb93e on router.chifor.me, granted the `codex` route
+# (round-robin over the router's own Codex seats). Preferred over a-d within the tier and never
+# sticky; a-d stay as the fallback AND must stay configured: the hourly usage probe is what
+# refreshes the seat logins that dsh and LiteLLM read (dsh.md § Codex subscriptions).
 pr_reviewer_llm_seats:
+  - { name: r, sudo_user: "", router_url: "https://router.chifor.me",
+      key_file: "{{ pr_reviewer_router_key_file }}", models: { gpt-6-astra: codex } }
   - { name: a, sudo_user: codexrun }
   - { name: b, sudo_user: codexrun2 }
   - { name: c, sudo_user: codexrun3 }
