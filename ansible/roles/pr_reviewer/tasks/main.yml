@@ -5,6 +5,7 @@
 # webhook secret, so revocation/rotation and attribution stay independent:
 #   reviewbot_<persona>_pat: <gitea PAT for reviewer-<persona>, scope write:repository>
 #   reviewbot_<persona>_webhook_secret: <hex — HMAC for THAT persona's org webhook>
+#   reviewbot_<persona>_router_key: <llm-router API key for THAT persona's router seat (optional)>
 # The whole role skips gracefully while that file is absent.
 - name: Check for the reviewbot secrets file (control node)
   ansible.builtin.stat:
@@ -28,6 +29,7 @@
   ansible.builtin.set_fact:
     _reviewbot_pat: "{{ lookup('vars', 'reviewbot_' ~ pr_reviewer_persona ~ '_pat', default='') }}"
     _reviewbot_webhook_secret: "{{ lookup('vars', 'reviewbot_' ~ pr_reviewer_persona ~ '_webhook_secret', default='') }}"
+    _reviewbot_router_key: "{{ lookup('vars', 'reviewbot_' ~ pr_reviewer_persona ~ '_router_key', default='') }}"
   no_log: true
 
 - name: Reviewbot directories
@@ -220,6 +222,21 @@
   no_log: true
   when: _reviewbot_webhook_secret | length > 0
   notify: Restart reviewbot
+
+# The router seat's API key (a seat with `router_url`, see reviewbot.py § router seats). Read
+# per call by the service user, never handed to a model, so no restart: a rotated key is live
+# on the next review. Minted through the router's approval flow (<router>/agent/skill.md) and
+# escrowed here; runbook dev-workers.md § "Router seats".
+- name: Install the router key
+  ansible.builtin.copy:
+    content: "{{ _reviewbot_router_key }}
+"
+    dest: "{{ pr_reviewer_router_key_file }}"
+    owner: "{{ pr_reviewer_user }}"
+    group: "{{ pr_reviewer_user }}"
+    mode: "0600"
+  no_log: true
+  when: _reviewbot_router_key | length > 0
 
 # ufw default-denies inbound on the workers (dev_worker firewall.yml); the Gitea webhook
 # delivery is LAN-sourced (cluster egress masquerades to node IPs), same as the agentforge
