@@ -229,8 +229,7 @@
 # escrowed here; runbook dev-workers.md § "Router seats".
 - name: Install the router key
   ansible.builtin.copy:
-    content: "{{ _reviewbot_router_key }}
-"
+    content: "{{ _reviewbot_router_key }}\n"
     dest: "{{ pr_reviewer_router_key_file }}"
     owner: "{{ pr_reviewer_user }}"
     group: "{{ pr_reviewer_user }}"

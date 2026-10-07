@@ -39,6 +39,13 @@ class Router(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         for k, v in (headers or {}).items():
             self.send_header(k, v)
+        if payload == "CUT":
+            self.send_header("content-type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b"40\r\ndata: {\"choices\": []}")      # 0x40 announced, fewer sent
+            self.wfile.flush()
+            self.close_connection = True
+            return
         if isinstance(payload, list):           # SSE
             self.send_header("content-type", "text/event-stream")
             self.end_headers()
@@ -213,6 +220,31 @@ class RouterSeatTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             m.run_llm("t", "d", "diff")
         self.assertIn("truncated", str(cm.exception))
+
+    def test_eof_before_completion_is_never_a_review(self):
+        """A complete-looking review JSON followed by a cut connection (no finish_reason, no
+        [DONE]) must not become a merge-gating verdict."""
+        m = self.load([self.router_seat(model="x")])
+        chunks = [{"choices": [{"index": 0, "delta": {"content": json.dumps(REVIEW)}}]}]
+        Router.script = [(200, {}, chunks)]
+        with self.assertRaises(RuntimeError) as cm:
+            m.run_llm("t", "d", "diff")
+        self.assertIn("before completion", str(cm.exception))
+        self.assertFalse(m.seat_parked("r"))
+
+    def test_finish_reason_without_done_is_complete(self):
+        m = self.load([self.router_seat(model="x")])
+        Router.script = [(200, {}, sse_answer(json.dumps(REVIEW))[:-1])]   # drop [DONE]
+        self.assertEqual(m.run_llm("t", "d", "diff")["summary"], "looks fine")
+
+    def test_chunked_stream_cut_mid_chunk_is_a_model_error(self):
+        """IncompleteRead is an HTTPException, not an OSError."""
+        m = self.load([self.router_seat(model="x")])
+        Router.script = [(200, {"transfer-encoding": "chunked"}, "CUT")]
+        with self.assertRaises(RuntimeError) as cm:
+            m.run_llm("t", "d", "diff")
+        self.assertNotIsInstance(cm.exception, m.RateLimited)
+        self.assertIn("router stream failed", str(cm.exception))
 
     def test_5xx_is_a_model_error_not_a_park(self):
         m = self.load([self.router_seat(model="x")])

@@ -14,6 +14,7 @@ validated, invalid ones demote to the summary. Phase-1 posture (see plan):
 event=COMMENT locked, central allowlist only, runs as the worker user.
 """
 import fnmatch
+import http.client
 import calendar
 import hashlib
 import hmac
@@ -2032,11 +2033,14 @@ def _run_router(seat, tier, prompt, remaining):
                     time.sleep(wait)
                     continue
             raise exc from None
-        except (urllib.error.URLError, OSError) as e:
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
             remaining()                 # past the deadline this raises TimeoutExpired instead
             raise ModelError(f"router unreachable: {type(e).__name__}: {e} [route {route}]") from None
         break
-    parts, usage, finish = [], None, None
+    # `done` is the stream's own end - `[DONE]` or a finish_reason. EOF without either is a
+    # connection cut short (Cloudflare, the router restarting), and the text so far may still
+    # parse as a complete-looking review: it must never become a merge-gating verdict.
+    parts, usage, finish, done = [], None, None, False
     with resp:
         sock = _stream_socket(resp)
         while True:
@@ -2048,7 +2052,7 @@ def _run_router(seat, tier, prompt, remaining):
                     pass
             try:
                 line = resp.readline(1 << 20)
-            except OSError as e:
+            except (OSError, http.client.HTTPException) as e:
                 remaining()
                 raise ModelError(f"router stream failed: {type(e).__name__}: {e} "
                                  f"[route {route}]") from None
@@ -2059,6 +2063,7 @@ def _run_router(seat, tier, prompt, remaining):
                 continue                # SSE comments (keepalives), event: lines, blanks
             data = line[5:].strip()
             if data == b"[DONE]":
+                done = True
                 break
             try:
                 obj = json.loads(data)
@@ -2078,7 +2083,7 @@ def _run_router(seat, tier, prompt, remaining):
                 if isinstance(c, str):
                     parts.append(c)
                 if ch.get("finish_reason"):
-                    finish = ch["finish_reason"]
+                    finish, done = ch["finish_reason"], True
             if isinstance(obj.get("usage"), dict):
                 usage = obj["usage"]
     if usage:
@@ -2087,6 +2092,9 @@ def _run_router(seat, tier, prompt, remaining):
         except (TypeError, ValueError):
             pass
     text = "".join(parts)
+    if not done:
+        raise ModelError(f"router stream ended before completion ({len(text)} chars, no "
+                         f"finish_reason or [DONE]) [route {route}]")
     if finish == "length":
         raise ModelError(f"router answer truncated (finish_reason=length) [route {route}]")
     if not text.strip():
@@ -2106,6 +2114,10 @@ def _run_llm(title, desc, diff_text, rubric, started, seat, model):
         return left
 
     prompt = rubric + PROMPT.replace("{title}", title).replace("{description}", desc or "") + diff_text
+    # NO scan_output HERE, deliberately: that scan looks for the SEAT's own credential (an
+    # auth.json in the HOME the CLI runs from), which a prompt-injected diff could have the CLI
+    # read into its answer. A router model runs on the router's hosts with no access to this
+    # machine, and the only credential in play - the router key - is never in the prompt.
     if is_router_seat(seat):
         return parse_review(_run_router(seat, model, prompt, remaining))
     workdir = tempfile.mkdtemp(prefix="reviewbot-")
