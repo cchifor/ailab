@@ -149,6 +149,9 @@ RESPOND_PY = STATE_HELPERS + textwrap.dedent("""\
     if method == "GET" and path == f"{base}/branches/main":
         reply(200, SC["branch"])
     if method == "GET" and path.startswith(f"{base}/commits/") and path.endswith("/status"):
+        if q.get("page", "1") == "1" and ST.get("status_fails", 0) < SC.get("status_fail_reads", 0):
+            ST["status_fails"] = ST.get("status_fails", 0) + 1
+            reply(502, {"message": "bad gateway"})
         phases, key = (SC["after_rerun"], "reads_after") if ST.get("rerun") else (SC["statuses"], "reads")
         idx = min(ST.get(key, 0), len(phases) - 1)
         items = page(phases[idx])
@@ -198,6 +201,10 @@ KUBE_PY = STATE_HELPERS + textwrap.dedent("""\
             if not SC.get("revocation_ineffective") and name in ST["minted"]:
                 ST["revoked"].append(ST["minted"][name])
             save()
+            if SC.get("term_on_delete"):
+                # an impatient operator or task runner: TERM to the script while it deletes the token
+                import subprocess
+                subprocess.run(["pkill", "-TERM", "-f", "gitea-owner-merge.sh %s %s" % (SC["repo"], SC["pr"]["number"])])
             print("DELETE 1")
         elif "string_agg" in stdin:
             event("LIST")
@@ -480,7 +487,10 @@ class GiteaOwnerMergeTest(unittest.TestCase):
             self.assert_refused_without_minting(r)
 
     def test_refuses_a_wip_or_draft_pr(self):
-        for extra in ({"title": "WIP: feat: x"}, {"title": "[WIP] feat"}, {"draft": True}):
+        # Gitea's own prefixes (WIP:, [WIP]) set draft; the gate also refuses any title that starts with the
+        # word WIP (reviewer-codex on ailab#1136): an owner gate errs on the side of refusing.
+        for extra in ({"title": "WIP: feat: x"}, {"title": "[WIP] feat"}, {"draft": True}, {"title": "WIP feature"},
+                      {"title": "WIP - feature"}, {"title": "wip: x"}, {"title": "(WIP) x"}, {"title": " [ wip ] x"}):
             self.fresh()
             pr = {"number": 7, "state": "open", "merged": False, "draft": False, "title": "feat: x",
                   "head": {"sha": HEAD}, "base": {"ref": "main"}}
@@ -488,6 +498,13 @@ class GiteaOwnerMergeTest(unittest.TestCase):
             self.scenario(pr=pr)
             r = self.run_script("platform", "7", HEAD)
             self.assert_refused_without_minting(r)
+
+    def test_a_title_that_only_starts_with_wip_letters_is_not_wip(self):
+        pr = {"number": 7, "state": "open", "merged": False, "draft": False, "title": "Wipe stale tokens",
+              "head": {"sha": HEAD}, "base": {"ref": "main"}}
+        self.scenario(pr=pr)
+        r = self.run_script("platform", "7", HEAD, execute=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_refuses_when_a_bot_did_not_approve_the_head(self):
         cases = [
@@ -637,6 +654,33 @@ class GiteaOwnerMergeTest(unittest.TestCase):
         self.assertEqual(len(self.mints()), 1)
         self.assertEqual(len(self.deletes()), 1, "a half-made token is deleted by name")
         self.assertEqual(self.owner_calls(), [])
+
+    @unittest.skipIf(os.name == "nt" or shutil.which("pkill") is None, "POSIX signals and pkill needed")
+    def test_signals_during_the_revocation_do_not_abort_it(self):
+        # reviewer-claude on ailab#1136: a TERM during the delete runs the exit trap, and a SECOND one during the
+        # trap's own delete must not abort it. A unique PR number keeps pkill's pattern on this run only.
+        self.scenario(term_on_delete=True,
+                      pr={"number": 424242, "state": "open", "merged": False, "draft": False, "title": "feat: x",
+                          "head": {"sha": HEAD}, "base": {"ref": "main"}})
+        r = self.run_script("platform", "424242", HEAD)
+        ev = self.events()
+        self.assertGreaterEqual(len(self.deletes()), 1)
+        last_delete = max(i for i, e in enumerate(ev) if e.startswith("DELETE "))
+        self.assertIn("LIST", ev[last_delete:], (r.returncode, r.stdout, r.stderr))
+        self.assertIn("next use -> HTTP 401", r.stdout, r.stderr)
+        self.assertNotIn("NOT CONFIRMED", r.stdout + r.stderr)
+
+    def test_a_transient_read_failure_while_waiting_is_retried(self):
+        self.scenario(status_fail_reads=1)
+        r = self.run_script("platform", "7", HEAD, polls="3")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.mints()), 1)
+
+    def test_persistent_read_failures_refuse_without_minting(self):
+        self.scenario(status_fail_reads=99)
+        r = self.run_script("platform", "7", HEAD, polls="10")
+        self.assert_refused_without_minting(r)
+        self.assertIn("read", r.stdout + r.stderr)
 
     def test_unconfirmed_revocation_is_loud(self):
         self.scenario(revocation_ineffective=True)

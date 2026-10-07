@@ -67,7 +67,10 @@ when platform `owner-ack.md` requires one.
      requires no context the file lacks. A repo without a contexts file is refused.
 
    While contexts are pending or missing, it waits (default 120 polls of 30 s) and re-runs the whole gate on
-   every poll, still with no credential.
+   every poll, still with no credential. A failed read is retried on the next poll; three failures in a row
+   stop the run.
+   A bot's latest review at the head counts, whatever its type: a later COMMENT review (`verdict=findings`)
+   refuses, exactly as it stops the bots' own merge (`reviewbot.py`, `persona_verdicts`).
 2. **Owner operation**, with `--execute` only. Only then is a token minted (`owner-op-<repo>-<pr>-<purpose>-<utc>`, scopes
    `write:issue,write:repository`). It lives in a shell variable and reaches curl only on stdin
    (`curl -q --proto =https --max-redirs 0 -H @-`), so it is never in a process argument or the output.
@@ -78,7 +81,7 @@ when platform `owner-ack.md` requires one.
      waits with no token until every context passes; token 2 does the merge. If owner-ack fails again after
      the re-run, it stops. If owner-ack is already green, no pin is posted.
 3. **Revocation.** A trap on EXIT, INT, TERM and HUP deletes the token by name on the infra-pg primary
-   (found by label, not by pod name). The script then proves the token is dead: it is gone from the database,
+   (found by label, not by pod name). Further signals are ignored while it does. The script then proves the token is dead: it is gone from the database,
    and its next use answers HTTP 401. It also prints the names of the tokens `chifor` still holds.
 
 What an `--approve-pin` run prints. This is platform #2149 on 2026-10-07; that run was unintended (see the

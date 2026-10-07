@@ -85,6 +85,8 @@ TOKEN=""  # its value: never printed, never an argument
 DB_POD=""
 on_exit() {
   local rc=$?
+  # A second INT/TERM/HUP must not abort the revocation (its kubectl children inherit the ignore).
+  trap '' INT TERM HUP
   revoke || rc=5
   rm -rf "$WORK"
   exit "$rc"
@@ -175,7 +177,8 @@ if pr.get("merged"):
     verdict("REFUSE", "the PR is already merged")
 if pr.get("state") != "open":
     verdict("REFUSE", f"the PR is {pr.get('state')}")
-if pr.get("draft") or re.match(r"\s*(WIP:|\[WIP\])", pr.get("title") or "", re.I):
+# Gitea sets draft for its own prefixes (WIP:, [WIP]); any title starting with the word WIP is refused too.
+if pr.get("draft") or re.match(r"\s*[\[(]?\s*WIP\b", pr.get("title") or "", re.I):
     verdict("REFUSE", "the PR is a draft or WIP")
 if (pr.get("base") or {}).get("ref") != "main":
     verdict("REFUSE", f"the PR targets {(pr.get('base') or {}).get('ref')}, not main")
@@ -243,7 +246,7 @@ if mode == "pin" and ack == "absent":
 verdict("OK", summary)
 PY
 
-# gate MODE: one credential-free pass; sets VERDICT.
+# gate MODE: one credential-free pass; sets VERDICT (READFAIL when a read failed, so no verdict was reached).
 gate() {
   if get "/repos/$ORG/$REPO/pulls/$PR" "$WORK/pr.json" \
     && get_pages "/repos/$ORG/$REPO/pulls/$PR/reviews" "$WORK/reviews.jsonl" \
@@ -251,17 +254,22 @@ gate() {
     VERDICT=$(py "$WORK/gate.py" "$1" "$CONTEXTS" "$HEAD_SHA" "$WORK/pr.json" "$WORK/reviews.jsonl" \
       "$WORK/status.jsonl") || VERDICT="REFUSE the gate evaluation failed"
   else
-    VERDICT="REFUSE a gate read failed"
+    VERDICT="READFAIL a gate read failed"
   fi
 }
 
 # wait_gate MODE [STALE_ACK_IDS]: run the gate until it passes, holding NO owner token. After a pin, PIN with the
-# same owner-ack status ids is the old failure not yet re-run (keep waiting); with new ids it failed again.
+# same owner-ack status ids is the old failure not yet re-run (keep waiting); with new ids it failed again. A
+# failed read is retried on the next poll (no credential is held), up to 3 in a row.
 wait_gate() {
-  local mode=$1 stale=${2:-} i
+  local mode=$1 stale=${2:-} i readfails=0
   for i in $(seq 1 "$MAX_POLLS"); do
     gate "$mode"
     case $VERDICT in
+      READFAIL\ *)
+        readfails=$((readfails + 1))
+        [ "$readfails" -lt 3 ] || stop 3 "$readfails gate reads in a row failed; nothing (more) minted"
+        log "a gate read failed ($readfails in a row); retrying on the next poll" ;;
       OK\ *) return 0 ;;
       PIN\ *)
         [ -z "$stale" ] && return 0
@@ -270,6 +278,7 @@ wait_gate() {
       WAIT\ *) ;;
       *) stop 3 "${VERDICT#REFUSE }" ;;
     esac
+    [[ "$VERDICT" == READFAIL\ * ]] || readfails=0
     [ $((i % 10)) -eq 1 ] && log "waiting: ${VERDICT#* }"
     [ "$i" -lt "$MAX_POLLS" ] && sleep "$POLL_SECONDS"
   done
@@ -362,6 +371,7 @@ if [ -z "$EXECUTE" ]; then
     WAIT\ *)
       log "DRY RUN: would wait (up to $MAX_POLLS polls of ${POLL_SECONDS}s, no credential) for: ${VERDICT#WAIT }"
       exit 6 ;;
+    READFAIL\ *) stop 3 "${VERDICT#READFAIL }" ;;
     *) stop 3 "${VERDICT#REFUSE }" ;;
   esac
   log "DRY RUN: nothing minted, posted or merged. Re-run with --execute to do it."
