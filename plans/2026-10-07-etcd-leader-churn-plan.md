@@ -1,268 +1,265 @@
 # etcd leader churn on shared consumer NVMe: analysis and remediation
 
-## Codex Review
+## Review decisions (round 1: Codex + Fable)
 
-- The WAL stalls and shared-storage topology strongly justify isolating control-plane storage; preserving discard and retaining the infrastructure alert are sensible.
-- A 5000 ms election timeout does **not** guarantee surviving a 5 s leader stall. Longer timeouts can prolong API outages, and longer controller leases suppress symptoms without restoring service.
-- Step 2 incorrectly treats every controller as a singleton: snapshot-controller has two replicas. CNPG and Kyverno require cross-repo work, and the pinned NFS chart does not expose the proposed lease settings.
-- Missing safeguards include runtime flag verification, explicit rollback, stronger maintenance gates, hardware compatibility checks, and reconciliation of disk placement with OpenTofu.
-- **Best solution:** prioritize step 3 and start compatibility checks/procurement now; bring step 5 and temporary CI load reduction forward. Use supported step 2 changes selectively if needed, consider step 1 only as a measured bridge, and skip step 4 unless a small experiment demonstrates worthwhile protection.
+Both reviewers independently ranked the dedicated control-plane disk first.
+
+- **Accepted from both:**
+  - The election-timeout change is a *bridge*, not a fix; it does not guarantee riding out a 5 s
+    stall.
+  - `io.latency` is dropped: the kernel lacks `CONFIG_BLK_CGROUP_IOLATENCY` and `qemu.slice` does not
+    delegate `io`.
+  - Thermal is a real factor.
+  - The verification and rollback gates are tightened.
+- **Accepted from Codex:**
+  - Keep heartbeat 250 and raise only election-timeout. A simulation agrees: for a 5.03 s leader
+    stall, P(election) is 11% at 250/5000 vs 20% at 500/5000 vs 100% at 250/2500.
+  - snapshot-controller already runs 2 replicas.
+  - The csi-nfs chart hard-codes its sidecar arguments.
+  - Kyverno and CNPG live in cchifor/platform.
+  - CP disk placement is declared in `kubernetes/infra/vms.tf` and must be reconciled after a move.
+  - Verify running flags, not EtcdSpec.
+  - Take an off-host etcd snapshot before any roll.
+  - Reduce CI load during maintenance.
+- **Accepted from Fable:**
+  - Kyverno's admission webhooks are `failurePolicy: Fail` with a single replica, so a restart blocks
+    API writes. Raise it to 2 replicas.
+  - Use `talosctl reboot`.
+  - Keep cp1 from holding leadership until the disk move.
+  - Concrete PLP part numbers.
+  - NVMe controller temperatures reach 92-101 °C.
+- **Disputed (round 2):** thick LVM vs LVM-thin for the new storage; whether step 1 is net-harmful.
+  See the `opus-pushback` markers.
 
 ## Context
 
-**Symptom.** At 2026-10-07 05:57Z, `ControlPlaneRestartWave` (critical) fired: 9 control-plane
-controllers restarted once each within 10 min:
+**Symptom.** On 2026-10-07 at 05:57Z, `ControlPlaneRestartWave` (critical) fired:
 
-- cnpg-operator, kyverno admission/background/cleanup/reports
-- csi-nfs-controller (3 sidecars), snapshot-controller
+- 9 control-plane controllers lost their client-go leases ("context deadline exceeded" / "leader
+  election lost") at 05:56:29-30Z and restarted once each: cnpg-operator, the kyverno
+  admission/background/cleanup/reports controllers, csi-nfs-controller and snapshot-controller.
+- They recovered on their own.
+- The problem is chronic. Lifetime restarts: cnpg-operator 50 since 2026-09-29, kyverno 45-54,
+  csi-nfs-controller 111.
+- Leader changes, per member (each member counts the same transition):
+  - 10 in the 12 h to 06:09Z;
+  - 4, 2, 4, 2, 0 and 6 in the earlier 12 h windows.
+- Restarts happen when API calls stall for longer than the clients' renew deadline, which elections
+  and long leader stalls both cause.
 
-All had lost their client-go leader-election lease ("context deadline exceeded" / "leader election
-lost") at 05:56:29-30Z. They recovered on their own. The underlying problem is chronic:
+**Topology.**
 
-- `etcd_server_leader_changes_seen_total` rose by 10 in the 12 h to 06:09Z.
-<!-- codex: This counter is per member and counts observed leader changes, not uniquely identified cluster elections; retain the per-member query and corroborate terms/logs rather than summing the same transition across three members. -->
-- Earlier 12 h windows: 4, 2, 4, 2, 0, 6.
-- The cnpg-operator pod (created 2026-09-29) has restarted 50 times; the kyverno controllers 45-54
-  times; csi-nfs-controller 111. Each election produces a restart round.
-<!-- codex: “Each election” is too strong: a brief election need not exhaust renewal retries, and an API/storage stall can cause lease loss without an election. Correlate individual restart reasons and renewal failures with the outage timeline. -->
-
-**Topology.** 3 Talos CPs, one per Proxmox host (ai-node1/2/3, Bosgame M5).
-
-- Each CP VM disk (80 GB, `local-lvm` thin) lives on the host's SINGLE NVMe: Kingston
-  OM8TAP42048K1 2 TB, consumer QLC, no PLP.
-- The same drive also carries:
-  - 2-3 Gitea Actions CI runner VMs per host (200 GB each, heavy docker build churn of
-    0.6-0.9 TB/day per runner);
-  - dev-worker VMs (node1);
-  - the Zot registry LXC (node1);
+- 3 Talos CPs, one per Proxmox host (ai-node1/2/3, Bosgame M5). `allowSchedulingOnControlPlanes` is
+  true, so the CPs also run app pods.
+- Each CP VM disk is 80 GB on `local-lvm` thin, on the host's single NVMe: a Kingston OM8TAP42048K1
+  2 TB, consumer QLC, DRAM-less, no PLP.
+- The same drive carries:
+  - 2-3 CI runner VMs (200 GB each, docker-build churn of 0.6-0.9 TB/day each);
+  - dev-workers and the Zot registry LXC (node1);
   - a Talos agent-node VM;
   - reviewer VMs and an LLM LXC (node3).
-- etcd's WAL (fdatasync per raft Ready) sits on the CP VM disk (Talos EPHEMERAL, /var).
-- Current etcd timing (machine-config `controlplane.yaml.tftpl`): `heartbeat-interval: 250`,
-  `election-timeout: 2500`. Raised from the 100/1000 defaults on 2026-09-29 (#951); leader changes
-  dropped to ~0 for a while, then returned.
-- Changing etcd flags needs one controlled reboot per CP. Talos updates EtcdSpec live but the
-  process keeps its old flags until boot, and `service etcd restart` is refused. Procedure: roll one CP
-  at a time with `_out/talosctl-1112.exe`, and require `talosctl etcd status` to show 3/3 in sync
-  between reboots.
-<!-- codex: This matches the documented behavior of this Talos deployment; retain the controlled reboot requirement and version-matched client rather than substituting an unsupported service restart. Resolve `_out` relative to `kubernetes/infra` and verify the running server versions before the roll. -->
+- The CP disk config is right for etcd: `cache=none`, `aio=io_uring`, `iothread=1`, guest write-cache
+  on, so flushes propagate.
+- About 85% of the device's FLUSH commands come from non-CP guests: host 202/146/126 flush/s vs
+  21-25/s per CP.
+- etcd's WAL sits on the CP VM disk (Talos EPHEMERAL).
+- Timing today is `heartbeat-interval 250` / `election-timeout 2500`
+  (`kubernetes/infra/machine-config/controlplane.yaml.tftpl:104-105`), raised from 100/1000 on 09-29
+  (#951).
+- etcd flag changes need one controlled reboot per CP: Talos updates EtcdSpec live but the process
+  keeps its old flags, and `service etcd restart` is refused.
 
 ## Evidence
 
-<!-- codex: The incident measurements below are reported evidence, not independently reproduced by this repository review; attach the relevant log excerpts and PromQL queries with UTC windows, member labels, and scrape resolution so the diagnosis and baseline are reproducible. -->
+All times UTC. Queries use etcd histograms on instances 192.168.0.41/42/43:2381 (cp1/2/3) and
+node-exporter on hosts 192.168.0.2/3/4.
 
-**1. Today's event was a leader-side WAL fsync stall on cp3 (ai-node3).**
+**1. Today's trigger: a device-wide write freeze on ai-node3 while cp3 was leader.**
 
-- cp3 was the etcd leader (member 1fd6da7fa19ceda6). Its etcd log:
-  - `slow fdatasync took 5.030716525s` at 05:56:23.79Z, so the sync started around 05:56:18.76;
-  - another `slow fdatasync 1.89s` at 05:56:25.68.
-- Sequence:
-  - from 05:56:19 all members logged "waiting for ReadIndex response took too long";
-  - at 05:56:21.77 cp2 started a pre-vote, then won term 779;
-  - cp3 truncated its unstable entries and became follower.
-- Transactions took 5-6 s around the election, and lease renewals with a 10 s client deadline failed.
-- ai-node3 host for the minute covering the stall:
-  - NVMe average write latency 84.6 ms (normally 2-8 ms) at only ~685 write IOPS and <1 MB/s reads;
-  - host IO PSI 19% ("some"), meaning roughly 11 s stalled in that minute;
-  - nvme writes 11-24 MB/s and discards ~0, so there was NO heavy load at the time;
-<!-- codex: One-minute throughput averages cannot exclude short bursts, queueing, flush serialization, or delayed effects of earlier writes; low completed throughput can itself result from a stalled device. IO PSI “some” measures time with at least one task stalled, not a continuous whole-host freeze. -->
-  - no kernel/NVMe errors, SMART media_errors 0, error-log empty;
-  - NVMe Thermal Management T1/T2 transition counts 0 on node3 (node2's drive shows T1 count 2,
-    387 s total);
-  - controller temperature sensors run 77-90 °C on all three hosts.
-<!-- codex: Zero T1/T2 transitions do not exclude every firmware thermal-throttling mechanism; identify the sensors and vendor thresholds, then inspect cooling and airflow now. These temperatures warrant investigation before adding another heat source to each enclosure. -->
-- Heavy CI writes on node3 only started at 05:57:30 (3.8-7.5k write IOPS), after the stall.
-- Reading: a firmware-internal write stall (QLC SLC-cache fold / GC, possibly thermal) on the
-  drive, not host-level contention.
-<!-- codex: Internal GC/cache folding is plausible, but the evidence does not isolate it from host scheduling, memory pressure, device-mapper, or QEMU delays. Describe shared-storage tail latency as established and the precise mechanism as a hypothesis; isolation remains justified without proving that mechanism. -->
+- cp3 logged `slow fdatasync 5.03s` (completed 05:56:23.79) and `1.89s` (05:56:25.68).
+- cp2 pre-voted at 05:56:21.77, about 3.0 s in and inside the current 2.5-5 s window, and won term
+  779.
+- On the host:
+  - nvme average write latency 84.6 ms;
+  - `io_time_weighted` 58 s/s, i.e. the whole device frozen about 5 s;
+  - only 0.6-24 MB/s of writes, discard 0;
+  - memory PSI 0, swap 0, CPU PSI about 0, cp3 steal under 1%, peer RTT p99 6 ms;
+  - no kernel or NVMe errors.
+- The exact firmware mechanism is a hypothesis: QLC SLC-cache fold / GC and/or controller-die
+  thermal throttling. A shared-device tail-latency freeze is established.
 
-**2. Multi-second WAL fsyncs happen on ALL three members, worst on cp1.**
+**2. Thermal.**
 
-WAL fsyncs >2.048 s:
+- NVMe sensor-1 24 h maxima: node1 92 °C, node2 101 °C, node3 94 °C (87-89 °C during the event).
+- node2 SMART: T1 throttle transitions 2, 387 s total.
+- node1/node2 "Warning Temperature Time" 7/5 min.
 
-| Window | cp1 | cp2 | cp3 |
+**3. Stall-length distribution (WAL fsync, 7 d, count above threshold):**
+
+| | cp1 | cp2 | cp3 |
 |---|---|---|---|
-| 1 d | 382 | 38 | 13 |
-| 7 d | 1926 | 212 | 87 |
+| > 1.024 s | 5455 | 808 | 375 |
+| > 2.048 s | 1914 | 211 | 86 |
+| > 4.096 s | 595 | 34 | 15 |
+| > 8.192 s | 126 | 4 | 1 |
 
-Hourly fsyncs >1.024 s since 2026-10-06 12:00Z:
+- Leaders in the last 36 h were always cp2 or cp3.
+- cp1 is a dangerous leader candidate, with 126 stalls over 8 s in a week.
 
-- cp1: 33-135/h during busy CI hours, 1-5/h overnight;
-- cp2: 0-31/h;
-- cp3: 0-12/h.
+**4. ai-node1 contention (analysed and partly fixed on 10-06).**
 
-Leaders over that period were cp2 and cp3. Leader changes per hour came in 1s, 2s and 3s
-(midnight hour 3), each aligned with slow fsyncs on the then-leader. With pre-vote on, a slow
-FOLLOWER (cp1) is not expected to disrupt; elections follow LEADER stalls.
-<!-- codex: Pre-vote avoids raising the term without prospective quorum support, while check-quorum's recent-leader protection helps reject disruptive votes; a lone stalled follower normally cannot displace a healthy leader/majority. It still reduces redundancy, and stalls on both followers can prevent commits or make the leader step down; see the [Raft implementation](https://github.com/etcd-io/raft/blob/v3.6.0/raft.go). -->
+- cp1's bad minutes correlate with node1 runner writes: median 46 vs 12 MB/s.
+- node1 had the fullest thin pool (72% vs 51/34%) and the highest avg write latency
+  (11.6 vs 4.1/1.0 ms). Pool allocation is only a proxy for the SSD's real NAND occupancy.
+- Done:
+  - chunked registry-LXC trim: pool 71.6 → 59.8%, node1 IO PSI about 33 → 15%;
+  - Flux `platform` artifact trim (#1106): cp1 own-disk writes 2.3-4.0 GB → 54 MB per 10 min.
+- cp1's slow fsyncs fell, but there were 7 leader changes between 20:18Z and 06:09Z.
 
-**3. cp1 / ai-node1 contention was analysed and partly fixed on 2026-10-06.**
+**5. Rejected levers.**
 
-- Over 24 h at 1-min resolution, the 124 minutes with cp1 fsync p99 >500 ms had node1-runner writes
-  of median 46 MB/s, against 12 MB/s in good minutes.
-- Discard volume did not separate bad minutes from good ones.
-- Per-runner 2-min write max was 169 MB/s, p99 ~92-116.
-- What separates node1 from node2 (similar CI writes) is thin-pool fill: 72% vs 51%; QLC slows as
-  it fills. Avg NVMe write latency was node1 11.6, node2 4.1, node3 1.0 ms; host IO PSI 22-30% vs <2%.
-<!-- codex: Thin-pool allocation is not the SSD's physical NAND occupancy or spare-space budget, and this cross-host comparison does not establish fill as the sole cause. Verify discard pass-through, thin-pool data and metadata usage, and other host workloads before attributing the difference entirely to QLC fullness. -->
-- Done on 2026-10-06:
-  - (a) Chunked fstrim of the registry LXC mp0: 212 GB freed, node1 pool 71.6 → 59.8%, node1 IO
-    PSI ~33 → ~15%.
-  - (b) Flux `platform` GitRepository `spec.ignore`: kustomize-controller unpack writes on cp1's
-    own disk went 2.3-4.0 GB → 54 MB per 10 min (ailab #1106).
-  - (c) The forge Postgres reclaim (unrelated to etcd).
-- Result: cp1 slow fsyncs fell to 43-77/h busy and 1-5/h overnight. Leader churn did NOT stop: 7
-  elections between 20:18Z on 10-06 and 06:09Z on 10-07.
+- Runner write caps: 120 MB/s halved fleet throughput on 09-29, and higher caps barely engage.
+- Removing runner `discard`: refills the pool.
+- `io.latency`: not compiled in (`# CONFIG_BLK_CGROUP_IOLATENCY is not set`, kernel 7.0.2-6-pve).
+  dm-thin worker IO is unattributable anyway.
+- None of these touch device-internal freezes.
 
-**4. Options measured or tried and rejected.**
+**6. Hardware.**
 
-- Runner PVE write caps:
-  - 120 MB/s halved fleet write throughput on 09-29.
-  - A 250/500 MB/s burst ceiling would never engage (max observed 169).
-<!-- codex: A two-minute maximum cannot prove a subsecond burst cap would never engage; measure at the limiter's timescale and consider aggregate traffic from all runners. The previous throughput regression supports caution, not this categorical conclusion. -->
-  - A cap low enough to matter (~30-40 MB/s) trades heavy CI throughput while the queue is already
-    215 deep.
-- Removing runner `discard`: runner disks are already 74-79% allocated WITH online discard, so pool
-  fill (the harmful variable) would rise.
-- Neither addresses device-internal stalls like today's, which happened at light load.
-<!-- codex: Reduced writes can lessen later GC/cache-folding pressure even when a stall occurs during low foreground traffic. A missing immediate option is temporarily reducing concurrent disk-heavy CI jobs or pausing admission during maintenance; accept a bounded queue penalty to protect quorum instead of rejecting all load reduction. -->
-
-**5. Hardware facts.**
-
-- Each host (dmidecode type 9) shows `M.2 Socket 3: Available`, i.e. a free second M.2 slot.
-<!-- codex: “Socket 3” identifies an M.2 socket class, not a third slot, and SMBIOS “Available” is not proof of an accessible second connector. Verify the board/manual and physical slot, NVMe wiring, supported length, component clearance, power, and cooling before purchasing. -->
-- Host IO scheduler `none`; cgroup v2 controllers include `io`, so `io.latency` and `io.max` work but
-  `io.weight` needs bfq/iocost.
-<!-- codex: `none` does not inherently prevent io.latency or io.max, but an available io controller does not prove CONFIG_BLK_CGROUP_IOLATENCY or usable latency controls on this kernel. Check the actual interface files, ancestor controller enablement, and QEMU I/O attribution through LVM-thin; scheduler weights alone are ineffective with none and no active iocost policy. -->
-- 124 GB RAM per host, 84-98 GB used.
-- Drive wear (SMART percentage_used) 57/54/34%, ~3.4-5.4 TB/day writes per node (2026-10-03),
-  projecting ~100% wear around early 2027 on node1/node2.
-<!-- codex: SMART percentage_used estimates consumed endurance, not a predictable failure date; extrapolate from measured wear trends rather than host bytes alone. Plan replacement of the original host/runner drives separately, since adding a CP SSD leaves host boot and other dependencies on those drives. -->
+- All three hosts show a free second M-key slot (`M.2 Socket 3: Available`). The Bosgame M5 is
+  documented with dual M.2 2280 PCIe 4.0 x4 behind the bottom panel.
+- Physical length, keying and clearance are still to be confirmed on the first host opened.
+- Drive wear (SMART percentage_used): 57/54/34%.
+- RAM: 124 GB per host, 84-98 GB used.
 
 ## Approach
 
-Recommended, in this order. Each step is independent and reversible.
-<!-- codex: The steps interact: increasing election time can lengthen lease-renewal outages, and both reboots and disk copying require reduced contention and healthy survivors. Start step 3 now, bring step 5 and maintenance load shedding forward, use step 2 selectively before extending outage tolerance in step 1, and leave step 4 as an optional experiment rather than a prerequisite. -->
+Ordered by value; A and D run in parallel.
 
-### 1. Ride out stalls: etcd heartbeat/election 250/2500 → 500/5000 (this week)
+### A. Now: procure and qualify the dedicated CP disk (the fix)
 
-- Edit `heartbeat-interval: "500"` and `election-timeout: "5000"` in
-  `kubernetes/infra/machine-config/controlplane.yaml.tftpl`. Keep the 10× ratio; rewrite the
-  rationale comment with this plan's data.
-<!-- codex: An exact 10× heartbeat/election ratio is not required; retaining heartbeat 250 ms while trialling election 5000 ms avoids unnecessarily slowing heartbeat cadence. Treat this as a temporary experiment based on outage duration and acceptable failover latency, consistent with [etcd timing guidance](https://etcd.io/docs/v3.5/tuning/). -->
-- `just plan` / apply config to all three CPs (`talosctl apply-config`, no reboot).
-<!-- codex: Review the generated configuration and full OpenTofu plan for unrelated VM changes, and explicitly use a no-reboot apply mode when applying manually. `talos.tf` has no rolling-health orchestration and its configuration resources depend on all CP VMs, so an unrestricted apply or resource target must not substitute for a reviewed maintenance sequence. -->
-- Roll one controlled reboot per CP: `talosctl shutdown` + `qm start`, never `qm shutdown`.
-<!-- codex: Before the first reboot, verify a recent usable etcd snapshot outside these hosts, save current configurations, and follow node-maintenance.md for drain/PDB, CNPG replication, volume attachments, and capacity gates. These CPs also run application workloads, so etcd health alone does not make a second drain safe. -->
-  - Order: followers first, the current leader last (or `talosctl etcd forfeit-leadership` before
-    its reboot).
-<!-- codex: Select the first follower by survivor health, not role alone: if cp1 remains the worst member, rebooting cp2 could leave a fragile cp1/cp3 quorum. Recheck leadership before every operation and confirm a successful transfer to a caught-up, healthy member before stopping the leader; mixed timeout settings during the roll still permit old-timeout elections. -->
-  - Between reboots, `talosctl etcd status` must show 3/3 in sync and the apiserver must be healthy.
-<!-- codex: Require all three members reachable, one agreed leader/term, applied-index lag recovered, no etcd alarms, and repeated successful API writes plus readiness checks over a defined observation window. Abort on renewed stalls or failed gates and recover the current node before touching another. -->
-  - Window: a quiet CI period (night), because a stall on one of the two remaining members during a
-    reboot loses quorum for the stall's length.
-<!-- codex: A quiet clock period is insufficient given the overnight stalls; actively drain or pause heavy CI admission across all three hosts and avoid concurrent trims, backups, or migrations. Loss of durable quorum progress can outlast the stall because of election, catch-up, and retry delays, and longer timeouts cannot restore a missing majority. -->
-- Effect: followers wait 5-10 s (randomized) before campaigning, so a ≤5 s leader fsync stall (all of
-  today's observed stalls) no longer causes an election.
-<!-- codex: This guarantee is false: at 500/5000 the randomized threshold is 10–19 ticks, nominally 5–9.5 s since the last accepted leader message, not since fdatasync began. The measured 5.0307 s stall already exceeds the minimum, and elapsed heartbeat time, scheduling, or successive stalls can still allow pre-vote and election; see the [timeout calculation](https://github.com/etcd-io/raft/blob/v3.6.0/raft.go#L1934-L1943). -->
-- Cost: a genuinely dead leader is replaced in 5-10 s instead of 2.5-5 s. The apiserver is degraded
-  for that long, which it already is during every stall today.
+- Order 3× M.2 2280 enterprise NVMe with full power-loss protection, 480 GB class:
+  - Kingston DC2000B 480 GB (preferred: low power, heatsink; matters at these temperatures);
+  - or Micron 7450 PRO 480 GB.
+- Buy one extra to qualify first.
+- Inspect cooling while each host is open: thermal pad or heatsink on BOTH drives, and check chassis
+  airflow.
+
+### B. This week: election-timeout 2500 → 5000, heartbeat stays 250 (bridge until C)
+
+- Edit `controlplane.yaml.tftpl:104-105` and rewrite the rationale comment with this plan's data.
+  Ratio 20× is fine.
+- Expected effect:
+  - leader stalls under about 5 s (cp2: 211 events/7 d over 2 s vs 34 over 4 s) stop causing
+    elections;
+  - stalls of 5-10 s cause an election with rising probability;
+  - expect roughly 1-3 elections/day until C, not 0.
+- Cost: a dead leader is detected in 5-10 s instead of 2.5-5 s.
 <!-- codex: Those ranges approximate campaign initiation, not guaranteed replacement or API recovery; voting, persistence, and backlog add time. Step 1 is ineffective at fixing slow commits and can be harmful when it delays replacing a stalled leader that two healthy followers could otherwise replace sooner. -->
-<!-- codex: Define rollback before rollout: restore 250/2500 in the source configuration and perform the same guarded one-member-at-a-time reboot sequence if API outage duration worsens. Reverting Git alone does not change running flags, and a separate timeout reboot campaign may be unnecessary if hardware installation is imminent. -->
+<!-- opus-pushback: The stall distribution makes this net-positive. Most leader stalls are 1-4 s (cp2: 808 over 1 s, 211 over 2 s, 34 over 4 s in 7 d), and each one that becomes an election costs MORE than the stall: 5-6 s transactions around term 779 today, truncated entries, and a round of controller restarts. Under the new setting a stalled leader still gets replaced once the stall exceeds 5-10 s, and the slow-commit problem itself is addressed by A/C, not by this step. -->
+- Procedure (night window, one CP at a time):
+  1. Take an off-host etcd snapshot (`talosctl etcd snapshot`). Save the machine configs. Confirm
+     CNPG replicas are streaming.
+  2. Apply the config to all three in no-reboot mode. Review `just plan` for unrelated drift first;
+     do not use a broad apply.
+  3. Reboot order: **cp1 first**, so cp2+cp3, the healthiest pair, carry quorum. Then the current
+     follower. The current leader goes last, after `talosctl etcd forfeit-leadership` to a caught-up
+     member other than cp1.
+  4. For the two reboots that leave cp1 in quorum, first stop node1's runner daemons (graceful drain,
+     after the in-flight job). Every cp1 stall is a commit stall while only two members are up.
+  5. Reboot with `talosctl reboot -n <cp>` (drain per node-maintenance.md).
+  6. Gate between members:
+     - all 3 members reachable, one agreed leader and term, applied index caught up, no alarms;
+     - 10 min of repeated successful API writes;
+     - the etcd startup log (process args) shows `election-timeout=5000`.
+  7. Abort on a renewed stall or a failed gate, and recover before touching the next member.
+- After the roll: if cp1 is leader, forfeit.
+- Rollback: the same procedure back to 2500.
 
-### 2. Make the restart waves non-events: longer leader-election leases for single-replica controllers (this week)
+### C. When the drives arrive: move each CP VM disk onto its own PLP drive
 
-- cnpg-operator, kyverno controllers, csi-nfs-controller and snapshot-controller run as single
-  replicas. Their lease is a liveness fence, not failover, so they gain nothing from the client-go
-  default `LeaseDuration 15s / RenewDeadline 10s`.
-<!-- codex: snapshot-controller is explicitly replicas: 2 in kubernetes/apps/infrastructure/storage/snapshot-controller/setup-snapshot-controller.yaml, so this step delays actual standby takeover. Verify live replicas and rollout strategy for every other component; even a nominal singleton can overlap with its replacement during a rollout. -->
-<!-- codex: A coordination.k8s.io Lease is persisted API data, not an etcd TTL lease revoked by a Raft election or expired automatically by the apiserver; clients interpret it and stop leading when renewal fails. RenewDeadline governs the renewal retry budget, LeaseDuration governs competitors' takeover eligibility, and [client-go explicitly does not guarantee fencing](https://github.com/kubernetes/client-go/blob/v0.34.0/tools/leaderelection/leaderelection.go). -->
-- Raise to ~60s / 40s / 5s via each component's flags or env, where supported. Then a 5-15 s API
-  stall no longer makes them exit.
-<!-- codex: Inventory each deployed version's actual defaults and supported arguments rather than assuming universal client-go defaults; snapshot-controller v8.6.0 already uses a 5 s retry period. Validate LeaseDuration > RenewDeadline > jitter-adjusted RetryPeriod, and check request timeouts and liveness probes, which can still cause exits despite a longer renewal budget. -->
-- Cost: after a real crash, the replacement pod waits up to the remaining lease (≤60 s) before it
-  acts.
-<!-- codex: This is only the lease-related delay: observation timing, retry jitter, scheduling, API recovery, and startup add time, while a successful graceful release can shorten it. Longer leases can harm CNPG failover and other controller recovery objectives; choose per-component budgets rather than a blanket 60/40/5 policy. -->
-- Scope: only components whose HelmRelease/manifest exposes the knobs; no forks.
-<!-- codex: The pinned csi-driver-nfs 4.13.2 chart hard-codes all three sidecars' argument lists and exposes no lease-timing values, so inventing Helm values is ineffective; see its [controller template](https://github.com/kubernetes-csi/csi-driver-nfs/blob/master/charts/v4.13.2/csi-driver-nfs/templates/csi-nfs-controller.yaml). Skip it under this scope, or explicitly justify a small Flux post-render patch targeting named containers, which does not require a chart fork. -->
-<!-- codex: snapshot-controller is a plain Deployment whose supported flags are --leader-election-lease-duration, --leader-election-renew-deadline, and --leader-election-retry-period; verify rendered arguments and both replicas if changed. The [v8.6.0 implementation](https://github.com/kubernetes-csi/external-snapshotter/blob/v8.6.0/cmd/snapshot-controller/main.go) exposes all three. -->
-
-### 3. Remove the cause: a dedicated PLP SSD per host for the CP VM disk (order now, install within weeks)
-
-- Install a small enterprise NVMe with power-loss protection (TLC, M.2 2280, e.g. 480-960 GB) in each
-  host's free M.2 Socket 3.
-<!-- codex: This is the highest-priority durable remediation; qualify an exact SKU for full data-in-flight PLP, sustained synchronous-write tail latency, endurance, fit, and thermals before ordering all three. If compatible PLP storage cannot fit, use suitable separate hardware for the CPs rather than treating another consumer SSD as equivalent. -->
-- Create a separate PVE storage on it (LVM-thin or ZFS). Move ONLY the CP VM disk there with
-  `qm disk move <vmid> scsi0 <new-storage>` (online), one CP at a time, with etcd 3/3 between moves.
+- Install one host at a time: drain its guests per node-maintenance.md; physical install + thermal
+  pads; confirm boot order and the new device's stable identity.
+- Create a PVE **LVM (thick)** storage on the new drive, one VG per host.
 <!-- codex: Prefer the familiar LVM-thin backend unless ZFS has a separate requirement; adding a new storage stack increases tuning and operational scope, and a single-disk ZFS pool adds no redundancy. Identify the new device by stable identity and budget thin-pool data and metadata headroom before creating storage. -->
-<!-- codex: Online movement of an active raw LVM-thin VM disk is supported through QEMU block mirroring; LVM-thin does not inherently require shutting down the guest, as [Proxmox staff explain](https://forum.proxmox.com/threads/vm-disk-moved-from-lvm-thin-to-lvm-thin-no-longer-thin.48308/). It still reads the suspect source and mirrors ongoing writes, so move a healthy follower first under reduced load, set a measured bandwidth limit, and monitor quorum throughout rather than only between moves. -->
-<!-- codex: Check the installed PVE version's snapshot/clone restrictions and allow for copying or allocating the full 80 GB logical disk rather than only filesystem-used space. Confirm the task completed, scsi0 points at the new volume, and boot settings remain correct before considering the move successful. -->
-<!-- codex: The [qm CLI](https://github.com/proxmox/pve-docs/blob/master/generated/qm.1-synopsis.adoc) retains the source as an unused disk by default; retain it until validation, then reclaim it deliberately. It becomes stale after cutover, so rollback means moving the current disk back or following documented member recovery, not blindly booting the old etcd disk. -->
-- PLP drives acknowledge flush/FUA from protected DRAM, so fdatasync becomes sub-millisecond and
-  immune to QLC folding/GC. Runners and everything else stay on the QLC drive.
-<!-- codex: PLP can improve durable-write latency, but neither DRAM-only flush completion nor sub-millisecond latency is guaranteed by the PLP label; implementations differ and GC, thermal, firmware, and host stalls remain possible. Require full in-flight protection and measure the complete guest-to-device flush path without disabling flushes or using unsafe caching; [Kingston describes the protection mechanism](https://www.kingston.com/en/blog/servers-and-data-centers/ssd-power-loss-protection). -->
-<!-- codex: “Everything else” is inaccurate: allowSchedulingOnControlPlanes is true, so moving the whole CP disk also moves container images, logs, and application-local writes onto the new drive. A missing complementary option is moving the heaviest non-control-plane disk writers to existing workers where capacity permits, while retaining the simpler whole-VM disk migration. -->
-- This is the "real fix" the 09-29 notes already named, and the only option that removes
-  device-internal stalls.
-<!-- codex: Dedicated storage removes dependence on this shared QLC device, not every possible internal stall; replacing the existing drive or relocating the CPs to suitable hosts are alternatives. The decisive benefit is removing CI/device contention from the CP storage path, not an absolute PLP latency guarantee. -->
-- Cost: hardware (~3 drives). Risk: physical install = one host reboot each (rolling, etcd 3/3
-  between).
-<!-- codex: Installation requires a powered-off host, so drain its Talos guests and stop its other VMs/LXCs using node-maintenance.md, including the documented D-state shutdown risk. Gate each host on both Proxmox and etcd quorum plus workload recovery, and confirm boot order and device identity after adding the SSD. -->
+<!-- opus-pushback: Thick LVM is also native PVE (no new stack) and is the simpler choice here. The drive holds exactly one 80 GB CP disk, with no snapshot or clone use, so thin provisioning buys nothing. Thin adds a pool-metadata commit and zeroing on the etcd flush path (node1 tdata showed about 9% amplification), and pool and metadata headroom would become a new failure mode. Fable independently recommended thick. -->
+- Move the disk: `qm disk move <vmid> scsi0 <new-storage> --bwlimit <measured>`, keeping the source
+  disk, while that CP is a follower, at night with CI drained on that host. Monitor quorum throughout.
+- Then:
+  - verify scsi0 points at the new volume and the guest boots from it;
+  - reconcile `kubernetes/infra/vms.tf` (per-CP datastore) until `just plan` shows no drift;
+  - only then reclaim the old volume.
+- App pods on the CPs move with the disk (images, logs, emptyDirs). That is fine at 480 GB, and
+  still far less churn than the runners.
+- Gate per host: that member's WAL fsync p99 under 10 ms, and zero fsyncs over 1.024 s for several
+  busy CI days.
 
-### 4. Keep host-level contention bounded until 3 lands: cgroup v2 `io.latency` for CP VM scopes (optional, measured)
+### D. This week, cheap: shrink the restart blast radius
 
-- Set `io.latency` (target e.g. 10 ms) on the CP VMs' systemd scopes on each host. A systemd
-  drop-in or hookscript re-applies it after VM restarts. The kernel then throttles sibling cgroups
-  (runners) only while the CP misses its latency target.
-<!-- codex: First prove that QEMU and its I/O workers are charged to the expected scope and that the physical backing device and competing workloads participate at the relevant peer level; separate per-VM thin LVs do not establish shared-device protection. io.latency protects block-I/O latency rather than directly enforcing an etcd fdatasync bound, and its hierarchy matters; see the [kernel documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#io-latency). -->
-<!-- codex: The protected scope includes all CP VM I/O, so application bulk writes can trigger runner throttling too, and an unattainable 10 ms target can heavily penalize peers without curing the stall. Prove both attribution and useful throttling before writing persistence hooks for transient PVE scopes. -->
-- This addresses node1-style contention (proven correlation with runner writes) without a static
-  cap. It does nothing for firmware stalls.
-- Measure fsync p99 and runner throughput for 48 h, and remove it if CI throughput drops measurably.
-<!-- codex: Some CI slowdown is the mechanism of protection, so reject the experiment based on an explicit latency benefit versus job-duration/queue budget, not any measurable throughput drop. Step 4 is over-engineering unless a bounded canary beats simpler load reduction; rollback must clear the active target and disable its reapplication hook. -->
+- cchifor/platform `deploy/components/kyverno/helmrelease.yaml`:
+  - `admissionController.replicas: 2`, so the `failurePolicy: Fail` webhooks keep a serving replica
+    through a restart, plus a PDB;
+  - optionally `--leaderElectionRetryPeriod=10s` (lease 60 s, renew 50 s).
+- csi-driver-nfs (`kubernetes/apps/infrastructure/storage/csi-driver-nfs.yaml`):
+  `controller.replicas: 2`, if the chart exposes it. Lease flags would need a postRenderer patch;
+  skip those.
+- CNPG operator lease flags (`--leader-lease-duration`/`--leader-renew-deadline`): platform repo,
+  optional.
+- snapshot-controller: no change (already 2 replicas).
 
-### 5. Housekeeping
+### E. This week: housekeeping and detection
 
-- Schedule a recurring registry-LXC trim on node1 (host `fstrim.timer` does not reach LXC mounts;
-  Zot GC refills): weekly, chunked, CI-quiet hours.
-<!-- codex: Bring this forward because reclaim already helped, but GC frees filesystem blocks while subsequent writes refill them; discard communicates those freed extents to lower layers. Verify the mp0 mount and discard pass-through, bound each trim batch, avoid reboot/migration windows, and monitor WAL latency because trim itself can produce stalls. -->
-- Leave the `ControlPlaneRestartWave` severity as is; it detected a real infrastructure event.
-<!-- codex: Retain this alert, but after extending leases it becomes a less sensitive storage-outage signal. Ensure independent alerts cover WAL/backend latency, absent leadership, failed proposals, and API availability so fewer restarts cannot hide continuing outages. -->
+- Weekly chunked trim of the registry LXC (node1) from a host timer, in CI-quiet hours, watching WAL
+  latency.
+- Alerts:
+  - NVMe sensor-1 over 90 °C for 10 min (`node_hwmon_temp_celsius`);
+  - `etcd_server_is_leader{instance="192.168.0.41:2381"} == 1` for 15 m (warning: forfeit), until C
+    is done;
+  - confirm WAL/backend-commit latency and no-leader alerts exist.
+- Keep `ControlPlaneRestartWave` as is.
+
+### Deferred / not recommended now
+
+- Runner disks `cache=unsafe` or `writeback`. This removes about 85% of device flushes. Revisit after
+  C, as a measured 48 h trial on node3; runner FS corruption on a host crash is acceptable because
+  runners can be rebuilt.
+- Moving ci-runner-9 to node3: not before C, because node3 hosts the healthiest leader candidate.
+- NVMe APST `nvme_core.default_ps_max_latency_us=0`: low prior.
 
 ## Critical files
 
-- `kubernetes/infra/machine-config/controlplane.yaml.tftpl`: etcd extraArgs + rationale comment
-  (step 1).
-- The HelmRelease values for cnpg-operator (installed by cchifor/platform, so cross-repo), kyverno,
-  csi-driver-nfs and snapshot-controller: leader-election flags (step 2).
-<!-- codex: Track CNPG changes and rollout in cchifor/platform explicitly; Kyverno is also delivered through platform-kyverno, as this repo's storage-policies Flux dependency documents. No local Kyverno HelmRelease was found, and snapshot-controller is a local plain Deployment, so identify each actual owner/version before promising completion of step 2. -->
-- Proxmox host config (storage.cfg, CP VM disk placement). Out-of-band today; document it in
-  `docs/runbooks/ai-host-setup.md` (step 3).
-<!-- codex: CP disk placement is already declared in kubernetes/infra/vms.tf through var.vm_datastore, and disk placement is not ignored by lifecycle; kubernetes/infra/main.tf does not exist in this worktree. Reconcile the declaration and refreshed state after each move using staged per-CP storage selection if needed, and require a final no-drift plan so later applies cannot undo the migration. -->
-- A host hookscript/systemd drop-in for io.latency plus the runbook entry (step 4).
-- A host timer for the chunked LXC trim plus the runbook entry (step 5).
+- `kubernetes/infra/machine-config/controlplane.yaml.tftpl` (B).
+- `kubernetes/infra/vms.tf` plus state, for the per-CP datastore (C).
+- `docs/runbooks/node-maintenance.md`, `docs/runbooks/ai-host-setup.md` (B, C, E procedures).
+- cchifor/platform `deploy/components/kyverno/helmrelease.yaml` (D).
+- `kubernetes/apps/infrastructure/storage/csi-driver-nfs.yaml` (D).
+- Monitoring rules under `kubernetes/apps/infrastructure/monitoring/` (E).
+- A host timer for the trim (E).
 
 ## Verification
 
-<!-- codex: Establish per-member WAL/backend latency, peer RTT, leader transitions, API write latency/errors, controller availability, and comparable CI workload baselines before changing anything. Record each change separately and define abort/rollback thresholds so simultaneous lease, timing, and storage changes do not obscure which intervention worked. -->
-
-- Step 1:
-  - `talosctl -n <cp> get etcdspec -o yaml` shows 500/5000 on all three;
-<!-- codex: EtcdSpec proves desired configuration only, precisely because this deployment does not restart etcd when it changes. Verify the chosen values in each running process's arguments or post-boot etcd startup logs, together with process start time, after every reboot. -->
-  - `etcd_server_leader_changes_seen_total` increase/24h drops to ≤1 over 3 busy days;
-  - stalls up to 5 s appear as `slow fdatasync` log lines without a term change;
-  - `ControlPlaneRestartWave` does not fire.
-<!-- codex: Fewer elections and alerts are insufficient: require API outage duration, successful Lease renewals, and controller work completion to improve or remain within explicit budgets. Separate planned leadership transfers/reboots from spontaneous churn, and do not induce production storage stalls merely to validate the incorrect five-second guarantee. -->
-- Step 2: the controllers' restart counters stay flat across the next leader change (if any).
-<!-- codex: Also verify rendered/live arguments, advancing Lease renewTime, successful reconciliation, and acceptable takeover after a controlled controller restart once storage is stable; a live but stalled controller is not success. Track pod replacements as well as container restarts, and retain the original per-component settings for GitOps rollback. -->
-- Step 3:
-  - `etcd_disk_wal_fsync_duration_seconds` p99 <10 ms on all members;
-  - zero WAL fsyncs >1 s per day;
-<!-- codex: Validate under several representative busy CI days after migration, including backend commit latency and absence of new API outages; p99 alone hides rare multi-second stalls. Compute tail-event counts per member from histogram count minus the appropriate cumulative bucket, using an actual exported boundary such as 1.024 s, and account for counter resets and missing scrapes. -->
-  - host IO PSI unchanged for runners.
-<!-- codex: Host-wide PSI mixes workloads and may improve when CP I/O moves, so “unchanged” is not a useful acceptance criterion. Check runner job duration/throughput separately and verify actual CP disk placement, safe cache/flush settings, SSD temperature, backup coverage, and a clean OpenTofu plan. -->
-- Step 4: cp1 fsync p99 during busy CI hours vs the 10-06 baseline; runner write throughput and job
-  durations vs the 10-06 baseline.
-<!-- codex: Use matched workload windows and inspect the kernel's available latency/throttling statistics to prove the intended scopes are affected; the 10-06 baseline predates other changes and is confounded. For step 5, add successful timer execution, reclaimed thin-pool space, and absence of trim-correlated latency spikes. -->
+- **Baseline first.** Per member, for 3 busy days before and after each change separately:
+  - WAL and backend-commit p99, plus counts over 1.024/4.096 s;
+  - leader changes, with planned transfers excluded;
+  - API write latency and errors;
+  - controller restarts and pod replacements;
+  - runner job durations.
+- **B:**
+  - the etcd startup args show 5000 on all members;
+  - no term change accompanies stalls under 5 s;
+  - leader changes trend to 3/day or fewer;
+  - API outage durations do not get longer.
+- **C:**
+  - `qm config` shows scsi0 on the new storage, and the tofu plan is clean;
+  - per-member WAL p99 under 10 ms and zero fsyncs over 1.024 s/day over several busy days;
+  - drive temperature in range.
+- **D:**
+  - 2 Ready admission-controller pods;
+  - the Lease `renewTime` advances;
+  - no admission failures during a controlled restart of one replica.
+- **E:**
+  - the timer ran;
+  - thin-pool space was reclaimed with no trim-correlated WAL spikes;
+  - the alerts evaluate.
 
 <!-- codex-review-status: complete -->
