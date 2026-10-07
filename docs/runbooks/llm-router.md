@@ -45,7 +45,7 @@ For the current Gitea CI image flow, see the Relay Assistant API image release b
    - **Before merging**, take a baseline on the release that is still live: `kubectl --context admin@ai -n llm-router exec deploy/llm-router -- sh -c 'cd /app && node scripts/validate-live.mjs --baseline'` (see step 8). If the live release predates the script, copy it in with `kubectl cp` first.
    - Record the result so step 8 can be compared against it.
 8. **Validate end to end on the live pod** (from `router-0.1.0-20260929-subs` on): `kubectl --context admin@ai -n llm-router exec deploy/llm-router -- sh -c 'cd /app && node scripts/validate-live.mjs'`.
-   - It sends real requests through the router's own API as the administrator, who is also the Claude owner: Codex text, streaming, a tool call (never executed), images to a vision model and refused for a non-vision one, Claude streaming, and (from `router-0.1.0-20260929-images` on) one 512x512 image from `qwen-image-2.1-fast-cloud`, checked to be a PNG of that size served by the `qwen-image` account. The step-7 `--baseline` run never includes it (it reports the check as skipped: the older release has no images API). On the first roll that adds it, configure the `qwen-image` account and its routes (admin API) before this step; until then run step 8 with `--skip-images "image routes not configured yet"`.
+   - It sends real requests through the router's own API as the administrator: Codex text, streaming, a tool call (never executed), images to a vision model and refused for a non-vision one, Claude streaming, and (from `router-0.1.0-20260929-images` on) one 512x512 image from `qwen-image-2.1-fast-cloud`, checked to be a PNG of that size served by the `qwen-image` account. The step-7 `--baseline` run never includes it (it reports the check as skipped: the older release has no images API). On the first roll that adds it, configure the `qwen-image` account and its routes (admin API) before this step; until then run step 8 with `--skip-images "image routes not configured yet"`.
    - Each check names the account and model that actually answered, taken from the request's trajectory.
    - At most 9 small requests and 3 minutes. It restores the one setting it changes (`visionModels` on `codex-2`).
    - Exit code 0 means all checks passed. Compare the output with the baseline from step 7.
@@ -165,3 +165,81 @@ branch `router-image-20261003-ui` names it (router entry only). Published by
 `validate-live --baseline` (4/4). Rollback: the previous digest
 `registry.chifor.me/llm-router/router@sha256:12697b84cc68e097b7dc11e570ad8a192cd1220881fb324e2a5b8e468c3aa30e`
 (run 57525) with source-commit `0013627e5c6511b21066ea8dea803ab4fde9f96a`.
+
+
+### Shared subscription routing release (2026-10-07)
+
+Release `router-0.1.0-20261007-shared-routing` uses source
+`0057394cf9d606c9648e885fa2f895d0f4362bd4` from
+[llm-router #83](https://git.chifor.me/cchifor/llm-router/pulls/83).
+It is based on the preceding production release and removes the caller ownership
+restriction from subscription routing, setup, catalogs, administration and UI.
+The same implementation is merged to main in
+[llm-router #84](https://git.chifor.me/cchifor/llm-router/pulls/84).
+Namespace, access-kind and route-scoped key authorization still apply. Claude's
+existing single-turn/no-tools adapter capabilities are unchanged.
+
+The runtime archive is `router-0.1.0-20261007-shared-routing.tar.gz`, SHA-256
+`016202a5d9b6efb8cc1d61f41bf5be4139324889dc50bbf1928263f0d73d1108`, attached to
+[Relay v0.2.0](https://git.chifor.me/cchifor/relay/releases/tag/v0.2.0).
+The image publisher verifies the source marker and archive checksum, then runs
+the compiled production smoke, backup tests and isolated migration test under
+the same Node 26.10.0 base digest and restricted container settings.
+[CI run 70582](https://git.chifor.me/cchifor/relay/actions/runs/70582) passed and
+published image
+`registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353`.
+[The immutable receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-70582.json)
+records source and packaging commit `d4a2844e5684228c53dbfdb5789c2fdbc072d78f`.
+Application validation: hotfix 941/941 tests; main 1,232 passed and one skipped;
+typecheck, compiled production smoke and browser coverage passed. The known
+architecture exception is unchanged (#79).
+
+After the old singleton stops, `backup-before-shared-routing` runs the packaged
+backup helper with `ROUTER_BACKUP_LABEL=pre-shared-routing-20261007`.
+It creates and verifies `/data/backups/pre-shared-routing-20261007`, including
+SQLite, the encryption key and any plugin composition file. A second init
+container runs `deploy/check-router-upgrade.mjs` against a temporary copy of that
+backup. It boots only storage and configuration: no provider plugins, saved
+extensions, network listeners or token refresh. It checks that only obsolete
+account owner fields and token bindings are removed, the configuration revision
+advances once, routes and encrypted credentials are preserved, and a second
+startup is idempotent. Either init failure prevents application startup. The
+application then applies the same migration to its normal database.
+
+After the reviewed GitOps rollout, check `/ready`, the init logs and the public
+unauthenticated management refusal. Run the bounded client-key canary in the
+router container (the administrator token is already in its environment):
+
+```sh
+kubectl -n llm-router rollout status deployment/llm-router --timeout=240s
+kubectl -n llm-router logs deployment/llm-router -c backup-before-shared-routing
+kubectl -n llm-router logs deployment/llm-router -c check-shared-routing-migration
+kubectl -n llm-router exec deployment/llm-router -c router -- node scripts/validate-shared-routes.mjs
+```
+
+The canary creates a temporary key scoped to the `claude` and `codex` routes,
+checks their visibility, requests streaming Chat Completions and nonstreaming
+Responses, and verifies the serving provider in each trajectory. It fails if a
+fallback masks a broken route and revokes its temporary key in cleanup. If the
+configured aliases differ, set `ROUTER_CANARY_ROUTES` to a JSON array of
+`{ "route": "alias", "provider": "provider-id" }` entries before running it.
+A process killed without cleanup can leave the short-lived key active until
+expiry: revoke the key with the `shared-route-canary-` name prefix through the admin UI.
+Record actual rollout and canary results before declaring production acceptance.
+
+Rollback requires the matched pre-upgrade state as well as the old image, since
+the old release enforces the removed fields. Through the existing GitOps review
+and recovery procedure, stop the singleton, retain a consistent post-upgrade
+snapshot, and restore the verified pre-upgrade SQLite/key/plugins set while no
+router process is running (remove stale WAL/SHM sidecars only after shutdown).
+Restore image
+`registry.chifor.me/llm-router/router@sha256:083ef7c7f931358b53e404b68b49c14a16d33eb6ecbcd55dd7e0968512cdb74b`,
+source annotation `867272e581aa5d6357a7abadf6220ede922918ae`, release annotation
+`router-0.1.0-20261003-ui`, and remove both new init containers before restarting.
+This restores application state to the backup timestamp; check any credentials
+that rotated after that timestamp and reauthenticate if necessary.
+
+After production acceptance, remove the two dated init containers in a follow-up
+reviewed change, retaining the verified backup until a newer recovery generation
+has been validated. The existing data PVC, authentication Secret and network
+policy remain in place.
