@@ -119,45 +119,6 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
-      # Recreate has stopped the old singleton before either preflight runs.
-      # A failed backup or migration check prevents the application from starting.
-      initContainers:
-        - name: backup-before-shared-routing
-          image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
-          imagePullPolicy: IfNotPresent
-          workingDir: /app
-          command: [node, deploy/backup-router.mjs]
-          env:
-            - name: ROUTER_BACKUP_LABEL
-              value: pre-shared-routing-20261007
-          resources:
-            requests: {cpu: 50m, memory: 64Mi}
-            limits: {cpu: "1", memory: 256Mi}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
-          volumeMounts:
-            - {name: data, mountPath: /data}
-            - {name: tmp, mountPath: /tmp}
-        - name: check-shared-routing-migration
-          image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
-          imagePullPolicy: IfNotPresent
-          workingDir: /app
-          command: [node, deploy/check-router-upgrade.mjs]
-          env:
-            - name: ROUTER_BACKUP_LABEL
-              value: pre-shared-routing-20261007
-          resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {cpu: "1", memory: 384Mi}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
-          volumeMounts:
-            - {name: data, mountPath: /data, readOnly: true}
-            - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
           image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
@@ -280,12 +241,6 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Temporary one-shot acceptance Job; removed together after CI records it.
-    - from:
-        - podSelector:
-            matchLabels: {app: llm-router-acceptance}
-      ports:
-        - {protocol: TCP, port: 8787}
     # Only the Cloudflare tunnel in the "edge" namespace may reach the
     # router, and only on 8787 (the Service front door is 80).
     - from:

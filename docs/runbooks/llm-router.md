@@ -255,7 +255,24 @@ was Ready on the pinned image; both init containers completed. Loki recorded
 `Router SQLite backup and associated files verified: pre-shared-routing-20261007`
 and the successful isolated migration/idempotence check. Public web asset names
 matched the release, `/health` and `/ready` returned 200, and unauthenticated
-admin config returned 401. Live canary acceptance is recorded separately by CI.
+admin config returned 401. Live acceptance also passed in GitOps Job
+`router-shared-routing-20261007` (pod `router-shared-routing-20261007-mvh7k`),
+with the CI observer at [run 70799](https://git.chifor.me/cchifor/ailab/actions/runs/70799).
+The temporary client key was revoked. Each response's trajectory confirmed the
+expected serving provider:
+
+| Route | Protocol | Serving account | Trajectory |
+| --- | --- | --- | --- |
+| claude | streaming Chat Completions | claude-3 | dd2d8e53-4f24-4f40-8676-df45844aab36 |
+| claude | Responses | claude-4 | d5f1246f-f124-4259-be18-294c6321ee5c |
+| codex | streaming Chat Completions | codex | 01257e95-8577-4083-8ca9-bf91d3e6fd6b |
+| codex | Responses | codex-2 | dee8e508-365f-4633-8142-c31d9aef30a2 |
+
+The acceptance Job, its temporary network rules and dated init containers are
+removed after this result. The verified backup remains on the data PVC. The
+reusable CI workflow remains, and verifies the new Ready Pod has the expected
+image and the current init-container composition; the old pre-cleanup Pod cannot
+satisfy that check.
 
 Rollback requires the matched pre-upgrade state as well as the old image, since
 the old release enforces the removed fields. Through the existing GitOps review
@@ -269,7 +286,7 @@ source annotation `867272e581aa5d6357a7abadf6220ede922918ae`, release annotation
 This restores application state to the backup timestamp; check any credentials
 that rotated after that timestamp and reauthenticate if necessary.
 
-After production acceptance, remove the canary Job, its temporary network rules,
-and the two dated init containers through a follow-up CI-reviewed change. Retain
-the verified backup until a newer recovery generation has been validated. The existing data PVC, authentication Secret and network
+For a future release, add a new uniquely named canary Job and remove it through
+a CI-reviewed cleanup after recording its result. Retain the verified recovery
+generation until a newer consistent backup has been validated. The existing data PVC, authentication Secret and network
 policy remain in place.
