@@ -3,7 +3,7 @@
 Current deployments use Gitea CI and reviewed GitOps changes; no llm-router
 kubeconfig is required or issued. The source is merged in Gitea, mirrored to
 GitHub, then reconciled by Flux. The initial manual deployment notes below are
-historical. See the plugin-settings release section for current CI acceptance.
+historical. See the provider-naming release section for the current release and CI acceptance.
 
 ## Topology and authentication
 
@@ -361,3 +361,46 @@ The dated init containers, completed canary Job and temporary network allowance
 are removed after that acceptance. The immutable image, persistent backup and
 reusable CI observer remain. The resulting Recreate rollout must pass the same
 Ready/image/public checks with no init containers or canary expected.
+
+
+## Provider-naming release (2026-10-07)
+
+`router-0.1.0-20261007-provider-names` deploys merged llm-router source
+`0974a7a00160ba1961fe4722af5c758f88610ea8` ([PR #86](https://git.chifor.me/cchifor/llm-router/pulls/86)).
+Provider rows now identify API-key and subscription access. The external Claude
+connector appears as `provider-claude-bridge`, described as connecting to an
+external Claude Code service that manages the login and runs requests. Claude's
+conversation choices appear as **Single-turn** and **Multi-turn**.
+
+This is a presentation change: stable plugin IDs, provider kinds, saved transport
+values, routes, credentials and the SQLite schema remain unchanged. The deployment
+preserves the selected transport. There is no data migration or one-shot init/Job;
+the existing verified backup remains available. The usual single-replica Recreate
+rollout briefly interrupts service while replacing the pod.
+
+[PR CI 71588](https://git.chifor.me/cchifor/llm-router/actions/runs/71588) passed
+before merge. A clean merged-source build, frozen production dependency install,
+production smoke and offline authenticated settings acceptance also passed locally.
+[Image CI 71933](https://git.chifor.me/cchifor/relay/actions/runs/71933) validates the
+exact image with all six provider display names, the bridge description, both
+conversation labels and all 41 plugin settings views before publishing it. These
+image checks use offline fixtures, without production configuration writes or
+provider inference.
+
+- Source: `0974a7a00160ba1961fe4722af5c758f88610ea8`.
+- Archive SHA-256: `c5d26c6bd310b45b2b5cdef8e52fc957c132ef89d63d6a123c0d490424cf8acc`.
+- Image: `registry.chifor.me/llm-router/router@sha256:598cd7e1b634bc652024aa7041e2ea7584df88caf6cb2e15fae0f044375d44ef`.
+- Runtime: unchanged Node 26.10.0 digest `sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
+- [Immutable image receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-71933.json).
+
+The **Router rollout acceptance** CI workflow checks one Ready router on this
+exact image, no init containers, public health/readiness and unauthenticated
+management refusal. Public SPA and bundle hashes are compared to the packaged
+release. No kubeconfig is used. The deployment PR records the resulting CI run
+and acceptance receipt.
+
+Rollback is an image/annotation revert through a reviewed GitOps PR to
+`registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44`
+(source `6ebe437da928efcb50b6bbcfbb187802fb3fa00b`, release
+`router-0.1.0-20261007-plugin-settings`). Saved settings remain compatible with
+that release; no database or composition restore is needed for this naming change.
