@@ -9,8 +9,11 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 >  **Forge = Gitea (`git.chifor.me`), NOT GitHub.** As of 2026-07-09 (ADR 0017) Gitea is the
 > **master** forge for this repo and `cchifor/platform`. Push, open PRs, and run CI on
 > **Gitea** (`git.chifor.me/cchifor/ailab`, org `cchifor`). `github.com/cchifor/*` is a
-> **read-only push-mirror backup** (GitHub Actions dormant). Use the Gitea API / `tea` /
-> `scripts/forge.sh` (gitea arm), **NOT `gh`**. Log in at git.chifor.me via Authelia.
+> **read-only push-mirror backup** (GitHub Actions dormant). Use the Gitea API / `tea`, **NOT `gh`**:
+> `scripts/gitea-api.sh` for routine calls (the workstation's non-admin `workstation-bot`), and
+> `scripts/gitea-owner-merge.sh` for owner operations (protected-file merges, `approve-pin`; a one-shot
+> owner token; a DRY RUN unless `--execute`; `docs/runbooks/owner-credentials.md`). Log in at git.chifor.me
+> via Authelia.
 >
 > **Flux's bootstrap source is the GITHUB MIRROR** (`https://github.com/cchifor/ailab.git`,
 > unauthenticated — it is public, and a source with no credential cannot write). It used to be

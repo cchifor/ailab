@@ -1,0 +1,10 @@
+# Required status contexts on cchifor/platform `main`, one glob pattern per line; `#` starts a comment.
+# Read by scripts/gitea-owner-merge.sh, whose gate runs with NO owner credential. Copied 2026-10-07 from
+# GET /repos/cchifor/platform/branches/main (status_check_contexts; enable_status_check=true). That endpoint
+# is readable by the non-admin workstation-bot, and the script compares it with this file on every run:
+# a context the live protection requires and this file lacks refuses the merge until the file is updated.
+CI / ci-gate*
+E2E Preflight / preflight*
+E2E Tests / smoke*
+Contract Tests / contract-gate*
+S2S Authority Guard / guard*
