@@ -66,12 +66,19 @@
 # event on a pod appears as a brand-new series at value 1, and increase() cannot see a rise from
 # nothing (the same blind spot as the 5xx counters above). For these two security signals a single
 # request is exactly the case to see, so each rule has a second branch,
-# `count((X > 0) unless (X offset 15m)) > 0`: a series that exists now with a value above 0 but did
-# not exist 15m ago is its first event, and it keeps the alert up for the same 15m as the increase()
-# branch. `unless` matches whole label sets, so an old series (present 15m ago) never counts, and a
-# child created already at 0 (a pre-initialised one on a new pod) never counts. Known false positive:
-# an OLD series that comes back after a scrape gap of more than ~15m (a long gatekeeper scrape outage)
-# reads as new for 15m. The redis gauge has no such gap (it exists from process start).
+# `count((X > 0) unless (last_over_time(X[1h] offset 15m))) > 0`: a series that exists now with a value
+# above 0 but had NO sample in the hour that ended 15m ago is its first event, and it keeps the alert up
+# for the same 15m as the increase() branch. `unless` matches whole label sets, so an old series never
+# counts, and a child created already at 0 (a pre-initialised one on a new pod) never counts.
+# WHY A RANGE, NOT `X offset 15m`: the instant lookup finds a sample only within the 5m lookback delta
+# before now-15m, so an OLD series whose scrape paused for more than 5m (a Prometheus restart, a
+# NetworkPolicy roll) read as new for about (gap - 5m) and paged falsely. The 1h range tolerates a gap
+# of up to about an hour. THE PRICE, a blind spot: a child that already existed, on a gatekeeper
+# container that then restarted IN PLACE (same pod name and IP: its counters reset and the child is
+# recreated lazily), and whose first event after the restart comes more than 15m but less than ~75m
+# after the last pre-restart sample, reads as old to this branch and as a single sample to increase().
+# A new pod (a rollout) is a new series and is seen. The redis gauge has neither gap (it exists from
+# process start).
 #
 # DRILLS AND PLANNED PLATFORM-WIDE ROLLS run under an Alertmanager silence scoped to the expected
 # alerts (GatekeeperHttp5xx, GatekeeperTokenUnavailable, GatekeeperTokenReviewLimited) and the
@@ -289,13 +296,13 @@ spec:
         # comparing the token, and counts it. Any such request is either a client on the internet
         # sending the bypass header, or an internal test client that now reaches gatekeeper through the
         # edge. Summed over pods and tenants: one alert, and the dashboard's /auth outcomes panel splits
-        # it. The second branch (`unless ... offset 15m`) catches the first refusal on a pod, a series that
-        # does not exist until then; see the header.
+        # it. The second branch (`unless ... last_over_time(... offset 15m)`) catches the first refusal on a pod,
+        # a series that does not exist until then; see the header.
         - alert: StriveTestBypassFromEdge
           expr: |
             sum(increase(gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"}[15m])) > 0
             or
-            count((gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"} > 0) unless (gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"} offset 15m)) > 0
+            count((gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"} > 0) unless (last_over_time(gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"}[1h] offset 15m))) > 0
           labels:
             severity: warning
           annotations:
@@ -310,13 +317,13 @@ spec:
         # X-API-Key is ignored and counted as status="disabled" (expected, so excluded here). Any other
         # api_key status means a key was looked up on some pod (accepted, refused or rate limited):
         # the flag is not false there (a rollback, a config drift), or the AG1a pin was reverted. The second
-        # branch (`unless ... offset 15m`) catches the first lookup on a pod: that child does not exist until
-        # then (see the header).
+        # branch (`unless ... last_over_time(... offset 15m)`) catches the first lookup on a pod: that child
+        # does not exist until then (see the header).
         - alert: GatekeeperApiKeyUsed
           expr: |
             sum(increase(gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"}[15m])) > 0
             or
-            count((gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"} > 0) unless (gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"} offset 15m)) > 0
+            count((gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"} > 0) unless (last_over_time(gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"}[1h] offset 15m))) > 0
           labels:
             severity: warning
           annotations:

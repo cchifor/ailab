@@ -1412,6 +1412,38 @@ tests:
         exp_alerts: []
 
   - interval: 1m
+    name: "an OLD edge_refused series that returns after a scrape gap (12m, then 30m) does not read as new"
+    input_series:
+      # A Prometheus restart or a NetworkPolicy roll: the series pre-exists with a value above 0, then no sample for
+      # longer than the 5m lookback delta. An instant `X offset 15m` lookup would call it new for about (gap - 5m).
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "3x10 _x12 3x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "3x5 _x30 3x40"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 34m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
     name: "with no test_bypass series at all (the state before AG1a) StriveTestBypassFromEdge is silent"
     input_series:
       - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="success"}'
@@ -1632,6 +1664,38 @@ tests:
         alertname: GatekeeperApiKeyUsed
         exp_alerts: []
       - eval_time: 30m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "an OLD api_key success series that returns after a scrape gap (12m, then 30m) does not read as new"
+    input_series:
+      # A Prometheus restart or a NetworkPolicy roll: the series pre-exists with a value above 0, then no sample for
+      # longer than the 5m lookback delta. An instant `X offset 15m` lookup would call it new for about (gap - 5m).
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
+        values: "3x10 _x12 3x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="api_key",status="success"}'
+        values: "3x5 _x30 3x40"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 34m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 45m
         alertname: GatekeeperApiKeyUsed
         exp_alerts: []
       - eval_time: 50m
