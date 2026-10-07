@@ -1,15 +1,7 @@
 # Strive auth hardening (F-01 to F-06), owner workstation credentials, S2S rollback drill 2, edge 5xx observability
 
-## Codex Review
-
-- Strong pinned inventory, explicit owner decisions, phased key publication, and rollback gates; retiring unused API keys is a proportionate simplification.
-- Blocking verification gaps: Redis fallback/reconnection counters are declared but never incremented, and Flux resume failures can leave controllers running.
-- Migration safety needs stronger treatment of per-pod session fallback, cached signing keys, mixed Fernet generations, and in-flight OIDC logins.
-- Several recommendations understate their costs or guarantees: header-based bypass isolation, two-hour owner tokens, short credential-rotation outages, and irreversible age-key cleanup.
-- Complete the missing rollout dependencies, negative tests, low-traffic alerts, and owner follow-ups for remaining F-05 items before execution.
-
-**Status: DRAFT for cross-review** (Codex and a second model must both sign). Nothing in this plan has
-been executed. Every live observation below was read-only (`kubectl --context admin@ai` get/describe,
+**Status: DRAFT, revised after review round 1** (Codex and Fable must both sign). Nothing in this plan has
+been executed. Every live observation below was read-only (`kubectl --context admin@ai` get/describe/logs,
 `get --raw` through the API-server service proxy to Prometheus and Loki, read-only `psql` on the Gitea
 database, public HTTPS endpoints). No Secret value, token or password was read or printed.
 
@@ -29,251 +21,297 @@ scope, plus three operational follow-ups of the S2S identity work:
    "Verification and drills"; runbook `ailab:docs/runbooks/s2s-identity.md:598-646`), not yet run.
 4. **Edge 5xx observability** (finding F-31): edge 5xx on 2026-10-06 18:10Z could not be attributed.
 
-**Pinned references.** platform `gitea/main` = `5b453c03f8a3` (2026-10-07); ailab `origin/main` =
-`c5a397a1`. Citations: `platform:<path>:<lines>` and `ailab:<path>:<lines>` at those commits; **LIVE** = read
-on 2026-10-07 unless dated; **UNVERIFIED** = not confirmed from code or the live system.
+**Since the draft:** platform #2125 (D.8) merged as `a1014dfed` and is LIVE since 2026-10-07 07:03Z: the ten
+Python services authenticate to gatekeeper with projected ServiceAccount tokens and the SOPS base registry is
+`services: []` (V61). Facts and steps that depend on it say **after #2125**. It removes the live preshared
+rotation problem (D5, A5.4), widens the TokenReview limiter's scope (D16) and changes what a config-only rollback
+must restore (D13, item 3).
+
+**Pinned references.** platform `gitea/main` = `a1014dfed` (2026-10-07, the #2125 merge); ailab `origin/main` =
+`c5a397a1`. The gatekeeper code, charts, Flux files and scripts cited are unchanged since the draft's `5b453c03f`;
+`ailab.yaml` and worker-manifest line numbers are re-pinned to `a1014dfed`. Citations: `platform:<path>:<lines>`
+and `ailab:<path>:<lines>` at those commits; **LIVE** = read on 2026-10-07 unless dated; **UNVERIFIED** = not
+confirmed from code or the live system.
 
 **Change-control rules that shape every step** (from the S2S work, not repeated per step):
 - Platform owner-protected file patterns (26, `ailab:docs/runbooks/s2s-identity.md:137-164`) can only be
-  merged by the owner in person (admin override). Of the files this plan touches, PROTECTED are:
+  merged by the owner in person (admin override). Of the files this plan touches, PROTECTED today are:
   `deploy/helm/templates/_helpers.tpl`, `deploy/helm/charts/gatekeeper/**`, `deploy/secrets/ailab/**`,
   `deploy/gitops/flux/clusters/ailab/**`, `infra/gatekeeper/src/app/gatekeeper/config.py`,
-  `infra/gatekeeper/src/app/core/lifecycle.py`, `infra/gatekeeper/src/app/main.py`. NOT protected (bot-approvable,
-  D2 residual): `routes.py`, `helpers.py`, `jwks.py`, `redis.py`, `apikeys*.py`, `metrics.py`,
-  `infra/gatekeeper/src/app/api/v1/api.py`, `deploy/components/**`, `deploy/helm/values/providers/ailab.yaml`
-  (but `ailab.yaml` and `deploy/components/workers/*.yaml` need the owner's `approve-pin`, `platform:docs/runbooks/owner-ack.md:12-62`).
+  `infra/gatekeeper/src/app/gatekeeper/tokenreview_verifier.py`, `infra/gatekeeper/src/app/core/lifecycle.py`,
+  `infra/gatekeeper/src/app/main.py`. NOT protected today (bot-approvable): `routes.py`, `routes_session.py`,
+  `helpers.py`, `jwks.py`, `oidc.py`, `server_session.py`, `redis.py`, `apikeys*.py`, `metrics.py`,
+  `infra/gatekeeper/src/app/api/v1/api.py`, `deploy/components/**`, `infra/keycloak-sync/**`,
+  `deploy/helm/values/providers/ailab.yaml` (but `ailab.yaml` and `deploy/components/workers/*.yaml` need the
+  owner's `approve-pin`, `platform:docs/runbooks/owner-ack.md:12-62`). D15 protects most of these before AG1a.
 - Every image-pin move in `ailab.yaml` needs a `<!-- pin-bump:v1 -->` block (`platform:docs/runbooks/ailab-pin-bump.md`).
 - Reviewbot rule: never open a dependent PR before its prerequisite is live.
-- "Owner" means `chifor` acting in person. Where this plan says "owner merge" the default mechanism is the
-  Gitea web UI (no token on disk), per item 2.
+- "Owner" means `chifor` acting in person. "Owner merge" defaults to the Gitea web UI (no token on disk), per item 2.
 
-**Out of scope**: F-07 to F-31 except where an item needs them (F-17 and F-20 are touched by F-02 and F-01; F-30 is
-item 2; F-31 is item 4); Valkey TLS and in-cluster transport encryption (F-16); moving preshared clients to `k8s`
-identities; the owner's kubeconfig, talosconfig and age key as workstation credentials (named as a residual in
-item 2); the hand-applied Strive tunnel (F-12); the Forge realm.
+**Out of scope**: F-07 to F-31 except where an item needs them (F-17 and F-20 are touched by F-02 and F-01; F-25 by
+D16; F-30 is item 2; F-31 is item 4); Valkey TLS and in-cluster transport encryption (F-16); the owner's kubeconfig,
+talosconfig and age key as workstation credentials (a residual in item 2); the hand-applied Strive tunnel (F-12);
+the Forge realm.
 
 ## Verified facts
 
 | # | Fact | Evidence |
 | --- | --- | --- |
 | **F-01 Valkey** | | |
-| V1 | Valkey runs `bitnamilegacy/valkey:8.0.1` via chart `valkey` 1.0.3, standalone, `auth.enabled: false`; the comment says the umbrella helper builds a password-less URL for every consumer and that Valkey is "NetworkPolicy-gated". | `platform:deploy/components/valkey/helmrelease.yaml:38-82`; LIVE HelmRelease Ready, 1.0.3 |
+| V1 | Valkey runs `bitnamilegacy/valkey:8.0.1` via chart `valkey` 1.0.3, standalone, `auth.enabled: false`; the comment says the helper builds a password-less URL for every consumer, that gatekeeper "blocked at boot" with auth on (historical, see V8), and that Valkey is "NetworkPolicy-gated". | `platform:deploy/components/valkey/helmrelease.yaml:38-82`; LIVE HelmRelease Ready, 1.0.3 |
 | V2 | NetworkPolicy `valkey` ingress rule has no `from` (any source on 6379); egress `{}`; no CiliumClusterwideNetworkPolicies. | LIVE `get netpol valkey -o yaml`; `get ciliumclusterwidenetworkpolicies` empty |
-| V3 | Chart default `networkPolicy.allowExternal: true`. With `false` the rule admits only pods labelled `valkey-client: "true"`, Valkey's own pods, and anything in `networkPolicy.extraIngress`. | bitnami `valkey` 1.0.3 `values.yaml:1492-1552`, `templates/networkpolicy.yaml` (pulled from `oci://registry-1.docker.io/bitnamicharts/valkey:1.0.3`; the cluster uses the HTTPS index of the same version; byte equality UNVERIFIED) |
-| V4 | `REDIS_URL` is a literal, password-less `redis://valkey-master.<ns>.svc.cluster.local:6379` rendered by the owner-protected helper for every chart that includes `strive.envFromGatekeeper` (24 includes, gatekeeper among them); the four worker manifests and airlock's `APP__AIRLOCK__RATE_LIMIT_REDIS_URL` set the same literal. | `platform:deploy/helm/templates/_helpers.tpl:293-294`; `deploy/helm/charts/gatekeeper/templates/deployment.yaml:97`; `deploy/components/workers/{digest,integration,mcp,workflow}-worker.yaml` (`REDIS_URL` at :103, :98, :86, :171); `ailab.yaml:1780-1781` |
-| V5 | 16 workloads (17 pods) carry a Redis URL env: airlock, deepagent, digest, digest-worker, gatekeeper (x2), integration, integration-worker, knowledge, mcp, mcp-worker, notification, profile, sentinel, tms, workflow, workflow-worker. All carry label `strive.io/service=<name>`. No pod outside `strive-ailab` targets this Valkey (open-webui's URLs point elsewhere). | LIVE pod env NAMES and labels |
-| V6 | TMS reads `APP__TMS__REDIS_URL` (default `redis://redis:6379`) and has no such env; no Service `redis` exists. TMS therefore most likely never reaches Valkey, so no `tenant-route:*` rows are written on ailab (spec open question 2). Inferred, not observed on the wire. | `platform:infra/tms/src/app/core/config/domain.py:119`, `loader.py:35-36`, `infra/tms/config/default.yaml:108`; LIVE env names, `get svc redis` NotFound |
-| V7 | Gatekeeper logs the full Redis URL at INFO twice. A password embedded in the URL would reach Loki, which is unauthenticated on the LAN. | `platform:infra/gatekeeper/src/app/gatekeeper/redis.py:467,664`; `ailab:kubernetes/apps/infrastructure/monitoring/alloy.yaml:98` <!-- codex: [P1] The pinned server_session.py also logs the full bearer session_id when issuing/deleting sessions, so unauthenticated Loki already exposes usable credentials independently of Redis URL logging; explicitly triage that exposure. --> |
-| V8 | Gatekeeper silently falls back to per-process memory on any `redis.ConnectionError`/`TimeoutError`/`OSError` and reconnects with exponential backoff capped at 60 s. redis-py's `AuthenticationError` subclasses `ConnectionError`, so a wrong password also degrades silently (library behaviour for the pinned redis-py: UNVERIFIED). | `redis.py:34-39,456-548` |
-| V9 | Valkey persistence: AOF on (`appendonly yes`, `save ""`), PVC 8Gi `nfs-csi`; one replica, so any change to the StatefulSet template restarts the only pod. | LIVE ConfigMap `valkey-configuration` (non-secret), PVC, StatefulSet |
-| V10 | Redis/Valkey ACL semantics this plan relies on: while user `default` is `nopass`, two-argument `AUTH default <anything>` succeeds and one-argument `AUTH <x>` errors. UNVERIFIED for `bitnamilegacy/valkey:8.0.1`; step A1.3 proves it before use. | Redis ACL documentation (`nopass`) |
+| V3 | Chart default `networkPolicy.allowExternal: true`. With `false` the rule admits only pods labelled `valkey-client: "true"`, Valkey's own pods, and anything in `networkPolicy.extraIngress`. | bitnami `valkey` 1.0.3 `values.yaml:1492-1552`, `templates/networkpolicy.yaml` (pulled from OCI; the cluster uses the HTTPS index of the same version; byte equality UNVERIFIED, A1.2 renders from the index) |
+| V4 | `REDIS_URL` is a literal, password-less `redis://valkey-master.<ns>.svc.cluster.local:6379` rendered by the owner-protected helper for every chart that includes `strive.envFromGatekeeper` (24 includes, gatekeeper among them); the four worker manifests and airlock's `APP__AIRLOCK__RATE_LIMIT_REDIS_URL` set the same literal. | `platform:deploy/helm/templates/_helpers.tpl:293-294`; `deploy/helm/charts/gatekeeper/templates/deployment.yaml:97`; `deploy/components/workers/{digest,integration,mcp,workflow}-worker.yaml` (`REDIS_URL` at :111, :106, :94, :179); `ailab.yaml:1932-1933` |
+| V5 | 16 workloads (17 pods) carry a Redis URL env: airlock, deepagent, digest, digest-worker, gatekeeper (x2), integration, integration-worker, knowledge, mcp, mcp-worker, notification, profile, sentinel, tms, workflow, workflow-worker, all labelled `strive.io/service=<name>`. No CronJob or Job in `strive-ailab` carries a Redis env name (airlock-reaper, ci-objectstore-expiry, workflow-artifact-expiry, e2e-runner, k6-weekly-soak, openbao-platform-pg-sync); their pods carry other labels or none. No pod outside `strive-ailab` targets this Valkey. | LIVE pod and CronJob/Job env NAMES and labels |
+| V6 | TMS reads `APP__TMS__REDIS_URL` (default `redis://redis:6379`) and has no such env; no Service `redis` exists, so TMS most likely never reaches Valkey (spec open question 2). Inferred. | `platform:infra/tms/src/app/core/config/domain.py:119`, `loader.py:35-36`, `infra/tms/config/default.yaml:108`; LIVE |
+| V7 | Gatekeeper logs the full Redis URL at INFO twice; a password in the URL would reach Loki. | `platform:infra/gatekeeper/src/app/gatekeeper/redis.py:467,664` |
+| V58 | Gatekeeper logs the full bearer `session_id` at INFO on issue and delete (and at WARNING on decrypt/limit paths). Loki holds 147 `server_session_issued session_id=` lines from the last 24 h and is reachable from the LAN without authentication (NodePort `monitoring/loki-lan` 30310). | `server_session.py:148-150,311,351-380`; `routes_session.py:80`; LIVE Loki `count_over_time` (count only), `get svc -A` |
+| V8 | Gatekeeper silently falls back to per-process memory on any `redis.ConnectionError`/`TimeoutError`/`OSError` and reconnects with exponential backoff capped at 60 s; readiness always answers 200, so pods stay Ready. Fallback logins live in one pod's memory and are lost on reconnect; fallback deletes are not replayed. The counters `gatekeeper_redis_fallback_total` and `gatekeeper_redis_reconnections_total` are declared but **never incremented** (series exist, always 0): today nothing shows a gatekeeper in fallback. | `redis.py:34-39,455-548`; `metrics.py:110-118` (no other reference); `api/v1/endpoints/health.py:58-77`; LIVE Prometheus |
+| V63 | Every Python consumer uses redis-py: 7.4.0 in the `uv.lock` of gatekeeper, tms, airlock, deepagent, integration, knowledge, mcp, notification, profile, sentinel, workflow and the weld SDKs; **8.0.0 in digest**. airlock and mcp also degrade silently without Redis (`AIRLOCK_ALLOW_MEMORY_RATE_LIMIT=1`; mcp warns "Redis client unavailable"). | `uv.lock` files at `a1014dfed`; `ailab.yaml:1930-1933`; `services/mcp/src/app/services/capability_events.py:70` |
+| V9 | Valkey persistence: AOF on (`appendonly yes`, `save ""`), PVC 8Gi `nfs-csi`; one replica, so any StatefulSet template change restarts the only pod. | LIVE ConfigMap `valkey-configuration`, PVC, StatefulSet |
+| V10 | While user `default` is `nopass`, two-argument `AUTH default <anything>` succeeds and one-argument `AUTH <x>` errors (Redis ACL docs). UNVERIFIED for this Valkey build; A1.3 proves it. | Redis ACL documentation |
 | **F-02 API keys** | | |
 | V11 | The management API takes tenant and owner from `X-Gatekeeper-Tenant`/`X-Gatekeeper-User-Id` with no role check, contrary to its docstring; it is mounted under `/api/v1`. | `platform:infra/gatekeeper/src/app/gatekeeper/apikeys_api.py:1-9,117-196`; `api/v1/api.py:4,9`; `main.py:72` |
-| V12 | Nothing in `apps/web`, `services/*` or `infra/tms` calls `/api-keys`; gatekeeper's RED metrics show no `/api/v1/api-keys` route in 7 days; spec: no `api_key` `/auth` traffic in 30 days. API-key tokens carry a slug that weld rejects (F-17), and `platform__app_import` is unreachable on ailab anyway. | `git grep` at 5b453c03f; LIVE Prometheus `http_server_request_duration_seconds_count{job="gatekeeper"}` by route; `ailab.yaml:188-189` |
+| V12 | Nothing in `apps/web`, `services/*` or `infra/tms` calls `/api-keys`; no `/api/v1/api-keys` route in gatekeeper's RED metrics for 7 days; spec: no `api_key` `/auth` traffic in 30 days. API-key tokens carry a slug weld rejects (F-17); `platform__app_import` is unreachable on ailab. | `git grep`; LIVE Prometheus by route; `ailab.yaml:188-189` |
 | V13 | The `X-API-Key` track runs first in `/auth`; when the header is present only that track runs. | `routes.py:741-784` |
 | **F-03 signing key** | | |
-| V14 | Public JWKS has one ES256 key, `kid` `8b77549a4272d160`; the SOPS file last changed 2026-06-18 (`5065f9982`). | LIVE `GET https://strive.place/auth/jwks`; `git log` of `deploy/secrets/ailab/gatekeeper-signing-keys.enc.yaml` |
-| V15 | `FileKeyRing` reads `active.pem` (required), `retiring.pem`, `pending.pem` once at startup; all loaded keys are published; only `active` signs. | `platform:infra/gatekeeper/src/app/gatekeeper/key_store.py:113-205` |
-| V16 | The whole Secret `gatekeeper-signing-keys` is mounted (no `items`) at `/var/run/secrets/gatekeeper-signing`, `optional: true`; no checksum annotation follows it. Gatekeeper rolls `maxUnavailable: 0`, 2 replicas, PDB `minAvailable: 1`. | `platform:deploy/helm/charts/gatekeeper/templates/deployment.yaml:184-216,19`; spec |
-| V17 | Every gatekeeper-side verification (cached internal JWT re-check, token-exchange subject token) uses the full published set, so a `pending` or `retiring` key verifies. A cached token whose `kid` left the ring is treated as a miss and re-minted. | `internal_token_cache.py:70-103`; `service_token.py:558-564` |
-| V18 | Verifier caches: weld 600 s lifespan, 1800 s stale, unknown-`kid` refetch without cooldown; harness 600 s lifespan, and after a successful unknown-`kid` refetch further unknown kids are refused for 60 s. Internal JWT `exp - iat` <= 300 s, weld skew 30 s. | `platform:sdks/weld-auth/src/weld/auth/jwks.py:33-34`; `services/harness/src/plugins/identity-gatekeeper/jwks.ts:17-23,62-64,85-86`; spec |
-| V19 | The keygen CronJob is disabled on ailab; the values comment claims gatekeeper self-generates its key, which is false (the kustomization says it must be pre-seeded). The Secret is Flux-applied from SOPS by `platform-secrets`, so an in-cluster patch (the CronJob's design) would be reverted on the next reconcile (inferred from Flux apply semantics). | `ailab.yaml:444-449`; `platform:deploy/secrets/ailab/kustomization.yaml:33-37` |
+| V14 | Public JWKS has one ES256 key, `kid` `8b77549a4272d160`; the SOPS file last changed 2026-06-18 (`5065f9982`). | LIVE `GET https://strive.place/auth/jwks`; `git log` |
+| V15 | `FileKeyRing` reads `active.pem` (required), `retiring.pem`, `pending.pem` once at startup (no hot reload); all loaded keys are published; only `active` signs; `kid` = first 16 hex of sha256 of the public key's SPKI DER. | `platform:infra/gatekeeper/src/app/gatekeeper/key_store.py:99-110,113-205` |
+| V16 | The whole Secret `gatekeeper-signing-keys` is mounted (no `items`), `optional: true`; no checksum annotation follows it. Gatekeeper rolls `maxUnavailable: 0`, 2 replicas, PDB `minAvailable: 1`. | `platform:deploy/helm/charts/gatekeeper/templates/deployment.yaml:19,184-216` |
+| V17 | Every gatekeeper-side verification uses the full published set, so a `pending` or `retiring` key verifies; a cached token whose `kid` left the ring is re-minted. | `internal_token_cache.py:70-103`; `service_token.py:558-564` |
+| V18 | Verifier caches: weld 600 s lifespan, 1800 s stale (only while gatekeeper is unreachable), unknown-`kid` refetch without cooldown; harness 600 s, and after a successful unknown-`kid` refetch further unknown kids are refused for 60 s. Both fetch gatekeeper's JWKS in-cluster (no HTTP cache). Internal JWT `exp - iat` <= 300 s, weld skew 30 s. | `platform:sdks/weld-auth/src/weld/auth/jwks.py:33-34`; `services/harness/src/plugins/identity-gatekeeper/jwks.ts:17-23,73-86`; `deploy/helm/charts/harness/values.yaml:125` |
+| V19 | The keygen CronJob is disabled on ailab; the values comment's self-generation claim is false (the kustomization says pre-seed). The Secret is Flux-applied from SOPS by `platform-secrets`, so an in-cluster patch would be reverted. | `ailab.yaml:444-449`; `platform:deploy/secrets/ailab/kustomization.yaml:33-37` |
 | **F-04 test bypass** | | |
 | V20 | `TEST_BYPASS_ENABLED=true`, token from `gatekeeper-secrets/test-bypass-token`, tenant allowlist = operator tenant, paths `/sandbox/,/api/airlock/,/api/v1/apps/`; evaluated before the session; 165 successes in 7 days (spec). | `ailab.yaml:415-441`; `routes.py:454-472,786-855` |
-| V21 | Sentinel reaches `strive.place` through the in-cluster Traefik, not Cloudflare: Chromium maps `strive.place` to `traefik.platform-edge.svc`, httpx uses `hostAliases` 10.97.5.57 (the Traefik ClusterIP). | `ailab.yaml:2069,2088`; LIVE `svc/traefik` 10.97.5.57 |
-| V22 | The platform-edge Traefik is `ClusterIP` only; internet traffic arrives only through Cloudflare tunnels, and Cloudflare sets `CF-Ray`/`CF-Connecting-IP` on every proxied request (the guest limiter already relies on `cf-connecting-ip`, `ailab.yaml:314-359`). That no non-Cloudflare path reaches Traefik from outside the cluster is inferred from the Service type and the absence of an LB. | LIVE `get svc,deploy -n platform-edge`; `deploy/components/traefik/helmrelease.yaml:35-38` |
-| V23 | The `gatekeeper-auth` middleware sets only `authResponseHeaders`; Traefik then forwards every request header to `/auth` (Traefik documentation; UNVERIFIED in-repo, tested in A4.2). | LIVE middleware; spec |
+| V21 | Sentinel reaches `strive.place` through the in-cluster Traefik: Chromium maps it to `traefik.platform-edge.svc`, httpx uses `hostAliases` 10.97.5.57. | `ailab.yaml:2237,2256`; LIVE `svc/traefik` |
+| V22 | The platform-edge Traefik is `ClusterIP` only; no NodePort or LoadBalancer Service in the cluster targets it; internet traffic arrives through the two `edge` cloudflared Deployments (`cloudflared`, `cloudflared-strive`). Cloudflare adds `CF-Ray`, `CF-Connecting-IP` and `CDN-Loop` to every proxied request (the guest limiter already relies on `cf-connecting-ip`, `ailab.yaml:314-359`). | LIVE `get svc -A`, `get deploy -n edge`; `deploy/components/traefik/helmrelease.yaml:35-38` |
+| V23 | The `gatekeeper-auth` middleware sets only `authResponseHeaders`; Traefik forwards every request header to `/auth` (Traefik docs; UNVERIFIED in-repo, A4.2 proves it). | LIVE middleware |
 | **F-05 roots of trust** | | |
-| V24 | One age recipient (`age1nfa6hh...`) encrypts all 74 ailab SOPS files and the 23 platform `deploy/secrets/ailab/*.enc.yaml`. The key file exists only at `C:\Users\chifo\work\home\ailab\kubernetes\infra\_out\age.agekey` on the workstation; `flux-system/sops-age` holds one key `age.agekey`, hand-applied (last-applied annotation, no labels). | `ailab:.sops.yaml`; `platform:.sops.yaml` (ailab rule); LIVE Secret metadata (key names only) |
-| V25 | Talos `rotate-ca --kubernetes` rotates only the Kubernetes API CA; "other Kubernetes secrets might need to be rotated manually". No Talos procedure exists for the ServiceAccount signing key (`cluster.serviceAccount.key`). | docs.siderolabs.com, Talos v1.11 "CA rotation" |
-| V26 | Realm `strive` publishes one RS256 signing key and one RSA-OAEP key. Gatekeeper caches Keycloak JWKS 900 s; an unknown `kid` forces one refetch, then a 60 s cooldown; a token that does not verify after the refetch terminates the session. | LIVE `GET https://auth.strive.place/realms/strive/protocol/openid-connect/certs`; `platform:infra/gatekeeper/src/app/gatekeeper/jwks.py:100-167`; spec <!-- codex: [P2] The pinned jwks.py arms its cooldown only when the requested kid remains absent after refresh, not after every successful unknown-kid refresh; base rotation tests on that implementation, including an attacker-armed cooldown. --> |
-| V27 | Preshared clients: one argon2id hash per client, no overlap; any `gatekeeper-secrets` edit must bump `gatekeeper.serviceRegistry.checksum` (CI guard), which rolls gatekeeper; consumer pods are not rolled by a Secret change (UNVERIFIED, spec). | `ailab.yaml:205-219`; spec |
+| V24 | One age recipient (`age1nfa6hh...`) encrypts all 74 ailab SOPS files and the 23 platform `deploy/secrets/ailab/*.enc.yaml`. The key file is at `C:\Users\chifo\work\home\ailab\kubernetes\infra\_out\age.agekey`; `flux-system/sops-age` holds one key `age.agekey`, hand-applied. Other holders are not inventoried (A5.2 step 0). | `.sops.yaml` (both repos); LIVE Secret metadata |
+| V25 | Talos `rotate-ca --kubernetes` rotates only the Kubernetes API CA; no Talos procedure exists for the ServiceAccount signing key. | Talos v1.11 "CA rotation" docs |
+| V26 | Realm `strive` publishes one RS256 signing key and one RSA-OAEP key. Gatekeeper caches Keycloak JWKS 900 s; an unknown `kid` forces one refetch, and the 60 s cooldown is armed **only when the kid is still absent after that refetch** (a fabricated kid arms it, a real new kid does not); a token that does not verify after the refetch terminates the session. | LIVE realm certs; `platform:infra/gatekeeper/src/app/gatekeeper/jwks.py:100-167` (arming at :160-166) |
+| V27 | **After #2125:** no ailab client is preshared (V61). Any `gatekeeper-secrets` edit must bump `gatekeeper.serviceRegistry.checksum` (sha256 of the whole ciphertext, CI-guarded), which rolls gatekeeper; consumer pods are not rolled by a Secret change. | `deploy/helm/scripts/check-service-registry-checksum.sh:1-45`; spec |
 | V28 | Session, guest and delegation encryption use single `Fernet` objects (no `MultiFernet`); rotating a key invalidates every session or grant. | `platform:infra/gatekeeper/src/app/core/lifecycle.py:163,181,210`; `config.py:328-333` |
 | **F-06 OIDC** | | |
-| V29 | The authorize redirect carries no `code_challenge`, no `nonce`, and `state` is the return path. It is built in `build_login_url` from two call sites: `GET /auth/login` and the ForwardAuth login redirect. | LIVE `curl -sD- https://strive.place/`; `helpers.py:119-165`; `routes.py:358-401,1611-1650` |
-| V30 | `/callback` only applies the open-redirect check to `state`, exchanges the code, decodes the access token without verification, and stores the ID token unverified. | `routes.py:1652-1760`; `helpers.py:409-422` |
-| V31 | `verify_token` passes audience but no issuer. The live issuer is `https://auth.strive.place/realms/strive`, also on back-channel calls. | `jwks.py:180-225`; spec (LIVE) |
-| V32 | keycloak-sync already reconciles client redirect URIs, and its bootstrap demands S256 PKCE for public clients: the pattern for enforcing PKCE on `gatekeeper`. | `platform:infra/keycloak-sync/src/keycloak_realm_sync/main.py:576-729`; `bootstrap.py:119-121` |
+| V29 | The authorize redirect carries no `code_challenge`, no `nonce`, and `state` is the return path; built in `build_login_url` (which also passes `kc_idp_hint`) from `GET /auth/login` and the ForwardAuth login redirect. | LIVE `curl -sD- https://strive.place/`; `helpers.py:119-165`; `routes.py:358-401,1611-1650` |
+| V30 | `/callback` only applies the open-redirect check to `state`, exchanges the code, decodes the access token without verification, stores the ID token unverified, and may refresh tokens after the tenant-assignment Admin API hook. | `routes.py:1652-1810`; `helpers.py:409-422` |
+| V62 | `exchange_code` has no `code_verifier` parameter and sends none. `validate_state` only rejects a missing leading `/` and a `//` prefix, so `/\evil.example` passes (browsers treat `\` as `/`: an open redirect today). | `oidc.py:26-76`; `helpers.py:409-422` |
+| V31 | `verify_token` passes audience but no issuer; the same `issuer_url` argument is the JWKS fetch base. Live issuer `https://auth.strive.place/realms/strive`. | `jwks.py:180-225`; spec (LIVE) |
+| V32 | keycloak-sync reconciles client redirect URIs (`sync_client_redirect_uris`) and its bootstrap demands S256 PKCE for public clients: the pattern for enforcing PKCE on `gatekeeper`. Its Job is re-applied by Kustomization `platform-identity` every 10-20 minutes. | `platform:infra/keycloak-sync/src/keycloak_realm_sync/main.py:576-729`; `bootstrap.py:119-121`; `docs/runbooks/ailab-pin-bump.md:17-19` |
 | V33 | Login volume: 395 `/callback` and 80 `/auth/login` answers in 7 days (about 2.4 logins per hour). | LIVE gatekeeper RED metrics |
 | **Item 2 credentials** | | |
-| V34 | Gitea users: `gitea_admin` (uid 1, site admin), `cchifor` (uid 2, type 1 = organization, a converted user), `chifor` (uid 3, site admin, `login_type` 6 = OAuth2 via Authelia). | Gitea DB `"user"` |
-| V35 | Token counts: `cchifor` **26** (the spec and runbook say 21: drift), `chifor` 1 (`cc-admin-20260913`: `read:organization,write:issue,write:repository,read:user`, last used 2026-10-07 06:06Z), `gitea_admin` 41. | Gitea DB `access_token` (names, scopes, dates only) |
-| V36 | Of the 26 `cchifor` tokens, only `ver040-1786337710` (`write:issue,write:repository`) was used in the last 30 days (2026-10-07 06:06Z). The other 25 were last used between 2026-08-10 and 2026-09-03; three carry `write:organization` (`reviewbot-setup2-2026-09`, `reviewbot-2026-09`, `cloudlab-bootstrap`). | same |
-| V37 | `gitea_admin`: only `af-ci-scaler-2941` (`read:admin`) and `flux-ailab-read` (`read:repository`) are documented consumers (last used 2026-09-17); 39 others were last used 2026-07-12 to 2026-08-11, including `stage0-ops-1784874768` with `write:admin`. | same; `ailab:docs/runbooks/s2s-identity.md:351-353` |
-| V38 | Gitea access tokens cannot expire in this deployment (no expiry column). DB-row deletion revokes at once (D1 precedent, verified 401). Whether `updated_unix` moves on every use is assumed from Gitea's auth code (UNVERIFIED); the timestamps above are consistent with known consumers. | DB schema; `ailab:docs/runbooks/s2s-identity.md:71-72` |
-| V39 | `chifor` has an OAuth2 grant to the built-in "Git Credential Manager" app (2026-08-05); the workstation holds GCM OAuth entries `git:https://refresh_token.git.chifor.me` and `git:https://oauth2@git.chifor.me`. Whether that refresh token is still valid is UNVERIFIED. | DB `oauth2_grant`; `cmdkey /list` (target names) |
-| V40 | Workstation Gitea credentials (names only): WCM `git:https://git.chifor.me` (user `cchifor`, the default), `git:https://cchifor@git.chifor.me`, `git:https://chifor@git.chifor.me`; `~/.git-credentials` one entry `chifor@git.chifor.me`; files `~/.gitea_tok`, `~/.gitea_cred_tmp` (contents not read); `credential.helper=manager`, `credential.https://chifor@git.chifor.me.helper=store`. Which token each holds is taken from the brief (OBSERVED by the coordinator), not re-read. | `cmdkey /list`; `git config --get-regexp credential`; `ls -la` |
-| V41 | Six Gitea Actions secrets have token-like names; all but `FORGE_RELEASE_TOKEN` (release-bot, 2026-10-05) were created before the first `cchifor` token (2026-08-10), so none holds a `cchifor` token unless re-set later (the table has no update column). | DB `secret` (names and dates) |
-| V42 | `pr_reviewer_merge_authors` includes `cchifor` and `chifor`. | `ailab:ansible/roles/pr_reviewer/defaults/main.yml:216` |
-| V43 | infra-pg (CNPG) runs the default custom-queries ConfigMap; its metrics port is scraped through the hand-written PodMonitor `infra-pg-metrics`. | LIVE Cluster spec; `ailab:kubernetes/apps/databases/infra-pg.yaml:286-300` |
+| V34 | Gitea users: `gitea_admin` (uid 1, site admin), `cchifor` (uid 2, organization, a converted user), `chifor` (uid 3, site admin, `login_type` 6 = OAuth2 via Authelia). | Gitea DB `"user"` |
+| V35 | Token counts: `cchifor` **26** (spec and runbook say 21: drift), `chifor` 1 (`cc-admin-20260913`, `read:organization,write:issue,write:repository,read:user`, last used 2026-10-07 06:06Z), `gitea_admin` 41. | Gitea DB `access_token` (names, scopes, dates) |
+| V36 | Of the 26 `cchifor` tokens only `ver040-1786337710` (`write:issue,write:repository`) was used in 30 days; the other 25 were last used 2026-08-10 to 2026-09-03; three carry `write:organization`. | same |
+| V37 | `gitea_admin`: only `af-ci-scaler-2941` (`read:admin`) and `flux-ailab-read` (`read:repository`) are documented consumers; 39 others were last used 2026-07-12 to 2026-08-11, including `stage0-ops-1784874768` with `write:admin`. | same; `ailab:docs/runbooks/s2s-identity.md:351-353` |
+| V38 | Gitea access tokens cannot expire here (no expiry column). Whether `updated_unix` moves on every use is UNVERIFIED (B6 tests it). | DB schema |
+| V39 | `chifor` has an OAuth2 grant to the built-in "Git Credential Manager" app; the workstation holds GCM entries `git:https://refresh_token.git.chifor.me` and `git:https://oauth2@git.chifor.me`. | DB `oauth2_grant`; `cmdkey /list` (names) |
+| V40 | Workstation Gitea credentials (names only): WCM `git:https://git.chifor.me` (user `cchifor`, the default), `git:https://cchifor@git.chifor.me`, `git:https://chifor@git.chifor.me`; `~/.git-credentials` one entry `chifor@git.chifor.me`; files `~/.gitea_tok`, `~/.gitea_cred_tmp`; `credential.helper=manager`, `credential.https://chifor@git.chifor.me.helper=store`; no `tea` config, no `.netrc`. | `cmdkey /list`; `git config --get-regexp credential`; `ls -la` |
+| V41 | Six Gitea Actions secrets have token-like names; all but `FORGE_RELEASE_TOKEN` predate the first `cchifor` token. | DB `secret` (names, dates) |
+| V42 | `pr_reviewer_merge_authors` = `cchifor, chifor, agentforge-ci-bot, renovate-bot, dev-worker-bot` (global); repo-scoped authors exist separately. | `ailab:ansible/roles/pr_reviewer/defaults/main.yml:216-219` |
+| V43 | infra-pg (CNPG) runs the default custom-queries ConfigMap, scraped through PodMonitor `infra-pg-metrics`. | LIVE; `ailab:kubernetes/apps/databases/infra-pg.yaml:286-300` |
+| V59 | Break-glass exists: Secret `gitea/gitea-admin` (SOPS `kubernetes/apps/apps/gitea/gitea-admin.sops.yaml`, "break-glass local admin") holds the `gitea_admin` password. Gitea runs one replica (1.26.1-rootless). Token deletion through the API needs that user's basic auth; Gitea keeps an in-process cache of recently successful tokens, so a DB-row deletion may not revoke a cached token before a restart (UNVERIFIED for 1.26.1). `scripts/forge.sh`, named in `CLAUDE.md`, does not exist. | `ailab:kubernetes/apps/apps/gitea/kustomization.yaml:5`, `gitea.yaml:93`; `docs/runbooks/agentforge-platform-activation.md:316-320`; LIVE deploy |
 | **Item 3 drill 2** | | |
-| V44 | HelmRelease `strive` and HelmChart `strive-ailab-strive` list three `valuesFiles`, the registry file last. | `platform:deploy/gitops/flux/clusters/ailab/app/helmrelease.yaml:21-24`; LIVE |
-| V45 | Gatekeeper is pinned to `sha256:3adaf0be...` (`sha-1e1e33775`). The pre-Phase-3 rollback target `sha256:45abbd52...` (`sha-19363455156f`) is still served by the registry (HEAD 200). Between them gatekeeper changed only by #2101 (S2S), #2105 (S2S) and a test-flake fix. | `ailab.yaml:191-202`; registry HEAD 2026-10-07 |
-| V46 | Darkening the harness requires `WEB_AGENT_PANEL=legacy` first; the current web image still honours `legacy`. | `ailab.yaml:1444-1447,2172-2178` |
-| V47 | TokenReview RBAC renders only with composite on; the apiserver CNP renders regardless (allow rule only). | `charts/gatekeeper/templates/tokenreview-rbac.yaml:1`; `ailab.yaml:220-231` |
-| V48 | With the registry file not listed, the S2S Authority Guard runs (a), (b), (b0), (b2); (b1) runs only when it is listed. | `platform:scripts/ci/check-s2s-authority.py:13-60,322-324` |
-| V49 | The pre-Phase-3 image rejects `SVC_AUTH_BACKEND=composite` (Literal) and ignores unknown env (`extra="ignore"`). | signed plan "Misconfiguration contract"; `ailab.yaml:357` |
-| V50 | helm-controller is v1.5.5, which embeds **Helm v4.2.0**; v1.5.0 switched new HelmReleases to server-side apply, existing ones keep client-side apply until their `.spec` changes. Platform CI renders with Helm 3, which (unlike Helm 4) ignores a parent overlay's `null` over a subchart default. Which apply method `strive` uses now is UNVERIFIED. | LIVE image tags; `fluxcd/helm-controller` v1.5.5 `go.mod`, CHANGELOG v1.5.0; `platform:deploy/helm/templates/_helpers.tpl:350-352`, `deploy/helm/scripts/tests/check-harness-chart-contract.sh:41-55` |
-| V51 | `flux-resume.sh` gates: target, source artifact, Kustomization `lastAppliedRevision`, HelmRelease chart version, end state (`--after-revert`: harness gone; `--after-drill`: scale to 1). | `ailab:scripts/s2s/flux-resume.sh:14-29` |
-| V52 | Lowest-traffic hours (gatekeeper `/auth` <= 5 per hour): 22:00-01:00Z and 03:00-07:00Z on 2026-10-06/07 (one day of data). | LIVE Prometheus `increase(gatekeeper_auth_requests_total[1h])` |
+| V44 | HelmRelease `strive` and HelmChart `strive-ailab-strive` list three `valuesFiles`, the registry file last; upgrade remediation `retries: 3` (default strategy rollback), `cleanupOnFail: true`. | `platform:deploy/gitops/flux/clusters/ailab/app/helmrelease.yaml:22-34`; LIVE |
+| V45 | Gatekeeper is pinned to `sha256:3adaf0be...` (`sha-1e1e33775`), unchanged by #2125. | `ailab.yaml:191-202` |
+| V46 | Darkening the harness requires `WEB_AGENT_PANEL=legacy` first; the current web image honours `legacy` "for one release". | `ailab.yaml:1580-1583,2340-2346` |
+| V47 | TokenReview RBAC renders only with composite on; the apiserver CNP renders regardless. | `charts/gatekeeper/templates/tokenreview-rbac.yaml:1`; `ailab.yaml:220-231` |
+| V48 | With the registry file not listed, the S2S Authority Guard runs (a), (b), (b0), (b2); (b1) only when listed. | `platform:scripts/ci/check-s2s-authority.py:13-60,322-324` |
+| V49 | The pre-Phase-3 image (`45abbd52...`) rejects `SVC_AUTH_BACKEND=composite` (Literal) and ignores unknown env. | signed plan "Misconfiguration contract"; `ailab.yaml:357` |
+| V50 | helm-controller v1.5.5 embeds Helm v4.2.0 and server-side apply for new HelmReleases; platform CI renders with Helm 3, which (unlike Helm 4) ignores a parent `null` over a subchart default. The apply method `strive` uses is UNVERIFIED. | LIVE image tags; helm-controller v1.5.5; `_helpers.tpl:350-352`; `check-harness-chart-contract.sh:41-55` |
+| V51 | `flux-resume.sh` gates: 0 target, 1 source artifact, 2 Kustomization `lastAppliedRevision`, 3 HelmRelease chart version, 4 end state. A STOP at gates 0-1 leaves everything suspended; a STOP at gate 2 or later leaves the Kustomization (and from gate 3 the HelmRelease) **resumed**, and the script says "freeze again (Kustomization first)". | `ailab:scripts/s2s/flux-resume.sh:14-29,186-217` |
+| V60 | `platform-app` and `platform-workers` `dependsOn` `platform-secrets` (same source); `platform-identity` and `platform-workers` depend on `platform-app`; `platform-secrets` interval 10 m. Dependents wait while a same-source dependency has not applied the current revision (Flux semantics, UNVERIFIED here; C5 records it). | `platform:deploy/gitops/flux/clusters/ailab/kustomizations.yaml:25-30,192-206,210-245` |
+| V61 | **After #2125 (LIVE 07:03Z):** gatekeeper logs `service_registry loaded ... clients=0` and `service_registry_extras loaded ... merged=11 refused=0`; the ten Python services and four workers present projected tokens (`serviceAccountToken.gatekeeper`); their `gatekeeper-client-secret` keys stay in each `<svc>-secrets`, inert; tms keeps one but has no registry entry. Gatekeeper refuses an extras entry whose `client_id` is also in the base. Every S2S mint now passes one process-wide TokenReview limiter (4 concurrent, 10/s, burst 20); ADR-034 accepted F-25 partly because "preshared clients are unaffected", no longer true. LIVE: 0 limited reviews; no gatekeeper or TokenReview alert exists. | LIVE logs; `platform:deploy/secrets/ailab/SECRETS.md:111-176`; `ailab.yaml` D.8 blocks; `config.py:363-367`; `ADR-034:303-318`; LIVE Prometheus, `get prometheusrule -A` |
+| V52 | Lowest-traffic hours (gatekeeper `/auth` <= 5 per hour): 22:00-01:00Z and 03:00-07:00Z (one day of data). | LIVE Prometheus |
 | **Item 4 edge** | | |
-| V53 | Traefik already exposes Prometheus metrics on entrypoint `metrics` (:9100) and the chart already creates ServiceMonitor `platform-edge/traefik`, but without label `release: kube-prometheus-stack`, which the Prometheus `serviceMonitorSelector` requires. Result: zero Traefik series (`count(traefik_entrypoint_requests_total)` empty, no `up` target in `platform-edge`). | LIVE Traefik args, ServiceMonitor labels, Prometheus CR selectors, queries; `platform:deploy/components/traefik/helmrelease.yaml:54-75`; traefik chart 36.3.0 `values.yaml:427-441` (`serviceMonitor.additionalLabels`) |
-| V54 | Access logs are JSON with every request header dropped (`--accesslog.fields.headers.defaultmode=drop`), shipped by the Alloy DaemonSet (`monitoring/alloy`, all pods) to single-binary Loki, retention 168 h. | LIVE args; `ailab:kubernetes/apps/infrastructure/monitoring/alloy.yaml`, `loki.yaml:39` |
-| V55 | **The "partially in Loki" premise did not reproduce.** For each of the last 30 hours, Traefik access lines in Loki >= gatekeeper `/auth` answers (ratio 1.1 to 3.9 in hours with traffic); the 2026-10-06 18:06-18:10Z 5xx lines (sandbox and web 503, airlock 500/502, integration and notification 500 with `OriginStatus` 0) are present. No strive pod was created between 17:55 and 18:15Z (only Jobs), so those 5xx were not a rollout. A 7-day `RequestCount` continuity check is recorded in E4. | LIVE Loki `count_over_time`, Prometheus `kube_pod_created` <!-- codex: [P2] More Traefik lines than /auth responses cannot establish completeness because the populations differ, and no new pod does not exclude container restarts or endpoint/config changes; keep the collector and incident-cause conclusions provisional. --> |
-| V56 | Gatekeeper exports OTLP RED metrics with `http_route` and `http_status_code`: 7-day `/auth` 5xx = 0; `/auth/token` 503 = 107 (drill 4). | LIVE Prometheus |
-| V57 | No strive PrometheusRule exists. ailab owns monitoring: rules with promtool fixtures (`.gitea/workflows/rules-lint.yaml`), Alertmanager to ntfy, the `strive-red` dashboard, and Gatus (generic `GatusEndpointDown`), which does not probe `strive.place`. | LIVE `get prometheusrule -A`; `ailab:kubernetes/apps/infrastructure/monitoring/kustomization.yaml:37`; `ailab:kubernetes/apps/apps/gatus/prometheusrule.yaml:23-45` |
+| V53 | Traefik exposes metrics on entrypoint `metrics` (:9100) and the chart creates ServiceMonitor `platform-edge/traefik` (`targetPort: metrics`), but (1) without label `release: kube-prometheus-stack`, which Prometheus requires, and (2) `svc/traefik` exposes only `web, websecure`, so the label alone yields no target. `metrics.prometheus.service.enabled: true` renders Service `traefik-metrics` (port `metrics`) and the ServiceMonitor selects it (Fable's local render of 36.3.0). Today: zero Traefik series. | LIVE; `platform:deploy/components/traefik/helmrelease.yaml:54-75`; chart 36.3.0 `values.yaml:427-441` |
+| V54 | Access logs are JSON with every request header dropped, shipped by the Alloy DaemonSet to single-binary Loki, retention 168 h. | LIVE args; `ailab:kubernetes/apps/infrastructure/monitoring/alloy.yaml`, `loki.yaml:39` |
+| V55 | **The "partially in Loki" premise did not reproduce (provisional).** For each of the last 30 hours Traefik access lines in Loki >= gatekeeper `/auth` answers (different populations, so this is not proof of completeness); the 2026-10-06 18:06-18:10Z 5xx lines are present; no strive pod was created then (restarts and endpoint changes not yet checked). E4 settles both. | LIVE Loki, Prometheus `kube_pod_created` |
+| V56 | Gatekeeper OTLP RED metrics: 7-day `/auth` 5xx = 0; `/auth/token` 503 = 107 (drill 4). | LIVE Prometheus |
+| V57 | No strive PrometheusRule exists. ailab owns monitoring: rules with promtool fixtures (`.gitea/workflows/rules-lint.yaml`), Alertmanager to ntfy routed on `severity`, the `strive-red` dashboard, Gatus (generic `GatusEndpointDown`). The Prometheus `ruleSelector` requires `release: kube-prometheus-stack`. | LIVE; `ailab:kubernetes/apps/apps/gatus/prometheusrule.yaml:17-45` |
 
 ## Owner decisions (required before execution)
 
 Each decision lists the options, the recommendation and its cost. Steps that depend on a decision name it.
 
 - **D1 (F-01) Valkey hardening depth.** (a) NetworkPolicy only. (b) NetworkPolicy plus AUTH. (c) b plus TLS now.
-  **Recommend b**; TLS follows the F-16 transport decision. Cost: one owner-merged helper change, a URL-safe
-  password rotation, one Valkey restart in an announced window (about 1 minute of degraded sessions, data kept by AOF),
-  and an ordering constraint: AUTH only after the log redaction in release AG1.
-  <!-- codex: [P2] D1(b) is useful perimeter hardening, but a shared default-user password grants every holder access to all Redis keys and remains plaintext on the wire; explicitly accept that blast radius and consider separate ACL users for sensitive stores. -->
-- **D2 (F-02) API keys.** (a) Retire on ailab: a flag turns off the `X-API-Key` track and the management API, existing
-  records are purged. (b) Harden: integrity-protected records, management API that derives tenant and owner from a
-  verified bearer and requires an admin role, slug-to-UUID mapping (F-17). **Recommend a** (zero use in 30 days, keys
-  cannot work against weld backends today, `platform__app_import` is unreachable on ailab). Cost: one protected
-  `config.py` field (owner merge); re-enabling later needs plan b.
-  <!-- codex: [P2] Retirement is proportionate, but zero observed use does not establish that the documented contract can be removed permanently; record owner acceptance and prevent flag/default changes or image rollback from silently restoring the vulnerable feature. -->
-- **D3 (F-04) Test bypass.** (a) Keep it, but refuse it for any request that came through Cloudflare (Sentinel already
-  runs in-cluster, V21), rotate the token, alert on edge attempts. (b) Disable permanently (Sentinel "Validate" stops
-  working on ailab). (c) Toggle per test window (an owner-ack PR each time). **Recommend a**; no replacement mechanism
-  for Sentinel is needed now (revisit with ADR-013). Cost: an unprotected code change and one token rotation (a few
-  minutes where Sentinel validations fail).
-  <!-- codex: [P1] D3 relies on absence of headers as permission, while ClusterIP alone proves neither origin isolation nor preservation of Cloudflare headers across tunnels/Workers/transforms; establish every ingress path or prefer a dedicated internal bypass route with an explicit source restriction. -->
-- **D4 (F-03) Signing-key rotation model.** (a) Keep the keygen CronJob off on ailab, rotate by owner SOPS commits in
-  three phases, roll by `kubectl rollout restart`, cadence every 180 days and on suspicion. (b) Build the keygen image
-  (incompatible with a Flux-managed Secret, V19). (c) Like a, but roll through a new chart checksum value (protected chart
-  change; two-controller race between the Secret and the roll). **Recommend a.** Cost: about 1 hour of owner time per rotation.
-  <!-- codex: [P2] The manual approach is reasonable, but no owner reminder, due-date check or overdue alert enforces the 180-day cadence; without one, the original never-rotated failure mode remains. -->
-- **D5 (F-05) Preshared S2S secrets.** (a) Written procedure with a measured mint-failure window now, migration to `k8s`
-  identities as a separate plan. (b) Dual-hash overlap in the registry (protected files). **Recommend a.** Cost: a
-  window of failed mints (expected under 2 minutes) per rotated client.
-  <!-- codex: [P2] The two-minute estimate excludes independent Secret reconciliation, scheduling and clients that do not retry 401s; compare measured end-to-end failures and job recovery with dual-hash overlap before accepting downtime. -->
+  (d) b with per-service ACL users. **Recommend b**; TLS follows F-16. Accepted blast radius: one shared `default`
+  password gives each of the 16 consumers every key, in plaintext on the pod network; (d) would need a password and
+  key-prefix ACL per consumer and is not worth it while the threat is anonymous access. Cost: one owner-merged helper
+  change, a password rotation, one platform-wide roll and one Valkey restart in quiet hours; AUTH only after AG1a.
+- **D2 (F-02) API keys.** (a) Retire on ailab: a flag turns off the `X-API-Key` track and the management API; records
+  are purged. (b) Harden (integrity-protected records, verified-bearer admin API, slug mapping). **Recommend a** (zero use
+  in 30 days, keys cannot work against weld backends, `platform__app_import` unreachable). The owner's acceptance is
+  recorded in the spec; `GatekeeperApiKeyUsed` (E3) fires if the track ever answers again (flag flipped or image
+  rolled back below AG1a). Cost: one protected `config.py` field; re-enabling needs plan b.
+- **D3 (F-04) Test bypass.** (a) Keep it, but refuse it for any request that came through Cloudflare (markers
+  `CF-Ray`, `CF-Connecting-IP`, `CDN-Loop`; Sentinel runs in-cluster, V21), enumerate every path into Traefik (A4.2),
+  rotate the token, alert on edge attempts. (b) Disable permanently (Sentinel "Validate" stops working). (c) Toggle per
+  test window. **Recommend a.** Cost: an unprotected code change and one token rotation.
+- **D4 (F-03) Signing-key rotation model.** (a) Keygen CronJob stays off; rotate by owner SOPS commits in three phases,
+  roll by `kubectl rollout restart`, every 180 days and on suspicion; each rotation ends by opening a due-dated platform
+  issue for the next. (b) Build the keygen image (incompatible with a Flux-managed Secret, V19). (c) Roll through a chart
+  checksum (protected change, two-controller race). **Recommend a.** Cost: about 1 hour of owner time per rotation.
+- **D5 (F-05) Preshared S2S secrets, after #2125.** No ailab client uses one (V61); the ten services' and tms's
+  `gatekeeper-client-secret` keys are inert. (a) Keep them only as rollback material until drill 2 has run, then
+  delete them in one owner SOPS commit. (b) Keep indefinitely. **Recommend a.** The preshared rotation procedure is
+  written for a re-added client (A5.4) but not rehearsed; drill 2 measures the same swap window.
 - **D6 (F-05) Session and delegation Fernet keys.** (a) Announced-logout procedure only. (b) `MultiFernet` overlap
-  (protected `lifecycle.py` and `config.py`). **Recommend a**: after F-01 the key is useful only together with Valkey
-  write access. Cost: a rotation logs every user out and voids long-running delegation grants.
-  <!-- codex: [P1] The premise is incomplete: Fernet also protects readable ciphertext/backups, and A6 newly uses the session key for browser-held OIDC transactions, so its value is no longer confined to Valkey writes; reassess separate key derivation and overlap versus an explicit maintenance outage. -->
+  (protected `lifecycle.py`, `config.py`). **Recommend a.** The key opens session and grant ciphertext wherever it lies
+  (Valkey, its AOF on the NFS PVC, backups), so F-01 narrows but does not remove its value; A6 therefore uses an
+  HKDF-derived key, not this one. Cost: a rotation logs every user out (repeatedly during the roll), voids long-running
+  grants, and is followed by a purge so a rollback cannot revive old records (A5.5).
 - **D7 (F-05) Kubernetes ServiceAccount signing key.** (a) Research and rehearse on a disposable Talos 1.11 cluster,
-  then write the procedure. (b) Record "no procedure" as an accepted residual. **Recommend a.** Cost: a disposable
-  cluster (docker or QEMU provider on a dev worker) and about a day of work.
-  <!-- codex: [P2] Research first is sound, but the estimate assumes an available disposable multi-control-plane environment with the necessary resources; time-box that prerequisite and allow a documented research outcome without delaying the production containment fixes. -->
-- **D8 (F-05) age key.** (a) Rehearse by a real dual-recipient rotation (reversible at every step). (b) Procedure plus a
-  dry run on a scratch repository. **Recommend a.** Cost: two re-encryption PRs per repository (one owner-merged on
-  platform) and a hand update of `flux-system/sops-age`. Neither option revokes what the old key can decrypt from git
-  history: after a suspected compromise every value must be rotated too.
-  <!-- codex: [P2] The recommendation overlooks rehearsing recovery and recipient removal on scratch data before the real rotation; choose the live option only after proving restoration with the new identity and deciding how historical backups remain recoverable. -->
-- **D9 (F-06) PKCE and nonce rollout.** (a) Two gatekeeper releases (expand, then contract) and then PKCE enforcement
-  on the Keycloak client. (b) One release, accepting that a login started on a new pod and finished on an old pod during
-  the roll fails once. **Recommend a.** Cost: one extra pin bump; after enforcement, any gatekeeper rollback to a
-  pre-contract image breaks logins until the Keycloak attribute is reverted first.
+  time-boxed to one day including building that cluster; a documented "not feasible without downtime" is an acceptable
+  outcome; it never delays A1-A4 or A6. (b) Record "no procedure" as an accepted residual. **Recommend a.**
+- **D8 (F-05) age key.** (a) Real dual-recipient rotation, preceded by a holder inventory and a 10-minute scratch
+  rehearsal; the old key is archived (encrypted to the new recipient), not destroyed, so git-history ciphertext stays
+  recoverable. (b) Procedure plus scratch rehearsal only. **Recommend a.** Cost: re-encryption PRs in both repositories
+  (platform owner-merged), a hand update of `flux-system/sops-age`. Neither option revokes what the old key decrypts
+  from history: after a suspected compromise every value must be rotated too.
+- **D9 (F-06) PKCE and nonce rollout.** (a) Expand (AG1b, with a canary), contract (AG2), then Keycloak enforcement.
+  (b) One release, accepting that a login started on a new pod and finished on an old pod fails once. **Recommend a.**
+  Cost: one extra pin bump; after enforcement a rollback below AG2 needs A6.4's rollback first.
   <!-- codex: [P2] Option a still restarts every legacy flow that reaches AG2, including a user paused at MFA for minutes; compare a separate switch-to-new-flow stage followed by a transaction-lifetime drain before disabling legacy callbacks. -->
+  <!-- opus-pushback: V33 gives about 2.4 logins per hour and AG2 rolls in quiet hours (V52, at most 5 /auth per hour) in about two minutes, so the expected number of legacy transactions caught by the roll is well under one, and each sees one "Sign in again" page (no retry loop after the A6 redesign); that does not justify a third gatekeeper release and pin bump. -->
 - **D10 (item 2) Routine identity.** (a) New non-admin user `workstation-bot` in team `automation`. (b) Reuse
   `dev-worker-bot`. **Recommend a** (separate revocation and attribution). Cost: one user, one token, one merge-author entry.
   <!-- codex: [P2] The separate identity is justified, but team automation grants all repositories and B2 adds global merge eligibility; decide whether repository-limited permissions and per-repository merge-author entries meet the workstation's actual needs. -->
-- **D11 (item 2) Owner actions.** (a) Web UI by default; for scripted owner operations an ephemeral token held
-  DPAPI-encrypted for at most 2 hours, deleted by the owner in the UI, with an alert after 4 hours. (b) a plus a CronJob
-  that deletes expired ephemeral tokens through the database. **Recommend a.** Cost: the owner performs merges and
-  approvals in the browser.
-  <!-- codex: [P1] Option a provides a local helper timeout, not a two-hour credential lifetime: the Gitea token remains valid until server-side deletion, even after DPAPI-file deletion; choose reliable revocation or describe the manual lifetime and four-hour detection gap accurately. -->
-- **D12 (item 2) Cleanup scope.** Include `chifor`'s GCM OAuth grant and the 39 undocumented `gitea_admin` tokens, keep
-  the two documented ones. **Recommend yes.** The workstation's kubeconfig, talosconfig and age key stay out of scope.
-  <!-- codex: [P2] Cleanup is justified only after mapping consumers, including periodic release/restore jobs and mutable Actions secrets; old last-use dates and creation timestamps alone do not prove the 39 tokens are unused. -->
-- **D13 (item 3) Drill 2 timing.** (a) Run it before release AG1, in a 4-hour window at 03:00-07:00Z, so the signed
-  rollback (image plus config) is exercised as written; afterwards redefine rollback as config-only. (b) Skip drill 2 and
-  redefine rollback as config-only now. **Recommend a.** Cost: the assistant runs on the legacy panel for the window,
-  and every `strive-ailab` deploy is frozen while the release is suspended.
-  <!-- codex: [P2] This delays fixes for active High findings to exercise an image rollback that is immediately retired; justify that sequencing against rehearsing the future config-only rollback, and decouple urgent containment if the historical drill cannot fit its window. -->
-- **D14 (item 4) Edge telemetry detail.** Enable Traefik router labels (needed to separate edge-generated 5xx from
-  origin 5xx), keep the `CF-Ray` header in access logs, Loki retention stays 168 h. **Recommend yes, yes, keep.** Cost:
-  one Traefik restart (surge rollout, `maxUnavailable: 0`), about 20 extra router series per code. The real Loki disk
-  usage is UNVERIFIED (NFS reports share-wide usage).
-  <!-- codex: [P2] The series estimate excludes methods/protocols, histogram buckets and replica churn; measure actual series and log-volume growth before accepting the stated telemetry cost. -->
-- **D15 (all) Protect the hardened files.** Add to platform `protected_file_patterns`: `infra/gatekeeper/src/app/gatekeeper/{routes,helpers,jwks,redis,apikeys,apikeys_api}.py`,
-  `infra/gatekeeper/src/app/api/v1/api.py`, `deploy/components/valkey/**`, `deploy/components/traefik/**` (braces expanded,
-  as in the runbook). **Recommend yes**, after the last code PR of this plan merges. Cost: 2 commits in the last 30
-  days touched these paths, so about 2 extra owner merges a month.
-  <!-- codex: [P1] Protection need not wait because AG1 already requires owner merge, and the list omits dependencies such as oidc.py, key_store.py and keycloak-sync/realm policy; protect the effective trust boundary and verify denied bot merges rather than extrapolating historical edit counts. -->
+  <!-- opus-pushback: workstation-bot replaces cchifor (an org-owner token) and chifor (site admin), both already global merge authors (V42), so a non-admin team-automation member with the same global eligibility is a strict reduction, the parity argument already accepted for dev-worker-bot; the workstation's sessions work across ailab, platform, cloudlab and docs repositories, so per-repository scoping would add churn without removing a real grant. -->
+- **D11 (item 2) Owner actions.** (a) Web UI by default. A scripted owner operation runs in the owner's own terminal
+  from a session-prepared script that reads the token with `Read-Host -AsSecureString` into process memory only; the
+  owner mints it in the UI immediately before and deletes it immediately after. The lifetime is manual: the token is
+  valid until deleted, and `GiteaOwnerTokenStanding` detects one older than 4 hours. (b) a plus a CronJob deleting
+  `owner-eph-*` tokens older than 2 hours through the database (a real bound, but a standing DB writer on tokens).
+  **Recommend a.** Cost: the owner performs merges and approvals in the browser.
+- **D12 (item 2) Cleanup scope.** Include `chifor`'s GCM OAuth grant and the 39 undocumented `gitea_admin` tokens; keep
+  the two documented ones. **Recommend yes**, with: B0 proves the `gitea_admin` break-glass login first; every token
+  slated for deletion is watched 7 days and deleted from a fresh snapshot (B6); a consumer that breaks gets a fresh
+  scoped token. The workstation's kubeconfig, talosconfig and age key stay out of scope.
+- **D13 (item 3) Drill 2 (changed after review).** The signed drill 2 (image plus config rollback) is **retired**: no
+  image older than AG1a may run once the fixes are live, the pre-Phase-3 image rejects `composite` (V49), and after A6.4
+  an older image cannot log users in. (a) **Config-only rollback drill**, the procedure operators would actually use:
+  one owner PR drops the registry `valuesFiles` entry, sets `harness.enabled: false`, keeps every image, and, **after
+  #2125**, restores the ten preshared clients (reverts #2125's deploy changes), because with an empty base registry
+  dropping the registry file alone would leave no S2S client. It runs after E1a in a quiet window and gates nothing
+  (not AG1a, AG1b or AG2). (b) Harness-only kill switch (`harness.enabled: false`, registry kept) plus offline Helm 3/4
+  renders of (a): no S2S window, but the real rollback stays unexercised. **Recommend a.** Cost: two S2S
+  mint-failure windows (rollback and re-forward, each one gatekeeper-plus-consumer roll, expected a few minutes,
+  measured), the assistant on the legacy panel and platform deploys frozen for the window.
+- **D14 (item 4) Edge telemetry detail.** Enable Traefik router labels, keep `CF-Ray` in access logs, Loki retention
+  stays 168 h. **Recommend yes, yes, keep.** Cost: one Traefik surge restart; the extra series (routers x codes x
+  methods x protocols, plus duration-histogram buckets) and log bytes are measured in E1b, and router labels are
+  reverted if they add more than 5% to Prometheus head series.
+- **D15 (all) Protect the hardened files, before AG1a opens** (AG1a already needs an owner merge, so protecting now
+  costs little): add to platform `protected_file_patterns`
+  `infra/gatekeeper/src/app/gatekeeper/{routes,routes_session,helpers,jwks,oidc,key_store,server_session,redis,apikeys,apikeys_api}.py`,
+  `infra/gatekeeper/src/app/api/v1/api.py`, `infra/keycloak-sync/src/keycloak_realm_sync/main.py`,
+  `deploy/components/keycloak-realm-seed/realm-configmap.yaml`, `deploy/components/valkey/**`,
+  `deploy/components/traefik/**` (braces expanded). `keycloak-realm-seed/sync-job.yaml` stays unprotected so fleet pin
+  bumps of the realm-sync image stay bot-mergeable (its code is protected). **Recommend yes.** Verify: a bot-authored
+  no-op PR touching one listed file cannot be merged by the bot. Cost: 3 commits in the last 30 days touched these
+  paths (about 2-3 extra owner merges a month) plus this plan's PRs.
+- **D16 (F-25, after #2125) TokenReview limiter scope.** (a) Keep the shared limiter; add `GatekeeperTokenReviewLimited`
+  (E3); correct ADR-034's and F-25's reasoning; build a per-client throttle only if the alert fires outside a drill.
+  (b) A per-client sub-bucket ahead of the shared limiter now (protected `tokenreview_verifier.py`, owner merge, one
+  gatekeeper release). **Recommend a**: 0 limited reviews so far, the positive cache serves steady-state mints for 60 s,
+  and an attacker must already run as an admitted in-cluster workload.
+- **D17 (F-05) The remaining "no procedure" rows** (Keycloak client secret, Flux deploy keys, tunnel credentials,
+  service database passwords). (a) One tracked issue each (owner, due date); F-05 is reported "partially addressed"
+  until they close. (b) Record them as accepted residuals in the spec. **Recommend a.**
 
 ## Approach
 
 Step IDs: **A** = item 1 (A1 = F-01 ... A6 = F-06; AG = shared gatekeeper releases), **B** = item 2, **C** = item 3,
-**E** = item 4. Commands are indicative; secret values are always piped, never echoed, and every artefact that could
-hold one goes to the main checkout's gitignored `kubernetes/infra/_out/` (`C:\Users\chifo\work\home\ailab`).
-<!-- codex: [P2] Gitignored storage is not protected storage: specify restrictive ACLs, temporary-file cleanup and exclusion from ordinary backups for generated private keys/plaintext, and verify the actual main-checkout path before execution. -->
+**E** = item 4. Commands are indicative; secret values are always piped, never echoed. Artefacts that could hold one go
+to the main checkout's gitignored `kubernetes/infra/_out/` (`C:\Users\chifo\work\home\ailab`): private keys and
+plaintext are restricted to the user (`icacls <f> /inheritance:r /grant:r "%USERNAME%:F"`) and deleted after use unless
+a step keeps them; before the first such step, confirm `_out/` is not inside a synced or backed-up folder.
 
-### Shared: gatekeeper releases AG1 and AG2
+### Shared: gatekeeper releases AG1a, AG1b and AG2
 
-- **AG1 (expand)**, one platform code PR plus a pin-bump PR. Contents: A1.0 (Redis URL redaction), A2.1 (API-key flag),
-  A4.1 (edge refusal), A6.1 (OIDC expand). The code PR touches `config.py` (protected) and is owner-merged; the pin
-  PR (`ailab.yaml`, owner `approve-pin`) is opened only after the image is built. Its rollback note: re-pin the previous
-  digest; nothing in AG1 migrates data. **After A1.4 lands, never roll gatekeeper back past AG1** (the old image logs the
-  Redis URL with the password); if forced, rotate the Valkey password afterwards.
-  <!-- codex: [P1] AG1 rollback also restores the API-key vulnerability and public bypass, so the rollback note needs a minimum safe release and feature-specific containment; rotating a leaked password afterwards does not prevent exposure during rollback. -->
-- **AG2 (contract)**, after AG1 has run at least 24 hours: A6.3. Rollback note: re-pin AG1 (AG1 still completes both
-  login shapes); after A6.4, revert the Keycloak attribute first.
+- **AG1a (containment; the minimum safe release)**: A1.0, A1.0b, A2.1, A4.1. One code PR (owner-merged: `config.py`) and
+  a pin PR opened after the image exists. Rollback: re-pin the previous digest only before A1.4; after A1.4 never below
+  AG1a (the old image logs the Valkey password; if forced, rotate it). A defect in one feature is contained without a
+  rollback: F-04 by `TEST_BYPASS_ENABLED=false`, F-02 needs none (the flag), logging or metrics by a fix forward.
+- **AG1b (OIDC expand)**: A6.1 and the `validate_state` hardening, after AG1a is live. Own code and pin PRs. Rollback:
+  re-pin AG1a.
+- **AG2 (contract)**: A6.3, after AG1b has soaked 24 hours with the canary (A6.2). Rollback: re-pin AG1b; after A6.4,
+  A6.4's rollback first.
 
 ### Item 1, F-01: Valkey authentication and ingress (D1)
 
-- **A1.0 (in AG1).** `redis.py`: log `scheme://host:port/db` only, never userinfo (both lines in V7). Unit test: a URL with
-  `default:secret@` logs no `secret`.
-  <!-- codex: [P1] At the pinned commit REDIS_FALLBACK_EVENTS and REDIS_RECONNECTIONS are declared only in metrics.py and never incremented anywhere; instrument startup/runtime failures and reconnection, and prove live scrape/alert behavior before any step relies on these counters. -->
-- **A1.1 Measure the real client set** (owner, read-only): `kubectl exec valkey-master-0 -- valkey-cli CLIENT LIST`,
-  reduced to `addr` IPs mapped to pod names; record which of the 16 workloads in V5 connect. The NetworkPolicy still
-  admits all 16 (a superset), so a missed lazy client cannot break.
-- **A1.2 NetworkPolicy** (platform PR, `deploy/components/valkey/helmrelease.yaml`, unprotected): `networkPolicy.allowExternal: false`
+- **A1.0 (AG1a).** `redis.py` logs `scheme://host:port/db` only (both lines in V7). Instrument the fallback:
+  `gatekeeper_redis_fallback_total` +1 on every switch to memory (connect failure and `_on_redis_failure`),
+  `gatekeeper_redis_reconnections_total` +1 on reconnect, and a new gauge `gatekeeper_redis_connected` (1/0; an idle
+  replica can sit in fallback without a failing operation). Unit tests: a `default:secret@` URL logs no `secret`; the
+  counters and gauge move on a simulated failure and reconnect. Live: the gauge reads 1 on both pods after AG1a.
+- **A1.0b (AG1a).** `server_session.py` and `routes_session.py` log the first 12 hex of sha256(session id), never the
+  id (V58). In the first quiet hour after AG1a, end every session issued before it (`UNLINK` of `gk:session:*`, counts
+  only; announced as a logout; re-login is silent while the Keycloak SSO cookie lives), because their ids sit in Loki.
+- **A1.1 Measure the real client set** (owner, read-only): sample `valkey-cli CLIENT LIST` every minute for at least 10
+  minutes (two airlock-reaper cycles), map `addr` to pods, and record each client pod's `strive.io/service` label. Any
+  client whose label is not among V5's 16 stops A1.2 until it is understood (V5 found no CronJob with a Redis env).
+- **A1.2 NetworkPolicy** (platform PR, `deploy/components/valkey/helmrelease.yaml`): `networkPolicy.allowExternal: false`
   and one `extraIngress` rule on 6379 from `podSelector` `strive.io/service In [airlock, deepagent, digest, digest-worker, gatekeeper, integration, integration-worker, knowledge, mcp, mcp-worker, notification, profile, sentinel, tms, workflow, workflow-worker]`.
-  Only the NetworkPolicy changes; the StatefulSet does not restart. Rollback: revert the PR.
-  <!-- codex: [P2] Render the exact Flux-fetched chart artifact and inspect all additive policies before claiming these are the only admitted sources or that no restart occurs; test new connections from disallowed pods in this and another namespace, including the chart's implicit valkey-client allowance. -->
-- **A1.3 Prove the AUTH semantics** (dev worker or CI, docker, no cluster): against `bitnamilegacy/valkey:8.0.1-debian-12-r1`
-  with an empty password, `AUTH default x` returns OK and `AUTH x` errors; redis-py `from_url("redis://default:x@host")`
-  pings OK; then with `requirepass x` the same URL pings OK and a wrong password raises. Record the outputs. If any result
-  differs, stop: A1.4 would then need clients that read a separate `REDIS_PASSWORD` (code in every consumer), re-planned.
-  <!-- codex: [P1] A redis-py proof does not cover the other consumers' libraries or effective configuration, including TMS's different env name; exercise each deployed client/version against both nopass and required-auth modes, including reconnect and background jobs. -->
-- **A1.4 Password and clients** (after AG1 is live and A1.3 passed):
+  Before merge: render chart 1.0.3 from the same HTTPS index the HelmRepository uses; only the NetworkPolicy may differ
+  (the StatefulSet byte-identical, so no restart). The chart also admits pods labelled `valkey-client: "true"` (namespace
+  writers only, the same trust as `strive.io/service`). After merge: 6379 times out from an unlabelled pod in
+  `strive-ailab` and from a pod in another namespace, and answers from a labelled consumer; StatefulSet generation
+  unchanged. Acceptance over 24 hours: Loki count in `strive-ailab` of `Error 110|Timeout connecting|Connection refused|Redis client unavailable|in-memory fallback`
+  at the pre-change baseline, airlock and mcp logs checked by name, `gatekeeper_redis_connected` 1 on both pods
+  (after AG1a). Rollback: revert the PR.
+- **A1.3 Prove the AUTH semantics** (dev worker or CI, docker, no cluster), with `bitnamilegacy/valkey:8.0.1-debian-12-r1`
+  and redis-py **7.4.0 and 8.0.0** (V63): with an empty password, `AUTH default x` returns OK, `AUTH x` errors and
+  `from_url("redis://default:x@host")` pings; with `requirepass x`, the same URL pings, a wrong password raises
+  `AuthenticationError`, `issubclass(AuthenticationError, ConnectionError)` holds (what makes gatekeeper's fallback catch
+  it, V8), and a client reconnects after a server restart; an AG1a gatekeeper container given a wrong password stays
+  Ready and its fallback counter moves. Record the outputs. Any difference: stop; A1.4 would then need every consumer to
+  read a separate `REDIS_PASSWORD`, re-planned. TMS is excluded (V6).
+- **A1.4 Password and clients** (after AG1a and A1.3; merged in V52 quiet hours, not on the day of another gatekeeper
+  roll, because it rolls every consumer):
   1. Owner rotates `valkey-password` in `deploy/secrets/ailab/valkey-auth.enc.yaml` (protected) to 64 hex characters
-     (URL-safe), so its current, unknown character set cannot break URL parsing. No consumer reads it yet.
-  2. Platform PR (owner-merged, `_helpers.tpl` protected): when `global.valkey.auth.enabled` (default `false`, so other
-     providers are untouched) the helper renders `REDIS_PASSWORD` from `secretKeyRef valkey-auth/valkey-password` and then
-     `REDIS_URL=redis://default:$(REDIS_PASSWORD)@valkey-master.<ns>.svc.cluster.local:6379`. Kubernetes expands `$(VAR)`
-     only for variables defined earlier in the same list, and the pod spec keeps the literal `$(REDIS_PASSWORD)`. The
-     same PR: `ailab.yaml` sets the flag and rewrites airlock's `APP__AIRLOCK__RATE_LIMIT_REDIS_URL` the same way; the four
-     worker manifests add both variables. Render tests (Helm 3 and Helm 4, V50): `REDIS_PASSWORD` precedes every URL that
-     uses it, no literal password in any manifest, flag off renders today's output byte-identically.
-  3. Rollout: every consumer rolls once. The server is still `nopass`, so the two-argument AUTH is accepted (A1.3).
-  Verify before A1.5: every pod that connected in A1.1 shows `REDIS_PASSWORD` among its env names;
-  `gatekeeper_redis_fallback_total` flat; Loki count of `NOAUTH|WRONGPASS|AuthenticationError` in `strive-ailab` = 0;
-  Loki count of the substring `redis://default:` = 0 (count only, never the lines).
-  <!-- codex: [P1] Env-name presence and successful AUTH against nopass cannot detect a wrong/misexpanded password, because any password succeeds there; verify applied Secret generation and effective credentials without printing them, including lazy/Job consumers absent from CLIENT LIST. -->
+     (URL-safe). No consumer reads it yet.
+  2. Platform PR (owner-merged, `_helpers.tpl` protected): when `global.valkey.auth.enabled` (default `false`, other
+     providers untouched) the helper renders `REDIS_PASSWORD` from `secretKeyRef valkey-auth/valkey-password` and then
+     `REDIS_URL=redis://default:$(REDIS_PASSWORD)@valkey-master.<ns>.svc.cluster.local:6379` (Kubernetes expands
+     `$(VAR)` only for variables defined earlier in the list; the pod spec keeps the literal). Same PR: `ailab.yaml` sets
+     the flag and rewrites airlock's `APP__AIRLOCK__RATE_LIMIT_REDIS_URL`; the four worker manifests add both variables.
+     Render tests (Helm 3 and Helm 4, V50): `REDIS_PASSWORD` precedes every URL that uses it, no literal password, flag
+     off renders today's output byte-identically.
+  3. Rollout. A `nopass` server accepts any password, so before A1.5 prove the effective value without printing it: in
+     each consumer pod `python -c` prints the first 12 hex of sha256(`REDIS_PASSWORD`) and the owner compares it with
+     the same fingerprint of the Secret value (read into a shell variable). Also: no literal password in any rendered
+     manifest; A1.2's Loki error count over 24 hours unchanged; the count (never the lines) of the substring
+     `redis://default:` in Loki = 0.
   Rollback: revert the PR (only while A1.5 is not live).
-- **A1.5 Server AUTH** (platform PR, `deploy/components/valkey/helmrelease.yaml`: `auth: {enabled: true, existingSecret: valkey-auth, existingSecretPasswordKey: valkey-password}`
-  and the comment fixed), merged at the start of an announced window in V52's quiet hours. One Valkey restart: during it
-  gatekeeper falls back to memory (V8) and reconnects within its backoff, so users may see one silent re-login; session
-  rows survive (AOF, V9). Rollback: revert (AUTH off); clients keep working because `nopass` accepts their AUTH.
-  <!-- codex: [P1] Fallback neither copies existing sessions into memory nor replays memory writes/deletions on recovery, so new logins can disappear and a logout/grant revocation can leave the persisted credential usable; rehearse login, refresh, logout and revocation across both replicas during and after the outage, or gate those operations in maintenance mode. -->
-- **Ordering inside F-01:** A1.2 any time after E1; A1.4 after AG1 and A1.3; A1.5 after A1.4 is verified. Rolling back
-  runs the reverse order (A1.5 before A1.4).
+- **A1.5 Server AUTH** (platform PR, `deploy/components/valkey/helmrelease.yaml`: `auth: {enabled: true, existingSecret: valkey-auth, existingSecretPasswordKey: valkey-password}`;
+  the stale comment at `:73-81` is replaced: gatekeeper no longer blocks at boot). Merged at the start of an announced
+  window in V52's quiet hours. One Valkey restart: until each gatekeeper reconnects (backoff up to 60 s), it serves from
+  per-pod memory, so logins made then are lost after reconnect (users re-login once) and logouts or grant revocations
+  made then are not persisted; the announcement asks for none, and any made are repeated afterwards. Session rows
+  survive (AOF, V9). After: an unauthenticated `PING` gets `NOAUTH`, a wrong password `WRONGPASS`, the right one
+  `PONG`; `gatekeeper_redis_connected` is 1 on both pods; a session created before the window still works; one login,
+  one refresh and one logout through the public host persist (the logout removes the session's keys, by count).
+  Rollback: revert (AUTH off); clients keep working because `nopass` accepts their AUTH.
+- **Ordering inside F-01:** A1.2 any time after E1a; A1.4 after AG1a and A1.3; A1.5 after A1.4 is verified. Rollback in
+  reverse order.
 
 ### Item 1, F-02: API keys (D2 = a)
 
-- **A2.1 (in AG1).** `config.py` field `api_keys_enabled: bool = True` (env `API_KEYS_ENABLED`; protected file). When
-  false: `api/v1/api.py` does not mount the `/api-keys` router (404), and `/auth` ignores `X-API-Key`, counting
-  `gatekeeper_auth_requests_total{method="api_key",status="disabled"}` and continuing with the remaining tracks.
-  `ailab.yaml` gatekeeper `extraEnv` sets `API_KEYS_ENABLED=false` in the AG1 pin PR. Tests: flag off gives 404 on the
-  management API, no API-key mint for a planted record, the session track still works with the header present; flag on
-  is unchanged.
-- **A2.2 Purge** (owner, after AG1): count `apikey:*` and `apikeys_by_tenant:*` keys with `SCAN` (count only), delete them
-  with `UNLINK`, count again (expected 0 before and after; any non-zero count is recorded and reported).
-  <!-- codex: [P2] Require the disabled flag on every serving replica and no remaining writers before purging; if the pre-count is nonzero, stop to establish ownership/impact rather than deleting unexpected active records and merely reporting afterwards. -->
-- **A2.3 Docs.** Fix the `apikeys_api.py:1-9` docstring and the gatekeeper README; record in the spec that F-02 and F-17
-  are closed on ailab by retirement.
-- If D2 = b, this item becomes a separate plan (record format change, verified-bearer management API, admin role, slug
-  mapping); nothing below depends on it.
-- **Dependency on F-01:** none in code. F-02's severity is High only while F-01 is open; A1.2 already narrows Valkey writers.
-  <!-- codex: [P1] AUTH and ingress restrictions do not repair the independent header-trusting management API or a compromised admitted consumer's ability to forge records; F-02 remains open until retirement or authenticated management/integrity checks are actually live. -->
+- **A2.1 (AG1a).** `config.py` field `api_keys_enabled: bool = True` (env `API_KEYS_ENABLED`). When false:
+  `api/v1/api.py` does not mount the `/api-keys` router (404), and `/auth` ignores `X-API-Key`, counting
+  `gatekeeper_auth_requests_total{method="api_key",status="disabled"}` and continuing with the other tracks. The AG1a pin
+  PR sets `API_KEYS_ENABLED=false` in gatekeeper `extraEnv`. Tests: flag off gives 404, no mint for a planted record,
+  the session track works with the header present; flag on unchanged.
+- **A2.2 Purge** (owner, after AG1a): first confirm both pods run AG1a with `API_KEYS_ENABLED=false` (env names and
+  value) and answer 404 on `/api/v1/api-keys`. Then count `apikey:*` and `apikeys_by_tenant:*` with `SCAN` (count only).
+  Expected 0. If non-zero, stop and identify the tenant and creator before deleting; otherwise `UNLINK` and count again.
+- **A2.3 Docs.** Fix the `apikeys_api.py:1-9` docstring and the gatekeeper README; the spec records F-02 and F-17 closed
+  on ailab by retirement.
+- If D2 = b, this item becomes a separate plan; nothing below depends on it.
+- **Status:** F-02 closes only through A2.1 and A2.2. F-01's work narrows who can write records but does not touch the
+  header-trusting management API.
 
 ### Item 1, F-03: signing-key rotation (D4 = a)
 
@@ -282,352 +320,394 @@ hold one goes to the main checkout's gitignored `kubernetes/infra/_out/` (`C:\Us
   `charts/gatekeeper/templates/keygen-cronjob.yaml:13-21`, `charts/gatekeeper/values.yaml:316-318`,
   `charts/gatekeeper/templates/deployment.yaml:185-190`, and the false self-generation claim at `ailab.yaml:444-448`.
 - **A3.2 Rotation, done for real as the rehearsal.** Each phase is one owner SOPS commit to
-  `deploy/secrets/ailab/gatekeeper-signing-keys.enc.yaml` (protected), then: wait until the live Secret's key NAMES match
-  (`kubectl get secret gatekeeper-signing-keys -o go-template='{{range $k,$v := .data}}{{$k}} {{end}}'`), then
-  `kubectl rollout restart deployment/gatekeeper` and `rollout status`. A rollout restart sets a pod-template annotation
-  that the Helm chart does not manage, so later upgrades do not re-roll (with Helm 4 server-side apply this is UNVERIFIED;
-  check that the next platform upgrade does not roll gatekeeper unexpectedly).
-  <!-- codex: [P2] Secret key names do not prove the intended material or source revision was applied; gate each restart on reconciled revision and expected public-key fingerprints, with all replacement pods loading the same generation. -->
-  - **P1 pending.** Generate a P-256 key into `_out/` (`openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256`), add
-    it as `pending.pem`. Check: both pods log `FileKeyRing loaded 2 key(s) ... [('active', '8b77549a4272d160'), ('pending', '<NEW>')]`;
-    `/auth/jwks` from each pod (exec, `127.0.0.1:5000`) lists both kids. **Wait at least 11 minutes** after the second pod
-    is Ready (V18: 600 s cache lifespan plus margin) so every verifier has the new key before anything signs with it.
+  `deploy/secrets/ailab/gatekeeper-signing-keys.enc.yaml` (protected). Gate before the restart: `platform-secrets`
+  `lastAppliedRevision` is the phase commit (one Flux apply writes all keys at once, so names and contents arrive
+  together; the 10-minute interval bounds the wait, or request a reconcile) and the live Secret's key NAMES match. Then
+  `kubectl rollout restart deployment/gatekeeper` and `rollout status`; each pod's `FileKeyRing loaded` line must list
+  exactly the expected kids, computed locally (`openssl pkey -in <f> -pubout -outform DER | sha256sum | cut -c1-16`, V15).
+  The restart annotation is not chart-managed; check that the next platform upgrade does not re-roll gatekeeper
+  (UNVERIFIED with Helm 4 server-side apply).
+  - **P1 pending.** Generate a P-256 key into `_out/` (`openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256`),
+    add it as `pending.pem`. Check: both pods list `('active', '8b77549a4272d160'), ('pending', '<NEW>')`; `/auth/jwks`
+    from each pod (exec, `127.0.0.1:5000`) lists both kids. **Wait at least 11 minutes** after the second pod is Ready
+    (V18: 600 s cache lifespan plus margin).
     <!-- codex: [P2] These caches refresh on demand, so waiting 11 minutes does not preload idle or stale-serving verifiers; prove successful refresh through each real JWKS path, including any HTTP intermediary cache, before promotion. -->
-  - **P2 promote.** `active.pem` := NEW, `retiring.pem` := OLD, no `pending.pem`. During the roll one pod signs with OLD and
-    the other with NEW; both publish and verify both (V17), so token exchange across replicas keeps working. Check: logs show
-    `('active', NEW), ('retiring', OLD)`; `scripts/s2s/phase4-probes.sh --gatekeeper-only` PASS; a minted token's header `kid`
-    is NEW; one `@api` journey passes.
-  - **P3 retire.** **Wait at least 15 minutes** after P2's rollout completed (330 s token-life bound plus margin), then
-    remove `retiring.pem`. Check: one kid (NEW) on both pods and on the public JWKS; probes and a journey pass.
-  - Rollback at any phase: `git revert` the phase commit and restart; the previous phase's key set comes back.
-    <!-- codex: [P2] A single adjacent-phase rollback preserves overlap, but chained reverts can remove NEW while its tokens are still valid; define reverse transitions with both verification keys retained until the last NEW-signed token drains. -->
-- **Emergency variant** (documented, not rehearsed): skip P1 and put NEW as the only key at once. Every outstanding token
-  then fails for at most 330 s; users get a fresh token on their next request (V17); harness verifications can be refused
-  for up to 60 s by its cooldown (V18).
-  <!-- codex: [P1] Removing OLD from JWKS does not revoke it from verifier caches: weld/harness can accept forged OLD-signed tokens for 600 seconds, or up to the 1800-second stale bound, and mixed single-key pods reject each other's tokens; the emergency procedure needs cache eviction/forced refresh and a coordinated transition with a measured revocation bound. -->
-- Cadence (D4): every 180 days and on suspicion; the runbook records each rotation's date and kids.
+    <!-- opus-pushback: Promotion does not rely on preloading: weld refetches on an unknown kid without cooldown and the harness once per 60 s (V18), both fetch gatekeeper's JWKS in-cluster with no HTTP intermediary (harness values.yaml:125), so the wait is margin; P2's probes, the @api journey and the backends' invalid_token count are the end-to-end proof through the real paths. -->
+  - **P2 promote.** `active.pem` := NEW, `retiring.pem` := OLD, no `pending.pem`. During the roll one pod signs with OLD,
+    the other with NEW; both publish and verify both (V17). Check: `('active', NEW), ('retiring', OLD)`;
+    `scripts/s2s/phase4-probes.sh --gatekeeper-only` PASS; a minted token's `kid` is NEW; one `@api` journey passes;
+    no `invalid_token` rise on the backends.
+  - **P3 retire.** **Wait at least 15 minutes** after P2's rollout (330 s token-life bound plus margin), then remove
+    `retiring.pem`. Check: one kid (NEW) on both pods and on the public JWKS; probes and a journey pass.
+  - Rollback: one phase back at a time (`git revert` of the phase commit, then restart); never remove a key that
+    signed within the last 15 minutes.
+- **Emergency variant** (documented, not rehearsed): put NEW as the only key at once. During the roll the two pods sign
+  with different single keys, so verifiers may refuse the other pod's tokens until the roll completes; outstanding
+  tokens fail for at most 330 s and are re-minted (V17). Verifiers keep OLD cached for up to 600 s (1800 s while
+  gatekeeper is unreachable), so a holder of OLD can mint accepted tokens that long: on a compromise, after the roll,
+  `kubectl rollout restart` every weld service and the harness to evict their caches; the bound is the roll plus those
+  restarts.
+- Cadence (D4): every 180 days and on suspicion; the runbook records each rotation's date and kids, and each rotation
+  opens the due-dated issue for the next.
 
 ### Item 1, F-04: test bypass (D3 = a)
 
-- **A4.1 (in AG1).** In the bypass track (`routes.py:786-855`), before the token comparison: if the request carries
-  `cf-ray` or `cf-connecting-ip`, record `status="edge_refused"` and answer the existing 401 body. A module constant in
-  `routes.py` names the two headers (no `config.py` change). A client that adds these headers itself only gets refused.
-  Tests: with either header, 401 and the new metric even with the right token; without them, today's behaviour.
-- **A4.2 Live acceptance** (after AG1): `gatekeeper_auth_requests_total{method="test_bypass",status="success"}` keeps
-  increasing with Sentinel's runs (or the owner triggers one Validate); the owner sends one internet request with the real
-  token to an allowlisted path (token read from the Secret into a shell variable, never printed): 401, and `edge_refused`
-  +1. This also proves V23 (the CF headers reach `/auth`).
-- **A4.3 Rotate the token** (the old one was usable from the internet for months): one owner commit changing
-  `test-bypass-token` in `gatekeeper-secrets.enc.yaml` and `sentinel-secrets.enc.yaml` and bumping
-  `gatekeeper.serviceRegistry.checksum` (V27, rolls gatekeeper), then `kubectl rollout restart deployment/sentinel`.
-  Sentinel validations fail between the two rolls (expected under 5 minutes). The procedure goes into the A5.1 platform runbook.
+- **A4.1 (AG1a).** In the bypass track (`routes.py:786-855`), before the token comparison: if the request carries
+  `cf-ray`, `cf-connecting-ip` or `cdn-loop`, count `status="edge_refused"` and answer the existing 401 body. A module
+  constant in `routes.py` names the headers (no `config.py` change). A client that adds them itself is only refused;
+  a client cannot remove what Cloudflare adds. Header presence is the discriminator because both paths reach Traefik
+  from dynamic pod IPs (cloudflared's or Sentinel's), so an address rule cannot separate them. Tests: with any marker,
+  401 and the metric even with the right token; without them, today's behaviour.
+- **A4.2 Live acceptance** (after AG1a): every path into Traefik is enumerated (read-only): Services of type
+  NodePort/LoadBalancer (none today, V22), the ingress rules of both cloudflared tunnels, any in-cluster proxy that
+  forwards to `traefik.platform-edge`; each internet path must carry the markers to `/auth`. The owner sends one internet
+  request with the real token to an allowlisted path (token read into a shell variable, never printed): 401 and
+  `edge_refused` +1 (this also proves V23). `gatekeeper_auth_requests_total{method="test_bypass",status="success"}` keeps
+  rising with Sentinel's runs, for every Sentinel validation kind (Validate targets `strive.place` only).
+- **A4.3 Rotate the token** (usable from the internet for months): one owner commit changing `test-bypass-token` in
+  `gatekeeper-secrets.enc.yaml` and `sentinel-secrets.enc.yaml` and bumping the checksum (V27), then
+  `kubectl rollout restart deployment/sentinel`. Sentinel validations fail between the two rolls (expected under 5
+  minutes). The procedure goes into the A5.1 platform runbook.
 - **A4.4** Alert `StriveTestBypassFromEdge` (E3).
-- Rollback: re-pin the pre-AG1 gatekeeper (re-opens F-04; see AG1's constraint).
-  <!-- codex: [P1] A bypass-fix failure should first use TEST_BYPASS_ENABLED=false, whose cost is already documented in D3, rather than rolling back the entire security release and reopening public impersonation. -->
+- Rollback: `TEST_BYPASS_ENABLED=false` first (D3 b's cost: Sentinel Validate stops); never an image rollback below AG1a.
 
 ### Item 1, F-05: roots-of-trust procedures
 
 - **A5.1 Runbooks.** ailab `docs/runbooks/roots-of-trust-rotation.md` (age key, Kubernetes SA key, Keycloak realm keys)
-  and platform `docs/runbooks/ailab-credential-rotation.md` (signing key = A3.2, test-bypass = A4.3, preshared, Fernet).
-  Each procedure states holders, order, overlap, expected user impact, verification and rollback. The spec's rotation
-  inventory and `platform:deploy/secrets/ailab/SECRETS.md` (protected) link them.
-- **A5.2 age key (D8).** Order, each step reversible:
-  1. Generate the new key into `_out/` (`age-keygen -o _out/age-<date>.agekey`).
-  2. Add it as a second identity to `flux-system/sops-age` (`kubectl create secret generic sops-age --from-file=age.agekey=<old> --from-file=age-<date>.agekey=<new> --dry-run=client -o yaml | kubectl apply -f -`;
-     kustomize-controller accepts several `.agekey` entries). Check: every Kustomization with SOPS decryption stays Ready.
-  3. Add the new recipient next to the old one in every creation rule of `ailab:.sops.yaml` and the ailab rule of
-     `platform:.sops.yaml`; run `sops updatekeys -y` on all 74 ailab files and the 23 platform files. Platform PR is owner-merged
-     (protected) and must bump `serviceRegistry.checksum` (the ciphertext of `gatekeeper-secrets.enc.yaml` changes; a harmless
-     gatekeeper roll). Check: each decrypts with the NEW key alone (`SOPS_AGE_KEY_FILE=<new> sops -d ... >/dev/null`, exit code only).
-     <!-- codex: [P2] SOPS_AGE_KEY_FILE alone does not prove isolation from SOPS_AGE_KEY, default identity files or other configured providers; perform the new-only check with alternatives unavailable and test actual Flux decryption with only the new identity before final deletion. -->
-  4. Remove the old recipient (`.sops.yaml`, `sops updatekeys` again, same checks), then the old identity from `sops-age`,
-     then the old key file and any backup. Check: all decrypting Kustomizations Ready after a forced reconcile.
-     <!-- codex: [P1] sops updatekeys rewraps the existing file data key, so an old age-key holder can recover that data key from git history and decrypt future edits that reuse it; rotate each SOPS data key when removing the old recipient, in addition to rotating exposed secret values after compromise. -->
-  Residual stated in the runbook: git history still holds ciphertexts the old key opens.
-  <!-- codex: [P1] Deleting the old key and every backup is irreversible for historical restores, and replacing age.agekey with a dated filename breaks consumers using the documented fixed path; define tested archival recovery and update every local/automation key reference before removing the old identity. -->
-- **A5.3 Keycloak realm keys** (owner, Admin console or `kcadm`, `master` admin password piped from the Secret):
-  <!-- codex: [P2] kcadm can persist the acquired privileged token in its default configuration; use an explicitly temporary restricted configuration and verify cleanup after the ceremony. -->
-  1. Add `rsa-generated` provider `rsa-<date>` with `active=false`, `enabled=true` (passive: published, not signing).
-     Check the public certs list both RS256 kids (that passive keys are published is UNVERIFIED for 26.0.0; checked here).
-     Wait at least 16 minutes (gatekeeper's 900 s JWKS cache, V26), so no session hits an unknown `kid` under the cooldown.
-  2. Make it active with a higher priority than the old one. New tokens carry the new `kid`; the old key keeps verifying.
-  3. For `hmac-generated` (refresh tokens) and `aes-generated`: add new providers with higher priority, keep the old
-     ones enabled for at least 11 hours (SSO maximum 36000 s; gatekeeper requests no `offline_access`).
-     <!-- codex: [P1] A realm-wide provider rotation must account for every client's offline/remember-me sessions and action/broker/encryption artifacts, not only gatekeeper's scopes; derive each key type's retention from actual issued-artifact lifetimes before disabling or deleting it. -->
-  4. Then set the old providers passive, then disabled, then delete them a day later. `rsa-enc-generated` the same way.
-  Check at each step: `gatekeeper_auth_requests_total` refresh-failure and termination statuses at baseline, one login,
-  one refresh past 300 s. Rollback: re-activate the old provider (still enabled until step 4).
-  <!-- codex: [P2] A fresh login and five-minute refresh do not prove old-key continuity; retain sessions/tokens issued before promotion and test their refresh and logout after retirement, with an explicit irreversible boundary once a provider is deleted. -->
-- **A5.4 Preshared S2S secrets (D5 = a).** Per client: new 32-byte secret and its argon2id hash (method in
-  `platform:deploy/secrets/ailab/SECRETS.md:198-213`); one owner commit changing `<svc>-secrets.enc.yaml`
-  `gatekeeper-client-secret`, the client's hash in `gatekeeper-secrets.enc.yaml` and the checksum; when gatekeeper's roll
-  completes, `kubectl rollout restart` the consumer Deployments (API and worker). Rehearse on the client with the fewest
-  mints in 7 days (chosen at execution from gatekeeper's `service_token_minted` logs) and measure the window: from the first
-  new gatekeeper pod Ready to the consumer Ready, count the client's 401s.
-  <!-- codex: [P1] One git commit is not atomic across Secret/application controllers or rolling replicas; gate on both Secrets' applied generations, test old/new consumer and gatekeeper combinations, and measure uncached mints/job recovery rather than assuming Ready or cached tokens prove success. -->
-- **A5.5 Fernet keys (D6 = a).** Procedure only: owner commit changing `session-fernet-key` (or `delegation-grant-fernet-key`)
-  plus the checksum, in V52's quiet hours, announced as a logout. Expected: every session ends (users re-login, silently
-  if Keycloak's SSO cookie is alive), guest sessions end, long-running delegation grants fail (deepagent falls back to its
-  300 s path, `ailab.yaml:373-376`).
-  <!-- codex: [P1] A rolling single-key change leaves old and new pods unable to read each other's sessions, grants and A6 login cookies, producing repeated failures beyond one logout; specify a traffic-gated cutover or decrypt overlap, and prevent rollback from resurrecting supposedly invalidated records. -->
+  and platform `docs/runbooks/ailab-credential-rotation.md` (signing key = A3.2, test-bypass = A4.3, preshared for a
+  re-added client = A5.4, Fernet = A5.5). Each states holders, order, overlap, user impact, verification and rollback.
+  The spec's rotation inventory and `platform:deploy/secrets/ailab/SECRETS.md` (protected) link them.
+- **A5.2 age key (D8).** Each step reversible until step 5:
+  0. Inventory holders (names only): Gitea Actions secrets on ailab, platform and cloudlab; Secrets in `external-secrets`
+     and `flux-system`; the workstation's `_out/`, `~/.config/sops/age/`, `SOPS_AGE_KEY*` variables; backups. Record
+     each; step 5 waits until every holder is updated or shown to use another recipient. Then a 10-minute scratch
+     rehearsal of steps 3-5 on a throwaway file.
+  1. Generate the new key into `_out/` (`age-keygen -o _out/age-<date>.agekey`, ACL-restricted).
+  2. Add it as a second identity to `flux-system/sops-age` (`kubectl create secret generic sops-age --from-file=age.agekey=<old> --from-file=age-<date>.agekey=<new> --dry-run=client -o yaml | kubectl apply -f -`).
+     Check: every SOPS Kustomization stays Ready.
+  3. Add the new recipient next to the old one in `ailab:.sops.yaml` and the ailab rule of `platform:.sops.yaml`; `sops
+     updatekeys -y` on all 74 ailab and 23 platform files (platform PR owner-merged, with the `serviceRegistry.checksum`
+     bump). Check each file decrypts with the new key alone and nothing else available:
+     `env -u SOPS_AGE_KEY HOME=<empty dir> SOPS_AGE_KEY_FILE=<new> sops -d <f> >/dev/null` (exit code only).
+  4. Prove Flux with the new key alone: remove the old identity from `sops-age`, force-reconcile every SOPS
+     Kustomization, all Ready (reversible: add it back).
+  5. Remove the old recipient **and rotate each file's data key** (`sops rotate -i --rm-age <old>`), because
+     `updatekeys` keeps the data key, which an old-key holder can recover from git history; checksum bump again; checks
+     as in step 3. Drill 2 (C4) must run before this step, since it restores a pre-#2125 ciphertext.
+  6. The new key moves to the fixed path `_out/age.agekey` (key name `age.agekey` in `sops-age`), so CLAUDE.md, README
+     and tooling stay true; the old key is archived encrypted to the new recipient
+     (`age -r <new> -o _out/age-retired-<date>.agekey.age <old>`), then the plaintext old key is deleted.
+  Residual in the runbook: git history holds ciphertexts the old key opens; after a suspected compromise rotate the values.
+- **A5.3 Keycloak realm keys** (owner, Admin console; if `kcadm` is used, `--config` points to a temporary file deleted
+  afterwards, `master` admin password piped from the Secret). First read, without secrets, the realm lifetimes
+  (`ssoSessionMaxLifespan`, `offlineSessionMaxLifespan`, remember-me, action-token lifespans) and each client's offline
+  session count; the retention for step 3 is the longest lifetime that has live artifacts (11 hours if no offline
+  sessions or remember-me exist).
+  1. Add `rsa-generated` provider `rsa-<date>`, `active=false`, `enabled=true` (passive). Check the public certs list
+     both RS256 kids (UNVERIFIED for 26.0.0; checked here). Wait at least 16 minutes: gatekeeper's 900 s cache refresh,
+     not an unknown-kid refetch, brings the kid in, so the cooldown (V26) cannot interfere.
+  2. Make it active with a higher priority. New tokens carry the new `kid`; the old key keeps verifying.
+  3. `hmac-generated` (refresh tokens) and `aes-generated`: add new providers with higher priority; keep the old ones
+     enabled for the retention above.
+  4. Old providers passive, then disabled, then deleted a day later (deletion is the irreversible boundary).
+     `rsa-enc-generated` the same way.
+  Check at each step: a test session logged in before step 2 still refreshes after steps 2 and 3; a fresh login;
+  `gatekeeper_auth_requests_total` refresh-failure and termination statuses at baseline. Rollback: re-activate the old
+  provider (possible until its deletion).
+- **A5.4 Preshared S2S secrets (D5 = a), after #2125.** No ailab client uses one. The procedure for a re-added client:
+  new 32-byte secret and its argon2id hash (`SECRETS.md`, "Bootstrap checklist"); one owner commit changing the client's
+  `gatekeeper-client-secret`, its hash in `gatekeeper-secrets.enc.yaml` and the checksum; after gatekeeper's roll,
+  `kubectl rollout restart` the consumer. Expected failure window: drill 2's measured swap window (C6). No rehearsal.
+- **A5.5 Fernet keys (D6 = a).** Owner commit changing `session-fernet-key` (or `delegation-grant-fernet-key`) plus the
+  checksum, in V52's quiet hours, announced as a logout. During the roll (about 2 minutes) old and new pods cannot read
+  each other's sessions, so users may be logged out more than once; log in after the roll. Then purge, by count, the
+  session, guest and delegation-grant records (key prefixes listed in the runbook) so a rollback to the old key cannot
+  revive them. Expected: every session ends (silent re-login while the Keycloak SSO cookie lives), guest sessions end,
+  long-running grants fail (deepagent falls back to its 300 s path, `ailab.yaml:373-376`), in-flight A6 logins restart
+  (their key is derived from this one).
 - **A5.6 Kubernetes SA signing key (D7 = a).** Research then rehearse on a disposable Talos 1.11.2 cluster (never on
-  `admin@ai`), answering: can `cluster.apiServer.extraArgs`/`extraVolumes` add a second `--service-account-key-file`
-  (verification) while `cluster.serviceAccount.key` switches the signing key; how long to keep the old verification key
-  (bound projected tokens refresh within about an hour; automount tokens are extended to a year by default, but the kubelet
-  replaces them on refresh); which `kubernetes.io/service-account-token` Secrets exist on `admin@ai` (they break when the old
-  key goes). Output: a procedure that rolls one CP at a time with `talosctl` 1.11.2 and etcd 3/3 between CPs, or a
-  recorded "not feasible without downtime". Until then the row stays "no procedure".
-  <!-- codex: [P2] Rehearse a cluster-wide add-verifier phase before changing any signer, then retire only after every consumer has refreshed; one-control-plane-at-a-time alone is insufficient, especially for cached/legacy tokens and gatekeeper's own TokenReview credential. -->
-- **A5.7** Update the spec's rotation inventory (and F-05's status) with links to the procedures and rehearsal dates.
+  `admin@ai`). The procedure to prove: add the new key as a verifier on every control plane first (a second
+  `--service-account-key-file` through `cluster.apiServer.extraArgs`/`extraVolumes`); then switch the signer
+  (`cluster.serviceAccount.key`) one CP at a time with `talosctl` 1.11.2 and etcd 3/3 between CPs; keep the old verifier
+  until every token it signed has been replaced (projected tokens refresh within about an hour; legacy
+  `kubernetes.io/service-account-token` Secrets never: inventory them on `admin@ai`). After #2125 every S2S mint depends
+  on TokenReview of projected tokens, and gatekeeper's own automount token calls TokenReview (F-26), so removing the old
+  verifier early breaks all S2S. Output: the procedure, or a recorded "not feasible without downtime".
+- **A5.7** Update the spec's rotation inventory and F-05's status (with links and rehearsal dates); open D17's issues.
 
 ### Item 1, F-06: PKCE, nonce, bound state, issuer (D9 = a)
 
 Design (stateless, no Valkey write per anonymous hit):
-- Login start (`/auth/login`, which the ForwardAuth redirect also goes through, see below) creates `state` (32 random
-  bytes, URL-safe), `nonce` (32 bytes) and `code_verifier` (64 bytes, URL-safe), and sends
-  `code_challenge=BASE64URL(SHA256(verifier))`, `code_challenge_method=S256`, `nonce` and `state`.
-- It sets one cookie per login attempt, `gk_oidc_<first 16 hex of sha256(state)>`: value = Fernet-encrypted (session key,
-  with a fixed type tag for domain separation) JSON `{v, state, nonce, code_verifier, return_path, iat}`; `HttpOnly; Secure;
-  SameSite=Lax; Path=/callback; Max-Age=900`. Lax cookies travel on the top-level GET redirect back from Keycloak.
-  <!-- codex: [P2] Bound return_path/cookie size and outstanding attempts, and clear matching cookies on every terminal success/error path; abandoned concurrent logins can otherwise exhaust cookie/header limits and break callbacks. -->
-  <!-- codex: [P1] Bind the transaction to trusted issuer, client ID and exact callback origin/URI, and address sibling-domain cookie injection/duplicate cookie names; a host-only __Host- cookie with Path=/ is an alternative to the proposed unprefixed callback-path cookie. -->
-- The ForwardAuth login redirect (`routes.py:1611-1650`) points to `/auth/login?redirect_uri=<path>` on the same host, so
-  only the directly routed `/auth/login` creates the cookie (no reliance on ForwardAuth relaying a new `Set-Cookie`).
-  The spec's validation item 1 changes accordingly (302 to `/auth/login`, then to Keycloak).
-  <!-- codex: [P2] Verify that both hosts route /auth/login and /callback directly without recursive ForwardAuth, and preserve percent-encoded paths/query strings and existing idp_hint behavior across the added redirect. -->
-- `/callback` looks up the cookie by the hashed `state`, decrypts it (Fernet TTL 900 s), compares `state` in constant time,
-  exchanges the code with `code_verifier`, verifies the ID token (RS256 via the realm JWKS, `iss`, `aud=client_id`, `exp`,
-  `nonce`), deletes the cookie, redirects to `return_path` (still passed through `validate_state`). On any mismatch or
-  missing cookie it **never exchanges the code**: it redirects once to `/auth/login?redirect_uri=<validated return path or />`;
-  a second failure within 60 s (marker cookie) returns a 400 page instead of looping.
-  <!-- codex: [P1] A marker cookie cannot bound retries when the browser rejects cookies, and a retry taking longer than 60 seconds also resets the proposed guard; use a retry bound that survives cookie rejection or return an explicit recoverable error, with browser tests for these cases. -->
-  <!-- codex: [P1] Require the ID-token claims rather than merely validating them when present, including sub/iat and applicable azp checks; verify the access token before the existing callback's tenant-assignment Admin API side effects, and validate any replacement tokens obtained during that hook. -->
-  <!-- codex: [P2] Specify behavior for access_denied, missing/malformed ID tokens, token-endpoint timeout, invalid_grant and replayed callbacks, including cookie cleanup and no session creation; the current success/mismatch outline does not cover those branches. -->
-  <!-- codex: [P2] The existing validate_state only checks leading slashes; add browser-level cases for backslashes, control characters, encoded scheme-relative URLs and double encoding before relying on it for the new nested redirect flow. -->
-- `verify_token` gains `issuer=` (the tenant config's public issuer).
-  <!-- codex: [P2] Keep the expected public issuer separate from the back-channel JWKS-fetch URL in the API and all call sites; their equality on ailab does not hold for every supported tenant/provider configuration. -->
+- **Login start** (`/auth/login`) creates `state` (32 random bytes, base64url, 43 characters), `nonce` (32 bytes) and
+  `code_verifier` (64 bytes), and sends `code_challenge=BASE64URL(SHA256(verifier))`, `code_challenge_method=S256`,
+  `nonce`, `state` and any vetted `kc_idp_hint`.
+- **Transaction cookie** `__Host-gk_oidc_<first 16 hex of sha256(state)>`: Fernet with a key derived by HKDF-SHA256 from
+  the session key (info `gk-oidc-tx-v1`); payload `{v, state, nonce, code_verifier, return_path (at most 1024 bytes,
+  else "/"), iss, client_id, redirect_uri, iat}`; `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=900`. The `__Host-`
+  prefix stops a sibling host (apps on `apps.strive.place`, F-13) from planting one for `strive.place`; `Path=/` lets
+  `/auth/login` prune to the 3 newest such cookies.
+- **Only navigations start a login.** The ForwardAuth miss (`routes.py:1611-1650`) answers 302 to
+  `/auth/login?redirect_uri=<path>` on the same host only for `Sec-Fetch-Mode: navigate` (or, without that header, an
+  `Accept` containing `text/html`); everything else gets the API-style 401, which also stops subresources from starting
+  logins. The hop through `/auth/login` is belt-and-braces (Traefik relays a 302's `Set-Cookie`, which
+  `authResponseHeaders` lists), kept so one code path sets the cookie; `kc_idp_hint` and percent-encoded paths survive it.
+  The spec's validation item 1 changes accordingly.
+- **`/callback`.** A `state` that does not start with `/` is a new-flow callback (a legacy state is a path: that is the
+  discriminator, so a missing or bad cookie never falls through to the legacy exchange). It decrypts the matching cookie
+  (TTL 900 s), compares `state` in constant time, checks `iss`, `client_id` and `redirect_uri` against the tenant config,
+  exchanges the code with `code_verifier` (`oidc.py:exchange_code` gains the parameter, V62), verifies the access token
+  (`verify_token` with the expected issuer) before the tenant-assignment hook and verifies any token that hook returns
+  (V30), verifies the ID token with required `iss`, `aud`, `exp`, `iat`, `sub`, `nonce` (and `azp` = client id when
+  `aud` has several values), deletes **every** `gk_oidc` cookie it received, and redirects to the validated return path.
+- **Every failure** (missing, expired or mismatched cookie, `error=access_denied`, missing or invalid ID token,
+  token-endpoint timeout, `invalid_grant` including a replayed code) creates no session, clears the cookies, and answers
+  a small 400 page with a "Sign in again" link to `/auth/login?redirect_uri=<validated path>`. There is no automatic
+  retry, so no loop is possible, with or without cookies.
+- `validate_state` also rejects backslashes, control characters, and, after percent-decoding up to twice, any `//` or
+  `\` prefix or scheme (V62).
+- `verify_token` gains `expected_issuer=` (the tenant's public issuer), separate from `issuer_url` (the back-channel
+  JWKS fetch base).
 
 Steps:
-- **A6.1 (in AG1, expand).** `/callback` accepts both shapes: with a matching `gk_oidc_*` cookie it runs the full check above;
-  without one it behaves as today (legacy). Login still sends the legacy request. The issuer check runs in report-only mode:
-  `gatekeeper_oidc_issuer_mismatch_total{token}` counts mismatches, nothing is refused. Tests: every branch above, including
-  "no exchange call on mismatch", cookie attributes, the ID-token checks, and legacy unchanged.
-  <!-- codex: [P1] Define an explicit legacy/new discriminator so a missing, malformed or undecryptable new-flow cookie cannot fall through to legacy exchange; keep metric labels to fixed token types rather than token values or arbitrary claims. -->
-- **A6.2 Soak** at least 24 hours: issuer mismatches = 0; `/callback` 5xx = 0 (RED metrics).
-  <!-- codex: [P1] AG1 initiates only legacy logins, so this soak does not exercise the new cookie, PKCE or ID-token validation path; add a controlled new-flow canary on each replica and prove nonzero successful observations before AG2. -->
-- **A6.3 (AG2, contract).** `/auth/login` sends PKCE, nonce and the random `state` and sets the cookie; the ForwardAuth
-  login redirect now points to `/auth/login` (design above); `/callback` refuses the legacy shape (restart, no exchange);
-  the issuer check enforces. Because AG1 is already on both pods, a login started
-  on an AG2 pod and finished on an AG1 pod succeeds; a legacy login finished on an AG2 pod restarts once (V33: under one
-  login per roll). Live checks: the anonymous `GET https://strive.place/` chain ends at an authorize URL with
-  `code_challenge_method=S256`, `nonce=` and a 43-character `state`; `GET /callback?code=x&state=y` without a cookie answers
-  302 to `/auth/login` and gatekeeper logs no token exchange; login journeys on both hosts pass.
-  <!-- codex: [P2] Test the full AG1/AG2 start/callback matrix, rollback with an outstanding new-flow cookie, concurrent tabs and a delayed MFA callback; average login volume is not a bound on in-flight transactions or their user impact. -->
-- **A6.4 Enforce at Keycloak.** keycloak-sync reconciles `pkce.code.challenge.method=S256` on client `gatekeeper` (same
-  pattern as `sync_client_redirect_uris`), and the realm seed (`deploy/components/keycloak-realm-seed/realm-configmap.yaml`)
-  gets the attribute for fresh imports; keycloak-sync pin bump. Check: an authorize request without `code_challenge` is
-  refused by Keycloak; logins pass. Rollback: remove the attribute first, then any image rollback.
-  <!-- codex: [P1] Rollback must change the reconciler's desired policy and confirm the effective client policy before reverting gatekeeper, otherwise keycloak-sync restores enforcement; also test plain challenges and missing/wrong verifiers at the token endpoint, not only a missing challenge at authorization. -->
+- **A6.1 (AG1b, expand).** `/callback` accepts both shapes (legacy = a path `state`, unchanged). Login still sends the
+  legacy request by default; `/auth/login?gk_flow=pkce` starts the new flow (the canary). The issuer check is
+  report-only: `gatekeeper_oidc_issuer_mismatch_total{token="access"|"id"}`; `gatekeeper_oidc_callback_total{flow,result}`
+  uses fixed label values. Tests: every branch above with no exchange call on any failure; cookie attributes and pruning
+  (five concurrent starts then one callback leave no `gk_oidc` cookie); `code_verifier` in the token request payload;
+  the `validate_state` cases; the matrix (AG1b start with AG2 callback and the reverse, two tabs, a callback after 15
+  minutes); legacy unchanged.
+- **A6.2 Soak** at least 24 hours: issuer mismatches 0; `/callback` 5xx 0; at least one successful canary login served
+  by each gatekeeper pod (`gatekeeper_oidc_callback_total{flow="pkce",result="success"}` > 0 per pod; repeat until both).
+- **A6.3 (AG2, contract).** `/auth/login` sends the new flow by default; the ForwardAuth miss redirects navigations to
+  `/auth/login`; `/callback` refuses the legacy shape (error page, no exchange); the issuer check enforces. A login
+  started on either release finishes on either (same cookie format); a legacy login finished on an AG2 pod during the
+  roll sees the error page once (V33). Live checks: the anonymous `GET https://strive.place/` chain ends at an authorize
+  URL with `code_challenge_method=S256`, `nonce=` and a 43-character `state`; `GET /callback?code=x&state=y` without a
+  cookie answers the 400 page and gatekeeper logs no token exchange; `/auth/login` and `/callback` answer directly
+  (not through ForwardAuth) on both hosts; an anonymous subresource request gets 401, not 302; login journeys on both
+  hosts pass.
+- **A6.4 Enforce at Keycloak.** keycloak-sync reconciles `pkce.code.challenge.method=S256` on client `gatekeeper` (as
+  `sync_client_redirect_uris`); the realm seed (`deploy/components/keycloak-realm-seed/realm-configmap.yaml`) carries it
+  for fresh imports; keycloak-sync pin bump. Check: an authorize request without `code_challenge`, or with `plain`, is
+  refused; a token request with a missing or wrong verifier gets `invalid_grant`; logins pass. **Rollback** (before any
+  gatekeeper rollback below AG2): suspend Kustomization `platform-identity` (it re-applies the sync Job every 10-20
+  minutes, V32), remove the attribute in the console, verify a legacy-shape authorize request is accepted, then re-pin;
+  land the keycloak-sync revert and its pin before resuming `platform-identity`.
 
 ### Item 2: owner workstation credentials (D10, D11, D12)
 
 Target state: the workstation holds one non-admin routine credential (`workstation-bot`); no `cchifor` token exists; no
-standing `chifor` token or OAuth grant exists; owner actions happen in the web UI, or through an ephemeral token that
-lives at most 2 hours; any re-accumulation alerts.
+standing `chifor` token or OAuth grant exists; owner actions happen in the web UI or from the owner's own terminal with a
+token held only in process memory and deleted right after; break-glass is documented and tested; any re-accumulation
+alerts.
 
+- **B0 Break-glass first** (before anything is revoked): `gitea_admin` keeps password login (V59). The owner checks
+  it: basic-auth `GET /api/v1/user` with the password read from Secret `gitea/gitea-admin` into a shell variable (status
+  only). The second path is cluster-admin `kubectl exec` into the Gitea pod to mint a token. Either way the token fires
+  `GiteaAdminTokenNotAllowlisted` and is deleted after use (B8 records this).
 - **B1 Identity.** Owner, in the Gitea pod: `gitea admin user create --username workstation-bot ...` (non-admin, random
   password never used), add it to org team `automation` (id 37, write, never admin). Mint `ws-<yyyymmdd>` with
   `write:repository,write:issue,read:organization,read:user` via `gitea admin user generate-access-token ... --raw`, piped
-  straight into `git credential approve` (`protocol=https`, `host=git.chifor.me`, `username=workstation-bot`) on the
-  workstation, never echoed.
+  straight into `git credential approve` (`protocol=https`, `host=git.chifor.me`, `username=workstation-bot`), never echoed.
 - **B2 Merge eligibility** (ailab PR): add `workstation-bot` to `pr_reviewer_merge_authors` (V42); converge the reviewers
   as the D1 record did (reviewers first). Lands before B3 (reviewbot rule).
 - **B3 Switch the workstation.**
+  - Inventory first: `git config --show-origin --get-regexp '^(credential|http\..*extraheader|url\.)'` at system and
+    global level and in every active checkout and worktree; WCM targets; `~/.git-credentials`; tools that read
+    `~/.gitea_tok` (none found in the repositories). Record.
   - `git config --global credential.https://git.chifor.me.username workstation-bot`; replace the WCM default
     `git:https://git.chifor.me` (`cchifor`) by the B1 token (`git credential reject` then `approve`).
-  - New `ailab:scripts/gitea-api.sh METHOD PATH [BODY_FILE]`: reads the routine credential with `git credential fill`
-    inside the process, passes the header to `curl -H @-` on stdin, prints only status and body, refuses to run if
-    `/user` is not `workstation-bot` with `is_admin=false`.
-    <!-- codex: [P2] Pin the API origin and validate PATH so credentials cannot be sent to a caller-supplied URL or forwarded across redirects; disable tracing/verbose header output and redact credential-bearing API responses. -->
-  - Remove the `credential.https://chifor@git.chifor.me.helper` entries and erase the `chifor` line from `~/.git-credentials`
-    (`git credential-store erase`); delete WCM targets `git:https://cchifor@git.chifor.me`, `git:https://chifor@git.chifor.me`,
-    `git:https://refresh_token.git.chifor.me`, `git:https://oauth2@git.chifor.me` (`cmdkey /delete:`). Keep `~/.gitea_tok` and
-    `~/.gitea_cred_tmp` only until B6's 401 check, then delete them.
-    <!-- codex: [P2] Inspect local/worktree/system Git configuration, URL-embedded usernames, useHttpPath, extraHeader and alternate helpers across active checkouts; changing the global username and known WCM entries alone does not establish the claimed single resolved identity. -->
-- **B4 Verify.** `scripts/gitea-api.sh GET /user` prints `workstation-bot is_admin=False`; a test push and a test PR from a
-  Claude session; that PR is reviewed and automerged by the reviewbot.
-  <!-- codex: [P1] Add negative checks that this identity cannot push protected main, merge protected-file changes, alter branch protection or perform admin operations; is_admin=false plus a successful routine PR does not prove the owner boundary. -->
-- **B5 Inventory metrics and alerts (prevents re-accumulation).** ailab: a custom-queries ConfigMap for infra-pg
-  (`target_databases: [gitea]`) added to `monitoring.customQueriesConfigMap` next to the default one (V43), exporting per
-  owner (`cchifor`, `chifor`, `gitea_admin`, and any `is_admin` user) the token count, the age of the oldest token, and the
-  count of names outside an allowlist (`gitea_admin`: `af-ci-scaler-2941`, `flux-ailab-read`). Rules
-  `kubernetes/apps/infrastructure/monitoring/gitea-credential-rules.yaml` with promtool fixtures:
-  `GiteaOrgAccountHasTokens` (`cchifor` > 0; fires until B6, which validates it), `GiteaOwnerTokenStanding` (any `chifor`
-  token older than 4 h), `GiteaAdminTokenNotAllowlisted`, `GiteaAdminUserCountChanged` (site admins != 2). Whether the CNPG
-  exporter's connection may read the gitea tables is UNVERIFIED; fallback: a dedicated read-only role (`SELECT` on
-  `access_token`, `"user"`, `oauth2_grant`) created like `gitea-db-bootstrap.yaml`.
-  <!-- codex: [P2] Creating a dedicated role does not make CNPG custom queries execute as that role; prove the actual exporter connection/permissions and prefer a restricted metadata view over SELECT on credential-bearing tables. -->
-  <!-- codex: [P2] Ensure zero-token owners still emit zero-valued series, use creation time rather than last-use time for token age, and alert on missing/query-failure telemetry; otherwise failed collection or disappearing rows can look like successful cleanup. -->
-  <!-- codex: [P1] These alerts do not detect a recreated OAuth grant, and a token-name allowlist can be evaded by reusing an allowed name; monitor OAuth grants and pin approved token identity/scopes, not just names and total admin count. -->
-- **B6 Observe, then revoke.** For 7 days after B3, `ver040-1786337710` and `cc-admin-20260913` must not be used (their
-  `updated_unix` frozen; checked daily, read-only). If either moves, find the consumer (Gitea access log, source IP at that
-  time) before revoking. Then the owner: snapshots ids and names to `_out/`; deletes all 26 `cchifor` rows in one transaction;
-  confirms with the local copies that the old default credential returns 401 (status only); deletes those copies; deletes
-  `cc-admin-20260913` and revokes the GCM OAuth grant in the UI (Settings, Applications); per D12 deletes the 39 undocumented
-  `gitea_admin` tokens. `GiteaOrgAccountHasTokens` resolves.
-  <!-- codex: [P1] Resolve updated_unix semantics on the deployed Gitea version before using the quiet period as evidence, and take a fresh ID/scope inventory immediately before deletion; fixed counts from October 7 are not safe deletion criteria. -->
-  <!-- codex: [P1] A prior 401 does not establish cross-replica cache invalidation after direct DB deletion; verify revoked PATs against each Gitea replica and test both outstanding OAuth access tokens and refresh attempts, using supported revocation or an explicit cache-invalidation procedure where necessary. -->
-- **B7** Remove `cchifor` from `pr_reviewer_merge_authors` (a re-minted org token can no longer automerge); keep `chifor`.
-- **B8 Docs.** New `ailab:docs/runbooks/owner-credentials.md` (identities, the two procedures below, alerts, rules);
-  update `s2s-identity.md:342-354` (count 26, closed items) and the spec's F-30. The owner updates `CLAUDE.md`'s forge
-  paragraph and the stale auto-memory note `trueswarm-admin-merge-identity.md` (a worker can no longer merge as `chifor`).
-  The branch-protection re-apply block in `s2s-identity.md` (which reads `$OWNER_TOKEN`) is rewritten to call the helper
-  below.
+  - New `ailab:scripts/gitea-api.sh METHOD PATH [BODY_FILE]`: fixed origin `https://git.chifor.me/api/v1`; PATH must
+    match `^/[A-Za-z0-9/_.,-]+(\?[A-Za-z0-9=&_.,-]*)?$`; reads the credential with `git credential fill` inside the
+    process and passes the header to `curl --proto =https --max-redirs 0 -H @-` on stdin, never with `-v` or tracing;
+    prints status and body; refuses unless `/user` is `workstation-bot` with `is_admin=false`.
+  - Remove the `credential.https://chifor@git.chifor.me.helper` entries and erase the `chifor` line from
+    `~/.git-credentials` (`git credential-store erase`); delete WCM targets `git:https://cchifor@git.chifor.me`,
+    `git:https://chifor@git.chifor.me`, `git:https://refresh_token.git.chifor.me`, `git:https://oauth2@git.chifor.me`
+    (`cmdkey /delete:`). Keep `~/.gitea_tok` and `~/.gitea_cred_tmp` only until B6's 401 check.
+- **B4 Verify.** Positive: `scripts/gitea-api.sh GET /user` prints `workstation-bot is_admin=False`; `git credential fill`
+  resolves `workstation-bot` for every active remote; a test push and PR from a Claude session is reviewed and automerged.
+  Negative: a push to protected `main` is refused; `PATCH` of branch protection answers 403; `GET /api/v1/admin/users`
+  answers 403; the bot cannot merge a no-op draft PR that touches an owner-protected file (closed afterwards).
+- **B5 Inventory metrics and alerts.** ailab: a custom-queries ConfigMap for infra-pg (`target_databases: [gitea]`) added
+  to `monitoring.customQueriesConfigMap` next to the default one (V43). CNPG's exporter runs these inside the instance
+  pod (as a superuser over the local socket per CNPG docs; UNVERIFIED for this version, proven by the series
+  appearing). The queries return only counts and ages, never token hashes: per owner (`cchifor`, `chifor`, `gitea_admin`,
+  every `is_admin` user, zero-filled through a left join from `"user"`) the token count, the oldest token's age by
+  `created_unix`, the count of tokens outside an allowlist keyed by (id, name, scopes) (`gitea_admin`: the two documented
+  ids), and the OAuth2 grant count. Rules `kubernetes/apps/infrastructure/monitoring/gitea-credential-rules.yaml` with
+  promtool fixtures (including a missing series): `GiteaOrgAccountHasTokens` (`cchifor` > 0; fires until B6),
+  `GiteaOwnerTokenStanding` (any `chifor` token older than 4 h), `GiteaAdminTokenNotAllowlisted`, `GiteaOwnerOAuthGrant`
+  (`chifor` grants > 0), `GiteaAdminUserCountChanged` (site admins != 2), `GiteaCredentialInventoryMissing` (series
+  absent for 30 m). Fallback if the exporter cannot read the tables: a superuser-owned view returning only these
+  aggregates, granted to the exporter's role.
+- **B6 Observe, then revoke.** For 7 days after B3, every token slated for deletion (26 `cchifor`, `cc-admin-20260913`, the
+  39 `gitea_admin`) is checked daily for an `updated_unix` change. First confirm the semantics: use the new
+  `workstation-bot` token once and see its `updated_unix` move; if it does not, 7 days of Gitea access logs for those
+  users replace this signal. A moving token: find the consumer before revoking. Then the owner: takes a fresh snapshot
+  of (id, name, scopes) to `_out/` and compares it with the watched set; deletes `gitea_admin`'s 39 through the API with
+  its basic auth (the supported path); deletes `cchifor`'s 26 in one DB transaction and then restarts Gitea (one
+  replica, a quiet minute) to drop its token cache (V59); deletes `cc-admin-20260913` and revokes the GCM grant in the UI
+  (Settings, Applications). Verify: the local copies get 401 (status only); a `git fetch` through the old GCM path fails
+  or prompts; then delete the copies. `GiteaOrgAccountHasTokens` resolves.
+- **B7** Remove `cchifor` from `pr_reviewer_merge_authors`; keep `chifor`.
+- **B8 Docs.** New `ailab:docs/runbooks/owner-credentials.md` (identities, the owner-action procedure below, break-glass
+  from B0, alerts, rules); update `s2s-identity.md:342-354` (count 26, closed items) and the spec's F-30. The owner
+  updates `CLAUDE.md`'s forge paragraph (its `scripts/forge.sh` does not exist: point to `scripts/gitea-api.sh`) and the
+  stale auto-memory note `trueswarm-admin-merge-identity.md`. The branch-protection re-apply block in `s2s-identity.md`
+  (which reads `$OWNER_TOKEN`) is rewritten for the owner-terminal procedure.
 
 **Owner actions from a Claude session (D11 = a).**
 1. Default: the owner merges (admin override), approves, posts `approve-pin`, or edits branch protection in the Gitea web
    UI (Authelia login). The session prepares the exact action (PR, head SHA, expected checks) and holds no owner credential.
-2. Scripted owner operation (for example the runbook's branch-protection re-apply): the owner mints
-   `owner-eph-<yyyymmddhhmm>-<purpose>` in the UI with the smallest scopes (usually `write:repository`), then runs
-   `pwsh scripts/owner-token.ps1 begin` (prompt with `Read-Host -AsSecureString`; stores it DPAPI-encrypted for the user
-   under `%LOCALAPPDATA%\ailab-owner-token\` with an expiry of now + 2 h). The session calls
-   `pwsh scripts/owner-token.ps1 api METHOD PATH [-Body file]`, which refuses after expiry, decrypts in-process, sends the
-   request and prints status plus non-secret fields only. At the end: `owner-token.ps1 end` deletes the file and the owner
-   deletes the token in the UI (the token API needs basic auth, which an OAuth-only owner may not have: UNVERIFIED).
-   `GiteaOwnerTokenStanding` fires if it survives 4 hours.
-   <!-- codex: [P2] DPAPI does not isolate a token from other processes running as the same Windows user, and an unrestricted api helper grants arbitrary owner actions during the window; explicitly accept that boundary or keep scripted execution with the owner/bind it to the reviewed operation. -->
+2. Scripted owner operation (for example the branch-protection re-apply): the session writes the script and shows it;
+   the owner mints `owner-eph-<yyyymmddhhmm>-<purpose>` in the UI with the smallest scopes, runs the script in their own
+   terminal (token via `Read-Host -AsSecureString`, kept in process memory, sent only to the fixed origin, output limited
+   to status and non-secret fields), then deletes the token in the UI. Nothing reaches disk or the session.
+   `GiteaOwnerTokenStanding` fires if a token survives 4 hours.
 3. Never: a token in the chat, in a repository, in an env file, in `~/.git-credentials`, or on a dev worker.
 
-### Item 3: rollback drill 2 (D13 = a)
+### Item 3: rollback drill 2 (D13 = a: config-only)
 
-Preconditions (all, or do not start): E1a live (edge metrics for the window); D13 decided and the window announced
-("assistant on the legacy panel; deploys frozen"); no platform PR in flight that the freeze would strand; the rollback
-digest still served by the registry and the pin check green; the owner present for the whole window.
+Preconditions (all, or do not start): E1a live; the window announced ("assistant on the legacy panel; deploys frozen;
+brief S2S failures"); V52 quiet hours; the owner present throughout; open platform PRs labelled `no-automerge` so main
+does not move during the window; the C4 and C8 PRs prepared and CI-green before the window; the pinned web image still
+honours `WEB_AGENT_PANEL=legacy` (V46; if a fleet pin removed it, the drill waits); before A5.2 step 5; not on the day of
+another gatekeeper roll.
 
-- **C1 Legacy panel first** (platform PR, `ailab.yaml` web env `WEB_AGENT_PANEL=legacy`, owner `approve-pin`), landed while
-  the harness is still up (V46). Check: the side panel and `/assistant` answer through the legacy agent. Abort if not.
-- **C2 Baseline** (record): `scripts/s2s/phase4-probes.sh` PASS; per gatekeeper pod: image digest, `service_token_minted`
-  count over 30 minutes, `gatekeeper_tokenreview_*`; edge 5xx ratio of the last hour; HelmChart `strive-ailab-strive`
-  `.spec.valuesFiles`; gatekeeper `/auth` and `/auth/token` RED rates.
-- **C3 Freeze** with the runbook's three commands (Kustomization, then HelmRelease, then scale), times recorded.
-  <!-- codex: [P1] This does not freeze platform-secrets, separate component/worker controllers, Git merges or image automation; reserve the shared source against concurrent changes because flux-resume.sh --sha requires the exact commit and can stall after main advances. -->
-  <!-- codex: [P2] Drain or explicitly account for active harness requests/jobs before scaling to zero; switching the UI prevents new panel traffic but does not preserve in-flight work or existing streams. -->
-- **C4 Rollback PR** (platform, one PR, owner-merged in the UI because `helmrelease.yaml` is protected; owner `approve-pin`):
-  - `ailab.yaml`: `harness.enabled: false`; gatekeeper `image.digest` back to `sha256:45abbd52fd3ea9985372056490078cec54b0a2964ee88ba8718fe402086aee79`
-    with a pin-bump block (migration: composite off; rollback: re-pin `3adaf0be...` and re-list the registry file).
-  - `helmrelease.yaml`: drop the `ailab-s2s-registry.yaml` entry. The registry file stays in the tree.
-  - **Helm-3 values caveat:** no value is set to `null` anywhere. CI renders with Helm 3 and helm-controller applies
-    with Helm 4 (V50), which treat a parent `null` over a subchart default differently, so a null-based switch could pass CI
-    and behave otherwise in the cluster. Every switch is a positive value or a dropped `valuesFiles` entry.
-  - Before merge, render offline with Helm 3 and Helm 4 using the two remaining files: gatekeeper env
-    `SVC_AUTH_BACKEND=preshared`, no `SERVICE_REGISTRY_EXTRAS_PATH`, no `gatekeeper-registry-extras` ConfigMap, no
-    TokenReview ClusterRole or binding, no harness object; the apiserver CNP is still present (V47, expected).
+- **C1 Legacy panel** (platform PR, `ailab.yaml` web env `WEB_AGENT_PANEL=legacy`, owner `approve-pin`), landed while the
+  harness is still up. Check: the side panel and `/assistant` answer through the legacy agent (abort if not). Then wait
+  until the harness's request rate has been 0 for 5 minutes.
+- **C2 Baseline** (record; active probes, because quiet hours carry little traffic): `scripts/s2s/phase4-probes.sh`
+  PASS; one e2e lane run; per gatekeeper pod the image digest, `service_token_minted` per client over 30 minutes,
+  `gatekeeper_tokenreview_*`, restart count; edge 5xx ratio of the last hour; HelmChart `.spec.valuesFiles`; gatekeeper
+  `/auth` and `/auth/token` RED rates.
+- **C3 Freeze**: suspend Kustomization `platform-secrets`, then `platform-app`, then the HelmRelease, then scale the
+  harness to 0; times recorded. `platform-workers` and `platform-identity` wait on `platform-app` (V60).
+- **C4 Rollback PR** (platform, one PR, owner-merged: `helmrelease.yaml` and `gatekeeper-secrets.enc.yaml` are protected;
+  owner `approve-pin`):
+  - revert #2125's deploy changes: the `serviceAccountToken.gatekeeper` blocks in `ailab.yaml`, the four worker
+    manifests, and `gatekeeper-secrets.enc.yaml` with its checksum (the ten preshared clients return to the base
+    registry; their secrets never left the `<svc>-secrets`), plus any CI contract lines that assert token mode;
+  - `ailab.yaml`: `harness.enabled: false`; every image digest unchanged;
+  - `helmrelease.yaml`: drop the `ailab-s2s-registry.yaml` entry (the file stays in the tree).
+  - **Helm-3 values caveat:** no value is set to `null`. CI renders with Helm 3 and helm-controller applies with Helm 4
+    (V50), which treat a parent `null` over a subchart default differently; every switch is a positive value or a
+    dropped `valuesFiles` entry.
+  - Before merge, render offline with Helm 3 and Helm 4 using the two remaining files: gatekeeper
+    `SVC_AUTH_BACKEND=preshared`, no `SERVICE_REGISTRY_EXTRAS_PATH`, no extras ConfigMap, no TokenReview ClusterRole or
+    binding, no harness object; each of the ten services and four workers renders `GATEKEEPER_CLIENT_SECRET` and no
+    projected token; the apiserver CNP is still present (V47).
   - Required checks: CI, E2E, contract, S2S Authority Guard ((b1) skipped, V48), `ailab-pins`, `owner-ack`.
-- **C5 Resume** only after the merge: `scripts/s2s/flux-resume.sh --after-revert --sha <merge sha>`; record each gate's time.
-  Then confirm what the script does not: HelmChart `.spec.valuesFiles` has two entries, and each gatekeeper pod runs
-  digest `45abbd52...` with `SVC_AUTH_BACKEND=preshared` and no extras volume.
+- **C5 Resume**, only after the merge: resume `platform-secrets` and wait until its `lastAppliedRevision` is the merge
+  sha; then `scripts/s2s/flux-resume.sh --after-revert --sha <merge sha>`; record each gate's time. Then confirm what the
+  script does not: HelmChart `.spec.valuesFiles` has two entries; each gatekeeper pod logs
+  `service_registry loaded ... clients=10` and no extras line; `platform-workers` applied the merge sha.
   <!-- codex: [P1] The script gates chart version, not the valuesFiles that produced the applied artifact; prove the chart/spec race is prevented or add an artifact-generation gate before treating the freeze as preventative, rather than detecting the wrong configuration after upgrade. -->
-- **C6 Verify** (runbook block): `--expect-refused` PASS; ClusterRole and binding NotFound; `service_token_minted` > 0
-  on each pod (base preshared mints); `strive-pg-harness-dsn` stays `SecretSynced`; the e2e lane passes; edge 5xx ratio
-  and gatekeeper 5xx during C3-C6 within the C2 baseline. Hold at least 30 minutes and record.
-  <!-- codex: [P2] phase4-probes.sh skips harness-token cases when the harness ServiceAccount is absent, so PASS can omit the identity being retired; record skips and add an explicit svc-harness refusal probe independent of that missing ServiceAccount. -->
+  <!-- opus-pushback: With the drill now config-only on the current image, the race's worst case is an upgrade built from the stale valuesFiles (registry still listed): gatekeeper keeps composite, refuses the ten extras whose client_id is back in the restored base (V61) and serves them as preshared, the harness is off, so nothing breaks; C5's valuesFiles and clients=/merged= checks detect it. Adding an artifact-generation gate to flux-resume.sh is not worth it for a benign, detected case. -->
+- **C6 Verify** (runbook block): `--expect-refused` PASS with its skips recorded (SA `harness` is gone) and the other-SA and
+  no-token cases for `svc-harness` explicitly passing; ClusterRole and binding NotFound; `service_token_minted` > 0 on
+  each pod for the restored preshared clients; `strive-pg-harness-dsn` stays `SecretSynced`; the e2e lane passes; edge
+  and gatekeeper 5xx within C2's baseline. Measure the swap window: from the first new gatekeeper pod Ready to the last
+  consumer Ready, the `/auth/token` 401s per client and how each consumer recovered (this is A5.4's and D5's
+  measurement). Hold at least 30 minutes and record.
 - **Abort criteria and actions.**
-  - Before the C4 merge (C2 probes fail, CI red, digest missing): `flux-resume.sh --after-drill`; nothing changed.
-  - A `flux-resume.sh` gate STOPs: stay frozen, diagnose, never resume by hand.
-    <!-- codex: [P1] This contradicts the script: failures at gates 2–4 can leave the Kustomization and/or HelmRelease resumed, and STOP does not re-suspend them; specify stage-dependent state inspection and explicit re-freezing in the safe order. -->
-  - New gatekeeper pods not Ready within 10 minutes or crash-looping on settings validation (the composite value reached
-    the old image: the chart and spec race of the spec's Figure 17): the old pods keep serving (`maxUnavailable: 0`);
-    let helm-controller's upgrade remediation act, record it, and go straight to C8.
-    <!-- codex: [P2] maxUnavailable protects Deployment replica availability, not consistency with RBAC, ConfigMaps, hooks or Helm remediation applied in the same upgrade; verify the configured remediation behavior and serving pods' actual auth health before calling this failure non-disruptive. -->
-  - Any base-client mint failure, gatekeeper 5xx, login failure, or edge 5xx ratio above twice the baseline for 10
-    minutes: roll forward at once with C8.
-    <!-- codex: [P2] Define the zero/no-traffic baseline case and use active probes during quiet hours; also prepare the recovery diff and emergency review path beforehand because C8 requires a new owner-merged PR and cannot necessarily execute “at once.” -->
-- **C7** Record: freeze to merge, merge to source artifact, Kustomization applied, HelmRelease upgraded, gatekeeper roll
-  duration, harness dark time, mints per pod, refusal results, edge 5xx during the window.
-- **C8 Re-activation, part 1 (Phase 3 again):** platform PR restoring the gatekeeper digest (`3adaf0be...`, or the fleet
-  pin current at that time) and the registry `valuesFiles` entry while keeping `harness.enabled: false` (owner-merged).
-  Land it with a freeze (the scale line answers NotFound: the harness is absent) and
-  `flux-resume.sh --after-revert --sha <sha>` (the harness is still absent, which is what that mode checks). Then the
-  runbook's pre-flip acceptance: `extras_sha` equals the ConfigMap hash, `base_sha` agrees, preshared mints, e2e lane,
-  `report-ailab-pin-drift` 0 torn.
-- **C9 Re-activation, part 2 (the flip):** `harness.enabled: true`; then `scripts/s2s/phase4-probes.sh` PASS, #2092's checks,
-  the `@api` journeys.
+  - Before the C4 merge: resume `platform-secrets`, then `flux-resume.sh --after-drill`; nothing changed.
+  - A `flux-resume.sh` STOP at gate 0 or 1: everything is still suspended; diagnose and re-run. At gate 2 or later the
+    Kustomization (from gate 3 also the HelmRelease) is resumed (V51): re-freeze in C3's order, then diagnose; never
+    un-freeze by hand.
+  - The Helm upgrade fails: helm-controller retries 3 times, then rolls the release back to the pre-drill revision
+    (V44). The Secret then holds the restored base while the release runs D.8, so any gatekeeper pod that restarts
+    refuses the ten extras and their token mints: record it and go to C8 at once.
+  - S2S mint failures beyond 10 minutes after the roll, gatekeeper 5xx, a login failure, or an edge 5xx ratio above
+    twice the baseline for 10 minutes: roll forward with C8 (prepared).
+- **C7** Record: freeze to merge, merge to source artifact, each Kustomization applied, HelmRelease upgraded, gatekeeper
+  roll duration, swap window, harness dark time, mints per pod and client, refusal results, edge 5xx in the window.
+- **C8 Re-forward, part 1:** the prepared PR reverts C4 except `harness.enabled`, which stays `false` (D.8 and the
+  registry entry come back), owner-merged; same freeze (`platform-secrets` included, the harness scale answers
+  NotFound), `platform-secrets` resumed first, then `flux-resume.sh --after-revert --sha <sha>`. Then the pre-flip
+  acceptance: gatekeeper logs `clients=0` and `merged=11`, `extras_sha` equals the ConfigMap hash, each of the ten
+  services mints through its projected token, the e2e lane passes, `report-ailab-pin-drift` shows 0 torn; measure the
+  swap window again.
+- **C9 Re-forward, part 2 (the flip):** `harness.enabled: true`; then `scripts/s2s/phase4-probes.sh` PASS, #2092's
+  checks, the `@api` journeys.
 - **C10** Revert C1 (`WEB_AGENT_PANEL=harness`); check the panel.
-- **C11** Record the drill in `s2s-identity.md` (drill 2 record), ADR-034 (dated note) and the spec's measured results; then
-  rewrite the drill-2 text: once AG1 is pinned, rollback is **config-only** (drop the registry entry and disable the harness,
-  keep the image), because older images lack AG1's fixes and, after A6.4, cannot log users in.
-  <!-- codex: [P2] The historical image rollback does not verify the replacement config-only procedure on the hardened image; add a bounded rehearsal or explicit compatibility checks for the procedure that operators will actually retain. -->
+- **C11** Record the drill in `s2s-identity.md` (drill 2 record with both measured windows), ADR-034 (dated note) and the
+  spec; rewrite the runbook's drill-2 text: the image rollback is retired (reasons in D13), and rollback after #2125 is
+  C4's config-and-secret PR.
 
 ### Item 4: edge 5xx observability (D14)
 
-Ownership: Traefik values live in platform `deploy/components/traefik/helmrelease.yaml` (Kustomization `platform-edge`,
-unprotected); Prometheus, Loki, Alloy, rules, dashboards and Gatus live in ailab.
+Ownership: Traefik values live in platform `deploy/components/traefik/helmrelease.yaml` (Kustomization `platform-edge`);
+Prometheus, Loki, Alloy, rules, dashboards and Gatus live in ailab.
 
-- **E1a Scrape Traefik** (platform PR): `metrics.prometheus.serviceMonitor.additionalLabels: {release: kube-prometheus-stack}`.
-  No Traefik restart (only the ServiceMonitor changes). Check: `up{namespace="platform-edge"} == 1`;
-  `traefik_entrypoint_requests_total` present. If the target does not appear (the ServiceMonitor targets the container port
-  `metrics` behind a Service that does not expose it), add `metrics.prometheus.service.enabled: true`.
-  <!-- codex: [P2] Inspect the rendered ServiceMonitor selector, Service port and endpoints before merge instead of treating the service setting as a guess; verify the specific Traefik target and sample freshness, not any up series in the namespace. -->
+- **E1a Scrape Traefik** (platform PR): `metrics.prometheus.serviceMonitor.additionalLabels: {release: kube-prometheus-stack}`
+  **and** `metrics.prometheus.service.enabled: true` (V53). Before merge: render chart 36.3.0 with these values and check
+  the ServiceMonitor selector (`app.kubernetes.io/component: metrics`), the new Service's `metrics` port, and that the
+  Traefik Deployment is unchanged (no restart; the drill's precondition depends on it). After: `up{namespace="platform-edge",service="traefik-metrics"} == 1`
+  for every Traefik pod, samples younger than two scrape intervals, `traefik_entrypoint_requests_total` present.
 - **E1b Attribution detail** (platform PR, after E1a, in quiet hours): `metrics.prometheus.addRoutersLabels: true`;
-  `logs.access.fields.headers.names: {Cf-Ray: keep}` (every other header stays dropped, so `Authorization`, cookies and
-  `X-Test-Token` are never logged). One surge restart of Traefik.
-- **E2 Gatus external probes** (ailab `kubernetes/apps/apps/gatus/configmap.yaml`): `https://strive.place/auth/jwks` (200),
-  `https://auth.strive.place/realms/strive/.well-known/openid-configuration` (200), `https://apps.strive.place/favicon.ico` (200).
-  They cross Cloudflare and the tunnel, so they catch failures Traefik never sees; the generic `GatusEndpointDown` covers them.
-  <!-- codex: [P2] Cached favicon/JWKS responses or a redirected HTML page can remain 200 while the origin is broken; verify cache bypass/origin reachability and expected response content, and distinguish these public-endpoint checks from login health. -->
+  `logs.access.fields.headers.names: {Cf-Ray: keep}` (every other header stays dropped). One surge restart. Record
+  Traefik series and Loki bytes per day for Traefik before and after (D14's measurement and revert rule).
+- **E2 Gatus external probes** (ailab `kubernetes/apps/apps/gatus/configmap.yaml`). First one `curl` from the Gatus pod
+  per URL: it must reach the public path (`ailab.yaml:2234-2236` calls that a "dead public hairpin" for Sentinel; Gatus
+  already probes other Cloudflare hosts) and Cloudflare must not serve it from cache (`cf-cache-status` DYNAMIC, BYPASS
+  or MISS). Probes keep Gatus's own User-Agent (Cloudflare bans `Python-urllib`). Endpoints and conditions:
+  `https://strive.place/auth/jwks` (`[STATUS] == 200`, `len([BODY].keys) > 0`),
+  `https://auth.strive.place/realms/strive/.well-known/openid-configuration` (`[BODY].issuer == https://auth.strive.place/realms/strive`),
+  and one uncacheable origin endpoint on `apps.strive.place` chosen by that curl. They prove edge-to-origin
+  reachability, not login health; the generic `GatusEndpointDown` covers them.
 - **E3 Rules** (ailab `kubernetes/apps/infrastructure/monitoring/strive-edge-rules.yaml` plus `.test.yaml`, listed in the
-  kustomization, linted by `rules-lint`). Initial thresholds, retuned after E4:
-  - `TraefikScrapeMissing`: `absent(up{namespace="platform-edge"} == 1)` for 15m (guards E1a against a later revert).
-    <!-- codex: [P2] Any other healthy target in platform-edge suppresses this alert, and one healthy Traefik replica can mask another failed one; scope the selector to Traefik and test both missing-target and up=0 cases. -->
-  - `StriveEdge5xxRatioHigh`: entrypoint `web` 5xx rate / all requests > 5% for 10m, only while traffic > 0.1 req/s.
-    <!-- codex: [P2] The traffic floor is 360 requests/hour, far above the stated quiet-window auth volume and capable of hiding a complete low-traffic outage; add an absolute/consecutive-failure or synthetic-probe condition and test that case. -->
-  - `StriveEdgeGenerated5xx` (D14 router labels): `sum by (service)` of router 5xx minus service 5xx over 10m > 3. These
-    are answers Traefik produced without an origin response (ForwardAuth unreachable, middleware errors). The arithmetic
-    relies on Traefik counting middleware-produced answers at router level only (UNVERIFIED for 3.4.3; E4 tests it).
-    <!-- codex: [P1] Missing service-5xx series cause PromQL subtraction to drop the result rather than subtract zero, precisely when all failures occur before an origin call; verify labels, zero-fill semantics and retry/shared-service effects before enabling this rule. -->
-  - `GatekeeperForwardAuth5xx`: `increase(http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code=~"5.."}[10m]) > 3`.
-  - `GatekeeperHttp5xx`: the same for every other route except `/auth/token` 503; `GatekeeperTokenUnavailable` for
-    `/auth/token` 503 > 20 in 10m.
-    <!-- codex: [P2] Specify aggregation across replicas and an alert for sustained low-volume token failure; accepting drill bursts globally can suppress real outages, so use a scoped maintenance silence rather than making the drill's error pattern permanently non-alerting. -->
-  - `GatekeeperRedisFallback`: `increase(gatekeeper_redis_fallback_total[5m]) > 0` (F-20; also the A1.4 and A1.5 guard).
-  - `StriveTestBypassFromEdge`: `increase(gatekeeper_auth_requests_total{method="test_bypass",status="edge_refused"}[15m]) > 0` (after AG1).
-  Each rule gets fixtures that fire and fixtures that must not fire (no traffic, one isolated 5xx, the `/auth/token` 503 burst of a revocation drill).
+  kustomization, linted by `rules-lint`), labelled `release: kube-prometheus-stack` (the `ruleSelector`) with a
+  `severity` per rule; a fixture asserts the label. Expressions sum across pods. Initial thresholds, retuned after E4:
+  - `TraefikScrapeMissing`: `absent(up{namespace="platform-edge",service="traefik-metrics"}) or up{namespace="platform-edge",service="traefik-metrics"} == 0` for 15m.
+  - `StriveEdge5xxRatioHigh`: entrypoint `web` 5xx / all > 5% for 10m while traffic > 0.01 req/s; `StriveEdge5xxBurst`:
+    at least 10 5xx in 10m whatever the ratio. A complete low-traffic outage is also caught by E2.
+  - `StriveEdgeGenerated5xx` (D14 router labels): router 5xx minus service 5xx per service over 10m > 3, with the service
+    side zero-filled (`or <router expression> * 0`) so a missing service series does not drop the result. Not deployed
+    until E4's test proves the arithmetic (UNVERIFIED for Traefik 3.4.3).
+  - `GatekeeperForwardAuth5xx`: `sum(increase(http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code=~"5.."}[10m])) > 3`.
+  - `GatekeeperHttp5xx`: the same for every other route except `/auth/token`. `GatekeeperTokenUnavailable`: any
+    `/auth/token` 503 in each of the last 15 minutes (sustained, low volume included). Drills run under an
+    Alertmanager silence scoped to the alert and the window instead of a permanent exemption.
+  - `GatekeeperRedisFallback`: `min(gatekeeper_redis_connected) == 0` for 2m or `increase(gatekeeper_redis_fallback_total[5m]) > 0` (needs A1.0).
+  - `StriveTestBypassFromEdge`: `increase(gatekeeper_auth_requests_total{method="test_bypass",status="edge_refused"}[15m]) > 0` (after AG1a).
+  - `GatekeeperApiKeyUsed` (D2): `increase(gatekeeper_auth_requests_total{method="api_key",status!="disabled"}[15m]) > 0` (after AG1a).
+  - `GatekeeperTokenReviewLimited` (D16): `increase(gatekeeper_tokenreview_limited_total[10m]) > 0 or increase(gatekeeper_tokenreview_total{outcome="unavailable"}[10m]) > 0`.
+  Each rule gets fixtures that fire and fixtures that must not (no traffic, one isolated 5xx, a missing series).
 - **E4 Baseline and tests** (7 days from E1a): daily p50, p95 and maximum of the edge 5xx ratio per Traefik service; the
-  count of 5xx with `OriginStatus` 0 from access logs; Gatus success. One controlled test in a scratch namespace (a test
-  IngressRoute whose ForwardAuth points to a closed port) to confirm the router-versus-service arithmetic; drop or rework
-  `StriveEdgeGenerated5xx` if it does not hold. One `RequestCount` continuity check over 7 days of Traefik lines in Loki
-  (gaps, Traefik restarts) to close the completeness question in V55. Then retune the thresholds in one ailab PR.
-  <!-- codex: [P2] Add a real origin-500 control, a never-created service-error series, and restarts/retries to the attribution test; correlate RequestCount per Traefik process because resets, duplicate ingestion and multiple replicas invalidate a global continuity comparison. -->
+  count of 5xx with `OriginStatus` 0; Gatus success. One controlled test in a scratch namespace: an IngressRoute whose
+  ForwardAuth points to a closed port (edge-generated), one whose origin answers 500, one never-hit service (zero-fill),
+  and one Traefik restart, to confirm the router-versus-service arithmetic; enable `StriveEdgeGenerated5xx` only if it
+  holds. `RequestCount` continuity over 7 days of Loki per Traefik pod (resets, restarts and replicas accounted), and
+  the 2026-10-06 18:06-18:10Z window re-checked for container restarts and endpoint changes, to settle V55. Then retune
+  the thresholds in one ailab PR.
 - **E5 Dashboard** (ailab `kubernetes/apps/infrastructure/monitoring/strive-edge-dashboard.yaml`, `grafana_dashboard: "1"`):
-  requests and 5xx by entrypoint and service, edge-generated 5xx, gatekeeper `/auth` outcomes
-  (`gatekeeper_auth_requests_total` by method and status), gatekeeper RED by route, Gatus results, and a Loki panel
-  `{namespace="platform-edge",container="traefik"} | json | DownstreamStatus >= 500`.
-- **Collector finding.** The collector is the Alloy DaemonSet (`monitoring/alloy`) writing to Loki; V55 found no partial
-  ingestion. The real gaps were the missing scrape label (E1a), no attribution between edge and origin (E1b, E3), no view
-  of failures before Traefik (E2), and 7-day retention against investigations started late (accepted under D14).
+  requests and 5xx by entrypoint and service, edge-generated 5xx, gatekeeper `/auth` outcomes by method and status,
+  gatekeeper RED by route, Gatus results, and a Loki panel `{namespace="platform-edge",container="traefik"} | json | DownstreamStatus >= 500`.
+- **Collector finding.** The collector is the Alloy DaemonSet writing to Loki; V55 found no partial ingestion
+  (provisional until E4). The real gaps were the missing scrape (E1a), no attribution between edge and origin (E1b, E3),
+  no view of failures before Traefik (E2), and 7-day retention against late investigations (accepted under D14).
 
 ## Sequencing and dependencies
 
-1. **E1a, E2, E3 (without the AG1-dependent rule)**: first, about one day; the E4 baseline starts with E1a.
-2. **B1 to B5**: in parallel with step 1. B5's alert proves itself by firing on `cchifor`.
-3. **A1.2** (Valkey NetworkPolicy) and **A1.3** (AUTH proof): in parallel, after E1a.
-4. **C1 to C11** (drill 2): after E1a and before AG1 (D13); one window, then C8 to C10 the same day or the next.
-5. **A3.1** docs and **A5.1** runbooks: any time; **A3.2** (real signing-key rotation): after E1a, not on the same day as
-   another gatekeeper roll.
-6. **AG1** (A1.0, A2.1, A4.1, A6.1): after C11. Then **A2.2**, **A4.2**, **A4.3**, **A4.4**, and the A6.2 soak.
-7. **A1.4**, then **A1.5** in a window: after AG1.
-8. **AG2** (A6.3) after the soak, then **A6.4**.
-9. **B6, B7, B8**: 7 days after B3.
-10. **A5.2 to A5.6**: after AG1, one at a time, each in its own window; A5.6 is research first.
-11. **E4** retune after 7 days; **D15** protection after the last code PR (AG2 and A6.4).
+Calendar rule: at most one gatekeeper-rolling or platform-wide change per day (C4, C8, AG1a, AG1b, AG2, A1.0b's purge,
+A1.4, A1.5, each A3.2 phase, A4.3, A5.2 PRs, A5.5), each in quiet hours with the previous 24 hours as its baseline (a
+C2-style snapshot), so each effect is attributable. Shared control planes: no platform merges during C's window; reviewer
+changes (B2, B7) not on a day that relies on a bot merge; A5.2 touches both repositories' Secrets and runs alone.
 
-<!-- codex: [P1] E1b, E5, A1.1, A2.3 and A5.7 are absent from this schedule, while E3's router rule depends on E1b and its attribution test; place those dependencies explicitly and make the Redis instrumentation a prerequisite for its alert and migration gates. -->
-<!-- codex: [P2] A1.5 verification requires an E4 baseline that may not yet exist, while A3.2 prohibits same-day rolls and other steps only prohibit concurrent rolls; define one consistent rollout calendar and a usable pre-window baseline rather than leaving these constraints implicit. -->
-
-Parallel tracks: B (credentials) and E (observability) are independent of A and C. A1.2 and A1.3 do not touch gatekeeper.
-Not in parallel: any two steps that roll gatekeeper (C4, C8, AG1, AG2, A1.4, A3.2, A4.3, A5.x), so that each roll's effect is
-attributable.
-<!-- codex: [P2] B and E are not fully independent: reviewer credential changes can affect recovery PRs, E platform merges can advance C's exact source SHA, and age rotation touches both repositories' Secrets; coordinate these shared control-plane dependencies as well as pod rolls. -->
+1. **D15** protection (owner, UI), **E1a**, **E2**, **B0** to **B5**: first; the E4 baseline starts with E1a.
+2. **E3** (rules that need neither AG1a nor E1b), **E5**, **A1.1**, **A1.2**, **A1.3**, **E1b**.
+3. **AG1a**, then **A2.2**, **A4.2**, **A4.3**, **A1.0b**'s purge, and E3's AG1a rules (Redis, bypass, API key).
+4. **AG1b**, then the **A6.2** soak with the canary.
+5. **A1.4**, then **A1.5** in a window (both need A1.0's instrumentation live).
+6. **C1 to C11** (drill 2): any time after E1a; independent of AG1a, AG1b and AG2; before A5.2 step 5.
+7. **AG2** after the soak, then **A6.4**.
+8. **A2.3**, **A3.1** and **A5.1** docs any time; **A3.2** after E1a.
+9. **E4** test and retune 7 days after E1a; `StriveEdgeGenerated5xx` only after the E4 test.
+10. **B6**, **B7**, **B8**: 7 days after B3.
+11. **A5.2** to **A5.6** after AG1a, one at a time; A5.6 time-boxed (D7).
+12. **A5.7** and D17's issues last; D5's deletion of the inert client secrets after C11.
 
 ## Critical files
 
@@ -635,107 +715,223 @@ attributable.
 
 | Path | Role | Protected |
 | --- | --- | --- |
-| `deploy/components/valkey/helmrelease.yaml` | Valkey NetworkPolicy (A1.2) and AUTH (A1.5) | no (yes after D15) |
+| `deploy/components/valkey/helmrelease.yaml` | Valkey NetworkPolicy (A1.2) and AUTH (A1.5) | after D15 |
 | `deploy/helm/templates/_helpers.tpl` | `REDIS_PASSWORD` and `REDIS_URL` (A1.4) | yes |
-| `deploy/components/workers/{digest,integration,mcp,workflow}-worker.yaml` | worker Redis env (A1.4) | no (owner-ack) |
-| `deploy/helm/values/providers/ailab.yaml` | flags, pins, airlock URL, web panel, harness (A1.4, AG1/AG2, C1, C4, C8-C10) | no (owner-ack) |
-| `deploy/secrets/ailab/{valkey-auth,gatekeeper-signing-keys,gatekeeper-secrets,sentinel-secrets,<svc>-secrets}.enc.yaml` | rotations (A1.4, A3.2, A4.3, A5.4, A5.5) | yes |
+| `deploy/components/workers/{digest,integration,mcp,workflow}-worker.yaml` | worker Redis env (A1.4); D.8 revert (C4, C8) | no (owner-ack) |
+| `deploy/helm/values/providers/ailab.yaml` | flags, pins, airlock URL, web panel, harness, D.8 blocks (A1.4, AG1a, AG1b, AG2, C1, C4, C8-C10) | no (owner-ack) |
+| `deploy/secrets/ailab/{valkey-auth,gatekeeper-signing-keys,gatekeeper-secrets,sentinel-secrets,<svc>-secrets}.enc.yaml` | rotations (A1.4, A3.2, A4.3, A5.5), drill (C4, C8), D5 cleanup | yes |
 | `deploy/gitops/flux/clusters/ailab/app/helmrelease.yaml` | `valuesFiles` (C4, C8) | yes |
-| `infra/gatekeeper/src/app/gatekeeper/redis.py` | URL redaction (A1.0) | no |
+| `infra/gatekeeper/src/app/gatekeeper/{redis,metrics}.py` | URL redaction and Redis instrumentation (A1.0) | `redis.py` after D15 |
+| `infra/gatekeeper/src/app/gatekeeper/{server_session,routes_session}.py` | session-id redaction (A1.0b) | after D15 |
 | `infra/gatekeeper/src/app/gatekeeper/config.py` | `api_keys_enabled` (A2.1) | yes |
-| `infra/gatekeeper/src/app/api/v1/api.py`, `gatekeeper/routes.py`, `gatekeeper/apikeys_api.py` | API-key flag (A2.1), edge refusal (A4.1), login redirect and callback (A6) | no |
-| `infra/gatekeeper/src/app/gatekeeper/helpers.py`, `gatekeeper/jwks.py`, `gatekeeper/metrics.py` | PKCE, nonce, cookie (A6), issuer (A6), new metric labels | no |
-| `infra/keycloak-sync/src/keycloak_realm_sync/main.py`, `deploy/components/keycloak-realm-seed/realm-configmap.yaml` | PKCE enforcement (A6.4) | no |
+| `infra/gatekeeper/src/app/api/v1/api.py`, `gatekeeper/routes.py`, `gatekeeper/apikeys_api.py` | API-key flag (A2.1), edge refusal (A4.1), login redirect and callback (A6) | after D15 |
+| `infra/gatekeeper/src/app/gatekeeper/{helpers,jwks,oidc}.py` | PKCE, nonce, cookie, `validate_state`, `code_verifier` in the exchange, expected issuer (A6) | after D15 |
+| `infra/keycloak-sync/src/keycloak_realm_sync/main.py`, `deploy/components/keycloak-realm-seed/realm-configmap.yaml` | PKCE enforcement (A6.4) | after D15 |
 | `deploy/helm/charts/gatekeeper/{values.yaml,templates/keygen-cronjob.yaml,templates/deployment.yaml}` | comment fixes (A3.1) | yes |
 | `docs/runbooks/gatekeeper-key-rotation-ailab.md`, `docs/runbooks/ailab-credential-rotation.md`, `docs/runbooks/gatekeeper-key-emergency-rotation.md` | procedures (A3.1, A5.1) | no |
-| `deploy/components/traefik/helmrelease.yaml` | ServiceMonitor label, router labels, `Cf-Ray` (E1a, E1b) | no (yes after D15) |
-
-<!-- codex: [P1] A6 must also change gatekeeper/oidc.py: the pinned exchange_code signature and token-request payload have no code_verifier parameter; include that implementation, its request-payload test and protection status in the scope. -->
+| `deploy/components/traefik/helmrelease.yaml` | ServiceMonitor label and metrics Service, router labels, `Cf-Ray` (E1a, E1b) | after D15 |
 
 **ailab** (`cchifor/ailab`):
 
 | Path | Role |
 | --- | --- |
 | `ansible/roles/pr_reviewer/defaults/main.yml` | merge authors (B2, B7) |
-| `scripts/gitea-api.sh`, `scripts/owner-token.ps1` | routine and ephemeral owner credential helpers (B3, item 2 procedure) |
+| `scripts/gitea-api.sh` | routine credential helper (B3) |
 | `kubernetes/apps/databases/infra-pg.yaml` plus a new custom-queries ConfigMap | token inventory metrics (B5) |
 | `kubernetes/apps/infrastructure/monitoring/{gitea-credential-rules,strive-edge-rules}.yaml` and `.test.yaml`, `strive-edge-dashboard.yaml`, `kustomization.yaml` | alerts and dashboard (B5, E3, E5) |
 | `kubernetes/apps/apps/gatus/configmap.yaml` | external probes (E2) |
-| `docs/runbooks/{owner-credentials,roots-of-trust-rotation}.md`, `docs/runbooks/s2s-identity.md` | procedures and records (A5.1, B8, C11) |
+| `docs/runbooks/{owner-credentials,roots-of-trust-rotation}.md`, `docs/runbooks/s2s-identity.md`, `CLAUDE.md` (owner) | procedures and records (A5.1, B8, C11) |
 | `scripts/s2s/{flux-resume.sh,phase4-probes.sh}` | used unchanged by C |
 
 ## Verification
 
-**F-01.** A1.2: an unlabelled throwaway pod in `strive-ailab` cannot open 6379 (timeout), a labelled consumer can;
-`gatekeeper_redis_fallback_total` flat. A1.4: as listed in the step. A1.5: from an admitted pod an unauthenticated `PING` gets
-`NOAUTH` and an authenticated one `PONG`; a test session created before the window is still valid after it;
-`gatekeeper_redis_reconnections_total` +1 per replica, then fallback flat; edge 5xx within the E4 baseline after reconnect.
-Resolved per the spec's own criterion: the NetworkPolicy names its sources and Valkey refuses unauthenticated commands.
-<!-- codex: [P2] An idle replica may never enter fallback, and redis-py may reconnect internally, so exactly +1 is not a reliable acceptance condition; require successful operations through each replica and an observed connected backend, plus a wrong-password rejection after AUTH is enabled. -->
+**F-01.** A1.2's reachability tests and 24-hour log counts. A1.4: the per-pod password fingerprints match; no literal
+password rendered; Loki counts 0. A1.5: unauthenticated `PING` gets `NOAUTH`, a wrong password `WRONGPASS`, the right one
+`PONG`; `gatekeeper_redis_connected` 1 on both pods; a session created before the window still valid; a login, refresh and
+logout after it persist; edge 5xx within the pre-window baseline. Resolved per the spec's criterion: the NetworkPolicy
+names its sources and Valkey refuses unauthenticated commands.
 
-**F-02.** `POST /api/v1/api-keys` from an admitted pod: 404. `/auth` with `X-API-Key` and a planted test record: no API-key
-mint (`status="disabled"` counted). `SCAN` counts 0. Spec F-02 and F-17 marked resolved by retirement.
+**F-02.** `POST /api/v1/api-keys` from an admitted pod: 404 on both pods. `/auth` with `X-API-Key` and a planted test
+record: no mint (`status="disabled"` counted). `SCAN` counts 0. Spec F-02 and F-17 marked resolved by retirement.
 
-**F-03.** The JWKS sequence `{OLD}`, `{OLD,NEW}`, `{NEW,OLD}`, `{NEW}` observed on both pods with the timestamps; probes and
-a journey pass after each phase; 0 gatekeeper 5xx and no `invalid_token` spike on backends during the rotation. Resolved when
-`/auth/jwks` has shown a key change with an overlap and the procedure is recorded.
+**F-03.** The JWKS sequence `{OLD}`, `{OLD,NEW}`, `{NEW,OLD}`, `{NEW}` observed on both pods with timestamps and the
+locally computed kids; probes and a journey pass after each phase; 0 gatekeeper 5xx and no `invalid_token` rise on
+backends. Resolved when `/auth/jwks` has shown a key change with an overlap and the procedure is recorded.
 
-**F-04.** A4.2's internet request gets 401 and `edge_refused` +1; Sentinel successes continue; after A4.3 the old token is
-refused in-cluster (401 `invalid_key`) and the new one accepted. Resolved per the spec: an `X-Test-Token` request from the
-internet is no longer accepted.
+**F-04.** Every path into Traefik enumerated; A4.2's internet request gets 401 and `edge_refused` +1; Sentinel successes
+continue for every validation kind; after A4.3 the old token is refused in-cluster (401 `invalid_key`) and the new one
+accepted. Resolved per the spec: an `X-Test-Token` request from the internet is no longer accepted.
 
-**F-05.** Each procedure exists and states order, overlap, impact and rollback. Rehearsal records: A3.2, A5.2 (all
-decrypting Kustomizations Ready at each step, old key gone from `sops-age` and the workstation), A5.3 (both kids published
-during the overlap, no session terminations above baseline), A5.4 (measured window and 401 count), A5.6 (research note and
-disposable-cluster outcome). The spec's validation item "every row marked No procedure has an owner-decided follow-up" holds.
+**F-05.** Each procedure exists and states order, overlap, impact and rollback. Rehearsal records: A3.2; A5.2 (holders
+inventoried, Flux Ready with the new key alone, data keys rotated, old key archived); A5.3 (both kids published during
+the overlap, the pre-promotion session still refreshing, no terminations above baseline); drill 2's measured swap
+windows (in place of A5.4's rehearsal); A5.6 (research note and outcome). D17's issues exist; F-05 is reported
+"partially addressed" until they close.
 
-**F-06.** Unit tests per A6.1; live checks per A6.3 and A6.4; login journeys on `strive.place` and `apps.strive.place` pass;
-`/callback` 4xx/5xx and `/auth/login` rates within baseline the day after AG2; issuer mismatches 0.
+**F-06.** Unit tests per A6.1; at least one canary success per pod in A6.2; live checks per A6.3 and A6.4 (including
+`plain` and wrong-verifier refusals); login journeys on `strive.place` and `apps.strive.place`; `/callback` 4xx/5xx and
+`/auth/login` rates within baseline the day after AG2; issuer mismatches 0.
 
-**Item 2.** `workstation-bot is_admin=False` is the only Gitea identity the workstation resolves; `cmdkey /list` shows no
-`chifor`, `cchifor` or OAuth Gitea targets; the files are gone; DB: `cchifor` 0 tokens, `chifor` 0 standing tokens and no
-OAuth grant, `gitea_admin` only the allowlisted two; the four B5 alerts are loaded and their fixtures pass; one rehearsal of
-the ephemeral owner procedure (mint, scripted call, delete, alert silent) is recorded.
+**Item 2.** `workstation-bot is_admin=False` is the only Gitea identity the workstation resolves, and B4's negative
+checks hold; `cmdkey /list` shows no `chifor`, `cchifor` or OAuth Gitea targets; the files are gone; DB: `cchifor` 0
+tokens, `chifor` 0 standing tokens and no OAuth grant, `gitea_admin` only the two allowlisted ids; the B5 alerts are
+loaded and their fixtures pass; the break-glass login (B0) and one owner-terminal operation (mint, run, delete, alert
+silent) are recorded.
 
-**Item 3.** Measurements in C7, results of C6, C8 and C9, and the C11 records.
+**Item 3.** C6 results, C7 measurements, C8 and C9 results, and the C11 records.
 
-**Item 4.** Traefik target up; E3 fixtures pass in `rules-lint`; the E4 controlled test outcome; the 7-day baseline table
-recorded in the dashboard description and in the spec's F-31; Gatus probes green.
-<!-- codex: [P2] Fixture success and loaded rules do not prove notification delivery; include one controlled firing/resolution through Prometheus, Alertmanager and ntfy, and verify that missing telemetry produces a failure rather than a green dashboard. -->
+**Item 4.** Traefik targets up for every pod; E3 fixtures pass in `rules-lint`; one synthetic alert posted to
+Alertmanager's `/api/v2/alerts` with E3's labels reaches ntfy and resolves; the E4 controlled-test outcome; the 7-day
+baseline table in the dashboard description and the spec's F-31; Gatus probes green.
 
 ## Risks and residuals
 
-- **Silent Valkey degradation.** A missed consumer or a wrong password makes gatekeeper fall back to per-pod memory without
-  an error (V8). Mitigation: A1.3 proof, A1.4 checks before A1.5, `GatekeeperRedisFallback`. Residual: F-20's silent fallback
-  itself stays (fail-closed is a separate decision).
-- **Password exposure in logs.** Any library outside gatekeeper that logs its connection URL would leak the Valkey password
-  into Loki (unauthenticated on the LAN). Only gatekeeper was found doing so; A1.4's Loki substring count is the check. A
-  gatekeeper rollback below AG1 after A1.4 reintroduces the leak (AG1's note).
-- **Label-based NetworkPolicy.** Any pod in `strive-ailab` that carries an admitted `strive.io/service` label reaches Valkey;
-  creating such pods needs namespace write (Flux cluster-admin path, accepted D2 of the S2S plan). AUTH is the second layer.
-- **Cloudflare-header test (F-04).** The refusal assumes every internet path transits Cloudflare (V22). A future
-  LoadBalancer or a second ingress without Cloudflare would bypass it; D15 protects the Traefik component, and the in-cluster
-  bypass still requires the token.
-- **Helm 3 versus Helm 4.** CI renders with Helm 3, the cluster applies with Helm 4 (V50); null semantics and server-side
-  apply differ. Mitigation: no null-based switches, dual renders in C4 and A1.4. Whether a `kubectl rollout restart`
-  annotation survives a Helm 4 server-side upgrade without a re-roll is UNVERIFIED (A3.2 checks it).
-- **Chart and spec race during C5 and C8.** Covered by the freeze and `flux-resume.sh`; the remaining failure mode (the old
-  image receiving `composite`) is non-disruptive because old pods keep serving, and has an explicit abort path.
-- **PKCE enforcement lock-in.** After A6.4, an image rollback below AG2 breaks every login until the Keycloak attribute is
-  removed; AG2's rollback note says so.
-- **Login restart loops.** Browsers that refuse the `gk_oidc_*` cookie get one restart and then a 400 page instead of a loop;
-  such users cannot log in (already true of the `session_id` cookie).
-- **Owner-equivalent credentials outside Gitea.** The workstation keeps cluster-admin (`admin@ai`), talosconfig and the age
-  key; with them anyone can exec into Gitea and mint tokens. Item 2 removes standing Gitea owner credentials only.
-- **`updated_unix` as "last used".** B6's observation depends on Gitea updating it on every token use (V38). If it does not,
-  a quiet consumer could break at revocation; the 401 checks and Gitea's access log are the fallback.
+- **Silent Valkey degradation.** A missed consumer or a wrong password makes consumers fall back to memory without an
+  error (V8, V63). Mitigation: A1.0's instrumentation, A1.3, A1.4's fingerprint check, `GatekeeperRedisFallback`.
+  Residual: F-20's silent fallback stays (fail-closed is a separate decision).
+- **Secrets in logs.** Any library outside gatekeeper that logs its connection URL would leak the Valkey password into
+  Loki, which the LAN can read; A1.4's substring count is the check. Session ids logged before AG1a are voided by
+  A1.0b's purge. A gatekeeper rollback below AG1a after A1.4 reintroduces both leaks (AG1a's note).
+- **Label-based NetworkPolicy.** Any pod in `strive-ailab` with an admitted `strive.io/service` label, or with
+  `valkey-client: "true"`, reaches Valkey; creating one needs namespace write (Flux cluster-admin path, accepted D2 of
+  the S2S plan). AUTH is the second layer.
+- **Cloudflare-header test (F-04).** The refusal assumes every internet path transits Cloudflare (V22, A4.2). A future
+  LoadBalancer or second ingress without Cloudflare would bypass it; D15 protects the Traefik component, and the
+  in-cluster bypass still requires the token.
+- **Helm 3 versus Helm 4.** Null semantics and server-side apply differ (V50). Mitigation: no null-based switches, dual
+  renders in C4 and A1.4. Whether a `rollout restart` annotation survives a Helm 4 upgrade is UNVERIFIED (A3.2 checks).
+- **Drill 2 after #2125.** Two S2S mint-failure windows by design (measured). A Helm remediation rollback mid-drill
+  leaves the Secret and the release disagreeing (C8 at once). Between `platform-secrets` resuming and the HelmRelease
+  upgrade, a gatekeeper restart would load the restored base early and refuse the ten extras; that gap is minutes.
+- **PKCE enforcement lock-in.** After A6.4, a rollback below AG2 breaks every login until the attribute is removed, which
+  needs `platform-identity` suspended first (A6.4's rollback).
+- **Login error page.** A browser that refuses cookies cannot log in (already true of the `session_id` cookie); it sees
+  the error page, never a loop.
+- **Owner-equivalent credentials outside Gitea.** The workstation keeps cluster-admin (`admin@ai`), talosconfig and the
+  age key; with them anyone can exec into Gitea and mint tokens (also the documented break-glass). Item 2 removes
+  standing Gitea owner credentials only.
+- **`updated_unix` as "last used".** B6 tests it on a fresh token first and falls back to access logs.
 - **API-key retirement** removes a documented (but unreachable on ailab) path for `platform__app_import`.
-- **Talos SA key.** May prove infeasible without downtime; then it stays an accepted residual with a recorded reason.
-- **Unprotected security code until D15.** Between AG1 and D15, a bot-approvable PR could revert A1.0, A2.1 (except
-  `config.py`), A4.1 or A6; the reviewers and the E3 alerts are the only guard in that period.
-- **Not addressed here:** Valkey TLS and transport encryption (F-16); F-07 back-channel logout; F-09 credential concentration;
-  F-10 tenant-scoped client credentials; F-12 tunnel drift; F-13 isolated app origin; the Keycloak client secret, Flux deploy
-  keys, tunnel credentials and service database passwords (the remaining "no procedure" rows of F-05 beyond the five named).
-  <!-- codex: [P1] Merely listing the remaining F-05 rows as out of scope does not satisfy the stated owner-decided-follow-up criterion; assign explicit owner decisions and tracked follow-ups or report F-05 as partially addressed rather than resolved. -->
+- **Talos SA key.** May prove infeasible without downtime; then an accepted residual with a recorded reason. After
+  #2125 a mistake there breaks every S2S mint.
+- **TokenReview limiter (D16).** A replay loop from an admitted pod can now turn every uncached S2S mint into 503s;
+  alerted, not prevented.
+- **Unprotected security code.** Closed by D15 before AG1a if decided; `keycloak-realm-seed/sync-job.yaml` stays
+  bot-mergeable by design.
+- **Not addressed here:** Valkey TLS and transport encryption (F-16); F-07 back-channel logout; F-09 credential
+  concentration; F-10 tenant-scoped client credentials; F-12 tunnel drift; F-13 isolated app origin; the remaining
+  "no procedure" rows of F-05, tracked by D17.
+
+## Review response log (round 1)
+
+Reviewers: Codex (84 inline markers, `f13de4db`) and Fable (`plans/2026-10-07-auth-hardening-and-ops-review-fable-r1.md`,
+SIGN WITH CHANGES). Codex claims checked against code at `a1014dfed` before deciding; "verified" marks the ones
+confirmed directly.
+
+**(a) Codex markers: 80 ACCEPT, 4 PUSHBACK**
+
+| # | Marker (location, gist) | Decision | Resolved in |
+| --- | --- | --- | --- |
+| 1 | V7: `server_session.py` logs full session ids | ACCEPT (verified: 147 lines in 24 h, Loki on a LAN NodePort) | V58, A1.0b |
+| 2 | V26: cooldown arms only if the kid stays absent | ACCEPT (verified `jwks.py:160-166`) | V26, A5.3 step 1 |
+| 3 | V55: completeness and incident cause provisional | ACCEPT | V55, E4 |
+| 4 | D1: shared-password blast radius | ACCEPT (accepted explicitly; ACL users as option d) | D1 |
+| 5 | D2: acceptance; silent re-enable | ACCEPT | D2, AG1a, E3 `GatekeeperApiKeyUsed` |
+| 6 | D3: header absence; ingress paths | ACCEPT (enumeration plus `CDN-Loop`; a dedicated internal route was rejected: Sentinel must use the same host and ForwardAuth path) | D3, A4.1, A4.2 |
+| 7 | D4: nothing enforces the cadence | ACCEPT (due-dated issue) | D4, A3.2 |
+| 8 | D5: window estimate | ACCEPT (moot after #2125; measured in drill 2) | D5, A5.4, C6 |
+| 9 | D6: premise incomplete | ACCEPT (premise reworded; A6 uses an HKDF-derived key) | D6, F-06 design |
+| 10 | D7: time-box | ACCEPT | D7 |
+| 11 | D8: scratch rehearsal, recovery | ACCEPT | D8, A5.2 steps 0 and 6 |
+| 12 | D9: third stage with a drain | PUSHBACK | D9 |
+| 13 | D10: repository-limited permissions | PUSHBACK | D10 |
+| 14 | D11: helper timeout is not a lifetime | ACCEPT (lifetime stated as manual; DPAPI helper dropped) | D11, owner actions |
+| 15 | D12: map consumers before cleanup | ACCEPT | D12, B6 |
+| 16 | D13: gating fixes on a retired drill | ACCEPT (coordinator ruling, amended for #2125) | D13, item 3 |
+| 17 | D14: series estimate | ACCEPT (measured, revert rule) | D14, E1b |
+| 18 | D15: timing and list | ACCEPT (before AG1a; `oidc.py`, `key_store.py`, `server_session.py`, keycloak paths added) | D15 |
+| 19 | Approach: `_out/` is not protected storage | ACCEPT | Approach |
+| 20 | AG1 rollback reopens F-02/F-04 | ACCEPT (minimum safe release, feature containment, AG1 split) | AG1a, AG1b |
+| 21 | A1.0: Redis counters never incremented | ACCEPT (verified: only declared, series flat at 0) | V8, A1.0, E3 |
+| 22 | A1.2: render the Flux chart, test other namespaces | ACCEPT | A1.2 |
+| 23 | A1.3: other consumers' libraries | ACCEPT (found digest on redis-py 8.0.0; both versions tested) | V63, A1.3 |
+| 24 | A1.4: a wrong password passes against nopass | ACCEPT (fingerprint comparison) | A1.4 step 3 |
+| 25 | A1.5: fallback loses logins, logouts | ACCEPT (impact stated, window rule, after-window persistence checks) | A1.5 |
+| 26 | A2.2: purge preconditions | ACCEPT | A2.2 |
+| 27 | F-02 stays open until retirement | ACCEPT | F-02 status |
+| 28 | A3.2: gate on revision and fingerprints | ACCEPT | A3.2 |
+| 29 | A3.2 P1: the wait does not preload caches | PUSHBACK | A3.2 P1 |
+| 30 | A3.2: chained reverts | ACCEPT | A3.2 rollback |
+| 31 | Emergency variant: cache revocation bound | ACCEPT | A3.2 emergency |
+| 32 | F-04 rollback: disable the flag first | ACCEPT | A4 rollback, AG1a |
+| 33-35 | A5.2: new-only check isolation; data-key rotation; archive and fixed path | ACCEPT | A5.2 steps 3-6 |
+| 36-38 | A5.3: kcadm config; realm-wide retention; old-key continuity | ACCEPT | A5.3 |
+| 39 | A5.4: non-atomic swap | ACCEPT (moot after #2125; the gates live in C5/C6) | A5.4, C5, C6 |
+| 40 | A5.5: rolling single-key change; resurrection | ACCEPT | A5.5 |
+| 41 | A5.6: add-verifier phase first | ACCEPT | A5.6 |
+| 42-49 | F-06 design: cookie bounds; binding and `__Host-`; routing and `idp_hint`; retry bound; required claims and tenant hook; error branches; `validate_state` cases; issuer vs fetch URL | ACCEPT (no auto-retry; `validate_state` verified to pass `/\host`) | F-06 design, V62 |
+| 50 | A6.1: discriminator and fixed labels | ACCEPT | F-06 design, A6.1 |
+| 51 | A6.2: soak never exercises the new path | ACCEPT (canary per pod) | A6.1, A6.2 |
+| 52 | A6.3: start/callback matrix | ACCEPT | A6.1 tests, A6.3 |
+| 53 | A6.4: reconciler rollback; token-endpoint tests | ACCEPT | A6.4 |
+| 54-56 | B3/B4: helper origin; Git config inventory; negative checks | ACCEPT | B3, B4 |
+| 57-59 | B5: exporter role; zero-fill and absence; OAuth grants and allowlist by id | ACCEPT | B5 |
+| 60-61 | B6: `updated_unix` semantics; cache invalidation | ACCEPT (one replica; API delete or restart) | V59, B6 |
+| 62 | DPAPI boundary | ACCEPT (helper dropped) | D11, owner actions |
+| 63 | C3: freeze misses `platform-secrets`, merges | ACCEPT | item 3 preconditions, C3, C5 |
+| 64 | C3: drain harness traffic | ACCEPT | C1 |
+| 65 | C5: valuesFiles race gate | PUSHBACK | C5 |
+| 66 | C6: probes skip harness cases | ACCEPT | C6 |
+| 67 | STOP at gates 2-4 leaves Flux resumed | ACCEPT (verified `flux-resume.sh:198-217`) | V51, C abort |
+| 68 | `maxUnavailable` vs remediation | ACCEPT (config-only removes the image path; remediation recorded) | V44, C abort |
+| 69 | Quiet-hour baseline; prepared recovery PR | ACCEPT | preconditions, C2, C abort |
+| 70 | C11: historical rollback not the kept one | ACCEPT (ruling) | D13, C11 |
+| 71 | E1a: inspect the render | ACCEPT (with Fable 1) | V53, E1a |
+| 72 | E2: cached 200s | ACCEPT | E2 |
+| 73-76 | E3: scope; traffic floor; zero-fill; aggregation, low volume, silences | ACCEPT | E3 |
+| 77 | E4: more controls, per-pod continuity | ACCEPT | E4 |
+| 78-80 | Sequencing: missing steps; calendar; shared control planes | ACCEPT | Sequencing |
+| 81 | `oidc.py` lacks `code_verifier` | ACCEPT (verified `oidc.py:26-76`) | V62, F-06 design, critical files, D15 |
+| 82 | F-01 verification: +1 reconnection unreliable | ACCEPT | Verification F-01 |
+| 83 | Alert delivery unproven | ACCEPT | Verification item 4 |
+| 84 | Remaining F-05 rows need decisions | ACCEPT | D17, A5.7, Verification F-05 |
+
+**(b) Fable findings and owner-decision opinions: 19 of 19 addressed, none rejected (2 adopted with changes)**
+
+| # | Finding | Disposition | Resolved in |
+| --- | --- | --- | --- |
+| 1 | E1a needs the metrics Service | Adopted | V53, E1a |
+| 2 | A1.1-A1.4 checks gatekeeper only; no window | Adopted; LIVE adds that no CronJob/Job carries a Redis env | V5, A1.1-A1.4 |
+| 3 | OIDC cookies accumulate | Adopted; the cookie becomes `__Host-`, `Path=/` so `/auth/login` prunes as well | F-06 design, A6.1 |
+| 4 | A6.4 rollback undone by keycloak-sync | Adopted | A6.4, risks |
+| 5 | No break-glass | Adopted (break-glass found: `gitea/gitea-admin`) | V59, B0, B8 |
+| 6 | D13 gates fixes on a retired drill | Adopted (ruling); amended: after #2125 the config-only rollback must restore the preshared base | D13, item 3 |
+| 7 | Split AG1 | Adopted | AG1a, AG1b |
+| 8 | age-key holder inventory | Adopted | A5.2 step 0 |
+| 9 | Protect keycloak-sync and realm seed | Adopted with a change: `main.py` and `realm-configmap.yaml` only, so `sync-job.yaml` pin bumps stay bot-mergeable | D15 |
+| 10 | Stale pin | Adopted (`a1014dfed`) | Pinned references |
+| 11 | Stale Valkey comment; gatekeeper-shaped A1.3 | Adopted | V1, V8, A1.3, A1.5 |
+| 12 | E3 rule label and severity | Adopted | E3 |
+| 13 | E2 feasibility, UA | Adopted | E2 |
+| 14 | Simpler owner-terminal procedure | Adopted | D11, owner actions |
+| 15 | B5 fallback role unnecessary | Adopted (fallback is an aggregate-only view) | B5 |
+| 16 | `scripts/forge.sh` does not exist | Adopted (verified) | V59, B8 |
+| 17 | `CDN-Loop`; why headers | Adopted with a correction: Sentinel's peer is its own pod IP, not cloudflared's; both are dynamic pod IPs | A4.1, A4.2 |
+| 18 | C1 depends on the web image | Adopted (precondition) | item 3 preconditions |
+| 19 | A3.2 one-write gate and bound | Adopted (plus Codex's fingerprint gate) | A3.2 |
+| D1-D4 | agree | unchanged; D2 and D4 gain an alert and a due-dated issue (Codex) | D1-D4 |
+| D5 | agree | superseded by #2125: rescoped to deleting inert secrets | D5 |
+| D6 | agree (a) | kept; premise reworded per Codex | D6 |
+| D7, D8 | agree with time-box, inventory | adopted | D7, D8 |
+| D9, D10 | agree | unchanged (Codex pushbacks recorded) | D9, D10 |
+| D11 | prefer the owner-terminal variant | adopted | D11 |
+| D12 | add break-glass | adopted | D12, B0 |
+| D13 | disagree; config-only drill | adopted | D13 |
+| D14 | agree | adopted with measurement | D14 |
+| D15 | add keycloak paths | adopted (narrowed, see 9) | D15 |
+
+New or changed owner decisions: D5 (rescoped after #2125), D11 (owner terminal, no DPAPI helper), D13 (config-only
+drill that restores the preshared base, gates nothing), D15 (before AG1a, wider list), D16 (new: TokenReview limiter
+after #2125), D17 (new: remaining F-05 rows).
 
 <!-- codex-review-status: complete -->
