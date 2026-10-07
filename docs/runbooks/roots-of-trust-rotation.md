@@ -592,6 +592,10 @@ this step's rollback a no-reboot change.
 Do not roll the signer back while any control plane has dropped the old verifier: tokens it then signs fail there (rehearsed). Roll step 4 back on
 every control plane first.
 
+The rows use `talosctl`. On the OpenTofu path, either express the rollback as a tofu change (revert the template or variable change and
+apply that control plane with the same per-step `apply_mode`), or freeze `kubernetes/infra` applies until the `talosctl` rollback is mirrored
+in tofu: otherwise the next `just apply` undoes it.
+
 ## What breaks if the order is wrong (rehearsed)
 
 - **Switching the signer without step 1** (Talos's default coupling): that control plane accepts only the new key at once. A healthy client
