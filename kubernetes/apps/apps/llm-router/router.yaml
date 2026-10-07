@@ -119,45 +119,6 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
-      # Recreate has stopped the old singleton before either preflight runs.
-      # A failed backup or migration check prevents the application from starting.
-      initContainers:
-        - name: backup-before-plugin-settings
-          image: registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44
-          imagePullPolicy: IfNotPresent
-          workingDir: /app
-          command: [node, deploy/backup-router.mjs]
-          env:
-            - name: ROUTER_BACKUP_LABEL
-              value: pre-plugin-settings-20261007
-          resources:
-            requests: {cpu: 50m, memory: 64Mi}
-            limits: {cpu: "1", memory: 256Mi}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
-          volumeMounts:
-            - {name: data, mountPath: /data}
-            - {name: tmp, mountPath: /tmp}
-        - name: check-plugin-settings-migration
-          image: registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44
-          imagePullPolicy: IfNotPresent
-          workingDir: /app
-          command: [node, deploy/check-router-upgrade.mjs]
-          env:
-            - name: ROUTER_BACKUP_LABEL
-              value: pre-plugin-settings-20261007
-          resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {cpu: "1", memory: 384Mi}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
-          volumeMounts:
-            - {name: data, mountPath: /data, readOnly: true}
-            - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
           image: registry.chifor.me/llm-router/router@sha256:0c1f9af1d3e0ee8bccc34a87ddd204d6500864c124e13844cd8346a81a127d44
@@ -292,12 +253,6 @@ spec:
       ports:
         - protocol: TCP
           port: 8787
-    # Temporary read-only settings canary; removed after CI acceptance.
-    - from:
-        - podSelector:
-            matchLabels: {app: llm-router-acceptance}
-      ports:
-        - {protocol: TCP, port: 8787}
   egress:
     # Cluster DNS (kube-dns runs in kube-system).
     - to:
