@@ -37,7 +37,16 @@ pr_reviewer_llm_cmd:
 # NOT recorded here: this repo mirrors to a PUBLIC GitHub repo, the LAN address and the `c4`
 # login are already published throughout the tree and are not credentials, but an account
 # address is an identity that appears nowhere else - ask the host (the probe above), not the file.
+#
+# SEAT `r` IS THE LLM ROUTER (2026-10-07; reviewbot.py § router seats, runbook dev-workers.md §
+# "Router seats"): API key key_f856495c9b0c on router.chifor.me. No `models` map, so each tier of
+# the ladder below is asked for by its own name - the router serves `fable`, `opus` and `sonnet`
+# as Claude models (probed 2026-10-07: each returned a correct review of a seeded-bug diff; a
+# 50 KB diff on fable streamed 179 s and completed). Preferred over a-c within every tier and
+# never sticky; a-c stay as the fallback.
 pr_reviewer_llm_seats:
+  - { name: r, sudo_user: "", router_url: "https://router.chifor.me",
+      key_file: "{{ pr_reviewer_router_key_file }}" }
   - { name: a, sudo_user: clauderun }
   - { name: b, sudo_user: clauderun2 }
   - { name: c, sudo_user: clauderun3 }
