@@ -151,6 +151,50 @@ disk as above, or `skopeo delete` old `agentforge/**` tags by hand (see "Refresh
 tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` then converges the
 new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
+## Thin-volume trim (weekly, ai-node1)
+
+Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never reaches LXC mount
+points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
+377 GB allocated for 170 GB in use. That thin-pool fill measurably slowed the shared consumer QLC
+NVMe that also carries cp1's etcd WAL (plans/2026-10-07-etcd-leader-churn-plan.md). One chunked trim
+freed 212 GB (pool 71.6% -> 59.8%).
+
+`scripts/lxc-fstrim-chunked.sh` (tests: `scripts/tests/test-lxc-fstrim-chunked.sh`, run in CI) trims
+8 GiB at a time:
+- inside the container's mount namespace;
+- waiting while host IO pressure (`/proc/pressure/io` some avg10) is above 45%;
+- pausing 15 s between chunks.
+
+Exit codes: 0 when done, 3 when pressure never dropped. `touch /run/lxc-fstrim-chunked.stop` halts it
+before the next chunk. Install on ai-node1 (root, via `scripts/node-ssh.py`):
+
+```bash
+install -m 0755 lxc-fstrim-chunked.sh /usr/local/sbin/lxc-fstrim-chunked.sh
+cat > /etc/systemd/system/registry-lxc-fstrim.service <<'UNIT'
+[Unit]
+Description=Chunked, IO-pressure-guarded fstrim of the registry LXC data volume (ct 5004 mp0)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lxc-fstrim-chunked.sh 5004 /var/lib/registry
+Nice=10
+UNIT
+cat > /etc/systemd/system/registry-lxc-fstrim.timer <<'UNIT'
+[Unit]
+Description=Weekly registry LXC trim, CI-quiet hours (after the 00:00Z infra-pg dump and 02:00Z Velero)
+[Timer]
+OnCalendar=Sun *-*-* 03:30:00 UTC
+RandomizedDelaySec=15min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
+```
+
+Check it with:
+- `systemctl list-timers registry-lxc-fstrim.timer`;
+- `journalctl -u registry-lxc-fstrim` (one line per chunk, then `end: trimmed_total=<bytes> pool=<%>`);
+- `lvs pve/vm-5004-disk-1 pve/data`.
+
 ## Capacity recovery, 2026-09-13
 
 Platform main build 32171 repeatedly failed image uploads with `blob upload unknown to registry`.
