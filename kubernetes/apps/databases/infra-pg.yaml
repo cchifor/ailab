@@ -288,6 +288,17 @@ spec:
   # (verified live: strive-pg's operator-generated PodMonitor has produced zero cnpg_* series). The
   # hand-written PodMonitor below (flux-monitoring.yaml precedent) carries the right label; the
   # instance pods expose the metrics port (9187) regardless.
+  monitoring:
+    # The list REPLACES what the operator's defaulting webhook wrote (cnpg-default-monitoring/queries,
+    # which is why the live spec already carried it), so the default entry is restated here: dropping
+    # it would silently stop every cnpg_pg_* family the replication/storage rules read. The second
+    # entry is the Gitea credential inventory (infra-pg-gitea-credential-queries.yaml, rules in
+    # monitoring/gitea-credential-rules.yaml).
+    customQueriesConfigMap:
+      - name: cnpg-default-monitoring
+        key: queries
+      - name: infra-pg-gitea-credential-queries
+        key: queries
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
