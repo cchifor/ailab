@@ -173,7 +173,7 @@ pressure is unreadable, and pauses 15 s between chunks. `touch /run/lxc-fstrim-c
 including during a pressure wait.
 
 Exit codes: 0 done or stopped, 1 volume, geometry or mount problem, 2 bad settings, 3 pressure never
-dropped, 4 pressure unreadable, 5 an fstrim failed. Install on ai-node1 (root, via
+dropped, 4 pressure unreadable, 5 an fstrim failed, 6 the host-side mount could not be released (`findmnt | grep lxc-fstrim`, then `umount` it by hand). Install on ai-node1 (root, via
 `scripts/node-ssh.py`):
 
 ```bash

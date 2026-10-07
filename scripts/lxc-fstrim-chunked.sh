@@ -30,6 +30,7 @@
 #   3 = IO pressure stayed above PSI_MAX for PSI_WAIT_MAX_S
 #   4 = IO pressure unreadable
 #   5 = an fstrim failed
+#   6 = the run succeeded but the host-side mount could not be released (the volume stays mounted)
 # Deploy (ai-node1, via scripts/node-ssh.py): docs/runbooks/registry-cache.md, "Thin-volume trim".
 set -uo pipefail
 
@@ -75,7 +76,21 @@ size=$(( blocks * bsize ))
 
 mnt="$(mktemp -d "$MOUNT_BASE/lxc-fstrim-$CTID-$MPKEY.XXXXXX")" || die 1 "mktemp under $MOUNT_BASE failed"
 mount -o rw,nosuid,nodev,noexec "$dev" "$mnt" || { rmdir "$mnt"; die 1 "mount $dev on $mnt failed"; }
-trap 'umount "$mnt" && rmdir "$mnt"' EXIT
+# Explicit cleanup, not a bare `trap 'umount && rmdir'`: an EXIT trap keeps the status that caused the
+# exit, so a failed umount (EBUSY) would leave a host-namespace mount of the LV behind while systemd saw
+# success (Codex impl-review round 2). Keep the original failure if there was one; otherwise a cleanup
+# failure is the run's failure (exit 6). Remove the directory only after a successful unmount.
+cleanup() {
+  local rc=$?
+  if umount "$mnt"; then
+    rmdir "$mnt" || log "cleanup: rmdir $mnt failed (unmounted; empty dir left behind)"
+  else
+    log "cleanup: umount $mnt ($dev) failed - the volume is still mounted on the host; release it by hand: umount $mnt"
+    [ "$rc" -eq 0 ] && rc=6
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 
 chunk=$(( CHUNK_GB * 1024 * 1024 * 1024 ))
 chunks=$(( (size + chunk - 1) / chunk ))

@@ -55,6 +55,8 @@ STUB
 cat > "$BIN/umount" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$CTL/umount_calls"
+[ -f "$CTL/umount_fail" ] && { echo "umount: $1: target is busy." >&2; exit 32; }
+exit 0
 STUB
 cat > "$BIN/fstrim" <<'STUB'
 #!/usr/bin/env bash
@@ -142,6 +144,17 @@ eq "exit 5" 5 "$(cat "$CTL/rc")"
 eq "stops at the failing chunk" 2 "$(calls fstrim_calls)"
 has "says which chunk" "chunk 2" "$(cat "$CTL/out")"
 eq "unmounts on the way out" 1 "$(calls umount_calls)"
+
+echo "== a failed unmount after a clean run fails the run (exit 6) and keeps the dir =="
+new_case umountfail; touch "$CTL/umount_fail"; run
+eq "exit 6" 6 "$(cat "$CTL/rc")"
+has "names the mount it could not release" "cleanup: umount" "$(cat "$CTL/out")"
+eq "the busy mount dir is NOT removed" 1 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | tr -d ' ')"
+
+echo "== a failed unmount after a failed trim keeps the trim's exit code (5) =="
+new_case bothfail; touch "$CTL/umount_fail"; echo 1 > "$CTL/fail_on"; run
+eq "exit 5 preserved" 5 "$(cat "$CTL/rc")"
+has "still reports the unmount failure" "cleanup: umount" "$(cat "$CTL/out")"
 
 echo "== invalid settings are rejected before anything is mounted (exit 2) =="
 for bad in "CHUNK_GB=-1" "CHUNK_GB=0" "PAUSE_S=0" "PSI_MAX=abc" "PSI_WAIT_MAX_S=x"; do
