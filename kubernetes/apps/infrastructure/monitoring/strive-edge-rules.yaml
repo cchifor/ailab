@@ -58,8 +58,8 @@
 # gatekeeper_redis_fallback_total and gatekeeper_redis_reconnections_total ALREADY exist (pre-initialised
 # at 0 on both pods, no increase in 7 days); gatekeeper_redis_connected, any method="api_key" series and
 # any status="edge_refused" / "disabled" series do NOT exist yet. These four rules therefore stay silent
-# until AG1a is live (an expression over an absent series never fires), and the fixtures below, not
-# the cluster, are what proves them until then.
+# until AG1a is live (an expression over an absent series never fires), and the fixtures in
+# strive-edge-rules.test.yaml, not the cluster, are what proves them until then.
 #
 # CAVEAT, same family as the one above: gatekeeper_auth_requests_total children are created lazily
 # per (tenant_id, method, status), so the FIRST edge_refused (or first non-disabled api_key) event of
