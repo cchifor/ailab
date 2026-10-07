@@ -1,0 +1,85 @@
+# One-shot acceptance through GitOps. Keep the completed Job until its result is
+# recorded, then remove this file and its NetworkPolicy in a reviewed change.
+# No TTL: Flux would otherwise recreate the deleted Job and repeat paid calls.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: router-shared-routing-20261007
+  namespace: llm-router
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 420
+  template:
+    metadata:
+      labels:
+        app: llm-router-acceptance
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      tolerations:
+        - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: canary
+          image: registry.chifor.me/llm-router/router@sha256:40478a235364dbf930c4b3d8d2e3d8defeaf271fb7eacedf813c3a6d7addc353
+          workingDir: /app
+          command: [node, --input-type=module, -e]
+          args:
+            - |
+              import { readFile } from 'node:fs/promises';
+              const base = process.env.ROUTER_BASE_URL;
+              const expected = await readFile('dist/web/index.html', 'utf8');
+              const deadline = Date.now() + 120_000;
+              let ready = false;
+              while (Date.now() < deadline) {
+                try {
+                  const health = await fetch(base + '/ready', { signal: AbortSignal.timeout(5000) });
+                  const index = await fetch(base + '/', { signal: AbortSignal.timeout(5000) });
+                  if (health.ok && index.ok && await index.text() === expected) { ready = true; break; }
+                } catch {}
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+              if (!ready) throw Error('Expected router release did not become ready');
+              await import('./scripts/validate-shared-routes.mjs');
+          env:
+            - name: ROUTER_BASE_URL
+              value: http://llm-router.llm-router.svc.cluster.local
+            - name: ROUTER_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef: {name: llm-router-auth, key: admin-token}
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-router-acceptance
+  namespace: llm-router
+spec:
+  podSelector:
+    matchLabels: {app: llm-router-acceptance}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels: {app: llm-router}
+      ports:
+        - {protocol: TCP, port: 8787}

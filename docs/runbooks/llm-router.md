@@ -1,5 +1,10 @@
 # LLM Router — router.chifor.me
 
+Current deployments use Gitea CI and reviewed GitOps changes; no llm-router
+kubeconfig is required or issued. The source is merged in Gitea, mirrored to
+GitHub, then reconciled by Flux. The initial manual deployment notes below are
+historical. See the shared-routing release section for current CI acceptance.
+
 ## Topology and authentication
 
 Cloudflare proxied CNAME → existing locally managed `ailab` tunnel → `llm-router.llm-router.svc.cluster.local:80` → Node :8787.
@@ -206,26 +211,51 @@ advances once, routes and encrypted credentials are preserved, and a second
 startup is idempotent. Either init failure prevents application startup. The
 application then applies the same migration to its normal database.
 
-After the reviewed GitOps rollout, check `/ready`, the init logs and the public
-unauthenticated management refusal. Run the bounded client-key canary in the
-router container (the administrator token is already in its environment):
+Deployment and acceptance use CI/GitOps:
 
-```sh
-kubectl -n llm-router rollout status deployment/llm-router --timeout=240s
-kubectl -n llm-router logs deployment/llm-router -c backup-before-shared-routing
-kubectl -n llm-router logs deployment/llm-router -c check-shared-routing-migration
-kubectl -n llm-router exec deployment/llm-router -c router -- node scripts/validate-shared-routes.mjs
-```
+1. The image publishing workflow produces an immutable digest and receipt.
+2. A reviewed AILab PR pins it; CI and the protected merge gate run normally.
+   Gitea mirrors main to GitHub and Flux reconciles the change.
+3. `.gitea/workflows/router-acceptance.yaml` runs on main changes to the router
+   manifests (or workflow dispatch). `scripts/check-router-rollout.py` reads the
+   existing LAN Prometheus API, rejects scrape samples older than 90 seconds,
+   and requires exactly one Ready router on the expected image, successful init
+   checks while configured, and successful completion of the configured canary.
+   It also checks public health/readiness and the unauthenticated 401. CI has no
+   Kubernetes credential and no router administrator token.
+4. The temporary GitOps Job `router-shared-routing-20261007` runs the packaged
+   `validate-shared-routes.mjs` against the live service. It waits for the exact
+   release's web document and readiness before testing. The existing
+   `llm-router-auth` Secret is referenced only inside the cluster. The Job has no
+   service-account token, persistent volumes or external egress. A temporary
+   NetworkPolicy admits only its connection to the router and DNS.
 
 The canary creates a temporary key scoped to the `claude` and `codex` routes,
-checks their visibility, requests streaming Chat Completions and nonstreaming
+checks visibility, requests streaming Chat Completions and nonstreaming
 Responses, and verifies the serving provider in each trajectory. It fails if a
-fallback masks a broken route and revokes its temporary key in cleanup. If the
-configured aliases differ, set `ROUTER_CANARY_ROUTES` to a JSON array of
-`{ "route": "alias", "provider": "provider-id" }` entries before running it.
-A process killed without cleanup can leave the short-lived key active until
-expiry: revoke the key with the `shared-route-canary-` name prefix through the admin UI.
-Record actual rollout and canary results before declaring production acceptance.
+fallback masks a broken route and revokes its temporary key in cleanup. It runs
+once, with no Job retries and a 420-second deadline; no TTL is set because Flux
+would recreate the Job and repeat the calls. The script has its own 240-second
+request deadline and 15-second cleanup timeout. Its success/failure is recorded
+in Prometheus and sanitized request/cleanup receipts in Loki under
+`{namespace="llm-router", container="canary"}`. Existing LAN endpoints are
+Prometheus `http://192.168.0.41:30090` and Loki `http://192.168.0.41:30310`.
+A process killed without cleanup can leave a key active for at most one day;
+revoke its `shared-route-canary-` name prefix through the admin UI if needed.
+
+The backup helper never overwrites a completed generation. Pod recreation with
+the same backup label rechecks its COMPLETE marker, SQLite integrity and file
+hashes, and reuses it; the migration check uses a fresh temporary copy. The
+original pre-upgrade recovery set remains intact. A corrupt backup prevents
+startup. Remove the dated init containers after acceptance so later Pod starts
+do not depend on that generation's retention.
+
+Production rollout evidence on 2026-10-07: pod `llm-router-6c644f6fbd-hk2lg`
+was Ready on the pinned image; both init containers completed. Loki recorded
+`Router SQLite backup and associated files verified: pre-shared-routing-20261007`
+and the successful isolated migration/idempotence check. Public web asset names
+matched the release, `/health` and `/ready` returned 200, and unauthenticated
+admin config returned 401. Live canary acceptance is recorded separately by CI.
 
 Rollback requires the matched pre-upgrade state as well as the old image, since
 the old release enforces the removed fields. Through the existing GitOps review
@@ -239,7 +269,7 @@ source annotation `867272e581aa5d6357a7abadf6220ede922918ae`, release annotation
 This restores application state to the backup timestamp; check any credentials
 that rotated after that timestamp and reauthenticate if necessary.
 
-After production acceptance, remove the two dated init containers in a follow-up
-reviewed change, retaining the verified backup until a newer recovery generation
-has been validated. The existing data PVC, authentication Secret and network
+After production acceptance, remove the canary Job, its temporary network rules,
+and the two dated init containers through a follow-up CI-reviewed change. Retain
+the verified backup until a newer recovery generation has been validated. The existing data PVC, authentication Secret and network
 policy remain in place.

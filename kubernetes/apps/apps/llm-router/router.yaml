@@ -280,6 +280,12 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # Temporary one-shot acceptance Job; removed together after CI records it.
+    - from:
+        - podSelector:
+            matchLabels: {app: llm-router-acceptance}
+      ports:
+        - {protocol: TCP, port: 8787}
     # Only the Cloudflare tunnel in the "edge" namespace may reach the
     # router, and only on 8787 (the Service front door is 80).
     - from:
