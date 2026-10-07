@@ -37,6 +37,9 @@ claude p90 enqueue-to-posted 6.8 min, codex 0.8 min; merges wait for both.
 | **No immutable PR diff over the API** (compare returns no files; web `.diff` needs a browser session) | Spike 3 |
 | **A review POST with an invalid inline position returns 500 and leaves an empty PENDING review that the next POST by the same account absorbs** | Spike 3 (primes-lab#18, closed) |
 | A reviewer bot's PAT (`reviewer-claude`, `write:repository`) fetches `refs/pull/<n>/head` + base as a partial clone; `merge-base` + `diff` work with lazy blob fetches | Spike 4 (on `ailab`, read-only) |
+| Spike 5 re-ran the whole Gitea suite on a fresh repository (`git.chifor.me/cchifor/reviewer`, `workstation-bot`, a non-admin bot account with push): every result above reproduced (ownership 15/15, late landing 5/5, listing 300/300, pending-review absorption, no compare files) | Spike 5 |
+| Combined status with **zero statuses is `pending`**; after one `success` it is `success` (so "green" = `success`, which implies non-empty) | Spike 5 |
+| Merge: `405 Please try again later` while Gitea computes mergeability of a fresh PR (even for a stale head); then a stale `head_commit_id` → `409 head out of date`, the head → merged (~6 s); merging again → `405 The PR is already merged`. A `WIP:` title → `405 Work in progress PRs cannot be merged` | Spike 5 |
 
 **Facts measured on GitHub** (`cchifor/reviewer`, user token via `gh`; `scripts/spikes/reviewbot-coord-github.py`):
 
@@ -54,11 +57,13 @@ claude p90 enqueue-to-posted 6.8 min, codex 0.8 min; merges wait for both.
 | One pending review per user per PR; while it exists **every new review POST is refused** (`422 User can only have one pending review per pull request`) — GitHub blocks, where Gitea absorbs | Spike 4 |
 | Approving one's own PR → `422` | Spike 4 |
 | `PUT /merge` with a stale `sha` → `409 Head branch was modified`; with the head `sha` → merged | Spike 4 |
+| Spike 5 re-ran the GitHub suite creating the listing refs through the paced API (120 refs, ~1 per second): every result reproduced and **no write outage occurred** | Spike 5 |
 | **Incident during the spike:** after one `git push` of 300 tags, the repository answered issue/PR writes (REST and GraphQL) and `git push` ref updates with `500` for about 20 minutes; API ref create/delete and all reads kept working (GitHub request ids `0787:358C89:2514799:24E4804:6AC6605D`, `D9A0:238AF4:23E036F:23B0E4B:6AC6605F`). Consequence: the coordination repository is written only through the paced API, never by bulk pushes, and a forge write error fails closed | Spike 4 |
 
 Not measured: GitHub App installation tokens and whether an App APPROVE counts toward required
-reviews (no App available; a user cannot approve its own PR); Gitea ownership races with a reviewer
-bot's token (the bots have no access to `primes-lab`). These remain Phase 0 items.
+reviews (out of scope: the owner confirmed Apps are not required — machine-user or user tokens suffice);
+the Gitea suite ran as `workstation-bot` (a non-admin bot account with push), not as `reviewer-claude`,
+which has no access to the test repositories.
 
 Review trail: `…-review-r1-fable.md`, `…-review-r1-codex.md`, `…-review-r2.md`, `…-review-r3.md`,
 `…-review-r4.md`, `…-review-a1.md`, `…-review-a2.md`, `…-review-a3.md`, `…-review-a4.md`
@@ -89,7 +94,7 @@ repository; no state crosses forges.
 | Post review | `{commit_id, event: APPROVED\|COMMENT, body, comments[{path, new_position\|old_position}]}` | `{commit_id, event: APPROVE\|COMMENT, body, comments[{path, line, side: RIGHT\|LEFT}]}` |
 | Definitive POST failure | 4xx (an invalid position answers **500** and leaves a pending review: not definitive) | 4xx incl. 422 (measured: nothing is created) |
 | CI green | combined status `success`, non-empty | ≥ 1 check run or status; check runs paginated, all `completed` with `success`/`neutral`/`skipped`; statuses `success`, or none only if check runs exist; required names from `GET /rules/branches/{b}` present and green |
-| Merge | `POST /merge {Do: merge, head_commit_id}` | `PUT /merge {sha, merge_method}`; merge-queue repositories: review and approve only |
+| Merge | `POST /merge {Do: merge, head_commit_id}`; `405 Please try again later` = retry (mergeability still computing); `409` = head moved; `405 already merged` = benign | `PUT /merge {sha, merge_method}`; `409` = head moved; merge-queue repositories: review and approve only |
 | Webhook | `X-Gitea-Signature` (hex HMAC-SHA256) | `X-Hub-Signature-256: sha256=<hex>`; actions `opened, reopened, synchronize, ready_for_review, edited, labeled, review_requested, converted_to_draft, closed` |
 | Create-if-absent tag (claims, rights) | `POST /tags {tag_name, target, message}`; status ignored | `POST /git/tags` with a payload **frozen per claim** (fixed `tagger.date`, same SHA on every retry), then `POST /git/refs`; 422 "Reference already exists" is the normal race outcome |
 | Ownership readback | `GET /git/refs/tags/<name>` → `GET /git/tags/{sha}` | `GET /git/ref/tags/<name>` → `GET /git/tags/{sha}` |
@@ -106,7 +111,8 @@ diff is bounded by `max_raw_bytes` before it is parsed.
 
 GitHub specifics:
 
-- **Identity:** one App per kind; permissions pull requests write, contents read on reviewed
+- **Identity:** a machine-user (or user) token per kind is sufficient (owner decision: GitHub Apps are not
+  required). Optional alternative: one App per kind; permissions pull requests write, contents read on reviewed
   repositories and write wherever the bot merges and on the coordination repository, checks and
   statuses read, metadata read. Whether an App APPROVE counts toward required approvals is checked
   in Phase 0b; where it does not, humans approve and the bot does not merge.

@@ -134,13 +134,15 @@ try:
     s3, b3, _ = call("POST", f"/repos/{REPO}/git/refs", {"ref": f"refs/tags/{RUN}.r0.pubfin1", "sha": main_sha})
     OUT["D_lightweight_ref"] = f"create {s}; exact read of a missing ref {s2}; duplicate create {s3} {b3.get('message')}"
 
-    # --- E. matching-refs with 300 refs (created by one git push)
-    for i in range(300):
-        git("tag", f"{RUN}.E.p1.h{i:03d}", main_sha, cwd=c)
-    git("push", "-q", "origin", *[f"refs/tags/{RUN}.E.p1.h{i:03d}" for i in range(300)], cwd=c)
+    # --- E. matching-refs with 120 refs, created through the paced API (a 300-tag git push put the
+    # repository into a 20-minute write outage on the previous run)
+    for i in range(120):
+        call("POST", f"/repos/{REPO}/git/refs", {"ref": f"refs/tags/{RUN}.E.p1.h{i:03d}", "sha": main_sha})
+        CREATED_REFS.add(f"tags/{RUN}.E.p1.h{i:03d}")
+        time.sleep(0.9)
     s, lst, h = call("GET", f"/repos/{REPO}/git/matching-refs/tags/{RUN}.E.")
     s2, lst2, _ = call("GET", f"/repos/{REPO}/git/matching-refs/tags/{RUN}.E.p1.h00")
-    OUT["E_matching_refs"] = (f"300 refs -> {len(lst) if isinstance(lst, list) else lst} returned (status {s}, "
+    OUT["E_matching_refs"] = (f"120 refs -> {len(lst) if isinstance(lst, list) else lst} returned (status {s}, "
                               f"Link header: {'Link' in h or 'link' in h}); narrower prefix -> {len(lst2) if isinstance(lst2, list) else lst2}")
 
     # --- F. reviews: valid line/side, invalid line, pending reviews
@@ -213,9 +215,8 @@ finally:
     # cleanup: race/lightweight refs via API; the 300 E tags via one git push; the branch
     for ref in sorted(CREATED_REFS):
         call("DELETE", f"/repos/{REPO}/git/refs/{ref}")
-    if os.path.isdir(f"{work}/clone"):
-        git("push", "-q", "origin", *[f":refs/tags/{RUN}.E.p1.h{i:03d}" for i in range(300)], cwd=f"{work}/clone")
-        git("push", "-q", "origin", f":refs/heads/spike-{RUN}", cwd=f"{work}/clone")
+        time.sleep(0.9)
+    call("DELETE", f"/repos/{REPO}/git/refs/heads/spike-{RUN}")
     s, left, _ = call("GET", f"/repos/{REPO}/git/matching-refs/tags/{RUN}")
     OUT["cleanup_tags_left"] = len(left) if isinstance(left, list) else left
     shutil.rmtree(work, ignore_errors=True)

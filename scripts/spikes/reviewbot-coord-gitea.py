@@ -1,6 +1,6 @@
 """Phase 0 spike (Gitea) on cchifor/primes-lab. Flat names under a unique prefix; everything created
 is deleted at the end (tags via git push, branch/PR via API). Never prints credentials."""
-import base64, collections, concurrent.futures as cf, json, random, subprocess, sys, time, uuid
+import base64, collections, concurrent.futures as cf, json, random, subprocess, sys, tempfile, time, uuid
 import urllib.error, urllib.parse, urllib.request
 from email.utils import parsedate_to_datetime
 
@@ -8,7 +8,10 @@ cred = subprocess.run(["git", "credential", "fill"], input="protocol=https\nhost
                       capture_output=True, text=True).stdout
 kv = dict(l.split("=", 1) for l in cred.splitlines() if "=" in l)
 AUTH = "Basic " + base64.b64encode(f"{kv['username']}:{kv['password']}".encode()).decode()
-WEB, BASE, REPO = "https://git.chifor.me", "https://git.chifor.me/api/v1", "cchifor/primes-lab"
+WEB, BASE = "https://git.chifor.me", "https://git.chifor.me/api/v1"
+REPO = sys.argv[1] if len(sys.argv) > 1 else "cchifor/primes-lab"
+GITDIR = tempfile.mkdtemp(prefix="rbspike-gitea-")
+subprocess.run(["git", "init", "-q", GITDIR], capture_output=True)
 RUN = f"rbs3{int(time.time())}"
 ALL_TAGS = set()
 OUT = {}
@@ -52,6 +55,11 @@ def read_owner(name):
     return t if s2 == 200 else None
 
 
+if api("GET", f"/repos/{REPO}/branches/main")[0] != 200:      # seed an empty repository
+    readme = b"# reviewer\n\nTest repository for reviewbot coordination spikes.\n"
+    api("POST", f"/repos/{REPO}/contents/README.md", {"content": base64.b64encode(readme).decode(),
+                                                      "message": "seed for reviewbot spikes", "branch": "main"})
+    OUT["seeded_now"] = True
 sha = api("GET", f"/repos/{REPO}/branches/main")[1]["commit"]["id"]
 pr_number = branch = None
 try:
@@ -131,7 +139,7 @@ try:
         new = f"f-new{rnd}"
 
         def deleter():
-            return subprocess.run(["git", "-C", "C:/Users/chifo/work/home/ailab", "push", "-q",
+            return subprocess.run(["git", "-C", GITDIR, "push", "-q",
                                    f"{WEB}/{REPO}.git", f":refs/tags/{name}"],
                                   capture_output=True, text=True).returncode
 
@@ -146,7 +154,7 @@ try:
         end = json.loads(t["message"].strip())["nonce"] if t else None
         results.append(f"delete rc={d_rc} create={c_st} -> end={end}")
         if t:
-            subprocess.run(["git", "-C", "C:/Users/chifo/work/home/ailab", "push", "-q", f"{WEB}/{REPO}.git",
+            subprocess.run(["git", "-C", GITDIR, "push", "-q", f"{WEB}/{REPO}.git",
                             f":refs/tags/{name}"], capture_output=True)
     OUT["F_delete_create_race"] = results
 
@@ -184,17 +192,41 @@ try:
     states2 = [(r.get("state"), r.get("comments_count"), r.get("commit_id", "")[:9]) for r in revs2] if isinstance(revs2, list) else revs2
     OUT["H_pending_review"] = {"invalid_post": invalid, "reviews_after_invalid": states,
                                "valid_post": valid, "reviews_after_valid": states2}
+    # I. commit statuses: zero statuses, then success
+    s, st0, _ = api("GET", f"/repos/{REPO}/commits/{head}/status")
+    api("POST", f"/repos/{REPO}/statuses/{head}", {"state": "success", "context": "spike/ci", "description": "spike"})
+    s, st1, _ = api("GET", f"/repos/{REPO}/commits/{head}/status")
+    OUT["I_combined_status"] = (f"no statuses -> state={st0.get('state')!r} total_count={st0.get('total_count')}; "
+                                f"after one success -> state={st1.get('state')!r} total_count={st1.get('total_count')}")
+    # K. merge with a wrong head_commit_id, then the right one
+    s, b, _ = api("POST", f"/repos/{REPO}/pulls/{pr_number}/merge", {"Do": "merge", "head_commit_id": sha})
+    wrong = f"{s} {(b.get('message') if isinstance(b, dict) else '')}"[:160]
+    s, b, _ = api("POST", f"/repos/{REPO}/pulls/{pr_number}/merge", {"Do": "merge", "head_commit_id": head})
+    right = f"{s} {(b.get('message') if isinstance(b, dict) else '')}"[:160]
+    s, prx, _ = api("GET", f"/repos/{REPO}/pulls/{pr_number}")
+    OUT["K_merge"] = {"wrong_head_commit_id": wrong, "right_head_commit_id": right,
+                      "after": f"merged={prx.get('merged')} base={prx.get('base', {}).get('ref')}"}
+    # J. local-git immutable diff with the same account
+    bare = tempfile.mkdtemp(prefix="rbspike-gitea-bare-")
+    subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+    r = subprocess.run(["git", "-C", bare, "fetch", "-q", "--filter=blob:none", f"{WEB}/{REPO}.git",
+                        f"+refs/pull/{pr_number}/head:refs/pr/{pr_number}", "+refs/heads/main:refs/base/main"],
+                       capture_output=True, text=True)
+    got = subprocess.run(["git", "-C", bare, "rev-parse", f"refs/pr/{pr_number}"], capture_output=True, text=True).stdout.strip()
+    mb = subprocess.run(["git", "-C", bare, "merge-base", "refs/base/main", got], capture_output=True, text=True).stdout.strip()
+    stat = subprocess.run(["git", "-C", bare, "diff", "--stat", mb, got], capture_output=True, text=True).stdout.strip().splitlines()
+    OUT["J_local_git_diff"] = f"fetch rc={r.returncode}; head matches: {got == head}; {stat[-1] if stat else r.stderr[-120:]}"
 finally:
     # cleanup: PR, branch, tags
-    if pr_number:
+    if pr_number and not api("GET", f"/repos/{REPO}/pulls/{pr_number}")[1].get("merged"):
         api("PATCH", f"/repos/{REPO}/pulls/{pr_number}", {"state": "closed"})
     if branch:
         OUT["cleanup_branch"] = api("DELETE", f"/repos/{REPO}/branches/{urllib.parse.quote(branch, safe='')}")[0]
     names = sorted(ALL_TAGS)
     for i in range(0, len(names), 100):
-        subprocess.run(["git", "-C", "C:/Users/chifo/work/home/ailab", "push", "-q", f"{WEB}/{REPO}.git"]
+        subprocess.run(["git", "-C", GITDIR, "push", "-q", f"{WEB}/{REPO}.git"]
                        + [f":refs/tags/{n}" for n in names[i:i + 100]], capture_output=True)
     s, b, _ = api("GET", f"/repos/{REPO}/git/refs/tags/{RUN}")
     OUT["cleanup_tags_left"] = len(b) if (s == 200 and isinstance(b, list)) else 0
-    OUT["cleanup_pr"] = f"PR #{pr_number} closed" if pr_number else "no PR"
+    OUT["cleanup_pr"] = f"PR #{pr_number} merged or closed" if pr_number else "no PR"
     print(json.dumps(OUT, indent=1, ensure_ascii=False))
