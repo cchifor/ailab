@@ -1,5 +1,17 @@
 # etcd leader churn on shared consumer NVMe: analysis and remediation
 
+## Codex Review (round 2)
+
+- **Timeout pushback accepted; concern dropped.** The observed stall distribution supports trying
+  250/5000 as a reversible bridge, with API outage duration checked alongside election counts.
+- **Thick-LVM pushback accepted; concern dropped.** Native PVE thick LVM is appropriate for one
+  80 GB disk without snapshot or clone requirements; thin provisioning adds no needed capability.
+- **New material issues:** leadership transfer cannot select the intended successor with the stated
+  Talos command; between-node gates must include CNPG recovery; two NFS controller replicas need
+  enforced host separation. Corrections are annotated below.
+- **Ordering endorsed:** A+D now, B this week as a bridge, C when drives arrive is the best solution
+  supported by the evidence, subject to the operational corrections below.
+
 ## Review decisions (round 1: Codex + Fable)
 
 Both reviewers independently ranked the dedicated control-plane disk first.
@@ -28,8 +40,8 @@ Both reviewers independently ranked the dedicated control-plane disk first.
   - Keep cp1 from holding leadership until the disk move.
   - Concrete PLP part numbers.
   - NVMe controller temperatures reach 92-101 °C.
-- **Disputed (round 2):** thick LVM vs LVM-thin for the new storage; whether step 1 is net-harmful.
-  See the `opus-pushback` markers.
+- **Resolved in round 2:** Codex accepts thick LVM for the new storage and the election-timeout
+  bridge. Both original concerns and their matching pushback markers have been removed.
 
 ## Context
 
@@ -155,8 +167,6 @@ Ordered by value; A and D run in parallel.
   - stalls of 5-10 s cause an election with rising probability;
   - expect roughly 1-3 elections/day until C, not 0.
 - Cost: a dead leader is detected in 5-10 s instead of 2.5-5 s.
-<!-- codex: Those ranges approximate campaign initiation, not guaranteed replacement or API recovery; voting, persistence, and backlog add time. Step 1 is ineffective at fixing slow commits and can be harmful when it delays replacing a stalled leader that two healthy followers could otherwise replace sooner. -->
-<!-- opus-pushback: The stall distribution makes this net-positive. Most leader stalls are 1-4 s (cp2: 808 over 1 s, 211 over 2 s, 34 over 4 s in 7 d), and each one that becomes an election costs MORE than the stall: 5-6 s transactions around term 779 today, truncated entries, and a round of controller restarts. Under the new setting a stalled leader still gets replaced once the stall exceeds 5-10 s, and the slow-commit problem itself is addressed by A/C, not by this step. -->
 - Procedure (night window, one CP at a time):
   1. Take an off-host etcd snapshot (`talosctl etcd snapshot`). Save the machine configs. Confirm
      CNPG replicas are streaming.
@@ -165,6 +175,7 @@ Ordered by value; A and D run in parallel.
   3. Reboot order: **cp1 first**, so cp2+cp3, the healthiest pair, carry quorum. Then the current
      follower. The current leader goes last, after `talosctl etcd forfeit-leadership` to a caught-up
      member other than cp1.
+     <!-- codex: round-2: This command cannot select the intended successor: Talos v1.11.2 forfeit-leadership takes no destination and its implementation selects the first other member, which can be cp1. See the [CLI source](https://github.com/siderolabs/talos/blob/v1.11.2/cmd/talosctl/cmd/talos/etcd.go) and [transfer implementation](https://github.com/siderolabs/talos/blob/v1.11.2/internal/pkg/etcd/etcd.go). Use the pinned kubernetes/infra/_out/talosctl-1112.exe for all Talos commands here, as node-maintenance.md requires; the system client is v1.6.2. Address the forfeit request only to the current leader, then query all three CP IPs and require agreement that a caught-up cp2/cp3 other than the reboot target is leader BEFORE proceeding. If that condition is not met, stop and establish a verified targeted transfer procedure; the after-roll cp1 check is too late to enforce this maintenance invariant. -->
   4. For the two reboots that leave cp1 in quorum, first stop node1's runner daemons (graceful drain,
      after the in-flight job). Every cp1 stall is a commit stall while only two members are up.
   5. Reboot with `talosctl reboot -n <cp>` (drain per node-maintenance.md).
@@ -172,6 +183,7 @@ Ordered by value; A and D run in parallel.
      - all 3 members reachable, one agreed leader and term, applied index caught up, no alarms;
      - 10 min of repeated successful API writes;
      - the etcd startup log (process args) shows `election-timeout=5000`.
+     <!-- codex: round-2: Include the full post-maintenance gate from docs/runbooks/node-maintenance.md before every subsequent CP reboot in B and host shutdown in C: nodes Ready and uncordoned, CNPG healthy, and strive-pg back at 3/3 on separate CPs with both replicas streaming. The runbook documents required hostname anti-affinity and slow Trident reattachment, so a database instance can remain Pending after etcd and API writes have recovered. Checking replication only before the roll and waiting ten minutes does not establish recovery; a second drain could leave only one database instance. -->
   7. Abort on a renewed stall or a failed gate, and recover before touching the next member.
 - After the roll: if cp1 is leader, forfeit.
 - Rollback: the same procedure back to 2500.
@@ -181,8 +193,6 @@ Ordered by value; A and D run in parallel.
 - Install one host at a time: drain its guests per node-maintenance.md; physical install + thermal
   pads; confirm boot order and the new device's stable identity.
 - Create a PVE **LVM (thick)** storage on the new drive, one VG per host.
-<!-- codex: Prefer the familiar LVM-thin backend unless ZFS has a separate requirement; adding a new storage stack increases tuning and operational scope, and a single-disk ZFS pool adds no redundancy. Identify the new device by stable identity and budget thin-pool data and metadata headroom before creating storage. -->
-<!-- opus-pushback: Thick LVM is also native PVE (no new stack) and is the simpler choice here. The drive holds exactly one 80 GB CP disk, with no snapshot or clone use, so thin provisioning buys nothing. Thin adds a pool-metadata commit and zeroing on the etcd flush path (node1 tdata showed about 9% amplification), and pool and metadata headroom would become a new failure mode. Fable independently recommended thick. -->
 - Move the disk: `qm disk move <vmid> scsi0 <new-storage> --bwlimit <measured>`, keeping the source
   disk, while that CP is a follower, at night with CI drained on that host. Monitor quorum throughout.
 - Then:
@@ -203,6 +213,7 @@ Ordered by value; A and D run in parallel.
 - csi-driver-nfs (`kubernetes/apps/infrastructure/storage/csi-driver-nfs.yaml`):
   `controller.replicas: 2`, if the chart exposes it. Lease flags would need a postRenderer patch;
   skip those.
+  <!-- codex: round-2: The pinned chart v4.13.2 exposes controller.replicas, but scaling it alone leaves a placement hazard: the controller uses hostNetwork and its liveness-probe binds localhost:29652, with no default pod anti-affinity. Colocated replicas can therefore hit a port collision and fail to become fully Ready. Require placement on different hostnames and verify two fully Ready controller pods. Check the rendered manifest: this chart emits controller.affinity only when it contains nodeSelectorTerms, so a podAntiAffinity-only value is silently ignored; use a combined affinity configuration that renders correctly or a postRenderer placement patch. See the [controller template](https://github.com/kubernetes-csi/csi-driver-nfs/blob/v4.13.2/charts/v4.13.2/csi-driver-nfs/templates/csi-nfs-controller.yaml) and [chart defaults](https://github.com/kubernetes-csi/csi-driver-nfs/blob/v4.13.2/charts/v4.13.2/csi-driver-nfs/values.yaml). -->
 - CNPG operator lease flags (`--leader-lease-duration`/`--leader-renew-deadline`): platform repo,
   optional.
 - snapshot-controller: no change (already 2 replicas).
