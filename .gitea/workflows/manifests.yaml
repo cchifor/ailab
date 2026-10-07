@@ -115,11 +115,16 @@ jobs:
           set -euo pipefail
           bash scripts/tests/test-env-reaper.sh
 
-      # scripts/lxc-fstrim-chunked.sh (the registry LXC's weekly trim on ai-node1, plans/2026-10-07-
-      # etcd-leader-churn-plan.md step E) against stubbed lxc-info/nsenter/df/fstrim/lvs/sleep and a
-      # synthetic /proc/pressure/io: whole-filesystem byte-exact chunk coverage, the stop file, waiting
-      # out host IO pressure, giving up (exit 3) when it never drops, and a stopped container as an
-      # error. Pure bash, no docker.
+      # scripts/lxc-fstrim-chunked.sh (the registry LXC's weekly, host-side-only trim on ai-node1,
+      # plans/2026-10-07-etcd-leader-churn-plan.md step E) against stubbed pct/pvesm/stat/tune2fs/mount/
+      # umount/fstrim/lvs/sleep and a synthetic /proc/pressure/io:
+      #   - coverage: whole-filesystem chunks from ext4 geometry, on the host-side mount;
+      #   - stops: the stop file (also mid pressure-wait), and the single-run lock (exit 7);
+      #   - IO pressure: waiting it out, giving up (exit 3), unreadable pressure (exit 4);
+      #   - failures: a failed trim (exit 5), a failed unmount (exit 6), and invalid settings or an
+      #     unknown/non-block volume;
+      #   - SIGTERM mid-sleep and mid-trim: waits for the in-flight child, then unmounts (exit 143).
+      # Pure bash, no docker.
       - name: lxc-fstrim-chunked under stubs
         shell: bash
         run: |
