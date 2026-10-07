@@ -1,0 +1,1169 @@
+# "Strive — Edge": the public edge and gatekeeper at a glance (E5 of the 2026-10-07 auth-hardening
+# plan, D14). Requests and 5xx by Traefik entrypoint and service, edge-generated 5xx, gatekeeper /auth
+# outcomes by method and status, gatekeeper RED by route, the Gatus `Strive edge` probes, and the Traefik
+# 5xx access-log lines. Companion to strive-edge-rules.yaml (the alerts) and strive-red-dashboard.yaml
+# (per-service RED for the whole platform). Provisioned via the Grafana sidecar (grafana_dashboard label).
+#
+# TRAEFIK SERIES come from the platform E1a scrape (ServiceMonitor `release` label + traefik-metrics
+# Service), live from 2026-10-07 ~08:46Z, so history before that does not exist. Names and labels were
+# verified against live Prometheus that day: traefik_entrypoint_requests_total{entrypoint,code,method,
+# protocol} and traefik_service_requests_total{code,method,protocol,exported_service}. NOTE exported_service:
+# Traefik's own `service` label collides with the scrape target's `service="traefik-metrics"`, so
+# Prometheus keeps the target's and renames Traefik's to exported_service; a query that groups or matches
+# on `service` silently gets the one scrape target. The router-based panel needs E1b (addRoutersLabels:
+# no traefik_router_* series exist yet) and its arithmetic is UNVERIFIED until E4. The Loki and
+# gatekeeper/Gatus panels do not depend on either.
+#
+# The gatekeeper RED series are the OTLP ones (http_route, http_status_code, no namespace/pod); the
+# gatekeeper_auth_* and gatekeeper_tokenreview_* series are scraped (namespace, pod). Latency is the mean
+# (sum/count): the exported histogram buckets are OpenTelemetry's millisecond defaults on a seconds metric,
+# so histogram_quantile returns a constant 4.75 for every route (also true of the p95 panel in
+# strive-red-dashboard.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: strive-edge-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  strive-edge.json: |
+    {
+      "title": "Strive — Edge",
+      "uid": "strive-edge",
+      "tags": [
+        "strive",
+        "edge",
+        "traefik",
+        "gatekeeper"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": {
+        "from": "now-3h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "label": "Prometheus",
+            "current": {},
+            "hide": 0,
+            "refresh": 1
+          },
+          {
+            "name": "DS_LOKI",
+            "type": "datasource",
+            "query": "loki",
+            "label": "Loki",
+            "current": {},
+            "hide": 0,
+            "refresh": 1
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "At a glance",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Traefik scrape",
+          "gridPos": {
+            "x": 0,
+            "y": 1,
+            "w": 4,
+            "h": 4
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "noValue": "NOT SCRAPED",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN"
+                    },
+                    "1": {
+                      "text": "UP"
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto",
+            "justifyMode": "center"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "min(up{namespace=\"platform-edge\",service=\"traefik-metrics\"})"
+            }
+          ],
+          "description": "up for service traefik-metrics in platform-edge (the platform E1a scrape, live since 2026-10-07). NOT SCRAPED means the target is gone; TraefikScrapeMissing fires after 15 minutes of it."
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Edge requests/s (web)",
+          "gridPos": {
+            "x": 4,
+            "y": 1,
+            "w": 5,
+            "h": 4
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "noValue": "no Traefik series",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto",
+            "justifyMode": "center"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Edge 5xx % (web)",
+          "gridPos": {
+            "x": 9,
+            "y": 1,
+            "w": 5,
+            "h": 4
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "noValue": "0 / no data",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 5
+                  }
+                ]
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto",
+            "justifyMode": "center"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "100 * sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[$__rate_interval])) / sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))"
+            }
+          ],
+          "description": "StriveEdge5xxRatioHigh fires above 5% for 10m while traffic exceeds 0.01 req/s."
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Edge 5xx in last 10m (web)",
+          "gridPos": {
+            "x": 14,
+            "y": 1,
+            "w": 5,
+            "h": 4
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "noValue": "0 / no data",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 10
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto",
+            "justifyMode": "center"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(increase(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[10m]))"
+            }
+          ],
+          "description": "StriveEdge5xxBurst fires at 10 or more in 10 minutes, whatever the ratio."
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Edge/gatekeeper alerts firing",
+          "gridPos": {
+            "x": 19,
+            "y": 1,
+            "w": 5,
+            "h": 4
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "noValue": "no data",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto",
+            "justifyMode": "center"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"TraefikScrapeMissing|StriveEdge.*|GatekeeperForwardAuth5xx|GatekeeperHttp5xx|GatekeeperTokenUnavailable|GatekeeperTokenReviewLimited\"}) or vector(0)"
+            }
+          ],
+          "description": "Firing alerts of strive-edge-rules.yaml (the rules behind this dashboard)."
+        },
+        {
+          "id": 7,
+          "type": "row",
+          "title": "Edge (Traefik) - requests and 5xx",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 5,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Requests/s by entrypoint",
+          "gridPos": {
+            "x": 0,
+            "y": 6,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (entrypoint) (rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\"}[$__rate_interval]))",
+              "legendFormat": "{{entrypoint}}"
+            }
+          ],
+          "description": "entrypoint web is the one cloudflared talks to; metrics is Traefik's own scrape port."
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "5xx/s by entrypoint and code",
+          "gridPos": {
+            "x": 12,
+            "y": 6,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (entrypoint, code) (rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval]))",
+              "legendFormat": "{{entrypoint}} {{code}}"
+            }
+          ],
+          "description": "No line means zero 5xx (or no series yet)."
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Requests/s by service (top 10)",
+          "gridPos": {
+            "x": 0,
+            "y": 14,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, sum by (exported_service) (rate(traefik_service_requests_total{namespace=\"platform-edge\"}[$__rate_interval])))",
+              "legendFormat": "{{exported_service}}"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "5xx/s by service and code",
+          "gridPos": {
+            "x": 12,
+            "y": 14,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (exported_service, code) (rate(traefik_service_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval]))",
+              "legendFormat": "{{exported_service}} {{code}}"
+            }
+          ],
+          "description": "5xx that reached a service (origin answered, or the proxy failed talking to it). The service name is the exported_service label: Traefik's own `service` label collides with the scrape target's `service=traefik-metrics` and Prometheus renames it. Compare with the edge-generated panel below."
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Edge-generated 5xx per service (router minus service)",
+          "gridPos": {
+            "x": 0,
+            "y": 22,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 60,
+                "stacking": {
+                  "mode": "normal"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (exported_service) (increase(traefik_router_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval])) - (sum by (exported_service) (increase(traefik_service_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval])) or sum by (exported_service) (increase(traefik_router_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval])) * 0)",
+              "legendFormat": "{{exported_service}}"
+            }
+          ],
+          "description": "5xx Traefik answered itself before a service was reached (a failed middleware such as ForwardAuth, no service). Needs router metrics (platform E1b: addRoutersLabels); no traefik_router_* series exist yet, so it is empty. The router-minus-service arithmetic is UNVERIFIED for Traefik 3.4.3 until E4 tests it, so treat this as indicative; the Loki panel below (OriginStatus 0) is the direct evidence."
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "5xx access-log lines by status (OriginStatus 0 = generated by Traefik)",
+          "gridPos": {
+            "x": 12,
+            "y": 22,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 60,
+                "stacking": {
+                  "mode": "normal"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "${DS_LOKI}"
+              },
+              "expr": "sum by (DownstreamStatus, OriginStatus) (count_over_time({namespace=\"platform-edge\",container=\"traefik\"} | json | DownstreamStatus >= 500 [$__auto]))",
+              "legendFormat": "down {{DownstreamStatus}} / origin {{OriginStatus}}",
+              "queryType": "range"
+            }
+          ],
+          "description": "From the access log, available now (no metrics needed). OriginStatus 0 with a 5xx downstream status means Traefik produced the response itself."
+        },
+        {
+          "id": 14,
+          "type": "logs",
+          "title": "Traefik 5xx access-log lines",
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 24,
+            "h": 10
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "enableLogDetails": true,
+            "dedupStrategy": "none",
+            "sortOrder": "Descending"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "${DS_LOKI}"
+              },
+              "queryType": "range",
+              "expr": "{namespace=\"platform-edge\",container=\"traefik\"} | json | DownstreamStatus >= 500"
+            }
+          ],
+          "description": "Access log is JSON with every request header dropped (V54). Fields: RouterName, ServiceName, DownstreamStatus, OriginStatus, Duration, RequestPath. Client addresses are present in the raw log lines; do not paste them into tickets."
+        },
+        {
+          "id": 15,
+          "type": "row",
+          "title": "gatekeeper - /auth outcomes and RED by route",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 40,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "/auth outcomes by method and status (req/s)",
+          "gridPos": {
+            "x": 0,
+            "y": 41,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (method, status) (rate(gatekeeper_auth_requests_total{job=\"gatekeeper\"}[$__rate_interval]))",
+              "legendFormat": "{{method}} / {{status}}"
+            }
+          ],
+          "description": "gatekeeper_auth_requests_total (scraped from the pods). method: jwt, none, session_post, anonymous_shell, test_bypass; status: success, redirected, session_extended and failure outcomes."
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "TokenReview outcomes and limiter (req/s)",
+          "gridPos": {
+            "x": 12,
+            "y": 41,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (outcome) (rate(gatekeeper_tokenreview_total{job=\"gatekeeper\"}[$__rate_interval]))",
+              "legendFormat": "{{outcome}}"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(gatekeeper_tokenreview_limited_total{job=\"gatekeeper\"}[$__rate_interval]))",
+              "legendFormat": "rate-limited"
+            }
+          ],
+          "description": "outcome: authenticated, refused, mismatch, unavailable. 'unavailable' and 'rate-limited' drive GatekeeperTokenReviewLimited."
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "Requests/s by route",
+          "gridPos": {
+            "x": 0,
+            "y": 49,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{job=\"gatekeeper\"}[$__rate_interval]))",
+              "legendFormat": "{{http_route}}"
+            }
+          ],
+          "description": "OTLP RED metrics pushed through alloy-otlp (labels http_route, http_status_code; no namespace or pod)."
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "5xx/s by route and status",
+          "gridPos": {
+            "x": 12,
+            "y": 49,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (http_route, http_status_code) (rate(http_server_request_duration_seconds_count{job=\"gatekeeper\",http_status_code=~\"5..\"}[$__rate_interval]))",
+              "legendFormat": "{{http_route}} {{http_status_code}}"
+            }
+          ],
+          "description": "No line means zero 5xx. /auth feeds GatekeeperForwardAuth5xx; /auth/token 503 feeds GatekeeperTokenUnavailable; everything else GatekeeperHttp5xx."
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Error rate by route (5xx %)",
+          "gridPos": {
+            "x": 0,
+            "y": 57,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "100 * sum by (http_route) (rate(http_server_request_duration_seconds_count{job=\"gatekeeper\",http_status_code=~\"5..\"}[$__rate_interval])) / sum by (http_route) (rate(http_server_request_duration_seconds_count{job=\"gatekeeper\"}[$__rate_interval]))",
+              "legendFormat": "{{http_route}}"
+            }
+          ],
+          "description": "Routes with no 5xx series do not appear."
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Mean duration by route",
+          "gridPos": {
+            "x": 12,
+            "y": 57,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_sum{job=\"gatekeeper\"}[$__rate_interval])) / sum by (http_route) (rate(http_server_request_duration_seconds_count{job=\"gatekeeper\"}[$__rate_interval]))",
+              "legendFormat": "{{http_route}}"
+            }
+          ],
+          "description": "Mean, not p95: the exported histogram buckets are the OpenTelemetry millisecond defaults (0..10000) applied to a seconds metric, so histogram_quantile saturates at a constant (4.75) for every route."
+        },
+        {
+          "id": 22,
+          "type": "row",
+          "title": "Gatus - Strive edge probes (group 'Strive edge', from inside the cluster, through Cloudflare)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 65,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 23,
+          "type": "stat",
+          "title": "Probe status",
+          "gridPos": {
+            "x": 0,
+            "y": 66,
+            "w": 12,
+            "h": 5
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "noValue": "not reporting",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN"
+                    },
+                    "1": {
+                      "text": "UP"
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "value_and_name",
+            "justifyMode": "center"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "gatus_results_endpoint_success{group=\"Strive edge\"}",
+              "legendFormat": "{{name}}"
+            }
+          ],
+          "description": "Last result per endpoint: Strive JWKS, Strive Keycloak OIDC discovery, Strive apps host. They prove edge-to-origin reachability, not login health. Sub-5m outages are visibility-only (GatusEndpointDown holds 5m)."
+        },
+        {
+          "id": 24,
+          "type": "timeseries",
+          "title": "Probe duration",
+          "gridPos": {
+            "x": 12,
+            "y": 66,
+            "w": 12,
+            "h": 5
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "gatus_results_duration_seconds{group=\"Strive edge\"}",
+              "legendFormat": "{{name}}"
+            }
+          ]
+        }
+      ]
+    }

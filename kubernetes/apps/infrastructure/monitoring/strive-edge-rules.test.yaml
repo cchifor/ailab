@@ -1,0 +1,823 @@
+# `promtool test rules` fixtures for strive-edge-rules.yaml. Run by scripts/rules-lint.sh on every
+# PR, after `promtool check rules`.
+#
+# WHY: `check rules` proves an expression PARSES, not that it can fire or that it stays quiet. Every
+# rule below is asserted BOTH ways - it fires on the shape of the incident it exists for, and it is
+# silent on the three shapes that must never page: NO TRAFFIC, ONE ISOLATED 5xx, and a MISSING SERIES
+# (a 5xx series does not exist until the first such response, and a scrape can be absent). The `severity`
+# label is asserted on every firing alert, because Alertmanager and the ntfy template read it.
+#
+# Series are written to match the REAL label sets (see the header of strive-edge-rules.yaml): the
+# gatekeeper OTLP series carry http_route / http_status_code / instance="<pod>-1" and NO namespace
+# or pod; the scraped gatekeeper_tokenreview_* series carry namespace / pod / outcome; the Traefik
+# series carry entrypoint / code plus the scrape target's namespace / pod (verified live 2026-10-07).
+#
+# Counters start at a NON-ZERO value wherever the series is meant to pre-exist: a brand-new counter
+# series loses its first event to increase() (see the rules header), and a fixture that begins at 0
+# would silently test a different, weaker expression.
+#
+# `rule_files` is the extracted spec name, because rules-lint.sh hands promtool the `spec:` body of
+# each PrometheusRule (the CRD wrapper is not a promtool rules file) under the manifest's basename.
+rule_files:
+  - strive-edge-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # =================================================================== TraefikScrapeMissing
+  - interval: 1m
+    name: no Traefik target at all pages after 15m (the state before E1a), not before
+    input_series:
+      # Something else is being scraped, so this is "Traefik absent", not "Prometheus empty".
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TraefikScrapeMissing
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: TraefikScrapeMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: platform-edge
+              service: traefik-metrics
+            exp_annotations:
+              summary: "Traefik metrics are not being scraped (platform-edge/traefik-metrics)"
+              description: >-
+                There is no `up` series for service traefik-metrics in namespace platform-edge, or a
+                Traefik target reports 0, and it has been so for 15m. Until it is back the StriveEdge*
+                rules cannot fire. Check the ServiceMonitor `traefik` carries
+                `release: kube-prometheus-stack`, that Service `traefik-metrics` exists with port
+                `metrics`, and the Prometheus targets page (platform E1a).
+
+  - interval: 1m
+    name: one unscrapeable Traefik pod pages, the healthy two do not
+    input_series:
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-a"}'
+        values: "0x40"
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-b"}'
+        values: "1x40"
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-c"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TraefikScrapeMissing
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: TraefikScrapeMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: platform-edge
+              service: traefik-metrics
+              pod: traefik-a
+            exp_annotations:
+              summary: "Traefik metrics are not being scraped (platform-edge/traefik-metrics)"
+              description: >-
+                There is no `up` series for service traefik-metrics in namespace platform-edge, or a
+                Traefik target reports 0, and it has been so for 15m. Until it is back the StriveEdge*
+                rules cannot fire. Check the ServiceMonitor `traefik` carries
+                `release: kube-prometheus-stack`, that Service `traefik-metrics` exists with port
+                `metrics`, and the Prometheus targets page (platform E1a).
+
+  - interval: 1m
+    name: healthy targets, a pod rollout and a 10m scrape gap do not page
+    input_series:
+      # A rollout: traefik-a leaves, traefik-d arrives, traefik-b is up throughout. Series are keyed
+      # by pod, so the replacement is a new series and absent() never sees an empty set.
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-a"}'
+        values: "1x15 _x25"
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-d"}'
+        values: "_x15 1x25"
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-b"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TraefikScrapeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TraefikScrapeMissing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: TraefikScrapeMissing
+        exp_alerts: []
+
+  - interval: 1m
+    name: a scrape gap shorter than the 15m hold (a Prometheus restart) does not page
+    input_series:
+      # All targets vanish for 10 samples, then return. absent() is true for part of the gap, the
+      # `for: 15m` hold is what keeps this from paging.
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-a"}'
+        values: "1x10 _x10 1x20"
+      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-b"}'
+        values: "1x10 _x10 1x20"
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: TraefikScrapeMissing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: TraefikScrapeMissing
+        exp_alerts: []
+
+  # ================================================================ StriveEdge5xxRatioHigh
+  - interval: 30s
+    name: 15% of web-entrypoint requests answering 5xx for 10m pages critical
+    input_series:
+      # Three Traefik pods, 2 req/s in total, 15% of it 5xx (+3 of every +20 per pod per 30s).
+      # The series pre-exist (non-zero start), so rate() sees every event.
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "1000+17x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+        values: "10+3x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-b"}'
+        values: "1000+17x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-b"}'
+        values: "10+3x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-c"}'
+        values: "1000+17x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="503",pod="traefik-c"}'
+        values: "10+3x120"
+    alert_rule_test:
+      # The 10m `for:` has not elapsed yet.
+      - eval_time: 8m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "More than 5% of public edge requests are answering 5xx"
+              description: >-
+                Over 5% of requests on Traefik entrypoint web (all pods) answered 5xx for 10m, with
+                traffic above 0.01 req/s. The strive-edge dashboard splits it by service; the Loki panel
+                there shows whether Traefik generated the 5xx itself (OriginStatus 0: a middleware such
+                as ForwardAuth failed, or no service was available) or relayed an origin status.
+
+  - interval: 30s
+    name: the ratio alert resolves once the 5xx stop
+    input_series:
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "1000+17x60 2020+20x100"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+        values: "10+3x60 190+0x100"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "More than 5% of public edge requests are answering 5xx"
+              description: >-
+                Over 5% of requests on Traefik entrypoint web (all pods) answered 5xx for 10m, with
+                traffic above 0.01 req/s. The strive-edge dashboard splits it by service; the Loki panel
+                there shows whether Traefik generated the 5xx itself (OriginStatus 0: a middleware such
+                as ForwardAuth failed, or no service was available) or relayed an origin status.
+      # 30m of constant 5xx counters later the 5m rate window holds no 5xx.
+      - eval_time: 45m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+
+  - interval: 30s
+    name: a ratio below 5% (1%) stays silent on the ratio rule and the burst rule
+    input_series:
+      # 1 req/s, 1% 5xx: ratio 0.01. 5xx per 10m ~ 6, below the burst's 10 as well.
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "1000+30x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+        values: "10+0x2 11+0x2 12+0x2 13+0x2 14+0x2 15+0x2 16+0x2 17+0x2 18+0x2 19+0x2 20+0x2 21+0x2 22+0x2 23+0x2 24+0x2 25+0x2 26+0x2 27+0x2 28+0x2 29+0x2 30+0x2 31+0x2 32+0x2 33+0x2 34+0x2 35+0x2 36+0x2 37+0x2 38+0x2 39+0x2 40+0x2 41+0x2 42+0x2 43+0x2 44+0x2 45+0x2 46+0x2 47+0x2 48+0x2 49+0x2"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  - interval: 30s
+    name: ONE isolated 5xx at moderate traffic pages nothing
+    input_series:
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "1000+10x120"
+      # A single 502 at about 10 minutes, then flat. A 1-in-300 blip: ratio ~0.3% at the peak.
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+        values: "5x20 6x100"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  - interval: 2m
+    name: a COMPLETE outage at very low traffic is below the ratio guard (E2 owns that case)
+    input_series:
+      # 100% 5xx, but one response per two minutes (0.0083 req/s, below the 0.01 req/s guard) and
+      # 5 per 10m (below the burst's 10). Only the traffic guard keeps the ratio rule quiet here.
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+        values: "100+1x40"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  - interval: 30s
+    name: no traffic at all (flat counters, 0/0) pages nothing
+    input_series:
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "1000+0x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+        values: "5+0x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  - interval: 30s
+    name: a missing series (no Traefik data, or no 5xx series yet) pages nothing
+    input_series:
+      # No traefik_* series at all, only an unrelated one. The Traefik rules are silent;
+      # TraefikScrapeMissing is what reports this state.
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x120"
+      # A different pod set with ONLY 200s: the 5xx series does not exist yet.
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "1000+10x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  - interval: 30s
+    name: 5xx on the metrics and websecure entrypoints and in other namespaces do not count
+    input_series:
+      # Only entrypoint="web" in namespace platform-edge is the public edge.
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="metrics",code="500",pod="traefik-a"}'
+        values: "100+20x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="websecure",code="500",pod="traefik-a"}'
+        values: "100+20x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "1000+30x120"
+      - series: 'traefik_entrypoint_requests_total{namespace="other",entrypoint="web",code="500",pod="traefik-x"}'
+        values: "100+20x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  # ================================================================== StriveEdge5xxBurst
+  - interval: 30s
+    name: a burst of 5xx pages whatever the ratio (the 2026-10-06 shape, 18 in four minutes)
+    input_series:
+      # 20 req/s of healthy traffic keeps the ratio far below 5% (< 0.2%), so ONLY the burst rule can
+      # fire. 18 5xx between 10:00 and 14:00 (+3 per tick, six ticks), then nothing - like the
+      # incident, the burst stops by itself.
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "100000+600x200"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-a"}'
+        values: "5x20 8 11 14 17 20 23 23x174"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: StriveEdge5xxBurst
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "At least 10 public edge 5xx responses in 10 minutes"
+              description: >-
+                Traefik entrypoint web (all pods) answered at least 10 5xx in the last 10 minutes,
+                whatever the ratio to traffic. On 2026-10-06 18:06-18:10Z the edge served 18 in four
+                minutes and nothing alerted. Use the strive-edge dashboard to split by service, and the
+                Loki panel (DownstreamStatus >= 500) to see router, origin status and Traefik pod.
+      # The ratio rule must NOT have fired for the same burst: this is what the burst rule is for.
+      - eval_time: 14m
+        alertname: StriveEdge5xxRatioHigh
+        exp_alerts: []
+      # Resolves once the burst has left the 10m window.
+      - eval_time: 40m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  - interval: 30s
+    name: the burst is summed across pods, no single pod needs to reach 10
+    input_series:
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-a"}'
+        values: "5+1x40 45x100"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-b"}'
+        values: "5+1x40 45x100"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "100000+600x140"
+    alert_rule_test:
+      # 20 minutes of one 5xx per 30 s on each pod: 40 per pod per 20 min, 20 in any 10m window.
+      - eval_time: 18m
+        alertname: StriveEdge5xxBurst
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "At least 10 public edge 5xx responses in 10 minutes"
+              description: >-
+                Traefik entrypoint web (all pods) answered at least 10 5xx in the last 10 minutes,
+                whatever the ratio to traffic. On 2026-10-06 18:06-18:10Z the edge served 18 in four
+                minutes and nothing alerted. Use the strive-edge dashboard to split by service, and the
+                Loki panel (DownstreamStatus >= 500) to see router, origin status and Traefik pod.
+
+  - interval: 30s
+    name: fewer than 10 5xx in the window (6) stays silent
+    input_series:
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+        values: "100000+600x200"
+      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-a"}'
+        values: "5x20 6 7 8 9 10 11 11x174"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: StriveEdge5xxBurst
+        exp_alerts: []
+
+  # =============================================================== GatekeeperForwardAuth5xx
+  - interval: 1m
+    name: sustained 5xx on /auth pages, summed over both gatekeeper pods
+    input_series:
+      # OTLP series: no namespace / pod, instance is "<pod>-1". One 5xx a minute per pod, 20 per 10m.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="500",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "20+1x40 61x100"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="502",http_method="GET",instance="gatekeeper-bbb-1"}'
+        values: "20+1x40 61x100"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="200",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "5000+30x140"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatekeeperForwardAuth5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper /auth (ForwardAuth) is answering 5xx"
+              description: >-
+                More than 3 5xx from gatekeeper route /auth (the Traefik ForwardAuth target) in the last
+                10 minutes, summed over its pods. Traefik turns a failed ForwardAuth call into its own
+                5xx, so this is the origin-side half of what StriveEdge5xxBurst sees at the edge. Check
+                the gatekeeper pods, Redis and the Keycloak reachability from gatekeeper.
+      # Resolves 10 minutes after the 5xx stop (they stop at 40m).
+      - eval_time: 60m
+        alertname: GatekeeperForwardAuth5xx
+        exp_alerts: []
+
+  - interval: 1m
+    name: ONE isolated 5xx, or two, on /auth pages nothing
+    input_series:
+      # One isolated 500 at ~10m.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="500",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "7x10 8x40"
+      # Two on the other pod, not enough either (> 3 is the bar).
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="502",http_method="GET",instance="gatekeeper-bbb-1"}'
+        values: "3x10 4x4 5x36"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="200",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "5000+30x50"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatekeeperForwardAuth5xx
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GatekeeperForwardAuth5xx
+        exp_alerts: []
+
+  - interval: 1m
+    name: no traffic, no 5xx series, non-5xx statuses, other routes and other jobs do not page
+    input_series:
+      # No traffic: flat counters.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="200",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "5000+0x40"
+      # Heavy 4xx / 3xx on /auth is the normal login traffic, not a server failure.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="401",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "100+50x40"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="302",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "100+50x40"
+      # 5xx on ANOTHER route is GatekeeperHttp5xx's, not this rule's.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/userinfo",http_status_code="500",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "10+5x40"
+      # 5xx on route /auth from a DIFFERENT service must not count (job guard).
+      - series: 'http_server_request_duration_seconds_count{job="tms",http_route="/auth",http_status_code="500",http_method="GET",instance="tms-aaa-1"}'
+        values: "10+5x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GatekeeperForwardAuth5xx
+        exp_alerts: []
+
+  # ===================================================================== GatekeeperHttp5xx
+  - interval: 1m
+    name: sustained /auth/token 500s page, and the alert names the route
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="500",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "30+1x40 71x100"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="200",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "800+5x140"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GatekeeperHttp5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              http_route: /auth/token
+            exp_annotations:
+              summary: "gatekeeper route /auth/token is answering 5xx"
+              description: >-
+                More than 3 5xx from gatekeeper route /auth/token in the last 10 minutes,
+                summed over its pods (for /auth/token a 503 is excluded: that is GatekeeperTokenUnavailable).
+                Drills and planned platform-wide rolls run under a silence for this alert. Check the
+                gatekeeper pod logs and the request's status code split on the strive-edge dashboard.
+      - eval_time: 60m
+        alertname: GatekeeperHttp5xx
+        exp_alerts: []
+
+  - interval: 1m
+    name: a non-503 5xx other than 500 on /auth/token (504) also pages
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="504",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "30+1x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GatekeeperHttp5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              http_route: /auth/token
+            exp_annotations:
+              summary: "gatekeeper route /auth/token is answering 5xx"
+              description: >-
+                More than 3 5xx from gatekeeper route /auth/token in the last 10 minutes,
+                summed over its pods (for /auth/token a 503 is excluded: that is GatekeeperTokenUnavailable).
+                Drills and planned platform-wide rolls run under a silence for this alert. Check the
+                gatekeeper pod logs and the request's status code split on the strive-edge dashboard.
+
+  - interval: 1m
+    name: /auth/token 503s are NOT GatekeeperHttp5xx's (the drill produced 107 of them)
+    input_series:
+      # 5 a minute for 40 minutes: far above the threshold on any other status, silent for 503.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "30+5x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GatekeeperHttp5xx
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperHttp5xx
+        exp_alerts: []
+
+  - interval: 1m
+    name: a 5xx on any other route pages per route, /auth is left to GatekeeperForwardAuth5xx
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/userinfo",http_status_code="500",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "10+1x40"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/userinfo",http_status_code="502",http_method="GET",instance="gatekeeper-bbb-1"}'
+        values: "10+1x40"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/api/v1/ready",http_status_code="503",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "10+1x40"
+      # /auth 5xx at a rate that would fire this rule if it were not excluded.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth",http_status_code="500",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "10+5x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GatekeeperHttp5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              http_route: /api/v1/ready
+            exp_annotations:
+              summary: "gatekeeper route /api/v1/ready is answering 5xx"
+              description: >-
+                More than 3 5xx from gatekeeper route /api/v1/ready in the last 10 minutes,
+                summed over its pods (for /auth/token a 503 is excluded: that is GatekeeperTokenUnavailable).
+                Drills and planned platform-wide rolls run under a silence for this alert. Check the
+                gatekeeper pod logs and the request's status code split on the strive-edge dashboard.
+          - exp_labels:
+              severity: warning
+              http_route: /auth/userinfo
+            exp_annotations:
+              summary: "gatekeeper route /auth/userinfo is answering 5xx"
+              description: >-
+                More than 3 5xx from gatekeeper route /auth/userinfo in the last 10 minutes,
+                summed over its pods (for /auth/token a 503 is excluded: that is GatekeeperTokenUnavailable).
+                Drills and planned platform-wide rolls run under a silence for this alert. Check the
+                gatekeeper pod logs and the request's status code split on the strive-edge dashboard.
+
+  - interval: 1m
+    name: ONE isolated 5xx, no traffic and a missing series do not page GatekeeperHttp5xx
+    input_series:
+      # One 500 on /callback, one 500 on /auth/token.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/callback",http_status_code="500",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "2x10 3x40"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="500",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "9x10 10x40"
+      # No traffic on a healthy route.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/jwks",http_status_code="200",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "100+0x50"
+      # A different job's 5xx on a shared route name.
+      - series: 'http_server_request_duration_seconds_count{job="tms",http_route="/auth/userinfo",http_status_code="500",http_method="GET",instance="tms-aaa-1"}'
+        values: "10+5x40"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatekeeperHttp5xx
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperHttp5xx
+        exp_alerts: []
+
+  # ============================================================== GatekeeperTokenUnavailable
+  - interval: 15s
+    name: continuous /auth/token 503s page after 15 minutes, not before, and resolve when they stop
+    input_series:
+      # Four 503s a minute (one per 15 s sample) on one pod from 0 to 50 minutes, then flat.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "5+1x200 205x400"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="200",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "1000+1x600"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "gatekeeper /auth/token has answered 503 continuously for 15 minutes"
+              description: >-
+                gatekeeper route /auth/token (service-to-service token minting) answered 503, the
+                TokenReview-unavailable status, in every two-minute window of the last 15 minutes. Check
+                the Kubernetes API reachability from gatekeeper and GatekeeperTokenReviewLimited. Drills
+                and planned platform-wide rolls run under a silence for this alert.
+      # The 503s stop at 50m; the 2-minute windows empty out a few minutes later.
+      - eval_time: 60m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+
+  - interval: 15s
+    name: LOW-volume /auth/token 503s (one per 90 seconds) still page when sustained
+    input_series:
+      # One 503 every 90 s (6 samples) for 24 minutes: no minute-long quiet spell, but no burst either.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "0+0x5 1+0x5 2+0x5 3+0x5 4+0x5 5+0x5 6+0x5 7+0x5 8+0x5 9+0x5 10+0x5 11+0x5 12+0x5 13+0x5 14+0x5 15+0x5 16+0x5 17+0x5 18+0x5 19+0x5 20+0x5 21+0x5 22+0x5 23+0x5 24+0x5 25+0x5 26+0x5"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "gatekeeper /auth/token has answered 503 continuously for 15 minutes"
+              description: >-
+                gatekeeper route /auth/token (service-to-service token minting) answered 503, the
+                TokenReview-unavailable status, in every two-minute window of the last 15 minutes. Check
+                the Kubernetes API reachability from gatekeeper and GatekeeperTokenReviewLimited. Drills
+                and planned platform-wide rolls run under a silence for this alert.
+
+  - interval: 15s
+    name: 503s on alternating pods are summed, so two pods that each fire every 2 minutes still page
+    input_series:
+      # Pod a counts every 2 minutes, pod b every 2 minutes offset by one minute: together one a minute.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "0+0x7 1+0x7 2+0x7 3+0x7 4+0x7 5+0x7 6+0x7 7+0x7 8+0x7 9+0x7 10+0x7 11+0x7 12+0x7 13+0x7 14+0x7 15+0x7 16+0x7 17+0x7 18+0x7"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-bbb-1"}'
+        values: "0+0x3 1+0x7 2+0x7 3+0x7 4+0x7 5+0x7 6+0x7 7+0x7 8+0x7 9+0x7 10+0x7 11+0x7 12+0x7 13+0x7 14+0x7 15+0x7 16+0x7 17+0x7 18+0x7"
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "gatekeeper /auth/token has answered 503 continuously for 15 minutes"
+              description: >-
+                gatekeeper route /auth/token (service-to-service token minting) answered 503, the
+                TokenReview-unavailable status, in every two-minute window of the last 15 minutes. Check
+                the Kubernetes API reachability from gatekeeper and GatekeeperTokenReviewLimited. Drills
+                and planned platform-wide rolls run under a silence for this alert.
+
+  - interval: 15s
+    name: the 2026-10-06 drill shape (10 minutes of 503s) does not page
+    input_series:
+      # 503s at 4 a minute from 0 to 10 minutes, then flat: below the 15-minute sustain, at every
+      # evaluation after it too.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "5+1x40 45x300"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+
+  - interval: 15s
+    name: two 10-minute bursts with a 3-minute gap do not page (a quiet spell breaks the sustain)
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "5+1x40 45x12 46+1x40 86x200"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+
+  - interval: 15s
+    name: 503s that end because the series vanished (a pod replaced mid-burst) do not page
+    input_series:
+      # 8 minutes of 503s, then the series is gone for good. The few steps that still have data are
+      # all 1, so a min-over-time formulation would page here; counting 15 present steps does not.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "5+1x32 _x400"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="200",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "1000+1x432"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+
+  - interval: 15s
+    name: ONE isolated 503, healthy traffic with no 503 series, 5xx other than 503, and a missing series do not page
+    input_series:
+      # One isolated 503 at about 5 minutes on a series that pre-exists.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="503",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "9x20 10x300"
+      # Continuous /auth/token 500s are GatekeeperHttp5xx's business, not this rule's.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="500",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "5+1x320"
+      # 503s on a different route (readiness) do not count.
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/api/v1/ready",http_status_code="503",http_method="GET",instance="gatekeeper-aaa-1"}'
+        values: "5+1x320"
+      - series: 'http_server_request_duration_seconds_count{job="gatekeeper",http_route="/auth/token",http_status_code="200",http_method="POST",instance="gatekeeper-aaa-1"}'
+        values: "1000+1x320"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+
+  - interval: 15s
+    name: with no gatekeeper series at all GatekeeperTokenUnavailable is silent
+    input_series:
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x400"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatekeeperTokenUnavailable
+        exp_alerts: []
+
+  # ========================================================== GatekeeperTokenReviewLimited
+  - interval: 1m
+    name: a rate-limited TokenReview call pages, and resolves after 10 minutes
+    input_series:
+      # Scraped series: namespace / pod labels, pre-initialised to 0 at pod start. One call limited at ~10m.
+      - series: 'gatekeeper_tokenreview_limited_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x10 1x50"
+      - series: 'gatekeeper_tokenreview_limited_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x60"
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",outcome="unavailable"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper TokenReview calls are being limited or are unavailable"
+              description: >-
+                In the last 10 minutes gatekeeper rate-limited a TokenReview call
+                (gatekeeper_tokenreview_limited_total) or got an `unavailable` outcome
+                (gatekeeper_tokenreview_total). Service-to-service tokens may be refused or delayed.
+                Drills and planned platform-wide rolls run under a silence for this alert.
+      - eval_time: 30m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts: []
+
+  - interval: 1m
+    name: an `unavailable` TokenReview outcome pages even with no limiter series change
+    input_series:
+      - series: 'gatekeeper_tokenreview_limited_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x60"
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",outcome="unavailable"}'
+        values: "0x10 2x50"
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",outcome="authenticated"}'
+        values: "100+10x60"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper TokenReview calls are being limited or are unavailable"
+              description: >-
+                In the last 10 minutes gatekeeper rate-limited a TokenReview call
+                (gatekeeper_tokenreview_limited_total) or got an `unavailable` outcome
+                (gatekeeper_tokenreview_total). Service-to-service tokens may be refused or delayed.
+                Drills and planned platform-wide rolls run under a silence for this alert.
+
+  - interval: 1m
+    name: the limiter and unavailable counters rising on DIFFERENT pods are one alert, not two
+    input_series:
+      - series: 'gatekeeper_tokenreview_limited_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x10 3x50"
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",outcome="unavailable"}'
+        values: "0x10 4x50"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper TokenReview calls are being limited or are unavailable"
+              description: >-
+                In the last 10 minutes gatekeeper rate-limited a TokenReview call
+                (gatekeeper_tokenreview_limited_total) or got an `unavailable` outcome
+                (gatekeeper_tokenreview_total). Service-to-service tokens may be refused or delayed.
+                Drills and planned platform-wide rolls run under a silence for this alert.
+
+  - interval: 1m
+    name: healthy TokenReview traffic, other outcomes, a counter reset and a missing series do not page
+    input_series:
+      # Pre-initialised counters sitting at zero (no event).
+      - series: 'gatekeeper_tokenreview_limited_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x60"
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",outcome="unavailable"}'
+        values: "0x60"
+      # Normal traffic, plus refusals and mismatches (caller errors, not unavailability).
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",outcome="authenticated"}'
+        values: "100+10x60"
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",outcome="refused"}'
+        values: "5+1x60"
+      - series: 'gatekeeper_tokenreview_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",outcome="mismatch"}'
+        values: "5+1x60"
+      # A pod restart: the counter falls back to 0 with no new event (and a stale old value before it).
+      - series: 'gatekeeper_tokenreview_limited_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-old"}'
+        values: "5x20 0x40"
+      # Another job's counter of the same name must not count.
+      - series: 'gatekeeper_tokenreview_limited_total{job="other",namespace="x",pod="other-1"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts: []
+
+  - interval: 1m
+    name: with no TokenReview series at all GatekeeperTokenReviewLimited is silent
+    input_series:
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GatekeeperTokenReviewLimited
+        exp_alerts: []
