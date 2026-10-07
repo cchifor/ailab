@@ -96,7 +96,7 @@ new_case() {
   echo "some avg10=3.00 avg60=3.00 avg300=3.00 total=1" > "$CTL/psi"
 }
 run() { # extra VAR=value settings may be passed as arguments
-  env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" CHUNK_GB=8 PAUSE_S=1 \
+  env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" LOCK_FILE="$CTL/lock" CHUNK_GB=8 PAUSE_S=1 \
     PSI_MAX=45 PSI_WAIT_MAX_S=5 "$@" bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1
   echo $? > "$CTL/rc"
 }
@@ -163,7 +163,7 @@ has "still reports the unmount failure" "cleanup: umount" "$(cat "$CTL/out")"
 
 echo "== systemctl stop (SIGTERM to the script and its child, mid-sleep) still unmounts =="
 new_case sigterm; touch "$CTL/block_sleep"
-env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=5 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &
+env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" LOCK_FILE="$CTL/lock" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=5 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &
 spid=$!
 for _ in $(seq 1 100); do [ -f "$CTL/sleeping" ] && break; /bin/sleep 0.1; done
 # What systemd's default KillMode=control-group does: SIGTERM to every process of the unit.
@@ -175,7 +175,7 @@ eq "mount dir removed" 0 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | 
 
 echo "== SIGTERM while an uninterruptible fstrim is in flight: waits for it, then unmounts =="
 new_case sigtrim; touch "$CTL/slow_trim"
-env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=5 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &
+env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" LOCK_FILE="$CTL/lock" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=5 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &
 spid=$!
 for _ in $(seq 1 100); do [ -f "$CTL/fstrim_running" ] && break; /bin/sleep 0.1; done
 kill -TERM "$spid" $(pgrep -P "$spid") 2>/dev/null
@@ -183,6 +183,17 @@ wait "$spid"; echo $? > "$CTL/rc"
 eq "exits 143 (terminated)" 143 "$(cat "$CTL/rc")"
 eq "only the in-flight chunk ran" 1 "$(calls fstrim_calls)"
 eq "mount released after the trim finished" 0 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | tr -d ' ')"
+
+echo "== a second run while one holds the lock refuses (exit 7) before mounting =="
+new_case locked
+( exec 9>"$CTL/lock"; flock 9; touch "$CTL/locked"; /bin/sleep 5 ) &
+holder=$!
+for _ in $(seq 1 50); do [ -f "$CTL/locked" ] && break; /bin/sleep 0.1; done
+run
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+eq "exit 7" 7 "$(cat "$CTL/rc")"
+eq "nothing mounted" 0 "$(calls mount_calls)"
+has "says why" "another run" "$(cat "$CTL/out")"
 
 echo "== invalid settings are rejected before anything is mounted (exit 2) =="
 for bad in "CHUNK_GB=-1" "CHUNK_GB=0" "PAUSE_S=0" "PSI_MAX=abc" "PSI_WAIT_MAX_S=x"; do

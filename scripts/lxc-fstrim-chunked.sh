@@ -32,6 +32,7 @@
 #   5 = an fstrim failed
 #   6 = the run succeeded but the host-side mount could not be released (the volume stays mounted)
 #   143/130 = stopped by SIGTERM/SIGINT (after the in-flight trim/sleep finished and the mount was released)
+#   7 = another run holds the lock (LOCK_FILE)
 # Deploy (ai-node1, via scripts/node-ssh.py): docs/runbooks/registry-cache.md, "Thin-volume trim".
 set -uo pipefail
 
@@ -62,6 +63,13 @@ psi() { awk '$1 == "some" { for (i = 2; i <= NF; i++) if ($i ~ /^avg10=[0-9]+(\.
 above() { awk -v a="$1" -v m="$PSI_MAX" 'BEGIN { exit !(a > m) }'; }
 pool() { lvs --noheadings -o data_percent "$POOL" 2>/dev/null | tr -d ' ' || echo "?"; }
 stopped() { [ -e "$STOP_FILE" ]; }
+
+# One run at a time (reviewer-claude on #1130): a hand-run supervised trim overlapping the timer's run
+# would mount the LV twice and double the discard bursts on cp1's WAL drive. The lock is released when
+# this process and its children exit.
+LOCK_FILE="${LOCK_FILE:-/run/lxc-fstrim-chunked.lock}"
+exec 9>"$LOCK_FILE" || die 1 "cannot open lock file $LOCK_FILE"
+flock -n 9 || die 7 "another run holds $LOCK_FILE - not starting a second, overlapping trim"
 
 # --- resolve the volume from host-side metadata only ----------------------------------------------
 volid="$(pct config "$CTID" 2>/dev/null | sed -nE "s/^${MPKEY}: ([^,]+),.*/\1/p")"
