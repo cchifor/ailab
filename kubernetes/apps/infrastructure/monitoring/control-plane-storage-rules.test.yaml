@@ -1,0 +1,99 @@
+# `promtool test rules` fixtures for control-plane-storage-rules.yaml. Run by scripts/rules-lint.sh on every PR.
+# `rule_files` is the extracted spec name (rules-lint.sh hands promtool each PrometheusRule's `spec:`
+# body under the manifest's basename).
+rule_files:
+  - control-plane-storage-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ EtcdLeaderOnWorstMember
+  - interval: 1m
+    name: cp1 holding etcd leadership for 15m warns
+    input_series:
+      - series: 'etcd_server_is_leader{job="kube-etcd", instance="192.168.0.41:2381"}'
+        values: "1x30"
+      - series: 'etcd_server_is_leader{job="kube-etcd", instance="192.168.0.42:2381"}'
+        values: "0x30"
+      - series: 'etcd_server_is_leader{job="kube-etcd", instance="192.168.0.43:2381"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: EtcdLeaderOnWorstMember
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kube-etcd
+              instance: 192.168.0.41:2381
+            exp_annotations:
+              summary: "etcd leader is cp1 (192.168.0.41), the member with the worst WAL-fsync tail"
+              description: "cp1 has held etcd leadership for 15m. Its disk stalls are the longest in the cluster (126 WAL fsyncs over 8 s in a week, vs 4 on cp2 and 1 on cp3), so while it leads, every one of them stalls every write and can trigger an election. Move leadership off it: `kubernetes/infra/_out/talosctl-1112.exe -n 192.168.0.41 etcd forfeit-leadership` (Talos hands it to the lowest member ID, cp3), then check with `etcd status`. Retire this alert once cp1's disk is on dedicated PLP storage (plans/2026-10-07-etcd-leader-churn-plan.md step C)."
+  - interval: 1m
+    name: a cp1 leadership shorter than 15m does not warn
+    input_series:
+      - series: 'etcd_server_is_leader{job="kube-etcd", instance="192.168.0.41:2381"}'
+        values: "1x10 0x20"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: EtcdLeaderOnWorstMember
+        exp_alerts: []
+  - interval: 1m
+    name: cp2 or cp3 leading does not warn
+    input_series:
+      - series: 'etcd_server_is_leader{job="kube-etcd", instance="192.168.0.41:2381"}'
+        values: "0x30"
+      - series: 'etcd_server_is_leader{job="kube-etcd", instance="192.168.0.42:2381"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: EtcdLeaderOnWorstMember
+        exp_alerts: []
+
+  # --------------------------------------------------------------- ProxmoxNvmeTemperatureHigh
+  - interval: 1m
+    name: a host NVMe controller above 95 C for 15m warns
+    input_series:
+      - series: 'node_hwmon_temp_celsius{job="proxmox-node", instance="192.168.0.3:9100", chip="nvme_nvme0", sensor="temp2"}'
+        values: "97x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxNvmeTemperatureHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxmox-node
+              instance: 192.168.0.3:9100
+              chip: nvme_nvme0
+              sensor: temp2
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.3:9100 NVMe controller at 97 C"
+              description: "The shared NVMe's controller sensor (temp2, Sensor 1) on 192.168.0.3:9100 has been above 95 C for 15m. These consumer QLC drives throttle and freeze writes when hot: node2 logged thermal-throttle transitions, and a 5 s device freeze on node3 caused the 2026-10-07 05:56Z etcd election. Check airflow and the drive's heatsink; correlate with etcd WAL fsync latency of the CP on that host."
+  - interval: 1m
+    name: the LLM LXC's copy of the same hwmon sensor does not warn
+    input_series:
+      - series: 'node_hwmon_temp_celsius{job="ai-llm-node", instance="192.168.0.45:9100", chip="nvme_nvme0", sensor="temp2"}'
+        values: "97x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxNvmeTemperatureHigh
+        exp_alerts: []
+  - interval: 1m
+    name: the at-rest range (82-92 C) and other sensors do not warn
+    input_series:
+      - series: 'node_hwmon_temp_celsius{job="proxmox-node", instance="192.168.0.2:9100", chip="nvme_nvme0", sensor="temp2"}'
+        values: "92x30"
+      - series: 'node_hwmon_temp_celsius{job="proxmox-node", instance="192.168.0.4:9100", chip="nvme_nvme0", sensor="temp3"}'
+        values: "99x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxNvmeTemperatureHigh
+        exp_alerts: []
+  - interval: 1m
+    name: a spike shorter than 15m does not warn
+    input_series:
+      - series: 'node_hwmon_temp_celsius{job="proxmox-node", instance="192.168.0.4:9100", chip="nvme_nvme0", sensor="temp2"}'
+        values: "90x5 98x10 90x15"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: ProxmoxNvmeTemperatureHigh
+        exp_alerts: []
