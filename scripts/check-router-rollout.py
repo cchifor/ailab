@@ -29,10 +29,18 @@ def expectation(root=ROOT):
         raise ValueError('Expected one consistent, digest-pinned router image')
     init = manifest.split('      initContainers:\n', 1)
     names = re.findall(r'        - name: ([-a-z0-9]+)', init[1].split('      containers:\n')[0]) if len(init) == 2 else []
-    canary = folder / 'shared-routing-canary.yaml'
-    job = re.search(r'\n  name: (router-shared-routing-[-a-z0-9]+)\n', canary.read_text()).group(1) if canary.exists() else None
-    if job and not re.search(r'image: ' + re.escape(next(iter(images))) + r'\s', canary.read_text()):
-        raise ValueError('Canary must use the same pinned release as the router')
+    canaries = list(folder.glob('*-canary.yaml'))
+    if len(canaries) > 1:
+        raise ValueError('Expected at most one rollout canary')
+    job = None
+    if canaries:
+        contents = canaries[0].read_text()
+        match = re.search(r'\n  name: (router-[-a-z0-9]+)\n', contents)
+        if not match:
+            raise ValueError('Canary must declare a versioned router Job')
+        job = match.group(1)
+        if not re.search(r'image: ' + re.escape(next(iter(images))) + r'\s', contents):
+            raise ValueError('Canary must use the same pinned release as the router')
     return images.pop(), names, job
 
 
@@ -70,7 +78,7 @@ def check(query_fn, image, init_names, job):
         if any(float(r['value'][1]) > 0 for r in failed):
             raise RuntimeError('Live canary failed; inspect its narrowly scoped Loki logs')
         if not any(float(r['value'][1]) == 1 for r in query_fn(f'kube_job_status_succeeded{{{selector}}}')):
-            raise Pending('Waiting for the one-shot Claude/Codex canary')
+            raise Pending('Waiting for the one-shot release canary')
     return {'image': image, 'pod': pod, 'completedInitChecks': init_names, 'completedCanaryJob': job}
 
 

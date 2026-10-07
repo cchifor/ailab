@@ -10,3 +10,4 @@ kind: Kustomization
 #   * The "edge" namespace label and the Cloudflare tunnel in edge-connector.
 resources:
   - router.yaml
+  - plugin-settings-canary.yaml
