@@ -821,3 +821,895 @@ tests:
       - eval_time: 30m
         alertname: GatekeeperTokenReviewLimited
         exp_alerts: []
+
+  # ========================================================= GatekeeperRedisDisconnected / GatekeeperRedisFallbackEvent
+  # The 2m `for:` has not elapsed at 1m; from 3m on only the pod that never connected is listed.
+  - interval: 1m
+    name: "a replica that STARTED in fallback pages GatekeeperRedisDisconnected after 2m, though its counter never moves"
+    input_series:
+      # The switch to memory happened before the first scrape: the fallback counter's FIRST sample is already 1,
+      # so increase() sees no event at all. Only the gauge (0 from the first scrape) catches this pod.
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x40"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "1x40"
+      - series: 'gatekeeper_redis_reconnections_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x40"
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "1x40"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x40"
+      - series: 'gatekeeper_redis_reconnections_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-aaa for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 30m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-aaa for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 10m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a brief fallback that reconnects within 2m: the event rule fires, the disconnected rule does not"
+    input_series:
+      # The gauge reads 0 for ONE sample (6m), the counter rises once (6m) and the reconnect counter follows.
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "1x5 0 1x35"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x5 1x35"
+      - series: 'gatekeeper_redis_reconnections_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x6 1x35"
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "1x41"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x41"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa fell back from Redis to in-memory in the last 5 minutes"
+              description: >-
+                gatekeeper_redis_fallback_total rose on pod gatekeeper-aaa within 5 minutes: it switched
+                to its in-memory fallback (a failed connect, or a failed Redis operation). This is the
+                transition; GatekeeperRedisDisconnected is the state and fires only if the pod stays in
+                fallback for 2m, so a brief flap that already reconnected shows only here. See also
+                gatekeeper_redis_reconnections_total. Planned platform-wide rolls (A1.4, A1.5) run under a
+                silence for this alert.
+      - eval_time: 6m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "sustained memory mode: the event is a pulse that expires, the disconnected rule holds until reconnect"
+    input_series:
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "1x5 0x37"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x5 1x37"
+      - series: 'gatekeeper_redis_reconnections_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x42"
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "1x42"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x42"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa fell back from Redis to in-memory in the last 5 minutes"
+              description: >-
+                gatekeeper_redis_fallback_total rose on pod gatekeeper-aaa within 5 minutes: it switched
+                to its in-memory fallback (a failed connect, or a failed Redis operation). This is the
+                transition; GatekeeperRedisDisconnected is the state and fires only if the pod stays in
+                fallback for 2m, so a brief flap that already reconnected shows only here. See also
+                gatekeeper_redis_reconnections_total. Planned platform-wide rolls (A1.4, A1.5) run under a
+                silence for this alert.
+      - eval_time: 9m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-aaa for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 30m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-aaa for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 40m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-aaa for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 30m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "one failed replica beside a healthy one fires for that pod alone"
+    input_series:
+      # aaa stays on Redis; bbb loses it at 8m. A rule over the max across pods would see 1 and stay silent.
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "1x48"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x48"
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "1x7 0x40"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x7 1x40"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: gatekeeper-bbb
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-bbb fell back from Redis to in-memory in the last 5 minutes"
+              description: >-
+                gatekeeper_redis_fallback_total rose on pod gatekeeper-bbb within 5 minutes: it switched
+                to its in-memory fallback (a failed connect, or a failed Redis operation). This is the
+                transition; GatekeeperRedisDisconnected is the state and fires only if the pod stays in
+                fallback for 2m, so a brief flap that already reconnected shows only here. See also
+                gatekeeper_redis_reconnections_total. Planned platform-wide rolls (A1.4, A1.5) run under a
+                silence for this alert.
+      - eval_time: 11m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-bbb
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-bbb is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-bbb for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 11m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: gatekeeper-bbb
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-bbb fell back from Redis to in-memory in the last 5 minutes"
+              description: >-
+                gatekeeper_redis_fallback_total rose on pod gatekeeper-bbb within 5 minutes: it switched
+                to its in-memory fallback (a failed connect, or a failed Redis operation). This is the
+                transition; GatekeeperRedisDisconnected is the state and fires only if the pod stays in
+                fallback for 2m, so a brief flap that already reconnected shows only here. See also
+                gatekeeper_redis_reconnections_total. Planned platform-wide rolls (A1.4, A1.5) run under a
+                silence for this alert.
+      - eval_time: 25m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-bbb
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-bbb is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-bbb for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 25m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a failed replica that is replaced by a healthy one stops firing"
+    input_series:
+      # A rollout while Redis is down: aaa (reading 0) leaves at 9m, ccc arrives healthy. Series are keyed by pod.
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x9 _x40"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "1x9 _x40"
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc"}'
+        values: "_x9 1x40"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc"}'
+        values: "_x9 0x40"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              pod: gatekeeper-aaa
+            exp_annotations:
+              summary: "gatekeeper pod gatekeeper-aaa is serving from its in-memory fallback, not Redis"
+              description: >-
+                gatekeeper_redis_connected has read 0 on pod gatekeeper-aaa for 2m: the replica lost
+                Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+                user routed to another replica is signed out and that state is not shared. The gauge reads 0
+                from the first scrape of a replica that started in fallback, which no counter shows. Check
+                Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+                for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+                this alert.
+      - eval_time: 20m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "healthy replicas, a flat counter, a counter reset on restart and another job's series do not page the Redis rules"
+    input_series:
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "1x40"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "3x10 0x30"
+      - series: 'gatekeeper_redis_connected{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "1x40"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "2x40"
+      - series: 'gatekeeper_redis_connected{job="other",namespace="x",pod="other-1"}'
+        values: "0x40"
+      - series: 'gatekeeper_redis_fallback_total{job="other",namespace="x",pod="other-1"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "before AG1a (the two counters pre-initialised at 0, no gauge) the Redis rules are silent"
+    input_series:
+      # The live state on 2026-10-07: the two counters exist at 0 on every pod, gatekeeper_redis_connected does not.
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x60"
+      - series: 'gatekeeper_redis_reconnections_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa"}'
+        values: "0x60"
+      - series: 'gatekeeper_redis_fallback_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x60"
+      - series: 'gatekeeper_redis_reconnections_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb"}'
+        values: "0x60"
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "with no gatekeeper series at all the Redis rules are silent"
+    input_series:
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GatekeeperRedisDisconnected
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperRedisFallbackEvent
+        exp_alerts: []
+
+  # ================================================================ StriveTestBypassFromEdge
+  # TIMELINES, for both rules below. promtool starts every series at t=0, and the new-series branch asks
+  # whether a series existed 15m earlier (`offset 15m`), which before t=15m reaches back before the data.
+  # So every fixture whose series must count as PRE-EXISTING evaluates only at 16m or later, and puts its
+  # increments after that. A series that must count as NEW is absent until a mid-run sample (`_x20 1x50`).
+
+  - interval: 1m
+    name: "an edge_refused increment on a pre-existing series pages StriveTestBypassFromEdge, and resolves once the 15m window has passed"
+    input_series:
+      # The series pre-exists at 2 (present since t=0, so the new-series branch stays out of it) and rises once at 20m,
+      # beside Sentinel's ordinary successful bypass runs, which must not matter.
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "2x19 3x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="success"}'
+        values: "100+5x70"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 32m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 40m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
+    name: "the FIRST edge_refused of a lazily created series (absent, then 1) pages, and resolves 15m later"
+    input_series:
+      # No edge_refused child exists on this pod until the first refusal: the series appears at value 1, which
+      # increase() cannot see. Only the new-series branch (a series now that did not exist 15m ago) pages it.
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "_x20 1x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="success"}'
+        values: "100+5x70"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 30m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 33m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 38m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a first edge_refused on a second pod, beside an old flat series on the first, pages"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "4x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="other",method="test_bypass",status="edge_refused"}'
+        values: "_x25 1x50"
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+      - eval_time: 45m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
+    name: "edge_refused rising on two pods and two tenants is one alert"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "0x19 2x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="other",method="test_bypass",status="edge_refused"}'
+        values: "1x19 3x50"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+              description: >-
+                In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+                header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+                comparing the token. Either a client on the internet is sending the bypass header, or a
+                test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+                case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+
+  - interval: 1m
+    name: "successful and invalid_key bypass runs, a flat, reset or zero edge_refused counter and another job's series do not page"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="success"}'
+        values: "100+5x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="invalid_key"}'
+        values: "1+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "7x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "5x20 0x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "_x20 0x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-eee",tenant_id="strive",method="test_bypass",status="success"}'
+        values: "_x20 3x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-eee",tenant_id="strive",method="test_bypass",status="invalid_key"}'
+        values: "_x20 1x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="edge_refused"}'
+        values: "0+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ddd",tenant_id="strive",method="jwt",status="edge_refused"}'
+        values: "_x20 1x50"
+      - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-1",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "0+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-2",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "_x20 1x50"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
+    name: "an OLD edge_refused series that returns after a scrape gap (12m, then 30m) does not read as new"
+    input_series:
+      # A Prometheus restart or a NetworkPolicy roll: the series pre-exists with a value above 0, then no sample for
+      # longer than the 5m lookback delta. An instant `X offset 15m` lookup would call it new for about (gap - 5m).
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "3x10 _x12 3x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="test_bypass",status="edge_refused"}'
+        values: "3x5 _x30 3x40"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 34m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  - interval: 1m
+    name: "with no test_bypass series at all (the state before AG1a) StriveTestBypassFromEdge is silent"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="success"}'
+        values: "100+5x70"
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: StriveTestBypassFromEdge
+        exp_alerts: []
+
+  # ===================================================================== GatekeeperApiKeyUsed
+  - interval: 1m
+    name: "an api_key request with a status other than disabled on a pre-existing series pages GatekeeperApiKeyUsed, and resolves after 15m"
+    input_series:
+      # One validated key at 20m (success), on a series that pre-exists at 10 (present since t=0).
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
+        values: "10x19 11x50"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 32m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 40m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "the FIRST api_key success of a lazily created series (absent, then 1) pages, and resolves 15m later"
+    input_series:
+      # No api_key child exists on this pod until a key is looked up: the series appears at value 1, which
+      # increase() cannot see. Only the new-series branch pages it.
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
+        values: "_x20 1x50"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 30m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 33m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 38m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a first api_key invalid_key (a refused key) on a new series pages too"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="invalid_key"}'
+        values: "_x20 1x50"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 38m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a REFUSED key (invalid_key) on an old series pages too, and the disabled counter beside it neither adds nor hides anything"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="invalid_key"}'
+        values: "0x19 1x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="disabled"}'
+        values: "0+2x70"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "gatekeeper looked up an API key although API keys are retired"
+              description: >-
+                In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+                appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+                refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+                every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+                and ignored) does not page.
+      - eval_time: 40m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "only status=disabled, old or newly created, whatever its rate, and other methods' statuses do not page"
+    input_series:
+      # The state AG1a is meant to produce: keys are sent, ignored and counted as disabled.
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="disabled"}'
+        values: "0+3x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="api_key",status="disabled"}'
+        values: "5+7x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc",tenant_id="strive",method="api_key",status="disabled"}'
+        values: "_x20 1+4x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="success"}'
+        values: "100+9x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="invalid_key"}'
+        values: "1+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ddd",tenant_id="strive",method="jwt",status="failed"}'
+        values: "_x20 1x50"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "a flat, reset or zero api_key counter, another job's series and a missing series do not page"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
+        values: "40x70"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="api_key",status="success"}'
+        values: "9x20 0x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-ccc",tenant_id="strive",method="api_key",status="success"}'
+        values: "_x20 0x50"
+      - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-1",tenant_id="strive",method="api_key",status="success"}'
+        values: "0+1x70"
+      - series: 'gatekeeper_auth_requests_total{job="other",namespace="x",pod="other-2",tenant_id="strive",method="api_key",status="success"}'
+        values: "_x20 1x50"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "an OLD api_key success series that returns after a scrape gap (12m, then 30m) does not read as new"
+    input_series:
+      # A Prometheus restart or a NetworkPolicy roll: the series pre-exists with a value above 0, then no sample for
+      # longer than the 5m lookback delta. An instant `X offset 15m` lookup would call it new for about (gap - 5m).
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="api_key",status="success"}'
+        values: "3x10 _x12 3x50"
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-bbb",tenant_id="strive",method="api_key",status="success"}'
+        values: "3x5 _x30 3x40"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 34m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: "with no api_key series at all (the state before AG1a) GatekeeperApiKeyUsed is silent"
+    input_series:
+      - series: 'gatekeeper_auth_requests_total{job="gatekeeper",namespace="strive-ailab",pod="gatekeeper-aaa",tenant_id="strive",method="jwt",status="success"}'
+        values: "100+5x70"
+      - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GatekeeperApiKeyUsed
+        exp_alerts: []

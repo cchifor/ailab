@@ -398,7 +398,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"TraefikScrapeMissing|StriveEdge.*|GatekeeperForwardAuth5xx|GatekeeperHttp5xx|GatekeeperTokenUnavailable|GatekeeperTokenReviewLimited\"}) or vector(0)",
+              "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"TraefikScrapeMissing|StriveEdge.*|GatekeeperForwardAuth5xx|GatekeeperHttp5xx|GatekeeperTokenUnavailable|GatekeeperTokenReviewLimited|GatekeeperRedisDisconnected|GatekeeperRedisFallbackEvent|StriveTestBypassFromEdge|GatekeeperApiKeyUsed\"}) or vector(0)",
               "instant": true,
               "range": false
             }

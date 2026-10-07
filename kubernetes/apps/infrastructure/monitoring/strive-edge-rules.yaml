@@ -44,10 +44,41 @@
 # (NOT a resource - promtool only, via scripts/rules-lint.sh) assert each rule fires on its
 # incident shape and stays silent on no traffic, one isolated 5xx and a missing series.
 #
-# NOT HERE YET, on purpose: GatekeeperRedisDisconnected / GatekeeperRedisFallbackEvent,
-# StriveTestBypassFromEdge and GatekeeperApiKeyUsed need a gatekeeper release that does not exist
-# yet (A1.0 / AG1a), and StriveEdgeGenerated5xx waits for E1b (router metrics) and E4's test of the
-# router-minus-service arithmetic on Traefik 3.4.3.
+# NOT HERE YET, on purpose: StriveEdgeGenerated5xx waits for E1b (router metrics) and E4's test of
+# the router-minus-service arithmetic on Traefik 3.4.3.
+#
+# THE SECOND GROUP (strive-gatekeeper-hardening) READS SERIES THAT GATEKEEPER RELEASE AG1a CREATES
+# (plan A1.0, A2.1, A4.1): gatekeeper_redis_connected{} (a label-less Gauge: 1 on live Redis, 0 on the
+# per-process memory fallback, 0 from the first scrape on a replica that started in fallback), the
+# existing gatekeeper_redis_fallback_total counter now incremented on every switch to memory, and two
+# new gatekeeper_auth_requests_total label values, {method="test_bypass",status="edge_refused"} and
+# {method="api_key",status="disabled"}. Checked against live Prometheus on 2026-10-07, BEFORE AG1a:
+# job="gatekeeper" (namespace strive-ailab, pod, instance ip:5000, service, container, endpoint) is the
+# real scrape label set; gatekeeper_auth_requests_total additionally carries tenant_id, method, status;
+# gatekeeper_redis_fallback_total and gatekeeper_redis_reconnections_total ALREADY exist (pre-initialised
+# at 0 on both pods, no increase in 7 days); gatekeeper_redis_connected, any method="api_key" series and
+# any status="edge_refused" / "disabled" series do NOT exist yet. These four rules therefore stay silent
+# until AG1a is live (an expression over an absent series never fires), and the fixtures in
+# strive-edge-rules.test.yaml, not the cluster, are what proves them until then.
+#
+# THE FIRST EVENT OF A LAZILY CREATED SERIES: gatekeeper_auth_requests_total children are created per
+# (tenant_id, method, status) on first use, so the FIRST edge_refused (or first non-disabled api_key)
+# event on a pod appears as a brand-new series at value 1, and increase() cannot see a rise from
+# nothing (the same blind spot as the 5xx counters above). For these two security signals a single
+# request is exactly the case to see, so each rule has a second branch,
+# `count((X > 0) unless (last_over_time(X[1h] offset 15m))) > 0`: a series that exists now with a value
+# above 0 but had NO sample in the hour that ended 15m ago is its first event, and it keeps the alert up
+# for the same 15m as the increase() branch. `unless` matches whole label sets, so an old series never
+# counts, and a child created already at 0 (a pre-initialised one on a new pod) never counts.
+# WHY A RANGE, NOT `X offset 15m`: the instant lookup finds a sample only within the 5m lookback delta
+# before now-15m, so an OLD series whose scrape paused for more than 5m (a Prometheus restart, a
+# NetworkPolicy roll) read as new for about (gap - 5m) and paged falsely. The 1h range tolerates a gap
+# of up to about an hour. THE PRICE, a blind spot: a child that already existed, on a gatekeeper
+# container that then restarted IN PLACE (same pod name and IP: its counters reset and the child is
+# recreated lazily), and whose first event after the restart comes more than 15m but less than ~75m
+# after the last pre-restart sample, reads as old to this branch and as a single sample to increase().
+# A new pod (a rollout) is a new series and is seen. The redis gauge has neither gap (it exists from
+# process start).
 #
 # DRILLS AND PLANNED PLATFORM-WIDE ROLLS run under an Alertmanager silence scoped to the expected
 # alerts (GatekeeperHttp5xx, GatekeeperTokenUnavailable, GatekeeperTokenReviewLimited) and the
@@ -214,3 +245,92 @@ spec:
               (gatekeeper_tokenreview_limited_total) or got an `unavailable` outcome
               (gatekeeper_tokenreview_total). Service-to-service tokens may be refused or delayed.
               Drills and planned platform-wide rolls run under a silence for this alert.
+    # Auth-hardening plan items 1 (A1.0, A2.1, A4.1) and E3. Needs gatekeeper release AG1a: see the
+    # header. A separate group so the dependency is visible and these rules evaluate on their own.
+    - name: strive-gatekeeper-hardening
+      rules:
+        # TWO rules, not one, because `for:` applies to a whole expression: the STATE (this rule,
+        # held 2m so a flap that reconnects does not page) and the TRANSITION (the next rule, no hold).
+        # Per pod, so one failed replica beside a healthy one fires for that pod alone and its pod
+        # label names the culprit. The gauge, not a counter, is the signal, because a replica that
+        # STARTED in fallback has no event to count: its fallback counter is already 1 at its first
+        # scrape, and an idle replica can sit in fallback with no failing operation. `max by (pod)`
+        # drops the scrape's instance / container / endpoint labels so each alert carries just `pod`,
+        # and keeps the pods apart: a healthy replica's 1 never masks a failed replica's 0.
+        - alert: GatekeeperRedisDisconnected
+          expr: |
+            max by (pod) (gatekeeper_redis_connected{job="gatekeeper"}) == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "gatekeeper pod {{ $labels.pod }} is serving from its in-memory fallback, not Redis"
+            description: >-
+              gatekeeper_redis_connected has read 0 on pod {{ $labels.pod }} for 2m: the replica lost
+              Redis, or started without it, and keeps sessions and refresh state in its own memory, so a
+              user routed to another replica is signed out and that state is not shared. The gauge reads 0
+              from the first scrape of a replica that started in fallback, which no counter shows. Check
+              Valkey (its NetworkPolicy and AUTH password if A1.2 or A1.5 just rolled) and this pod's logs
+              for "in-memory fallback". Planned platform-wide rolls (A1.4, A1.5) run under a silence for
+              this alert.
+        # The transition. No `for:` - the 5m increase window IS the hold, and a fallback that already
+        # reconnected is still worth knowing about (it is the ONLY rule that sees a flap shorter than
+        # GatekeeperRedisDisconnected's 2m). A replica that started in fallback never fires this one
+        # (its first sample is already 1); that case is the rule above.
+        - alert: GatekeeperRedisFallbackEvent
+          expr: |
+            sum by (pod) (increase(gatekeeper_redis_fallback_total{job="gatekeeper"}[5m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "gatekeeper pod {{ $labels.pod }} fell back from Redis to in-memory in the last 5 minutes"
+            description: >-
+              gatekeeper_redis_fallback_total rose on pod {{ $labels.pod }} within 5 minutes: it switched
+              to its in-memory fallback (a failed connect, or a failed Redis operation). This is the
+              transition; GatekeeperRedisDisconnected is the state and fires only if the pod stays in
+              fallback for 2m, so a brief flap that already reconnected shows only here. See also
+              gatekeeper_redis_reconnections_total. Planned platform-wide rolls (A1.4, A1.5) run under a
+              silence for this alert.
+        # F-04. After AG1a the test-bypass track refuses a request carrying cf-ray, cf-connecting-ip or
+        # cdn-loop (Cloudflare adds them; a client cannot remove them) with the usual 401, WITHOUT
+        # comparing the token, and counts it. Any such request is either a client on the internet
+        # sending the bypass header, or an internal test client that now reaches gatekeeper through the
+        # edge. Summed over pods and tenants: one alert, and the dashboard's /auth outcomes panel splits
+        # it. The second branch (`unless ... last_over_time(... offset 15m)`) catches the first refusal on a pod,
+        # a series that does not exist until then; see the header.
+        - alert: StriveTestBypassFromEdge
+          expr: |
+            sum(increase(gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"}[15m])) > 0
+            or
+            count((gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"} > 0) unless (last_over_time(gatekeeper_auth_requests_total{job="gatekeeper",method="test_bypass",status="edge_refused"}[1h] offset 15m))) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "gatekeeper refused test-bypass requests that came through the Cloudflare edge"
+            description: >-
+              In the last 15 minutes gatekeeper counted a test-bypass request carrying a Cloudflare
+              header (cf-ray, cf-connecting-ip or cdn-loop) as edge_refused and answered 401 without
+              comparing the token. Either a client on the internet is sending the bypass header, or a
+              test client (Sentinel) now reaches Traefik through Cloudflare instead of in-cluster; in that
+              case its token has crossed the public edge. Plan A4.2 lists every path into Traefik.
+        # F-02, D2 = a. API keys are retired: AG1a sets API_KEYS_ENABLED=false, after which an
+        # X-API-Key is ignored and counted as status="disabled" (expected, so excluded here). Any other
+        # api_key status means a key was looked up on some pod (accepted, refused or rate limited):
+        # the flag is not false there (a rollback, a config drift), or the AG1a pin was reverted. The second
+        # branch (`unless ... last_over_time(... offset 15m)`) catches the first lookup on a pod: that child
+        # does not exist until then (see the header).
+        - alert: GatekeeperApiKeyUsed
+          expr: |
+            sum(increase(gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"}[15m])) > 0
+            or
+            count((gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"} > 0) unless (last_over_time(gatekeeper_auth_requests_total{job="gatekeeper",method="api_key",status!="disabled"}[1h] offset 15m))) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "gatekeeper looked up an API key although API keys are retired"
+            description: >-
+              In the last 15 minutes gatekeeper_auth_requests_total{method="api_key"} rose, or first
+              appeared, with a status other than `disabled`: an X-API-Key was validated (accepted or
+              refused), so API_KEYS_ENABLED is not false on at least one pod. Check the gatekeeper env on
+              every pod and that the AG1a pin is still live. The expected `disabled` status (a key sent
+              and ignored) does not page.
