@@ -120,16 +120,24 @@ see `docs/runbooks/openbao-estate-credentials.md`) and platform's `age1wuvg...` 
 
 ## Step 1 — generate the new key
 
-Use one shell for steps 1 to 6 (the variables carry over), from the main checkout:
+The rotation spans days and several PRs, so no single shell will last. Every step uses these variables; **paste this block at the
+top of each step in a fresh shell** (set `D` to the date of step 1; it re-derives everything from the files and prints STOP if the new key
+file is missing):
 
 ```bash
 cd <main checkout>/kubernetes/infra/_out
-D=$(date +%Y%m%d); OLD=age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
-WORK=$PWD/age-rotation-$D; umask 077; mkdir -p "$WORK"
-age-keygen -o age-$D.agekey 2>&1 | sed 's/^Public key: /new recipient: /'           # prints the public key only
+D=<yyyymmdd of step 1>; OLD=age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+WORK=$PWD/age-rotation-$D; NEWFILE=$PWD/age-$D.agekey; umask 077
+NEW=$(age-keygen -y "$NEWFILE" 2>/dev/null); [ -n "$NEW" ] || echo "STOP: $NEWFILE is missing or unreadable; do not continue (the loops would run with an empty recipient)"
+```
+
+Then, once, for step 1 itself (on this very first run the block above prints STOP until the key exists; run it again after `age-keygen`):
+
+```bash
+mkdir -p "$WORK"
+age-keygen -o age-$D.agekey 2>&1 | sed 's/^Public key: /new recipient: /'           # prints the public key only (re-run the block above afterwards)
 MSYS_NO_PATHCONV=1 icacls age-$D.agekey /inheritance:r /grant:r "$USERNAME:F"       # (or run icacls from PowerShell)
-NEWFILE=$PWD/age-$D.agekey; NEW=$(age-keygen -y "$NEWFILE")
-cp age.agekey age-old.agekey          # a plain backup of the old key for rollback; deleted in step 6
+[ -e age-old.agekey ] || cp age.agekey age-old.agekey     # a plain backup of the old key for rollback (never overwritten: a re-run would copy the merged file); deleted in step 6
 ```
 
 **Keep every fixed-path reader working through the whole rotation.** After step 5 the files open only with the new key, but
@@ -137,7 +145,7 @@ cp age.agekey age-old.agekey          # a plain backup of the old key for rollba
 make `age.agekey` hold **both** identities now (sops tries each line), and reduce it to the new key in step 6:
 
 ```bash
-cat age-old.agekey "$NEWFILE" > age.agekey.tmp && mv age.agekey.tmp age.agekey
+{ cat age-old.agekey; echo; cat "$NEWFILE"; } > age.agekey.tmp && mv age.agekey.tmp age.agekey
 ```
 
 Check: `SOPS_AGE_KEY_FILE=$PWD/age.agekey sops decrypt <any one file> >/dev/null` still exits 0. Rollback: `cp age-old.agekey age.agekey`.
@@ -149,11 +157,13 @@ The kustomize-controller reads every `*.agekey` key of the Secret. Build the Sec
 ```bash
 kubectl --context admin@ai -n flux-system create secret generic sops-age \
   --from-file=age.agekey=age-old.agekey --from-file=age-$D.agekey="$NEWFILE" --dry-run=client -o yaml \
-  | kubectl --context admin@ai apply -f -
+  | kubectl --context admin@ai replace -f -
+kubectl --context admin@ai -n flux-system get secret sops-age -o json | jq -r '.data | keys[]'     # exactly: age-<D>.agekey and age.agekey
 ```
 
-Check: the Secret has the two key **names** (`kubectl ... get secret sops-age -o json | jq -r '.data | keys[]'`), and every SOPS
-Kustomization stays Ready (the loop below, without the wait for a fresh reconcile). Rollback: re-apply with only the old key.
+`replace` writes the Secret wholesale, so a key that is not in the new object is gone (`apply` on a Secret that was applied by hand
+only removes keys when a last-applied annotation exists). Check: the key **names** above, and every SOPS Kustomization stays Ready
+(the loop of step 4, without the wait for a fresh reconcile). Rollback: replace with only the old key.
 
 ## Step 3 — add the new recipient next to the old one and re-key every file
 
@@ -162,7 +172,7 @@ Kustomization stays Ready (the loop below, without the wait for a fresh reconcil
    ```bash
    sed -i "s/^\( *age: \)$OLD\$/\1$OLD,$NEW/" .sops.yaml && grep -c "$NEW" .sops.yaml     # 7
    export SOPS_AGE_KEY_FILE=<main checkout>/kubernetes/infra/_out/age.agekey   # holds both identities since step 1
-   # run from the repository root; OLD, NEW, NEWFILE, WORK and D from step 1 must still be set
+   # paste the variable block of step 1 first (it sets OLD, NEW, NEWFILE, WORK, D), then cd to this repository's root
    git grep -l -E '^sops:' -- '*.sops.yaml' ':!*.example' | grep -v '^\.sops\.yaml$' > "$WORK/ailab-files.txt"; wc -l < "$WORK/ailab-files.txt"   # 73
    while read -r f; do sops updatekeys -y "$f" > /dev/null 2>&1 || echo "FAILED $f"; done < "$WORK/ailab-files.txt"
    ```
@@ -200,7 +210,8 @@ valid once step 3 has re-keyed every repository those Kustomizations read** (ste
 
 ```bash
 kubectl --context admin@ai -n flux-system create secret generic sops-age \
-  --from-file=age-$D.agekey="$NEWFILE" --dry-run=client -o yaml | kubectl --context admin@ai apply -f -
+  --from-file=age-$D.agekey="$NEWFILE" --dry-run=client -o yaml | kubectl --context admin@ai replace -f -
+kubectl --context admin@ai -n flux-system get secret sops-age -o json | jq -r '.data | keys[]'     # must print ONLY age-<D>.agekey: the proof the old identity is gone
 T=$(date +%s)
 for k in $(kubectl --context admin@ai -n flux-system get kustomization -o json | jq -r '.items[] | select(.spec.decryption.secretRef.name=="sops-age") | .metadata.name'); do
   kubectl --context admin@ai -n flux-system annotate --overwrite kustomization/$k reconcile.fluxcd.io/requestedAt="$T" > /dev/null
@@ -210,7 +221,7 @@ kubectl --context admin@ai -n flux-system get kustomization -o json | jq -r --ar
 ```
 
 Every row must read `<name>  <T>  true  True` (handled this reconcile, Ready). A Kustomization on a repository you did not re-key shows
-`False` with a decryption error: re-apply `sops-age` with both keys (the step 2 command) and finish step 3 for that repository.
+`False` with a decryption error: replace `sops-age` with both keys (the step 2 command) and finish step 3 for that repository.
 The Flux sources of this estate are the GitHub push-mirrors for ailab (interval 1 m) and platform (10 m); a re-keyed commit
 reaches the cluster after the mirror sync, so run step 4 after `lastAppliedRevision` of each Kustomization is the re-keying
 commit (`kubectl ... get kustomization <name> -o jsonpath='{.status.lastAppliedRevision}'`).
@@ -218,7 +229,9 @@ commit (`kubectl ... get kustomization <name> -o jsonpath='{.status.lastAppliedR
 ## Gate before step 5
 
 All of: every holder of step 0 updated or shown to use another recipient; the **new key has its offline and Vaultwarden
-copies** (the DR files are ciphertexts to it from step 5 on); step 4 green; no pending drill. Step 5 is the first step that
+copies** (the DR files are ciphertexts to it from step 5 on); **the Gitea Actions secret `SOPS_AGE_KEY`, if it holds this key, already
+carries the new key** (the owner sets it in the UI now: after step 3 every file accepts both recipients, so CI keeps working, but the
+step 5 PRs re-key the files to the new recipient only, and their own CI would fail with the old key in the secret); step 4 green; no pending drill. Step 5 is the first step that
 cannot simply be undone by editing `.sops.yaml`.
 
 ## Step 5 — remove the old recipient and rotate each file's data key
@@ -246,17 +259,19 @@ is archived (below); restore it temporarily with `age -d -i <new key> _out/age-r
    cd <main checkout>/kubernetes/infra/_out
    cp "$NEWFILE" age.agekey.tmp && mv age.agekey.tmp age.agekey              # CLAUDE.md, README.md and tooling stay true
    kubectl --context admin@ai -n flux-system create secret generic sops-age --from-file=age.agekey=age.agekey --dry-run=client -o yaml \
-     | kubectl --context admin@ai apply -f -
+     | kubectl --context admin@ai replace -f -
+   kubectl --context admin@ai -n flux-system get secret sops-age -o json | jq -r '.data | keys[]'     # must print only age.agekey
    ```
 
-   Re-run the annotate-and-check part of step 4 (not its `create secret`): all Ready. Update the Gitea `SOPS_AGE_KEY` secret if it held this key (owner, UI), the offline and
-   Vaultwarden copies, and `~/work/keys/age.agekey` (or delete it per `openbao-estate-credentials.md`).
+   Re-run the annotate-and-check part of step 4 (not its `create secret`): all Ready. The Gitea `SOPS_AGE_KEY` secret was already moved at the gate before step 5. Update `~/work/keys/age.agekey` (or delete it per
+   `openbao-estate-credentials.md`) and confirm the offline and Vaultwarden copies hold the new key.
 2. Archive the old key encrypted to the **new** recipient, verify it, then delete the plaintext:
 
    ```bash
    age -r "$NEW" -o age-retired-$D.agekey.age age-old.agekey
    [ "$(age -d -i age.agekey age-retired-$D.agekey.age | sha256sum | cut -c1-12)" = "$(sha256sum < age-old.agekey | cut -c1-12)" ] && echo "archive verified"
-   rm -f age-old.agekey "$WORK/unrelated.agekey"      # on an SSD a delete is not an erase; the archive is the only recoverable copy
+   cmp -s "$NEWFILE" age.agekey && rm -f "$NEWFILE"     # the new key must not exist twice in plaintext (age.agekey is the one copy)
+   rm -f age-old.agekey && rm -rf "$WORK"               # on an SSD a delete is not an erase; the archive is the only recoverable copy
    ```
 
 ## Rollback summary
@@ -264,9 +279,9 @@ is archived (below); restore it temporarily with `age -d -i <new key> _out/age-r
 | After | Undo |
 | --- | --- |
 | step 1 | `cp age-old.agekey age.agekey`; delete the new key file |
-| step 2 | re-apply `sops-age` with the old key only |
+| step 2 | replace `sops-age` with the old key only |
 | step 3 | `sops rotate -i --rm-age <new>` per file, or remove the new recipient from `.sops.yaml` and `updatekeys` (no `git revert`) |
-| step 4 | re-apply `sops-age` with both keys |
+| step 4 | replace `sops-age` with both keys |
 | step 5 | the old key still exists (`age-old.agekey`, then the archive): re-add it with `sops updatekeys -y` after listing both recipients again |
 | step 6 | restore the old key from the archive with the new key; the old recipient must be re-added to every file first |
 
@@ -317,20 +332,25 @@ control planes. Never touch `admin@ai` for this.
 
 1. **Build** a 3-CP Talos 1.11.2 cluster (the `kubernetes/infra/` module with a different state and names, or `talosctl cluster create` if it runs here) with a workload that
    authenticates by TokenReview (a copy of the gatekeeper pattern), a projected-token consumer and one legacy token Secret.
-2. **Make the verifier set explicit and independent of the signer, with BOTH public keys, on every control plane.** By default the kube-apiserver
-   verifies with the public half of the key in `cluster.serviceAccount.key`, the same key that signs, so changing that key in step 3 would silently
-   swap the old verifier for the new one and invalidate every old token at once. Break that coupling first. Generate the new RSA key, extract the **old** and the **new**
-   public keys into two files, mount both into the kube-apiserver (`cluster.apiServer.extraVolumes`, from a path on the node) and list **both** as
-   `--service-account-key-file` (`cluster.apiServer.extraArgs`). The rehearsal must settle two Talos questions, because the answer decides the patch: does an `extraArgs` entry for
-   `service-account-key-file` *replace* Talos's own value or add to it, and how is a repeated flag expressed (a comma-joined value or, on newer Talos, a list). Either way, list OLD and NEW
-   explicitly so that the verifier set no longer follows the signer. Apply to one CP at a time. Check on **each** control plane (address each CP's API server directly, not the VIP):
-   a TokenReview of an old token (a projected token and a legacy Secret token taken before the change) is `authenticated`; the apiserver's flags show both files; `/openid/v1/jwks` lists both keys (if it does).
+2. **Make the verifier set contain BOTH public keys, independently of the signer, on every control plane.** By default the kube-apiserver verifies with
+   the public half of the key in `cluster.serviceAccount.key`, the same key that signs, so changing that key in step 3 would silently swap the old verifier for the
+   new one and invalidate every old token at once. Break that coupling first. Generate the new RSA key. Two ways to try, **in this order** (both UNVERIFIED, the rehearsal's job):
+   - **(a) A PEM bundle in `cluster.serviceAccount.key`.** kube-apiserver's `--service-account-key-file` accepts a PEM file with several keys (all become verifiers),
+     while `--service-account-signing-key-file` uses the **first** private key. Appending the new private key as a second block makes it a verifier without changing the
+     signer, and reordering the blocks later switches the signer. Prove that Talos accepts a two-block value and writes it unchanged to the file both flags read, and that the
+     apiserver then verifies with both.
+   - **(b) Explicit flags and files:** mount the old and the new public key files (`cluster.apiServer.extraVolumes`) and list both as `--service-account-key-file`
+     (`cluster.apiServer.extraArgs`). Talos may **reject** an `extraArgs` entry that duplicates a flag it sets itself (and this flag is one it sets), and a repeated flag may need a
+     comma-joined value or, on newer Talos, a list: settle both on the rehearsal cluster before relying on this path.
+
+   Apply to one CP at a time. Check on **each** control plane (address each CP's API server directly, not the VIP): a TokenReview of an old token (a projected token and a legacy Secret
+   token taken before the change) is `authenticated`; the apiserver's arguments or key files show both keys; `/openid/v1/jwks` lists both keys (if it does).
 3. **Switch the signer.** Change `cluster.serviceAccount.key` to the new key (one CP at a time). The verifier set from step 2 is unchanged by this, so old and new tokens
    both verify throughout the roll. Check after each CP: etcd 3/3; a freshly created TokenRequest has the new `kid`; a TokenReview of an **old-signed** token is still `authenticated` on **every**
    control plane, the one just switched included, and so is a TokenReview of a new-signed token on each of them; the consumer's projected token refreshes and keeps working.
 4. **Keep the old verifier until every token it signed has been replaced:** projected tokens within about an hour; legacy Secrets never (re-issue them: delete and
-   recreate the Secret, re-run the consumers' renderers). Only then remove **the OLD public key specifically** from the `--service-account-key-file` list and its volume (leave the new one;
-   do not just drop "the second file"), one CP at a time, and check that an old-signed TokenReview is now `authenticated: false` and a new-signed one still `true` on each.
+   recreate the Secret, re-run the consumers' renderers). Only then remove **the OLD key specifically** (its block in the bundle, or its file and volume in the flag list; leave the new one;
+   do not just drop "the second entry"), one CP at a time, and check that an old-signed TokenReview is now `authenticated: false` and a new-signed one still `true` on each.
 5. **Record the result in this runbook and in the plan's A5.7 note**: the exact `talosctl` and machine-config patches that worked, the measured downtime per CP and for the
    workload, what had to be re-issued, and where the new key was written (tfstate and the DR bundle). Or the recorded finding that it cannot be done without
    downtime and why.
@@ -394,7 +414,9 @@ timeout (30 days by the seed), and a remember-me session lives as long as its ow
 ## Steps
 
 1. **Add a passive RSA signing provider.** Add provider `rsa-generated` named `rsa-<date>`, key size 2048, algorithm RS256, `active = false`, `enabled = true`, priority higher than the current one's (the
-   Providers tab shows it). Check: `.../protocol/openid-connect/certs` lists **both** RS256 kids (UNVERIFIED for this Keycloak build; checked here). **Wait at least 16 minutes**:
+   Providers tab shows it). Check: `.../protocol/openid-connect/certs` lists **both** RS256 kids. Keycloak documents a passive key as verify-only, so it should be listed, but this build has **not** been observed doing it (the
+   realm has only ever had active keys): confirm it **before** waiting. If a passive key is not published, gatekeeper's cache refresh brings nothing in and step 2 produces unknown-kid refetches instead (still safe: a real new kid does not
+   arm the cooldown, but the first tokens after step 2 pay a refetch). **Wait at least 16 minutes**:
    gatekeeper's 900 s cache refresh, not an unknown-kid refetch, brings the new kid in, so the cooldown cannot interfere (a real new kid does not arm it, but waiting removes the question).
 2. **Make it active.** `active = true` on `rsa-<date>` (higher priority wins). New tokens carry the new `kid`; the old key keeps verifying everything it signed.
 3. **Add the refresh-token and cookie keys.** Add new `hmac-generated-hs512` and `aes-generated` providers with a higher priority than the current ones; keep the old ones **enabled** for the retention above, so
