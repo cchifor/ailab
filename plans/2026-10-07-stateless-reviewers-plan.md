@@ -36,6 +36,29 @@ claude p90 enqueue-to-posted 6.8 min, codex 0.8 min; merges wait for both.
 | **A create whose client timed out still lands** (5/5, 0.2 s later) | Spike 3 |
 | **No immutable PR diff over the API** (compare returns no files; web `.diff` needs a browser session) | Spike 3 |
 | **A review POST with an invalid inline position returns 500 and leaves an empty PENDING review that the next POST by the same account absorbs** | Spike 3 (primes-lab#18, closed) |
+| A reviewer bot's PAT (`reviewer-claude`, `write:repository`) fetches `refs/pull/<n>/head` + base as a partial clone; `merge-base` + `diff` work with lazy blob fetches | Spike 4 (on `ailab`, read-only) |
+
+**Facts measured on GitHub** (`cchifor/reviewer`, user token via `gh`; `scripts/spikes/reviewbot-coord-github.py`):
+
+| Fact | Evidence |
+| --- | --- |
+| Tag object + `POST /git/refs`: exactly one `201`, the rest `422 Reference already exists`; **on GitHub the `201` caller is the owner** (its object is the ref target and its nonce reads back) | 5 × 8-way staggered rounds |
+| Same tag-object payload (incl. `tagger.date`) → same SHA; a different date → a different SHA; `tagger.date` is kept as supplied | Spike 4 |
+| Lightweight ref create 201, duplicate 422; exact read of a missing ref (`GET /git/ref/tags/<name>`) 404 | Spike 4 |
+| `GET /git/matching-refs/tags/<prefix>` returned all 300 refs, no `Link` header | Spike 4 |
+| PR check runs attach to the **head commit** (none on the test merge commit); the combined status of that head is `pending` with `total_count 0` although a check run passed | Spike 4 |
+| A conditional `GET` answered 304 leaves `X-RateLimit-Remaining` unchanged; headers `X-RateLimit-Limit/Remaining/Reset/Resource/Used` | Spike 4 |
+| `git fetch refs/pull/<n>/head` over HTTPS with the token, then a local `merge-base` + `diff` | Spike 4 |
+| `mergeable` read immediately after PR creation is `null`; `mergeable_state: clean` after CI | Spike 4 |
+| A review with an unresolvable line → `422 Line could not be resolved`; **nothing is left behind** (definitive) | Spike 4 |
+| One pending review per user per PR; while it exists **every new review POST is refused** (`422 User can only have one pending review per pull request`) — GitHub blocks, where Gitea absorbs | Spike 4 |
+| Approving one's own PR → `422` | Spike 4 |
+| `PUT /merge` with a stale `sha` → `409 Head branch was modified`; with the head `sha` → merged | Spike 4 |
+| **Incident during the spike:** after one `git push` of 300 tags, the repository answered issue/PR writes (REST and GraphQL) and `git push` ref updates with `500` for about 20 minutes; API ref create/delete and all reads kept working (GitHub request ids `0787:358C89:2514799:24E4804:6AC6605D`, `D9A0:238AF4:23E036F:23B0E4B:6AC6605F`). Consequence: the coordination repository is written only through the paced API, never by bulk pushes, and a forge write error fails closed | Spike 4 |
+
+Not measured: GitHub App installation tokens and whether an App APPROVE counts toward required
+reviews (no App available; a user cannot approve its own PR); Gitea ownership races with a reviewer
+bot's token (the bots have no access to `primes-lab`). These remain Phase 0 items.
 
 Review trail: `…-review-r1-fable.md`, `…-review-r1-codex.md`, `…-review-r2.md`, `…-review-r3.md`,
 `…-review-r4.md`, `…-review-a1.md`, `…-review-a2.md`, `…-review-a3.md`, `…-review-a4.md`
@@ -64,7 +87,7 @@ repository; no state crosses forges.
 | List reviews | paginate to the empty page (no cap); a failed page fails the read | same with `Link` |
 | Review diff | **local git** (section 6) | **local git** (section 6) |
 | Post review | `{commit_id, event: APPROVED\|COMMENT, body, comments[{path, new_position\|old_position}]}` | `{commit_id, event: APPROVE\|COMMENT, body, comments[{path, line, side: RIGHT\|LEFT}]}` |
-| Definitive POST failure | 4xx (an invalid position answers **500**: not definitive) | 4xx incl. 422 (nothing is created) |
+| Definitive POST failure | 4xx (an invalid position answers **500** and leaves a pending review: not definitive) | 4xx incl. 422 (measured: nothing is created) |
 | CI green | combined status `success`, non-empty | ≥ 1 check run or status; check runs paginated, all `completed` with `success`/`neutral`/`skipped`; statuses `success`, or none only if check runs exist; required names from `GET /rules/branches/{b}` present and green |
 | Merge | `POST /merge {Do: merge, head_commit_id}` | `PUT /merge {sha, merge_method}`; merge-queue repositories: review and approve only |
 | Webhook | `X-Gitea-Signature` (hex HMAC-SHA256) | `X-Hub-Signature-256: sha256=<hex>`; actions `opened, reopened, synchronize, ready_for_review, edited, labeled, review_requested, converted_to_draft, closed` |
