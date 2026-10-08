@@ -31,16 +31,25 @@ stringData:
     token: ENC[AES256_GCM,data:4z0wpfHQp7znzV23I66w4jo2W8AUDJX2wvnWAHtht7dRYQw1cbe1tn5DRlAn3lS8,iv:GWcn5/rWtglJAIx7isKGkpcL5qL6OD3lYFVlYiwrtEg=,tag:VefSZ6I70BqYI7a3OujFNg==,type:str]
 sops:
     age:
-        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
-          enc: |
+        - enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBWRjhOa2lodnJhNGl3emp4
-            UHZaSmQwcGhTYXc0U2Y4Tm05d29vK3hQdTJvCnExMUhCcEkrWmJOaUhXL1RCYUM2
-            VFc3K3I1aGcvNzV3eks1ZTJxK25rRnMKLS0tIEFJMnUxRXVGbC8vYmlKclhrSDBy
-            aG1FLy9CWERDTld6MEZOcUFzWU1lTk0KkxrM9k8Hx1MV4Sfq3V3RpiC2+0pWD/AP
-            4izlo5MRNYQTo1kv9XU6QR7NuceulEOBmDCgJ37WjYmJBnjNUh5aKw==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBVUDNwaDVYd1VtUFNnU2V2
+            YXBCOHNOQnNVYWtYUmZUWHNUNzlYcVdNa2lZCkpXalZidmhsRFMwZzhzRU93OUJZ
+            WGpmd0Q5T1NZYnM0SmY2U1ZxWlBuK3cKLS0tIDJJenpqaXcyV3lqaVk5NDRvZURF
+            eWRNZ2V5Y1JIWDdXd21YN0hPM21ZZGMKvexms3IiFAU8Ihtv1a5QhyADAuI6vaQV
+            0vMdKJ4prls9GSZWnK4G2RSPB5ei5kTU5s1KyK0AYhBOviaDagqyCQ==
             -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBubFZ6eHFJRHk3NEgxZkhm
+            M0pMYTBkK09JclpTWGY2RkJNTWsxUnhoRjBrCkFhRU81blJqQ3NWOW9RZHhuOWM4
+            N3hmTEYvejlXVy9la0VONVZWS3J5YW8KLS0tIFl2clBPcFRpaDhPV0hNOVVTZHNs
+            cGJkUHdRcTAwaTJST2NQUzY3eFB6ajgK1Y4niLfk/2a6dNG66LxYpi7DY2Y5F9aV
+            rjp5qKnQ6Efat5hAI6BN0SEjXHzkFNdRODuCskIVK8I9vQCAayM66Q==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+    encrypted_regex: ^(data|stringData)$
     lastmodified: "2026-09-11T16:50:12Z"
     mac: ENC[AES256_GCM,data:oesBtlei/sGkK2vPK3VxazkBuVHep1KbkSNgsv9T8Se9oioXFnHVMTj+Y61Mi6Q67mey7b2ynYx3B8PNHTe1wLTWFwUNIrztObnLBDf4jJLwyUbyD2af2fKS0l5c8bhzrNSEmFUKJwy/0zuL036vC5BqpTtwIvy+xB8ofTRJz2Q=,iv:0v8C1ks3g5SVi83FkGRjv0d6EnBsOB7GlMyWKFW6iZE=,tag:mYBz1SaKmE81Op2A0JtUKw==,type:str]
-    encrypted_regex: ^(data|stringData)$
     version: 3.12.2
