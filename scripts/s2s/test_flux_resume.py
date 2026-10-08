@@ -187,6 +187,8 @@ def fake_kubectl(argv):
             return _out("%s|%d|%d|%s|True|GitRepository|flux-system|%s" % ("true" if suspended else "false", gen, observed, applied, src_name))
         if args[0] == "patch" and kind == "kustomization":
             assert '"suspend":false' in args[-1]
+            # What platform-secrets had applied when platform-app was resumed (#1162 review).
+            st["secrets_at_app_patch"] = st.get("secrets", {}).get("applied", rev(OLD))
             st["ks_suspended"] = False
             return _out("kustomization.kustomize.toolkit.fluxcd.io/platform-app patched\n")
         if args[0] == "get" and kind == "kustomization":
@@ -558,9 +560,10 @@ class FluxResume(unittest.TestCase):
         # values landed first, the ten services would present preshared secrets to a registry that still
         # has no entry for them. The script resumes platform-secrets first and requires it to apply the
         # target before platform-app moves.
-        self.state(secrets={"suspended": True, "after": 2})
+        self.state(secrets={"suspended": True, "after": 3})
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 0, text)
+        self.assertEqual(self.final()["secrets_at_app_patch"], rev(TARGET))
         sec_patch = self.index("patch", "kustomization/" + SECRETS)
         sec_last_get = self.last("get", "kustomization/" + SECRETS)
         app_patch = self.index("patch", "kustomization")
@@ -571,10 +574,14 @@ class FluxResume(unittest.TestCase):
         self.assertIn("RESUMED", text)
 
     def test_suspended_secrets_are_landed_first_in_every_mode(self):
-        self.state(secrets={"suspended": True})
+        # Review of #1162 round 2 (both reviewers): the wait must not depend on re-reading the suspend
+        # field after the un-suspend. The secrets apply only on the third poll here, so a skipped wait
+        # resumes platform-app before they land.
+        self.state(secrets={"suspended": True, "after": 3})
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 0, text)
         self.assertLess(self.last("get", "kustomization/" + SECRETS), self.index("patch", "kustomization"))
+        self.assertEqual(self.final()["secrets_at_app_patch"], rev(TARGET))
 
     def test_secrets_that_never_apply_stop_before_platform_app(self):
         self.state(secrets={"suspended": True, "applies": False})

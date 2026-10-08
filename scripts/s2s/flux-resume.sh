@@ -305,7 +305,10 @@ echo "source at $ART"
 
 wait_until secrets_read || stop "cannot read Kustomization $FLUX_NS/$SECRETS (${TIMEOUT}s)" \
   "Nothing was resumed: the Kustomization and the HelmRelease stay suspended. Re-run once the API answers."
-if [[ ${SECRETS_STATE%%|*} == true ]]; then
+# Read once, before the patch: secrets_generation refreshes SECRETS_STATE, whose suspend then reads false.
+SECRETS_WAS_SUSPENDED=0
+[[ ${SECRETS_STATE%%|*} == true ]] && SECRETS_WAS_SUSPENDED=1
+if ((SECRETS_WAS_SUSPENDED)); then
   step "1b. Kustomization $FLUX_NS/$SECRETS (frozen with the release): resume it first, then require it applied $SHA"
   f patch kustomization "$SECRETS" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
   wait_until secrets_generation || stop "cannot read Kustomization $FLUX_NS/$SECRETS after its resume (${TIMEOUT}s)" \
@@ -313,7 +316,7 @@ if [[ ${SECRETS_STATE%%|*} == true ]]; then
 elif [[ $MODE == config ]]; then
   step "1b. Kustomization $FLUX_NS/$SECRETS: a config change lands its Secrets first; require it applied $SHA"
 fi
-if [[ ${SECRETS_STATE%%|*} == true || $MODE == config ]]; then
+if ((SECRETS_WAS_SUSPENDED)) || [[ $MODE == config ]]; then
   f annotate kustomization "$SECRETS" --overwrite "reconcile.fluxcd.io/requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
   wait_until secrets_applied || stop "Kustomization $FLUX_NS/$SECRETS reads '${SECRETS_STATE:-?}' (suspend|generation|observedGeneration|lastAppliedRevision|Ready), not applied main@sha1:$SHA past generation $SECRETS_GEN, after ${TIMEOUT}s" \
     "platform-app and the HelmRelease stay suspended: values must not land before the Secrets they rely on. Investigate $SECRETS."
