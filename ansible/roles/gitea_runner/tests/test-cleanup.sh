@@ -102,7 +102,9 @@ case "\$*" in
     echo "\$st"; [ "\$st" = active ] && exit 0 || exit 3 ;;
   *MainPID*)
     [ "\${MOCK_SYSTEMCTL_FAIL:-0}" = 1 ] && exit 1
-    echo "\${MOCK_MAINPID:-4242}" ;;
+    # A stopped unit has MainPID 0, as the real one does — the heal re-reads idle with it stopped.
+    st="\$(cat "$WORK/runner.state" 2>/dev/null)"; st="\${st:-active}"
+    if [ "\$st" = active ]; then echo "\${MOCK_MAINPID:-4242}"; else echo 0; fi ;;
   *"restart docker.service"*)
     echo "systemctl \$*" >> "$CALLS"; : > "$WORK/phase.dockerrestart"; exit "\${MOCK_DOCKER_RESTART_RC:-0}" ;;
   *stop*gitea-act-runner*)
@@ -144,6 +146,9 @@ case "\$*" in
     # MOCK_PEER_BUSY_FROM=<phase>: the peer starts a job once the script reaches that phase.
     [ -n "\${MOCK_PEER_BUSY_FROM:-}" ] && [ -f "$WORK/phase.\$MOCK_PEER_BUSY_FROM" ] && { echo 5150; exit 0; }
     exit 1 ;;
+  # Like the real one, pgrep -P 0 matches init and kthreadd: a script that probed a stopped unit's
+  # MainPID 0 would read it as busy forever. (No backticks in this heredoc: it is unquoted.)
+  "-P 0") echo 1; exit 0 ;;
 esac
 if [ -n "\${MOCK_BUSY_FROM:-}" ]; then
   [ -f "$WORK/phase.\$MOCK_BUSY_FROM" ] && { echo 4243; exit 0; }
@@ -611,9 +616,18 @@ check "N7: ...and the sweep runs" swept
 dangle; MOCK_DOCKER_RESTART_RC=1 run_beacon 0 50
 check "N8: a failed docker restart still gets the runner running again" \
   'calls_has "systemctl start --no-block gitea-act-runner.service" && [ "$(cat "$WORK/runner.state")" = active ]'
-check "N8: the surviving record is reported, recorded as failed, and the attempt counts" \
-  '[ "$(heal_field dangling_record)" = 1 ] && [ "$(state_val failed_record)" = "$Y" ] && [ "$(heal_field heals_total)" = 1 ]'
+# The step believed to release the record never happened, so this is NOT a record that survived a
+# heal: no builder prune, no failed_record, and the cooldown (not a permanent block) governs the retry.
+check "N8: ...no builder prune and NOT recorded as failed (retried after the cooldown)" \
+  '! grep -qE "docker builder prune -af *$" "$CALLS" && [ -z "$(state_val failed_record)" ]'
+check "N8: the record stays reported and the attempt counts" \
+  '[ "$(heal_field dangling_record)" = 1 ] && [ "$(heal_field heals_total)" = 1 ] && [ -n "$(state_val last_heal)" ]'
 check "N8: runner_held is released once the runner is seen active" '[ "$(heal_field runner_held)" = 0 ]'
+
+# A FULL heal (restart succeeded) that leaves the record listed is the case failed_record is for.
+dangle; run_beacon 0 50
+check "N8b: a record still listed after the full heal is recorded as failed (never retried)" \
+  'heal_ran && grep -qE "docker builder prune -af *$" "$CALLS" && [ "$(state_val failed_record)" = "$Y" ] && [ "$(heal_field dangling_record)" = 1 ]'
 
 # A runner someone else stopped stays stopped: the heal only restarts what it stopped itself.
 dangle; MOCK_RUNNER_STATE=inactive MOCK_DU_CLEARS=1 run_beacon 0 50
@@ -642,6 +656,8 @@ dangle; MOCK_STOP_FAIL=1 run_beacon 0 50
 check "N11: runner still active after the stop -> no image prune, no docker restart" \
   '! heal_ran && ! grep -qE "docker image prune -af *$" "$CALLS"'
 check "N11: ...the record stays reported" '[ "$(heal_field dangling_record)" = 1 ]'
+check "N11: ...the cooldown is kept (an unstoppable runner is not drained every tick) and runner_held released" \
+  '[ -n "$(state_val last_heal)" ] && [ "$(state_val runner_held)" = 0 ]'
 
 # SIGKILL skips every trap: a later invocation must start the runner from the persisted marker alone.
 # --recover-runner is what the unit's ExecStopPost runs; it must touch nothing else.
@@ -693,10 +709,14 @@ dangle; MOCK_PEER_BUSY_FROM=runnerstop run_beacon 0 50
 check "N17: a peer job starting during the stop -> no image prune, no docker restart" \
   '! heal_ran && ! grep -qE "docker image prune -af *$" "$CALLS"'
 check "N17: ...and the runner is started again" '[ "$(cat "$WORK/runner.state")" = active ]'
+check "N17: ...nothing destructive ran, so the cooldown is given back and runner_held released" \
+  '[ "$(state_val last_heal)" = 0 ] && [ "$(state_val heals_total)" = 0 ] && [ "$(state_val runner_held)" = 0 ]'
 
 dangle; MOCK_PEER_BUSY_FROM=image run_beacon 0 50
 check "N18: a peer job starting during the image prune -> no docker restart" '! heal_ran && grep -qE "docker image prune -af *$" "$CALLS"'
 check "N18: ...and the runner is started again" '[ "$(cat "$WORK/runner.state")" = active ]'
+check "N18: ...the image prune ran, so the cooldown is kept; runner_held released" \
+  '[ -n "$(state_val last_heal)" ] && [ "$(state_val runner_held)" = 0 ]'
 
 # state_set must not report success when the final rename fails (its temp file was complete).
 dangle; MOCK_MV_FAIL=1 run_beacon 0 50

@@ -331,20 +331,23 @@ recover_runner() {
   esac
 }
 
-# Is Y (arg 1) a live record in dockerd's BuildKit? 0 = listed, 1 = not listed, 2 = could not read.
-record_listed() {
-  local live rc
-  live="$(timeout -k 10 120 docker builder du --verbose 2>/dev/null)" || return 2
+# BuildKit's live record list, printed; non-zero when it cannot be read.
+buildkit_records() { timeout -k 10 120 docker builder du --verbose 2>/dev/null; }
+
+# Is Y (arg 1) a record in the listing (arg 2)? 0 = listed, 1 = not listed, 2 = matcher error.
+record_in() {
+  local rc
   # A here-string, not `printf | grep -q`: under pipefail an early-exiting grep -q can SIGPIPE the
   # writer on a large listing, and that 141 would read as "not listed".
-  grep -qE "^ID:[[:space:]]+$1[[:space:]]*$" <<< "$live"; rc=$?
+  grep -qE "^ID:[[:space:]]+$1[[:space:]]*$" <<< "$2"; rc=$?
   case "$rc" in 0 | 1) return "$rc" ;; *) return 2 ;; esac
 }
 
 # Print "Y X" for the first journal pair whose Y BuildKit still lists. 0 = found, 1 = none, 2 = a read
-# failed. Every pair in the window is checked, so healed pairs cannot crowd out a live one.
+# failed. Every pair in the window is checked against ONE listing, so healed pairs cannot crowd out a
+# live one and a long journal does not mean a long run.
 find_dangling() {
-  local since journal pairs y x rc
+  local since journal pairs live y x rc
   since=$(( $(date +%s) - HEAL_LOOKBACK_SEC ))
   journal="$(timeout -k 10 60 journalctl -u docker.service --since "@$since" --no-pager -o cat 2>/dev/null)" || return 2
   # \1: the snapshot reported missing must be the X being committed — anything else is another failure.
@@ -352,8 +355,9 @@ find_dangling() {
     | sed -n 's/.*failed to commit \([a-z0-9][a-z0-9]*\) to \([a-z0-9][a-z0-9]*\) during finalize: .*snapshot \1 does not exist: not found.*/\2 \1/p' \
     | sort -u)" || return 2 # a failed parse is unknown, not "none" (pipefail carries the status)
   [ -n "$pairs" ] || return 1
+  live="$(buildkit_records)" || return 2
   while read -r y x; do
-    record_listed "$y"; rc=$?
+    record_in "$y" "$live"; rc=$?
     case "$rc" in
       0) printf '%s %s\n' "$y" "$x"; return 0 ;;
       1) : ;;
@@ -381,11 +385,27 @@ heal_start_runner() {
   systemctl start --no-block "$SERVICE" >/dev/null 2>&1 || log "heal: FAILED to queue a start of $SERVICE (runner_held stays set; the next tick retries)"
 }
 
-# heal_dangling_record <Y> <X>, after wait_for_gap. 0 = Y is gone afterwards; 1 = the heal ran or
-# started and Y is still listed (or the stop could not be confirmed); 2 = ran, could not verify;
-# 3 = did not start (runner in transition, or the attempt could not be persisted).
+# Every non-trap exit of a heal: queue the start, give it a bounded chance to be seen, and release
+# runner_held as soon as it is (recover_runner). Whatever is still pending, the next tick covers.
+heal_release_runner() {
+  local i=0
+  heal_start_runner
+  trap - EXIT TERM INT
+  [ "$(state_get runner_held)" = 1 ] || return 0
+  while [ "$i" -lt 120 ]; do
+    case "$(systemctl is-active "$SERVICE" 2>/dev/null)" in active | failed) break ;; esac
+    sleep 1; i=$(( i + 1 ))
+  done
+  recover_runner
+}
+
+# heal_dangling_record <Y> <X>, after wait_for_gap. 0 = Y is gone afterwards; 1 = Y is still listed
+# after the full heal, or the heal stopped part-way; 2 = could not finish or verify (the docker restart
+# failed, or the listing is unreadable) — retried after the cooldown; 3 = did not start (an earlier
+# recovery pending, runner in transition, the attempt not persistable), or stopped before anything
+# destructive with the cooldown given back.
 heal_dangling_record() {
-  local y="$1" x="$2" st i
+  local y="$1" x="$2" st live prev_last prev_total
   # An earlier heal's recovery is still pending (recover_runner ran at the top of this tick and has not
   # seen the runner active). This heal would see that runner stopped, take it for an operator's, and
   # overwrite the marker that keeps it being restarted. The marker wins; the alert covers the wait.
@@ -402,6 +422,7 @@ heal_dangling_record() {
   # Persist the attempt BEFORE anything changes: the cooldown has to hold on exactly the paths where
   # this run never reaches its end (SIGTERM at TimeoutStartSec, SIGKILL), and runner_held is what lets
   # a later invocation recover a runner this one stopped.
+  prev_last="$last_heal"; prev_total="$heals_total"
   if ! state_set last_heal "$(date +%s)" heals_total "$(( heals_total + 1 ))" runner_held "$heal_owned"; then
     heal_owned=0
     log "heal: cannot persist the attempt to $HEAL_STATE -> not healing (no cooldown and no runner recovery without it)"
@@ -423,53 +444,55 @@ heal_dangling_record() {
     case "$st" in
       inactive | failed) : ;;
       *)
+        # The cooldown is KEPT here: a runner that does not stop would otherwise be drained (taken out
+        # of the pool for up to 10 minutes) on every tick.
         log "heal: $SERVICE is '${st:-unreadable}' after the stop -> NOT touching docker"
-        heal_start_runner; trap - EXIT TERM INT
+        heal_release_runner
         return 1 ;;
     esac
   fi
   # The gap was confirmed before a stop that can drain for 10 minutes, so it is re-read before each
-  # destructive step. Our runner is stopped by now, so these reads see the co-located peer only.
+  # destructive step. Our runner is stopped by now (its MainPID reads 0, which any_job_running takes as
+  # "no job of ours"), so these reads see the co-located peer only.
   if ! idle_confirmed; then
+    # Nothing destructive has run, so the cooldown is given back: the next gap retries.
     log "heal: the co-located runner started a job during the stop -> NOT touching docker"
-    heal_start_runner; trap - EXIT TERM INT
-    return 1
+    state_set last_heal "$prev_last" heals_total "$prev_total" || true
+    heals_total="$prev_total"
+    heal_release_runner
+    return 3
   fi
   # The order is the one that worked by hand: image prune, then the restart, then the builder prune.
   log "heal: dangling BuildKit record $y (snapshot $x missing): image prune -af, restart docker, builder prune -af"
   timeout -k 30 600 docker image prune -af >/dev/null 2>&1 || log "heal: image prune did not finish cleanly"
   if ! idle_confirmed; then
     log "heal: the co-located runner started a job during the image prune -> NOT restarting docker"
-    heal_start_runner; trap - EXIT TERM INT
+    heal_release_runner
     return 1
   fi
-  timeout -k 30 300 systemctl restart docker.service >/dev/null 2>&1 || log "heal: restarting docker.service FAILED"
+  # A failed restart means the step believed to release the record never happened: no builder prune,
+  # and NOT failed_record (that is for a record that survives the whole heal) — the cooldown retries it.
+  if ! timeout -k 30 300 systemctl restart docker.service >/dev/null 2>&1; then
+    log "heal: restarting docker.service FAILED -> skipping the builder prune; retried after the cooldown"
+    heal_release_runner
+    return 2
+  fi
   if ! idle_confirmed; then
     log "heal: the co-located runner started a job during the docker restart -> NOT running the builder prune"
-    heal_start_runner; trap - EXIT TERM INT
+    heal_release_runner
     return 1
   fi
   timeout -k 30 600 docker builder prune -af >/dev/null 2>&1 || log "heal: builder prune did not finish cleanly"
-  heal_start_runner
-  trap - EXIT TERM INT
-  # Give the start a bounded chance to be seen; recover_runner clears the marker once it is active,
-  # and the next tick keeps trying if it is not.
-  if [ "$(state_get runner_held)" = 1 ]; then
-    i=0
-    while [ "$i" -lt 120 ]; do
-      case "$(systemctl is-active "$SERVICE" 2>/dev/null)" in active | failed) break ;; esac
-      sleep 1; i=$(( i + 1 ))
-    done
-    recover_runner
-  fi
-  record_listed "$y"
+  heal_release_runner
+  live="$(buildkit_records)" || { log "heal: cannot list BuildKit records to verify the heal"; return 2; }
+  record_in "$y" "$live"
   case $? in
     1) return 0 ;;
     0)
       state_set failed_record "$y" || true
       log "heal: record $y is STILL listed after the heal -> it will not be retried automatically"
       return 1 ;;
-    *) log "heal: cannot list BuildKit records to verify the heal"; return 2 ;;
+    *) log "heal: cannot match BuildKit records to verify the heal"; return 2 ;;
   esac
 }
 
