@@ -31,7 +31,7 @@ OUT="$ROOT/_out"; BIN="$ROOT/bin"; mkdir -p "$OUT" "$BIN"
 touch "$OUT/talosconfig"
 
 # One talosctl stub, installed under every versioned name. It logs every call, answers
-# `version --client` with ITS OWN tag ($CTL/tag.<binary>), fails for any -n/-e address listed in
+# `version --client` with ITS OWN tag ($CTL/tag.<binary>, exit status $CTL/client_rc.<binary>), fails for any -n/-e address listed in
 # $CTL/unreachable, and fails a command whose keyword has a $CTL/fail.<keyword> file AFTER printing
 # valid-looking output (a failed probe must not pass on its output alone).
 cat > "$ROOT/talosctl-stub" <<'STUB'
@@ -40,7 +40,8 @@ me="$(basename "$0")"
 args="$*"
 echo "$me $args" >> "$CTL/calls"
 if [[ "$args" == *"version --client"* ]]; then
-  printf 'Client:\n\tTag:         %s\n' "$(cat "$CTL/tag.$me" 2>/dev/null)"; exit 0
+  printf 'Client:\n\tTag:         %s\n' "$(cat "$CTL/tag.$me" 2>/dev/null)"
+  exit "$(cat "$CTL/client_rc.$me" 2>/dev/null || echo 0)"
 fi
 node=""; ep=""
 while [ $# -gt 0 ]; do case "$1" in -n) node=$2; shift ;; -e) ep=$2; shift ;; esac; shift; done
@@ -142,6 +143,13 @@ new_case renamed; cp "$ROOT/talosctl-stub" "$OUT/talosctl-custom.exe"; echo "v1.
 eq "a differently named v1.11.2 client -> exit 0" 0 "$(cat "$CTL/rc")"
 has "and it is the one that upgrades" "talosctl-custom.exe" "$(upgrade_line)"
 rm -f "$OUT/talosctl-custom.exe"
+new_case clientrc; echo 7 > "$CTL/client_rc.talosctl-1112.exe"; run 192.168.0.47 v1.11.6
+eq "the only v1.11.2 client fails its identity probe (valid tag, exit 7) -> exit 1" 1 "$(cat "$CTL/rc")"
+eq "no upgrade call" "" "$(upgrade_line)"
+new_case clientrc2; echo 7 > "$CTL/client_rc.talosctl-1112.exe"; cp "$ROOT/talosctl-stub" "$OUT/talosctl-spare.exe"; echo "v1.11.2" > "$CTL/tag.talosctl-spare.exe"; run 192.168.0.47 v1.11.6
+eq "a healthy second v1.11.2 client -> exit 0" 0 "$(cat "$CTL/rc")"
+has "and the failing one never upgrades" "talosctl-spare.exe" "$(upgrade_line)"
+rm -f "$OUT/talosctl-spare.exe"
 new_case newest; run 192.168.0.47 v1.11.6
 has "the running-version read uses the NEWEST client (v1.14.2, not 11311 by name)" "talosctl-1142.exe" "$(grep ' version$' "$CTL/calls" | head -1)"
 

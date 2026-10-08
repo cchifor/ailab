@@ -116,7 +116,9 @@ declare -A TAG=()
 probe_bin=""; newest=""
 for b in "$TALOS_OUT"/talosctl-*.exe; do
   [ -f "$b" ] || continue
-  t="$("$b" version --client 2>/dev/null | awk '$1=="Tag:"{print $2; exit}')"
+  # A client is registered only if its own identity probe SUCCEEDS; output alone proves nothing.
+  cout="$("$b" version --client 2>/dev/null)" || { log "client $b failed its version probe - ignored"; continue; }
+  t="$(awk '$1=="Tag:"{print $2; exit}' <<<"$cout")"
   [[ "$t" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || continue
   TAG["$b"]=$t
   key=$(printf '%06d%06d%06d' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
