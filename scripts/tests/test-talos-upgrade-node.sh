@@ -4,11 +4,14 @@
 # The wrapper exists because talosctl's default --image drops the node's system extensions (the plain
 # ghcr installer for 1.11-1.13 clients, an empty-schematic metal-installer for 1.14), and losing
 # iscsi-tools breaks every Trident iSCSI PV. Invariants:
-# - the image is always factory nocloud-installer/<the node's OWN live schematic>:<target>;
-# - the client binary matches the node's running version;
+# - the image is always factory nocloud-installer/<the node's OWN live schematic>:<target>, and the
+#   schematic is read structurally: exactly one `schematic` extension, 64 hex;
+# - the client binary is the one whose `version --client` IS the node's running version (identity,
+#   not file name);
 # - adjacent-minor or patch steps only, never a downgrade;
-# - nocloud only, the image must exist in the factory;
-# - --dry-run never calls upgrade.
+# - nocloud only, the image must exist in the factory, and every probe's exit status counts;
+# - a control plane (by its live machine type) is upgraded through a REACHABLE survivor CP;
+# - --dry-run never calls upgrade, and the upgrade never passes --force.
 #
 # Run: bash scripts/tests/test-talos-upgrade-node.sh   (Linux, WSL or Git Bash)
 set -u
@@ -27,29 +30,48 @@ ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 OUT="$ROOT/_out"; BIN="$ROOT/bin"; mkdir -p "$OUT" "$BIN"
 touch "$OUT/talosconfig"
 
-# One talosctl stub, installed under every versioned name. It reports which binary ran, and answers
-# version/get from $CTL files.
+# One talosctl stub, installed under every versioned name. It logs every call, answers
+# `version --client` with ITS OWN tag ($CTL/tag.<binary>), fails for any -n/-e address listed in
+# $CTL/unreachable, and fails a command whose keyword has a $CTL/fail.<keyword> file AFTER printing
+# valid-looking output (a failed probe must not pass on its output alone).
 cat > "$ROOT/talosctl-stub" <<'STUB'
 #!/usr/bin/env bash
 me="$(basename "$0")"
 args="$*"
 echo "$me $args" >> "$CTL/calls"
+if [[ "$args" == *"version --client"* ]]; then
+  printf 'Client:\n\tTag:         %s\n' "$(cat "$CTL/tag.$me" 2>/dev/null)"; exit 0
+fi
+node=""; ep=""
+while [ $# -gt 0 ]; do case "$1" in -n) node=$2; shift ;; -e) ep=$2; shift ;; esac; shift; done
+for ip in $node $ep; do
+  grep -qx "$ip" "$CTL/unreachable" 2>/dev/null && { echo "rpc error: code = Unavailable ($ip)" >&2; exit 1; }
+done
 case "$args" in
-  *" version"*) printf 'Server:\n\tNODE:        %s\n\tTag:         %s\n' x "$(cat "$CTL/server_version")" ;;
+  *" upgrade "*) echo "upgrade started"; exit 0 ;;
+  *" version"*) printf 'Client:\n\tTag:         x\nServer:\n\tNODE:        %s\n\tTag:         %s\n' "$node" "$(cat "$CTL/server_version")" ;;
   *"get extensions"*) cat "$CTL/extensions.json" ;;
-  *"get platformmetadata"*) printf '{"spec":{"platform":"%s"}}\n' "$(cat "$CTL/platform")" ;;
-  *" upgrade "*) echo "upgrade started" ;;
+  *"get platformmetadata"*) printf '{"node":"%s","spec":{"hostname":"talos","platform":"%s"}}\n' "$node" "$(cat "$CTL/platform")" ;;
+  *"get machinetype"*)
+    if [ -f "$CTL/machinetype" ]; then t=$(cat "$CTL/machinetype")
+    else case "$node" in 192.168.0.41|192.168.0.42|192.168.0.43) t=controlplane ;; *) t=worker ;; esac; fi
+    printf '{\n    "metadata": {"id": "machine-type"},\n    "node": "%s",\n    "spec": "%s"\n}\n' "$node" "$t" ;;
 esac
+for k in version extensions platformmetadata machinetype; do
+  case "$args" in *"$k"*) [ -f "$CTL/fail.$k" ] && exit 1 ;; esac
+done
+exit 0
 STUB
 chmod +x "$ROOT/talosctl-stub"
-for v in 1112 1116 11212 11311 1142; do cp "$ROOT/talosctl-stub" "$OUT/talosctl-$v.exe"; done
+CLIENTS="1112:v1.11.2 1116:v1.11.6 11212:v1.12.12 11311:v1.13.11 1142:v1.14.2"
+for c in $CLIENTS; do cp "$ROOT/talosctl-stub" "$OUT/talosctl-${c%%:*}.exe"; done
 
+# The factory manifest probe: prints $CTL/curl_code (default 200), exits $CTL/curl_rc (default 0).
 cat > "$BIN/curl" <<'STUB'
 #!/usr/bin/env bash
-# The factory manifest probe: 200 unless $CTL/image_missing exists.
 echo "$*" >> "$CTL/curl_calls"
-[ -f "$CTL/image_missing" ] && { printf '404'; exit 0; }
-printf '200'
+printf '%s' "$(cat "$CTL/curl_code" 2>/dev/null || echo 200)"
+exit "$(cat "$CTL/curl_rc" 2>/dev/null || echo 0)"
 STUB
 chmod +x "$BIN/curl"
 
@@ -58,10 +80,11 @@ SCHEM_K=0839748ecac818fa6db9bc8bad2cc054eed752a32cd83226e18aa382a3a384f7
 new_case() {
   export CTL="$ROOT/ctl.$1"; rm -rf "$CTL"; mkdir -p "$CTL"
   echo "v1.11.2" > "$CTL/server_version"; echo "nocloud" > "$CTL/platform"
+  for c in $CLIENTS; do echo "${c#*:}" > "$CTL/tag.talosctl-${c%%:*}.exe"; done
   printf '{"spec":{"metadata":{"name":"iscsi-tools","version":"v0.2.0"}}}\n{"spec":{"metadata":{"name":"schematic","version":"%s"}}}\n' "$SCHEM_A" > "$CTL/extensions.json"
 }
 run() { # run <node> <target> [--dry-run]
-  PATH="$BIN:$PATH" TALOS_OUT="$OUT" bash "$SCRIPT" "$@" > "$CTL/out" 2>&1; echo $? > "$CTL/rc"
+  PATH="$BIN:$PATH" TALOS_OUT="${RUN_OUT:-$OUT}" bash "$SCRIPT" "$@" > "$CTL/out" 2>&1; echo $? > "$CTL/rc"
 }
 upgrade_line() { grep " upgrade " "$CTL/calls" 2>/dev/null | head -1; }
 
@@ -72,25 +95,55 @@ has "runs the client matching the RUNNING version (1.11.2)" "talosctl-1112.exe" 
 has "image is the factory nocloud installer for the live schematic" "--image factory.talos.dev/nocloud-installer/$SCHEM_A:v1.11.6" "$(upgrade_line)"
 has "waits for completion" "--wait" "$(upgrade_line)"
 has "targets only the given node" "-n 192.168.0.47" "$(upgrade_line)"
-
+hasnt "never --force" "--force" "$(upgrade_line)"
 hasnt "a worker gets no -e override" " -e " "$(upgrade_line)"
+has "factory probe asks for this schematic and tag" "/v2/nocloud-installer/$SCHEM_A/manifests/v1.11.6" "$(cat "$CTL/curl_calls")"
+has "factory probe is a HEAD" "-I" "$(cat "$CTL/curl_calls")"
 
-echo "== a CP is upgraded THROUGH a survivor CP, never through itself =="
+echo "== a CP is upgraded THROUGH a reachable survivor CP, never through itself =="
 new_case cp; run 192.168.0.41 v1.11.6
 has "cp1 upgraded via another CP endpoint" "-e 192.168.0.42" "$(upgrade_line)"
 hasnt "never via its own address" "-e 192.168.0.41" "$(upgrade_line)"
 has "and still only node cp1" "-n 192.168.0.41" "$(upgrade_line)"
 new_case cp2; run 192.168.0.42 v1.11.6
 has "cp2 upgraded via cp1" "-e 192.168.0.41" "$(upgrade_line)"
+new_case cpdown; echo 192.168.0.42 > "$CTL/unreachable"; run 192.168.0.41 v1.11.6
+eq "cp1 with cp2 down -> exit 0" 0 "$(cat "$CTL/rc")"
+has "skips the unreachable cp2 and uses cp3" "-e 192.168.0.43" "$(upgrade_line)"
+new_case nosurv; printf '192.168.0.42\n192.168.0.43\n' > "$CTL/unreachable"; run 192.168.0.41 v1.11.6
+eq "no reachable survivor -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case onlyself; TALOS_CP_IPS=192.168.0.41 run 192.168.0.41 v1.11.6
+eq "TALOS_CP_IPS = only the target -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case unlisted; echo controlplane > "$CTL/machinetype"; run 192.168.0.47 v1.11.6
+eq "a live control plane missing from TALOS_CP_IPS -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case badlist; TALOS_CP_IPS="192.168.0.41 not-an-ip" run 192.168.0.41 v1.11.6
+eq "a malformed TALOS_CP_IPS -> exit 2" 2 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
 
-echo "== a kata/gvisor node keeps ITS schematic =="
+echo "== a kata/gvisor node keeps ITS schematic; JSON is read structurally =="
 new_case kata; printf '{"spec":{"metadata":{"name":"schematic","version":"%s"}}}\n' "$SCHEM_K" > "$CTL/extensions.json"; run 192.168.0.49 v1.11.6
 has "agent-node-3 image carries the kata schematic" "nocloud-installer/$SCHEM_K:v1.11.6" "$(upgrade_line)"
+new_case pretty; printf '{\n\t"node": "192.168.0.49",\n\t"spec": {\n\t\t"metadata": {\n\t\t\t"version": "%s",\n\t\t\t"author": "x",\n\t\t\t"name": "schematic"\n\t\t}\n\t}\n}\n{\n\t"spec": {"metadata": {"name": "kata-containers", "version": "3.20.0"}}\n}\n' "$SCHEM_K" > "$CTL/extensions.json"; run 192.168.0.49 v1.11.6
+eq "pretty-printed, reordered, tab-indented JSON -> exit 0" 0 "$(cat "$CTL/rc")"
+has "and the schematic is still found" "nocloud-installer/$SCHEM_K:v1.11.6" "$(upgrade_line)"
+new_case twoschem; printf '{"spec":{"metadata":{"name":"schematic","version":"%s"}}}\n{"spec":{"metadata":{"name":"schematic","version":"%s"}}}\n' "$SCHEM_A" "$SCHEM_K" > "$CTL/extensions.json"; run 192.168.0.47 v1.11.6
+eq "two schematic extensions -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case decoy; printf '{"spec":{"metadata":{"name":"iscsi-tools","version":"v0.2.0","description":"\\"name\\": \\"schematic\\", \\"version\\": \\"%s\\""}}}\n' "$SCHEM_A" > "$CTL/extensions.json"; run 192.168.0.47 v1.11.6
+eq "a schematic-looking string inside another field -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
 
 echo "== adjacent minor allowed, client follows the running version =="
 new_case minor; echo "v1.11.6" > "$CTL/server_version"; run 192.168.0.41 v1.12.12
 eq "exit 0" 0 "$(cat "$CTL/rc")"
 has "1.11.6 node is driven by talosctl-1116" "talosctl-1116.exe" "$(upgrade_line)"
+
+echo "== the client is chosen by what it IS, not by its file name =="
+new_case liar; echo "v1.11.6" > "$CTL/tag.talosctl-1112.exe"; run 192.168.0.47 v1.11.6
+eq "no binary reports v1.11.2 -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case renamed; cp "$ROOT/talosctl-stub" "$OUT/talosctl-custom.exe"; echo "v1.11.2" > "$CTL/tag.talosctl-custom.exe"; echo "v9.9.9" > "$CTL/tag.talosctl-1112.exe"; run 192.168.0.47 v1.11.6
+eq "a differently named v1.11.2 client -> exit 0" 0 "$(cat "$CTL/rc")"
+has "and it is the one that upgrades" "talosctl-custom.exe" "$(upgrade_line)"
+rm -f "$OUT/talosctl-custom.exe"
+new_case newest; run 192.168.0.47 v1.11.6
+has "the running-version read uses the NEWEST client (v1.14.2, not 11311 by name)" "talosctl-1142.exe" "$(grep ' version$' "$CTL/calls" | head -1)"
 
 echo "== refusals: skip a minor, downgrade, same version =="
 new_case skip; run 192.168.0.41 v1.13.11
@@ -105,22 +158,50 @@ new_case noschem; printf '{"spec":{"metadata":{"name":"iscsi-tools","version":"v
 eq "no schematic -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
 new_case metal; echo "metal" > "$CTL/platform"; run 192.168.0.41 v1.11.6
 eq "non-nocloud -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
-new_case noimg; touch "$CTL/image_missing"; run 192.168.0.41 v1.11.6
+new_case noimg; echo 404 > "$CTL/curl_code"; run 192.168.0.41 v1.11.6
 eq "image not in factory -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+has "says the image is not found" "not found" "$(cat "$CTL/out")"
 new_case noclient; echo "v1.10.9" > "$CTL/server_version"; run 192.168.0.41 v1.11.6
 eq "no talosctl for the running version -> exit 1" 1 "$(cat "$CTL/rc")"
+
+echo "== a failed probe never passes on its output =="
+new_case curlrc; echo 28 > "$CTL/curl_rc"; run 192.168.0.47 v1.11.6
+eq "curl transport error after printing 200 -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+hasnt "and it is not reported as a missing image" "not found" "$(cat "$CTL/out")"
+new_case curl503; echo 503 > "$CTL/curl_code"; run 192.168.0.47 v1.11.6
+eq "factory HTTP 503 -> exit 1" 1 "$(cat "$CTL/rc")"; has "reported as HTTP 503" "503" "$(cat "$CTL/out")"
+hasnt "not as a missing image" "not found" "$(cat "$CTL/out")"
+for k in version extensions platformmetadata machinetype; do
+  new_case "fail$k"; touch "$CTL/fail.$k"; run 192.168.0.47 v1.11.6
+  eq "talosctl $k failing (with valid output) -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+done
 
 echo "== --dry-run prints the exact command and never upgrades =="
 new_case dry; run 192.168.0.41 v1.11.6 --dry-run
 eq "exit 0" 0 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
 has "prints the command" "upgrade" "$(cat "$CTL/out")"
 has "prints the image" "nocloud-installer/$SCHEM_A:v1.11.6" "$(cat "$CTL/out")"
+SPACED="$ROOT/out dir"; mkdir -p "$SPACED"; cp "$OUT"/talosctl-*.exe "$OUT/talosconfig" "$SPACED/"
+new_case spaced; RUN_OUT="$SPACED" run 192.168.0.47 v1.11.6 --dry-run
+eq "a TALOS_OUT with a space works" 0 "$(cat "$CTL/rc")"
+has "and the printed command keeps the argument boundary" 'out\ dir/talosctl-1112.exe' "$(cat "$CTL/out")"
+
+echo "== without TALOS_OUT, a worktree resolves the MAIN checkout's _out =="
+new_case wt
+( cd "$ROOT" && git init -q main && cd main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init \
+  && git worktree add -q "$ROOT/wt" -b wt ) >/dev/null 2>&1
+mkdir -p "$ROOT/main/kubernetes/infra/_out"; cp "$OUT"/talosctl-*.exe "$OUT/talosconfig" "$ROOT/main/kubernetes/infra/_out/"
+( cd "$ROOT/wt" && PATH="$BIN:$PATH" TALOS_OUT= bash "$SCRIPT" 192.168.0.47 v1.11.6 > "$CTL/out" 2>&1; echo $? > "$CTL/rc" )
+eq "exit 0 from the worktree" 0 "$(cat "$CTL/rc")"
+has "uses the main checkout's _out" "main/kubernetes/infra/_out/talosconfig" "$(upgrade_line)"
 
 echo "== bad arguments =="
 new_case args; run 192.168.0.41
 eq "missing target -> exit 2" 2 "$(cat "$CTL/rc")"
 new_case args2; run not-an-ip v1.11.6
 eq "bad node -> exit 2" 2 "$(cat "$CTL/rc")"
+new_case args3; run 192.168.0.300 v1.11.6
+eq "octet over 255 -> exit 2" 2 "$(cat "$CTL/rc")"
 
 echo
 echo "talos-upgrade-node: $PASS passed, $FAIL failed"
