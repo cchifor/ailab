@@ -10,9 +10,11 @@
 # protocol} and traefik_service_requests_total{code,method,protocol,exported_service}. NOTE exported_service:
 # Traefik's own `service` label collides with the scrape target's `service="traefik-metrics"`, so
 # Prometheus keeps the target's and renames Traefik's to exported_service; a query that groups or matches
-# on `service` silently gets the one scrape target. The router-based panel needs E1b (addRoutersLabels:
-# no traefik_router_* series exist yet) and its arithmetic is UNVERIFIED until E4. The Loki and
-# gatekeeper/Gatus panels do not depend on either.
+# on `service` silently gets the one scrape target. The router-based panel reads
+# traefik_router_requests_total{router,exported_service,code,method,protocol} (platform E1b,
+# addRoutersLabels, live) and its router-minus-service arithmetic was proven by E4's controlled test on
+# 2026-10-08 (strive-edge-rules.yaml has the measurements and the StriveEdgeGenerated5xx alert). The Loki
+# and gatekeeper/Gatus panels do not depend on either.
 #
 # The gatekeeper RED series are the OTLP ones (http_route, http_status_code, no namespace/pod); the
 # gatekeeper_auth_* and gatekeeper_tokenreview_* series are scraped (namespace, pod). Latency is the mean
@@ -652,7 +654,7 @@ data:
               "legendFormat": "{{exported_service}}"
             }
           ],
-          "description": "5xx Traefik answered itself before a service was reached (a failed middleware such as ForwardAuth, no service). Needs router metrics (platform E1b: addRoutersLabels); no traefik_router_* series exist yet, so it is empty. The router-minus-service arithmetic is UNVERIFIED for Traefik 3.4.3 until E4 tests it, so treat this as indicative; the Loki panel below (OriginStatus 0) is the direct evidence."
+          "description": "5xx Traefik answered itself before a service was reached (a failed middleware such as ForwardAuth, no service). Router 5xx minus service 5xx per exported_service (platform E1b router metrics); the arithmetic was verified on Traefik 3.4.3 by E4's controlled test (2026-10-08), and the StriveEdgeGenerated5xx alert reads the same difference. It does NOT include an origin 5xx or an unreachable origin (the service handler counts those), only what Traefik answered itself. The Loki panel below (OriginStatus 0) lists the requests."
         },
         {
           "id": 13,

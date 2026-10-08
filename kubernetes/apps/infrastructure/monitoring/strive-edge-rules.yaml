@@ -44,8 +44,36 @@
 # (NOT a resource - promtool only, via scripts/rules-lint.sh) assert each rule fires on its
 # incident shape and stays silent on no traffic, one isolated 5xx and a missing series.
 #
-# NOT HERE YET, on purpose: StriveEdgeGenerated5xx waits for E1b (router metrics) and E4's test of
-# the router-minus-service arithmetic on Traefik 3.4.3.
+# STRIVEEDGEGENERATED5XX (router 5xx minus service 5xx), PROVEN BY E4's CONTROLLED TEST. With
+# addRoutersLabels on (platform E1b) Traefik 3.4.3 exports traefik_router_requests_total{router,
+# exported_service,code,method,protocol} next to traefik_service_requests_total{exported_service,code,
+# method,protocol}, both plus the scrape target's namespace / pod / service="traefik-metrics". The router
+# series is the status the router returned to the client; the service series is only what the service
+# handler returned, so a 5xx that Traefik produced BEFORE the service (a failed ForwardAuth call, a
+# service with no endpoints) is in the first family and not in the second. Every IngressRoute route in this
+# estate has one Service, so its router and its Traefik service share one name and `exported_service`
+# (on the router series it is the router's service) joins the two. Measured on 2026-10-08 on the live
+# Traefik, from a pod in a scratch namespace (e4-edge-test, since deleted) with a Host that
+# is not public, two bursts one scrape apart, final counters:
+#   ForwardAuth target refuses the connection (500)     router 500 = 10  service: NO series  -> edge
+#   ForwardAuth server itself answers 500 (relayed)     router 500 = 7   service: NO series  -> edge
+#   service with no endpoints (503, OriginStatus 0)     router 503 = 9   service: NO series  -> edge
+#   origin answers 500                                  router 500 = 8   service 500 = 8     -> 0
+#   origin port refuses (Traefik's own 502)             router 502 = 9   service 502 = 9     -> 0
+#   errors middleware over that 502 (sandbox-errors)    router 502 = 9   service 502 = 9     -> 0
+#   one service: 8 ForwardAuth refusals + 6 origin 500  router 500 = 14  service 500 = 6     -> 8 (edge share)
+#   a never-hit service                                 no series        no series           -> absent
+# Live data agrees: the one real 5xx since E1a (a 504 on web, protocol sse) is in both families, and the
+# ForwardAuth 401s are router-only, which is why the rule is restricted to code=~"5..". A plain `A - B` DROPS
+# the edge-generated rows (no service series, so no match), the one case the rule exists for: the `or`
+# branch zero-fills the service side from the router expression itself. A service with NO router series
+# has nothing to subtract from, so a never-hit service stays absent. Counters live in Traefik's memory: a
+# restart resets the router and the service series TOGETHER and a pod replacement is a new pod label,
+# which `sum by (exported_service)` merges; neither is a false positive (fixtures: pod replacement and
+# in-place counter reset). That is reasoning plus fixtures, NOT a live restart: Traefik is the shared edge
+# and one replica, so E4 did not restart it. The 502 case matters for scope: an unreachable origin is
+# counted by the service handler, so it is NOT "edge-generated" here; StriveEdge5xxBurst and
+# StriveEdge5xxRatioHigh cover it.
 #
 # THE SECOND GROUP (strive-gatekeeper-hardening) READS SERIES THAT GATEKEEPER RELEASE AG1a CREATES
 # (plan A1.0, A2.1, A4.1): gatekeeper_redis_connected{} (a label-less Gauge: 1 on live Redis, 0 on the
@@ -163,6 +191,38 @@ spec:
               whatever the ratio to traffic. On 2026-10-06 18:06-18:10Z the edge served 18 in four
               minutes and nothing alerted. Use the strive-edge dashboard to split by service, and the
               Loki panel (DownstreamStatus >= 500) to see router, origin status and Traefik pod.
+        # D14 / E4. The 5xx that Traefik answered ITSELF, per Traefik service: router 5xx minus service 5xx
+        # over 10m, with the service side zero-filled (see the header: without the `or` branch the one
+        # case this rule is for would vanish from the subtraction). Summed over pods, so the alert
+        # carries only `exported_service` (router@provider, e.g. strive-ailab-web-<hash>@kubernetescrd).
+        # No `for:` - the 10m increase window IS the hold, as for StriveEdge5xxBurst. increase()
+        # extrapolates (7 real events read 7.6-8.8 in the E4 test) and the first 5xx of a brand-new
+        # series is invisible, so "> 3" means about four or five real events; the fixtures keep clear
+        # margins on both sides. It sees only the edge-generated share: an origin 5xx or an
+        # unreachable origin is in the service series too and nets to 0.
+        - alert: StriveEdgeGenerated5xx
+          expr: |
+            (
+              sum by (exported_service) (increase(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
+              -
+              (
+                sum by (exported_service) (increase(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
+                or
+                sum by (exported_service) (increase(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[10m])) * 0
+              )
+            ) > 3
+          labels:
+            severity: warning
+          annotations:
+            summary: "Traefik answered 5xx itself for {{ $labels.exported_service }}"
+            description: >-
+              More than 3 5xx in the last 10 minutes were returned to clients by the Traefik router of
+              {{ $labels.exported_service }} without its service handler producing them (router 5xx minus
+              service 5xx): a ForwardAuth call that failed or answered 5xx, a middleware error, or a
+              service with no endpoints. An origin 5xx and an unreachable origin are counted on both
+              sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
+              strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
+              (GatekeeperForwardAuth5xx) and its pods.
         # gatekeeper's ForwardAuth route. Every authenticated request through the edge passes it, so
         # a 5xx here is blocked traffic rather than an application error. 7 days of live data: zero
         # 5xx, so > 3 in 10m is far above the baseline while ignoring one stray response.
