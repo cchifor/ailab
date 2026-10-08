@@ -265,6 +265,15 @@ class EnvReaperPlacement(unittest.TestCase):
         flux = yaml.safe_load(self.FLUX_KS.read_text(encoding="utf-8"))
         self.assertNotIn("targetNamespace", flux["spec"], "a Flux targetNamespace would move the reaper into testpool")
 
+    def test_reaper_starts_before_the_first_kata_sandbox(self):
+        """/run/vc is tmpfs that Kata creates at the FIRST sandbox after boot. `type: Directory`
+        made the reaper ContainerCreating on an idle env node (6 days, 2026-10-08) — exactly the
+        node where the next sandbox's hang must already be watched."""
+        docs = [d for d in yaml.safe_load_all((self.TESTPOOL / "env-reaper.yaml").read_text(encoding="utf-8")) if d]
+        ds = next(d for d in docs if d["kind"] == "DaemonSet")
+        vols = {v["name"]: v for v in ds["spec"]["template"]["spec"]["volumes"]}
+        self.assertEqual({"path": "/run/vc", "type": "DirectoryOrCreate"}, vols["vc-run"]["hostPath"])
+
 
 if __name__ == "__main__":
     unittest.main()

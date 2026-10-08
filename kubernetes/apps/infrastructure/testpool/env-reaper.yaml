@@ -343,4 +343,8 @@ spec:
         - name: script
           configMap: { name: env-reaper, defaultMode: 0555 }
         - name: vc-run
-          hostPath: { path: /run/vc, type: Directory } # kata sandbox state (persist.json)
+          # Kata sandbox state (persist.json). DirectoryOrCreate, not Directory: /run is tmpfs and
+          # Kata creates /run/vc only at the first sandbox after boot, so `Directory` left the reaper
+          # ContainerCreating on an idle env node for 6 days (2026-10-08). Kata MkdirAll's into an
+          # existing dir, and reap.sh already skips a missing sbs/.
+          hostPath: { path: /run/vc, type: DirectoryOrCreate }
