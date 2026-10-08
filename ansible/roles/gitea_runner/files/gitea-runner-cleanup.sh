@@ -343,11 +343,12 @@ record_in() {
   case "$rc" in 0 | 1) return "$rc" ;; *) return 2 ;; esac
 }
 
-# Print "Y X" for the first journal pair whose Y BuildKit still lists. 0 = found, 1 = none, 2 = a read
-# failed. Every pair in the window is checked against ONE listing, so healed pairs cannot crowd out a
-# live one and a long journal does not mean a long run.
+# Print "Y X" for EVERY journal pair whose Y BuildKit still lists. 0 = at least one, 1 = none, 2 = a
+# read failed. Every pair in the window is checked against ONE listing, so healed pairs cannot crowd
+# out a live one and a long journal does not mean a long run. All live pairs are returned, not the
+# first: the caller must be able to skip a failed record and still heal another record behind it.
 find_dangling() {
-  local since journal pairs live y x rc
+  local since journal pairs live y x rc any=1
   since=$(( $(date +%s) - HEAL_LOOKBACK_SEC ))
   journal="$(timeout -k 10 60 journalctl -u docker.service --since "@$since" --no-pager -o cat 2>/dev/null)" || return 2
   # \1: the snapshot reported missing must be the X being committed — anything else is another failure.
@@ -359,12 +360,12 @@ find_dangling() {
   while read -r y x; do
     record_in "$y" "$live"; rc=$?
     case "$rc" in
-      0) printf '%s %s\n' "$y" "$x"; return 0 ;;
+      0) printf '%s %s\n' "$y" "$x"; any=0 ;;
       1) : ;;
       *) return 2 ;;
     esac
   done <<< "$pairs"
-  return 1
+  return "$any"
 }
 
 # Wait up to IDLE_WAIT_SEC (wall clock) for a CONFIRMED job gap.
@@ -471,7 +472,7 @@ heal_dangling_record() {
     return 1
   fi
   # A failed restart means the step believed to release the record never happened: no builder prune,
-  # and NOT failed_record (that is for a record that survives the whole heal) — the cooldown retries it.
+  # and NOT marked failed (that is for a record that survives the whole heal) — the cooldown retries it.
   if ! timeout -k 30 300 systemctl restart docker.service >/dev/null 2>&1; then
     log "heal: restarting docker.service FAILED -> skipping the builder prune; retried after the cooldown"
     heal_release_runner
@@ -489,7 +490,7 @@ heal_dangling_record() {
   case $? in
     1) return 0 ;;
     0)
-      state_set failed_record "$y" || true
+      state_set "failed_$y" 1 || true # one key per record: a second failure must not un-fail the first
       log "heal: record $y is STILL listed after the heal -> it will not be retried automatically"
       return 1 ;;
     *) log "heal: cannot match BuildKit records to verify the heal"; return 2 ;;
@@ -514,9 +515,17 @@ else
   case $? in
     1) dflag=0 ;;
     0)
-      y="${found%% *}"; x="${found#* }"; dflag=1
-      if [ "$y" = "$(state_get failed_record)" ]; then
-        log "dangling BuildKit record $y (snapshot $x): an earlier heal left it in place -> alerting, not retrying"
+      dflag=1
+      # A record an earlier heal left in place is never retried, but it must not shadow another live
+      # record behind it (pairs sort by id, not recency): pick the first live one that is not it.
+      # failed_<Y>=1 marks one record; failed_record=<Y> is the single-slot key of the first release.
+      legacy_failed="$(state_get failed_record)"; failed_live=0; y=""; x=""
+      while read -r cy cx; do
+        if [ "$(state_get "failed_$cy")" = 1 ] || [ "$cy" = "$legacy_failed" ]; then failed_live=1; continue; fi
+        [ -n "$y" ] || { y="$cy"; x="$cx"; }
+      done <<< "$found"
+      if [ -z "$y" ]; then
+        log "dangling BuildKit record(s) that an earlier heal left in place are still listed -> alerting, not retrying"
       elif [ $(( $(date +%s) - last_heal )) -lt "$HEAL_COOLDOWN_SEC" ]; then
         log "dangling BuildKit record $y (snapshot $x): heal cooldown since @${last_heal} -> not healing again yet"
       elif ! wait_for_gap; then
@@ -525,7 +534,8 @@ else
         pct_h="$(disk_pct)"
         heal_dangling_record "$y" "$x"
         case $? in
-          0) dflag=0; healed=1; log "heal: record $y gone, disk ${pct_h}% -> $(disk_pct)%" ;;
+          # The failed record, if it was live, keeps the alert up; the next tick re-reads it.
+          0) dflag="$failed_live"; healed=1; log "heal: record $y gone, disk ${pct_h}% -> $(disk_pct)%" ;;
           1 | 2) healed=1 ;;
           *) : ;; # did not start; the sweep below runs as usual
         esac
