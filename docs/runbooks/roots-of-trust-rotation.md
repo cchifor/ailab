@@ -54,7 +54,7 @@ The private key is one file and lives in several places:
 Different keys, **not** rotated here: `kubernetes/infra/_out/talos-backup-age.key` (public `age13ruz38k...`, etcd snapshots;
 see `docs/runbooks/openbao-estate-credentials.md`) and platform's `age1wuvg...` recipient.
 
-## Tooling facts (checked 2026-10-07, sops 3.9.4, Windows Git Bash)
+## Tooling facts (Windows Git Bash checked 2026-10-07 with sops 3.9.4; WSL re-checked 2026-10-08 with sops 3.13.1)
 
 - WSL (`Ubuntu`) has no internet. Since 2026-10-08 it has sops 3.13.1 at `~/.local/bin/sops` (in a login shell:
   `wsl.exe -e bash -l`; capture `SOPS=$(command -v sops)` before any `env -i`). The 2026-10-08 rotation used the WSL sops
@@ -80,7 +80,11 @@ see `docs/runbooks/openbao-estate-credentials.md`) and platform's `age1wuvg...` 
    # Secrets in the cluster that hold an age identity (by key name):
    kubectl --context admin@ai get secret -A -o json | jq -r '.items[] | select((.data // {}) | keys | any(test("agekey|age[.]key|keys[.]txt|age-key"))) | .metadata.namespace + "/" + .metadata.name'
    # Repositories: every file naming the recipient, and every encrypted file (this repo: expect 73):
-   git grep -l "$(age-keygen -y <main checkout>/kubernetes/infra/_out/age.agekey)"     # the current recipient
+   # The current recipient, from the key file. Refuse an empty or multi-line answer: `git grep -l ""` would list every file.
+   # Run on Windows (age-keygen is Windows-only). The cross-check fails when this runbook's "What it is" is stale.
+   R=$(age-keygen -y <main checkout>/kubernetes/infra/_out/age.agekey | tr -d '\r')
+   [ -n "$R" ] && [ "$(printf '%s\n' "$R" | wc -l)" = 1 ] && grep -qF "$R" docs/runbooks/roots-of-trust-rotation.md \
+     && git grep -l -F "$R" || echo "STOP: no single recipient read, or it is not the one this runbook names"
    git grep -l -E '^sops:' -- '*.sops.yaml' ':!*.example' | grep -v '^\.sops\.yaml$' | wc -l
    # Workstation and VMs (paths only):
    ls -la ~/.config/sops/age/ ~/work/keys/ 2>/dev/null; env | cut -d= -f1 | grep -i '^SOPS_AGE'
@@ -299,9 +303,9 @@ Retired `age1nfa6hhdz...` (in service since 2026-06-14). The new recipient is `a
 | 2 | 17:01 | `sops-age` = both keys (`replace`, which dropped the `last-applied` copy of the key, H5); 27/27 SOPS Kustomizations Ready |
 | 3 | by 19:38 | `updatekeys` to both recipients. Repositories and PRs: ailab #1152 (73 files), platform #2197 (27, with the checksum bump), cloudlab #38 (1), muse-stream #2 (1), trueswarm-admin #153 (25 files, plus `provision-foundation.py`) |
 | 4 | 19:43 | `sops-age` = the new key only; all 27 handled a fresh reconcile, Ready |
-| gate | 21:2x-21:30 | H6-H8 dev-worker copies deleted (no workflow used them); H9 org Actions secret `SOPS_AGE_KEY` re-set to the platform `age1wuvg...` identity only; drill 2 finished first |
+| gate | by 21:31 | H6-H8 dev-worker copies deleted (no workflow used them); H9 org Actions secret `SOPS_AGE_KEY` re-set to the platform `age1wuvg...` identity only; drill 2 finished first |
 | 5 | 21:49-22:05 | `sops rotate -i --rm-age <old>` with only the new key. Repositories and PRs: cloudlab #39, muse-stream #3, trueswarm-admin #155, ailab #1163 (plus the broker inventory's `seedsDocumentSha256`), platform #2201 (checksum `ef33ed12...`). In each repository the old key opens 0 files, the new key opens all of them, and an unrelated key opens 0 |
-| 6 | 22:26-22:40 | `_out/age.agekey` = the new key (ACL: the owner, SYSTEM, Administrators); `sops-age` = the single key `age.agekey`, and all 27 reconciled fresh; the old key archived as `_out/age-retired-20261008.agekey.age` (encrypted to the new key, verified); the plaintext old key, the duplicate new-key file and the rotation scratch deleted; `~/work/keys/age.agekey` and `~/work/keys/backup/age.agekey` now hold the new key |
+| 6 | 22:26-22:40 | `_out/age.agekey` = the new key. Its ACL keeps the owner, SYSTEM and Administrators, as before, and drops the inherited sandbox principals (`CodexSandboxUsers` had Modify); the step-1 file was owner-only. `sops-age` = the single key `age.agekey`, and all 27 reconciled fresh; the old key archived as `_out/age-retired-20261008.agekey.age` (encrypted to the new key, verified); the plaintext old key, the duplicate new-key file and the rotation scratch deleted; `~/work/keys/age.agekey` and `~/work/keys/backup/age.agekey` now hold the new key |
 
 Left open after the rotation:
 
@@ -310,8 +314,13 @@ Left open after the rotation:
   confirmed (`openbao-estate-credentials.md` §2).
 - **Not re-keyed.** trueswarm (2 files) and trueswarm-test (2 files) were outside the R10 scope and are still encrypted
   to the retired key. They open only through the archive. Neither repository is read by Flux.
-- **Backups.** Velero backups (up to 30 days), etcd snapshots (30 days) and their Google Drive mirrors still contain
-  the retired key inside `sops-age`. They age out by 2026-11-08.
+- **Backups.** Backups taken before step 4 (2026-10-08 19:43Z) still contain the retired key inside `sops-age`:
+  - Velero: the last weekly that holds it expires on 2026-11-03 (its TTL is 720 h), and the dailies (168 h) expire
+    by 2026-10-15.
+  - etcd snapshots: `talos-backup`'s prune deletes them after 30 days, so the last ones go by about 2026-11-08.
+  - The Google Drive mirrors (`gdrive-crypt:velero`, `gdrive-crypt:talos-etcd-backups`): the nightly `rclone sync`
+    (04:00Z, `--drive-use-trash=false`, so no Drive trash copy) follows each deletion within a day. That holds
+    while the sync job keeps succeeding.
 
 ## Residual
 
