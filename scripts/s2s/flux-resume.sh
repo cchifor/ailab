@@ -180,9 +180,9 @@ parent_read() {
 # (flux-system/flux-system) applies its own object from git and drops the requestedAt annotation (drill 2,
 # 2026-10-08).
 parent_reconciled() {
-  local susp gen observed applied ready src art
+  local susp observed applied ready src art
   parent_read "$PARENT" || return 1
-  IFS='|' read -r susp gen observed applied ready src <<<"$PARENT_STATE"
+  IFS='|' read -r susp _ observed applied ready src <<<"$PARENT_STATE"
   art=$(f get gitrepository "$src" -o jsonpath='{.status.artifact.revision}') || return 1
   art=${art//$'\r'/}
   PARENT_SRC=$art
