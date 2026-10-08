@@ -176,9 +176,10 @@ spec:
         # ---- dangling BuildKit record (gitea-runner-cleanup.sh section 0) ----
         # A cache record that points at a missing snapshot fails EVERY build reusing it, whatever the PR
         # (ci-runner-3 09-28, ci-runner-9 10-04, ci-runner-1 10-07 — each found by a human reading CI
-        # logs). The cleanup now heals it in the next job gap, so this fires only when a CONFIRMED
-        # record outlives that: no job gap for an hour, the cooldown after a heal that did not remove
-        # it, or no readable BuildKit metadata db to confirm it with.
+        # logs). The cleanup now heals it in the next job gap, so this fires only when a record BuildKit
+        # still lists outlives that for an hour: no job gap, the runner in transition, the cooldown, or
+        # a heal that left it in place (that record is then never retried automatically). A failed
+        # journal/BuildKit read keeps the beacon's last value, so it neither raises nor clears this.
         - alert: CIRunnerBuildkitDanglingRecord
           expr: gitea_runner_buildkit_dangling_record{job="ci-runner-node"} == 1
           for: 1h
@@ -188,8 +189,22 @@ spec:
             description: >-
               Builds on {{ $labels.instance }} that reuse the record fail with `during finalize: …
               snapshot <id> does not exist: not found`, whatever the PR. `journalctl -t
-              gitea-runner-cleanup | grep -i dangling` says why the heal has not run (cooldown, no job
-              gap, cannot confirm). Heal by hand: docs/runbooks/ci-runners.md, Troubleshooting.
+              gitea-runner-cleanup | grep -iE 'dangling|heal'` says why (cooldown, no job gap, runner in
+              transition, or an earlier heal left it in place). Heal by hand: docs/runbooks/ci-runners.md,
+              Troubleshooting.
+        # The heal stops the runner. runner_held stays 1 until the runner is seen active again; every
+        # tick and the unit's ExecStopPost retry the start, so 30 minutes of it means the start keeps
+        # failing and the runner is out of the pool.
+        - alert: CIRunnerBuildkitHealRunnerHeld
+          expr: gitea_runner_buildkit_runner_held{job="ci-runner-node"} == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} has been out of the pool since a BuildKit heal stopped it"
+            description: >-
+              The dangling-record heal stopped gitea-act-runner on {{ $labels.instance }} and it has not
+              been seen active since, although every cleanup tick retries the start. Check `systemctl
+              status gitea-act-runner` and `journalctl -u gitea-act-runner -t gitea-runner-cleanup`.
         # ---- the 2026-08-08 mid-job-prune RCA: the two signals that were missing ----
         # 1. Did the cleanup prune THROUGH a live job? Post-fix this is a last-resort action taken only at
         # CRITICAL disk after a failed idle wait, so ANY occurrence is worth a look: a prune's containerd

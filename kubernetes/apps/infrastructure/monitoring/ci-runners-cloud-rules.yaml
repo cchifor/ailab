@@ -103,6 +103,15 @@ spec:
             description: >-
               Builds on {{ $labels.nodename }} that reuse the record fail at finalize, whatever the PR.
               See CIRunnerBuildkitDanglingRecord and docs/runbooks/ci-runners.md, Troubleshooting.
+        - alert: CloudCIRunnerBuildkitHealRunnerHeld
+          expr: gitea_runner_buildkit_runner_held{job="ci-runner-cloud"} == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} has been out of the pool since a BuildKit heal stopped it"
+            description: >-
+              See CIRunnerBuildkitHealRunnerHeld: the heal stopped gitea-act-runner on
+              {{ $labels.nodename }} and every tick's start has not brought it back.
         # INHIBITION SOURCE ONLY — Alertmanager routes it to "null" and uses it to mute the chart's
         # generic TargetDown for the three cloudlab scrape jobs (cloud-node, ci-runner-cloud, cloud-pve;
         # kube-prometheus-stack.yaml inhibit_rules). The rules in this file are host-gated, but

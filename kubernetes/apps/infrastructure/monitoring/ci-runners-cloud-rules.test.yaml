@@ -307,3 +307,30 @@ tests:
               description: >-
                 Builds on cloud-ci-9 that reuse the record fail at finalize, whatever the PR.
                 See CIRunnerBuildkitDanglingRecord and docs/runbooks/ci-runners.md, Troubleshooting.
+
+  # ---------------------------------------- the heal stopped the runner and it has not come back
+  - interval: 1m
+    name: a runner held by the heal for 30m fires; one released inside that does not
+    input_series:
+      - series: 'gitea_runner_buildkit_runner_held{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-9", instance="192.168.0.34:9100"}'
+        values: "1+0x60"
+      - series: 'gitea_runner_buildkit_runner_held{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-10", instance="192.168.0.35:9100"}'
+        values: "1+0x10 0+0x50"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CloudCIRunnerBuildkitHealRunnerHeld
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CloudCIRunnerBuildkitHealRunnerHeld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-cloud
+              cloud_host: cloud3
+              nodename: cloud-ci-9
+              instance: 192.168.0.34:9100
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-9 has been out of the pool since a BuildKit heal stopped it"
+              description: >-
+                See CIRunnerBuildkitHealRunnerHeld: the heal stopped gitea-act-runner on
+                cloud-ci-9 and every tick's start has not brought it back.

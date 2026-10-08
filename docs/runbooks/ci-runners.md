@@ -172,13 +172,18 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   **CIRunnerDiskFilling** / **DiskWillFillSoon** (node_filesystem), **CIRunnerBuildCacheHigh** (>25 GB
   post-cleanup), **CIRunnerCleanupStale** (timer not run >1h), **CIRunnerMaintenanceBeaconMissing** (gitea
   reclaim beacon absent). These migrated off the retiring GitHub agent's `runner_reclaim_*` beacons.
-- **Dangling BuildKit record heal** (section 0 of `gitea-runner-cleanup.sh`): when the docker journal names a
-  snapshot in a `during finalize: … snapshot <id> does not exist: not found` failure AND BuildKit's metadata
-  db still references that id, the next tick waits for a job gap, stops `gitea-act-runner`, runs `image
-  prune -af` → `systemctl restart docker` → `builder prune -af`, and starts the runner again. At most one
-  heal per 6h. Beacon `gitea_runner_buildkit_heal.prom` (`dangling_record`, `heal_last_seconds`,
-  `heals_total`); alert **CIRunnerBuildkitDanglingRecord** when a confirmed record outlives the heal for
-  1h. Manual recipe in Troubleshooting below.
+- **Dangling BuildKit record heal** (section 0 of `gitea-runner-cleanup.sh`): when the docker journal has a
+  `failed to commit <X> to <Y> during finalize: … snapshot <X> does not exist: not found` failure AND
+  `docker builder du --verbose` still lists record `<Y>`, the next tick waits for a job gap, records the
+  attempt, stops `gitea-act-runner` and checks it is stopped, runs `image prune -af` → `systemctl restart
+  docker` → `builder prune -af`, and starts the runner again. At most one attempt per 6h; a record still
+  listed after a full heal is never retried automatically. A read failure is "unknown": no heal, and the
+  beacon keeps its last value. Recovery: the attempt persists `runner_held=1` in
+  `/var/lib/gitea-runner-cleanup/buildkit-heal.state` before the stop, and every tick (plus the unit's
+  `ExecStopPost=… --recover-runner`) starts the runner until it is seen active. Beacon
+  `gitea_runner_buildkit_heal.prom` (`dangling_record`, `runner_held`, `heal_last_seconds`, `heals_total`);
+  alerts **CIRunnerBuildkitDanglingRecord** (1h) and **CIRunnerBuildkitHealRunnerHeld** (30m). Manual
+  recipe in Troubleshooting below.
 - **Manual one-shot:** `ssh ubuntu@<ip> 'sudo systemctl start gitea-runner-cleanup.service'` (idle-guarded;
   a no-op if a job is in flight). Emergency disk relief on an idle runner:
   `sudo docker builder prune -f --filter until=24h; sudo docker image prune -af --filter until=24h`.
@@ -390,16 +395,18 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
   - *Find the runner:* the job log names it; or grep every runner:
     `sudo journalctl -u docker.service --since -1d | grep -c 'during finalize.*snapshot .* does not exist: not found'`
     (the narrower pattern keeps out the unrelated pull flake, `lease does not exist: not found`).
-  - *Confirm it is still dangling:* `sudo grep -c -a <id>
-    /var/lib/docker/buildkit/containerd-overlayfs/metadata_v2.db` is non-zero. `docker builder du
-    --verbose` lists record ids, not snapshot keys, so the id is absent from it even while every build
-    fails on it.
-  - *Why the obvious fix does nothing:* `docker builder prune -af` alone reclaims 0 B. The image store
-    pins the record, and dockerd's BuildKit keeps the records ACTIVE with nothing running until dockerd
-    restarts.
+  - *Confirm it is still dangling:* the error names two ids, `commit <X> to <Y>`. `<Y>` is the record
+    every failing build reuses; `sudo docker builder du --verbose | grep -A8 '^ID: *<Y>$'` lists it while
+    the bug is live (ci-runner-9 on 10-08: `[builder 17/20] COPY src/ src/`, usage count 34 = the
+    original build plus 33 failed reuses). `<X>` never appears there. `sudo grep -c -a <X>
+    /var/lib/docker/buildkit/containerd-overlayfs/metadata_v2.db` is a diagnostic only: the db is bbolt,
+    and freed pages can keep old bytes.
+  - *Why the obvious fix does nothing:* `docker builder prune -af` alone reclaimed 0 B on ci-runner-1.
+    The working explanation, not proven, is that the image store pins the record and dockerd's BuildKit
+    keeps it active until dockerd restarts. What is established is the repair below.
   - *Heal by hand* (runner idle — `pgrep -P $(systemctl show -p MainPID --value gitea-act-runner)` empty):
     `sudo systemctl stop gitea-act-runner` (drains a live job) → `sudo docker image prune -af` →
-    `sudo systemctl restart docker` → `sudo docker builder prune -af` → the grep above returns 0 →
+    `sudo systemctl restart docker` → `sudo docker builder prune -af` → `<Y>` is no longer listed →
     `sudo systemctl start gitea-act-runner`. The persistent `dsh-conductor-image-pin` container on
     ci-runner-1 is `unless-stopped` and comes back with dockerd. Cost: the runner's warm images and
     cache (ci-runner-1 on 10-07: 43 GB images + 9.4 GB cache), re-pulled from the registry mirror.
