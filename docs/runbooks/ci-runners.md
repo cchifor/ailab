@@ -172,6 +172,13 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   **CIRunnerDiskFilling** / **DiskWillFillSoon** (node_filesystem), **CIRunnerBuildCacheHigh** (>25 GB
   post-cleanup), **CIRunnerCleanupStale** (timer not run >1h), **CIRunnerMaintenanceBeaconMissing** (gitea
   reclaim beacon absent). These migrated off the retiring GitHub agent's `runner_reclaim_*` beacons.
+- **Dangling BuildKit record heal** (section 0 of `gitea-runner-cleanup.sh`): when the docker journal names a
+  snapshot in a `during finalize: … snapshot <id> does not exist: not found` failure AND BuildKit's metadata
+  db still references that id, the next tick waits for a job gap, stops `gitea-act-runner`, runs `image
+  prune -af` → `systemctl restart docker` → `builder prune -af`, and starts the runner again. At most one
+  heal per 6h. Beacon `gitea_runner_buildkit_heal.prom` (`dangling_record`, `heal_last_seconds`,
+  `heals_total`); alert **CIRunnerBuildkitDanglingRecord** when a confirmed record outlives the heal for
+  1h. Manual recipe in Troubleshooting below.
 - **Manual one-shot:** `ssh ubuntu@<ip> 'sudo systemctl start gitea-runner-cleanup.service'` (idle-guarded;
   a no-op if a job is in flight). Emergency disk relief on an idle runner:
   `sudo docker builder prune -f --filter until=24h; sudo docker image prune -af --filter until=24h`.
@@ -373,6 +380,29 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
   GitHub UI.
 
 ## Troubleshooting
+- **Every docker build on ONE runner fails at finalize with `failed to commit <id> to <id2> during
+  finalize: failed to stat active key during commit: snapshot <id> does not exist: not found`, whatever
+  the PR** (same job passes on a rerun that lands elsewhere): a build lost its client while BuildKit was
+  committing a layer (a cancelled run, or `session healthcheck failed fatally` in the docker journal) and
+  left a cache record pointing at a missing snapshot. Seen on ci-runner-3 (09-28), ci-runner-9 (10-04,
+  33 failed builds in 14h) and ci-runner-1 (10-07). The cleanup timer heals it on its own (section 7,
+  "Dangling BuildKit record heal"); **CIRunnerBuildkitDanglingRecord** means it could not.
+  - *Find the runner:* the job log names it; or grep every runner:
+    `sudo journalctl -u docker.service --since -1d | grep -c 'during finalize.*snapshot .* does not exist: not found'`
+    (the narrower pattern keeps out the unrelated pull flake, `lease does not exist: not found`).
+  - *Confirm it is still dangling:* `sudo grep -c -a <id>
+    /var/lib/docker/buildkit/containerd-overlayfs/metadata_v2.db` is non-zero. `docker builder du
+    --verbose` lists record ids, not snapshot keys, so the id is absent from it even while every build
+    fails on it.
+  - *Why the obvious fix does nothing:* `docker builder prune -af` alone reclaims 0 B. The image store
+    pins the record, and dockerd's BuildKit keeps the records ACTIVE with nothing running until dockerd
+    restarts.
+  - *Heal by hand* (runner idle — `pgrep -P $(systemctl show -p MainPID --value gitea-act-runner)` empty):
+    `sudo systemctl stop gitea-act-runner` (drains a live job) → `sudo docker image prune -af` →
+    `sudo systemctl restart docker` → `sudo docker builder prune -af` → the grep above returns 0 →
+    `sudo systemctl start gitea-act-runner`. The persistent `dsh-conductor-image-pin` container on
+    ci-runner-1 is `unless-stopped` and comes back with dockerd. Cost: the runner's warm images and
+    cache (ci-runner-1 on 10-07: 43 GB images + 9.4 GB cache), re-pulled from the registry mirror.
 - **`just runners` / a direct `ansible-playbook` does nothing ("skipping: no hosts matched"):** on WSL,
   `/mnt/c` is world-writable, so Ansible silently ignores `ansible.cfg` (and thus the inventory). The
   `just` recipes now set `ANSIBLE_CONFIG` explicitly; invoking `ansible-playbook` by hand needs

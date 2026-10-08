@@ -21,11 +21,24 @@ cat >"$BIN/docker" <<EOF
 #!/usr/bin/env bash
 echo "docker \$*" >> "$CALLS"
 case "\$1 \$2" in
-  "image prune") : > "$WORK/phase.image"; exit 0 ;;
+  "image prune")
+    : > "$WORK/phase.image"
+    # MOCK_HANG_HEAL holds the heal's UNWINDOWED image prune long enough for the test to SIGTERM the
+    # script mid-heal (case N10).
+    if [ "\${MOCK_HANG_HEAL:-0}" = 1 ] && ! printf '%s' "\$*" | grep -q -- '--filter'; then
+      : > "$WORK/phase.hang"; sleep 3
+    fi
+    exit 0 ;;
   "builder prune")
     # the UNWINDOWED cap prune (-af) is the phase the per-builder re-check must follow
     printf '%s' "\$*" | grep -q -- '-af' && : > "$WORK/phase.afprune"
+    # MOCK_META_CLEARS: the full prune removes the dangling record from BuildKit's metadata db, as the
+    # real one does once dockerd has restarted (section 0 heal).
+    if [ "\${MOCK_META_CLEARS:-0}" = 1 ] && printf '%s' "\$*" | grep -q -- '-af' && [ -n "\${MOCK_DOCKER_ROOT:-}" ]; then
+      : > "\$MOCK_DOCKER_ROOT/buildkit/containerd-overlayfs/metadata_v2.db"
+    fi
     exit 0 ;;
+  "info --format") echo "\${MOCK_DOCKER_ROOT:-}" ;; # DockerRootDir; empty = unreadable
   "container prune") : > "$WORK/phase.container"; exit 0 ;;
   "network prune") exit 0 ;;
   "buildx prune") exit 0 ;;
@@ -65,10 +78,16 @@ EOF
 # systemctl mock.
 #   show -p MainPID  -> a live pid, unless MOCK_SYSTEMCTL_FAIL=1 (then rc!=0, an unreadable signal)
 #   is-active <svc>  -> MOCK_PEER_STATE (default "active"); "unreadable" makes it exit nonzero,
-#                       which is what a systemctl/DBus failure looks like to the script
+#                       which is what a systemctl/DBus failure looks like to the script. Our own
+#                       runner unit answers MOCK_RUNNER_STATE instead (default "active").
+#   stop/start/restart -> logged to the call log (the section 0 heal); `restart docker.service` exits
+#                       MOCK_DOCKER_RESTART_RC.
 cat >"$BIN/systemctl" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
+  *is-active*gitea-act-runner*)
+    st="\${MOCK_RUNNER_STATE:-active}"
+    echo "\$st"; [ "\$st" = active ] && exit 0 || exit 3 ;;
   *is-active*)
     st="\${MOCK_PEER_STATE:-active}"
     [ "\$st" = unreadable ] && exit 3
@@ -76,8 +95,18 @@ case "\$*" in
   *MainPID*)
     [ "\${MOCK_SYSTEMCTL_FAIL:-0}" = 1 ] && exit 1
     echo "\${MOCK_MAINPID:-4242}" ;;
+  *"restart docker.service"*)
+    echo "systemctl \$*" >> "$CALLS"; exit "\${MOCK_DOCKER_RESTART_RC:-0}" ;;
+  *stop* | *start*) echo "systemctl \$*" >> "$CALLS" ;;
   *) : ;;
 esac
+EOF
+
+# journalctl -u docker.service -> the contents of MOCK_JOURNAL (default: an empty journal).
+cat >"$BIN/journalctl" <<EOF
+#!/usr/bin/env bash
+[ -n "\${MOCK_JOURNAL:-}" ] && cat "\$MOCK_JOURNAL" 2>/dev/null
+exit 0
 EOF
 
 # pgrep. Two DISTINCT uses in the script, and the mock must honour both, including exit codes —
@@ -137,7 +166,19 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_CRITICAL_UNTIL="${CRITUNTIL:-4h}" \
     GITEA_CLEANUP_MIN_UNTIL_SEC="${MINUNTIL-14400}" \
     GITEA_CLEANUP_BEACON="${BEACON:-0}" GITEA_CLEANUP_TEXTFILE_DIR="${TEXTDIR:-/nonexistent}" \
-    bash "$SCRIPT" >/dev/null 2>&1 || true
+    GITEA_CLEANUP_HEAL_DANGLING="${HEALON:-1}" GITEA_CLEANUP_HEAL_STATE="$WORK/heal.state" \
+    MOCK_JOURNAL="${MOCK_JOURNAL:-}" MOCK_DOCKER_ROOT="${MOCK_DOCKER_ROOT:-}" \
+    MOCK_META_CLEARS="${MOCK_META_CLEARS:-0}" MOCK_RUNNER_STATE="${MOCK_RUNNER_STATE:-active}" \
+    MOCK_DOCKER_RESTART_RC="${MOCK_DOCKER_RESTART_RC:-0}" MOCK_HANG_HEAL="${MOCK_HANG_HEAL:-0}" \
+    bash "$SCRIPT" >/dev/null 2>&1 &
+  local pid=$! i=0
+  # TERM_AT_HANG: SIGTERM the script once the mock reports it is inside the heal (case N10) — what
+  # systemd does to this unit at TimeoutStartSec.
+  if [ "${TERM_AT_HANG:-0}" = 1 ]; then
+    while [ ! -f "$WORK/phase.hang" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -TERM "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null || true
 }
 calls_has() { grep -qF "$1" "$CALLS"; }
 
@@ -424,6 +465,107 @@ MOCK_PCT_AFTER=60 IDLEWAIT=2 run_beacon 1 85
 [ "$(beacon_field pressure_defer)" = 0 ] && ok "P5: pressure cleared during the wait -> NOT starved" || bad "P5: pressure cleared during the wait must set pressure_defer=0 (got '$(beacon_field pressure_defer)')"
 [ "$(beacon_field busy_skip)" = 1 ] && ok "P5: ...but it is still a busy skip" || bad "P5: pressure-cleared exit must still set busy_skip=1 (got '$(beacon_field busy_skip)')"
 unset MOCK_PCT_AFTER IDLEWAIT
+
+echo "[N] dangling BuildKit record heal (section 0)"
+# 2026-10-07, ci-runner-1: a build lost its client mid-commit and left a cache record pointing at a
+# missing snapshot. Every later build that reused the record failed at finalize, whatever the PR, until
+# a heal by hand (image prune -af, restart dockerd, builder prune -af). Section 0 runs that heal itself,
+# but only when the journal names the id AND BuildKit's metadata db still references it, only in a
+# confirmed job gap, with the runner stopped for the duration and started again however the heal ends.
+DROOT="$WORK/dockerroot"; META="$DROOT/buildkit/containerd-overlayfs/metadata_v2.db"
+JRNL="$WORK/docker.journal"; SNAP=96jcs8mnru1kpem80tk95udfv
+# Verbatim from ci-runner-1's journal (-o cat), 2026-10-07 21:30:17.
+FINALIZE_LINE="time=\"2026-10-07T21:30:17.525922783+03:00\" level=error msg=/moby.buildkit.v1.Control/Solve error=\"rpc error: code = Unknown desc = failed to commit $SNAP to 5n25clekmoo4u81kp8c9cu4a8 during finalize: failed to stat active key during commit: snapshot $SNAP does not exist: not found\" spanID=cafbe78542e860d0"
+heal_field() { sed -n "s/^gitea_runner_buildkit_$1 \(.*\)$/\1/p" "$BEACONDIR/gitea_runner_buildkit_heal.prom" 2>/dev/null; }
+heal_ran() { calls_has "systemctl restart docker.service"; }
+dangle() { # the journal names SNAP twice, the metadata db references it, no earlier heal
+  mkdir -p "$(dirname "$META")"
+  printf 'xx%s"}cache.lastUsedAt{"value":1}\n' "$SNAP" > "$META"
+  printf '%s\n%s\n' "$FINALIZE_LINE" "$FINALIZE_LINE" > "$JRNL"
+  rm -f "$WORK/heal.state" "$BEACONDIR/gitea_runner_buildkit_heal.prom"
+}
+in_order() { # <label> <call>... : every call present, each strictly after the one before
+  local label="$1" prev=0 n c; shift
+  for c in "$@"; do
+    n="$(grep -nF -- "$c" "$CALLS" | head -1 | cut -d: -f1)"
+    if [ -z "$n" ] || [ "$n" -le "$prev" ]; then bad "$label (missing or out of order: $c)"; return; fi
+    prev="$n"
+  done
+  ok "$label"
+}
+MOCK_JOURNAL="$JRNL"; MOCK_DOCKER_ROOT="$DROOT"
+
+dangle; MOCK_META_CLEARS=1 run_beacon 0 50
+in_order "N1: heal order: stop runner, image prune, restart docker, builder prune, start runner" \
+  "systemctl stop gitea-act-runner.service" "docker image prune -af" "systemctl restart docker.service" \
+  "docker builder prune -af" "systemctl start --no-block gitea-act-runner.service"
+if grep -q -- '--filter until=' "$CALLS"; then bad "N1: the sweep must not run after a heal"; else ok "N1: the sweep is skipped after a heal (the heal already pruned)"; fi
+if grep -q 'actions.runner' "$CALLS"; then bad "N1: the dormant GitHub agent must not be stopped or started"; else ok "N1: the GitHub agent's unit is left alone"; fi
+[ "$(heal_field dangling_record)" = 0 ] && ok "N1: beacon dangling_record=0 once the record is gone" || bad "N1: beacon dangling_record must be 0 after a heal that removed the record (got '$(heal_field dangling_record)')"
+[ "$(heal_field heals_total)" = 1 ] && ok "N1: beacon heals_total=1" || bad "N1: beacon heals_total must be 1 (got '$(heal_field heals_total)')"
+grep -q '^heals_total=1$' "$WORK/heal.state" 2>/dev/null && ok "N1: the heal is recorded in the state file" || bad "N1: the heal must be recorded in the state file"
+[ "$(beacon_field busy_skip)" = 0 ] && [ "$(beacon_field pressure_defer)" = 0 ] && ok "N1: the cleanup beacon is still written (healthy field set)" || bad "N1: the cleanup beacon must still be written after a heal"
+
+# The confirm step is what keeps a journal line about an ALREADY-healed id from re-healing the runner
+# every tick for the whole lookback.
+dangle; : > "$META"; run_beacon 0 50
+if heal_ran; then bad "N2: an id the metadata db no longer references must not be healed again"; else ok "N2: an id the metadata db no longer references is ignored"; fi
+assert_has "image prune -af --filter until=86400s" "N2: ...and the routine sweep runs as usual"
+[ "$(heal_field dangling_record)" = 0 ] && ok "N2: beacon dangling_record=0" || bad "N2: beacon dangling_record must be 0 (got '$(heal_field dangling_record)')"
+
+dangle; IDLEWAIT=2 run_beacon 1 50
+if heal_ran || calls_has "systemctl stop"; then bad "N3: no heal and no runner stop while a job runs"; else ok "N3: no heal while a job runs (no gap -> next tick retries)"; fi
+[ "$(heal_field dangling_record)" = 1 ] && ok "N3: beacon dangling_record=1 while the heal waits" || bad "N3: beacon dangling_record must be 1 while unhealed (got '$(heal_field dangling_record)')"
+
+dangle; MOCK_BUSY_DROP_AFTER=1 IDLEWAIT=8 MOCK_META_CLEARS=1 run_beacon 1 50
+heal_ran && ok "N3b: a job gap during the wait -> heal runs" || bad "N3b: the heal must run once a job gap appears during the wait"
+unset MOCK_BUSY_DROP_AFTER
+
+dangle; printf 'last_heal=%s\nheals_total=1\n' "$(( $(date +%s) - 60 ))" > "$WORK/heal.state"; run_beacon 0 50
+if heal_ran; then bad "N4: a record that survived a heal 60s ago must not trigger another (cooldown)"; else ok "N4: cooldown: no second heal within the window"; fi
+[ "$(heal_field dangling_record)" = 1 ] && ok "N4: ...and it is reported (dangling_record=1 -> alert)" || bad "N4: a record surviving its heal must be reported (got '$(heal_field dangling_record)')"
+[ "$(heal_field heals_total)" = 1 ] && ok "N4: heals_total carries over from the state file" || bad "N4: heals_total must carry over (got '$(heal_field heals_total)')"
+
+dangle; printf 'last_heal=%s\nheals_total=1\n' "$(( $(date +%s) - 21601 ))" > "$WORK/heal.state"; MOCK_META_CLEARS=1 run_beacon 0 50
+heal_ran && ok "N5: once the cooldown has passed, the heal runs again" || bad "N5: the heal must run again after the cooldown"
+[ "$(heal_field heals_total)" = 2 ] && ok "N5: heals_total=2" || bad "N5: heals_total must be 2 (got '$(heal_field heals_total)')"
+
+# No metadata db to read = cannot confirm. A destructive heal on unconfirmed evidence is the wrong
+# failure direction, but the evidence is still surfaced.
+dangle; MOCK_DOCKER_ROOT="" run_beacon 0 50
+if heal_ran; then bad "N6: an unconfirmable candidate must NOT be healed"; else ok "N6: no metadata db readable -> no heal (fails closed)"; fi
+[ "$(heal_field dangling_record)" = 1 ] && ok "N6: ...but it is reported (dangling_record=1)" || bad "N6: an unconfirmable candidate must be reported (got '$(heal_field dangling_record)')"
+
+dangle; HEALON=0 run_beacon 0 50
+if heal_ran; then bad "N7: HEAL_DANGLING=0 must disable the heal"; else ok "N7: HEAL_DANGLING=0 disables the heal"; fi
+[ ! -e "$BEACONDIR/gitea_runner_buildkit_heal.prom" ] && ok "N7: ...and writes no heal beacon" || bad "N7: a disabled heal must not write its beacon"
+
+dangle; MOCK_DOCKER_RESTART_RC=1 run_beacon 0 50
+calls_has "systemctl start --no-block gitea-act-runner.service" && ok "N8: a failed docker restart still starts the runner again" || bad "N8: the runner must be started again after a failed heal step"
+[ "$(heal_field dangling_record)" = 1 ] && ok "N8: a record that survives the heal is reported" || bad "N8: a surviving record must be reported (got '$(heal_field dangling_record)')"
+[ "$(heal_field heals_total)" = 1 ] && ok "N8: the attempt still counts (starts the cooldown)" || bad "N8: a failed heal must still count (got '$(heal_field heals_total)')"
+
+# A runner an operator stopped stays stopped: the heal only restarts what it stopped itself.
+dangle; MOCK_RUNNER_STATE=inactive MOCK_META_CLEARS=1 run_beacon 0 50
+heal_ran && ok "N9: the heal still runs with the runner already stopped" || bad "N9: the heal must run with the runner already stopped"
+if calls_has "systemctl start" || calls_has "systemctl stop gitea"; then bad "N9: a runner that was not running must not be stopped or started"; else ok "N9: an already-stopped runner is not started"; fi
+
+dangle; MOCK_HANG_HEAL=1 TERM_AT_HANG=1 run_beacon 0 50
+calls_has "systemctl start --no-block gitea-act-runner.service" && ok "N10: SIGTERM mid-heal still starts the runner again (trap)" || bad "N10: SIGTERM mid-heal must still start the runner again"
+if heal_ran; then bad "N10: the heal must stop at the SIGTERM"; else ok "N10: ...and the heal stops there"; fi
+
+# Neighbouring failures that are NOT this one. The pull-lease flake (ci-runner-containerd-lease) and a
+# plain cancelled finalize both name ids, and the metadata db references both, so only the parser can
+# keep them out.
+dangle
+printf 'xx lxnm33ay9barlzva4hvu72s2b extract-844538062-ocr8 xx\n' > "$META"
+{
+  echo 'level=error msg="failed to commit snapshot extract-844538062-ocr8 sha256:aa: NotFound: lease does not exist: not found"'
+  echo 'level=error msg=/moby.buildkit.v1.Control/Solve error="rpc error: code = Canceled desc = failed to commit lxnm33ay9barlzva4hvu72s2b to 92epe5m9nwvsasko5mz3tn8yy during finalize: context canceled"'
+} > "$JRNL"
+run_beacon 0 50
+if heal_ran; then bad "N11: the lease flake / a cancelled finalize must not trigger the heal"; else ok "N11: other 'not found' / finalize errors do not match the signature"; fi
+unset MOCK_JOURNAL MOCK_DOCKER_ROOT
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
 # Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in

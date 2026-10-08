@@ -278,3 +278,32 @@ tests:
       - eval_time: 15m
         alertname: CloudlabAsleep
         exp_alerts: []
+
+  # ---------------------------------------- dangling BuildKit record the auto-heal has not cleared
+  - interval: 1m
+    name: a dangling BuildKit record unhealed for an hour fires; one healed inside the hour does not
+    input_series:
+      # cloud-ci-9: confirmed record, never healed (no job gap / cooldown) -> fires from 60m
+      - series: 'gitea_runner_buildkit_dangling_record{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-9", instance="192.168.0.34:9100"}'
+        values: "1+0x90"
+      # cloud-ci-10: healed by the cleanup at ~20m -> never fires
+      - series: 'gitea_runner_buildkit_dangling_record{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-10", instance="192.168.0.35:9100"}'
+        values: "1+0x20 0+0x70"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CloudCIRunnerBuildkitDanglingRecord
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: CloudCIRunnerBuildkitDanglingRecord
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-cloud
+              cloud_host: cloud3
+              nodename: cloud-ci-9
+              instance: 192.168.0.34:9100
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-9 has a dangling BuildKit cache record the auto-heal has not cleared"
+              description: >-
+                Builds on cloud-ci-9 that reuse the record fail at finalize, whatever the PR.
+                See CIRunnerBuildkitDanglingRecord and docs/runbooks/ci-runners.md, Troubleshooting.
