@@ -669,6 +669,11 @@ class InProcess(unittest.TestCase):
 KS_SUSPEND = """kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":%s}}'"""
 HR_SUSPEND = """kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":%s}}'"""
 SCALE = "kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=%d"
+#: The freeze is top-down (incident AG2-1, 2026-10-08): a parent Kustomization re-applies its children
+#: and drops a `kubectl patch` suspend, so a freeze of platform-app and the HelmRelease alone was undone
+#: twice within minutes. The root and `platform` are suspended before `platform-app`.
+PARENT_SUSPEND = """kubectl --context admin@ai -n flux-system patch kustomization %s --type=merge -p '{"spec":{"suspend":true}}'"""
+FREEZE_PARENTS = ("flux-system", "platform")
 
 
 def _ordered(case, text, needles):
@@ -680,13 +685,16 @@ def _ordered(case, text, needles):
 
 
 def assert_freeze(case, text, scale_to):
-    """Freeze = the Flux Kustomization first (it re-applies the HelmRelease from git and clears a
-    hand-set suspend), then the HelmRelease (helm-controller upgrades), then the scale."""
-    _ordered(case, text, [KS_SUSPEND % "true", HR_SUSPEND % "true", SCALE % scale_to])
+    """Freeze = the parents (the root, then `platform`), then the Flux Kustomization `platform-app`
+    (it re-applies the HelmRelease from git and clears a hand-set suspend), then the HelmRelease
+    (helm-controller upgrades), then the scale."""
+    _ordered(case, text, [PARENT_SUSPEND % p for p in FREEZE_PARENTS]
+             + [KS_SUSPEND % "true", HR_SUSPEND % "true", SCALE % scale_to])
 
 
 RESUME_REVERT = "scripts/s2s/flux-resume.sh --after-revert"
 RESUME_DRILL = "scripts/s2s/flux-resume.sh --after-drill"
+RESUME_CONFIG = "scripts/s2s/flux-resume.sh --after-config"
 
 
 def assert_resume(case, text, mode):
@@ -702,14 +710,24 @@ def assert_freeze_then_resume(case, text, scale_to):
 
 
 class RunbookFreezeOrder(unittest.TestCase):
-    """The runbook's freezes suspend the Kustomization before the HelmRelease (observed 2026-10-06
-    17:22Z: a HelmRelease-only suspend was cleared by the next platform-app reconcile). Every resume
-    is scripts/s2s/flux-resume.sh: no command block un-suspends by hand. A freeze and a resume never
-    share a code fence, so pasting a freeze never un-freezes."""
+    """The runbook's freezes are top-down: the root, then `platform`, then `platform-app` (incident
+    AG2-1, 2026-10-08: a parent re-applies its children and drops a hand-set suspend), and the
+    Kustomization before the HelmRelease (observed 2026-10-06 17:22Z: a HelmRelease-only suspend was
+    cleared by the next platform-app reconcile). Every resume is scripts/s2s/flux-resume.sh: no command
+    block un-suspends by hand. A freeze and a resume never share a code fence, so pasting a freeze
+    never un-freezes."""
 
     @staticmethod
     def flux_lines(block):
-        return [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization platform-app" in l]
+        return [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization " in l]
+
+    @staticmethod
+    def suspended_kustomizations(lines):
+        names = []
+        for line in lines:
+            if "patch kustomization " in line and '"suspend":true' in line:
+                names.append(line.split("patch kustomization ", 1)[1].split()[0])
+        return names
 
     def blocks(self):
         text = RUNBOOK.read_text(encoding="utf-8")
@@ -729,6 +747,13 @@ class RunbookFreezeOrder(unittest.TestCase):
             has_resume = "flux-resume.sh" in block
             self.assertFalse(has_freeze and has_resume, "a freeze and a resume in ONE fence:\n" + block)
             resumes += block.count("flux-resume.sh --after-")
+            names = self.suspended_kustomizations(lines)
+            if names:
+                # Top-down: the root, then `platform`, then (only in drill 2, whose PR edits a Secret)
+                # platform-secrets, and platform-app last.
+                self.assertEqual(names[:2], list(FREEZE_PARENTS), "not top-down:\n" + block)
+                self.assertEqual(names[-1], "platform-app", block)
+                self.assertLessEqual(set(names[2:-1]), {"platform-secrets"}, block)
             for i, line in enumerate(lines):
                 if "patch helmrelease strive" in line:
                     freezes += 1
@@ -743,13 +768,25 @@ class RunbookFreezeOrder(unittest.TestCase):
     def test_each_resume_uses_the_right_mode(self):
         text = RUNBOOK.read_text(encoding="utf-8")
         darken = text[text.index("**On any failure, darken the harness.**") :]
-        self.assertIn(RESUME_REVERT, darken[: darken.index("- **Suspend both")])
+        self.assertIn(RESUME_REVERT, darken[: darken.index("- **Freeze top-down")])
         restore = text[text.index("**Restore the harness afterwards**") :]
         block = restore[restore.index("```sh\n") :].split("```")[1]
         self.assertIn(RESUME_DRILL, block)
         self.assertLess(block.index(RESUME_DRILL), block.index("scripts/s2s/phase4-probes.sh"))
-        drill2 = text[text.index("**2. Rollback (not image-only).**") : text.index("**3. Token rotation.**")]
-        self.assertIn(RESUME_REVERT, drill2)
+        drill2 = text[text.index("**2. Rollback after #2125 (config only") : text.index("**3. Token rotation.**")]
+        self.assertIn(RESUME_CONFIG, drill2)
+
+    def test_drill_2_freezes_the_secrets_and_keeps_the_harness(self):
+        # Drill 2 as run on 2026-10-08 (R22): its PR edits gatekeeper-secrets.enc.yaml, so
+        # platform-secrets is frozen too and resumed first; the harness stays up throughout.
+        text = RUNBOOK.read_text(encoding="utf-8")
+        drill2 = text[text.index("**2. Rollback after #2125 (config only") : text.index("**3. Token rotation.**")]
+        fences = [b.split("```")[0] for b in drill2.split("```sh\n")[1:]]
+        freeze = [f for f in fences if '"suspend":true' in f]
+        self.assertEqual(len(freeze), 1, "drill 2 has one freeze block")
+        self.assertEqual(self.suspended_kustomizations(freeze[0].splitlines()),
+                         ["flux-system", "platform", "platform-secrets", "platform-app"])
+        self.assertNotIn("scale deployment/harness", drill2)
 
 
 def find_bash():

@@ -52,6 +52,9 @@ HELMRELEASE=strive
 # The Flux Kustomization that applies the HelmRelease manifest (deploy/gitops/flux/clusters/ailab/app).
 FLUX_NS=flux-system
 FLUX_KUSTOMIZATION=platform-app
+# Its parents, outermost first: the root (applies `platform`) and `platform` (applies platform-app).
+# Each re-applies its children and drops a hand-set suspend (incident AG2-1, 2026-10-08).
+FLUX_PARENTS=(flux-system platform)
 # A real route of the harness IngressRoute (PathPrefix(/api/harness), gatekeeper-auth BEFORE the
 # rewrite; the harness serves /admin/v1/chat*): unauthenticated it must be 401, never a login 302.
 EDGE_URL=https://strive.place/api/harness/admin/v1/chat
@@ -160,15 +163,28 @@ redact() { sed -E 's/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/<redac
 k() { kubectl --context "$CONTEXT" -n "$NS" "$@"; }
 kg() { kubectl --context "$CONTEXT" -n "$GK_NS" "$@"; }
 
-# Freeze = the Flux Kustomization FIRST, then the HelmRelease, then the scale. Both suspends are
-# needed: the Kustomization re-applies the HelmRelease manifest from git and so clears a hand-set
-# HelmRelease suspend within one reconcile (observed 2026-10-06 17:22Z); the HelmRelease suspend
-# stops helm-controller upgrades, which would put the replica count back.
+# Freeze = top-down: the parent Kustomizations (the root, then `platform`), then the Flux
+# Kustomization that applies the HelmRelease, then the HelmRelease, then the scale. Every suspend is
+# needed: a parent re-applies its children from git and drops a hand-set suspend (incident AG2-1,
+# 2026-10-08: a freeze of platform-app and the HelmRelease alone was undone twice within minutes);
+# the Kustomization re-applies the HelmRelease manifest and so clears a hand-set HelmRelease suspend
+# within one reconcile (observed 2026-10-06 17:22Z); the HelmRelease suspend stops helm-controller
+# upgrades, which would put the replica count back. flux-resume.sh resumes the parents last.
 freeze_commands() {
+  local parent
   cat <<EOF
-  1. Freeze the release, the Kustomization first (it re-applies the HelmRelease from git and clears
-     a hand-set HelmRelease suspend; observed 2026-10-06 17:22Z), then the HelmRelease (Helm
-     re-applies the replica count on every platform commit, so a bare scale is undone):
+  1. Freeze the release top-down: the root Kustomization, then \`platform\` (each re-applies its
+     children from git and drops a hand-set suspend; incident AG2-1, 2026-10-08), then the
+     Kustomization $FLUX_KUSTOMIZATION (it re-applies the HelmRelease from git and clears a hand-set
+     HelmRelease suspend; observed 2026-10-06 17:22Z), then the HelmRelease (Helm re-applies the
+     replica count on every platform commit, so a bare scale is undone). Suspending the root holds
+     every ailab GitOps change until the resume:
+EOF
+  for parent in "${FLUX_PARENTS[@]}"; do
+    printf "       kubectl --context %s -n %s patch kustomization %s --type=merge -p '{\"spec\":{\"suspend\":true}}'\n" \
+      "$CONTEXT" "$FLUX_NS" "$parent"
+  done
+  cat <<EOF
        kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $FLUX_KUSTOMIZATION --type=merge -p '{"spec":{"suspend":true}}'
        kubectl --context $CONTEXT -n $NS patch helmrelease $HELMRELEASE --type=merge -p '{"spec":{"suspend":true}}'
   2. Stop every harness pod (its projected token dies with the pod; deleting the pod alone does NOT
@@ -184,7 +200,8 @@ EOF
 resume_commands() {
   cat <<EOF
      (never by hand: it gates each step on the commit Flux actually fetched and applied: the source,
-     then the Kustomization, then the HelmRelease only if still suspended; see the script's header)
+     then the Kustomization, then the HelmRelease only if still suspended, then the parents, the
+     root last; see the script's header)
        scripts/s2s/flux-resume.sh --after-$1
 EOF
 }

@@ -479,9 +479,12 @@ When the extras gain a second k8s entry, `refuse-second-k8s` runs as well, autom
   `uv run --quiet python3 scripts/ci/report-ailab-pin-drift.py --count-app-templates --fail-on-torn --fail-on-incoherent`.
 
 **On any failure, darken the harness.** The script prints `DARKEN THE HARNESS` and these commands.
-First the freeze, the Kustomization first, then the HelmRelease, then the scale:
+First the freeze, top-down: the root Kustomization, then `platform`, then `platform-app`, then the
+HelmRelease, then the scale:
 
 ```sh
+kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=0
@@ -497,14 +500,19 @@ Resume with `scripts/s2s/flux-resume.sh`, never by hand (see "Resuming the relea
 scripts/s2s/flux-resume.sh --after-revert   # optional: --sha <the revert's merge commit on platform main>
 ```
 
-- **Suspend both, the Kustomization first.** The Flux Kustomization `flux-system/platform-app`
-  (path `deploy/gitops/flux/clusters/ailab/app`) re-applies the HelmRelease from git. It clears a
+- **Freeze top-down, the Kustomizations before the HelmRelease.** Each parent re-applies its
+  children from git and drops a `kubectl patch` suspend: the root `flux-system/flux-system`
+  applies `platform`, and `platform` applies `platform-app` (and `platform-secrets`). A freeze of
+  `platform-app` and the HelmRelease alone was undone twice within minutes on 2026-10-08 (incident
+  AG2-1). The Flux Kustomization `flux-system/platform-app` (path
+  `deploy/gitops/flux/clusters/ailab/app`) re-applies the HelmRelease from git. It clears a
   hand-set HelmRelease suspend within one reconcile: observed 2026-10-06, suspended at 17:21Z and
   cleared at 17:22:39Z. The HelmRelease suspend is still needed: the HelmRelease uses
   `reconcileStrategy: Revision`, so every platform commit upgrades the release, and Helm's
   three-way merge puts `replicas: 1` back.
-- **What freezing costs.** It freezes every strive-ailab deploy, and everything else that
-  `platform-app` applies, until both are resumed.
+- **What freezing costs.** With the root suspended, every ailab GitOps change waits, as do every
+  strive-ailab deploy and everything else that `platform` and `platform-app` apply, until
+  `flux-resume.sh` resumes them.
 - **Resuming the release** is `scripts/s2s/flux-resume.sh`, never a hand-typed un-suspend. Waiting
   on the Kustomization's `observedGeneration` proves nothing: it also moves when suspend is toggled.
   If the source still serves the pre-merge artifact, an un-suspended Kustomization re-applies the old
@@ -516,13 +524,26 @@ scripts/s2s/flux-resume.sh --after-revert   # optional: --sha <the revert's merg
      (`reconcile.fluxcd.io/requestedAt`), then waits until `.status.artifact.revision` is
      `main@sha1:<target>`. Without `--sha` a later main also counts: main is append-only, so it
      descends from the target. Nothing is resumed before this.
-  3. **The Kustomization.** It un-suspends `platform-app`, then waits until
+  3. **The Secrets.** If Kustomization `platform-secrets` is suspended (drill 2 freezes it), it
+     un-suspends it first. It then waits until the Kustomization has processed the new generation,
+     `.status.lastAppliedRevision` is `main@sha1:<target>` and Ready is True. With `--after-config`
+     it requires this even when `platform-secrets` was not suspended, because values that land
+     before the Secret would point the ten services at preshared secrets the registry does not hold
+     yet. Otherwise an unsuspended `platform-secrets` is not a gate: a darken must not depend on it.
+  4. **The Kustomization.** It un-suspends `platform-app`, then waits until
      `.status.lastAppliedRevision` is `main@sha1:<target>` and Ready is True.
-  4. **The HelmRelease.** It un-suspends it only if `.spec.suspend` still reads true (the
+  5. **The HelmRelease.** It un-suspends it only if `.spec.suspend` still reads true (the
      Kustomization's re-apply normally clears it). Then it waits until Ready is True and
      `.status.history[0].chartVersion` carries the target's first 12 hex.
-  5. **The end state.** With `--after-revert`, `deployment/harness` must be gone. With
-     `--after-drill`, it scales the harness to 1 and waits for the rollout.
+  6. **The end state.** With `--after-revert`, `deployment/harness` must be gone. With
+     `--after-drill`, it scales the harness to 1 and waits for the rollout. With `--after-config`
+     (a config-only rollback or re-forward that keeps the harness, drill 2), `deployment/harness`
+     must still exist with its rollout complete.
+  7. **The parents.** It resumes `platform`, then the root `flux-system`, each only if suspended,
+     and waits until the Kustomization's `observedGeneration` reaches the generation the
+     un-suspend created, its `lastAppliedRevision` equals what its own source serves, and Ready
+     is True. `lastHandledReconcileAt` is not used: the root applies its own object from git and
+     drops the `requestedAt` annotation (drill 2, 2026-10-08).
 
   `--dry-run` prints these exact commands without any call.
 - **Deleting the harness pod does not revoke.** The Deployment is `Recreate` and brings up a fresh,
@@ -651,8 +672,10 @@ on that reconcile. The owner only has to confirm with
 
 The owner runs these, with `K="kubectl --context admin@ai -n strive-ailab"`.
 
-- Run drills 1, 3 and 4 after the probes pass, in any order. Drill 2 deactivates the harness.
-- Drills 1, 2 and 4 take the harness out of service (the freeze block of the darken commands). Drill 1
+- Run drills 1, 3 and 4 after the probes pass, in any order. Drill 2 keeps the harness up; it
+  freezes Flux for its window and moves the ten services and four workers between preshared and
+  projected tokens.
+- Drills 1 and 4 take the harness out of service (the freeze block of the darken commands). Drill 1
   does it first: otherwise the harness would get 401s from the replica that refuses it.
 - **Restore the harness afterwards** (only once the drill is over). `flux-resume.sh --after-drill`
   lands the current platform main through the gates described under "Resuming the release", then
@@ -671,8 +694,11 @@ scripts/s2s/phase4-probes.sh
 
 ```sh
 K="kubectl --context admin@ai -n strive-ailab"
-# Freeze (the Kustomization first: it re-applies the HelmRelease and clears a hand-set suspend).
-# This also keeps Helm off the ConfigMap mid-drill.
+# Freeze top-down (each parent re-applies its children and drops a hand-set suspend; the
+# Kustomization re-applies the HelmRelease and clears its suspend). This also keeps Helm off the
+# ConfigMap mid-drill.
+kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
@@ -704,55 +730,127 @@ scripts/s2s/phase4-probes.sh --gatekeeper-only                            # PASS
 
 Then restore the harness (above).
 
-**2. Rollback (not image-only).** This is a real deactivation: it undoes Phases 3 and 4, so run it
-only when the owner chooses to. One platform PR, merged by the owner (it touches the protected Flux
-file):
+**2. Rollback after #2125 (config only; the harness stays up).** The rollback operators would actually
+use. It moves the ten Python services and the four workers back to preshared client secrets and
+forward again, keeps every image, and keeps the harness on its projected token.
 
+- **The image rollback is retired** (plan D13, 2026-10-07). No image older than AG1a may run once the
+  auth fixes are live. The pre-Phase-3 gatekeeper rejects `composite` (V49). After A6.4 (Keycloak
+  enforces S256 PKCE for gatekeeper), an older image cannot log users in.
+- **The harness stays up.** The legacy web panel is gone (L3a-L3d, platform #2153-#2157), so
+  `harness.enabled: false` would leave the assistant dark for the whole window. Instead,
+  `ailab-s2s-registry.yaml` stays in `valuesFiles`, so gatekeeper stays `composite` with its TokenReview
+  RBAC, and `svc-harness` keeps its extras entry.
+- **The rollback's material.** While D5 (a) holds, the ten `<svc>-secrets` `gatekeeper-client-secret`
+  values stay in the cluster, inert. They are what this rollback restores. Deleting them (platform #2176)
+  retires this rollback; record that in ADR-034 when it happens.
+
+**The rollback PR** (platform, owner-merged: `gatekeeper-secrets.enc.yaml` is protected; `approve-pin`).
+Drill 2 used #2198 as the worked example:
+
+- `deploy/secrets/ailab/gatekeeper-secrets.enc.yaml`: a `sops` edit of the **current** file that
+  changes only `service-registry`. It sets it to the pre-#2125 registry: the ten entries, hashes only,
+  read locally from #2125's parent revision. Every other key and every recipient stays as on main.
+  - That revision is encrypted only to the age key retired on 2026-10-08. Open it with the archived
+    key: `age -d -i kubernetes/infra/_out/age.agekey -o <0600 temp file>
+    kubernetes/infra/_out/age-retired-20261008.agekey.age`. Delete the temp file afterwards.
+  - Check, printing only names and OK/FAIL:
+    - the decrypted documents before and after differ only in `service-registry`;
+    - each argon2 hash verifies against the matching `<svc>-secrets` value.
 - `deploy/helm/values/providers/ailab.yaml`:
-  - `harness.enabled: false`;
-  - the gatekeeper `image.digest` back to the pre-Phase-3 pin that the Phase 3 comment records:
-    `sha256:45abbd52fd3ea9985372056490078cec54b0a2964ee88ba8718fe402086aee79` (`sha-19363455156f`).
-- `deploy/gitops/flux/clusters/ailab/app/helmrelease.yaml`: drop the
-  `deploy/helm/values/providers/ailab-s2s-registry.yaml` `valuesFiles` entry. The composite backend
-  and the extras go with it. The old image has no composite backend, so the image and the config
-  revert together.
+  - each of the ten services gets `serviceAccountToken: { gatekeeper: { enabled: false } }`. Use a
+    positive value, never `null`: CI renders with Helm 3 and helm-controller applies with Helm 4,
+    which treat a parent `null` over a subchart default differently;
+  - the harness line stays;
+  - `serviceRegistry.checksum` is recomputed from the new ciphertext;
+  - every image digest is unchanged.
+- The four worker manifests (`deploy/components/workers/*-worker.yaml`): back to
+  `GATEKEEPER_CLIENT_SECRET` and the `default` ServiceAccount (a `git revert` of #2125's hunks).
+- CI contracts: `deploy/helm/scripts/tests/check-s2s-token-mode-contract.sh` grades the workers as
+  preshared for the window. In #2198 this was `AILAB_TOKEN=()`.
+- Before the window, hold every open platform PR with `no-automerge`, and open a window issue
+  labelled `rollout-freeze`.
 
-Freeze, then merge the rollback PR:
+Freeze top-down. `platform-secrets` is frozen too, because the PR edits a Secret, and it is resumed
+first. The harness is not scaled:
 
 ```sh
+kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization platform-secrets --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
-$K scale deployment/harness --replicas=0
 ```
 
-**Only after the rollback PR has merged**, resume with `flux-resume.sh --after-revert`. It proves
-that the source fetched the merge and that the Kustomization applied the reverted `helmrelease.yaml`
-before the HelmRelease can move. Resuming by hand could upgrade the stale pre-rollback spec and bring
-the harness back. It also requires `deployment/harness` to be gone. Then verify:
+**Only after the PR has merged**, resume with `flux-resume.sh --after-config`. It runs gates 1-7
+under "Resuming the release":
+
+1. It resumes `platform-secrets` first and requires it to have applied the merge (gate 3) before
+   `platform-app` moves.
+2. It lands `platform-app` and the HelmRelease.
+3. It requires the harness rollout.
+4. It resumes `platform`, then the root.
 
 ```sh
-scripts/s2s/flux-resume.sh --after-revert   # optional: --sha <the rollback PR's merge commit>
-$K rollout status deployment/gatekeeper --timeout=600s
-scripts/s2s/phase4-probes.sh --expect-refused
-kubectl --context admin@ai get clusterrole,clusterrolebinding strive-ailab-gatekeeper-tokenreview
-for p in $($K get pod -l app.kubernetes.io/name=gatekeeper -o name); do
-  echo "$p $($K logs "$p" -c gatekeeper --since=30m | grep -c service_token_minted)"
-done
-$K get externalsecret strive-pg-harness-dsn
+scripts/s2s/flux-resume.sh --after-config --sha <the PR's merge commit>
 ```
 
-Expected:
+Then confirm that the Secret carries the committed registry. Compare the sha256 prefix of the live
+`gatekeeper-secrets` `service-registry` with that of the committed one, decrypted locally (names and
+hashes only, never the values).
 
-- `--expect-refused` PASSes. SA `harness` is gone, so its cases are skipped; the other-SA and
-  no-token requests get 401 on the preshared backend.
-- The ClusterRole and ClusterRoleBinding are NotFound: the TokenReview RBAC went with composite.
-- The `service_token_minted` count is above 0 on each pod: base preshared mints work. Run the e2e
-  lane if traffic is quiet.
-- The DSN ExternalSecret stays SecretSynced. Do not delete it here; it stays until no consumer uses
-  it.
+Expected after the rollback:
 
-Re-activation is Phases 3 and 4 again: revert the rollback PR, run the pre-flip acceptance, then the
-flip and the probes.
+- Each gatekeeper pod logs `service_registry loaded ... clients=10` and
+  `service_registry_extras loaded ... merged=1 refused=10`: the ten colliding extras entries are
+  refused with `client_id_in_base`, and `svc-harness` is merged.
+- The ten services and four workers carry `GATEKEEPER_CLIENT_SECRET` and no projected token. The
+  harness keeps its token.
+- `phase4-probes.sh` FAILs only `registry` with `client_id_in_base=10`. That is this state by design,
+  and no alert rule fires on it. Every harness check passes.
+- No `service_token_rejected` lines in gatekeeper's Loki stream after the roll, and every client
+  that mints does so again within a minute.
+
+**The re-forward** is one PR that restores the pre-rollback state: `service-registry` back to
+`services: []`, and the values, worker manifests and contracts back to token mode.
+
+- If no other commit touched `gatekeeper-secrets.enc.yaml` since the rollback, a
+  `git revert -m 1 <rollback merge>` is exactly that: drill 2's #2200 had a tree byte-identical to the
+  pre-rollback main.
+- Otherwise use a `sops` edit of the current file. Never `git revert` a SOPS file that another commit
+  touched since.
+
+Use the same freeze and the same two-step resume (`--after-config`). Expected:
+
+- gatekeeper `clients=0` and `merged=11 refused=0`;
+- `extras_sha` equals the ConfigMap hash;
+- each of the ten services and four workers mints through its projected token;
+- `phase4-probes.sh` ALL CHECKS PASSED;
+- `report-ailab-pin-drift` shows 0 torn.
+
+The rollback never drops the registry file, so the plan's C8a step (restore the registry file first)
+and its artifact-versus-spec race do not arise.
+
+**Drill 2 record (2026-10-08, plan C1-C11 as redesigned, ruling R22).** Both directions ran back to
+back in quiet hours. The harness was up throughout; it never went dark.
+
+| | Rollback (C4', #2198 `ce7bb034`) | Re-forward (C8b, #2200 `800fb378`) |
+|---|---|---|
+| Freeze (top-down) | 20:10:22Z | 20:47:19Z |
+| PR merged | 20:14:21Z | 21:00:19Z |
+| Source at the merge | 20:14:56Z | 21:01:00Z |
+| `platform-secrets` applied, registry checked | 20:15:07Z, `77b3ada0` (10 entries) | 21:01:09Z, `a163d50c` (0 entries) |
+| Gatekeeper rolls | 1 (pods 20:16:13Z, 20:16:23Z) | 1 (pods 21:04:52Z, 21:05:06Z) |
+| Gatekeeper registry | `clients=10`, `merged=1 refused=10` | `clients=0`, `merged=11 refused=0` |
+| First mint per client after the roll | 20-54 s (profile 8 min, a rare minter; deepagent and sentinel minted nothing in the window) | 22-94 s (21:05:14Z-21:06:26Z) |
+| Rejected mints, ten services | 0 | 0 |
+| Rejected mints, four workers | 0 | 0 |
+| Parents resumed | `platform` 20:17:12Z. The root resumed, but the then-gate gave a false STOP (fixed in ailab #1161) | `platform` (generation 25), then the root (generation 9, ailab `dee98e57`), about 21:06Z |
+| Probes | only `registry` `client_id_in_base=10` (by design) | ALL CHECKS PASSED |
+| Hold or snapshot | 20:17-20:45Z: TokenReview refused, mismatch and unavailable 0; `/auth/token` 401 and 403 0; edge 5xx 0; PKCE canary OK | 20 min: TokenReview authenticated only; `/auth/token` 200 only; edge 5xx 0; pin drift 0 torn; PKCE canary OK |
+
+The only `service_token_rejected` and `invalid_client` lines in either window are the probe runs'
+deliberate refusals. Per probe run, that is six 401s and seven `unauthorized_client` 403s per replica.
 
 **3. Token rotation.** Both tokens rotate in place. The kubelet replaces a projected token after
 about 80% of its lifetime, so about 48 minutes for a one-hour token. For each token, observe a
@@ -801,7 +899,10 @@ It passes when that replica's `OWNTOKEN fp` changed and its `k8s-mint` PASSes:
 # --bound-object-kind Pod, which dies with the pod as its projected token does), checks that
 # both replicas accept it, then watches for the pod to go
 scripts/s2s/phase4-probes.sh --revocation-drill
-# terminal 2, when terminal 1 prints "Revoke now" (the Kustomization first, then the HelmRelease):
+# terminal 2, when terminal 1 prints "Revoke now" (top-down: the parents, then the Kustomization,
+# then the HelmRelease):
+kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
