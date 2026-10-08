@@ -781,7 +781,8 @@ class RunbookFreezeOrder(unittest.TestCase):
         # platform-secrets is frozen too and resumed first; the harness stays up throughout.
         text = RUNBOOK.read_text(encoding="utf-8")
         drill2 = text[text.index("**2. Rollback after #2125 (config only") : text.index("**3. Token rotation.**")]
-        freeze = [b.split("```")[0] for b in drill2.split("```sh\n")[1:] if '"suspend":true' in b]
+        fences = [b.split("```")[0] for b in drill2.split("```sh\n")[1:]]
+        freeze = [f for f in fences if '"suspend":true' in f]
         self.assertEqual(len(freeze), 1, "drill 2 has one freeze block")
         self.assertEqual(self.suspended_kustomizations(freeze[0].splitlines()),
                          ["flux-system", "platform", "platform-secrets", "platform-app"])

@@ -19,6 +19,12 @@
 #      main@sha1:<platform main now>: main is protected and append-only, so a later main descends
 #      from the target, and it then becomes the target. With --sha it must be exactly that commit.
 #      Nothing is resumed before this.
+#   1b. Secrets: Kustomization platform-secrets (deploy/secrets/ailab). If it is suspended (drill 2 freezes it,
+#      because its config change edits gatekeeper-secrets.enc.yaml), un-suspend it; with --after-config, require
+#      it even when it was not suspended. Either way, wait until it has processed the generation the un-suspend
+#      created, .status.lastAppliedRevision is main@sha1:<target> and Ready is True, BEFORE platform-app moves:
+#      values that land first would point the ten services at preshared secrets the registry does not hold yet.
+#      Outside --after-config an unsuspended platform-secrets is not a gate (a darken must not depend on it).
 #   2. Kustomization: un-suspend platform-app, then wait until .status.lastAppliedRevision is
 #      main@sha1:<target> and Ready is True.
 #   3. HelmRelease: un-suspend it ONLY if .spec.suspend still reads true (the Kustomization's
@@ -49,6 +55,7 @@ export MSYS_NO_PATHCONV=1
 CONTEXT=admin@ai
 FLUX_NS=flux-system
 SOURCE=platform
+SECRETS=platform-secrets
 KUSTOMIZATION=platform-app
 NS=strive-ailab
 HELMRELEASE=strive
@@ -142,6 +149,29 @@ source_at_target() {
   return 1
 }
 
+# secrets_read: SECRETS_STATE = suspend|generation|observedGeneration|lastAppliedRevision|Ready of
+# platform-secrets. A failed read is an error, never "not suspended".
+SECRETS_STATE='' SECRETS_GEN=0
+secrets_read() {
+  SECRETS_STATE=$(f get kustomization "$SECRETS" -o jsonpath='{.spec.suspend}{"|"}{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.lastAppliedRevision}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
+  SECRETS_STATE=${SECRETS_STATE//$'\r'/}
+  [[ $SECRETS_STATE == *"|"*"|"*"|"*"|"* ]]
+}
+# secrets_generation: the generation after the un-suspend, into SECRETS_GEN (retried like every gate).
+secrets_generation() {
+  secrets_read || return 1
+  SECRETS_GEN=$(cut -d'|' -f2 <<<"$SECRETS_STATE")
+  [[ $SECRETS_GEN =~ ^[0-9]+$ ]]
+}
+# secrets_applied: resumed, past the un-suspend's generation (0 when it was not suspended), applied the
+# target and Ready.
+secrets_applied() {
+  local susp observed applied ready
+  secrets_read || return 1
+  IFS='|' read -r susp _ observed applied ready <<<"$SECRETS_STATE"
+  [[ $susp != true && ${observed:-0} -ge $SECRETS_GEN && $applied == *"@sha1:$SHA" && $ready == True ]]
+}
+
 ks_applied() {
   local susp applied ready
   KS=$(f get kustomization "$KUSTOMIZATION" -o jsonpath='{.spec.suspend}{"|"}{.status.lastAppliedRevision}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
@@ -224,6 +254,10 @@ flux-resume ($MODE), dry run: no cluster or git call. The steps, each gated (at 
   1. kubectl --context $CONTEXT -n $FLUX_NS annotate gitrepository $SOURCE --overwrite reconcile.fluxcd.io/requestedAt=<now>
      wait: kubectl --context $CONTEXT -n $FLUX_NS get gitrepository $SOURCE -o jsonpath='{.status.artifact.revision}'
            is main@sha1:<target> (or a later platform main); NOTHING is resumed before this
+  1b. only if kubectl --context $CONTEXT -n $FLUX_NS get kustomization $SECRETS -o jsonpath='{.spec.suspend}' is true:
+       kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $SECRETS --type=merge -p '{"spec":{"suspend":false}}'
+     wait (when it was suspended, and always with --after-config): observedGeneration >= the new generation,
+           .status.lastAppliedRevision is main@sha1:<target> and Ready is True, BEFORE step 2
   2. kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $KUSTOMIZATION --type=merge -p '{"spec":{"suspend":false}}'
      wait: .status.lastAppliedRevision is main@sha1:<target> and Ready is True
   3. only if kubectl --context $CONTEXT -n $NS get helmrelease $HELMRELEASE -o jsonpath='{.spec.suspend}' is still true:
@@ -268,6 +302,23 @@ f annotate gitrepository "$SOURCE" --overwrite "reconcile.fluxcd.io/requestedAt=
 wait_until source_at_target || stop "GitRepository $FLUX_NS/$SOURCE is at '${ART:-?}', not main@sha1:$SHA, after ${TIMEOUT}s" \
   "Nothing was resumed: the Kustomization and the HelmRelease stay suspended. Re-run once the source has fetched the commit."
 echo "source at $ART"
+
+wait_until secrets_read || stop "cannot read Kustomization $FLUX_NS/$SECRETS (${TIMEOUT}s)" \
+  "Nothing was resumed: the Kustomization and the HelmRelease stay suspended. Re-run once the API answers."
+if [[ ${SECRETS_STATE%%|*} == true ]]; then
+  step "1b. Kustomization $FLUX_NS/$SECRETS (frozen with the release): resume it first, then require it applied $SHA"
+  f patch kustomization "$SECRETS" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
+  wait_until secrets_generation || stop "cannot read Kustomization $FLUX_NS/$SECRETS after its resume (${TIMEOUT}s)" \
+    "Only $SECRETS is resumed; platform-app and the HelmRelease stay suspended."
+elif [[ $MODE == config ]]; then
+  step "1b. Kustomization $FLUX_NS/$SECRETS: a config change lands its Secrets first; require it applied $SHA"
+fi
+if [[ ${SECRETS_STATE%%|*} == true || $MODE == config ]]; then
+  f annotate kustomization "$SECRETS" --overwrite "reconcile.fluxcd.io/requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
+  wait_until secrets_applied || stop "Kustomization $FLUX_NS/$SECRETS reads '${SECRETS_STATE:-?}' (suspend|generation|observedGeneration|lastAppliedRevision|Ready), not applied main@sha1:$SHA past generation $SECRETS_GEN, after ${TIMEOUT}s" \
+    "platform-app and the HelmRelease stay suspended: values must not land before the Secrets they rely on. Investigate $SECRETS."
+  echo "Kustomization $FLUX_NS/$SECRETS applied ${SHA:0:12} and Ready"
+fi
 
 step "2. Kustomization $FLUX_NS/$KUSTOMIZATION: resume, then require it applied $SHA"
 f patch kustomization "$KUSTOMIZATION" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null

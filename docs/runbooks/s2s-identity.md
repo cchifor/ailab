@@ -524,16 +524,22 @@ scripts/s2s/flux-resume.sh --after-revert   # optional: --sha <the revert's merg
      (`reconcile.fluxcd.io/requestedAt`), then waits until `.status.artifact.revision` is
      `main@sha1:<target>`. Without `--sha` a later main also counts: main is append-only, so it
      descends from the target. Nothing is resumed before this.
-  3. **The Kustomization.** It un-suspends `platform-app`, then waits until
+  3. **The Secrets.** If Kustomization `platform-secrets` is suspended (drill 2 freezes it), it
+     un-suspends it first. It then waits until the Kustomization has processed the new generation,
+     `.status.lastAppliedRevision` is `main@sha1:<target>` and Ready is True. With `--after-config`
+     it requires this even when `platform-secrets` was not suspended, because values that land
+     before the Secret would point the ten services at preshared secrets the registry does not hold
+     yet. Otherwise an unsuspended `platform-secrets` is not a gate: a darken must not depend on it.
+  4. **The Kustomization.** It un-suspends `platform-app`, then waits until
      `.status.lastAppliedRevision` is `main@sha1:<target>` and Ready is True.
-  4. **The HelmRelease.** It un-suspends it only if `.spec.suspend` still reads true (the
+  5. **The HelmRelease.** It un-suspends it only if `.spec.suspend` still reads true (the
      Kustomization's re-apply normally clears it). Then it waits until Ready is True and
      `.status.history[0].chartVersion` carries the target's first 12 hex.
-  5. **The end state.** With `--after-revert`, `deployment/harness` must be gone. With
+  6. **The end state.** With `--after-revert`, `deployment/harness` must be gone. With
      `--after-drill`, it scales the harness to 1 and waits for the rollout. With `--after-config`
      (a config-only rollback or re-forward that keeps the harness, drill 2), `deployment/harness`
      must still exist with its rollout complete.
-  6. **The parents.** It resumes `platform`, then the root `flux-system`, each only if suspended,
+  7. **The parents.** It resumes `platform`, then the root `flux-system`, each only if suspended,
      and waits until the Kustomization's `observedGeneration` reaches the generation the
      un-suspend created, its `lastAppliedRevision` equals what its own source serves, and Ready
      is True. `lastHandledReconcileAt` is not used: the root applies its own object from git and
@@ -776,21 +782,22 @@ kubectl --context admin@ai -n flux-system patch kustomization platform-app --typ
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 ```
 
-**Only after the PR has merged**, resume in two steps:
+**Only after the PR has merged**, resume with `flux-resume.sh --after-config`. It runs gates 1-7
+under "Resuming the release":
 
-1. Resume `platform-secrets` and wait for a fresh reconcile:
-   - its `lastHandledReconcileAt` equals the `requestedAt` you set;
-   - its `lastAppliedRevision` is `main@sha1:<merge sha>`;
-   - Ready is True.
-
-   Then compare sha256 prefixes of the live `gatekeeper-secrets` `service-registry` and the committed
-   one (decrypt locally). Resume nothing else until they match.
-2. Run `flux-resume.sh --after-config`. It lands `platform-app` and the HelmRelease, requires the
-   harness rollout, then resumes `platform` and the root (gates 1-6 under "Resuming the release").
+1. It resumes `platform-secrets` first and requires it to have applied the merge (gate 3) before
+   `platform-app` moves.
+2. It lands `platform-app` and the HelmRelease.
+3. It requires the harness rollout.
+4. It resumes `platform`, then the root.
 
 ```sh
 scripts/s2s/flux-resume.sh --after-config --sha <the PR's merge commit>
 ```
+
+Then confirm that the Secret carries the committed registry. Compare the sha256 prefix of the live
+`gatekeeper-secrets` `service-registry` with that of the committed one, decrypted locally (names and
+hashes only, never the values).
 
 Expected after the rollback:
 

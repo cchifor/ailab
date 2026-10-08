@@ -8,6 +8,8 @@ A stateful fake Flux stands in for the cluster:
   and that re-apply clears the HelmRelease's hand-set suspend (as observed live on 2026-10-06 at
   17:22:39Z).
 - The HelmRelease upgrades its chart to the applied revision.
+- The Kustomization `platform-secrets` (not suspended by default) applies the fetched revision some
+  polls after it is resumed or nudged.
 
 A fake `git` answers `ls-remote` for platform main. Faults model what the gates must catch:
 - a source stuck on the old commit;
@@ -41,6 +43,9 @@ LATER = "b" * 40
 WRITES = {"annotate", "patch", "scale", "rollout", "delete", "apply", "edit", "label", "replace"}
 #: The Kustomizations that apply platform-app (R19: a freeze suspends them top-down).
 PARENTS = ("platform", "flux-system")
+#: The Kustomization that applies the release's Secrets (deploy/secrets/ailab). Drill 2's config change edits
+#: one, so it is frozen with the release and must land before platform-app (#1162 review).
+SECRETS = "platform-secrets"
 #: ailab main as the root's source serves it, before and after the freeze.
 AILAB_OLD = "c" * 40
 AILAB = "d" * 40
@@ -130,6 +135,26 @@ def fake_kubectl(argv):
                     st["source"] = rev(st["main"])
             return _out(st["source"])
         name = args[2] if len(args) > 2 else ""
+        if kind == "kustomization" and name == SECRETS:
+            sec = st.setdefault("secrets", {})
+            if args[0] == "patch":
+                assert '"suspend":false' in args[-1]
+                sec["suspended"] = False
+                sec["gen"] = sec.get("gen", 4) + 1  # the unsuspend is a spec change
+                return _out("kustomization.kustomize.toolkit.fluxcd.io/%s patched\n" % SECRETS)
+            if args[0] == "annotate":
+                sec["annotated"] = True
+                return _out("kustomization.kustomize.toolkit.fluxcd.io/%s annotated\n" % SECRETS)
+            if args[0] == "get":
+                suspended = sec.get("suspended", False)
+                gen, observed = sec.get("gen", 4), sec.get("observed", 4)
+                applied = sec.get("applied", rev(OLD))
+                if not suspended and sec.get("applies", True):
+                    sec["polls"] = sec.get("polls", 0) + 1
+                    if sec["polls"] >= sec.get("after", 1):
+                        observed, applied = gen, st["source"]
+                        sec["observed"], sec["applied"] = observed, applied
+                return _out("%s|%d|%d|%s|True" % ("true" if suspended else "false", gen, observed, applied))
         if args[0] == "patch" and kind == "kustomization" and name in PARENTS:
             assert '"suspend":false' in args[-1]
             st.setdefault("parents", {})[name] = False
@@ -278,7 +303,7 @@ class FluxResume(unittest.TestCase):
                 continue
             args = [a for i, a in enumerate(call[1:]) if a not in ("--context", "-n") and (i == 0 or call[1:][i - 1] not in ("--context", "-n"))]
             kind = args[1] if len(args) > 1 else ""
-            if kind == "kustomization" and len(args) > 2 and args[2] in PARENTS:
+            if kind == "kustomization" and len(args) > 2 and args[2] in PARENTS + (SECRETS,):
                 kind = "kustomization/" + args[2]
             out.append((args[0], kind))
         return out
@@ -522,6 +547,66 @@ class FluxResume(unittest.TestCase):
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 0, text)
         self.assertIn("RESUMED", text)
+
+    def last(self, verb, kind):
+        verbs = self.verbs()
+        self.assertIn((verb, kind), verbs, verbs)
+        return max(i for i, v in enumerate(verbs) if v == (verb, kind))
+
+    def test_suspended_secrets_land_before_platform_app(self):
+        # Review of #1162 (reviewer-claude): drill 2 freezes platform-secrets with the release. If the
+        # values landed first, the ten services would present preshared secrets to a registry that still
+        # has no entry for them. The script resumes platform-secrets first and requires it to apply the
+        # target before platform-app moves.
+        self.state(secrets={"suspended": True, "after": 2})
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 0, text)
+        sec_patch = self.index("patch", "kustomization/" + SECRETS)
+        sec_last_get = self.last("get", "kustomization/" + SECRETS)
+        app_patch = self.index("patch", "kustomization")
+        self.assertLess(self.index("annotate", "gitrepository"), sec_patch)
+        self.assertLess(sec_patch, sec_last_get)
+        self.assertLess(sec_last_get, app_patch)
+        self.assertEqual(self.final()["secrets"]["applied"], rev(TARGET))
+        self.assertIn("RESUMED", text)
+
+    def test_suspended_secrets_are_landed_first_in_every_mode(self):
+        self.state(secrets={"suspended": True})
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        self.assertLess(self.last("get", "kustomization/" + SECRETS), self.index("patch", "kustomization"))
+
+    def test_secrets_that_never_apply_stop_before_platform_app(self):
+        self.state(secrets={"suspended": True, "applies": False})
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("STOP", text)
+        self.assertIn("Kustomization flux-system/%s" % SECRETS, text)
+        self.assertNotIn(("patch", "kustomization"), self.verbs())
+        self.assertTrue(self.final()["ks_suspended"])
+
+    def test_after_config_requires_unsuspended_secrets_at_the_target(self):
+        # A config change lands its Secrets first even when platform-secrets was not frozen.
+        self.state(secrets={"suspended": False, "applies": False})
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn(SECRETS, text)
+        self.assertNotIn(("patch", "kustomization"), self.verbs())
+        self.assertNotIn(("patch", "kustomization/" + SECRETS), self.verbs())
+
+    def test_the_darken_and_drill_paths_do_not_wait_on_unsuspended_secrets(self):
+        # Outside --after-config an unsuspended platform-secrets is not a gate: a darken revert must not
+        # depend on an unrelated Kustomization being healthy.
+        self.state(secrets={"suspended": False, "applies": False})
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn(("patch", "kustomization/" + SECRETS), self.verbs())
+
+    def test_dry_run_names_the_secrets_step(self):
+        rc, text = self.run_script("--after-config", "--dry-run")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("kustomization %s" % SECRETS, text)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == "__main__":
