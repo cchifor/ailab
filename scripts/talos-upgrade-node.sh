@@ -20,8 +20,11 @@
 #
 # CONTROL PLANES. A node whose live machine type is controlplane is upgraded THROUGH another CP: with
 # the talosconfig's default endpoints, the API connection that streams `--wait` could be the very node
-# that reboots. The survivor is the first other address in TALOS_CP_IPS that answers `version` within
-# 20 s; no reachable survivor is a refusal.
+# that reboots. EVERY other address in TALOS_CP_IPS must answer `version` within 20 s (with one CP
+# already absent, rebooting another loses etcd quorum); the first is the endpoint. Then etcd is read
+# through it: membership must equal TALOS_CP_IPS with no learners, every member must report status
+# without errors, all must agree on one leader that is NOT the target (forfeit leadership first), one
+# raft term, and applied indexes within 1000 entries.
 #
 # PARSING. talosctl -o json is a stream of resource objects; it is parsed structurally (python3 or
 # python, whichever runs), and the node must report exactly one `schematic` extension (64 hex) and
@@ -30,7 +33,7 @@
 #
 # Refuses: skipping a minor, a downgrade or no-op, a missing or ambiguous schematic, a non-nocloud
 # platform, an image absent from the factory (or a factory probe that failed), no client for the
-# running version, and a CP with no reachable survivor. It never passes --force, and it leaves
+# running version, and a CP whose peers or etcd are not fully healthy or which leads etcd. It never passes --force, and it leaves
 # draining to Talos/talosctl (the program's per-node procedure pre-drains with kubectl and gates
 # before and after; this script is only the upgrade step).
 #
@@ -53,6 +56,7 @@ t_maj=${BASH_REMATCH[1]}; t_min=${BASH_REMATCH[2]}; t_pat=${BASH_REMATCH[3]}
 [ -z "$DRY" ] || [ "$DRY" = "--dry-run" ] || usage
 CP_IPS="${TALOS_CP_IPS:-192.168.0.41 192.168.0.42 192.168.0.43}"
 for cp in $CP_IPS; do is_ipv4 "$cp" || { echo "TALOS_CP_IPS entry '$cp' is not an IPv4 address"; exit 2; }; done
+cp_csv="$(printf '%s,' $CP_IPS)"; cp_csv="${cp_csv%,}"
 
 if [ -z "${TALOS_OUT:-}" ]; then
   common="$(git rev-parse --git-common-dir 2>/dev/null)" || { echo "set TALOS_OUT"; exit 1; }
@@ -100,6 +104,77 @@ if not ok:
     sys.exit(1)
 print(v[0])
 ' "$1"
+}
+
+# etcd_gate <members table> <status table>: talosctl's `etcd members` / `etcd status` tables (cells
+# may contain spaces, so columns are cut at the header's column starts). Prints a one-line verdict;
+# exits non-zero unless membership = TALOS_CP_IPS with no learners, every member reports status with
+# no errors, all agree on one leader that is a member and NOT the target, one raft term, and applied
+# indexes within 1000 entries.
+etcd_gate() {
+  "$PY" -c '
+import re, sys
+node, cps, mem_txt, st_txt = sys.argv[1], sys.argv[2].split(), sys.argv[3], sys.argv[4]
+def fail(msg):
+    print(msg)
+    sys.exit(1)
+def table(text):
+    lines = [l.rstrip("\r") for l in text.splitlines() if l.strip()]
+    if not lines:
+        return []
+    hdr = lines[0]
+    starts = [i for i, ch in enumerate(hdr) if ch != " " and (i == 0 or hdr[i - 2:i] == "  ")]
+    bounds = list(zip(starts, starts[1:] + [None]))
+    names = [hdr[s:e].strip() for s, e in bounds]
+    return [{n: row[s:e].strip() for n, (s, e) in zip(names, bounds)} for row in lines[1:]]
+try:
+    mem, st = table(mem_txt), table(st_txt)
+    if not mem or not st:
+        fail("empty etcd members/status")
+    if not {"ID", "PEER URLS", "LEARNER"} <= set(mem[0]) or \
+       not {"NODE", "MEMBER", "LEADER", "RAFT TERM", "RAFT APPLIED INDEX", "LEARNER", "ERRORS"} <= set(st[0]):
+        fail("unexpected etcd table layout")
+    peers = {}
+    for r in mem:
+        m = re.match(r"https?://([0-9.]+):", r["PEER URLS"])
+        if not m:
+            fail("cannot read peer URL %r" % r["PEER URLS"])
+        if r["LEARNER"] != "false":
+            fail("member %s is a learner" % r["ID"])
+        peers[m.group(1)] = r["ID"]
+    if len(mem) != len(cps) or sorted(peers) != sorted(cps):
+        fail("etcd members %s != TALOS_CP_IPS %s" % (sorted(peers), sorted(cps)))
+    by_node = {r["NODE"]: r for r in st}
+    if len(st) != len(cps) or sorted(by_node) != sorted(cps):
+        fail("etcd status covers %s, expected %s" % (sorted(by_node), sorted(cps)))
+    for ip, r in sorted(by_node.items()):
+        if r["ERRORS"]:
+            fail("%s reports errors: %s" % (ip, r["ERRORS"]))
+        if r["LEARNER"] != "false":
+            fail("%s is a learner" % ip)
+        if r["MEMBER"] != peers[ip]:
+            fail("%s reports member %s, expected %s" % (ip, r["MEMBER"], peers[ip]))
+    leaders = {r["LEADER"] for r in st}
+    if len(leaders) != 1:
+        fail("members disagree on the leader: %s" % sorted(leaders))
+    leader = leaders.pop()
+    if leader not in peers.values():
+        fail("leader %s is not a member" % leader)
+    if leader == peers[node]:
+        fail("the target %s is the etcd leader (%s); forfeit leadership first" % (node, leader))
+    terms = {r["RAFT TERM"] for r in st}
+    if len(terms) != 1:
+        fail("members disagree on the raft term: %s" % sorted(terms))
+    applied = [int(r["RAFT APPLIED INDEX"]) for r in st]
+    if max(applied) - min(applied) > 1000:
+        fail("applied indexes differ by %d entries (> 1000)" % (max(applied) - min(applied)))
+    lip = [ip for ip, i in peers.items() if i == leader][0]
+    print("%d/%d healthy, leader %s (%s), term %s" % (len(st), len(cps), leader, lip, terms.pop()))
+except SystemExit:
+    raise
+except Exception as e:
+    fail("cannot parse etcd tables: %s" % e)
+' "$NODE" "$CP_IPS" "$1" "$2"
 }
 
 ERRF="$(mktemp)"; trap 'rm -f "$ERRF"' EXIT
@@ -167,14 +242,25 @@ endpoint=()
 case "$mtype" in
   controlplane)
     [ "$in_cp_list" -eq 1 ] || { log "node is a control plane but not in TALOS_CP_IPS ($CP_IPS) - refusing"; exit 1; }
+    # EVERY other CP must answer: with one already absent, rebooting this one loses etcd quorum.
+    down=""
     for cand in $CP_IPS; do
       [ "$cand" = "$NODE" ] && continue
       if timeout 20 "$client" --talosconfig "$TC" -e "$cand" -n "$cand" version >/dev/null 2>&1; then
-        endpoint=(-e "$cand"); break
+        [ "${#endpoint[@]}" -gt 0 ] || endpoint=(-e "$cand")
+      else
+        down="$down $cand"
       fi
-      log "survivor candidate $cand did not answer"
     done
-    [ "${#endpoint[@]}" -gt 0 ] || { log "no reachable control-plane endpoint other than the target - refusing"; exit 1; }
+    [ -z "$down" ] || { log "control plane(s)$down did not answer - refusing (rebooting $NODE would leave etcd without quorum)"; exit 1; }
+    [ "${#endpoint[@]}" -gt 0 ] || { log "no control-plane endpoint other than the target in TALOS_CP_IPS - refusing"; exit 1; }
+    # And etcd itself, read through the survivor: membership = TALOS_CP_IPS, all healthy, one leader
+    # that is NOT the target (forfeit-leadership first), one term, applied indexes caught up.
+    probe "reading etcd members" timeout 60 "$client" --talosconfig "$TC" "${endpoint[@]}" -n "${endpoint[1]}" etcd members
+    members=$OUT
+    probe "reading etcd status" timeout 60 "$client" --talosconfig "$TC" "${endpoint[@]}" -n "$cp_csv" etcd status
+    verdict="$(etcd_gate "$members" "$OUT")" || { log "etcd gate: $verdict - refusing"; exit 1; }
+    log "etcd: $verdict"
     ;;
   worker)
     [ "$in_cp_list" -eq 0 ] || { log "node is a worker but listed in TALOS_CP_IPS ($CP_IPS) - refusing"; exit 1; }

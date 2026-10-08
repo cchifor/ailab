@@ -134,7 +134,8 @@ jobs:
       # The Talos per-node upgrade wrapper (plans/2026-10-08-talos-upgrade-program-plan.md, P0.6) under
       # a talosctl stub installed as every versioned client plus a curl stub: the image is the node's
       # OWN live schematic (read structurally: exactly one), the client is the one whose
-      # `version --client` IS the running version, a control plane goes through a REACHABLE survivor,
+      # `version --client` IS the running version, a control plane only into a fully healthy etcd it does
+      # not lead (every peer answering, through a survivor),
       # every failed probe is a refusal, adjacent-minor/patch steps only, never --force. Pure bash +
       # python3 + git (worktree resolution), no docker.
       - name: talos-upgrade-node under stubs

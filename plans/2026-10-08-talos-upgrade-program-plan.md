@@ -175,8 +175,11 @@ cluster. Both reviewers said **do not execute unchanged**. Everything below is a
    - no critical alerts;
    - the backup checkpoint for this phase is taken.
 2. **Leadership:** if the target leads, `forfeit-leadership` (sent to the target only). Then all
-   members must agree that a caught-up member other than cp1 leads. Re-check immediately before the
-   drain. Stop if it is wrong.
+   members must agree that a caught-up member other than the target leads (prefer not cp1, whose
+   disk stalls most). Re-check immediately before the drain. Stop if it is wrong. The wrapper
+   enforces this too: it refuses a CP unless every other CP answers, etcd membership equals the CP
+   list with no learners or errors, one leader that is not the target, one term, and applied indexes
+   within 1000 entries.
 3. **Workload moves:**
    - cordon the target;
    - move every CNPG primary off it with `kubectl cnpg promote <cluster> <caught-up replica>`

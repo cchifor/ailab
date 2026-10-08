@@ -50,6 +50,8 @@ for ip in $node $ep; do
 done
 case "$args" in
   *" upgrade "*) echo "upgrade started"; exit 0 ;;
+  *"etcd members"*) cat "$CTL/etcd_members" ;;
+  *"etcd status"*) cat "$CTL/etcd_status" ;;
   *" version"*) printf 'Client:\n\tTag:         x\nServer:\n\tNODE:        %s\n\tTag:         %s\n' "$node" "$(cat "$CTL/server_version")" ;;
   *"get extensions"*) cat "$CTL/extensions.json" ;;
   *"get platformmetadata"*) printf '{"node":"%s","spec":{"hostname":"talos","platform":"%s"}}\n' "$node" "$(cat "$CTL/platform")" ;;
@@ -58,8 +60,8 @@ case "$args" in
     else case "$node" in 192.168.0.41|192.168.0.42|192.168.0.43) t=controlplane ;; *) t=worker ;; esac; fi
     printf '{\n    "metadata": {"id": "machine-type"},\n    "node": "%s",\n    "spec": "%s"\n}\n' "$node" "$t" ;;
 esac
-for k in version extensions platformmetadata machinetype; do
-  case "$args" in *"$k"*) [ -f "$CTL/fail.$k" ] && exit 1 ;; esac
+for k in version extensions platformmetadata machinetype "etcd members" "etcd status"; do
+  case "$args" in *"$k"*) [ -f "$CTL/fail.${k// /-}" ] && exit 1 ;; esac
 done
 exit 0
 STUB
@@ -76,12 +78,27 @@ exit "$(cat "$CTL/curl_rc" 2>/dev/null || echo 0)"
 STUB
 chmod +x "$BIN/curl"
 
+# Healthy etcd, in talosctl's own table layout (copied from the live cluster): cp3 leads, one term,
+# every member applied to the same index, no learners, no errors.
+cat > "$ROOT/etcd_members" <<'TABLE'
+NODE           ID                 HOSTNAME    PEER URLS                   CLIENT URLS                 LEARNER
+192.168.0.42   1fd6da7fa19ceda6   talos-cp3   https://192.168.0.43:2380   https://192.168.0.43:2379   false
+192.168.0.42   48262c4ce7932bdd   talos-cp2   https://192.168.0.42:2380   https://192.168.0.42:2379   false
+192.168.0.42   c652f51572e4975e   talos-cp1   https://192.168.0.41:2380   https://192.168.0.41:2379   false
+TABLE
+cat > "$ROOT/etcd_status" <<'TABLE'
+NODE           MEMBER             DB SIZE   IN USE           LEADER             RAFT INDEX   RAFT TERM   RAFT APPLIED INDEX   LEARNER   PROTOCOL   STORAGE   ERRORS
+192.168.0.43   1fd6da7fa19ceda6   243 MB    90 MB (37.00%)   1fd6da7fa19ceda6   102561441    792         102561441            false     3.6.4      3.6.0
+192.168.0.42   48262c4ce7932bdd   260 MB    90 MB (34.47%)   1fd6da7fa19ceda6   102561441    792         102561441            false     3.6.4      3.6.0
+192.168.0.41   c652f51572e4975e   252 MB    90 MB (35.73%)   1fd6da7fa19ceda6   102561441    792         102561441            false     3.6.4      3.6.0
+TABLE
 SCHEM_A=53513e54bb39202f35694412577a6bc53d484744d35a126e5d42ef34785c0d83
 SCHEM_K=0839748ecac818fa6db9bc8bad2cc054eed752a32cd83226e18aa382a3a384f7
 new_case() {
   export CTL="$ROOT/ctl.$1"; rm -rf "$CTL"; mkdir -p "$CTL"
   echo "v1.11.2" > "$CTL/server_version"; echo "nocloud" > "$CTL/platform"
   for c in $CLIENTS; do echo "${c#*:}" > "$CTL/tag.talosctl-${c%%:*}.exe"; done
+  cp "$ROOT/etcd_members" "$ROOT/etcd_status" "$CTL/"
   printf '{"spec":{"metadata":{"name":"iscsi-tools","version":"v0.2.0"}}}\n{"spec":{"metadata":{"name":"schematic","version":"%s"}}}\n' "$SCHEM_A" > "$CTL/extensions.json"
 }
 run() { # run <node> <target> [--dry-run]
@@ -109,8 +126,10 @@ has "and still only node cp1" "-n 192.168.0.41" "$(upgrade_line)"
 new_case cp2; run 192.168.0.42 v1.11.6
 has "cp2 upgraded via cp1" "-e 192.168.0.41" "$(upgrade_line)"
 new_case cpdown; echo 192.168.0.42 > "$CTL/unreachable"; run 192.168.0.41 v1.11.6
-eq "cp1 with cp2 down -> exit 0" 0 "$(cat "$CTL/rc")"
-has "skips the unreachable cp2 and uses cp3" "-e 192.168.0.43" "$(upgrade_line)"
+eq "cp1 with cp2 down -> exit 1 (rebooting cp1 would lose etcd quorum)" 1 "$(cat "$CTL/rc")"
+eq "no upgrade call" "" "$(upgrade_line)"
+has "names the absent control plane" "192.168.0.42" "$(grep -i 'did not answer' "$CTL/out")"
+has "a healthy CP upgrade reports the etcd leader" "leader 1fd6da7fa19ceda6" "$(cat "$ROOT/ctl.cp/out")"
 new_case nosurv; printf '192.168.0.42\n192.168.0.43\n' > "$CTL/unreachable"; run 192.168.0.41 v1.11.6
 eq "no reachable survivor -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
 new_case onlyself; TALOS_CP_IPS=192.168.0.41 run 192.168.0.41 v1.11.6
@@ -119,6 +138,32 @@ new_case unlisted; echo controlplane > "$CTL/machinetype"; run 192.168.0.47 v1.1
 eq "a live control plane missing from TALOS_CP_IPS -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
 new_case badlist; TALOS_CP_IPS="192.168.0.41 not-an-ip" run 192.168.0.41 v1.11.6
 eq "a malformed TALOS_CP_IPS -> exit 2" 2 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+
+echo "== a CP is upgraded only into a fully healthy 3/3 etcd it does not lead =="
+new_case leader; run 192.168.0.43 v1.11.6
+eq "the target (cp3) is the etcd leader -> exit 1 (forfeit first)" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+has "says so" "leader" "$(cat "$CTL/out")"
+new_case etcderr; sed -i '/^192.168.0.43 /s/ *$/   etcdserver: request timed out/' "$CTL/etcd_status"; run 192.168.0.41 v1.11.6
+eq "a member reporting ERRORS -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case learner; sed -i '/talos-cp3/s/false$/true/' "$CTL/etcd_members"; run 192.168.0.41 v1.11.6
+eq "a learner member -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case lag; sed -i '/^192.168.0.42 /s/102561441            false/102551441            false/' "$CTL/etcd_status"; run 192.168.0.41 v1.11.6
+eq "a member 10000 entries behind -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case term; sed -i '/^192.168.0.42 /s/ 792 / 793 /' "$CTL/etcd_status"; run 192.168.0.41 v1.11.6
+eq "members disagreeing on the raft term -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case twoleaders; sed -i '/^192.168.0.42 /s/   1fd6da7fa19ceda6   102561441/   48262c4ce7932bdd   102561441/' "$CTL/etcd_status"; run 192.168.0.41 v1.11.6
+eq "members disagreeing on the leader -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case twomembers; sed -i '/talos-cp3/d' "$CTL/etcd_members"; run 192.168.0.41 v1.11.6
+eq "etcd membership != TALOS_CP_IPS -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+new_case statusmissing; sed -i '/^192.168.0.43 /d' "$CTL/etcd_status"; run 192.168.0.41 v1.11.6
+eq "a member missing from etcd status -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+for k in etcd-members etcd-status; do
+  new_case "fail$k"; touch "$CTL/fail.$k"; run 192.168.0.41 v1.11.6
+  eq "talosctl ${k/-/ } failing (with valid output) -> exit 1" 1 "$(cat "$CTL/rc")"; eq "no upgrade call" "" "$(upgrade_line)"
+done
+new_case workeretcd; run 192.168.0.47 v1.11.6
+eq "a worker upgrade -> exit 0" 0 "$(cat "$CTL/rc")"
+eq "and never asks etcd" "" "$(grep ' etcd ' "$CTL/calls")"
 
 echo "== a kata/gvisor node keeps ITS schematic; JSON is read structurally =="
 new_case kata; printf '{"spec":{"metadata":{"name":"schematic","version":"%s"}}}\n' "$SCHEM_K" > "$CTL/extensions.json"; run 192.168.0.49 v1.11.6
