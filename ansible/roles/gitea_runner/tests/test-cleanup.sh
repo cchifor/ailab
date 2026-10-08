@@ -773,6 +773,21 @@ check "N22d: a second record whose full heal fails is marked too, and the first 
   'heal_ran && [ "$(state_val "failed_$Y")" = 1 ] && [ "$(state_val "failed_$Y2")" = 1 ]'
 unset MOCK_JOURNAL MOCK_DU
 
+echo "[Q] the gap wait is ONE wall-clock budget per run"
+# The busy-gate loop counted IDLE_CONFIRM_POLLS-1 confirm sleeps on every BUSY iteration, although a
+# busy read returns at once and sleeps nothing, so the 600s budget expired after ~200s of real waiting
+# (codex, reviewing #1142). Both waits now go through wait_for_gap, whose deadline is set once per run:
+# the busy gate gets its full budget, and a run whose heal already spent it does not wait a second time
+# (the unit's TimeoutStartSec is sized for one wait). Timing bounds are generous on purpose.
+t0=$(date +%s); IDLEWAIT=6 run_beacon 1 85; el=$(( $(date +%s) - t0 ))
+check "Q1: busy at pressure -> the busy gate waits its whole budget on the wall clock (${el}s for 6s)" '[ "$el" -ge 5 ]'
+check "Q1: ...then defers as before (pressure_defer=1)" '[ "$(beacon_field pressure_defer)" = 1 ]'
+
+dangle; t0=$(date +%s); MOCK_JOURNAL="$JRNL" MOCK_DU="$DU" IDLEWAIT=5 run_beacon 1 85; el=$(( $(date +%s) - t0 ))
+check "Q2: heal and busy gate share ONE budget: a busy run waits once, not twice (${el}s for 5s)" '[ "$el" -ge 4 ] && [ "$el" -lt 9 ]'
+check "Q2: ...the record stays reported and the busy gate still defers" \
+  '[ "$(heal_field dangling_record)" = 1 ] && [ "$(beacon_field pressure_defer)" = 1 ]'
+
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
 # Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in
 # the script ARE the values this suite exercises. In production the env file always exists, rendered
