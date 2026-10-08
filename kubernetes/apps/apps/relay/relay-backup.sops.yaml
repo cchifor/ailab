@@ -7,28 +7,19 @@ metadata:
         app.kubernetes.io/part-of: relay
 type: Opaque
 stringData:
-    PGPASSWORD: ENC[AES256_GCM,data:IOJjYYp7m+eys2iOAU7y0Huwj1Jzik+Qaj14zlvy6ijdruQ0LM7UqlySUTxg50KT,iv:/vmVoogQfPkRnJ2WbK10Tt5vLxSr0Y+Nv4Dc38uvI08=,tag:Or2GUYn81lQUnrFv43Sn1Q==,type:str]
+    PGPASSWORD: ENC[AES256_GCM,data:UZ3TD18LmZSMENoTMpjYtRNBcib31hVscfHCq4vQZRS7gF9TR9yPF9NOUXBtpWcI,iv:/vmVoogQfPkRnJ2WbK10Tt5vLxSr0Y+Nv4Dc38uvI08=,tag:Pah9/7vqwTgSpyVJOwDSfw==,type:str]
 sops:
     age:
         - enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBvbGkzT1Y0TlFGUVgvc3R1
-            M0RHNEkrK2dGWTEybkY2ayt0ZnNSSGhMNjBNClhVTklQSE1xd0Z3SWtFb2IxMGRo
-            enlxMEJZeUhDQWJ2aVpQVlZxeURXeDAKLS0tIDZtZnpleVIxT3lGSGlDaUc3WmdH
-            TGs0eVZtRDFtamc4TnN1Q0M4NXJGWXcKw0l60CjddOw+bTEKFkboyn9gc9P5ueEJ
-            A6BNgxlBobD151cCE+C+FqZd32rmHL3U0Ka/n5JPzdUZnxUiOjIaMw==
-            -----END AGE ENCRYPTED FILE-----
-          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
-        - enc: |
-            -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBOeXU2ZFdaTnJodW84V1lq
-            czRjaFEvYmF5Rkk5TWhlYnJUTzllbGNURWpJCnZ6YThEWDZxbkF2TDhra3UxZFlF
-            eS9DVHVrTU1iMFBJSFZSZWd1NVE4QU0KLS0tIGRGTTdNQy9LNEluakZqaWY0ejV3
-            aGtuOXRnTENDclpZT1UrbWJWS1EzaXMKFdpqzr41dpCHMoZVab94rrX9hcgMyQcW
-            neHJJGfTC4RBmju/5GITlC9xcMncs23IPrvLeu1B2X98JoOGp9Tqlg==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB0dkNJRnV4NVduY2w5WU1p
+            YmtVL0dpemtvcHlWYTFNbGZOanB1c3B2cFNZCkVPSXlKNW9CYkEyWjZhQTZBZWZ1
+            b2Z0YUlxWnVFazFKWWJvMk8rOERNT0EKLS0tIHg5QVJ1VkNGR3FZZmlrMFVCN3hV
+            a05Wa254dXdaSDFHaGlBRUVtR1lWRVEKJg77SKUQipKa9LHkT12QnNmQG32/or41
+            hfagKS0Ieg56L2tK+1rw1iVhQwEAJkPDorADTIHXfFEIzV9FAlBl1Q==
             -----END AGE ENCRYPTED FILE-----
           recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
     encrypted_regex: ^(data|stringData)$
-    lastmodified: "2026-10-01T18:47:42Z"
-    mac: ENC[AES256_GCM,data:IhU8fxlqXuf+9GIMgwnXaOQcnfOCV6g263U4I1+qh57RtlufVGSrBUhfhEzMmeG2wpaDGzslEtcNx9SHrSOi5Ad+bN4UnqYKRCaAtp0ZPcjvS1BLpaA41t0LZ+sxprm0y65EtV8vU4FDFeVsrPOajuih2HsP50Qfeik2Ngz2hOs=,iv:bYB5s5ZCgUavkI02/MOT5tzCjzt8uFBjxVoIX1b3SEI=,tag:V2eYPHDnlfxiSJkoQlRf3Q==,type:str]
+    lastmodified: "2026-10-08T21:33:23Z"
+    mac: ENC[AES256_GCM,data:LJD4dCyNWG3PHb7rQ0Ut+MLJ0xyVvRr7fDaplP2nV8yungRP6yS9qIhSDaTp965aDXyD4riAExJIW8q7XJ2m3OkuCoPT45p/iHGFWBAY5VrruJZWrpRDmLvqrjpEOgkTnjm/kF0kcP3h6MAPbudy2SEec4qck3EeJP40dgi7zrI=,iv:Ao/725Ji1bjk70gVJgrDr31+Z7excqkD/ldT5gQ3CJ0=,tag:GoANWXUu+neevI3n1Hf2hQ==,type:str]
     version: 3.12.2
