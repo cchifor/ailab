@@ -34,7 +34,8 @@ absent from a git worktree; resolve it with `"$(cd "$(git rev-parse --git-common
 
 ## What it is, who holds it
 
-One age recipient, `age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g`, is the recipient of **every** SOPS
+One age recipient, `age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t` (since the 2026-10-08 rotation; see "Rotation record" below; the
+retired one was `age1nfa6hhdz...`), is the recipient of **every** SOPS
 file of this repository (73 encrypted files on 2026-10-07; the "74" of the plan counts `.sops.yaml` itself, which is
 configuration, not ciphertext) and of the 23 platform `deploy/secrets/ailab/*.enc.yaml`. The cluster decrypts several other repositories with the same Flux key
 (cloudlab's `.sops.yaml` is recorded as naming the same recipient in `kubernetes/apps/clusters/ai/cloudlab.yaml`; step 0 checks the rest).
@@ -55,8 +56,10 @@ see `docs/runbooks/openbao-estate-credentials.md`) and platform's `age1wuvg...` 
 
 ## Tooling facts (checked 2026-10-07, sops 3.9.4, Windows Git Bash)
 
-- WSL (`Ubuntu`) has **no `sops`** and no internet. Use the Windows `sops` (`/c/Users/chifo/bin/sops`) with a controlled
-  environment (below), or copy a Linux `sops` binary into WSL through `/mnt/c` if you want the "WSL sops" the plan names.
+- WSL (`Ubuntu`) has no internet. Since 2026-10-08 it has sops 3.13.1 at `~/.local/bin/sops` (in a login shell:
+  `wsl.exe -e bash -l`; capture `SOPS=$(command -v sops)` before any `env -i`). The 2026-10-08 rotation used the WSL sops
+  for **every** repository: the rules of platform, muse-stream and trueswarm-admin use `/`, which the Windows sops does
+  not match (next bullet). Generate keys and run git on Windows (`age-keygen` is Windows-only).
 - This repository's `.sops.yaml` rules use `[/\\]` separators, so they match on Windows and Linux. **Platform's anchored
   rule `^deploy/secrets/ailab/.*\.enc\.yaml$` does not match on Windows**: `sops updatekeys` and `sops encrypt` answer
   `no matching creation rules found` because sops sees `deploy\secrets\ailab\...`. For the platform half, either run a Linux
@@ -77,7 +80,7 @@ see `docs/runbooks/openbao-estate-credentials.md`) and platform's `age1wuvg...` 
    # Secrets in the cluster that hold an age identity (by key name):
    kubectl --context admin@ai get secret -A -o json | jq -r '.items[] | select((.data // {}) | keys | any(test("agekey|age[.]key|keys[.]txt|age-key"))) | .metadata.namespace + "/" + .metadata.name'
    # Repositories: every file naming the recipient, and every encrypted file (this repo: expect 73):
-   git grep -l 'age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g'
+   git grep -l "$(age-keygen -y <main checkout>/kubernetes/infra/_out/age.agekey)"     # the current recipient
    git grep -l -E '^sops:' -- '*.sops.yaml' ':!*.example' | grep -v '^\.sops\.yaml$' | wc -l
    # Workstation and VMs (paths only):
    ls -la ~/.config/sops/age/ ~/work/keys/ 2>/dev/null; env | cut -d= -f1 | grep -i '^SOPS_AGE'
@@ -126,7 +129,7 @@ file is missing):
 
 ```bash
 cd <main checkout>/kubernetes/infra/_out
-D=<yyyymmdd of step 1>; OLD=age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+D=<yyyymmdd of step 1>; OLD=<the recipient being retired: the current one, from step 0>
 WORK=$PWD/age-rotation-$D; NEWFILE=$PWD/age-$D.agekey; umask 077
 NEW=$(age-keygen -y "$NEWFILE" 2>/dev/null); [ -n "$NEW" ] || echo "STOP: $NEWFILE is missing or unreadable; do not continue (the loops would run with an empty recipient)"
 ```
@@ -284,6 +287,31 @@ is archived (below); restore it temporarily with `age -d -i <new key> _out/age-r
 | step 4 | replace `sops-age` with both keys |
 | step 5 | the old key still exists (`age-old.agekey`, then the archive): re-add it with `sops updatekeys -y` after listing both recipients again |
 | step 6 | restore the old key from the archive with the new key; the old recipient must be re-added to every file first |
+
+## Rotation record (2026-10-08, auth-hardening plan A5.2, decision D8)
+
+Retired `age1nfa6hhdz...` (in service since 2026-06-14). The new recipient is `age1g0exjqgq9l52...`.
+
+| Step | When (UTC) | What |
+| --- | --- | --- |
+| 0 | 2026-10-08 | Inventory of H1-H14 and the 127 files in 7 repositories (5 in scope); scratch rehearsal passed |
+| 1 | 2026-10-08 | New key `_out/age-20261008.agekey` (ACL user-only); `age-old.agekey` backup; `age.agekey` held both identities |
+| 2 | 17:01 | `sops-age` = both keys (`replace`, which dropped the `last-applied` copy of the key, H5); 27/27 SOPS Kustomizations Ready |
+| 3 | by 19:38 | `updatekeys` to both recipients. Repositories and PRs: ailab #1152 (73 files), platform #2197 (27, with the checksum bump), cloudlab #38 (1), muse-stream #2 (1), trueswarm-admin #153 (25 files, plus `provision-foundation.py`) |
+| 4 | 19:43 | `sops-age` = the new key only; all 27 handled a fresh reconcile, Ready |
+| gate | 21:2x-21:30 | H6-H8 dev-worker copies deleted (no workflow used them); H9 org Actions secret `SOPS_AGE_KEY` re-set to the platform `age1wuvg...` identity only; drill 2 finished first |
+| 5 | 21:49-22:05 | `sops rotate -i --rm-age <old>` with only the new key. Repositories and PRs: cloudlab #39, muse-stream #3, trueswarm-admin #155, ailab #1163 (plus the broker inventory's `seedsDocumentSha256`), platform #2201 (checksum `ef33ed12...`). In each repository the old key opens 0 files, the new key opens all of them, and an unrelated key opens 0 |
+| 6 | 22:26-22:40 | `_out/age.agekey` = the new key (ACL: the owner, SYSTEM, Administrators); `sops-age` = the single key `age.agekey`, and all 27 reconciled fresh; the old key archived as `_out/age-retired-20261008.agekey.age` (encrypted to the new key, verified); the plaintext old key, the duplicate new-key file and the rotation scratch deleted; `~/work/keys/age.agekey` and `~/work/keys/backup/age.agekey` now hold the new key |
+
+Left open after the rotation:
+
+- **Owner-held copies.** The offline and Vaultwarden copies (H13) and the GitHub Actions secrets on the dormant mirrors
+  (H14) must hold the new key. The workstation copies under `~/work/keys/` may be deleted once the offline copy is
+  confirmed (`openbao-estate-credentials.md` §2).
+- **Not re-keyed.** trueswarm (2 files) and trueswarm-test (2 files) were outside the R10 scope and are still encrypted
+  to the retired key. They open only through the archive. Neither repository is read by Flux.
+- **Backups.** Velero backups (up to 30 days), etcd snapshots (30 days) and their Google Drive mirrors still contain
+  the retired key inside `sops-age`. They age out by 2026-11-08.
 
 ## Residual
 
