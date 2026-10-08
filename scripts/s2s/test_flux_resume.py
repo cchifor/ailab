@@ -41,6 +41,9 @@ LATER = "b" * 40
 WRITES = {"annotate", "patch", "scale", "rollout", "delete", "apply", "edit", "label", "replace"}
 #: The Kustomizations that apply platform-app (R19: a freeze suspends them top-down).
 PARENTS = ("platform", "flux-system")
+#: ailab main as the root's source serves it, before and after the freeze.
+AILAB_OLD = "c" * 40
+AILAB = "d" * 40
 
 
 def find_bash():
@@ -112,11 +115,14 @@ def fake_kubectl(argv):
             continue
         args.append(argv[i])
         i += 1
-    kind = args[1] if len(args) > 1 else ""
+    kind = (args[1] if len(args) > 1 else "").lower()  # kubectl kinds are case-insensitive
     try:
         if args[0] == "annotate" and kind == "gitrepository":
             st["annotated"] = True
             return _out("gitrepository.source.toolkit.fluxcd.io/platform annotated\n")
+        if args[0] == "get" and kind == "gitrepository" and len(args) > 2 and args[2] == "flux-system":
+            st["source_lookups"] = st.get("source_lookups", 0) + 1
+            return _out(st.get("ailab_source", rev(AILAB)))
         if args[0] == "get" and kind == "gitrepository":
             if st.get("annotated") and st.get("source_fetches", True):
                 st["source_polls"] = st.get("source_polls", 0) + 1
@@ -127,21 +133,33 @@ def fake_kubectl(argv):
         if args[0] == "patch" and kind == "kustomization" and name in PARENTS:
             assert '"suspend":false' in args[-1]
             st.setdefault("parents", {})[name] = False
+            gen = st.setdefault("parent_gen", {})
+            gen[name] = gen.get(name, 7) + 1  # the unsuspend is a spec change
             return _out("kustomization.kustomize.toolkit.fluxcd.io/%s patched\n" % name)
         if args[0] == "annotate" and kind == "kustomization" and name in PARENTS:
-            value = [a for a in args if a.startswith("reconcile.fluxcd.io/requestedAt=")][0].split("=", 1)[1]
-            st.setdefault("parent_requested", {})[name] = value
+            # A nudge only: the self-applied root drops it on its own re-apply (drill 2, 2026-10-08).
             return _out("kustomization.kustomize.toolkit.fluxcd.io/%s annotated\n" % name)
         if args[0] == "get" and kind == "kustomization" and name in PARENTS:
             if name in st.get("parent_get_fails", []):
                 sys.stderr.write("error: the server is currently unable to handle the request\n")
                 return 1
             suspended = st.get("parents", {}).get(name, False)
-            handled = st.setdefault("parent_handled", {}).get(name, "stale")
+            gen = st.setdefault("parent_gen", {}).get(name, 7)
+            observed = st.setdefault("parent_observed", {}).get(name, 7)
+            src_name = "platform" if name == "platform" else "flux-system"
+            src = st["source"] if src_name == "platform" else st.get("ailab_source", rev(AILAB))
+            applied = st.setdefault("parent_applied", {}).get(name, rev(OLD) if src_name == "platform" else rev(AILAB_OLD))
+            if name in st.get("parent_transient_once", []) and not suspended:
+                st["parent_transient_once"].remove(name)
+                sys.stderr.write("error: etcdserver: request timed out\n")
+                return 1
             if not suspended and name not in st.get("parent_never_reconciles", []):
-                handled = st.get("parent_requested", {}).get(name, handled)
-                st["parent_handled"][name] = handled
-            return _out("%s|%s|True" % ("true" if suspended else "false", handled))
+                observed = gen
+                if name not in st.get("parent_stale_revision", []):
+                    applied = src
+                st["parent_observed"][name] = observed
+                st["parent_applied"][name] = applied
+            return _out("%s|%d|%d|%s|True|GitRepository|flux-system|%s" % ("true" if suspended else "false", gen, observed, applied, src_name))
         if args[0] == "patch" and kind == "kustomization":
             assert '"suspend":false' in args[-1]
             st["ks_suspended"] = False
@@ -442,7 +460,8 @@ class FluxResume(unittest.TestCase):
 
     def test_a_parent_whose_stale_ready_is_not_a_fresh_reconcile_stops(self):
         # Review of #1159 (reviewer-codex): Ready=True right after the unsuspend can be the condition
-        # from before the freeze. The gate requires lastHandledReconcileAt == the requestedAt it set.
+        # from before the freeze. The gate requires observedGeneration to reach the generation the
+        # unsuspend created and lastAppliedRevision to equal the parent's source artifact.
         self.state(parents={"platform": True, "flux-system": True}, parent_never_reconciles=["platform"])
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 1, text)
@@ -476,6 +495,33 @@ class FluxResume(unittest.TestCase):
         self.assertEqual(rc, 1, text)
         self.assertIn("did not finish rolling out", text)
         self.assertNotIn(("patch", "kustomization/platform"), self.verbs())
+
+    def test_the_self_applied_root_passes_without_a_handled_request(self):
+        # Drill 2 (2026-10-08): flux-system/flux-system applies its own object from git, which drops the
+        # requestedAt annotation, so lastHandledReconcileAt never moved and the old gate gave a false STOP
+        # after the release had landed. Generation + revision are the proof that works for the root.
+        self.state(parents={"platform": True, "flux-system": True}, ailab_source=rev(AILAB))
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(self.final()["parent_applied"]["flux-system"], rev(AILAB))
+        self.assertIn("RESUMED", text)
+
+    def test_a_fresh_generation_with_a_stale_revision_stops(self):
+        # Review of #1161 (reviewer-claude): the revision half of the gate on its own: the controller has
+        # processed the new generation but still reports the pre-freeze lastAppliedRevision.
+        self.state(parents={"platform": True, "flux-system": True}, ailab_source=rev(AILAB),
+                   parent_stale_revision=["flux-system"])
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("Kustomization flux-system/flux-system", text)
+        self.assertIn(rev(AILAB_OLD), text)
+
+    def test_a_transient_read_right_after_the_unsuspend_is_retried(self):
+        # Review of #1161 (reviewer-claude): the post-unsuspend generation read is retried, not a false STOP.
+        self.state(parents={"platform": True, "flux-system": True}, parent_transient_once=["platform"])
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("RESUMED", text)
 
 
 if __name__ == "__main__":
