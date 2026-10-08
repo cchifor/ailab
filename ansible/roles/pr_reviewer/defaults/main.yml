@@ -222,8 +222,8 @@ pr_reviewer_merge_personas: [claude, codex]
 # repo, Gitea refuses this NON-admin author's merges of those files; until then they are not.
 # workstation-bot: the owner workstation's non-admin routine identity since 2026-10-07 (ailab plan
 # 2026-10-07-auth-hardening-and-ops, B2, owner decision D10), replacing the workstation's use of the
-# `cchifor` org token. Also parity: `cchifor` was listed until that plan's B7 (2026-10-08) removed it;
-# `chifor` (the owner) stays.
+# `cchifor` org token. History: `cchifor` was listed here until that plan's B7 (2026-10-08) removed
+# it; `chifor` (the owner) stays.
 # The grant stays GLOBAL after B7 on purpose (plan decision D10, reviewed twice): workstation-bot is
 # in team `automation` (all repositories, write), exactly like the global dev-worker-bot, so a leaked
 # token can already push branches and open PRs in every org repo; and the workstation's sessions work
