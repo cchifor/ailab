@@ -350,7 +350,7 @@ find_dangling() {
   # \1: the snapshot reported missing must be the X being committed — anything else is another failure.
   pairs="$(printf '%s\n' "$journal" \
     | sed -n 's/.*failed to commit \([a-z0-9][a-z0-9]*\) to \([a-z0-9][a-z0-9]*\) during finalize: .*snapshot \1 does not exist: not found.*/\2 \1/p' \
-    | sort -u)"
+    | sort -u)" || return 2 # a failed parse is unknown, not "none" (pipefail carries the status)
   [ -n "$pairs" ] || return 1
   while read -r y x; do
     record_listed "$y"; rc=$?
@@ -444,6 +444,11 @@ heal_dangling_record() {
     return 1
   fi
   timeout -k 30 300 systemctl restart docker.service >/dev/null 2>&1 || log "heal: restarting docker.service FAILED"
+  if ! idle_confirmed; then
+    log "heal: the co-located runner started a job during the docker restart -> NOT running the builder prune"
+    heal_start_runner; trap - EXIT TERM INT
+    return 1
+  fi
   timeout -k 30 600 docker builder prune -af >/dev/null 2>&1 || log "heal: builder prune did not finish cleanly"
   heal_start_runner
   trap - EXIT TERM INT

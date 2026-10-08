@@ -104,7 +104,7 @@ case "\$*" in
     [ "\${MOCK_SYSTEMCTL_FAIL:-0}" = 1 ] && exit 1
     echo "\${MOCK_MAINPID:-4242}" ;;
   *"restart docker.service"*)
-    echo "systemctl \$*" >> "$CALLS"; exit "\${MOCK_DOCKER_RESTART_RC:-0}" ;;
+    echo "systemctl \$*" >> "$CALLS"; : > "$WORK/phase.dockerrestart"; exit "\${MOCK_DOCKER_RESTART_RC:-0}" ;;
   *stop*gitea-act-runner*)
     echo "systemctl \$*" >> "$CALLS"; : > "$WORK/phase.runnerstop"
     [ "\${MOCK_STOP_FAIL:-0}" = 1 ] && exit 1
@@ -172,6 +172,15 @@ if [ "\${MOCK_MV_FAIL:-0}" = 1 ]; then case "\$*" in *heal.state*) exit 1 ;; esa
 exec "$REAL_MV" "\$@"
 EOF
 
+# sort: the real one, except that MOCK_SORT_FAIL=1 makes it fail with no output (a temp-file I/O
+# error, say) — the journal parse in section 0 must read that as unknown, not "none" (case N21).
+REAL_SORT="$(command -v sort)"
+cat >"$BIN/sort" <<EOF
+#!/usr/bin/env bash
+[ "\${MOCK_SORT_FAIL:-0}" = 1 ] && { cat > /dev/null; exit 2; }
+exec "$REAL_SORT" "\$@"
+EOF
+
 for stub in logger; do printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/$stub"; done
 chmod +x "$BIN"/*
 
@@ -202,6 +211,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_STOP_FAIL="${MOCK_STOP_FAIL:-0}" MOCK_START_FAIL="${MOCK_START_FAIL:-0}" \
     MOCK_DOCKER_RESTART_RC="${MOCK_DOCKER_RESTART_RC:-0}" MOCK_HANG_HEAL="${MOCK_HANG_HEAL:-0}" \
     MOCK_PEER_BUSY_FROM="${MOCK_PEER_BUSY_FROM:-}" MOCK_MV_FAIL="${MOCK_MV_FAIL:-0}" \
+    MOCK_SORT_FAIL="${MOCK_SORT_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
   # TERM_AT_HANG: SIGTERM the script once the mock reports it is inside the heal (case N10) — what
@@ -692,6 +702,15 @@ check "N18: ...and the runner is started again" '[ "$(cat "$WORK/runner.state")"
 dangle; MOCK_MV_FAIL=1 run_beacon 0 50
 check "N19: the state file cannot be replaced -> no runner stop, no heal" '! heal_ran && ! calls_has "systemctl stop"'
 check "N19: ...and the sweep runs" swept
+
+dangle; MOCK_PEER_BUSY_FROM=dockerrestart run_beacon 0 50
+check "N20: a peer job starting during the docker restart -> no builder prune" \
+  'heal_ran && ! grep -qE "docker builder prune -af *$" "$CALLS"'
+check "N20: ...and the runner is started again" '[ "$(cat "$WORK/runner.state")" = active ]'
+
+dangle; printf 'dangling=1\n' > "$WORK/heal.state"; MOCK_SORT_FAIL=1 run_beacon 0 50
+check "N21: a failed journal parse is unknown: no heal, last dangling_record=1 kept, sweep runs" \
+  '! heal_ran && [ "$(heal_field dangling_record)" = 1 ] && swept'
 unset MOCK_JOURNAL MOCK_DU
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
