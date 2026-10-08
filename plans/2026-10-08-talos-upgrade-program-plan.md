@@ -1,311 +1,400 @@
 # Talos 1.11.2 → 1.14.2 upgrade program (Kubernetes 1.31.4 → 1.33.13)
 
-## Codex Review
+## Review decisions (round 1: Codex + Opus stand-in for Fable)
 
-- The adjacent-minor Talos path, explicit factory images, separate env schematic, and one-node gates are sound; Kubernetes 1.33 before Talos 1.14 follows the published support matrix.
-- **Do not execute unchanged.** The shared-disk etcd stalls require stronger pre-drain and survivor-health gates, and the blanket A/B rollback instruction is unsafe across an etcd cluster-version transition.
-- Correct the Proxmox replacement claim, QNAP Flux chart reconciliation, feature-gate statement, CNPG isolation semantics, and final IaC apply procedure.
-- Prefer P0 → P1 and stability soak → QNAP/Cilium preparation → P2/P3 → Kyverno/CNPG → P5/P6 → P7, with separate component windows and verified recovery points.
-- Missing essentials include backup-window coordination, consistent backups for every database cluster, VIP/KubePrism failover checks, env runtime-config validation, and explicit abort/recovery deadlines; Kubernetes 1.33 remains a temporary EOL endpoint.
+Fable was out of credits; the owner chose an Opus stand-in, which verified its claims against the live
+cluster. Both reviewers said **do not execute unchanged**. Everything below is accepted and folded in.
+
+**Corrections to the draft:**
+- Upgrades use talosctl's `--image`, not `machine.install.image` (that is read only at first install).
+- agent-node-3 runs the kata/gVisor schematic.
+- bpg 0.116 `import_from` does not force a VM replacement.
+- `talos_machine_secrets` replaces only when the version is LOWERED.
+- Bumping `talos_version` also changes the config contract: a 1.14 contract fails validation and
+  enables sandboxd. Pin the contract separately.
+- AppArmor gates are gone in 1.33, while `SidecarContainers` stays (locked true).
+- The QNAP tag bump needs `reconcileStrategy: Revision`.
+- CNPG primary isolation needs BOTH the API and the peers to be lost.
+
+**Reordering and new gates:**
+- Order: QNAP + Cilium (all the way to 1.18.14) before Talos 1.12's kernel 6.18; Kyverno/CNPG after
+  P3; Kubernetes after the add-ons; Talos 1.14 last, with a 24 h soak before the third CP.
+- `upgrade-k8s` runs with exactly one `-n` and `--dry-run` first.
+- Add etcd :2383 to the firewall before 1.14.
+- Per-node install images come from each node's live schematic.
+- Single-instance CNPG PDBs, CP capacity, CI-fleet and night-cronjob quiescing.
+- Consistent backups for every Postgres cluster.
+- Cause-specific recovery with deadlines.
+- tofu hygiene: provider locks, the untracked `node-labels.tf`, a no-destroy gate.
+
+**Owner decisions (2026-10-08):**
+- Delete the drill restores `trueswarm-recovery/restored-592a76d3` and `restored-671d5224`.
+- Remove `admin-restore-application-20260926` from trueswarm-admin's qualification Kustomization
+  (`chifor` merges).
+- Round 2 reviewers: Codex and the Opus stand-in.
+- First CP window tonight (P1) only if every P0 gate is green.
 
 ## Context
 
-**Goal.** The owner asked (2026-10-08) for the newest Talos. That is v1.14.2, released 2026-09-29. The
-owner chose the full program over stopping at 1.13.11, which is the newest release that still supports
-Kubernetes 1.31. Control-plane (CP) reboots happen in CI-quiet night windows.
+**Goal and scope.**
+- The owner asked for the newest Talos: v1.14.2 (2026-09-29), via the full program.
+- Talos 1.14 accepts Kubernetes ≥1.32.0 in code, but its support matrix starts at 1.33. We stop on
+  Kubernetes 1.33.13. 1.33 is EOL, so it is a bounded endpoint with a dated exit plan
+  (Follow-ups), not a long-term state.
+- **Realistic duration:** about 20 windows over 4-6 weeks.
 
-**Current state (verified 2026-10-08).**
+**State** (2026-10-08; refresh live before every phase):
 
-<!-- codex: This review checked repository configuration and upstream documentation, not the live cluster or the platform repository; retain the dated inventory as prior evidence and refresh actual versions, schematics, pending configs, and workload placement before execution. -->
-
-- **Nodes:** 7 Talos v1.11.2 nodes, all on platform `nocloud` and Kubernetes v1.31.4:
-  - CPs: cp1/cp2/cp3, 192.168.0.41-43, VIP .40;
-  - agent nodes: .47-.49 (tofu `infra/agent-nodes`);
-  - env node: talos-env-node-1, .37 (tofu `infra/env-pool`, staged apply).
-- **Image schematics:**
-  - CPs and agent nodes run `53513e54…`: qemu-guest-agent, iscsi-tools, util-linux-tools.
-  - The env node runs `0839748e…`: the same three plus kata-containers and gvisor.
-- **The extension trap.** No template sets `machine.install.image`, so the config falls back to the
-  provider default: today `ghcr.io/siderolabs/installer:v1.13.0` (no extensions). With provider 0.12
-  it becomes `factory…/metal-installer/376567988…` (`customization: {}`, also none). An upgrade that
-  relies on the config's image would DROP iscsi-tools, and every Trident iSCSI PV (CNPG included)
-  would break.
-  <!-- codex: The extension-loss risk is real, but `talosctl upgrade` defaults its image from the CLI version, not from `machine.install.image`; fixing the template does not replace explicitly passing the correct factory image on every upgrade. Provider-generated defaults also depend on the installed provider, so inspect rendered configuration rather than treating the quoted default as universal ([upgrade guide](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/lifecycle-management/upgrading-talos)). -->
+- **Talos nodes.** 7 nodes on Talos v1.11.2 and Kubernetes v1.31.4, all platform nocloud and
+  booted via SeaBIOS/GRUB:
+  - CPs .41-.43 (VIP .40);
+  - agent nodes .47-.49;
+  - env node .37 (tofu env-pool, staged apply).
+- **Schematics are per node:**
+  - `53513e54…` (qemu-guest-agent, iscsi-tools, util-linux-tools): cp1-3, agent-node-1, agent-node-2.
+  - `0839748e…` (adds kata-containers, gvisor): agent-node-3 and the env node.
+  - **The real extension trap is talosctl's default `--image`.** For 1.11-1.13 clients it is the
+    plain ghcr installer, with no extensions. The 1.14.2 client defaults to
+    `metal-installer/376567…`: `customization: {}` and the wrong platform. Either default drops
+    iscsi-tools, which breaks every Trident iSCSI PV.
+  - `factory.talos.dev/nocloud-installer/<schematic>:<ver>` resolves for both schematics at all four
+    targets. `ghcr installer:v1.14.2` returns 404.
 - **Add-ons:**
-  - Cilium 1.16.5, hand-installed from `kubernetes/infra/bootstrap/cilium-values.yaml`, chart not
-    pinned anywhere;
-  - Kyverno 1.13.4 (chart 3.3.6) and CNPG operator 1.24.1 (chart 0.22.1), both owner-protected in
-    cchifor/platform;
-  - QNAP CSI/Trident v1.6.0 (ailab Flux GitRepository tag);
-  - Flux 2.8.8, kube-prometheus-stack 86.2.3, cert-manager 1.20.2, ESO 2.7.0, Velero 1.18.1,
-    KEDA 2.20.1, metrics-server 0.7.2, snapshot-controller 8.6.0, agent-sandbox 1.0.5.
-- **etcd:** 3.6.4. Leader elections recur because the CP disks share consumer QLC NVMe with CI
-  runners (plans/2026-10-07-etcd-leader-churn-plan.md). Its step B (election-timeout 5000) is merged
-  but not yet rolled.
-- **kyverno admission:** now 2 replicas plus a PDB (platform #2137, live 2026-10-08).
+  - Cilium 1.16.5 (helm rev 1, hand-installed from `kubernetes/infra/bootstrap/cilium-values.yaml`;
+    cluster-name `default`; one cilium-operator replica, on the env node). Cilium 1.16 and 1.17 are
+    EOL; 1.18 supports Kubernetes 1.30-1.33.
+  - Kyverno 1.13.4 (chart 3.3.6) and CNPG 1.24.1 (chart 0.22.1), both owner-protected in
+    cchifor/platform.
+  - QNAP CSI v1.6.0. Its chart is 2.0.0 at both tags, and the HelmChart uses the ChartVersion
+    strategy.
+  - Flux 2.8.8 (documented floor: Kubernetes 1.33, so already below it).
+- **Postgres:** 8 CNPG clusters. Three are single-instance drill restores, being removed per the owner
+  decision.
+- **CP capacity:** CP requests are at 77-83% CPU and memory. A drained CP's pods only half fit on the
+  other two. cnpg-operator, the cert-manager and ESO webhooks (failurePolicy Fail) and Flux all sit on
+  cp1, at default priority.
+- **etcd:** 3.6.4, with 7 leader changes in 24 h on shared QLC disks. The 250/5000 timing is merged
+  but not rolled.
+- **Kyverno admission:** 2 replicas plus a PDB (platform #2137).
+- **tofu:**
+  - Every module requests talos `~> 0.12` and proxmox `~> 0.116`, but the ops checkout's locks are
+    0.11.0 and 0.114.0.
+  - The agent-nodes state contains label/taint resources from an UNTRACKED `node-labels.tf` in the
+    ops checkout. A plan from a clean checkout would destroy them.
+  - agent-nodes still uses `apply_mode` auto.
+  - `var.talos_version` doubles as the config/secrets contract.
 
-**Hard constraints from the research** (sources: siderolabs release and support-matrix pages, the
-upgrade guide, `pkg/machinery/compatibility`, the component compatibility matrices).
-
-- **Talos path.** Talos upgrades go through adjacent minors at their latest patch:
-  1.11.6 → 1.12.12 → 1.13.11 → 1.14.2. Talos 1.14 refuses nodes older than 1.12.
-  `ghcr.io/siderolabs/installer` is not published for 1.14, so always pass the factory installer.
-  <!-- codex: Adjacent minors at their latest patches are the recommended tested path, not the exact installer enforcement boundary; retain this conservative sequence despite the installer accepting some skipped-minor upgrades ([supported paths](https://docs.siderolabs.com/talos/v1.13/configure-your-talos-cluster/lifecycle-management/upgrading-talos)). -->
-- **Kubernetes support:** Talos 1.13 supports 1.31-1.36 and Talos 1.14 supports 1.33-1.37.
-  Kubernetes moves one minor per `upgrade-k8s`: 1.31.4 → 1.32.13 → 1.33.13. Both 1.32 and 1.33 are
-  EOL and are transit points only.
-  <!-- codex: Distinguish published support from acceptance checks: the [1.14 matrix](https://docs.siderolabs.com/talos/v1.14/getting-started/support-matrix) starts at Kubernetes 1.33, while the [v1.14.2 compatibility constant](https://github.com/siderolabs/talos/blob/v1.14.2/pkg/machinery/compatibility/talos114/talos114.go) permits 1.32. Keep 1.33 before P7; there is no corresponding requirement to move Kubernetes before P2 or P3. -->
-- **Add-ons blocking Kubernetes 1.32/1.33:**
-  - Cilium 1.16 is tested on Kubernetes ≤1.30; 1.17.18 covers ≤1.32 and 1.18.14 covers 1.30-1.33.
-    One minor at a time, with pre-flight.
-  - Kyverno 1.13 supports ≤1.31; 1.16.4 (chart 3.6.4) supports 1.31-1.34.
-  - CNPG 1.24 supports ≤1.31; 1.27.4 supports 1.31-1.33. Go in order 1.25 → 1.26 → 1.27; each hop
-    rolls every Postgres cluster.
-  - The QNAP v1.6.0 chart has `kubeVersion <= 1.32`, so the HelmRelease fails on 1.33. v1.6.2 has
-    `<= 1.35`.
-    <!-- codex: The chart bounds are confirmed, but crossing the bound does not itself stop an already-running driver; it blocks chart installation/upgrade when Helm checks compatibility. Complete and verify the actual driver upgrade before 1.33 rather than relying on an existing Ready HelmRelease ([v1.6.0 chart](https://github.com/qnap-dev/QNAP-CSI-PlugIn/blob/v1.6.0/Helm/trident/Chart.yaml), [v1.6.2 chart](https://github.com/qnap-dev/QNAP-CSI-PlugIn/blob/v1.6.2/Helm/trident/Chart.yaml)). -->
-- **Version-specific changes:**
-  - Talos 1.12: kernel 6.18 and stricter hardening sysctls.
-  - Talos 1.13: talosctl performs the drain for nodes on ≥1.13; `--stage/--force/--preserve` are
-    deprecated.
-    <!-- codex: This describes the new lifecycle path when both client and serving node support it; P3 initiated with the 1.12 client still uses the legacy path. In the new path, installation happens before client-side draining and reboot, so a drain failure can leave new boot assets installed but not booted ([v1.13.11 implementation](https://github.com/siderolabs/talos/blob/v1.13.11/cmd/talosctl/cmd/talos/upgrade.go)). -->
-  - Talos 1.14: etcd 3.7.1 (effectively one-way); TLS 1.3 minimum for etcd and kube-apiserver; etcd's
-    default metrics port moves to 2383 (we pin `listen-metrics-urls :2381` explicitly).
-    <!-- codex: Also account for 1.14 configuration-apply changes: the CLI removes reboot mode and applies configuration without automatically rebooting, while some changes still need an explicit reboot. Neither an accepted apply nor a no-reboot setting proves every requested change is active ([1.14 changes](https://docs.siderolabs.com/talos/v1.14/getting-started/what%27s-new-in-talos)). -->
-- **tofu hazards:**
-  - `var.talos_version` feeds the CP and agent VM disk `import_from`, and `ignore_changes` covers only
-    `initialization`. A version bump plans a disk/VM REPLACE (env-pool already ignores
-    `disk[0].import_from`).
-    <!-- codex: The replacement claim is wrong for bpg 0.116: `import_from` has `ForceNew: false`, and existing disks are not re-imported. Keep the narrow ignore rule to suppress irrelevant drift, but inspect the actual provider-locked plan for unrelated disk changes and VM power cycles ([schema](https://github.com/bpg/terraform-provider-proxmox/blob/v0.116.0/proxmoxtf/resource/vm/disk/schema.go), [update implementation](https://github.com/bpg/terraform-provider-proxmox/blob/v0.116.0/proxmoxtf/resource/vm/disk/disk.go)). -->
-  - `var.talos_version` also feeds `talos_machine_secrets`.
-    <!-- codex: In provider 0.12, increasing this contract updates metadata without regenerating cluster secrets; decreasing it requests replacement, making a blanket variable revert during rollback dangerous. Preserve the existing PKI and decouple its generation contract from the OS version if needed ([provider implementation](https://github.com/siderolabs/terraform-provider-talos/blob/v0.12.0/pkg/talos/talos_machine_secrets_resource.go)). -->
-  - `var.kubernetes_version` must follow each `upgrade-k8s`, or a later apply pushes 1.31.4 images
-    back.
-    <!-- codex: Changing either version variable regenerates desired machine configuration; it is not an imperative Talos/Kubernetes upgrade, and a later configuration apply can replace live image settings. Freeze unrelated applies during each transition and compare the complete rendered configuration with live and staged configuration before reconciliation. -->
+**Talos and Kubernetes facts:**
+- **Talos path:** adjacent minors at their latest patch: 1.11.6 → 1.12.12 → 1.13.11 → 1.14.2.
+  Talos 1.14 refuses nodes older than 1.12.
+- **Drain behaviour:**
+  - Nodes on ≤1.12 cordon and drain themselves on upgrade, but only for 5 min. Eviction errors are
+    logged, then pods are stopped, so PDBs are not honoured beyond that.
+  - The 1.13 client flow writes the new image BEFORE draining (PDB-respecting). A failed drain
+    returns early: the node stays cordoned and is armed to boot the new version on its next reboot.
+- **Kubernetes support:** Talos 1.13 supports 1.31-1.36; Talos 1.14 supports 1.33-1.37 (doc).
+- **`upgrade-k8s`:**
+  - one minor at a time;
+  - needs exactly one `-n <cp>`;
+  - with a 1.13 client it prunes bootstrap manifests.
+- **Talos 1.12:**
+  - kernel 6.18; early 1.12 kernels hit Cilium-triggered BPF verifier bugs (talos#12726,
+    cilium#44216);
+  - hardening: ptrace_scope 2, kptr_restrict 2, unprivileged userfaultfd 0;
+  - kata extension 3.26.0 (3.32.0 in 1.13/1.14). The env node ships a verbatim 3.20.0
+    `configuration.toml` (kata_debug).
+- **Talos 1.14:**
+  - etcd 3.7.1. A mixed 3.6/3.7 cluster stays on 3.6; once all members are upgraded, reverting needs
+    the etcd downgrade workflow or a snapshot restore.
+  - TLS 1.3 minimum for the etcd and kube-apiserver serving endpoints.
+  - A new etcd gRPC-gateway listener on :2383 (our metrics stay on :2381; the firewall rule covers
+    only 2379-2380).
+  - A fresh 1.14-contract config emits `SecurityProfileConfig workloadIsolation: true`.
+- **Add-on targets:**
+  - Cilium 1.16.5 → 1.16.19 → 1.17.18 → 1.18.14;
+  - QNAP v1.6.2 (chart bound ≤1.35);
+  - Kyverno 1.14.5 → 1.15.3 → 1.16.4 (chart 3.6.4);
+  - CNPG 1.25.4 → 1.26.3 → 1.27.4.
 
 ## Approach
 
-Every step is gated and one node at a time. Workers can go any time. CPs go 02:30-05:00Z: after the
-01:00Z etcd snapshot and the 02:00Z Velero backup, before CI ramps up. Each phase must be green before
-the next one starts; phases may span several nights.
+**Global rules for every window:**
+- **Tools:**
+  - Always use full-path talosctl. The client must match the node's running version:
+    `kubernetes/infra/_out/talosctl-<ver>.exe`, checksum-verified (1112, 1116, 11212, 11311, 1142).
+  - Always pass `--talosconfig _out/talosconfig` and `kubectl --context admin@ai`.
+  - Every Talos upgrade goes through `scripts/talos-upgrade-node.sh` (P0.6), never a hand-typed
+    image.
+- **CP windows** start after the 01:00Z talos-backup and the 02:00Z Velero backup are CONFIRMED
+  finished, not at a fixed time. They leave 60 min of recovery reserve before CI ramps up (about
+  06:00Z).
+- **Quiesce first:**
+  - pause new CI on all three hosts and wait for active jobs to finish (gitea runner daemons stopped
+    gracefully);
+  - suspend `e2e-runner-agentic-qwen` (03:17Z), `rclone-offsite` (04:00Z) and, on Sundays,
+    `k6-weekly-soak` (02:00Z) and Velero's Sunday 03:00Z schedule, via their reconcilers;
+  - resume all of them and confirm one successful run afterwards.
+- **Pacing:**
+  - one node at a time;
+  - at most 2 CPs per night;
+  - each Talos minor is a completed cluster phase with a worker canary and a ≥24 h soak before its CPs;
+  - one component change per window;
+  - never a CNPG hop and a CP reboot in the same window.
+- **No tofu apply** of `infra`, `agent-nodes` or `env-pool` during the program, except the P0 guard
+  changes and the per-phase version reconciliation (P8 rules). Every plan must show 0 destroy,
+  0 replace and no unrelated diff.
 
-<!-- codex: The safest practical adjustment is P0 → P1 plus a stability soak → P4's QNAP/Cilium steps → P2/P3 → P4's Kyverno/CNPG steps → P5/P6 → P7. This prepares networking/storage before new kernels while avoiding unnecessary CNPG operator rollouts before the earlier CP reboot rounds; keep each component change in its own window. -->
-<!-- codex: “Workers can go any time” is unsafe for occupied agent/env pools and misleading on shared Proxmox disks: pause new work, finish active jobs/leases, and check host I/O before each worker upgrade. Use one ordinary worker as the first canary for each Talos target, and treat the env node as a separate runtime canary. -->
-<!-- codex: 02:30 does not prove the 02:00 backup has finished, and the repository also schedules Sunday Velero at 03:00Z and off-site rclone at 04:00Z. Wait for backup/data-transfer completion, coordinate temporary schedule pauses through their reconciler, and reserve recovery time before the window ends; resume schedules and verify a successful run afterward. -->
+**Per-node CP procedure:**
 
-### P0. Preconditions (day 1)
+1. **Pre-checks:**
+   - etcd 3/3, one leader and term, applied index caught up, no alarms;
+   - per-member WAL p99 below 100 ms over the last 15 min;
+   - API writes OK through the VIP and through every apiserver;
+   - no critical alerts;
+   - the backup checkpoint for this phase is taken.
+2. **Leadership:** if the target leads, `forfeit-leadership` (sent to the target only). Then all
+   members must agree that a caught-up member other than cp1 leads. Re-check immediately before the
+   drain. Stop if it is wrong.
+3. **Workload moves:**
+   - cordon the target;
+   - move every CNPG primary off it (`kubectl cnpg promote` to a caught-up replica) and verify the
+     writable service and replication;
+   - move cnpg-operator off it (it sits on cp1);
+   - confirm kyverno admission and the cert-manager/ESO webhooks still have a Ready replica on
+     another node;
+   - apply the node-maintenance headroom gate (1e): requests on the two survivors must fit the
+     drained pods' Tier-A set, or the window stops;
+   - pre-drain with `kubectl drain --ignore-daemonsets --delete-emptydir-data --timeout=15m`
+     (PDB-respecting). A blocked eviction is diagnosed, never forced.
+4. **Upgrade:** `scripts/talos-upgrade-node.sh <ip> <ver>`. The wrapper:
+   - reads the node's live schematic;
+   - resolves `factory.talos.dev/nocloud-installer/<schematic>:<ver>` and verifies the manifest
+     exists;
+   - runs the matching client with `--wait`;
+   - refuses if the schematic is unknown or the platform is not nocloud.
+5. **Post-checks (gate):**
+   - **Node:** boot ID changed; `talosctl version` = target; `get extensions` lists the schematic's
+     extensions; iscsid and qemu-guest-agent healthy; Ready and uncordoned; no DiskPressure.
+   - **etcd:** 3/3, the flags as expected (`talosctl processes`).
+   - **Postgres:**
+     - infra-pg 2/2, strive-pg 3/3 and every trueswarm cluster streaming;
+     - infra-pg slot `wal_status` reserved (cap 1 GB, no WAL archive: a replica left Pending loses
+       its slot);
+     - application writes OK (Gitea, Authelia).
+   - **Platform:** kyverno admission 2/2; no pod stuck ContainerCreating on a volume; Cilium health
+     OK.
+   - Then 30 min with no new critical alerts, watched from outside the drained node.
+6. **Recovery by cause, with deadlines** (measured on the canary, then fixed):
+   - boot/etcd rejoin: 10 min;
+   - volume/DB recovery: 15 min (allow for the documented ~8-minute Trident reattach).
+   - Quorum loss, storage I/O errors or failed application writes: stop at once and repair forward.
+     `talosctl rollback` only for a node that will not come up healthy on the new OS, using the
+     client of the version it is running. Never after etcd 3.7 is cluster-wide.
+   - Never restart a survivor, remove a member or force quorum while one CP is absent.
 
-1. **talosctl clients.** Download the Windows binaries for v1.11.6, v1.12.12, v1.13.11 and v1.14.2
-   from the GitHub release. Verify each against the release `sha256sum.txt`. Store them as
-   `kubernetes/infra/_out/talosctl-<ver>.exe` (gitignored). The rule: use the client that matches the
-   version the cluster is running.
-   <!-- codex: Retain and verify the 1.11.2 binary required by P1, invoke every versioned binary by full path, and explicitly select this cluster's talosconfig and Kubernetes context. Match the serving node's version during mixed-version operation and switch to the new client for post-upgrade inspection; the runbook documents an unsafe system talosctl and a different default Kubernetes context. -->
-2. **IaC guards** (ailab PR, merged and plan-verified before any tofu apply):
-   - Explicit `machine.install.image =
-     factory.talos.dev/nocloud-installer/<schematic>:<talos_version>` in the CP and worker templates,
-     using `talos_image_factory_schematic.this.id` = 53513e54…. The env-pool template gets its own
-     0839748e… schematic.
-     <!-- codex: The nocloud installer name is appropriate; record full per-node schematic IDs, verify the selected platform, and resolve both schematics for every target version before a window. A schematic preserves extension selection, not extension versions or availability, and the worker modules need an explicit variable/output input rather than a reference to a resource in another module ([Image Factory](https://docs.siderolabs.com/talos/v1.13/learn-more/image-factory), [nocloud installer example](https://factory.talos.dev/?arch=amd64&cmdline-set=true&extensions=-&extensions=siderolabs%2Fiscsi-tools&extensions=siderolabs%2Futil-linux-tools&platform=nocloud&target=cloud&version=1.10.6)). -->
-   - `lifecycle.ignore_changes` gains the disk `import_from` on the CP VMs (`vms.tf`) and the agent
-     VMs (`agent-nodes/main.tf`).
-   - `tofu plan` in all three modules must show NO replacement of `talos_machine_secrets`,
-     `proxmox_virtual_environment_vm` or disks. The only change allowed is in-place config: install
-     image, etcd election-timeout and `apply_mode`.
-     <!-- codex: Resolve and record exact provider versions first: all modules request Talos `~> 0.12`, but this worktree only has the env-pool lockfile, so a provider change must not sneak into an operational apply. Back up the authoritative states and inspect protected rendered-config diffs, since sensitive-value placeholders can hide material changes. -->
-     <!-- codex: Add explicit `no_reboot` for agent-node configuration applies and consider `reboot_after_update = false` on CP/agent VMs, matching the existing env VM guard. “In-place” and “no reboot” still permit disruptive service restarts, so reject unrelated hardware diffs and apply any service-affecting configuration to one node with health gates. -->
-   - No module's machine config may carry `SidecarContainers` or `AppArmor` feature gates (they
-     break 1.33).
-     <!-- codex: This is partly wrong: `AppArmor` is absent in Kubernetes 1.33, but `SidecarContainers` remains registered and locked true at GA, so `SidecarContainers=true` is not itself a startup-breaking setting. Remove obsolete overrides after inspecting both generated and live configurations, and specifically reject `SidecarContainers=false` ([1.33.13 feature gates](https://github.com/kubernetes/kubernetes/blob/v1.33.13/pkg/features/kube_features.go)). -->
-3. **Backups verified, not assumed:**
-   - a fresh off-host `talosctl etcd snapshot`;
-   - the latest `talos-backup` run succeeded;
-   - the Velero `databases` kopia repo passes a verify (the 10-06 maintenance logged "failed to
-     rewrite 14 contents");
-   - a test-restore of the latest infra-pg dump into a scratch namespace;
-   - the CNPG clusters (infra-pg, strive-pg, trueswarm*) are healthy and streaming.
-   <!-- codex: This is insufficient for the database rollout: `velero/volume-policy.yaml` explicitly says strive/trueswarm still rely on filesystem copies of running PostgreSQL data, which are not a demonstrated consistent recovery point. Obtain and test a consistent logical or native backup for each affected cluster before its first disruption; restoring infra-pg alone does not cover them. -->
-   <!-- codex: Verify an encrypted snapshot can actually be retrieved, decrypted, inspected, and restored in an isolated recovery rehearsal, with the existing Talos secrets bundle and required keys available off-cluster. Save per-node configurations, provider states, and previous installer references securely, and take a new recovery checkpoint before each Kubernetes minor and the etcd 3.7 transition. -->
-4. **Baseline** for 24 h:
-   - per-member WAL p99 and leader changes;
-   - API error rate;
-   - pods not Ready;
-   - Trident volume attach latency;
-   - Cilium drops and health.
-   Record it in the PR.
-   <!-- codex: An already-bad baseline is not a go criterion: also track multi-second fsync tails, backend commit latency, pending/failed proposals, host I/O pressure, and API write success during the actual quiet period. After P1, require stability under the intended load suppression before more CP rolls; if stalls persist while quiet, defer the program for the existing storage-remediation work. -->
+**Worker procedure:**
+- Pause new work on the pool (agent/env tenants), wait for active jobs and leases, then pre-drain.
+- Upgrade through the wrapper, then the same node gates.
+- For agent-node-3 and the env node, also run the runtime tests (P2).
+- agent-node-1 is the canary for each Talos target.
 
-### P1. Talos 1.11.2 → 1.11.6, plus etcd election-timeout 5000 (client 1.11.2)
+### P0. Preconditions (today; gates for tonight's P1)
 
-- **Workers first (day):** agent-node-1..3, then the env node. For each:
-  1. `talosctl upgrade -n <ip> --image factory.talos.dev/nocloud-installer/<schematic>:v1.11.6`.
-     Talos below 1.13 cordons and drains itself.
-     <!-- codex: Add explicit endpoint/context selection and `--wait`, then verify that the boot ID and running version changed before evaluating Ready; an asynchronous acknowledgement or a pre-existing Ready condition is not completion. Pre-check eviction blockers and use a completed, eviction-respecting pre-drain where necessary rather than treating the legacy shutdown drain as a guaranteed application-safety gate. -->
-  2. Wait for Ready and uncordon. `talosctl get extensions` must list iscsi-tools (and kata/gvisor on
-     the env node).
-     <!-- codex: Talos normally uncordons after a successful legacy upgrade; investigate a remaining cordon before manually clearing it. Verify CNI, CSI and runtime services first so a node that is merely Ready does not immediately receive production work with broken mounts or sandbox handlers. -->
-  3. Check the node's Trident iSCSI sessions and that its pods are Running.
-- **CPs (night):**
-  <!-- codex: Before each CP, inspect all PDBs and pod placement, ensure Kyverno replicas occupy different surviving failure domains, and verify spare schedulable capacity despite agent/env taints and local-path PV constraints. Cordon the target, move any CNPG primary to a caught-up survivor under operator control, and verify the writable service and replication before proceeding; do not bypass PDBs to meet the window. -->
-  1. On each CP first, `talosctl patch machineconfig --mode=no-reboot` with election-timeout 5000;
-     the upgrade's reboot activates it.
-     <!-- codex: This matches the repository's observed etcd behavior, but `no-reboot` is not staged mode: it applies supported live configuration changes and rejects changes requiring reboot on these older servers. Confirm the patch is accepted and persisted, then verify the running etcd flags after reboot; a rejected patch will not be activated later. -->
-  2. Order: cp1 first (cp2+cp3, the healthiest pair, hold quorum), then the follower, then the leader.
-  3. For the leader: `forfeit-leadership` to the leader only, then all members must agree a caught-up
-     member other than cp1 and other than the target leads. Stop if not.
-     <!-- codex: Re-evaluate leadership immediately before every CP drain and reboot, not only the nominal final leader step; forfeiting leadership does not permanently exclude cp1 from future elections. If the observed leader or survivor health violates the rule, stop and reassess rather than repeatedly inducing elections. -->
-  4. Stop node1's runner daemons (graceful drain) whenever cp1 is one of the two survivors.
-     <!-- codex: Quiesce competing writes on both survivor hosts before draining the target, not only node1's runners: the repository records stalls on cp2 and cp3 too. Pausing new CI assignments is insufficient until active jobs and other heavy writers have finished, and stopping runners does not cure QLC device-internal stalls. -->
-  5. **Gate per node** (node-maintenance.md):
-     - etcd 3/3, one leader and term, applied index caught up, no alarms;
-       <!-- codex: Require this before and after each CP and continuously watch both survivors while the target is absent; a three-member cluster with one member down has no remaining failure tolerance. If either survivor stalls or API writes fail, halt further changes and prioritize restoring the absent member, without restarting a survivor, removing members, or forcing quorum checks. -->
-     - 10 min of successful API writes;
-       <!-- codex: Check writes through VIP .40 and healthy individual API servers, verify VIP ownership/ARP convergence, and inspect KubePrism's healthy upstreams while each CP is absent. Cilium uses localhost:7445, but external administration uses the VIP; neither path alone proves the other survives, and Talos management endpoints should be CP addresses rather than the VIP. -->
-     - nodes Ready and uncordoned;
-     - infra-pg 2/2 and strive-pg 3/3 streaming on separate CPs;
-       <!-- codex: Include every trueswarm cluster and application reconnection/write checks, not only operator status. Strive's required anti-affinity can leave its displaced instance Pending until the CP returns, so this is a post-return gate and must pass before the next CP; allow the documented roughly eight-minute storage recovery and preserve its CPU/memory headroom. -->
-     - kyverno admission 2/2 Ready;
-     - no pod stuck ContainerCreating on a volume;
-     - `talosctl processes` shows `--election-timeout=5000`;
-     - extensions present.
-- **Abort and rollback:** `talosctl rollback -n <ip>` (A/B partition) if a node fails its gate.
-  Never touch a second node while one is unhealthy.
-  <!-- codex: A blanket rollback for any failed gate is unsafe: first distinguish drain failure, boot failure, config error, storage failure, and quorum loss, then select recovery for that cause. A/B retains only the immediately previous OS boot assets and does not restore Kubernetes or PV data; across minors require compatible saved configuration and etcd state, and use the client matching the node's actual running version. -->
-  <!-- codex: Define explicit escalation deadlines before execution, such as a ten-minute boot/etcd rejoin budget and a fifteen-minute volume/database recovery budget, adjusted from canary measurements. Any quorum loss, storage corruption/I/O error, or failed application write is an immediate stop; exceeding a deadline means diagnosis and recovery, not automatic rollback or beginning the next node. -->
+1. **Drill restores out** (owner decision):
+   - delete CNPG Clusters `trueswarm-recovery/restored-592a76d3` and `restored-671d5224` (their PVs
+     are Retain; record the PV names for NAS cleanup);
+   - open a trueswarm-admin PR removing `admin-restore-application-20260926` from the qualification
+     Kustomization (`chifor` merges).
+2. **Backups:**
+   - an off-host `talosctl etcd snapshot`, plus confirming the latest `talos-backup` succeeded;
+   - a RESTORE REHEARSAL: retrieve, age-decrypt and inspect one snapshot (`etcdutl snapshot status`)
+     on a workstation;
+   - a consistent `pg_dump` of every CNPG cluster (infra-pg, strive-pg, trueswarm-pg,
+     trueswarm-platform-pg, trueswarm-admin-pg) to off-cluster storage, with a test-restore of
+     infra-pg and strive-pg into a scratch Postgres;
+   - a Velero databases kopia repo verify;
+   - an off-cluster copy of the Talos secrets bundle, the per-node machine configs and the tofu
+     states.
+3. **Baseline (24 h, recorded):** per-member WAL p99 and fsyncs over 1.024 s and over 4.096 s,
+   backend commit, failed proposals, leader changes, host IO PSI, API write success, pods not Ready,
+   Trident attach latency, Cilium drops.
+   - **Go/no-go:** if stalls persist during the quiesced window itself, defer the CP phases until the
+     PLP-drive work (etcd-leader-churn plan step C).
+4. **Capacity and placement:**
+   - PriorityClass `platform-critical` on cnpg-operator, the cert-manager/ESO webhooks and the Flux
+     controllers (ailab and platform HelmRelease values);
+   - kyverno admission spread required across nodes;
+   - confirm no workload pins itself to a single CP.
+5. **IaC guards** (one ailab PR, plan-verified, no apply except where stated):
+   - A new `talos_config_contract = "v1.11"` variable feeds `talos_machine_secrets` (plus
+     `lifecycle.prevent_destroy`) and the `talos_machine_configuration` contract in all three modules.
+     `talos_version` drives only the install image and the raw-image stage path.
+   - Explicit `machine.install.image` = the per-pool factory nocloud installer. It is housekeeping
+     for future installs; the wrapper is the upgrade guard.
+   - `ignore_changes` on the disk `import_from` (noise suppression) and `reboot_after_update = false`
+     on the CP and agent VMs.
+   - agent-nodes and env-pool apply modes explicit: agent-nodes `no_reboot`; env-pool stays `staged`.
+   - Commit the untracked `node-labels.tf` (agent-node taints/labels) after coordinating with the
+     session that owns the ops checkout.
+   - Run `tofu init -upgrade` as its own reviewed step in all three modules. The locks move to
+     talos 0.12.x and proxmox 0.116.x, and full plans are inspected: 0 destroy, 0 replace, the
+     rendered machine config diffed against the live `get machineconfig`.
+6. **`scripts/talos-upgrade-node.sh`** (with a test using stubbed talosctl and curl): it resolves the
+   live schematic, the client binary and the image as described in step 4 of the CP procedure,
+   with `--dry-run` support.
 
-### P2. Talos → 1.12.12 (client 1.11.6) and P3. Talos → 1.13.11 (client 1.12.12)
+### P1. Talos 1.11.2 → 1.11.6, plus etcd election-timeout 5000
 
-- Same procedure, with the image tag at the target version.
-  <!-- codex: Make P2 and P3 separate completed cluster phases with their own canary and soak; do not carry a single worker through both minors while the rest remain on 1.11. Retain a viable previous-version recovery point before overwriting the next A/B slot. -->
-- **After P2:**
-  - kernel 6.18;
-  - hardening sysctls: verify Cilium health, Trident iSCSI and a kata RuntimeClass smoke pod on the
-    env node (the warm pool is paused, so run one explicit test);
-    <!-- codex: The env node's `kata_debug=true` installs a complete Kata 3.20.0 configuration copied from Talos 1.11.2, including runtime-specific paths/settings; rebase that file against each target extension before booting it, as `env-pool.md` requires. Test the actual `kata-env` handler, gVisor, nested KVM, PVC I/O, networking and sandbox teardown at every minor, since listing extensions or starting a generic pod does not validate this configuration. -->
-  - the `.machine.network`/`registries` deprecation warnings are expected.
-    <!-- codex: Keep working legacy configuration during the OS rollout; do not combine it with wholesale network/registry document migration. Compare active and persisted/staged env configuration before every reboot so unrelated pending file changes cannot enter the canary unnoticed. -->
-- **After P3:** talosctl ≥1.13 performs the drain itself for later upgrades. The GRUB
-  `extraKernelArgs` bug doesn't apply (none set).
+- **Workers:** the agent-node-1 canary, then agent-node-2, agent-node-3 (runtime tests) and the env
+  node (today, after P0.6).
+- **CPs** (tonight, if P0 is green: at most 2):
+  1. `talosctl patch machineconfig --mode=no-reboot` with election-timeout 5000 on the target.
+     Confirm it is accepted and persisted (`get machineconfig`).
+  2. Run the CP procedure. The reboot activates the new flags; verify with `processes`.
+  3. Order: cp1 first, then the follower, then the leader (night 2 if needed).
+- **Soak** 24 h with the baseline comparison before P2.
 
-### P4. Add-ons ready for Kubernetes 1.32 (Kubernetes still 1.31)
+### P4a. QNAP CSI and Cilium, before the 1.12 kernel (Kubernetes still 1.31)
 
-1. **QNAP CSI v1.6.0 → v1.6.2** (ailab Flux GitRepository tag).
-   <!-- codex: Changing only the Git tag is insufficient: both tags declare chart version `2.0.0`, and the HelmRelease omits `spec.chart.spec.reconcileStrategy: Revision`. Set that strategy and verify the new Git artifact, Helm chart revision, operator and actual Trident controller/node images before proceeding ([Flux reconciliation rules](https://fluxcd.io/flux/components/source/helmcharts/#reconcile-strategy)). -->
-   - Do it early: it adds a data-safety check before formatting, and 1.33 needs it.
-   - Verify a new PVC provisions, attaches and expands.
-     <!-- codex: Also write known data, remount it after a node move/reboot, and verify persistence, detach, snapshot/restore and cleanup on disposable volumes. Check existing volumes, storage-fabric routes, the Trident attacher-timeout policy, and `iscsi-recovery-tmo` behavior; retain the timeout workaround until the new driver is demonstrated to set correct integer values. -->
-2. **Cilium 1.16.5 → 1.16.19 → 1.17.18.**
-   - Manual `helm upgrade --version <v>` with the repo values. Pin the version in
-     `kubernetes/infra/bootstrap/cilium-values.yaml`'s header and in a runbook.
-     <!-- codex: Export the live release's user values and manifest, reconcile them with this file, and render/diff each target chart before upgrading; the file's claim of Flux day-2 ownership contradicts the stated manual installation. Preserve kube-proxy replacement, KubePrism localhost:7445 and Talos security/cgroup settings, use the documented `upgradeCompatibility` setting, and avoid `--reuse-values` across minors ([Cilium upgrade guide](https://docs.cilium.io/en/v1.17/operations/upgrade/)). -->
-   - Run the Cilium pre-flight first. One minor per quiet window.
-     <!-- codex: Make preflight use the same KubePrism API endpoint because kube-proxy is disabled, and wait for the entire agent/operator rollout before the next change. Record the previous Helm revision and supported adjacent-version rollback procedure; a header comment alone does not enforce the executable chart version. -->
-   - Verify `cilium status`/connectivity, Hubble, and no drop spike.
-   - Check that `cluster.name` meets 1.17's ≤32 chars of `[a-z0-9-]`.
-3. **Kyverno 1.13.4 → 1.14.5 → 1.15.3 → 1.16.4.**
-   - Platform PRs (owner merges), one hop each. Verify admission and webhook health after every hop.
-     <!-- codex: Record chart versions separately from application versions for every Kyverno and CNPG hop, including how the platform HelmRelease upgrades CRDs. Preserve admission replicas/PDB/spread settings, test both allowed and denied requests plus existing mutation policies, and verify webhook service endpoints and CA bundles before any Kubernetes change. -->
-   - 1.15 turns on ValidatingAdmissionPolicy generation by default. Set it explicitly to the current
-     behaviour.
-4. **CNPG 1.24.1 → 1.25.4 → 1.26.3 → 1.27.4.**
-   - Platform PRs (owner merges), one hop per window. Each hop rolls and switches over every cluster;
-     watch infra-pg (Gitea/Authelia) closely.
-     <!-- codex: Sequential upgrades are the recommended conservative route, but “each hop switches over every cluster” depends on live instance-manager and primary-update settings; 1.26 specifically forces a restart even with in-place updates enabled. Inventory those settings and await actual rollout completion, including supervised actions, without adding gratuitous switchovers solely to satisfy the checklist ([CNPG upgrade behavior](https://cloudnative-pg.io/docs/1.27/installation_upgrade/)). -->
-     <!-- codex: CNPG can roll different clusters concurrently, multiplying QNAP attachment and API load even though each individual cluster rolls serially. Use controlled rollout delays where needed, preserve PostgreSQL major versions, and gate on replication lag, read/write service recovery and application reconnection for every cluster. -->
-   - 1.27's liveness isolation check can shut down a primary that loses the API server. Do not run a
-     CNPG hop and a CP reboot in the same window.
-     <!-- codex: The isolation description is incomplete: failure requires losing both the Kubernetes API and every peer instance-manager REST endpoint, not API loss alone. Validate peer reachability/network policy and appropriate probe timeouts before the later P7 reboots, and do not disable this split-brain protection merely because etcd has churn ([CNPG primary isolation](https://github.com/cloudnative-pg/cloudnative-pg/blob/release-1.27/docs/src/instance_manager.md)). -->
-   <!-- codex: Define add-on-specific abort/recovery actions before these hops: preserve prior charts, values and CRDs, halt further upgrades on failed admission/network/storage/database checks, and coordinate any Git revert with Flux. Helm rollback does not automatically reverse CRD schema changes or database state. -->
+1. **QNAP v1.6.2:**
+   - set `spec.chart.spec.reconcileStrategy: Revision` on the `qnap-trident` HelmRelease and bump the
+     GitRepository tag;
+   - verify the artifact revision, then the operator, controller and node images at v1.6.2;
+   - on disposable volumes: provision, write known data, attach, expand, move to another node and
+     remount, snapshot/restore, delete;
+   - keep the Trident attacher-timeout policy and the `iscsi-recovery-tmo` workaround until the new
+     driver is shown to make them unnecessary.
+2. **Cilium 1.16.5 → 1.16.19 → 1.17.18 → 1.18.14, one hop per window.** For each hop:
+   - export the live user values and manifest; reconcile them with the repo values file and commit;
+   - render and diff the target chart; set `upgradeCompatibility` to the previous minor; no
+     `--reuse-values`;
+   - run the pre-flight against KubePrism localhost:7445;
+   - `helm upgrade --version <v>` and wait for the full agent/operator rollout;
+   - `cilium status` and the connectivity test, Hubble, a policy allow/deny probe, and DNS;
+   - record the Helm revision for rollback.
+   - **Before 1.18,** check the identity-relevant label config (the 1.18 identity-churn warning only
+     applies to custom label settings).
+   - Record the pinned version in the values-file header and the runbook.
 
-### P5. Kubernetes 1.31.4 → 1.32.13 (client 1.13.11)
+### P2. Talos → 1.12.12 and P3. Talos → 1.13.11
 
-- Run `talosctl upgrade-k8s --to 1.32.13 --with-docs=false --with-examples=false`.
-  <!-- codex: As written this may fail because the generated talosconfig selects all three CP nodes: `upgrade-k8s` requires exactly one `-n <healthy-cp-ip>` and upgrades the whole cluster, not just that node. Specify the versioned executable and talosconfig/endpoints, run the same command with `--dry-run` first, and retain default image pre-pulling; the two comment-generation flags are valid ([v1.13.11 command](https://github.com/siderolabs/talos/blob/v1.13.11/cmd/talosctl/cmd/talos/upgrade-k8s.go)). -->
-  <!-- codex: This patches control-plane components and all kubelets without a Talos OS reboot or a PDB-protected node drain, and kubelet updates can still disrupt workloads; schedule it in a quiet window with all CPs healthy. Inspect bootstrap manifest changes and 1.13 inventory pruning, preserve disabled kube-proxy/CNI-none, and verify CoreDNS afterward ([Kubernetes upgrade behavior](https://docs.siderolabs.com/kubernetes-guides/advanced-guides/upgrading-kubernetes)). -->
-  <!-- codex: Review removed APIs, admission policies, client compatibility and feature gates before the dry run, including infrequently used CronJobs and restore manifests. A successful dry run and post-upgrade deprecated-API metric cannot prove those dormant consumers are compatible. -->
-- Then bump `kubernetes_version` in `infra`, `infra/agent-nodes` and `infra/env-pool`. Each
-  `tofu plan` must show config-only changes.
-  <!-- codex: Commit the successful version promptly, but do not blindly apply the regenerated full configs: compare every component image and retained customization with the live result. For the staged env module, ensure its next boot cannot restore an older kubelet/configuration; keep unrelated applies frozen until live, persisted and desired versions agree. -->
-- Verify: all control-plane static pods are on 1.32.13, every kubelet reports 1.32.13, and no
-  deprecated-API errors.
-  <!-- codex: Add a checkpoint for partial failure: record completed components, diagnose the blocker, and resume the same target upgrade only after health recovers. Kubernetes downgrade is not the routine abort path; never attempt it by lowering tofu variables or by Talos A/B rollback, and document full-cluster recovery plus its data-loss boundary if forward repair fails. -->
+- Each is a full cluster phase: canary, workers, CPs (2 per night), then a 24 h soak.
+- Keep the A/B recovery point: never start the next minor until the current one has soaked.
+- **Env node (before P2):**
+  - refresh the env-pool `kata_debug` `configuration.toml` against the target kata extension (3.26.0
+    for 1.12.12, 3.32.0 for 1.13.11), or set `kata_debug=false`;
+  - staged apply, then compare active against staged config before the reboot.
+- **After each phase** on agent-node-3 and the env node: the `kata-env` handler, gVisor, nested KVM,
+  PVC I/O, networking and sandbox teardown; one real AgentForge/env job; review the userspace OOM
+  handler defaults.
+- **P3:** the 1.12.12 client drives P3, so the legacy self-drain path still applies.
 
-### P6. Add-ons for 1.33, then Kubernetes 1.32.13 → 1.33.13
+### P4b. Kyverno and CNPG (Kubernetes still 1.31; after P3)
 
-1. Cilium 1.17.18 → 1.18.14. The new service-account identity label causes identity churn: quiet
-   window, and watch drops.
-   <!-- codex: The documented identity-churn warning is conditional on custom identity-relevant label configuration; inspect live values before asserting it applies or changing label selection. Reuse the full preflight, values review, connectivity tests and rollback preparation from the earlier hop ([1.18 upgrade notes](https://docs.cilium.io/en/v1.18/operations/upgrade/)). -->
-2. Run `upgrade-k8s --to 1.33.13` (same flags) and bump the tofu `kubernetes_version` again.
-   <!-- codex: Require a completed Cilium rollout and soak before this command, then repeat all P5 backup, dry-run, single-CP targeting, reconciliation and failure-handling steps. Verify actual QNAP 1.6.2 and compatible Kyverno/CNPG versions before crossing the Kubernetes minor boundary. -->
+- **Kyverno 1.13.4 → 1.14.5 → 1.15.3 → 1.16.4.** Platform PRs (owner merges), one hop per window:
+  - record chart and app versions;
+  - CRD upgrade behaviour;
+  - preserve 2 replicas, the PDB and the spread;
+  - set ValidatingAdmissionPolicy generation explicitly in 1.15;
+  - after each hop: an allowed and a denied request, the existing mutations still applied (including
+    `trident-attacher-timeout`), and the webhook endpoints and CA bundles.
+- **CNPG 1.24.1 → 1.25.4 → 1.26.3 → 1.27.4.** Platform PRs (owner merges), one hop per window:
+  - consider `ENABLE_INSTANCE_MANAGER_INPLACE_UPDATES=true` first, so the hops do not each roll all
+    clusters (1.26 forces one restart anyway);
+  - stagger the rollouts;
+  - gate per cluster on replication lag, the infra-pg slot, service recovery and application writes;
+  - for 1.27, validate peer instance-manager reachability (the network policies) before any later CP
+    reboot.
+- **Abort:** keep the prior chart, values and CRDs; a Helm or Git revert does not reverse CRD or
+  database state.
+
+### P5. Kubernetes 1.31.4 → 1.32.13 and P6. → 1.33.13 (client 1.13.11, quiet window each)
+
+1. Review first: removed APIs (flowcontrol v1beta3 is gone in 1.32), admission policies, dormant
+   CronJobs and restore manifests, and feature gates (no `SidecarContainers=false`, no AppArmor
+   gates).
+2. Take a backup checkpoint.
+3. Run `talosctl-11311.exe -n <one healthy cp> upgrade-k8s --to <v> --with-docs=false
+   --with-examples=false --dry-run`. Inspect the bootstrap manifest changes and pruning, then run it
+   for real.
+4. Verify:
+   - every apiserver, the controller-manager and the scheduler;
+   - CoreDNS, service routing and network-policy behaviour;
+   - admission;
+   - representative application transactions;
+   - all kubelets at the version.
+5. Commit the `kubernetes_version` bump in all three modules. Before any apply, diff the rendered
+   config against live; for env-pool, make sure its staged config cannot restore an older kubelet.
+6. **Partial failure:** record the components that completed, repair, and re-run the same target. No
+   downgrade.
+7. **P6 extra:** before it, confirm QNAP v1.6.2 and Kyverno/CNPG at their targets.
 
 ### P7. Talos 1.13.11 → 1.14.2 (client 1.13.11)
 
-- Take a fresh off-host etcd snapshot right before the first CP. etcd 3.7.1 is one-way once the
-  cluster version moves.
-  <!-- codex: “One-way” is an operational precaution, not an absolute etcd limitation: a mixed 3.6/3.7 cluster remains on the older protocol, while a fully upgraded cluster needs the supported downgrade workflow or a pre-upgrade snapshot restore. Do not use plain Talos rollback after the cluster version advances; establish a stop checkpoint before the final CP and a rehearsed Talos-compatible recovery procedure with an explicit RPO ([etcd 3.7 upgrade/rollback rules](https://etcd.io/docs/v3.7/upgrades/upgrade_3_7/)). -->
-  <!-- codex: Confirm each member's actual etcd image/version and cluster version rather than assuming the Talos tag alone upgrades etcd; an explicit machine-config image override can retain an older version. Never restore an old snapshot or VM disk into one member of the still-running production quorum as an attempted cluster rollback. -->
-- Verify the TLS 1.3 minimum before the first CP: talos-backup, the Prometheus apiserver/kubelet
-  scrape, Flux and the ESO webhooks all negotiate TLS 1.3. Check with `openssl s_client -tls1_2`
-  against a 1.14 node.
-  <!-- codex: This test is insufficient and mistimed: a 1.14 worker has no kube-apiserver, and TLS 1.2 rejection alone proves neither TLS 1.3 success nor application compatibility. Test on an isolated 1.14 CP beforehand, then positively verify authenticated TLS 1.3 and real client operations against the first upgraded production CP before proceeding. -->
-  <!-- codex: Test the correct connection directions: the changed minimum covers etcd and kube-apiserver serving endpoints, whereas ESO webhook serving TLS and kubelet scraping are separate paths. Talos-backup uses the Talos API, so prove its pinned beta image can perform and upload a snapshot after the upgrade instead of treating an OpenSSL probe as validation. -->
-  <!-- codex: Retaining metrics on :2381 does not remove the new :2383 HTTP/gateway listener; the current CP firewall contains only 2379-2380. Inspect the bound listener and extend the existing source restrictions to 2383 where reachable, then verify restrictions from a non-CP host and confirm metrics still scrape on 2381 ([1.14 etcd changes](https://docs.siderolabs.com/talos/v1.14/getting-started/what%27s-new-in-talos)). -->
-- Same per-node gates. talosctl ≥1.13 drains (`--drain` default, 5 m timeout). If a drain fails, the
-  node may be left cordoned: re-run, never use `--force`.
-  <!-- codex: Diagnose failed eviction/PDB, finalizer, storage or runtime shutdown before retrying, and allow a deliberate timeout suited to this cluster's measured attach/switchover times. Because new boot assets may already be installed, inspect running versus pending upgrade state and avoid an unrelated reboot; keep the client process and API connectivity alive through drain, reboot and uncordon. -->
-- Keep workload isolation (sandboxd) off.
-  <!-- codex: An OS upgrade preserves the absent/disabled setting, but generating a fresh 1.14 configuration can introduce `SecurityProfileConfig` with isolation enabled. Explicitly preserve the intended setting during P8 and defer enabling isolation to a separate CSI/Kata-tested change ([1.14 upgrade configuration changes](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/lifecycle-management/upgrading-talos)). -->
+1. Before P7:
+   - add 2383 to the etcd ingress `NetworkRuleConfig` (same source set as 2379-2380, CP-only) and
+     black-box test it from a non-CP host after the first 1.14 CP;
+   - keep sandboxd off (the config contract stays pinned, see P8).
+2. Workers first. Then cp1 and the follower; soak ≥24 h (the etcd cluster version stays 3.6 while
+   mixed); then the third CP (the point of no return).
+3. After the first 1.14 CP:
+   - positively verify TLS 1.3 client operations (kubectl, Flux, the Prometheus scrape of that
+     apiserver) and the etcd member's health;
+   - run a manual talos-backup job and decrypt its snapshot.
+4. **If the 1.13 drain fails:** the node may already be armed to boot 1.14. Diagnose (PDB, finalizer,
+   storage). Do not reboot it unplanned. Re-run the same upgrade once fixed; never `--force`.
+5. After the third CP: confirm each member's etcd image/version and the cluster version.
+6. Snapshot immediately before the third CP; the RPO is that snapshot.
 
-### P8. Reconcile IaC and record
+### P8. Reconcile and record (after each phase, final at the end)
 
-- `talos_version = "v1.14.2"` in all three modules; the import_from guards prevent VM replacement.
-  <!-- codex: Reconcile version intent at each completed phase, or explicitly maintain an apply freeze until this point; leaving desired state on 1.11 through a multi-night program makes an unrelated apply hazardous. For future node creation, stage and verify the final nocloud raw images with the correct per-pool schematic on the Proxmox hosts, since ignoring existing import paths does not supply a new-node image. -->
-- `tofu plan` is a no-op apart from expected attributes. Apply with `apply_mode = "no_reboot"`.
-  <!-- codex: A clean plan does not establish live convergence: provider 0.12's configuration-apply `Read` does not refresh machine configuration from the node. Compare live and persisted/staged configurations against the complete rendered result, including Kubernetes/etcd images, CNI/proxy settings, network routes, new document kinds and defaults, before any apply ([provider implementation](https://github.com/siderolabs/terraform-provider-talos/blob/v0.12.0/pkg/talos/talos_machine_configuration_apply_resource.go)). -->
-  <!-- codex: Applying `no_reboot` indiscriminately is wrong for the env pool's established staged-only contract and can still restart services elsewhere. Preserve staged mode for env changes, reconcile active configuration deliberately at its announced window, and handle any service-affecting CP changes serially; document all remaining activation requirements instead of calling the result complete. -->
-- New `docs/runbooks/talos-upgrade.md`: the per-node procedure, gates, client-matching, install-image
-  rule and rollback.
-- Follow-ups out of scope:
-  - Kubernetes 1.34+ (1.33 is EOL);
-    <!-- codex: Calling 1.33 a transit point conflicts with leaving the next supported release indefinitely out of scope. Preserve this program's bounded target, but assign an owner and dated exit plan for the EOL Kubernetes/add-on endpoint rather than presenting it as a supported long-term production state. -->
-  - CNPG 1.28 → 1.29/1.30, Cilium 1.19+, Kyverno ≥1.17 and the ClusterPolicy deprecation;
-  - Flux 2.9 (needs 1.34), metrics-server 0.8.
+- Keep `talos_config_contract` at v1.11 (it never moves in this program). Bump `talos_version` and
+  `kubernetes_version` to the achieved versions after each phase.
+- Before any apply: 0 destroy/replace, and the rendered config diffed against live.
+- env-pool stays `staged` and is activated at its announced window. Stage the final nocloud raw image
+  per schematic on the Proxmox hosts, for future node creation.
+- New `docs/runbooks/talos-upgrade.md`: the procedures above, the wrapper, the client matrix,
+  recovery by cause, and the cronjob/CI quiescing list. Also update node-maintenance.md's client
+  references.
+
+### Follow-ups (owned, dated)
+
+- **Kubernetes 1.34+** plan by 2026-11-15 (1.33 is EOL), together with CNPG 1.28 → 1.29/1.30,
+  Cilium 1.19+, Kyverno ≥1.17 and the ClusterPolicy deprecation, Flux 2.9 and metrics-server 0.8.
 
 ## Critical files
 
-- ailab:
-  - `kubernetes/infra/{vms.tf,talos.tf,image.tf,variables.tf,machine-config/controlplane.yaml.tftpl}`
-  - `kubernetes/infra/agent-nodes/{main.tf,talos.tf,variables.tf}`
+- **ailab:**
+  - `kubernetes/infra/{talos.tf,vms.tf,image.tf,variables.tf,versions.tf,machine-config/*.tftpl}`
+  - `kubernetes/infra/agent-nodes/{main.tf,talos.tf,variables.tf,node-labels.tf}`
   - `kubernetes/infra/env-pool/*`
   - `kubernetes/infra/bootstrap/cilium-values.yaml`
-  - `kubernetes/apps/infrastructure/sources/qnap-csi.yaml`
+  - `kubernetes/apps/infrastructure/{sources,storage}/qnap-csi.yaml`
+  - the etcd firewall template
+  - new `scripts/talos-upgrade-node.sh` and its test
   - new `docs/runbooks/talos-upgrade.md`
-  <!-- codex: Also include the agent worker template, provider constraints/lockfiles, `storage/qnap-csi.yaml` for Revision reconciliation, and the backup schedules/recovery evidence in the implementation review. Update stale maintenance commands to select the appropriate versioned client without copying unrelated Proxmox host-reboot or AI-LXC maintenance into this Talos-only program. -->
-- cchifor/platform (owner merges):
-  - `deploy/components/kyverno/helmrelease.yaml`
-  - `deploy/components/cnpg-operator/helmrelease.yaml`
-- Ops checkout `kubernetes/infra/_out/`: talosctl binaries and talosconfig (not in git).
+  - `docs/runbooks/node-maintenance.md`
+- **cchifor/platform** (owner merges): the kyverno and cnpg-operator HelmReleases.
+- **trueswarm-admin:** the qualification Kustomization.
+- **Ops checkout:** `kubernetes/infra/_out/` (clients, talosconfig).
 
 ## Verification
 
-- **Per node, every Talos step:**
-  - `talosctl version` shows the target;
-  - `get extensions` shows iscsi-tools (and kata/gvisor on the env node);
-    <!-- codex: Record full schematic and extension versions and verify iscsid/qemu-guest-agent service health, actual PVC read/write/remount behavior, and runtime teardown on env nodes. Check boot logs, storage/network errors, free EPHEMERAL space and absence of DiskPressure; extension registration alone does not demonstrate functionality. -->
-  - the full gate above;
-  - no new critical alerts for 30 min.
-    <!-- codex: Monitor API and application writes from outside the node being drained because Prometheus/Alertmanager can themselves move or lose state during these CP drains. Budget the thirty-minute observation plus recovery reserve into each window, with known singleton downtime distinguished from unexpected Tier-A failures. -->
-- **Per add-on hop:** the component's own health (Cilium connectivity test, Kyverno admission of a
-  test object, CNPG cluster healthy + streaming + a switchover observed, QNAP PVC
-  provision/attach/expand).
-- **Per Kubernetes step:** all nodes at the version; `kubectl get --raw /readyz?verbose`;
-  `apiserver_requested_deprecated_apis` reviewed; the Flux Kustomizations and HelmReleases all Ready.
-  <!-- codex: Check every API-server endpoint, controller-manager/scheduler health, DNS, service routing, network-policy allow/deny behavior, admission, and representative application transactions after each minor. Verify the next scheduled jobs and backup/restore path too, since node version and Ready conditions miss failures in dormant workloads. -->
+- **Per Talos node:** the full gate in the CP procedure's post-checks. On agent-node-3 and the env
+  node, add the runtime tests.
+- **Per add-on hop:**
+  - Cilium: connectivity, policy and DNS;
+  - QNAP: the disposable-volume suite;
+  - Kyverno: allow/deny and mutation;
+  - CNPG: per-cluster lag, slot and writes.
+- **Per Kubernetes minor:** the P5 verification list, and the next scheduled backup jobs succeed.
 - **End state:**
-  - 7 nodes on Talos v1.14.2 and Kubernetes v1.33.13;
-  - etcd 3.7.x, 3/3;
-  - all three tofu plans clean;
-  - runbook merged;
-  - leader-change rate no worse than the P0 baseline.
-    <!-- codex: Require an after-upgrade soak covering normal CI and a complete backup cycle, with successful snapshots, decryptability, database backups and no unexplained API/storage failures. Compare latency tails and write availability as well as election counts: increasing the election timeout can hide elections while leaving the underlying disk stalls and degraded availability unchanged. -->
+  - 7 nodes on Talos v1.14.2, Kubernetes v1.33.13, etcd 3.7.x 3/3;
+  - three clean tofu plans with the contract pinned;
+  - the runbook merged;
+  - an after-upgrade soak covering normal CI and a full backup cycle (snapshot decrypts, database
+    dumps restore);
+  - write availability and latency tails no worse than the P0 baseline (not just the
+    election count).
 
 <!-- codex-review-status: complete -->
