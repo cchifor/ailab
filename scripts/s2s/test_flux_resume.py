@@ -115,12 +115,13 @@ def fake_kubectl(argv):
             continue
         args.append(argv[i])
         i += 1
-    kind = args[1] if len(args) > 1 else ""
+    kind = (args[1] if len(args) > 1 else "").lower()  # kubectl kinds are case-insensitive
     try:
         if args[0] == "annotate" and kind == "gitrepository":
             st["annotated"] = True
             return _out("gitrepository.source.toolkit.fluxcd.io/platform annotated\n")
         if args[0] == "get" and kind == "gitrepository" and len(args) > 2 and args[2] == "flux-system":
+            st["source_lookups"] = st.get("source_lookups", 0) + 1
             return _out(st.get("ailab_source", rev(AILAB)))
         if args[0] == "get" and kind == "gitrepository":
             if st.get("annotated") and st.get("source_fetches", True):
@@ -148,11 +149,17 @@ def fake_kubectl(argv):
             src_name = "platform" if name == "platform" else "flux-system"
             src = st["source"] if src_name == "platform" else st.get("ailab_source", rev(AILAB))
             applied = st.setdefault("parent_applied", {}).get(name, rev(OLD) if src_name == "platform" else rev(AILAB_OLD))
+            if name in st.get("parent_transient_once", []) and not suspended:
+                st["parent_transient_once"].remove(name)
+                sys.stderr.write("error: etcdserver: request timed out\n")
+                return 1
             if not suspended and name not in st.get("parent_never_reconciles", []):
-                observed, applied = gen, src
+                observed = gen
+                if name not in st.get("parent_stale_revision", []):
+                    applied = src
                 st["parent_observed"][name] = observed
                 st["parent_applied"][name] = applied
-            return _out("%s|%d|%d|%s|True|%s" % ("true" if suspended else "false", gen, observed, applied, src_name))
+            return _out("%s|%d|%d|%s|True|GitRepository|flux-system|%s" % ("true" if suspended else "false", gen, observed, applied, src_name))
         if args[0] == "patch" and kind == "kustomization":
             assert '"suspend":false' in args[-1]
             st["ks_suspended"] = False
@@ -497,6 +504,23 @@ class FluxResume(unittest.TestCase):
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 0, text)
         self.assertEqual(self.final()["parent_applied"]["flux-system"], rev(AILAB))
+        self.assertIn("RESUMED", text)
+
+    def test_a_fresh_generation_with_a_stale_revision_stops(self):
+        # Review of #1161 (reviewer-claude): the revision half of the gate on its own: the controller has
+        # processed the new generation but still reports the pre-freeze lastAppliedRevision.
+        self.state(parents={"platform": True, "flux-system": True}, ailab_source=rev(AILAB),
+                   parent_stale_revision=["flux-system"])
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("Kustomization flux-system/flux-system", text)
+        self.assertIn(rev(AILAB_OLD), text)
+
+    def test_a_transient_read_right_after_the_unsuspend_is_retried(self):
+        # Review of #1161 (reviewer-claude): the post-unsuspend generation read is retried, not a false STOP.
+        self.state(parents={"platform": True, "flux-system": True}, parent_transient_once=["platform"])
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 0, text)
         self.assertIn("RESUMED", text)
 
 
