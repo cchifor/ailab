@@ -186,14 +186,21 @@ cat >"$BIN/sort" <<EOF
 exec "$REAL_SORT" "\$@"
 EOF
 
-for stub in logger; do printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/$stub"; done
+# logger: keep the script's log lines (the last argument) in $WORK/logger.log, so a case can assert WHICH
+# record a heal acted on, not only that one ran.
+cat >"$BIN/logger" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do last="\$a"; done
+printf '%s\n' "\${last:-}" >> "$WORK/logger.log"
+exit 0
+EOF
 chmod +x "$BIN"/*
 
 run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUSY_DROP_AFTER, CACHECAP)
   # IDLE_WAIT_SEC is forced tiny here: the real default is 600s, because under pressure the busy gate
   # WAITS for the between-jobs gap instead of pruning through a live job. Left at its default, every
   # busy+pressure case below would stall this suite for 10 minutes.
-  : > "$CALLS"; rm -f "$WORK/pgrep.count" "$WORK/df.count" "$WORK"/phase.*
+  : > "$CALLS"; : > "$WORK/logger.log"; rm -f "$WORK/pgrep.count" "$WORK/df.count" "$WORK"/phase.*
   # KEEP_RUNNER_STATE=1 carries the runner's state over from the previous run (multi-tick cases).
   [ "${KEEP_RUNNER_STATE:-0}" = 1 ] || echo "${MOCK_RUNNER_STATE:-active}" > "$WORK/runner.state"
   MOCK_BUSY="$1" MOCK_PCT="$2" MOCK_PCT_AFTER="${MOCK_PCT_AFTER:-}" PATH="$BIN:$PATH" \
@@ -617,17 +624,17 @@ dangle; MOCK_DOCKER_RESTART_RC=1 run_beacon 0 50
 check "N8: a failed docker restart still gets the runner running again" \
   'calls_has "systemctl start --no-block gitea-act-runner.service" && [ "$(cat "$WORK/runner.state")" = active ]'
 # The step believed to release the record never happened, so this is NOT a record that survived a
-# heal: no builder prune, no failed_record, and the cooldown (not a permanent block) governs the retry.
-check "N8: ...no builder prune and NOT recorded as failed (retried after the cooldown)" \
-  '! grep -qE "docker builder prune -af *$" "$CALLS" && [ -z "$(state_val failed_record)" ]'
+# heal: no builder prune, no failed mark, and the cooldown (not a permanent block) governs the retry.
+check "N8: ...no builder prune and NOT marked failed (retried after the cooldown)" \
+  '! grep -qE "docker builder prune -af *$" "$CALLS" && [ -z "$(state_val "failed_$Y")" ]'
 check "N8: the record stays reported and the attempt counts" \
   '[ "$(heal_field dangling_record)" = 1 ] && [ "$(heal_field heals_total)" = 1 ] && [ -n "$(state_val last_heal)" ]'
 check "N8: runner_held is released once the runner is seen active" '[ "$(heal_field runner_held)" = 0 ]'
 
-# A FULL heal (restart succeeded) that leaves the record listed is the case failed_record is for.
+# A FULL heal (restart succeeded) that leaves the record listed is the case the failed mark is for.
 dangle; run_beacon 0 50
-check "N8b: a record still listed after the full heal is recorded as failed (never retried)" \
-  'heal_ran && grep -qE "docker builder prune -af *$" "$CALLS" && [ "$(state_val failed_record)" = "$Y" ] && [ "$(heal_field dangling_record)" = 1 ]'
+check "N8b: a record still listed after the full heal is marked failed (never retried)" \
+  'heal_ran && grep -qE "docker builder prune -af *$" "$CALLS" && [ "$(state_val "failed_$Y")" = 1 ] && [ "$(heal_field dangling_record)" = 1 ]'
 
 # A runner someone else stopped stays stopped: the heal only restarts what it stopped itself.
 dangle; MOCK_RUNNER_STATE=inactive MOCK_DU_CLEARS=1 run_beacon 0 50
@@ -731,6 +738,39 @@ check "N20: ...and the runner is started again" '[ "$(cat "$WORK/runner.state")"
 dangle; printf 'dangling=1\n' > "$WORK/heal.state"; MOCK_SORT_FAIL=1 run_beacon 0 50
 check "N21: a failed journal parse is unknown: no heal, last dangling_record=1 kept, sweep runs" \
   '! heal_ran && [ "$(heal_field dangling_record)" = 1 ] && swept'
+
+# A failed record must not shadow a second live record behind it (reviewer-claude on #1142). The pairs
+# sort by Y, so the failed Y below comes FIRST; only skipping it reaches the healable Y2.
+X2=xx9missingsnapshot000000; Y2=zz9healablerecord0000000
+two_dangle() { # the journal names (X, Y) and (X2, Y2); BuildKit lists both
+  dangle
+  printf '%s\n' "$FINALIZE_LINE" "level=error msg=/moby.buildkit.v1.Control/Solve error=\"failed to commit $X2 to $Y2 during finalize: failed to stat active key during commit: snapshot $X2 does not exist: not found\"" > "$JRNL"
+  du_lists "$Y" "$Y2"
+}
+two_dangle; printf 'last_heal=%s\nheals_total=1\nfailed_%s=1\n' "$(( $(date +%s) - 99999 ))" "$Y" > "$WORK/heal.state"
+MOCK_DU_CLEARS=1 run_beacon 0 50
+healed_record() { grep -q "heal: dangling BuildKit record $1 (snapshot" "$WORK/logger.log"; }
+check "N22: a failed record listed first does not stop the heal of another live record" \
+  'heal_ran && healed_record "$Y2" && ! healed_record "$Y"'
+check "N22: ...the failed record keeps the alert up for this tick and stays marked" \
+  '[ "$(heal_field dangling_record)" = 1 ] && [ "$(state_val "failed_$Y")" = 1 ] && [ "$(heal_field heals_total)" = 2 ]'
+
+# The first release kept ONE failed record under the key failed_record; it is still honoured.
+two_dangle; printf 'last_heal=%s\nheals_total=1\nfailed_record=%s\n' "$(( $(date +%s) - 99999 ))" "$Y" > "$WORK/heal.state"
+MOCK_DU_CLEARS=1 run_beacon 0 50
+check "N22b: a legacy failed_record is still skipped, and the other record is healed" \
+  'healed_record "$Y2" && ! healed_record "$Y"'
+
+# Failed marks are a SET: a second record whose heal fails must not un-fail the first. With one slot
+# the two would take turns being retried, every cooldown, forever.
+two_dangle; printf 'last_heal=%s\nheals_total=2\nfailed_%s=1\nfailed_%s=1\n' "$(( $(date +%s) - 99999 ))" "$Y" "$Y2" > "$WORK/heal.state"
+run_beacon 0 50
+check "N22c: every record a full heal left in place is skipped -> no heal, alert up, sweep runs" \
+  '! heal_ran && [ "$(heal_field dangling_record)" = 1 ] && swept'
+two_dangle; printf 'last_heal=%s\nheals_total=1\nfailed_%s=1\n' "$(( $(date +%s) - 99999 ))" "$Y" > "$WORK/heal.state"
+run_beacon 0 50
+check "N22d: a second record whose full heal fails is marked too, and the first stays marked" \
+  'heal_ran && [ "$(state_val "failed_$Y")" = 1 ] && [ "$(state_val "failed_$Y2")" = 1 ]'
 unset MOCK_JOURNAL MOCK_DU
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
