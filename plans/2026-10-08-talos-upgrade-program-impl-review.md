@@ -1,6 +1,6 @@
 # Implementation review — talos-upgrade-program — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
