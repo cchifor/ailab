@@ -78,19 +78,23 @@
 # A SERVICE SERIES BORN INSIDE THE WINDOW (review of PR #1147). Traefik creates a counter series on its
 # first event, and increase() cannot see anything before a series' first sample: one event, or a whole
 # burst inside one 30 s scrape. If the router series of the same pod/code/method/protocol is OLDER (earlier
-# ForwardAuth 500s created it), the router's increase() does see that burst, and the origin 5xx that
-# created the service series would be left over as "edge-generated". So a service series with no sample
-# in the hour before the window, whose router key does have one, counts at its full value
-# (last_over_time over the window) instead of its increase(), times 1.1: increase() extrapolates the
-# router side to the whole window, 10m / 9.5m = 1.053 with 30 s scrapes and 10m / 9m = 1.11 with a
-# missed scrape at an edge, where it would take a first-scrape burst of over 270 to leave 3. When the
-# router series is born in the same window (a code or method that pod never answered before), both
-# families lose the same first scrape and both keep increase(), so an origin burst still nets to 0 and an
-# edge-generated share beside it still pages (the 2026-10-06 shape). A scrape gap of over an hour makes a
-# pod's router and service series "born" together, so it cannot page by itself either. A brand-new
-# ROUTER-only series still loses its first scrape: that hides edge-generated 5xx, it never invents them.
-# Fixtures: "an origin burst that creates the service 5xx series beside an OLDER router series" and
-# "router and service series born TOGETHER".
+# ForwardAuth 500s created it, before the window or earlier inside it), the router's increase() does see
+# that burst, and the origin 5xx that created the service series would be left over as "edge-generated".
+# So a service series with no sample in the hour before the window whose router key's FIRST sample in the
+# window (min_over_time(timestamp(...)[10m:30s]); an older series shows its last pre-window sample
+# through the lookback) is EARLIER than its own counts at its full value (last_over_time over the
+# window) instead of its increase(), times 1.1: increase() extrapolates the router side to the whole
+# window, 10m / 9.5m = 1.053 with 30 s scrapes and 10m / 9m = 1.11 with a missed scrape at an edge,
+# where it would take a first-scrape burst of over 270 to leave 3. A router series born in the SAME
+# scrape as the service series (a code or method that pod never answered before) has the same first
+# timestamp: both families lose the same first scrape and both keep increase(), so an origin burst still
+# nets to 0 and an edge-generated share beside it still pages (the 2026-10-06 shape). A scrape gap of
+# over an hour makes a pod's router and service series reappear in the same scrape, so it cannot page by
+# itself either. A brand-new ROUTER-only series still loses its first scrape: that hides edge-generated
+# 5xx, it never invents them. Several routers on one key: the earliest decides, which can only
+# over-subtract (mask). Fixtures: "an origin burst that creates the service 5xx series beside an OLDER
+# router series", "a router series born EARLIER inside the window" and "router and service series born
+# TOGETHER".
 #
 # TWO SHAPES THAT BREAK THE ARITHMETIC; neither exists on 2026-10-08 (no TraefikService, and no retry
 # middleware, in the cluster):
@@ -230,8 +234,8 @@ spec:
         # series is invisible, so "> 3" means about four or five real events; the fixtures keep clear
         # margins on both sides. It sees only the edge-generated share: an origin 5xx or an
         # unreachable origin is in the service series too and nets to 0. The service side is summed per
-        # pod/code/method/protocol first so that a service series BORN inside the window, beside an older
-        # router series of the same key, counts at its full value * 1.1 instead of its increase() (see
+        # pod/code/method/protocol first so that a service series BORN inside the window, whose router key
+        # has an EARLIER first sample, counts at its full value * 1.1 instead of its increase() (see
         # "A SERVICE SERIES BORN INSIDE THE WINDOW" in the header).
         - alert: StriveEdgeGenerated5xx
           expr: |
@@ -247,7 +251,11 @@ spec:
                       sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[1h] offset 10m))
                     )
                     and
-                    sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[1h] offset 10m))
+                    (
+                      min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_router_requests_total{namespace="platform-edge",code=~"5.."})[10m:30s]))
+                      <
+                      min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_service_requests_total{namespace="platform-edge",code=~"5.."})[10m:30s]))
+                    )
                   ) * 1.1
                   or
                   sum by (exported_service, code, method, protocol, pod) (increase(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
