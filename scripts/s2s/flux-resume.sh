@@ -26,7 +26,16 @@
 #      is True and .status.history[0].chartVersion carries the target's first 12 hex
 #      (reconcileStrategy: Revision gives <version>+<sha12>...).
 #   4. --after-revert: deployment/harness must be gone. --after-drill: scale it to 1 and wait for
-#      the rollout; then run scripts/s2s/phase4-probes.sh.
+#      the rollout; then run scripts/s2s/phase4-probes.sh. --after-config (a config-only rollback or
+#      re-forward that keeps the harness, drill 2 as redesigned on 2026-10-08): deployment/harness must
+#      still exist and its rollout must be complete.
+#   5. The parents: Kustomizations flux-system/platform (it applies platform-app) and then
+#      flux-system/flux-system (the root), each resumed only if it is suspended, then Ready required.
+#
+# THE FREEZE IS TOP-DOWN (incident AG2-1, 2026-10-08): a parent Kustomization re-applies its children
+# and drops a `kubectl patch` suspend, so a freeze of platform-app and the HelmRelease alone was undone
+# twice within minutes. Freeze flux-system, then platform, then the children; this script resumes the
+# children first and the parents last. Parents that are not suspended get a WARNING at step 0.
 #
 # OWNER-RUN, from a machine that is not a dev worker, with the `admin@ai` context and git access to
 # cchifor/platform. Git Bash on Windows or bash on Linux.
@@ -50,11 +59,13 @@ POLL=${PHASE4_RESUME_POLL_SECONDS:-10}
 
 usage() {
   cat <<'EOF'
-usage: scripts/s2s/flux-resume.sh (--after-revert | --after-drill) [--sha SHA] [--dry-run]
+usage: scripts/s2s/flux-resume.sh (--after-revert | --after-drill | --after-config) [--sha SHA] [--dry-run]
 
   --after-revert  after the durable revert (harness.enabled: false) has MERGED on platform main:
                   lands it, then requires deployment/harness to be gone
   --after-drill   once a drill is over: lands platform main, then scales the harness back to 1
+  --after-config  a config-only rollback or re-forward that keeps the harness: lands it, then requires
+                  deployment/harness to exist and be rolled out
   --sha SHA       the platform commit to land (40 hex), e.g. the revert's merge commit. The source
                   must then carry exactly that commit. Default: platform main now, or any later
                   main (main is append-only, so it descends from the target)
@@ -68,8 +79,8 @@ EOF
 MODE='' SHA='' DRY_RUN=0 PINNED=0
 while (($#)); do
   case "$1" in
-    --after-revert | --after-drill)
-      [[ -z $MODE ]] || { echo "flux-resume: choose one of --after-revert and --after-drill" >&2; exit 2; }
+    --after-revert | --after-drill | --after-config)
+      [[ -z $MODE ]] || { echo "flux-resume: choose one of --after-revert, --after-drill and --after-config" >&2; exit 2; }
       MODE=${1#--after-}
       ;;
     --sha)
@@ -84,7 +95,7 @@ while (($#)); do
   esac
   shift
 done
-[[ -n $MODE ]] || { echo "flux-resume: --after-revert or --after-drill is required" >&2; usage >&2; exit 2; }
+[[ -n $MODE ]] || { echo "flux-resume: --after-revert, --after-drill or --after-config is required" >&2; usage >&2; exit 2; }
 
 f() { kubectl --context "$CONTEXT" -n "$FLUX_NS" "$@"; }
 h() { kubectl --context "$CONTEXT" -n "$NS" "$@"; }
@@ -151,6 +162,29 @@ hr_upgraded() {
   [[ $susp != true && $chart == *"${SHA:0:12}"* && $ready == True ]]
 }
 
+# The parents of platform-app, innermost first: flux-system/platform applies it, flux-system/flux-system
+# (the root) applies platform.
+PARENTS=(platform flux-system)
+PARENT=''
+parent_suspended() {
+  local out
+  out=$(f get kustomization "$1" -o jsonpath='{.spec.suspend}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
+  out=${out//$'\r'/}
+  [[ ${out%%|*} == true ]]
+}
+parent_ready() {
+  local out
+  out=$(f get kustomization "$PARENT" -o jsonpath='{.spec.suspend}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
+  out=${out//$'\r'/}
+  [[ ${out%%|*} != true && ${out#*|} == True ]]
+}
+
+harness_up() {
+  local out
+  out=$(h get deployment "$HARNESS" --ignore-not-found -o name) || return 1
+  [[ -n ${out//$'\r'/} ]]
+}
+
 harness_gone() {
   local out
   out=$(h get deployment "$HARNESS" --ignore-not-found -o name) || return 1
@@ -172,9 +206,14 @@ flux-resume ($MODE), dry run: no cluster or git call. The steps, each gated (at 
 EOF
   if [[ $MODE == revert ]]; then
     echo "  4. wait: kubectl --context $CONTEXT -n $NS get deployment $HARNESS --ignore-not-found is empty (the harness is gone)"
+  elif [[ $MODE == config ]]; then
+    echo "  4. require: kubectl --context $CONTEXT -n $NS get deployment/$HARNESS exists; rollout status deployment/$HARNESS"
   else
     echo "  4. kubectl --context $CONTEXT -n $NS scale deployment/$HARNESS --replicas=1; rollout status; then scripts/s2s/phase4-probes.sh"
   fi
+  for p in "${PARENTS[@]}"; do
+    echo "  5. only if suspended: kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $p --type=merge -p '{\"spec\":{\"suspend\":false}}'; wait Ready"
+  done
   exit 0
 fi
 
@@ -186,6 +225,15 @@ step "0. Target commit"
 [[ $SHA =~ ^[0-9a-f]{40}$ ]] || stop "cannot read platform main (git ls-remote $PLATFORM_REMOTE refs/heads/main)" \
   "Nothing was changed: the Kustomization and the HelmRelease stay suspended."
 echo "landing platform $SHA ($MODE)"
+SUSPENDED_PARENTS=()
+for p in "${PARENTS[@]}"; do
+  if parent_suspended "$p"; then
+    SUSPENDED_PARENTS+=("$p")
+  else
+    echo "WARNING: Kustomization $FLUX_NS/$p is not suspended: the freeze is not top-down, so its next reconcile can clear the children's suspends (R19)."
+  fi
+done
+[[ ${#SUSPENDED_PARENTS[@]} -gt 0 ]] && echo "suspended parents, resumed last: ${SUSPENDED_PARENTS[*]}"
 
 step "1. Source: GitRepository $FLUX_NS/$SOURCE must carry $SHA before anything is resumed"
 f annotate gitrepository "$SOURCE" --overwrite "reconcile.fluxcd.io/requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
@@ -216,10 +264,26 @@ if [[ $MODE == revert ]]; then
   wait_until harness_gone || stop "deployment/$HARNESS still exists after the upgrade to $SHA" \
     "Is the revert (harness.enabled: false) in that commit? Freeze again (Kustomization first) and scale the harness to 0."
   echo "deployment/$HARNESS is gone"
+elif [[ $MODE == config ]]; then
+  step "4. A config-only change keeps the harness: deployment/$HARNESS must be up"
+  harness_up || stop "deployment/$HARNESS is missing after the upgrade to $SHA" \
+    "A config-only rollback or re-forward keeps the harness (harness.enabled: true). Investigate before resuming the parents; they stay suspended."
+  h rollout status "deployment/$HARNESS" --timeout="${TIMEOUT}s" >/dev/null || stop "deployment/$HARNESS did not finish rolling out" \
+    "The parents stay suspended. Investigate the harness."
+  echo "deployment/$HARNESS is up"
 else
   step "4. After the drill: the harness back to one replica"
   h scale "deployment/$HARNESS" --replicas=1 >/dev/null
   h rollout status "deployment/$HARNESS" --timeout="${TIMEOUT}s"
   echo "Now run the full check: scripts/s2s/phase4-probes.sh"
+fi
+if [[ ${#SUSPENDED_PARENTS[@]} -gt 0 ]]; then
+  step "5. The parents, innermost first: ${SUSPENDED_PARENTS[*]}"
+  for PARENT in "${SUSPENDED_PARENTS[@]}"; do
+    f patch kustomization "$PARENT" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
+    wait_until parent_ready || stop "Kustomization $FLUX_NS/$PARENT is not Ready after its resume (${TIMEOUT}s)" \
+      "The release has landed; the remaining parents stay suspended. Investigate $PARENT."
+    echo "Kustomization $FLUX_NS/$PARENT resumed and Ready"
+  done
 fi
 printf '\nRESUMED: platform %s applied by the Kustomization and the HelmRelease\n' "$SHA"

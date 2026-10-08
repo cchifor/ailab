@@ -39,6 +39,8 @@ OLD = "1" * 40
 TARGET = "a" * 40
 LATER = "b" * 40
 WRITES = {"annotate", "patch", "scale", "rollout", "delete", "apply", "edit", "label", "replace"}
+#: The Kustomizations that apply platform-app (R19: a freeze suspends them top-down).
+PARENTS = ("platform", "flux-system")
 
 
 def find_bash():
@@ -121,6 +123,14 @@ def fake_kubectl(argv):
                 if st["source_polls"] >= st.get("source_after", 1):
                     st["source"] = rev(st["main"])
             return _out(st["source"])
+        name = args[2] if len(args) > 2 else ""
+        if args[0] == "patch" and kind == "kustomization" and name in PARENTS:
+            assert '"suspend":false' in args[-1]
+            st.setdefault("parents", {})[name] = False
+            return _out("kustomization.kustomize.toolkit.fluxcd.io/%s patched\n" % name)
+        if args[0] == "get" and kind == "kustomization" and name in PARENTS:
+            suspended = st.get("parents", {}).get(name, False)
+            return _out("%s|True" % ("true" if suspended else "false"))
         if args[0] == "patch" and kind == "kustomization":
             assert '"suspend":false' in args[-1]
             st["ks_suspended"] = False
@@ -232,7 +242,10 @@ class FluxResume(unittest.TestCase):
             if call[0] != "kubectl":
                 continue
             args = [a for i, a in enumerate(call[1:]) if a not in ("--context", "-n") and (i == 0 or call[1:][i - 1] not in ("--context", "-n"))]
-            out.append((args[0], args[1] if len(args) > 1 else ""))
+            kind = args[1] if len(args) > 1 else ""
+            if kind == "kustomization" and len(args) > 2 and args[2] in PARENTS:
+                kind = "kustomization/" + args[2]
+            out.append((args[0], kind))
         return out
 
     def index(self, verb, kind):
@@ -349,6 +362,66 @@ class FluxResume(unittest.TestCase):
             rc, _ = self.run_script(*bad)
             self.assertEqual(rc, 2, bad)
         self.assertEqual(self.calls(), [])
+
+    def test_suspended_parents_are_resumed_last_platform_then_flux_system(self):
+        # R19: a freeze suspends flux-system, platform, platform-app and the HelmRelease top-down,
+        # because a parent re-applies its children and drops a kubectl-patch suspend. They are
+        # resumed only after the release landed, the inner parent first.
+        self.state(parents={"platform": True, "flux-system": True})
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        last_hr_get = max(i for i, v in enumerate(self.verbs()) if v == ("get", "helmrelease"))
+        platform = self.index("patch", "kustomization/platform")
+        flux_system = self.index("patch", "kustomization/flux-system")
+        self.assertLess(last_hr_get, platform)
+        self.assertLess(platform, flux_system)
+        self.assertEqual(self.final()["parents"], {"platform": False, "flux-system": False})
+        self.assertIn("RESUMED", text)
+
+    def test_a_gate_stop_leaves_the_parents_suspended(self):
+        self.state(parents={"platform": True, "flux-system": True}, source_fetches=False)
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 1, text)
+        self.assertNotIn(("patch", "kustomization/platform"), self.verbs())
+        self.assertNotIn(("patch", "kustomization/flux-system"), self.verbs())
+        self.assertEqual(self.final()["parents"], {"platform": True, "flux-system": True})
+
+    def test_parents_that_are_not_suspended_are_warned_about_and_left_alone(self):
+        self.state(parents={"platform": False, "flux-system": False})
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("WARNING", text)
+        self.assertIn("top-down", text)
+        self.assertNotIn(("patch", "kustomization/platform"), self.verbs())
+        self.assertNotIn(("patch", "kustomization/flux-system"), self.verbs())
+
+    def test_after_config_keeps_the_harness(self):
+        # R22: drill 2 keeps the assistant up; a config-only rollback/re-forward must leave the
+        # harness deployed (no scale, no removal).
+        self.state(parents={"platform": True, "flux-system": True})
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn(("scale", "deployment/harness"), self.verbs())
+        self.assertIn("deployment/harness is up", text)
+        self.assertEqual(self.final()["parents"], {"platform": False, "flux-system": False})
+
+    def test_after_config_stops_when_the_harness_is_gone(self):
+        self.state(harness=False)
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("STOP", text)
+        self.assertIn("deployment/harness is missing", text)
+
+    def test_dry_run_names_the_parent_step_and_the_config_mode(self):
+        self.state()
+        rc, text = self.run_script("--after-config", "--dry-run")
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(self.calls(), [])
+        self.assertIn("kustomization platform", text)
+        self.assertIn("kustomization flux-system", text)
+        self.assertIn("deployment/harness", text)
+        rc, _ = self.run_script("--after-config", "--after-drill")
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":
