@@ -10,22 +10,26 @@ stringData:
     username: ENC[AES256_GCM,data:OKIS1b0=,iv:tBEZ6kiguAbenrfmwI5DA0M1/Zrm6czbF51vNEFQUaY=,tag:wmPHicjuKx3ogqsXSgXhOg==,type:str]
     password: ENC[AES256_GCM,data:jHvx37gaN58uyUbjUej6llc0Tp61ceHAtlCIymTVqQ==,iv:yN5FpP+x6tWjHGcywSIPrbZjXDyFamF3VQ6hRmyJLvs=,tag:5UPPdCl8dtBtirbxNaNo2w==,type:str]
 sops:
-    kms: []
-    gcp_kms: []
-    azure_kv: []
-    hc_vault: []
     age:
-        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
-          enc: |
+        - enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBsU1RwdGxwby83cEN0VytJ
-            bmt2VWZWZkFRS3AzNmxMN0V2cTJpTmJrS3owCk9pN2ZIOGFnTllVa21PeGdUejQ2
-            SExmUkhkR05KMjlLbTQvRmV0TXNVV0kKLS0tIEkzeXA4ay92WlBuVEtISFV0cWdo
-            TGNmUDB1akYybWJtUlprQ3dMaVFoL0UKiyvjPJIYxVNmgrMjqM2ppYLaPddN1bVw
-            j5lXOM6YhG+E/EDz8GrILJNttrOgP6akvEbgx4hxnBbfyjXSN6C6XQ==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAzSTlDMGhJR1JBVjcyOTQy
+            N0Q5aDN1MENZSHM3SFVQNXJUVU5FNElGeXdNClhDaGY5SERYUjQ0d0poMmVPYTNU
+            bHVmR2RIZ0JXRG1MRlF4eG5Kalc1LzQKLS0tIEJWT0luQ1ZDOGo0QXBiZ1NKR2VM
+            RmRvNjdaQTBtRXZDaVdwUWpjYmE3R1kKbmRocxFId1cNYlaqxoxxWNM1zB2pUgOG
+            O6PS7NQltElTXgz/X6CBEaC/1yXn4BHYjxJo1NeSz4o34+xZa1GSlQ==
             -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBBVnVDM0RUakRDek95SEs3
+            cGV1MmFkWkFSNjE1eFZRSnN3S1NESUEwdWxNCmg3TXBvekFWQU9vdXJKcS9vNmFV
+            Nml3RnEvZ0RncEVZY3NVM3UxcjlrRXMKLS0tIGhvY2FjRklpZlVGSXg1aENaYytR
+            c09EVFF1NkNFOENDR0JBV3JIeXlVUzgKOxko/MdLLPt0bQBcCc0/p1gu/Iec7gxf
+            PR2toR36JWszEIpokWwOn80NI9/i2kArM8+ro0GY/Z18uQ70YD3Qyw==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+    encrypted_regex: ^(data|stringData)$
     lastmodified: "2026-07-21T18:53:29Z"
     mac: ENC[AES256_GCM,data:wmJl7bQkRJSrkTIlLRI2Yj2YYHkTECdEa+deTBDCqbQe/8BBKrr3KIIrwLl8dsst29on6tzFZRlxcF3wlPzs00yS1zxLsPET5eJlKdE3j0p0tZ7zeg50NWsWrlkq0oPq5l36kIW4RYMb97oSko1wVk5qk44g/uXoSGQH1nB+G38=,iv:4mTOy0Y6T2t613LC2CUbrw4jHVKxanDx1k0kOthyDVc=,tag:VGSKHZfOwYxNZbezqZ1vRQ==,type:str]
-    pgp: []
-    encrypted_regex: ^(data|stringData)$
     version: 3.9.4

@@ -8,16 +8,25 @@ stringData:
 type: Opaque
 sops:
     age:
-        - recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
-          enc: |
+        - enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBKNVlZN3N5djAzSDU5Tkxs
-            ajNZcWVlUEMzTDBUWWZjZEJveFVVd3JJRjBnCjZGZUtPMWhyNC9qWVc0blFneTJC
-            a0V5VzdFbnFEUzlxTGJDeEZFak5yMHcKLS0tIGxjYkJPdGREeVJlM0hmbUlFbkRM
-            cVZtQko2K1ArZWU3ZnRKci95M2hOUm8K6qBe9znsd0d4wHVHHfwlEDKZ4csi/T+k
-            fp6Eo03paBve2jhfoyHyT6bg7No61u44+TccHr8mPfNMiadPATrBtA==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBPNmJHR2tRMXgzcFpSWlZn
+            bFVJbURLa2FyVENVSWpTMlNMSWNCdnFpYmtvCkdIeTJVOHdHWG1OWEplRnBuZWJS
+            MVZFMTRMdmF0UUNUZkJNVXkwYkVoUHcKLS0tIFpZM1JycWRxUys3Nm8wNnZneHhH
+            RW8wZWFQNkpYMVZFY3BPSE0wMk9xeDQKkAtyTurD4T6tnFdgjWvF66bejI9yHrcS
+            eNHWTKsIghER+yNqX69qUJAenz7fNED/wQQu0qVGwOvLQc4S8FM97A==
             -----END AGE ENCRYPTED FILE-----
+          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBVeDF5T2tvQlN0dFltZFFv
+            WDFHeHljYXVFYTV6cWwyckZPOVRoQlNLN2tvCjRLYkQ5TUVURDJwdjhkaW8yWGts
+            U09rWHFwY2NzeG5XMFZYcFd2Z2IwSFEKLS0tIEdqYm9LQXFaTStqNi8zRUIybzY4
+            SkltZHpnL1lvcE1zMnpYVkQ4YVNpVjAKuu8ySt6qeBXBlsiUXDenfkKZ7njKBekw
+            9kTt8BreqVF5zsKpbuopyk03zNtVxHg1/tOg0Ck8r7E5JtsqO2NHcA==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+    encrypted_regex: ^(data|stringData)$
     lastmodified: "2026-09-26T12:06:44Z"
     mac: ENC[AES256_GCM,data:3JPjPqPJd+G2QbVgREAqT7hxFWBAMmvOqXRu/LjuBX1qdJ11rWSgOwP7/2xEbYNfNvLfdgEna27dgY3Qz/d729OCFQCNlKRwnsYL5/5rCJm2itVSVsNVbV8LLV7PozQzBv8E5xPJN2eM97tIwTEeXAJXTrh1nJ3tnWFIljCOfeg=,iv:3YY2IQBwPrRuCbt70A6lq/5n+99sNnuZUMVisWy0xQU=,tag:kitqt5oaX8cuLifQWyUyIw==,type:str]
-    encrypted_regex: ^(data|stringData)$
     version: 3.10.2
