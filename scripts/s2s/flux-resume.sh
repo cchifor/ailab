@@ -165,21 +165,28 @@ hr_upgraded() {
 # The parents of platform-app, innermost first: flux-system/platform applies it, flux-system/flux-system
 # (the root) applies platform.
 PARENTS=(platform flux-system)
-PARENT='' PARENT_STATE='' REQUESTED=''
-# parent_read NAME: PARENT_STATE = suspend|lastHandledReconcileAt|Ready. A failed read is an error (return 1),
-# never "not suspended": a transient API error must not drop a frozen parent from the resume list.
+PARENT='' PARENT_STATE='' GEN_AFTER=0 PARENT_SRC=''
+# parent_read NAME: PARENT_STATE = suspend|generation|observedGeneration|lastAppliedRevision|Ready|sourceRef.name.
+# A failed read is an error (return 1), never "not suspended": a transient API error must not drop a frozen
+# parent from the resume list.
 parent_read() {
-  PARENT_STATE=$(f get kustomization "$1" -o jsonpath='{.spec.suspend}{"|"}{.status.lastHandledReconcileAt}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
+  PARENT_STATE=$(f get kustomization "$1" -o jsonpath='{.spec.suspend}{"|"}{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.lastAppliedRevision}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.spec.sourceRef.name}') || return 1
   PARENT_STATE=${PARENT_STATE//$'\r'/}
-  [[ $PARENT_STATE == *"|"*"|"* ]]
+  [[ $PARENT_STATE == *"|"*"|"*"|"*"|"*"|"* ]]
 }
-# parent_reconciled: resumed AND it handled the reconcile requested at REQUESTED AND Ready. A Ready condition
-# alone can be the one from before the freeze.
+# parent_reconciled: resumed, the controller has processed the generation the unsuspend created
+# (observedGeneration >= GEN_AFTER), it applied what its own source serves now, and it is Ready. A Ready
+# condition alone can be the one from before the freeze, and lastHandledReconcileAt is not usable: the root
+# (flux-system/flux-system) applies its own object from git and drops the requestedAt annotation (drill 2,
+# 2026-10-08).
 parent_reconciled() {
-  local susp handled ready
+  local susp gen observed applied ready src art
   parent_read "$PARENT" || return 1
-  IFS='|' read -r susp handled ready <<<"$PARENT_STATE"
-  [[ $susp != true && $handled == "$REQUESTED" && $ready == True ]]
+  IFS='|' read -r susp gen observed applied ready src <<<"$PARENT_STATE"
+  art=$(f get gitrepository "$src" -o jsonpath='{.status.artifact.revision}') || return 1
+  art=${art//$'\r'/}
+  PARENT_SRC=$art
+  [[ $susp != true && ${observed:-0} -ge $GEN_AFTER && -n $art && $applied == "$art" && $ready == True ]]
 }
 
 # harness_up: deployment/harness exists with at least one available replica (rollout status alone succeeds
@@ -222,7 +229,7 @@ EOF
     echo "  4. kubectl --context $CONTEXT -n $NS scale deployment/$HARNESS --replicas=1; rollout status; then scripts/s2s/phase4-probes.sh"
   fi
   for p in "${PARENTS[@]}"; do
-    echo "  5. only if suspended: kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $p --type=merge -p '{\"spec\":{\"suspend\":false}}'; annotate reconcile.fluxcd.io/requestedAt=<now>; wait: lastHandledReconcileAt == <now> and Ready"
+    echo "  5. only if suspended: kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $p --type=merge -p '{\"spec\":{\"suspend\":false}}'; wait: observedGeneration >= the new generation, lastAppliedRevision == its source's artifact, Ready"
   done
   exit 0
 fi
@@ -293,11 +300,14 @@ if [[ ${#SUSPENDED_PARENTS[@]} -gt 0 ]]; then
   step "5. The parents, innermost first: ${SUSPENDED_PARENTS[*]}"
   for PARENT in "${SUSPENDED_PARENTS[@]}"; do
     f patch kustomization "$PARENT" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
-    REQUESTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    f annotate kustomization "$PARENT" --overwrite "reconcile.fluxcd.io/requestedAt=$REQUESTED" >/dev/null
-    wait_until parent_reconciled || stop "Kustomization $FLUX_NS/$PARENT reads '${PARENT_STATE:-?}' (suspend|lastHandledReconcileAt|Ready), not a fresh reconcile of $REQUESTED, after ${TIMEOUT}s" \
+    parent_read "$PARENT" || stop "cannot read Kustomization $FLUX_NS/$PARENT after its resume" \
       "The release has landed; the remaining parents stay suspended. Investigate $PARENT."
-    echo "Kustomization $FLUX_NS/$PARENT resumed, reconciled ($REQUESTED) and Ready"
+    GEN_AFTER=$(cut -d'|' -f2 <<<"$PARENT_STATE")
+    # A nudge only; the gate does not depend on it (the root drops it on its own re-apply).
+    f annotate kustomization "$PARENT" --overwrite "reconcile.fluxcd.io/requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
+    wait_until parent_reconciled || stop "Kustomization $FLUX_NS/$PARENT reads '${PARENT_STATE:-?}' (suspend|generation|observedGeneration|lastAppliedRevision|Ready|source), source at '${PARENT_SRC:-?}', not reconciled past generation $GEN_AFTER, after ${TIMEOUT}s" \
+      "The release has landed; the remaining parents stay suspended. Investigate $PARENT."
+    echo "Kustomization $FLUX_NS/$PARENT resumed, reconciled (generation $GEN_AFTER, ${PARENT_SRC}) and Ready"
   done
 fi
 printf '\nRESUMED: platform %s applied by the Kustomization and the HelmRelease\n' "$SHA"
