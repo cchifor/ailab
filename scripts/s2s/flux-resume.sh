@@ -165,25 +165,35 @@ hr_upgraded() {
 # The parents of platform-app, innermost first: flux-system/platform applies it, flux-system/flux-system
 # (the root) applies platform.
 PARENTS=(platform flux-system)
-PARENT=''
-parent_suspended() {
-  local out
-  out=$(f get kustomization "$1" -o jsonpath='{.spec.suspend}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
-  out=${out//$'\r'/}
-  [[ ${out%%|*} == true ]]
+PARENT='' PARENT_STATE='' REQUESTED=''
+# parent_read NAME: PARENT_STATE = suspend|lastHandledReconcileAt|Ready. A failed read is an error (return 1),
+# never "not suspended": a transient API error must not drop a frozen parent from the resume list.
+parent_read() {
+  PARENT_STATE=$(f get kustomization "$1" -o jsonpath='{.spec.suspend}{"|"}{.status.lastHandledReconcileAt}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
+  PARENT_STATE=${PARENT_STATE//$'\r'/}
+  [[ $PARENT_STATE == *"|"*"|"* ]]
 }
-parent_ready() {
-  local out
-  out=$(f get kustomization "$PARENT" -o jsonpath='{.spec.suspend}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
-  out=${out//$'\r'/}
-  [[ ${out%%|*} != true && ${out#*|} == True ]]
+# parent_reconciled: resumed AND it handled the reconcile requested at REQUESTED AND Ready. A Ready condition
+# alone can be the one from before the freeze.
+parent_reconciled() {
+  local susp handled ready
+  parent_read "$PARENT" || return 1
+  IFS='|' read -r susp handled ready <<<"$PARENT_STATE"
+  [[ $susp != true && $handled == "$REQUESTED" && $ready == True ]]
 }
 
+# harness_up: deployment/harness exists with at least one available replica (rollout status alone succeeds
+# on a deployment scaled to zero).
 harness_up() {
-  local out
+  local out spec avail
   out=$(h get deployment "$HARNESS" --ignore-not-found -o name) || return 1
-  [[ -n ${out//$'\r'/} ]]
+  [[ -n ${out//$'\r'/} ]] || { HARNESS_WHY="is missing"; return 1; }
+  out=$(h get deployment "$HARNESS" -o jsonpath='{.spec.replicas}{"|"}{.status.availableReplicas}') || return 1
+  out=${out//$'\r'/}
+  IFS='|' read -r spec avail <<<"$out"
+  [[ ${avail:-0} -ge 1 ]] || { HARNESS_WHY="has no available replica (spec.replicas=${spec:-?})"; return 1; }
 }
+HARNESS_WHY=''
 
 harness_gone() {
   local out
@@ -207,12 +217,12 @@ EOF
   if [[ $MODE == revert ]]; then
     echo "  4. wait: kubectl --context $CONTEXT -n $NS get deployment $HARNESS --ignore-not-found is empty (the harness is gone)"
   elif [[ $MODE == config ]]; then
-    echo "  4. require: kubectl --context $CONTEXT -n $NS get deployment/$HARNESS exists; rollout status deployment/$HARNESS"
+    echo "  4. require: kubectl --context $CONTEXT -n $NS get deployment/$HARNESS exists with .status.availableReplicas >= 1"
   else
     echo "  4. kubectl --context $CONTEXT -n $NS scale deployment/$HARNESS --replicas=1; rollout status; then scripts/s2s/phase4-probes.sh"
   fi
   for p in "${PARENTS[@]}"; do
-    echo "  5. only if suspended: kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $p --type=merge -p '{\"spec\":{\"suspend\":false}}'; wait Ready"
+    echo "  5. only if suspended: kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $p --type=merge -p '{\"spec\":{\"suspend\":false}}'; annotate reconcile.fluxcd.io/requestedAt=<now>; wait: lastHandledReconcileAt == <now> and Ready"
   done
   exit 0
 fi
@@ -227,7 +237,9 @@ step "0. Target commit"
 echo "landing platform $SHA ($MODE)"
 SUSPENDED_PARENTS=()
 for p in "${PARENTS[@]}"; do
-  if parent_suspended "$p"; then
+  parent_read "$p" || stop "cannot read Kustomization $FLUX_NS/$p" \
+    "Nothing was changed: everything frozen stays frozen. Re-run once the API answers."
+  if [[ ${PARENT_STATE%%|*} == true ]]; then
     SUSPENDED_PARENTS+=("$p")
   else
     echo "WARNING: Kustomization $FLUX_NS/$p is not suspended: the freeze is not top-down, so its next reconcile can clear the children's suspends (R19)."
@@ -266,10 +278,9 @@ if [[ $MODE == revert ]]; then
   echo "deployment/$HARNESS is gone"
 elif [[ $MODE == config ]]; then
   step "4. A config-only change keeps the harness: deployment/$HARNESS must be up"
-  harness_up || stop "deployment/$HARNESS is missing after the upgrade to $SHA" \
-    "A config-only rollback or re-forward keeps the harness (harness.enabled: true). Investigate before resuming the parents; they stay suspended."
-  h rollout status "deployment/$HARNESS" --timeout="${TIMEOUT}s" >/dev/null || stop "deployment/$HARNESS did not finish rolling out" \
-    "The parents stay suspended. Investigate the harness."
+  h rollout status "deployment/$HARNESS" --timeout="${TIMEOUT}s" >/dev/null 2>&1 || true
+  harness_up || stop "deployment/$HARNESS $HARNESS_WHY after the upgrade to $SHA" \
+    "A config-only rollback or re-forward keeps the harness up (harness.enabled: true). Investigate before resuming the parents; they stay suspended."
   echo "deployment/$HARNESS is up"
 else
   step "4. After the drill: the harness back to one replica"
@@ -281,9 +292,11 @@ if [[ ${#SUSPENDED_PARENTS[@]} -gt 0 ]]; then
   step "5. The parents, innermost first: ${SUSPENDED_PARENTS[*]}"
   for PARENT in "${SUSPENDED_PARENTS[@]}"; do
     f patch kustomization "$PARENT" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
-    wait_until parent_ready || stop "Kustomization $FLUX_NS/$PARENT is not Ready after its resume (${TIMEOUT}s)" \
+    REQUESTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    f annotate kustomization "$PARENT" --overwrite "reconcile.fluxcd.io/requestedAt=$REQUESTED" >/dev/null
+    wait_until parent_reconciled || stop "Kustomization $FLUX_NS/$PARENT reads '${PARENT_STATE:-?}' (suspend|lastHandledReconcileAt|Ready), not a fresh reconcile of $REQUESTED, after ${TIMEOUT}s" \
       "The release has landed; the remaining parents stay suspended. Investigate $PARENT."
-    echo "Kustomization $FLUX_NS/$PARENT resumed and Ready"
+    echo "Kustomization $FLUX_NS/$PARENT resumed, reconciled ($REQUESTED) and Ready"
   done
 fi
 printf '\nRESUMED: platform %s applied by the Kustomization and the HelmRelease\n' "$SHA"

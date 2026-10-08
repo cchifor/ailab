@@ -128,9 +128,20 @@ def fake_kubectl(argv):
             assert '"suspend":false' in args[-1]
             st.setdefault("parents", {})[name] = False
             return _out("kustomization.kustomize.toolkit.fluxcd.io/%s patched\n" % name)
+        if args[0] == "annotate" and kind == "kustomization" and name in PARENTS:
+            value = [a for a in args if a.startswith("reconcile.fluxcd.io/requestedAt=")][0].split("=", 1)[1]
+            st.setdefault("parent_requested", {})[name] = value
+            return _out("kustomization.kustomize.toolkit.fluxcd.io/%s annotated\n" % name)
         if args[0] == "get" and kind == "kustomization" and name in PARENTS:
+            if name in st.get("parent_get_fails", []):
+                sys.stderr.write("error: the server is currently unable to handle the request\n")
+                return 1
             suspended = st.get("parents", {}).get(name, False)
-            return _out("%s|True" % ("true" if suspended else "false"))
+            handled = st.setdefault("parent_handled", {}).get(name, "stale")
+            if not suspended and name not in st.get("parent_never_reconciles", []):
+                handled = st.get("parent_requested", {}).get(name, handled)
+                st["parent_handled"][name] = handled
+            return _out("%s|%s|True" % ("true" if suspended else "false", handled))
         if args[0] == "patch" and kind == "kustomization":
             assert '"suspend":false' in args[-1]
             st["ks_suspended"] = False
@@ -157,6 +168,9 @@ def fake_kubectl(argv):
                         st["harness"] = False
             return _out("%s|%s|True" % ("true" if st["hr_suspended"] else "", st["chart"]))
         if args[0] == "get" and kind == "deployment":
+            if any(a.startswith("jsonpath=") and "availableReplicas" in a for a in args):
+                n = st.get("harness_replicas", 1) if st["harness"] else 0
+                return _out("%d|%s" % (n, n if n else ""))
             return _out("deployment.apps/harness\n" if st["harness"] else "")
         if args[0] == "scale":
             st["replicas"] = int(args[-1].split("=")[1])
@@ -422,6 +436,34 @@ class FluxResume(unittest.TestCase):
         self.assertIn("deployment/harness", text)
         rc, _ = self.run_script("--after-config", "--after-drill")
         self.assertEqual(rc, 2)
+
+    def test_a_parent_whose_stale_ready_is_not_a_fresh_reconcile_stops(self):
+        # Review of #1159 (reviewer-codex): Ready=True right after the unsuspend can be the condition
+        # from before the freeze. The gate requires lastHandledReconcileAt == the requestedAt it set.
+        self.state(parents={"platform": True, "flux-system": True}, parent_never_reconciles=["platform"])
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("STOP", text)
+        self.assertIn("Kustomization flux-system/platform", text)
+        self.assertNotIn(("patch", "kustomization/flux-system"), self.verbs())
+        self.assertTrue(self.final()["parents"]["flux-system"])
+
+    def test_an_unreadable_parent_at_step_0_changes_nothing(self):
+        # Review of #1159 (reviewer-claude): a failed read is not "not suspended".
+        self.state(parents={"platform": True, "flux-system": True}, parent_get_fails=["platform"])
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("cannot read Kustomization flux-system/platform", text)
+        self.assertFalse(WRITES & {v for v, _ in self.verbs()})
+
+    def test_after_config_refuses_a_harness_scaled_to_zero(self):
+        # Review of #1159 (reviewer-claude): `rollout status` succeeds at 0 replicas; the mode proves the
+        # assistant stayed up, so at least one available replica is required.
+        self.state(harness_replicas=0)
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("STOP", text)
+        self.assertIn("no available replica", text)
 
 
 if __name__ == "__main__":
