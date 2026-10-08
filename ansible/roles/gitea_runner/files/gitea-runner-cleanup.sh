@@ -76,8 +76,9 @@ ACTCACHE_DIR="${GITEA_CLEANUP_ACTCACHE_DIR:-/home/runner/act-runner/.cache/actca
 ACTCACHE_MAX_MB="${GITEA_CLEANUP_ACTCACHE_MAX_MB:-1536}"
 WORKDIR_PARENT="${GITEA_RUNNER_WORKDIR_PARENT:-/home/runner/act-runner/work}"
 WS_PRUNE_AGE_H="${GITEA_CLEANUP_WS_PRUNE_AGE_H:-48}" # 0 disables the stale-workspace prune
-# Busy+pressure: how long to wait for the between-jobs gap before giving up (see the busy gate below).
-# MUST stay below the unit's TimeoutStartSec minus the worst-case prune time.
+# How long a run may wait (wall clock) for the between-jobs gap before giving up — ONE budget per run,
+# shared by the dangling-record heal and the busy gate (wait_for_gap). MUST stay below the unit's
+# TimeoutStartSec minus the worst-case prune time.
 IDLE_WAIT_SEC="${GITEA_CLEANUP_IDLE_WAIT_SEC:-600}"
 # 1s, not 10s. Measured 2026-08-08 over 6h of real CI: ~96% of the gaps between consecutive
 # jobs on a runner are <=10s (ci-runner-4: 272 of 283), so a 10s poll missed almost every one
@@ -368,14 +369,21 @@ find_dangling() {
   return "$any"
 }
 
-# Wait up to IDLE_WAIT_SEC (wall clock) for a CONFIRMED job gap.
+# Wait for a CONFIRMED job gap, within ONE wall-clock budget of IDLE_WAIT_SEC per run. The deadline is
+# set by the first call and shared by every later one (the heal in section 0, then the busy gate), so
+# a tick that already spent the budget waiting for a gap that never came does not wait a second time:
+# the unit's TimeoutStartSec is sized for one IDLE_WAIT_SEC, not two. The deadline is checked BEFORE
+# each read, so no read starts after it; a read already under way can still run past it by its own
+# confirm polls ((IDLE_CONFIRM_POLLS-1) x IDLE_POLL_SEC). A call with the budget spent — or with
+# IDLE_WAIT_SEC=0 — reads nothing and returns "no gap".
+gap_deadline=""
 wait_for_gap() {
-  local deadline=$(( $(date +%s) + IDLE_WAIT_SEC ))
-  while :; do
+  [ -n "$gap_deadline" ] || gap_deadline=$(( $(date +%s) + IDLE_WAIT_SEC ))
+  while [ "$(date +%s)" -lt "$gap_deadline" ]; do
     idle_confirmed && return 0
-    [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep "$IDLE_POLL_SEC"
   done
+  return 1
 }
 
 # Trap-safe: queue the start and return; the marker covers a start that never completes.
@@ -594,22 +602,22 @@ if [ "$busy" -eq 1 ]; then
   # Under pressure AND busy: wait for the between-jobs gap instead of racing the daemon. The unit's
   # TimeoutStartSec must exceed IDLE_WAIT_SEC + the prune itself; the timer is OnUnitInactiveSec (from
   # FINISH), so waiting here just spaces the next tick — it can never overlap this run.
-  waited=0
-  while [ "$waited" -lt "$IDLE_WAIT_SEC" ]; do
-    sleep "$IDLE_POLL_SEC"
-    waited=$(( waited + IDLE_POLL_SEC ))
-    # idle_confirmed() consumes IDLE_CONFIRM_POLLS-1 extra sleeps when it starts idle; count them so
-    # a long confirm cannot overrun IDLE_WAIT_SEC (and thus the unit's TimeoutStartSec).
-    if idle_confirmed; then busy=0; break; fi
-    waited=$(( waited + (IDLE_CONFIRM_POLLS - 1) * IDLE_POLL_SEC ))
-  done
+  # wait_for_gap holds the per-run budget on the wall clock. The loop it replaced counted
+  # IDLE_CONFIRM_POLLS-1 confirm sleeps on EVERY busy iteration, although a busy read returns at once
+  # and sleeps nothing, so the default 600s budget ran out after about 200s of real waiting (codex,
+  # reviewing #1142). This wait is now the full 600s it was sized as — unless the heal in section 0
+  # already spent the budget this run, in which case it reads nothing and defers (or, at critical,
+  # prunes through), exactly as a busy gate with no gap in its budget always has.
+  gap_t0=$(date +%s)
+  if wait_for_gap; then busy=0; fi
+  waited=$(( $(date +%s) - gap_t0 ))
   if [ "$busy" -eq 0 ]; then
     log "pressure sweep waited ${waited}s for the job gap -> sweeping race-free (disk ${before}%)"
   else
     pct_now="$(disk_pct)"; is_num "$pct_now" || pct_now="$before"
     if [ "$pct_now" -ge "$CRITICAL_PCT" ]; then
       midjob=1
-      log "CRITICAL disk ${pct_now}% and no job gap in ${IDLE_WAIT_SEC}s -> pruning THROUGH a live job (ENOSPC would red every job)"
+      log "CRITICAL disk ${pct_now}% and no job gap in ${waited}s -> pruning THROUGH a live job (ENOSPC would red every job)"
     else
       # THIS `exit 0` SKIPS THE WHOLE SWEEP, including the docker-free stale-workspace prune (section
       # 5) and the age-gated container reap (section 2), both of which are safe under load. That is a
@@ -644,7 +652,7 @@ if [ "$busy" -eq 1 ]; then
       # as starvation and page. (The old single log line asserted "disk X% >= PRESSURE_PCT%" on this
       # path unconditionally, which was simply false whenever the pressure had cleared.)
       if [ "$pct_now" -ge "$PRESSURE_PCT" ]; then
-        log "defer: disk ${pct_now}% >= ${PRESSURE_PCT}% but < ${CRITICAL_PCT}% and busy for ${IDLE_WAIT_SEC}s -> skip; next tick retries"
+        log "defer: disk ${pct_now}% >= ${PRESSURE_PCT}% but < ${CRITICAL_PCT}% and busy for the whole ${waited}s gap wait -> skip; next tick retries"
         write_beacon "busy_skip 1" "pressure_defer 1" "midjob_prune 0" "last_run_seconds $(date +%s)" \
           "disk_used_percent ${pct_now}"
       else

@@ -187,7 +187,9 @@ gitea_runner_cleanup_critical_until: 4h
 gitea_runner_cleanup_min_until_sec: 14400 # 4h
 # Busy + pressure: how long to wait for the job gap before deferring (or, at critical, pruning anyway).
 # Jobs average ~1.5min with frequent gaps (~74 idle sweeps/day/runner observed), so 10min nearly always
-# finds one. MUST stay below the unit's TimeoutStartSec minus worst-case prune time.
+# finds one. Wall clock, ONE budget per run, shared with the dangling-record heal. (Until 2026-10-08 the
+# busy-gate loop over-counted its confirm sleeps and really waited only ~200s of the 600.) MUST stay
+# below the unit's TimeoutStartSec minus worst-case prune time.
 gitea_runner_cleanup_idle_wait_sec: 600
 gitea_runner_cleanup_idle_poll_sec: 1 # was 10; ~96% of real inter-job gaps are <=10s, so a 10s
 #   poll missed nearly all of them and pressure sweeps deferred indefinitely while disk climbed.
