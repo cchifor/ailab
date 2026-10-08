@@ -15,28 +15,19 @@ metadata:
     namespace: agentforge
 type: Opaque
 stringData:
-    AFP_INFRA_BOT_TOKEN: ENC[AES256_GCM,data:jsuL26Go6qotV6RFFEMA65Zsd46a3C19+zjQAiMNjhP6IDOA7jbZ1w==,iv:ty1PTpftWK25tNOrVK1K8tJAACZvUMkh9XYeMRWgZgg=,tag:NTyvblB4CuwvlGiT8g+IVQ==,type:str]
+    AFP_INFRA_BOT_TOKEN: ENC[AES256_GCM,data:c6gzRM2qmtsAchwvMnOUSHYZx3aH0WJ/LSj3GMOTtMomDOIqTWV9Wg==,iv:ty1PTpftWK25tNOrVK1K8tJAACZvUMkh9XYeMRWgZgg=,tag:AhGYaktDdLUpNFubpm0KJw==,type:str]
 sops:
     age:
         - enc: |
             -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA3ZVJDUXBsOUJ5Tm1FN1dr
-            WFZwZHo4ZWlRZFhDWVVrSlBkeXZlRUh0bVVvClozc244UGxuYzB4REhxWmRlcE8w
-            em9lSncycDNYR0lVMVE1VXc0ZHRlek0KLS0tIDFaY0lUMWphSXpUV0FsKytuY0Vy
-            UExBMXMvRWZUSUZmaTlHc0RHbUxtTFEKQAAW3yfH66QNCGsN+qp36JyIFA4CI2Fx
-            6DUAsH1JSsY81+CL/NxDmtNNFxlqTwFIn/11+UFs9PSWUTZZWd9fhQ==
-            -----END AGE ENCRYPTED FILE-----
-          recipient: age1nfa6hhdz9egnje3nwa2k0gpk5nr29nyvu74eprk20m7ql4fhw4esrlmt5g
-        - enc: |
-            -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSArUWNSM25kQ3QrU09HTlBp
-            Sy9McWhXNmluNkNzZVVPaWpSMGY4c3dkSW1NClgzZjVhejRYM3hWNzJ3ZFZ5WHlU
-            cm9UaUNJaDVOZ0ptUExBMmdIaUN1SXMKLS0tIFgzVEZvcjNtSDd6T0IzUXVzaHpP
-            cEVzK3E3TkRXTCtXVVlHWFZBYUlGV1EKj/SiAMUvdqihF+J5wqMJ87eIC00KJsnl
-            vaxytLZn4irWbYbdRLrFq3+gfvKo9/qBhDqcDC/fmt7FA7h30GuJvA==
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBEQldTMkR6dFNTZWtOMC96
+            QXRsdUpKRExsMlVnd1d3dzR4MTZhSlcyMjI4Cm43dlVNd0ZNZ2pEdENza3BydWhm
+            TURxYkFrS0pnbm5NaHpPUC91TzFYSnMKLS0tIG5ObmtLOVNVN2Y0YnBlVktOL3M0
+            c0pWV1d3dnJISTdtanlWSGorWDRtbDAKwUoFpJqluRuK2JUN6iS4I/2bHMlU4OXD
+            CSnJhpm2Xf4K87OrewoNbnnlKXyxG4iTN569pCAB8EnIN/cNCEFyXA==
             -----END AGE ENCRYPTED FILE-----
           recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
     encrypted_regex: ^(data|stringData)$
-    lastmodified: "2026-07-24T06:40:43Z"
-    mac: ENC[AES256_GCM,data:D/THd2d0E069UmI53YGiKtxcU+Qpo1p9qU1PZm2LwHXRAxoWZkDsX9S0hXvPm2fw5qdtllhpHKuCU/CgY2UeBV7qibks0f2Rf9sLYhEMNWbwpVX8TkVPEVcKoT5C1qLkM1hlVVNlotzF7QHHUzC4YoMCSfVfithJwWehmDZS6kQ=,iv:NCX6okAJfPoCyhfo+dWLXpB+gv9YWZFPrtL7gmbtbbI=,tag:4S8MSam4XUMoJ6LMfmJyuA==,type:str]
+    lastmodified: "2026-10-08T21:33:22Z"
+    mac: ENC[AES256_GCM,data:BJuUL2FvfyxrQZb3kJTN26vyhcXz8qG+/HcEFOlAIPNriOOtyLvW9pL3k+15iQqOPStmEpVEO/gCf/IMh3haHiayz+LgCk6WTdB162nxukJ54uVPoKk9AqmzEK+0ePhwemaKALs469xMqrR21Us7oV7uuzQpwXlJ6pZ9a+BcRnc=,iv:YzhFNRwAZf2D0q8NCqFqnS5STEWAFKmd8HAsA+4/ldA=,tag:oSIUKxho01g1N684HSmxJg==,type:str]
     version: 3.9.4
