@@ -278,7 +278,8 @@ if [[ $MODE == revert ]]; then
   echo "deployment/$HARNESS is gone"
 elif [[ $MODE == config ]]; then
   step "4. A config-only change keeps the harness: deployment/$HARNESS must be up"
-  h rollout status "deployment/$HARNESS" --timeout="${TIMEOUT}s" >/dev/null 2>&1 || true
+  h rollout status "deployment/$HARNESS" --timeout="${TIMEOUT}s" >/dev/null || stop "deployment/$HARNESS did not finish rolling out after the upgrade to $SHA" \
+    "The parents stay suspended. Investigate the harness rollout."
   harness_up || stop "deployment/$HARNESS $HARNESS_WHY after the upgrade to $SHA" \
     "A config-only rollback or re-forward keeps the harness up (harness.enabled: true). Investigate before resuming the parents; they stay suspended."
   echo "deployment/$HARNESS is up"

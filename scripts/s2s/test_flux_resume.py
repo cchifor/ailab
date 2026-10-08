@@ -176,6 +176,9 @@ def fake_kubectl(argv):
             st["replicas"] = int(args[-1].split("=")[1])
             return _out("deployment.apps/harness scaled\n")
         if args[0] == "rollout":
+            if st.get("harness_rollout_fails"):
+                sys.stderr.write('error: deployment "harness" exceeded its progress deadline\n')
+                return 1
             return _out('deployment "harness" successfully rolled out\n')
         sys.stderr.write("fake kubectl: unexpected %r\n" % (argv,))
         return 99
@@ -464,6 +467,15 @@ class FluxResume(unittest.TestCase):
         self.assertEqual(rc, 1, text)
         self.assertIn("STOP", text)
         self.assertIn("no available replica", text)
+
+    def test_after_config_stops_on_a_failed_harness_rollout(self):
+        # Review of #1159 (reviewer-codex): old replicas can stay available while the new rollout fails;
+        # a failed `rollout status` must stop the run before the parents are resumed.
+        self.state(parents={"platform": True, "flux-system": True}, harness_rollout_fails=True)
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("did not finish rolling out", text)
+        self.assertNotIn(("patch", "kustomization/platform"), self.verbs())
 
 
 if __name__ == "__main__":
