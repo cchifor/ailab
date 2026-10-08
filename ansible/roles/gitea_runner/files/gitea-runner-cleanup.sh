@@ -21,11 +21,17 @@
 #     The prune's containerd GC pass can reap an in-flight pull's lease regardless of the filter, so
 #     concurrency is governed by the busy gate below, never by the window. (2026-08-08 RCA.)
 #   * NO `docker volume prune` (a job's data volumes are irreplaceable — reclaimed only via image/cache).
-# ONE OPERATION IS DELIBERATELY NOT SAFE-BY-CONSTRUCTION: the build-cache SIZE cap in section 3b runs
-# `builder prune -af`, which has NO retention window and removes every unused cache record. Nothing
-# about the window argument above covers it. Its safety rests entirely on (a) never running from the
-# mid-job critical path, (b) a fresh busy re-read immediately before each destructive call, and (c) a
-# disk gate — a narrower guarantee than the rest of this script, spelled out at section 3b.
+# THREE OPERATIONS ARE DELIBERATELY NOT SAFE-BY-CONSTRUCTION, and nothing about the window argument
+# above covers any of them:
+#   * the build-cache SIZE cap in section 3b runs `builder prune -af`, which has NO retention window and
+#     removes every unused cache record;
+#   * the disk-gated full image prune in section 3c runs `image prune -af`, likewise unwindowed;
+#   * the dangling-record heal in section 0 runs both AND restarts dockerd.
+# 3b and 3c rest on (a) never running from the mid-job critical path, (b) a fresh busy re-read
+# immediately before each destructive call, and (c) a disk gate — a narrower guarantee than the rest of
+# this script, spelled out at section 3b. Section 0 takes a confirmed job gap, then STOPS the runner and
+# checks it is stopped before it touches anything, so no job of ours can start during it; see the notes
+# there.
 # The idle check below is therefore only a cheap "skip the work while obviously busy" optimization, not
 # the safety mechanism. Best-effort; ALWAYS exits 0.
 set -uo pipefail
@@ -98,10 +104,22 @@ CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-20000000000}"
 # CI pulls and builds faster than any age rule. So an unwindowed prune has to exist somewhere; keeping
 # it idle-only and above this threshold is what makes it affordable.
 FULL_PRUNE_PCT="${GITEA_CLEANUP_FULL_PRUNE_PCT:-88}"
+# Dangling BuildKit record heal (section 0). 1 enables it.
+HEAL_DANGLING="${GITEA_CLEANUP_HEAL_DANGLING:-1}"
+# How far back the docker journal is searched for the failure signature. A record stays dangling until
+# healed, but it is only FOUND through its errors: one whose last failed build is older than this (or
+# rotated out of the journal) stays latent until a build fails on it again. ci-runner-9's record from
+# 2026-10-04 was still live on 10-08 with no error since 10-05.
+HEAL_LOOKBACK_SEC="${GITEA_CLEANUP_HEAL_LOOKBACK_SEC:-604800}"
+# At most one heal attempt per window, whatever the record. A record that is still listed after a full
+# heal is not retried at all: it stays on the alert for a human.
+HEAL_COOLDOWN_SEC="${GITEA_CLEANUP_HEAL_COOLDOWN_SEC:-21600}"
+HEAL_STATE="${GITEA_CLEANUP_HEAL_STATE:-/var/lib/gitea-runner-cleanup/buildkit-heal.state}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
-command -v docker >/dev/null 2>&1 || exit 0
+# (No docker CLI -> exit 0 happens at the start of section 0, AFTER the runner recovery, which needs
+# only systemctl: a heal that left the runner stopped must still be recovered without docker.)
 log() { logger -t gitea-runner-cleanup -- "$*" 2>/dev/null || true; }
 disk_pct() { df --output=pcent "$DISK_PATH" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 is_num() { case "${1:-}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
@@ -225,6 +243,307 @@ prune_extra_builders() {
     timeout 300 docker buildx prune -f --filter "until=$win" --builder "$b" >/dev/null 2>&1 || true
   done
 }
+
+# ---- 0. dangling BuildKit record heal --------------------------------------------------------------
+# The failure: a build that loses its client while BuildKit commits a layer (a cancelled run, or a
+# client session whose healthcheck dies — ci-runner-1, 2026-10-07 21:29:55) leaves an immutable cache
+# record Y whose content lives only in a mutable ref X, and X's snapshot is gone. Every later build
+# that reuses Y tries to finalize it and fails, whatever the PR:
+#   failed to commit <X> to <Y> during finalize: failed to stat active key during commit:
+#   snapshot <X> does not exist: not found
+# It does not clear on its own. Seen on ci-runner-3 (09-28), ci-runner-9 (10-04: 33 failed builds in
+# 14h, then latent once the failing key stopped being reused; on 10-08 Y was still listed, `COPY src/
+# src/`, usage count 34) and ci-runner-1 (10-07).
+#
+# The sweep below does not remove it, and on ci-runner-1 `builder prune -af` alone reclaimed 0 B. The
+# working explanation, not proven, is that the image store pins the record and dockerd's BuildKit keeps
+# it active until dockerd restarts. What IS established is the repair that worked by hand on
+# ci-runner-3 and ci-runner-1: image prune -af, restart dockerd, builder prune -af. It costs the runner
+# its warm images and cache, and the next jobs re-pull from the registry mirror.
+#
+# DETECTION takes two independent reads. The docker journal names (X, Y) pairs; BuildKit itself, via
+# `docker builder du --verbose`, must still list Y as a live record. That answer comes from the active
+# store's own index, so a pair that was already healed is ignored however long its lines stay in the
+# journal, and neither freed database pages nor a previous snapshotter's files can count as evidence.
+# Every read that FAILS is unknown, never "clean": no heal, and the beacon keeps its last known value.
+#
+# SAFETY, in order: no earlier heal's recovery pending; a confirmed job gap; the attempt and the
+# "runner held" marker persisted (else no heal); the runner stopped AND seen stopped (else nothing
+# destructive runs); the co-located peer re-read idle before each destructive step. The runner
+# is started again from an EXIT/TERM trap, and because SIGKILL skips every trap, the persisted marker
+# makes every later invocation (each tick, and this unit's ExecStopPost via --recover-runner) start it
+# until it is seen active.
+
+HEAL_BEACON_FILE="$TEXTFILE_DIR/gitea_runner_buildkit_heal.prom"
+
+# State: key=value lines, values [a-z0-9]. Parsed, never sourced: this root script both writes and reads it.
+state_get() { sed -n "s/^$1=\([a-z0-9]*\)$/\1/p" "$HEAL_STATE" 2>/dev/null | tail -1; }
+# state_set <key> <value> [<key> <value>...]: one atomic rewrite that keeps every other key. Returns
+# non-zero when it could not persist; the heal treats that as "do not proceed".
+state_set() {
+  local tmp re="" n rc
+  mkdir -p "$(dirname "$HEAL_STATE")" 2>/dev/null || return 1
+  # An existing file we cannot read would be rewritten without its other keys (runner_held among them).
+  if [ -e "$HEAL_STATE" ] && [ ! -r "$HEAL_STATE" ]; then return 1; fi
+  tmp="$(mktemp "$HEAL_STATE.XXXX" 2>/dev/null)" || return 1
+  for (( n = 1; n < $#; n += 2 )); do re="$re|${!n}"; done
+  # Every write is checked: the file is only renamed into place once it was built completely.
+  if [ -e "$HEAL_STATE" ]; then
+    grep -vE "^(${re#|})=" "$HEAL_STATE" > "$tmp"; rc=$?
+    [ "$rc" -le 1 ] || { rm -f "$tmp"; return 1; } # 1 = no other keys, which is fine; 2 = an error
+  fi
+  while [ $# -ge 2 ]; do
+    printf '%s=%s\n' "$1" "$2" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    shift 2
+  done
+  mv -f "$tmp" "$HEAL_STATE" || { rm -f "$tmp"; return 1; }
+}
+
+# Its own file, so the cleanup beacon's field set (which CIRunnerCleanupBeaconFieldMissing checks) is
+# unchanged. runner_held 1 = a heal stopped the runner and has not seen it active since.
+write_heal_beacon() { # <dangling_record 0|1>
+  [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
+  local tmp held lh ht
+  held="$(state_get runner_held)"; is_num "$held" || held=0
+  lh="$(state_get last_heal)"; is_num "$lh" || lh=0
+  ht="$(state_get heals_total)"; is_num "$ht" || ht=0
+  tmp="$(mktemp "$HEAL_BEACON_FILE.XXXX" 2>/dev/null)" || return 0
+  printf 'gitea_runner_buildkit_%s %s\n' dangling_record "$1" runner_held "$held" \
+    heal_last_seconds "$lh" heals_total "$ht" > "$tmp"
+  chmod 0644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$HEAL_BEACON_FILE" 2>/dev/null || rm -f "$tmp"
+}
+
+# A heal stopped the runner and has not seen it active since -> start it. Idempotent; runs at the top
+# of every invocation and as this unit's ExecStopPost (--recover-runner), so even a heal killed outright
+# gets the runner back within a tick.
+recover_runner() {
+  [ "$(state_get runner_held)" = 1 ] || return 0
+  local st
+  st="$(systemctl is-active "$SERVICE" 2>/dev/null)"
+  case "$st" in
+    active) state_set runner_held 0 || log "heal: $SERVICE is back but $HEAL_STATE could not be updated" ;;
+    activating | reloading) : ;; # a start is already in flight
+    *)
+      log "heal: $SERVICE is '${st:-unreadable}' after a heal stopped it -> starting it again"
+      systemctl start --no-block "$SERVICE" >/dev/null 2>&1 || log "heal: FAILED to queue a start of $SERVICE"
+      ;;
+  esac
+}
+
+# BuildKit's live record list, printed; non-zero when it cannot be read.
+buildkit_records() { timeout -k 10 120 docker builder du --verbose 2>/dev/null; }
+
+# Is Y (arg 1) a record in the listing (arg 2)? 0 = listed, 1 = not listed, 2 = matcher error.
+record_in() {
+  local rc
+  # A here-string, not `printf | grep -q`: under pipefail an early-exiting grep -q can SIGPIPE the
+  # writer on a large listing, and that 141 would read as "not listed".
+  grep -qE "^ID:[[:space:]]+$1[[:space:]]*$" <<< "$2"; rc=$?
+  case "$rc" in 0 | 1) return "$rc" ;; *) return 2 ;; esac
+}
+
+# Print "Y X" for the first journal pair whose Y BuildKit still lists. 0 = found, 1 = none, 2 = a read
+# failed. Every pair in the window is checked against ONE listing, so healed pairs cannot crowd out a
+# live one and a long journal does not mean a long run.
+find_dangling() {
+  local since journal pairs live y x rc
+  since=$(( $(date +%s) - HEAL_LOOKBACK_SEC ))
+  journal="$(timeout -k 10 60 journalctl -u docker.service --since "@$since" --no-pager -o cat 2>/dev/null)" || return 2
+  # \1: the snapshot reported missing must be the X being committed — anything else is another failure.
+  pairs="$(printf '%s\n' "$journal" \
+    | sed -n 's/.*failed to commit \([a-z0-9][a-z0-9]*\) to \([a-z0-9][a-z0-9]*\) during finalize: .*snapshot \1 does not exist: not found.*/\2 \1/p' \
+    | sort -u)" || return 2 # a failed parse is unknown, not "none" (pipefail carries the status)
+  [ -n "$pairs" ] || return 1
+  live="$(buildkit_records)" || return 2
+  while read -r y x; do
+    record_in "$y" "$live"; rc=$?
+    case "$rc" in
+      0) printf '%s %s\n' "$y" "$x"; return 0 ;;
+      1) : ;;
+      *) return 2 ;;
+    esac
+  done <<< "$pairs"
+  return 1
+}
+
+# Wait up to IDLE_WAIT_SEC (wall clock) for a CONFIRMED job gap.
+wait_for_gap() {
+  local deadline=$(( $(date +%s) + IDLE_WAIT_SEC ))
+  while :; do
+    idle_confirmed && return 0
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep "$IDLE_POLL_SEC"
+  done
+}
+
+# Trap-safe: queue the start and return; the marker covers a start that never completes.
+heal_owned=0
+heal_start_runner() {
+  [ "$heal_owned" -eq 1 ] || return 0
+  heal_owned=0
+  systemctl start --no-block "$SERVICE" >/dev/null 2>&1 || log "heal: FAILED to queue a start of $SERVICE (runner_held stays set; the next tick retries)"
+}
+
+# Every non-trap exit of a heal: queue the start, give it a bounded chance to be seen, and release
+# runner_held as soon as it is (recover_runner). Whatever is still pending, the next tick covers.
+heal_release_runner() {
+  local i=0
+  heal_start_runner
+  trap - EXIT TERM INT
+  [ "$(state_get runner_held)" = 1 ] || return 0
+  while [ "$i" -lt 120 ]; do
+    case "$(systemctl is-active "$SERVICE" 2>/dev/null)" in active | failed) break ;; esac
+    sleep 1; i=$(( i + 1 ))
+  done
+  recover_runner
+}
+
+# heal_dangling_record <Y> <X>, after wait_for_gap. 0 = Y is gone afterwards; 1 = Y is still listed
+# after the full heal, or the heal stopped part-way; 2 = could not finish or verify (the docker restart
+# failed, or the listing is unreadable) — retried after the cooldown; 3 = did not start (an earlier
+# recovery pending, runner in transition, the attempt not persistable), or stopped before anything
+# destructive with the cooldown given back.
+heal_dangling_record() {
+  local y="$1" x="$2" st live prev_last prev_total
+  # An earlier heal's recovery is still pending (recover_runner ran at the top of this tick and has not
+  # seen the runner active). This heal would see that runner stopped, take it for an operator's, and
+  # overwrite the marker that keeps it being restarted. The marker wins; the alert covers the wait.
+  if [ "$(state_get runner_held)" = 1 ]; then
+    log "heal: an earlier heal's runner recovery is still pending -> not healing this tick"
+    return 3
+  fi
+  st="$(systemctl is-active "$SERVICE" 2>/dev/null)"
+  case "$st" in
+    active) heal_owned=1 ;;
+    inactive | failed) heal_owned=0 ;; # stopped by someone else: heal, and leave it stopped
+    *) log "heal: $SERVICE is '${st:-unreadable}' -> not healing this tick"; return 3 ;;
+  esac
+  # Persist the attempt BEFORE anything changes: the cooldown has to hold on exactly the paths where
+  # this run never reaches its end (SIGTERM at TimeoutStartSec, SIGKILL), and runner_held is what lets
+  # a later invocation recover a runner this one stopped.
+  prev_last="$last_heal"; prev_total="$heals_total"
+  if ! state_set last_heal "$(date +%s)" heals_total "$(( heals_total + 1 ))" runner_held "$heal_owned"; then
+    heal_owned=0
+    log "heal: cannot persist the attempt to $HEAL_STATE -> not healing (no cooldown and no runner recovery without it)"
+    return 3
+  fi
+  heals_total=$(( heals_total + 1 ))
+  trap heal_start_runner EXIT
+  trap 'exit 143' TERM INT
+  if [ "$heal_owned" -eq 1 ]; then
+    # Stop OUR runner so it takes no job while dockerd restarts. KillMode=mixed + shutdown_timeout make
+    # the stop drain: a job that slipped in after the idle read finishes (up to 10min, TimeoutStopSec
+    # 11min) before act_runner exits; only a longer one is cancelled. 700s covers that.
+    # The co-located GitHub agent is NOT stopped: it is dormant, and stopping and re-starting its
+    # registration wrapper would change a unit this script does not own. It is re-checked right before
+    # each destructive step below instead; a peer job that starts INSIDE a step is the residual risk,
+    # the same class as 3b's.
+    timeout -k 10 700 systemctl stop "$SERVICE" >/dev/null 2>&1
+    st="$(systemctl is-active "$SERVICE" 2>/dev/null)"
+    case "$st" in
+      inactive | failed) : ;;
+      *)
+        # The cooldown is KEPT here: a runner that does not stop would otherwise be drained (taken out
+        # of the pool for up to 10 minutes) on every tick.
+        log "heal: $SERVICE is '${st:-unreadable}' after the stop -> NOT touching docker"
+        heal_release_runner
+        return 1 ;;
+    esac
+  fi
+  # The gap was confirmed before a stop that can drain for 10 minutes, so it is re-read before each
+  # destructive step. Our runner is stopped by now (its MainPID reads 0, which any_job_running takes as
+  # "no job of ours"), so these reads see the co-located peer only.
+  if ! idle_confirmed; then
+    # Nothing destructive has run, so the cooldown is given back: the next gap retries.
+    log "heal: the co-located runner started a job during the stop -> NOT touching docker"
+    state_set last_heal "$prev_last" heals_total "$prev_total" || true
+    heals_total="$prev_total"
+    heal_release_runner
+    return 3
+  fi
+  # The order is the one that worked by hand: image prune, then the restart, then the builder prune.
+  log "heal: dangling BuildKit record $y (snapshot $x missing): image prune -af, restart docker, builder prune -af"
+  timeout -k 30 600 docker image prune -af >/dev/null 2>&1 || log "heal: image prune did not finish cleanly"
+  if ! idle_confirmed; then
+    log "heal: the co-located runner started a job during the image prune -> NOT restarting docker"
+    heal_release_runner
+    return 1
+  fi
+  # A failed restart means the step believed to release the record never happened: no builder prune,
+  # and NOT failed_record (that is for a record that survives the whole heal) — the cooldown retries it.
+  if ! timeout -k 30 300 systemctl restart docker.service >/dev/null 2>&1; then
+    log "heal: restarting docker.service FAILED -> skipping the builder prune; retried after the cooldown"
+    heal_release_runner
+    return 2
+  fi
+  if ! idle_confirmed; then
+    log "heal: the co-located runner started a job during the docker restart -> NOT running the builder prune"
+    heal_release_runner
+    return 1
+  fi
+  timeout -k 30 600 docker builder prune -af >/dev/null 2>&1 || log "heal: builder prune did not finish cleanly"
+  heal_release_runner
+  live="$(buildkit_records)" || { log "heal: cannot list BuildKit records to verify the heal"; return 2; }
+  record_in "$y" "$live"
+  case $? in
+    1) return 0 ;;
+    0)
+      state_set failed_record "$y" || true
+      log "heal: record $y is STILL listed after the heal -> it will not be retried automatically"
+      return 1 ;;
+    *) log "heal: cannot match BuildKit records to verify the heal"; return 2 ;;
+  esac
+}
+
+if [ "${1:-}" = --recover-runner ]; then
+  recover_runner
+  exit 0
+fi
+
+recover_runner
+command -v docker >/dev/null 2>&1 || exit 0
+if [ "$HEAL_DANGLING" != 1 ]; then
+  # A disabled heal must not leave its last value on node_exporter (a stale 1 would keep alerting).
+  rm -f "$HEAL_BEACON_FILE" 2>/dev/null || true
+else
+  heals_total="$(state_get heals_total)"; is_num "$heals_total" || heals_total=0
+  last_heal="$(state_get last_heal)"; is_num "$last_heal" || last_heal=0
+  healed=0
+  found="$(find_dangling)"
+  case $? in
+    1) dflag=0 ;;
+    0)
+      y="${found%% *}"; x="${found#* }"; dflag=1
+      if [ "$y" = "$(state_get failed_record)" ]; then
+        log "dangling BuildKit record $y (snapshot $x): an earlier heal left it in place -> alerting, not retrying"
+      elif [ $(( $(date +%s) - last_heal )) -lt "$HEAL_COOLDOWN_SEC" ]; then
+        log "dangling BuildKit record $y (snapshot $x): heal cooldown since @${last_heal} -> not healing again yet"
+      elif ! wait_for_gap; then
+        log "dangling BuildKit record $y (snapshot $x): no job gap in ${IDLE_WAIT_SEC}s -> next tick retries"
+      else
+        pct_h="$(disk_pct)"
+        heal_dangling_record "$y" "$x"
+        case $? in
+          0) dflag=0; healed=1; log "heal: record $y gone, disk ${pct_h}% -> $(disk_pct)%" ;;
+          1 | 2) healed=1 ;;
+          *) : ;; # did not start; the sweep below runs as usual
+        esac
+      fi ;;
+    *)
+      dflag="$(state_get dangling)"; is_num "$dflag" || dflag=0
+      log "heal: the docker journal or BuildKit's record list could not be read -> state unknown, keeping dangling_record=${dflag}" ;;
+  esac
+  state_set dangling "$dflag" || true
+  write_heal_beacon "$dflag"
+  if [ "$healed" -eq 1 ]; then
+    # The heal ran both unwindowed prunes (or stopped half-way); the rest of the sweep waits for the
+    # next tick. Same field set as the busy gate's early exits.
+    write_beacon "busy_skip 0" "pressure_defer 0" "midjob_prune 0" "last_run_seconds $(date +%s)" \
+      "disk_used_percent $(disk_pct)"
+    exit 0
+  fi
+fi
 
 before="$(disk_pct)"; is_num "$before" || before=0
 busy=0; any_job_running && busy=1 || true # `|| true`: keep the compound exit 0 (robust if `set -e` is ever added)

@@ -16,6 +16,10 @@ ExecStart={{ gitea_runner_cleanup_bin }}
 # trip the unit timeout mid-sweep. 3600 leaves headroom; the timer is OnUnitInactiveSec (measured from
 # FINISH), so a long sweep only spaces the next tick out — it can never overlap itself.
 TimeoutStartSec=3600
+# The dangling-record heal (section 0 of the script) stops the runner. If this unit is killed before
+# the heal's own trap starts it again (SIGKILL skips traps), this does: --recover-runner is a no-op
+# unless a heal left its "runner held" marker in the state file. `-` so it never fails the unit.
+ExecStopPost=-{{ gitea_runner_cleanup_bin }} --recover-runner
 # Lowest priority: cleanup must never starve a job that arrives; nice + idle I/O.
 Nice=15
 IOSchedulingClass=best-effort

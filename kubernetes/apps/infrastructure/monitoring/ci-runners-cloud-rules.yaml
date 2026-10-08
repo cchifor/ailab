@@ -92,6 +92,26 @@ spec:
               for >1h while the VM is scraped and its host is up — docker/storage reclamation is
               stalled. Check `systemctl status gitea-runner-cleanup.timer` + `journalctl -t
               gitea-runner-cleanup`.
+        # Same rule as CIRunnerBuildkitDanglingRecord for the 24/7 pool. No host gate: the series only
+        # exists while the runner is scraped, and a runner that is off fails no builds.
+        - alert: CloudCIRunnerBuildkitDanglingRecord
+          expr: gitea_runner_buildkit_dangling_record{job="ci-runner-cloud"} == 1
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} has a dangling BuildKit cache record the auto-heal has not cleared"
+            description: >-
+              Builds on {{ $labels.nodename }} that reuse the record fail at finalize, whatever the PR.
+              See CIRunnerBuildkitDanglingRecord and docs/runbooks/ci-runners.md, Troubleshooting.
+        - alert: CloudCIRunnerBuildkitHealRunnerHeld
+          expr: gitea_runner_buildkit_runner_held{job="ci-runner-cloud"} == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} has been out of the pool since a BuildKit heal stopped it"
+            description: >-
+              See CIRunnerBuildkitHealRunnerHeld: the heal stopped gitea-act-runner on
+              {{ $labels.nodename }} and every tick's start has not brought it back.
         # INHIBITION SOURCE ONLY — Alertmanager routes it to "null" and uses it to mute the chart's
         # generic TargetDown for the three cloudlab scrape jobs (cloud-node, ci-runner-cloud, cloud-pve;
         # kube-prometheus-stack.yaml inhibit_rules). The rules in this file are host-gated, but

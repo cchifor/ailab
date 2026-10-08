@@ -243,3 +243,15 @@ gitea_runner_cleanup_peer_services: "actions.runner.cchifor-platform.service"
 # fleet-wide in 90 minutes while disks climbed to 93%). Runner.Worker exists only during a job.
 gitea_runner_cleanup_peer_job_process_re: "Runner\\.Worker"
 gitea_runner_cleanup_beacon: true # node_exporter textfile beacon (gitea_runner_cleanup_*.prom)
+# Dangling BuildKit record heal (section 0 of gitea-runner-cleanup.sh). A build that loses its client
+# mid-commit can leave a cache record pointing at a missing snapshot; every later build reusing it fails
+# with `during finalize: … snapshot <id> does not exist: not found` until someone heals the runner
+# (ci-runner-3 09-28, ci-runner-9 10-04, ci-runner-1 10-07). When the journal names such a failure AND
+# `docker builder du` still lists the record it commits into, the sweep waits for a job gap, stops the
+# runner (and checks it stopped), runs image prune -af + docker restart + builder prune -af, and starts
+# the runner again. Costs that runner's warm images and build cache. Beacon:
+# gitea_runner_buildkit_heal.prom; the state file also carries the "runner held" recovery marker.
+gitea_runner_cleanup_heal_dangling: true
+gitea_runner_cleanup_heal_lookback_sec: 604800 # 7d of docker journal searched for the signature
+gitea_runner_cleanup_heal_cooldown_sec: 21600 # at most one heal per 6h; a record that survives one alerts
+gitea_runner_cleanup_heal_state: /var/lib/gitea-runner-cleanup/buildkit-heal.state
