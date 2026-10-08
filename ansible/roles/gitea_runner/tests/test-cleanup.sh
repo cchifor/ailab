@@ -106,7 +106,7 @@ case "\$*" in
   *"restart docker.service"*)
     echo "systemctl \$*" >> "$CALLS"; exit "\${MOCK_DOCKER_RESTART_RC:-0}" ;;
   *stop*gitea-act-runner*)
-    echo "systemctl \$*" >> "$CALLS"
+    echo "systemctl \$*" >> "$CALLS"; : > "$WORK/phase.runnerstop"
     [ "\${MOCK_STOP_FAIL:-0}" = 1 ] && exit 1
     echo inactive > "$WORK/runner.state" ;;
   *start*gitea-act-runner*)
@@ -141,6 +141,8 @@ case "\$*" in
     # rc 2 models a pgrep ERROR (bad regex, /proc failure) — distinct from rc 1 "no match".
     [ "\${MOCK_PEER_PROBE_RC:-}" = 2 ] && exit 2
     [ "\${MOCK_PEER_JOB:-0}" = 1 ] && { echo 5150; exit 0; }
+    # MOCK_PEER_BUSY_FROM=<phase>: the peer starts a job once the script reaches that phase.
+    [ -n "\${MOCK_PEER_BUSY_FROM:-}" ] && [ -f "$WORK/phase.\$MOCK_PEER_BUSY_FROM" ] && { echo 5150; exit 0; }
     exit 1 ;;
 esac
 if [ -n "\${MOCK_BUSY_FROM:-}" ]; then
@@ -159,6 +161,15 @@ if [ -n "\${MOCK_BUSY_DROP_AFTER:-}" ]; then
 fi
 echo 4243
 exit 0
+EOF
+
+# mv: the real one, except that MOCK_MV_FAIL=1 makes the rename of the heal STATE file fail — the
+# last step of state_set, after its temp file was fully written (case N19).
+REAL_MV="$(command -v mv)"
+cat >"$BIN/mv" <<EOF
+#!/usr/bin/env bash
+if [ "\${MOCK_MV_FAIL:-0}" = 1 ]; then case "\$*" in *heal.state*) exit 1 ;; esac; fi
+exec "$REAL_MV" "\$@"
 EOF
 
 for stub in logger; do printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/$stub"; done
@@ -190,6 +201,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_DU="${MOCK_DU:-}" MOCK_DU_CLEARS="${MOCK_DU_CLEARS:-0}" MOCK_DU_FAIL="${MOCK_DU_FAIL:-0}" \
     MOCK_STOP_FAIL="${MOCK_STOP_FAIL:-0}" MOCK_START_FAIL="${MOCK_START_FAIL:-0}" \
     MOCK_DOCKER_RESTART_RC="${MOCK_DOCKER_RESTART_RC:-0}" MOCK_HANG_HEAL="${MOCK_HANG_HEAL:-0}" \
+    MOCK_PEER_BUSY_FROM="${MOCK_PEER_BUSY_FROM:-}" MOCK_MV_FAIL="${MOCK_MV_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
   # TERM_AT_HANG: SIGTERM the script once the mock reports it is inside the heal (case N10) — what
@@ -649,6 +661,37 @@ du_lists 92epe5m9nwvsasko5mz3tn8yy "$Y"
 run_beacon 0 50
 check "N14: other 'not found' / finalize errors do not match the signature" '! heal_ran'
 check "N14: ...the beacon says clean and the sweep runs" '[ "$(heal_field dangling_record)" = 0 ] && swept'
+
+# A production-size listing with Y FIRST (ci-runner-9 lists 865 records). `printf | grep -q` under
+# pipefail could SIGPIPE the writer here and read a listed record as absent (codex round 2).
+dangle
+{ printf 'ID:           %s\nMutable:      false\n\n' "$Y"; for i in $(seq 1 4000); do printf 'ID:           filler%06d\nMutable:      false\nDescription:  [builder 1/9] RUN true\n\n' "$i"; done; } > "$DU"
+MOCK_DU_CLEARS=1 run_beacon 0 50
+check "N15: Y at the top of a large record listing is still found -> heal runs" heal_ran
+
+# An earlier heal's recovery still pending: a new heal would read the stopped runner as an operator's
+# and overwrite the marker that keeps it being restarted.
+dangle; printf 'last_heal=%s\nheals_total=1\nrunner_held=1\n' "$(( $(date +%s) - 99999 ))" > "$WORK/heal.state"
+MOCK_RUNNER_STATE=failed MOCK_START_FAIL=1 run_beacon 0 50
+check "N16: a pending runner recovery blocks a new heal, cooldown expired or not" '! heal_ran'
+check "N16: ...the start is retried and the marker survives (runner_held=1 -> alert)" \
+  'calls_has "systemctl start --no-block gitea-act-runner.service" && [ "$(state_val runner_held)" = 1 ] && [ "$(heal_field runner_held)" = 1 ]'
+
+# The peer is re-read before each destructive step: the gap was confirmed before a stop that can drain
+# for 10 minutes.
+dangle; MOCK_PEER_BUSY_FROM=runnerstop run_beacon 0 50
+check "N17: a peer job starting during the stop -> no image prune, no docker restart" \
+  '! heal_ran && ! grep -qE "docker image prune -af *$" "$CALLS"'
+check "N17: ...and the runner is started again" '[ "$(cat "$WORK/runner.state")" = active ]'
+
+dangle; MOCK_PEER_BUSY_FROM=image run_beacon 0 50
+check "N18: a peer job starting during the image prune -> no docker restart" '! heal_ran && grep -qE "docker image prune -af *$" "$CALLS"'
+check "N18: ...and the runner is started again" '[ "$(cat "$WORK/runner.state")" = active ]'
+
+# state_set must not report success when the final rename fails (its temp file was complete).
+dangle; MOCK_MV_FAIL=1 run_beacon 0 50
+check "N19: the state file cannot be replaced -> no runner stop, no heal" '! heal_ran && ! calls_has "systemctl stop"'
+check "N19: ...and the sweep runs" swept
 unset MOCK_JOURNAL MOCK_DU
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
