@@ -788,6 +788,16 @@ check "Q2: heal and busy gate share ONE budget: a busy run waits once, not twice
 check "Q2: ...the record stays reported and the busy gate still defers" \
   '[ "$(heal_field dangling_record)" = 1 ] && [ "$(beacon_field pressure_defer)" = 1 ]'
 
+# No read may START after the budget is spent (codex on #1151): a confirm read run after the deadline
+# would sleep its confirm polls and could report a gap past the budget. IDLE_WAIT_SEC=0 is the sharpest
+# form: the busy gate's budget is spent before it begins, so it must read nothing and defer — what the
+# old loop did, since it never iterated at 0. Busy at the gate, idle on every later read: one read
+# would find the gap and sweep, so only the deadline-first check keeps this a deferral.
+MOCK_BUSY_DROP_AFTER=1 IDLEWAIT=0 run_beacon 1 85
+check "Q3: budget spent (IDLE_WAIT_SEC=0) -> no read after the deadline, the busy gate defers" \
+  '! swept && [ "$(beacon_field pressure_defer)" = 1 ]'
+unset MOCK_BUSY_DROP_AFTER
+
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
 # Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in
 # the script ARE the values this suite exercises. In production the env file always exists, rendered

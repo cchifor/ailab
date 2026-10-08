@@ -372,15 +372,18 @@ find_dangling() {
 # Wait for a CONFIRMED job gap, within ONE wall-clock budget of IDLE_WAIT_SEC per run. The deadline is
 # set by the first call and shared by every later one (the heal in section 0, then the busy gate), so
 # a tick that already spent the budget waiting for a gap that never came does not wait a second time:
-# the unit's TimeoutStartSec is sized for one IDLE_WAIT_SEC, not two.
+# the unit's TimeoutStartSec is sized for one IDLE_WAIT_SEC, not two. The deadline is checked BEFORE
+# each read, so no read starts after it; a read already under way can still run past it by its own
+# confirm polls ((IDLE_CONFIRM_POLLS-1) x IDLE_POLL_SEC). A call with the budget spent — or with
+# IDLE_WAIT_SEC=0 — reads nothing and returns "no gap".
 gap_deadline=""
 wait_for_gap() {
   [ -n "$gap_deadline" ] || gap_deadline=$(( $(date +%s) + IDLE_WAIT_SEC ))
-  while :; do
+  while [ "$(date +%s)" -lt "$gap_deadline" ]; do
     idle_confirmed && return 0
-    [ "$(date +%s)" -lt "$gap_deadline" ] || return 1
     sleep "$IDLE_POLL_SEC"
   done
+  return 1
 }
 
 # Trap-safe: queue the start and return; the marker covers a start that never completes.
@@ -603,7 +606,8 @@ if [ "$busy" -eq 1 ]; then
   # IDLE_CONFIRM_POLLS-1 confirm sleeps on EVERY busy iteration, although a busy read returns at once
   # and sleeps nothing, so the default 600s budget ran out after about 200s of real waiting (codex,
   # reviewing #1142). This wait is now the full 600s it was sized as — unless the heal in section 0
-  # already spent the budget this run, in which case it gets a single idle read.
+  # already spent the budget this run, in which case it reads nothing and defers (or, at critical,
+  # prunes through), exactly as a busy gate with no gap in its budget always has.
   gap_t0=$(date +%s)
   if wait_for_gap; then busy=0; fi
   waited=$(( $(date +%s) - gap_t0 ))
