@@ -8,10 +8,11 @@
 # NOT a dev worker, with the `admin@ai` kube context. Git Bash on Windows or bash on Linux; needs
 # kubectl, curl, base64 and sha256sum (no local python).
 #
-# Per gatekeeper replica (every pod of app.kubernetes.io/name=gatekeeper in strive-ailab, or each
-# --replica), it execs into container `gatekeeper` and runs scripts/s2s/phase4_probe.py with the
-# pod's OWN python against http://127.0.0.1:5000. The gatekeeper NetworkPolicy admits only Traefik
-# and the allowedClients, so in-pod loopback is how ONE replica is tested on its own.
+# Per gatekeeper replica (every pod of app.kubernetes.io/name=gatekeeper in gatekeeper's namespace
+# $GK_NS, or each --replica), it execs into container `gatekeeper` and runs
+# scripts/s2s/phase4_probe.py with the pod's OWN python against http://127.0.0.1:5000. The gatekeeper
+# NetworkPolicy admits only Traefik and the allowedClients, so in-pod loopback is how ONE replica is
+# tested on its own.
 #
 # Tokens are TokenRequests (`kubectl create token`, no stored object, 10 minutes): the harness
 # ServiceAccount for audience strive-gatekeeper, the same SA for a wrong audience, and the

@@ -1291,7 +1291,9 @@ class RunbookDrillBackup(unittest.TestCase):
             with open(os.path.join(repo, ".gitignore"), "w", encoding="utf-8", newline="\n") as f:
                 f.write("kubernetes/infra/_out/\n")
         env = dict(os.environ, K_LOG=self.log, K_CM=CM_YAML, K_GET_FAIL="1" if get_fail else "")
-        script = 'cd "$1" || exit 9\nK="bash %s"\n%s' % (self.stub.replace("\\", "/"), drill1_backup_lines())
+        stub = self.stub.replace("\\", "/")
+        # The backup reads gatekeeper's ConfigMap through $G (strive-gatekeeper since A.2); $K stays for the rest.
+        script = 'cd "$1" || exit 9\nK="bash %s"\nG="bash %s"\n%s' % (stub, stub, drill1_backup_lines())
         done = subprocess.run([BASH, "-c", script, "drill", repo.replace("\\", "/")], env=env, capture_output=True, text=True)
         calls = open(self.log, encoding="utf-8").read().splitlines() if os.path.exists(self.log) else []
         saved = os.path.join(repo, "kubernetes", "infra", "_out", "gatekeeper-registry-extras-drill.yaml")

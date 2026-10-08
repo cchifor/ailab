@@ -8,8 +8,11 @@ kind: Kustomization
 # in its own namespace). It equals GK_NS in scripts/s2s/phase4-probes.sh
 # (scripts/s2s/test_phase4_job.py fails while the two differ). The parent kustomization copies
 # this namespace into the Job's GATEKEEPER_NAMESPACE (a kustomize replacement), so nothing else
-# changes. Flux creates the objects in the new namespace and prunes the old ones. Rollback (the
-# platform cutover reverted): strive-ailab here and in GK_NS.
+# changes. Flux creates the objects in the new namespace and prunes the old ones.
+# MERGE ONLY AFTER the platform cutover is live: strive-gatekeeper exists, endpoints/gatekeeper there
+# is 2/2 ready, and the old gatekeeper is gone from strive-ailab. Earlier, this Kustomization fails
+# to apply or the Job records a false FAIL. On a platform cutover rollback, revert this PR (back to
+# strive-ailab here and in GK_NS) TOGETHER WITH the platform revert, not after it.
 namespace: strive-gatekeeper
 resources:
   - rbac.yaml

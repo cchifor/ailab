@@ -115,8 +115,9 @@
 # existing gatekeeper_redis_fallback_total counter now incremented on every switch to memory, and two
 # new gatekeeper_auth_requests_total label values, {method="test_bypass",status="edge_refused"} and
 # {method="api_key",status="disabled"}. Checked against live Prometheus on 2026-10-07, BEFORE AG1a:
-# job="gatekeeper" (namespace strive-ailab, pod, instance ip:5000, service, container, endpoint) is the
-# real scrape label set; gatekeeper_auth_requests_total additionally carries tenant_id, method, status;
+# job="gatekeeper" (namespace strive-ailab then, strive-gatekeeper since the A.2 cutover; pod,
+# instance ip:5000, service, container, endpoint) is the real scrape label set;
+# gatekeeper_auth_requests_total additionally carries tenant_id, method, status;
 # gatekeeper_redis_fallback_total and gatekeeper_redis_reconnections_total ALREADY exist (pre-initialised
 # at 0 on both pods, no increase in 7 days); gatekeeper_redis_connected, any method="api_key" series and
 # any status="edge_refused" / "disabled" series do NOT exist yet. These four rules therefore stay silent
