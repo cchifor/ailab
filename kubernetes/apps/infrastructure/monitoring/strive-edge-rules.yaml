@@ -75,6 +75,36 @@
 # counted by the service handler, so it is NOT "edge-generated" here; StriveEdge5xxBurst and
 # StriveEdge5xxRatioHigh cover it.
 #
+# A SERVICE SERIES BORN INSIDE THE WINDOW (review of PR #1147). Traefik creates a counter series on its
+# first event, and increase() cannot see anything before a series' first sample: one event, or a whole
+# burst inside one 30 s scrape. If the router series of the same pod/code/method/protocol is OLDER (earlier
+# ForwardAuth 500s created it), the router's increase() does see that burst, and the origin 5xx that
+# created the service series would be left over as "edge-generated". So a service series with no sample
+# in the hour before the window, whose router key does have one, counts at its full value
+# (last_over_time over the window) instead of its increase(), times 1.1: increase() extrapolates the
+# router side to the whole window, 10m / 9.5m = 1.053 with 30 s scrapes and 10m / 9m = 1.11 with a
+# missed scrape at an edge, where it would take a first-scrape burst of over 270 to leave 3. When the
+# router series is born in the same window (a code or method that pod never answered before), both
+# families lose the same first scrape and both keep increase(), so an origin burst still nets to 0 and an
+# edge-generated share beside it still pages (the 2026-10-06 shape). A scrape gap of over an hour makes a
+# pod's router and service series "born" together, so it cannot page by itself either. A brand-new
+# ROUTER-only series still loses its first scrape: that hides edge-generated 5xx, it never invents them.
+# Fixtures: "an origin burst that creates the service 5xx series beside an OLDER router series" and
+# "router and service series born TOGETHER".
+#
+# TWO SHAPES THAT BREAK THE ARITHMETIC; neither exists on 2026-10-08 (no TraefikService, and no retry
+# middleware, in the cluster):
+#   * a TraefikService (weighted, mirroring, failover) in front of a route. The router's
+#     exported_service is then the TraefikService while the service series carry the child services'
+#     names, nothing joins, the zero-fill applies, and every origin 5xx on that route pages as
+#     edge-generated. Every route today has one Kubernetes Service (router and service share the name);
+#     a TraefikService needs a change here first. A fixture pins the false positive and the alert
+#     description tells the responder to check for one.
+#   * the retry middleware. It wraps the service handler, so the service series counts every attempt
+#     and the router series counts the one response: the service side outgrows the router side, which
+#     hides origin 5xx (StriveEdge5xxBurst still sees them) and also MASKS edge-generated 5xx on that
+#     service. Attaching retry to a route blinds this rule for it.
+#
 # THE SECOND GROUP (strive-gatekeeper-hardening) READS SERIES THAT GATEKEEPER RELEASE AG1a CREATES
 # (plan A1.0, A2.1, A4.1): gatekeeper_redis_connected{} (a label-less Gauge: 1 on live Redis, 0 on the
 # per-process memory fallback, 0 from the first scrape on a replica that started in fallback), the
@@ -196,17 +226,32 @@ spec:
         # case this rule is for would vanish from the subtraction). Summed over pods, so the alert
         # carries only `exported_service` (router@provider, e.g. strive-ailab-web-<hash>@kubernetescrd).
         # No `for:` - the 10m increase window IS the hold, as for StriveEdge5xxBurst. increase()
-        # extrapolates (7 real events read 7.6-8.8 in the E4 test) and the first 5xx of a brand-new
+        # extrapolates (7 real events read 7.6-8.8 in the E4 test) and the first scrape of a brand-new
         # series is invisible, so "> 3" means about four or five real events; the fixtures keep clear
         # margins on both sides. It sees only the edge-generated share: an origin 5xx or an
-        # unreachable origin is in the service series too and nets to 0.
+        # unreachable origin is in the service series too and nets to 0. The service side is summed per
+        # pod/code/method/protocol first so that a service series BORN inside the window, beside an older
+        # router series of the same key, counts at its full value * 1.1 instead of its increase() (see
+        # "A SERVICE SERIES BORN INSIDE THE WINDOW" in the header).
         - alert: StriveEdgeGenerated5xx
           expr: |
             (
               sum by (exported_service) (increase(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
               -
               (
-                sum by (exported_service) (increase(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
+                sum by (exported_service) (
+                  (
+                    (
+                      sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
+                      unless
+                      sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[1h] offset 10m))
+                    )
+                    and
+                    sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[1h] offset 10m))
+                  ) * 1.1
+                  or
+                  sum by (exported_service, code, method, protocol, pod) (increase(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
+                )
                 or
                 sum by (exported_service) (increase(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[10m])) * 0
               )
@@ -223,6 +268,8 @@ spec:
               sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
               strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
               (GatekeeperForwardAuth5xx) and its pods.
+              If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+              do not join and its origin 5xx count here too.
         # gatekeeper's ForwardAuth route. Every authenticated request through the edge passes it, so
         # a 5xx here is blocked traffic rather than an application error. 7 days of live data: zero
         # 5xx, so > 3 in 10m is far above the baseline while ignoring one stray response.

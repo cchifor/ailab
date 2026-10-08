@@ -396,6 +396,8 @@ tests:
                 sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
                 strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
                 (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
       # Flat for 25 m by now: the 10m window holds no increase and the alert has resolved.
       - eval_time: 45m
         alertname: StriveEdgeGenerated5xx
@@ -448,6 +450,8 @@ tests:
                 sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
                 strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
                 (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
 
   - interval: 30s
     name: it is per service - edge-generated 5xx on gatekeeper page that service alone, origin 5xx on web do not
@@ -478,6 +482,8 @@ tests:
                 sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
                 strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
                 (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
 
   - interval: 1m
     name: it sums over Traefik pods - two pods that are each below the threshold page together, one alone does not
@@ -507,6 +513,8 @@ tests:
                 sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
                 strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
                 (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
 
   - interval: 30s
     name: a Traefik pod replacement - origin 5xx stay silent, edge-generated 5xx keep paging (series by pod)
@@ -542,6 +550,8 @@ tests:
                 sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
                 strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
                 (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
 
   - interval: 30s
     name: an in-place counter reset (container restart, same pod) on both sides stays silent for origin 5xx
@@ -571,6 +581,8 @@ tests:
                 sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
                 strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
                 (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
 
   - interval: 30s
     name: a brand-new router series pages after about a dozen events, three stay silent (first event is invisible)
@@ -598,6 +610,139 @@ tests:
                 sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
                 strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
                 (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
+
+  - interval: 30s
+    name: an origin burst that creates the service 5xx series beside an OLDER router series stays silent (review of #1147)
+    input_series:
+      # web: earlier ForwardAuth 500s left a router 500 series at 20, flat. Then 100 origin 500s arrive inside
+      # one scrape (minute 20 to 20.5): the router counter jumps to 120 and the service 500 series is CREATED
+      # at 100. increase() of the new service series is 0 (its burst is before its first sample) while the
+      # router's increase() sees the jump, extrapolated to 105.3. Without the born-series term this pages for
+      # 105; with it at 1.0x it still pages for 5.3 (extrapolation), so the 1.1 factor is pinned here too.
+      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "20x40 120x79"
+      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "_x41 100x78"
+      # gatekeeper, the control: the same shape with 10 origin 500s, then 8 edge-generated 500s (ForwardAuth)
+      # one per tick. The edge share still pages: router 18 * 1.053 - service 10 * 1.1 = 7.9 at minute 25.
+      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "20x40 30+1x8 38x71"
+      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "_x41 10x78"
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: StriveEdgeGenerated5xx
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: StriveEdgeGenerated5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_service: "strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd"
+            exp_annotations:
+              summary: "Traefik answered 5xx itself for strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd"
+              description: >-
+                More than 3 5xx in the last 10 minutes were returned to clients by the Traefik router of
+                strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd without its service handler producing them (router 5xx minus
+                service 5xx): a ForwardAuth call that failed or answered 5xx, a middleware error, or a
+                service with no endpoints. An origin 5xx and an unreachable origin are counted on both
+                sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
+                strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
+                (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
+      # The service series is an hour-old "known" series from minute 30.5 on; both counters are flat for web.
+      - eval_time: 31m
+        alertname: StriveEdgeGenerated5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_service: "strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd"
+            exp_annotations:
+              summary: "Traefik answered 5xx itself for strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd"
+              description: >-
+                More than 3 5xx in the last 10 minutes were returned to clients by the Traefik router of
+                strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd without its service handler producing them (router 5xx minus
+                service 5xx): a ForwardAuth call that failed or answered 5xx, a middleware error, or a
+                service with no endpoints. An origin 5xx and an unreachable origin are counted on both
+                sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
+                strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
+                (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
+
+  - interval: 30s
+    name: router and service series born TOGETHER (a code the pod never answered) keep increase() on both sides - the 2026-10-06 shape pages
+    input_series:
+      # web: 8 ForwardAuth 500s on an old router 500 series, beside 12 origin 502s whose router AND service
+      # series are both created at 12 inside one scrape. Both new series lose the same first scrape, so the
+      # 502s net to 0 and the 8 edge-generated 500s page. Counting the new service series at full value here
+      # (without its router being older) would subtract 12 and hide the 8.
+      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "20x40 21+1x7 28x72"
+      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+        values: "_x41 12x78"
+      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+        values: "_x41 12x78"
+      # gatekeeper: a pure origin burst on a brand-new code, both families created together at 50: silent.
+      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+        values: "_x41 50x78"
+      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+        values: "_x41 50x78"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: StriveEdgeGenerated5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_service: "strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd"
+            exp_annotations:
+              summary: "Traefik answered 5xx itself for strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd"
+              description: >-
+                More than 3 5xx in the last 10 minutes were returned to clients by the Traefik router of
+                strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd without its service handler producing them (router 5xx minus
+                service 5xx): a ForwardAuth call that failed or answered 5xx, a middleware error, or a
+                service with no endpoints. An origin 5xx and an unreachable origin are counted on both
+                sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
+                strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
+                (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
+
+  - interval: 30s
+    name: KNOWN FALSE POSITIVE - a route fronted by a TraefikService pages origin 5xx, because the names do not join
+    input_series:
+      # A weighted TraefikService in front of two Kubernetes Services: the router's exported_service is the
+      # TraefikService, the service series carry the two children's names, so nothing joins, the zero-fill
+      # applies and 1 origin 500 per tick pages as "edge-generated". No route uses a TraefikService today;
+      # this pins the shape the alert description warns about (see the rule's header).
+      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-weighted@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "5+2x40 85x80"
+      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-v1-80@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "5+1x40 45x80"
+      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-v2-80@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+        values: "5+1x40 45x80"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: StriveEdgeGenerated5xx
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_service: "strive-ailab-web-weighted@kubernetescrd"
+            exp_annotations:
+              summary: "Traefik answered 5xx itself for strive-ailab-web-weighted@kubernetescrd"
+              description: >-
+                More than 3 5xx in the last 10 minutes were returned to clients by the Traefik router of
+                strive-ailab-web-weighted@kubernetescrd without its service handler producing them (router 5xx minus
+                service 5xx): a ForwardAuth call that failed or answered 5xx, a middleware error, or a
+                service with no endpoints. An origin 5xx and an unreachable origin are counted on both
+                sides and do not count here (StriveEdge5xxBurst covers those). The Loki panel on the
+                strive-edge dashboard (OriginStatus 0) lists the requests; check gatekeeper first
+                (GatekeeperForwardAuth5xx) and its pods.
+                If the route is fronted by a TraefikService (kubectl get traefikservices -A), the names
+                do not join and its origin 5xx count here too.
 
   - interval: 30s
     name: two stray edge-generated 5xx, ForwardAuth 401s (router-only 4xx) and flat counters page nothing
