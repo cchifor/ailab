@@ -1149,6 +1149,11 @@ inode, size and mtime still match the source manifest, and directories only once
 `dev-worker-archives/dev-worker-3/forge-archives-20261009.tar.zst` (50.7 GB; restore with
 `zstd -dc … | tar -C <dir> --numeric-owner -xpf -`).
 
+Build cache is bounded continuously by BuildKit's own GC (`builder.gc` in `/etc/docker/daemon.json`,
+`dev_worker_buildkit_gc_*`: max 20 GB, yields when /workspace is under 15% free); check it with
+`docker buildx inspect default` (GC Policy rules). Before 2026-10-09 the GC ran on docker's
+disk-size defaults — 93 GiB max on these disks — and only the daily prune held it near 20 GB.
+
 If the disk is at 100%, `docker builder prune -af` is the quickest few GB to get the agent moving
 again (build cache only; nothing running depends on it), then `docker volume prune -f --filter
 label=com.docker.volume.anonymous` (unreferenced anonymous volumes; check

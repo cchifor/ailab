@@ -355,6 +355,26 @@ dev_worker_helmtest_namespace: "helmtest-{{ inventory_hostname | regex_replace('
 # recently used records. A size cap, because the age filter is a no-op on buildx 0.37.
 dev_worker_buildx_cache_max: "20GB"
 
+# BuildKit's own garbage collector (templates/daemon.json.j2 `builder.gc`), which runs continuously
+# inside dockerd, not once a day. It was already on, but with defaults derived from the disk size:
+# on the 125 GB /workspace that is "Max Used Space: 93.13GiB" (`docker buildx inspect default`,
+# dev-worker-2, 2026-10-09) — the daily 20 GB cap above freed 15 GB at 03:11 and the cache was back
+# at 31 GB twelve hours later. Max used = the same 20 GB, enforced as builds finish; min free = 20 GB,
+# ~15% of the 125 GB /workspace (disk-guard's trigger), so BuildKit also yields space when the disk
+# runs short — absolute, not "15%": percentage parsing of this key is not proven on this docker;
+# reserved = warm cache GC never takes. "GB" may be read as decimal or binary (inspect shows 18.63GiB
+# or 20GiB): either is fine. plans/2026-10-09-dev-worker-disk-hardening-plan.md W3.
+dev_worker_buildkit_gc_max_used: "20GB"
+dev_worker_buildkit_gc_min_free: "20GB"
+dev_worker_buildkit_gc_reserved: "2GB"
+
+# A daemon.json change needs a dockerd restart. live-restore keeps containers running, but any
+# in-flight build or pull fails, so a playbook run does NOT restart docker unless this is true: it
+# warns instead, and the weekly docker restart (Sun 04:00) applies the change. Roll a change out one
+# worker at a time when its docker is idle: `-l dev-worker-N -t docker_daemon -e
+# dev_worker_docker_restart_on_config_change=true`.
+dev_worker_docker_restart_on_config_change: false
+
 # The same daily unit also removes anonymous docker volumes that no container (running or stopped)
 # references — label com.docker.volume.anonymous only, never named volumes. Throwaway test containers
 # removed without -v leave one each (dev-worker-3: 240, 12 GB, on 2026-10-06).

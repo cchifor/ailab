@@ -5,5 +5,13 @@
     "max-size": "10m",
     "max-file": "3"
   },
-  "live-restore": true
+  "live-restore": true,
+  "builder": {
+    "gc": {
+      "enabled": true,
+      "defaultReservedSpace": "{{ dev_worker_buildkit_gc_reserved }}",
+      "defaultMaxUsedSpace": "{{ dev_worker_buildkit_gc_max_used }}",
+      "defaultMinFreeSpace": "{{ dev_worker_buildkit_gc_min_free }}"
+    }
+  }
 }
