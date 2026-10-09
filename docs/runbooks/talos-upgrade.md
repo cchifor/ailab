@@ -213,7 +213,18 @@ needs a separate owner decision. It restores control-plane metadata only.
   diffed against live (`talosctl get machineconfig`, the `v1alpha1` document) for **every** node.
 - A node with `apply_mode = "staged"` (env-node-1) takes a tofu apply into its `persistent` config only.
   The active `v1alpha1` keeps the old values until that node's next reboot. That is expected, so don't
-  re-apply.
+  re-apply because of it.
+- **But a later no-reboot `talosctl patch` on that node discards the staged change.** It rebuilds
+  both config copies from the active one. That happened on 2026-10-09: the kubelet roll's patch at
+  17:46Z dropped env-node-1's staged `install.image` from #1184. So after any `talosctl patch` on a
+  staged node, re-run its tofu apply. Two conditions:
+  - **First land the patched value in the tofu inputs.** The apply stages the *tofu-rendered* config. A
+    patch that tofu doesn't know about is missing from the re-staged `persistent` config, and the next
+    reboot silently reverts it. Here, the kubelet image came from `kubernetes_version` v1.35.9 (#1196),
+    applied in the same run that re-staged the installer.
+  - **Diff rendered vs live first.** The only delta against the active `v1alpha1` should be the change
+    you mean to stage (plus anything still waiting for a reboot). Then check the `persistent` copy after
+    the apply.
 
 ## Addons in the same program
 

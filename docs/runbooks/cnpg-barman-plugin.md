@@ -100,10 +100,13 @@ All `kubectl` below means `kubectl --context admin@ai`. The default context is a
    - **The webhook does not check that the plugin or ObjectStore exist.** Keep the order: plugin ->
      ObjectStores -> cutover.
 
-   CNPG then rolls the replica first, then the primary. Expect a bounded write interruption on that
-   cluster:
-   - switchover clusters: seconds;
-   - `primaryUpdateMethod: restart` (trueswarm-admin-pg): ~3 min of smart shutdown, then ~30 s down.
+   CNPG then rolls the replica first, then the primary. **The primary is always recreated in place,
+   whatever `primaryUpdateMethod` says.** The operator logs "Primary is missing the WAL-archiver
+   sidecar; recreating it in place instead of switching over". This is the 1.30.1 deadlock fix: a
+   switchover would need the old primary to archive its last WAL through a sidecar it doesn't have yet.
+   Expect the primary to be unavailable for the smart shutdown (at most `smartShutdownTimeout`, 180 s;
+   it ends as soon as clients disconnect), plus about 20 s to recreate. Observed on 2026-10-09:
+   trueswarm-admin-pg and trueswarm-platform-pg about 3 min each, trueswarm-pg about 20 s.
 5. **Verify**:
    - every instance pod has the **native sidecar**: initContainer `plugin-barman-cloud`,
      `restartPolicy: Always`, ready, at the pinned digest;
@@ -119,13 +122,21 @@ All `kubectl` below means `kubectl --context admin@ai`. The default context is a
    - `barman_cloud_cloudnative_pg_io_last_available_backup_timestamp` is fresh in Prometheus;
    - no `CNPG*` alert fires.
 6. **Continuity drill.** It proves that WAL from both archivers replays.
-   1. On the source primary, **commit a drill marker** in the `postgres` maintenance database, not the
-      application database:
-      `CREATE TABLE IF NOT EXISTS ailab_drill_marker (name text PRIMARY KEY, at timestamptz DEFAULT now()); INSERT INTO ailab_drill_marker (name) VALUES ('post-plugin-<cluster>');`
-      Then, **after** that commit, `SELECT pg_create_restore_point('post-plugin-<cluster>')` and
+   1. Pick a restore-point name `<rp>` that is unique per run. The marker uses the same name. The
+      2026-10-09 drills used `ta-a6-<short cluster>-<UTC yyyymmddThhmmss>`, e.g.
+      `ta-a6-admin-20261009T182712` (see Status). On the source primary, **commit a drill marker** in the
+      `postgres` maintenance database, not the application database:
+      `CREATE TABLE IF NOT EXISTS ailab_drill_marker (name text PRIMARY KEY, at timestamptz DEFAULT now()); INSERT INTO ailab_drill_marker (name) VALUES ('<rp>');`
+      Then, **after** that commit, `SELECT pg_create_restore_point('<rp>')` and
       `pg_switch_wal()`. The marker's commit record precedes the restore point in WAL, so a recovery that
       reaches the point must contain it, whatever the application writes meanwhile.
-   2. Run the drill with `recoveryTarget: {backupID: <baseline in-tree backupID>, targetName: post-plugin-<cluster>}`.
+      When scripting this with `INSERT ... RETURNING name`, run `psql -qAt -v ON_ERROR_STOP=1` and
+      match the returned row exactly (`grep -qFx '<rp>'`):
+      - plain `psql -At` prints the row and then the `INSERT 0 1` tag; `-q` suppresses the tag;
+      - a re-run also emits a `NOTICE` (relation already exists) on stderr, which lands in the parsed
+        output if the wrapper merges `2>&1`.
+      Either way, `tail -1` / `head -1` can check the wrong line.
+   2. Run the drill with `recoveryTarget: {backupID: <baseline in-tree backupID>, targetName: <rp>}`.
       It passes when both hold:
       - the drill Cluster is Ready: PostgreSQL fails recovery if the named target is never reached;
       - the marker row is present in the drill's `postgres` database.
@@ -137,8 +148,25 @@ All `kubectl` below means `kubectl --context admin@ai`. The default context is a
    4. Clean up as above.
    5. Do this for all three clusters, each against its own `serverName`. trueswarm-pg and
       trueswarm-platform-pg share the bucket prefix.
+   6. After the last drill, `DROP TABLE IF EXISTS ailab_drill_marker` in each source's `postgres`
+      database.
 7. **Un-suspend** the schedule with the same `--field-manager=cutover-window`.
 8. **After an hour**, re-check that `failed_count` stayed flat on the same primary.
+
+## Status (2026-10-09): all three clusters cut over
+
+The pre-CNPG-1.31 gate passes, both live and on trueswarm-admin `main` (c888d985). All three
+schedules are `method: plugin` and un-suspended.
+
+| Cluster | PR | A3 in-tree base | Plugin backup | Restore point | Continuity drill |
+|---|---|---|---|---|---|
+| trueswarm-admin-pg | trueswarm-admin#158 | `20261009T181234` | `20261009T182402` | `ta-a6-admin-20261009T182712` | PASS, 3/3 counts equal |
+| trueswarm-platform-pg | trueswarm-admin#159 | `20261009T183436` | `20261009T184556` | `ta-a6-platform-20261009T184640` | PASS, 3/3 counts equal |
+| trueswarm-pg | trueswarm-admin#160 | `20261009T185233` | `20261009T185945` | `ta-a6-trueswarm-20261009T190025` | PASS, 3/3 counts equal |
+
+A2 (the plugin reads the in-tree catalog to latest) passed on trueswarm-admin-pg before any cutover.
+Each cluster's `firstRecoverabilityPoint` was unchanged after its cutover. The `ailab_drill_marker`
+tables are dropped.
 
 ## Expected noise
 
