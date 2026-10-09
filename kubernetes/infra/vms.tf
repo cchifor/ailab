@@ -56,6 +56,9 @@ resource "proxmox_virtual_environment_vm" "cp" {
   serial_device {} # Talos prefers a serial console
 
   lifecycle {
-    ignore_changes = [initialization] # avoid churn after first boot
+    # disk[0].import_from: create-only (the nocloud image the disk was first imported from). Its path
+    # carries var.talos_version, which now tracks the RUNNING Talos; without this every version bump
+    # would show an in-place disk diff (env-pool precedent).
+    ignore_changes = [initialization, disk[0].import_from] # avoid churn after first boot
   }
 }

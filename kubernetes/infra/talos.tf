@@ -1,5 +1,5 @@
 resource "talos_machine_secrets" "this" {
-  talos_version = var.talos_version
+  talos_version = var.talos_config_contract
 }
 
 data "talos_machine_configuration" "cp" {
@@ -7,7 +7,7 @@ data "talos_machine_configuration" "cp" {
   cluster_endpoint   = "https://${var.cluster_vip}:6443"
   machine_type       = "controlplane"
   machine_secrets    = talos_machine_secrets.this.machine_secrets
-  talos_version      = var.talos_version
+  talos_version      = var.talos_config_contract
   kubernetes_version = var.kubernetes_version
 }
 
