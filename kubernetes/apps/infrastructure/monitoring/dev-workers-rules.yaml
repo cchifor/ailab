@@ -137,11 +137,14 @@ spec:
               under 15% free) should already be reclaiming: `journalctl -u dev-worker-disk-guard -n 50`.
               If it deferred (docker busy) or exhausted its ladder, look by hand: `cleanup --dry-run`
               (docker: stale stacks, images, volumes, build cache), `docker system df`, then
-              `du -xh --max-depth=2` on the mount — what remains is live work.
+              `du -xh --max-depth=2` on the mount. On `/` look in `$HOME` first: agents have parked
+              tarballs and evidence trees there (dev-worker-3, 2026-10-09).
         # disk-guard (role dev_worker, files/disk-guard) ran every reclaim step CLEANLY and a filesystem is still
-        # under its trigger: what is left is live work (worktrees in use, compose stacks, named volumes,
-        # recent images) and the disk will reach 100% unless a human frees or grows it. Added after
-        # dev-worker-3's /workspace refilled to 100% on 2026-10-06, five days after the 10-01 cleanup.
+        # under its trigger: eligible reclaim was not enough. What is left is outside what the guard may
+        # remove (worktrees in use, compose stacks, named volumes, recent images, agent data in $HOME or
+        # /workspace) and the disk will reach 100% unless a human frees or grows it. Added after
+        # dev-worker-3's /workspace refilled to 100% on 2026-10-06, five days after the 10-01 cleanup;
+        # on 2026-10-09 it was ~50 GB of agent-made tarballs, part of them moved into $HOME on /.
         - alert: DevWorkerDiskGuardExhausted
           expr: dev_worker_disk_guard_exhausted{job="dev-worker-node"} == 1
           for: 15m
@@ -149,11 +152,12 @@ spec:
           annotations:
             summary: "Dev worker {{ $labels.instance }}: disk-guard exhausted, disk still filling"
             description: >-
-              disk-guard on {{ $labels.instance }} ran its whole ladder (build cache, anonymous volumes,
-              old containers + unused images, merged worktrees, idle deps) and a disk is still under its
-              trigger. What is left is live work. `journalctl -u dev-worker-disk-guard -n 80`, then
-              `du -xh --max-depth=2 /workspace | sort -rh | head`, `docker system df -v`; ask the agent
-              owner what can go, or grow the scsi1 disk (kubernetes/infra/dev-workers).
+              disk-guard on {{ $labels.instance }} ran its whole ladder (old codex releases, build cache,
+              anonymous volumes, old containers + unused images, merged worktrees, idle deps) and a disk is
+              still under its trigger. `journalctl -u dev-worker-disk-guard -n 80` names the low
+              filesystem and, once an hour, its largest directories ("largest under"). Then
+              `docker system df -v`; ask the agent owner what can go (bulk agent data belongs in the capped
+              /workspace/archive, or on the NAS via the runbook), or grow the disk (kubernetes/infra/dev-workers).
         # Reclaim is being attempted and is not working: a step exits non-zero (docker daemon down,
         # cleanup crashing, a step timing out) on consecutive runs. Separate from Exhausted on purpose —
         # a failed step says nothing about whether what is left is live work.
@@ -187,3 +191,25 @@ spec:
               /var/lib/prometheus/node-exporter/dev_worker_disk_guard.prom. `systemctl status
               dev-worker-disk-guard.timer dev-worker-disk-guard.service`; roll out with
               `--tags disk_guard`.
+        # The agents' archive dir (dev_worker_archive_dir) is capped by disk-guard on every run, but only
+        # entries unchanged for an hour may go: a burst of new entries can hold it over the cap for up to
+        # an hour by design. Over for 2h means the cap is not working (every entry keeps changing, or the
+        # removal fails) and the archive is growing unbounded again. A scan that runs out of time
+        # removes nothing and sets archive_scan_timeout (archive_bytes is then a lower bound): the same
+        # alert, since an archive too big to scan in 120 s is exactly one the cap is not holding.
+        - alert: DevWorkerArchiveOverCap
+          expr: |
+            dev_worker_disk_guard_archive_bytes{job="dev-worker-node"}
+              > dev_worker_disk_guard_archive_max_bytes{job="dev-worker-node"}
+            or dev_worker_disk_guard_archive_scan_timeout{job="dev-worker-node"} == 1
+          for: 2h
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: agent archive over its cap for 2h+"
+            description: >-
+              /workspace/archive on {{ $labels.instance }} has been over its cap (or too big to scan in
+              120 s) for 2h, which the hour-long grace for new entries cannot explain. `journalctl -u
+              dev-worker-disk-guard | grep archive` shows whether entries keep changing ("everything left
+              changed within the hour"), a removal fails ("could not remove": a root-owned entry is never
+              removed) or the scan times out ("nothing removed this run": too many files — ask the agent
+              to pack them). `du -sh /workspace/archive/* | sort -rh | head`.
