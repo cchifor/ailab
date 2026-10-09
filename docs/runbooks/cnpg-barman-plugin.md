@@ -189,14 +189,17 @@ kubectl get backups.postgresql.cnpg.io -A -o json | jq '[.items[] | select((.spe
 ```
 
 Repeat the selection over every Flux-built directory of trueswarm-admin. `kubectl kustomize` emits a
-multi-document YAML stream, so wrap it into an `items` list first:
+multi-document YAML stream, so wrap it into an `items` list with Python and PyYAML. Don't use `yq`: the Go
+(mikefarah) yq treats `-s` as split-to-files, which would feed jq nothing. The jq filter **errors** when
+nothing was rendered, so a parse failure can't pass as `[]`:
 
 ```sh
+set -o pipefail
 for d in deploy/platform deploy/foundation; do
-  kubectl kustomize "$d" | yq -o json -s '{"items": .}' | jq '[.items[]
-    | select((.kind == "Cluster" and (.spec.backup.barmanObjectStore or ([.spec.externalClusters[]? | select(.barmanObjectStore)] | length > 0)))
-          or (.kind == "ScheduledBackup" and (.spec.method == null or .spec.method == "barmanObjectStore")))
-    | .kind + "/" + .metadata.name]'                                                            # []
+  kubectl kustomize "$d"     | python3 -c 'import sys, json, yaml; print(json.dumps({"items": [o for o in yaml.safe_load_all(sys.stdin) if o]}))'     | jq -e 'if (.items | length) == 0 then error("nothing rendered for this dir") else [.items[]
+        | select((.kind == "Cluster" and (.spec.backup.barmanObjectStore or ([.spec.externalClusters[]? | select(.barmanObjectStore)] | length > 0)))
+              or (.kind == "ScheduledBackup" and (.spec.method == null or .spec.method == "barmanObjectStore")))
+        | .kind + "/" + .metadata.name] end' || echo "GATE ERROR in $d"                        # expect []
 done
 ```
 
