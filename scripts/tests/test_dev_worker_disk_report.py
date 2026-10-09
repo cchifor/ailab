@@ -192,14 +192,22 @@ class ImplReviewTest(unittest.TestCase):
                              os.path.join(d, "state"), 10, 5 * GB, 24)
             text = dr.render(model, NOW, 1.0, 10, 5 * GB)
             self.assertIn('dir="wt",kind="worktrees"', text)
-            self.assertIn(f'dir="wt/dump",kind="other"}} {25 * GB}', text)
+            self.assertIn(f'dir="wt/dump",kind="other",depth="2"}} {25 * GB}', text)
             self.assertNotIn('dir="wt/one"', text)
 
-    def test_a_missing_configured_root_is_a_failed_scan(self):
-        with tempfile.TemporaryDirectory() as d:
+    def test_a_missing_workspace_root_fails_only_when_the_disk_is_not_mounted(self):
+        with tempfile.TemporaryDirectory() as d:              # a plain dir: not a mountpoint
             out = dr.scan_all(["nobody-here"], d, 600, scan=lambda p, left: {".": 1})
             self.assertIn(("nobody-here", "workspace"), out)
             self.assertIsNone(out[("nobody-here", "workspace")])
+        real = dr.os.path.ismount
+        dr.os.path.ismount = lambda p: True                    # mounted: the user just has no dir
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = dr.scan_all(["nobody-here"], d, 600, scan=lambda p, left: {".": 1})
+                self.assertNotIn(("nobody-here", "workspace"), out)
+        finally:
+            dr.os.path.ismount = real
 
     def test_a_history_write_failure_is_reported(self):
         with tempfile.TemporaryDirectory() as d:

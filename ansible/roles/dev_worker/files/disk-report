@@ -216,8 +216,8 @@ def render(model, now, scan_seconds, top, big):
             data.append(f'dev_worker_dir_bytes{{{base},dir="{esc(n)}",kind="{r["kinds"].get(n, "other")}"}}'
                         f" {r['top'][n]}")
         for n, b in sorted(r.get("nested", {}).items(), key=lambda kv: -kv[1]):
-            if b > big:
-                data.append(f'dev_worker_dir_bytes{{{base},dir="{esc(n)}",kind="other"}} {b}')
+            if b > big:     # depth="2": also inside its group's series — exclude it from sums
+                data.append(f'dev_worker_dir_bytes{{{base},dir="{esc(n)}",kind="other",depth="2"}} {b}')
         for n, g in sorted(r["growth"].items(), key=lambda kv: -kv[1])[:top]:
             if g > 0:
                 data.append(f'dev_worker_dir_growth_bytes{{{base},dir="{esc(n)}",kind="{r["kinds"].get(n, "other")}"}} {g}')
@@ -279,8 +279,13 @@ def scan_all(users, workspace, budget, scan=du, clock=time.monotonic):
         for root_name, path in (("workspace", os.path.join(workspace, user)),
                                 ("home", os.path.join("/home", user))):
             if not os.path.isdir(path):
-                print(f"disk-report: {path}: missing (an unmounted /workspace?)", file=sys.stderr)
-                out[(user, root_name)] = None       # failed: keeps its last values, scan incomplete
+                # Failed (keeps its last values, scan incomplete) only when the workspace disk is not
+                # mounted; a root that simply does not exist for this user is not scanned at all, or
+                # it would keep the report "stale" forever on a healthy worker.
+                if root_name == "workspace" and not os.path.ismount(workspace):
+                    print(f"disk-report: {workspace} is not mounted; {path} counts as failed",
+                          file=sys.stderr)
+                    out[(user, root_name)] = None
                 continue
             left = deadline - clock()
             if left <= 0:

@@ -164,9 +164,9 @@ for name in .cache .npm; do
 	fi
 	# -T: if a tool recreated $src between the rename and here, fail instead of putting the link
 	# INSIDE the new directory; the old copy is cache, so it goes either way, and the next run retries.
-	if ! ln -sT -- "$dst" "$src" 2>/dev/null; then
+	if ! err=$(ln -sT -- "$dst" "$src" 2>&1); then
 		rm -rf -- "$src.pre-workspace" || :
-		echo "skip $src: recreated while it was being moved; the next run retries"
+		echo "skip $src: could not link it to $dst ($err); the next run retries"
 		continue
 	fi
 	rm -rf -- "$src.pre-workspace" || echo "skip: could not fully remove $src.pre-workspace"
