@@ -7,8 +7,7 @@
 ### Critical pressure still overrides Docker protection
 **Location:** ansible/roles/dev_worker/files/disk-guard:331
 **Severity:** blocker
-<!-- codex: The busy gate still falls through when the Docker filesystem is below --critical, allowing prune operations during the builds/pulls whose leases those operations can invalidate; W2 explicitly required continued protection and escalation at critical space. Remove the override, update the alert/runbook language promising pruning below 5%, and test that every Docker reclaim step remains deferred under critical pressure while Docker is busy. -->
-<!-- opus-pushback: ESCALATED to the operator (plan says escalate-instead-of-delete at critical; implementation keeps the 10-06 design: below 5% free a docker prune runs through a busy client, because at that point the in-flight build/pull is about to fail on ENOSPC anyway and ENOSPC takes every other command with it). Both review bots approved the implemented behaviour on #1190; the plan's W2 sentence is reconciled to whatever the operator decides. -->
+Settled by the operator (2026-10-09): keep pruning through a busy docker below --critical; the plan's W2 sentence is amended to match (no code change).
 
 ### Full-cache pruning still bypasses its hourly limit
 **Location:** PR #1189 / #1190 — BuildKit GC policy and disk-guard full_prune_due/ladder
