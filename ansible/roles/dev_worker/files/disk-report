@@ -48,14 +48,20 @@ LABEL_MAX = 120
 
 def du(root, timeout, run=subprocess.run):
     """{relative path: bytes} for root's entries down to depth 2 (files included), one filesystem.
-    Raises subprocess.TimeoutExpired, or OSError when du produced no total for the root (it failed
-    early: the root vanished, EIO, ...) — partial output must never pass for a complete scan. A
-    non-zero exit WITH the total is accepted: on a live worker files vanish mid-walk and du says so."""
+    Raises subprocess.TimeoutExpired, or OSError when the scan is not trustworthy: no total for the
+    root (du failed early), or a non-zero exit for any reason other than files vanishing mid-walk —
+    a total after an I/O or permission error counts only what du could read, and must never pass for
+    a complete scan. Vanishing files ("No such file or directory") are normal on a live worker."""
     r = run(["du", "-x", "-a", "-B1", "--max-depth=2", root], stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=timeout, errors="surrogateescape")
     sizes = parse_du(r.stdout, root)
     if "." not in sizes:
         raise OSError(f"du {root}: no total (exit {r.returncode}): {r.stderr.strip()[-200:]}")
+    if r.returncode != 0:
+        other = [line for line in r.stderr.splitlines()
+                 if line.strip() and not line.rstrip().endswith("No such file or directory")]
+        if other:
+            raise OSError(f"du {root}: exit {r.returncode}: {other[0][-200:]}")
     return sizes
 
 

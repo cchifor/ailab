@@ -189,9 +189,18 @@ class DuTest(unittest.TestCase):
         with self.assertRaises(OSError):
             dr.du("/w/c4", 10, run=run)
 
-    def test_a_nonzero_exit_with_the_total_is_accepted(self):
-        run = lambda *a, **k: self.R("4096\t/w/c4/a\n8192\t/w/c4\n", 1, "du: cannot access 'x': No such file")
+    def test_files_vanishing_mid_walk_are_tolerated(self):
+        err = "du: cannot access '/w/c4/a/tmp1': No such file or directory\n"
+        run = lambda *a, **k: self.R("4096\t/w/c4/a\n8192\t/w/c4\n", 1, err)
         self.assertEqual(dr.du("/w/c4", 10, run=run), {"a": 4096, ".": 8192})
+
+    def test_a_total_after_an_io_or_permission_error_is_a_failed_scan(self):
+        for err in ("du: cannot read directory '/w/c4/a/b': Input/output error\n",
+                    "du: cannot access '/w/c4/x': No such file or directory\n"
+                    "du: cannot read directory '/w/c4/p': Permission denied\n"):
+            run = lambda *a, **k: self.R("4096\t/w/c4/a\n8192\t/w/c4\n", 1, err)
+            with self.assertRaises(OSError, msg=err):
+                dr.du("/w/c4", 10, run=run)
 
 
 class ScanTest(unittest.TestCase):
