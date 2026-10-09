@@ -404,3 +404,73 @@ Rollback is an image/annotation revert through a reviewed GitOps PR to
 (source `6ebe437da928efcb50b6bbcfbb187802fb3fa00b`, release
 `router-0.1.0-20261007-plugin-settings`). Saved settings remain compatible with
 that release; no database or composition restore is needed for this naming change.
+
+
+## Codex-native routes release (2026-10-09)
+
+`router-0.1.0-20261009-codex-native` deploys merged llm-router main
+`d7c798db2f1e3c4785a69cf9b9970d72c8fce5f3`
+([PR #87](https://git.chifor.me/cchifor/llm-router/pulls/87)). It lets the **Codex CLI** use the
+router. Today it is the ailab dev workers (`dev-workers.md` § "Codex through the router").
+
+**Why.** The CLI speaks the subscription backend's own Responses protocol: tools as
+`additional_tools` input items, encrypted reasoning items, `include`, `prompt_cache_key`,
+`reasoning.context`, `text.verbosity`. The router's Responses subset refuses it
+(`400 UNSUPPORTED_PARAMETER: include`, measured 2026-10-09), and codex 0.160 has no Chat Completions
+mode any more (`wire_api = "chat" is no longer supported`).
+
+**What.** The api-openai setting `codexNative.routes` (in `ROUTER_PLUGIN_CONFIG`, `router.yaml`)
+lists routes that serve `POST /v1/responses` as a pass-through:
+
+- **Request:** the client's body goes to the route's Codex account as sent. The router sets the
+  deployment's model, `store: false` and `stream: true`, forwards an allowlist of the CLI's
+  session and client headers, and uses the account's own credentials.
+- **Response:** every upstream SSE event comes back as it came, the backend's own failure events
+  included. The router reads only the terminal event, for usage, the finish and the error code.
+- **Engine features apply unchanged:** routing, admission, timeouts, cooldowns, plan limits,
+  usage and the journal (`request.received` carries `native: codex-responses`).
+- **Unlisted routes:** nothing changes for them.
+- **Model names:** a route-scoped key that names a model (the CLI's `gpt-6-astra`) is served by
+  the first of its listed routes whose every target serves exactly that model. A route of the
+  requested name always wins over that mapping.
+- **Body size:** bodies over 2 MiB, up to 16 MiB (the CLI resends the whole conversation each
+  turn), are admitted before they are read, and only for keys that may use a listed route. At
+  most 8 are received at once.
+
+**The routes and the account.** Six routes, one per model `codex-5` offers: `dw-gpt-6-astra`,
+`dw-gpt-6-sol`, `dw-gpt-6-luna`, `dw-gpt-5.6-sol`, `dw-gpt-5.6-terra` and `dw-gpt-5.6-luna`. Each has:
+
+- one target, `codex-5/<model>`;
+- `maxAttempts: 1`, no fallback (encrypted reasoning only decrypts on the account that produced
+  it);
+- `timeoutMs` 300 s and `idleTimeoutMs` 600 s (above the CLI's own 300 s stream idle).
+
+They were created through `PUT /admin/v1/config` (revision 314). At cutover, account `codex-5`
+(`charlie@strive.us`) was taken out of the shared `codex` route, which is back to the four
+accounts it had on 2026-10-07, and its `concurrency` went from 1 to 6. It now serves only the dev
+workers. The four workers' keys (`dev-worker-N codex (ailab dev worker, <ip>)`, expiring
+2027-10-09) are limited to the six routes. Their values are seeded into OpenBao from
+`devworker-seeds.sops.yaml`.
+
+**Image.** Built from the merged source in the pinned Node 26.10.0 runtime image: frozen install,
+build, production install, production smoke. Published by relay
+`release/router-codex-native-image`.
+
+- Archive `router-0.1.0-20261009-codex-native.tar.gz`, SHA-256
+  `6cc278b18f80c31312f52d92bfbfcc1d62ebe89958051e6c6cf1a4914756bf50` (relay v0.2.0 asset).
+- Image: `registry.chifor.me/llm-router/router@sha256:9f9661c8458479d9ed3b2915bd0be7bef73e6fa706f783d9410bad0fe8c0b49b`.
+- [Image CI 75225](https://git.chifor.me/cchifor/relay/actions/runs/75225) (production smoke, plugin settings, backup and upgrade checks under the non-root/read-only constraints); [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-75225.json).
+- Before release, the same build ran the real Codex CLI (0.153.4 and 0.160.0) on dev-worker-1 against the real subscription backend, through a local router on that host's own login (an access token only, never refreshed): a shell tool call, an `apply_patch` edit and multi-turn reasoning all completed.
+
+There is no schema or data change, and no init container or canary. The usual single-replica
+Recreate rollout briefly interrupts service. The **Router rollout acceptance** workflow checks the
+pod and the public endpoints. End to end: a real `codex exec` on each dev worker
+(`scripts/validate-codex-fleet.sh`). Locally, before merge: the real CLI through the router to a
+fake backend replaying a captured stream.
+
+**Rollback** is an image/annotation revert through a reviewed GitOps PR to
+`registry.chifor.me/llm-router/router@sha256:598cd7e1b634bc652024aa7041e2ea7584df88caf6cb2e15fae0f044375d44ef`
+(source `0974a7a00160ba1961fe4722af5c758f88610ea8`, release
+`router-0.1.0-20261007-provider-names`). That release's settings schema is not strict, so it ignores
+the `codexNative` key, but drop the key in the same PR anyway. First turn the dev workers back to their own
+logins (`dev_worker_codex_router_enabled: false`).
