@@ -18,6 +18,8 @@
 # ~425 MB per auto-update, never pruned by codex) when / is low, and caps the agents' archive dir
 # (dev_worker_archive_dir) on every run. Both added after dev-worker-3 filled / AND /workspace with
 # ~50 GB of agent-made "qualification archives", part of them moved into $HOME on the root disk.
+# Also under buildx_prune: that unit (tasks/docker.yml) runs its prunes through
+# `disk-guard --run-when-docker-idle`, so a -t buildx_prune run must not leave an older guard behind.
 - name: Install the disk-guard tool
   ansible.builtin.copy:
     src: disk-guard
@@ -25,6 +27,7 @@
     owner: root
     group: root
     mode: "0755"
+  tags: [buildx_prune]
 
 # A tag-limited run skips workspace.yml (which mounts the data disk): without this check the archive
 # dir below would land on the root filesystem of a worker whose data disk is not mounted.
@@ -57,7 +60,7 @@
 
         [Service]
         Type=oneshot
-        ExecStart=/usr/local/bin/disk-guard --watch / --watch {{ dev_worker_workspace_mount }} --docker-fs {{ dev_worker_workspace_mount }} --low {{ dev_worker_disk_guard_low }} --target {{ dev_worker_disk_guard_target }} --critical {{ dev_worker_disk_guard_critical }} --image-days {{ dev_worker_disk_guard_image_days }} --deps-days {{ dev_worker_disk_guard_deps_days }} --worktree-days {{ dev_worker_worktree_prune_days }} --archive-dir {{ dev_worker_archive_dir }} --archive-max-gb {{ dev_worker_archive_max_gb }}{{ ' --worktrees-remove' if (dev_worker_worktree_prune_mode | string) == 'remove' else '' }}
+        ExecStart=/usr/local/bin/disk-guard --watch / --watch {{ dev_worker_workspace_mount }} --docker-fs {{ dev_worker_workspace_mount }} --low {{ dev_worker_disk_guard_low }} --target {{ dev_worker_disk_guard_target }} --critical {{ dev_worker_disk_guard_critical }} --image-days {{ dev_worker_disk_guard_image_days }} --deps-days {{ dev_worker_disk_guard_deps_days }} --worktree-days {{ dev_worker_worktree_prune_days }} --archive-dir {{ dev_worker_archive_dir }} --archive-max-gb {{ dev_worker_archive_max_gb }} --build-cache-max-used {{ dev_worker_buildkit_gc_max_used }} --build-cache-min-free {{ dev_worker_buildkit_gc_min_free }} --build-cache-reserved {{ dev_worker_buildkit_gc_reserved }}{{ ' --worktrees-remove' if (dev_worker_worktree_prune_mode | string) == 'remove' else '' }}
         Nice=10
         IOSchedulingClass=best-effort
         IOSchedulingPriority=7

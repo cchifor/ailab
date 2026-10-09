@@ -11,12 +11,12 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 **The base spec is shared** — cores + ceiling + floor are module-wide scalars in
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
 `dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries identity plus two optional
-per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw3 — node1 mitigation — and 6 GiB on dw4, node2) and
+per-worker overrides: `memory_floating_mib` (12 GiB floor on dw3 and 16 GiB on dw1 — node1 mitigation; dw1's was raised by hand and codified 2026-10-09 — and 6 GiB on dw4, node2) and
 `memory_mib` (unused since dev-worker-6's retirement; it carried the 12 GiB-ceiling POC, see below).
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 60+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**16** floor = ceiling, node1) / 60+128 GiB |
 | dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 60+128 GiB |
 | dev-worker-3 | ai-node1 | 4204 | 192.168.0.10 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 60+128 GiB |
 | dev-worker-4 | ai-node2 | 4205 | 192.168.0.11 | 8 vCPU / 16 GiB (**6**–16 balloon, node2 floor) / 60+128 GiB |
@@ -1078,7 +1078,9 @@ sourced from `~/.bashrc` for tmux/ttyd panes, and by the claude-job unit), and `
 are symlinks to `/workspace/<user>/.cache` and `.npm`, so every tool's default cache lands there.
 System `/tmp` stays on `/`. An agent started before the rollout keeps `/tmp` until it is restarted.
 `sudo -u <user> agent-dirs-migrate <home> /workspace/<user>` re-runs the move (it skips while a
-uv/pip/npm/playwright process of that user runs).
+process of that user uses the caches, checked again right before each switch). A tool that starts
+in the instant between that check and the switch keeps its files: the old tree stays as
+`~/.cache.pre-workspace` ("kept … still in use") and a later run removes it once nothing uses it.
 
 **Alerts and what to do** (`kubernetes/apps/infrastructure/monitoring/dev-workers-rules.yaml`; the
 hardening plan behind them: `plans/2026-10-09-dev-worker-disk-hardening-plan.md`):
@@ -1140,8 +1142,10 @@ held lock defers a step, it never runs two prunes at once. Each daily docker pru
 `disk-guard --run-when-docker-idle 3600 -- <prune>`: the lock and an idle docker are checked together
 right before it starts, retried for up to an hour, then the prune is skipped; BuildKit's GC holds the
 build cache meanwhile. Under sustained pressure the guard's
-all-cache `builder prune -af` runs at most hourly (dangling cache only in between) unless /workspace
-is under 5%. A step that runs long keeps the heartbeat fresh (rewritten every minute).
+all-cache `builder prune -af` runs at most hourly, under 5% free too; the ticks in between prune to
+the BuildKit GC target (`--max-used-space`/`--min-free-space`/`--reserved-space` from
+`dev_worker_buildkit_gc_*`), which below 20 GB free leaves only the 2 GB most recently used cache.
+A step that runs long keeps the heartbeat fresh (rewritten every minute).
 
 Removals the guard makes itself (codex releases, archive entries) run `rm -rf` as the owner of the
 entry, never as root: a root-owned archive entry is left alone ("could not remove"), and a codex

@@ -11,9 +11,14 @@
 # Skips the whole run (reporting "busy") while anything of this user uses the caches — a process
 # whose cwd, executable, open file or memory mapping is under ~/.cache or ~/.npm (whatever its command
 # line: `python -m pip`, `node .../playwright/cli.js`, a browser) — or while a package tool runs by
-# name; the next run retries. DW_AGENT_DIRS_BUSY_CHECK=0 disables both (tests of the move itself).
+# name; the next run retries. The check runs again right before each switch (the browser copy can
+# take minutes). A tool can still start between that check and the rename — nothing short of a lock
+# every tool honours rules it out — so the renamed old tree is removed only once nothing references
+# it: until then it is kept, the tool keeps its files, and a later run removes it.
+# DW_AGENT_DIRS_BUSY_CHECK=0 disables all of these checks (tests of the move itself).
 #
-# Prints "moved <path>" for each change (ansible's changed_when), "skip …" for anything left alone.
+# Prints "moved <path>" / "removed <path>" for each change (ansible's changed_when), "skip …" for
+# anything left alone, "kept …" for an old tree still in use.
 set -euo pipefail
 
 home=${1:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
@@ -34,7 +39,6 @@ if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ] && [ "$(readlink "/proc/$PPID/ns/mn
 	echo "skip: busy (not running in the caller's mount namespace; cannot judge which processes use the caches)"
 	exit 0
 fi
-cache_ids=$(stat -Lc '%d:%i' "$home/.cache" "$home/.npm" 2>/dev/null || :)
 relevant() { # PID: could this process be using our caches?
 	local pid=$1 d id
 	[ "$(readlink "/proc/$pid/ns/mnt" 2>/dev/null)" = "$self_ns" ] && return 0
@@ -51,8 +55,8 @@ relevant() { # PID: could this process be using our caches?
 # file (/proc/PID/maps carries the device and inode) — in ANY namespace: a container, an `unshare -m`
 # sandbox or a private ~/.cache with the host's ~/.cache/uv bind-mounted into it all reference the
 # same objects if they use our caches, whatever path they see them under.
-cache_objects() {
-	find "$home/.cache/" "$home/.npm/" -xdev -printf '%D:%i\n' 2>/dev/null | sort -u
+tree_objects() { # DIR...
+	find "$@" -xdev -printf '%D:%i\n' 2>/dev/null | sort -u
 }
 process_objects() {
 	local p dev ino maj min
@@ -83,9 +87,9 @@ uninspectable_tool() {
 	done
 	return 1
 }
-caches_in_use() {
+in_use() { # DIR...: does a process of this user reference anything under DIR?
 	local objs
-	objs=$(cache_objects)
+	objs=$(tree_objects "$@")
 	[ -n "$objs" ] || return 1
 	[ -n "$(comm -12 <(printf '%s\n' "$objs") <(process_objects) | head -1)" ] || uninspectable_tool
 }
@@ -117,26 +121,47 @@ containers_mount_caches() {
 	return 1
 }
 
-if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ]; then
-	if caches_in_use; then
-		echo "skip: busy (a process of $(id -un) is using $home/.cache or $home/.npm)"
-		exit 0
+# Prints why the caches are busy and returns 0; returns 1 when they are not.
+busy() {
+	local pid rc=0
+	[ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ] || return 1
+	cache_ids=$(stat -Lc '%d:%i' "$home/.cache" "$home/.npm" 2>/dev/null || :) # for relevant()
+	if in_use "$home/.cache/" "$home/.npm/"; then
+		echo "a process of $(id -un) is using $home/.cache or $home/.npm"
+		return 0
 	fi
 	for pid in $(pgrep -u "$(id -u)" -f -- '(^|[ /])(uv|uvx|pip3?|npm|npx|pnpm)( |$)|-m (pip|uv)( |$)|playwright(/| |$)|ms-playwright/'); do
 		if relevant "$pid"; then
-			echo "skip: busy (a uv/pip/npm/playwright process of $(id -un) is running)"
-			exit 0
+			echo "a uv/pip/npm/playwright process of $(id -un) is running"
+			return 0
 		fi
 	done
-	rc=0
 	containers_mount_caches || rc=$?
-	if [ "$rc" = 0 ]; then
-		echo "skip: busy (a running container bind-mounts $home/.cache or $home/.npm)"
-		exit 0
-	elif [ "$rc" = 2 ]; then
-		echo "skip: busy (cannot ask docker which containers mount $home/.cache or $home/.npm)"
-		exit 0
+	case $rc in
+	0) echo "a running container bind-mounts $home/.cache or $home/.npm" ;;
+	2) echo "cannot ask docker which containers mount $home/.cache or $home/.npm" ;;
+	*) return 1 ;;
+	esac
+}
+
+# Remove SRC's renamed old tree unless a process still references it (a tool that started after the
+# last busy check keeps its files; a later run removes the tree). 0 = nothing is left of it.
+drop_old() { # SRC
+	local old=$1.pre-workspace
+	[ -e "$old" ] || return 0
+	if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ] && in_use "$old/"; then
+		echo "kept $old: still in use; a later run removes it"
+		return 1
 	fi
+	if ! rm -rf -- "$old"; then
+		echo "skip: could not fully remove $old"
+		return 1
+	fi
+}
+
+if why=$(busy); then
+	echo "skip: busy ($why)"
+	exit 0
 fi
 
 for name in .cache .npm; do
@@ -145,6 +170,9 @@ for name in .cache .npm; do
 	mkdir -p "$dst"
 	if [ -L "$src" ]; then
 		if [ "$(readlink -f -- "$src")" = "$(readlink -f -- "$dst")" ]; then
+			if [ -e "$src.pre-workspace" ] && drop_old "$src"; then
+				echo "removed $src.pre-workspace (kept by an earlier run while in use)"
+			fi
 			continue
 		fi
 		echo "skip $src: a symlink to $(readlink -- "$src"), not $dst"
@@ -155,14 +183,29 @@ for name in .cache .npm; do
 		continue
 	fi
 	if [ -d "$src" ]; then
+		if ! drop_old "$src"; then # an old tree a tool still uses: never rename onto it
+			echo "skip $src: $src.pre-workspace from an earlier run is still there"
+			continue
+		fi
 		if [ "$name" = .cache ] && [ -d "$src/ms-playwright" ] && [ ! -e "$dst/ms-playwright" ]; then
 			rm -rf -- "$dst/ms-playwright.partial"
 			cp -a -- "$src/ms-playwright" "$dst/ms-playwright.partial"
 			mv -- "$dst/ms-playwright.partial" "$dst/ms-playwright"
 		fi
-		mv -- "$src" "$src.pre-workspace"
+		# Again right before the switch: the copy above can take minutes.
+		if why=$(busy); then
+			echo "skip: busy ($why)"
+			exit 0
+		fi
+		mv -T -- "$src" "$src.pre-workspace"
 	fi
-	ln -s -- "$dst" "$src"
-	rm -rf -- "$src.pre-workspace" || echo "skip: could not fully remove $src.pre-workspace"
+	# -T: if a tool recreated $src between the rename and here, fail instead of putting the link
+	# INSIDE the new directory; the next run retries.
+	if ! err=$(ln -sT -- "$dst" "$src" 2>&1); then
+		drop_old "$src" || :
+		echo "skip $src: could not link it to $dst ($err); the next run retries"
+		continue
+	fi
+	drop_old "$src" || :
 	echo "moved $src -> $dst"
 done

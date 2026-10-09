@@ -736,25 +736,49 @@ class ReliabilityTest(unittest.TestCase):
         step = dg.Step("x", True, ("sh", "-c", f"exit {dg.FLOCK_BUSY}"), 10)
         self.assertEqual(dg.run_step(step), dg.LOCKED)
 
-    def test_full_cache_prune_at_most_hourly_unless_critical(self):
-        o = opts()
+    def test_full_cache_prune_at_most_hourly_even_when_critical(self):
+        o = opts("--build-cache-max-used", "20GB", "--build-cache-min-free", "20GB",
+                 "--build-cache-reserved", "2GB")
+        target = ("--max-used-space", "20GB", "--min-free-space", "20GB", "--reserved-space", "2GB")
         d = Disk({"/": 0.40, "/workspace": 0.08})
         dg.guard(o, d.measure, d.avail, d.run, quiet, idle)
-        self.assertIn("-af", d.argv["build-cache"])                     # first: due
+        self.assertEqual(d.argv["build-cache"][-1], "-af")              # first: due, everything
         self.assertTrue(os.path.exists(o.full_prune_stamp))
         d2 = Disk({"/": 0.40, "/workspace": 0.08})
         dg.guard(o, d2.measure, d2.avail, d2.run, quiet, idle)
-        self.assertNotIn("-af", d2.argv["build-cache"])                 # within the hour
-        self.assertIn("-f", d2.argv["build-cache"])
-        d3 = Disk({"/": 0.40, "/workspace": 0.03})                      # under --critical
-        dg.guard(o, d3.measure, d3.avail, d3.run, quiet, idle)
-        self.assertIn("-af", d3.argv["build-cache"])
+        self.assertEqual(d2.argv["build-cache"][-6:], target)           # within the hour: GC target
+        # Repeated ticks under --critical, builds caching again in between (each tick finds the disk
+        # short again): every one prunes to the target — at critical, all but the reserved cache —
+        # never the full -af again within the hour.
+        for _ in range(3):
+            d3 = Disk({"/": 0.40, "/workspace": 0.03})
+            dg.guard(o, d3.measure, d3.avail, d3.run, quiet, idle)
+            self.assertEqual(d3.argv["build-cache"][-6:], target)
+            self.assertEqual(d3.argv["build-cache"].count("-af"), 1)
+        os.utime(o.full_prune_stamp, (time.time() - dg.FULL_PRUNE_EVERY - 1,) * 2)
+        d4 = Disk({"/": 0.40, "/workspace": 0.03})
+        dg.guard(o, d4.measure, d4.avail, d4.run, quiet, idle)
+        self.assertEqual(d4.argv["build-cache"][-1], "-af")             # an hour later: due again
+
+    def test_the_build_cache_target_defaults_to_the_buildkit_gc_policy(self):
+        o = opts()
+        self.assertEqual((o.build_cache_max_used, o.build_cache_min_free, o.build_cache_reserved),
+                         ("20GB", "20GB", "2GB"))
 
     def test_a_failed_full_prune_does_not_start_the_hour(self):
         o = opts()
         d = Disk({"/": 0.40, "/workspace": 0.08}, rc={"build-cache": 1})
         dg.guard(o, d.measure, d.avail, d.run, quiet, idle)
         self.assertFalse(os.path.exists(o.full_prune_stamp))
+
+    @unittest.skipUnless(shutil.which("timeout") and shutil.which("sleep"), "needs coreutils")
+    def test_a_hung_step_is_killed_at_its_budget(self):
+        # A real subprocess that never finishes: `timeout` ends it at the step's budget, the step
+        # counts as failed (non-zero), and the run goes on to complete.
+        started = time.monotonic()
+        rc = dg.run_step(dg.Step("hang", False, ("sleep", "60"), 1))
+        self.assertNotEqual(rc, 0)
+        self.assertLess(time.monotonic() - started, 30)
 
     def test_heartbeat_keeps_beating_while_a_step_runs(self):
         beats = []

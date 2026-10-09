@@ -179,6 +179,46 @@ class BuildRenderTest(unittest.TestCase):
         self.assertIn(f"dev_worker_disk_report_last_complete_timestamp_seconds {NOW - 3600}", text)
 
 
+class ImplReviewTest(unittest.TestCase):
+    """Phase B (plans/2026-10-09-dev-worker-disk-hardening-impl-review.md) round 1."""
+
+    def test_non_git_data_beside_checkouts_in_a_grouping_dir_is_exported(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "c4")
+            os.makedirs(os.path.join(root, "wt", "one", ".git"))
+            os.makedirs(os.path.join(root, "wt", "dump"))
+            sizes = {".": 30 * GB, "wt": 30 * GB, "wt/one": 2 * GB, "wt/dump": 25 * GB}
+            model = dr.build(["c4"], NOW, {("c4", "workspace"): (root, sizes)},
+                             os.path.join(d, "state"), 10, 5 * GB, 24)
+            text = dr.render(model, NOW, 1.0, 10, 5 * GB)
+            self.assertIn('dir="wt",kind="worktrees"', text)
+            self.assertIn(f'dir="wt/dump",kind="other",depth="2"}} {25 * GB}', text)
+            self.assertNotIn('dir="wt/one"', text)
+
+    def test_a_missing_workspace_root_fails_only_when_the_disk_is_not_mounted(self):
+        with tempfile.TemporaryDirectory() as d:              # a plain dir: not a mountpoint
+            out = dr.scan_all(["nobody-here"], d, 600, scan=lambda p, left: {".": 1})
+            self.assertIn(("nobody-here", "workspace"), out)
+            self.assertIsNone(out[("nobody-here", "workspace")])
+        real = dr.os.path.ismount
+        dr.os.path.ismount = lambda p: True                    # mounted: the user just has no dir
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = dr.scan_all(["nobody-here"], d, 600, scan=lambda p, left: {".": 1})
+                self.assertNotIn(("nobody-here", "workspace"), out)
+        finally:
+            dr.os.path.ismount = real
+
+    def test_a_history_write_failure_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            blocker = os.path.join(d, "blocker")
+            pathlib.Path(blocker).write_text("")
+            self.assertFalse(dr.save({"complete": True, "roots": {}}, os.path.join(blocker, "s"), NOW, 30))
+            self.assertTrue(dr.save({"complete": True, "roots": {}}, os.path.join(d, "s"), NOW, 30))
+            text = dr.render({"complete": True, "roots": {}, "history_write_failed": 1}, NOW, 1.0, 10, 5 * GB)
+            self.assertIn("dev_worker_disk_report_history_write_failed 1", text)
+
+
 class DuTest(unittest.TestCase):
     class R:
         def __init__(self, out, rc, err=""):

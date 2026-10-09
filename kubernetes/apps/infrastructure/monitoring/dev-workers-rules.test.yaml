@@ -385,8 +385,8 @@ tests:
             exp_annotations:
               summary: "Dev worker 192.168.0.8:9100: disk attribution is stale"
               description: >-
-                dev-worker-disk-report on 192.168.0.8:9100 has not completed a scan for 3h, so
-                DirGrowing/UnownedDataLarge are blind. `systemctl status dev-worker-disk-report.service`,
+                dev-worker-disk-report on 192.168.0.8:9100 has not completed a scan for 3h, or cannot
+                save its history (growth loses its baseline), so DirGrowing/UnownedDataLarge are blind. `systemctl status dev-worker-disk-report.service`,
                 `journalctl -u dev-worker-disk-report -n 30` (a du over its 10 min budget marks the scan
                 incomplete); roll out with `--tags disk_report`.
 
@@ -416,3 +416,28 @@ tests:
                 DirGrowing/UnownedDataLarge cannot fire there. `systemctl list-timers
                 dev-worker-disk-report.timer`, `journalctl -u dev-worker-disk-report -n 30`; roll out with
                 `--tags disk_report`.
+
+  # Scans complete (fresh last_complete) but the history cannot be saved: still stale for growth.
+  - interval: 1m
+    name: a disk-report that cannot save its history pages DiskReportStale
+    input_series:
+      - series: 'dev_worker_disk_report_last_complete_timestamp_seconds{job="dev-worker-node", instance="192.168.0.11:9100"}'
+        values: "0+60x20"
+      - series: 'dev_worker_disk_report_history_write_failed{job="dev-worker-node", instance="192.168.0.11:9100"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DevWorkerDiskReportStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.11:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.11:9100: disk attribution is stale"
+              description: >-
+                dev-worker-disk-report on 192.168.0.11:9100 has not completed a scan for 3h, or cannot
+                save its history (growth loses its baseline), so DirGrowing/UnownedDataLarge are blind.
+                `systemctl status dev-worker-disk-report.service`,
+                `journalctl -u dev-worker-disk-report -n 30` (a du over its 10 min budget marks the scan
+                incomplete); roll out with `--tags disk_report`.

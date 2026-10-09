@@ -211,7 +211,9 @@ variable "dev_worker_nodes" {
     memory_mib = optional(number)
   }))
   default = {
-    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1", memory_floating_mib = 12288 }
+    # dev-worker-1's floor was raised to 16 GiB by hand outside tofu and codified on 2026-10-09 (operator
+    # decision, found by the W6 root-disk plan: plans/2026-10-09-dev-worker-disk-hardening-plan.md).
+    "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1", memory_floating_mib = 16384 }
     "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2" }
     # Slot 3 = the VM that was dev-worker-4 until 2026-09-23 (vmid 4204, ai-node1), re-slotted by
     # `tofu state mv` (PR-C2, gate G3a-2) with its node1 12 GiB floor; its IP moved .11 -> .10 and its

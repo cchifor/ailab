@@ -141,6 +141,48 @@ if unshare -rm true 2>/dev/null; then
 			mount --bind '$t/keep-uv' '$t/home8/.cache/uv' && cd '$t/home8/.cache/uv' && sleep 30"
 fi
 
+# 6e. A cache user that starts AFTER the first busy check (here: while the Playwright browsers are
+#     copied) is caught by the re-check right before the switch: nothing is renamed or removed.
+#     A stub `cp` starts it — deterministic: the sleeper's cwd is set before it is forked.
+realcp=$(command -v cp)
+realln=$(command -v ln)
+mkdir -p "$t/late" "$t/ws/u9" "$t/home9/.cache/ms-playwright/chromium-1" "$t/home9/.cache/uv/x"
+echo y >"$t/home9/.cache/uv/x/f"
+cat >"$t/late/cp" <<STUB
+#!/bin/bash
+cd '$t/home9/.cache/uv' && { sleep 30 >/dev/null 2>&1 & echo \$! >'$t/late.pid'; }
+cd /
+exec '$realcp' "\$@"
+STUB
+chmod +x "$t/late/cp"
+out=$(PATH="$t/late:$PATH" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home9" "$t/ws/u9")
+kill "$(cat "$t/late.pid")" 2>/dev/null || :
+grep -q "skip: busy" <<<"$out" || fail "a cache user started during the copy did not make it skip: $out"
+[ ! -L "$t/home9/.cache" ] && [ "$(cat "$t/home9/.cache/uv/x/f")" = y ] || fail "switched under a user started after the first check"
+
+# 6f. ...and one that starts after the re-check, between the rename and the link (a stub `ln`): the
+#     switch completes, but the old tree it is using is KEPT; once it is gone, the next run removes it.
+mkdir -p "$t/late2" "$t/ws/u10" "$t/home10/.cache/uv/x"
+echo y >"$t/home10/.cache/uv/x/f"
+cat >"$t/late2/ln" <<STUB
+#!/bin/bash
+for a; do src=\$a; done
+cd "\$src.pre-workspace/uv" 2>/dev/null && { sleep 30 >/dev/null 2>&1 & echo \$! >'$t/late2.pid'; }
+cd /
+exec '$realln' "\$@"
+STUB
+chmod +x "$t/late2/ln"
+out=$(PATH="$t/late2:$PATH" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home10" "$t/ws/u10")
+grep -q "moved $t/home10/.cache" <<<"$out" || fail "the switch did not complete: $out"
+grep -q "kept $t/home10/.cache.pre-workspace" <<<"$out" || fail "an old tree in use was not reported kept: $out"
+[ "$(cat "$t/home10/.cache.pre-workspace/uv/x/f")" = y ] || fail "an old tree in use was removed"
+kill "$(cat "$t/late2.pid")" 2>/dev/null || :
+wait 2>/dev/null || :
+sleep 0.2
+out=$(DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home10" "$t/ws/u10")
+grep -q "removed $t/home10/.cache.pre-workspace" <<<"$out" || fail "the next run did not remove the old tree: $out"
+[ ! -e "$t/home10/.cache.pre-workspace" ] || fail "the old tree is still there"
+
 # 7. The TMPDIR hook: set only for an existing, real, writable directory.
 hook=$t/hook.sh
 sed "s#{{ dev_worker_workspace_mount }}#$t/ws#g" "$tmpl" >"$hook"

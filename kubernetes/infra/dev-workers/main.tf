@@ -45,9 +45,9 @@ resource "proxmox_virtual_environment_vm" "dev_worker" {
   # dev workers return RAM to the host. The default floor is a module scalar, kept low because the
   # heavyweight LLMs on node2/node3 are now idle-unloaded (llama-swap), so ballooning actually works
   # and inflates a busy worker toward the ceiling. See variables.tf + docs/runbooks/dev-workers.md.
-  # Floor and ceiling are the uniform scalars UNLESS this worker carries an override: ai-node1's two
-  # workers pin a 12 GiB floor (that node is oversubscribed enough that ballooning never inflates
-  # them) and dev-worker-4 (vmid 4205, ex-dev-worker-5) pins 6 GiB (node2) — see the notes on dev_worker_nodes in variables.tf. `memory` is deliberately NOT in lifecycle.ignore_changes below: ignoring it
+  # Floor and ceiling are the uniform scalars UNLESS this worker carries an override: ai-node1's
+  # workers pin a high floor (that node is oversubscribed enough that ballooning never inflates them;
+  # dev-worker-3 12 GiB, dev-worker-1 16 GiB since 2026-10-09) and dev-worker-4 (vmid 4205, ex-dev-worker-5) pins 6 GiB (node2) — see the notes on dev_worker_nodes in variables.tf. `memory` is deliberately NOT in lifecycle.ignore_changes below: ignoring it
   # would stop tofu managing memory at all and hide the next divergence, where codifying the
   # override keeps the drift visible and reviewable.
   memory {
