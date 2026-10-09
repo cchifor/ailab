@@ -10,8 +10,13 @@ forge-objects.taild43998.ts.net
 
 Cluster SDK clients and tailnet browsers keep the same HTTPS URL and signed
 Host. Cluster DNS returns the internal Service address; outside the cluster,
-Tailscale resolves the name to the dedicated proxy. The platform owner PR must
-provide that Service and TLS endpoint before this change is activated. No fixed
+Tailscale resolves the name to the dedicated proxy. The platform certificate
+bootstrap stage must first be merged and observed reconciled with its live
+dependency edge and current-generation Certificate Ready. Only then may the
+separate platform TLS stage provide its Service and endpoint; this DNS stage
+follows both. Do not merge the two platform stages as one batch: an existing
+Flux child can otherwise consume the TLS Deployment before the parent installs
+its new dependency edge. No fixed
 IP, LAN reservation, public DNS, Tailscale DNSConfig or wildcard rewrite is added.
 No Kubernetes write or rollout was performed during preparation.
 
@@ -53,7 +58,7 @@ discovery, reverse lookups, upstream forwarding, error logging, caching, readine
 metrics, loop detection and reload/load-balancing retain the exact pinned baseline.
 Names adjacent to the selected name and unrelated tailnet names are not rewritten.
 
-1. Review the ownership boundary above and the platform companion PR. Confirm
+1. Review the ownership boundary above and both platform companion PRs. Confirm
    the internal 443 Service and certificate are ready before merging this DNS
    change. Cross-repository Flux ordering is not enforced by these manifests;
    owner rollout order is required. Activating DNS first produces resolution or
