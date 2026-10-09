@@ -1,0 +1,65 @@
+---
+# disk-report — hourly per-directory attribution of /workspace/<user> and /home/<user> (files/disk-report,
+# tested by scripts/tests/test_dev_worker_disk_report.py). W5 of
+# plans/2026-10-09-dev-worker-disk-hardening-plan.md: disk-guard must leave agent-made data alone, so a
+# human has to hear WHICH directory is growing while there is still room. Alerts DevWorkerDirGrowing,
+# DevWorkerUnownedDataLarge, DevWorkerDiskReportStale. A scan of dev-worker-3 (~3.2M inodes) took
+# 150 s; the unit runs it at idle CPU/IO priority with a 10 min budget. Own tag: --tags disk_report.
+- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
+  ansible.builtin.set_fact:
+    dev_worker_users: >-
+      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
+         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
+          if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  when: dev_worker_users is not defined
+
+- name: Install the disk-report tool
+  ansible.builtin.copy:
+    src: disk-report
+    dest: /usr/local/bin/disk-report
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the disk-report unit + timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - dest: dev-worker-disk-report.service
+      content: |
+        [Unit]
+        Description=Attribute dev-worker disk usage per directory (hourly)
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/disk-report{% for u in dev_worker_users %} --user {{ u.name }}{% endfor %} --workspace {{ dev_worker_workspace_mount }}
+        Nice=19
+        IOSchedulingClass=idle
+        TimeoutStartSec=20min
+    - dest: dev-worker-disk-report.timer
+      content: |
+        [Unit]
+        Description=Hourly dev-worker disk attribution
+
+        [Timer]
+        OnBootSec=15min
+        OnCalendar=hourly
+        RandomizedDelaySec=10min
+        Persistent=true
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd
+
+- name: Disk-report timer enabled
+  ansible.builtin.systemd:
+    name: dev-worker-disk-report.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  # --check does not write the unit above, so the timer cannot exist yet on a first rollout.
+  ignore_errors: "{{ ansible_check_mode }}"
