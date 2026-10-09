@@ -101,6 +101,19 @@ def top_level(sizes):
     return {rel: b for rel, b in sizes.items() if rel != "." and os.sep not in rel}
 
 
+def nested_unowned(root, sizes, kinds):
+    """{"group/child": bytes} for the non-git children of each grouping directory (kind=worktrees):
+    the group as a whole is exempt from the unowned-data policy, the data beside its checkouts is not."""
+    out = {}
+    for rel, b in sizes.items():
+        group, sep, child = rel.partition(os.sep)
+        if not sep or os.sep in child or kinds.get(group) != "worktrees":
+            continue
+        if not os.path.lexists(os.path.join(root, group, child, ".git")):
+            out[rel] = b
+    return out
+
+
 def growth(now_top, then_top):
     """{name: bytes grown} for every entry, new ones counting from 0."""
     return {name: b - then_top.get(name, 0) for name, b in now_top.items()}
@@ -158,7 +171,7 @@ def build(users, now, scan, state_dir, top, big, growth_hours):
         grown = growth(top_now, base[key]) if key in base else {}
         out["roots"][key] = {"user": user, "root": root_name, "path": root, "total": sizes.get(".", 0),
                              "top": top_now, "kinds": kinds, "growth": grown, "depth2": sizes,
-                             "scanned_at": int(now)}
+                             "nested": nested_unowned(root, sizes, kinds), "scanned_at": int(now)}
     return out
 
 
@@ -173,6 +186,10 @@ def render(model, now, scan_seconds, top, big):
         "# HELP dev_worker_disk_report_scan_seconds How long this run's scans took.",
         "# TYPE dev_worker_disk_report_scan_seconds gauge",
         f"dev_worker_disk_report_scan_seconds {scan_seconds:.1f}",
+        "# HELP dev_worker_disk_report_history_write_failed 1 if this run could not save its state/snapshot"
+        " (growth then loses its baseline).",
+        "# TYPE dev_worker_disk_report_history_write_failed gauge",
+        f"dev_worker_disk_report_history_write_failed {model.get('history_write_failed', 0)}",
         "# HELP dev_worker_disk_report_last_complete_timestamp_seconds Last run in which every root scanned.",
         "# TYPE dev_worker_disk_report_last_complete_timestamp_seconds gauge",
     ] + ([f"dev_worker_disk_report_last_complete_timestamp_seconds {model['complete_at']}"]
@@ -198,6 +215,9 @@ def render(model, now, scan_seconds, top, big):
         for n in sorted(shown, key=lambda n: -r["top"][n]):
             data.append(f'dev_worker_dir_bytes{{{base},dir="{esc(n)}",kind="{r["kinds"].get(n, "other")}"}}'
                         f" {r['top'][n]}")
+        for n, b in sorted(r.get("nested", {}).items(), key=lambda kv: -kv[1]):
+            if b > big:
+                data.append(f'dev_worker_dir_bytes{{{base},dir="{esc(n)}",kind="other"}} {b}')
         for n, g in sorted(r["growth"].items(), key=lambda kv: -kv[1])[:top]:
             if g > 0:
                 data.append(f'dev_worker_dir_growth_bytes{{{base},dir="{esc(n)}",kind="{r["kinds"].get(n, "other")}"}} {g}')
@@ -213,34 +233,42 @@ def load_json(path):
 
 
 def write_atomic(path, text, mode):
+    """True when written."""
     tmp = f"{path}.{os.getpid()}"
     try:
         with open(tmp, "w") as f:
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
+        return True
     except (OSError, UnicodeError) as e:
         print(f"disk-report: cannot write {path}: {e}", file=sys.stderr)
         try:
             os.unlink(tmp)
         except OSError:
             pass
+        return False
 
 
 def save(model, state_dir, now, keep_hours):
     """latest.json every run (a failed root carries its own last values in it); the snapshot only
     holds the roots scanned in THIS run, so a stale carried root never becomes a growth baseline."""
-    os.makedirs(state_dir, mode=0o700, exist_ok=True)
-    write_atomic(os.path.join(state_dir, "latest.json"), json.dumps(model), 0o600)
+    try:
+        os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    except OSError as e:
+        print(f"disk-report: {state_dir}: {e}", file=sys.stderr)
+        return False
+    ok = write_atomic(os.path.join(state_dir, "latest.json"), json.dumps(model), 0o600)
     snap = {"roots": {k: {"top": v["top"]} for k, v in model["roots"].items()
                       if v.get("scanned_at") == int(now)}}
-    write_atomic(os.path.join(state_dir, f"snap-{int(now)}.json"), json.dumps(snap), 0o600)
+    ok = write_atomic(os.path.join(state_dir, f"snap-{int(now)}.json"), json.dumps(snap), 0o600) and ok
     for path in glob.glob(os.path.join(state_dir, "snap-*.json")):
         try:
             if now - int(os.path.basename(path)[5:-5]) > keep_hours * 3600:
                 os.unlink(path)
         except (ValueError, OSError):
             pass
+    return ok
 
 
 def scan_all(users, workspace, budget, scan=du, clock=time.monotonic):
@@ -251,6 +279,8 @@ def scan_all(users, workspace, budget, scan=du, clock=time.monotonic):
         for root_name, path in (("workspace", os.path.join(workspace, user)),
                                 ("home", os.path.join("/home", user))):
             if not os.path.isdir(path):
+                print(f"disk-report: {path}: missing (an unmounted /workspace?)", file=sys.stderr)
+                out[(user, root_name)] = None       # failed: keeps its last values, scan incomplete
                 continue
             left = deadline - clock()
             if left <= 0:
@@ -290,7 +320,8 @@ def main(argv=None):
     if opts.dry_run:
         sys.stdout.write(text)
         return 0
-    save(model, opts.state_dir, now, opts.keep_hours)
+    model["history_write_failed"] = int(not save(model, opts.state_dir, now, opts.keep_hours))
+    text = render(model, now, time.monotonic() - started, opts.top, opts.big_gb * 1e9)
     if os.path.isdir(opts.textfile_dir):
         write_atomic(os.path.join(opts.textfile_dir, PROM), text, 0o644)
     return 0

@@ -79,7 +79,6 @@
 # --tags agent_dirs.
 - name: Agent temp files and caches off the root disk
   ansible.builtin.import_tasks: agent_dirs.yml
-  when: dev_worker_agent_dirs_on_workspace | bool
   tags: [agent_dirs]
 
 # Deliberately next to the swapfile: both are last-ditch behaviour for a worker that has run out of

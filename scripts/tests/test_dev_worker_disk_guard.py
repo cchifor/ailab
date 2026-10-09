@@ -756,6 +756,15 @@ class ReliabilityTest(unittest.TestCase):
         dg.guard(o, d.measure, d.avail, d.run, quiet, idle)
         self.assertFalse(os.path.exists(o.full_prune_stamp))
 
+    @unittest.skipUnless(shutil.which("timeout") and shutil.which("sleep"), "needs coreutils")
+    def test_a_hung_step_is_killed_at_its_budget(self):
+        # A real subprocess that never finishes: `timeout` ends it at the step's budget, the step
+        # counts as failed (non-zero), and the run goes on to complete.
+        started = time.monotonic()
+        rc = dg.run_step(dg.Step("hang", False, ("sleep", "60"), 1))
+        self.assertNotEqual(rc, 0)
+        self.assertLess(time.monotonic() - started, 30)
+
     def test_heartbeat_keeps_beating_while_a_step_runs(self):
         beats = []
         rc = dg.run_with_heartbeat(lambda step: time.sleep(0.35) or 0, None,

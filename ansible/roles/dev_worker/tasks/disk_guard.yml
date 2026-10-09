@@ -18,6 +18,8 @@
 # ~425 MB per auto-update, never pruned by codex) when / is low, and caps the agents' archive dir
 # (dev_worker_archive_dir) on every run. Both added after dev-worker-3 filled / AND /workspace with
 # ~50 GB of agent-made "qualification archives", part of them moved into $HOME on the root disk.
+# Also under buildx_prune: that unit (tasks/docker.yml) runs its prunes through
+# `disk-guard --run-when-docker-idle`, so a -t buildx_prune run must not leave an older guard behind.
 - name: Install the disk-guard tool
   ansible.builtin.copy:
     src: disk-guard
@@ -25,6 +27,7 @@
     owner: root
     group: root
     mode: "0755"
+  tags: [buildx_prune]
 
 # A tag-limited run skips workspace.yml (which mounts the data disk): without this check the archive
 # dir below would land on the root filesystem of a worker whose data disk is not mounted.
