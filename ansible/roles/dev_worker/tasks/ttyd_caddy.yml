@@ -23,28 +23,24 @@
     - Restart ttyd
 
 # Caddy comes from its pinned GitHub release .deb (sha512 from the release's checksums file), not the
-# Cloudsmith apt repo. Since 2026-10-09 that repo answers 402 Payment Required (bandwidth quota,
-# caddyserver/caddy#8184). A dead source in sources.list.d fails EVERY `update_cache: true` in this
-# role, which broke the whole role, not just Caddy. The repo and its key are removed so they cannot
-# poison apt again. Pinned to the version every worker already runs, so this changes no installed
-# package; bump dev_worker_caddy_version deliberately.
-- name: Remove the Cloudsmith Caddy apt repository (402 since 2026-10-09)
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop:
-    - /etc/apt/sources.list.d/caddy-stable.sources
-    - /etc/apt/keyrings/caddy-stable.asc
-
+# Cloudsmith apt repo, which answers 402 since 2026-10-09 (caddyserver/caddy#8184). The repo/key
+# cleanup is the first task of main.yml (tags: always), because the role's first apt cache update
+# would fail before reaching this file. Pinned to the version every worker runs; bump
+# dev_worker_caddy_version deliberately. The role asserts x86_64 at the top, hence linux_amd64.
 - name: Read the installed Caddy version
   ansible.builtin.package_facts:
     manager: apt
 
+- name: Decide whether Caddy {{ dev_worker_caddy_version }} must be installed
+  ansible.builtin.set_fact:
+    dev_worker_caddy_needs_install: >-
+      {{ (ansible_facts.packages.caddy | default([{"version": ""}]))[0].version != dev_worker_caddy_version }}
+
 # Download + install only when the installed version differs, so a routine converge never fetches
-# the 18 MB .deb (and check mode does not trip over a download it skipped).
+# the 18 MB .deb or restarts Caddy. In check mode get_url does not download, so the install is
+# skipped there (it would only fail on the missing file).
 - name: Download Caddy {{ dev_worker_caddy_version }} (.deb, checksum-verified)
-  when: >-
-    (ansible_facts.packages.caddy | default([{"version": ""}]))[0].version != dev_worker_caddy_version
+  when: dev_worker_caddy_needs_install | bool
   ansible.builtin.get_url:
     url: "https://github.com/caddyserver/caddy/releases/download/v{{ dev_worker_caddy_version }}/caddy_{{ dev_worker_caddy_version }}_linux_amd64.deb"
     dest: "/var/cache/apt/archives/caddy_{{ dev_worker_caddy_version }}_linux_amd64.deb"
@@ -52,8 +48,7 @@
     mode: "0644"
 
 - name: Install Caddy {{ dev_worker_caddy_version }}
-  when: >-
-    (ansible_facts.packages.caddy | default([{"version": ""}]))[0].version != dev_worker_caddy_version
+  when: dev_worker_caddy_needs_install | bool and not ansible_check_mode
   ansible.builtin.apt:
     deb: "/var/cache/apt/archives/caddy_{{ dev_worker_caddy_version }}_linux_amd64.deb"
 

@@ -12,6 +12,20 @@
       - ansible_facts['architecture'] == "x86_64"
       - ansible_facts['distribution'] == "Ubuntu"
     fail_msg: "dev_worker targets amd64 Ubuntu (24.04 noble) VMs only."
+  tags: [always]
+
+# BEFORE the first `update_cache: true` (packages.yml), unconditionally and on every tag: Caddy's
+# Cloudsmith apt repo answers 402 Payment Required since 2026-10-09 (caddyserver/caddy#8184), and one
+# dead source in sources.list.d fails every apt cache update in this role. Caddy now comes from its
+# GitHub release .deb (ttyd_caddy.yml), so the repo and key must never be present again.
+- name: Remove the Cloudsmith Caddy apt repository (402 since 2026-10-09)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/caddy-stable.sources
+    - /etc/apt/keyrings/caddy-stable.asc
+  tags: [always]
 
 - name: Base packages, yq, qemu-guest-agent
   ansible.builtin.import_tasks: packages.yml
