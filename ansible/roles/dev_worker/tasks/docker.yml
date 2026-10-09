@@ -47,12 +47,16 @@
     state: directory
     mode: "0710"
 
-- name: Lay down /etc/docker/daemon.json (data-root + log rotation + live-restore)
+# Own tag so a daemon.json change (e.g. the BuildKit GC policy) can be rolled out alone, worker by
+# worker: --tags docker_daemon. The restart keeps containers (live-restore) but fails any in-flight
+# build or pull, so roll out when the worker's docker is idle.
+- name: Lay down /etc/docker/daemon.json (data-root, log rotation, live-restore, BuildKit GC)
   ansible.builtin.template:
     src: daemon.json.j2
     dest: /etc/docker/daemon.json
     mode: "0644"
   notify: Restart docker
+  tags: [docker_daemon]
 
 - name: Enable + start docker
   ansible.builtin.systemd:
@@ -126,6 +130,8 @@
   notify: Reload systemd
 
 # Section 15: daily buildx cache prune so containerd's overlayfs snapshotter doesn't grow unbounded.
+# Since 2026-10-09 a BACKSTOP: BuildKit's own GC (daemon.json `builder.gc`, dev_worker_buildkit_gc_*)
+# enforces the same cap continuously; this keeps the daily sweep in case the GC policy is lost.
 # Size-capped, NOT age-filtered: `buildx prune --filter=until=168h` removes nothing on buildx 0.37 /
 # BuildKit 0.33 — this timer logged "Total: 0B" every week while 20+ GB of cache sat unused on every
 # worker (found 2026-09-23). --max-used-space evicts least-recently-used records above the cap.
