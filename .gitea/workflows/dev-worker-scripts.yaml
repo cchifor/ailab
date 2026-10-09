@@ -71,6 +71,14 @@ jobs:
           set -euo pipefail
           bash ansible/roles/dev_worker/tests/test-cred-helper.sh
 
+      # The read-only git credential helper (tasks/git_credential_helper.yml) against real git:
+      # reject/approve leave ~/.git-credentials alone, and the task's migration refuses unknown helpers.
+      - name: read-only git credential helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/dev_worker/tests/test-git-credential-readonly.sh
+
       - name: codex router-key helper (vault, cache, fallback)
         shell: bash
         run: |

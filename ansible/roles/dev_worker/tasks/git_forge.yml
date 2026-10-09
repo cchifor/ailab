@@ -1,29 +1,23 @@
 ---
 # Gitea (git.chifor.me) forge access for the dev-worker users. Gitea is the master forge now
 # (ADR 0017), so agents/devs on the worker clone/push private cchifor/* repos over HTTPS. This writes a
-# per-user credential.helper=store + a ~/.git-credentials line using a `dev-worker-bot` read/write-repository
-# Gitea token (dev_worker_gitea_token, SOPS). No-op when the token isn't provided. Gitea SSH is
-# in-cluster only (not tunnelled), so HTTPS+token is the access path.
+# per-user ~/.git-credentials line using a `dev-worker-bot` read/write-repository Gitea token
+# (dev_worker_gitea_token, SOPS) and points git at a read-only helper for it
+# (git_credential_helper.yml). No-op when the token isn't provided. Gitea SSH is in-cluster only
+# (not tunnelled), so HTTPS+token is the access path.
 #
 # YIELDS TO OPENBAO: when dev_worker_enable_openbao is on, the bao agent renders ~/.git-credentials
 # from af/dev-workers/common instead (ADR 0020), so this whole block stands down rather than fight
 # it — two writers of one file would flip it back and forth on every run, and a PAT rotated in
-# OpenBao would be silently reverted here to whatever the SOPS file still holds. openbao.yml carries
-# its own copy of the credential.helper git-config task, since both paths need it.
+# OpenBao would be silently reverted here to whatever the SOPS file still holds. openbao.yml imports
+# the same git_credential_helper.yml, since both paths need it.
 - name: Configure Gitea git credentials (per dev-worker user)
   when:
     - dev_worker_gitea_token | default('') | length > 0
     - not (dev_worker_enable_openbao | bool)
   block:
-    - name: Enable the per-user git credential store
-      become: true
-      become_user: "{{ item.name }}"
-      ansible.builtin.command:
-        cmd: git config --global credential.helper store
-      changed_when: false
-      loop: "{{ dev_worker_users }}"
-      loop_control:
-        label: "{{ item.name }}"
+    - name: Point git at the read-only credential helper (shared with the other credential path)
+      ansible.builtin.import_tasks: git_credential_helper.yml
 
     - name: Pin the git.chifor.me credential username (shared with the other credential path)
       ansible.builtin.import_tasks: pin_gitea_username.yml
