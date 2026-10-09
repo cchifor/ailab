@@ -4,6 +4,7 @@ kind: Kustomization
 # ingress, cloudflared, tailscale. Populated per sub-phase.
 resources:
   - core # PriorityClasses first — workloads below reference them
+  - core-dns # Exact private S3 rewrite; adopts the Talos Corefile (owner review)
   - sources
   - cert-manager # TLS cert automation (ClusterIssuers applied separately via clusters/ai/cert-manager-config.yaml)
   - storage

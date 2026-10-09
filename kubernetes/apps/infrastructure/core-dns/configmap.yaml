@@ -1,0 +1,45 @@
+# This adopts the FULL Corefile scalar from Talos bootstrap, not a fragment.
+# Baseline: Talos v1.14.2, cluster.local; exact live match on 2026-10-10.
+# Owner review and Talos-upgrade comparison: docs/runbooks/forge-objectstore-dns.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+  annotations:
+    # Removing this Flux input must never delete the cluster DNS configuration.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+            lameduck 5s
+        }
+        ready
+        log . {
+            class error
+        }
+        prometheus :9153
+
+        rewrite stop {
+            name exact forge-objects.taild43998.ts.net objectstore-forge-tls.strive-ailab.svc.cluster.local
+            answer auto
+        }
+
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+            pods insecure
+            fallthrough in-addr.arpa ip6.arpa
+            ttl 30
+        }
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30 {
+           disable success cluster.local
+           disable denial cluster.local
+        }
+        loop
+        reload
+        loadbalance
+    }
