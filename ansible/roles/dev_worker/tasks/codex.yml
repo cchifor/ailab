@@ -205,21 +205,34 @@
 # default also differs by version (off in 0.160, on in 0.162), and a TUI refuses a daemon whose feature
 # set differs: "Background server has incompatible feature settings" (dev-worker-2, 2026-10-09). The
 # model metadata codex needs is its own catalog's for gpt-6-astra, which discovery would not improve.
+# Pinned whatever the provider: discovery is irrelevant to the built-in ChatGPT provider, and a pin that
+# came and went with the router would bring the version-dependent default (and the prompt) back.
+# A RUNNING daemon keeps the features it started with, so a change here is announced below.
 - name: Pin codex model discovery off per user (CLI and daemon must agree)
   community.general.ini_file:
     path: "{{ item.home }}/.codex/config.toml"
     section: features
     option: api_key_model_discovery
     value: "false"
-    state: "{{ 'present' if dev_worker_codex_router_enabled | bool else 'absent' }}"
     no_extra_spaces: false
     create: true
     owner: "{{ item.name }}"
     group: "{{ item.name }}"
     mode: "0600"
+  register: dev_worker_codex_feature_pin
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
+
+- name: Announce the app-server daemon restart the pin needs (never done here; it interrupts attached TUIs)
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: codex features changed for
+      {{ dev_worker_codex_feature_pin.results | selectattr('changed') | map(attribute='item.name') | join(', ') }}.
+      Their running app-server daemon still has its old feature set, and new TUIs will hit "Background
+      server has incompatible feature settings" until it restarts. As each user, when no TUI is attached:
+      `codex app-server daemon restart` (runbook dev-workers.md, "Codex through the router").
+  when: dev_worker_codex_feature_pin.results | selectattr('changed') | list | length > 0
 
 - name: A `chatgpt` profile per user (the host's own login, for when the router cannot serve)
   community.general.ini_file:
