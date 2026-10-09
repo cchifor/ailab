@@ -37,6 +37,11 @@
 - name: Mount the /workspace data disk
   ansible.builtin.import_tasks: workspace.yml
 
+# Grow / online after its disk is enlarged in tofu (dev_worker_rootfs_gb). Own tag: --tags rootfs.
+- name: Grow the root filesystem to its disk
+  ansible.builtin.import_tasks: rootfs.yml
+  tags: [rootfs]
+
 - name: "/tmp hygiene (tmpfiles.d aging; full loopback cap behind a toggle)"
   ansible.builtin.import_tasks: tmp_hygiene.yml
 

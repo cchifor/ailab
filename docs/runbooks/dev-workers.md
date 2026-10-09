@@ -16,10 +16,10 @@ per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw3 — node1 
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
-| dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 40+128 GiB |
-| dev-worker-3 | ai-node1 | 4204 | 192.168.0.10 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 40+128 GiB |
-| dev-worker-4 | ai-node2 | 4205 | 192.168.0.11 | 8 vCPU / 16 GiB (**6**–16 balloon, node2 floor) / 40+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 60+128 GiB |
+| dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 60+128 GiB |
+| dev-worker-3 | ai-node1 | 4204 | 192.168.0.10 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 60+128 GiB |
+| dev-worker-4 | ai-node2 | 4205 | 192.168.0.11 | 8 vCPU / 16 GiB (**6**–16 balloon, node2 floor) / 60+128 GiB |
 
 **Slot ≠ vmid since 2026-09-23.** **dev-worker-6** (ai-node3, 4206, 192.168.0.13) was **retired
 2026-09-21** and **slot 3's original VM** (ai-node3, 4203) on **2026-09-23**, both to fund the second

@@ -117,9 +117,14 @@ variable "dev_worker_memory_floating_mib" {
   default     = 4096
 }
 variable "dev_worker_rootfs_gb" {
-  description = "Root disk (scsi0) size in GiB; cloud-init growpart expands the root fs to fill it."
+  description = "Root disk (scsi0) size in GiB; cloud-init growpart expands the root fs to fill it at boot, the role's rootfs tag online."
   type        = number
-  default     = 40
+  # 40 -> 60 on 2026-10-09 (plans/2026-10-09-dev-worker-disk-hardening-plan.md W6): every worker's / went
+  # under 6% free at least once in the 15 days before (dev-worker-2: 98%). Headroom for what cannot
+  # move to /workspace (agent CLIs, $HOME config, hard-coded /tmp writers), not a substitute for that
+  # move. local-lvm thin pools on ai-node1/2 were ~57% used (~780 GB free) at the time. Grow only:
+  # PVE cannot shrink a disk.
+  default = 60
 }
 variable "dev_worker_workspace_gb" {
   description = "Blank data disk (scsi1) size in GiB; Ansible partitions/mkfs/mounts it at /workspace."
