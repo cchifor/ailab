@@ -21,8 +21,22 @@ case "$h" in
 esac
 home=$(getent passwd "$u" | cut -d: -f6)
 f="$home/.codex/auth.json"
-if [ ! -s "$f" ]; then echo "$h FAIL user=$u no $f"; exit 1; fi
 
+# A user whose codex talks to the LLM router (dev workers since 2026-10-09: top-level `model_provider`
+# naming the role's [model_providers.*] table) authenticates with the router key the provider's `auth`
+# command prints, not with auth.json: check that command yields a key (the value is discarded), then
+# the same real round-trip below, which goes through the router.
+auth=""
+provider=$(awk -F'"' '/^\[/{exit} /^model_provider[[:space:]]*=/{print $2; exit}' "$home/.codex/config.toml" 2>/dev/null)
+if [ -n "$provider" ] && [ "$provider" != "openai" ]; then
+  # CODEX_ROUTER_NO_CACHE=1: a LIVE vault read (the helper's cached fallback would hide a dead cred path).
+  if ! kerr=$(sudo -n -u "$u" -H env CODEX_ROUTER_NO_CACHE=1 /usr/local/bin/codex-router-key 2>&1 >/dev/null); then
+    echo "$h FAIL user=$u router($provider) no key from the vault: $(printf '%s' "$kerr" | head -1 | cut -c1-160)"; exit 1
+  fi
+  auth="router($provider)"
+elif [ ! -s "$f" ]; then echo "$h FAIL user=$u no $f"; exit 1; fi
+
+if [ -z "$auth" ]; then
 auth=$(python3 - "$f" <<'PY'
 import base64, json, sys, time
 d = json.load(open(sys.argv[1])); t = d.get("tokens") or {}
@@ -46,6 +60,7 @@ case "$auth" in
   "$want"*|API-KEY*|UNKNOWN-SHAPE*) ;;
   *) echo "$h FAIL user=$u $auth expected=$want"; exit 1 ;;
 esac
+fi
 
 # A LOGIN shell for the user: codex is an npm global under the user's own prefix (~/.npm-global/bin
 # on the dev workers, /usr/bin on the reviewers), reachable through the user's profile PATH, not

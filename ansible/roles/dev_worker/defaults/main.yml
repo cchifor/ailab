@@ -59,7 +59,8 @@ dev_worker_codex_pkg: "@openai/codex"
 # Any user whose installed codex is OLDER than this is upgraded to exactly it (never downgraded).
 # gpt-6-astra needs >= 0.153.0 (measured 2026-09-05: 0.152.1 rejected, 0.153.0 accepted): an
 # older CLI is rejected upstream with `400 The 'gpt-6-astra' model requires a newer version of Codex`.
-dev_worker_codex_version: "0.153.4"
+# 0.160.0: the floor for the router provider's `auth` command (measured on 0.160.0, 2026-10-09).
+dev_worker_codex_version: "0.160.0"
 # Written as TOP-LEVEL keys into each user's ~/.codex/config.toml (edit-in-place, see codex.yml).
 # Empty string = leave that key unmanaged.
 dev_worker_codex_model: "gpt-6-astra"
@@ -83,6 +84,20 @@ dev_worker_codex_sandbox_network: true
 # docs/runbooks/openbao-dev-workers.md § "Host-owned codex logins".
 # false = the previous design: every user's auth.json is rendered from the shared projection.
 dev_worker_codex_host_owned_login: true
+
+# ---- Codex through the estate's LLM router (tasks/codex.yml; docs/runbooks/dev-workers.md § "Codex through the router") ----
+# true = each user's codex talks to router.chifor.me instead of ChatGPT with the host's own login:
+# `model_provider` (top level) names the [model_providers.<provider>] table this role writes, whose
+# `auth` command is /usr/local/bin/codex-router-key. That helper reads this host's router key from
+# OpenBao (`cred get <hostname> <field>`, af/dev-workers/<hostname>) on every call and keeps the last
+# good value in ~/.config/llm-router/codex.key, so a vault outage does not stop codex. The router
+# serves these requests on its Codex-native routes (llm-router `codexNative`), which pin one ChatGPT
+# subscription (codex-5); the key is limited to those routes. The host login stays on disk:
+# `codex -p chatgpt` uses it. false = the provider table and the top-level key are removed.
+dev_worker_codex_router_enabled: false
+dev_worker_codex_router_provider: "llm-router"
+dev_worker_codex_router_base_url: "https://router.chifor.me/v1"
+dev_worker_codex_router_key_field: "llm_router_codex_key"
 
 # ---- feature toggles ----
 dev_worker_install_docker: true

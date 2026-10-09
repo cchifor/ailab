@@ -191,7 +191,11 @@ Secret.
   the password fallback. Extending this key to them is a separate decision.
 - `af/dev-workers/<inventory_hostname>` — per-worker. Fields: `tep_kubeconfig`,
   `helmtest_kubeconfig` (ADR 0021). Also where per-worker Gitea bot PATs will land (ADR 0020
-  follow-up, still outstanding).
+  follow-up, still outstanding). `llm_router_codex_key` (since 2026-10-09) is this worker's
+  router.chifor.me API key, which its Codex sends through `/usr/local/bin/codex-router-key` (`cred
+  get <hostname> llm_router_codex_key`; `dev-workers.md` § "Codex through the router"). It is
+  **SEEDED**: `dev-worker-N.json` in `devworker-seeds.sops.yaml` (seed-wins), unlike the two
+  sync-owned fields below.
 
   These two are **SYNC-OWNED, and that is a FOURTH precedence in this repo — not the seed-wins
   contract the rest of this page describes.** They are written by the `openbao-k8stoken-sync`
@@ -605,6 +609,10 @@ Only once all six are done: delete `ansible/secrets/tep-tokens.sops.yaml`,
 staged-rollout switch, not a supported steady state (ADR 0021).
 
 ## Host-owned codex logins (dev workers, since 2026-09-29)
+
+> **Since 2026-10-09 the dev workers' Codex runs on the LLM router**, not on these logins
+> (`dev-workers.md` § "Codex through the router"). The host logins stay on disk as the `chatgpt`
+> profile (`codex -p chatgpt`), and everything below still applies to them.
 
 **The dev workers no longer render the shared login below.** `dev_worker_codex_host_owned_login`
 (role default `true`) drops the codex `template {}` from each worker's `agent.hcl`, so the bao agent

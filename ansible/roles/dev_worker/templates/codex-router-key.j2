@@ -1,0 +1,31 @@
+#!/bin/sh
+# Managed by ansible (role: dev_worker, tasks/codex.yml). The `auth` command of codex's
+# [model_providers.{{ dev_worker_codex_router_provider }}] table: prints this host's LLM-router key on stdout and nothing else,
+# which codex sends as `Authorization: Bearer <key>` to {{ dev_worker_codex_router_base_url }}.
+#
+# The key lives in OpenBao (af/dev-workers/<hostname>, field {{ dev_worker_codex_router_key_field }}) and is read through
+# `cred` on every call, so a rotation needs no ansible run. The last good value is kept in
+# ~/.config/llm-router/codex.key (0600) and printed when the vault cannot be read, so an OpenBao
+# outage does not stop codex; that fallback says so on stderr. CODEX_ROUTER_NO_CACHE=1 skips it, so a
+# check (scripts/validate-codex-host.sh) proves the live vault path. Never run it in a terminal you
+# share: it prints the key.
+set -u
+# Env-overridable so tests/test-codex-router-key.sh can drive the real script with a fake `cred`.
+CRED="${CODEX_ROUTER_CRED:-/usr/local/bin/cred}"
+cache="${HOME}/.config/llm-router/codex.key"
+if key="$("$CRED" get "$(hostname -s)" {{ dev_worker_codex_router_key_field }} 2>/dev/null)" && [ -n "$key" ]; then
+  umask 077
+  mkdir -p "${cache%/*}"
+  if [ ! -s "$cache" ] || [ "$(cat "$cache")" != "$key" ]; then
+    { printf '%s' "$key" > "$cache.tmp.$$" && mv -f "$cache.tmp.$$" "$cache"; } 2>/dev/null || rm -f "$cache.tmp.$$"
+  fi
+  printf '%s' "$key"
+  exit 0
+fi
+if [ "${CODEX_ROUTER_NO_CACHE:-0}" != 1 ] && [ -s "$cache" ]; then
+  echo "codex-router-key: 'cred get $(hostname -s) {{ dev_worker_codex_router_key_field }}' failed; using the cached key" >&2
+  cat "$cache"
+  exit 0
+fi
+echo "codex-router-key: no router key: 'cred get $(hostname -s) {{ dev_worker_codex_router_key_field }}' failed and there is no cached copy (docs/runbooks/dev-workers.md, Codex through the router)" >&2
+exit 1

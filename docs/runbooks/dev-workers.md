@@ -200,6 +200,96 @@ every sandboxed command runs in an empty network namespace, and `git push` fails
 helper also logs `unable to get credential storage lock ... Read-only file system` after a successful
 auth. That line is harmless: the file is rendered by the OpenBao agent, not by git.
 
+### Codex through the router (since 2026-10-09)
+
+**All four workers' Codex runs on the estate's LLM router** (router.chifor.me), on ONE ChatGPT
+subscription the router holds: account `codex-5`. The workers do not use their own ChatGPT logins
+for this. Role `dev_worker`, `tasks/codex.yml`, `dev_worker_codex_router_enabled: true` in
+`group_vars/dev_workers.yml`. Each user's `~/.codex/config.toml` gets:
+
+```toml
+model_provider = "llm-router"            # top level, next to the model pin
+
+[model_providers.llm-router]
+name = "llm-router"
+base_url = "https://router.chifor.me/v1"
+wire_api = "responses"
+auth = { command = "/usr/local/bin/codex-router-key" }
+
+[profiles.chatgpt]                       # escape hatch: the host's own ChatGPT login
+model_provider = "openai"
+```
+
+How a request travels:
+
+1. Codex runs `/usr/local/bin/codex-router-key` for its bearer. The helper reads this host's router
+   key with `cred get <hostname> llm_router_codex_key` (OpenBao `af/dev-workers/<hostname>`). It
+   keeps the last good value in `~/.config/llm-router/codex.key` (0600) and prints that copy when
+   the vault cannot be read. It says so on stderr: `... failed; using the cached key`.
+   `CODEX_ROUTER_NO_CACHE=1` skips the fallback, which is how the fleet validator proves the live
+   vault path. The key is never in the config file, and never in the environment of
+   the CLI or its tools.
+2. Codex sends its own Responses request (the real model name, `gpt-6-astra`) to
+   `https://router.chifor.me/v1/responses`.
+3. The router's **Codex-native routes** pass that request through as sent. These are the
+   `codexNative` setting in `ROUTER_PLUGIN_CONFIG`, `kubernetes/apps/apps/llm-router/router.yaml`,
+   and `docs/runbooks/llm-router.md` § "Codex-native routes". Each key is limited to the six `dw-*`
+   routes, one per model, all on `codex-5`. The router maps the CLI's model name to the route that
+   serves it (`gpt-6-astra` → `dw-gpt-6-astra`).
+
+The router's console (Activity, API keys) shows each worker's requests under its own key:
+`dev-worker-N codex (ailab dev worker, <ip>)`.
+
+| host | router key | prefix |
+|---|---|---|
+| dev-worker-1 | `key_aa2543746716` | `lrk_w7bR` |
+| dev-worker-2 | `key_43132b508eaa` | `lrk_UxUf` |
+| dev-worker-3 | `key_65e07ec0f75a` | `lrk_meXV` |
+| dev-worker-4 | `key_b06fc4e10a3c` | `lrk__1Wv` |
+
+All four keys expire on **2027-10-09** (365 days). The values live only in
+`kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml`
+(`dev-worker-N.json` → `af/dev-workers/dev-worker-N`, seed-wins). From there the
+`openbao-devworker-provision` Job writes them to the vault.
+
+**Shared quota and capacity.** The four workers share one subscription's windows. The router shows
+them on `codex-5` (Status; `GET /admin/v1/config` → account `codex-5`). `codex-5` serves only these
+routes: it was taken out of the shared `codex` route the same day. Its `concurrency` (6) caps how
+many requests the four workers run at once. A seventh gets `429 busy` with `Retry-After`, which
+Codex retries. A spent window answers 429 until it resets. Run `codex -p chatgpt` to work on the
+host's own login meanwhile.
+
+**After any change to the provider settings,** restart the managed app-server daemon as the user:
+`codex app-server daemon restart`, then restart open TUIs. Codex >= 0.158 keeps the provider the
+daemon started with. `dev_worker_codex_version` is 0.160.0, the version on which the `auth` command
+was measured.
+
+**Check a worker:** `scripts/validate-codex-fleet.sh dev-worker-3` (or the whole fleet). Router mode
+reports `router(llm-router)`: the key helper must yield a key, then a real `codex exec` goes through
+the router.
+
+**Rotate a worker's key.**
+
+1. Mint the new key (router admin API `POST /admin/v1/keys` with name, the six `dw-*` routes and
+   `expiresInDays`).
+2. Re-encrypt it into `devworker-seeds.sops.yaml` (decrypt, edit, `sops -e --filename-override`,
+   every leaf `ENC[`).
+3. Merge, then delete Job `openbao-devworker-provision` so Flux re-runs it.
+4. The helper picks the new value up on its next call. Revoke the old key.
+
+**Turn it off** (all workers, or one host in `host_vars`): `dev_worker_codex_router_enabled: false`
+→ `ansible-playbook dev-workers.yml -t codex`, then `codex app-server daemon restart` per user. The
+provider table, the top-level key and each user's cached key are removed, and Codex is back on
+the host's own ChatGPT login. Revoke the keys on the router if they are no longer wanted.
+
+| symptom | cause / fix |
+|---|---|
+| `401 UNAUTHORIZED` from the router | key revoked or expired: rotate (above) |
+| `codex-router-key: no router key` | vault unreachable and no cached copy yet: `cred list` (sink token, sealed vault), see `openbao-dev-workers.md` |
+| `403 ROUTE_NOT_ALLOWED ... none of them serves "X"` | the CLI asked for a model with no `dw-X` route: add the route (one per model, `codex-5` only) and the key's routes |
+| `400 UNSUPPORTED_PARAMETER: include` | the request reached a route that is not in `codexNative.routes` (subset parser): check the router's `ROUTER_PLUGIN_CONFIG` |
+| `429 ... busy` | all `codex-5` slots in use by the four workers: wait, or raise the account's `concurrency` |
+
 ### Optional: sandboxed separate agent account
 To isolate the headless agent from `c4`'s sudo, set `dev_worker_agent_user: claude-agent` in
 `group_vars/dev_workers.yml` and re-run. That restores the homelab two-user split: `claude-agent`
