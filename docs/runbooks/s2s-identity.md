@@ -814,6 +814,10 @@ under "Resuming the release":
 4. It requires the harness rollout.
 5. It resumes `platform`, then the root.
 
+A cluster without Kustomization `platform-gatekeeper` (before the A.2 cutover, or after a platform
+revert of it) stops the script at step 1c by design: that world's resume is the runbook revision that
+shipped with it, not this one.
+
 ```sh
 scripts/s2s/flux-resume.sh --after-config --sha <the PR's merge commit>
 $G rollout status deployment/gatekeeper --timeout=600s

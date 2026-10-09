@@ -219,9 +219,12 @@ gkhr_upgraded() {
   IFS='|' read -r susp chart ready <<<"$GKHR"
   [[ $susp != true && $ready == True ]] || return 1
   [[ $chart == *"${SHA:0:12}"* ]] && return 0
-  art=$(f get helmchart "${GK_NS}-${GK_HELMRELEASE}" -o jsonpath='{.status.observedSourceArtifactRevision}' 2>/dev/null) || return 1
+  # Strategy-independent path: the chart artifact was built from the target AND this release has deployed
+  # that very artifact (its history head equals the chart's artifact revision; the artifact alone would
+  # pass between the rebuild and the upgrade).
+  art=$(f get helmchart "${GK_NS}-${GK_HELMRELEASE}" -o jsonpath='{.status.observedSourceArtifactRevision}{"|"}{.status.artifact.revision}' 2>/dev/null) || return 1
   art=${art//$'\r'/}
-  [[ $art == *"@sha1:$SHA" ]]
+  [[ ${art%%|*} == *"@sha1:$SHA" && -n ${art#*|} && $chart == "${art#*|}" ]]
 }
 
 ks_applied() {
@@ -318,7 +321,10 @@ flux-resume ($MODE), dry run: no cluster or git call. The steps, each gated (at 
        kubectl --context $CONTEXT -n $GK_NS patch helmrelease $GK_HELMRELEASE --type=merge -p '{"spec":{"suspend":false}}'
      wait: Ready is True and .status.history[0].chartVersion carries <target>'s first 12 hex (the release renders
            ./deploy/helm from the same GitRepository, reconcileStrategy Revision), else HelmChart
-           $FLUX_NS/$GK_NS-$GK_HELMRELEASE .status.observedSourceArtifactRevision is main@sha1:<target>; BEFORE step 2
+           $FLUX_NS/$GK_NS-$GK_HELMRELEASE .status.observedSourceArtifactRevision is main@sha1:<target> AND the
+           release's history head equals that HelmChart's .status.artifact.revision; BEFORE step 2.
+     A cluster without Kustomization $GK_KUSTOMIZATION (before the A.2 cutover, or after a platform revert of
+           it) stops here by design: use the runbook revision of that world.
   2. kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $KUSTOMIZATION --type=merge -p '{"spec":{"suspend":false}}'
      wait: .status.lastAppliedRevision is main@sha1:<target> and Ready is True
   3. only if kubectl --context $CONTEXT -n $NS get helmrelease $HELMRELEASE -o jsonpath='{.spec.suspend}' is still true:
