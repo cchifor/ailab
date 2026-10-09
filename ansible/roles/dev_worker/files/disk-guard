@@ -37,8 +37,9 @@ once an hour (FULL_PRUNE_EVERY) unless the docker fs is under --critical; otherw
 cache only — BuildKit's own GC (daemon.json builder.gc) holds the cache at its cap meanwhile. While a
 step runs, the heartbeat is rewritten every BEAT_EVERY seconds, so a long step is not "stale"; a hung
 one is bounded by its timeout and shows as no completed run (DevWorkerDiskGuardStale, 3h).
-`disk-guard --docker-idle-wait N` only waits for an idle docker (exit 0) or gives up after N s (1):
-the daily buildx/volume prune runs it as its ExecCondition.
+`disk-guard --run-when-docker-idle N -- CMD` runs CMD under the shared lock once docker is idle,
+both re-checked together right before it runs, or skips it (exit 0) after N s: the daily
+buildx/volume prune wraps each of its prunes in it.
 Busy gate for steps 1-3: ANY docker prune or image removal triggers a containerd GC pass that reaps
 the lease of an in-flight pull or build (measured on the CI runners, 2026-08-08: a job with a prune
 inside it failed ~3x as often — gitea-runner-cleanup.sh). So while a docker client is building,
@@ -392,20 +393,45 @@ def run_with_heartbeat(run, step, beat, every):
         t.join()
 
 
-def wait_docker_idle(timeout, busy=None, sleep=time.sleep, clock=time.monotonic, every=30,
-                     log=print):
-    """--docker-idle-wait: 0 as soon as no docker client is building, pulling or starting, 1 if one
-    still is after `timeout` seconds. The daily buildx/volume prune unit runs this as its
-    ExecCondition, so it skips a day rather than reap an in-flight pull's lease."""
+def try_lock(path):
+    """The shared reclaim lock, non-blocking: an open file holding it, or None when held elsewhere."""
+    import fcntl  # Linux only; imported here so the tests import this file anywhere
+    f = open(path, "a")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+def run_when_docker_idle(cmd, timeout, busy=None, lock=None, run=None, sleep=time.sleep,
+                         clock=time.monotonic, every=30, log=print):
+    """--run-when-docker-idle SECONDS -- CMD: run CMD (a docker prune) while holding the shared
+    reclaim lock AND with docker idle, both checked together right before it runs: idleness seen
+    before waiting for the lock would be stale by the time the lock is free. Busy or locked: let go
+    and retry every `every` s until `timeout`, then skip (0 — a skipped day, not a failure; BuildKit's
+    GC holds the cache meanwhile). Otherwise CMD's exit code."""
     busy = busy or docker_busy
+    lock = lock or (lambda: try_lock(CLEANUP_LOCK))
+    run = run or (lambda c: subprocess.run(c, stdin=subprocess.DEVNULL, check=False).returncode)
     deadline = clock() + timeout
+    why = "never tried"
     while True:
-        what = busy()
-        if not what:
-            return 0
+        held = lock()
+        if held is None:
+            why = "another reclaim run holds the lock"
+        else:
+            try:
+                what = busy()       # re-read UNDER the lock, immediately before running
+                if not what:
+                    return run(cmd)
+                why = f"docker is busy: {what}"
+            finally:
+                held.close()
         if clock() >= deadline:
-            log(f"disk-guard: docker still busy after {timeout} s ({what}); skipping")
-            return 1
+            log(f"disk-guard: skipping {' '.join(cmd)} after {timeout} s: {why}")
+            return 0
         sleep(every)
 
 
@@ -970,9 +996,10 @@ def parse_args(argv):
                    help="the agents' archive dir, capped at --archive-max-gb on every run")
     p.add_argument("--archive-max-gb", type=float, default=20)
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--docker-idle-wait", type=int, default=None, metavar="SECONDS",
-                   help="only wait until no docker client is building/pulling/starting: exit 0 when "
-                        "idle, 1 if still busy after SECONDS (an ExecCondition for docker prunes)")
+    p.add_argument("--run-when-docker-idle", type=int, default=None, metavar="SECONDS",
+                   help="run the command after -- under the shared reclaim lock once docker is idle "
+                        "(both re-checked together); skip with 0 after SECONDS (daily docker prunes)")
+    p.add_argument("command", nargs="*", help=argparse.SUPPRESS)
     p.add_argument("--full-prune-stamp", default=FULL_PRUNE_STAMP, help=argparse.SUPPRESS)
     p.add_argument("--beat-every", type=float, default=BEAT_EVERY, help=argparse.SUPPRESS)
     a = p.parse_args(argv)
@@ -990,8 +1017,11 @@ def parse_args(argv):
 
 def main(argv=None):
     opts = parse_args(sys.argv[1:] if argv is None else argv)
-    if opts.docker_idle_wait is not None:
-        return wait_docker_idle(opts.docker_idle_wait)
+    if opts.run_when_docker_idle is not None:
+        if not opts.command:
+            print("disk-guard: --run-when-docker-idle needs a command after --", file=sys.stderr)
+            return 2
+        return run_when_docker_idle(opts.command, opts.run_when_docker_idle)
     if not opts.dry_run:
         if os.geteuid() != 0:
             print("disk-guard: run as root (or --dry-run)", file=sys.stderr)

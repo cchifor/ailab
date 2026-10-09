@@ -1078,9 +1078,10 @@ Since 2026-10-09 the guard also:
 
 Every reclaim entrypoint shares one lock, `/run/lock/dev-worker-cleanup.lock` (`cleanup`, the
 guard's docker prunes through `flock -n`, the daily buildx/volume unit through `flock -w 900`): a
-held lock defers a step, it never runs two prunes at once. The daily docker prune also waits up to an
-hour for docker to be idle (`ExecCondition=disk-guard --docker-idle-wait 3600`) and skips the day if
-it never is; BuildKit's GC holds the build cache meanwhile. Under sustained pressure the guard's
+held lock defers a step, it never runs two prunes at once. Each daily docker prune runs through
+`disk-guard --run-when-docker-idle 3600 -- <prune>`: the lock and an idle docker are checked together
+right before it starts, retried for up to an hour, then the prune is skipped; BuildKit's GC holds the
+build cache meanwhile. Under sustained pressure the guard's
 all-cache `builder prune -af` runs at most hourly (dangling cache only in between) unless /workspace
 is under 5%. A step that runs long keeps the heartbeat fresh (rewritten every minute).
 

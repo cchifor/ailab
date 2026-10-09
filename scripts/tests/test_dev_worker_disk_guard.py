@@ -770,20 +770,54 @@ class ReliabilityTest(unittest.TestCase):
         time.sleep(0.15)
         self.assertEqual(len(beats), n)
 
-    def test_docker_idle_wait(self):
-        answers = iter(["docker pull pg", "docker pull pg", ""])
-        clock = iter(range(0, 1000, 30))
-        self.assertEqual(dg.wait_docker_idle(3600, busy=lambda: next(answers), sleep=lambda s: None,
-                                             clock=lambda: next(clock), log=quiet), 0)
-        clock = iter(range(0, 100000, 30))
-        logs = []
-        self.assertEqual(dg.wait_docker_idle(90, busy=lambda: "docker build .", sleep=lambda s: None,
-                                             clock=lambda: next(clock), log=logs.append), 1)
-        self.assertIn("still busy", logs[0])
+    def test_run_when_docker_idle_rechecks_under_the_lock(self):
+        # Idle while the lock is held elsewhere; busy by the time the lock is free; idle later: the
+        # prune runs only on an idle observation made while holding the lock.
+        class Held:
+            def close(self):
+                pass
+        locks = iter([None, Held(), Held()])
+        busy = iter(["docker pull pg", ""])
+        ran, clock = [], iter(range(0, 10000, 30))
+        rc = dg.run_when_docker_idle(["docker", "buildx", "prune"], 3600, busy=lambda: next(busy),
+                                     lock=lambda: next(locks), run=lambda c: ran.append(c) or 0,
+                                     sleep=lambda s: None, clock=lambda: next(clock), log=quiet)
+        self.assertEqual((rc, ran), (0, [["docker", "buildx", "prune"]]))
 
-    def test_docker_idle_wait_is_a_mode_of_main(self):
-        o = dg.parse_args(["--docker-idle-wait", "60"])
-        self.assertEqual(o.docker_idle_wait, 60)
+    def test_run_when_docker_idle_skips_with_0_after_the_timeout(self):
+        class Held:
+            def close(self):
+                pass
+        ran, logs, clock = [], [], iter(range(0, 100000, 30))
+        rc = dg.run_when_docker_idle(["docker", "volume", "prune"], 90, busy=lambda: "docker build .",
+                                     lock=lambda: Held(), run=lambda c: ran.append(c) or 0,
+                                     sleep=lambda s: None, clock=lambda: next(clock), log=logs.append)
+        self.assertEqual((rc, ran), (0, []))
+        self.assertIn("docker is busy", logs[0])
+
+    def test_run_when_docker_idle_returns_the_commands_exit_code(self):
+        class Held:
+            def close(self):
+                pass
+        rc = dg.run_when_docker_idle(["false"], 10, busy=lambda: "", lock=lambda: Held(),
+                                     run=lambda c: 3, sleep=lambda s: None, clock=lambda: 0, log=quiet)
+        self.assertEqual(rc, 3)
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX only")
+    def test_try_lock_is_exclusive(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "lock")
+            first = dg.try_lock(path)
+            self.assertIsNotNone(first)
+            self.assertIsNone(dg.try_lock(path))
+            first.close()
+            second = dg.try_lock(path)
+            self.assertIsNotNone(second)
+            second.close()
+
+    def test_run_when_docker_idle_is_a_mode_of_main(self):
+        o = dg.parse_args(["--run-when-docker-idle", "60", "--", "docker", "volume", "prune", "-f"])
+        self.assertEqual((o.run_when_docker_idle, o.command), (60, ["docker", "volume", "prune", "-f"]))
 
 
 class ResultStateTest(unittest.TestCase):
