@@ -216,8 +216,8 @@ never has to print a secret value in order to use it.
 - **`git_forge.yml` yields ownership of `~/.git-credentials`** when `dev_worker_enable_openbao` is
   on — the file becomes agent-rendered from `af/dev-workers/common`. Two writers of one path is a
   silent-flapping bug, so exactly one of the two paths runs. git's own `store` helper was a third
-  writer: it deleted the line on any 401, including the ones Gitea returns for valid tokens while its
-  database is down (2026-10-09). Since then git's helper is read-only
+  writer: it deleted the line whenever the server answered 401 to it, including the 401s Gitea returns
+  for valid tokens while its database is down (2026-10-09). Since then git's helper is read-only
   (`tasks/git_credential_helper.yml`).
 - **A new operator ceremony exists** (six secret-id mints) and it does **not** survive an OpenBao
   wipe: the roles and the KV re-materialise from git, but every secret-id is invalidated. Recorded in

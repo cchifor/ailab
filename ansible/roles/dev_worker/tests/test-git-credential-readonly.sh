@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Drives real git against files/git-credential-store-readonly in a throwaway HOME: `fill` returns
-# the stored line, while `reject` (what git runs on a 401) and `approve` (what it runs on success)
-# leave ~/.git-credentials byte-identical. A control run with the stock `store` helper and the SAME
+# the stored line and nothing from ~/.config/git/credentials, while `reject` (what git runs when a
+# server refuses the credential it sent) and `approve` (what it runs on success) leave
+# ~/.git-credentials byte-identical. A control run with the stock `store` helper and the SAME
 # reject input must erase the line, which proves this test can see the bug it guards. Then the
 # task's own migration script (cut out of tasks/git_credential_helper.yml): `store` or nothing is
-# replaced, a re-run changes nothing, and a hand-added helper stops it. Then the wiring.
-# CI: .gitea/workflows/dev-worker-scripts.yaml.
+# replaced, a re-run changes nothing, and a hand-added helper, a helper in the XDG config, an empty
+# entry, an unreadable config or a failed write stops it with nothing reported as changed. Then the
+# wiring.
+# CI: .gitea/workflows/dev-worker-scripts.yaml. Linux only: Git Bash on Windows rewrites the
+# /usr/local/bin/... argument into C:/Program Files/Git/usr/local/bin/... before git stores it.
 set -euo pipefail
 ROLE="$(cd "$(dirname "$0")/.." && pwd)"
 TASKS="$ROLE/tasks"
@@ -54,11 +58,16 @@ cmp -s "$creds" "$work/expected" || bad "approve changed ~/.git-credentials"
 out="$(fill)" || bad "fill failed after reject + approve"
 printf '%s\n' "$out" | grep -qx 'password=tok_first' || bad "fill after reject + approve returned the wrong password"
 
-# A host with no stored line: fill fails cleanly instead of prompting or inventing a password.
+# A host with no line in ~/.git-credentials: fill fails cleanly instead of prompting or inventing a
+# password, and does not fall back to the XDG credentials file that stock `store` also reads.
+mkdir -p "$XDG_CONFIG_HOME/git"
+printf '%s
+' 'https://other:tok_xdg@elsewhere.example' > "$XDG_CONFIG_HOME/git/credentials"
 if printf 'protocol=https\nhost=elsewhere.example\n\n' | git credential fill >"$work/none" 2>/dev/null; then
   bad "fill for an unknown host succeeded"
 fi
 if grep -q '^password=' "$work/none"; then bad "fill for an unknown host printed a password"; fi
+rm -f "$XDG_CONFIG_HOME/git/credentials"
 
 # The task's migration script, run as written. The block scalar sits between the shell line and
 # `args:`, indented four spaces.
@@ -66,7 +75,13 @@ sed -n '/ansible.builtin.shell: |/,/^  args:/p' "$TASKS/git_credential_helper.ym
 want="$(sed -n 's/^want=\(.*\)$/\1/p' "$work/migrate.sh")"
 [ -n "$want" ] || bad "could not cut the migration script out of git_credential_helper.yml"
 migrate() { sh "$work/migrate.sh" >"$work/m.out" 2>"$work/m.err"; }
-helpers() { git config --global --get-all credential.helper || true; }
+helpers() { git config --file "$HOME/.gitconfig" --get-all credential.helper || true; }
+# A refused run: non-zero, nothing reported as changed, and the stderr names $1.
+refused() {
+  if migrate; then bad "migrate: $2 must stop the task"; fi
+  if [ -s "$work/m.out" ]; then bad "migrate: $2 reported a change"; fi
+  grep -qF -- "$1" "$work/m.err" || bad "migrate: the failure for $2 does not name '$1': $(cat "$work/m.err")"
+}
 
 git config --global --unset-all credential.helper || true
 migrate || bad "migrate: no helper set must succeed"
@@ -80,18 +95,45 @@ migrate || bad "migrate: a re-run must succeed"
 if [ -s "$work/m.out" ]; then bad "migrate: a re-run reported a change"; fi
 
 git config --global --add credential.helper cache
-if migrate; then bad "migrate: a hand-added second helper must stop the task"; fi
-grep -q 'unexpected global credential.helper' "$work/m.err" || bad "migrate: the failure does not name the helper"
-[ "$(helpers | wc -l)" -eq 2 ] || bad "migrate: a refused run changed the helper list"
+refused cache "a hand-added second helper"
+[ "$(helpers)" = "$(printf '%s
+cache' "$want")" ] || bad "migrate: a refused run changed the helper list"
 
 use cache
-if migrate; then bad "migrate: a hand-set helper must stop the task"; fi
+refused cache "a hand-set helper"
 [ "$(helpers)" = cache ] || bad "migrate: a refused run replaced a hand-set helper"
+
+# An empty entry after the wanted one resets git's helper list to nothing; it must not read as done.
+use "$want"; git config --global --add credential.helper ''
+refused "2 entries" "an empty trailing entry"
+
+# A helper in ~/.config/git/config: `git config --global` reads it but would write ~/.gitconfig.
+use store; mkdir -p "$XDG_CONFIG_HOME/git"
+git config --file "$XDG_CONFIG_HOME/git/config" credential.helper store
+refused "$XDG_CONFIG_HOME/git/config" "a helper in the XDG config"
+[ "$(helpers)" = store ] || bad "migrate: a refused run changed ~/.gitconfig"
+rm -f "$XDG_CONFIG_HOME/git/config"
+
+# An unreadable ~/.gitconfig is not "no helper".
+cp "$HOME/.gitconfig" "$work/gitconfig.good"
+printf '[credential
+' >> "$HOME/.gitconfig"
+refused "cannot read" "an unreadable ~/.gitconfig"
+cp "$work/gitconfig.good" "$HOME/.gitconfig"
+
+# A write that fails (a held lock) must fail the task, not report a change.
+touch "$HOME/.gitconfig.lock"
+refused "could not write" "a failed write"
+[ "$(helpers)" = store ] || bad "migrate: a failed write changed the helper"
+rm -f "$HOME/.gitconfig.lock"
+migrate && [ "$(helpers)" = "$want" ] || bad "migrate: 'store' was not replaced once the lock was gone"
 
 # Wiring. The path the task configures is the path it installs, from this file.
 inst="$(sed -n 's/^ *dest: \(.*\)$/\1/p' "$TASKS/git_credential_helper.yml")"
 [ "$inst" = "$want" ] || bad "installed path '$inst' != configured path '$want'"
 grep -q '^ *src: git-credential-store-readonly$' "$TASKS/git_credential_helper.yml" || bad "the task does not install files/git-credential-store-readonly"
+# git runs an absolute-path helper directly, so a non-executable install breaks every forge call.
+grep -q '^ *mode: "0755"$' "$TASKS/git_credential_helper.yml" || bad "the helper is not installed 0755"
 for f in git_forge.yml openbao.yml; do
   grep -q 'import_tasks: git_credential_helper.yml' "$TASKS/$f" || bad "$f does not import git_credential_helper.yml"
 done

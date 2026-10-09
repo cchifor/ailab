@@ -198,19 +198,26 @@ every sandboxed command runs in an empty network namespace, and `git push` fails
 `Could not resolve host: git.chifor.me` although the worker's own DNS is fine. That was the
 2026-09-26 dev-worker-4 report, which read as a DNS outage.
 
-**git only reads `~/.git-credentials`** (`tasks/git_credential_helper.yml`). Each user's global
-`credential.helper` is `/usr/local/bin/git-credential-store-readonly`. It answers `get` from the file
-and ignores `store` and `erase`, because the file already has an owner: the OpenBao agent, or Ansible on
-the SOPS path. With git's stock `store` helper, every 401 deleted the line. On 2026-10-09 a CNPG
-operator upgrade restarted infra-pg, and for those ~3.5 minutes Gitea answered 401 to VALID tokens,
-because it could not look them up in its database. dev-worker-3 lost its only credential that way, and
-its agent stopped to ask for a credential refresh until the OpenBao agent's next periodic render put
-the line back. Now a Gitea outage fails the requests made during it and nothing after. A token that
-really is revoked keeps getting 401s until the new one is in OpenBao (§ Rotation in
-`openbao-dev-workers.md`). The role stops with `unexpected global credential.helper` if a user has a
-helper other than `store` or this one; remove it or bring it into the role. The old
-`unable to get credential storage lock ... Read-only file system` line inside the Codex sandbox came
-from `store` rewriting the file after each success, and is gone with it.
+**git only reads `~/.git-credentials`** (`tasks/git_credential_helper.yml`). Each user's
+`credential.helper` in `~/.gitconfig` is `/usr/local/bin/git-credential-store-readonly`. It answers
+`get` from that file only, and ignores `store` and `erase`, because the file already has an owner: the
+OpenBao agent, or Ansible on the SOPS path. With git's stock `store` helper, a 401 to the credential git
+had sent deleted the line. On 2026-10-09 a CNPG operator upgrade restarted infra-pg, and for those
+~3.5 minutes Gitea answered 401 to VALID tokens, because it could not look them up in its database.
+dev-worker-3 lost its only credential that way, and its agent stopped to ask for a credential refresh
+until the OpenBao agent's next periodic render put the line back. Now the credential survives the
+outage: requests made during it still fail and are not retried, but the next attempt after Gitea
+recovers authenticates. A token that really is revoked keeps getting 401s until the source the file
+comes from has the new one: OpenBao (§ Rotation in `openbao-dev-workers.md`), or
+`dev_worker_gitea_token` and a playbook run on the SOPS path.
+
+The task stops, naming the value, rather than overwrite a helper it did not set: anything in
+`~/.gitconfig` other than `store`, the read-only path, or nothing (an empty entry included, since it
+resets git's helper list); any `credential.helper` in `~/.config/git/config` (`git config --global`
+reads that file but writes only `~/.gitconfig`); or a config it cannot read or write. Remove the helper
+or bring it into the role. The old `unable to get credential storage lock ... Read-only file system`
+line inside the Codex sandbox came from `store` rewriting the file after each success, and is gone with
+it.
 
 ### Codex through the router (since 2026-10-09)
 

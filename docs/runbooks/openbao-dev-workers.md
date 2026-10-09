@@ -535,7 +535,7 @@ id c4 | tr ' ' '\n' | grep openbao-agent       # c4 must be in the group (log ou
 cred list                                      # names visible to this worker
 cred get common gitea_pat | wc -c              # LENGTH only — never print the value
 ls -l ~/.git-credentials                       # 0600, owned by the user, rendered by the agent
-git config --global --get-all credential.helper  # exactly /usr/local/bin/git-credential-store-readonly
+git config --file ~/.gitconfig --get-all credential.helper  # exactly /usr/local/bin/git-credential-store-readonly
 git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD >/dev/null && echo "forge auth ok"
 ```
 
