@@ -53,13 +53,31 @@ variable "image_datastore" {
 
 # ---- Talos / Kubernetes identity — MUST match the LIVE cluster exactly (workers join it) ----
 # These mirror infra/variables.tf. A mismatch (wrong version/endpoint) makes the worker fail to join.
+# talos_version = the RUNNING Talos (images; future installs). Upgraded live 2026-10-09 with
+# scripts/talos-upgrade-node.sh (1.11.2 -> 1.11.6 -> 1.12.12 -> 1.13.11 -> 1.14.2); kubernetes_version
+# via `talosctl upgrade-k8s` (1.31.4 -> 1.32.13 -> 1.33.13).
 variable "talos_version" {
   type    = string
-  default = "v1.11.2"
+  default = "v1.14.2"
 }
 variable "kubernetes_version" {
   type    = string
-  default = "v1.31.4"
+  default = "v1.33.13"
+}
+variable "talos_config_contract" {
+  # The Talos version the machine CONFIG (and talos_machine_secrets) is generated for - NOT the
+  # running Talos. Pinned to the value already in state: a different contract regenerates the config
+  # with that release's defaults (1.14 adds SecurityProfileConfig workloadIsolation -> sandboxd), and
+  # a LOWER one (e.g. "v1.11" = v1.11.0) makes talos_machine_secrets replace the cluster PKI.
+  # Moving it is a dated, reviewed migration of its own (plans/2026-10-08-talos-upgrade-program-plan.md, P8).
+  type    = string
+  default = "v1.11.2"
+  validation {
+    # Identical in infra, agent-nodes and env-pool (and in talos_machine_secrets state): a drifted copy
+    # would render a different config schema for that pool. Move all three together, by plan.
+    condition     = var.talos_config_contract == "v1.11.2"
+    error_message = "talos_config_contract must stay v1.11.2 (the contract in state); moving it is a reviewed migration - see docs/runbooks/talos-upgrade.md."
+  }
 }
 variable "cluster_name" {
   type    = string

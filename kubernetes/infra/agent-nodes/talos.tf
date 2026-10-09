@@ -21,7 +21,7 @@ data "talos_machine_configuration" "worker" {
   cluster_endpoint   = "https://${var.cluster_vip}:6443"
   machine_type       = "worker"
   machine_secrets    = data.terraform_remote_state.infra.outputs.machine_secrets
-  talos_version      = var.talos_version
+  talos_version      = var.talos_config_contract
   kubernetes_version = var.kubernetes_version
 }
 

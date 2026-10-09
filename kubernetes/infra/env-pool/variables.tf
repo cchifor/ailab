@@ -62,13 +62,31 @@ variable "image_datastore" {
 }
 
 # ---- Talos / Kubernetes identity — MUST match the LIVE cluster ----
+# talos_version = the RUNNING Talos (images; future installs). Upgraded live 2026-10-09 with
+# scripts/talos-upgrade-node.sh (1.11.2 -> 1.11.6 -> 1.12.12 -> 1.13.11 -> 1.14.2); kubernetes_version
+# via `talosctl upgrade-k8s` (1.31.4 -> 1.32.13 -> 1.33.13).
 variable "talos_version" {
   type    = string
-  default = "v1.11.2"
+  default = "v1.14.2"
 }
 variable "kubernetes_version" {
   type    = string
-  default = "v1.31.4"
+  default = "v1.33.13"
+}
+variable "talos_config_contract" {
+  # The Talos version the machine CONFIG (and talos_machine_secrets) is generated for - NOT the
+  # running Talos. Pinned to the value already in state: a different contract regenerates the config
+  # with that release's defaults (1.14 adds SecurityProfileConfig workloadIsolation -> sandboxd), and
+  # a LOWER one (e.g. "v1.11" = v1.11.0) makes talos_machine_secrets replace the cluster PKI.
+  # Moving it is a dated, reviewed migration of its own (plans/2026-10-08-talos-upgrade-program-plan.md, P8).
+  type    = string
+  default = "v1.11.2"
+  validation {
+    # Identical in infra, agent-nodes and env-pool (and in talos_machine_secrets state): a drifted copy
+    # would render a different config schema for that pool. Move all three together, by plan.
+    condition     = var.talos_config_contract == "v1.11.2"
+    error_message = "talos_config_contract must stay v1.11.2 (the contract in state); moving it is a reviewed migration - see docs/runbooks/talos-upgrade.md."
+  }
 }
 variable "cluster_name" {
   type    = string
@@ -86,6 +104,9 @@ variable "storage_service_ip" {
 # ---- Kata debug evidence (plans/2026-09-20-env-pool-root-cause-followup-plan.md, T2) ----
 variable "kata_debug" {
   description = <<-EOT
+    DEFAULT false since 2026-10-09: the embedded machine-config/kata/configuration.toml is a verbatim copy
+    of the kata 3.20 extension's config and does NOT match the kata 3.26+ extension of Talos 1.12+.
+    Re-enable only after replacing it with the CURRENT extension's configuration.toml.
     true = deliver machine.files that (1) raise containerd to [debug] level and point the `kata`
     runtime at /var/etc/kata-containers/configuration.toml (machine-config/cri-20-customization.part),
     (2) install that file as a verbatim copy of the extension's config (machine-config/kata/
@@ -96,7 +117,9 @@ variable "kata_debug" {
     worker.yaml.tftpl — a file under machine-config/ alone ships nothing.
   EOT
   type        = bool
-  default     = true # G2 (2026-09-21): applied in staged mode, activated by the announced reboot
+  default     = false # 2026-10-09: the 3.20 verbatim config does not match the kata 3.26+ extension of Talos 1.12+;
+  # removed live (staged) before the 1.12.12 reboot, kata-env verified on 1.12/1.13/1.14. Re-enable only with a
+  # configuration.toml copied from the CURRENT extension.
 }
 
 # ---- Env-node sizing ----
