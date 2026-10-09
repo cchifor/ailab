@@ -448,9 +448,15 @@ lists routes that serve `POST /v1/responses` as a pass-through:
 **What bounds a long Codex turn.** In the router, `timeoutMs` is only the wait **before any
 output** (the first upstream byte), not a whole-request deadline. `idleTimeoutMs` bounds the
 **silence between upstream bytes** once output has begun. With no `maxDurationMs`, nothing caps
-the whole request, so a turn that keeps streaming runs as long as it streams. The CLI's own
-stream idle timeout is 300 s, below the route's 600 s, so the CLI notices a stalled stream
-first.
+the whole request, so a turn that keeps streaming runs as long as it streams.
+
+On a stalled upstream the **CLI's own stream idle timeout (300 s) fires first**: the router's
+`: keepalive` comments do not reset it. This was measured on 2026-10-09 with codex 0.154.0 and
+0.160.0 through a local router whose fake backend sent `response.created` and then stalled, with
+`stream_idle_timeout_ms` at 30 s. Both CLIs ended with `idle timeout waiting for SSE` after
+32-33 s while the router kept sending keepalives every 15 s. The CLI's idle timer counts SSE
+events, not bytes. The route's 600 s `idleTimeoutMs` therefore matters only for clients that do
+not time out themselves.
 
 The Cloudflare edge does not cut these streams. Its ~100 s limits are on the origin's first byte
 and on silence between bytes. The router sends the SSE headers and `: ok` as soon as the attempt
