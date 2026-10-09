@@ -225,7 +225,9 @@ How a request travels:
 1. Codex runs `/usr/local/bin/codex-router-key` for its bearer. The helper reads this host's router
    key with `cred get <hostname> llm_router_codex_key` (OpenBao `af/dev-workers/<hostname>`). It
    keeps the last good value in `~/.config/llm-router/codex.key` (0600) and prints that copy when
-   the vault cannot be read. The key is never in the config file, and never in the environment of
+   the vault cannot be read. It says so on stderr: `... failed; using the cached key`.
+   `CODEX_ROUTER_NO_CACHE=1` skips the fallback, which is how the fleet validator proves the live
+   vault path. The key is never in the config file, and never in the environment of
    the CLI or its tools.
 2. Codex sends its own Responses request (the real model name, `gpt-6-astra`) to
    `https://router.chifor.me/v1/responses`.
@@ -277,7 +279,8 @@ the router.
 
 **Turn it off** (all workers, or one host in `host_vars`): `dev_worker_codex_router_enabled: false`
 → `ansible-playbook dev-workers.yml -t codex`, then `codex app-server daemon restart` per user. The
-provider table and the top-level key are removed, and Codex is back on the host's own ChatGPT login.
+provider table, the top-level key and each user's cached key are removed, and Codex is back on
+the host's own ChatGPT login. Revoke the keys on the router if they are no longer wanted.
 
 | symptom | cause / fix |
 |---|---|

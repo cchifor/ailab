@@ -39,6 +39,13 @@ out="$(FAKE_VALUE=lrk_rotated run)" || bad "vault read failed after rotation"
 
 out="$(FAKE_VALUE= run)" || bad "vault down with a cache: exit $?"
 [ "$out" = lrk_rotated ] || bad "vault down: the cached key was not used ('$out')"
+grep -q "using the cached key" "$work/err" || bad "the cached fallback must say so on stderr"
+
+# CODEX_ROUTER_NO_CACHE=1 (the validator): a live read or nothing, even with a cache present.
+if out="$(CODEX_ROUTER_NO_CACHE=1 FAKE_VALUE= run)"; then bad "NO_CACHE with the vault down must fail"; fi
+[ -z "$out" ] || bad "NO_CACHE failure printed to stdout: '$out'"
+out="$(CODEX_ROUTER_NO_CACHE=1 FAKE_VALUE=lrk_rotated run)" || bad "NO_CACHE with the vault up must succeed"
+[ "$out" = lrk_rotated ] || bad "NO_CACHE live read printed '$out'"
 
 rm -f "$cache"
 if out="$(FAKE_VALUE= run)"; then bad "vault down without a cache must fail"; fi

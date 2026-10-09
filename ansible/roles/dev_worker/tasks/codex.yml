@@ -179,6 +179,15 @@
   loop_control:
     label: "{{ item.0.name }} {{ item.1.key }}"
 
+- name: Remove each user's cached router key (router provider off)
+  ansible.builtin.file:
+    path: "{{ item.home }}/.config/llm-router/codex.key"
+    state: absent
+  when: not dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Remove the router provider table (router provider off)
   community.general.ini_file:
     path: "{{ item.home }}/.codex/config.toml"

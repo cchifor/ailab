@@ -29,7 +29,10 @@ f="$home/.codex/auth.json"
 auth=""
 provider=$(awk -F'"' '/^\[/{exit} /^model_provider[[:space:]]*=/{print $2; exit}' "$home/.codex/config.toml" 2>/dev/null)
 if [ -n "$provider" ] && [ "$provider" != "openai" ]; then
-  if ! sudo -n -u "$u" -H /usr/local/bin/codex-router-key >/dev/null 2>&1; then echo "$h FAIL user=$u router($provider) codex-router-key printed no key"; exit 1; fi
+  # CODEX_ROUTER_NO_CACHE=1: a LIVE vault read (the helper's cached fallback would hide a dead cred path).
+  if ! kerr=$(sudo -n -u "$u" -H env CODEX_ROUTER_NO_CACHE=1 /usr/local/bin/codex-router-key 2>&1 >/dev/null); then
+    echo "$h FAIL user=$u router($provider) no key from the vault: $(printf '%s' "$kerr" | head -1 | cut -c1-160)"; exit 1
+  fi
   auth="router($provider)"
 elif [ ! -s "$f" ]; then echo "$h FAIL user=$u no $f"; exit 1; fi
 
