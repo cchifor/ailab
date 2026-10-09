@@ -95,6 +95,18 @@ class EvaluateHost(unittest.TestCase):
     def test_label_present_among_others_ok(self):
         self.assertTrue(ccr.evaluate_host(good_fields(label="ubuntu-latest,self-hosted-hv:host")).ok)
 
+    def test_dedicated_host_requires_sole_forge_label(self):
+        fields = good_fields(label="forge-complete:host")
+        self.assertTrue(ccr.evaluate_host(fields, "ci-runner-9").ok)
+        for label in ("self-hosted-hv:host", "forge-complete", "forge-complete:docker://node:24",
+                      "forge-complete:host,self-hosted-hv:host", "forge-complete:host,forge-complete:host"):
+            self.assertFalse(ccr.evaluate_host(good_fields(label=label), "ci-runner-9").ok, label)
+
+    def test_ordinary_or_unknown_host_cannot_accept_dedicated_label(self):
+        for name in ("ci-runner-1", "unknown", ""):
+            for label in ("forge-complete:host", "self-hosted-hv:host,forge-complete:host"):
+                self.assertFalse(ccr.evaluate_host(good_fields(label=label), name).ok)
+
     def test_address_trailing_slash_normalized_ok(self):
         self.assertTrue(ccr.evaluate_host(good_fields(address="https://git.chifor.me/")).ok)
 
@@ -299,10 +311,22 @@ class MainIntegration(unittest.TestCase):
     GOOD_PROBE = ("daemon=active\ndocker=29.6.2\nlabel=self-hosted-hv:host\n"
                   "address=https://git.chifor.me\nregistry=200\ngitea=403\ncapacity=1\n")
 
+    @classmethod
+    def good_probe(cls, ip):
+        label = ccr.DEDICATED_LABELS.get(ccr.KNOWN_BY_IP.get(ip), ccr.EXPECTED_LABEL)
+        return cls.GOOD_PROBE.replace("self-hosted-hv:host", label)
+
+    @staticmethod
+    def online_pool():
+        return [{"name": name, "status": "online", "labels": [{"name":
+                 ccr.DEDICATED_LABELS.get(name, ccr.EXPECTED_LABEL).removesuffix(":host")} ]}
+                for _ip, name in ccr.DEFAULT_RUNNERS]
+
     def _run(self, argv, env, probe=None, probe_exc=None, runners=None, query_exc=None):
         out = io.StringIO()
         pm = (mock.patch.object(ccr, "run_probe", side_effect=probe_exc) if probe_exc
-              else mock.patch.object(ccr, "run_probe", return_value=probe or self.GOOD_PROBE))
+              else mock.patch.object(ccr, "run_probe", side_effect=(lambda _ip: probe)
+                                     if probe is not None else self.good_probe))
         qm = (mock.patch.object(ccr, "query_gitea_runners", side_effect=query_exc) if query_exc
               else mock.patch.object(ccr, "query_gitea_runners", return_value=runners or []))
         with mock.patch.dict("os.environ", env, clear=True), pm, qm, contextlib.redirect_stdout(out):
@@ -325,10 +349,10 @@ class MainIntegration(unittest.TestCase):
         self.assertIn("unreachable", text)
 
     def test_full_pass_and_token_never_printed(self):
-        runners = [{"name": f"ci-runner-{i}", "status": "online"} for i in range(1, 6)]
+        runners = self.online_pool()
         rc, text = self._run([], {"GITEA_TOKEN": TOKEN_SENTINEL}, runners=runners)
         self.assertEqual(rc, 0)
-        self.assertIn("5/5 expected runners online", text)
+        self.assertIn("6/6 expected runners online", text)
         self.assertNotIn(TOKEN_SENTINEL, text)  # token must never reach stdout
 
     def test_api_error_token_never_printed(self):
@@ -338,12 +362,31 @@ class MainIntegration(unittest.TestCase):
         self.assertNotIn(TOKEN_SENTINEL, text)
 
     def test_include_cloud_prints_info_and_still_passes(self):
-        runners = [{"name": f"ci-runner-{i}", "status": "online"} for i in range(1, 6)]
+        runners = self.online_pool()
         runners.append({"name": "cloud-ci-1", "status": "offline"})
         rc, text = self._run(["--include-cloud"], {"GITEA_TOKEN": TOKEN_SENTINEL}, runners=runners)
         self.assertEqual(rc, 0)
         self.assertIn("[INFO] api: cloud runner cloud-ci-1 status=offline", text)
         self.assertNotIn("[WARN]", text)
+
+    def test_live_dedicated_advertisement_must_match_host(self):
+        runners = self.online_pool()
+        runners[-1]["labels"] = [{"name": "self-hosted-hv"}]
+        rc, text = self._run([], {"GITEA_TOKEN": TOKEN_SENTINEL}, runners=runners)
+        self.assertEqual(rc, 1)
+        self.assertIn("dedicated ci-runner-9", text)
+
+    def test_no_other_online_runner_may_offer_long_label(self):
+        runners = self.online_pool()
+        runners[0]["labels"].append({"name": "forge-complete"})
+        rc, text = self._run([], {"GITEA_TOKEN": TOKEN_SENTINEL}, runners=runners)
+        self.assertEqual(rc, 1)
+        self.assertIn("ordinary/unexpected runner ci-runner-1", text)
+
+    def test_dedicated_host_with_ordinary_label_fails_before_api(self):
+        rc, text = self._run(["--skip-api", "192.168.0.31"], {}, probe=self.GOOD_PROBE)
+        self.assertEqual(rc, 1)
+        self.assertIn("dedicated ci-runner-9", text)
 
     def test_api_subpool_still_gates_full_pool(self):
         # probing one host but only 4 runners online -> API must still FAIL (whole pool is the gate)

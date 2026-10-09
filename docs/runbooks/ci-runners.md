@@ -1,5 +1,8 @@
 # Runbook — self-hosted GitHub Actions runners (Proxmox)
 
+The owner-operated [complete Forge gate](forge-complete-gate.md) reserves ci-runner-9 for a
+ten-hour job with a dedicated label; its rollout must be observed before Forge uses that route.
+
 5 ephemeral runner VMs (2 on node1/node2, 1 on node3) joining the `cchifor/platform` **`self-hosted-hv`** pool.
 See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_runner/` (config).
 

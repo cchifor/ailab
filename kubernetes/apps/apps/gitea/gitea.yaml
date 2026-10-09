@@ -197,6 +197,9 @@ spec:
           DEFAULT_REPO_UNITS: repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects,repo.packages,repo.actions
         actions:
           ENABLED: true
+          # Server-wide ceiling for ci-runner-9's ten-hour complete Forge job. Ordinary workers keep
+          # their own three-hour timeout. Owner rollout: docs/runbooks/forge-complete-gate.md.
+          ENDLESS_TASK_TIMEOUT: 12h
           DEFAULT_ACTIONS_URL: github # `uses: actions/checkout@vN` resolves from github.com
           ARTIFACT_RETENTION_DAYS: 14 # retention applies to the S3 backend too
           # 14d (was 30) — aligns with ARTIFACT_RETENTION_DAYS. cron.cleanup_actions (enabled, @midnight)

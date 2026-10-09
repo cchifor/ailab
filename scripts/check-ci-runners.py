@@ -6,13 +6,13 @@ bootstrap/workload images ON this pool (the user's host-mode override of the P2 
 proposal — ADR 0019; see docs/runbooks/ci-runners.md §8). This is a READ-ONLY activation gate: it never
 mutates a VM, a registration, or local trust state.
 
-    python scripts/check-ci-runners.py                 # probe the default pool (.14-.18) + Gitea API
+    python scripts/check-ci-runners.py                 # probe ordinary (.14-.18) + Forge (.31) + API
     python scripts/check-ci-runners.py --skip-api       # host-side only (no GITEA_TOKEN needed)
     python scripts/check-ci-runners.py --include-cloud  # also LIST the cloud-ci-N runners (informational)
     python scripts/check-ci-runners.py 192.168.0.14     # target one runner
 
 Per host (SSH as `ubuntu`, key ~/.ssh/id_ed25519), asserts: the act_runner daemon is active; the `runner`
-service account can reach Docker; the runner is registered host-mode (label `self-hosted-hv:host`) to the
+service account can reach Docker; the runner has its host-specific host-mode label registered to the
 Gitea instance; egress to registry.chifor.me (anonymous pull path) and git.chifor.me is healthy; and
 capacity == 1. Then (unless --skip-api) queries the Gitea org runners API and asserts every expected
 ci-runner-N reports status=online — the authoritative "Gitea sees a schedulable runner" signal that a
@@ -38,6 +38,7 @@ DEFAULT_RUNNERS = [
     ("192.168.0.16", "ci-runner-3"),
     ("192.168.0.17", "ci-runner-4"),
     ("192.168.0.18", "ci-runner-5"),
+    ("192.168.0.31", "ci-runner-9"),
 ]
 KNOWN_BY_IP = dict(DEFAULT_RUNNERS)
 # The cloudlab opportunistic runners (cloud-ci-N, ADR 0032) are NEVER part of DEFAULT_RUNNERS: their
@@ -52,6 +53,7 @@ CLOUD_RUNNER_RE = re.compile(r"^cloud-ci-\d+$")
 GITEA_URL = "https://git.chifor.me"
 GITEA_ORG = "cchifor"
 EXPECTED_LABEL = "self-hosted-hv:host"  # host-execution schema (NOT docker://)
+DEDICATED_LABELS = {"ci-runner-9": "forge-complete:host"}
 EXPECTED_CAPACITY = 1
 # git.chifor.me/api/v1/version needs sign-in (403) — any of these proves TLS+L7 egress; 000/3xx/5xx = FAIL
 # (a 3xx redirect is NOT accepted: the finalized plan's status policy is exactly {200,401,403}).
@@ -122,7 +124,7 @@ def parse_probe_output(text: str) -> dict:
     return fields
 
 
-def evaluate_host(fields: dict) -> HostResult:
+def evaluate_host(fields: dict, runner_name: str = "") -> HostResult:
     """Decide pool-fitness for one runner from its parsed probe fields. Pure."""
     failures = []
 
@@ -145,8 +147,15 @@ def evaluate_host(fields: dict) -> HostResult:
 
     if present("label"):
         labels = [x.strip() for x in fields["label"].split(",") if x.strip()]
-        if EXPECTED_LABEL not in labels:
-            failures.append(f"label: {labels or '[]'} lacks '{EXPECTED_LABEL}' (host-mode)")
+        expected_label = DEDICATED_LABELS.get(runner_name, EXPECTED_LABEL)
+        if runner_name in DEDICATED_LABELS:
+            if labels != [expected_label]:
+                failures.append(f"label: dedicated {runner_name} needs only '{expected_label}'")
+        else:
+            if expected_label not in labels:
+                failures.append(f"label: {labels or '[]'} lacks '{expected_label}' (host-mode)")
+            if any(label in DEDICATED_LABELS.values() for label in labels):
+                failures.append("label: an ordinary worker must not accept a dedicated long job")
 
     if present("address"):
         addr = fields["address"].rstrip("/")
@@ -188,6 +197,16 @@ def evaluate_api(runners, expected_names, include_cloud: bool = False) -> ApiRes
             failures.append(f"api: malformed runner entry {str(r)[:60]!r} (name/status not strings)")
             continue
         nm = r["name"]
+        labels = r.get("labels")
+        dedicated_names = {label.removesuffix(":host") for label in DEDICATED_LABELS.values()}
+        if nm in DEDICATED_LABELS:
+            expected = DEDICATED_LABELS[nm].removesuffix(":host")
+            if (not isinstance(labels, list) or len(labels) != 1
+                    or not isinstance(labels[0], dict) or labels[0].get("name") != expected):
+                failures.append(f"api: dedicated {nm} must advertise only {expected!r}")
+        elif isinstance(labels, list) and any(
+                isinstance(label, dict) and label.get("name") in dedicated_names for label in labels):
+            failures.append(f"api: ordinary/unexpected runner {nm} advertises a dedicated label")
         if nm in by_name:  # duplicate name could mask an offline one depending on order → fail-closed
             failures.append(f"api: duplicate runner name {nm!r} in payload (ambiguous schema)")
             continue
@@ -311,7 +330,7 @@ def main(argv) -> int:
         targets = [(ip, KNOWN_BY_IP.get(ip, ip)) for ip in positional]
     else:
         targets = list(DEFAULT_RUNNERS)
-    # The API online-check always gates the WHOLE pool (ci-runner-1..5), regardless of which hosts were
+    # The API online-check always gates the WHOLE declared pool, regardless of which hosts were
     # SSH-probed: positional IPs only narrow the host-side probe (a debug affordance) and must not be able
     # to shrink the schedulability gate to a subset — or to a vacuous 0/0 when an unknown IP is passed.
     expected_names = {name for _ip, name in DEFAULT_RUNNERS}
@@ -324,11 +343,12 @@ def main(argv) -> int:
             print(f"[FAIL] {name} {ip}: unreachable ({type(exc).__name__}: {exc})")
             ok = False
             continue
-        result = evaluate_host(parse_probe_output(text))
+        result = evaluate_host(parse_probe_output(text), name)
         if result.ok:
             v = result.details
             print(f"[ OK ] {name} {ip}: daemon=active docker={v.get('docker')} "
-                  f"label={EXPECTED_LABEL} registry={v.get('registry')} gitea={v.get('gitea')} "
+                  f"label={DEDICATED_LABELS.get(name, EXPECTED_LABEL)} "
+                  f"registry={v.get('registry')} gitea={v.get('gitea')} "
                   f"capacity={v.get('capacity')}")
         else:
             print(f"[FAIL] {name} {ip}:")

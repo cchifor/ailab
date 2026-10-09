@@ -10,6 +10,10 @@
 # github_runner and assumed present here (run `just runners` before `just gitea-runners`). Extracting a
 # shared `runner_common` role is a post-cutover follow-up (once github_runner is retired).
 gitea_runner_enabled: false # opt-in, like github_runner (flip in group_vars/gitea_runners.yml)
+# Explicit host retirement boundary. A dedicated host must be drained and both old runner services
+# stopped BEFORE applying this role; the guard then disables the legacy GitHub service. Disabling its
+# installation alone would leave an existing service and its destructive reclaim hook running.
+gitea_runner_exclusive_host: false
 
 # ---- Gitea instance + pool identity ----
 # The label matches the GitHub pool (self-hosted-hv) so platform's `runs-on: ${{ vars.RUNNER_LABEL ||

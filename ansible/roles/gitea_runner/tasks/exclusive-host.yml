@@ -1,0 +1,41 @@
+---
+# Applies on EVERY maintenance run for an exclusive host, including a later config update.
+# A new shutdown_timeout cannot protect the old daemon before it has read that configuration.
+- name: Require explicit exclusive-host configuration
+  ansible.builtin.assert:
+    that:
+      - not (github_runner_agent_enabled | default(true) | bool)
+      - gitea_runner_label != 'self-hosted-hv'
+      - gitea_runner_capacity | int == 1
+    fail_msg: >-
+      An exclusive host must disable GitHub agent installation, use a dedicated label and capacity1.
+      Follow docs/runbooks/forge-complete-gate.md; other hosts must remain in the ordinary pool.
+
+- name: Observe both runner service states without stopping a task
+  ansible.builtin.service_facts:
+
+- name: Require both existing services stopped before exclusive-host maintenance
+  ansible.builtin.assert:
+    that:
+      - item not in ansible_facts.services or ansible_facts.services[item].state == 'stopped'
+    fail_msg: >-
+      {{ item }} is not stopped. The owner must pause scheduling, observe no active tasks on BOTH
+      Gitea and GitHub, and stop both services before applying this role. Missing Runner.Worker
+      alone is not evidence that a Gitea task is idle. No runner has been stopped by this guard.
+  loop:
+    - "{{ gitea_runner_service }}"
+    - "{{ github_runner_service | default('actions.runner.cchifor-platform.service') }}"
+
+- name: Reject a surviving runner daemon or GitHub worker outside stopped services
+  ansible.builtin.command:
+    argv: [pgrep, -x, 'act_runner|Runner[.]Worker']
+  register: _exclusive_runner_processes
+  changed_when: false
+  failed_when: _exclusive_runner_processes.rc != 1
+
+- name: Disable the installed legacy GitHub service on this exclusive host
+  ansible.builtin.systemd_service:
+    name: "{{ github_runner_service | default('actions.runner.cchifor-platform.service') }}"
+    state: stopped
+    enabled: false
+  when: (github_runner_service | default('actions.runner.cchifor-platform.service')) in ansible_facts.services

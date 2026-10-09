@@ -3,9 +3,14 @@
 # re-run. Gated as a whole by gitea-runners.yml (when: gitea_runner_enabled), so no per-task guards.
 # Assumes the base toolchain (Docker + the `runner` user) is already installed by the github_runner role
 # — run `just runners` before `just gitea-runners`. Day-2: a re-run restarts the daemon (handler),
-# interrupting at most the in-flight job (Gitea re-queues it); run when the pool is mostly idle.
+# potentially interrupting an in-flight job; Gitea does not automatically re-queue it. Drain before
+# maintenance. Exclusive hosts additionally enforce stopped services before any role mutation.
 
 # ── 0. preflight ─────────────────────────────────────────────────────────────
+- name: Guard exclusive-host maintenance before any runner mutation
+  ansible.builtin.include_tasks: exclusive-host.yml
+  when: gitea_runner_exclusive_host | bool
+
 - name: Assert the Gitea org runner-registration token is configured
   ansible.builtin.assert:
     that:

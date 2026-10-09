@@ -1,0 +1,15 @@
+---
+# Reserve the existing always-on VM4109 on ai-node1 for one complete Forge gate.
+# Owner rollout is required: docs/runbooks/forge-complete-gate.md. No fleet default changes.
+gitea_runner_exclusive_host: true
+github_runner_agent_enabled: false
+gitea_runner_label: forge-complete
+gitea_runner_capacity: 1
+# This is the COMPLETE job budget, including bootstrap and evidence upload.
+gitea_runner_job_timeout: 10h
+gitea_runner_shutdown_timeout_min: 600
+# Never age-reap a live ten-hour job's containers or freshly pulled images.
+gitea_runner_cleanup_min_until_sec: 39600
+gitea_runner_cleanup_reap_age_sec: 39600
+gitea_runner_cleanup_pressure_until: 11h
+gitea_runner_cleanup_critical_until: 11h
