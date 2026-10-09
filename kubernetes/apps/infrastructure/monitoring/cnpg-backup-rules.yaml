@@ -167,47 +167,110 @@ spec:
               No instance of trueswarm-admin/trueswarm-admin-pg has been scraped successfully for 15 minutes, so every
               WAL-archiving and backup alert for it is blind. Check the pods, the trueswarm-admin-pg-metrics
               PodMonitor (trueswarm-pg-podmonitors.yaml) and the monitoring -> :9187 NetworkPolicy.
-        # Scraped but exporting no backup timestamp from either family: the exporter or the plugin's
-        # metrics hook lost the series, which would otherwise read as "quiet".
+        # Scraped, but no instance reports being the primary. Every series-reading rule above is
+        # filtered on `cnpg_pg_replication_in_recovery == 0`, so they all go quiet together when that
+        # series disappears while `up` stays 1: the primary's scrape fails but a replica's succeeds,
+        # the pg_replication default query errors (cnpg_collector_last_collection_error), or a
+        # failover leaves no primary. 15m tolerates a switchover. (ailab#1179 review)
+        - alert: CNPGPrimaryNotObserved
+          expr: absent(cnpg_pg_replication_in_recovery{namespace="trueswarm", cluster="trueswarm-pg"} == 0)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm
+            cluster: trueswarm-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-pg: no scraped instance reports being the primary"
+            description: >-
+              No scraped instance of trueswarm/trueswarm-pg has reported cnpg_pg_replication_in_recovery == 0 for
+              15 minutes, so every primary-filtered WAL-archiving and backup alert for it is blind.
+              Either the primary is not being scraped (check its pod and target), the replication
+              query is failing (cnpg_collector_last_collection_error), or the cluster has no primary.
+        - alert: CNPGPrimaryNotObserved
+          expr: absent(cnpg_pg_replication_in_recovery{namespace="trueswarm", cluster="trueswarm-platform-pg"} == 0)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm
+            cluster: trueswarm-platform-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-platform-pg: no scraped instance reports being the primary"
+            description: >-
+              No scraped instance of trueswarm/trueswarm-platform-pg has reported cnpg_pg_replication_in_recovery == 0 for
+              15 minutes, so every primary-filtered WAL-archiving and backup alert for it is blind.
+              Either the primary is not being scraped (check its pod and target), the replication
+              query is failing (cnpg_collector_last_collection_error), or the cluster has no primary.
+        - alert: CNPGPrimaryNotObserved
+          expr: absent(cnpg_pg_replication_in_recovery{namespace="trueswarm-admin", cluster="trueswarm-admin-pg"} == 0)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm-admin
+            cluster: trueswarm-admin-pg
+          annotations:
+            summary: "CNPG trueswarm-admin/trueswarm-admin-pg: no scraped instance reports being the primary"
+            description: >-
+              No scraped instance of trueswarm-admin/trueswarm-admin-pg has reported cnpg_pg_replication_in_recovery == 0 for
+              15 minutes, so every primary-filtered WAL-archiving and backup alert for it is blind.
+              Either the primary is not being scraped (check its pod and target), the replication
+              query is failing (cnpg_collector_last_collection_error), or the cluster has no primary.
+        # The primary is scraped but exports no backup timestamp from either family: the exporter or the
+        # plugin's metrics hook lost the series, which would otherwise read as "quiet". Anchored to the
+        # PRIMARY like the rules it guards, so a replica still exporting a timestamp does not mask it.
         - alert: CNPGBackupMetricMissing
-          expr: absent({__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm", cluster="trueswarm-pg"})
+          expr: |
+            absent(
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm", cluster="trueswarm-pg"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
           for: 30m
           labels:
             severity: warning
             namespace: trueswarm
             cluster: trueswarm-pg
           annotations:
-            summary: "CNPG trueswarm/trueswarm-pg exports no backup timestamp"
+            summary: "CNPG trueswarm/trueswarm-pg primary exports no backup timestamp"
             description: >-
-              trueswarm/trueswarm-pg has exported neither barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
-              (plugin) nor cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
+              The primary of trueswarm/trueswarm-pg has exported neither
+              barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor
+              cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
               CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the
               migration, the plugin-barman-cloud sidecar.
         - alert: CNPGBackupMetricMissing
-          expr: absent({__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm", cluster="trueswarm-platform-pg"})
+          expr: |
+            absent(
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm", cluster="trueswarm-platform-pg"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
           for: 30m
           labels:
             severity: warning
             namespace: trueswarm
             cluster: trueswarm-platform-pg
           annotations:
-            summary: "CNPG trueswarm/trueswarm-platform-pg exports no backup timestamp"
+            summary: "CNPG trueswarm/trueswarm-platform-pg primary exports no backup timestamp"
             description: >-
-              trueswarm/trueswarm-platform-pg has exported neither barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
-              (plugin) nor cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
+              The primary of trueswarm/trueswarm-platform-pg has exported neither
+              barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor
+              cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
               CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the
               migration, the plugin-barman-cloud sidecar.
         - alert: CNPGBackupMetricMissing
-          expr: absent({__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm-admin", cluster="trueswarm-admin-pg"})
+          expr: |
+            absent(
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm-admin", cluster="trueswarm-admin-pg"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
           for: 30m
           labels:
             severity: warning
             namespace: trueswarm-admin
             cluster: trueswarm-admin-pg
           annotations:
-            summary: "CNPG trueswarm-admin/trueswarm-admin-pg exports no backup timestamp"
+            summary: "CNPG trueswarm-admin/trueswarm-admin-pg primary exports no backup timestamp"
             description: >-
-              trueswarm-admin/trueswarm-admin-pg has exported neither barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
-              (plugin) nor cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
+              The primary of trueswarm-admin/trueswarm-admin-pg has exported neither
+              barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor
+              cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
               CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the
               migration, the plugin-barman-cloud sidecar.

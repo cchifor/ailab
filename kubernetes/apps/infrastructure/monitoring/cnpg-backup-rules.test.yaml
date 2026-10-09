@@ -71,6 +71,40 @@ tests:
         alertname: CNPGWalArchivingFailing
         exp_alerts: []
 
+  # ...and the verdict really MOVES: here the new primary is the failing one. A rule that simply
+  # dropped every pod after a role change would pass the test above; this one would catch it.
+  # (ailab#1179 review: claude 65619)
+  - interval: 1m
+    name: after a switchover the new primary's failing archiver pages
+    input_series:
+      - series: 'cnpg_pg_replication_in_recovery{namespace="trueswarm", pod="trueswarm-pg-1", cluster="trueswarm-pg"}'
+        values: "0+0x9 1+0x30"
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="trueswarm", pod="trueswarm-pg-1", cluster="trueswarm-pg"}'
+        values: "-1+0x40"
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="trueswarm", pod="trueswarm-pg-1", cluster="trueswarm-pg"}'
+        values: "3000+0x40"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="trueswarm", pod="trueswarm-pg-2", cluster="trueswarm-pg"}'
+        values: "1+0x9 0+0x30"
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="trueswarm", pod="trueswarm-pg-2", cluster="trueswarm-pg"}'
+        values: "2000+0x40"
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="trueswarm", pod="trueswarm-pg-2", cluster="trueswarm-pg"}'
+        values: "1000+0x40"
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: CNPGWalArchivingFailing
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: CNPGWalArchivingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: trueswarm
+              pod: trueswarm-pg-2
+              cluster: trueswarm-pg
+            exp_annotations:
+              summary: "CNPG WAL archiving failing on trueswarm/trueswarm-pg-2"
+              description: "The primary trueswarm/trueswarm-pg-2 has failed to archive WAL more recently than it last succeeded, for over 15 minutes. Point-in-time recovery stops at the last archived segment, and pg_wal grows until the volume fills (CNPGVolumeNearlyFull). Check the Cluster's ContinuousArchiving condition and the archiver log (in-tree: the postgres container; plugin: the plugin-barman-cloud sidecar). \"Expected empty archive\" has its own documented escape hatch in the plan."
+
   # ------------------------------------------------------- 2. backlog, and idle stays quiet
   - interval: 1m
     name: a growing .ready backlog on the primary warns after 30m; an idle primary does not
@@ -189,14 +223,43 @@ tests:
               summary: "CNPG trueswarm-admin/trueswarm-admin-pg has no scraped instance"
               description: "No instance of trueswarm-admin/trueswarm-admin-pg has been scraped successfully for 15 minutes, so every WAL-archiving and backup alert for it is blind. Check the pods, the trueswarm-admin-pg-metrics PodMonitor (trueswarm-pg-podmonitors.yaml) and the monitoring -> :9187 NetworkPolicy."
 
+  # The healthy primary is scraped for trueswarm-pg (in-tree family) and trueswarm-platform-pg (plugin
+  # family). trueswarm-admin-pg's primary is NOT scraped: only its replica is, and that replica still
+  # exports a fresh timestamp. Up stays 1, the scrape-level absence rule stays quiet, and every
+  # primary-filtered rule would read as "fine". The two primary-anchored coverage rules must page.
+  # (ailab#1179 review: codex 65613, claude 65618)
   - interval: 1m
-    name: a scraped cluster exporting neither backup family warns; either family alone is enough
+    name: a cluster whose primary is not scraped pages even while a replica exports a fresh timestamp
     input_series:
+      - series: 'up{job="trueswarm/trueswarm-pg-metrics", namespace="trueswarm", pod="trueswarm-pg-1", cluster="trueswarm-pg"}'
+        values: "1+0x40"
+      - series: 'up{job="trueswarm/trueswarm-platform-pg-metrics", namespace="trueswarm", pod="trueswarm-platform-pg-1", cluster="trueswarm-platform-pg"}'
+        values: "1+0x40"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="trueswarm", pod="trueswarm-pg-1", cluster="trueswarm-pg"}'
+        values: "0+0x40"
       - series: 'cnpg_collector_last_available_backup_timestamp{namespace="trueswarm", pod="trueswarm-pg-1", cluster="trueswarm-pg"}'
         values: "100+0x40"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="trueswarm", pod="trueswarm-platform-pg-1", cluster="trueswarm-platform-pg"}'
+        values: "0+0x40"
       - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="trueswarm", pod="trueswarm-platform-pg-1", cluster="trueswarm-platform-pg"}'
         values: "100+0x40"
+      - series: 'up{job="trueswarm-admin/trueswarm-admin-pg-metrics", namespace="trueswarm-admin", pod="trueswarm-admin-pg-1", cluster="trueswarm-admin-pg"}'
+        values: "1+0x40"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="trueswarm-admin", pod="trueswarm-admin-pg-1", cluster="trueswarm-admin-pg"}'
+        values: "1+0x40"
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="trueswarm-admin", pod="trueswarm-admin-pg-1", cluster="trueswarm-admin-pg"}'
+        values: "100+0x40"
     alert_rule_test:
+      - eval_time: 16m
+        alertname: CNPGPrimaryNotObserved
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: trueswarm-admin
+              cluster: trueswarm-admin-pg
+            exp_annotations:
+              summary: "CNPG trueswarm-admin/trueswarm-admin-pg: no scraped instance reports being the primary"
+              description: "No scraped instance of trueswarm-admin/trueswarm-admin-pg has reported cnpg_pg_replication_in_recovery == 0 for 15 minutes, so every primary-filtered WAL-archiving and backup alert for it is blind. Either the primary is not being scraped (check its pod and target), the replication query is failing (cnpg_collector_last_collection_error), or the cluster has no primary."
       - eval_time: 31m
         alertname: CNPGBackupMetricMissing
         exp_alerts:
@@ -205,5 +268,8 @@ tests:
               namespace: trueswarm-admin
               cluster: trueswarm-admin-pg
             exp_annotations:
-              summary: "CNPG trueswarm-admin/trueswarm-admin-pg exports no backup timestamp"
-              description: "trueswarm-admin/trueswarm-admin-pg has exported neither barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the migration, the plugin-barman-cloud sidecar."
+              summary: "CNPG trueswarm-admin/trueswarm-admin-pg primary exports no backup timestamp"
+              description: "The primary of trueswarm-admin/trueswarm-admin-pg has exported neither barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the migration, the plugin-barman-cloud sidecar."
+      - eval_time: 31m
+        alertname: CNPGBackupScrapeMissing
+        exp_alerts: []
