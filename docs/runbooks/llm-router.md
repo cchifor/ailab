@@ -548,9 +548,21 @@ this rollout.
 2. Issue four keys: `{routes: [dw-N], defaultRoute: dw-N, expiresInDays: 365}`.
 3. Re-seed `dev-worker-N.json` in `devworker-seeds.sops.yaml`. The workers read the key live, so
    their Codex config does not change.
-4. Verify in the journal: each key, then route `dw-N`, then `sub-codex-5`, then `codex-5`, with
-   `x-router-route: sub-codex-5`.
-5. Keep the old keys and the `dw-gpt-*` routes until after a soak. Then revoke the old keys.
+   - The workers' Codex sends the **model name**, not a route: the role pins
+     `model = "gpt-6-astra"` (`dev_worker_codex_model`), and the CLI puts it in `model`.
+   - With the new key, `gpt-6-astra` is not one of the key's routes and the CLI sends no header, so
+     the request takes the key's `defaultRoute` `dw-N` in model mode.
+   - Never set the pin to a route name: a route name in `model` is route mode, and a route outside
+     `[dw-N]` would be refused with 403.
+4. Verify that each worker's request resolved through its pointer:
+   - in the journal, the trajectory has `model: gpt-6-astra` and `route: dw-N`;
+   - its `routing.evaluated` route is `sub-codex-5`, served by `codex-5`;
+   - the response carries `x-router-route: sub-codex-5`;
+   - then run `scripts/validate-codex-fleet.sh dev_workers`.
+5. Keep the old keys until after a soak, then revoke them.
+   - Keep the six `dw-gpt-*` routes, and their `codexNative.routes` entries in `router.yaml`, for
+     as long as a rollback to an image older than this release is possible. The rollback below
+     needs them.
 
 After that, repointing a worker is one change to its pointer (`dw-N`), for example to a pool. Pools
 should wait for conversation placement (PR C).
@@ -575,9 +587,22 @@ acceptance** workflow checks the pod and the public endpoints.
 - **Before the cutover above:** an image/annotation revert through a reviewed GitOps PR to
   `registry.chifor.me/llm-router/router@sha256:9f9661c8458479d9ed3b2915bd0be7bef73e6fa706f783d9410bad0fe8c0b49b`
   (source `d7c798db2f1e3c4785a69cf9b9970d72c8fce5f3`, release `router-0.1.0-20261009-codex-native`).
-- **After the cutover**, the older image ignores `defaultRoute` and serves `*` targets to no one,
-  so the new keys stop working. Its next config write also drops `models` and `native`. Therefore:
-  1. First put the workers back on the old keys (re-seed the old values, which are kept until the
-     soak ends).
-  2. Then revert the image.
-  3. Then remove `sub-codex-5` and the `dw-N` pointers.
+- **After the cutover**, the older image ignores `defaultRoute` and the per-route `native`, and
+  serves `*` targets to no one, so the new keys stop working. Its next config write also drops
+  `models` and `native`.
+  - **Precondition:** the older image passes the Codex protocol through only on routes listed in
+    the manifest's `codexNative.routes`. The workers must therefore go back to routes in that
+    list, the six `dw-gpt-*` routes, which must still exist.
+  - **Before the old keys are revoked** (during the soak):
+    1. Re-seed the old key values into `dev-worker-N.json` and let the provision Job write them.
+    2. Check with `scripts/validate-codex-fleet.sh dev_workers` that each worker answers through a
+       `dw-gpt-*` route (journal: `route` absent, `model: dw-gpt-6-astra`).
+    3. Then revert the image.
+    4. Then remove `sub-codex-5` and the `dw-N` pointers.
+  - **After the old keys are revoked:**
+    1. Issue four replacement route-mode keys first, in the old shape:
+       `{routes: [the six dw-gpt-* routes], expiresInDays: 365}`, with no `defaultRoute`.
+    2. Seed and verify them as above.
+    3. Then revert the image.
+    4. Then remove `sub-codex-5` and the `dw-N` pointers.
+    5. Then revoke the per-key `dw-N` keys.
