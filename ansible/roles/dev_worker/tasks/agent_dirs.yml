@@ -1,0 +1,87 @@
+---
+# Agent temp files and caches off the 40 GB root disk (plans/2026-10-09-dev-worker-disk-hardening-plan.md
+# W4). On 2026-10-09 dev-worker-2's / reached 98%: /tmp 9.7 GB of pytest/node scratch younger than
+# the 8h aging, ~/.cache 6.4 GB, ~/.npm on top — none of it reclaimable by disk-guard, all of it agent
+# work that belongs on /workspace.
+#   - TMPDIR -> /workspace/<user>/.tmp (profile.d for login shells + ~/.bashrc for tmux/ttyd panes,
+#     which are not login shells; the claude-job unit sets it itself). System /tmp is NOT moved: a
+#     full /workspace must not also break system services and the tools that recover from it.
+#   - ~/.cache and ~/.npm become symlinks onto /workspace/<user>/, so EVERY entrypoint — cron, sudo,
+#     services, tools that ignore XDG variables — writes there (files/agent-dirs-migrate).
+# Already-running agents keep their old TMPDIR until they are restarted (new panes pick it up).
+# Own tag: --tags agent_dirs. Toggle: dev_worker_agent_dirs_on_workspace.
+- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
+  ansible.builtin.set_fact:
+    dev_worker_users: >-
+      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
+         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
+          if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  when: dev_worker_users is not defined
+
+# A tag-limited run skips workspace.yml: never create these on the root filesystem.
+- name: Check that {{ dev_worker_workspace_mount }} is a mounted filesystem
+  ansible.builtin.command: mountpoint -q {{ dev_worker_workspace_mount }}
+  changed_when: false
+  check_mode: false
+
+- name: Ensure each user's workspace temp + cache directories
+  ansible.builtin.file:
+    path: "{{ dev_worker_workspace_mount }}/{{ item.0.name }}/{{ item.1 }}"
+    state: directory
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0700"
+  loop: "{{ dev_worker_users | product(['.tmp', '.cache', '.npm']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+# Same 8h aging and the same socket exclusions as /tmp (tmp_hygiene.yml): ssh-agent puts its socket
+# under $TMPDIR, so a long session's agent socket must survive the sweep.
+- name: Install tmpfiles.d aging for the workspace temp directories
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/01-dev-worker-agent-tmp.conf
+    mode: "0644"
+    content: |
+      # Managed by ansible (role: dev_worker, tasks/agent_dirs.yml). Agent TMPDIRs on /workspace:
+      # aged like /tmp (8h), the same IPC/socket paths excluded.
+      {% for u in dev_worker_users %}
+      d {{ dev_worker_workspace_mount }}/{{ u.name }}/.tmp 0700 {{ u.name }} {{ u.name }} 8h
+      x {{ dev_worker_workspace_mount }}/{{ u.name }}/.tmp/ssh-*
+      x {{ dev_worker_workspace_mount }}/{{ u.name }}/.tmp/tmux-*
+      x {{ dev_worker_workspace_mount }}/{{ u.name }}/.tmp/systemd-private-*
+      {% endfor %}
+
+- name: Install the agent TMPDIR profile.d hook
+  ansible.builtin.template:
+    src: profile.d-02-dev-worker-agent-tmp.sh.j2
+    dest: /etc/profile.d/02-dev-worker-agent-tmp.sh
+    mode: "0644"
+
+- name: Source the agent TMPDIR hook from interactive non-login shells (tmux/ttyd)
+  ansible.builtin.lineinfile:
+    path: "{{ item.home }}/.bashrc"
+    line: "[ -r /etc/profile.d/02-dev-worker-agent-tmp.sh ] && . /etc/profile.d/02-dev-worker-agent-tmp.sh"
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Install the cache-migration tool
+  ansible.builtin.copy:
+    src: agent-dirs-migrate
+    dest: /usr/local/sbin/agent-dirs-migrate
+    mode: "0755"
+
+- name: Move each user's ~/.cache and ~/.npm onto /workspace (symlinks left behind)
+  become: true
+  become_user: "{{ item.name }}"
+  ansible.builtin.command: >-
+    /usr/local/sbin/agent-dirs-migrate {{ item.home }} {{ dev_worker_workspace_mount }}/{{ item.name }}
+  register: dev_worker_agent_dirs_migrate
+  changed_when: "'moved ' in dev_worker_agent_dirs_migrate.stdout"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"

@@ -1025,6 +1025,14 @@ data-root, so it is the one that fills. At 100% the agent cannot start any comma
 included — and has to ask for help. `/` (40 GB) fills too: `/tmp`, tool caches and anything agents
 park in `$HOME` live there.
 
+**Agent temp and caches live on `/workspace`** (since 2026-10-09, `tasks/agent_dirs.yml`): agents'
+`TMPDIR` is `/workspace/<user>/.tmp` (aged 8h like `/tmp`; set by `/etc/profile.d/02-dev-worker-agent-tmp.sh`,
+sourced from `~/.bashrc` for tmux/ttyd panes, and by the claude-job unit), and `~/.cache` and `~/.npm`
+are symlinks to `/workspace/<user>/.cache` and `.npm`, so every tool's default cache lands there.
+System `/tmp` stays on `/`. An agent started before the rollout keeps `/tmp` until it is restarted.
+`sudo -u <user> agent-dirs-migrate <home> /workspace/<user>` re-runs the move (it skips while a
+uv/pip/npm/playwright process of that user runs).
+
 **Alerts and what to do** (`kubernetes/apps/infrastructure/monitoring/dev-workers-rules.yaml`; the
 hardening plan behind them: `plans/2026-10-09-dev-worker-disk-hardening-plan.md`):
 

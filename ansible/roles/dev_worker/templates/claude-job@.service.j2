@@ -13,5 +13,9 @@ EnvironmentFile=-/workspace/agent-jobs/%i/job.env
 Environment=CLAUDE_HOME=/home/{{ dev_worker_agent_user }}/.claude
 Environment=CODEX_HOME=/home/{{ dev_worker_agent_user }}/.codex
 Environment=PATH=/home/{{ dev_worker_agent_user }}/{{ dev_worker_npm_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{% if dev_worker_agent_dirs_on_workspace | bool %}
+# Agent scratch on /workspace, not the root disk (tasks/agent_dirs.yml).
+Environment=TMPDIR={{ dev_worker_workspace_mount }}/{{ dev_worker_agent_user }}/.tmp
+{% endif %}
 ExecStart=/bin/bash -c 'mkdir -p output && claude -p "$(cat prompt.md)" --output-format json --allowed-tools "$(cat allowed-tools.txt | tr "\n" "," | sed s/,$//)" >> output/$(date -u +%%Y%%m%%dT%%H%%M%%SZ).jsonl 2>&1'
 TimeoutStartSec=30min
