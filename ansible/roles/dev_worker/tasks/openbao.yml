@@ -471,18 +471,12 @@
     executable: /bin/bash
   changed_when: false
 
-# Duplicated from git_forge.yml on purpose: that file yields ~/.git-credentials to the agent when
-# this plumbing is on (and skips itself entirely), but the file is useless without the store helper
-# configured, so whichever path writes the credential must also set this.
-- name: Enable the per-user git credential store
-  become: true
-  become_user: "{{ item.name }}"
-  ansible.builtin.command:
-    cmd: git config --global credential.helper store
-  changed_when: false
-  loop: "{{ dev_worker_users }}"
-  loop_control:
-    label: "{{ item.name }}"
+# Shared with git_forge.yml: that file yields ~/.git-credentials to the agent when this plumbing is on
+# (and skips itself entirely), but the file is useless without a helper that reads it, so whichever
+# path writes the credential must also set this. The helper is read-only, so git never deletes the
+# line the agent rendered (files/git-credential-store-readonly).
+- name: Point git at the read-only credential helper (shared with the other credential path)
+  ansible.builtin.import_tasks: git_credential_helper.yml
 
 - name: Pin the git.chifor.me credential username (shared with the other credential path)
   ansible.builtin.import_tasks: pin_gitea_username.yml

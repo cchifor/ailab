@@ -196,9 +196,21 @@ refuses to run if the stock profile is also loaded (two profiles on one path). C
 `~/.codex/config.toml`, set by `tasks/codex.yml` from `dev_worker_codex_sandbox_network`). Without it,
 every sandboxed command runs in an empty network namespace, and `git push` fails with
 `Could not resolve host: git.chifor.me` although the worker's own DNS is fine. That was the
-2026-09-26 dev-worker-4 report, which read as a DNS outage. Inside the sandbox, git's `store` credential
-helper also logs `unable to get credential storage lock ... Read-only file system` after a successful
-auth. That line is harmless: the file is rendered by the OpenBao agent, not by git.
+2026-09-26 dev-worker-4 report, which read as a DNS outage.
+
+**git only reads `~/.git-credentials`** (`tasks/git_credential_helper.yml`). Each user's global
+`credential.helper` is `/usr/local/bin/git-credential-store-readonly`. It answers `get` from the file
+and ignores `store` and `erase`, because the file already has an owner: the OpenBao agent, or Ansible on
+the SOPS path. With git's stock `store` helper, every 401 deleted the line. On 2026-10-09 a CNPG
+operator upgrade restarted infra-pg, and for those ~3.5 minutes Gitea answered 401 to VALID tokens,
+because it could not look them up in its database. dev-worker-3 lost its only credential that way, and
+its agent stopped to ask for a credential refresh until the OpenBao agent's next periodic render put
+the line back. Now a Gitea outage fails the requests made during it and nothing after. A token that
+really is revoked keeps getting 401s until the new one is in OpenBao (§ Rotation in
+`openbao-dev-workers.md`). The role stops with `unexpected global credential.helper` if a user has a
+helper other than `store` or this one; remove it or bring it into the role. The old
+`unable to get credential storage lock ... Read-only file system` line inside the Codex sandbox came
+from `store` rewriting the file after each success, and is gone with it.
 
 ### Codex through the router (since 2026-10-09)
 
