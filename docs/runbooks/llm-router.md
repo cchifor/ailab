@@ -509,3 +509,109 @@ the `codexNative` key, but drop the key in the same PR anyway. The order:
    answers the CLI with `400 UNSUPPORTED_PARAMETER: include`, so never re-enable
    `dev_worker_codex_router_enabled` against it.
 4. Put `codex-5` back into the `codex` route if its capacity is wanted there.
+
+## Per-key routing release: model mode (2026-10-09)
+
+`router-0.1.0-20261009-model-mode` deploys merged llm-router main
+`473c9e0f3bbf92659326a0122e1cb872665083b3`
+([PR #89](https://git.chifor.me/cchifor/llm-router/pulls/89)). It is PR A of the design
+`docs/design/per-key-routing.md` in llm-router. It lets each API key be routed on its own, with
+routes that serve whatever model the agent names.
+
+**What it adds.** **Model mode**: a request names the model it wants in `model`, and a route is
+selected for it, either by the `X-Router-Route` header or by the key's new **`defaultRoute`**.
+
+- **Any-model routes.** A route target may say `model: "*"`. It then serves the requested model on
+  any account whose catalog lists it.
+- **`models`** on a route is an allowlist. It bounds the route and its fallbacks.
+- **`native: ["codex-responses"]`** on a route makes `POST /v1/responses` a Codex pass-through.
+  - It replaces the `codexNative.routes` list in `router.yaml`, which still applies to routes
+    without the field.
+  - A config rule refuses native routes that would reach non-Codex accounts
+    (`422 INVALID_NATIVE_ROUTE`).
+- **New responses.**
+  - `x-router-route` names the route that served.
+  - `400 MODEL_NOT_SUPPORTED` comes before any upstream call, for a model the route chain does not
+    serve.
+  - `400 MODEL_REQUIRED` when an any-model route is named in `model`.
+  - `404 ROUTE_NOT_FOUND`.
+- **Route mode is unchanged.** Every request that names a route or a model by name behaves as
+  before, including the dev workers' current keys and the six `dw-gpt-*` routes.
+
+**State and order** (the per-key cutover for the dev workers, design §7). None of this is done by
+this rollout.
+
+1. After acceptance, through `PUT /admin/v1/config`, add:
+   - route `sub-codex-5`: one target `codex-5` with model `*`, `native: ["codex-responses"]`, the
+     same timeouts as the `dw-gpt-*` routes, `maxAttempts: 1`;
+   - pointers `dw-1` … `dw-4` → `sub-codex-5`.
+2. Issue four keys: `{routes: [dw-N], defaultRoute: dw-N, expiresInDays: 365}`.
+3. Re-seed `dev-worker-N.json` in `devworker-seeds.sops.yaml`. The workers read the key live, so
+   their Codex config does not change.
+   - The workers' Codex sends the **model name**, not a route: the role pins
+     `model = "gpt-6-astra"` (`dev_worker_codex_model`), and the CLI puts it in `model`.
+   - With the new key, `gpt-6-astra` is not one of the key's routes and the CLI sends no header, so
+     the request takes the key's `defaultRoute` `dw-N` in model mode.
+   - Never set the pin to a route name: a route name in `model` is route mode, and a route outside
+     `[dw-N]` would be refused with 403.
+4. Verify that each worker's request resolved through its pointer:
+   - in the journal, the trajectory has `model: gpt-6-astra` and `route: dw-N`;
+   - its `routing.evaluated` route is `sub-codex-5`, served by `codex-5`;
+   - the response carries `x-router-route: sub-codex-5`;
+   - then run `scripts/validate-codex-fleet.sh dev_workers`.
+5. Keep the old keys until after a soak, then revoke them.
+   - Keep the six `dw-gpt-*` routes, and their `codexNative.routes` entries in `router.yaml`, for
+     as long as a rollback to an image older than this release is possible. The rollback below
+     needs them.
+
+After that, repointing a worker is one change to its pointer (`dw-N`), for example to a pool. Pools
+should wait for conversation placement (PR C).
+
+**Image.** Built from the merged source in the pinned Node 26.10.0 runtime image: frozen install,
+build, production install, production smoke. Published by relay `release/router-model-mode-image`.
+
+- Archive `router-0.1.0-20261009-model-mode.tar.gz`, SHA-256
+  `4912d861143192a23bcbf37a5ce14c57d4aa5b659c7b6801e9171fc1913ee00a` (a relay v0.2.0 asset).
+- Image: `registry.chifor.me/llm-router/router@sha256:3a106b220aa2cbb6911f90edff698b93fec5628534a4ac4c7f57b8b081df8dd7`.
+- [Image CI 76282](https://git.chifor.me/cchifor/relay/actions/runs/76282);
+  [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-76282.json).
+- Before merge: 1324 tests passed. The only failures were the known environmental ones (the image
+  store's free-space guard, `claude-sdk` timing). Each of the eight tasks was reviewed, plus a final
+  whole-branch review.
+
+There is no schema change: new route and key fields are optional, and trajectories keep their
+columns. The usual single-replica Recreate rollout briefly interrupts service. The **Router rollout
+acceptance** workflow checks the pod and the public endpoints.
+
+**Rollback.**
+- **Before the cutover above:** an image/annotation revert through a reviewed GitOps PR to
+  `registry.chifor.me/llm-router/router@sha256:9f9661c8458479d9ed3b2915bd0be7bef73e6fa706f783d9410bad0fe8c0b49b`
+  (source `d7c798db2f1e3c4785a69cf9b9970d72c8fce5f3`, release `router-0.1.0-20261009-codex-native`).
+- **After the cutover**, the older image ignores `defaultRoute` and the per-route `native`, and
+  serves `*` targets to no one, so the new keys stop working. Its next config write also drops
+  `models` and `native`.
+  - **Precondition:** the older image passes the Codex protocol through only on routes listed in
+    the manifest's `codexNative.routes`. The workers must therefore go back to routes in that
+    list, the six `dw-gpt-*` routes, which must still exist.
+  - **The Codex model pin never changes in either direction.** It stays `model = "gpt-6-astra"`
+    (`dev_worker_codex_model`), and the CLI always sends that model name.
+    - **What changes is the key.** A key limited to the `dw-gpt-*` routes, with no `defaultRoute`,
+      is served by the **legacy Codex-native exact-model mapping** (#87, kept in every release since).
+    - The mapping takes the first of the key's native routes whose every enabled target serves
+      exactly the requested model: `gpt-6-astra` becomes `dw-gpt-6-astra`.
+    - The router then journals that route name as the trajectory's `model`. That is why old-key
+      traffic shows `model: dw-gpt-6-astra` even though the CLI sent `gpt-6-astra`.
+  - **Before the old keys are revoked** (during the soak):
+    1. Re-seed the old key values into `dev-worker-N.json` and let the provision Job write them.
+    2. Check with `scripts/validate-codex-fleet.sh dev_workers` that each worker answers through a
+       `dw-gpt-*` route. In the journal: `route` absent and `model: dw-gpt-6-astra`, from the
+       mapping above.
+    3. Then revert the image.
+    4. Then remove `sub-codex-5` and the `dw-N` pointers.
+  - **After the old keys are revoked:**
+    1. Issue four replacement route-mode keys first, in the old shape:
+       `{routes: [the six dw-gpt-* routes], expiresInDays: 365}`, with no `defaultRoute`.
+    2. Seed and verify them as above.
+    3. Then revert the image.
+    4. Then remove `sub-codex-5` and the `dw-N` pointers.
+    5. Then revoke the per-key `dw-N` keys.
