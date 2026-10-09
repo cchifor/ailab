@@ -334,9 +334,18 @@ def remove_as_owner(path, uid, gid):
               file=sys.stderr)
         return False
     kw = {} if os.geteuid() == uid else {"user": uid, "group": gid, "extra_groups": []}
+    cmds = [["rm", "-rf", "--one-file-system", "--", path]]
+    if os.path.isdir(path) and not os.path.islink(path):
+        # Even its owner cannot empty a directory without u+w (or enter one without u+x): a Go module
+        # cache, or a tree an agent chmod'ed read-only as "immutable". Restore u+wx on the real
+        # directories first, as the same user. find never follows symlinks (-P), and `-exec ... ;`
+        # runs before find descends, so a dir without u+x is fixed before it is entered.
+        cmds.insert(0, ["find", path, "-xdev", "-type", "d", "!", "-perm", "-u=wx",
+                        "-exec", "chmod", "u+wx", "{}", ";"])
     try:
-        subprocess.run(["rm", "-rf", "--one-file-system", "--", path], stdin=subprocess.DEVNULL,
-                       capture_output=True, timeout=1800, check=False, **kw)
+        for cmd in cmds:
+            subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=1800,
+                           check=False, **kw)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"disk-guard: rm {path}: {e}", file=sys.stderr)
     return not os.path.lexists(path)

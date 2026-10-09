@@ -627,6 +627,30 @@ class ArchiveTrimTest(unittest.TestCase):
         self.assertTrue(dg.remove_as_owner(str(self.arc / "a"), st.st_uid, st.st_gid))
         self.assertFalse((self.arc / "a").exists())
 
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() != 0, "POSIX, not as root")
+    def test_remove_as_owner_empties_read_only_dirs(self):
+        # An "immutable" archive: chmod -R a-w, and one dir not even traversable.
+        self.entry("ro", 64, OLD)
+        (self.arc / "ro" / "sub" / "deep").mkdir()
+        (self.arc / "ro" / "sub" / "deep" / "f").write_text("x")
+        os.chmod(self.arc / "ro" / "sub" / "deep", 0o444)
+        os.chmod(self.arc / "ro" / "sub", 0o555)
+        os.chmod(self.arc / "ro", 0o555)
+        st = os.lstat(self.arc / "ro")
+        self.assertTrue(dg.remove_as_owner(str(self.arc / "ro"), st.st_uid, st.st_gid))
+        self.assertFalse((self.arc / "ro").exists())
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() != 0, "POSIX, not as root")
+    def test_remove_as_owner_never_chmods_through_a_symlinked_entry(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        os.chmod(outside, 0o555)
+        (self.arc / "link").symlink_to(outside)
+        st = os.lstat(self.arc / "link")
+        self.assertTrue(dg.remove_as_owner(str(self.arc / "link"), st.st_uid, st.st_gid))
+        self.assertEqual(os.stat(outside).st_mode & 0o777, 0o555)
+        os.chmod(outside, 0o755)
+
     def test_remove_as_owner_never_runs_as_root(self):
         self.entry("a", 64, OLD)
         self.assertFalse(dg.remove_as_owner(str(self.arc / "a"), 0, 0))
