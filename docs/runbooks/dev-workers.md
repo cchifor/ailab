@@ -11,12 +11,12 @@ tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 **The base spec is shared** — cores + ceiling + floor are module-wide scalars in
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
 `dev_worker_memory_floating_mib`); the `dev_worker_nodes` map carries identity plus two optional
-per-worker overrides: `memory_floating_mib` (12 GiB floors on dw1/dw3 — node1 mitigation — and 6 GiB on dw4, node2) and
+per-worker overrides: `memory_floating_mib` (12 GiB floor on dw3 and 16 GiB on dw1 — node1 mitigation; dw1's was raised by hand and codified 2026-10-09 — and 6 GiB on dw4, node2) and
 `memory_mib` (unused since dev-worker-6's retirement; it carried the 12 GiB-ceiling POC, see below).
 
 | Host | Node | vmid | IP | Sizing |
 |---|---|---|---|---|
-| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 60+128 GiB |
+| dev-worker-1 | ai-node1 | 4201 | 192.168.0.8  | 8 vCPU / 16 GiB (**16** floor = ceiling, node1) / 60+128 GiB |
 | dev-worker-2 | ai-node2 | 4202 | 192.168.0.9  | 8 vCPU / 16 GiB (4–16 balloon) / 60+128 GiB |
 | dev-worker-3 | ai-node1 | 4204 | 192.168.0.10 | 8 vCPU / 16 GiB (**12**–16 balloon, node1 floor) / 60+128 GiB |
 | dev-worker-4 | ai-node2 | 4205 | 192.168.0.11 | 8 vCPU / 16 GiB (**6**–16 balloon, node2 floor) / 60+128 GiB |

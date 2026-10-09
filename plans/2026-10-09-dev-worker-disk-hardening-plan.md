@@ -109,8 +109,10 @@ Principles:
   manual `cleanup`); the daily docker prunes take the same busy gate as the guard.
 - Under sustained pressure, the full `builder prune -af` runs at most once per hour; other ticks
   reclaim toward the target with `--max-used-space`.
-- Elapsed deferral never overrides a protection. At critical space with docker busy, the guard
-  escalates (alert) instead of deleting.
+- Elapsed deferral never overrides a protection. At critical space (< 5% free) with docker busy the
+  guard still runs its docker reclaim (operator decision 2026-10-09, Phase B review): the in-flight
+  build or pull is about to fail on ENOSPC anyway, and ENOSPC takes every other command with it;
+  DiskFilling (critical) and Deferred page in any case.
 
 **W3. Native BuildKit GC** (`templates/daemon.json.j2`)
 - Enable the daemon's built-in builder GC (`"builder": {"gc": {"enabled": true,
