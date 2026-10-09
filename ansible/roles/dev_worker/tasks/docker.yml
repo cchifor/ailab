@@ -157,10 +157,15 @@
 
         [Service]
         Type=oneshot
+        # Skip the day (not fail) while a docker client is building, pulling or starting something:
+        # a prune's containerd GC reaps an in-flight pull's lease. Up to 1h of waiting for idle.
+        ExecCondition=/usr/local/bin/disk-guard --docker-idle-wait 3600
+        TimeoutStartSec=2h
+        # The reclaim lock every entrypoint shares (cleanup, disk-guard): never two prunes at once.
         {% if dev_worker_anon_volume_prune | bool %}
-        ExecStart=-/usr/bin/docker volume prune -f --filter label=com.docker.volume.anonymous
+        ExecStart=-/usr/bin/flock -w 900 /run/lock/dev-worker-cleanup.lock /usr/bin/docker volume prune -f --filter label=com.docker.volume.anonymous
         {% endif %}
-        ExecStart=/usr/bin/docker buildx prune -f --max-used-space {{ dev_worker_buildx_cache_max }}
+        ExecStart=/usr/bin/flock -w 900 /run/lock/dev-worker-cleanup.lock /usr/bin/docker buildx prune -f --max-used-space {{ dev_worker_buildx_cache_max }}
     - dest: docker-buildx-prune.timer
       content: |
         [Unit]

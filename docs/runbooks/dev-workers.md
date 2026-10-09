@@ -1076,6 +1076,14 @@ Since 2026-10-09 the guard also:
 - names the filesystem that is still low when it ends **EXHAUSTED**, and logs its largest
   directories (`largest under …`, du depth 2) once an hour per filesystem.
 
+Every reclaim entrypoint shares one lock, `/run/lock/dev-worker-cleanup.lock` (`cleanup`, the
+guard's docker prunes through `flock -n`, the daily buildx/volume unit through `flock -w 900`): a
+held lock defers a step, it never runs two prunes at once. The daily docker prune also waits up to an
+hour for docker to be idle (`ExecCondition=disk-guard --docker-idle-wait 3600`) and skips the day if
+it never is; BuildKit's GC holds the build cache meanwhile. Under sustained pressure the guard's
+all-cache `builder prune -af` runs at most hourly (dangling cache only in between) unless /workspace
+is under 5%. A step that runs long keeps the heartbeat fresh (rewritten every minute).
+
 Removals the guard makes itself (codex releases, archive entries) run `rm -rf` as the owner of the
 entry, never as root: a root-owned archive entry is left alone ("could not remove"), and a codex
 install reached through a symlink is skipped. An archive scan over 120 s removes nothing that run and
