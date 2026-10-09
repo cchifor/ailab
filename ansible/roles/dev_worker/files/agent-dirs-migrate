@@ -20,12 +20,20 @@ home=${1:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 root=${2:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 [ -d "$root" ] || { echo "skip: $root does not exist"; exit 0; }
 
-# Any process of this user (the effective uid owns its /proc entry) with its cwd, executable, an open
-# file or a mapping under one of the caches.
+# Processes in another mount namespace — a container's, whose uid 1000 is this user's — see their own
+# filesystem: a containerised Playwright under /home/appuser/.cache never touches this ~/.cache (it
+# blocked dev-worker-3 forever, 2026-10-09). Only a container that bind-mounts the caches can, and
+# containers_mount_caches covers that.
+self_ns=$(readlink /proc/self/ns/mnt)
+same_ns() { [ "$(readlink "/proc/$1/ns/mnt" 2>/dev/null)" = "$self_ns" ]; }
+
+# Any process of this user in this mount namespace (the effective uid owns its /proc entry) with its
+# cwd, executable, an open file or a mapping under one of the caches.
 caches_in_use() {
 	local p link target
 	for p in /proc/[0-9]*; do
 		[ -O "$p" ] || continue
+		same_ns "${p#/proc/}" || continue
 		for link in "$p/cwd" "$p/exe" "$p"/fd/*; do
 			target=$(readlink -- "$link" 2>/dev/null) || continue
 			case "$target" in
@@ -37,13 +45,28 @@ caches_in_use() {
 	return 1
 }
 
+# A running container with a bind mount at or under one of the caches: moving the directory would pull
+# it from under the container.
+containers_mount_caches() {
+	command -v docker >/dev/null 2>&1 || return 1
+	docker ps -q 2>/dev/null |
+		xargs -r docker inspect --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null |
+		grep -qE "^($home/\.cache|$home/\.npm)(/|\$)"
+}
+
 if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ]; then
 	if caches_in_use; then
 		echo "skip: busy (a process of $(id -un) is using $home/.cache or $home/.npm)"
 		exit 0
 	fi
-	if pgrep -u "$(id -u)" -f -- '(^|[ /])(uv|uvx|pip3?|npm|npx|pnpm)( |$)|-m (pip|uv)( |$)|playwright(/| |$)|ms-playwright/' >/dev/null; then
-		echo "skip: busy (a uv/pip/npm/playwright process of $(id -un) is running)"
+	for pid in $(pgrep -u "$(id -u)" -f -- '(^|[ /])(uv|uvx|pip3?|npm|npx|pnpm)( |$)|-m (pip|uv)( |$)|playwright(/| |$)|ms-playwright/'); do
+		if same_ns "$pid"; then
+			echo "skip: busy (a uv/pip/npm/playwright process of $(id -un) is running)"
+			exit 0
+		fi
+	done
+	if containers_mount_caches; then
+		echo "skip: busy (a running container bind-mounts $home/.cache or $home/.npm)"
 		exit 0
 	fi
 fi

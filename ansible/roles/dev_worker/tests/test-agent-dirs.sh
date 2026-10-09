@@ -82,6 +82,24 @@ out=$(DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home5" "$root")
 kill "$idle_pid" 2>/dev/null || :
 grep -q "moved $t/home5/.cache" <<<"$out" || fail "an unrelated process blocked the move: $out"
 
+# 6b. A running container that bind-mounts the cache blocks the move; one mounting elsewhere does not.
+#     (Processes INSIDE containers run in another mount namespace and are ignored by the use/name
+#     checks: their /home/appuser/.cache is not this ~/.cache.) A stub `docker` stands in.
+mkdir -p "$t/stub" "$t/home6/.cache"
+cat >"$t/stub/docker" <<STUB
+#!/bin/bash
+case "\$1" in
+ps) echo abc123 ;;
+inspect) printf '%s\n' "\$DW_STUB_MOUNT" ;;
+esac
+STUB
+chmod +x "$t/stub/docker"
+out=$(PATH="$t/stub:$PATH" DW_STUB_MOUNT="$t/home6/.cache/uv" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home6" "$root")
+grep -q "skip: busy (a running container bind-mounts" <<<"$out" || fail "a container mounting the cache did not block: $out"
+[ ! -L "$t/home6/.cache" ] || fail "moved under a container's bind mount"
+out=$(PATH="$t/stub:$PATH" DW_STUB_MOUNT="/srv/data" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home6" "$root")
+grep -q "moved $t/home6/.cache" <<<"$out" || fail "an unrelated container mount blocked the move: $out"
+
 # 7. The TMPDIR hook: set only for an existing, real, writable directory.
 hook=$t/hook.sh
 sed "s#{{ dev_worker_workspace_mount }}#$t/ws#g" "$tmpl" >"$hook"
