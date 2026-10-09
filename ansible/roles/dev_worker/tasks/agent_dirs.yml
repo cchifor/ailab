@@ -83,7 +83,7 @@
       ansible.builtin.command: >-
         /usr/local/sbin/agent-dirs-migrate {{ item.home }} {{ dev_worker_workspace_mount }}/{{ item.name }}
       register: dev_worker_agent_dirs_migrate
-      changed_when: "'moved ' in dev_worker_agent_dirs_migrate.stdout"
+      changed_when: "'moved ' in dev_worker_agent_dirs_migrate.stdout or 'removed ' in dev_worker_agent_dirs_migrate.stdout"
       failed_when: >-
         dev_worker_agent_dirs_migrate.rc != 0 or
         (dev_worker_agent_dirs_fail_when_busy | bool and 'skip: busy' in dev_worker_agent_dirs_migrate.stdout)

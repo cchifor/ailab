@@ -33,8 +33,9 @@ only their roots on a still-short fs (a full / does not cost /workspace a worktr
                    nothing has touched for N days and nothing is using.
 Steps 1-2 run under cleanup's lock (flock), the one every reclaim entrypoint shares: a step whose lock
 is held is deferred, never run concurrently with another prune. Step 1's all-cache `-af` runs at most
-once an hour (FULL_PRUNE_EVERY) unless the docker fs is under --critical; otherwise it prunes dangling
-cache only — BuildKit's own GC (daemon.json builder.gc) holds the cache at its cap meanwhile. While a
+once an hour (FULL_PRUNE_EVERY), --critical or not; the ticks in between prune to BuildKit's GC target
+(daemon.json builder.gc, passed in as --build-cache-*): over its max used space, or until its min free
+space — at --critical, all but the reserved, most recently used cache. While a
 step runs, the heartbeat is rewritten every BEAT_EVERY seconds, so a long step is not "stale"; a hung
 one is bounded by its timeout and shows as no completed run (DevWorkerDiskGuardStale, 3h).
 `disk-guard --run-when-docker-idle N -- CMD` runs CMD under the shared lock once docker is idle,
@@ -109,8 +110,8 @@ LOCK = "/run/lock/dev-worker-disk-guard.lock"
 CLEANUP_LOCK = "/run/lock/dev-worker-cleanup.lock"
 FLOCK_BUSY = 75     # flock -E: the exit code when CLEANUP_LOCK is held
 # `docker builder prune -af` throws away ALL warm build cache. Under sustained pressure it would run
-# every tick; at most once per FULL_PRUNE_EVERY it does, otherwise (and always above --critical) the
-# step prunes only unreferenced/dangling cache. BuildKit's own GC holds the cache at its cap meanwhile.
+# every tick, discarding what each build between ticks just cached; at most once per FULL_PRUNE_EVERY
+# it does (also under --critical), otherwise the step prunes to the GC target (--build-cache-*).
 FULL_PRUNE_STAMP = "/run/dev-worker-disk-guard.full-prune"
 FULL_PRUNE_EVERY = 3600     # seconds
 # While a step runs, the heartbeat is rewritten this often, so a legitimate 45-min step does not look
@@ -174,10 +175,8 @@ def locked(*argv):
     return ("flock", "-n", "-E", str(FLOCK_BUSY), CLEANUP_LOCK, *argv)
 
 
-def full_prune_due(stamp, now, critical):
+def full_prune_due(stamp, now):
     """Is the all-cache `-af` build-cache prune allowed now (see FULL_PRUNE_EVERY)?"""
-    if critical:
-        return True
     try:
         return now - os.stat(stamp).st_mtime >= FULL_PRUNE_EVERY
     except OSError:
@@ -333,11 +332,13 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
                     f"through a busy docker: {what}")
         full = False
         if step.name == "build-cache":
-            critical = measure(opts.docker_fs) < opts.critical / 100
-            full = full_prune_due(opts.full_prune_stamp, time.time(), critical)
+            full = full_prune_due(opts.full_prune_stamp, time.time())
             if not full:
-                step = replace(step, argv=tuple(a for a in step.argv if a != "-af") + ("-f",))
-                log("disk-guard: build-cache: full prune ran within the hour; dangling cache only")
+                step = replace(step, argv=step.argv + (
+                    "--max-used-space", opts.build_cache_max_used,
+                    "--min-free-space", opts.build_cache_min_free,
+                    "--reserved-space", opts.build_cache_reserved))
+                log("disk-guard: build-cache: full prune ran within the hour; pruning to the GC target")
         if opts.dry_run:
             log(f"disk-guard: would run {step.name}: {' '.join(step.argv) or ','.join(step.roots)}")
             if step.fn:
@@ -979,6 +980,12 @@ def parse_args(argv):
     p.add_argument("--target", type=float, default=25, help="stop at this %% free (default 25)")
     p.add_argument("--critical", type=float, default=5,
                    help="under this %% free, docker steps run even through a busy docker (default 5)")
+    p.add_argument("--build-cache-max-used", default="20GB",
+                   help="between hourly full prunes, prune build cache over this (builder.gc max used)")
+    p.add_argument("--build-cache-min-free", default="20GB",
+                   help="...and until this much is free (builder.gc min free)")
+    p.add_argument("--build-cache-reserved", default="2GB",
+                   help="...never below this much cache (builder.gc reserved)")
     p.add_argument("--image-days", type=int, default=3)
     p.add_argument("--stopped-hours", type=int, default=24)
     p.add_argument("--deps-days", type=int, default=3)

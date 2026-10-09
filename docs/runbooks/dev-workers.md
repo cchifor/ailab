@@ -1050,7 +1050,9 @@ sourced from `~/.bashrc` for tmux/ttyd panes, and by the claude-job unit), and `
 are symlinks to `/workspace/<user>/.cache` and `.npm`, so every tool's default cache lands there.
 System `/tmp` stays on `/`. An agent started before the rollout keeps `/tmp` until it is restarted.
 `sudo -u <user> agent-dirs-migrate <home> /workspace/<user>` re-runs the move (it skips while a
-uv/pip/npm/playwright process of that user runs).
+process of that user uses the caches, checked again right before each switch). A tool that starts
+in the instant between that check and the switch keeps its files: the old tree stays as
+`~/.cache.pre-workspace` ("kept … still in use") and a later run removes it once nothing uses it.
 
 **Alerts and what to do** (`kubernetes/apps/infrastructure/monitoring/dev-workers-rules.yaml`; the
 hardening plan behind them: `plans/2026-10-09-dev-worker-disk-hardening-plan.md`):
@@ -1112,8 +1114,10 @@ held lock defers a step, it never runs two prunes at once. Each daily docker pru
 `disk-guard --run-when-docker-idle 3600 -- <prune>`: the lock and an idle docker are checked together
 right before it starts, retried for up to an hour, then the prune is skipped; BuildKit's GC holds the
 build cache meanwhile. Under sustained pressure the guard's
-all-cache `builder prune -af` runs at most hourly (dangling cache only in between) unless /workspace
-is under 5%. A step that runs long keeps the heartbeat fresh (rewritten every minute).
+all-cache `builder prune -af` runs at most hourly, under 5% free too; the ticks in between prune to
+the BuildKit GC target (`--max-used-space`/`--min-free-space`/`--reserved-space` from
+`dev_worker_buildkit_gc_*`), which below 20 GB free leaves only the 2 GB most recently used cache.
+A step that runs long keeps the heartbeat fresh (rewritten every minute).
 
 Removals the guard makes itself (codex releases, archive entries) run `rm -rf` as the owner of the
 entry, never as root: a root-owned archive entry is left alone ("could not remove"), and a codex

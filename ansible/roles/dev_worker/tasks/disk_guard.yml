@@ -60,7 +60,7 @@
 
         [Service]
         Type=oneshot
-        ExecStart=/usr/local/bin/disk-guard --watch / --watch {{ dev_worker_workspace_mount }} --docker-fs {{ dev_worker_workspace_mount }} --low {{ dev_worker_disk_guard_low }} --target {{ dev_worker_disk_guard_target }} --critical {{ dev_worker_disk_guard_critical }} --image-days {{ dev_worker_disk_guard_image_days }} --deps-days {{ dev_worker_disk_guard_deps_days }} --worktree-days {{ dev_worker_worktree_prune_days }} --archive-dir {{ dev_worker_archive_dir }} --archive-max-gb {{ dev_worker_archive_max_gb }}{{ ' --worktrees-remove' if (dev_worker_worktree_prune_mode | string) == 'remove' else '' }}
+        ExecStart=/usr/local/bin/disk-guard --watch / --watch {{ dev_worker_workspace_mount }} --docker-fs {{ dev_worker_workspace_mount }} --low {{ dev_worker_disk_guard_low }} --target {{ dev_worker_disk_guard_target }} --critical {{ dev_worker_disk_guard_critical }} --image-days {{ dev_worker_disk_guard_image_days }} --deps-days {{ dev_worker_disk_guard_deps_days }} --worktree-days {{ dev_worker_worktree_prune_days }} --archive-dir {{ dev_worker_archive_dir }} --archive-max-gb {{ dev_worker_archive_max_gb }} --build-cache-max-used {{ dev_worker_buildkit_gc_max_used }} --build-cache-min-free {{ dev_worker_buildkit_gc_min_free }} --build-cache-reserved {{ dev_worker_buildkit_gc_reserved }}{{ ' --worktrees-remove' if (dev_worker_worktree_prune_mode | string) == 'remove' else '' }}
         Nice=10
         IOSchedulingClass=best-effort
         IOSchedulingPriority=7
