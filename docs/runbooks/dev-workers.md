@@ -1044,6 +1044,9 @@ hardening plan behind them: `plans/2026-10-09-dev-worker-disk-hardening-plan.md`
 | `DevWorkerInodesLow` (warning) | under 10% (or 200k) free inodes — the guard does not react to inodes | `sudo du -x --inodes --max-depth=3 <mount> \| sort -rn \| head` |
 | `DevWorkerDiskGuardExhausted{mountpoint}` | the guard ran every step and that fs is still under 15%: what is left is outside what it may delete | ask the agent's owner; move bulk data to the NAS (below); grow the disk |
 | `DevWorkerDiskGuardDeferred{reason}` | docker reclaim held off for 1h+ by a busy docker client or another cleanup's lock | `journalctl -u dev-worker-disk-guard \| grep deferred` names it; stop a stuck pull/build |
+| `DevWorkerDirGrowing{dir}` (warning) | a top-level directory of a user's `/workspace` or `/home` root grew > 15 GB in 24h (hourly `disk-report`; no growth series in a worker's first ~19h) | ask the agent's owner; `sudo jq . /var/lib/dev-worker-disk-report/latest.json` has the depth-2 listing |
+| `DevWorkerUnownedDataLarge{dir}` (warning) | a top-level directory that is not a git checkout, cache or tmp dir holds > 20 GB for 1h — nothing reclaims it | ask for its owner and lifetime: delete, `/workspace/archive`, or the NAS (below) |
+| `DevWorkerDiskReportStale` / `Missing` | no run in which every root scanned for 3h (a du over its 10 min budget, or one that fails, marks a scan incomplete; each root keeps its own last good values) / a worker that never completed one | `journalctl -u dev-worker-disk-report -n 30` |
 | `DevWorkerDiskGuardFailing` / `Stale` / `StateUnknown` | the guard itself is broken: a step exits non-zero, no heartbeat 30m / no completed run 3h, or no readable `/var/lib/dev-worker-disk-guard/state.json` | `systemctl status dev-worker-disk-guard.service`, then the journal |
 
 Exhausted and Failing come from the guard's last COMPLETED run (state file above), carried by every

@@ -140,6 +140,9 @@
         ago is deleted automatically (never one changed within the hour). Anything that must outlive
         the cap: summarize it in the PR or issue, or ask the operator to move it to the NAS. Do not
         commit large binaries to git.
+      - Every top-level directory under `{{ dev_worker_workspace_mount }}/<you>` should be a git checkout, a
+        cache, or have an owner and a lifetime. Non-git directories over 20 GB, and any directory
+        growing 15 GB+ a day, are reported to the operator by name.
       - Cleaning up means deleting. Packing a worktree, build tree or dependency directory into a
         tarball and keeping it frees nothing. If it can be rebuilt from a pushed commit, delete it;
         if it holds work that exists nowhere else (uncommitted changes, a one-off failure capture),

@@ -305,3 +305,114 @@ tests:
                 unreadable or cannot be written, so the Exhausted/Failing alerts are blind. `sudo cat
                 /var/lib/dev-worker-disk-guard/state.json`, `journalctl -u dev-worker-disk-guard -n 30`
                 (a full / makes the write fail).
+
+  # --- disk-report (W5): alerts that name the directory ---------------------------------------
+  - interval: 1m
+    name: a directory growing 16 GB in a day pages DirGrowing with its name
+    input_series:
+      - series: 'dev_worker_dir_growth_bytes{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="forge-qualification-archives", kind="other"}'
+        values: "16000000000x20"
+      - series: 'dev_worker_dir_growth_bytes{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="platform", kind="git"}'
+        values: "2000000000x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DevWorkerDirGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+              user: c4
+              root: workspace
+              dir: forge-qualification-archives
+              kind: other
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: workspace/forge-qualification-archives grew 14.9GiB in 24h"
+              description: >-
+                forge-qualification-archives under c4's workspace root on 192.168.0.10:9100
+                (other) grew 14.9GiB over the last day. If it is not
+                expected (a build, a dataset someone asked for), ask the agent's owner what it is; bulk
+                evidence belongs in the capped /workspace/archive or on the NAS (runbook § Disk full).
+                Full listing: `sudo jq . /var/lib/dev-worker-disk-report/latest.json`.
+
+  - interval: 1m
+    name: 23 GB of unowned data for an hour pages UnownedDataLarge; a big git checkout does not
+    input_series:
+      - series: 'dev_worker_dir_bytes{job="dev-worker-node", instance="192.168.0.11:9100", user="c4", root="workspace", dir=".private", kind="other"}'
+        values: "23000000000x80"
+      - series: 'dev_worker_dir_bytes{job="dev-worker-node", instance="192.168.0.11:9100", user="c4", root="workspace", dir="trueswarm", kind="git"}'
+        values: "30000000000x80"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: DevWorkerUnownedDataLarge
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: DevWorkerUnownedDataLarge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.11:9100"
+              user: c4
+              root: workspace
+              dir: .private
+              kind: other
+            exp_annotations:
+              summary: "Dev worker 192.168.0.11:9100: workspace/.private holds 21.42GiB of unowned data"
+              description: >-
+                .private under c4's workspace root on 192.168.0.11:9100
+                is not a git checkout, cache or tmp dir and holds 21.42GiB. disk-guard
+                will never reclaim it. Ask the agent's owner for its owner and lifetime: delete it, move
+                it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly.
+
+  # The last complete scan was at t=0: silent before 3h, paging a few minutes after (not ~6h).
+  - interval: 1m
+    name: no completed disk-report scan for 3h pages DiskReportStale shortly after 3h
+    input_series:
+      - series: 'dev_worker_disk_report_last_complete_timestamp_seconds{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "0x220"
+    alert_rule_test:
+      - eval_time: 2h55m
+        alertname: DevWorkerDiskReportStale
+        exp_alerts: []
+      - eval_time: 3h10m
+        alertname: DevWorkerDiskReportStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.8:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.8:9100: disk attribution is stale"
+              description: >-
+                dev-worker-disk-report on 192.168.0.8:9100 has not completed a scan for 3h, so
+                DirGrowing/UnownedDataLarge are blind. `systemctl status dev-worker-disk-report.service`,
+                `journalctl -u dev-worker-disk-report -n 30` (a du over its 10 min budget marks the scan
+                incomplete); roll out with `--tags disk_report`.
+
+  # Up, but never a complete scan (never installed, crashes before writing, never completes).
+  - interval: 5m
+    name: an up worker with no complete disk-report scan for 3h pages DiskReportMissing
+    input_series:
+      - series: 'up{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "1x50"
+      - series: 'dev_worker_disk_report_last_scan_timestamp_seconds{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "0+300x50"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: DevWorkerDiskReportMissing
+        exp_alerts: []
+      - eval_time: 3h10m
+        alertname: DevWorkerDiskReportMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.9:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.9:9100: no disk attribution at all"
+              description: >-
+                192.168.0.9:9100 has never reported a complete dev-worker-disk-report scan, so
+                DirGrowing/UnownedDataLarge cannot fire there. `systemctl list-timers
+                dev-worker-disk-report.timer`, `journalctl -u dev-worker-disk-report -n 30`; roll out with
+                `--tags disk_report`.

@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""disk-report — who is using a dev-worker's disks, hourly, before disk-guard has to care.
+
+W5 of plans/2026-10-09-dev-worker-disk-hardening-plan.md. disk-guard reclaims only what is safe to
+delete; agent-made data (worktree snapshots, evidence trees, private datasets) it must leave alone,
+so a human has to hear about it while there is still room — and be told WHICH directory. On
+2026-10-09 the forge agent's "qualification archives" grew ~50 GB in 2-3 days on dev-worker-3 and
+nothing named them until both disks were full.
+
+  disk-report --user c4 --user other   one scan per user of /workspace/<user> and /home/<user>
+  disk-report --dry-run                 print the result, write nothing
+
+Per user root it runs `du -x -a --max-depth=2` (one filesystem, files included), at idle priority
+from its systemd unit, within --budget seconds in total. Results:
+  /var/lib/dev-worker-disk-report/latest.json   the full depth-2 listing (root only, 0600)
+  /var/lib/dev-worker-disk-report/snap-<ts>.json  hourly top-level snapshots, --keep-hours of them
+  dev_worker_disk_report.prom (node_exporter textfile):
+    dev_worker_disk_report_last_scan_timestamp_seconds, _scan_complete (0 = a du timed out or
+      failed: the values are the last complete scan's, see _data_timestamp_seconds), _scan_seconds
+    dev_worker_dir_user_bytes{user,root}                  total per user root
+    dev_worker_dir_bytes{user,root,dir,kind}              the --top largest top-level entries, plus
+                                                          every kind=other|file entry over --big-gb
+    dev_worker_dir_growth_bytes{user,root,dir,kind}       growth over --growth-hours, the --top
+                                                          fastest-growing (computed over ALL entries
+                                                          before truncating, so a new dir shows)
+`kind` is a hint, never a deletion criterion: git (has .git: a clone or linked worktree), worktrees (a
+plain directory holding git worktrees, like wt/), cache (.cache*, .npm), tmp (.tmp), file, other.
+Alerts: DevWorkerDirGrowing, DevWorkerUnownedDataLarge, DevWorkerDiskReportStale.
+
+Installed by ansible (roles/dev_worker, tasks/disk_report.yml); tested by
+scripts/tests/test_dev_worker_disk_report.py.
+"""
+import argparse
+import glob
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+
+STATE_DIR = "/var/lib/dev-worker-disk-report"
+TEXTFILE_DIR = "/var/lib/prometheus/node-exporter"
+PROM = "dev_worker_disk_report.prom"
+CACHE_NAMES = (".npm",)              # plus anything starting with ".cache"
+LABEL_MAX = 120
+
+
+def du(root, timeout, run=subprocess.run):
+    """{relative path: bytes} for root's entries down to depth 2 (files included), one filesystem.
+    Raises subprocess.TimeoutExpired, or OSError when the scan is not trustworthy: no total for the
+    root (du failed early), or a non-zero exit for any reason other than files vanishing mid-walk —
+    a total after an I/O or permission error counts only what du could read, and must never pass for
+    a complete scan. Vanishing files ("No such file or directory") are normal on a live worker."""
+    r = run(["du", "-x", "-a", "-B1", "--max-depth=2", root], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=timeout, errors="surrogateescape")
+    sizes = parse_du(r.stdout, root)
+    if "." not in sizes:
+        raise OSError(f"du {root}: no total (exit {r.returncode}): {r.stderr.strip()[-200:]}")
+    if r.returncode != 0:
+        other = [line for line in r.stderr.splitlines()
+                 if line.strip() and not line.rstrip().endswith("No such file or directory")]
+        if other:
+            raise OSError(f"du {root}: exit {r.returncode}: {other[0][-200:]}")
+    return sizes
+
+
+def parse_du(out, root):
+    sizes = {}
+    root = root.rstrip("/")
+    for line in out.splitlines():
+        size, _, path = line.partition("\t")
+        if not size.isdigit() or not path:
+            continue
+        rel = os.path.relpath(path, root) if path != root else "."
+        sizes[rel] = int(size)
+    return sizes
+
+
+def kind_of(root, name):
+    p = os.path.join(root, name)
+    if name == ".tmp":
+        return "tmp"
+    if name.startswith(".cache") or name in CACHE_NAMES:
+        return "cache"
+    if os.path.islink(p) or not os.path.isdir(p):
+        return "file"
+    if os.path.lexists(os.path.join(p, ".git")):
+        return "git"
+    try:
+        for child in os.scandir(p):
+            if child.is_dir(follow_symlinks=False) and os.path.lexists(os.path.join(child.path, ".git")):
+                return "worktrees"
+    except OSError:
+        pass
+    return "other"
+
+
+def top_level(sizes):
+    """{name: bytes} of the root's direct entries (depth 1)."""
+    return {rel: b for rel, b in sizes.items() if rel != "." and os.sep not in rel}
+
+
+def growth(now_top, then_top):
+    """{name: bytes grown} for every entry, new ones counting from 0."""
+    return {name: b - then_top.get(name, 0) for name, b in now_top.items()}
+
+
+def baselines(state_dir, now, hours):
+    """{root key: its top-level sizes} from, for EACH root, the snapshot closest to `hours` ago that
+    contains that root and is at least 0.8 * hours old. A root no snapshot has gets no baseline (no
+    growth series), never an empty one: that would report every directory as grown by its full size."""
+    snaps = []
+    for path in glob.glob(os.path.join(state_dir, "snap-*.json")):
+        try:
+            age = now - int(os.path.basename(path)[5:-5])
+        except ValueError:
+            continue
+        if age >= 0.8 * hours * 3600:
+            snaps.append((abs(age - hours * 3600), path))
+    out = {}
+    for _dist, path in sorted(snaps):
+        data = load_json(path) or {}
+        for key, root in data.get("roots", {}).items():
+            if key not in out and isinstance(root.get("top"), dict):
+                out[key] = root["top"]
+    return out
+
+
+def esc(value):
+    """A Prometheus label value: valid UTF-8 (a non-UTF-8 file name arrives from du as lone
+    surrogates), escaped, and capped — with a short hash of the full name, so two long siblings
+    with the same prefix cannot become one series (which would make node_exporter drop the file)."""
+    v = value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    if len(v) > LABEL_MAX:
+        v = v[:LABEL_MAX - 9] + "~" + hashlib.sha1(v.encode()).hexdigest()[:8]
+    return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def build(users, now, scan, state_dir, top, big, growth_hours):
+    """The metrics model from this scan (`scan` = {(user, root_name): (root_path, sizes) | None}).
+    A None entry is a failed/timed-out du: that root keeps ITS OWN last successful values (each root
+    is persisted on its own). complete_at is the last run in which every root scanned."""
+    prev = load_json(os.path.join(state_dir, "latest.json")) or {}
+    base = baselines(state_dir, now, growth_hours)
+    complete = all(v is not None for v in scan.values())
+    out = {"complete": complete, "roots": {},
+           "complete_at": int(now) if complete else prev.get("complete_at")}
+    for (user, root_name), v in scan.items():
+        key = f"{user}:{root_name}"
+        if v is None:
+            if key in prev.get("roots", {}):
+                out["roots"][key] = prev["roots"][key]
+            continue
+        root, sizes = v
+        top_now = top_level(sizes)
+        kinds = {name: kind_of(root, name) for name in top_now}
+        grown = growth(top_now, base[key]) if key in base else {}
+        out["roots"][key] = {"user": user, "root": root_name, "path": root, "total": sizes.get(".", 0),
+                             "top": top_now, "kinds": kinds, "growth": grown, "depth2": sizes,
+                             "scanned_at": int(now)}
+    return out
+
+
+def render(model, now, scan_seconds, top, big):
+    lines = [
+        "# HELP dev_worker_disk_report_last_scan_timestamp_seconds When disk-report last ran.",
+        "# TYPE dev_worker_disk_report_last_scan_timestamp_seconds gauge",
+        f"dev_worker_disk_report_last_scan_timestamp_seconds {int(now)}",
+        "# HELP dev_worker_disk_report_scan_complete 0 if a du timed out or failed this run.",
+        "# TYPE dev_worker_disk_report_scan_complete gauge",
+        f"dev_worker_disk_report_scan_complete {int(model['complete'])}",
+        "# HELP dev_worker_disk_report_scan_seconds How long this run's scans took.",
+        "# TYPE dev_worker_disk_report_scan_seconds gauge",
+        f"dev_worker_disk_report_scan_seconds {scan_seconds:.1f}",
+        "# HELP dev_worker_disk_report_last_complete_timestamp_seconds Last run in which every root scanned.",
+        "# TYPE dev_worker_disk_report_last_complete_timestamp_seconds gauge",
+    ] + ([f"dev_worker_disk_report_last_complete_timestamp_seconds {model['complete_at']}"]
+         if model.get("complete_at") else []) + [
+        "# HELP dev_worker_disk_report_data_timestamp_seconds When each root's values were scanned.",
+        "# TYPE dev_worker_disk_report_data_timestamp_seconds gauge",
+        "# HELP dev_worker_dir_user_bytes Total bytes under a user's root.",
+        "# TYPE dev_worker_dir_user_bytes gauge",
+        "# HELP dev_worker_dir_bytes Bytes of a top-level entry of a user's root (largest, and large unowned).",
+        "# TYPE dev_worker_dir_bytes gauge",
+        "# HELP dev_worker_dir_growth_bytes Growth of a top-level entry over the growth window (fastest).",
+        "# TYPE dev_worker_dir_growth_bytes gauge",
+    ]
+    data = []
+    for key in sorted(model["roots"]):
+        r = model["roots"][key]
+        base = f'user="{esc(r["user"])}",root="{esc(r["root"])}"'
+        data.append(f"dev_worker_disk_report_data_timestamp_seconds{{{base}}} {r['scanned_at']}")
+        data.append(f"dev_worker_dir_user_bytes{{{base}}} {r['total']}")
+        largest = sorted(r["top"].items(), key=lambda kv: -kv[1])
+        shown = {n for n, _ in largest[:top]}
+        shown |= {n for n, b in largest if r["kinds"].get(n) in ("other", "file") and b > big}
+        for n in sorted(shown, key=lambda n: -r["top"][n]):
+            data.append(f'dev_worker_dir_bytes{{{base},dir="{esc(n)}",kind="{r["kinds"].get(n, "other")}"}}'
+                        f" {r['top'][n]}")
+        for n, g in sorted(r["growth"].items(), key=lambda kv: -kv[1])[:top]:
+            if g > 0:
+                data.append(f'dev_worker_dir_growth_bytes{{{base},dir="{esc(n)}",kind="{r["kinds"].get(n, "other")}"}} {g}')
+    return "\n".join(lines + data) + "\n"
+
+
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_atomic(path, text, mode):
+    tmp = f"{path}.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except (OSError, UnicodeError) as e:
+        print(f"disk-report: cannot write {path}: {e}", file=sys.stderr)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def save(model, state_dir, now, keep_hours):
+    """latest.json every run (a failed root carries its own last values in it); the snapshot only
+    holds the roots scanned in THIS run, so a stale carried root never becomes a growth baseline."""
+    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    write_atomic(os.path.join(state_dir, "latest.json"), json.dumps(model), 0o600)
+    snap = {"roots": {k: {"top": v["top"]} for k, v in model["roots"].items()
+                      if v.get("scanned_at") == int(now)}}
+    write_atomic(os.path.join(state_dir, f"snap-{int(now)}.json"), json.dumps(snap), 0o600)
+    for path in glob.glob(os.path.join(state_dir, "snap-*.json")):
+        try:
+            if now - int(os.path.basename(path)[5:-5]) > keep_hours * 3600:
+                os.unlink(path)
+        except (ValueError, OSError):
+            pass
+
+
+def scan_all(users, workspace, budget, scan=du, clock=time.monotonic):
+    """{(user, 'workspace'|'home'): (path, sizes) | None}; a root skipped or timed out is None."""
+    deadline = clock() + budget
+    out = {}
+    for user in users:
+        for root_name, path in (("workspace", os.path.join(workspace, user)),
+                                ("home", os.path.join("/home", user))):
+            if not os.path.isdir(path):
+                continue
+            left = deadline - clock()
+            if left <= 0:
+                out[(user, root_name)] = None
+                continue
+            try:
+                out[(user, root_name)] = (path, scan(path, left))
+            except (subprocess.TimeoutExpired, OSError) as e:
+                print(f"disk-report: {path}: {e}", file=sys.stderr)
+                out[(user, root_name)] = None
+    return out
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="disk-report", description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog=__doc__.split("\n\n", 1)[1])
+    p.add_argument("--user", action="append", required=True, help="a user to report (repeatable)")
+    p.add_argument("--workspace", default="/workspace")
+    p.add_argument("--budget", type=int, default=600, help="seconds for all scans (default 600)")
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--big-gb", type=float, default=5, help="always export other/file entries over this")
+    p.add_argument("--growth-hours", type=float, default=24)
+    p.add_argument("--keep-hours", type=float, default=30)
+    p.add_argument("--state-dir", default=STATE_DIR)
+    p.add_argument("--textfile-dir", default=TEXTFILE_DIR)
+    p.add_argument("--dry-run", action="store_true")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    opts = parse_args(sys.argv[1:] if argv is None else argv)
+    started, now = time.monotonic(), time.time()
+    scan = scan_all(opts.user, opts.workspace, opts.budget)
+    model = build(opts.user, now, scan, opts.state_dir, opts.top, opts.big_gb * 1e9, opts.growth_hours)
+    text = render(model, now, time.monotonic() - started, opts.top, opts.big_gb * 1e9)
+    if opts.dry_run:
+        sys.stdout.write(text)
+        return 0
+    save(model, opts.state_dir, now, opts.keep_hours)
+    if os.path.isdir(opts.textfile_dir):
+        write_atomic(os.path.join(opts.textfile_dir, PROM), text, 0o644)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

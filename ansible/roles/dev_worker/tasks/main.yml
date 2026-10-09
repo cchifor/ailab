@@ -70,6 +70,11 @@
   ansible.builtin.import_tasks: disk_guard.yml
   tags: [disk_guard]
 
+# Hourly per-directory disk attribution (alerts name the directory). Own tag: --tags disk_report.
+- name: disk-report (who is using the disks)
+  ansible.builtin.import_tasks: disk_report.yml
+  tags: [disk_report]
+
 # Agent TMPDIR + ~/.cache + ~/.npm onto /workspace (needs workspace.yml and users.yml). Own tag:
 # --tags agent_dirs.
 - name: Agent temp files and caches off the root disk

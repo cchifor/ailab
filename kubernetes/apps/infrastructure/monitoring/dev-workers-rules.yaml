@@ -288,6 +288,67 @@ spec:
               unreadable or cannot be written, so the Exhausted/Failing alerts are blind. `sudo cat
               /var/lib/dev-worker-disk-guard/state.json`, `journalctl -u dev-worker-disk-guard -n 30`
               (a full / makes the write fail).
+        # disk-report (role dev_worker, files/disk-report, hourly): which directory is filling a disk,
+        # before disk-guard has to care — it must leave agent-made data alone, so a human has to hear
+        # about it while there is still room. On 2026-10-09 agent "qualification archives" grew ~50 GB
+        # in 2-3 days on dev-worker-3 and nothing named them until both disks were full. Growth needs a
+        # snapshot >= ~19h old, so a fresh worker has no growth series for its first day.
+        - alert: DevWorkerDirGrowing
+          expr: dev_worker_dir_growth_bytes{job="dev-worker-node"} > 15e9
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: {{ $labels.root }}/{{ $labels.dir }} grew {{ $value | humanize1024 }}B in 24h"
+            description: >-
+              {{ $labels.dir }} under {{ $labels.user }}'s {{ $labels.root }} root on {{ $labels.instance }}
+              ({{ $labels.kind }}) grew {{ $value | humanize1024 }}B over the last day. If it is not
+              expected (a build, a dataset someone asked for), ask the agent's owner what it is; bulk
+              evidence belongs in the capped /workspace/archive or on the NAS (runbook § Disk full).
+              Full listing: `sudo jq . /var/lib/dev-worker-disk-report/latest.json`.
+        # A top-level directory that is not a git checkout, a cache, the agent tmp dir or the archive,
+        # holding over 20 GB: data nothing owns and nothing reclaims (dev-worker-4 had 23 GB in .private,
+        # dev-worker-2 17.8 GB in forge-maintenance on 2026-10-09).
+        - alert: DevWorkerUnownedDataLarge
+          expr: dev_worker_dir_bytes{job="dev-worker-node",kind=~"other|file"} > 20e9
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: {{ $labels.root }}/{{ $labels.dir }} holds {{ $value | humanize1024 }}B of unowned data"
+            description: >-
+              {{ $labels.dir }} under {{ $labels.user }}'s {{ $labels.root }} root on {{ $labels.instance }}
+              is not a git checkout, cache or tmp dir and holds {{ $value | humanize1024 }}B. disk-guard
+              will never reclaim it. Ask the agent's owner for its owner and lifetime: delete it, move
+              it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly.
+        # The attribution is out of date: no run in which every root scanned for 3h — the timer stopped,
+        # or a root's du keeps timing out or failing (its values are then its own last successful
+        # scan's, see data_timestamp_seconds). The threshold carries the delay; `for` only debounces.
+        - alert: DevWorkerDiskReportStale
+          expr: |
+            (time() - dev_worker_disk_report_last_complete_timestamp_seconds{job="dev-worker-node"}) > 10800
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: disk attribution is stale"
+            description: >-
+              dev-worker-disk-report on {{ $labels.instance }} has not completed a scan for 3h, so
+              DirGrowing/UnownedDataLarge are blind. `systemctl status dev-worker-disk-report.service`,
+              `journalctl -u dev-worker-disk-report -n 30` (a du over its 10 min budget marks the scan
+              incomplete); roll out with `--tags disk_report`.
+        # No complete scan ever reported by a worker that is up: the tool is not installed, crashes
+        # before writing, or never completes. A fresh rollout has one within ~70 min (hourly timer).
+        - alert: DevWorkerDiskReportMissing
+          expr: |
+            up{job="dev-worker-node"} == 1
+              unless on (instance) dev_worker_disk_report_last_complete_timestamp_seconds{job="dev-worker-node"}
+          for: 3h
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: no disk attribution at all"
+            description: >-
+              {{ $labels.instance }} has never reported a complete dev-worker-disk-report scan, so
+              DirGrowing/UnownedDataLarge cannot fire there. `systemctl list-timers
+              dev-worker-disk-report.timer`, `journalctl -u dev-worker-disk-report -n 30`; roll out with
+              `--tags disk_report`.
         # The agents' archive dir (dev_worker_archive_dir) is capped by disk-guard on every run, but only
         # entries unchanged for an hour may go: a burst of new entries can hold it over the cap for up to
         # an hour by design. Over for 2h means the cap is not working (every entry keeps changing, or the
