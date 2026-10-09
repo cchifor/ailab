@@ -452,7 +452,7 @@ Setup, workstation, Git Bash. `$W` holds the new private key and witness tokens:
 ```bash
 OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
 export TALOSCONFIG="$OUT/talosconfig" MSYS_NO_PATHCONV=1
-T="$OUT/talosctl-1112.exe"; K="kubectl --context admin@ai"; W="$OUT/sa-rotation"
+T="$OUT/talosctl-1142.exe"; K="kubectl --context admin@ai"; W="$OUT/sa-rotation"
 CPS="192.168.0.41 192.168.0.42 192.168.0.43"; ALL=192.168.0.41,192.168.0.42,192.168.0.43
 declare -A POD=([192.168.0.41]=kube-apiserver-talos-cp1 [192.168.0.42]=kube-apiserver-talos-cp2 [192.168.0.43]=kube-apiserver-talos-cp3)
 b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
