@@ -593,10 +593,19 @@ acceptance** workflow checks the pod and the public endpoints.
   - **Precondition:** the older image passes the Codex protocol through only on routes listed in
     the manifest's `codexNative.routes`. The workers must therefore go back to routes in that
     list, the six `dw-gpt-*` routes, which must still exist.
+  - **The Codex model pin never changes in either direction.** It stays `model = "gpt-6-astra"`
+    (`dev_worker_codex_model`), and the CLI always sends that model name.
+    - **What changes is the key.** A key limited to the `dw-gpt-*` routes, with no `defaultRoute`,
+      is served by the **legacy Codex-native exact-model mapping** (#87, kept in every release since).
+    - The mapping takes the first of the key's native routes whose every enabled target serves
+      exactly the requested model: `gpt-6-astra` becomes `dw-gpt-6-astra`.
+    - The router then journals that route name as the trajectory's `model`. That is why old-key
+      traffic shows `model: dw-gpt-6-astra` even though the CLI sent `gpt-6-astra`.
   - **Before the old keys are revoked** (during the soak):
     1. Re-seed the old key values into `dev-worker-N.json` and let the provision Job write them.
     2. Check with `scripts/validate-codex-fleet.sh dev_workers` that each worker answers through a
-       `dw-gpt-*` route (journal: `route` absent, `model: dw-gpt-6-astra`).
+       `dw-gpt-*` route. In the journal: `route` absent and `model: dw-gpt-6-astra`, from the
+       mapping above.
     3. Then revert the image.
     4. Then remove `sub-codex-5` and the `dw-N` pointers.
   - **After the old keys are revoked:**
