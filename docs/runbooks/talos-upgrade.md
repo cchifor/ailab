@@ -79,7 +79,7 @@ Workers have no CNPG instances and can go in parallel. CPs never can.
 ## Addons in the same program
 
 - Cilium (hand-installed Helm, values in `kubernetes/infra/bootstrap/cilium-values.yaml`). One minor
-  per hop: `helm --kube-context admin@ai upgrade cilium cilium/cilium --version <v> -f <values> --set upgradeCompatibility=<prev minor>`,
+  per hop: `helm --kube-context admin@ai upgrade cilium cilium/cilium --version <v> -f <values> --set upgradeCompatibility=1.16` (the INITIALLY installed version, not the previous minor; see the header of cilium-values.yaml),
   then the agent/operator rollout, `cilium-dbg status` on every agent, and a DNS + service smoke.
 - Kyverno / CNPG: platform PRs (`deploy/components/{kyverno,cnpg-operator}/helmrelease.yaml`), one
   minor per hop, chart-to-app mapping checked with `helm show chart`. Every CNPG hop rolls every

@@ -102,9 +102,9 @@
       "allowedVersions": "/^v1\\.14\\./"
     },
     {
-      "description": "alpine/k8s is kubectl for in-cluster Jobs (env-reaper, gitea actions-run-retention, cnpg-lost-slot-reclone). kubectl is supported only within one minor of the kube-apiserver (v1.31.4), so hold it to 1.30-1.32. #931 proposed 1.37.1. Move this window in the same change that upgrades Kubernetes.",
+      "description": "alpine/k8s is kubectl for in-cluster Jobs (env-reaper, gitea actions-run-retention, cnpg-lost-slot-reclone). kubectl is supported only within one minor of the kube-apiserver. Held to 1.34 for the 2026-10-09 program (apiserver 1.33 -> 1.34 -> 1.35; 1.34 is within one minor of all three), so the Jobs stay in skew through every hop. After the program lands on 1.35, widen to 1.34-1.36. Move this window in the same change that upgrades Kubernetes (the 1.33 upgrade missed it).",
       "matchPackageNames": ["docker.io/alpine/k8s", "alpine/k8s"],
-      "allowedVersions": "/^1\\.(30|31|32)\\./"
+      "allowedVersions": "/^1\\.34\\./"
     },
     {
       "description": "Hold the OpenBao provision-Job CLI images (quay.io/openbao/openbao) at the SERVER's minor, 2.6.x -- each Job's comment pins the CLI to the server's version. The server is the `openbao` Flux HelmRelease chart (0.29.4 = 2.6.2), and Renovate does NOT track it: the flux manager is not configured beyond its gotk-components default, so no chart PR has ever been opened. A group would therefore still produce a CLI-only bump (#938: 2.7.0 against a 2.6.2 server). Lift this bound in the same PR that bumps the chart (a human-scheduled restart of the single-replica secrets store).",

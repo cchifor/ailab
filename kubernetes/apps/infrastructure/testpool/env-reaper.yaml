@@ -315,7 +315,7 @@ spec:
         - name: reaper
           # kubectl 1.32 (+1 minor of the 1.31 API, inside the supported skew) + jq. docker.io pulls
           # go through the node's mirror.gcr.io hosts.toml. Digest from Docker Hub, 2026-03-23.
-          image: docker.io/alpine/k8s:1.32.13@sha256:ffb0758383fdd5878419930052e2854afe6c0479303a59edaca4143ce8d3c016
+          image: docker.io/alpine/k8s:1.34.12@sha256:d50424976a0a888d2531f13035dce45c004ec2b6f877f233005ba35c0d61be5d
           command: ["/bin/sh", "/opt/env-reaper/reap.sh"]
           env:
             - name: NODE_NAME
