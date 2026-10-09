@@ -18,9 +18,14 @@
     signed_by: /etc/apt/keyrings/kubernetes.asc
     enabled: true
 
+# Version-pinned to the minor (`kubectl=1.34.*`), not bare `kubectl`: with a bare name and
+# `present`, bumping dev_worker_kubectl_minor switched the per-minor repo but never touched the
+# installed package (dev-workers sat on 1.30 against a 1.33 apiserver, out of skew). The wildcard
+# makes a minor bump reinstall from the new repo, while routine runs stay idempotent (no unattended
+# patch upgrades, unlike `state: latest`).
 - name: Install kubectl
   ansible.builtin.apt:
-    name: kubectl
+    name: "kubectl={{ dev_worker_kubectl_minor }}.*"
     state: present
     update_cache: true
 

@@ -207,7 +207,7 @@ of 32 threads).
 
 ```bash
 # 0. workstation: confirm quorum BEFORE starting
-_out/talosctl-1112.exe -n 192.168.0.41 etcd status            # 3/3 in-sync
+_out/talosctl-1142.exe -n 192.168.0.41 etcd status            # 3/3 in-sync
 
 # 1. edit grub (append once; sed is NOT idempotent — verify the line)
 cp /etc/default/grub /etc/default/grub.bak.$(date +%F)
@@ -216,7 +216,7 @@ grep GRUB_CMDLINE_LINUX_DEFAULT /etc/default/grub             # sanity-check it 
 update-grub
 
 # 2. workstation: gracefully stop THIS host's Talos CP (NOT qm shutdown / ACPI — won't stop Talos)
-_out/talosctl-1112.exe shutdown -n <cp-ip>                    # cp1 .41 / cp2 .42 / cp3 .43
+_out/talosctl-1142.exe shutdown -n <cp-ip>                    # cp1 .41 / cp2 .42 / cp3 .43
 #    NOTE: DRAINS the node first (evicts pods, 5-min drain timeout) THEN powers off — ~5 min total, and it
 #    bounces that CP's k8s workloads (they reschedule to the other 2 nodes). Poll for stopped, don't assume:
 #    for i in $(seq 1 90); do [ "$(qm status <4001|4002|4003> | awk '{print $2}')" = stopped ] && break; sleep 5; done

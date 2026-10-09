@@ -6,8 +6,8 @@
 # WHY NOW (plans/2026-10-09-k8s-1.35-and-barman-plugin-plan.md, Phase M). These are the only clusters
 # in the estate with a WAL archive and base backups (in-tree Barman today, plugin-barman-cloud after
 # the migration), and nothing alerted on either. trueswarm-platform-pg's last base backup was
-# 2026-10-01, and trueswarm-pg/trueswarm-platform-pg have no ScheduledBackup at all. The migration
-# must not be the first time anyone looks.
+# 2026-10-01, and trueswarm-pg/trueswarm-platform-pg had no ScheduledBackup at all until
+# cchifor/trueswarm-admin#156 (2026-10-09). The migration must not be the first time anyone looks.
 #
 # Same shape as strive-pg-metrics / infra-pg-metrics, for the same two reasons:
 #   * named `<cluster>-metrics`, never `<cluster>`: CNPG deletes a PodMonitor carrying the cluster's

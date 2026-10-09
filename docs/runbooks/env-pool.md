@@ -16,7 +16,7 @@ Incident that produced this runbook: 2026-09-20, `plans/2026-09-20-env-pool-froz
 
 ## Prerequisites
 
-- **talosctl:** `kubernetes/infra/_out/talosctl-1112.exe` (v1.11.2 — the system `talosctl` v1.6.2 is
+- **talosctl:** `kubernetes/infra/_out/talosctl-1142.exe` (v1.14.2, the cluster's Talos version — the system `talosctl` v1.6.2 is
   fine for read-only calls but unsafe for config writes) with
   `TALOSCONFIG=kubernetes/infra/_out/talosconfig`, endpoint any CP (`-e 192.168.0.41`), node
   `-n 192.168.0.37`.
@@ -50,7 +50,7 @@ Both graceful paths hang on the un-killable containers — do not wait on them:
 
 1. **(≤ 5 min) Evidence, if the outage is already total.** Do not extend it collecting more:
    ```sh
-   T="kubernetes/infra/_out/talosctl-1112.exe -e 192.168.0.41 -n 192.168.0.37"
+   T="kubernetes/infra/_out/talosctl-1142.exe -e 192.168.0.41 -n 192.168.0.37"
    $T services; $T processes | grep -E "cloud-hypervisor|virtiofsd|containerd-shim-kata"
    $T logs cri > cri.log; $T logs kubelet > kubelet.log; $T logs syslogd > syslogd.log; $T dmesg > dmesg.log
    $T ls /run/vc/sbs; $T read /run/vc/sbs/<sandbox-id>/persist.json > persist.json   # MSYS_NO_PATHCONV=1 in Git Bash
@@ -149,7 +149,7 @@ virtiofsd freeze — are recorded with timestamps in the plan's soak record (epo
   which silences the guest entirely. Either change is a machine-config change (below) and starts a
   new soak epoch.
 - **Before any env-node image or extension upgrade:** re-verify the base file —
-  `MSYS_NO_PATHCONV=1 kubernetes/infra/_out/talosctl-1112.exe -e 192.168.0.41 -n 192.168.0.37 read /usr/local/share/kata-containers/configuration.toml | sha256sum`
+  `MSYS_NO_PATHCONV=1 kubernetes/infra/_out/talosctl-1142.exe -e 192.168.0.41 -n 192.168.0.37 read /usr/local/share/kata-containers/configuration.toml | sha256sum`
   must equal the hash above. If it differs, refresh `kata/configuration.toml` from the new
   extension FIRST; otherwise the node would run an old base under a new Kata.
 
@@ -166,7 +166,7 @@ node. From Windows (`~/.tofubin/tofu.exe`; from a worktree add
    nothing on the VM, label or taint. To see the exact node-side diff, extract the rendered config
    from the plan JSON (`tofu show -json …` → `resource_changes[].change.after.machine_configuration`,
    into `_out/`, it holds cluster secrets) and run
-   `talosctl-1112.exe … apply-config --dry-run --mode=auto -f <file>`.
+   `talosctl-1142.exe … apply-config --dry-run --mode=auto -f <file>`.
 3. `tofu -chdir=kubernetes/infra/env-pool apply ../_out/env-pool.tfplan` — stages only.
    `talosctl … read /system/state/config.yaml | grep -c <new path>` shows the staged content;
    `talosctl … get mc -o yaml` still shows the running one.
@@ -175,7 +175,7 @@ node. From Windows (`~/.tofubin/tofu.exe`; from a worktree add
    `kubectl -n testpool get sandboxclaims` empty; no `Terminating` pods on the node; node `Ready`;
    `kubectl -n testpool exec <member> -c control -- true` answers (a frozen guest hangs the reboot —
    reap it first); `cri-log-relay` Running. Then
-   `kubernetes/infra/_out/talosctl-1112.exe -e 192.168.0.41 -n 192.168.0.37 reboot --wait`.
+   `kubernetes/infra/_out/talosctl-1142.exe -e 192.168.0.41 -n 192.168.0.37 reboot --wait`.
    If it sits in `stopAllPods` for > 5 min, `qm reset 4401` from ai-node2 (Recovery, above).
 5. Verify: `talosctl … read /etc/cri/conf.d/cri.toml` shows the intended `kata` runtime table;
    `talosctl … ls -l /var/etc/kata-containers/config.d` lists exactly the drop-ins in the repo (each

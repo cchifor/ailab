@@ -118,6 +118,7 @@
 - name: k8s tooling (kubectl/helm/k9s)
   ansible.builtin.import_tasks: k8s_tools.yml
   when: dev_worker_install_k8s_tools | bool
+  tags: [k8s-tools] # `--tags k8s-tools` refreshes just these after a cluster upgrade
 
 - name: tep — test-environment pool CLI + namespace-scoped kubeconfig
   ansible.builtin.import_tasks: tep.yml
