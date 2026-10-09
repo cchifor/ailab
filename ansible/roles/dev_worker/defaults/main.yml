@@ -390,3 +390,11 @@ dev_worker_disk_guard_target: 25
 dev_worker_disk_guard_critical: 5
 dev_worker_disk_guard_image_days: 3
 dev_worker_disk_guard_deps_days: 3
+
+# The agents' archive dir (tasks/disk_guard.yml): where the agent guide tells them to keep evidence
+# they want after a task, instead of tarballs in $HOME on the 40 GB root disk (dev-worker-3,
+# 2026-10-09: ~50 GB of "qualification archives" across / and /workspace filled both). disk-guard
+# caps it on every run, low disk or not: oldest-changed top-level entry first, never one changed
+# within the hour. GB = 10^9 bytes.
+dev_worker_archive_dir: "{{ dev_worker_workspace_mount }}/archive"
+dev_worker_archive_max_gb: 20

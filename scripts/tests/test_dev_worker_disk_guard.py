@@ -15,7 +15,9 @@ The guard's contract, pinned here:
 """
 import importlib.machinery
 import importlib.util
+import os
 import pathlib
+import shutil
 import tempfile
 import unittest
 
@@ -25,8 +27,8 @@ _spec = importlib.util.spec_from_loader("dw_disk_guard", _loader)
 dg = importlib.util.module_from_spec(_spec)
 _loader.exec_module(dg)
 
-# /home lives on /, /workspace is its own disk — the workers' layout.
-FS = {"/": "/", "/home": "/", "/workspace": "/workspace"}
+# /home and /root live on /, /workspace is its own disk — the workers' layout.
+FS = {"/": "/", "/home": "/", "/root": "/", "/workspace": "/workspace"}
 
 
 def layout(a, b):
@@ -43,6 +45,7 @@ class Disk:
         self.rc = rc or {}
         self.ran = []
         self.argv = {}
+        self.roots = {}
 
     def measure(self, p):
         return self.free[p]
@@ -53,6 +56,7 @@ class Disk:
     def run(self, step):
         self.ran.append(step.name)
         self.argv[step.name] = step.argv
+        self.roots[step.name] = step.roots
         for p, g in self.gain.get(step.name, {}).items():
             self.free[p] = min(1.0, self.free[p] + g)
         return self.rc.get(step.name, 0)
@@ -105,7 +109,8 @@ class GuardTest(unittest.TestCase):
     def test_root_fs_low_skips_docker_and_spares_workspace(self):
         d = Disk({"/": 0.05, "/workspace": 0.60})
         dg.guard(opts("--worktrees-remove"), d.measure, d.avail, d.run, quiet, idle)
-        self.assertEqual(d.ran, ["worktrees", "deps"])
+        self.assertEqual(d.ran, ["codex-releases", "worktrees", "deps"])
+        self.assertEqual(d.roots["codex-releases"], ("/home", "/root"))
         self.assertEqual(roots_of(d.argv["worktrees"]), "/home")
         self.assertEqual(roots_of(d.argv["deps"]), "/home")
 
@@ -119,7 +124,7 @@ class GuardTest(unittest.TestCase):
         # because / is still short, and the walk steps then search / only.
         d = Disk({"/": 0.05, "/workspace": 0.05}, gain={"build-cache": {"/workspace": 0.30}})
         dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle)
-        self.assertEqual(d.ran, ["build-cache", "deps"])
+        self.assertEqual(d.ran, ["codex-releases", "build-cache", "deps"])
         self.assertEqual(roots_of(d.argv["deps"]), "/home")
 
     def test_worktree_step_only_in_remove_mode(self):
@@ -267,6 +272,349 @@ class GuardTest(unittest.TestCase):
             self.assertEqual([f.name for f in files], [dg.PROM])
             self.assertEqual(files[0].read_text(), text)
 
+
+    def test_full_ladder_when_both_disks_are_low(self):
+        d = Disk({"/": 0.01, "/workspace": 0.01})
+        dg.guard(opts("--worktrees-remove"), d.measure, d.avail, d.run, quiet, idle)
+        self.assertEqual(d.ran, ["codex-releases", "build-cache", "anon-volumes", "docker",
+                                 "worktrees", "deps"])
+
+    def test_codex_releases_only_for_the_root_fs(self):
+        d = Disk({"/": 0.40, "/workspace": 0.01})
+        dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle)
+        self.assertNotIn("codex-releases", d.ran)
+
+    def test_exhausted_names_the_low_fs_and_reports_it(self):
+        d = Disk({"/": 0.05, "/workspace": 0.40})
+        logs, reported = [], []
+        m = dg.guard(opts(), d.measure, d.avail, d.run, logs.append, idle, report=reported.append)
+        self.assertEqual(m["exhausted"], 1)
+        self.assertEqual(reported, [["/"]])
+        self.assertIn("eligible reclaim was not enough: / (5.0%) is still under 15% free", logs[-1])
+        self.assertNotIn("/workspace", logs[-1])
+
+    def test_not_exhausted_no_report(self):
+        d = Disk({"/": 0.05, "/workspace": 0.40}, gain={"codex-releases": {"/": 0.30}})
+        reported = []
+        m = dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle, report=reported.append)
+        self.assertEqual((m["exhausted"], reported, d.ran), (0, [], ["codex-releases"]))
+
+    def test_dry_run_previews_in_process_steps_only(self):
+        d = Disk({"/": 0.05, "/workspace": 0.05})
+        reported = []
+        m = dg.guard(opts("--dry-run"), d.measure, d.avail, d.run, quiet, idle,
+                     report=reported.append)
+        self.assertEqual(d.ran, ["codex-releases"])     # bound to dry_run; nothing else is called
+        self.assertEqual((m["steps_run"], m["exhausted"], reported), (0, 0, []))
+
+    def test_run_step_runs_in_process_steps(self):
+        seen = []
+        ok = dg.Step("x", False, (), 1, fn=lambda roots: seen.append(roots) or 0, roots=("/home",))
+        self.assertEqual(dg.run_step(ok), 0)
+        self.assertEqual(seen, [("/home",)])
+
+        def boom(roots):
+            raise PermissionError("nope")
+        self.assertEqual(dg.run_step(dg.Step("y", False, (), 1, fn=boom)), 1)
+
+
+OLD = 1_000_000.0       # a timestamp long before NOW
+NOW = OLD + 30 * 86400
+
+
+def MTIME(st):
+    """The archive tests set mtimes; a test cannot set a ctime, so they judge age by mtime."""
+    return st.st_mtime
+
+
+def touch_tree(path, when):
+    """Set the mtime of `path` and everything under it (symlinks themselves untouched)."""
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for n in filenames:
+            os.utime(os.path.join(dirpath, n), (when, when))
+        os.utime(dirpath, (when, when))
+    if os.path.isfile(path):
+        os.utime(path, (when, when))
+
+
+def rm(path, uid, gid):
+    """remove_as_owner's contract (True when gone), without changing user."""
+    if os.path.islink(path) or os.path.isfile(path):
+        os.unlink(path)
+    else:
+        shutil.rmtree(path)
+    return not os.path.lexists(path)
+
+
+class CodexReleasesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.tmp.name) / "home" / "c4"
+        self.daemon = self.home / dg.CODEX_DAEMON
+        self.rel = self.daemon / "releases"
+        for v in ("0.158.0", "0.159.0", "0.160.0", "0.161.0", "0.162.0", "0.163.0"):
+            (self.rel / v / "bin").mkdir(parents=True)
+            (self.rel / v / "bin" / "codex").write_bytes(b"x" * 4096)
+            touch_tree(self.rel / v, OLD)
+        (self.daemon / "current").symlink_to(self.rel / "0.162.0")
+        (self.daemon / "auto-update-version").write_text("0.163.0\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def prune(self, exes=(), remove=rm, dry_run=False, lock=lambda d: True):
+        logs = []
+        rc = dg.prune_codex_releases([str(self.home.parent)], exes=set(exes), now=NOW,
+                                     log=logs.append, remove=remove, dry_run=dry_run, lock=lock,
+                                     stamp=MTIME)
+        return rc, sorted(p.name for p in self.rel.iterdir()), logs
+
+    def test_keeps_current_next_running_and_young(self):
+        touch_tree(self.rel / "0.160.0", NOW - 60)                  # being installed
+        running = os.path.realpath(self.rel / "0.158.0" / "bin" / "codex")
+        rc, left, logs = self.prune(exes=[running])
+        self.assertEqual(rc, 0)
+        self.assertEqual(left, ["0.158.0", "0.160.0", "0.162.0", "0.163.0"])
+        self.assertEqual(len(logs), 2)                              # 0.159.0 and 0.161.0
+
+    def test_a_home_itself_is_a_root_too(self):
+        dg.prune_codex_releases([str(self.home)], exes=set(), now=NOW, log=quiet, remove=rm,
+                                lock=lambda d: True, stamp=MTIME)
+        self.assertEqual(sorted(p.name for p in self.rel.iterdir()), ["0.162.0", "0.163.0"])
+
+    def test_dangling_current_skips_the_home(self):
+        (self.daemon / "current").unlink()
+        (self.daemon / "current").symlink_to(self.rel / "0.999.0")
+        rc, left, logs = self.prune()
+        self.assertEqual((rc, len(left)), (0, 6))
+        self.assertIn("skipped", logs[0])
+
+    def test_current_outside_releases_skips_the_home(self):
+        outside = pathlib.Path(self.tmp.name) / "elsewhere"
+        outside.mkdir()
+        (self.daemon / "current").unlink()
+        (self.daemon / "current").symlink_to(outside)
+        self.assertEqual(len(self.prune()[1]), 6)
+
+    def test_never_follows_a_symlinked_release(self):
+        victim = pathlib.Path(self.tmp.name) / "victim"
+        victim.mkdir()
+        (victim / "keep").write_text("x")
+        (self.rel / "0.150.0").symlink_to(victim)
+        self.prune()
+        self.assertTrue((victim / "keep").exists())
+        self.assertTrue((self.rel / "0.150.0").is_symlink())
+
+    def test_installer_holding_the_lock_skips_the_home(self):
+        rc, left, logs = self.prune(lock=lambda d: None)
+        self.assertEqual((rc, len(left)), (0, 6))
+        self.assertIn("install.lock", logs[0])
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX only")
+    def test_installer_lock_is_taken_and_released(self):
+        import fcntl
+        (self.daemon / "install.lock").write_text("")
+        held = dg.installer_lock(str(self.daemon))
+        self.assertIsNone(dg.installer_lock(str(self.daemon)))  # flock: a second open file conflicts
+        held.close()
+        again = dg.installer_lock(str(self.daemon))
+        self.assertNotIn(again, (None, True))
+        again.close()
+        with open(self.daemon / "install.lock") as f:               # an installer holding it
+            fcntl.flock(f, fcntl.LOCK_EX)
+            self.assertIsNone(dg.installer_lock(str(self.daemon)))
+        (self.daemon / "install.lock").unlink()
+        self.assertIs(dg.installer_lock(str(self.daemon)), True)
+
+    def test_current_moving_mid_prune_stops_it(self):
+        def flip(p, u, g):
+            (self.daemon / "current").unlink()
+            (self.daemon / "current").symlink_to(self.rel / "0.163.0")
+            return rm(p, u, g)
+        rc, left, logs = self.prune(remove=flip)
+        self.assertEqual(left, ["0.159.0", "0.160.0", "0.161.0", "0.162.0", "0.163.0"])
+        self.assertIn("moved mid-prune", logs[-1])
+
+    def test_dry_run_lists_and_removes_nothing(self):
+        rc, left, logs = self.prune(dry_run=True)
+        self.assertEqual((rc, len(left)), (0, 6))
+        self.assertEqual(len(logs), 4)
+        self.assertTrue(all("would remove" in line for line in logs))
+
+    def test_failed_removal_is_rc_1(self):
+        rc, left, logs = self.prune(remove=lambda p, u, g: False)
+        self.assertEqual((rc, len(left)), (1, 6))
+        self.assertTrue(all("could not remove" in line for line in logs))
+
+    def test_removes_as_the_releases_dir_owner(self):
+        seen = []
+        self.prune(remove=lambda p, u, g: seen.append((u, g)) or rm(p, u, g))
+        st = os.lstat(self.rel)
+        self.assertEqual(set(seen), {(st.st_uid, st.st_gid)})
+
+
+class ArchiveTrimTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.arc = self.root / "archive"
+        self.arc.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def entry(self, name, kb, when, as_dir=True):
+        p = self.arc / name
+        if as_dir:
+            (p / "sub").mkdir(parents=True)
+            (p / "sub" / "data").write_bytes(os.urandom(kb * 1024))
+        else:
+            p.write_bytes(os.urandom(kb * 1024))
+        touch_tree(p, when)
+        return dg.tree_usage(str(p), stamp=MTIME)[0]
+
+    def test_removes_oldest_first_down_to_the_cap(self):
+        a = self.entry("a", 64, OLD)
+        b = self.entry("b", 64, OLD + 100, as_dir=False)
+        c = self.entry("c", 64, OLD + 200)
+        left, removed = dg.trim_archive(str(self.arc), c + 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        self.assertEqual(sorted(p.name for p in self.arc.iterdir()), ["c"])
+        self.assertEqual((left, removed), (c, a + b))
+
+    def test_newest_mtime_inside_an_entry_counts(self):
+        self.entry("a", 64, OLD)
+        b = self.entry("b", 64, OLD + 100)
+        os.utime(self.arc / "a" / "sub" / "data", (OLD + 500, OLD + 500))   # a was written last
+        dg.trim_archive(str(self.arc), b + 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        self.assertEqual(sorted(p.name for p in self.arc.iterdir()), ["a"])
+
+    def test_never_removes_a_young_entry(self):
+        self.entry("old", 64, OLD)
+        self.entry("young", 64, NOW - 60)
+        left, _removed = dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        self.assertEqual(sorted(p.name for p in self.arc.iterdir()), ["young"])
+        self.assertGreater(left, 1)
+
+    def test_under_the_cap_is_a_noop(self):
+        a = self.entry("a", 64, OLD)
+        self.assertEqual(dg.trim_archive(str(self.arc), a * 10, now=NOW, log=quiet, remove=rm, stamp=MTIME),
+                         (a, 0))
+        self.assertTrue((self.arc / "a").exists())
+
+    def test_symlinked_entry_counts_and_removes_only_the_link(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "big").write_bytes(os.urandom(256 * 1024))
+        (self.arc / "link").symlink_to(outside)
+        os.utime(self.arc / "link", (OLD, OLD), follow_symlinks=False)
+        self.entry("keep", 64, NOW - 60)
+        dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        self.assertFalse((self.arc / "link").is_symlink())
+        self.assertTrue((outside / "big").exists())
+
+    def test_archive_dir_symlink_or_missing_is_never_trimmed(self):
+        self.entry("a", 64, OLD)
+        (self.root / "via-link").symlink_to(self.arc)
+        self.assertEqual(dg.trim_archive(str(self.root / "via-link"), 1, now=NOW, log=quiet,
+                                         remove=rm, stamp=MTIME), (0, 0))
+        self.assertEqual(dg.trim_archive(str(self.root / "nope"), 1, now=NOW, log=quiet,
+                                         remove=rm, stamp=MTIME), (0, 0))
+        self.assertTrue((self.arc / "a").exists())
+
+    def test_dry_run_removes_nothing(self):
+        self.entry("a", 64, OLD)
+        logs = []
+        dg.trim_archive(str(self.arc), 1, now=NOW, log=logs.append, remove=rm, dry_run=True,
+                        stamp=MTIME)
+        self.assertTrue((self.arc / "a").exists())
+        self.assertIn("would remove", logs[0])
+
+    def test_failed_removal_keeps_counting_it(self):
+        a = self.entry("a", 64, OLD)
+        left, removed = dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet,
+                                        remove=lambda p, u, g: False, stamp=MTIME)
+        self.assertEqual((left, removed), (a, 0))
+
+    def test_all_young_over_the_cap_says_so(self):
+        self.entry("young", 64, NOW - 60)
+        logs = []
+        dg.trim_archive(str(self.arc), 1, now=NOW, log=logs.append, remove=rm, stamp=MTIME)
+        self.assertTrue((self.arc / "young").exists())
+        self.assertIn("over its 0 GB cap, and everything left changed within the hour", logs[0])
+
+    def test_hard_links_count_once(self):
+        a = self.entry("a", 64, OLD)
+        (self.arc / "b").mkdir()
+        os.link(self.arc / "a" / "sub" / "data", self.arc / "b" / "data")
+        touch_tree(self.arc / "b", OLD)
+        left, _removed = dg.trim_archive(str(self.arc), 10**12, now=NOW, log=quiet, remove=rm,
+                                         stamp=MTIME)
+        self.assertLess(left, a + 64 * 1024)
+
+    def test_scan_over_budget_removes_nothing(self):
+        self.entry("a", 64, OLD)
+        logs = []
+        self.assertIsNone(dg.trim_archive(str(self.arc), 1, now=NOW, log=logs.append, remove=rm,
+                                          budget=-1, stamp=MTIME))
+        self.assertTrue((self.arc / "a").exists())
+        self.assertIn("nothing removed", logs[0])
+
+    def test_age_counts_ctime_so_a_moved_in_entry_is_young(self):
+        f = self.root / "made-long-ago"
+        f.write_bytes(b"x" * 4096)
+        os.utime(f, (OLD, OLD))                         # mv keeps this mtime...
+        os.rename(f, self.arc / "moved-in")             # ...but bumps the ctime
+        dg.trim_archive(str(self.arc), 1, log=quiet, remove=rm)      # real clock, default stamp
+        self.assertTrue((self.arc / "moved-in").exists())
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX only")
+    def test_remove_as_owner_removes_a_tree(self):
+        self.entry("a", 64, OLD)
+        st = os.lstat(self.arc)
+        self.assertTrue(dg.remove_as_owner(str(self.arc / "a"), st.st_uid, st.st_gid))
+        self.assertFalse((self.arc / "a").exists())
+
+
+class ReportTest(unittest.TestCase):
+    def test_largest_dirs_once_an_hour(self):
+        with tempfile.TemporaryDirectory() as d:
+            stamp = os.path.join(d, "stamp")
+            calls, logs = [], []
+
+            def du(p):
+                calls.append(p)
+                return (f"{40 * 10**9}\t{p}/c4/archives\n{87 * 10**9}\t{p}/c4\n"
+                        f"{112 * 10**9}\t{p}\n{7 * 10**9}\t{p}/docker\n")
+            dg.report_largest(["/workspace"], log=logs.append, stamp=stamp, now=NOW, du=du, top=2)
+            self.assertEqual(logs, ["disk-guard: largest under /workspace: /workspace/c4 87.0 GB, "
+                                    "/workspace/c4/archives 40.0 GB"])
+            dg.report_largest(["/workspace"], log=logs.append, stamp=stamp, now=NOW + 600, du=du)
+            self.assertEqual(calls, ["/workspace"])                 # rate-limited
+            dg.report_largest(["/"], log=logs.append, stamp=stamp, now=NOW + 600, du=du)
+            self.assertEqual(calls, ["/workspace", "/"])            # per filesystem
+            dg.report_largest(["/workspace"], log=logs.append, stamp=stamp, now=NOW + 3700, du=du)
+            self.assertEqual(calls, ["/workspace", "/", "/workspace"])
+
+    def test_du_timeout_is_logged_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            logs = []
+
+            def du(p):
+                raise dg.subprocess.TimeoutExpired(["du"], 300)
+            dg.report_largest(["/workspace"], log=logs.append, stamp=os.path.join(d, "s"),
+                              now=NOW, du=du)
+            self.assertIn("du timed out", logs[0])
+
+    def test_prom_carries_archive_metrics_when_capped(self):
+        m = {"triggered": 0, "steps_run": 0, "failed_steps": 0, "reclaimed_bytes": 0,
+             "exhausted": 0, "deferred": 0, "free_ratio": {"/": 0.5},
+             "archive_bytes": 123, "archive_removed_bytes": 45, "archive_max_bytes": 678}
+        text = dg.render_prom(m, 1700000000)
+        self.assertIn("dev_worker_disk_guard_archive_bytes 123\n", text)
+        self.assertIn("dev_worker_disk_guard_archive_removed_bytes 45\n", text)
+        self.assertIn("dev_worker_disk_guard_archive_max_bytes 678\n", text)
+        del m["archive_bytes"], m["archive_removed_bytes"], m["archive_max_bytes"]
+        self.assertNotIn("archive", dg.render_prom(m, 1700000000))
 
 if __name__ == "__main__":
     unittest.main()

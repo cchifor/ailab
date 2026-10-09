@@ -13,6 +13,11 @@
 # untracked files are never touched. "Exhausted" (all steps ran, still low) is exported for the
 # DevWorkerDiskGuardExhausted alert: what is left is live work and needs a human.
 # Own tag so it can be rolled out alone: --tags disk_guard.
+#
+# Since 2026-10-09 it also prunes old codex daemon releases (~/.codex/packages/app-server-daemon,
+# ~425 MB per auto-update, never pruned by codex) when / is low, and caps the agents' archive dir
+# (dev_worker_archive_dir) on every run. Both added after dev-worker-3 filled / AND /workspace with
+# ~50 GB of agent-made "qualification archives", part of them moved into $HOME on the root disk.
 - name: Install the disk-guard tool
   ansible.builtin.copy:
     src: disk-guard
@@ -20,6 +25,20 @@
     owner: root
     group: root
     mode: "0755"
+
+# A tag-limited run skips workspace.yml (which mounts the data disk): without this check the archive
+# dir below would land on the root filesystem of a worker whose data disk is not mounted.
+- name: Check that {{ dev_worker_workspace_mount }} is a mounted filesystem
+  ansible.builtin.command: mountpoint -q {{ dev_worker_workspace_mount }}
+  changed_when: false
+
+- name: Ensure the agents' archive directory (capped by disk-guard)
+  ansible.builtin.file:
+    path: "{{ dev_worker_archive_dir }}"
+    state: directory
+    owner: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_agent_user }}"
+    mode: "2775"
 
 - name: Install the disk-guard unit + timer
   ansible.builtin.copy:
@@ -35,7 +54,7 @@
 
         [Service]
         Type=oneshot
-        ExecStart=/usr/local/bin/disk-guard --watch / --watch {{ dev_worker_workspace_mount }} --docker-fs {{ dev_worker_workspace_mount }} --low {{ dev_worker_disk_guard_low }} --target {{ dev_worker_disk_guard_target }} --critical {{ dev_worker_disk_guard_critical }} --image-days {{ dev_worker_disk_guard_image_days }} --deps-days {{ dev_worker_disk_guard_deps_days }} --worktree-days {{ dev_worker_worktree_prune_days }}{{ ' --worktrees-remove' if (dev_worker_worktree_prune_mode | string) == 'remove' else '' }}
+        ExecStart=/usr/local/bin/disk-guard --watch / --watch {{ dev_worker_workspace_mount }} --docker-fs {{ dev_worker_workspace_mount }} --low {{ dev_worker_disk_guard_low }} --target {{ dev_worker_disk_guard_target }} --critical {{ dev_worker_disk_guard_critical }} --image-days {{ dev_worker_disk_guard_image_days }} --deps-days {{ dev_worker_disk_guard_deps_days }} --worktree-days {{ dev_worker_worktree_prune_days }} --archive-dir {{ dev_worker_archive_dir }} --archive-max-gb {{ dev_worker_archive_max_gb }}{{ ' --worktrees-remove' if (dev_worker_worktree_prune_mode | string) == 'remove' else '' }}
         Nice=10
         IOSchedulingClass=best-effort
         IOSchedulingPriority=7
@@ -108,15 +127,27 @@
         `docker rm -fv <name>` — without `-v` its anonymous volumes (e.g. a postgres data dir) stay
         behind. In test loops, prefer one long-lived container over one per iteration.
       - Throwaway compose stacks: `docker compose down -v` when done.
-      - Check before big builds: `df -h {{ dev_worker_workspace_mount }}`, `docker system df`.
+      - Check before big builds: `df -h / {{ dev_worker_workspace_mount }}`, `docker system df`.
         `cleanup --dry-run` shows what can safely go.
-      - Keep artifacts you must preserve in a git-tracked place or outside worktrees you will delete.
+      - `/`, `$HOME` and `/tmp` are ONE small disk (~40 GB) that also holds the OS. Never put bulk
+        data there: archives, tarballs, evidence or diagnostic trees, copies of worktrees. Never
+        "relocate" data from {{ dev_worker_workspace_mount }} into `$HOME` to free space: that fills the OS disk instead.
+      - Evidence you want to keep after a task goes in `{{ dev_worker_archive_dir }}`, one file or directory per
+        item. That directory is capped at {{ dev_worker_archive_max_gb }} GB: when it is over, the item changed longest
+        ago is deleted automatically (never one changed within the hour). Anything that must outlive
+        the cap: summarize it in the PR or issue, or ask the operator to move it to the NAS. Do not
+        commit large binaries to git.
+      - Cleaning up means deleting. Packing a worktree, build tree or dependency directory into a
+        tarball and keeping it frees nothing. If it can be rebuilt from a pushed commit, delete it;
+        if it holds work that exists nowhere else (uncommitted changes, a one-off failure capture),
+        keep only that part, in `{{ dev_worker_archive_dir }}`.
 
       A disk guard runs every {{ dev_worker_disk_guard_interval }}. Under {{ dev_worker_disk_guard_low }}% free it removes, in order, until {{ dev_worker_disk_guard_target }}%:
-      unused build cache, unreferenced anonymous volumes, stopped non-compose containers older than
-      a day, images unused for {{ dev_worker_disk_guard_image_days }}+ days, merged idle worktrees, and node_modules / .venv / target
-      in worktrees idle {{ dev_worker_disk_guard_deps_days }}+ days. It never touches compose stacks, named volumes, source,
-      git state or untracked files.
+      old codex daemon releases (when / is low), unused build cache, unreferenced anonymous volumes,
+      stopped non-compose containers older than a day, images unused for {{ dev_worker_disk_guard_image_days }}+ days, merged idle
+      worktrees, and node_modules / .venv / target in worktrees idle {{ dev_worker_disk_guard_deps_days }}+ days. It never touches
+      compose stacks, named volumes, source, git state or untracked files outside `{{ dev_worker_archive_dir }}`;
+      inside it, the {{ dev_worker_archive_max_gb }} GB cap applies to everything, on every run.
   loop: "{{ dev_worker_users | product(['.claude/CLAUDE.md', '.codex/AGENTS.md']) | list }}"
   loop_control:
     label: "{{ item.0.name }}: {{ item.1 }}"

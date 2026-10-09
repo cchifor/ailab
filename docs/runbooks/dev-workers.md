@@ -1042,6 +1042,24 @@ to 100% within a day on 2026-10-06 (180 anonymous postgres volumes created on 10
 Agents are told the same rules (`docker run --rm`, `docker rm -v`, `compose down -v`) in a managed
 block of `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`.
 
+Since 2026-10-09 the guard also:
+- **prunes old codex daemon releases** when `/` is low (step 0): `~/.codex/packages/app-server-daemon/releases/<ver>`,
+  ~425 MB per auto-update and never pruned by codex (dev-worker-4 had 11, 4.5 GB). It keeps `current`,
+  the version in `auto-update-version`, any release a running process executes from and any touched
+  within the hour, skips a home whose `install.lock` an installer holds, and stops if `current`
+  moves mid-prune.
+- **caps the agents' archive dir** `/workspace/archive` (`dev_worker_archive_dir`,
+  `dev_worker_archive_max_gb`, default 20 GB) on every run, low disk or not: the entry that changed
+  least recently (newest mtime or ctime anywhere in it, so a `mv` in counts as new) goes first, never
+  one changed within the hour. The agent guide tells agents to keep evidence there, one item per
+  entry, and never to park bulk data in `$HOME` (`/` is the 40 GB OS disk). `DevWorkerArchiveOverCap`
+  fires when it stays over the cap for 2h.
+- names the filesystem that is still low when it ends **EXHAUSTED**, and logs its largest
+  directories (`largest under …`, du depth 2) once an hour per filesystem.
+
+Removals the guard makes itself (codex releases, archive entries) run `rm -rf` as the owner of the
+directory they sit in, never as root.
+
 What reclaims it by hand, safest first (`cleanup` is the role's tool, `ansible/roles/dev_worker/files/cleanup`):
 
 1. `sudo cleanup --no-docker --deps --dry-run`, then without `--dry-run` — node_modules, `.venv`
@@ -1086,7 +1104,29 @@ What reclaims it by hand, safest first (`cleanup` is the role's tool, `ansible/r
    are never touched (`dev_worker_anon_volume_prune: false` turns it off). Before 2026-10-06 nothing
    reaped them: test loops that `docker rm` a postgres container without `-v` left one PGDATA volume
    per run, and dev-worker-3 hit 100% with 240 of them (12.1 GB).
-4. What is left is live work: `du -xh --max-depth=2 /workspace | sort -rh | head`.
+4. What is left is live work: `du -xh --max-depth=2 /workspace | sort -rh | head` (and on `/`,
+   `sudo du -xh --max-depth=2 / | sort -rh | head`: look in `$HOME`). Agent-made archives
+   are the usual suspect: on 2026-10-09 dev-worker-3 had ~50 GB of `.tar.zst` "qualification
+   archives" and evidence trees (whole worktree snapshots, kept under a "no artifact deletion" rule
+   the agent gave itself), 9 GB of them moved into `$HOME` on `/`. Ask the agent's owner before
+   deleting anything there; to keep it, move it to the NAS (below).
+
+**Moving agent data to the NAS.** The QNAP export (`pve-nfs`) is reachable only from the storage
+networks, so dev-workers cannot mount it; relay through a Proxmox host, which mounts it at
+`/mnt/pve/qnap-nfs`. From a workstation with SSH to both (pipes the stream through it, ~90 MB/s):
+
+```sh
+ssh c4@<worker> 'tar -C / --numeric-owner -cf - <paths relative to /> | zstd -T2 -3 -q | tee >(sha256sum >/tmp/offload.sha256)' \
+  | ssh root@<pve-host> 'mkdir -p /mnt/pve/qnap-nfs/dev-worker-archives/<worker> && cat > /mnt/pve/qnap-nfs/dev-worker-archives/<worker>/<name>.tar.zst'
+```
+
+Then, before deleting anything on the worker: the stream's sha256 must equal the file's on the NAS;
+extract it into a scratch directory on the NAS and compare a per-file manifest (path, type, mode,
+size, sha256, symlink target) with one taken of the source; delete on the worker only files whose
+inode, size and mtime still match the source manifest, and directories only once empty. Leave a
+`MOVED-TO-NAS.md` where the data was. dev-worker-3's 2026-10-09 move:
+`dev-worker-archives/dev-worker-3/forge-archives-20261009.tar.zst` (50.7 GB; restore with
+`zstd -dc … | tar -C <dir> --numeric-owner -xpf -`).
 
 If the disk is at 100%, `docker builder prune -af` is the quickest few GB to get the agent moving
 again (build cache only; nothing running depends on it), then `docker volume prune -f --filter
