@@ -49,13 +49,16 @@
 
 # Own tag so a daemon.json change (e.g. the BuildKit GC policy) can be rolled out alone, worker by
 # worker: --tags docker_daemon. The restart keeps containers (live-restore) but fails any in-flight
-# build or pull, so roll out when the worker's docker is idle.
+# build or pull, so it only happens with dev_worker_docker_restart_on_config_change=true; otherwise
+# the run warns and the weekly docker restart (Sun 04:00) applies the change.
 - name: Lay down /etc/docker/daemon.json (data-root, log rotation, live-restore, BuildKit GC)
   ansible.builtin.template:
     src: daemon.json.j2
     dest: /etc/docker/daemon.json
     mode: "0644"
-  notify: Restart docker
+  notify:
+    - Restart docker for a daemon.json change
+    - Warn about a pending daemon.json change
   tags: [docker_daemon]
 
 - name: Enable + start docker
