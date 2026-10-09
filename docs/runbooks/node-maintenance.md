@@ -10,8 +10,8 @@ which workloads must survive a node loss (Tier A) and which singletons are *acce
 
 - **All 3 nodes are control planes AND workers.** etcd quorum needs 2/3 → strictly **ONE node at a
   time**, and verify quorum before *and* after each node:
-  `_out/talosctl-1112.exe -n 192.168.0.41 etcd status` → **3/3 in-sync**.
-  Use `_out/talosctl-1112.exe` (v1.11.2) — the system `talosctl` is v1.6.2 and UNSAFE.
+  `_out/talosctl-1142.exe -n 192.168.0.41 etcd status` → **3/3 in-sync**.
+  Use `_out/talosctl-1142.exe` (v1.14.2) — the system `talosctl` is v1.6.2 and UNSAFE.
 - **`qm shutdown` / ACPI does NOT stop Talos** (falls back to a hard stop). Graceful =
   `talosctl shutdown -n <cp-ip>` — it **drains first** (evicts pods, 5-min drain timeout), then powers
   off. Expect ~5 min, poll `qm status <vmid>` for `stopped`.
@@ -28,7 +28,7 @@ which workloads must survive a node loss (Tier A) and which singletons are *acce
 
 ```bash
 # 0. quorum green?                                   3/3 in-sync
-_out/talosctl-1112.exe -n 192.168.0.41 etcd status
+_out/talosctl-1142.exe -n 192.168.0.41 etcd status
 
 # 1. where do the CNPG primaries sit? If one is on the node you're taking down, you can (optionally)
 #    switch it away first for a deterministic hand-off. The operator ALSO does this automatically
@@ -77,7 +77,7 @@ kubectl --context admin@ai get pods -n monitoring -o wide | grep -E 'alertmanage
 
 # 3. graceful stop of that host's CP (drains ~5 min, then powers off; poll for stopped).
 #    `qm` only exists ON the Proxmox host -> run the poll through node-ssh.py:
-_out/talosctl-1112.exe shutdown -n <cp-ip>
+_out/talosctl-1142.exe shutdown -n <cp-ip>
 python scripts/node-ssh.py <host-ip> "for i in \$(seq 1 90); do qm status <vmid> | grep -q stopped && break; sleep 5; done; qm status <vmid>"
 
 # 4. host work (BIOS / kernel / Proxmox upgrade / hardware), then reboot the host.
@@ -111,7 +111,7 @@ python scripts/node-ssh.py <host-ip> "ps -eo pid,stat,wchan:24,comm | awk '\$2 ~
 
 ```bash
 # 1. Talos guests (CP + any agent/env node on this host) -- these DRAIN, so they go first
-_out/talosctl-1112.exe shutdown -n <cp-ip>            # repeat per Talos guest on the host
+_out/talosctl-1142.exe shutdown -n <cp-ip>            # repeat per Talos guest on the host
 
 # 2. QEMU VMs (runners, dev-workers)
 python scripts/node-ssh.py <host-ip> "for v in <ubuntu vmids>; do qm shutdown \$v --timeout 300 & done"
@@ -204,7 +204,7 @@ kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=
 ## Post-maintenance checklist (gates before touching the next node)
 
 ```bash
-_out/talosctl-1112.exe -n 192.168.0.41 etcd status                  # 3/3 in-sync
+_out/talosctl-1142.exe -n 192.168.0.41 etcd status                  # 3/3 in-sync
 kubectl --context admin@ai get nodes                                # all Ready, none SchedulingDisabled
                                                                     # (Talos uncordons on boot; `kubectl uncordon` if stuck)
 curl -s -m 10 http://<ai-lxc-ip>:8082/v1/models                     # AI LXC: llama-swap answering

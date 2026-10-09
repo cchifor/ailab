@@ -96,7 +96,7 @@ Run `just` with no args to list all tasks — the K8s-era recipes live there too
 
 - **Kubernetes apps** (`kubernetes/apps/**`): Flux reconciles `main` — PR → squash-merge to ship. **VMs/LXCs** (`kubernetes/infra/**`): OpenTofu applied by hand via `just` (Flux does NOT manage these).
 - **kubectl:** the default context is a *different* cluster — always `kubectl --context admin@ai` or `KUBECONFIG=kubernetes/infra/_out/kubeconfig`.
-- **talosctl:** use `_out/talosctl-1112.exe` (v1.11.2, matches the cluster); the system talosctl is v1.6.2 and silently drops newer config keys. Node maintenance = `talosctl shutdown`, **one node at a time**, etcd 3/3 between nodes — [`docs/runbooks/node-maintenance.md`](docs/runbooks/node-maintenance.md).
+- **talosctl:** use `_out/talosctl-1142.exe` (v1.14.2, matches the cluster); the system talosctl is v1.6.2 and silently drops newer config keys. Node maintenance = `talosctl shutdown`, **one node at a time**, etcd 3/3 between nodes — [`docs/runbooks/node-maintenance.md`](docs/runbooks/node-maintenance.md).
 - **Hosts/LXCs:** `python scripts/node-ssh.py <host-ip> "<cmd>"` and `python scripts/lxc-exec.py <host> <ctid>` (no Ansible in WSL on this box).
 
 ---
@@ -122,7 +122,7 @@ Run `just` with no args to list all tasks — the K8s-era recipes live there too
 | Full design / architecture | [`docs/architecture.md`](docs/architecture.md), [`docs/k8s-architecture.md`](docs/k8s-architecture.md) |
 | Authoritative IP plan | [`docs/network-plan.md`](docs/network-plan.md) |
 | **Decisions (source of truth)** | [`docs/decisions/`](docs/decisions/) — ADRs 0001–0026, living documents; the newest, [0026](docs/decisions/0026-second-chatgpt-subscription-through-litellm.md), serves GPT-6 Astra from a second ChatGPT subscription through LiteLLM's `chatgpt/` provider (a second native dsh Codex route is impossible on the installed adapter) |
-| Operations | [`docs/runbooks/`](docs/runbooks/) — node maintenance & node loss, AI host setup, [model registration](docs/runbooks/model-registration.md) (LiteLLM → dsh, Open WebUI), [dsh agent UI](docs/runbooks/dsh.md), [dsh Kubernetes access](docs/runbooks/dsh-k8s-admin.md), internet exposure, CI runners, dev workers, QNAP storage, registry cache, [roots-of-trust rotation](docs/runbooks/roots-of-trust-rotation.md) (age key, ServiceAccount signing key, Keycloak realm keys), [owner credentials](docs/runbooks/owner-credentials.md) (Gitea identities, automated owner merges, break-glass) |
+| Operations | [`docs/runbooks/`](docs/runbooks/) — node maintenance & node loss, AI host setup, [model registration](docs/runbooks/model-registration.md) (LiteLLM → dsh, Open WebUI), [dsh agent UI](docs/runbooks/dsh.md), [dsh Kubernetes access](docs/runbooks/dsh-k8s-admin.md), internet exposure, CI runners, dev workers, QNAP storage, registry cache, [roots-of-trust rotation](docs/runbooks/roots-of-trust-rotation.md) (age key, ServiceAccount signing key, Keycloak realm keys), [owner credentials](docs/runbooks/owner-credentials.md) (Gitea identities, automated owner merges, break-glass), [Talos/Kubernetes upgrades](docs/runbooks/talos-upgrade.md), [CNPG Barman plugin](docs/runbooks/cnpg-barman-plugin.md) |
 | Operator cheat-sheet (paths, contexts, gotchas) | [`CLAUDE.md`](CLAUDE.md) |
 | K8s follow-ups / backlog | [`docs/k8s-followups.md`](docs/k8s-followups.md) |
 
