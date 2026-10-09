@@ -60,7 +60,12 @@ dev_worker_codex_pkg: "@openai/codex"
 # gpt-6-astra needs >= 0.153.0 (measured 2026-09-05: 0.152.1 rejected, 0.153.0 accepted): an
 # older CLI is rejected upstream with `400 The 'gpt-6-astra' model requires a newer version of Codex`.
 # 0.160.0: the floor for the router provider's `auth` command (measured on 0.160.0, 2026-10-09).
-dev_worker_codex_version: "0.160.0"
+# 0.162.0: the version the managed app-server daemon auto-updated itself to. A TUI whose CLI differs from
+# the running daemon refuses to attach when their feature defaults disagree ("Background server has
+# incompatible feature settings", 2026-10-09: 0.160 vs 0.162 on api_key_model_discovery). The daemon's
+# updater keeps moving, so the [features] pin in tasks/codex.yml is what actually prevents that; this
+# floor only keeps the gap small.
+dev_worker_codex_version: "0.162.0"
 # Written as TOP-LEVEL keys into each user's ~/.codex/config.toml (edit-in-place, see codex.yml).
 # Empty string = leave that key unmanaged.
 dev_worker_codex_model: "gpt-6-astra"
