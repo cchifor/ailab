@@ -50,17 +50,37 @@ out=$(bash "$migrate" "$t/home4" "$t/nope")
 grep -q "does not exist" <<<"$out" || fail "a missing workspace root was not reported: $out"
 [ -d "$t/home4/.cache" ] && [ ! -L "$t/home4/.cache" ] || fail "~/.cache was touched without a workspace root"
 
-# 6. A cache-writing tool of this user is running: the whole run is skipped.
-if command -v pgrep >/dev/null; then
-	mkdir -p "$t/home5/.cache"
-	(exec -a npm sleep 30) &
-	busy=$!
+# 6. Something of this user is using the caches, however it was started: the run is skipped.
+#    By name (npm, `python -m pip`, Playwright's node CLI) and by use (a cwd inside ~/.cache).
+busy_case() { # NAME ARGV...: run ARGV in the background, expect the migration to skip, clean up
+	local name=$1 pid out
+	shift
+	mkdir -p "$t/home5/.cache/uv"
+	"$@" &
+	pid=$!
 	sleep 0.3
 	out=$(DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home5" "$root")
-	kill "$busy" 2>/dev/null || :
-	grep -q "skip: busy" <<<"$out" || fail "a running npm did not make it skip: $out"
-	[ ! -L "$t/home5/.cache" ] || fail "moved while busy"
+	kill "$pid" 2>/dev/null || :
+	wait "$pid" 2>/dev/null || :
+	grep -q "skip: busy" <<<"$out" || fail "$name did not make it skip: $out"
+	[ ! -L "$t/home5/.cache" ] || fail "moved while $name was running"
+}
+mkdir -p "$t/bin" "$t/proj/node_modules/playwright"
+printf '#!/bin/bash\nsleep 30\n' >"$t/bin/python3"
+printf '#!/bin/bash\nsleep 30\n' >"$t/bin/node"
+chmod +x "$t/bin/python3" "$t/bin/node"
+if command -v pgrep >/dev/null; then
+	busy_case "npm" bash -c 'exec -a npm sleep 30'
+	busy_case "python -m pip" "$t/bin/python3" -m pip install x
+	busy_case "node playwright/cli.js" "$t/bin/node" "$t/proj/node_modules/playwright/cli.js" install
 fi
+busy_case "a shell inside ~/.cache" bash -c "cd '$t/home5/.cache/uv' && sleep 30"
+# ...and an unrelated process of the same user does not block it.
+(cd "$t" && sleep 30) &
+idle_pid=$!
+out=$(DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home5" "$root")
+kill "$idle_pid" 2>/dev/null || :
+grep -q "moved $t/home5/.cache" <<<"$out" || fail "an unrelated process blocked the move: $out"
 
 # 7. The TMPDIR hook: set only for an existing, real, writable directory.
 hook=$t/hook.sh

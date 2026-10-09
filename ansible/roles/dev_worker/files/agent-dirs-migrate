@@ -8,8 +8,10 @@
 # target is left alone; a symlink pointing elsewhere, or a non-directory, is reported and skipped.
 # Caches are regenerable, so they are NOT copied — they repopulate — except Playwright's browsers,
 # which tests cannot run without and which take minutes to re-download: those are copied first.
-# Skips the whole run (reporting "busy") while a cache-writing tool of this user runs, so nothing
-# is moved from under it; the next run retries. DW_AGENT_DIRS_BUSY_CHECK=0 disables that (tests).
+# Skips the whole run (reporting "busy") while anything of this user uses the caches — a process
+# whose cwd, executable, open file or memory mapping is under ~/.cache or ~/.npm (whatever its command
+# line: `python -m pip`, `node .../playwright/cli.js`, a browser) — or while a package tool runs by
+# name; the next run retries. DW_AGENT_DIRS_BUSY_CHECK=0 disables both (tests of the move itself).
 #
 # Prints "moved <path>" for each change (ansible's changed_when), "skip …" for anything left alone.
 set -euo pipefail
@@ -18,10 +20,32 @@ home=${1:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 root=${2:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 [ -d "$root" ] || { echo "skip: $root does not exist"; exit 0; }
 
-if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ] &&
-	pgrep -u "$(id -u)" -f -- '(^|/)(uv|uvx|pip3?|npm|npx|pnpm|playwright)( |$)|ms-playwright/' >/dev/null; then
-	echo "skip: busy (a uv/pip/npm/playwright process of $(id -un) is running)"
-	exit 0
+# Any process of this user (the effective uid owns its /proc entry) with its cwd, executable, an open
+# file or a mapping under one of the caches.
+caches_in_use() {
+	local p link target
+	for p in /proc/[0-9]*; do
+		[ -O "$p" ] || continue
+		for link in "$p/cwd" "$p/exe" "$p"/fd/*; do
+			target=$(readlink -- "$link" 2>/dev/null) || continue
+			case "$target" in
+			"$home/.cache" | "$home/.cache/"* | "$home/.npm" | "$home/.npm/"*) return 0 ;;
+			esac
+		done
+		grep -qsF -e "$home/.cache/" -e "$home/.npm/" "$p/maps" && return 0
+	done
+	return 1
+}
+
+if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ]; then
+	if caches_in_use; then
+		echo "skip: busy (a process of $(id -un) is using $home/.cache or $home/.npm)"
+		exit 0
+	fi
+	if pgrep -u "$(id -u)" -f -- '(^|[ /])(uv|uvx|pip3?|npm|npx|pnpm)( |$)|-m (pip|uv)( |$)|playwright(/| |$)|ms-playwright/' >/dev/null; then
+		echo "skip: busy (a uv/pip/npm/playwright process of $(id -un) is running)"
+		exit 0
+	fi
 fi
 
 for name in .cache .npm; do
