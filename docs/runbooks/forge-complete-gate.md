@@ -51,20 +51,28 @@ in-flight pull through containerd GC despite the age floor.
    the host for surviving task processes and containers. Missing `Runner.Worker` does not prove
    Gitea idle: host-mode Gitea jobs use different processes.
 3. With both queues drained, stop `gitea-act-runner.service` and
-   `actions.runner.cchifor-platform.service`. Verify both existing units are stopped and no
-   `act_runner` or `Runner.Worker` process remains. Keep scheduling paused through conversion.
+   `actions.runner.cchifor-platform.service`. Verify both existing units report
+   `ActiveState=inactive` and `SubState=dead`, and no `act_runner`, `Runner.Listener` or
+   `Runner.Worker` process remains. Transitional, failed or unknown states require investigation;
+   the condensed `service_facts` value `stopped` is insufficient. Keep scheduling paused through conversion.
    Do not stop a live job to satisfy this step. The old daemon still has its old drain budget;
    changing a file does not change an already running daemon's deadline.
 4. Merge the owner-reviewed ailab change. Wait for the GitHub mirror and Flux to reconcile the
    Gitea HelmRelease, the Recreate rollout to finish and the forge to recover. Verify intended
    `ENDLESS_TASK_TIMEOUT=12h` and the effective runtime setting. Leave heartbeat/zombie detection
-   unchanged. Do not infer the effective setting from the HelmRelease alone.
+   unchanged. Do not infer the effective setting from the HelmRelease alone. From this merge
+   until steps 5–7 complete, the pool gate is expected to fail: ci-runner-9 is paused/stopped or
+   still advertises its old `self-hosted-hv` label instead of `forge-complete`. Record this as the
+   planned maintenance window; do not bypass the strict dedicated-host/API checks or report the
+   pool healthy before conversion and registration have been observed.
 5. Apply `ansible/gitea-runners.yml` **only to ci-runner-9** through the normal approved SOPS/Ansible
    workflow (`--limit ci-runner-9`). The `gitea_runner_exclusive_host` guard runs before any runner
    configuration/binary change and fails closed if either existing service is not stopped or a
    runner process survives. It then stops and disables any installed legacy GitHub unit.
-   `github_runner_agent_enabled: false` alone only skips installation and would leave an existing
-   service and its Docker reclaim hook active. Preserve its role-managed regular unit file under
+   `github_runner_agent_enabled: false` skips the entire `github_runner/tasks/agent.yml` include,
+   covering download, unit/drop-in installation and enable/start; it does not retire an existing
+   service or its Docker reclaim hook. That retirement is the exclusive-host guard's final task.
+   Preserve its role-managed regular unit file under
    `/etc/systemd/system`; masking would conflict with that file. Keep the peer-service cleanup
    probe; the stopped peer is inactive. Do not run a fleet-wide restart.
 6. Verify runner timeout 10h, shutdown 600m, capacity 1, sole label `forge-complete:host`, systemd

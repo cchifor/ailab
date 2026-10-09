@@ -1,5 +1,6 @@
 """Render the dedicated gate budgets and exercise the exclusive-host safety predicates."""
 import pathlib
+import re
 import unittest
 
 import jinja2
@@ -82,7 +83,12 @@ class ExclusiveHostGuards(unittest.TestCase):
         tasks = read_yaml(ROLE / "tasks/main.yml")
         self.assertEqual(tasks[0]["ansible.builtin.include_tasks"], "exclusive-host.yml")
         self.assertEqual(tasks[0]["when"], "gitea_runner_exclusive_host | bool")
-        self.assertIn("ansible.builtin.service_facts", self.tasks[1])
+        observation = self.tasks[1]
+        self.assertEqual(observation["ansible.builtin.command"]["argv"],
+                         ["systemctl", "show", "--property=LoadState", "--property=ActiveState",
+                          "--property=SubState", "--", "{{ item }}"])
+        self.assertFalse(observation["changed_when"])
+        self.assertFalse(observation["check_mode"])
         self.assertIn("ansible.builtin.systemd_service", self.tasks[-1])
         retirement = self.tasks[-1]["ansible.builtin.systemd_service"]
         self.assertEqual(retirement["state"], "stopped")
@@ -99,24 +105,78 @@ class ExclusiveHostGuards(unittest.TestCase):
                            ("gitea_runner_capacity", 2)):
             self.assertFalse(evaluate({**valid, key: value}), key)
 
-    def test_running_or_unknown_service_state_blocks_maintenance(self):
-        predicate = self.env.compile_expression(self.tasks[2]["ansible.builtin.assert"]["that"][0])
+    def test_only_fully_inactive_dead_or_absent_units_admit_maintenance(self):
+        predicates = [self.env.compile_expression(p)
+                      for p in self.tasks[2]["ansible.builtin.assert"]["that"]]
+        evaluate = lambda observation: all(p(item=observation) for p in predicates)
         for service in ("gitea-act-runner.service", "actions.runner.cchifor-platform.service"):
-            for state in ("running", "unknown", "starting"):
-                facts = {"services": {service: {"state": state}}}
-                self.assertFalse(predicate(item=service, ansible_facts=facts), (service, state))
-            facts = {"services": {service: {"state": "stopped"}}}
-            self.assertTrue(predicate(item=service, ansible_facts=facts))
-            self.assertTrue(predicate(item=service, ansible_facts={"services": {}}))
+            for active, substate in (("active", "running"), ("activating", "start"),
+                                     ("activating", "auto-restart"), ("deactivating", "stop"),
+                                     ("deactivating", "stop-sigterm"), ("failed", "failed"),
+                                     ("unknown", "unknown"), ("inactive", "running")):
+                observation = {"item": service, "rc": 0, "stdout_lines": [
+                    "LoadState=loaded", "ActiveState=" + active, "SubState=" + substate]}
+                self.assertFalse(evaluate(observation), (service, active, substate))
+            for loaded, rc in (("loaded", 0), ("not-found", 0), ("not-found", 4)):
+                observation = {"item": service, "rc": rc, "stdout_lines": [
+                    "LoadState=" + loaded, "ActiveState=inactive", "SubState=dead"]}
+                self.assertTrue(evaluate(observation), (service, loaded, rc))
+            for lines in ([], ["LoadState=loaded"],
+                          ["LoadState=error", "ActiveState=inactive", "SubState=dead"],
+                          ["LoadState=masked", "ActiveState=inactive", "SubState=dead"],
+                          ["LoadState=loaded", "ActiveState=inactive", "SubState=dead", "unknown"]):
+                self.assertFalse(evaluate({"item": service, "rc": 0, "stdout_lines": lines}), lines)
+            self.assertFalse(evaluate({"item": service, "rc": 4, "stdout_lines": [
+                "LoadState=loaded", "ActiveState=inactive", "SubState=dead"]}))
+
+    def test_failed_systemd_observation_cannot_be_treated_as_absent(self):
+        failed = self.env.compile_expression(self.tasks[1]["failed_when"])
+        for rc in (1, 2, 127):
+            self.assertTrue(failed(_exclusive_runner_services={"rc": rc}), rc)
+        for rc in (0, 4):
+            self.assertFalse(failed(_exclusive_runner_services={"rc": rc}), rc)
+
+    def test_legacy_disable_requires_an_observed_loaded_unit(self):
+        predicate = self.env.compile_expression(self.tasks[-1]["when"])
+        for loaded, expected in (("loaded", True), ("not-found", False)):
+            observations = {"results": [{}, {"stdout_lines": ["LoadState=" + loaded]}]}
+            self.assertEqual(predicate(_exclusive_runner_services=observations), expected)
 
     def test_no_worker_is_not_inferred_from_a_failed_process_probe(self):
         probe = self.tasks[3]
         self.assertEqual(probe["ansible.builtin.command"]["argv"],
-                         ["pgrep", "-x", "act_runner|Runner[.]Worker"])
+                         ["pgrep", "-x", "act_runner|Runner[.]Listener|Runner[.]Worker"])
+        self.assertFalse(probe["check_mode"])
+        pattern = probe["ansible.builtin.command"]["argv"][-1]
+        for name in ("act_runner", "Runner.Listener", "Runner.Worker"):
+            self.assertIsNotNone(re.fullmatch(pattern, name))
+        self.assertIsNone(re.fullmatch(pattern, "RunnerXListener"))
         failed = self.env.compile_expression(probe["failed_when"])
         for rc in (0, 2, 127):
             self.assertTrue(failed(_exclusive_runner_processes={"rc": rc}), rc)
         self.assertFalse(failed(_exclusive_runner_processes={"rc": 1}))
+
+    def test_disabled_github_agent_skips_installation_and_enable_start(self):
+        role = ROOT / "ansible/roles/github_runner"
+        tasks = read_yaml(role / "tasks/main.yml")
+        include = next(task for task in tasks
+                       if task.get("ansible.builtin.include_tasks") == "agent.yml")
+        predicate = self.env.compile_expression(include["when"])
+        dedicated = read_yaml(ROOT / "ansible/host_vars/ci-runner-9.yml")
+        self.assertFalse(predicate(**dedicated))
+        self.assertTrue(predicate(github_runner_agent_enabled=True))
+        agent = read_yaml(role / "tasks/agent.yml")
+        self.assertTrue(any("ansible.builtin.get_url" in task for task in agent))
+        start = next(task["ansible.builtin.systemd"] for task in agent
+                     if "ansible.builtin.systemd" in task)
+        self.assertEqual(start["name"], "{{ github_runner_service }}")
+        self.assertEqual(start["state"], "started")
+        self.assertTrue(start["enabled"])
+        # Outside the gated include, only shared toolchain services may be started.
+        for task in tasks:
+            service = task.get("ansible.builtin.systemd", {})
+            self.assertNotEqual(service.get("name"), "{{ github_runner_service }}")
+            self.assertNotEqual(task.get("notify"), "Restart github-runner")
 
 
 if __name__ == "__main__":
