@@ -1,5 +1,14 @@
 # Cilium values for Talos (kube-proxy-free via KubePrism on localhost:7445).
-# Used for the bootstrap install and reused by Flux for day-2 management.
+#
+# LIVE: chart cilium/cilium 1.19.8 (Helm release kube-system/cilium, revision 5, upgraded 2026-10-09
+# from 1.18.14 with --set upgradeCompatibility=1.18). Keep this line equal to `helm -n kube-system
+# list` and update it in the same change as every hop.
+#
+# Cilium is HAND-INSTALLED with Helm, not managed by Flux (no HelmRelease exists): bootstrap with
+# these values, and upgrade one minor per hop (docs/runbooks/talos-upgrade.md, "Addons"):
+#   helm --kube-context admin@ai -n kube-system upgrade cilium cilium/cilium --version <v> -f kubernetes/infra/bootstrap/cilium-values.yaml --set upgradeCompatibility=<previous minor>
+# upgradeCompatibility is deliberately NOT in this file: it is an upgrade-time setting, and a fresh
+# install from this file must get the current defaults. Run the pre-flight check first.
 ipam:
   mode: kubernetes
 kubeProxyReplacement: true

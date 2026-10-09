@@ -42,7 +42,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 ## Talos / control-plane safety
 - Graceful CP reboot = **`talosctl shutdown -n <cp-ip>`** — **`qm shutdown`/ACPI does NOT stop Talos** (falls back to a hard stop). Then `qm set <vmid> --memory …` + `qm start`.
-- Use **`_out/talosctl-1112.exe`** (v1.11.2, matches the cluster). The system `talosctl` is v1.6.2 and **UNSAFE** (silently drops newer config keys).
+- Use **`_out/talosctl-1142.exe`** (v1.14.2, matches the cluster since the 2026-10-09 upgrade; `scripts/talos-upgrade-node.sh` picks the client whose `version --client` matches each node). The system `talosctl` is v1.6.2 and **UNSAFE** (silently drops newer config keys).
 - Roll **ONE CP at a time**; verify **`talosctl … etcd status` is 3/3 in-sync** (quorum) between each reboot.
 
 ## Inventory (mgmt LAN 192.168.0.0/24)

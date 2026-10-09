@@ -18,10 +18,13 @@
     signed_by: /etc/apt/keyrings/kubernetes.asc
     enabled: true
 
+# `latest`, not `present`: the repo above is per-MINOR, so this only ever moves to the newest patch
+# of dev_worker_kubectl_minor. With `present`, bumping the minor switched the repo but left the old
+# kubectl installed forever (dev-workers sat on 1.30 against a 1.33 apiserver, out of skew).
 - name: Install kubectl
   ansible.builtin.apt:
     name: kubectl
-    state: present
+    state: latest
     update_cache: true
 
 - name: Install helm {{ dev_worker_helm_version }}

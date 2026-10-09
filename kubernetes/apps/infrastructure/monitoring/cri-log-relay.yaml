@@ -104,11 +104,12 @@ spec:
       containers:
         - name: relay
           # talosctl on the cluster's Talos MINOR, not its exact patch: every node reports Talos
-          # v1.11.2, talosctl is supported within one minor of the nodes, and renovate.json holds
-          # this image to v1.11.x (lift that bound in the change that upgrades Talos). The relay
-          # only streams logs, so a newer 1.11 patch client is safe here. CLAUDE.md's talosctl-1112
-          # is the operator binary for machine-config applies, where an exact match matters.
-          image: ghcr.io/siderolabs/talosctl:v1.11.6@sha256:9f7d71e27190f19f04cbd5ad59752af75e54920c4601072cef93a578097be1b9
+          # v1.14.2 (upgrade program 2026-10-08/09), talosctl is supported within one minor of the
+          # nodes, and renovate.json holds this image to v1.14.x (lift that bound in the change that
+          # upgrades Talos). It ran v1.11.6 against 1.14 nodes from 2026-10-09 until this bump,
+          # because the Talos program missed the bound. CLAUDE.md's talosctl-1142 is the operator
+          # binary for machine-config applies, where an exact match matters.
+          image: ghcr.io/siderolabs/talosctl:v1.14.2@sha256:b655ae1c73789c4789fcf6fbd61c8f45400ed4b3bd9892a26092fcd4d8d95d86
           args:
             - --talosconfig=/etc/talos/config
             - --endpoints=192.168.0.41,192.168.0.42,192.168.0.43 # any CP apid proxies to the node; talosctl fails over across the list, so a cp1 reboot does not stop the capture
