@@ -385,7 +385,7 @@ request to a pod IP from anywhere else would test the NetworkPolicy, not gatekee
 
 - The effective `extras_sha` equals the rendered hash. `extras_sha` is the SHA-256 of the exact
   ConfigMap data bytes:
-  `kubectl -n strive-ailab get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum`.
+  `kubectl -n strive-gatekeeper get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum`.
   It is NOT the pod annotation `checksum/registry-extras`, which hashes the whole rendered template.
 - `gatekeeper_service_registry_extras_rejected == 0`, and every
   `gatekeeper_service_registry_extras_refused_total{reason}` series is 0.
@@ -398,11 +398,11 @@ Before the flip, check the first three by hand. The probes script below cannot r
 the harness's token, and a dark harness has no ServiceAccount.
 
 ```sh
-K="kubectl --context admin@ai -n strive-ailab"
-$K get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum
-for p in $($K get pod -l app.kubernetes.io/name=gatekeeper -o name); do
+G="kubectl --context admin@ai -n strive-gatekeeper"
+$G get cm gatekeeper-registry-extras -o jsonpath='{.data.registry\.yaml}' | sha256sum
+for p in $($G get pod -l app.kubernetes.io/name=gatekeeper -o name); do
   echo "$p"
-  $K exec "$p" -c gatekeeper -- python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5000/metrics',timeout=5).read().decode())" \
+  $G exec "$p" -c gatekeeper -- python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5000/metrics',timeout=5).read().decode())" \
     | grep -E '^gatekeeper_service_registry_(info|extras_rejected|extras_refused_total)'
 done
 ```
@@ -569,7 +569,7 @@ copied byte for byte into the manifest directory; a test fails on drift.
    flight), or fewer than 2 ready replicas, fails the run before a token exists.
 2. Reads ConfigMap `gatekeeper-registry-extras` through the API, from gatekeeper's namespace, and
    writes its `data.registry.yaml` byte for byte to an emptyDir. A pod cannot mount another
-   namespace's ConfigMap, and gatekeeper is moving to its own namespace (below).
+   namespace's ConfigMap, and gatekeeper runs in its own namespace, `strive-gatekeeper` (below).
 3. Makes the same three TokenRequests as the workstation script (600 s, the API minimum), with
    its own ServiceAccount token. The tokens stay in the process's memory: never argv, env, a file
    or the log.
@@ -651,9 +651,12 @@ A `FAIL` on a replica means the same as it does from the workstation script: **d
 That one line moves the gatekeeper-side Role, its RoleBinding and the NetworkPolicy. A kustomize
 replacement copies the same value into the Job's `GATEKEEPER_NAMESPACE`. The workstation script
 has the matching constant `GK_NS` in `scripts/s2s/phase4-probes.sh`, and a test fails while the
-two differ. When gatekeeper moves to `strive-gatekeeper`, change exactly those two lines, in one
-ailab PR, merged after the namespace exists. The env change recreates the Job, so the probe runs
-against the new namespace on that reconcile. The TokenRequest Role, the ServiceAccount, the Job and
+two differ. Gatekeeper moved to `strive-gatekeeper` with the platform A.2 cutover, and both lines now
+say `strive-gatekeeper`. They changed together, in one ailab PR merged only after the cutover was live
+(the namespace existed, `endpoints/gatekeeper` there was 2/2 ready, and the old gatekeeper was gone
+from `strive-ailab`). A cutover rollback reverts that PR together with the platform revert, not after
+it. The env change recreates the Job, so the probe runs against the current namespace on that
+reconcile. The TokenRequest Role, the ServiceAccount, the Job and
 the NetworkPolicy's `namespaceSelector` (`strive-ailab`) do not change.
 
 **First run.** Merging the PR creates the Flux Kustomization and the Job, and the first run starts
@@ -670,7 +673,9 @@ on that reconcile. The owner only has to confirm with
 
 ### Drills (plan, "Verification and drills")
 
-The owner runs these, with `K="kubectl --context admin@ai -n strive-ailab"`.
+The owner runs these, with `K="kubectl --context admin@ai -n strive-ailab"` (the harness, HelmRelease
+`strive`) and `G="kubectl --context admin@ai -n strive-gatekeeper"` (gatekeeper's pods, ConfigMap and
+HelmRelease `gatekeeper`).
 
 - Run drills 1, 3 and 4 after the probes pass, in any order. Drill 2 keeps the harness up; it
   freezes Flux for its window and moves the ten services and four workers between preshared and
@@ -694,6 +699,7 @@ scripts/s2s/phase4-probes.sh
 
 ```sh
 K="kubectl --context admin@ai -n strive-ailab"
+G="kubectl --context admin@ai -n strive-gatekeeper"
 # Freeze top-down (each parent re-applies its children and drops a hand-set suspend; the
 # Kustomization re-applies the HelmRelease and clears its suspend). This also keeps Helm off the
 # ConfigMap mid-drill.
@@ -702,33 +708,40 @@ kubectl --context admin@ai -n flux-system patch kustomization platform --type=me
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
+# Freeze the gatekeeper release too, the same way: it owns the ConfigMap, so this keeps Helm off it mid-drill.
+kubectl --context admin@ai -n flux-system patch kustomization platform-gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
+$G patch helmrelease gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
 scripts/s2s/phase4-probes.sh --gatekeeper-only                            # baseline: PASS on both replicas
-A=$($K get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[0].metadata.name}')
-B=$($K get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[1].metadata.name}')
+A=$($G get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[0].metadata.name}')
+B=$($G get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[1].metadata.name}')
 # Delete the extras (non-secret: grants only), but ONLY once a copy to restore from is saved. The copy
 # goes to the MAIN checkout's gitignored kubernetes/infra/_out/ (a worktree has none), so run this
 # from an ailab checkout. On "STOP", nothing was deleted: do not go on.
 OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
 git -C "${OUT%/kubernetes/infra/_out}" check-ignore -q kubernetes/infra/_out/x && mkdir -p "$OUT" || OUT=
 SAVE="${OUT:-/nonexistent-ailab-out}/gatekeeper-registry-extras-drill.yaml"
-$K get configmap gatekeeper-registry-extras -o yaml > "$SAVE" && grep -q '^kind: ConfigMap' "$SAVE" \
-  && $K delete configmap gatekeeper-registry-extras || echo "STOP: no verified copy at $SAVE; nothing deleted" >&2
+$G get configmap gatekeeper-registry-extras -o yaml > "$SAVE" && grep -q '^kind: ConfigMap' "$SAVE" \
+  && $G delete configmap gatekeeper-registry-extras || echo "STOP: no verified copy at $SAVE; nothing deleted" >&2
 scripts/s2s/phase4-probes.sh --gatekeeper-only --no-registry-check        # PASS: both pods kept the extras they loaded
 # Cold start: restart A without the ConfigMap (the mount is optional: true).
-$K delete pod "$A"
-$K rollout status deployment/gatekeeper --timeout=300s
-C=$($K get pod -l app.kubernetes.io/name=gatekeeper -o name | sed 's|^pod/||' | grep -vx -e "$A" -e "$B")
+$G delete pod "$A"
+$G rollout status deployment/gatekeeper --timeout=300s
+C=$($G get pod -l app.kubernetes.io/name=gatekeeper -o name | sed 's|^pod/||' | grep -vx -e "$A" -e "$B")
 scripts/s2s/phase4-probes.sh --replica "$C" --expect-refused              # PASS: extras_sha empty, svc-harness 401
 scripts/s2s/phase4-probes.sh --replica "$B" --gatekeeper-only --no-registry-check   # PASS: B still serves svc-harness
 # Restore the ConfigMap. There is no reload: C keeps refusing until it is rolled.
-sed -e '/^  resourceVersion:/d' -e '/^  uid:/d' -e '/^  creationTimestamp:/d' "$SAVE" | $K create -f -
+sed -e '/^  resourceVersion:/d' -e '/^  uid:/d' -e '/^  creationTimestamp:/d' "$SAVE" | $G create -f -
 scripts/s2s/phase4-probes.sh --replica "$C" --expect-refused              # PASS: still refused
-$K rollout restart deployment/gatekeeper
-$K rollout status deployment/gatekeeper --timeout=300s
+$G rollout restart deployment/gatekeeper
+$G rollout status deployment/gatekeeper --timeout=300s
 scripts/s2s/phase4-probes.sh --gatekeeper-only                            # PASS on both: extras_sha = the ConfigMap again
 ```
 
-Then restore the harness (above).
+The resume is the script, as everywhere in this runbook: `flux-resume.sh --after-drill` (above) resumes
+the gatekeeper release too, as its step 1c: Kustomization `flux-system/platform-gatekeeper` first, then
+HelmRelease `strive-gatekeeper/gatekeeper` only if its `.spec.suspend` still reads true (the
+Kustomization's re-apply normally clears it), and it waits for Ready at the landed commit before
+`platform-app` moves. The drill merged nothing, so the commit it lands is platform main now.
 
 **2. Rollback after #2125 (config only; the harness stays up).** The rollback operators would actually
 use. It moves the ten Python services and the four workers back to preshared client secrets and
@@ -772,27 +785,48 @@ Drill 2 used #2198 as the worked example:
   labelled `rollout-freeze`.
 
 Freeze top-down. `platform-secrets` is frozen too, because the PR edits a Secret, and it is resumed
-first. The harness is not scaled:
+first. The gatekeeper release (`platform-gatekeeper`, a sibling of `platform-app` since the A.2
+cutover) is frozen too: the PR changes the registry and its checksum, and a sibling is not held by its
+suspended parent. The harness is not scaled:
 
 ```sh
+K="kubectl --context admin@ai -n strive-ailab"
+G="kubectl --context admin@ai -n strive-gatekeeper"
 kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-secrets --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization platform-gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
+$G patch helmrelease gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
 ```
 
 **Only after the PR has merged**, resume with `flux-resume.sh --after-config`. It runs gates 1-7
 under "Resuming the release":
 
 1. It resumes `platform-secrets` first and requires it to have applied the merge (gate 3) before
-   `platform-app` moves.
-2. It lands `platform-app` and the HelmRelease.
-3. It requires the harness rollout.
-4. It resumes `platform`, then the root.
+   anything else moves.
+2. It resumes `platform-gatekeeper` and the `gatekeeper` HelmRelease (step 1c) and requires the
+   gatekeeper upgrade to the merge: the new registry checksum rolls gatekeeper here, so the services
+   come back to a gatekeeper that already serves the registry they expect. The block below reads
+   that roll (`rollout status`), the probes and the mint counts.
+3. It lands `platform-app` and the HelmRelease.
+4. It requires the harness rollout.
+5. It resumes `platform`, then the root.
+
+A cluster without Kustomization `platform-gatekeeper` (before the A.2 cutover, or after a platform
+revert of it) stops the script at step 1c by design: that world's resume is the runbook revision that
+shipped with it, not this one.
 
 ```sh
 scripts/s2s/flux-resume.sh --after-config --sha <the PR's merge commit>
+$G rollout status deployment/gatekeeper --timeout=600s
+scripts/s2s/phase4-probes.sh --expect-refused
+kubectl --context admin@ai get clusterrole,clusterrolebinding strive-gatekeeper-gatekeeper-tokenreview
+for p in $($G get pod -l app.kubernetes.io/name=gatekeeper -o name); do
+  echo "$p $($G logs "$p" -c gatekeeper --since=30m | grep -c service_token_minted)"
+done
+$K get externalsecret strive-pg-harness-dsn
 ```
 
 Then confirm that the Secret carries the committed registry. Compare the sha256 prefix of the live
@@ -862,7 +896,7 @@ The harness token:
 
 ```sh
 hfp() { $K exec deploy/harness -c harness -- node -e 'const c=require("crypto"),f=require("fs");const t=f.readFileSync("/var/run/secrets/tokens/gatekeeper/token","utf8").trim();const p=JSON.parse(Buffer.from(t.split(".")[1],"base64url"));console.log(c.createHash("sha256").update(t).digest("hex").slice(0,12),"iat="+p.iat,"exp="+p.exp)'; }
-gkm() { for p in $($K get pod -l app.kubernetes.io/name=gatekeeper -o name); do echo "$p"; $K exec "$p" -c gatekeeper -- python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5000/metrics',timeout=5).read().decode())" | grep -E '^gatekeeper_tokenreview_(total|cache_total)\{'; done; }
+gkm() { for p in $($G get pod -l app.kubernetes.io/name=gatekeeper -o name); do echo "$p"; $G exec "$p" -c gatekeeper -- python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5000/metrics',timeout=5).read().decode())" | grep -E '^gatekeeper_tokenreview_(total|cache_total)\{'; done; }
 hfp; gkm   # note the fingerprint and the counters
 # repeat hfp every 5 minutes until the fingerprint changes (about 48 min after its iat), then:
 gkm        # counters before

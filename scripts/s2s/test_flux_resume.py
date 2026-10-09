@@ -46,6 +46,11 @@ PARENTS = ("platform", "flux-system")
 #: The Kustomization that applies the release's Secrets (deploy/secrets/ailab). Drill 2's config change edits
 #: one, so it is frozen with the release and must land before platform-app (#1162 review).
 SECRETS = "platform-secrets"
+# The gatekeeper release (platform A.2): its Kustomization, its HelmRelease (in strive-gatekeeper) and the
+# HelmChart source-controller builds for it (flux-system/<hr namespace>-<hr name>).
+GK = "platform-gatekeeper"
+GK_HR = "gatekeeper"
+GK_CHART = "strive-gatekeeper-gatekeeper"
 #: ailab main as the root's source serves it, before and after the freeze.
 AILAB_OLD = "c" * 40
 AILAB = "d" * 40
@@ -155,6 +160,53 @@ def fake_kubectl(argv):
                         observed, applied = gen, st["source"]
                         sec["observed"], sec["applied"] = observed, applied
                 return _out("%s|%d|%d|%s|True" % ("true" if suspended else "false", gen, observed, applied))
+        if kind == "kustomization" and name == GK:
+            if st.get("gk_missing"):
+                sys.stderr.write('Error from server (NotFound): kustomizations.kustomize.toolkit.fluxcd.io "%s" not found\n' % GK)
+                return 1
+            gk = st.setdefault("gk", {})
+            if args[0] == "patch":
+                assert '"suspend":false' in args[-1]
+                gk["suspended"] = False
+                gk["gen"] = gk.get("gen", 3) + 1  # the unsuspend is a spec change
+                return _out("kustomization.kustomize.toolkit.fluxcd.io/%s patched\n" % GK)
+            if args[0] == "annotate":
+                gk["annotated"] = True
+                return _out("kustomization.kustomize.toolkit.fluxcd.io/%s annotated\n" % GK)
+            if args[0] == "get":
+                suspended = gk.get("suspended", False)
+                gen, observed = gk.get("gen", 3), gk.get("observed", 3)
+                applied = gk.get("applied", rev(OLD))
+                if not suspended and gk.get("applies", True):
+                    gk["polls"] = gk.get("polls", 0) + 1
+                    if gk["polls"] >= gk.get("after", 1):
+                        observed, applied = gen, st["source"]
+                        gk["observed"], gk["applied"] = observed, applied
+                        if gk.get("clears_hr_suspend", True):
+                            st["gkhr_suspended"] = False  # the Kustomization's re-apply clears a hand-set suspend
+                return _out("%s|%d|%d|%s|True" % ("true" if suspended else "false", gen, observed, applied))
+        if kind == "helmrelease" and name == GK_HR:
+            if args[0] == "patch":
+                assert '"suspend":false' in args[-1]
+                st["gkhr_suspended"] = False
+                return _out("helmrelease.helm.toolkit.fluxcd.io/%s patched\n" % GK_HR)
+            if args[0] == "get":
+                if not st.get("gkhr_suspended", False) and st.get("gkhr_upgrades", True):
+                    st["gkhr_polls"] = st.get("gkhr_polls", 0) + 1
+                    if st["gkhr_polls"] >= st.get("gkhr_after", 1):
+                        applied = st.get("gk", {}).get("applied", rev(OLD)).split("sha1:")[-1]
+                        # A release whose chart version does not carry the commit (not reconcileStrategy Revision).
+                        st["gkhr_chart"] = "0.2.0" if st.get("gkhr_chart_plain") else "0.2.0+%s.1" % applied[:12]
+                return _out("%s|%s|True" % ("true" if st.get("gkhr_suspended", False) else "", st.get("gkhr_chart", "0.2.0+%s.1" % OLD[:12])))
+        if args[0] == "get" and kind == "helmchart" and name == GK_CHART:
+            # observedSourceArtifactRevision|artifact.revision: built from what platform-gatekeeper applied; the
+            # artifact's revision equals the deployed chart unless the test says the release lags the build.
+            built = st.get("gk", {}).get("applied", rev(OLD))
+            if st.get("gkhr_chart_plain"):
+                art = "0.2.0-build2" if st.get("helmchart_ahead") else "0.2.0"
+            else:
+                art = "0.2.0+%s.1" % built.split("sha1:")[-1][:12]  # what source-controller versions a Revision build
+            return _out("%s|%s" % (built, art))
         if args[0] == "patch" and kind == "kustomization" and name in PARENTS:
             assert '"suspend":false' in args[-1]
             st.setdefault("parents", {})[name] = False
@@ -235,7 +287,9 @@ def fake_kubectl(argv):
 
 
 @unittest.skipIf(BASH is None, "bash is required (set PHASE4_TEST_BASH)")
-class FluxResume(unittest.TestCase):
+class _Resume(unittest.TestCase):
+    """The harness: a fake kubectl/git on PATH, a state file the fake reads and writes, and the call log."""
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="flux-resume-")
         self.stubs = os.path.join(self.dir, "bin")
@@ -305,8 +359,10 @@ class FluxResume(unittest.TestCase):
                 continue
             args = [a for i, a in enumerate(call[1:]) if a not in ("--context", "-n") and (i == 0 or call[1:][i - 1] not in ("--context", "-n"))]
             kind = args[1] if len(args) > 1 else ""
-            if kind == "kustomization" and len(args) > 2 and args[2] in PARENTS + (SECRETS,):
+            if kind == "kustomization" and len(args) > 2 and args[2] in PARENTS + (SECRETS, GK):
                 kind = "kustomization/" + args[2]
+            if kind in ("helmrelease", "helmchart") and len(args) > 2 and args[2] in (GK_HR, GK_CHART):
+                kind = kind + "/" + args[2]
             out.append((args[0], kind))
         return out
 
@@ -318,6 +374,13 @@ class FluxResume(unittest.TestCase):
     def final(self):
         return _load(self.dir)
 
+    def last(self, verb, kind):
+        verbs = self.verbs()
+        self.assertIn((verb, kind), verbs, verbs)
+        return max(i for i, v in enumerate(verbs) if v == (verb, kind))
+
+
+class FluxResume(_Resume):
     def test_after_drill_lands_the_commit_in_order(self):
         self.state()
         rc, text = self.run_script("--after-drill")
@@ -550,11 +613,6 @@ class FluxResume(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertIn("RESUMED", text)
 
-    def last(self, verb, kind):
-        verbs = self.verbs()
-        self.assertIn((verb, kind), verbs, verbs)
-        return max(i for i, v in enumerate(verbs) if v == (verb, kind))
-
     def test_suspended_secrets_land_before_platform_app(self):
         # Review of #1162 (reviewer-claude): drill 2 freezes platform-secrets with the release. If the
         # values landed first, the ten services would present preshared secrets to a registry that still
@@ -614,6 +672,76 @@ class FluxResume(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertIn("kustomization %s" % SECRETS, text)
         self.assertEqual(self.calls(), [])
+
+
+class GatekeeperRelease(_Resume):
+    """Step 1c (platform A.2): the gatekeeper release is its own HelmRelease under Kustomization
+    platform-gatekeeper, a sibling of platform-app. The script resumes and gates it after the Secrets and
+    before platform-app, so the services never come back to a gatekeeper that does not serve their
+    registry yet."""
+
+    def test_a_suspended_gatekeeper_release_is_resumed_and_gated_before_platform_app(self):
+        self.state(gk={"suspended": True, "after": 2}, gkhr_suspended=True)
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        gk = self.index("patch", "kustomization/" + GK)
+        self.assertLess(gk, self.index("patch", "kustomization"))  # platform-app comes after
+        self.assertLess(self.last("get", "helmrelease/" + GK_HR), self.index("patch", "kustomization"))
+        # The Kustomization's re-apply cleared the HelmRelease suspend: no hand patch needed.
+        self.assertNotIn(("patch", "helmrelease/" + GK_HR), self.verbs())
+        self.assertIn("HelmRelease strive-gatekeeper/gatekeeper upgraded", text)
+
+    def test_a_gatekeeper_helmrelease_still_suspended_is_resumed_only_after_its_apply(self):
+        self.state(gk={"suspended": True, "clears_hr_suspend": False}, gkhr_suspended=True)
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        self.assertLess(self.last("get", "kustomization/" + GK), self.index("patch", "helmrelease/" + GK_HR))
+        self.assertLess(self.index("patch", "helmrelease/" + GK_HR), self.index("patch", "kustomization"))
+
+    def test_after_config_requires_the_gatekeeper_release_even_when_not_suspended(self):
+        # A config rollback changes the registry checksum: gatekeeper must roll before the services return.
+        self.state(gk={"applies": False})
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("STOP", text)
+        self.assertIn("Kustomization flux-system/" + GK, text)
+        self.assertNotIn(("patch", "kustomization"), self.verbs())  # platform-app untouched
+        self.assertNotIn(("patch", "helmrelease"), self.verbs())
+
+    def test_a_gatekeeper_upgrade_that_never_lands_stops_before_platform_app(self):
+        self.state(gk={"suspended": True}, gkhr_suspended=True, gkhr_upgrades=False)
+        rc, text = self.run_script("--after-config")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("HelmRelease strive-gatekeeper/gatekeeper", text)
+        self.assertNotIn(("patch", "kustomization"), self.verbs())
+
+    def test_outside_config_an_unsuspended_gatekeeper_release_is_not_a_gate(self):
+        self.state(gk={"applies": False})
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn(("annotate", "kustomization/" + GK), self.verbs())
+        self.assertNotIn(("get", "helmrelease/" + GK_HR), self.verbs())
+
+    def test_a_missing_gatekeeper_kustomization_stops_at_1c(self):
+        # Before the cutover, or after a platform revert of it: this script is for the post-cutover world.
+        self.state(gk_missing=True)
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("cannot read Kustomization flux-system/" + GK, text)
+        self.assertNotIn(("patch", "kustomization"), self.verbs())
+
+    def test_a_chart_version_without_the_commit_passes_only_as_a_deployed_artifact_built_from_the_target(self):
+        # Not reconcileStrategy Revision: the HelmChart proves the build, and the release's history head must
+        # equal the chart's artifact revision (deployed, not just built).
+        self.state(gk={"suspended": True}, gkhr_suspended=True, gkhr_chart_plain=True)
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 0, text)
+        self.assertIn(("get", "helmchart/" + GK_CHART), self.verbs())
+        self.state(gk={"suspended": True}, gkhr_suspended=True, gkhr_chart_plain=True, helmchart_ahead=True)
+        rc, text = self.run_script("--after-drill")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("HelmRelease strive-gatekeeper/gatekeeper", text)
+
 
 
 if __name__ == "__main__":

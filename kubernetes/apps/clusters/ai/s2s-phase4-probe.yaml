@@ -1,8 +1,9 @@
 # The S2S Phase 4 probe Job (ns strive-ailab): ServiceAccount + Role + RoleBinding, an additive
-# NetworkPolicy admitting the probe pod to gatekeeper, and the Job itself
+# NetworkPolicy admitting the probe pod to gatekeeper (that policy and the gatekeeper-side Role +
+# RoleBinding live in gatekeeper's namespace, strive-gatekeeper), and the Job itself
 # (kubernetes/apps/infrastructure/s2s-phase4-probe/). DEDICATED Kustomization, wait:false: a Job
 # that FAILS is the probe's verdict and must never gate a layer. No decryption -- nothing here is a
-# secret. No dependsOn: strive-ailab and the gatekeeper objects come from the platform repo's own
+# secret. No dependsOn: strive-ailab, strive-gatekeeper and the gatekeeper objects come from the platform repo's own
 # Kustomizations, and a missing one is an apply error / a Pending pod retried every retryInterval
 # (the platform-access reasoning).
 apiVersion: kustomize.toolkit.fluxcd.io/v1

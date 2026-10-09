@@ -395,7 +395,7 @@ decision at the end of this section.
 - **TokenReview consumers.** After #2125 every S2S mint depends on TokenReview of projected ServiceAccount tokens, and gatekeeper's own
   automounted token calls TokenReview (F-26). Consumers (ClusterRoleBindings to `system:auth-delegator` or to a TokenReview ClusterRole):
   `keda/keda-metrics-server`, `kube-system/metrics-server`, `openbao/openbao-server` (Kubernetes auth), the OpenBao `k8stoken-sync` role and
-  gatekeeper (`strive-ailab-gatekeeper-tokenreview`). Re-read the list before a run:
+  gatekeeper (`strive-gatekeeper-gatekeeper-tokenreview`). Re-read the list before a run:
 
   ```bash
   kubectl --context admin@ai get clusterrolebinding -o json | jq -r '.items[] | select(.roleRef.name=="system:auth-delegator") | .metadata.name + " -> " + ([.subjects[]? | .kind + ":" + (.namespace // "") + "/" + .name] | join(","))'

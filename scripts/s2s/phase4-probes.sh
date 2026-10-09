@@ -8,10 +8,11 @@
 # NOT a dev worker, with the `admin@ai` kube context. Git Bash on Windows or bash on Linux; needs
 # kubectl, curl, base64 and sha256sum (no local python).
 #
-# Per gatekeeper replica (every pod of app.kubernetes.io/name=gatekeeper in strive-ailab, or each
-# --replica), it execs into container `gatekeeper` and runs scripts/s2s/phase4_probe.py with the
-# pod's OWN python against http://127.0.0.1:5000. The gatekeeper NetworkPolicy admits only Traefik
-# and the allowedClients, so in-pod loopback is how ONE replica is tested on its own.
+# Per gatekeeper replica (every pod of app.kubernetes.io/name=gatekeeper in gatekeeper's namespace
+# $GK_NS, or each --replica), it execs into container `gatekeeper` and runs
+# scripts/s2s/phase4_probe.py with the pod's OWN python against http://127.0.0.1:5000. The gatekeeper
+# NetworkPolicy admits only Traefik and the allowedClients, so in-pod loopback is how ONE replica is
+# tested on its own.
 #
 # Tokens are TokenRequests (`kubectl create token`, no stored object, 10 minutes): the harness
 # ServiceAccount for audience strive-gatekeeper, the same SA for a wrong audience, and the
@@ -32,11 +33,11 @@ export MSYS_NO_PATHCONV=1
 CONTEXT=admin@ai
 # The harness, its ServiceAccount, the `default` SA and HelmRelease `strive` live in NS.
 NS=strive-ailab
-# Gatekeeper's namespace: its pods, Service/Endpoints and ConfigMap gatekeeper-registry-extras. The
-# A.2 move (gatekeeper into its own namespace, platform PR3) flips THIS line to strive-gatekeeper.
+# Gatekeeper's namespace: its pods, Service/Endpoints and ConfigMap gatekeeper-registry-extras.
+# strive-gatekeeper since the A.2 cutover (platform: gatekeeper in its own namespace, step 3).
 # It is the shared source: scripts/s2s/test_phase4_job.py fails unless the in-cluster probe Job
 # (kubernetes/apps/infrastructure/s2s-phase4-probe/gatekeeper-ns/kustomization.yaml) says the same.
-GK_NS=strive-ailab
+GK_NS=strive-gatekeeper
 GK_LABEL=app.kubernetes.io/name=gatekeeper
 GK_CONTAINER=gatekeeper
 HARNESS_LABEL=app.kubernetes.io/name=harness
