@@ -130,6 +130,17 @@ if unshare -rm true 2>/dev/null; then
 	BUSY_HOME="$t/home7" busy_case "unshare -m inside ~/.cache" unshare -rm bash -c "cd '$t/home7/.cache/uv' && sleep 30"
 fi
 
+# 6d. A sandbox with a PRIVATE ~/.cache (its own tmpfs: a different identity) that bind-mounts the
+#     host's ~/.cache/uv inside it, and works in there: the top-level identities differ, the objects
+#     it references do not. Must block.
+if unshare -rm true 2>/dev/null; then
+	mkdir -p "$t/home8/.cache/uv" "$t/keep-uv"
+	BUSY_HOME="$t/home8" busy_case "a private ~/.cache with the host uv cache bind-mounted" \
+		unshare -rm bash -c "mount --bind '$t/home8/.cache/uv' '$t/keep-uv' &&
+			mount -t tmpfs none '$t/home8/.cache' && mkdir '$t/home8/.cache/uv' &&
+			mount --bind '$t/keep-uv' '$t/home8/.cache/uv' && cd '$t/home8/.cache/uv' && sleep 30"
+fi
+
 # 7. The TMPDIR hook: set only for an existing, real, writable directory.
 hook=$t/hook.sh
 sed "s#{{ dev_worker_workspace_mount }}#$t/ws#g" "$tmpl" >"$hook"

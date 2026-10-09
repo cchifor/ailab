@@ -20,12 +20,12 @@ home=${1:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 root=${2:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 [ -d "$root" ] || { echo "skip: $root does not exist"; exit 0; }
 
-# A process in another mount namespace — a container's, whose uid 1000 is this user's — usually sees
-# its own filesystem: a containerised Playwright under /home/appuser/.cache never touches this
-# ~/.cache (it blocked dev-worker-3 forever, 2026-10-09). But another namespace is not proof (`unshare
-# -m`, a sandboxed service still see the host home), so such a process is excluded only when it is
-# PROVEN isolated: its root is readable and neither cache path under it is the same file as ours.
-# Anything unprovable counts, conservatively.
+# For the by-NAME heuristic only (the identity check below needs no namespace logic): a process in
+# another mount namespace — a container's, whose uid 1000 is this user's — usually sees its own
+# filesystem; a containerised Playwright under /home/appuser/.cache never touches this ~/.cache (its
+# NAME blocked dev-worker-3 forever, 2026-10-09). Another namespace is not proof (`unshare -m`, a
+# sandboxed service), so a name match is ignored only when the process is PROVEN isolated: its root is
+# readable and neither cache path under it is the same file as ours. Anything unprovable counts.
 self_ns=$(readlink /proc/self/ns/mnt)
 # The checks below judge other processes against THIS process's view; run from a sandboxed unit or a
 # container (a namespace of its own), every host process would look isolated. Refuse rather than
@@ -46,22 +46,48 @@ relevant() { # PID: could this process be using our caches?
 	return 1
 }
 
-# Any relevant process of this user (the effective uid owns its /proc entry) with its cwd, executable,
-# an open file or a mapping under one of the caches.
-caches_in_use() {
-	local p link target
+# Identity, not paths: "dev:ino" of every object in the caches (one walk, one filesystem each), and of
+# every object each process of this user references — cwd, executable, every open fd, every mapped
+# file (/proc/PID/maps carries the device and inode) — in ANY namespace: a container, an `unshare -m`
+# sandbox or a private ~/.cache with the host's ~/.cache/uv bind-mounted into it all reference the
+# same objects if they use our caches, whatever path they see them under.
+cache_objects() {
+	find "$home/.cache/" "$home/.npm/" -xdev -printf '%D:%i\n' 2>/dev/null | sort -u
+}
+process_objects() {
+	local p dev ino maj min
 	for p in /proc/[0-9]*; do
 		[ -O "$p" ] || continue
-		relevant "${p#/proc/}" || continue
-		for link in "$p/cwd" "$p/exe" "$p"/fd/*; do
-			target=$(readlink -- "$link" 2>/dev/null) || continue
-			case "$target" in
-			"$home/.cache" | "$home/.cache/"* | "$home/.npm" | "$home/.npm/"*) return 0 ;;
-			esac
-		done
-		grep -qsF -e "$home/.cache/" -e "$home/.npm/" "$p/maps" && return 0
+		stat -Lc '%d:%i' "$p/cwd" "$p/exe" "$p"/fd/* 2>/dev/null
+		while read -r _ _ _ dev ino _; do
+			[ -n "$ino" ] && [ "$ino" != 0 ] || continue
+			maj=$((16#${dev%%:*}))
+			min=$((16#${dev##*:}))
+			echo "$(((min & 255) | (maj << 8) | ((min >> 8) << 20))):$ino"
+		done 2>/dev/null <"$p/maps"
+	done | sort -u
+}
+# Processes of this user that cannot be inspected at all (not dumpable: sshd sessions, systemd --user,
+# (sd-pam), some container inits — dev-worker-3, 2026-10-09). Counting them all as busy would block
+# the move whenever anyone is logged in; ignoring them all would miss a non-dumpable tool. So: busy
+# only when its name (comm, always readable) is a cache-using tool.
+uninspectable_tool() {
+	local p comm
+	for p in /proc/[0-9]*; do
+		[ -O "$p" ] || continue
+		head -c1 "$p/maps" >/dev/null 2>&1 && continue
+		read -r comm 2>/dev/null <"$p/comm" || continue
+		case "$comm" in
+		uv | uvx | pip | pip3 | npm | npx | pnpm | node | python | python3* | playwright* | chrom* | headless_shell | firefox* | WebKit*) return 0 ;;
+		esac
 	done
 	return 1
+}
+caches_in_use() {
+	local objs
+	objs=$(cache_objects)
+	[ -n "$objs" ] || return 1
+	[ -n "$(comm -12 <(printf '%s\n' "$objs") <(process_objects) | head -1)" ] || uninspectable_tool
 }
 
 # A running container with a bind mount at, under or ABOVE one of the caches ($HOME, /home, /): moving
