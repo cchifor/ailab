@@ -764,6 +764,29 @@ class ResultStateTest(unittest.TestCase):
         self.assertNotIn("dev_worker_disk_guard_exhausted", text)
         self.assertNotIn("dev_worker_disk_guard_failed_steps", text)
 
+    def test_a_state_write_failure_is_exported_and_leaves_no_temp_file(self):
+        # Run 1 completes but cannot persist (the parent is a file, not a dir): its final metrics say
+        # so, and run 2 (which can only load the older state, here none) cannot pass for healthy.
+        with tempfile.TemporaryDirectory() as d:
+            blocker = os.path.join(d, "blocker")
+            with open(blocker, "w") as f:
+                f.write("")
+            path = os.path.join(blocker, "state.json")
+            result = dg.next_state(None, dict(self.M, exhausted_paths=["/workspace"]),
+                                   ["/", "/workspace"], 1000)
+            self.assertFalse(dg.save_state(result, path))
+            final = dg.render_prom(dict(self.M, state_write_failed=1), 1000, result)
+            self.assertIn("dev_worker_disk_guard_state_write_failed 1\n", final)
+            self.assertIsNone(dg.load_state(path))
+            self.assertIn("dev_worker_disk_guard_state_known 0\n",
+                          dg.render_prom(dict(self.M), 1300, dg.load_state(path)))
+            self.assertEqual(sorted(os.listdir(d)), ["blocker"])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "state.json")
+            self.assertTrue(dg.save_state(result, path))
+            self.assertEqual(os.listdir(d), ["state.json"])          # no temp file left behind
+            self.assertNotIn("state_write_failed", dg.render_prom(dict(self.M), 1300, result))
+
     def test_state_roundtrip_and_rejects_bad_files(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "sub", "state.json")

@@ -271,7 +271,33 @@ tests:
             exp_annotations:
               summary: "Dev worker 192.168.0.8:9100: disk-guard has no completed-run result"
               description: >-
-                /var/lib/dev-worker-disk-guard/state.json on 192.168.0.8:9100 is missing or
-                unreadable, so the Exhausted/Failing alerts are blind. `sudo cat
+                /var/lib/dev-worker-disk-guard/state.json on 192.168.0.8:9100 is missing,
+                unreadable or cannot be written, so the Exhausted/Failing alerts are blind. `sudo cat
+                /var/lib/dev-worker-disk-guard/state.json`, `journalctl -u dev-worker-disk-guard -n 30`
+                (a full / makes the write fail).
+
+  # Runs complete and the metrics file is written, but the state file cannot be: state_known stays 1
+  # (each run exports its own fresh result) and state_write_failed=1 appears only in each run's final
+  # write, absent from its heartbeats (here: present 3 of every 5 minutes). Must still page.
+  - interval: 1m
+    name: a state file that cannot be written pages StateUnknown despite fresh results
+    input_series:
+      - series: 'dev_worker_disk_guard_state_known{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "1x50"
+      - series: 'dev_worker_disk_guard_state_write_failed{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: DevWorkerDiskGuardStateUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.9:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.9:9100: disk-guard has no completed-run result"
+              description: >-
+                /var/lib/dev-worker-disk-guard/state.json on 192.168.0.9:9100 is missing,
+                unreadable or cannot be written, so the Exhausted/Failing alerts are blind. `sudo cat
                 /var/lib/dev-worker-disk-guard/state.json`, `journalctl -u dev-worker-disk-guard -n 30`
                 (a full / makes the write fail).

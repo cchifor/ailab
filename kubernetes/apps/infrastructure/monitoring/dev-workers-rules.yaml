@@ -271,17 +271,20 @@ spec:
               over an hour ({{ $labels.reason }}) while the docker filesystem is short. `journalctl -u
               dev-worker-disk-guard | grep deferred` names the blocking command. A stuck `docker pull`
               or build holds it until /workspace reaches 5%; stop it if it is not live work.
-        # No trustworthy completed-run result: the state file is missing or unreadable for 30m (a fresh
-        # worker has one within ~5 min). Exhausted/Failing cannot fire while this holds.
+        # No trustworthy completed-run result: the state file is missing or unreadable, or runs complete
+        # but cannot persist it (state_write_failed is only in a run's final write, so it is read over
+        # 15m), for 30m. A fresh worker has one within ~5 min. Exhausted/Failing are blind meanwhile.
         - alert: DevWorkerDiskGuardStateUnknown
-          expr: dev_worker_disk_guard_state_known{job="dev-worker-node"} == 0
+          expr: |
+            dev_worker_disk_guard_state_known{job="dev-worker-node"} == 0
+              or max_over_time(dev_worker_disk_guard_state_write_failed{job="dev-worker-node"}[15m]) == 1
           for: 30m
           labels: { severity: warning }
           annotations:
             summary: "Dev worker {{ $labels.instance }}: disk-guard has no completed-run result"
             description: >-
-              /var/lib/dev-worker-disk-guard/state.json on {{ $labels.instance }} is missing or
-              unreadable, so the Exhausted/Failing alerts are blind. `sudo cat
+              /var/lib/dev-worker-disk-guard/state.json on {{ $labels.instance }} is missing,
+              unreadable or cannot be written, so the Exhausted/Failing alerts are blind. `sudo cat
               /var/lib/dev-worker-disk-guard/state.json`, `journalctl -u dev-worker-disk-guard -n 30`
               (a full / makes the write fail).
         # The agents' archive dir (dev_worker_archive_dir) is capped by disk-guard on every run, but only

@@ -82,13 +82,15 @@ Principles:
   `instance` + `mountpoint` (guard metrics gain a `mountpoint` label where they are per-filesystem).
 - disk-guard result state: the heartbeat carries the last COMPLETED run's `exhausted` /
   `failed_steps` per filesystem until the current run completes; a completed healthy run clears it;
-  missing/unparseable state is exported as unknown (`state_known 0`), never as healthy. New
-  `last_completed_timestamp_seconds` beside the heartbeat, and a `last_progress` timestamp so a hung
-  step is distinguishable from a slow one. Atomic writes stay (tmp + rename, one flocked writer).
-- `DevWorkerDiskTimeToFull` as a WARNING (not a page): `predict_linear` over 1 h, 4 h horizon, gated
-  on < 30% free; tuned by replaying the 15 days of history (count fires vs real < 5% episodes, and
-  fires during build-then-reclaim cycles) before it is enabled. Abrupt allocations are covered by
-  DiskLow/DiskFilling, not by the forecast.
+  missing/unparseable state is exported as unknown (`state_known 0`), never as healthy; a state file
+  that cannot be written is exported as `state_write_failed 1` (same alert). New
+  `last_completed_timestamp_seconds` beside the heartbeat. Atomic writes stay (tmp + fsync + rename,
+  one flocked writer). [Shipped in #1188; the `last_progress` timestamp moved to W2 with the heartbeat
+  thread that would maintain it.]
+- `DevWorkerDiskTimeToFull` as a WARNING (not a page), tuned by replaying the 15 days of history.
+  Shipped: 6 h fit, 12 h horizon, under 25% free, for 15 m — warned before 39 of 41 real < 5%
+  episodes with 16 false (the drafted 1 h / 4 h / < 30% warned 38 of 41 with 31 false); median lead
+  ~70 min, because the fills are bursts. Abrupt allocations are covered by DiskLow/DiskFilling.
 - `DevWorkerInodesLow` (< 10% free inodes or < 200k free) as a warning with a runbook response
   (find the inode-heavy dir; the byte ladder does not trigger on inodes).
 - `DevWorkerDiskGuardDeferred`: deferral start is tracked across runs (persisted, reset only when a

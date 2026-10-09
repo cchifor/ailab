@@ -74,8 +74,9 @@ _deferred_since_timestamp_seconds{reason} while a deferral lasts across runs. _s
 trustworthy completed result yet (first run, unreadable state): unknown, not healthy. Also
 _free_ratio{mountpoint}, and with --archive-dir _archive_bytes, _archive_max_bytes,
 _archive_removed_bytes (this run's removals, as scanned: not a counter) and _archive_scan_timeout.
-Alerts: DevWorkerDiskLow (from node_exporter alone, independent of this tool) pages; this tool's
-DevWorkerDiskGuardExhausted / Failing / Deferred / Stale explain why reclaim did not help.
+Alerts: DevWorkerDiskLow (warning, 15%) and DevWorkerDiskFilling (critical, 12%) come from
+node_exporter alone, independent of this tool; this tool's DevWorkerDiskGuardExhausted / Failing /
+Deferred / Stale / StateUnknown explain why reclaim did not help.
 
 Installed by ansible (roles/dev_worker, tasks/disk_guard.yml); tested by
 scripts/tests/test_dev_worker_disk_guard.py.
@@ -705,16 +706,25 @@ def next_state(prev, m, watched, now):
 
 
 def save_state(st, path=STATE):
-    """Atomic (rename). A failure leaves the previous state: the next run carries older results,
-    and last_completed_timestamp_seconds shows their age."""
+    """Atomic (rename). True when written. A failure leaves the previous state, so the next run
+    carries older results: the caller exports state_write_failed 1, which the StateUnknown alert
+    watches, instead of letting this run's fresh metrics look persisted."""
+    tmp = f"{path}.{os.getpid()}"
     try:
         os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
-        tmp = f"{path}.{os.getpid()}"
         with open(tmp, "w") as f:
             json.dump(st, f)
+            f.flush()
+            os.fsync(f.fileno())        # a crash must not leave an empty state behind the rename
         os.replace(tmp, path)
+        return True
     except OSError as e:
         print(f"disk-guard: cannot write {path}: {e}", file=sys.stderr)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
 
 
 def render_prom(m, now, result=None):
@@ -764,6 +774,13 @@ def render_prom(m, now, result=None):
         "# TYPE dev_worker_disk_guard_state_known gauge",
         f"dev_worker_disk_guard_state_known {int(result is not None)}",
     ]
+    if "state_write_failed" in m:           # only a run's final write knows; heartbeats omit it
+        lines += [
+            "# HELP dev_worker_disk_guard_state_write_failed 1 if the last completed run could not"
+            " persist its result (the next run will carry an older one).",
+            "# TYPE dev_worker_disk_guard_state_write_failed gauge",
+            f"dev_worker_disk_guard_state_write_failed {m['state_write_failed']}",
+        ]
     if result is not None:
         lines += [
             "# HELP dev_worker_disk_guard_last_completed_timestamp_seconds When a run last completed.",
@@ -893,7 +910,7 @@ def main(argv=None):
     if not opts.dry_run:
         now = time.time()
         result = next_state(prev, m, list(dict.fromkeys(opts.watch)), now)
-        save_state(result, opts.state_file)
+        m["state_write_failed"] = int(not save_state(result, opts.state_file))
         write_prom(render_prom(m, now, result), opts.textfile_dir)
         if m.get("exhausted_paths"):
             report_largest(m["exhausted_paths"])    # after the heartbeat: du can take minutes
