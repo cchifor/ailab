@@ -21,11 +21,19 @@ spec:
   chart:
     spec:
       chart: ./Helm/trident
+      # Revision, not the default ChartVersion: the chart is 2.0.0 at both v1.6.0 and v1.6.2, so a tag
+      # bump alone would never re-render it (Talos upgrade program P4a, 2026-10-09).
+      reconcileStrategy: Revision
       sourceRef:
         kind: GitRepository
         name: qnap-csi
         namespace: flux-system
+  # CRDs: Helm skips crds/ on upgrade by default. CreateReplace applies a changed chart CRD
+  # (tridentorchestrator; the operator creates the rest at runtime). Identical at v1.6.0/v1.6.2.
   install:
     createNamespace: false
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
   values:
     forceInstallRancherClusterRoles: false
