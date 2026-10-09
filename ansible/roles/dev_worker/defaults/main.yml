@@ -405,3 +405,6 @@ dev_worker_archive_max_gb: 20
 # /workspace/<user>/ (W4 of plans/2026-10-09-dev-worker-disk-hardening-plan.md). dev-worker-2's / hit
 # 98% on 2026-10-09 with 9.7 GB of /tmp scratch and 6.4 GB of ~/.cache.
 dev_worker_agent_dirs_on_workspace: true
+# Fail the play (instead of warning) when a user's cache move is skipped because something of theirs
+# is using ~/.cache or ~/.npm — for a rollout that must not silently no-op.
+dev_worker_agent_dirs_fail_when_busy: false

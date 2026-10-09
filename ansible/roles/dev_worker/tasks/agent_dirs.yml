@@ -64,7 +64,6 @@
     create: true
     owner: "{{ item.name }}"
     group: "{{ item.name }}"
-    mode: "0644"
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
@@ -82,6 +81,23 @@
     /usr/local/sbin/agent-dirs-migrate {{ item.home }} {{ dev_worker_workspace_mount }}/{{ item.name }}
   register: dev_worker_agent_dirs_migrate
   changed_when: "'moved ' in dev_worker_agent_dirs_migrate.stdout"
+  failed_when: >-
+    dev_worker_agent_dirs_migrate.rc != 0 or
+    (dev_worker_agent_dirs_fail_when_busy | bool and 'skip: busy' in dev_worker_agent_dirs_migrate.stdout)
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
+
+# A busy skip is not an error, but it must not look like success: an always-on Playwright MCP browser
+# or a long-running `uv run` server maps files under ~/.cache and defers the move on every run until
+# it is restarted.
+- name: Warn about users whose caches were not moved (busy, or a foreign symlink)
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.name }}: caches NOT moved — {{ item.stdout_lines | select('match', '^skip') | join('; ') }}.
+      Stop or restart that user's agent processes using ~/.cache or ~/.npm (Playwright MCP browsers,
+      long-running uv/npm servers) and re-run with -t agent_dirs.
+  loop: "{{ dev_worker_agent_dirs_migrate.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name | default('') }}"
+  when: item.stdout is defined and 'skip' in item.stdout
