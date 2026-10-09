@@ -19,6 +19,7 @@ import os
 import pathlib
 import shutil
 import tempfile
+import time
 import unittest
 
 _PATH = pathlib.Path(__file__).resolve().parents[2] / "ansible/roles/dev_worker/files/disk-guard"
@@ -62,9 +63,13 @@ class Disk:
         return self.rc.get(step.name, 0)
 
 
+_STAMPS = tempfile.TemporaryDirectory()
+
+
 def opts(*extra, same_fs=layout):
+    stamp = tempfile.mktemp(dir=_STAMPS.name)       # a fresh, absent stamp: the full prune is due
     o = dg.parse_args(["--watch", "/", "--watch", "/workspace", "--docker-fs", "/workspace",
-                       *extra])
+                       "--full-prune-stamp", stamp, *extra])
     o.same_fs = same_fs
     return o
 
@@ -714,6 +719,105 @@ class ReportTest(unittest.TestCase):
         self.assertIn("dev_worker_disk_guard_archive_scan_timeout 1\n", text)
         del m["archive_bytes"], m["archive_removed_bytes"], m["archive_max_bytes"]
         self.assertNotIn("archive", dg.render_prom(m, 1700000000))
+
+
+class ReliabilityTest(unittest.TestCase):
+    """W2 of plans/2026-10-09-dev-worker-disk-hardening-plan.md: shared lock, full-prune rate limit,
+    heartbeat during long steps, idle-docker wait for the daily prune."""
+
+    def test_direct_docker_prunes_take_the_shared_reclaim_lock(self):
+        steps = {s.name: s for s in dg.ladder(opts())}
+        for name in ("build-cache", "anon-volumes"):
+            self.assertEqual(steps[name].argv[:5], ("flock", "-n", "-E", str(dg.FLOCK_BUSY),
+                                                    dg.CLEANUP_LOCK), name)
+
+    @unittest.skipUnless(shutil.which("timeout") and shutil.which("sh"), "needs coreutils timeout")
+    def test_a_held_lock_is_a_deferral_not_a_failure(self):
+        step = dg.Step("x", True, ("sh", "-c", f"exit {dg.FLOCK_BUSY}"), 10)
+        self.assertEqual(dg.run_step(step), dg.LOCKED)
+
+    def test_full_cache_prune_at_most_hourly_unless_critical(self):
+        o = opts()
+        d = Disk({"/": 0.40, "/workspace": 0.08})
+        dg.guard(o, d.measure, d.avail, d.run, quiet, idle)
+        self.assertIn("-af", d.argv["build-cache"])                     # first: due
+        self.assertTrue(os.path.exists(o.full_prune_stamp))
+        d2 = Disk({"/": 0.40, "/workspace": 0.08})
+        dg.guard(o, d2.measure, d2.avail, d2.run, quiet, idle)
+        self.assertNotIn("-af", d2.argv["build-cache"])                 # within the hour
+        self.assertIn("-f", d2.argv["build-cache"])
+        d3 = Disk({"/": 0.40, "/workspace": 0.03})                      # under --critical
+        dg.guard(o, d3.measure, d3.avail, d3.run, quiet, idle)
+        self.assertIn("-af", d3.argv["build-cache"])
+
+    def test_a_failed_full_prune_does_not_start_the_hour(self):
+        o = opts()
+        d = Disk({"/": 0.40, "/workspace": 0.08}, rc={"build-cache": 1})
+        dg.guard(o, d.measure, d.avail, d.run, quiet, idle)
+        self.assertFalse(os.path.exists(o.full_prune_stamp))
+
+    def test_heartbeat_keeps_beating_while_a_step_runs(self):
+        beats = []
+        rc = dg.run_with_heartbeat(lambda step: time.sleep(0.35) or 0, None,
+                                   lambda: beats.append(1), 0.1)
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(len(beats), 2)
+
+    def test_heartbeat_stops_when_the_step_returns(self):
+        beats = []
+        dg.run_with_heartbeat(lambda step: 0, None, lambda: beats.append(1), 0.05)
+        n = len(beats)
+        time.sleep(0.15)
+        self.assertEqual(len(beats), n)
+
+    def test_run_when_docker_idle_rechecks_under_the_lock(self):
+        # Idle while the lock is held elsewhere; busy by the time the lock is free; idle later: the
+        # prune runs only on an idle observation made while holding the lock.
+        class Held:
+            def close(self):
+                pass
+        locks = iter([None, Held(), Held()])
+        busy = iter(["docker pull pg", ""])
+        ran, clock = [], iter(range(0, 10000, 30))
+        rc = dg.run_when_docker_idle(["docker", "buildx", "prune"], 3600, busy=lambda: next(busy),
+                                     lock=lambda: next(locks), run=lambda c: ran.append(c) or 0,
+                                     sleep=lambda s: None, clock=lambda: next(clock), log=quiet)
+        self.assertEqual((rc, ran), (0, [["docker", "buildx", "prune"]]))
+
+    def test_run_when_docker_idle_skips_with_0_after_the_timeout(self):
+        class Held:
+            def close(self):
+                pass
+        ran, logs, clock = [], [], iter(range(0, 100000, 30))
+        rc = dg.run_when_docker_idle(["docker", "volume", "prune"], 90, busy=lambda: "docker build .",
+                                     lock=lambda: Held(), run=lambda c: ran.append(c) or 0,
+                                     sleep=lambda s: None, clock=lambda: next(clock), log=logs.append)
+        self.assertEqual((rc, ran), (0, []))
+        self.assertIn("docker is busy", logs[0])
+
+    def test_run_when_docker_idle_returns_the_commands_exit_code(self):
+        class Held:
+            def close(self):
+                pass
+        rc = dg.run_when_docker_idle(["false"], 10, busy=lambda: "", lock=lambda: Held(),
+                                     run=lambda c: 3, sleep=lambda s: None, clock=lambda: 0, log=quiet)
+        self.assertEqual(rc, 3)
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX only")
+    def test_try_lock_is_exclusive(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "lock")
+            first = dg.try_lock(path)
+            self.assertIsNotNone(first)
+            self.assertIsNone(dg.try_lock(path))
+            first.close()
+            second = dg.try_lock(path)
+            self.assertIsNotNone(second)
+            second.close()
+
+    def test_run_when_docker_idle_is_a_mode_of_main(self):
+        o = dg.parse_args(["--run-when-docker-idle", "60", "--", "docker", "volume", "prune", "-f"])
+        self.assertEqual((o.run_when_docker_idle, o.command), (60, ["docker", "volume", "prune", "-f"]))
 
 
 class ResultStateTest(unittest.TestCase):

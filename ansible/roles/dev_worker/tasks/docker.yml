@@ -202,10 +202,14 @@
 
         [Service]
         Type=oneshot
+        # Each prune runs under the reclaim lock every entrypoint shares (cleanup, disk-guard) AND
+        # with docker idle, both re-checked together right before it starts (a prune's containerd GC
+        # reaps an in-flight pull's lease); otherwise it waits up to 1h, then skips (exit 0).
+        TimeoutStartSec=2h30min
         {% if dev_worker_anon_volume_prune | bool %}
-        ExecStart=-/usr/bin/docker volume prune -f --filter label=com.docker.volume.anonymous
+        ExecStart=-/usr/local/bin/disk-guard --run-when-docker-idle 3600 -- /usr/bin/docker volume prune -f --filter label=com.docker.volume.anonymous
         {% endif %}
-        ExecStart=/usr/bin/docker buildx prune -f --max-used-space {{ dev_worker_buildx_cache_max }}
+        ExecStart=/usr/local/bin/disk-guard --run-when-docker-idle 3600 -- /usr/bin/docker buildx prune -f --max-used-space {{ dev_worker_buildx_cache_max }}
     - dest: docker-buildx-prune.timer
       content: |
         [Unit]
