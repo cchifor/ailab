@@ -10,6 +10,12 @@ t=$(mktemp -d)
 trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 export DW_AGENT_DIRS_BUSY_CHECK=0
+# A docker that reports no containers, so the result never depends on the machine running the test
+# (a real docker whose socket this user cannot open now counts as busy, by design).
+mkdir -p "$t/nodocker"
+printf '#!/bin/bash\nexit 0\n' >"$t/nodocker/docker"
+chmod +x "$t/nodocker/docker"
+export PATH="$t/nodocker:$PATH"
 
 # 1. A real ~/.cache (Playwright browsers + a uv cache) and ~/.npm become symlinks onto the workspace;
 #    the browsers are carried over, everything else repopulates.
@@ -52,18 +58,18 @@ grep -q "does not exist" <<<"$out" || fail "a missing workspace root was not rep
 
 # 6. Something of this user is using the caches, however it was started: the run is skipped.
 #    By name (npm, `python -m pip`, Playwright's node CLI) and by use (a cwd inside ~/.cache).
-busy_case() { # NAME ARGV...: run ARGV in the background, expect the migration to skip, clean up
-	local name=$1 pid out
+busy_case() { # NAME ARGV...: run ARGV in the background, expect the migration of $BUSY_HOME to skip
+	local name=$1 pid out h=${BUSY_HOME:-$t/home5}
 	shift
-	mkdir -p "$t/home5/.cache/uv"
+	mkdir -p "$h/.cache/uv"
 	"$@" &
 	pid=$!
 	sleep 0.3
-	out=$(DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home5" "$root")
+	out=$(DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$h" "$root")
 	kill "$pid" 2>/dev/null || :
 	wait "$pid" 2>/dev/null || :
 	grep -q "skip: busy" <<<"$out" || fail "$name did not make it skip: $out"
-	[ ! -L "$t/home5/.cache" ] || fail "moved while $name was running"
+	[ ! -L "$h/.cache" ] || fail "moved while $name was running"
 }
 mkdir -p "$t/bin" "$t/proj/node_modules/playwright"
 printf '#!/bin/bash\nsleep 30\n' >"$t/bin/python3"
@@ -97,8 +103,32 @@ chmod +x "$t/stub/docker"
 out=$(PATH="$t/stub:$PATH" DW_STUB_MOUNT="$t/home6/.cache/uv" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home6" "$root")
 grep -q "skip: busy (a running container bind-mounts" <<<"$out" || fail "a container mounting the cache did not block: $out"
 [ ! -L "$t/home6/.cache" ] || fail "moved under a container's bind mount"
+for src in "$t/home6" "$t" "/"; do # an ANCESTOR of the cache mounted into a container also blocks
+	out=$(PATH="$t/stub:$PATH" DW_STUB_MOUNT="$src" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home6" "$root")
+	grep -q "skip: busy (a running container bind-mounts" <<<"$out" || fail "a container mounting $src did not block: $out"
+done
+mkdir -p "$t/home6x/.cache"
+out=$(PATH="$t/stub:$PATH" DW_STUB_MOUNT="$t/home6x/.cachex" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home6x" "$root")
+grep -q "moved $t/home6x/.cache" <<<"$out" || fail "a sibling with the cache's name as prefix blocked: $out"
 out=$(PATH="$t/stub:$PATH" DW_STUB_MOUNT="/srv/data" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home6" "$root")
 grep -q "moved $t/home6/.cache" <<<"$out" || fail "an unrelated container mount blocked the move: $out"
+
+# A docker that cannot be asked (daemon down, socket denied) is busy, never "no containers".
+cat >"$t/stub/docker" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
+mkdir -p "$t/home6b/.cache"
+out=$(PATH="$t/stub:$PATH" DW_AGENT_DIRS_BUSY_CHECK=1 bash "$migrate" "$t/home6b" "$root")
+grep -q "skip: busy (cannot ask docker" <<<"$out" || fail "a failing docker did not count as busy: $out"
+[ ! -L "$t/home6b/.cache" ] || fail "moved although docker could not be asked"
+
+# 6c. A process in ANOTHER mount namespace that still shares the host cache (unshare -m) blocks it:
+#     another namespace is not proof of isolation. Needs unprivileged user+mount namespaces.
+if unshare -rm true 2>/dev/null; then
+	mkdir -p "$t/home7/.cache/uv"
+	BUSY_HOME="$t/home7" busy_case "unshare -m inside ~/.cache" unshare -rm bash -c "cd '$t/home7/.cache/uv' && sleep 30"
+fi
 
 # 7. The TMPDIR hook: set only for an existing, real, writable directory.
 hook=$t/hook.sh
