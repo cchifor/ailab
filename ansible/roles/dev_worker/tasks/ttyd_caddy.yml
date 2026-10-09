@@ -22,27 +22,40 @@
     - Reload systemd
     - Restart ttyd
 
-- name: Add Caddy apt signing key
+# Caddy comes from its pinned GitHub release .deb (sha512 from the release's checksums file), not the
+# Cloudsmith apt repo. Since 2026-10-09 that repo answers 402 Payment Required (bandwidth quota,
+# caddyserver/caddy#8184). A dead source in sources.list.d fails EVERY `update_cache: true` in this
+# role, which broke the whole role, not just Caddy. The repo and its key are removed so they cannot
+# poison apt again. Pinned to the version every worker already runs, so this changes no installed
+# package; bump dev_worker_caddy_version deliberately.
+- name: Remove the Cloudsmith Caddy apt repository (402 since 2026-10-09)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/caddy-stable.sources
+    - /etc/apt/keyrings/caddy-stable.asc
+
+- name: Read the installed Caddy version
+  ansible.builtin.package_facts:
+    manager: apt
+
+# Download + install only when the installed version differs, so a routine converge never fetches
+# the 18 MB .deb (and check mode does not trip over a download it skipped).
+- name: Download Caddy {{ dev_worker_caddy_version }} (.deb, checksum-verified)
+  when: >-
+    (ansible_facts.packages.caddy | default([{"version": ""}]))[0].version != dev_worker_caddy_version
   ansible.builtin.get_url:
-    url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
-    dest: /etc/apt/keyrings/caddy-stable.asc
+    url: "https://github.com/caddyserver/caddy/releases/download/v{{ dev_worker_caddy_version }}/caddy_{{ dev_worker_caddy_version }}_linux_amd64.deb"
+    dest: "/var/cache/apt/archives/caddy_{{ dev_worker_caddy_version }}_linux_amd64.deb"
+    checksum: "sha512:https://github.com/caddyserver/caddy/releases/download/v{{ dev_worker_caddy_version }}/caddy_{{ dev_worker_caddy_version }}_checksums.txt"
     mode: "0644"
 
-- name: Add Caddy apt repository
-  ansible.builtin.deb822_repository:
-    name: caddy-stable
-    types: [deb]
-    uris: https://dl.cloudsmith.io/public/caddy/stable/deb/debian
-    suites: [any-version]
-    components: [main]
-    signed_by: /etc/apt/keyrings/caddy-stable.asc
-    enabled: true
-
-- name: Install Caddy
+- name: Install Caddy {{ dev_worker_caddy_version }}
+  when: >-
+    (ansible_facts.packages.caddy | default([{"version": ""}]))[0].version != dev_worker_caddy_version
   ansible.builtin.apt:
-    name: caddy
-    state: present
-    update_cache: true
+    deb: "/var/cache/apt/archives/caddy_{{ dev_worker_caddy_version }}_linux_amd64.deb"
 
 - name: Enable + start ttyd + caddy
   ansible.builtin.systemd:

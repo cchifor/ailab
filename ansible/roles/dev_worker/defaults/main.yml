@@ -47,6 +47,7 @@ dev_worker_helm_version: "v3.22.0" # newest Helm 3 (2026-10-09); Helm 4 is a sep
 dev_worker_k9s_version: "v0.51.0"
 dev_worker_kubectl_minor: "1.34" # kubectl is supported within +-1 minor of the apiserver: 1.34 covers the cluster's 1.33 -> 1.34 -> 1.35 program (2026-10-09). Bump with the cluster.
 dev_worker_ttyd_version: "1.7.7"
+dev_worker_caddy_version: "2.11.4" # GitHub release .deb (tasks/ttyd_caddy.yml); equals what every worker runs (2026-10-09)
 dev_worker_tpm_version: "v3.1.0"
 
 # ---- npm package ids ----

@@ -130,6 +130,7 @@
 - name: ttyd web terminal + Caddy HTTPS
   ansible.builtin.import_tasks: ttyd_caddy.yml
   when: dev_worker_enable_ttyd | bool
+  tags: [caddy] # `-t caddy` alone repairs the Caddy install without a full role run
 
 # Landing dir for pasted files: the web terminal's dw-upload (web_gate.yml, next) and
 # the workstation helpers in scripts/dw-paste/. Before the gate, which starts dw-upload into it. Needs the /workspace mount
