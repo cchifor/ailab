@@ -543,7 +543,9 @@ this rollout.
 
 1. After acceptance, through `PUT /admin/v1/config`, add:
    - route `sub-codex-5`: one target `codex-5` with model `*`, `native: ["codex-responses"]`, the
-     same timeouts as the `dw-gpt-*` routes, `maxAttempts: 1`;
+     same timeouts as the `dw-gpt-*` routes, `maxAttempts: 1`, and `models` set to the six models
+     the `dw-gpt-*` routes serve. This keeps the per-key model set explicit. Done 2026-10-09:
+     revision 655 for the route, revision 676 for `models`;
    - pointers `dw-1` … `dw-4` → `sub-codex-5`.
 2. Issue four keys: `{routes: [dw-N], defaultRoute: dw-N, expiresInDays: 365}`.
 3. Re-seed `dev-worker-N.json` in `devworker-seeds.sops.yaml`. The workers read the key live, so

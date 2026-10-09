@@ -252,23 +252,51 @@ How a request travels:
    the CLI or its tools.
 2. Codex sends its own Responses request (the real model name, `gpt-6-astra`) to
    `https://router.chifor.me/v1/responses`.
-3. The router's **Codex-native routes** pass that request through as sent. These are the
-   `codexNative` setting in `ROUTER_PLUGIN_CONFIG`, `kubernetes/apps/apps/llm-router/router.yaml`,
-   and `docs/runbooks/llm-router.md` § "Codex-native routes". Each key is limited to the six `dw-*`
-   routes, one per model, all on `codex-5`. The router maps the CLI's model name to the route that
-   serves it (`gpt-6-astra` → `dw-gpt-6-astra`).
+3. **Per-key routing** (since 2026-10-09, llm-router model mode, `docs/runbooks/llm-router.md`
+   § "Per-key routing release").
+   - Each worker's key is limited to its own pointer route `dw-N`, which is also the key's
+     `defaultRoute`.
+   - The CLI's model name is not a route, so the router serves it in **model mode** on `dw-N`.
+     Today every `dw-N` points to `sub-codex-5`, one any-model target `codex-5:*`, with
+     `native: ["codex-responses"]`, so the request is passed through as sent.
+   - **Which models a worker may ask for.** `sub-codex-5` carries the allowlist `models` set to
+     the same six models the old `dw-gpt-*` routes served: `gpt-6-astra`, `gpt-6-sol`,
+     `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`. This is config revision 676.
+     - Any other model name gets `400 MODEL_NOT_SUPPORTED` before any upstream call, as before.
+     - Even without the allowlist, codex-5's catalog (today exactly those six) would bound it.
+     - The allowlist keeps the per-key model set explicit if the catalog grows.
+   - **To move one worker** to another subscription or a pool, repoint its `dw-N` (one config
+     change, `PUT /admin/v1/config`, or the chat's `/point dw-N`). Nothing changes on the worker.
+     Put the same `models` allowlist on the new target route.
+   - The response header `x-router-route` and the journal (`route: dw-N`) show where each request
+     went.
 
 The router's console (Activity, API keys) shows each worker's requests under its own key:
-`dev-worker-N codex (ailab dev worker, <ip>)`.
+`dev-worker-N codex per-key (ailab dev worker, <ip>)`.
 
-| host | router key | prefix |
-|---|---|---|
-| dev-worker-1 | `key_aa2543746716` | `lrk_w7bR` |
-| dev-worker-2 | `key_43132b508eaa` | `lrk_UxUf` |
-| dev-worker-3 | `key_65e07ec0f75a` | `lrk_meXV` |
-| dev-worker-4 | `key_b06fc4e10a3c` | `lrk__1Wv` |
+| host | router key | prefix | route (default) |
+|---|---|---|---|
+| dev-worker-1 | `key_056782fff988` | `lrk_zjqj` | `dw-1` |
+| dev-worker-2 | `key_f68566fbf013` | `lrk_zhVO` | `dw-2` |
+| dev-worker-3 | `key_23f0823b6934` | `lrk_C3bB` | `dw-3` |
+| dev-worker-4 | `key_dc874b9d0a75` | `lrk_UNcf` | `dw-4` |
 
-All four keys expire on **2027-10-09** (365 days). The values live only in
+**Previous keys, kept for the soak.** These are limited to the six `dw-gpt-*` model routes,
+which the legacy exact-model mapping serves (`gpt-6-astra` → `dw-gpt-6-astra`):
+- `key_aa2543746716` (`lrk_w7bR`)
+- `key_43132b508eaa` (`lrk_UxUf`)
+- `key_65e07ec0f75a` (`lrk_meXV`)
+- `key_b06fc4e10a3c` (`lrk__1Wv`)
+
+They and the `dw-gpt-*` routes stay until the soak ends, because the router rollback needs them
+(`llm-router.md` § "Per-key routing release", Rollback). Their values are in the git history of
+`kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml`; this runbook only
+lists IDs and prefixes.
+
+When the soak ends, revoke them in the router: `DELETE /admin/v1/keys/<id>`, or the console's API
+keys page. Dropping them from the seed file does not do it: they stay valid until 2027-10-09.
+
+All keys expire on **2027-10-09** (365 days). The current values live only in
 `kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml`
 (`dev-worker-N.json` → `af/dev-workers/dev-worker-N`, seed-wins). From there the
 `openbao-devworker-provision` Job writes them to the vault.
