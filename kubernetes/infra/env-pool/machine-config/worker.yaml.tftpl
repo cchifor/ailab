@@ -10,6 +10,7 @@ machine:
     dedicated: env:NoSchedule
   install:
     disk: /dev/sda
+    image: ${install_image} # the node's own factory installer (kata + gvisor + iscsi schematic)
   # Kata needs vhost vsock (agent transport) + vhost-net in the WORKER kernel. The agent-nodes
   # P2 rollout applies the same two modules (present in the applied agent-node machine config;
   # the extensions themselves are baked in the boot image).

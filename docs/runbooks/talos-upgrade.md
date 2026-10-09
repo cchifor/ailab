@@ -69,7 +69,12 @@ Workers have no CNPG instances and can go in parallel. CPs never can.
 
 ## Tofu after an upgrade (never apply blindly)
 
-- `talos_version` / `kubernetes_version` = what runs. `talos_config_contract` stays `v1.11.2` (the
+- `talos_version` / `kubernetes_version` = what runs. Bump `talos_version` in **all three** modules (infra,
+  agent-nodes, env-pool) in the same change as a Talos upgrade, and `kubernetes_version` right after each
+  `upgrade-k8s` hop. `machine.install.image` (the reinstall/reset image) is derived from `talos_version` plus
+  each node's schematic (`image.tf` for the CPs, `talos-schematics.yaml` for kata/gvisor), so a lagging
+  variable would make a reset install an older Talos. A node whose extensions change needs its schematic
+  updated in `talos-schematics.yaml` (or `agent-nodes/talos.tf` `install_schematics`) in the same change. `talos_config_contract` stays `v1.11.2` (the
   value in state; it feeds `talos_machine_secrets` and the rendered config). Moving it is its own
   reviewed migration.
 - VM disks ignore `disk[0].import_from` (create-only), so a version bump is not a disk diff.

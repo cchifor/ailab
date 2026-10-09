@@ -27,7 +27,7 @@ variable "talos_version" {
 }
 variable "kubernetes_version" {
   type    = string
-  default = "v1.33.13"
+  default = "v1.34.12" # live since the 2026-10-09 hop (upgrade-k8s + per-node kubelet roll); bump right after every hop
 }
 variable "talos_config_contract" {
   # The Talos version the machine CONFIG (and talos_machine_secrets) is generated for - NOT the
