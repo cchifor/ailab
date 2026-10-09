@@ -112,8 +112,9 @@
 
 # ── 4. register (one-time; creates .runner) ──────────────────────────────────
 # The org token registers a runner scoped to the whole org. `creates:` makes this idempotent — a
-# re-run does NOT re-register (which would orphan the old entry in the Gitea UI). To force a fresh
-# registration (e.g. token reset / label change), delete {{ gitea_runner_config_dir }}/.runner first.
+# re-run does NOT re-register (which would orphan the old entry in the Gitea UI). A label change is
+# config-only: act_runner updates/saves cached labels and declares them before polling. Preserve
+# .runner and its identity; registration replacement is a separate owner-reviewed operation.
 - name: Register act_runner against Gitea (org scope, host label)
   become: true
   become_user: "{{ gitea_runner_user }}"

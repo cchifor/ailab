@@ -5,6 +5,9 @@ owner-operated infrastructure. The infrastructure PR requires owner review; keep
 Forge workflow in draft until the ordered rollout below has been observed. Source checks do not
 certify the live gate.
 
+The dependent [Forge routing PR319](https://git.chifor.me/cchifor/forge/pulls/319) preserves the single
+complete test invocation and must remain draft until this runbook's live prerequisites are met.
+
 ## Scope and budget
 
 | Setting | Dedicated worker | Ordinary workers |
