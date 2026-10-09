@@ -737,11 +737,11 @@ $G rollout status deployment/gatekeeper --timeout=300s
 scripts/s2s/phase4-probes.sh --gatekeeper-only                            # PASS on both: extras_sha = the ConfigMap again
 ```
 
-Then resume the gatekeeper release: `flux-resume.sh` covers only `platform-app` and `strive`. Un-suspend
-Kustomization `flux-system/platform-gatekeeper` first, then HelmRelease `gatekeeper` only if its
-`.spec.suspend` still reads true (the Kustomization's re-apply normally clears it), and wait until it
-is Ready. The drill merged nothing, so there is no newer source artifact to wait for. Then restore the
-harness (above).
+The resume is the script, as everywhere in this runbook: `flux-resume.sh --after-drill` (above) resumes
+the gatekeeper release too, as its step 1c: Kustomization `flux-system/platform-gatekeeper` first, then
+HelmRelease `strive-gatekeeper/gatekeeper` only if its `.spec.suspend` still reads true (the
+Kustomization's re-apply normally clears it), and it waits for Ready at the landed commit before
+`platform-app` moves. The drill merged nothing, so the commit it lands is platform main now.
 
 **2. Rollback after #2125 (config only; the harness stays up).** The rollback operators would actually
 use. It moves the ten Python services and the four workers back to preshared client secrets and
@@ -785,24 +785,34 @@ Drill 2 used #2198 as the worked example:
   labelled `rollout-freeze`.
 
 Freeze top-down. `platform-secrets` is frozen too, because the PR edits a Secret, and it is resumed
-first. The harness is not scaled:
+first. The gatekeeper release (`platform-gatekeeper`, a sibling of `platform-app` since the A.2
+cutover) is frozen too: the PR changes the registry and its checksum, and a sibling is not held by its
+suspended parent. The harness is not scaled:
 
 ```sh
+K="kubectl --context admin@ai -n strive-ailab"
+G="kubectl --context admin@ai -n strive-gatekeeper"
 kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-secrets --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization platform-gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
+$G patch helmrelease gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
 ```
 
 **Only after the PR has merged**, resume with `flux-resume.sh --after-config`. It runs gates 1-7
 under "Resuming the release":
 
 1. It resumes `platform-secrets` first and requires it to have applied the merge (gate 3) before
-   `platform-app` moves.
-2. It lands `platform-app` and the HelmRelease.
-3. It requires the harness rollout.
-4. It resumes `platform`, then the root.
+   anything else moves.
+2. It resumes `platform-gatekeeper` and the `gatekeeper` HelmRelease (step 1c) and requires the
+   gatekeeper upgrade to the merge: the new registry checksum rolls gatekeeper here, so the services
+   come back to a gatekeeper that already serves the registry they expect. The block below reads
+   that roll (`rollout status`), the probes and the mint counts.
+3. It lands `platform-app` and the HelmRelease.
+4. It requires the harness rollout.
+5. It resumes `platform`, then the root.
 
 ```sh
 scripts/s2s/flux-resume.sh --after-config --sha <the PR's merge commit>

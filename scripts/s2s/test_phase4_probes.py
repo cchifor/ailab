@@ -779,6 +779,19 @@ class RunbookFreezeOrder(unittest.TestCase):
         self.assertGreaterEqual(freezes, 4, "the darken block and drills 1, 2 and 4 freeze")
         self.assertGreaterEqual(resumes, 3, "the darken resume, drill 2 and the drills' restore resume")
 
+    def test_the_script_resumes_the_gatekeeper_release_before_platform_app(self):
+        # Step 1c: the gatekeeper release (platform A.2) is resumed and gated before platform-app, in every
+        # mode, so the services never come back to a gatekeeper that does not serve their registry yet.
+        for mode in ("--after-drill", "--after-config", "--after-revert"):
+            out = subprocess.run(
+                ["bash", str(HERE / "flux-resume.sh"), mode, "--dry-run"],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            gk = out.index("kustomization platform-gatekeeper")
+            self.assertLess(gk, out.index("patch kustomization platform-app"), mode)
+            self.assertIn("helmrelease gatekeeper", out[gk:], mode)
+            self.assertLess(out.index("kustomization platform-secrets"), gk, mode)
+
     def test_each_resume_uses_the_right_mode(self):
         text = RUNBOOK.read_text(encoding="utf-8")
         darken = text[text.index("**On any failure, darken the harness.**") :]
@@ -792,14 +805,16 @@ class RunbookFreezeOrder(unittest.TestCase):
 
     def test_drill_2_freezes_the_secrets_and_keeps_the_harness(self):
         # Drill 2 as run on 2026-10-08 (R22): its PR edits gatekeeper-secrets.enc.yaml, so
-        # platform-secrets is frozen too and resumed first; the harness stays up throughout.
+        # platform-secrets is frozen too and resumed first; the harness stays up throughout. Since the
+        # A.2 cutover the gatekeeper release is a sibling of platform-app (platform-gatekeeper), so the
+        # drill freezes it too: the registry change must not land on it mid-window.
         text = RUNBOOK.read_text(encoding="utf-8")
         drill2 = text[text.index("**2. Rollback after #2125 (config only") : text.index("**3. Token rotation.**")]
         fences = [b.split("```")[0] for b in drill2.split("```sh\n")[1:]]
         freeze = [f for f in fences if '"suspend":true' in f]
         self.assertEqual(len(freeze), 1, "drill 2 has one freeze block")
         self.assertEqual(self.suspended_kustomizations(freeze[0].splitlines()),
-                         ["flux-system", "platform", "platform-secrets", "platform-app"])
+                         ["flux-system", "platform", "platform-secrets", "platform-app", "platform-gatekeeper"])
         self.assertNotIn("scale deployment/harness", drill2)
 
 

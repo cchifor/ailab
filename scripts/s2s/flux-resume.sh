@@ -25,6 +25,14 @@
 #      created, .status.lastAppliedRevision is main@sha1:<target> and Ready is True, BEFORE platform-app moves:
 #      values that land first would point the ten services at preshared secrets the registry does not hold yet.
 #      Outside --after-config an unsuspended platform-secrets is not a gate (a darken must not depend on it).
+#   1c. Gatekeeper (platform A.2: the trust root is its own release, HelmRelease strive-gatekeeper/gatekeeper
+#      under Kustomization flux-system/platform-gatekeeper, a sibling of platform-app). If the Kustomization is
+#      suspended (drill 1 freezes it: it owns the registry-extras ConfigMap; drill 2 freezes it: the rollback
+#      PR changes the registry and its checksum, which must roll gatekeeper BEFORE the services come back),
+#      un-suspend it and require it applied main@sha1:<target> and Ready; with --after-config, require that
+#      even when it was not suspended. Then the HelmRelease: un-suspend it ONLY if .spec.suspend still reads
+#      true, and require Ready with .status.history[0].chartVersion carrying the target's first 12 hex.
+#      Outside --after-config an unsuspended platform-gatekeeper is not a gate.
 #   2. Kustomization: un-suspend platform-app, then wait until .status.lastAppliedRevision is
 #      main@sha1:<target> and Ready is True.
 #   3. HelmRelease: un-suspend it ONLY if .spec.suspend still reads true (the Kustomization's
@@ -56,6 +64,9 @@ CONTEXT=admin@ai
 FLUX_NS=flux-system
 SOURCE=platform
 SECRETS=platform-secrets
+GK_KUSTOMIZATION=platform-gatekeeper
+GK_NS=strive-gatekeeper
+GK_HELMRELEASE=gatekeeper
 KUSTOMIZATION=platform-app
 NS=strive-ailab
 HELMRELEASE=strive
@@ -106,6 +117,7 @@ done
 
 f() { kubectl --context "$CONTEXT" -n "$FLUX_NS" "$@"; }
 h() { kubectl --context "$CONTEXT" -n "$NS" "$@"; }
+g() { kubectl --context "$CONTEXT" -n "$GK_NS" "$@"; }
 step() { printf '\n== %s\n' "$*"; }
 stop() {
   printf '\nSTOP: %s\n' "$1"
@@ -170,6 +182,36 @@ secrets_applied() {
   secrets_read || return 1
   IFS='|' read -r susp _ observed applied ready <<<"$SECRETS_STATE"
   [[ $susp != true && ${observed:-0} -ge $SECRETS_GEN && $applied == *"@sha1:$SHA" && $ready == True ]]
+}
+
+# The gatekeeper Kustomization, read and gated exactly like platform-secrets.
+GK_STATE='' GK_GEN=0
+gk_read() {
+  GK_STATE=$(f get kustomization "$GK_KUSTOMIZATION" -o jsonpath='{.spec.suspend}{"|"}{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.lastAppliedRevision}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
+  GK_STATE=${GK_STATE//$'\r'/}
+  [[ $GK_STATE == *"|"*"|"*"|"*"|"* ]]
+}
+gk_generation() {
+  gk_read || return 1
+  GK_GEN=$(cut -d'|' -f2 <<<"$GK_STATE")
+  [[ $GK_GEN =~ ^[0-9]+$ ]]
+}
+gk_applied() {
+  local susp observed applied ready
+  gk_read || return 1
+  IFS='|' read -r susp _ observed applied ready <<<"$GK_STATE"
+  [[ $susp != true && ${observed:-0} -ge $GK_GEN && $applied == *"@sha1:$SHA" && $ready == True ]]
+}
+GKHR=''
+gkhr_read() {
+  GKHR=$(g get helmrelease "$GK_HELMRELEASE" -o jsonpath='{.spec.suspend}{"|"}{.status.history[0].chartVersion}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
+  GKHR=${GKHR//$'\r'/}
+}
+gkhr_upgraded() {
+  local susp chart ready
+  gkhr_read || return 1
+  IFS='|' read -r susp chart ready <<<"$GKHR"
+  [[ $susp != true && $chart == *"${SHA:0:12}"* && $ready == True ]]
 }
 
 ks_applied() {
@@ -258,6 +300,14 @@ flux-resume ($MODE), dry run: no cluster or git call. The steps, each gated (at 
        kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $SECRETS --type=merge -p '{"spec":{"suspend":false}}'
      wait (when it was suspended, and always with --after-config): observedGeneration >= the new generation,
            .status.lastAppliedRevision is main@sha1:<target> and Ready is True, BEFORE step 2
+  1c. only if kubectl --context $CONTEXT -n $FLUX_NS get kustomization $GK_KUSTOMIZATION -o jsonpath='{.spec.suspend}' is true:
+       kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $GK_KUSTOMIZATION --type=merge -p '{"spec":{"suspend":false}}'
+     wait (when it was suspended, and always with --after-config): observedGeneration >= the new generation,
+           .status.lastAppliedRevision is main@sha1:<target> and Ready is True; then, only if
+           kubectl --context $CONTEXT -n $GK_NS get helmrelease $GK_HELMRELEASE -o jsonpath='{.spec.suspend}' is still true:
+       kubectl --context $CONTEXT -n $GK_NS patch helmrelease $GK_HELMRELEASE --type=merge -p '{"spec":{"suspend":false}}'
+     wait: Ready is True and .status.history[0].chartVersion carries <target>'s first 12 hex (gatekeeper serves
+           the registry the services are about to use), BEFORE step 2
   2. kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $KUSTOMIZATION --type=merge -p '{"spec":{"suspend":false}}'
      wait: .status.lastAppliedRevision is main@sha1:<target> and Ready is True
   3. only if kubectl --context $CONTEXT -n $NS get helmrelease $HELMRELEASE -o jsonpath='{.spec.suspend}' is still true:
@@ -321,6 +371,33 @@ if ((SECRETS_WAS_SUSPENDED)) || [[ $MODE == config ]]; then
   wait_until secrets_applied || stop "Kustomization $FLUX_NS/$SECRETS reads '${SECRETS_STATE:-?}' (suspend|generation|observedGeneration|lastAppliedRevision|Ready), not applied main@sha1:$SHA past generation $SECRETS_GEN, after ${TIMEOUT}s" \
     "platform-app and the HelmRelease stay suspended: values must not land before the Secrets they rely on. Investigate $SECRETS."
   echo "Kustomization $FLUX_NS/$SECRETS applied ${SHA:0:12} and Ready"
+fi
+
+wait_until gk_read || stop "cannot read Kustomization $FLUX_NS/$GK_KUSTOMIZATION (${TIMEOUT}s)" \
+  "platform-app and the HelmRelease stay suspended. Re-run once the API answers."
+GK_WAS_SUSPENDED=0
+[[ ${GK_STATE%%|*} == true ]] && GK_WAS_SUSPENDED=1
+if ((GK_WAS_SUSPENDED)); then
+  step "1c. Kustomization $FLUX_NS/$GK_KUSTOMIZATION (frozen with the release): resume it, then require it applied $SHA"
+  f patch kustomization "$GK_KUSTOMIZATION" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
+  wait_until gk_generation || stop "cannot read Kustomization $FLUX_NS/$GK_KUSTOMIZATION after its resume (${TIMEOUT}s)" \
+    "Only $SECRETS and $GK_KUSTOMIZATION are resumed; platform-app and the HelmRelease stay suspended."
+elif [[ $MODE == config ]]; then
+  step "1c. Kustomization $FLUX_NS/$GK_KUSTOMIZATION: a config change rolls gatekeeper before the services; require it applied $SHA"
+fi
+if ((GK_WAS_SUSPENDED)) || [[ $MODE == config ]]; then
+  f annotate kustomization "$GK_KUSTOMIZATION" --overwrite "reconcile.fluxcd.io/requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
+  wait_until gk_applied || stop "Kustomization $FLUX_NS/$GK_KUSTOMIZATION reads '${GK_STATE:-?}' (suspend|generation|observedGeneration|lastAppliedRevision|Ready), not applied main@sha1:$SHA past generation $GK_GEN and Ready, after ${TIMEOUT}s" \
+    "platform-app and the HelmRelease stay suspended: the services must not come back before gatekeeper serves the registry they need. Investigate $GK_KUSTOMIZATION."
+  echo "Kustomization $FLUX_NS/$GK_KUSTOMIZATION applied ${SHA:0:12} and Ready"
+  gkhr_read || stop "cannot read HelmRelease $GK_NS/$GK_HELMRELEASE" "platform-app and the HelmRelease stay suspended."
+  if [[ ${GKHR%%|*} == true ]]; then
+    echo "HelmRelease $GK_NS/$GK_HELMRELEASE still suspended after its Kustomization applied $SHA: resuming it"
+    g patch helmrelease "$GK_HELMRELEASE" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
+  fi
+  wait_until gkhr_upgraded || stop "HelmRelease $GK_NS/$GK_HELMRELEASE reads '${GKHR:-?}' (suspend|chartVersion|Ready), not upgraded to ${SHA:0:12}, after ${TIMEOUT}s" \
+    "platform-app and the HelmRelease stay suspended. Investigate the gatekeeper release, or freeze again (Kustomization first)."
+  echo "HelmRelease $GK_NS/$GK_HELMRELEASE upgraded: chart ${GKHR#*|}"
 fi
 
 step "2. Kustomization $FLUX_NS/$KUSTOMIZATION: resume, then require it applied $SHA"
