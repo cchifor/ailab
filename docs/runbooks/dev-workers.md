@@ -1022,9 +1022,26 @@ Codex; the transcript, attachments included, is stored at Anthropic — mind scr
 
 `/workspace` is its own disk (scsi1) and holds both the agents' worktrees and the docker/containerd
 data-root, so it is the one that fills. At 100% the agent cannot start any command — cleanup
-included — and has to ask for help. `DevWorkerDiskFilling` fires at <12% free on `/` or `/workspace`
-(before 2026-10-01 it watched `/` only, which is how dev-worker-3 reached 100% and dev-worker-2 0.7%
-free without a page).
+included — and has to ask for help. `/` (40 GB) fills too: `/tmp`, tool caches and anything agents
+park in `$HOME` live there.
+
+**Alerts and what to do** (`kubernetes/apps/infrastructure/monitoring/dev-workers-rules.yaml`; the
+hardening plan behind them: `plans/2026-10-09-dev-worker-disk-hardening-plan.md`):
+
+| Alert | Means | First move |
+|---|---|---|
+| `DevWorkerDiskLow` (warning) | under 15% free for 30m, from node_exporter alone — fires whatever state the guard is in | `journalctl -u dev-worker-disk-guard -n 60` (what it ran; if exhausted, the "largest under" lines) |
+| `DevWorkerDiskFilling` (critical) | under 12% free for 15m | as above, now; the agent is hours or less from ENOSPC |
+| `DevWorkerDiskTimeToFull` (warning) | under 25% free and the last 6h's trend reaches zero within 12h; replayed over 15 days it warned before 39 of 41 real <5% episodes, median ~70 min ahead | `sudo du -xh --max-depth=2 <mount> \| sort -rh \| head`, `docker system df` |
+| `DevWorkerInodesLow` (warning) | under 10% (or 200k) free inodes — the guard does not react to inodes | `sudo du -x --inodes --max-depth=3 <mount> \| sort -rn \| head` |
+| `DevWorkerDiskGuardExhausted{mountpoint}` | the guard ran every step and that fs is still under 15%: what is left is outside what it may delete | ask the agent's owner; move bulk data to the NAS (below); grow the disk |
+| `DevWorkerDiskGuardDeferred{reason}` | docker reclaim held off for 1h+ by a busy docker client or another cleanup's lock | `journalctl -u dev-worker-disk-guard \| grep deferred` names it; stop a stuck pull/build |
+| `DevWorkerDiskGuardFailing` / `Stale` / `StateUnknown` | the guard itself is broken: a step exits non-zero, no heartbeat 30m / no completed run 3h, or no readable `/var/lib/dev-worker-disk-guard/state.json` | `systemctl status dev-worker-disk-guard.service`, then the journal |
+
+Exhausted and Failing come from the guard's last COMPLETED run (state file above), carried by every
+heartbeat of the next one. Until 2026-10-09 each run's first heartbeat reset them to 0, so on a worker
+whose ladder outlasted one scrape the alerts never held their `for:` (dev-worker-3: 33 firing samples
+in ~100 exhausted hours).
 
 **Automatic, under pressure: `dev-worker-disk-guard`** (`ansible/roles/dev_worker/files/disk-guard`,
 timer every 5 min, since 2026-10-06). When `/` or `/workspace` is under 15% free it walks a ladder —
