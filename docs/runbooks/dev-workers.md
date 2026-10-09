@@ -259,10 +259,30 @@ many requests the four workers run at once. A seventh gets `429 busy` with `Retr
 Codex retries. A spent window answers 429 until it resets. Run `codex -p chatgpt` to work on the
 host's own login meanwhile.
 
+**CLI and daemon must agree on features.** Codex TUIs attach to the managed app-server daemon
+(`~/.codex/app-server-control/*.sock`), whose updater upgrades it on its own (0.162.0 on 2026-10-09
+while the CLI was 0.160.0). A TUI refuses a daemon whose feature set differs from its own:
+"Background server has incompatible feature settings ... requires api_key_model_discovery to be
+disabled". The role pins `[features] api_key_model_discovery = false`: discovery asks the router's
+`/v1/models`, whose OpenAI list codex cannot decode, and its default flipped between 0.160 and 0.162.
+At that prompt, **1. Run without daemon this time** is always safe. **2. Restart with these settings**
+restarts the daemon and interrupts the TUIs attached to it.
+
 **After any change to the provider settings,** restart the managed app-server daemon as the user:
 `codex app-server daemon restart`, then restart open TUIs. Codex >= 0.158 keeps the provider the
-daemon started with. `dev_worker_codex_version` is 0.160.0, the version on which the `auth` command
-was measured.
+daemon started with. Check for attached TUIs first: a client of the daemon socket is a session whose
+work a restart interrupts. As the user:
+
+```bash
+s=$(readlink -f ~/.codex/app-server-control/app-server-control.sock)
+ss -xp | grep -F "$s" | grep -v LISTEN   # one line per attached client; none = safe to restart
+# which TUI it is: the 8th column is the client's socket inode
+ss -xp | awk -v i="$(ss -xp | grep -F "$s" | grep -v LISTEN | awk '{print $8}' | head -1)" '$6==i'
+```
+
+`scripts/validate-codex-fleet.sh` reports `daemon=<version>` next to `codex=` and marks
+`SKEW(cli!=daemon)`. `dev_worker_codex_version` is 0.162.0. The `auth` command was measured
+on 0.160.0, and 0.162.0 is what the daemon updated itself to.
 
 **Check a worker:** `scripts/validate-codex-fleet.sh dev-worker-3` (or the whole fleet). Router mode
 reports `router(llm-router)`: the key helper must yield a key, then a real `codex exec` goes through

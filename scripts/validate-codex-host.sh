@@ -70,7 +70,15 @@ out=$(cd / && sudo -n -u "$u" -H bash -lc 'timeout 150 codex exec --skip-git-rep
         "Reply with exactly: OK" </dev/null' 2>&1); rc=$?
 last=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
 if [ "$rc" -eq 0 ] && [ "$last" = "OK" ]; then
-  echo "$h OK   user=$u $auth codex=$(sudo -n -u "$u" -H bash -lc 'codex --version' 2>/dev/null | awk '{print $NF}')"
+  # The managed app-server daemon updates itself; a CLI/daemon version gap is how a feature-default
+  # flip reaches users ("Background server has incompatible feature settings"). Reported, not failed.
+  # daemon= is the RUNNING app server TUIs attach to (`codex app-server daemon version`, appServerVersion),
+  # not the installed package, which a self-update can move ahead of it until the next restart.
+  cli=$(sudo -n -u "$u" -H bash -lc 'codex --version' 2>/dev/null | awk '{print $NF}')
+  dmn=$(sudo -n -u "$u" -H bash -lc 'timeout 20 codex app-server daemon version' 2>/dev/null | tail -1 \
+        | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("appServerVersion") or "")' 2>/dev/null)
+  skew=""; [ -n "$dmn" ] && [ "$dmn" != "$cli" ] && skew=" SKEW(cli!=daemon)"
+  echo "$h OK   user=$u $auth codex=$cli daemon=${dmn:-none}$skew"
 else
   err=$(printf '%s\n' "$out" | grep -iE 'error|401|expired|revoked|unauthorized' | head -1 | cut -c1-140)
   echo "$h FAIL user=$u $auth rc=$rc ${err:-$last}"
