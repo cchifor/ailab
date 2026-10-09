@@ -1,0 +1,278 @@
+# Alerts over CloudNativePG BACKUP health: WAL archiving and base-backup age, for the clusters that
+# have a backup at all (the three trueswarm clusters; infra-pg and strive-pg have no spec.backup, see
+# cnpg-replication-rules.yaml). Written for plans/2026-10-09-k8s-1.35-and-barman-plugin-plan.md
+# (Phase M): the in-tree Barman -> plugin-barman-cloud migration must not be the first time anyone
+# looks. As of 2026-10-09 nothing alerted on either, the clusters were not even scraped
+# (trueswarm-pg-podmonitors.yaml), trueswarm-platform-pg's last base backup was 2026-10-01, and
+# trueswarm-admin-pg's archiver had 828 failures on record.
+#
+# Every series-reading rule is filtered to the PRIMARY with `and on (namespace, pod)
+# cnpg_pg_replication_in_recovery == 0`, applied BEFORE any aggregation. A replica keeps exporting
+# the pg_stat_archiver row it had when it was last a primary (live: seconds_since_last_archival
+# 1,012,864 on a strive-pg replica), so unfiltered rules page on every healthy cluster. It is a set
+# filter (`and`), never a multiplication: `x * (in_recovery == 0)` keeps the left-hand value of
+# `== 0`, which is 0, and silently zeroes the thing being measured.
+#
+# The absence rules at the bottom deliberately do NOT use that filter. A failed scrape removes
+# cnpg_pg_replication_in_recovery along with everything else, so a filtered rule goes quiet at
+# exactly the moment it is needed. They are anchored instead to an explicit inventory: one rule per
+# expected cluster, with literal labels.
+#
+# Metric families (both are read so the rules hold across the migration):
+#   * in-tree Barman (CNPG's own collector): cnpg_collector_last_available_backup_timestamp /
+#     _last_failed_backup_timestamp / _first_recoverability_point;
+#   * plugin-barman-cloud v0.15.1 (exported through the same instance exporter on :9187):
+#     barman_cloud_cloudnative_pg_io_last_available_backup_timestamp / _last_failed_backup_timestamp /
+#     _first_recoverability_point.
+# `max by (namespace, cluster)` over a `__name__=~` selector takes whichever family is newest, so
+# neither a stale in-tree series after the cutover nor a not-yet-populated plugin series before it
+# can mask the other.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cnpg-backup
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cnpg-backup
+      rules:
+        # The primary's archiver is failing right now: its most recent failure is newer than its most
+        # recent success. A persistent-state rule, not increase(failed_count): once a broken archiver
+        # stops retrying fast enough to move a counter, an increase() rule goes quiet while WAL piles
+        # up. CNPG's exporter reports -1 for "never", so a primary that has never archived but has
+        # failed also fires. 15m tolerates the seconds-long gap of a primary restart or switchover
+        # (including the plugin cutover, when the old primary briefly has no archiver sidecar).
+        - alert: CNPGWalArchivingFailing
+          expr: |
+            cnpg_pg_stat_archiver_last_failed_time{namespace=~"trueswarm|trueswarm-admin"}
+              > cnpg_pg_stat_archiver_last_archived_time{namespace=~"trueswarm|trueswarm-admin"}
+            and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CNPG WAL archiving failing on {{ $labels.namespace }}/{{ $labels.pod }}"
+            description: >-
+              The primary {{ $labels.namespace }}/{{ $labels.pod }} has failed to archive WAL more
+              recently than it last succeeded, for over 15 minutes. Point-in-time recovery stops at
+              the last archived segment, and pg_wal grows until the volume fills
+              (CNPGVolumeNearlyFull). Check the Cluster's ContinuousArchiving condition and the
+              archiver log (in-tree: the postgres container; plugin: the plugin-barman-cloud
+              sidecar). "Expected empty archive" has its own documented escape hatch in the plan.
+        # WAL waiting to be archived, read from the .ready files CNPG counts on the primary. Unlike
+        # seconds_since_last_archival this stays quiet on an idle database (nothing to archive means
+        # zero .ready files), and it catches an archiver that is slow or wedged without logging a
+        # failure.
+        - alert: CNPGWalArchiveBacklog
+          expr: |
+            cnpg_collector_pg_wal_archive_status{namespace=~"trueswarm|trueswarm-admin", value="ready"} > 5
+            and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CNPG WAL archive backlog on {{ $labels.namespace }}/{{ $labels.pod }} ({{ $value }} segments)"
+            description: >-
+              {{ $value }} WAL segments have been waiting to be archived on the primary
+              {{ $labels.namespace }}/{{ $labels.pod }} for over 30 minutes. The archiver is behind
+              or stuck; if it keeps growing, CNPGWalArchivingFailing or CNPGVolumeNearlyFull follows.
+        # Newest completed base backup older than 26h, per cluster. All three have a daily
+        # ScheduledBackup: admin-daily (02:00Z), and trueswarm-pg-daily (02:15Z) /
+        # trueswarm-platform-pg-daily (02:30Z) since cchifor/trueswarm-admin#156 (merged 2026-10-09,
+        # a prerequisite of this rule). So 26h is a missed run plus a margin for a slow one. A
+        # cluster that has never been backed up reports 0 and fires.
+        - alert: CNPGBaseBackupStale
+          expr: |
+            time() - max by (namespace, cluster) (
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace=~"trueswarm|trueswarm-admin"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            ) > 26 * 3600
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CNPG {{ $labels.namespace }}/{{ $labels.cluster }}: newest base backup is {{ $value | humanizeDuration }} old"
+            description: >-
+              The newest completed base backup of {{ $labels.namespace }}/{{ $labels.cluster }} is
+              older than 26 hours, so a daily ScheduledBackup was missed or failed. Recovery still
+              works from the old base backup plus archived WAL, but replay takes longer and the
+              retention window ages toward losing the base. Check `kubectl get backups -n
+              {{ $labels.namespace }}` and the ScheduledBackup's lastScheduleTime/suspend.
+        # The latest backup attempt failed: a failure newer than the newest success. Separate from
+        # CNPGBaseBackupStale so a failed run is reported the same night, not 26h later.
+        - alert: CNPGBackupFailing
+          expr: |
+            max by (namespace, cluster) (
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp|cnpg_collector_last_failed_backup_timestamp", namespace=~"trueswarm|trueswarm-admin"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
+            > max by (namespace, cluster) (
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace=~"trueswarm|trueswarm-admin"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CNPG {{ $labels.namespace }}/{{ $labels.cluster }}: the latest base backup failed"
+            description: >-
+              The most recent base-backup attempt of {{ $labels.namespace }}/{{ $labels.cluster }}
+              failed and no backup has completed since. Check the failed Backup object's
+              status.error and the archiver log.
+    # ABSENCE: an explicit inventory, one rule per expected cluster, deliberately NOT joined to any
+    # CNPG series (see the header). `up == 1` covers both a target that is down and one that has
+    # vanished from discovery entirely (no pods, PodMonitor deleted, relabel broken). absent() over a
+    # comparison returns an empty label set, so namespace/cluster come from the rule labels and the
+    # annotations spell the cluster out literally ($labels only carries the expression's labels).
+    - name: cnpg-backup-coverage
+      rules:
+        - alert: CNPGBackupScrapeMissing
+          expr: absent(up{job="trueswarm/trueswarm-pg-metrics"} == 1)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm
+            cluster: trueswarm-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-pg has no scraped instance"
+            description: >-
+              No instance of trueswarm/trueswarm-pg has been scraped successfully for 15 minutes, so every
+              WAL-archiving and backup alert for it is blind. Check the pods, the trueswarm-pg-metrics
+              PodMonitor (trueswarm-pg-podmonitors.yaml) and the monitoring -> :9187 NetworkPolicy.
+        - alert: CNPGBackupScrapeMissing
+          expr: absent(up{job="trueswarm/trueswarm-platform-pg-metrics"} == 1)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm
+            cluster: trueswarm-platform-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-platform-pg has no scraped instance"
+            description: >-
+              No instance of trueswarm/trueswarm-platform-pg has been scraped successfully for 15 minutes, so every
+              WAL-archiving and backup alert for it is blind. Check the pods, the trueswarm-platform-pg-metrics
+              PodMonitor (trueswarm-pg-podmonitors.yaml) and the monitoring -> :9187 NetworkPolicy.
+        - alert: CNPGBackupScrapeMissing
+          expr: absent(up{job="trueswarm-admin/trueswarm-admin-pg-metrics"} == 1)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm-admin
+            cluster: trueswarm-admin-pg
+          annotations:
+            summary: "CNPG trueswarm-admin/trueswarm-admin-pg has no scraped instance"
+            description: >-
+              No instance of trueswarm-admin/trueswarm-admin-pg has been scraped successfully for 15 minutes, so every
+              WAL-archiving and backup alert for it is blind. Check the pods, the trueswarm-admin-pg-metrics
+              PodMonitor (trueswarm-pg-podmonitors.yaml) and the monitoring -> :9187 NetworkPolicy.
+        # Scraped, but no instance reports being the primary. Every series-reading rule above is
+        # filtered on `cnpg_pg_replication_in_recovery == 0`, so they all go quiet together when that
+        # series disappears while `up` stays 1: the primary's scrape fails but a replica's succeeds,
+        # the pg_replication default query errors (cnpg_collector_last_collection_error), or a
+        # failover leaves no primary. 15m tolerates a switchover. (ailab#1179 review)
+        - alert: CNPGPrimaryNotObserved
+          expr: absent(cnpg_pg_replication_in_recovery{namespace="trueswarm", cluster="trueswarm-pg"} == 0)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm
+            cluster: trueswarm-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-pg: no scraped instance reports being the primary"
+            description: >-
+              No scraped instance of trueswarm/trueswarm-pg has reported cnpg_pg_replication_in_recovery == 0 for
+              15 minutes, so every primary-filtered WAL-archiving and backup alert for it is blind.
+              Either the primary is not being scraped (check its pod and target), the replication
+              query is failing (cnpg_collector_last_collection_error), or the cluster has no primary.
+        - alert: CNPGPrimaryNotObserved
+          expr: absent(cnpg_pg_replication_in_recovery{namespace="trueswarm", cluster="trueswarm-platform-pg"} == 0)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm
+            cluster: trueswarm-platform-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-platform-pg: no scraped instance reports being the primary"
+            description: >-
+              No scraped instance of trueswarm/trueswarm-platform-pg has reported cnpg_pg_replication_in_recovery == 0 for
+              15 minutes, so every primary-filtered WAL-archiving and backup alert for it is blind.
+              Either the primary is not being scraped (check its pod and target), the replication
+              query is failing (cnpg_collector_last_collection_error), or the cluster has no primary.
+        - alert: CNPGPrimaryNotObserved
+          expr: absent(cnpg_pg_replication_in_recovery{namespace="trueswarm-admin", cluster="trueswarm-admin-pg"} == 0)
+          for: 15m
+          labels:
+            severity: critical
+            namespace: trueswarm-admin
+            cluster: trueswarm-admin-pg
+          annotations:
+            summary: "CNPG trueswarm-admin/trueswarm-admin-pg: no scraped instance reports being the primary"
+            description: >-
+              No scraped instance of trueswarm-admin/trueswarm-admin-pg has reported cnpg_pg_replication_in_recovery == 0 for
+              15 minutes, so every primary-filtered WAL-archiving and backup alert for it is blind.
+              Either the primary is not being scraped (check its pod and target), the replication
+              query is failing (cnpg_collector_last_collection_error), or the cluster has no primary.
+        # The primary is scraped but exports no backup timestamp from either family: the exporter or the
+        # plugin's metrics hook lost the series, which would otherwise read as "quiet". Anchored to the
+        # PRIMARY like the rules it guards, so a replica still exporting a timestamp does not mask it.
+        - alert: CNPGBackupMetricMissing
+          expr: |
+            absent(
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm", cluster="trueswarm-pg"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
+          for: 30m
+          labels:
+            severity: warning
+            namespace: trueswarm
+            cluster: trueswarm-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-pg primary exports no backup timestamp"
+            description: >-
+              The primary of trueswarm/trueswarm-pg has exported neither
+              barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor
+              cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
+              CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the
+              migration, the plugin-barman-cloud sidecar.
+        - alert: CNPGBackupMetricMissing
+          expr: |
+            absent(
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm", cluster="trueswarm-platform-pg"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
+          for: 30m
+          labels:
+            severity: warning
+            namespace: trueswarm
+            cluster: trueswarm-platform-pg
+          annotations:
+            summary: "CNPG trueswarm/trueswarm-platform-pg primary exports no backup timestamp"
+            description: >-
+              The primary of trueswarm/trueswarm-platform-pg has exported neither
+              barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor
+              cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
+              CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the
+              migration, the plugin-barman-cloud sidecar.
+        - alert: CNPGBackupMetricMissing
+          expr: |
+            absent(
+              {__name__=~"barman_cloud_cloudnative_pg_io_last_available_backup_timestamp|cnpg_collector_last_available_backup_timestamp", namespace="trueswarm-admin", cluster="trueswarm-admin-pg"}
+              and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+            )
+          for: 30m
+          labels:
+            severity: warning
+            namespace: trueswarm-admin
+            cluster: trueswarm-admin-pg
+          annotations:
+            summary: "CNPG trueswarm-admin/trueswarm-admin-pg primary exports no backup timestamp"
+            description: >-
+              The primary of trueswarm-admin/trueswarm-admin-pg has exported neither
+              barman_cloud_cloudnative_pg_io_last_available_backup_timestamp (plugin) nor
+              cnpg_collector_last_available_backup_timestamp (in-tree) for 30 minutes, so
+              CNPGBaseBackupStale cannot evaluate. Check the instance metrics on :9187 and, after the
+              migration, the plugin-barman-cloud sidecar.
