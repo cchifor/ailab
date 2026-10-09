@@ -240,8 +240,15 @@ How a request travels:
    - The CLI's model name is not a route, so the router serves it in **model mode** on `dw-N`.
      Today every `dw-N` points to `sub-codex-5`, one any-model target `codex-5:*`, with
      `native: ["codex-responses"]`, so the request is passed through as sent.
+   - **Which models a worker may ask for.** `sub-codex-5` carries the allowlist `models` set to
+     the same six models the old `dw-gpt-*` routes served: `gpt-6-astra`, `gpt-6-sol`,
+     `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`. This is config revision 676.
+     - Any other model name gets `400 MODEL_NOT_SUPPORTED` before any upstream call, as before.
+     - Even without the allowlist, codex-5's catalog (today exactly those six) would bound it.
+     - The allowlist keeps the per-key model set explicit if the catalog grows.
    - **To move one worker** to another subscription or a pool, repoint its `dw-N` (one config
      change, `PUT /admin/v1/config`, or the chat's `/point dw-N`). Nothing changes on the worker.
+     Put the same `models` allowlist on the new target route.
    - The response header `x-router-route` and the journal (`route: dw-N`) show where each request
      went.
 
@@ -263,8 +270,12 @@ which the legacy exact-model mapping serves (`gpt-6-astra` → `dw-gpt-6-astra`)
 - `key_b06fc4e10a3c` (`lrk__1Wv`)
 
 They and the `dw-gpt-*` routes stay until the soak ends, because the router rollback needs them
-(`llm-router.md` § "Per-key routing release", Rollback). Their values are in this file's git
-history.
+(`llm-router.md` § "Per-key routing release", Rollback). Their values are in the git history of
+`kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml`; this runbook only
+lists IDs and prefixes.
+
+When the soak ends, revoke them in the router: `DELETE /admin/v1/keys/<id>`, or the console's API
+keys page. Dropping them from the seed file does not do it: they stay valid until 2027-10-09.
 
 All keys expire on **2027-10-09** (365 days). The current values live only in
 `kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml`
