@@ -207,11 +207,21 @@ gkhr_read() {
   GKHR=$(g get helmrelease "$GK_HELMRELEASE" -o jsonpath='{.spec.suspend}{"|"}{.status.history[0].chartVersion}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
   GKHR=${GKHR//$'\r'/}
 }
+# gkhr_upgraded: not suspended, Ready, and built from the target commit. The gatekeeper release renders
+# ./deploy/helm from the SAME GitRepository as strive with reconcileStrategy Revision (platform
+# deploy/gitops/flux/clusters/ailab/gatekeeper/helmrelease.yaml), so its chartVersion carries the commit
+# like strive's. Should that ever change, the HelmChart's observedSourceArtifactRevision (flux-system/
+# <hr namespace>-<hr name>) is the strategy-independent proof: the chart artifact was built from the
+# source at the target.
 gkhr_upgraded() {
-  local susp chart ready
+  local susp chart ready art
   gkhr_read || return 1
   IFS='|' read -r susp chart ready <<<"$GKHR"
-  [[ $susp != true && $chart == *"${SHA:0:12}"* && $ready == True ]]
+  [[ $susp != true && $ready == True ]] || return 1
+  [[ $chart == *"${SHA:0:12}"* ]] && return 0
+  art=$(f get helmchart "${GK_NS}-${GK_HELMRELEASE}" -o jsonpath='{.status.observedSourceArtifactRevision}' 2>/dev/null) || return 1
+  art=${art//$'\r'/}
+  [[ $art == *"@sha1:$SHA" ]]
 }
 
 ks_applied() {
@@ -306,8 +316,9 @@ flux-resume ($MODE), dry run: no cluster or git call. The steps, each gated (at 
            .status.lastAppliedRevision is main@sha1:<target> and Ready is True; then, only if
            kubectl --context $CONTEXT -n $GK_NS get helmrelease $GK_HELMRELEASE -o jsonpath='{.spec.suspend}' is still true:
        kubectl --context $CONTEXT -n $GK_NS patch helmrelease $GK_HELMRELEASE --type=merge -p '{"spec":{"suspend":false}}'
-     wait: Ready is True and .status.history[0].chartVersion carries <target>'s first 12 hex (gatekeeper serves
-           the registry the services are about to use), BEFORE step 2
+     wait: Ready is True and .status.history[0].chartVersion carries <target>'s first 12 hex (the release renders
+           ./deploy/helm from the same GitRepository, reconcileStrategy Revision), else HelmChart
+           $FLUX_NS/$GK_NS-$GK_HELMRELEASE .status.observedSourceArtifactRevision is main@sha1:<target>; BEFORE step 2
   2. kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $KUSTOMIZATION --type=merge -p '{"spec":{"suspend":false}}'
      wait: .status.lastAppliedRevision is main@sha1:<target> and Ready is True
   3. only if kubectl --context $CONTEXT -n $NS get helmrelease $HELMRELEASE -o jsonpath='{.spec.suspend}' is still true:
