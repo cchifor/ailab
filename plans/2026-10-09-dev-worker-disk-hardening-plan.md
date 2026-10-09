@@ -237,6 +237,11 @@ ext4 project quotas for `/workspace/<user>` instead of waiting a fixed month.
   under 5% free; measured TimeToFull lead time reported (not promised); guard exhausted time per
   worker trends down. Track build failures, re-download cost and reclaim duration alongside.
 
+## Operator decisions (2026-10-09)
+- Proceed: implement P0 now (W1-W5 as separate PRs, alerts first), Phase B implementation review after.
+- W6: yes, grow `/` to 60 GB after the ai-node1/2 storage headroom check.
+- W7: opt-in `dev-worker.disposable=true` label for automatic stack teardown; all other stacks report + alert.
+
 ## Review disposition (codex round 1, 80 findings)
 All accepted; none pushed back. Themes and where they landed:
 - Re-prioritization (guard reliability, native build-cache GC and minimal attribution into P0;
