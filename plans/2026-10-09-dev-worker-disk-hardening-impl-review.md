@@ -1,6 +1,6 @@
 # Implementation review — dev-worker-disk-hardening — rounds 1-2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
@@ -47,7 +47,7 @@ Resolved in 358d9c88: non-git children of a kind=worktrees directory are exporte
 ### Missing report roots are counted as a complete scan
 **Location:** PR #1193 — disk-report scan_all/build and report freshness alerts
 **Severity:** important
-Resolved in 358d9c88: a configured root that is missing is a failed scan (None): it keeps its last values, the run is incomplete, complete_at does not advance.
+Resolved in 358d9c88: a missing workspace root while /workspace is not mounted is a failed scan (None; narrowed in c3c22bc9 after reviewer-claude: a user with no workspace dir on a mounted disk is simply not scanned): it keeps its last values, the run is incomplete, complete_at does not advance.
 
 ### Growth-history write failures can leave monitoring apparently healthy
 **Location:** PR #1193 — disk-report write_atomic/save/main and report freshness alerts
