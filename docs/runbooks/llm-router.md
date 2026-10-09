@@ -443,14 +443,35 @@ lists routes that serve `POST /v1/responses` as a pass-through:
 - one target, `codex-5/<model>`;
 - `maxAttempts: 1`, no fallback (encrypted reasoning only decrypts on the account that produced
   it);
-- `timeoutMs` 300 s and `idleTimeoutMs` 600 s (above the CLI's own 300 s stream idle).
+- `timeoutMs` 300 s and `idleTimeoutMs` 600 s, and no `maxDurationMs`.
 
-They were created through `PUT /admin/v1/config` (revision 314). At cutover, account `codex-5`
-(`charlie@strive.us`) was taken out of the shared `codex` route, which is back to the four
-accounts it had on 2026-10-07, and its `concurrency` went from 1 to 6. It now serves only the dev
-workers. The four workers' keys (`dev-worker-N codex (ailab dev worker, <ip>)`, expiring
-2027-10-09) are limited to the six routes. Their values are seeded into OpenBao from
-`devworker-seeds.sops.yaml`.
+**What bounds a long Codex turn.** In the router, `timeoutMs` is only the wait **before any
+output** (the first upstream byte), not a whole-request deadline. `idleTimeoutMs` bounds the
+**silence between upstream bytes** once output has begun. With no `maxDurationMs`, nothing caps
+the whole request, so a turn that keeps streaming runs as long as it streams. The CLI's own
+stream idle timeout is 300 s, below the route's 600 s, so the CLI notices a stalled stream
+first.
+
+The Cloudflare edge does not cut these streams. Its ~100 s limits are on the origin's first byte
+and on silence between bytes. The router sends the SSE headers and `: ok` as soon as the attempt
+is selected, then a `: keepalive` comment after every 15 s without a byte (README, "Streams start
+at once"). The api-openai `imageProxy` 90 s deadline (requests carrying `cf-ray`) is applied only
+by the image endpoints. Inference on `/v1/responses` passes no caller deadline (llm-router
+`packages/plugins/api-openai/index.ts`: `proxied` is computed in `images()` only).
+
+**State and order.**
+
+- **Done before this rollout:** the six routes, created through `PUT /admin/v1/config`
+  (revision 314), and the four workers' keys (`dev-worker-N codex (ailab dev worker, <ip>)`,
+  expiring 2027-10-09, limited to the six routes).
+- **Cutover, after this rollout's acceptance:**
+  - account `codex-5` comes out of the shared `codex` route, back to the four accounts it had
+    on 2026-10-07;
+  - its `concurrency` goes from 1 to 6, so it serves only the dev workers.
+- **Then, in the dev-worker PR:** the keys are seeded into OpenBao (`devworker-seeds.sops.yaml`)
+  and the workers are switched.
+
+Check the live state with `GET /admin/v1/config`: account `codex-5` and the `codex` route.
 
 **Image.** Built from the merged source in the pinned Node 26.10.0 runtime image: frozen install,
 build, production install, production smoke. Published by relay
@@ -472,5 +493,13 @@ fake backend replaying a captured stream.
 `registry.chifor.me/llm-router/router@sha256:598cd7e1b634bc652024aa7041e2ea7584df88caf6cb2e15fae0f044375d44ef`
 (source `0974a7a00160ba1961fe4722af5c758f88610ea8`, release
 `router-0.1.0-20261007-provider-names`). That release's settings schema is not strict, so it ignores
-the `codexNative` key, but drop the key in the same PR anyway. First turn the dev workers back to their own
-logins (`dev_worker_codex_router_enabled: false`).
+the `codexNative` key, but drop the key in the same PR anyway. The order:
+
+1. **First** turn the dev workers back to their own logins: `dev_worker_codex_router_enabled:
+   false`, converge, then `codex app-server daemon restart` per user.
+2. Then revert the image.
+3. Then delete the six `dw-*` routes, or at least keep the workers off the router until a native
+   release is back. The previous release serves those routes with the Responses subset and
+   answers the CLI with `400 UNSUPPORTED_PARAMETER: include`, so never re-enable
+   `dev_worker_codex_router_enabled` against it.
+4. Put `codex-5` back into the `codex` route if its capacity is wanted there.

@@ -161,7 +161,10 @@ spec:
             # is ready, and Cloudflare's edge gives the origin 100 s (then a bare 524 that SDKs retry, replaying the
             # generation). Requests carrying cf-ray (set by the edge on every request; all ingress is the edge
             # cloudflared, see the NetworkPolicy) get a 90 s whole-request deadline, so the router answers first:
-            # 504 with x-should-retry: false. In-pod callers (validate-live) keep the route's own deadline.
+            # 504 with x-should-retry: false. In-pod callers (validate-live) keep the route's own deadline. This deadline
+            # is applied by the image endpoints only: inference (/v1/chat/completions, /v1/responses) passes none, so
+            # Codex-native streams are bounded by the routes' own wait/idle timeouts (and kept alive past the edge's
+            # idle limit by the router's 15 s SSE keepalives).
             # api-openai codexNative (llm-router #87, 2026-10-09): the dev workers' Codex CLIs. These routes serve
             # POST /v1/responses as a pass-through of the CLI's own protocol to their Codex account. All six pin
             # account codex-5 (one per model; the workers' keys are limited to them and name the real model, which
