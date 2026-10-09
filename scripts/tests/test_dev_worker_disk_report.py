@@ -48,16 +48,28 @@ class ParseTest(unittest.TestCase):
                                    ".cache-npm": "cache", "f.tar": "file"})
 
 
+def snap(d, hours_ago, roots):
+    pathlib.Path(d, f"snap-{NOW - hours_ago * 3600}.json").write_text(
+        json.dumps({"roots": {k: {"top": v} for k, v in roots.items()}}))
+
+
 class SnapshotTest(unittest.TestCase):
     def test_closest_to_the_window_never_too_young(self):
         with tempfile.TemporaryDirectory() as d:
             for hours_ago in (2, 18, 23, 26):
-                ts = NOW - hours_ago * 3600
-                pathlib.Path(d, f"snap-{ts}.json").write_text(json.dumps({"h": hours_ago}))
-            self.assertEqual(dr.pick_snapshot(d, NOW, 24), {"h": 23})
+                snap(d, hours_ago, {"c4:workspace": {"a": hours_ago}})
+            self.assertEqual(dr.baselines(d, NOW, 24), {"c4:workspace": {"a": 23}})
         with tempfile.TemporaryDirectory() as d:
-            pathlib.Path(d, f"snap-{NOW - 3600}.json").write_text("{}")
-            self.assertIsNone(dr.pick_snapshot(d, NOW, 24))                # only a young one
+            snap(d, 1, {"c4:workspace": {"a": 1}})
+            self.assertEqual(dr.baselines(d, NOW, 24), {})                  # only a young one
+
+    def test_baseline_is_per_root(self):
+        # The snapshot closest to 24h lacks the home root (its scan failed then): an older one that
+        # has it is used for that root; a root no snapshot has gets no baseline at all.
+        with tempfile.TemporaryDirectory() as d:
+            snap(d, 24, {"c4:workspace": {"a": 1}})
+            snap(d, 27, {"c4:workspace": {"a": 2}, "c4:home": {"h": 3}})
+            self.assertEqual(dr.baselines(d, NOW, 24), {"c4:workspace": {"a": 1}, "c4:home": {"h": 3}})
 
     def test_save_keeps_a_window_of_snapshots(self):
         with tempfile.TemporaryDirectory() as d:
@@ -126,6 +138,60 @@ class BuildRenderTest(unittest.TestCase):
     def test_label_escaping_and_cap(self):
         self.assertEqual(dr.esc('a"b\\c\nd'), 'a\\"b\\\\c\\nd')
         self.assertEqual(len(dr.esc("x" * 500)), dr.LABEL_MAX)
+        self.assertNotEqual(dr.esc("x" * 300 + "1"), dr.esc("x" * 300 + "2"))   # no collision
+
+    def test_a_non_utf8_name_still_renders_and_writes(self):
+        name = b"bad\xff-name".decode("utf-8", "surrogateescape")          # as du hands it over
+        v = dr.esc(name)
+        v.encode("utf-8")                                                 # must not raise
+        model = {"complete": True, "complete_at": NOW, "roots": {"c4:workspace": {
+            "user": "c4", "root": "workspace", "total": 1, "top": {name: 25 * GB},
+            "kinds": {name: "other"}, "growth": {}, "scanned_at": NOW}}}
+        text = dr.render(model, NOW, 1.0, 10, 5 * GB)
+        with tempfile.TemporaryDirectory() as d:
+            dr.write_atomic(os.path.join(d, "x.prom"), text, 0o644)
+            self.assertEqual(os.listdir(d), ["x.prom"])
+
+    def test_no_baseline_for_a_root_means_no_growth(self):
+        os.makedirs(self.state)
+        snap(self.state, 24, {"c4:home": {"x": 1}})                       # another root only
+        scan = {("c4", "workspace"): scan_of(self.root, {"big1": 60 * GB})}
+        model = dr.build(["c4"], NOW, scan, self.state, 10, 5 * GB, 24)
+        self.assertEqual(model["roots"]["c4:workspace"]["growth"], {})
+
+    def test_a_partial_run_persists_each_root_on_its_own(self):
+        # workspace scans, home fails: workspace is saved and snapshotted; home keeps its OWN last
+        # values in latest.json but is not in this run's snapshot (it would be a stale baseline).
+        os.makedirs(self.state)
+        prev = {"complete": True, "complete_at": NOW - 3600, "roots": {"c4:home": {
+            "user": "c4", "root": "home", "total": 3 * GB, "top": {".codex": 3 * GB},
+            "kinds": {".codex": "other"}, "growth": {}, "scanned_at": NOW - 3600}}}
+        pathlib.Path(self.state, "latest.json").write_text(json.dumps(prev))
+        scan = {("c4", "workspace"): scan_of(self.root, {"big1": 9 * GB}), ("c4", "home"): None}
+        model = dr.build(["c4"], NOW, scan, self.state, 10, 5 * GB, 24)
+        dr.save(model, self.state, NOW, 30)
+        latest = json.loads(pathlib.Path(self.state, "latest.json").read_text())
+        self.assertEqual(set(latest["roots"]), {"c4:workspace", "c4:home"})
+        self.assertEqual(latest["complete_at"], NOW - 3600)                # not this partial run
+        snapped = json.loads(pathlib.Path(self.state, f"snap-{NOW}.json").read_text())
+        self.assertEqual(set(snapped["roots"]), {"c4:workspace"})
+        text = dr.render(model, NOW, 1.0, 10, 5 * GB)
+        self.assertIn(f"dev_worker_disk_report_last_complete_timestamp_seconds {NOW - 3600}", text)
+
+
+class DuTest(unittest.TestCase):
+    class R:
+        def __init__(self, out, rc, err=""):
+            self.stdout, self.returncode, self.stderr = out, rc, err
+
+    def test_no_total_line_is_a_failed_scan(self):
+        run = lambda *a, **k: self.R("4096\t/w/c4/a\n", 1, "du: cannot read directory")
+        with self.assertRaises(OSError):
+            dr.du("/w/c4", 10, run=run)
+
+    def test_a_nonzero_exit_with_the_total_is_accepted(self):
+        run = lambda *a, **k: self.R("4096\t/w/c4/a\n8192\t/w/c4\n", 1, "du: cannot access 'x': No such file")
+        self.assertEqual(dr.du("/w/c4", 10, run=run), {"a": 4096, ".": 8192})
 
 
 class ScanTest(unittest.TestCase):

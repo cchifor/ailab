@@ -32,6 +32,7 @@ scripts/tests/test_dev_worker_disk_report.py.
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -45,12 +46,17 @@ CACHE_NAMES = (".npm",)              # plus anything starting with ".cache"
 LABEL_MAX = 120
 
 
-def du(root, timeout):
+def du(root, timeout, run=subprocess.run):
     """{relative path: bytes} for root's entries down to depth 2 (files included), one filesystem.
-    Raises subprocess.TimeoutExpired or CalledProcessError-like OSError on failure."""
-    r = subprocess.run(["du", "-x", "-a", "-B1", "--max-depth=2", root], stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True, timeout=timeout, errors="surrogateescape")
-    return parse_du(r.stdout, root)
+    Raises subprocess.TimeoutExpired, or OSError when du produced no total for the root (it failed
+    early: the root vanished, EIO, ...) — partial output must never pass for a complete scan. A
+    non-zero exit WITH the total is accepted: on a live worker files vanish mid-walk and du says so."""
+    r = run(["du", "-x", "-a", "-B1", "--max-depth=2", root], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=timeout, errors="surrogateescape")
+    sizes = parse_du(r.stdout, root)
+    if "." not in sizes:
+        raise OSError(f"du {root}: no total (exit {r.returncode}): {r.stderr.strip()[-200:]}")
+    return sizes
 
 
 def parse_du(out, root):
@@ -94,40 +100,46 @@ def growth(now_top, then_top):
     return {name: b - then_top.get(name, 0) for name, b in now_top.items()}
 
 
-def pick_snapshot(state_dir, now, hours):
-    """The snapshot closest to `hours` ago, at least 0.8 * hours old; None when there is none yet."""
-    best, best_age = None, None
+def baselines(state_dir, now, hours):
+    """{root key: its top-level sizes} from, for EACH root, the snapshot closest to `hours` ago that
+    contains that root and is at least 0.8 * hours old. A root no snapshot has gets no baseline (no
+    growth series), never an empty one: that would report every directory as grown by its full size."""
+    snaps = []
     for path in glob.glob(os.path.join(state_dir, "snap-*.json")):
         try:
-            ts = int(os.path.basename(path)[5:-5])
+            age = now - int(os.path.basename(path)[5:-5])
         except ValueError:
             continue
-        age = now - ts
-        if age < 0.8 * hours * 3600:
-            continue
-        if best is None or abs(age - hours * 3600) < abs(best_age - hours * 3600):
-            best, best_age = path, age
-    if best is None:
-        return None
-    try:
-        with open(best) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+        if age >= 0.8 * hours * 3600:
+            snaps.append((abs(age - hours * 3600), path))
+    out = {}
+    for _dist, path in sorted(snaps):
+        data = load_json(path) or {}
+        for key, root in data.get("roots", {}).items():
+            if key not in out and isinstance(root.get("top"), dict):
+                out[key] = root["top"]
+    return out
 
 
 def esc(value):
-    """A Prometheus label value: escaped, and capped so one odd name cannot blow up a series."""
-    v = value if len(value) <= LABEL_MAX else value[:LABEL_MAX - 1] + "~"
+    """A Prometheus label value: valid UTF-8 (a non-UTF-8 file name arrives from du as lone
+    surrogates), escaped, and capped — with a short hash of the full name, so two long siblings
+    with the same prefix cannot become one series (which would make node_exporter drop the file)."""
+    v = value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    if len(v) > LABEL_MAX:
+        v = v[:LABEL_MAX - 9] + "~" + hashlib.sha1(v.encode()).hexdigest()[:8]
     return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 def build(users, now, scan, state_dir, top, big, growth_hours):
     """The metrics model from this scan (`scan` = {(user, root_name): (root_path, sizes) | None}).
-    A None entry is a failed/timed-out du: that root keeps its last complete values."""
+    A None entry is a failed/timed-out du: that root keeps ITS OWN last successful values (each root
+    is persisted on its own). complete_at is the last run in which every root scanned."""
     prev = load_json(os.path.join(state_dir, "latest.json")) or {}
-    then = pick_snapshot(state_dir, now, growth_hours) or {}
-    out = {"complete": all(v is not None for v in scan.values()), "roots": {}}
+    base = baselines(state_dir, now, growth_hours)
+    complete = all(v is not None for v in scan.values())
+    out = {"complete": complete, "roots": {},
+           "complete_at": int(now) if complete else prev.get("complete_at")}
     for (user, root_name), v in scan.items():
         key = f"{user}:{root_name}"
         if v is None:
@@ -137,7 +149,7 @@ def build(users, now, scan, state_dir, top, big, growth_hours):
         root, sizes = v
         top_now = top_level(sizes)
         kinds = {name: kind_of(root, name) for name in top_now}
-        grown = growth(top_now, then.get("roots", {}).get(key, {}).get("top", {})) if then else {}
+        grown = growth(top_now, base[key]) if key in base else {}
         out["roots"][key] = {"user": user, "root": root_name, "path": root, "total": sizes.get(".", 0),
                              "top": top_now, "kinds": kinds, "growth": grown, "depth2": sizes,
                              "scanned_at": int(now)}
@@ -155,6 +167,10 @@ def render(model, now, scan_seconds, top, big):
         "# HELP dev_worker_disk_report_scan_seconds How long this run's scans took.",
         "# TYPE dev_worker_disk_report_scan_seconds gauge",
         f"dev_worker_disk_report_scan_seconds {scan_seconds:.1f}",
+        "# HELP dev_worker_disk_report_last_complete_timestamp_seconds Last run in which every root scanned.",
+        "# TYPE dev_worker_disk_report_last_complete_timestamp_seconds gauge",
+    ] + ([f"dev_worker_disk_report_last_complete_timestamp_seconds {model['complete_at']}"]
+         if model.get("complete_at") else []) + [
         "# HELP dev_worker_disk_report_data_timestamp_seconds When each root's values were scanned.",
         "# TYPE dev_worker_disk_report_data_timestamp_seconds gauge",
         "# HELP dev_worker_dir_user_bytes Total bytes under a user's root.",
@@ -197,7 +213,7 @@ def write_atomic(path, text, mode):
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         print(f"disk-report: cannot write {path}: {e}", file=sys.stderr)
         try:
             os.unlink(tmp)
@@ -206,9 +222,12 @@ def write_atomic(path, text, mode):
 
 
 def save(model, state_dir, now, keep_hours):
+    """latest.json every run (a failed root carries its own last values in it); the snapshot only
+    holds the roots scanned in THIS run, so a stale carried root never becomes a growth baseline."""
     os.makedirs(state_dir, mode=0o700, exist_ok=True)
     write_atomic(os.path.join(state_dir, "latest.json"), json.dumps(model), 0o600)
-    snap = {"roots": {k: {"top": v["top"]} for k, v in model["roots"].items()}}
+    snap = {"roots": {k: {"top": v["top"]} for k, v in model["roots"].items()
+                      if v.get("scanned_at") == int(now)}}
     write_atomic(os.path.join(state_dir, f"snap-{int(now)}.json"), json.dumps(snap), 0o600)
     for path in glob.glob(os.path.join(state_dir, "snap-*.json")):
         try:
@@ -265,8 +284,7 @@ def main(argv=None):
     if opts.dry_run:
         sys.stdout.write(text)
         return 0
-    if model["complete"]:
-        save(model, opts.state_dir, now, opts.keep_hours)
+    save(model, opts.state_dir, now, opts.keep_hours)
     if os.path.isdir(opts.textfile_dir):
         write_atomic(os.path.join(opts.textfile_dir, PROM), text, 0o644)
     return 0

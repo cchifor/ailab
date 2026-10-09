@@ -365,18 +365,17 @@ tests:
                 will never reclaim it. Ask the agent's owner for its owner and lifetime: delete it, move
                 it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly.
 
-  - interval: 5m
-    name: no completed disk-report scan for 3h+ pages DiskReportStale
+  # The last complete scan was at t=0: silent before 3h, paging a few minutes after (not ~6h).
+  - interval: 1m
+    name: no completed disk-report scan for 3h pages DiskReportStale shortly after 3h
     input_series:
-      - series: 'dev_worker_disk_report_last_scan_timestamp_seconds{job="dev-worker-node", instance="192.168.0.8:9100"}'
-        values: "0x80"
-      - series: 'dev_worker_disk_report_scan_complete{job="dev-worker-node", instance="192.168.0.8:9100"}'
-        values: "1x80"
+      - series: 'dev_worker_disk_report_last_complete_timestamp_seconds{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "0x220"
     alert_rule_test:
-      - eval_time: 5h
+      - eval_time: 2h55m
         alertname: DevWorkerDiskReportStale
         exp_alerts: []
-      - eval_time: 6h10m
+      - eval_time: 3h10m
         alertname: DevWorkerDiskReportStale
         exp_alerts:
           - exp_labels:
@@ -386,7 +385,34 @@ tests:
             exp_annotations:
               summary: "Dev worker 192.168.0.8:9100: disk attribution is stale"
               description: >-
-                dev-worker-disk-report on 192.168.0.8:9100 has not completed a scan recently, so
+                dev-worker-disk-report on 192.168.0.8:9100 has not completed a scan for 3h, so
                 DirGrowing/UnownedDataLarge are blind. `systemctl status dev-worker-disk-report.service`,
                 `journalctl -u dev-worker-disk-report -n 30` (a du over its 10 min budget marks the scan
                 incomplete); roll out with `--tags disk_report`.
+
+  # Up, but never a complete scan (never installed, crashes before writing, never completes).
+  - interval: 5m
+    name: an up worker with no complete disk-report scan for 3h pages DiskReportMissing
+    input_series:
+      - series: 'up{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "1x50"
+      - series: 'dev_worker_disk_report_last_scan_timestamp_seconds{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "0+300x50"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: DevWorkerDiskReportMissing
+        exp_alerts: []
+      - eval_time: 3h10m
+        alertname: DevWorkerDiskReportMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.9:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.9:9100: no disk attribution at all"
+              description: >-
+                192.168.0.9:9100 has never reported a complete dev-worker-disk-report scan, so
+                DirGrowing/UnownedDataLarge cannot fire there. `systemctl list-timers
+                dev-worker-disk-report.timer`, `journalctl -u dev-worker-disk-report -n 30`; roll out with
+                `--tags disk_report`.
