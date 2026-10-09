@@ -143,3 +143,16 @@ variable "agent_nodes" {
     "agent-node-3" = { node_name = "ai-node3", vm_id = 4303, ip = "192.168.0.49", host_ip = "192.168.0.4", hostname = "agent-node-3" }
   }
 }
+
+variable "install_schematics" {
+  description = <<-EOT
+    Per-node Image Factory schematic for machine.install.image, overriding the CP schematic
+    (infra output schematic_id, 53513e54...). agent-node-3 runs the kata/gvisor schematic since the
+    AgentForge P2 rollout; the live schematic is what `talosctl get extensions` reports and what
+    scripts/talos-upgrade-node.sh upgrades with. Keep this map equal to it.
+  EOT
+  type        = map(string)
+  default = {
+    "agent-node-3" = "0839748ecac818fa6db9bc8bad2cc054eed752a32cd83226e18aa382a3a384f7" # qemu-guest-agent + iscsi-tools + util-linux-tools + kata-containers + gvisor
+  }
+}

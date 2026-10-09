@@ -34,6 +34,7 @@ locals {
       nameservers        = jsonencode(var.nameservers)
       host_ip            = v.host_ip              # WS2/ADR 0011: next-hop (this node's Proxmox host) for the TB storage /32 route
       storage_service_ip = var.storage_service_ip # QNAP NFS/iSCSI service IP on the storage fabric
+      install_image      = "factory.talos.dev/nocloud-installer/${lookup(var.install_schematics, k, data.terraform_remote_state.infra.outputs.schematic_id)}:${var.talos_version}"
     })
   }
 }

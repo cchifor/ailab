@@ -8,6 +8,7 @@ machine:
     dedicated: agent:NoSchedule
   install:
     disk: /dev/sda # matches controlplane.yaml.tftpl
+    image: ${install_image} # the node's own factory installer (see controlplane.yaml.tftpl)
   network:
     nameservers: ${nameservers}
     interfaces:

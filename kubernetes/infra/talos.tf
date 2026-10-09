@@ -23,6 +23,7 @@ locals {
       storage_service_ip = var.storage_service_ip
       storage_tier       = v.storage_tier                          # WS2: node label for fast-storage workload affinity
       cp_ips             = [for _, c in var.control_planes : c.ip] # etcd ingress allow-list
+      install_image      = "factory.talos.dev/nocloud-installer/${talos_image_factory_schematic.this.id}:${var.talos_version}"
     })
   }
 }

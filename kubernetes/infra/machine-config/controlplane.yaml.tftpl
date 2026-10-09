@@ -6,6 +6,10 @@ machine:
     ailab.io/storage-tier: ${storage_tier}
   install:
     disk: /dev/sda
+    # The node's own factory installer (schematic = its extensions). Used only by install/reset;
+    # upgrades pass the image explicitly (scripts/talos-upgrade-node.sh). Without it the default was
+    # a vanilla installer, so a reinstall would have dropped iscsi-tools.
+    image: ${install_image}
   network:
     nameservers: ${nameservers}
     interfaces:

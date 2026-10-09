@@ -169,3 +169,9 @@ variable "env_nodes" {
     error_message = "env_nodes[*].apply_mode must be one of auto, reboot, no_reboot, staged (staged_if_needing_reboot is deliberately excluded)."
   }
 }
+
+variable "install_schematic" {
+  description = "Image Factory schematic for machine.install.image: the env pool's kata/gvisor + iscsi image (main.tf header). Must equal `talosctl get extensions` on the env nodes."
+  type        = string
+  default     = "0839748ecac818fa6db9bc8bad2cc054eed752a32cd83226e18aa382a3a384f7"
+}

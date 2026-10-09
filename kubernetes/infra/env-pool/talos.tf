@@ -35,6 +35,7 @@ locals {
       host_ip            = v.host_ip
       storage_service_ip = var.storage_service_ip
       kata_debug         = var.kata_debug
+      install_image      = "factory.talos.dev/nocloud-installer/${var.install_schematic}:${var.talos_version}"
     }, local.kata_files))
   }
 }
