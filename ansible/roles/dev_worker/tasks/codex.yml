@@ -123,7 +123,8 @@
 #   1. top-level `model_provider = "<provider>"` (absent = codex's built-in `openai`, the host login);
 #   2. the [model_providers.<provider>] table: base_url, wire_api and the `auth` command, which codex
 #      runs to get the bearer (no key in the file, and none in any environment the CLI or its tools see);
-#   3. a [profiles.chatgpt] escape hatch back to the host's own login: `codex -p chatgpt`.
+#   3. a `chatgpt` profile, ~/.codex/chatgpt.config.toml (codex 0.162 refuses the legacy
+#      [profiles.chatgpt] table), as the escape hatch back to the host's own login: `codex -p chatgpt`.
 # Turning it off removes 1 and 2 (the profile is harmless and stays). A running TUI or app-server daemon
 # keeps the provider it started with: `codex app-server daemon restart` after a change.
 - name: Install the router-key helper codex's provider auth runs
@@ -234,14 +235,39 @@
       `codex app-server daemon restart` (runbook dev-workers.md, "Codex through the router").
   when: dev_worker_codex_feature_pin.results | selectattr('changed') | list | length > 0
 
-- name: A `chatgpt` profile per user (the host's own login, for when the router cannot serve)
+# The `chatgpt` profile is its own file. Codex 0.162 refuses `-p chatgpt` while config.toml still holds
+# the legacy table: "--profile `chatgpt` cannot be used while config.toml contains legacy ...
+# [profiles.chatgpt] config; move those settings into ~/.codex/chatgpt.config.toml" (dev-worker-1,
+# 2026-10-09). Plain `codex` was unaffected, so only the escape hatch broke. The legacy table goes
+# whatever the provider, because the file replaces it.
+- name: Remove a legacy top-level `profile = "chatgpt"` selector (the same refusal names it)
+  community.general.ini_file:
+    path: "{{ item.home }}/.codex/config.toml"
+    # No `section`: the top-level region only. `exclusive: false` with the value removes exactly that line, so a
+    # selector of another profile (the user's own) stays.
+    option: profile
+    value: '"chatgpt"'
+    exclusive: false
+    state: absent
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove the legacy [profiles.chatgpt] table (codex 0.162 refuses -p chatgpt while it exists)
   community.general.ini_file:
     path: "{{ item.home }}/.codex/config.toml"
     section: profiles.chatgpt
-    option: model_provider
-    value: '"openai"'
-    no_extra_spaces: false
-    create: true
+    state: absent
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: A `chatgpt` profile file per user (the host's own login, for when the router cannot serve)
+  ansible.builtin.copy:
+    dest: "{{ item.home }}/.codex/chatgpt.config.toml"
+    content: |
+      # Managed by ansible (dev_worker role). `codex -p chatgpt`: the host's own ChatGPT login instead of the router.
+      model_provider = "openai"
     owner: "{{ item.name }}"
     group: "{{ item.name }}"
     mode: "0600"

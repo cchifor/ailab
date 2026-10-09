@@ -215,10 +215,12 @@ name = "llm-router"
 base_url = "https://router.chifor.me/v1"
 wire_api = "responses"
 auth = { command = "/usr/local/bin/codex-router-key" }
-
-[profiles.chatgpt]                       # escape hatch: the host's own ChatGPT login
-model_provider = "openai"
 ```
+
+The escape hatch to the host's own ChatGPT login is the profile file `~/.codex/chatgpt.config.toml`
+(`model_provider = "openai"`), used as `codex -p chatgpt`. Codex 0.162 refuses `-p chatgpt` while
+`config.toml` still holds the legacy `[profiles.chatgpt]` table ("move those settings into
+~/.codex/chatgpt.config.toml"), so the role removes that table.
 
 How a request travels:
 
