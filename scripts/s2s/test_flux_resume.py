@@ -287,7 +287,9 @@ def fake_kubectl(argv):
 
 
 @unittest.skipIf(BASH is None, "bash is required (set PHASE4_TEST_BASH)")
-class FluxResume(unittest.TestCase):
+class _Resume(unittest.TestCase):
+    """The harness: a fake kubectl/git on PATH, a state file the fake reads and writes, and the call log."""
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="flux-resume-")
         self.stubs = os.path.join(self.dir, "bin")
@@ -372,6 +374,13 @@ class FluxResume(unittest.TestCase):
     def final(self):
         return _load(self.dir)
 
+    def last(self, verb, kind):
+        verbs = self.verbs()
+        self.assertIn((verb, kind), verbs, verbs)
+        return max(i for i, v in enumerate(verbs) if v == (verb, kind))
+
+
+class FluxResume(_Resume):
     def test_after_drill_lands_the_commit_in_order(self):
         self.state()
         rc, text = self.run_script("--after-drill")
@@ -604,11 +613,6 @@ class FluxResume(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertIn("RESUMED", text)
 
-    def last(self, verb, kind):
-        verbs = self.verbs()
-        self.assertIn((verb, kind), verbs, verbs)
-        return max(i for i, v in enumerate(verbs) if v == (verb, kind))
-
     def test_suspended_secrets_land_before_platform_app(self):
         # Review of #1162 (reviewer-claude): drill 2 freezes platform-secrets with the release. If the
         # values landed first, the ten services would present preshared secrets to a registry that still
@@ -670,7 +674,7 @@ class FluxResume(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
 
-class GatekeeperRelease(FluxResume):
+class GatekeeperRelease(_Resume):
     """Step 1c (platform A.2): the gatekeeper release is its own HelmRelease under Kustomization
     platform-gatekeeper, a sibling of platform-app. The script resumes and gates it after the Secrets and
     before platform-app, so the services never come back to a gatekeeper that does not serve their
