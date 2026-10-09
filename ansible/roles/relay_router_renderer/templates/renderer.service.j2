@@ -1,0 +1,23 @@
+[Unit]
+Description=Relay router credential rendering for {{ relay_binding.bindingId }}
+After=network-online.target relay-router-auth.service
+Wants=network-online.target relay-router-auth.service
+
+[Service]
+ExecStart={{ relay_router_artifact_dir }}/{{ relay_router_renderer_sha256 }}/relay-credential-renderer --config {{ relay_router_config_dir }}/{{ relay_binding.bindingId }}.json --watch
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateUsers=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{ relay_router_state_dir }}/{{ relay_binding.bindingId }}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+---
+# Explicit deployment only; not imported by site.yml or dev-workers.yml.
+- name: Stage or reconcile isolated Relay router worker services
+  hosts: dev_workers
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Load dedicated router reader AppRoles from the specified SOPS file
+      community.sops.load_vars:
+        file: "{{ relay_router_secrets_file }}"
+      no_log: true
+      when:
+        - relay_router_enabled | default(false) | bool
+        - relay_router_secrets_file | default('') | length > 0
+  roles:
+    - role: relay_router_renderer

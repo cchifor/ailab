@@ -1,0 +1,166 @@
+---
+- name: Require bounded explicit artifacts, identities and paths
+  ansible.builtin.assert:
+    that:
+      - relay_router_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - relay_router_renderer_source | length > 0
+      - relay_router_bao_source | length > 0
+      - relay_router_renderer_sha256 is match('^[a-f0-9]{64}$')
+      - relay_router_bao_sha256 is match('^[a-f0-9]{64}$')
+      - relay_router_tenant_id is match(relay_router_uuid_pattern)
+      - relay_router_host_id is match(relay_router_uuid_pattern)
+      - relay_router_origin is match(relay_router_origin_pattern)
+      - relay_router_bao_origin is match(relay_router_origin_pattern)
+      - relay_router_bao_mount is match('^[A-Za-z0-9_-]{1,128}$')
+      - relay_router_bao_prefix is match('^[A-Za-z0-9_-]{1,128}(/[A-Za-z0-9_-]{1,128})*$')
+      - relay_router_bao_prefix | length <= 512
+      - relay_router_bindings | length > 0
+      - relay_router_bindings | length <= 32
+      - relay_router_bindings | map(attribute='bindingId') | unique | length == relay_router_bindings | length
+    quiet: true
+  vars:
+    relay_router_uuid_pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+    relay_router_origin_pattern: '^https://[a-z0-9][a-z0-9.-]*(?::[1-9][0-9]{0,4})?$'
+
+- name: Reject unsafe systemd and filesystem paths
+  ansible.builtin.assert:
+    that:
+      - item is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - "'/../' not in item + '/' and '/./' not in item + '/'"
+    quiet: true
+  loop:
+    - "{{ relay_router_home }}"
+    - "{{ relay_router_config_dir }}"
+    - "{{ relay_router_state_dir }}"
+    - "{{ relay_router_unit_dir }}"
+    - "{{ relay_router_artifact_dir }}"
+    - "{{ relay_router_connector_state_file }}"
+
+- name: Resolve the existing worker execution UID
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ relay_router_user }}"
+
+- name: Derive pinned artifact and runtime locations
+  ansible.builtin.set_fact:
+    relay_router_uid: "{{ getent_passwd[relay_router_user][1] }}"
+    relay_router_artifacts:
+      - { name: relay-credential-renderer, source: "{{ relay_router_renderer_source }}", sha: "{{ relay_router_renderer_sha256 }}" }
+      - { name: bao, source: "{{ relay_router_bao_source }}", sha: "{{ relay_router_bao_sha256 }}" }
+
+- name: Verify controller artifact hashes
+  ansible.builtin.stat:
+    path: "{{ item.source }}"
+    checksum_algorithm: sha256
+    follow: false
+  delegate_to: localhost
+  become: false
+  loop: "{{ relay_router_artifacts }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: relay_router_source_stats
+
+- name: Reject missing, linked or different controller artifact bytes
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(true)
+      - item.stat.checksum | default('') == item.item.sha
+    quiet: true
+  loop: "{{ relay_router_source_stats.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Require the exact approved host and private connector identity
+  block:
+    - name: Inspect existing connector identity permissions
+      ansible.builtin.stat:
+        path: "{{ relay_router_connector_state_file }}"
+        follow: false
+      register: relay_router_connector_stat
+    - name: Require an owner-only regular connector file
+      ansible.builtin.assert:
+        that:
+          - relay_router_connector_stat.stat.isreg | default(false)
+          - not relay_router_connector_stat.stat.islnk | default(true)
+          - relay_router_connector_stat.stat.nlink | default(0) == 1
+          - relay_router_connector_stat.stat.uid | default(-1) | int == relay_router_uid | int
+          - relay_router_connector_stat.stat.mode | default('') == '0600'
+          - relay_router_connector_stat.stat.size | default(0) <= 65536
+        quiet: true
+    - name: Read the existing connector identity without logging it
+      ansible.builtin.slurp:
+        src: "{{ relay_router_connector_state_file }}"
+      register: relay_router_connector_bytes
+    - name: Require explicit approved identity and separate AppRole credentials
+      ansible.builtin.assert:
+        that:
+          - relay_state.id == relay_router_host_id
+          - relay_state.url | regex_replace('/$', '') == relay_router_origin
+          - relay_state.phase == 'approved'
+          - relay_state.token is match('^[!-~]{20,8192}$')
+          - relay_router_role_id | length > 0
+          - relay_router_secret_id | length > 0
+          - relay_router_role_id is match('^[A-Za-z0-9_-]+$')
+          - relay_router_secret_id is match('^[A-Za-z0-9_-]+$')
+        quiet: true
+      vars:
+        relay_state: "{{ relay_router_connector_bytes.content | b64decode | from_json }}"
+  no_log: true
+
+- name: Require complete identity-matched holder policies and dedicated destinations
+  ansible.builtin.assert:
+    that:
+      - item.keys() | list | sort == ['bindingId', 'connectionId', 'credentialFile', 'executionIdentity', 'hostId', 'origin', 'protocol', 'selection', 'tenantId']
+      - item.tenantId == relay_router_tenant_id
+      - item.hostId == relay_router_host_id
+      - item.executionIdentity == relay_router_user
+      - item.bindingId is match(relay_router_uuid_pattern)
+      - item.connectionId is match(relay_router_uuid_pattern)
+      - item.origin is match(relay_router_origin_pattern)
+      - item.credentialFile == relay_router_state_dir + '/' + item.bindingId + '/credential.json'
+      - item.protocol in ['openai-chat', 'openai-responses', 'codex-responses']
+      - item.selection.kind in ['model', 'route']
+      - item.selection.keys() | list | sort == (['kind', 'model'] if item.selection.kind == 'model' else ['alias', 'kind'])
+      - item.selection.get('model', item.selection.get('alias', '')) | length > 0
+      - item.selection.get('model', item.selection.get('alias', '')) | length <= 256
+      - item.protocol != 'codex-responses' or item.selection.kind == 'model'
+    quiet: true
+  vars:
+    relay_router_uuid_pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+    relay_router_origin_pattern: '^https://[a-z0-9][a-z0-9.-]*(?::[1-9][0-9]{0,4})?$'
+  loop: "{{ relay_router_bindings }}"
+  loop_control:
+    label: "{{ item.bindingId }}"
+
+- name: Inspect previous managed binding inventory
+  ansible.builtin.stat:
+    path: "{{ relay_router_config_dir }}/bindings.json"
+  register: relay_router_previous_stat
+
+- name: Read previous managed binding inventory
+  ansible.builtin.slurp:
+    src: "{{ relay_router_config_dir }}/bindings.json"
+  register: relay_router_previous
+  when: relay_router_previous_stat.stat.exists
+
+- name: Require retiring old bindings before removing their deployment definitions
+  ansible.builtin.assert:
+    that: (relay_router_previous.content | b64decode | from_json) | difference(relay_router_bindings | map(attribute='bindingId') | list) | length == 0
+    fail_msg: Revoke/drain removed bindings, confirm file cleanup, stop/remove their units and update bindings.json following docs/runbooks/relay-router-workers.md before removing inventory entries.
+    quiet: true
+  when: relay_router_previous_stat.stat.exists
+
+- name: Verify user service persistence before enabling any service
+  ansible.builtin.command:
+    argv: [loginctl, show-user, "{{ relay_router_uid }}", --property=Linger, --value]
+  register: relay_router_linger
+  changed_when: false
+  when: relay_router_manage_services | bool
+
+- name: Require the existing persistent user manager
+  ansible.builtin.assert:
+    that: relay_router_linger.stdout | trim == 'yes'
+    fail_msg: Enable worker linger through the reviewed worker bootstrap before starting these services.
+    quiet: true
+  when: relay_router_manage_services | bool

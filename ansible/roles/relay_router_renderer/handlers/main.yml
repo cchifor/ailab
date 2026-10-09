@@ -1,0 +1,14 @@
+---
+- name: Restart managed router services after verified configuration changes
+  listen: relay router configuration changed
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    scope: user
+    daemon_reload: true
+    state: restarted
+  become: true
+  become_user: "{{ relay_router_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_router_uid }}"
+  loop: "{{ ['relay-router-auth.service'] + relay_router_bindings | map(attribute='bindingId') | map('regex_replace', '^(.*)$', 'relay-router-render-\\1.service') | list }}"
+  when: relay_router_manage_services | bool
