@@ -20,20 +20,100 @@ home=${1:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 root=${2:?usage: agent-dirs-migrate HOME WORKSPACE_ROOT}
 [ -d "$root" ] || { echo "skip: $root does not exist"; exit 0; }
 
-# Any process of this user (the effective uid owns its /proc entry) with its cwd, executable, an open
-# file or a mapping under one of the caches.
-caches_in_use() {
-	local p link target
+# For the by-NAME heuristic only (the identity check below needs no namespace logic): a process in
+# another mount namespace — a container's, whose uid 1000 is this user's — usually sees its own
+# filesystem; a containerised Playwright under /home/appuser/.cache never touches this ~/.cache (its
+# NAME blocked dev-worker-3 forever, 2026-10-09). Another namespace is not proof (`unshare -m`, a
+# sandboxed service), so a name match is ignored only when the process is PROVEN isolated: its root is
+# readable and neither cache path under it is the same file as ours. Anything unprovable counts.
+self_ns=$(readlink /proc/self/ns/mnt)
+# The checks below judge other processes against THIS process's view; run from a sandboxed unit or a
+# container (a namespace of its own), every host process would look isolated. Refuse rather than
+# judge from the wrong place (under ssh/ansible the parent shares the namespace).
+if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ] && [ "$(readlink "/proc/$PPID/ns/mnt" 2>/dev/null)" != "$self_ns" ]; then
+	echo "skip: busy (not running in the caller's mount namespace; cannot judge which processes use the caches)"
+	exit 0
+fi
+cache_ids=$(stat -Lc '%d:%i' "$home/.cache" "$home/.npm" 2>/dev/null || :)
+relevant() { # PID: could this process be using our caches?
+	local pid=$1 d id
+	[ "$(readlink "/proc/$pid/ns/mnt" 2>/dev/null)" = "$self_ns" ] && return 0
+	[ -r "/proc/$pid/root/" ] || return 0 # cannot look inside: assume it can
+	for d in .cache .npm; do
+		id=$(stat -Lc '%d:%i' "/proc/$pid/root$home/$d" 2>/dev/null) || continue
+		grep -qxF -- "$id" <<<"$cache_ids" && return 0
+	done
+	return 1
+}
+
+# Identity, not paths: "dev:ino" of every object in the caches (one walk, one filesystem each), and of
+# every object each process of this user references — cwd, executable, every open fd, every mapped
+# file (/proc/PID/maps carries the device and inode) — in ANY namespace: a container, an `unshare -m`
+# sandbox or a private ~/.cache with the host's ~/.cache/uv bind-mounted into it all reference the
+# same objects if they use our caches, whatever path they see them under.
+cache_objects() {
+	find "$home/.cache/" "$home/.npm/" -xdev -printf '%D:%i\n' 2>/dev/null | sort -u
+}
+process_objects() {
+	local p dev ino maj min
 	for p in /proc/[0-9]*; do
 		[ -O "$p" ] || continue
-		for link in "$p/cwd" "$p/exe" "$p"/fd/*; do
-			target=$(readlink -- "$link" 2>/dev/null) || continue
-			case "$target" in
-			"$home/.cache" | "$home/.cache/"* | "$home/.npm" | "$home/.npm/"*) return 0 ;;
-			esac
-		done
-		grep -qsF -e "$home/.cache/" -e "$home/.npm/" "$p/maps" && return 0
+		stat -Lc '%d:%i' "$p/cwd" "$p/exe" "$p"/fd/* 2>/dev/null
+		while read -r _ _ _ dev ino _; do
+			[ -n "$ino" ] && [ "$ino" != 0 ] || continue
+			maj=$((16#${dev%%:*}))
+			min=$((16#${dev##*:}))
+			echo "$(((min & 255) | (maj << 8) | ((min >> 8) << 20))):$ino"
+		done 2>/dev/null <"$p/maps"
+	done | sort -u
+}
+# Processes of this user that cannot be inspected at all (not dumpable: sshd sessions, systemd --user,
+# (sd-pam), some container inits — dev-worker-3, 2026-10-09). Counting them all as busy would block
+# the move whenever anyone is logged in; ignoring them all would miss a non-dumpable tool. So: busy
+# only when its name (comm, always readable) is a cache-using tool.
+uninspectable_tool() {
+	local p comm
+	for p in /proc/[0-9]*; do
+		[ -O "$p" ] || continue
+		head -c1 "$p/maps" >/dev/null 2>&1 && continue
+		read -r comm 2>/dev/null <"$p/comm" || continue
+		case "$comm" in
+		uv | uvx | pip | pip3 | npm | npx | pnpm | node | python | python3* | playwright* | chrom* | headless_shell | firefox* | WebKit*) return 0 ;;
+		esac
 	done
+	return 1
+}
+caches_in_use() {
+	local objs
+	objs=$(cache_objects)
+	[ -n "$objs" ] || return 1
+	[ -n "$(comm -12 <(printf '%s\n' "$objs") <(process_objects) | head -1)" ] || uninspectable_tool
+}
+
+# A running container with a bind mount at, under or ABOVE one of the caches ($HOME, /home, /): moving
+# the directory would pull it from under the container. Path-component boundaries: /home/c4/.cachex
+# is not /home/c4/.cache.
+overlaps_caches() { # MOUNT_SOURCE
+	local src=${1%/} c
+	[ -n "$src" ] || return 0 # "/"
+	for c in "$home/.cache" "$home/.npm"; do
+		case "$c/" in "$src"/*) return 0 ;; esac # the source is c or an ancestor of it
+		case "$src/" in "$c"/*) return 0 ;; esac # the source is under c
+	done
+	return 1
+}
+# 0 = a container mounts them, 1 = none does, 2 = docker could not be asked (callers treat it as busy:
+# a daemon that is down or a socket this user cannot open must not read as "no containers").
+containers_mount_caches() {
+	local ids mounts src
+	command -v docker >/dev/null 2>&1 || return 1
+	ids=$(timeout 30 docker ps -q 2>/dev/null) || return 2
+	[ -n "$ids" ] || return 1
+	# shellcheck disable=SC2086 # one id per word
+	mounts=$(timeout 60 docker inspect --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' $ids 2>/dev/null) || return 2
+	while IFS= read -r src; do
+		[ -n "$src" ] && overlaps_caches "$src" && return 0
+	done <<<"$mounts"
 	return 1
 }
 
@@ -42,8 +122,19 @@ if [ "${DW_AGENT_DIRS_BUSY_CHECK:-1}" != 0 ]; then
 		echo "skip: busy (a process of $(id -un) is using $home/.cache or $home/.npm)"
 		exit 0
 	fi
-	if pgrep -u "$(id -u)" -f -- '(^|[ /])(uv|uvx|pip3?|npm|npx|pnpm)( |$)|-m (pip|uv)( |$)|playwright(/| |$)|ms-playwright/' >/dev/null; then
-		echo "skip: busy (a uv/pip/npm/playwright process of $(id -un) is running)"
+	for pid in $(pgrep -u "$(id -u)" -f -- '(^|[ /])(uv|uvx|pip3?|npm|npx|pnpm)( |$)|-m (pip|uv)( |$)|playwright(/| |$)|ms-playwright/'); do
+		if relevant "$pid"; then
+			echo "skip: busy (a uv/pip/npm/playwright process of $(id -un) is running)"
+			exit 0
+		fi
+	done
+	rc=0
+	containers_mount_caches || rc=$?
+	if [ "$rc" = 0 ]; then
+		echo "skip: busy (a running container bind-mounts $home/.cache or $home/.npm)"
+		exit 0
+	elif [ "$rc" = 2 ]; then
+		echo "skip: busy (cannot ask docker which containers mount $home/.cache or $home/.npm)"
 		exit 0
 	fi
 fi
