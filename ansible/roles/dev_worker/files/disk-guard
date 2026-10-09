@@ -15,7 +15,7 @@ The ladder. Before each step the low filesystems are re-measured, and a step onl
 own filesystem is still under --target: docker steps for the docker fs, and the other steps search
 only their roots on a still-short fs (a full / does not cost /workspace a worktree):
   0. codex-releases  old codex app-server daemon releases in ~/.codex/packages/app-server-daemon/
-                   (/home/*, /root): ~425 MB each, one per auto-update, never pruned by codex. Kept:
+                   (/home/*): ~425 MB each, one per auto-update, never pruned by codex. Kept:
                    `current`, the one `auto-update-version` names, any a running process executes
                    from, any touched within the hour (an install in flight). A home whose `current`
                    does not resolve to a release, or whose install.lock an installer holds (flock),
@@ -48,13 +48,15 @@ While its top-level entries add up to more than the cap, the entry that changed 
 removed. "Changed" is the newest mtime OR ctime anywhere in the entry: ctime because `mv` into the
 archive keeps a file's old mtime but bumps its ctime, and nobody can set a ctime back. An entry
 changed within the hour is never removed, so a burst of new entries can hold the dir over its cap
-for up to an hour (archive_bytes > archive_max_bytes: the DevWorkerArchiveOverCap alert). Hard
-links are counted once; the scan gives up after ARCHIVE_SCAN_BUDGET seconds and then removes nothing
-that run. Nothing outside that directory is ever removed by the cap.
+for up to an hour (archive_bytes > archive_max_bytes: the DevWorkerArchiveOverCap alert). A file
+hard-linked from several entries is counted once, and only removing its last entry counts as freeing
+it. The scan gives up after ARCHIVE_SCAN_BUDGET seconds, removes nothing that run and reports
+archive_scan_timeout=1 (same alert). Nothing outside that directory is ever removed by the cap.
 
 Every removal by this tool itself (a codex release, an archive entry) runs `rm -rf` as the owner of
-the directory it sits in, never as root: those directories are user-writable, and a symlink swapped
-in mid-run can then only reach what that user could remove anyway.
+that entry, and never as root: a root-owned entry is left alone, and so is a codex install reached
+through a symlink. Those directories are user-writable; a symlink swapped in mid-run can then only
+reach what that user could remove anyway.
 
 When a run ends exhausted it logs the largest directories (du -x, depth 2) of each filesystem still
 under --low, each filesystem at most once an hour: eligible reclaim fell short, and the log says
@@ -65,8 +67,8 @@ Each run writes dev_worker_disk_guard.prom to the node_exporter textfile directo
   _exhausted (1 = every step ran and a watched fs is still under --low: eligible reclaim was not
   enough, a human has to look; never set when a step was deferred or failed), _failed_steps,
   _deferred (1 = a step waited for a busy docker or for cleanup's lock),
-  _free_ratio{mountpoint}, and with --archive-dir _archive_bytes, _archive_max_bytes and
-  _archive_removed_bytes (this run's removals, as scanned: not a counter).
+  _free_ratio{mountpoint}, and with --archive-dir _archive_bytes, _archive_max_bytes,
+  _archive_removed_bytes (this run's removals, as scanned: not a counter) and _archive_scan_timeout.
   Alerts: DevWorkerDiskGuardExhausted / Failing / Stale.
 
 Installed by ansible (roles/dev_worker, tasks/disk_guard.yml); tested by
@@ -94,7 +96,7 @@ DU_TIMEOUT = 300    # seconds per filesystem
 ARCHIVE_SCAN_BUDGET = 120   # seconds
 # Codex's app-server daemon, per user: current -> releases/<ver>, one release per auto-update.
 CODEX_DAEMON = ".codex/packages/app-server-daemon"
-CODEX_HOMES = ("/home", "/root")    # /home/<user>/.codex and /root/.codex
+CODEX_HOMES = ("/home",)            # /home/<user>/.codex (root's own is never pruned: see remove_as_owner)
 # A release dir or archive entry modified this recently may still be being written: never removed.
 YOUNG = 3600        # seconds
 # run_step's answer when `cleanup` refused because another run (the daily timer) holds its lock: the
@@ -220,11 +222,12 @@ WINDOWS = {"start": START_WINDOW, "build-start": BUILD_START_WINDOW}   # "build"
 
 
 def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=docker_busy,
-          progress=lambda m: None, report=lambda paths: None):
-    """One check. Returns the metrics dict. Pure apart from `measure`, `avail`, `run`, `busy`,
-    `progress` and `report`, which the tests replace. `progress(m)` is called when a run triggers and
-    after every step, so the heartbeat keeps beating through a ladder that takes longer than the Stale
-    window. `report(paths)` is called with the filesystems still low when a run ends exhausted."""
+          progress=lambda m: None):
+    """One check. Returns the metrics dict. Pure apart from `measure`, `avail`, `run`, `busy`
+    and `progress`, which the tests replace. `progress(m)` is called when a run triggers and after
+    every step, so the heartbeat keeps beating through a ladder that takes longer than the Stale
+    window. An exhausted run lists the filesystems still low in m["exhausted_paths"]; main reports
+    on them after the final metrics write, so a slow du never delays the heartbeat."""
     run = run or run_step
     watched = list(dict.fromkeys(opts.watch))
     same = opts.same_fs or same_filesystem
@@ -296,7 +299,7 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
             "under {}% free and needs a human".format(
                 ", ".join(f"{p} ({after[p] * 100:.1f}%)" for p in still),
                 "is" if len(still) == 1 else "are", opts.low))
-        report(still)
+        m["exhausted_paths"] = still
     return m
 
 
@@ -322,10 +325,14 @@ def run_step(step):
 
 
 def remove_as_owner(path, uid, gid):
-    """`rm -rf` one entry as `uid`, never as root. The callers remove entries of user-writable
-    directories: run as root, a symlink the user swaps in between the check and the removal would
-    aim root's rm anywhere; run as the user, it reaches only what that user could remove anyway.
-    True when the entry is gone."""
+    """`rm -rf` one entry as its owner `uid`, NEVER as root (uid 0 is refused). The callers remove
+    entries of user-writable directories: run as root, a symlink the user swaps in between the check
+    and the removal would aim root's rm anywhere; run as the entry's owner, it reaches only what that
+    user could remove anyway. True when the entry is gone."""
+    if uid == 0:
+        print(f"disk-guard: {path} is owned by root; not removed (removals never run as root)",
+              file=sys.stderr)
+        return False
     kw = {} if os.geteuid() == uid else {"user": uid, "group": gid, "extra_groups": []}
     try:
         subprocess.run(["rm", "-rf", "--one-file-system", "--", path], stdin=subprocess.DEVNULL,
@@ -345,41 +352,54 @@ def changed_at(st):
     return max(st.st_mtime, st.st_ctime)
 
 
-def tree_usage(path, dev=None, seen=None, deadline=None, stamp=changed_at):
-    """(bytes on disk, newest `stamp`) of `path` and everything under it: lstat only, symlinks are
-    never followed, other filesystems are not entered, an inode already in `seen` (a hard link)
-    adds no bytes. Unreadable parts count as nothing. Raises ScanTimeout past `deadline`."""
-    seen = set() if seen is None else seen
+def past(deadline):
+    return deadline is not None and time.monotonic() > deadline
+
+
+def walk_lstat(path, dev, deadline=None):
+    """Yield the lstat of `path` and of everything under it: symlinks never followed, other
+    filesystems not entered (a mountpoint is yielded, not descended), unreadable parts skipped.
+    Raises ScanTimeout past `deadline`, checked every 256 entries and before every directory."""
     try:
         st = os.lstat(path)
     except OSError:
-        return 0, 0.0
-    dev = st.st_dev if dev is None else dev
-    size, newest = 0, stamp(st)
-    if (st.st_dev, st.st_ino) not in seen:
-        seen.add((st.st_dev, st.st_ino))
-        size = st.st_blocks * 512
+        return
+    yield st
     if not stat.S_ISDIR(st.st_mode) or st.st_dev != dev:
-        return size, newest
-    stack = [path]
+        return
+    stack, n = [path], 0
     while stack:
-        if deadline is not None and time.monotonic() > deadline:
+        if past(deadline):
             raise ScanTimeout(path)
         try:
             with os.scandir(stack.pop()) as it:
                 for e in it:
+                    n += 1
+                    if n % 256 == 0 and past(deadline):
+                        raise ScanTimeout(path)
                     try:
                         s = e.stat(follow_symlinks=False)
                     except OSError:
                         continue
-                    newest = max(newest, stamp(s))
-                    if (s.st_dev, s.st_ino) not in seen:
-                        seen.add((s.st_dev, s.st_ino))
-                        size += s.st_blocks * 512
+                    yield s
                     if stat.S_ISDIR(s.st_mode) and s.st_dev == dev:
                         stack.append(e.path)
         except OSError:
             continue
+
+
+def tree_usage(path, stamp=changed_at):
+    """(bytes on disk, newest `stamp`) of one tree on one filesystem, hard links counted once."""
+    try:
+        dev = os.lstat(path).st_dev
+    except OSError:
+        return 0, 0.0
+    size, newest, seen = 0, 0.0, set()
+    for st in walk_lstat(path, dev):
+        newest = max(newest, stamp(st))
+        if (st.st_ino) not in seen:
+            seen.add(st.st_ino)
+            size += st.st_blocks * 512
     return size, newest
 
 
@@ -400,7 +420,7 @@ def running_exes(proc="/proc"):
 
 def codex_daemon_dirs(roots):
     """Each `<home>/.codex/packages/app-server-daemon` under `roots` (a root may itself be a home,
-    like /root, or hold homes, like /home)."""
+    or hold homes, like /home)."""
     found = []
     for r in roots:
         for d in [os.path.join(r, CODEX_DAEMON)] + sorted(glob.glob(os.path.join(r, "*", CODEX_DAEMON))):
@@ -446,6 +466,12 @@ def prune_codex_releases(roots, exes=None, now=None, log=print, remove=remove_as
     now = time.time() if now is None else now
     rc = 0
     for d in codex_daemon_dirs(roots):
+        # Reached through a symlink (an ancestor, or releases/ itself): not a home's own codex
+        # install, and its owner would not be the user whose home this is. Never pruned.
+        rel = os.path.join(d, "releases")
+        if os.path.realpath(d) != os.path.abspath(d) or os.path.islink(rel):
+            log(f"  codex-releases: {d}: reached through a symlink; skipped")
+            continue
         held = lock(d)
         if held is None:
             log(f"  codex-releases: {d}: an install holds install.lock; skipped")
@@ -470,14 +496,16 @@ def prune_daemon_dir(d, exes, now, log, remove, dry_run, stamp):
             keep.add(f.read().strip())
     except OSError:
         pass
-    owner = os.lstat(rel)
     rc = 0
     for name in sorted(os.listdir(rel)):
         p = os.path.join(rel, name)
-        real = os.path.join(os.path.realpath(rel), name)
-        if name in keep or os.path.islink(p) or not os.path.isdir(p):
+        try:
+            st = os.lstat(p)
+        except OSError:
             continue
-        if any(e.startswith(real + os.sep) for e in exes):
+        if name in keep or not stat.S_ISDIR(st.st_mode):
+            continue                    # a symlink is not a dir to lstat: never followed
+        if any(e.startswith(p + os.sep) for e in exes):
             continue                    # a process still runs from it
         size, newest = tree_usage(p, stamp=stamp)
         if now - newest < YOUNG:
@@ -487,7 +515,7 @@ def prune_daemon_dir(d, exes, now, log, remove, dry_run, stamp):
             return rc
         if dry_run:
             log(f"  codex-releases: would remove {p} ({size / 1e9:.2f} GB)")
-        elif remove(p, owner.st_uid, owner.st_gid):
+        elif remove(p, st.st_uid, st.st_gid):
             log(f"  codex-releases: removed {p} ({size / 1e9:.2f} GB)")
         else:
             log(f"  codex-releases: could not remove {p}")
@@ -495,50 +523,91 @@ def prune_daemon_dir(d, exes, now, log, remove, dry_run, stamp):
     return rc
 
 
+@dataclass
+class Entry:
+    path: str
+    uid: int
+    gid: int
+    dev: int
+    newest: float = 0.0
+    own: int = 0                # bytes of inodes only this entry links (nlink 1, and directories)
+    shared: dict = None         # ino -> bytes, for files linked more than once
+
+
+def scan_entry(path, dev, deadline, stamp):
+    st = os.lstat(path)
+    e = Entry(path, st.st_uid, st.st_gid, st.st_dev, shared={})
+    for s in walk_lstat(path, dev, deadline):
+        e.newest = max(e.newest, stamp(s))
+        if s.st_nlink > 1 and not stat.S_ISDIR(s.st_mode):
+            e.shared[s.st_ino] = s.st_blocks * 512
+        else:
+            e.own += s.st_blocks * 512
+    return e
+
+
 def trim_archive(path, max_bytes, now=None, log=print, remove=remove_as_owner, dry_run=False,
                  budget=ARCHIVE_SCAN_BUDGET, stamp=changed_at):
-    """The archive cap, best effort. Returns (bytes left, bytes removed); (0, 0) when `path` is not
-    a real directory (missing, or a symlink: never trimmed through). A scan past `budget` seconds
-    removes nothing and returns None: incomplete totals must not pick what to delete."""
+    """The archive cap, best effort. Returns {"bytes", "removed", "timeout"}, or None when `path`
+    is not a real directory (missing, or a symlink: never trimmed through).
+
+    Bytes are the archive's own allocation, a hard-linked file counted once however many entries
+    link it; removing an entry subtracts only what no remaining entry still links. A scan past
+    `budget` seconds removes nothing that run and reports timeout=1 with the bytes counted so far (a
+    lower bound): incomplete totals must not pick what to delete."""
     now = time.time() if now is None else now
     try:
         st = os.lstat(path)
     except OSError:
-        return 0, 0
+        return None
     if not stat.S_ISDIR(st.st_mode):
-        return 0, 0
+        return None
     deadline = time.monotonic() + budget
-    seen = {(st.st_dev, st.st_ino)}
-    entries = []
+    entries, refs, partial = [], {}, 0
     try:
         for name in sorted(os.listdir(path)):
-            p = os.path.join(path, name)
-            size, newest = tree_usage(p, st.st_dev, seen, deadline, stamp)
-            entries.append((newest, name, p, size))
+            if past(deadline):
+                raise ScanTimeout(path)
+            try:
+                e = scan_entry(os.path.join(path, name), st.st_dev, deadline, stamp)
+            except FileNotFoundError:
+                continue                # removed by its owner mid-scan
+            entries.append(e)
+            partial += e.own + sum(b for i, b in e.shared.items() if i not in refs)
+            for i in e.shared:
+                refs[i] = refs.get(i, 0) + 1
+        if past(deadline):
+            raise ScanTimeout(path)
     except ScanTimeout:
         log(f"disk-guard: archive {path}: scan took over {budget} s; nothing removed this run")
-        return None
-    total = sum(e[3] for e in entries)
-    removed = 0
-    for newest, _name, p, size in sorted(entries):
+        return {"bytes": partial, "removed": 0, "timeout": 1}
+    total, removed = partial, 0
+    for e in sorted(entries, key=lambda x: (x.newest, x.path)):
         if total <= max_bytes:
             break
-        if now - newest < YOUNG:
+        if now - e.newest < YOUNG:
             log(f"disk-guard: archive {path} is {total / 1e9:.1f} GB, over its "
                 f"{max_bytes / 1e9:.0f} GB cap, and everything left changed within the hour")
             break                       # oldest-first: everything after this is younger still
-        age_h = (now - newest) / 3600
+        if e.dev != st.st_dev:
+            log(f"disk-guard: archive: {e.path} is a mountpoint; never removed")
+            continue                    # rm --one-file-system would descend into what is mounted
+        freed = e.own + sum(b for i, b in e.shared.items() if refs[i] == 1)
+        age_h = (now - e.newest) / 3600
         if dry_run:
-            log(f"disk-guard: archive: would remove {p} ({size / 1e9:.2f} GB, idle {age_h:.0f} h)")
-        elif remove(p, st.st_uid, st.st_gid):
-            log(f"disk-guard: archive over {max_bytes / 1e9:.0f} GB: removed {p} "
-                f"({size / 1e9:.2f} GB, idle {age_h:.0f} h)")
+            log(f"disk-guard: archive: would remove {e.path} ({freed / 1e9:.2f} GB, "
+                f"idle {age_h:.0f} h)")
+        elif remove(e.path, e.uid, e.gid):
+            log(f"disk-guard: archive over {max_bytes / 1e9:.0f} GB: removed {e.path} "
+                f"({freed / 1e9:.2f} GB, idle {age_h:.0f} h)")
         else:
-            log(f"disk-guard: archive: could not remove {p}")
+            log(f"disk-guard: archive: could not remove {e.path}")
             continue
-        total -= size
-        removed += size
-    return total, removed
+        for i in e.shared:
+            refs[i] -= 1
+        total -= freed
+        removed += freed
+    return {"bytes": total, "removed": removed, "timeout": 0}
 
 
 def report_largest(paths, log=print, stamp=DU_STAMP, now=None, every=DU_EVERY, top=DU_TOP,
@@ -620,6 +689,10 @@ def render_prom(m, now):
             "# HELP dev_worker_disk_guard_archive_removed_bytes Bytes the last run removed for the cap.",
             "# TYPE dev_worker_disk_guard_archive_removed_bytes gauge",
             f"dev_worker_disk_guard_archive_removed_bytes {m['archive_removed_bytes']}",
+            "# HELP dev_worker_disk_guard_archive_scan_timeout 1 if the last archive scan ran out of"
+            " time (archive_bytes is then a lower bound and nothing was removed).",
+            "# TYPE dev_worker_disk_guard_archive_scan_timeout gauge",
+            f"dev_worker_disk_guard_archive_scan_timeout {m.get('archive_scan_timeout', 0)}",
         ]
     return "\n".join(lines) + "\n"
 
@@ -713,18 +786,20 @@ def main(argv=None):
 
     def with_archive(m):
         if archive is not None:
-            m["archive_bytes"], m["archive_removed_bytes"] = archive
+            m["archive_bytes"], m["archive_removed_bytes"] = archive["bytes"], archive["removed"]
+            m["archive_scan_timeout"] = archive["timeout"]
             m["archive_max_bytes"] = int(opts.archive_max_gb * 1e9)
         return m
     beat = (lambda m: None) if opts.dry_run else (
         lambda m: write_prom(render_prom(with_archive(m), time.time()), opts.textfile_dir))
-    m = with_archive(guard(opts, progress=beat,
-                           report=(lambda paths: None) if opts.dry_run else report_largest))
+    m = with_archive(guard(opts, progress=beat))
     if not m["triggered"] and opts.dry_run:
         print("disk-guard: ok — " + ", ".join(
             f"{p} {r * 100:.1f}% free" for p, r in m["free_ratio"].items()))
     if not opts.dry_run:
         write_prom(render_prom(m, time.time()), opts.textfile_dir)
+        if m.get("exhausted_paths"):
+            report_largest(m["exhausted_paths"])    # after the heartbeat: du can take minutes
     return 0
 
 

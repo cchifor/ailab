@@ -38,13 +38,14 @@ the cause; the ladder ran clean and found nothing.
 
 ## Design (this PR)
 ### A. disk-guard: new `codex-releases` step (step 0, only while `/` is low)
-In-process step for `/root` and `/home/*` on a still-short filesystem, in
-`.codex/packages/app-server-daemon/`. Skip the home if `current` does not resolve to a dir under
-`releases/`, or if codex's own `install.lock` is held (non-blocking flock, opened O_NOFOLLOW).
+In-process step for `/home/*` on a still-short filesystem, in `.codex/packages/app-server-daemon/`.
+Skip the home if the install is reached through a symlink (an ancestor or `releases/` itself), if
+`current` does not resolve to a dir under `releases/`, or if codex's own `install.lock` is held
+(non-blocking flock, opened O_NOFOLLOW).
 Keep `current`'s target, the release named in `auto-update-version`, any release containing a running
 process' executable (`/proc/*/exe`) and any release changed < 1 h ago. Re-read `current` before every
-removal; if it moved, stop. Removal = `rm -rf --one-file-system` **as the owner of `releases/`**, never
-root. `--dry-run` lists what it would remove.
+removal; if it moved, stop. Removal = `rm -rf --one-file-system` **as the release dir's owner**; uid 0
+is refused outright (so `/root` is not a codex home here). `--dry-run` lists what it would remove.
 
 ### B. A capped archive directory for agents: `/workspace/archive`
 - Role: `dev_worker_archive_dir` (default `{{ dev_worker_workspace_mount }}/archive`, 2775
@@ -52,12 +53,16 @@ root. `--dry-run` lists what it would remove.
   `dev_worker_archive_max_gb` (default 20, GB = 10^9).
 - disk-guard `--archive-dir D --archive-max-gb N` on EVERY run (independent of the low-disk gate):
   best-effort retention. Per top-level entry: allocated bytes (lstat, symlinks never followed, one
-  filesystem, hard links counted once) and newest change = max(mtime, ctime) anywhere in it (ctime
-  because `mv` into the archive keeps the old mtime; ctime cannot be set back). While over the cap,
-  remove the least recently changed entry, never one changed < 1 h ago (then log that everything
-  left is young). The scan has a 120 s budget; past it nothing is removed that run. Removal as the
-  archive dir's owner. Metrics `dev_worker_disk_guard_archive_bytes`, `_archive_max_bytes`,
-  `_archive_removed_bytes` (this run, as scanned); alert `DevWorkerArchiveOverCap` (over for 2h).
+  filesystem) and newest change = max(mtime, ctime) anywhere in it (ctime because `mv` into the
+  archive keeps the old mtime; ctime cannot be set back). A file linked from several entries counts
+  once, and only removing its last entry frees it (per-inode reference counts, multiply-linked
+  files only). While over the cap, remove the least recently changed entry, never one changed
+  < 1 h ago (then log that everything left is young). The scan has a 120 s budget, checked per entry
+  and every 256 directory entries; past it nothing is removed that run and `archive_scan_timeout=1`
+  is exported with the bytes counted so far. Each entry is removed as its own owner, never root.
+  Metrics `dev_worker_disk_guard_archive_bytes`, `_archive_max_bytes`, `_archive_removed_bytes`
+  (this run, as scanned), `_archive_scan_timeout`; alert `DevWorkerArchiveOverCap` (over the cap or
+  timing out, for 2h). The dir is owned like the mount (agent user, admin group, setgid).
 - Nothing outside that directory is ever removed by the cap.
 
 ### C. Agent guide (managed block in `~/.claude/CLAUDE.md` + `~/.codex/AGENTS.md`)
@@ -71,9 +76,10 @@ while work that exists nowhere else is kept (only that part).
 "every step ran, eligible reclaim was not enough: / (5.0%) is still under 15% free" — names the
 filesystems actually still low. Then the 8 largest `du -x --max-depth=2` directories of each, each
 filesystem at most once an hour (stamp per filesystem in /run, never written by `--dry-run`), du
-timeout 300 s logged as such. Alert text points at those lines and at `$HOME`.
+timeout 300 s logged as such. The report runs in `main` AFTER the final metrics write, so a slow du
+never delays the heartbeat. Alert text points at those lines and at `$HOME`.
 
-## Tests (scripts/tests/test_dev_worker_disk_guard.py, 55)
+## Tests (scripts/tests/test_dev_worker_disk_guard.py, 62)
 Ladder order with codex-releases first and only for `/`; codex-releases keeps current /
 auto-update-version / running / young, skips a dangling or foreign `current` and a held
 install.lock (real flock), stops when `current` moves, never follows a symlinked release, removes
@@ -100,6 +106,22 @@ Rejected: a staging/publication protocol for archive entries (#3) — an hour of
 completion signal, documented to the agents; descriptor-pinned deletion / bind-mount detection (#2) —
 the owner-uid rm bounds the blast radius to what the agent could delete itself; inode exhaustion
 (#11) — real, but not this incident (/workspace 39% inodes): follow-up.
+
+## PR review round 1 (#1183: reviewer-codex, reviewer-claude, on 06f03a58)
+All accepted and fixed in the next push:
+- codex: "never as root" was not enforced (uid 0 ran rm as root; a `releases` symlink's lstat owner
+  stood in for the target's). Now uid 0 is refused, `/root` dropped, installs reached through a
+  symlink skipped, and every entry is removed as ITS OWN owner.
+- codex: the scan deadline missed flat files and wide directories. Now checked per entry, every 256
+  directory entries and once more before any removal.
+- codex + claude: a shared hard-linked inode was charged to the first entry scanned, so removing it
+  could report the archive under its cap without freeing the blocks. Now exact per-inode reference
+  counts.
+- claude: a timed-out scan exported no archive metrics, silencing the alert exactly when the archive
+  is huge. Now `archive_scan_timeout` + a lower-bound size, and the alert fires on it.
+- claude: the du report ran before the final heartbeat (up to 10 min). Moved after it.
+- claude: one owner for a dir the guide advertises to every user. Admin group + setgid, and removal
+  as the entry's owner.
 
 ## Rollout
 PR -> CI -> reviewbot. Canary dev-worker-3 first: `--tags disk_guard -l dev-worker-3`, then

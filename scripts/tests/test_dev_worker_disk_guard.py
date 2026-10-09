@@ -110,7 +110,7 @@ class GuardTest(unittest.TestCase):
         d = Disk({"/": 0.05, "/workspace": 0.60})
         dg.guard(opts("--worktrees-remove"), d.measure, d.avail, d.run, quiet, idle)
         self.assertEqual(d.ran, ["codex-releases", "worktrees", "deps"])
-        self.assertEqual(d.roots["codex-releases"], ("/home", "/root"))
+        self.assertEqual(d.roots["codex-releases"], ("/home",))
         self.assertEqual(roots_of(d.argv["worktrees"]), "/home")
         self.assertEqual(roots_of(d.argv["deps"]), "/home")
 
@@ -286,26 +286,24 @@ class GuardTest(unittest.TestCase):
 
     def test_exhausted_names_the_low_fs_and_reports_it(self):
         d = Disk({"/": 0.05, "/workspace": 0.40})
-        logs, reported = [], []
-        m = dg.guard(opts(), d.measure, d.avail, d.run, logs.append, idle, report=reported.append)
+        logs = []
+        m = dg.guard(opts(), d.measure, d.avail, d.run, logs.append, idle)
         self.assertEqual(m["exhausted"], 1)
-        self.assertEqual(reported, [["/"]])
+        self.assertEqual(m["exhausted_paths"], ["/"])
         self.assertIn("eligible reclaim was not enough: / (5.0%) is still under 15% free", logs[-1])
         self.assertNotIn("/workspace", logs[-1])
 
     def test_not_exhausted_no_report(self):
         d = Disk({"/": 0.05, "/workspace": 0.40}, gain={"codex-releases": {"/": 0.30}})
-        reported = []
-        m = dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle, report=reported.append)
-        self.assertEqual((m["exhausted"], reported, d.ran), (0, [], ["codex-releases"]))
+        m = dg.guard(opts(), d.measure, d.avail, d.run, quiet, idle)
+        self.assertEqual((m["exhausted"], m.get("exhausted_paths"), d.ran),
+                         (0, None, ["codex-releases"]))
 
     def test_dry_run_previews_in_process_steps_only(self):
         d = Disk({"/": 0.05, "/workspace": 0.05})
-        reported = []
-        m = dg.guard(opts("--dry-run"), d.measure, d.avail, d.run, quiet, idle,
-                     report=reported.append)
+        m = dg.guard(opts("--dry-run"), d.measure, d.avail, d.run, quiet, idle)
         self.assertEqual(d.ran, ["codex-releases"])     # bound to dry_run; nothing else is called
-        self.assertEqual((m["steps_run"], m["exhausted"], reported), (0, 0, []))
+        self.assertEqual((m["steps_run"], m["exhausted"], m.get("exhausted_paths")), (0, 0, None))
 
     def test_run_step_runs_in_process_steps(self):
         seen = []
@@ -405,6 +403,26 @@ class CodexReleasesTest(unittest.TestCase):
         self.assertTrue((victim / "keep").exists())
         self.assertTrue((self.rel / "0.150.0").is_symlink())
 
+    def test_symlinked_releases_dir_is_skipped(self):
+        real = pathlib.Path(self.tmp.name) / "real-releases"
+        self.rel.rename(real)
+        self.rel.symlink_to(real)
+        (self.daemon / "current").unlink()
+        (self.daemon / "current").symlink_to(self.rel / "0.162.0")
+        rc, _left, logs = self.prune()
+        self.assertEqual(len(list(real.iterdir())), 6)
+        self.assertIn("through a symlink", logs[0])
+
+    def test_install_reached_through_a_symlinked_ancestor_is_skipped(self):
+        other = pathlib.Path(self.tmp.name) / "other" / "u"
+        other.mkdir(parents=True)
+        (other / ".codex").symlink_to(self.home / ".codex")
+        logs = []
+        dg.prune_codex_releases([str(other.parent)], exes=set(), now=NOW, log=logs.append,
+                                remove=rm, lock=lambda d: True, stamp=MTIME)
+        self.assertEqual(len(list(self.rel.iterdir())), 6)
+        self.assertIn("through a symlink", logs[0])
+
     def test_installer_holding_the_lock_skips_the_home(self):
         rc, left, logs = self.prune(lock=lambda d: None)
         self.assertEqual((rc, len(left)), (0, 6))
@@ -477,9 +495,9 @@ class ArchiveTrimTest(unittest.TestCase):
         a = self.entry("a", 64, OLD)
         b = self.entry("b", 64, OLD + 100, as_dir=False)
         c = self.entry("c", 64, OLD + 200)
-        left, removed = dg.trim_archive(str(self.arc), c + 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        r = dg.trim_archive(str(self.arc), c + 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
         self.assertEqual(sorted(p.name for p in self.arc.iterdir()), ["c"])
-        self.assertEqual((left, removed), (c, a + b))
+        self.assertEqual(r, {"bytes": c, "removed": a + b, "timeout": 0})
 
     def test_newest_mtime_inside_an_entry_counts(self):
         self.entry("a", 64, OLD)
@@ -491,14 +509,14 @@ class ArchiveTrimTest(unittest.TestCase):
     def test_never_removes_a_young_entry(self):
         self.entry("old", 64, OLD)
         self.entry("young", 64, NOW - 60)
-        left, _removed = dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        r = dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet, remove=rm, stamp=MTIME)
         self.assertEqual(sorted(p.name for p in self.arc.iterdir()), ["young"])
-        self.assertGreater(left, 1)
+        self.assertGreater(r["bytes"], 1)
 
     def test_under_the_cap_is_a_noop(self):
         a = self.entry("a", 64, OLD)
-        self.assertEqual(dg.trim_archive(str(self.arc), a * 10, now=NOW, log=quiet, remove=rm, stamp=MTIME),
-                         (a, 0))
+        self.assertEqual(dg.trim_archive(str(self.arc), a * 10, now=NOW, log=quiet, remove=rm,
+                                         stamp=MTIME), {"bytes": a, "removed": 0, "timeout": 0})
         self.assertTrue((self.arc / "a").exists())
 
     def test_symlinked_entry_counts_and_removes_only_the_link(self):
@@ -515,10 +533,10 @@ class ArchiveTrimTest(unittest.TestCase):
     def test_archive_dir_symlink_or_missing_is_never_trimmed(self):
         self.entry("a", 64, OLD)
         (self.root / "via-link").symlink_to(self.arc)
-        self.assertEqual(dg.trim_archive(str(self.root / "via-link"), 1, now=NOW, log=quiet,
-                                         remove=rm, stamp=MTIME), (0, 0))
-        self.assertEqual(dg.trim_archive(str(self.root / "nope"), 1, now=NOW, log=quiet,
-                                         remove=rm, stamp=MTIME), (0, 0))
+        self.assertIsNone(dg.trim_archive(str(self.root / "via-link"), 1, now=NOW, log=quiet,
+                                          remove=rm, stamp=MTIME))
+        self.assertIsNone(dg.trim_archive(str(self.root / "nope"), 1, now=NOW, log=quiet,
+                                          remove=rm, stamp=MTIME))
         self.assertTrue((self.arc / "a").exists())
 
     def test_dry_run_removes_nothing(self):
@@ -531,9 +549,9 @@ class ArchiveTrimTest(unittest.TestCase):
 
     def test_failed_removal_keeps_counting_it(self):
         a = self.entry("a", 64, OLD)
-        left, removed = dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet,
-                                        remove=lambda p, u, g: False, stamp=MTIME)
-        self.assertEqual((left, removed), (a, 0))
+        r = dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet,
+                            remove=lambda p, u, g: False, stamp=MTIME)
+        self.assertEqual((r["bytes"], r["removed"]), (a, 0))
 
     def test_all_young_over_the_cap_says_so(self):
         self.entry("young", 64, NOW - 60)
@@ -547,15 +565,50 @@ class ArchiveTrimTest(unittest.TestCase):
         (self.arc / "b").mkdir()
         os.link(self.arc / "a" / "sub" / "data", self.arc / "b" / "data")
         touch_tree(self.arc / "b", OLD)
-        left, _removed = dg.trim_archive(str(self.arc), 10**12, now=NOW, log=quiet, remove=rm,
-                                         stamp=MTIME)
-        self.assertLess(left, a + 64 * 1024)
+        r = dg.trim_archive(str(self.arc), 10**12, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        self.assertLess(r["bytes"], a + 64 * 1024)
+
+    def test_removing_one_link_of_a_shared_file_frees_nothing_of_it(self):
+        # a (oldest) holds a 256 KB file that b also links. Removing a frees only a's own bytes: the
+        # shared file still counts while b links it, so b must go too before the archive is under.
+        self.entry("a", 64, OLD)
+        (self.arc / "a" / "shared").write_bytes(os.urandom(256 * 1024))
+        (self.arc / "b").mkdir()
+        os.link(self.arc / "a" / "shared", self.arc / "b" / "shared")
+        touch_tree(self.arc / "a", OLD)
+        touch_tree(self.arc / "b", OLD + 100)
+        r = dg.trim_archive(str(self.arc), 128 * 1024, now=NOW, log=quiet, remove=rm, stamp=MTIME)
+        self.assertEqual(list(self.arc.iterdir()), [])
+        self.assertEqual(r["bytes"], 0)
+
+    def test_flat_files_past_the_budget_remove_nothing(self):
+        for n in ("a", "b", "c"):
+            self.entry(n, 16, OLD, as_dir=False)
+        r = dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet, remove=rm, budget=-1,
+                            stamp=MTIME)
+        self.assertEqual(r["timeout"], 1)
+        self.assertEqual(len(list(self.arc.iterdir())), 3)
+
+    def test_wide_directory_hits_the_deadline_inside_the_scan(self):
+        d = self.arc / "wide"
+        d.mkdir()
+        for i in range(600):
+            (d / str(i)).write_bytes(b"")
+        clock = iter(range(10**6))
+        real = dg.time.monotonic
+        dg.time.monotonic = lambda: next(clock)     # each check is one tick later
+        try:
+            with self.assertRaises(dg.ScanTimeout):
+                list(dg.walk_lstat(str(d), os.lstat(d).st_dev, deadline=1))
+        finally:
+            dg.time.monotonic = real
 
     def test_scan_over_budget_removes_nothing(self):
         self.entry("a", 64, OLD)
         logs = []
-        self.assertIsNone(dg.trim_archive(str(self.arc), 1, now=NOW, log=logs.append, remove=rm,
-                                          budget=-1, stamp=MTIME))
+        r = dg.trim_archive(str(self.arc), 1, now=NOW, log=logs.append, remove=rm, budget=-1,
+                            stamp=MTIME)
+        self.assertEqual((r["timeout"], r["removed"]), (1, 0))
         self.assertTrue((self.arc / "a").exists())
         self.assertIn("nothing removed", logs[0])
 
@@ -567,12 +620,25 @@ class ArchiveTrimTest(unittest.TestCase):
         dg.trim_archive(str(self.arc), 1, log=quiet, remove=rm)      # real clock, default stamp
         self.assertTrue((self.arc / "moved-in").exists())
 
-    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX only")
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() != 0, "POSIX, not as root")
     def test_remove_as_owner_removes_a_tree(self):
         self.entry("a", 64, OLD)
-        st = os.lstat(self.arc)
+        st = os.lstat(self.arc / "a")
         self.assertTrue(dg.remove_as_owner(str(self.arc / "a"), st.st_uid, st.st_gid))
         self.assertFalse((self.arc / "a").exists())
+
+    def test_remove_as_owner_never_runs_as_root(self):
+        self.entry("a", 64, OLD)
+        self.assertFalse(dg.remove_as_owner(str(self.arc / "a"), 0, 0))
+        self.assertTrue((self.arc / "a").exists())
+
+    def test_each_entry_is_removed_as_its_own_owner(self):
+        self.entry("a", 64, OLD)
+        st_a = os.lstat(self.arc / "a")
+        seen = []
+        dg.trim_archive(str(self.arc), 1, now=NOW, log=quiet, stamp=MTIME,
+                        remove=lambda p, u, g: seen.append((p, u, g)) or rm(p, u, g))
+        self.assertEqual(seen, [(str(self.arc / "a"), st_a.st_uid, st_a.st_gid)])
 
 
 class ReportTest(unittest.TestCase):
@@ -608,11 +674,13 @@ class ReportTest(unittest.TestCase):
     def test_prom_carries_archive_metrics_when_capped(self):
         m = {"triggered": 0, "steps_run": 0, "failed_steps": 0, "reclaimed_bytes": 0,
              "exhausted": 0, "deferred": 0, "free_ratio": {"/": 0.5},
-             "archive_bytes": 123, "archive_removed_bytes": 45, "archive_max_bytes": 678}
+             "archive_bytes": 123, "archive_removed_bytes": 45, "archive_max_bytes": 678,
+             "archive_scan_timeout": 1}
         text = dg.render_prom(m, 1700000000)
         self.assertIn("dev_worker_disk_guard_archive_bytes 123\n", text)
         self.assertIn("dev_worker_disk_guard_archive_removed_bytes 45\n", text)
         self.assertIn("dev_worker_disk_guard_archive_max_bytes 678\n", text)
+        self.assertIn("dev_worker_disk_guard_archive_scan_timeout 1\n", text)
         del m["archive_bytes"], m["archive_removed_bytes"], m["archive_max_bytes"]
         self.assertNotIn("archive", dg.render_prom(m, 1700000000))
 

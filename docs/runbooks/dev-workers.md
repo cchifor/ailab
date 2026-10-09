@@ -1043,7 +1043,7 @@ Agents are told the same rules (`docker run --rm`, `docker rm -v`, `compose down
 block of `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`.
 
 Since 2026-10-09 the guard also:
-- **prunes old codex daemon releases** when `/` is low (step 0): `~/.codex/packages/app-server-daemon/releases/<ver>`,
+- **prunes old codex daemon releases** when `/` is low (step 0), for each `/home/*` user: `~/.codex/packages/app-server-daemon/releases/<ver>`,
   ~425 MB per auto-update and never pruned by codex (dev-worker-4 had 11, 4.5 GB). It keeps `current`,
   the version in `auto-update-version`, any release a running process executes from and any touched
   within the hour, skips a home whose `install.lock` an installer holds, and stops if `current`
@@ -1058,7 +1058,9 @@ Since 2026-10-09 the guard also:
   directories (`largest under …`, du depth 2) once an hour per filesystem.
 
 Removals the guard makes itself (codex releases, archive entries) run `rm -rf` as the owner of the
-directory they sit in, never as root.
+entry, never as root: a root-owned archive entry is left alone ("could not remove"), and a codex
+install reached through a symlink is skipped. An archive scan over 120 s removes nothing that run and
+sets `dev_worker_disk_guard_archive_scan_timeout` (same alert).
 
 What reclaims it by hand, safest first (`cleanup` is the role's tool, `ansible/roles/dev_worker/files/cleanup`):
 

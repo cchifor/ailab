@@ -194,18 +194,22 @@ spec:
         # The agents' archive dir (dev_worker_archive_dir) is capped by disk-guard on every run, but only
         # entries unchanged for an hour may go: a burst of new entries can hold it over the cap for up to
         # an hour by design. Over for 2h means the cap is not working (every entry keeps changing, or the
-        # removal fails) and the archive is growing unbounded again. A scan that times out exports no
-        # archive metrics for that run (it logs "nothing removed this run") rather than a wrong size.
+        # removal fails) and the archive is growing unbounded again. A scan that runs out of time
+        # removes nothing and sets archive_scan_timeout (archive_bytes is then a lower bound): the same
+        # alert, since an archive too big to scan in 120 s is exactly one the cap is not holding.
         - alert: DevWorkerArchiveOverCap
           expr: |
             dev_worker_disk_guard_archive_bytes{job="dev-worker-node"}
               > dev_worker_disk_guard_archive_max_bytes{job="dev-worker-node"}
+            or dev_worker_disk_guard_archive_scan_timeout{job="dev-worker-node"} == 1
           for: 2h
           labels: { severity: warning }
           annotations:
             summary: "Dev worker {{ $labels.instance }}: agent archive over its cap for 2h+"
             description: >-
-              /workspace/archive on {{ $labels.instance }} has been over its cap for 2h, which the
-              hour-long grace for new entries cannot explain. `journalctl -u dev-worker-disk-guard | grep
-              archive` shows whether entries keep changing ("everything left changed within the hour") or a
-              removal fails ("could not remove"). `du -sh /workspace/archive/* | sort -rh | head`.
+              /workspace/archive on {{ $labels.instance }} has been over its cap (or too big to scan in
+              120 s) for 2h, which the hour-long grace for new entries cannot explain. `journalctl -u
+              dev-worker-disk-guard | grep archive` shows whether entries keep changing ("everything left
+              changed within the hour"), a removal fails ("could not remove": a root-owned entry is never
+              removed) or the scan times out ("nothing removed this run": too many files — ask the agent
+              to pack them). `du -sh /workspace/archive/* | sort -rh | head`.

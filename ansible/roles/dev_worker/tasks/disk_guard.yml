@@ -32,12 +32,15 @@
   ansible.builtin.command: mountpoint -q {{ dev_worker_workspace_mount }}
   changed_when: false
 
+# Same ownership as the mount itself (workspace.yml): agent-owned, admin group, setgid, so both
+# users' agents can add entries. The cap removes each entry as that entry's owner (never root), so
+# an entry created as root (sudo) is never removed by it and logs "could not remove".
 - name: Ensure the agents' archive directory (capped by disk-guard)
   ansible.builtin.file:
     path: "{{ dev_worker_archive_dir }}"
     state: directory
     owner: "{{ dev_worker_agent_user }}"
-    group: "{{ dev_worker_agent_user }}"
+    group: "{{ dev_worker_admin_user }}"
     mode: "2775"
 
 - name: Install the disk-guard unit + timer
