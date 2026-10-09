@@ -49,3 +49,8 @@ output "client_configuration" {
   value     = talos_machine_secrets.this.client_configuration
   sensitive = true
 }
+
+output "talos_config_contract" {
+  description = "The Talos config contract (talos_machine_secrets + rendered configs). Worker modules validate their own copy against v1.11.2 until this output is in state (next infra apply)."
+  value       = var.talos_config_contract
+}

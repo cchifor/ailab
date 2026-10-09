@@ -81,6 +81,12 @@ variable "talos_config_contract" {
   # Moving it is a dated, reviewed migration of its own (plans/2026-10-08-talos-upgrade-program-plan.md, P8).
   type    = string
   default = "v1.11.2"
+  validation {
+    # Identical in infra, agent-nodes and env-pool (and in talos_machine_secrets state): a drifted copy
+    # would render a different config schema for that pool. Move all three together, by plan.
+    condition     = var.talos_config_contract == "v1.11.2"
+    error_message = "talos_config_contract must stay v1.11.2 (the contract in state); moving it is a reviewed migration - see docs/runbooks/talos-upgrade.md."
+  }
 }
 variable "cluster_name" {
   type    = string
@@ -98,6 +104,9 @@ variable "storage_service_ip" {
 # ---- Kata debug evidence (plans/2026-09-20-env-pool-root-cause-followup-plan.md, T2) ----
 variable "kata_debug" {
   description = <<-EOT
+    DEFAULT false since 2026-10-09: the embedded machine-config/kata/configuration.toml is a verbatim copy
+    of the kata 3.20 extension's config and does NOT match the kata 3.26+ extension of Talos 1.12+.
+    Re-enable only after replacing it with the CURRENT extension's configuration.toml.
     true = deliver machine.files that (1) raise containerd to [debug] level and point the `kata`
     runtime at /var/etc/kata-containers/configuration.toml (machine-config/cri-20-customization.part),
     (2) install that file as a verbatim copy of the extension's config (machine-config/kata/

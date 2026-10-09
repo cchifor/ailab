@@ -159,8 +159,9 @@ name: etcd-ingress
 portSelector:
   ports:
     - 2379-2380
-    # 2383 = the etcd gRPC-gateway listener new in Talos 1.14 (etcd 3.7). Added live 2026-10-09 before the
-    # 1.14 CPs; black-box: a non-CP host times out on :2383 like on :2379.
+    # 2383 = etcd's separate HTTP client listener under Talos 1.14 (etcd 3.7): `talosctl processes` on a
+    # 1.14 CP shows --listen-client-http-urls=https://0.0.0.0:2383 beside --listen-client-urls=...:2379.
+    # Added live 2026-10-09 before the 1.14 CPs; black-box: a non-CP host times out on :2383 like on :2379.
     - 2383
   protocol: tcp
 ingress:
