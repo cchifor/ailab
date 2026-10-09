@@ -28,7 +28,12 @@ spec:
         kind: GitRepository
         name: qnap-csi
         namespace: flux-system
+  # CRDs: Helm skips crds/ on upgrade by default. CreateReplace applies a changed chart CRD
+  # (tridentorchestrator; the operator creates the rest at runtime). Identical at v1.6.0/v1.6.2.
   install:
     createNamespace: false
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
   values:
     forceInstallRancherClusterRoles: false

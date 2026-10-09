@@ -10,3 +10,6 @@ spec:
   url: https://github.com/qnap-dev/QNAP-CSI-PlugIn
   ref:
     tag: v1.6.2
+    # Pinned to the tag's commit (annotated tag ef11525e -> commit 8e88467e): commit takes precedence,
+    # so a force-moved tag cannot change the deployed storage driver. Bump both together.
+    commit: 8e88467ecf612fb84bbcd4caf300b624fca41de2
