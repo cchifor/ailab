@@ -55,7 +55,7 @@ All `kubectl` below means `kubectl --context admin@ai`. The default context is a
      bootstrap:
        recovery:
          source: origin
-         # continuity drill only: recoveryTarget: {backupID: <A3 in-tree backupID>, targetName: <restore point>}
+         # continuity drill only: recoveryTarget: {backupID: <baseline in-tree backupID>, targetName: <restore point>}
      externalClusters:
      - name: origin
        plugin:
@@ -119,13 +119,21 @@ All `kubectl` below means `kubectl --context admin@ai`. The default context is a
    - `barman_cloud_cloudnative_pg_io_last_available_backup_timestamp` is fresh in Prometheus;
    - no `CNPG*` alert fires.
 6. **Continuity drill.** It proves that WAL from both archivers replays.
-   1. On the source primary, in **one** `REPEATABLE READ` transaction, count the rows of the 3 largest
-      tables. Then `SELECT pg_create_restore_point('post-plugin-<cluster>')`, commit, and run
-      `pg_switch_wal()`.
+   1. On the source primary, **commit a drill marker** in the `postgres` maintenance database, not the
+      application database:
+      `CREATE TABLE IF NOT EXISTS ailab_drill_marker (name text PRIMARY KEY, at timestamptz DEFAULT now()); INSERT INTO ailab_drill_marker (name) VALUES ('post-plugin-<cluster>');`
+      Then, **after** that commit, `SELECT pg_create_restore_point('post-plugin-<cluster>')` and
+      `pg_switch_wal()`. The marker's commit record precedes the restore point in WAL, so a recovery that
+      reaches the point must contain it, whatever the application writes meanwhile.
    2. Run the drill with `recoveryTarget: {backupID: <baseline in-tree backupID>, targetName: post-plugin-<cluster>}`.
-      Reaching the named point proves that the in-tree base backup plus WAL from **both** archivers
-      replays; PostgreSQL fails recovery if the target is never reached.
-   3. The counts must match.
+      It passes when both hold:
+      - the drill Cluster is Ready: PostgreSQL fails recovery if the named target is never reached;
+      - the marker row is present in the drill's `postgres` database.
+
+      Together these prove that the in-tree base backup plus WAL from **both** archivers replays.
+   3. Row counts of the 3 largest tables, taken in one `REPEATABLE READ` transaction just before the
+      marker, are a **sanity check only**. Concurrent commits between that snapshot and the restore point
+      can legitimately change them; expect an exact match only if application writes were quiesced.
    4. Clean up as above.
    5. Do this for all three clusters, each against its own `serverName`. trueswarm-pg and
       trueswarm-platform-pg share the bucket prefix.
@@ -180,8 +188,17 @@ kubectl get backups.postgresql.cnpg.io -A -o json | jq '[.items[] | select((.spe
   or .spec.method == "barmanObjectStore") and .status.phase != "completed")] | length'           # 0
 ```
 
-Repeat the same selection over `kubectl kustomize` of every Flux-built directory of trueswarm-admin
-(`deploy/platform`, `deploy/foundation`).
+Repeat the selection over every Flux-built directory of trueswarm-admin. `kubectl kustomize` emits a
+multi-document YAML stream, so wrap it into an `items` list first:
+
+```sh
+for d in deploy/platform deploy/foundation; do
+  kubectl kustomize "$d" | yq -o json -s '{"items": .}' | jq '[.items[]
+    | select((.kind == "Cluster" and (.spec.backup.barmanObjectStore or ([.spec.externalClusters[]? | select(.barmanObjectStore)] | length > 0)))
+          or (.kind == "ScheduledBackup" and (.spec.method == null or .spec.method == "barmanObjectStore")))
+    | .kind + "/" + .metadata.name]'                                                            # []
+done
+```
 
 - **Historical Backup CRs.** About 30 completed in-tree Backup CRs remain as audit records, and are
   allowed. If 1.31's CRD rejects them, export them (`kubectl get backup -o yaml`), then remove them from

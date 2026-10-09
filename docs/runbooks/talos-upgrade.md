@@ -90,7 +90,7 @@ gated on application health (`talosctl upgrade-k8s` alone patches all kubelets i
      - node Ready;
      - no trident-node errors in the last 5 min.
    - **Patch:**
-     `talosctl -n <ip> -e 192.168.0.41 patch mc --mode=no-reboot --dry-run -p '{"machine":{"kubelet":{"image":"ghcr.io/siderolabs/kubelet:v<target>"}}}'`.
+     `_out/talosctl-1142.exe -n <ip> -e 192.168.0.41 patch mc --mode=no-reboot --dry-run -p '{"machine":{"kubelet":{"image":"ghcr.io/siderolabs/kubelet:v<target>"}}}'`.
      The dry-run diff must change exactly the kubelet image line; then run it without `--dry-run`.
      - Use a **strategic-merge** patch. Talos refuses JSON6902 patches on multi-document configs, which
        all CPs have.
