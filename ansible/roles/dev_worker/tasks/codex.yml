@@ -115,3 +115,92 @@
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
+
+# ---- Codex through the estate's LLM router (defaults/main.yml: dev_worker_codex_router_*) ----
+# The CLI's own Responses protocol, served by the router's Codex-native routes (llm-router
+# `codexNative`), which pin the subscription the dev workers share (codex-5). Three edits per user, all
+# table-aware like the ones above, so codex's [projects.*] trust tables and anything a user added stay:
+#   1. top-level `model_provider = "<provider>"` (absent = codex's built-in `openai`, the host login);
+#   2. the [model_providers.<provider>] table: base_url, wire_api and the `auth` command, which codex
+#      runs to get the bearer (no key in the file, and none in any environment the CLI or its tools see);
+#   3. a [profiles.chatgpt] escape hatch back to the host's own login: `codex -p chatgpt`.
+# Turning it off removes 1 and 2 (the profile is harmless and stays). A running TUI or app-server daemon
+# keeps the provider it started with: `codex app-server daemon restart` after a change.
+- name: Install the router-key helper codex's provider auth runs
+  ansible.builtin.template:
+    src: codex-router-key.j2
+    dest: /usr/local/bin/codex-router-key
+    owner: root
+    group: root
+    mode: "0755"
+  when: dev_worker_codex_router_enabled | bool
+
+- name: Remove the router-key helper (router provider off)
+  ansible.builtin.file:
+    path: /usr/local/bin/codex-router-key
+    state: absent
+  when: not dev_worker_codex_router_enabled | bool
+
+- name: Point each user's codex at the router provider (top-level key, table-aware, in place)
+  community.general.ini_file:
+    path: "{{ item.home }}/.codex/config.toml"
+    # No `section`: the top-level region only, as for the model pin above.
+    option: model_provider
+    value: '"{{ dev_worker_codex_router_provider }}"'
+    state: "{{ 'present' if dev_worker_codex_router_enabled | bool else 'absent' }}"
+    no_extra_spaces: false
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: The router provider table per user
+  community.general.ini_file:
+    path: "{{ item.0.home }}/.codex/config.toml"
+    section: "model_providers.{{ dev_worker_codex_router_provider }}"
+    option: "{{ item.1.key }}"
+    value: "{{ item.1.value }}"
+    no_extra_spaces: false
+    create: true
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0600"
+  when: dev_worker_codex_router_enabled | bool
+  loop: >-
+    {{ dev_worker_users | product([
+         {'key': 'name', 'value': '"' ~ dev_worker_codex_router_provider ~ '"'},
+         {'key': 'base_url', 'value': '"' ~ dev_worker_codex_router_base_url ~ '"'},
+         {'key': 'wire_api', 'value': '"responses"'},
+         {'key': 'auth', 'value': '{ command = "/usr/local/bin/codex-router-key" }'}
+       ]) | list }}
+  loop_control:
+    label: "{{ item.0.name }} {{ item.1.key }}"
+
+- name: Remove the router provider table (router provider off)
+  community.general.ini_file:
+    path: "{{ item.home }}/.codex/config.toml"
+    section: "model_providers.{{ dev_worker_codex_router_provider }}"
+    state: absent
+  when: not dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: A `chatgpt` profile per user (the host's own login, for when the router cannot serve)
+  community.general.ini_file:
+    path: "{{ item.home }}/.codex/config.toml"
+    section: profiles.chatgpt
+    option: model_provider
+    value: '"openai"'
+    no_extra_spaces: false
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+  when: dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"

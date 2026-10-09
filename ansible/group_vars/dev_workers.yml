@@ -14,6 +14,11 @@ dev_worker_enabled: true
 # the local SOPS file — minted per the ceremony in docs/runbooks/openbao-dev-workers.md; a host
 # missing its entry fails the role's assert rather than deploying a broken agent.
 dev_worker_enable_openbao: true
+# Codex through the estate's LLM router (router.chifor.me Codex-native routes dw-*, one ChatGPT
+# subscription: codex-5), on all four workers since 2026-10-09. Needs this host's router key at
+# af/dev-workers/<hostname> field llm_router_codex_key (seeded: devworker-seeds.sops.yaml). The host's
+# own ChatGPT login stays as `codex -p chatgpt`. Runbook: dev-workers.md § "Codex through the router".
+dev_worker_codex_router_enabled: true
 # dev_worker_enable_herdr — PILOT, deliberately NOT flipped here: it is per-host in
 # host_vars/dev-worker-4.yml so only that worker runs it (runbook § "herdr pilot").
 
