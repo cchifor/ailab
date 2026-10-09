@@ -262,9 +262,16 @@ class GuardTest(unittest.TestCase):
     def test_prom_render_and_atomic_write(self):
         m = {"triggered": 1, "steps_run": 2, "failed_steps": 0, "reclaimed_bytes": 5,
              "exhausted": 0, "deferred": 0, "free_ratio": {"/": 0.5, "/workspace": 0.26}}
-        text = dg.render_prom(m, 1700000000)
+        result = {"version": 1, "completed_at": 1699999000, "failed_steps": 0,
+                  "exhausted": {"/": 0, "/workspace": 1}, "deferred_since": None,
+                  "deferred_reason": None}
+        text = dg.render_prom(m, 1700000000, result)
         self.assertIn("dev_worker_disk_guard_last_run_timestamp_seconds 1700000000\n", text)
+        self.assertIn("dev_worker_disk_guard_last_completed_timestamp_seconds 1699999000\n", text)
         self.assertIn("dev_worker_disk_guard_failed_steps 0\n", text)
+        self.assertIn('dev_worker_disk_guard_exhausted{mountpoint="/workspace"} 1\n', text)
+        self.assertIn("dev_worker_disk_guard_state_known 1\n", text)
+        self.assertNotIn("deferred_since", text)
         self.assertIn('dev_worker_disk_guard_free_ratio{mountpoint="/workspace"} 0.2600\n', text)
         with tempfile.TemporaryDirectory() as d:
             dg.write_prom(text, d)
@@ -707,6 +714,110 @@ class ReportTest(unittest.TestCase):
         self.assertIn("dev_worker_disk_guard_archive_scan_timeout 1\n", text)
         del m["archive_bytes"], m["archive_removed_bytes"], m["archive_max_bytes"]
         self.assertNotIn("archive", dg.render_prom(m, 1700000000))
+
+
+class ResultStateTest(unittest.TestCase):
+    """The last completed run's results survive into every heartbeat of the next run: before
+    2026-10-09 the first heartbeat of each run exported exhausted=0, so on dw3 (a ladder longer than
+    a 30 s scrape) DevWorkerDiskGuardExhausted recorded 33 firing samples in ~100 exhausted hours."""
+
+    M = {"triggered": 1, "steps_run": 0, "failed_steps": 0, "reclaimed_bytes": 0, "exhausted": 0,
+         "deferred": 0, "free_ratio": {"/": 0.4, "/workspace": 0.05}}
+
+    def test_exhausted_result_is_carried_through_the_next_runs_heartbeats(self):
+        done = dict(self.M, exhausted=1, steps_run=5, exhausted_paths=["/workspace"])
+        result = dg.next_state(None, done, ["/", "/workspace"], 1000)
+        self.assertEqual(result["exhausted"], {"/": 0, "/workspace": 1})
+        heartbeat = dg.render_prom(dict(self.M), 1300, result)   # next run, first heartbeat
+        self.assertIn('dev_worker_disk_guard_exhausted{mountpoint="/workspace"} 1\n', heartbeat)
+
+    def test_a_completed_healthy_run_clears_it(self):
+        prev = dg.next_state(None, dict(self.M, exhausted_paths=["/"]), ["/", "/workspace"], 1000)
+        healthy = dict(self.M, triggered=0)
+        self.assertEqual(dg.next_state(prev, healthy, ["/", "/workspace"], 1300)["exhausted"],
+                         {"/": 0, "/workspace": 0})
+
+    def test_failed_steps_are_carried_and_cleared_the_same_way(self):
+        prev = dg.next_state(None, dict(self.M, failed_steps=2), ["/"], 1000)
+        self.assertIn("dev_worker_disk_guard_failed_steps 2\n", dg.render_prom(dict(self.M), 1100, prev))
+        self.assertEqual(dg.next_state(prev, dict(self.M), ["/"], 1300)["failed_steps"], 0)
+
+    def test_deferral_start_survives_runs_until_one_does_not_defer(self):
+        deferred = dict(self.M, deferred=1, deferred_reason="docker-busy")
+        a = dg.next_state(None, deferred, ["/workspace"], 1000)
+        b = dg.next_state(a, deferred, ["/workspace"], 1300)
+        self.assertEqual((a["deferred_since"], b["deferred_since"]), (1000, 1000))
+        self.assertIn('deferred_since_timestamp_seconds{reason="docker-busy"} 1000\n',
+                      dg.render_prom(dict(self.M), 1400, b))
+        c = dg.next_state(b, dict(self.M), ["/workspace"], 1600)
+        self.assertIsNone(c["deferred_since"])
+        self.assertNotIn("deferred_since", dg.render_prom(dict(self.M), 1700, c))
+
+    def test_guard_records_why_it_deferred(self):
+        d = Disk({"/": 0.40, "/workspace": 0.08})
+        m = dg.guard(opts(), d.measure, d.avail, d.run, quiet, building)
+        self.assertEqual((m["deferred"], m["deferred_reason"]), (1, "docker-busy"))
+
+    def test_unknown_state_is_exported_as_unknown_not_healthy(self):
+        text = dg.render_prom(dict(self.M), 1000, None)
+        self.assertIn("dev_worker_disk_guard_state_known 0\n", text)
+        self.assertNotIn("dev_worker_disk_guard_exhausted", text)
+        self.assertNotIn("dev_worker_disk_guard_failed_steps", text)
+
+    def test_a_state_write_failure_is_exported_and_leaves_no_temp_file(self):
+        # Run 1 completes but cannot persist (the parent is a file, not a dir): its final metrics say
+        # so, and run 2 (which can only load the older state, here none) cannot pass for healthy.
+        with tempfile.TemporaryDirectory() as d:
+            blocker = os.path.join(d, "blocker")
+            with open(blocker, "w") as f:
+                f.write("")
+            path = os.path.join(blocker, "state.json")
+            result = dg.next_state(None, dict(self.M, exhausted_paths=["/workspace"]),
+                                   ["/", "/workspace"], 1000)
+            self.assertFalse(dg.save_state(result, path))
+            final = dg.render_prom(dict(self.M, state_write_failed=1), 1000, result)
+            self.assertIn("dev_worker_disk_guard_state_write_failed 1\n", final)
+            self.assertIsNone(dg.load_state(path))
+            self.assertIn("dev_worker_disk_guard_state_known 0\n",
+                          dg.render_prom(dict(self.M), 1300, dg.load_state(path)))
+            self.assertEqual(sorted(os.listdir(d)), ["blocker"])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "state.json")
+            self.assertTrue(dg.save_state(result, path))
+            self.assertEqual(os.listdir(d), ["state.json"])          # no temp file left behind
+            self.assertNotIn("state_write_failed", dg.render_prom(dict(self.M), 1300, result))
+
+    def test_write_failure_is_carried_by_every_heartbeat_until_a_write_succeeds(self):
+        # An existing (older) state stays readable, the write keeps failing, and runs are long: every
+        # heartbeat of every run must export the failure, or StateUnknown's for: resets each run.
+        with tempfile.TemporaryDirectory() as d:
+            mark = os.path.join(d, "mark")
+            older = dg.next_state(None, dict(self.M), ["/workspace"], 500)
+            for run in range(3):
+                failing = int(os.path.lexists(mark))
+                beat = dg.render_prom(dict(self.M, state_write_failed=failing), 1000 + run, older)
+                if run:
+                    self.assertIn("dev_worker_disk_guard_state_write_failed 1\n", beat)
+                self.assertIn("dev_worker_disk_guard_state_known 1\n", beat)
+                dg.mark_write_failure(True, mark)                       # the run's write fails again
+            dg.mark_write_failure(False, mark)                          # a write finally succeeds
+            self.assertFalse(os.path.lexists(mark))
+            beat = dg.render_prom(dict(self.M, state_write_failed=int(os.path.lexists(mark))), 2000, older)
+            self.assertIn("dev_worker_disk_guard_state_write_failed 0\n", beat)
+
+    def test_state_roundtrip_and_rejects_bad_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "sub", "state.json")
+            self.assertIsNone(dg.load_state(path))                      # missing
+            st = dg.next_state(None, dict(self.M, exhausted_paths=["/"]), ["/"], 1000)
+            dg.save_state(st, path)
+            self.assertEqual(dg.load_state(path), st)
+            for bad in ("{trunc", "[]", '{"version": 2}', '{"version": 1, "completed_at": 1}',
+                        '{"version": 1, "completed_at": 1, "failed_steps": 0, "exhausted": {"/": 7},'
+                        ' "deferred_since": null, "deferred_reason": null}'):
+                with open(path, "w") as f:
+                    f.write(bad)
+                self.assertIsNone(dg.load_state(path), bad)
 
 if __name__ == "__main__":
     unittest.main()

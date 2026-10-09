@@ -62,20 +62,28 @@ When a run ends exhausted it logs the largest directories (du -x, depth 2) of ea
 under --low, each filesystem at most once an hour: eligible reclaim fell short, and the log says
 where the rest is. --dry-run never writes the hourly stamp.
 
-Each run writes dev_worker_disk_guard.prom to the node_exporter textfile directory:
-  dev_worker_disk_guard_last_run_timestamp_seconds, _triggered, _steps_run, _reclaimed_bytes,
-  _exhausted (1 = every step ran and a watched fs is still under --low: eligible reclaim was not
-  enough, a human has to look; never set when a step was deferred or failed), _failed_steps,
-  _deferred (1 = a step waited for a busy docker or for cleanup's lock),
-  _free_ratio{mountpoint}, and with --archive-dir _archive_bytes, _archive_max_bytes,
-  _archive_removed_bytes (this run's removals, as scanned: not a counter) and _archive_scan_timeout.
-  Alerts: DevWorkerDiskGuardExhausted / Failing / Stale.
+Each run writes dev_worker_disk_guard.prom to the node_exporter textfile directory, at its start,
+after every step and at the end. Per run: _last_run_timestamp_seconds (the heartbeat), _triggered,
+_steps_run, _reclaimed_bytes, _deferred (1 = a step waited for a busy docker or for cleanup's lock).
+From the last COMPLETED run, kept in /var/lib/dev-worker-disk-guard/state.json and carried by every
+heartbeat of the next run (a heartbeat used to reset them to 0 mid-run, so an alert with `for:`
+never held through a ladder longer than one scrape): _last_completed_timestamp_seconds,
+_exhausted{mountpoint} (1 = every step ran and that fs is still under --low: eligible reclaim was not
+enough, a human has to look; never set when a step was deferred or failed), _failed_steps, and
+_deferred_since_timestamp_seconds{reason} while a deferral lasts across runs. _state_known 0 = no
+trustworthy completed result yet (first run, unreadable state): unknown, not healthy. Also
+_free_ratio{mountpoint}, and with --archive-dir _archive_bytes, _archive_max_bytes,
+_archive_removed_bytes (this run's removals, as scanned: not a counter) and _archive_scan_timeout.
+Alerts: DevWorkerDiskLow (warning, 15%) and DevWorkerDiskFilling (critical, 12%) come from
+node_exporter alone, independent of this tool; this tool's DevWorkerDiskGuardExhausted / Failing /
+Deferred / Stale / StateUnknown explain why reclaim did not help.
 
 Installed by ansible (roles/dev_worker, tasks/disk_guard.yml); tested by
 scripts/tests/test_dev_worker_disk_guard.py.
 """
 import argparse
 import glob
+import json
 import os
 import stat
 import subprocess
@@ -87,6 +95,13 @@ CLEANUP = "/usr/local/bin/cleanup"
 LOCK = "/run/lock/dev-worker-disk-guard.lock"
 TEXTFILE_DIR = "/var/lib/prometheus/node-exporter"
 PROM = "dev_worker_disk_guard.prom"
+# The last COMPLETED run's results, carried by every heartbeat of the next run (see load_state).
+STATE = "/var/lib/dev-worker-disk-guard/state.json"
+STATE_VERSION = 1
+# Set while the state file cannot be written, cleared by the next successful write. On /run (tmpfs),
+# so it is writable when / is full — the usual reason the state write fails — and every heartbeat can
+# carry the failure, not only the final write of a failing run.
+WRITE_FAIL_MARK = "/run/dev-worker-disk-guard.state-write-failed"
 # The exhausted du report runs at most once per DU_EVERY (the stamp is on tmpfs: a reboot re-reports).
 DU_STAMP = "/run/dev-worker-disk-guard.du-report"
 DU_EVERY = 3600     # seconds
@@ -263,6 +278,7 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
             if what and measure(opts.docker_fs) >= opts.critical / 100:
                 log(f"disk-guard: {step.name} deferred, docker is busy: {what}")
                 m["deferred"] = 1
+                m["deferred_reason"] = "docker-busy"
                 continue
             if what:
                 log(f"disk-guard: {opts.docker_fs} under {opts.critical}% — {step.name} runs "
@@ -276,6 +292,7 @@ def guard(opts, measure=free_ratio, avail=free_bytes, run=None, log=print, busy=
         if rc == LOCKED:
             log(f"disk-guard: {step.name} deferred, another cleanup run holds its lock")
             m["deferred"] = 1
+            m.setdefault("deferred_reason", "cleanup-lock")
             continue
         m["steps_run"] += 1
         if rc != 0:
@@ -659,9 +676,80 @@ def report_largest(paths, log=print, stamp=DU_STAMP, now=None, every=DU_EVERY, t
             f"{d} {s / 1e9:.1f} GB" for s, d in rows[:top]))
 
 
-def render_prom(m, now):
+def load_state(path=STATE):
+    """The last completed run's results, or None when there are none to trust (first run, a
+    missing, truncated or foreign file). None is exported as state_known 0: unknown, never healthy."""
+    try:
+        with open(path) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    try:
+        ok = (st["version"] == STATE_VERSION
+              and isinstance(st["completed_at"], (int, float))
+              and isinstance(st["failed_steps"], int)
+              and all(isinstance(k, str) and v in (0, 1) for k, v in st["exhausted"].items())
+              and (st["deferred_since"] is None or isinstance(st["deferred_since"], (int, float)))
+              and (st["deferred_reason"] is None or isinstance(st["deferred_reason"], str)))
+    except (KeyError, TypeError, AttributeError):
+        return None
+    return st if ok else None
+
+
+def next_state(prev, m, watched, now):
+    """The result a completed run hands to the next one. Exhausted is per filesystem; a deferral's
+    start survives across runs until a run completes WITHOUT deferring (resetting it every tick would
+    make a deferral that lasts hours look minutes old)."""
+    st = {"version": STATE_VERSION, "completed_at": int(now), "failed_steps": m["failed_steps"],
+          "exhausted": {p: int(p in m.get("exhausted_paths", ())) for p in watched},
+          "deferred_since": None, "deferred_reason": None}
+    if m["deferred"]:
+        st["deferred_since"] = (prev or {}).get("deferred_since") or int(now)
+        st["deferred_reason"] = m.get("deferred_reason", "unknown")
+    return st
+
+
+def save_state(st, path=STATE):
+    """Atomic (rename). True when written. A failure leaves the previous state, so the next run
+    carries older results: the caller exports state_write_failed 1 and sets WRITE_FAIL_MARK, so every
+    heartbeat until a successful write keeps exporting it (DevWorkerDiskGuardStateUnknown)."""
+    tmp = f"{path}.{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump(st, f)
+            f.flush()
+            os.fsync(f.fileno())        # a crash must not leave an empty state behind the rename
+        os.replace(tmp, path)
+        return True
+    except OSError as e:
+        print(f"disk-guard: cannot write {path}: {e}", file=sys.stderr)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def mark_write_failure(failed, path=WRITE_FAIL_MARK):
+    """Record whether the state write failed (marker present) or succeeded (marker removed)."""
+    try:
+        if failed:
+            with open(path, "w"):
+                pass
+        elif os.path.lexists(path):
+            os.unlink(path)
+    except OSError as e:
+        print(f"disk-guard: {path}: {e}", file=sys.stderr)
+
+
+def render_prom(m, now, result=None):
+    """`m` is the current run (its heartbeat, triggered, steps, reclaim, free space); `result` is the
+    last COMPLETED run (load_state / next_state): exhausted, failed_steps and the deferral are
+    exported from it, so a ladder that outlasts a scrape no longer resets the alerts built on them."""
     lines = [
-        "# HELP dev_worker_disk_guard_last_run_timestamp_seconds When disk-guard last completed.",
+        "# HELP dev_worker_disk_guard_last_run_timestamp_seconds disk-guard's heartbeat: last start,"
+        " step or completion of a run.",
         "# TYPE dev_worker_disk_guard_last_run_timestamp_seconds gauge",
         f"dev_worker_disk_guard_last_run_timestamp_seconds {int(now)}",
         "# HELP dev_worker_disk_guard_triggered 1 if the last run found a watched fs under --low.",
@@ -670,16 +758,10 @@ def render_prom(m, now):
         "# HELP dev_worker_disk_guard_steps_run Reclaim steps the last run executed.",
         "# TYPE dev_worker_disk_guard_steps_run gauge",
         f"dev_worker_disk_guard_steps_run {m['steps_run']}",
-        "# HELP dev_worker_disk_guard_failed_steps Steps of the last run that exited non-zero.",
-        "# TYPE dev_worker_disk_guard_failed_steps gauge",
-        f"dev_worker_disk_guard_failed_steps {m['failed_steps']}",
         "# HELP dev_worker_disk_guard_reclaimed_bytes Bytes the last run freed.",
         "# TYPE dev_worker_disk_guard_reclaimed_bytes gauge",
         f"dev_worker_disk_guard_reclaimed_bytes {m['reclaimed_bytes']}",
-        "# HELP dev_worker_disk_guard_exhausted 1 if every step ran and a fs is still under --low.",
-        "# TYPE dev_worker_disk_guard_exhausted gauge",
-        f"dev_worker_disk_guard_exhausted {m['exhausted']}",
-        "# HELP dev_worker_disk_guard_deferred 1 if docker steps waited for a busy docker client.",
+        "# HELP dev_worker_disk_guard_deferred 1 if this run deferred a step (busy docker, cleanup's lock).",
         "# TYPE dev_worker_disk_guard_deferred gauge",
         f"dev_worker_disk_guard_deferred {m['deferred']}",
         "# HELP dev_worker_disk_guard_free_ratio Free fraction (unprivileged) after the last run.",
@@ -703,6 +785,40 @@ def render_prom(m, now):
             "# TYPE dev_worker_disk_guard_archive_scan_timeout gauge",
             f"dev_worker_disk_guard_archive_scan_timeout {m.get('archive_scan_timeout', 0)}",
         ]
+    lines += [
+        "# HELP dev_worker_disk_guard_state_known 1 if the last completed run's results are known.",
+        "# TYPE dev_worker_disk_guard_state_known gauge",
+        f"dev_worker_disk_guard_state_known {int(result is not None)}",
+    ]
+    if "state_write_failed" in m:
+        lines += [
+            "# HELP dev_worker_disk_guard_state_write_failed 1 while the state file cannot be written"
+            " (the next run will carry an older result).",
+            "# TYPE dev_worker_disk_guard_state_write_failed gauge",
+            f"dev_worker_disk_guard_state_write_failed {m['state_write_failed']}",
+        ]
+    if result is not None:
+        lines += [
+            "# HELP dev_worker_disk_guard_last_completed_timestamp_seconds When a run last completed.",
+            "# TYPE dev_worker_disk_guard_last_completed_timestamp_seconds gauge",
+            f"dev_worker_disk_guard_last_completed_timestamp_seconds {result['completed_at']}",
+            "# HELP dev_worker_disk_guard_failed_steps Steps of the last completed run that exited non-zero.",
+            "# TYPE dev_worker_disk_guard_failed_steps gauge",
+            f"dev_worker_disk_guard_failed_steps {result['failed_steps']}",
+            "# HELP dev_worker_disk_guard_exhausted 1 if the last completed run ran every step and this"
+            " fs is still under --low.",
+            "# TYPE dev_worker_disk_guard_exhausted gauge",
+        ]
+        for mp, v in sorted(result["exhausted"].items()):
+            lines.append(f'dev_worker_disk_guard_exhausted{{mountpoint="{mp}"}} {v}')
+        if result["deferred_since"] is not None:
+            lines += [
+                "# HELP dev_worker_disk_guard_deferred_since_timestamp_seconds Start of the current"
+                " uninterrupted deferral (only while one lasts).",
+                "# TYPE dev_worker_disk_guard_deferred_since_timestamp_seconds gauge",
+                f'dev_worker_disk_guard_deferred_since_timestamp_seconds{{reason="{result["deferred_reason"]}"}}'
+                f" {result['deferred_since']}",
+            ]
     return "\n".join(lines) + "\n"
 
 
@@ -757,6 +873,8 @@ def parse_args(argv):
                    help="include the whole-worktree step (dev_worker_worktree_prune_mode: remove)")
     p.add_argument("--cleanup", default=CLEANUP, help=argparse.SUPPRESS)
     p.add_argument("--textfile-dir", default=TEXTFILE_DIR)
+    p.add_argument("--state-file", default=STATE, help=argparse.SUPPRESS)
+    p.add_argument("--write-fail-mark", default=WRITE_FAIL_MARK, help=argparse.SUPPRESS)
     p.add_argument("--roots", default=",".join(WALK_ROOTS),
                    help="where the worktree/deps steps look, each only while its fs is short")
     p.add_argument("--archive-dir", default=None,
@@ -799,14 +917,24 @@ def main(argv=None):
             m["archive_scan_timeout"] = archive["timeout"]
             m["archive_max_bytes"] = int(opts.archive_max_gb * 1e9)
         return m
-    beat = (lambda m: None) if opts.dry_run else (
-        lambda m: write_prom(render_prom(with_archive(m), time.time()), opts.textfile_dir))
+    prev = load_state(opts.state_file)
+    failing = int(os.path.lexists(opts.write_fail_mark))   # carried by every heartbeat until cleared
+
+    def heartbeat(m):
+        m = with_archive(m)
+        m.setdefault("state_write_failed", failing)
+        write_prom(render_prom(m, time.time(), prev), opts.textfile_dir)
+    beat = (lambda m: None) if opts.dry_run else heartbeat
     m = with_archive(guard(opts, progress=beat))
     if not m["triggered"] and opts.dry_run:
         print("disk-guard: ok — " + ", ".join(
             f"{p} {r * 100:.1f}% free" for p, r in m["free_ratio"].items()))
     if not opts.dry_run:
-        write_prom(render_prom(m, time.time()), opts.textfile_dir)
+        now = time.time()
+        result = next_state(prev, m, list(dict.fromkeys(opts.watch)), now)
+        m["state_write_failed"] = int(not save_state(result, opts.state_file))
+        mark_write_failure(m["state_write_failed"], opts.write_fail_mark)
+        write_prom(render_prom(m, now, result), opts.textfile_dir)
         if m.get("exhausted_paths"):
             report_largest(m["exhausted_paths"])    # after the heartbeat: du can take minutes
     return 0

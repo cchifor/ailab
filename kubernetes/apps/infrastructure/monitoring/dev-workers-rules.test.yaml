@@ -75,3 +75,233 @@ tests:
                 192.168.0.9:9100 is >50% into its 4 GiB safety-valve swap AND tasks have stalled on
                 memory >5% of the time (PSI) for >30m — the working set no longer fits. Same remedy as
                 DevWorkerLowMemory: host RAM headroom on the owning node, or stop what is resident.
+
+  # --- disk (2026-10-09, plans/2026-10-09-dev-worker-disk-hardening-plan.md W1) -----------------
+  # 100 GB filesystem; 14 GB free is under disk-guard's 15% trigger, 20 GB is not.
+  - interval: 1m
+    name: under 15% free for 30m pages DiskLow, from node_exporter alone
+    input_series:
+      - series: 'node_filesystem_size_bytes{job="dev-worker-node", instance="192.168.0.10:9100", mountpoint="/workspace"}'
+        values: "100000000000x60"
+      - series: 'node_filesystem_avail_bytes{job="dev-worker-node", instance="192.168.0.10:9100", mountpoint="/workspace"}'
+        values: "14000000000x60"
+      - series: 'node_filesystem_size_bytes{job="dev-worker-node", instance="192.168.0.10:9100", mountpoint="/"}'
+        values: "100000000000x60"
+      - series: 'node_filesystem_avail_bytes{job="dev-worker-node", instance="192.168.0.10:9100", mountpoint="/"}'
+        values: "20000000000x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DevWorkerDiskLow
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: DevWorkerDiskLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+              mountpoint: /workspace
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100 /workspace <15% free for 30m"
+              description: >-
+                192.168.0.10:9100 /workspace has been under 15% free for 30m, below
+                the point where dev-worker-disk-guard starts reclaiming. `journalctl -u
+                dev-worker-disk-guard -n 60` shows what it ran and, if it is exhausted, the largest
+                directories ("largest under"). Bursts of 36 GB in 6h have been measured, so at this
+                level a disk can be full within hours. Runbook: docs/runbooks/dev-workers.md § Disk full.
+      - eval_time: 40m
+        alertname: DevWorkerDiskTimeToFull
+        exp_alerts: []
+
+  # The heartbeat now carries the last COMPLETED run's exhausted=1 through the next run, so the
+  # exported series is constant while the guard stays exhausted (before: 0 at every run's start).
+  - interval: 30s
+    name: an exhausted guard pages for as long as it stays exhausted
+    input_series:
+      - series: 'dev_worker_disk_guard_exhausted{job="dev-worker-node", instance="192.168.0.10:9100", mountpoint="/workspace"}'
+        values: "1x120"
+      - series: 'dev_worker_disk_guard_exhausted{job="dev-worker-node", instance="192.168.0.10:9100", mountpoint="/"}'
+        values: "0x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: DevWorkerDiskGuardExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+              mountpoint: /workspace
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: disk-guard exhausted on /workspace"
+              description: >-
+                disk-guard on 192.168.0.10:9100 ran its whole ladder (old codex releases, build cache,
+                anonymous volumes, old containers + unused images, merged worktrees, idle deps) and a disk is
+                still under its trigger. `journalctl -u dev-worker-disk-guard -n 80` names the low
+                filesystem and, once an hour, its largest directories ("largest under"). Then
+                `docker system df -v`; ask the agent owner what can go (bulk agent data belongs in the capped
+                /workspace/archive, or on the NAS via the runbook), or grow the disk (kubernetes/infra/dev-workers).
+
+  # 100 GB, 24 GB free and losing 50 MB/min (3 GB/h): empty in 8h, inside the 12h horizon. A disk
+  # that sits at 20 GB free without moving must not warn.
+  - interval: 1m
+    name: a steady fill under 25% free warns TimeToFull; a stable low disk does not
+    input_series:
+      - series: 'node_filesystem_size_bytes{job="dev-worker-node", instance="192.168.0.9:9100", mountpoint="/workspace"}'
+        values: "100000000000x60"
+      - series: 'node_filesystem_avail_bytes{job="dev-worker-node", instance="192.168.0.9:9100", mountpoint="/workspace"}'
+        values: "24000000000-50000000x60"
+      - series: 'node_filesystem_size_bytes{job="dev-worker-node", instance="192.168.0.9:9100", mountpoint="/"}'
+        values: "100000000000x60"
+      - series: 'node_filesystem_avail_bytes{job="dev-worker-node", instance="192.168.0.9:9100", mountpoint="/"}'
+        values: "20000000000x60"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: DevWorkerDiskTimeToFull
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.9:9100"
+              mountpoint: /workspace
+            exp_annotations:
+              summary: "Dev worker 192.168.0.9:9100 /workspace on course to fill within 12h"
+              description: >-
+                At the last 6h's rate, 192.168.0.9:9100 /workspace (under 25% free)
+                runs out of space within 12h. Find what is growing before disk-guard has to: `sudo du
+                -xh --max-depth=2 /workspace | sort -rh | head`, `docker system df`.
+
+  - interval: 1m
+    name: under 10% free inodes warns InodesLow
+    input_series:
+      - series: 'node_filesystem_files{job="dev-worker-node", instance="192.168.0.11:9100", mountpoint="/workspace"}'
+        values: "8388608x45"
+      - series: 'node_filesystem_files_free{job="dev-worker-node", instance="192.168.0.11:9100", mountpoint="/workspace"}'
+        values: "500000x45"
+      - series: 'node_filesystem_files{job="dev-worker-node", instance="192.168.0.11:9100", mountpoint="/"}'
+        values: "5111808x45"
+      - series: 'node_filesystem_files_free{job="dev-worker-node", instance="192.168.0.11:9100", mountpoint="/"}'
+        values: "4443315x45"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: DevWorkerInodesLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.11:9100"
+              mountpoint: /workspace
+            exp_annotations:
+              summary: "Dev worker 192.168.0.11:9100 /workspace is running out of inodes"
+              description: >-
+                192.168.0.11:9100 /workspace has under 10% (or 200k) free inodes; at
+                zero every file create fails with ENOSPC however many bytes are free, and disk-guard
+                does not react to inodes. Find the directory with the most files: `sudo du -x
+                --inodes --max-depth=3 /workspace | sort -rn | head`.
+
+  # The deferral's start is a persisted timestamp (epoch 0 here): over an hour old pages.
+  - interval: 1m
+    name: a deferral older than an hour pages Deferred
+    input_series:
+      - series: 'dev_worker_disk_guard_deferred_since_timestamp_seconds{job="dev-worker-node", instance="192.168.0.10:9100", reason="docker-busy"}'
+        values: "0x80"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: DevWorkerDiskGuardDeferred
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: DevWorkerDiskGuardDeferred
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+              reason: docker-busy
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: disk-guard deferred for 1h+ (docker-busy)"
+              description: >-
+                disk-guard on 192.168.0.10:9100 has been unable to run its docker reclaim steps for
+                over an hour (docker-busy) while the docker filesystem is short. `journalctl -u
+                dev-worker-disk-guard | grep deferred` names the blocking command. A stuck `docker pull`
+                or build holds it until /workspace reaches 5%; stop it if it is not live work.
+
+  # Heartbeats keep coming (last_run is always fresh) but no run has completed for 3h: a hung run.
+  - interval: 1m
+    name: heartbeats without a completed run for 3h is Stale
+    input_series:
+      - series: 'dev_worker_disk_guard_last_run_timestamp_seconds{job="dev-worker-node", instance="192.168.0.10:9100"}'
+        values: "0+60x200"
+      - series: 'dev_worker_disk_guard_last_completed_timestamp_seconds{job="dev-worker-node", instance="192.168.0.10:9100"}'
+        values: "0x200"
+      - series: 'up{job="dev-worker-node", instance="192.168.0.10:9100"}'
+        values: "1x200"
+    alert_rule_test:
+      - eval_time: 170m
+        alertname: DevWorkerDiskGuardStale
+        exp_alerts: []
+      - eval_time: 190m
+        alertname: DevWorkerDiskGuardStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: disk-guard stale (no heartbeat 30m+ or no completed run 3h+)"
+              description: >-
+                No fresh dev_worker_disk_guard_last_run_timestamp_seconds from 192.168.0.10:9100, or
+                no completed run (last_completed_timestamp_seconds) for 3h: the dev-worker-disk-guard
+                timer is stopped or failing, a run hangs, or / is too full to write
+                /var/lib/prometheus/node-exporter/dev_worker_disk_guard.prom. `systemctl status
+                dev-worker-disk-guard.timer dev-worker-disk-guard.service`; roll out with
+                `--tags disk_guard`.
+
+  - interval: 1m
+    name: no trustworthy completed-run state for 30m is StateUnknown
+    input_series:
+      - series: 'dev_worker_disk_guard_state_known{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "0x45"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: DevWorkerDiskGuardStateUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.8:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.8:9100: disk-guard has no completed-run result"
+              description: >-
+                /var/lib/dev-worker-disk-guard/state.json on 192.168.0.8:9100 is missing,
+                unreadable or cannot be written, so the Exhausted/Failing alerts are blind. `sudo cat
+                /var/lib/dev-worker-disk-guard/state.json`, `journalctl -u dev-worker-disk-guard -n 30`
+                (a full / makes the write fail).
+
+  # Runs complete and the metrics file is written, but the state file cannot be: state_known stays 1
+  # (an older state is still readable) while state_write_failed=1 is carried by every heartbeat, so the
+  # series is continuous across runs of any length. Must page; a recovered write must not.
+  - interval: 1m
+    name: a state file that cannot be written pages StateUnknown despite fresh results
+    input_series:
+      - series: 'dev_worker_disk_guard_state_known{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "1x50"
+      - series: 'dev_worker_disk_guard_state_write_failed{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "1x50"
+      - series: 'dev_worker_disk_guard_state_known{job="dev-worker-node", instance="192.168.0.11:9100"}'
+        values: "1x50"
+      - series: 'dev_worker_disk_guard_state_write_failed{job="dev-worker-node", instance="192.168.0.11:9100"}'
+        values: "1x20 0x30"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: DevWorkerDiskGuardStateUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.9:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.9:9100: disk-guard has no completed-run result"
+              description: >-
+                /var/lib/dev-worker-disk-guard/state.json on 192.168.0.9:9100 is missing,
+                unreadable or cannot be written, so the Exhausted/Failing alerts are blind. `sudo cat
+                /var/lib/dev-worker-disk-guard/state.json`, `journalctl -u dev-worker-disk-guard -n 30`
+                (a full / makes the write fail).
