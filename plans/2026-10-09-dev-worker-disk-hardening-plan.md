@@ -259,4 +259,4 @@ All accepted; none pushed back. Themes and where they landed:
 - Verification (48 h < policy windows, idempotence, real tool behaviour over env grep,
   unachievable "every episode preceded"): Verification section.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
