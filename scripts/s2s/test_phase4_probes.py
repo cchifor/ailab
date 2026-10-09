@@ -674,6 +674,10 @@ SCALE = "kubectl --context admin@ai -n strive-ailab scale deployment/harness --r
 #: twice within minutes. The root and `platform` are suspended before `platform-app`.
 PARENT_SUSPEND = """kubectl --context admin@ai -n flux-system patch kustomization %s --type=merge -p '{"spec":{"suspend":true}}'"""
 FREEZE_PARENTS = ("flux-system", "platform")
+# The leaves a drill may freeze after the parents: platform-app (the strive release) and, since
+# gatekeeper runs in its own namespace (platform A.2), platform-gatekeeper (the gatekeeper release and
+# its registry-extras ConfigMap). Siblings under `platform`, frozen in either order.
+FREEZE_LEAVES = ("platform-app", "platform-gatekeeper")
 
 
 def _ordered(case, text, needles):
@@ -719,7 +723,7 @@ class RunbookFreezeOrder(unittest.TestCase):
 
     @staticmethod
     def flux_lines(block):
-        return [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch kustomization " in l]
+        return [l for l in block.splitlines() if "patch helmrelease strive" in l or "patch helmrelease gatekeeper" in l or "patch kustomization " in l]
 
     @staticmethod
     def suspended_kustomizations(lines):
@@ -750,10 +754,13 @@ class RunbookFreezeOrder(unittest.TestCase):
             names = self.suspended_kustomizations(lines)
             if names:
                 # Top-down: the root, then `platform`, then (only in drill 2, whose PR edits a Secret)
-                # platform-secrets, and platform-app last.
+                # platform-secrets, then the leaves (FREEZE_LEAVES): platform-app always, and
+                # platform-gatekeeper where the drill touches the gatekeeper release's ConfigMap.
                 self.assertEqual(names[:2], list(FREEZE_PARENTS), "not top-down:\n" + block)
-                self.assertEqual(names[-1], "platform-app", block)
-                self.assertLessEqual(set(names[2:-1]), {"platform-secrets"}, block)
+                self.assertIn("platform-app", names[2:], block)
+                self.assertLessEqual(set(names[2:]) - set(FREEZE_LEAVES), {"platform-secrets"}, block)
+                first_leaf = min(i for i, n in enumerate(names) if n in FREEZE_LEAVES)
+                self.assertTrue(all(n in FREEZE_LEAVES for n in names[first_leaf:]), "a parent after a leaf:\n" + block)
             for i, line in enumerate(lines):
                 if "patch helmrelease strive" in line:
                     freezes += 1
@@ -762,6 +769,13 @@ class RunbookFreezeOrder(unittest.TestCase):
                 if "patch kustomization platform-app" in line:
                     after = self.neighbour(lines, i, +1, block)
                     self.assertTrue("patch helmrelease strive" in after and '"suspend":true' in after, block)
+                # The gatekeeper release pairs with ITS Kustomization the same way.
+                if "patch helmrelease gatekeeper" in line:
+                    before = self.neighbour(lines, i, -1, block)
+                    self.assertTrue("patch kustomization platform-gatekeeper" in before and '"suspend":true' in before, block)
+                if "patch kustomization platform-gatekeeper" in line:
+                    after = self.neighbour(lines, i, +1, block)
+                    self.assertTrue("patch helmrelease gatekeeper" in after and '"suspend":true' in after, block)
         self.assertGreaterEqual(freezes, 4, "the darken block and drills 1, 2 and 4 freeze")
         self.assertGreaterEqual(resumes, 3, "the darken resume, drill 2 and the drills' restore resume")
 
