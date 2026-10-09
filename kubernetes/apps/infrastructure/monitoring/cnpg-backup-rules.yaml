@@ -80,9 +80,11 @@ spec:
               {{ $value }} WAL segments have been waiting to be archived on the primary
               {{ $labels.namespace }}/{{ $labels.pod }} for over 30 minutes. The archiver is behind
               or stuck; if it keeps growing, CNPGWalArchivingFailing or CNPGVolumeNearlyFull follows.
-        # Newest completed base backup older than 26h, per cluster. Every cluster is meant to have a
-        # daily ScheduledBackup (02:00-02:30Z), so 26h is a missed run plus a margin for a slow one.
-        # A cluster that has never been backed up reports 0 and fires.
+        # Newest completed base backup older than 26h, per cluster. All three have a daily
+        # ScheduledBackup: admin-daily (02:00Z), and trueswarm-pg-daily (02:15Z) /
+        # trueswarm-platform-pg-daily (02:30Z) since cchifor/trueswarm-admin#156 (merged 2026-10-09,
+        # a prerequisite of this rule). So 26h is a missed run plus a margin for a slow one. A
+        # cluster that has never been backed up reports 0 and fires.
         - alert: CNPGBaseBackupStale
           expr: |
             time() - max by (namespace, cluster) (
