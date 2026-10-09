@@ -240,6 +240,19 @@
 # [profiles.chatgpt] config; move those settings into ~/.codex/chatgpt.config.toml" (dev-worker-1,
 # 2026-10-09). Plain `codex` was unaffected, so only the escape hatch broke. The legacy table goes
 # whatever the provider, because the file replaces it.
+- name: Remove a legacy top-level `profile = "chatgpt"` selector (the same refusal names it)
+  community.general.ini_file:
+    path: "{{ item.home }}/.codex/config.toml"
+    # No `section`: the top-level region only. `exclusive: false` with the value removes exactly that line, so a
+    # selector of another profile (the user's own) stays.
+    option: profile
+    value: '"chatgpt"'
+    exclusive: false
+    state: absent
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Remove the legacy [profiles.chatgpt] table (codex 0.162 refuses -p chatgpt while it exists)
   community.general.ini_file:
     path: "{{ item.home }}/.codex/config.toml"
