@@ -2,7 +2,8 @@
 # Grow the root partition + ext4 filesystem online to fill the scsi0 disk after it is enlarged in tofu
 # (kubernetes/infra/dev-workers: dev_worker_rootfs_gb). cloud-init's growpart only runs at boot; this
 # applies a resize without a reboot. Idempotent: growpart says NOCHANGE when the partition already
-# fills the disk, and resize2fs is then a no-op. Own tag: --tags rootfs.
+# fills the disk, and resize2fs says "Nothing to do" when the filesystem fills the partition. Own
+# tag: --tags rootfs.
 # W6 of plans/2026-10-09-dev-worker-disk-hardening-plan.md (40 -> 60 GB, 2026-10-09).
 - name: Find the root filesystem's device and type
   ansible.builtin.command: findmnt -n -o SOURCE,FSTYPE /
@@ -24,7 +25,10 @@
   failed_when: dev_worker_growpart.rc != 0 and 'NOCHANGE' not in dev_worker_growpart.stdout
   when: dev_worker_rootfs_src.stdout.split()[1] == 'ext4'
 
+# Every run, not only when growpart changed something this run: a resize2fs that failed (or a play
+# interrupted) after growpart, or a partition grown elsewhere, still converges on the next run.
 - name: Grow the root ext4 filesystem online
   ansible.builtin.command: resize2fs {{ dev_worker_rootfs_src.stdout.split()[0] }}
-  when: dev_worker_growpart is changed
-  changed_when: true
+  register: dev_worker_resize2fs
+  changed_when: "'Nothing to do' not in (dev_worker_resize2fs.stdout + dev_worker_resize2fs.stderr)"
+  when: dev_worker_rootfs_src.stdout.split()[1] == 'ext4'
