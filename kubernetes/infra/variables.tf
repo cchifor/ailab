@@ -89,6 +89,14 @@ variable "control_planes" {
   # (ACPI/`qm shutdown` does NOT stop Talos), and verify `talosctl etcd status` 3/3 in-sync between nodes.
   # See docs/runbooks/ai-host-setup.md.
   #
+  # cores 8 -> 10 and memory -> 32 GiB on all three (2026-10-09, applied live with `talosctl shutdown`,
+  # `qm set`, `qm start`, one CP at a time during the Talos 1.11.6 roll; this default records it).
+  # The working set is still ~8-10 GiB; the binding constraint is pod REQUESTS. The 3 CPs requested
+  # ~15.7 CPU / 51 Gi, while any two allocated only 14 CPU / ~44 Gi, so draining one CP did not fit
+  # (cp2's drain needed 5.2 CPU / 17 Gi into 4.4 / 13 free). Each CP now allocates 9 CPU / 27.8 Gi.
+  # Host RAM was checked first: memory PSI 0, ~1 GiB swap, 25/28/66 GiB available after the resize.
+  # Re-check node1/node2 memory pressure (dev-worker floors) if host load grows.
+  #
   # disk_gb 40 -> 80 (2026-09-27). /var (EPHEMERAL) was 38.6 GB with 20-27 GB of container images
   # per CP; cp2/cp3 dipped below the kubelet's ~3.86 GB eviction threshold in the week before
   # (DiskPressure), and 13 velero pods were evicted from cp1. local-lvm is thin with 0.57-1.28 TB
@@ -98,9 +106,9 @@ variable "control_planes" {
   # config resource first: it depends on ALL three VMs, so targeting it pulls every pending resize
   # in), start, then check `talosctl get volumestatus EPHEMERAL` and etcd 3/3.
   default = {
-    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 80 }
-    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", storage_tier = "thunderbolt", cores = 8, memory = 24576, disk_gb = 80 }
-    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", storage_tier = "ethernet", cores = 8, memory = 28672, disk_gb = 80 }
+    cp1 = { host_node = "ai-node1", vm_id = 4001, ip = "192.168.0.41", host_ip = "192.168.0.2", storage_tier = "thunderbolt", cores = 10, memory = 32768, disk_gb = 80 }
+    cp2 = { host_node = "ai-node2", vm_id = 4002, ip = "192.168.0.42", host_ip = "192.168.0.3", storage_tier = "thunderbolt", cores = 10, memory = 32768, disk_gb = 80 }
+    cp3 = { host_node = "ai-node3", vm_id = 4003, ip = "192.168.0.43", host_ip = "192.168.0.4", storage_tier = "ethernet", cores = 10, memory = 32768, disk_gb = 80 }
   }
 }
 
