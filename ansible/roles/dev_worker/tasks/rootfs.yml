@@ -11,12 +11,20 @@
   changed_when: false
   check_mode: false
 
+- name: Ensure growpart is installed (cloud-guest-utils)
+  ansible.builtin.package:
+    name: cloud-guest-utils
+    state: present
+
+# The rescan makes the guest see a disk enlarged while it runs even if QEMU's capacity-change event
+# was missed (it would otherwise report NOCHANGE and pass green at the old size).
 - name: Grow the root partition to fill its disk
   ansible.builtin.shell: |
-    set -o pipefail
+    set -euo pipefail
     part={{ dev_worker_rootfs_src.stdout.split()[0] }}
     disk=/dev/$(lsblk -no PKNAME "$part")
-    num=$(cat /sys/class/block/$(basename "$part")/partition)
+    num=$(cat "/sys/class/block/$(basename "$part")/partition")
+    echo 1 > "/sys/class/block/$(basename "$disk")/device/rescan" 2>/dev/null || true
     growpart "$disk" "$num"
   args:
     executable: /bin/bash
