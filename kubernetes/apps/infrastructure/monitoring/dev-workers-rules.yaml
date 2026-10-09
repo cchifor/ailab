@@ -272,12 +272,13 @@ spec:
               dev-worker-disk-guard | grep deferred` names the blocking command. A stuck `docker pull`
               or build holds it until /workspace reaches 5%; stop it if it is not live work.
         # No trustworthy completed-run result: the state file is missing or unreadable, or runs complete
-        # but cannot persist it (state_write_failed is only in a run's final write, so it is read over
-        # 15m), for 30m. A fresh worker has one within ~5 min. Exhausted/Failing are blind meanwhile.
+        # but cannot persist it — state_write_failed is carried by every heartbeat (a marker on /run)
+        # until a write succeeds, so the series is continuous however long a run takes. For 30m; a
+        # fresh worker has a state within ~5 min. Exhausted/Failing are blind meanwhile.
         - alert: DevWorkerDiskGuardStateUnknown
           expr: |
             dev_worker_disk_guard_state_known{job="dev-worker-node"} == 0
-              or max_over_time(dev_worker_disk_guard_state_write_failed{job="dev-worker-node"}[15m]) == 1
+              or dev_worker_disk_guard_state_write_failed{job="dev-worker-node"} == 1
           for: 30m
           labels: { severity: warning }
           annotations:

@@ -787,6 +787,24 @@ class ResultStateTest(unittest.TestCase):
             self.assertEqual(os.listdir(d), ["state.json"])          # no temp file left behind
             self.assertNotIn("state_write_failed", dg.render_prom(dict(self.M), 1300, result))
 
+    def test_write_failure_is_carried_by_every_heartbeat_until_a_write_succeeds(self):
+        # An existing (older) state stays readable, the write keeps failing, and runs are long: every
+        # heartbeat of every run must export the failure, or StateUnknown's for: resets each run.
+        with tempfile.TemporaryDirectory() as d:
+            mark = os.path.join(d, "mark")
+            older = dg.next_state(None, dict(self.M), ["/workspace"], 500)
+            for run in range(3):
+                failing = int(os.path.lexists(mark))
+                beat = dg.render_prom(dict(self.M, state_write_failed=failing), 1000 + run, older)
+                if run:
+                    self.assertIn("dev_worker_disk_guard_state_write_failed 1\n", beat)
+                self.assertIn("dev_worker_disk_guard_state_known 1\n", beat)
+                dg.mark_write_failure(True, mark)                       # the run's write fails again
+            dg.mark_write_failure(False, mark)                          # a write finally succeeds
+            self.assertFalse(os.path.lexists(mark))
+            beat = dg.render_prom(dict(self.M, state_write_failed=int(os.path.lexists(mark))), 2000, older)
+            self.assertIn("dev_worker_disk_guard_state_write_failed 0\n", beat)
+
     def test_state_roundtrip_and_rejects_bad_files(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "sub", "state.json")

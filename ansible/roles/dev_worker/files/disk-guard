@@ -98,6 +98,10 @@ PROM = "dev_worker_disk_guard.prom"
 # The last COMPLETED run's results, carried by every heartbeat of the next run (see load_state).
 STATE = "/var/lib/dev-worker-disk-guard/state.json"
 STATE_VERSION = 1
+# Set while the state file cannot be written, cleared by the next successful write. On /run (tmpfs),
+# so it is writable when / is full — the usual reason the state write fails — and every heartbeat can
+# carry the failure, not only the final write of a failing run.
+WRITE_FAIL_MARK = "/run/dev-worker-disk-guard.state-write-failed"
 # The exhausted du report runs at most once per DU_EVERY (the stamp is on tmpfs: a reboot re-reports).
 DU_STAMP = "/run/dev-worker-disk-guard.du-report"
 DU_EVERY = 3600     # seconds
@@ -707,8 +711,8 @@ def next_state(prev, m, watched, now):
 
 def save_state(st, path=STATE):
     """Atomic (rename). True when written. A failure leaves the previous state, so the next run
-    carries older results: the caller exports state_write_failed 1, which the StateUnknown alert
-    watches, instead of letting this run's fresh metrics look persisted."""
+    carries older results: the caller exports state_write_failed 1 and sets WRITE_FAIL_MARK, so every
+    heartbeat until a successful write keeps exporting it (DevWorkerDiskGuardStateUnknown)."""
     tmp = f"{path}.{os.getpid()}"
     try:
         os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
@@ -725,6 +729,18 @@ def save_state(st, path=STATE):
         except OSError:
             pass
         return False
+
+
+def mark_write_failure(failed, path=WRITE_FAIL_MARK):
+    """Record whether the state write failed (marker present) or succeeded (marker removed)."""
+    try:
+        if failed:
+            with open(path, "w"):
+                pass
+        elif os.path.lexists(path):
+            os.unlink(path)
+    except OSError as e:
+        print(f"disk-guard: {path}: {e}", file=sys.stderr)
 
 
 def render_prom(m, now, result=None):
@@ -774,10 +790,10 @@ def render_prom(m, now, result=None):
         "# TYPE dev_worker_disk_guard_state_known gauge",
         f"dev_worker_disk_guard_state_known {int(result is not None)}",
     ]
-    if "state_write_failed" in m:           # only a run's final write knows; heartbeats omit it
+    if "state_write_failed" in m:
         lines += [
-            "# HELP dev_worker_disk_guard_state_write_failed 1 if the last completed run could not"
-            " persist its result (the next run will carry an older one).",
+            "# HELP dev_worker_disk_guard_state_write_failed 1 while the state file cannot be written"
+            " (the next run will carry an older result).",
             "# TYPE dev_worker_disk_guard_state_write_failed gauge",
             f"dev_worker_disk_guard_state_write_failed {m['state_write_failed']}",
         ]
@@ -858,6 +874,7 @@ def parse_args(argv):
     p.add_argument("--cleanup", default=CLEANUP, help=argparse.SUPPRESS)
     p.add_argument("--textfile-dir", default=TEXTFILE_DIR)
     p.add_argument("--state-file", default=STATE, help=argparse.SUPPRESS)
+    p.add_argument("--write-fail-mark", default=WRITE_FAIL_MARK, help=argparse.SUPPRESS)
     p.add_argument("--roots", default=",".join(WALK_ROOTS),
                    help="where the worktree/deps steps look, each only while its fs is short")
     p.add_argument("--archive-dir", default=None,
@@ -901,8 +918,13 @@ def main(argv=None):
             m["archive_max_bytes"] = int(opts.archive_max_gb * 1e9)
         return m
     prev = load_state(opts.state_file)
-    beat = (lambda m: None) if opts.dry_run else (
-        lambda m: write_prom(render_prom(with_archive(m), time.time(), prev), opts.textfile_dir))
+    failing = int(os.path.lexists(opts.write_fail_mark))   # carried by every heartbeat until cleared
+
+    def heartbeat(m):
+        m = with_archive(m)
+        m.setdefault("state_write_failed", failing)
+        write_prom(render_prom(m, time.time(), prev), opts.textfile_dir)
+    beat = (lambda m: None) if opts.dry_run else heartbeat
     m = with_archive(guard(opts, progress=beat))
     if not m["triggered"] and opts.dry_run:
         print("disk-guard: ok — " + ", ".join(
@@ -911,6 +933,7 @@ def main(argv=None):
         now = time.time()
         result = next_state(prev, m, list(dict.fromkeys(opts.watch)), now)
         m["state_write_failed"] = int(not save_state(result, opts.state_file))
+        mark_write_failure(m["state_write_failed"], opts.write_fail_mark)
         write_prom(render_prom(m, now, result), opts.textfile_dir)
         if m.get("exhausted_paths"):
             report_largest(m["exhausted_paths"])    # after the heartbeat: du can take minutes

@@ -277,15 +277,19 @@ tests:
                 (a full / makes the write fail).
 
   # Runs complete and the metrics file is written, but the state file cannot be: state_known stays 1
-  # (each run exports its own fresh result) and state_write_failed=1 appears only in each run's final
-  # write, absent from its heartbeats (here: present 3 of every 5 minutes). Must still page.
+  # (an older state is still readable) while state_write_failed=1 is carried by every heartbeat, so the
+  # series is continuous across runs of any length. Must page; a recovered write must not.
   - interval: 1m
     name: a state file that cannot be written pages StateUnknown despite fresh results
     input_series:
       - series: 'dev_worker_disk_guard_state_known{job="dev-worker-node", instance="192.168.0.9:9100"}'
         values: "1x50"
       - series: 'dev_worker_disk_guard_state_write_failed{job="dev-worker-node", instance="192.168.0.9:9100"}'
-        values: "1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _ 1 1 1 _ _"
+        values: "1x50"
+      - series: 'dev_worker_disk_guard_state_known{job="dev-worker-node", instance="192.168.0.11:9100"}'
+        values: "1x50"
+      - series: 'dev_worker_disk_guard_state_write_failed{job="dev-worker-node", instance="192.168.0.11:9100"}'
+        values: "1x20 0x30"
     alert_rule_test:
       - eval_time: 45m
         alertname: DevWorkerDiskGuardStateUnknown
