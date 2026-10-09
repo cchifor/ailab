@@ -122,16 +122,21 @@ All `kubectl` below means `kubectl --context admin@ai`. The default context is a
    - `barman_cloud_cloudnative_pg_io_last_available_backup_timestamp` is fresh in Prometheus;
    - no `CNPG*` alert fires.
 6. **Continuity drill.** It proves that WAL from both archivers replays.
-   1. On the source primary, **commit a drill marker** in the `postgres` maintenance database, not the
-      application database:
-      `CREATE TABLE IF NOT EXISTS ailab_drill_marker (name text PRIMARY KEY, at timestamptz DEFAULT now()); INSERT INTO ailab_drill_marker (name) VALUES ('post-plugin-<cluster>');`
-      Then, **after** that commit, `SELECT pg_create_restore_point('post-plugin-<cluster>')` and
+   1. Pick a restore-point name `<rp>` that is unique per run. The marker uses the same name. The
+      2026-10-09 drills used `ta-a6-<short cluster>-<UTC yyyymmddThhmmss>`, e.g.
+      `ta-a6-admin-20261009T182712` (see Status). On the source primary, **commit a drill marker** in the
+      `postgres` maintenance database, not the application database:
+      `CREATE TABLE IF NOT EXISTS ailab_drill_marker (name text PRIMARY KEY, at timestamptz DEFAULT now()); INSERT INTO ailab_drill_marker (name) VALUES ('<rp>');`
+      Then, **after** that commit, `SELECT pg_create_restore_point('<rp>')` and
       `pg_switch_wal()`. The marker's commit record precedes the restore point in WAL, so a recovery that
       reaches the point must contain it, whatever the application writes meanwhile.
-      When scripting this with `INSERT ... RETURNING name`, match the returned row exactly. `psql -At`
-      prints the row, then the `INSERT 0 1` tag, and on a re-run a `NOTICE` (relation already exists), so
-      `tail -1` / `head -1` check the wrong line.
-   2. Run the drill with `recoveryTarget: {backupID: <baseline in-tree backupID>, targetName: post-plugin-<cluster>}`.
+      When scripting this with `INSERT ... RETURNING name`, run `psql -qAt -v ON_ERROR_STOP=1` and
+      match the returned row exactly (`grep -qFx '<rp>'`):
+      - plain `psql -At` prints the row and then the `INSERT 0 1` tag; `-q` suppresses the tag;
+      - a re-run also emits a `NOTICE` (relation already exists) on stderr, which lands in the parsed
+        output if the wrapper merges `2>&1`.
+      Either way, `tail -1` / `head -1` can check the wrong line.
+   2. Run the drill with `recoveryTarget: {backupID: <baseline in-tree backupID>, targetName: <rp>}`.
       It passes when both hold:
       - the drill Cluster is Ready: PostgreSQL fails recovery if the named target is never reached;
       - the marker row is present in the drill's `postgres` database.
