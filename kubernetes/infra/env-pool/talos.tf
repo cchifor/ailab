@@ -19,6 +19,7 @@ data "talos_machine_configuration" "worker" {
 }
 
 locals {
+  schematics = yamldecode(file("${path.module}/../talos-schematics.yaml"))
   # Kata debug evidence files (T2). Read verbatim; the template indents them into `content: |`
   # block scalars, so the node receives them byte-for-byte (V2 compares sha256 after boot).
   kata_files = {
@@ -35,7 +36,7 @@ locals {
       host_ip            = v.host_ip
       storage_service_ip = var.storage_service_ip
       kata_debug         = var.kata_debug
-      install_image      = "factory.talos.dev/nocloud-installer/${var.install_schematic}:${var.talos_version}"
+      install_image      = "factory.talos.dev/nocloud-installer/${local.schematics.kata_gvisor}:${var.talos_version}"
     }, local.kata_files))
   }
 }

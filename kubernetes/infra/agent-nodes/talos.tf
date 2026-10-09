@@ -26,6 +26,13 @@ data "talos_machine_configuration" "worker" {
 }
 
 locals {
+  schematics = yamldecode(file("${path.module}/../talos-schematics.yaml"))
+  # Per-node install schematic, overriding the CP schematic (infra output schematic_id). Keys must
+  # be var.agent_nodes keys: a typo would silently fall back to the CP schematic and a reinstall
+  # would drop kata/gvisor, so talos_machine_configuration_apply.worker has a precondition on it.
+  install_schematics = {
+    "agent-node-3" = local.schematics.kata_gvisor
+  }
   worker_patches = {
     for k, v in var.agent_nodes : k => templatefile("${path.module}/machine-config/worker.yaml.tftpl", {
       node_ip            = v.ip
@@ -34,7 +41,7 @@ locals {
       nameservers        = jsonencode(var.nameservers)
       host_ip            = v.host_ip              # WS2/ADR 0011: next-hop (this node's Proxmox host) for the TB storage /32 route
       storage_service_ip = var.storage_service_ip # QNAP NFS/iSCSI service IP on the storage fabric
-      install_image      = "factory.talos.dev/nocloud-installer/${lookup(var.install_schematics, k, data.terraform_remote_state.infra.outputs.schematic_id)}:${var.talos_version}"
+      install_image      = "factory.talos.dev/nocloud-installer/${lookup(local.install_schematics, k, data.terraform_remote_state.infra.outputs.schematic_id)}:${var.talos_version}"
     })
   }
 }
@@ -49,6 +56,13 @@ resource "talos_machine_configuration_apply" "worker" {
   machine_configuration_input = data.talos_machine_configuration.worker.machine_configuration
   node                        = each.value.ip
   config_patches              = [local.worker_patches[each.key]]
+
+  lifecycle {
+    precondition {
+      condition     = alltrue([for k in keys(local.install_schematics) : contains(keys(var.agent_nodes), k)])
+      error_message = "local.install_schematics has a key that is not in var.agent_nodes (renamed or mistyped node?): that node would silently get the CP schematic."
+    }
+  }
 
   depends_on = [proxmox_virtual_environment_vm.agent]
 }
