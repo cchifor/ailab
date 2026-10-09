@@ -51,14 +51,50 @@
 # worker: --tags docker_daemon. The restart keeps containers (live-restore) but fails any in-flight
 # build or pull, so it only happens with dev_worker_docker_restart_on_config_change=true; otherwise
 # the run warns and the weekly docker restart (Sun 04:00) applies the change.
+# validate: a daemon.json dockerd rejects is never installed. The first start with a new file can be
+# the unattended weekly restart on every worker at once, so a bad one must not get that far.
 - name: Lay down /etc/docker/daemon.json (data-root, log rotation, live-restore, BuildKit GC)
   ansible.builtin.template:
     src: daemon.json.j2
     dest: /etc/docker/daemon.json
     mode: "0644"
-  notify:
-    - Restart docker for a daemon.json change
-    - Warn about a pending daemon.json change
+    validate: /usr/bin/dockerd --validate --config-file %s
+  tags: [docker_daemon]
+
+# "Pending" = daemon.json is newer than the running dockerd, whichever run wrote it: an opt-in re-run
+# after a default run (which left the file changed but docker untouched) still restarts.
+- name: Check whether the running dockerd predates daemon.json
+  ansible.builtin.shell: |
+    set -o pipefail
+    started=$(systemctl show -p ActiveEnterTimestamp --value docker.service)
+    [ -n "$started" ] && [ "$(stat -c %Y /etc/docker/daemon.json)" -gt "$(date -d "$started" +%s)" ]
+  args:
+    executable: /bin/bash
+  register: dev_worker_daemon_json_pending
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [docker_daemon]
+
+- name: Restart dockerd to apply the pending daemon.json
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  when:
+    - dev_worker_daemon_json_pending.rc == 0
+    - dev_worker_docker_restart_on_config_change | bool
+  tags: [docker_daemon]
+
+- name: Warn that a daemon.json change is pending a dockerd restart
+  ansible.builtin.debug:
+    msg: >-
+      /etc/docker/daemon.json on {{ inventory_hostname }} is newer than the running dockerd, which
+      was NOT restarted (dev_worker_docker_restart_on_config_change=false): the weekly docker restart
+      (Sun 04:00) applies it, or run -l {{ inventory_hostname }} -t docker_daemon -e
+      dev_worker_docker_restart_on_config_change=true when docker is idle.
+  when:
+    - dev_worker_daemon_json_pending.rc == 0
+    - not (dev_worker_docker_restart_on_config_change | bool)
   tags: [docker_daemon]
 
 - name: Enable + start docker

@@ -8,22 +8,6 @@
     name: docker
     state: restarted
 
-# daemon.json changes restart dockerd only on request (defaults: dev_worker_docker_restart_on_config_change).
-- name: Restart docker for a daemon.json change
-  ansible.builtin.systemd:
-    name: docker
-    state: restarted
-  when: dev_worker_docker_restart_on_config_change | bool
-
-- name: Warn about a pending daemon.json change
-  ansible.builtin.debug:
-    msg: >-
-      /etc/docker/daemon.json changed on {{ inventory_hostname }} but dockerd was NOT restarted
-      (dev_worker_docker_restart_on_config_change=false): the weekly docker restart (Sun 04:00)
-      applies it, or re-run with -t docker_daemon -e dev_worker_docker_restart_on_config_change=true
-      when docker is idle.
-  when: not (dev_worker_docker_restart_on_config_change | bool)
-
 - name: Restart ttyd
   ansible.builtin.systemd:
     name: ttyd
