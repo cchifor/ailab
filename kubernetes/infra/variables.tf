@@ -83,8 +83,9 @@ variable "control_planes" {
   # all downsized to free host RAM for the co-located dev-worker VMs (which OOM-thrashed at their 2 GiB
   # balloon floor under host oversubscription; node1 needed the same once its dev-worker floor was
   # raised to 8 GiB, leaving node1 at ~5.6 GiB swap). Safe: measured CP working set is only ~8-10 GiB
-  # (24h peak <=10.4 GiB; the ~20-24 GiB `qm` "used" is mostly reclaimable guest page cache). cp3 stays
-  # 28 (node3 is lighter: 1 runner, no registry LXC). Talos has no memory hotplug, so a change reboots
+  # (24h peak <=10.4 GiB; the ~20-24 GiB `qm` "used" is mostly reclaimable guest page cache). cp3 stayed
+  # 28 (node3 is lighter: 1 runner, no registry LXC) until the 2026-10-09 resize below made all three
+  # equal. Talos has no memory hotplug, so a change reboots
   # the VM — roll ONE node at a time (3-CP HA tolerates one down), graceful-stop via `talosctl shutdown`
   # (ACPI/`qm shutdown` does NOT stop Talos), and verify `talosctl etcd status` 3/3 in-sync between nodes.
   # See docs/runbooks/ai-host-setup.md.
@@ -94,8 +95,8 @@ variable "control_planes" {
   # The working set is still ~8-10 GiB; the binding constraint is pod REQUESTS. The 3 CPs requested
   # ~15.7 CPU / 51 Gi, while any two allocated only 14 CPU / ~44 Gi, so draining one CP did not fit
   # (cp2's drain needed 5.2 CPU / 17 Gi into 4.4 / 13 free). Each CP now allocates 9 CPU / 27.8 Gi.
-  # Host RAM was checked first: memory PSI 0, ~1 GiB swap, 25/28/66 GiB available after the resize.
-  # Re-check node1/node2 memory pressure (dev-worker floors) if host load grows.
+  # Host-RAM check and the per-node record: plans/2026-10-08-talos-upgrade-program-plan.md (ledger).
+  # Re-check node1/node2 memory pressure (the dev-worker floors above) if host load grows.
   #
   # disk_gb 40 -> 80 (2026-09-27). /var (EPHEMERAL) was 38.6 GB with 20-27 GB of container images
   # per CP; cp2/cp3 dipped below the kubelet's ~3.86 GB eviction threshold in the week before
