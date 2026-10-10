@@ -13,8 +13,10 @@ workflow default that the target repo's `AGENTS.md`, `CLAUDE.md`, and `TESTING.m
 At the end, state which phases ran and what was skipped, and why.
 
 ## Estate safeguards (non-overridable)
-- Playwright / heavy compose never run directly on a dev-worker — lease a pool env (`tep`
-  or the repo's wrapper); release leases even on failure.
+- Tests run where the target repo's "Where tests run" section puts them (platform: `CLAUDE.md`).
+  A repo without one: lint/unit/in-memory integration locally, full-stack e2e in CI on the PR.
+  This worker is shared: at most ONE compose stack at a time (`docker compose ls` first), torn
+  down (`down -v`) when done, also on failure. There is no test-env pool and no `tep` (ADR 0037).
 - Kubernetes-facing work: name the exact context/namespace/commands/cleanup and get operator
   approval for THAT scope before any write; verify the current kubectl context immediately
   before mutating. Approval to validate is not approval to mutate.
@@ -69,8 +71,9 @@ At the end, state which phases ran and what was skipped, and why.
   verification, not ritual unit tests; UI behavior changes need e2e coverage.
 
 ## Phase 3 — validate
-- Route suites by the repo's own workload classification (its AGENTS.md/TESTING.md), not by
-  test type; the estate safeguard above governs anything heavy or browser-shaped.
+- Route suites by the repo's own "Where tests run" section (its CLAUDE.md/AGENTS.md/TESTING.md),
+  not by test type; the estate safeguard above governs anything heavy or browser-shaped. A tier the
+  repo assigns to CI is confirmed by that CI job on the PR — wait for it, do not re-create it here.
 - Rerun the tiers affected by every fix, not just the first implementation.
 
 ## Phase 4 — PR to merge

@@ -960,7 +960,7 @@ one-person company — so it gets one host, a memory cap, and a kill switch.
 Herdr's payoff over "an agent in tmux" is a **conductor**: an interactive Claude Code session
 in a herdr pane (`HERDR_ENV=1`) that plans, spawns, watches, and verifies worker agents
 through the `herdr` CLI — and never implements. Codex-validated design (2026-09-01); the
-cross-repo conventions (global ~2-Claude cap, worktree hygiene, tep head-of-line, gitea PRs)
+cross-repo conventions (global ~2-Claude cap, worktree hygiene, gitea PRs)
 live in the agentforge `AGENTS.md`.
 
 - **Setup (ansible, `-t herdr`):** the claude+codex integrations
@@ -984,7 +984,8 @@ live in the agentforge `AGENTS.md`.
   stays with the conductor; disable auto-memory for ephemeral workers (one shared project
   memory dir across worktrees leaks context between them).
 - **Capacity:** plan for conductor + ONE active heavy worker — dw4's balloon can pin near
-  the 4 GiB floor under node load, and the 1-member tep pool serializes PW-class runs anyway.
+  the 4 GiB floor under node load, and a worker holds one compose stack at a time (the test-env
+  pool that used to take PW-class runs off the worker was retired, ADR 0037).
 - **Teardown:** `herdr worktree remove --workspace <ws>` only after verification (never
   `--force` first); keep briefs/reports out of product commits.
 - **Upgrade:** bump `dev_worker_herdr_version` + `dev_worker_herdr_sha256` together. A herdr server
