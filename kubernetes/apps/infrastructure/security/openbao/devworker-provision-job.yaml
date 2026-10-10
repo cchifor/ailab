@@ -142,7 +142,7 @@ data:
       token_max_ttl=30m
 
     # openbao-k8stoken-sync (ADR 0021) — the in-cluster job that mints per-worker kubeconfigs and
-    # writes them to af/dev-workers/<host>.{tep,helmtest}_kubeconfig. It authenticates with the
+    # writes them to af/dev-workers/<host>.helmtest_kubeconfig (tep_kubeconfig until ADR 0037). It authenticates with the
     # KUBERNETES auth mount, NOT the breakglass token: a daily credential-writer must not hold root.
     #
     # CAPABILITIES: `read` and `patch` are NOT optional extras. KV-v2's patch is an HTTP PATCH that

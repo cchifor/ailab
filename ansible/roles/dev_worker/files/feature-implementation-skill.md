@@ -16,7 +16,8 @@ At the end, state which phases ran and what was skipped, and why.
 - Tests run where the target repo's "Where tests run" section puts them (platform: `CLAUDE.md`).
   A repo without one: lint/unit/in-memory integration locally, full-stack e2e in CI on the PR.
   This worker is shared: at most ONE compose stack at a time (`docker compose ls` first), torn
-  down (`down -v`) when done, also on failure. There is no test-env pool and no `tep` (ADR 0037).
+  down (`down -v`) when done, also on failure — whatever the repo says; a repo section may narrow
+  this rule, never widen it. There is no test-env pool and no `tep` (ADR 0037).
 - Kubernetes-facing work: name the exact context/namespace/commands/cleanup and get operator
   approval for THAT scope before any write; verify the current kubectl context immediately
   before mutating. Approval to validate is not approval to mutate.

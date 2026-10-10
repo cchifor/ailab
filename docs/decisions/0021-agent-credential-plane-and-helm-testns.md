@@ -3,6 +3,9 @@
 **Status:** PROPOSED (2026-09-10). Implementation on `feat/openbao-agent-creds-and-helm-testns`.
 Phase 3 (the `bao agent` cutover) ships **opt-in per host** (`dev_worker_openbao_kubeconfig_cutover:
 false`) so the cluster side can land and be verified before any worker changes.
+**Superseded in part by ADR 0037 (2026-10-10):** the `tep` kubeconfig, the `testpool` lease namespace
+and its `tep-dw<N>` ServiceAccounts are retired with the test-env pool. The helmtest half and the
+sync-owned kubeconfig mechanism stand.
 **Relates to:** ADR 0020 (per-VM AppRole + agent-rendered files — this extends that plane to
 Kubernetes credentials and amends its durability claim), 0019 (OpenBao + ESO as the estate secret
 store; the k8s auth mount this reuses), 0018 (the dev-worker agents that consume these), 0007 (k8s
