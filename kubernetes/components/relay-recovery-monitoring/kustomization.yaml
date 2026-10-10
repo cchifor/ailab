@@ -9,6 +9,6 @@ configMapGenerator:
   literals:
   # Exact source used by `npm run recovery:verify` in the matching Relay PR.
   - verifier-sha256=79f8b0161c77e52d1278b94c3a62b6ab694d48c511e7c15e60570adf2b11d095
-  - schema-version=42
+  - schema-version=43
 patches:
 - path: deployment.yaml

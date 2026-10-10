@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      containers:
+      - name: relay
+        env:
+        - name: RELAY_RECOVERY_GENERATION_FILE
+          value: /run/relay-restore/generation.json
+        volumeMounts:
+        - name: restore-generation
+          mountPath: /run/relay-restore/generation.json
+          subPath: generation.json
+          readOnly: true
+      volumes:
+      - name: restore-generation
+        configMap:
+          name: relay-recovery-generation
+          defaultMode: 0444
+          items:
+          - key: generation.json
+            path: generation.json

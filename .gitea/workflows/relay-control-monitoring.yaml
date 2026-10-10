@@ -4,6 +4,7 @@ on:
     paths:
     - 'kubernetes/components/relay-control-monitoring/**'
     - 'kubernetes/components/relay-recovery-monitoring/**'
+    - 'kubernetes/components/relay-restore-fencing/**'
     - 'kubernetes/components/relay-notifications/relay/**'
     - 'kubernetes/apps/apps/relay/**'
     - 'scripts/tests/integration/test_relay_control_monitoring.py'
@@ -14,6 +15,7 @@ on:
     paths:
     - 'kubernetes/components/relay-control-monitoring/**'
     - 'kubernetes/components/relay-recovery-monitoring/**'
+    - 'kubernetes/components/relay-restore-fencing/**'
     - 'kubernetes/components/relay-notifications/relay/**'
     - 'kubernetes/apps/apps/relay/**'
     - 'scripts/tests/integration/test_relay_control_monitoring.py'

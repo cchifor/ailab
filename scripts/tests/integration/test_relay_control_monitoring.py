@@ -39,7 +39,7 @@ class Monitoring(unittest.TestCase):
                      'build', str(wrapper.relative_to(ROOT))).stdout
         cls.docs = list(yaml.safe_load_all(raw))
         configuration = yaml.safe_load((wrapper / 'kustomization.yaml').read_text())
-        configuration.setdefault('components', []).append(os.path.relpath(ROOT / 'kubernetes/components/relay-recovery-monitoring', wrapper))
+        configuration.setdefault('components', []).extend(os.path.relpath(ROOT / 'kubernetes/components' / component, wrapper) for component in ['relay-recovery-monitoring', 'relay-restore-fencing'])
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
         cls.recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
             'build', str(wrapper.relative_to(ROOT))).stdout))
@@ -123,7 +123,7 @@ class Monitoring(unittest.TestCase):
         policy_name = next(v['configMap']['name'] for v in spec['volumes'] if v['name'] == 'recovery-policy')
         policy = named(self.recovery_docs, 'ConfigMap', policy_name)['data']
         self.assertRegex(policy['verifier-sha256'], r'^[a-f0-9]{64}$')
-        self.assertEqual(policy['schema-version'], '42')
+        self.assertEqual(policy['schema-version'], '43')
         for key, value in policy.items():
             (self.root / 'policy' / key).write_text(value + '\n')
         self.run_setup(recovery='1')
@@ -148,6 +148,19 @@ class Monitoring(unittest.TestCase):
             self.run_setup(False, recovery='1')
             self.assertEqual(json.loads(target.read_text()), expected)
         self.run_setup(False, recovery='2')
+
+    def test_restore_generation_is_external_canonical_readonly_and_opt_in(self):
+        spec = named(self.recovery_docs, 'Deployment', 'relay')['spec']['template']['spec']
+        application = next(c for c in spec['containers'] if c['name'] == 'relay')
+        self.assertIn({'name': 'RELAY_RECOVERY_GENERATION_FILE', 'value': '/run/relay-restore/generation.json'}, application['env'])
+        self.assertIn({'name': 'restore-generation', 'mountPath': '/run/relay-restore/generation.json',
+                       'subPath': 'generation.json', 'readOnly': True}, application['volumeMounts'])
+        self.assertIn({'name': 'restore-generation', 'configMap': {'name': 'relay-recovery-generation',
+                       'defaultMode': 292, 'items': [{'key': 'generation.json', 'path': 'generation.json'}]}}, spec['volumes'])
+        self.assertFalse(any(d['kind'] == 'ConfigMap' and d['metadata']['name'] == 'relay-recovery-generation' for d in self.recovery_docs))
+        for init in spec['initContainers']:
+            self.assertNotIn('restore-generation', {m['name'] for m in init.get('volumeMounts', [])})
+        self.assertNotIn('relay-restore-fencing', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
 
     def test_invalid_inputs_fail_closed_and_keep_last_complete_file(self):
         self.run_setup()

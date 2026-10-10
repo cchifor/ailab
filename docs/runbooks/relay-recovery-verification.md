@@ -32,7 +32,7 @@ configuration to the existing private collector verifier JSON:
 "recoveryEvidence": {
   "path": "/run/relay-recovery/private/evidence.json",
   "verifierSha256": "<SHA256 of the reviewed deployed verifier>",
-  "schemaVersion": 42
+  "schemaVersion": 43
 }
 ```
 
@@ -40,16 +40,16 @@ Enable this component after `relay-control-monitoring`. It provides a separate
 nonsecret policy ConfigMap, opts the existing materializer into the extension,
 and mounts a dedicated 1 MiB RWX `nfs-csi` evidence PVC read-only into Relay. It
 does not use a file `subPath`, so an atomic receipt replacement is visible on the
-next scrape. The policy currently pins schema 42 and the exact reviewed verifier
+next scrape. The policy currently pins schema 43 and the exact reviewed verifier
 source SHA256; a verifier/schema upgrade requires a matching GitOps change.
-Enabling this schema-42 policy requires a successful isolated restore of schema
-42; any existing schema-41 `evidence.json` becomes unavailable on the next scrape.
+Enabling this schema-43 policy requires a successful isolated restore of schema
+42; any existing schema-42 `evidence.json` becomes unavailable on the next scrape.
 The unchanged verifier validates a strictly increasing migration inventory, actual table
 readability and forced RLS, and hashes the restored artifact inventory. It does
 not impose column-specific ownership or recovery-claim semantics; those are
 qualified by Relay's native recovery tests, separately from restore evidence.
-Relay [#103](https://git.chifor.me/cchifor/relay/pulls/103) exercised this exact
-verifier against an actual schema-42 database/artifact restore. The matching
+Relay [#105](https://git.chifor.me/cchifor/relay/pulls/105) exercised this exact
+verifier against an actual schema-43 database/artifact restore. The matching
 collector rejects evidence whose final migration does not match its policy.
 The policy's generated name also changes the pod template on policy updates.
 
@@ -81,3 +81,34 @@ Qualification exercises each missing series, unavailable and recovered evidence,
 independent/simultaneous age faults, recovery with a new backup, and suppression
 of age alerts while evidence is unavailable. All rules are included automatically
 in the repository-wide Prometheus rule gate.
+
+
+## Restore authority before reconnecting services
+
+The separate opt-in `kubernetes/components/relay-restore-fencing` component mounts
+an externally provisioned `relay-recovery-generation` ConfigMap key
+`generation.json`, read-only, at `/run/relay-restore/generation.json`. It sets
+`RELAY_RECOVERY_GENERATION_FILE` only for the Relay application. The referenced
+ConfigMap is intentionally not created by this component: the operator owns its
+fresh generation for each restore and must keep it outside the backup inventory.
+It is nonsecret JSON with `version: 1` and a new `generation` UUID. There is no
+placeholder generation that could accidentally authorize an old database.
+
+A single-file `subPath` gives the verifier a canonical regular file, avoiding
+kubelet's projected-volume symlinks. Generation changes require a deliberate pod
+replacement after fencing; they do not update a running process. Stop Relay and
+all provisioning/bootstrap workers first and prevent automatic restart. Perform
+and verify the isolated restore, migrate it, then run the matching Relay
+`npm run recovery:fence -- <expected-restored-database-name>` with the same
+generation file and the deployment's schema-owner connection, without RLS bypass.
+Provisioning workers need that same file/path configuration before restarting.
+Do not change database role privileges or enable RLS bypass for this operation.
+
+Relay refuses startup when the generation does not match a completed fence, and
+refuses removal of the file once a fence exists. The fence retires old logins,
+approvals, agent identities and queued work; known router keys enter independent
+revocation and escrow cleanup. It does not reenable pools/profiles or release
+capacity. Inventory router/OpenBao/Incus/native resources created after the backup
+before admitting new work: those resources are absent from the restored rows.
+The detailed behavioral contract and tested command are in Relay's
+`restored-authority-fence.md`. No component is enabled in the live overlay.
