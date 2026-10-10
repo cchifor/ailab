@@ -68,6 +68,9 @@ pr_reviewer_repos:
   # label is set. No additional author grant or merge-gate exception is introduced.
   - cchifor/relay
   - cchifor/llm-router
+  # Maintained dsh front door from Relay R2; same two-persona/current-head/CI gates.
+  # Activation prerequisites: docs/runbooks/dsh-acp-plus-reviewer-onboarding.md.
+  - cchifor/dsh-acp-plus
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
 # its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
