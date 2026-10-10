@@ -1,6 +1,6 @@
-# PENDING DELETION (ADR 0037, 2026-10-10). Nothing references this file: the agent-sandbox Flux
-# Kustomization and this directory's kustomization.yaml are gone, and Flux has deleted the controller
-# and its CRDs. It is removed in two commits only because the whole 425 KB vendored release manifest
+# PENDING DELETION (ADR 0037, 2026-10-10). Nothing references this file: this commit deletes the
+# agent-sandbox Flux Kustomization and this directory's kustomization.yaml, and once it merges Flux
+# deletes the controller, its namespace and the CRDs. It is removed in two commits only because the whole 425 KB vendored release manifest
 # exceeds the review bots' 400 KB cap; this is the first half, the next PR deletes the rest.
 apiVersion: v1
 kind: Namespace
