@@ -170,20 +170,23 @@ INVENTORY=inventory/hosts.yml
 TS=kubernetes/apps/clusters/ai/trueswarm-observer.yaml
 TSA=kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
 E2E=kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml
-# edit_all <file> <old> <new> <expected count>: replace every occurrence, asserting how many there were
+# edit_all <file> <old> <new> <expected count>: replace every occurrence; N+ means at least N.
 edit_all() {
   "$PY" - "$WORK/$1" "$2" "$3" "$4" <<'PY' || fail "[F] fixture edit did not match: $1"
 import io, sys
-path, old, new, n = sys.argv[1], sys.argv[2].encode().decode("unicode_escape"), sys.argv[3].encode().decode("unicode_escape"), int(sys.argv[4])
+path, old, new, count = sys.argv[1], sys.argv[2].encode().decode("unicode_escape"), sys.argv[3].encode().decode("unicode_escape"), sys.argv[4]
+n = int(count.rstrip("+"))
 s = io.open(path, encoding="utf-8", newline="").read()
-if s.count(old) != n:
-    sys.exit("%s: expected %d x %r, found %d" % (path, n, old, s.count(old)))
+if (s.count(old) < n if count.endswith("+") else s.count(old) != n):
+    sys.exit("%s: expected %s x %r, found %d" % (path, count, old, s.count(old)))
 io.open(path, "w", encoding="utf-8", newline="").write(s.replace(old, new))
 PY
 }
 edit_all "$RBAC" 'apiVersion: v1\nkind: ServiceAccount\nmetadata: { name: platform-dw4, namespace: platform-access }\nautomountServiceAccountToken: false\n---\n' '' 1
 edit_all "$RBAC" ', "platform-dw4"' '' 1
-edit_all "$RBAC" '  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }\n' '' 3
+# Three permanent observer subjects plus any project-scoped grants (e.g. temporary Relay R0).
+# A COMPLETE retirement removes all of them, including after the temporary grant is removed.
+edit_all "$RBAC" '  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }\n' '' '3+'
 edit_all "$PGSYNC" 'value: "1 2 3 4"' 'value: "1 2 3"' 2
 edit_all "$PGSYNC" 'value: "5 6"' 'value: "4 5 6"' 2
 edit_all "$K8STOKEN" 'for _n in (1, 2, 3, 4):' 'for _n in (1, 2, 3):' 1
