@@ -26,23 +26,19 @@
     path: /usr/local/bin/tep
     state: absent
 
-# "safe" only when the agent config on disk has no tep stanza AND the running agent (if any) started
-# after that config was written, i.e. it is actually running it.
+# files/tep-retire-gate.sh decides (unit-tested: tests/test-tep-retire-gate.sh). "safe" only when
+# agent.hcl has no tep stanza AND the running agent, if any, started after that file was written,
+# compared at nanosecond precision: whole seconds called a restart from just BEFORE the write in the
+# same second "safe" (reviewer-codex, ailab#1217). Anything unreadable fails closed.
 - name: Check that the running bao agent no longer renders ~/.tep/kubeconfig
-  ansible.builtin.shell: |
-    set -eu
-    hcl=/etc/openbao-agent/agent.hcl
-    if [ -f "$hcl" ] && grep -q 'tep-kubeconfig' "$hcl"; then echo unsafe-config; exit 0; fi
-    if [ -f "$hcl" ] && [ "$(systemctl is-active openbao-agent || true)" = active ]; then
-      started=$(date -d "$(systemctl show openbao-agent -p ExecMainStartTimestamp --value)" +%s)
-      [ "$started" -ge "$(stat -c %Y "$hcl")" ] || { echo unsafe-stale-process; exit 0; }
-    fi
-    echo safe
-  args:
-    executable: /bin/bash
-  register: tep_retire_gate
+  ansible.builtin.script: tep-retire-gate.sh /etc/openbao-agent/agent.hcl
+  register: tep_retire_gate_run
   changed_when: false
   check_mode: false
+
+- name: Read the gate's verdict
+  ansible.builtin.set_fact:
+    tep_retire_gate: { stdout: "{{ tep_retire_gate_run.stdout | trim }}" }
 
 - name: Remove ~/.tep and the agent's tep template
   ansible.builtin.file:

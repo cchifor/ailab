@@ -85,6 +85,14 @@ jobs:
           set -euo pipefail
           bash ansible/roles/dev_worker/tests/test-codex-router-key.sh
 
+      # The tep retirement gate (tasks/tep.yml, ADR 0037): ~/.tep may go only once the RUNNING bao agent
+      # no longer renders into it, at nanosecond precision (the same-second regression from ailab#1217).
+      - name: tep retirement gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/dev_worker/tests/test-tep-retire-gate.sh
+
       # Agent TMPDIR hook + ~/.cache/~/.npm migration onto /workspace (tasks/agent_dirs.yml).
       - name: agent temp + cache dirs off the root disk
         shell: bash
