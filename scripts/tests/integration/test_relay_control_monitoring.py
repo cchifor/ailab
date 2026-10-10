@@ -162,6 +162,7 @@ class Monitoring(unittest.TestCase):
         self.assertEqual(initializer['securityContext']['runAsGroup'], 1000)
         self.assertEqual([c for c in self.spec['initContainers'] if c['name'] not in ('metrics-files', 'notification-files')], base['initContainers'])
         application = next(c for c in self.spec['containers'] if c['name'] == 'relay')
+        self.assertEqual(application.get('securityContext', {}).get('runAsUser', self.spec['securityContext'].get('runAsUser')), 1000)
         self.assertEqual(application['image'], next(c for c in base['containers'] if c['name'] == 'relay')['image'])
         env = {e['name']: e.get('value') for e in application['env']}
         self.assertEqual(env['RELAY_CONTROL_METRICS_FILE'], '/run/relay-metrics/private/config.json')

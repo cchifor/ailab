@@ -128,7 +128,8 @@ spec:
         description: Inspect the daily coordinated database/artifact backup and its storage. Job success is not
           restore verification; the named artifact/database restore gate remains required.
     - alert: RelayControlMetricSchemaIncomplete
-      expr: up{job="relay-control-plane"} == 1 unless on(job, instance) (count by(job, instance) ({__name__=~"relay_control_(holder_reports_stale|holders_unreported|holder_journal_reports_missing|control_commands_unknown|permission_decisions_unknown|question_answers_unknown|router_credentials_unknown|router_installations_unknown|router_revocations_pending|router_escrow_cleanup_pending)",job="relay-control-plane"})
+      expr: up{job="relay-control-plane"} == 1 unless on(job, instance) (count by(job, instance) (count by(__name__,
+        job, instance) ({__name__=~"relay_control_(holder_reports_stale|holders_unreported|holder_journal_reports_missing|control_commands_unknown|permission_decisions_unknown|question_answers_unknown|router_credentials_unknown|router_installations_unknown|router_revocations_pending|router_escrow_cleanup_pending)",job="relay-control-plane"}))
         == 10)
       for: 5m
       labels:

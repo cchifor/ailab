@@ -715,3 +715,72 @@ tests:
   - eval_time: 6m
     alertname: RelayControlMetricSchemaIncomplete
     exp_alerts: []
+- name: partial critical schema warns with extra label dimensions
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80",scope="extra"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: warning
+        service: relay
+      exp_annotations:
+        summary: Relay critical metric schema is incomplete
+        description: A successful scrape omitted a required holder, delivery or cleanup observation. Check release
+          compatibility; missing series must not look like a healthy zero.
+- name: complete critical schema stays healthy with extra label dimensions
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80",scope="extra"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts: []
