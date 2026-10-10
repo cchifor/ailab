@@ -1,0 +1,27 @@
+name: relay-control-monitoring
+on:
+  pull_request:
+    paths:
+    - 'kubernetes/components/relay-control-monitoring/**'
+    - 'kubernetes/components/relay-notifications/relay/**'
+    - 'kubernetes/apps/apps/relay/**'
+    - 'scripts/tests/integration/test_relay_control_monitoring.py'
+    - 'scripts/tests/integration/test_relay_notifications.py'
+    - '.gitea/workflows/relay-control-monitoring.yaml'
+  push:
+    branches: [main]
+    paths:
+    - 'kubernetes/components/relay-control-monitoring/**'
+    - 'kubernetes/components/relay-notifications/relay/**'
+    - 'kubernetes/apps/apps/relay/**'
+    - 'scripts/tests/integration/test_relay_control_monitoring.py'
+    - 'scripts/tests/integration/test_relay_notifications.py'
+    - '.gitea/workflows/relay-control-monitoring.yaml'
+jobs:
+  relay-control-monitoring:
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+    - name: Render and qualify the private collector configuration
+      run: python3 scripts/tests/integration/test_relay_control_monitoring.py
