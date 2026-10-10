@@ -32,7 +32,7 @@ configuration to the existing private collector verifier JSON:
 "recoveryEvidence": {
   "path": "/run/relay-recovery/private/evidence.json",
   "verifierSha256": "<SHA256 of the reviewed deployed verifier>",
-  "schemaVersion": 41
+  "schemaVersion": 42
 }
 ```
 
@@ -40,7 +40,7 @@ Enable this component after `relay-control-monitoring`. It provides a separate
 nonsecret policy ConfigMap, opts the existing materializer into the extension,
 and mounts a dedicated 1 MiB RWX `nfs-csi` evidence PVC read-only into Relay. It
 does not use a file `subPath`, so an atomic receipt replacement is visible on the
-next scrape. The policy currently pins schema 41 and the exact reviewed verifier
+next scrape. The policy currently pins schema 42 and the exact reviewed verifier
 source SHA256; a verifier/schema upgrade requires a matching GitOps change.
 The policy's generated name also changes the pod template on policy updates.
 

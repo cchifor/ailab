@@ -123,12 +123,12 @@ class Monitoring(unittest.TestCase):
         policy_name = next(v['configMap']['name'] for v in spec['volumes'] if v['name'] == 'recovery-policy')
         policy = named(self.recovery_docs, 'ConfigMap', policy_name)['data']
         self.assertRegex(policy['verifier-sha256'], r'^[a-f0-9]{64}$')
-        self.assertEqual(policy['schema-version'], '41')
+        self.assertEqual(policy['schema-version'], '42')
         for key, value in policy.items():
             (self.root / 'policy' / key).write_text(value + '\n')
         self.run_setup(recovery='1')
         expected = {**self.config, 'recoveryEvidence': {'path': '/run/relay-recovery/private/evidence.json',
-                    'verifierSha256': policy['verifier-sha256'], 'schemaVersion': 41}}
+                    'verifierSha256': policy['verifier-sha256'], 'schemaVersion': 42}}
         target = self.root / 'output/private/config.json'
         self.assertEqual(json.loads(target.read_text()), expected)
         application = next(c for c in spec['containers'] if c['name'] == 'relay')
