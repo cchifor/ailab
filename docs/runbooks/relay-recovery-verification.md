@@ -32,7 +32,7 @@ configuration to the existing private collector verifier JSON:
 "recoveryEvidence": {
   "path": "/run/relay-recovery/private/evidence.json",
   "verifierSha256": "<SHA256 of the reviewed deployed verifier>",
-  "schemaVersion": 41
+  "schemaVersion": 42
 }
 ```
 
@@ -40,8 +40,17 @@ Enable this component after `relay-control-monitoring`. It provides a separate
 nonsecret policy ConfigMap, opts the existing materializer into the extension,
 and mounts a dedicated 1 MiB RWX `nfs-csi` evidence PVC read-only into Relay. It
 does not use a file `subPath`, so an atomic receipt replacement is visible on the
-next scrape. The policy currently pins schema 41 and the exact reviewed verifier
+next scrape. The policy currently pins schema 42 and the exact reviewed verifier
 source SHA256; a verifier/schema upgrade requires a matching GitOps change.
+Enabling this schema-42 policy requires a successful isolated restore of schema
+42; any existing schema-41 `evidence.json` becomes unavailable on the next scrape.
+The unchanged verifier validates a strictly increasing migration inventory, actual table
+readability and forced RLS, and hashes the restored artifact inventory. It does
+not impose column-specific ownership or recovery-claim semantics; those are
+qualified by Relay's native recovery tests, separately from restore evidence.
+Relay [#103](https://git.chifor.me/cchifor/relay/pulls/103) exercised this exact
+verifier against an actual schema-42 database/artifact restore. The matching
+collector rejects evidence whose final migration does not match its policy.
 The policy's generated name also changes the pod template on policy updates.
 
 The operator must approve storage placement and a publisher's narrow mount of
