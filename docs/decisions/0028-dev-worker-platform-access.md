@@ -290,7 +290,7 @@ row in the runbook's retire checklist.
 (Decision 3) covers `strive-pg` only. Extending it is its own decision, with its own exclusions for
 the admin workspace.
 
-## Amendment 2026-10-10 — temporary forge object-store certificate observer (`platform-dw2`)
+## Amendment 2026-10-10 — temporary forge object-store certificate observer (all live slots)
 
 **Trigger.** The dev-worker-2 agent prepared
 [cchifor/platform#2221](https://git.chifor.me/cchifor/platform/pulls/2221), which adds the
@@ -300,9 +300,14 @@ needs the issuer checked before the merge, then the live `dependsOn` edge and th
 Ready state at its current generation read after it. `platform-dw2` got 403 on
 `ClusterIssuer/ailab-ca`; the observer ClusterRole covers no cert-manager or Kustomization objects.
 
-**Grant.** `forge-objectstore-cert-observer-dw2`, in `platform-access/rbac.yaml`, for `platform-dw2`
-only, `get` by `resourceNames` only. It has no Secrets, no CertificateRequests, no list/watch and no
-writes.
+**Grant.** `forge-objectstore-cert-observer`, in `platform-access/rbac.yaml`, `get` by `resourceNames`
+only. It has no Secrets, no CertificateRequests, no list/watch and no writes.
+
+**Subjects: every live slot (`platform-dw1`..`platform-dw4`), not one.** Decision 2's escalation
+default is one slot. The operator asked for every dev worker on 2026-10-10. The wider subject list is
+acceptable because the objects carry no secret material (below) and the grant has no write path.
+The three subject lists are a slot enumeration. The slot guard's reference scan fails CI on a
+retired slot left in them, so a retirement must remove it here as well.
 
 | Where | Object | Grants |
 |---|---|---|
@@ -325,7 +330,7 @@ apply every minute instead.
 
 **Temporary.** Remove by **2026-10-24**, tracked by
 [ailab#1225](https://git.chifor.me/cchifor/ailab/issues/1225). The objects' `remove-by`
-annotation records the date. Kubernetes does not enforce it. The grant lets the worker observe and
+annotation records the date. Kubernetes does not enforce it. The grant lets the workers observe and
 record. Merging #2221 and activating the later TLS stage stay owner decisions.
 
 ## Follow-ups

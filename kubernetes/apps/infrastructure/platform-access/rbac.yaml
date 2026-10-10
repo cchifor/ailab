@@ -254,16 +254,18 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 # Temporary forge object-store certificate bootstrap observation (cchifor/platform#2221, runbook
-# docs/runbooks/forge-objectstore-certificate-bootstrap.md in that repo): lets only platform-dw2
-# check the issuer before the merge and read the Flux edge + Certificate Ready state after it.
-# Remove all six forge-objectstore-cert-observer-dw2 documents by 2026-10-24 (RBAC has no native
-# TTL). `get` by resourceNames only (resourceNames cannot restrict list), no Secrets, no
+# docs/runbooks/forge-objectstore-certificate-bootstrap.md in that repo): lets every live dev-worker
+# slot check the issuer before the merge and read the Flux edge + Certificate Ready state after it
+# (all slots at the operator's request, 2026-10-10). Its subjects are a slot enumeration: retiring a
+# slot means removing it here too (scripts/check-slot-enumerations.py fails CI on a stale one).
+# Remove all six forge-objectstore-cert-observer documents by 2026-10-24 (RBAC has no native TTL).
+# `get` by resourceNames only (resourceNames cannot restrict list), no Secrets, no
 # CertificateRequests, no writes. The ClusterRoleBinding is the second cluster-scoped dev-worker
 # grant: ADR 0028, amendment 2026-10-10.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-24"
     platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1225"
@@ -277,21 +279,24 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-24"
     platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1225"
 subjects:
+  - { kind: ServiceAccount, name: platform-dw1, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
 roleRef:
   kind: ClusterRole
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   namespace: flux-system
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-24"
@@ -310,22 +315,25 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   namespace: flux-system
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-24"
     platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1225"
 subjects:
+  - { kind: ServiceAccount, name: platform-dw1, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
 roleRef:
   kind: Role
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   namespace: strive-ailab
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-24"
@@ -340,14 +348,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   namespace: strive-ailab
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-24"
     platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1225"
 subjects:
+  - { kind: ServiceAccount, name: platform-dw1, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw3, namespace: platform-access }
+  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
 roleRef:
   kind: Role
-  name: forge-objectstore-cert-observer-dw2
+  name: forge-objectstore-cert-observer
   apiGroup: rbac.authorization.k8s.io

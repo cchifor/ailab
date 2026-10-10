@@ -54,13 +54,13 @@ denied.
 | Project | Slots | Namespaces | Flux (`flux-system`, get by name) | Defined in |
 |---|---|---|---|---|
 | Trueswarm | `platform-dw2`, `platform-dw4` | `trueswarm`, `trueswarm-admin`, `trueswarm-recovery`, plus `get` on the 5 `trueswarm-executor-*` ValidatingAdmissionPolicies | Kustomizations `trueswarm`, `trueswarm-git-auth`, `trueswarm-admin*`, `trueswarm-platform-*`; GitRepositories `trueswarm`, `trueswarm-admin`; Jobs `trueswarm{,-admin}-git-bootstrap`, `trueswarm-admin-executor-bootstrap` | ailab `kubernetes/apps/clusters/ai/trueswarm{,-admin}-observer.yaml` **and** `cchifor/trueswarm-admin` `deploy/{platform,foundation,recovery-foundation,security}/observer.yaml` (+ `deploy/platform/backup-observer.yaml`) |
-| Forge object-store certificate bootstrap ([platform#2221](https://git.chifor.me/cchifor/platform/pulls/2221); **temporary, remove by 2026-10-24**, [#1225](https://git.chifor.me/cchifor/ailab/issues/1225); ADR 0028 amendment 2026-10-10) | `platform-dw2` | `strive-ailab`: `get` Certificate `objectstore-forge-tls`; cluster: `get` ClusterIssuer `ailab-ca` | Kustomizations `platform`, `platform-objectstore`, `platform-objectstore-certificate`; GitRepository `platform` | ailab `kubernetes/apps/infrastructure/platform-access/rbac.yaml` (`forge-objectstore-cert-observer-dw2`) |
+| Forge object-store certificate bootstrap ([platform#2221](https://git.chifor.me/cchifor/platform/pulls/2221); **temporary, remove by 2026-10-24**, [#1225](https://git.chifor.me/cchifor/ailab/issues/1225); ADR 0028 amendment 2026-10-10) | all live slots (`platform-dw1`..`platform-dw4`) | `strive-ailab`: `get` Certificate `objectstore-forge-tls`; cluster: `get` ClusterIssuer `ailab-ca` | Kustomizations `platform`, `platform-objectstore`, `platform-objectstore-certificate`; GitRepository `platform` | ailab `kubernetes/apps/infrastructure/platform-access/rbac.yaml` (`forge-objectstore-cert-observer`) |
 
 ```sh
 platform kubectl -n trueswarm-admin get deploy,jobs,clusters.postgresql.cnpg.io,backups.postgresql.cnpg.io
 platform kubectl -n trueswarm logs job/<migration-job>
 platform kubectl -n flux-system get kustomization trueswarm-admin-migration -o wide   # by name; a bare `get kustomizations` is denied
-# forge object-store certificate bootstrap (dw2 only, until 2026-10-24)
+# forge object-store certificate bootstrap (every slot, until 2026-10-24)
 platform kubectl get clusterissuer ailab-ca -o jsonpath='{.status.conditions}'
 platform kubectl -n flux-system get kustomization platform-objectstore -o jsonpath='{.spec.dependsOn}'
 platform kubectl -n strive-ailab get certificate objectstore-forge-tls -o jsonpath='{.metadata.generation} {.status.conditions}'
@@ -256,7 +256,7 @@ the same live set, and retired slots must appear in both `RETIRED_SLOTS` lists:
 | 7 | `kubernetes/infra/dev-workers/variables.tf` | the map key |
 | 8 | `inventory/hosts.yml` | the host |
 | 9 | `kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml` (ADR 0035) | `LIVE_SLOTS` — **in both the CronJob and the bootstrap Job**; the next run drops the slot from both app Secrets |
-| 10 | project-scoped grants: `kubernetes/apps/clusters/ai/*-observer.yaml` (CI-checked), and the **`cchifor/trueswarm-admin`** repo's `deploy/*/observer.yaml` + `deploy/*/backup-observer.yaml` (NOT CI-checked from here) | drop the slot's subject; re-home the grant if the project's agent moves |
+| 10 | project-scoped grants: `kubernetes/apps/clusters/ai/*-observer.yaml` and the purpose-named grants in `platform-access/rbac.yaml` (`relay-r0-observer-dw4`, `forge-objectstore-cert-observer` until 2026-10-24) (CI-checked), and the **`cchifor/trueswarm-admin`** repo's `deploy/*/observer.yaml` + `deploy/*/backup-observer.yaml` (NOT CI-checked from here) | drop the slot's subject; re-home the grant if the project's agent moves |
 
 ```bash
 python3 scripts/check-slot-enumerations.py   # prints every enumeration and its set; exits 1 on a DIFF
