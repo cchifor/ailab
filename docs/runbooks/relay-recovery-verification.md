@@ -43,7 +43,7 @@ does not use a file `subPath`, so an atomic receipt replacement is visible on th
 next scrape. The policy currently pins schema 43 and the exact reviewed verifier
 source SHA256; a verifier/schema upgrade requires a matching GitOps change.
 Enabling this schema-43 policy requires a successful isolated restore of schema
-42; any existing schema-42 `evidence.json` becomes unavailable on the next scrape.
+43; any existing schema-42 `evidence.json` becomes unavailable on the next scrape.
 The unchanged verifier validates a strictly increasing migration inventory, actual table
 readability and forced RLS, and hashes the restored artifact inventory. It does
 not impose column-specific ownership or recovery-claim semantics; those are
