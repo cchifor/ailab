@@ -1,0 +1,27 @@
+---
+relay_connector_enabled: false
+# false stages files only when the selected connector service is stopped.
+relay_connector_manage_service: false
+relay_connector_user: ""
+relay_connector_group: "{{ relay_connector_primary_group }}"
+relay_connector_home: "{{ ansible_facts['getent_passwd'][relay_connector_user][4] }}"
+relay_connector_unit_dir: "{{ relay_connector_home }}/.config/systemd/user"
+relay_connector_artifact_dir: /opt/relay/connector
+relay_connector_artifact_owner: root
+relay_connector_artifact_group: root
+# Controller-local release binary. Never build or resolve 'latest' on the worker.
+relay_connector_source: ""
+relay_connector_arch: ""
+relay_connector_origin: https://relay.chifor.me
+relay_connector_host_id: ""
+relay_connector_state_file: ""
+# Exact existing service settings, reviewed per worker; never written to identity.
+relay_connector_name: ""
+relay_connector_sockets: []
+# Public v0.3.5 manifest observed 2026-10-10; change through release review.
+relay_connector_release:
+  version: 0.3.5
+  sourceCommit: a78d6f33dcc14c7ecd34b12b1adca23975dea874
+  sha256:
+    amd64: a79a35bee2615a28ce2fe1e01da9784ec7e832c28d493d7865d78a7ede03179e
+    arm64: e89518ffeaa8ff7dbef0cc67de753fd6b614f2de29e47e83557fd8af3012afa0

@@ -1,0 +1,34 @@
+name: relay-connectors
+on:
+  pull_request:
+    paths:
+      - "ansible/roles/relay_connector/**"
+      - "ansible/relay-connectors.yml"
+      - "scripts/tests/integration/test_relay_connectors.py"
+      - "scripts/tests/integration/requirements-relay-connectors.txt"
+      - ".gitea/workflows/relay-connectors.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "ansible/roles/relay_connector/**"
+      - "ansible/relay-connectors.yml"
+      - "scripts/tests/integration/test_relay_connectors.py"
+      - "scripts/tests/integration/requirements-relay-connectors.txt"
+      - ".gitea/workflows/relay-connectors.yaml"
+jobs:
+  relay-connectors:
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate connector pins, identity preservation and service convergence
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v systemd-analyze
+          trap 'rm -rf .venv-relay-connector-tests .relay-connector-tests' EXIT
+          python3 -m venv .venv-relay-connector-tests
+          .venv-relay-connector-tests/bin/pip install --require-hashes -r scripts/tests/integration/requirements-relay-connectors.txt
+          mkdir -p .relay-connector-tests
+          PATH="$PWD/.venv-relay-connector-tests/bin:$PATH" TMPDIR="$PWD/.relay-connector-tests" \
+            .venv-relay-connector-tests/bin/python scripts/tests/integration/test_relay_connectors.py

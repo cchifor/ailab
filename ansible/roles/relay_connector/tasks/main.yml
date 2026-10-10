@@ -1,0 +1,4 @@
+---
+- name: Adopt the connector only when explicitly enabled
+  ansible.builtin.include_tasks: configure.yml
+  when: relay_connector_enabled | bool

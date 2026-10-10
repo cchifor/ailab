@@ -1,0 +1,137 @@
+---
+- name: Validate all authority, release and staging inputs before writes
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Create the content-addressed release directory
+  ansible.builtin.file:
+    path: "{{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}"
+    state: directory
+    owner: "{{ relay_connector_artifact_owner }}"
+    group: "{{ relay_connector_artifact_group }}"
+    mode: "0755"
+
+- name: Install the reviewed connector binary
+  ansible.builtin.copy:
+    src: "{{ relay_connector_source }}"
+    dest: "{{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector"
+    owner: "{{ relay_connector_artifact_owner }}"
+    group: "{{ relay_connector_artifact_group }}"
+    mode: "0755"
+  register: relay_connector_binary
+
+- name: Recheck the installed release bytes
+  ansible.builtin.stat:
+    path: "{{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector"
+    checksum_algorithm: sha256
+    follow: false
+  register: relay_connector_installed
+
+- name: Require an unlinked matching installed artifact
+  ansible.builtin.assert:
+    that:
+      - relay_connector_installed.stat.isreg | default(false)
+      - not relay_connector_installed.stat.islnk | default(true)
+      - relay_connector_installed.stat.nlink | default(0) == 1
+      - relay_connector_installed.stat.checksum | default('') == relay_connector_sha
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Verify executable release version as the execution user
+  ansible.builtin.command:
+    argv: ["{{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector", --version]
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  changed_when: false
+  register: relay_connector_version
+  when: not ansible_check_mode
+
+- name: Require the declared connector version
+  ansible.builtin.assert:
+    that: relay_connector_version.stdout | trim == 'relay-connector ' + relay_connector_release.version
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Create the user's unit directory
+  ansible.builtin.file:
+    path: "{{ relay_connector_unit_dir }}"
+    state: directory
+    owner: "{{ relay_connector_user }}"
+    group: "{{ relay_connector_group }}"
+    mode: "0755"
+
+- name: Install the selected connector unit
+  ansible.builtin.template:
+    src: connector.service.j2
+    dest: "{{ relay_connector_unit_dir }}/{{ relay_connector_unit }}"
+    owner: "{{ relay_connector_user }}"
+    group: "{{ relay_connector_group }}"
+    mode: "0644"
+  register: relay_connector_unit_file
+
+- name: Compute the intended nonsecret service revision
+  ansible.builtin.set_fact:
+    relay_connector_revision: "{{ lookup('ansible.builtin.template', 'connector.service.j2') | hash('sha256') }}"
+
+- name: Inspect the last successfully applied service revision
+  ansible.builtin.stat:
+    path: "{{ relay_connector_artifact_dir }}/applied-{{ relay_connector_host_id }}.json"
+  register: relay_connector_applied_stat
+
+- name: Read the nonsecret applied service revision
+  ansible.builtin.slurp:
+    src: "{{ relay_connector_artifact_dir }}/applied-{{ relay_connector_host_id }}.json"
+  register: relay_connector_applied
+  when: relay_connector_applied_stat.stat.exists
+
+- name: Reload the user manager before inspecting staged configuration
+  ansible.builtin.systemd_service:
+    scope: user
+    daemon_reload: true
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_connector_uid }}"
+  when: relay_connector_manage_service | bool and not ansible_check_mode
+
+- name: Inspect effective unit ownership before starting or restarting
+  ansible.builtin.command:
+    argv: [systemctl, --user, show, "{{ relay_connector_unit }}", --property=FragmentPath, --property=DropInPaths]
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_connector_uid }}"
+  register: relay_connector_effective
+  changed_when: false
+  when: relay_connector_manage_service | bool and not ansible_check_mode
+
+- name: Reject shadowed units and unreviewed overrides
+  ansible.builtin.assert:
+    that:
+      - "('FragmentPath=' + relay_connector_unit_dir + '/' + relay_connector_unit) in relay_connector_effective.stdout_lines"
+      - "'DropInPaths=' in relay_connector_effective.stdout_lines"
+    quiet: true
+    fail_msg: Effective connector unit must be the managed file without drop-in overrides.
+  when: relay_connector_manage_service | bool and not ansible_check_mode
+
+- name: Enable the connector and restart only after an actual managed change
+  ansible.builtin.systemd_service:
+    name: "{{ relay_connector_unit }}"
+    scope: user
+    enabled: true
+    state: "{{ 'restarted' if relay_connector_binary.changed or relay_connector_unit_file.changed or applied_revision != relay_connector_revision else 'started' }}"
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_connector_uid }}"
+  when: relay_connector_manage_service | bool and not ansible_check_mode
+  vars:
+    applied_revision: "{{ (relay_connector_applied.content | default('e30=') | b64decode | from_json).get('unitSha256', '') }}"
+
+- name: Record the service revision only after successful activation
+  ansible.builtin.copy:
+    content: "{{ {'unitSha256': relay_connector_revision, 'binarySha256': relay_connector_sha, 'sourceCommit': relay_connector_release.sourceCommit, 'version': relay_connector_release.version} | to_nice_json }}\n"
+    dest: "{{ relay_connector_artifact_dir }}/applied-{{ relay_connector_host_id }}.json"
+    owner: "{{ relay_connector_artifact_owner }}"
+    group: "{{ relay_connector_artifact_group }}"
+    mode: "0644"
+  when: relay_connector_manage_service | bool and not ansible_check_mode
