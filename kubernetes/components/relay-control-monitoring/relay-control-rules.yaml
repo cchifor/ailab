@@ -140,14 +140,14 @@ spec:
         description: A successful scrape omitted a required holder, delivery or cleanup observation. Check release
           compatibility; missing series must not look like a healthy zero.
     - alert: RelayHolderStorageObservationMissing
-      expr: (relay_control_holder_filesystem_reports_missing{job="relay-control-plane"} > 0) or (relay_control_holder_native_home_reports_missing{job="relay-control-plane"} > 0) or (relay_control_holder_native_home_reports_incomplete{job="relay-control-plane"} > 0)
+      expr: label_replace(relay_control_holder_filesystem_reports_missing{job="relay-control-plane"} > 0, "reason", "filesystem_missing", "", "") or label_replace(relay_control_holder_native_home_reports_missing{job="relay-control-plane"} > 0, "reason", "native_home_missing", "", "") or label_replace(relay_control_holder_native_home_reports_incomplete{job="relay-control-plane"} > 0, "reason", "native_home_incomplete", "", "")
       for: 5m
       labels:
         severity: warning
         service: relay
       annotations:
         summary: Relay holder storage observations are unavailable
-        description: Inspect approved bounded-volume placement and native-home sampling. Missing, incomplete or expired samples are excluded from capacity totals and never establish zero usage.
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label. Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are excluded from capacity totals and never establish zero usage.
     - alert: RelayHolderFilesystemNearCapacity
       expr: relay_control_holder_filesystems_near_capacity{job="relay-control-plane"} > 0
       for: 2m

@@ -130,7 +130,10 @@ becomes a metric label.
 
 `RelayHolderFilesystemNearCapacity` warns below ten percent available blocks or
 inodes. `RelayHolderStorageObservationMissing` warns when bounded-volume or
-complete native-home observations are unavailable. The critical schema check
+complete native-home observations are unavailable, with a fixed `reason` label
+(`filesystem_missing`, `native_home_missing`, or `native_home_incomplete`).
+Expired native scans are included in `native_home_incomplete`; simultaneous
+faults remain separate alerts. The critical schema check
 requires these new series so an old/mismatched release cannot silently appear
 healthy. Deploy this component with the matching reviewed Relay release; older
 legacy holders need the bounded-volume policy to report filesystem capacity.
