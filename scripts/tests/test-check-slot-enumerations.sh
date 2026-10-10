@@ -146,6 +146,13 @@ edit kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml \
 expect_fail "the admin observer's RoleBinding naming a non-live slot" "STALE"
 restore kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
 
+# A purpose-named grant in platform-access/rbac.yaml (relay-r0-observer-dw4 shape) is not one of the
+# observer RoleBindings the equality comparison parses — the reference scan is what must catch it.
+edit kubernetes/apps/infrastructure/platform-access/rbac.yaml \
+  's + "---\nkind: RoleBinding\nmetadata:\n  name: purpose-grant-dw99\n  namespace: flux-system\nsubjects:\n  - { kind: ServiceAccount, name: platform-dw99, namespace: platform-access }\n"'
+expect_fail "a purpose-named RoleBinding in platform-access/rbac.yaml naming a non-live slot" "STALE"
+restore kubernetes/apps/infrastructure/platform-access/rbac.yaml
+
 edit kubernetes/apps/clusters/ai/trueswarm-observer.yaml \
   's + "# name: platform-dw99 (a comment, not a subject)\n"'
 run_check || fail "a COMMENT naming a non-live slot must not fail the check"

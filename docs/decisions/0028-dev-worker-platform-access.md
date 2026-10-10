@@ -290,6 +290,49 @@ row in the runbook's retire checklist.
 (Decision 3) covers `strive-pg` only. Extending it is its own decision, with its own exclusions for
 the admin workspace.
 
+## Amendment 2026-10-10 — temporary forge object-store certificate observer (all live slots)
+
+**Trigger.** The dev-worker-2 agent prepared
+[cchifor/platform#2221](https://git.chifor.me/cchifor/platform/pulls/2221), which adds the
+`objectstore-forge-tls` Certificate (issuer `ailab-ca`) and the Flux edge `platform-objectstore` →
+`platform-objectstore-certificate`. The platform runbook `forge-objectstore-certificate-bootstrap.md`
+needs the issuer checked before the merge, then the live `dependsOn` edge and the Certificate's
+Ready state at its current generation read after it. `platform-dw2` got 403 on
+`ClusterIssuer/ailab-ca`; the observer ClusterRole covers no cert-manager or Kustomization objects.
+
+**Grant.** `forge-objectstore-cert-observer`, in `platform-access/rbac.yaml`, `get` by `resourceNames`
+only. It has no Secrets, no CertificateRequests, no list/watch and no writes.
+
+**Subjects: every live slot (`platform-dw1`..`platform-dw4`), not one.** Decision 2's escalation
+default is one slot. The operator asked for every dev worker on 2026-10-10. The wider subject list is
+acceptable because the objects carry no secret material (below) and the grant has no write path.
+The three subject lists are a slot enumeration. The slot guard's reference scan fails CI on a
+retired slot left in them, so a retirement must remove it here as well.
+
+| Where | Object | Grants |
+|---|---|---|
+| cluster | ClusterRole + ClusterRoleBinding | `get` ClusterIssuer `ailab-ca` |
+| `flux-system` | Role + RoleBinding | `get` Kustomizations `platform`, `platform-objectstore`, `platform-objectstore-certificate`; GitRepository `platform` |
+| `strive-ailab` | Role + RoleBinding | `get` Certificate `objectstore-forge-tls` |
+
+**The second cluster-scoped grant.** This is the exception the 2026-09-29 amendment requires its own
+amendment for. It is kept because a ClusterIssuer has no namespaced equivalent. It is `get` on one
+named object, and that object holds no secret material: its spec names the CA Secret
+(`ailab-root-ca`, which stays denied) and its status is the `Ready` condition the runbook asks for.
+The Certificate exposes its Secret's name, DNS names and status. The private key stays in the
+denied Secret. Like the Trueswarm Flux grants, the Kustomization and GitRepository `get` exposes
+`secretRef` names (`sops-age`, `platform-deploy-key`) and the source URL, not a credential.
+
+**Why `platform-access`, not `clusters/ai/`.** The `strive-ailab` Role needs a namespace that the
+`platform` Kustomization creates. The root `flux-system` Kustomization would fail its whole apply on
+a rebuild before that namespace exists. The dedicated `platform-access` Kustomization retries that
+apply every minute instead.
+
+**Temporary.** Remove by **2026-10-24**, tracked by
+[ailab#1225](https://git.chifor.me/cchifor/ailab/issues/1225). The objects' `remove-by`
+annotation records the date. Kubernetes does not enforce it. The grant lets the workers observe and
+record. Merging #2221 and activating the later TLS stage stay owner decisions.
+
 ## Follow-ups
 
 - **OpenBao's `database` secrets engine** for per-lease Postgres credentials, if revocation ever
