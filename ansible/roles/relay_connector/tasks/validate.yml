@@ -107,7 +107,7 @@
     that:
       - identity.id == relay_connector_host_id
       - identity.url == relay_connector_origin
-      - identity.phase | default('approved') == 'approved'
+      - identity.phase | default('') == 'approved'
       - identity.token is match('^[!-~]{20,8192}$')
       - identity.service.account == relay_connector_user
       - identity.service.name == relay_connector_name

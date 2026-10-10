@@ -46,9 +46,11 @@ relay_connector_sockets: ['']  # Must exactly match existing service configurati
 The example identity/path values must be replaced, not copied into inventory.
 The service filename is `relay-connector-<host UUID>.service`; it matches Relay's
 installer convention. The existing state must be a regular single-link 0600
-file owned by that execution user, with the exact origin, approved phase, account,
+file owned by that execution user, with the exact origin, explicit approved phase, account,
 name and sockets. A missing or mismatched identity fails; use the normal reviewed
-enrollment flow separately for a new installation. Do not copy a worker token
+enrollment flow separately for a new installation. Phase-less legacy state is
+unsupported by this role; establish approval through the existing connector/hub
+workflow before adoption rather than inferring it from a missing field. Do not copy a worker token
 into Ansible variables, logs or operator handoff files.
 
 ## Converge one worker

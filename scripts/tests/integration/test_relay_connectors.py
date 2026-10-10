@@ -162,6 +162,9 @@ else: sys.exit('unexpected service command: '+repr(args))
             self.identity.chmod(0o640)
             self.role(success=False)
             self.identity.chmod(0o600)
+            self.identity.write_text(json.dumps({k:v for k,v in original.items() if k != 'phase'}))
+            self.role(success=False)
+            self.assertNotIn('phase', json.loads(self.identity.read_text()))
             for changed in [dict(phase='pending'), dict(id=str(uuid.uuid4())),
                             dict(service={**original['service'], 'account':'foreign'})]:
                 self.identity.write_text(json.dumps({**original, **changed}))
