@@ -1,0 +1,301 @@
+rule_files:
+  - relay-recovery-rules.yaml
+evaluation_interval: 1m
+tests:
+- name: omitting verification_available fails the schema gate
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_schema_version{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: critical
+        service: relay
+      exp_annotations:
+        summary: Relay restore verification metrics are incomplete
+        description: A successful scrape lacks required restore evidence metrics. Check the matching Relay release
+          and collector configuration; backup job success cannot replace these observations.
+- name: omitting verified_timestamp_seconds fails the schema gate
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_schema_version{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: critical
+        service: relay
+      exp_annotations:
+        summary: Relay restore verification metrics are incomplete
+        description: A successful scrape lacks required restore evidence metrics. Check the matching Relay release
+          and collector configuration; backup job success cannot replace these observations.
+- name: omitting backup_timestamp_seconds fails the schema gate
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_schema_version{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: critical
+        service: relay
+      exp_annotations:
+        summary: Relay restore verification metrics are incomplete
+        description: A successful scrape lacks required restore evidence metrics. Check the matching Relay release
+          and collector configuration; backup job success cannot replace these observations.
+- name: omitting schema_version fails the schema gate
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: critical
+        service: relay
+      exp_annotations:
+        summary: Relay restore verification metrics are incomplete
+        description: A successful scrape lacks required restore evidence metrics. Check the matching Relay release
+          and collector configuration; backup job success cannot replace these observations.
+- name: complete restore schema stays healthy
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_schema_version{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts: []
+- name: unavailable evidence fires and matching receipt clears
+  interval: 1m
+  input_series:
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x6 1+0x5
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: RelayRestoreVerificationMissing
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayRestoreVerificationMissing
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: warning
+        service: relay
+      exp_annotations:
+        summary: Relay has no matching completed restore verification
+        description: Run the reviewed isolated database/artifact verifier and publish its private completed receipt
+          through the approved operator route. Missing, invalid, future-dated, wrong-verifier or wrong-schema evidence
+          is unavailable.
+  - eval_time: 8m
+    alertname: RelayRestoreVerificationMissing
+    exp_alerts: []
+- name: 'age faults remain distinct: verification_old'
+  interval: 1m
+  input_series:
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10100
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10089 605400+0x10
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+60x10100
+  alert_rule_test:
+  - eval_time: 168h
+    alertname: RelayRestoreVerificationStale
+    exp_alerts: []
+  - eval_time: 168h6m
+    alertname: RelayRestoreVerificationStale
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: warning
+        service: relay
+        reason: verification_old
+      exp_annotations:
+        summary: Relay restore verification is older than seven days
+        description: Inspect the reason label. Verify a recent coordinated backup generation; rerunning verification
+          on an old backup must not refresh the backup-age gate. This evidence does not establish live credential
+          reconciliation or native session recovery.
+  - eval_time: 168h11m
+    alertname: RelayRestoreVerificationStale
+    exp_alerts: []
+- name: 'age faults remain distinct: backup_old'
+  interval: 1m
+  input_series:
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10100
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+60x10100
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10089 605400+0x10
+  alert_rule_test:
+  - eval_time: 168h
+    alertname: RelayRestoreVerificationStale
+    exp_alerts: []
+  - eval_time: 168h6m
+    alertname: RelayRestoreVerificationStale
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: warning
+        service: relay
+        reason: backup_old
+      exp_annotations:
+        summary: Relay restore verification is older than seven days
+        description: Inspect the reason label. Verify a recent coordinated backup generation; rerunning verification
+          on an old backup must not refresh the backup-age gate. This evidence does not establish live credential
+          reconciliation or native session recovery.
+  - eval_time: 168h11m
+    alertname: RelayRestoreVerificationStale
+    exp_alerts: []
+- name: 'age faults remain distinct: verification_old,backup_old'
+  interval: 1m
+  input_series:
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10100
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10089 605400+0x10
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10089 605400+0x10
+  alert_rule_test:
+  - eval_time: 168h
+    alertname: RelayRestoreVerificationStale
+    exp_alerts: []
+  - eval_time: 168h6m
+    alertname: RelayRestoreVerificationStale
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: warning
+        service: relay
+        reason: verification_old
+      exp_annotations:
+        summary: Relay restore verification is older than seven days
+        description: Inspect the reason label. Verify a recent coordinated backup generation; rerunning verification
+          on an old backup must not refresh the backup-age gate. This evidence does not establish live credential
+          reconciliation or native session recovery.
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: warning
+        service: relay
+        reason: backup_old
+      exp_annotations:
+        summary: Relay restore verification is older than seven days
+        description: Inspect the reason label. Verify a recent coordinated backup generation; rerunning verification
+          on an old backup must not refresh the backup-age gate. This evidence does not establish live credential
+          reconciliation or native session recovery.
+  - eval_time: 168h11m
+    alertname: RelayRestoreVerificationStale
+    exp_alerts: []
+- name: unavailable evidence does not fabricate age observations
+  interval: 1m
+  input_series:
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x10100
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x10100
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x10100
+  alert_rule_test:
+  - eval_time: 168h6m
+    alertname: RelayRestoreVerificationStale
+    exp_alerts: []
+- name: duplicate metric series cannot mask a missing name
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80",extra="duplicate"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: critical
+        service: relay
+      exp_annotations:
+        summary: Relay restore verification metrics are incomplete
+        description: A successful scrape lacks required restore evidence metrics. Check the matching Relay release
+          and collector configuration; backup job success cannot replace these observations.
+- name: duplicate metric series preserve a complete schema
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_schema_version{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80",extra="duplicate"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts: []
