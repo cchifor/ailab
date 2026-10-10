@@ -6,6 +6,19 @@ Relay follows the existing llm-router topology: Cloudflare proxied CNAME → the
 
 The authoritative manifests live in `cchifor/ailab`, directory `kubernetes/apps/apps/relay`. The tunnel route is in `apps/edge/cloudflared.yaml`; DNS is declared in `kubernetes/infra/cloudflare/variables.tf`. Both require the normal protected-main GitOps review flow. Do not patch the shared tunnel or suspend Flux to bypass that flow.
 
+### Temporary R0 observation (remove by 2026-10-17)
+
+The purpose-scoped `relay-r0-observer-dw4` Role and RoleBinding in
+`kubernetes/apps/infrastructure/platform-access/rbac.yaml` let only `platform-dw4`
+inspect Relay workloads, init-container logs, backup Job status, release ConfigMaps
+and volume metadata using `platform kubectl -n relay ...`. They grant no Secret,
+exec/attach, port-forward, credential minting or Kubernetes write access. Use them
+to compare live release identity and backup-gate outcomes with the control-plane
+plan; successful Job status alone does not prove a restore or artifact inventory.
+Any repair or restore still needs its normal reviewed GitOps change or authorized
+operator route. Remove both resources after R0 observation, no later than
+2026-10-17. Their annotation records the deadline; Kubernetes does not enforce it.
+
 ## Release payload
 
 `relay-0.1.2-20261001` is a versioned, immutable release containing compiled server/UI code, the production dependencies, and public connector downloads extracted from the tested `relay-platform:0.1.2` image. It is mounted read-only under a digest-pinned Node 22.23 runtime. There is no package installation at startup.

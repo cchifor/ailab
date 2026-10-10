@@ -216,3 +216,40 @@ roleRef:
   kind: ClusterRole
   name: dev-worker-platform-observer
   apiGroup: rbac.authorization.k8s.io
+---
+# Temporary R0 observation for Relay's agent-control-plane implementation.
+# Remove both this Role and its binding by 2026-10-17 (RBAC has no native TTL).
+# Scope is deliberately smaller than the platform observer: no forwarding,
+# Secret access, process access, credential minting or writes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: relay-r0-observer-dw4
+  namespace: relay
+  annotations:
+    platform-access.chifor.me/remove-by: "2026-10-17"
+    platform-access.chifor.me/purpose: "Relay R0 release, backup gate and workload observation"
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status", "services", "endpoints", "configmaps", "events", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: relay-r0-observer-dw4
+  namespace: relay
+  annotations:
+    platform-access.chifor.me/remove-by: "2026-10-17"
+subjects:
+  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
+roleRef:
+  kind: Role
+  name: relay-r0-observer-dw4
+  apiGroup: rbac.authorization.k8s.io
