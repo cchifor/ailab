@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Opt-in after the reviewed Relay metrics release and credential provisioning.
+resources:
+- collector.yaml
+- network-policy.yaml
+- relay-control-rules.yaml
+configMapGenerator:
+- name: relay-metrics-setup
+  namespace: relay
+  files:
+  - materialize.mjs
+patches:
+- path: deployment.yaml
+- target:
+    kind: Service
+    name: relay
+    namespace: relay
+  patch: |-
+    - op: add
+      path: /metadata/labels/relay-control-metrics
+      value: 'true'

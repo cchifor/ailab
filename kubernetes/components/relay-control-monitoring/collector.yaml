@@ -1,0 +1,30 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: relay-control-plane
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [relay]
+  selector:
+    matchLabels:
+      relay-control-metrics: 'true'
+  sampleLimit: 100
+  endpoints:
+  - port: http
+    path: /metrics/agent-control-plane
+    scheme: http
+    interval: 30s
+    scrapeTimeout: 10s
+    followRedirects: false
+    honorLabels: false
+    authorization:
+      type: Bearer
+      credentials:
+        name: relay-control-collector
+        key: token
+    relabelings:
+    - targetLabel: job
+      replacement: relay-control-plane
