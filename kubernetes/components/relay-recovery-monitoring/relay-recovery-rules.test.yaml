@@ -254,3 +254,48 @@ tests:
   - eval_time: 168h6m
     alertname: RelayRestoreVerificationStale
     exp_alerts: []
+- name: duplicate metric series cannot mask a missing name
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80",extra="duplicate"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        job: relay-control-plane
+        instance: relay:80
+        severity: critical
+        service: relay
+      exp_annotations:
+        summary: Relay restore verification metrics are incomplete
+        description: A successful scrape lacks required restore evidence metrics. Check the matching Relay release
+          and collector configuration; backup job success cannot replace these observations.
+- name: duplicate metric series preserve a complete schema
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verified_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_backup_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_schema_version{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_restore_verification_available{job="relay-control-plane",instance="relay:80",extra="duplicate"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayRestoreMetricSchemaIncomplete
+    exp_alerts: []

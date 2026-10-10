@@ -39,7 +39,7 @@ class Monitoring(unittest.TestCase):
                      'build', str(wrapper.relative_to(ROOT))).stdout
         cls.docs = list(yaml.safe_load_all(raw))
         configuration = yaml.safe_load((wrapper / 'kustomization.yaml').read_text())
-        configuration['components'].append(os.path.relpath(ROOT / 'kubernetes/components/relay-recovery-monitoring', wrapper))
+        configuration.setdefault('components', []).append(os.path.relpath(ROOT / 'kubernetes/components/relay-recovery-monitoring', wrapper))
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
         cls.recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
             'build', str(wrapper.relative_to(ROOT))).stdout))

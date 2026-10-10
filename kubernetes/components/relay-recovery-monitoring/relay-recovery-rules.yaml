@@ -10,7 +10,7 @@ spec:
   - name: relay-recovery
     rules:
     - alert: RelayRestoreMetricSchemaIncomplete
-      expr: up{job="relay-control-plane"} == 1 unless on(job,instance) (count by(job,instance) ({job="relay-control-plane",__name__=~"relay_control_restore_(verification_available|verified_timestamp_seconds|backup_timestamp_seconds|schema_version)"}) == 4)
+      expr: up{job="relay-control-plane"} == 1 unless on(job,instance) (count by(job,instance) (count by(__name__,job,instance) ({job="relay-control-plane",__name__=~"relay_control_restore_(verification_available|verified_timestamp_seconds|backup_timestamp_seconds|schema_version)"})) == 4)
       for: 5m
       labels:
         severity: critical

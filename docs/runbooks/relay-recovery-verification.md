@@ -24,8 +24,8 @@ archive, 1 GiB restored database storage, 2 GiB container memory without swap an
 
 The Relay repository's `verified-recovery.md` specifies the command and exact
 receipt format. After a successful verification, the operator publishes the
-completed private 0600 receipt through a reviewed file mount owned by root or the
-Relay execution UID. The application must mount it read-only. Add this nonsecret
+completed private 0600 receipt through a reviewed file mount owned by the
+Relay execution UID (1000 in this deployment). The application must mount it read-only. Add this nonsecret
 configuration to the existing private collector verifier JSON:
 
 ```json
@@ -47,7 +47,7 @@ The policy's generated name also changes the pod template on policy updates.
 The operator must approve storage placement and a publisher's narrow mount of
 this PVC. Precreate a canonical UID-1000-owned 0700 `private` directory, then
 publish only the verifier's completed `private/evidence.json`, preserving UID
-1000 or root ownership and 0600 mode, with atomic rename; do not copy raw backups,
+1000 ownership and 0600 mode, with atomic rename; do not copy raw backups,
 SQL output, credentials or plugin sources to this volume. No publisher has been
 enabled and no receipt is fabricated by this component. An empty volume is an
 explicit unavailable observation and alerts after five minutes. The operator
