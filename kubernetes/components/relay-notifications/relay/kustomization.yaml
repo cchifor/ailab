@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Opt-in only. The live Relay release does not yet contain the notification worker.
+configMapGenerator:
+- name: relay-notification-setup
+  namespace: relay
+  files:
+  - materialize.mjs
+patches:
+- path: deployment.yaml

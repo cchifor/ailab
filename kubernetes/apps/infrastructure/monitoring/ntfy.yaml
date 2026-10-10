@@ -7,6 +7,8 @@ metadata:
   name: ntfy-config
   namespace: monitoring
 data:
+  # The opt-in Relay notification component validates deny-all here before adding
+  # scoped users/ACLs. Quoted/unquoted values and trailing comments are accepted.
   server.yml: |
     base-url: "https://ntfy.chifor.me"
     listen-http: ":80"

@@ -1,0 +1,25 @@
+name: relay-notifications
+on:
+  pull_request:
+    paths:
+    - 'kubernetes/components/relay-notifications/**'
+    - 'kubernetes/apps/apps/relay/**'
+    - 'kubernetes/apps/infrastructure/monitoring/ntfy.yaml'
+    - 'scripts/tests/integration/test_relay_notifications.py'
+    - '.gitea/workflows/relay-notifications.yaml'
+  push:
+    branches: [main]
+    paths:
+    - 'kubernetes/components/relay-notifications/**'
+    - 'kubernetes/apps/apps/relay/**'
+    - 'kubernetes/apps/infrastructure/monitoring/ntfy.yaml'
+    - 'scripts/tests/integration/test_relay_notifications.py'
+    - '.gitea/workflows/relay-notifications.yaml'
+jobs:
+  relay-notifications:
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+    - name: Build opt-in components and qualify native ntfy authority and private files
+      run: python3 scripts/tests/integration/test_relay_notifications.py
