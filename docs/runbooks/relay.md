@@ -10,14 +10,25 @@ The authoritative manifests live in `cchifor/ailab`, directory `kubernetes/apps/
 
 The purpose-scoped `relay-r0-observer-dw4` Role and RoleBinding in
 `kubernetes/apps/infrastructure/platform-access/rbac.yaml` let only `platform-dw4`
-inspect Relay workloads, init-container logs, backup Job status, release ConfigMaps
-and volume metadata using `platform kubectl -n relay ...`. They grant no Secret,
-exec/attach, port-forward, credential minting or Kubernetes write access. Use them
+inspect Relay workload/init-container status, backup Job status, release annotations
+and volume metadata using `platform kubectl -n relay ...`. They grant no ConfigMap,
+pod log, Secret, exec/attach, port-forward, credential minting or Kubernetes write access. Use them
 to compare live release identity and backup-gate outcomes with the control-plane
 plan; successful Job status alone does not prove a restore or artifact inventory.
 Any repair or restore still needs its normal reviewed GitOps change or authorized
 operator route. Remove both resources after R0 observation, no later than
-2026-10-17. Their annotation records the deadline; Kubernetes does not enforce it.
+2026-10-17, tracked by [issue #1216](https://git.chifor.me/cchifor/ailab/issues/1216).
+Their annotations record the deadline and issue; Kubernetes does not enforce it.
+Inspecting a specific backup failure's log requires a separate reviewed grant
+after the relevant Pod identity and log source have been checked.
+
+The dedicated platform-access Flux Kustomization intentionally has no dependsOn
+on the apps/platform/vault stacks: their outages must not freeze observer RBAC
+changes. It retries missing namespaces every minute during a rebuild, as it
+already does for the platform namespaces. Relay's Namespace is protected from
+Flux pruning. This temporary grant follows that existing policy; it does not
+guarantee first-reconcile success on an empty cluster. Its Kustomize output keeps
+the `relay` namespace unchanged (there is no top-level namespace transformer).
 
 ## Release payload
 

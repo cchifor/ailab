@@ -219,8 +219,8 @@ roleRef:
 ---
 # Temporary R0 observation for Relay's agent-control-plane implementation.
 # Remove both this Role and its binding by 2026-10-17 (RBAC has no native TTL).
-# Scope is deliberately smaller than the platform observer: no forwarding,
-# Secret access, process access, credential minting or writes.
+# Scope is deliberately smaller than the platform observer: no logs/ConfigMaps,
+# forwarding, Secret access, process access, credential minting or writes.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -228,10 +228,14 @@ metadata:
   namespace: relay
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-17"
+    platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1216"
     platform-access.chifor.me/purpose: "Relay R0 release, backup gate and workload observation"
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "pods/status", "services", "endpoints", "configmaps", "events", "persistentvolumeclaims"]
+    resources: ["pods", "services", "events", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets", "statefulsets"]
@@ -247,6 +251,7 @@ metadata:
   namespace: relay
   annotations:
     platform-access.chifor.me/remove-by: "2026-10-17"
+    platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1216"
 subjects:
   - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }
 roleRef:
