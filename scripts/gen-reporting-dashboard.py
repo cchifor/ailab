@@ -121,7 +121,7 @@ def multistat(title, x, y, w, h, items, mappings=None, description=None):
             expr = f'(({v}) + on() group_left(of) (0 * count_values("of", {it["total"]}))) or on() ({v})'
             targets.append({"refId": ref, "datasource": _ds(), "expr": expr, "instant": True,
                             "legendFormat": f"{it['name']} {it['of']} {{{{of}}}}"})
-            targets.append({"refId": f"T{i}", "datasource": _ds(), "expr": it["total"], "instant": True,
+            targets.append({"refId": f"T{i}", "datasource": _ds(), "expr": it["max"], "instant": True,
                             "legendFormat": "max"})
             transformations.append({"id": "configFromData", "options": {
                 "configRefId": f"T{i}", "mappings": [{"fieldName": "max", "handlerKey": "max"}],
@@ -167,15 +167,19 @@ def count_item(name, expr, steps):
     return {"name": name, "expr": expr, "steps": steps}
 
 
-def ready_item(name, ready, total, live, paused=None, steps=READY_STEPS, of="of"):
+def ready_item(name, ready, total, live, paused=None, steps=READY_STEPS, of="of", total_fallback=None):
     """`ready`: the series set counted as ready. `total`: a label-less expression for how many there
-    should be; `of` is the word between the name and it. `live`: a series set whose presence proves
-    the exporter is up (NO_DATA_MAP).
+    should be; `of` is the word between the name and it. `total_fallback`: the `max` to use when
+    `total` returns nothing - without one Grafana falls back to an automatic max, the value itself,
+    and ANY value reads green (reviewer-claude on #1211). Only needed where `total` and `live`
+    come from different metrics; the name's total then reads blank. `live`: a series set whose
+    presence proves the exporter is up (NO_DATA_MAP).
     `paused`: an expression that returns a series while the thing is DELIBERATELY at zero - then
     nothing ready reads "paused" (-2, PAUSED_MAP), not a red 0."""
     pz = f' or on() (vector(-2) and on() ({paused}))' if paused else ''
     value = f'count({ready}){pz} or on() (count({live}) * 0) or on() (absent({live}) * -1)'
-    return {"name": name, "value": value, "total": total, "steps": steps, "of": of}
+    return {"name": name, "value": value, "total": total, "steps": steps, "of": of,
+            "max": f'({total}) or on() vector({total_fallback})' if total_fallback is not None else total}
 
 
 def bargauge(title, x, y, w, h, expr, unit="percent", legend="{{id}}", maxv=100, steps=None):
@@ -677,10 +681,11 @@ WARM_POOL = 'sum(agentsandbox_warmpool_spec_replicas{exported_namespace="testpoo
 # condition - orange while part of the pool is still refilling after leases, green at the size.
 # "paused" while the pool is DELIBERATELY at 0 (#880, 2026-09-27): the old red 0 sat on the
 # dashboard for the whole pause, exactly the false alarm the alert's `unless` already removes.
-# FAIL-OPEN like that alert: no spec metric -> no "paused", just the red 0.
+# FAIL-OPEN like that alert: with no spec metric there is no "paused" and no pool size, and the
+# tile reads as before the pool had one - green at 1+ Ready, red at 0 (total_fallback 1).
 ENVS_READY = ready_item(
     "envs", f'(kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}',
-    WARM_POOL, 'kube_pod_info', paused=f'{WARM_POOL} == 0', of="· warm pool",
+    WARM_POOL, 'kube_pod_info', paused=f'{WARM_POOL} == 0', of="· warm pool", total_fallback=1,
     steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1}, {"color": "green", "value": 100}])
 ENVS_READY_DESC = ("Ready test environments (warm + leased) of the warm-pool size. "
                    "\"paused\" while the SandboxWarmPool is deliberately at 0 replicas.")
@@ -733,7 +738,13 @@ panels += [
 #     total climbs forever and its slope is invisible at a glance.
 # THE WINDOW IS THE TIME PICKER'S (2026-10-10): the counts and maxima read $__range, so they
 # answer for the range on screen; they were fixed at 1 h / 24 h / the daemon's lifetime and showed
-# the same figure on every range. round(): increase() extrapolates (1.0003 quarantines).
+# the same figure on every range. round(): increase() extrapolates (1.0003 failures).
+def gauge_rises(metric):
+    """How much a count-GAUGE rose in the range: the sum of its positive 1 m steps. Falls are
+    ignored instead of read as counter resets, which is what increase() would do."""
+    return f'sum(sum_over_time(clamp_min({metric} - {metric} offset 1m, 0)[$__range:1m]))'
+
+
 panels.append(row("PR Reviewers (automatic LLM review bots — reviewbot; counts are over the selected range)", 136))
 panels += [
     stat("Claude Bot Heartbeat Age", 0, 137, 4, 4,
@@ -762,12 +773,12 @@ panels += [
          'round(sum(increase(reviewbot_llm_timeouts_total[$__range]))) or vector(0)',
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
                 {"color": "red", "value": 10}], description="In the selected time range."),
-    # The cumulative gauge's increase, NOT its value — see the header. It can fall (a quarantined
-    # job requeued: one reset in 30 days), which increase() over-counts as a reset; the daemon's
-    # own 24 h twin, reviewbot_quarantined_recent_jobs, is a fixed window and stays in the
-    # Errors panel below.
-    stat("Quarantined", 0, 141, 4, 4,
-         'round(sum(increase(reviewbot_quarantined_jobs[$__range]))) or vector(0)',
+    # The cumulative gauge's RISES in the range, NOT its value — see the header. Not increase():
+    # the gauge can fall (a quarantined job requeued: once in 30 days), and increase() reads a
+    # fall as a counter reset and adds the gauge's whole value - a false red 9 for one requeue
+    # (reviewer-claude on #1211). The daemon's own 24 h twin, reviewbot_quarantined_recent_jobs,
+    # is a fixed window and stays in the Errors panel below.
+    stat("Quarantined", 0, 141, 4, 4, f'{gauge_rises("reviewbot_quarantined_jobs")} or vector(0)',
          steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}],
          description="In the selected time range."),
     # A job held this long is wedged, not working: one attempt is capped at llm_timeout_s
@@ -794,10 +805,11 @@ panels += [
                 {"color": "red", "value": 600}]),
     stat("Peak Output Tokens", 16, 141, 4, 4,
          'max(max_over_time(reviewbot_llm_output_tokens_last[$__range])) or vector(0)'),
-    # The range's increase, not the cumulative total: the total only ever climbs and says nothing
-    # about now. The "Reviews Completed over Time" panel below carries the running figure.
-    stat("Reviews Done", 20, 141, 4, 4,
-         'round(sum(increase(reviewbot_jobs_done[$__range]))) or vector(0)',
+    # The range's rises, not the cumulative total: the total only ever climbs and says nothing
+    # about now. A COUNT of done jobs, not a counter - a migration can move done jobs out
+    # (reviewbot.py's size-cap requeue) - so gauge_rises, as for Quarantined. The "Reviews
+    # Completed over Time" panel below carries the running figure.
+    stat("Reviews Done", 20, 141, 4, 4, f'{gauge_rises("reviewbot_jobs_done")} or vector(0)',
          description="In the selected time range."),
     # THE ERROR PANEL. Failures and timeouts are separate series because they mean different
     # things and have different remedies: a timeout says the deadline is too tight for the
@@ -866,21 +878,24 @@ NODE_READY = 'kube_node_status_condition{condition="Ready",status="true"}'
 # ALERTS FOLLOW THE TIME PICKER. The tiles and the table used to read ALERTS at the end of the range
 # only, so the default 6 h view counted 23 warnings, 19 of them firing for 10 h to 12 days
 # (2026-10-10) - the same number on every range. Now an alert counts when it STARTED FIRING inside
-# the range: it fired at some point in it and was NOT firing at the range's start (`unless ...
-# offset $__range` - read from the ALERTS samples themselves, not from activeAt, which a Prometheus
-# restart resets for short-`for` rules). That includes alerts that have since resolved; the table's
-# State column says which. A chronic warning drops out of a short range and comes back on a wider
-# one, but a CRITICAL still firing never drops out, however old: the critical value and the table
-# add every critical firing now. Watchdog/InfoInhibitor are the always-firing meta-alerts. Grafana
-# evaluates an instant query at the range's END with $__range as the lookback, so a past absolute
-# range works the same way.
+# the range: a RISING EDGE - a 1 m step where it fires and did not 1 m earlier - anywhere in it
+# (the subquery). So a re-fired alert counts too: one firing at the range's start that resolved and
+# fired again inside it (a first cut compared the start and end only, and dropped exactly those
+# flapping alerts - reviewer-claude on #1211). Read from the ALERTS samples themselves, not from
+# activeAt, which a Prometheus restart resets for short-`for` rules (a resolved alert gets a
+# staleness marker; a short restart does not). Includes alerts that have since resolved; the
+# table's State column says which. A chronic warning drops out of a short range and comes back on
+# a wider one, but a CRITICAL still firing never drops out, however old: the critical value and the
+# table add every critical firing now. Watchdog/InfoInhibitor are the always-firing meta-alerts.
+# Grafana evaluates an instant query at the range's END with $__range as the lookback, so a past
+# absolute range works the same way.
 FIRING = 'ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"%s}'
 FIRING_CRIT = FIRING % ',severity="critical"'
 
 
 def alerts_in_range(sev=None):
     f = FIRING % (f',severity="{sev}"' if sev else "")
-    raised = f'(max_over_time({f}[$__range]) unless {f} offset $__range)'
+    raised = f'max_over_time(({f} unless {f} offset 1m)[$__range:1m])'
     return f'({raised} or {FIRING_CRIT})' if sev in (None, "critical") else raised
 
 
