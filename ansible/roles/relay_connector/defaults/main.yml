@@ -3,8 +3,8 @@ relay_connector_enabled: false
 # false stages files only when the selected connector service is stopped.
 relay_connector_manage_service: false
 relay_connector_user: ""
-relay_connector_group: "{{ relay_connector_user }}"
-relay_connector_home: "/home/{{ relay_connector_user }}"
+relay_connector_group: "{{ relay_connector_primary_group }}"
+relay_connector_home: "{{ ansible_facts['getent_passwd'][relay_connector_user][4] }}"
 relay_connector_unit_dir: "{{ relay_connector_home }}/.config/systemd/user"
 relay_connector_artifact_dir: /opt/relay/connector
 relay_connector_artifact_owner: root

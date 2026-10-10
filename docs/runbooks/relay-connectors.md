@@ -44,6 +44,9 @@ relay_connector_sockets: ['']  # Must exactly match existing service configurati
 ```
 
 The example identity/path values must be replaced, not copied into inventory.
+Home and primary group default to the existing passwd/group records, including
+nonstandard account homes and group names; explicit overrides are for reviewed
+custom layouts. The role resolves these facts before validating paths.
 The service filename is `relay-connector-<host UUID>.service`; it matches Relay's
 installer convention. The existing state must be a regular single-link 0600
 file owned by that execution user, with the exact origin, explicit approved phase, account,
@@ -73,7 +76,9 @@ router renderers and credentials are preserved.
 
 The role verifies controller and installed hashes, native architecture and
 `--version`; installs root-owned content-addressed artifacts; and uses the
-current connector's unit hardening and `serve` command. The effective unit must
+current connector's unit hardening and `serve` command. Network readiness uses
+the connector's reconnection loop and service restart policy, not a system-only
+network target in the user manager. The effective unit must
 be the managed file without drop-in overrides. An applied nonsecret unit revision
 is written only after successful service activation. It makes a later activation
 of staged files and a retry after interrupted restart converge correctly.

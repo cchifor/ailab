@@ -16,6 +16,21 @@
       - relay_connector_sockets | length <= 16
     quiet: true
 
+- name: Resolve the existing execution account before deriving paths or ownership
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ relay_connector_user }}"
+
+- name: Resolve the actual primary group by passwd GID
+  ansible.builtin.getent:
+    database: group
+    key: "{{ ansible_facts['getent_passwd'][relay_connector_user][2] }}"
+  register: relay_connector_group_record
+
+- name: Derive the primary group name
+  ansible.builtin.set_fact:
+    relay_connector_primary_group: "{{ relay_connector_group_record.ansible_facts.getent_group.keys() | list | first }}"
+
 - name: Reject unsafe systemd and filesystem paths
   ansible.builtin.assert:
     that:
@@ -38,11 +53,6 @@
       - "'/../' not in item + '/' and '/./' not in item + '/'"
     quiet: true
   loop: "{{ relay_connector_sockets }}"
-
-- name: Resolve the existing execution account
-  ansible.builtin.getent:
-    database: passwd
-    key: "{{ relay_connector_user }}"
 
 - name: Derive managed locations without changing identity
   ansible.builtin.set_fact:
@@ -128,12 +138,15 @@
     argv: [loginctl, show-user, "{{ relay_connector_uid }}", --property=Linger, --value]
   register: relay_connector_linger
   changed_when: false
+  failed_when: false
   check_mode: false
   when: relay_connector_manage_service | bool
 
 - name: Require linger before any managed service changes
   ansible.builtin.assert:
-    that: relay_connector_linger.stdout | trim == 'yes'
+    that:
+      - relay_connector_linger.rc == 0
+      - relay_connector_linger.stdout | trim == 'yes'
     quiet: true
     fail_msg: Converge worker linger through the reviewed account bootstrap before enabling connector management.
   when: relay_connector_manage_service | bool

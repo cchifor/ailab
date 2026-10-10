@@ -91,12 +91,23 @@ else: sys.exit('unexpected service command: '+repr(args))
         loginctl = commands / 'loginctl'
         loginctl.write_text('#!/usr/bin/env python3\nimport json,pathlib,sys\n' +
             f"assert sys.argv[1:] == ['show-user','{os.getuid()}','--property=Linger','--value']\n" +
-            f"print(json.loads(pathlib.Path({str(cls.state)!r}).read_text())['linger'])\n")
+            f"value=json.loads(pathlib.Path({str(cls.state)!r}).read_text())['linger']\n" +
+            "if value=='missing-session': sys.exit(1)\nprint(value)\n")
         loginctl.chmod(0o755)
+        getent = commands / 'getent'
+        getent.write_text('#!/usr/bin/env python3\nimport json,pathlib,subprocess,sys\n'+
+            f"state=json.loads(pathlib.Path({str(cls.state)!r}).read_text())\n"+
+            "out=subprocess.check_output(['/usr/bin/getent',*sys.argv[1:]],text=True).strip()\n"+
+            "if sys.argv[1]=='passwd' and state.get('passwdHome'):\n"+
+            "    fields=out.split(':'); fields[5]=state['passwdHome']; fields[3]='0'; out=':'.join(fields)\n"+
+            "print(out)\n")
+        getent.chmod(0o755)
         cls.play = cls.root / 'play.yml'
         cls.play.write_text(yaml.safe_dump([dict(hosts='localhost', gather_facts=False,
             environment=dict(PATH=str(commands)+':'+os.environ['PATH']),
-            roles=[dict(role='relay_connector')])]))
+            roles=[dict(role='relay_connector')],
+            post_tasks=[{'ansible.builtin.debug': {'msg':'derived-account={{ relay_connector_home }}:{{ relay_connector_group }}'},
+                         'when':'relay_connector_enabled | bool'}])]))
         cfg = cls.root / 'ansible.cfg'
         cfg.write_text('[defaults]\nroles_path='+str(ROOT/'ansible/roles')+'\nretry_files_enabled=False\n')
         cls.env = {**os.environ, 'ANSIBLE_CONFIG': str(cfg), 'ANSIBLE_NOCOLOR': '1',
@@ -109,8 +120,9 @@ else: sys.exit('unexpected service command: '+repr(args))
     def state_update(self, **values):
         self.state.write_text(json.dumps({**json.loads(self.state.read_text()), **values}))
 
-    def role(self, updates=None, success=True, check=False):
+    def role(self, updates=None, success=True, check=False, omit=()):
         values = {**self.values, **(updates or {})}
+        for key in omit: values.pop(key, None)
         extra = self.root/'vars.json'
         extra.write_text(json.dumps(values))
         self.command_log.write_text('')
@@ -191,6 +203,9 @@ else: sys.exit('unexpected service command: '+repr(args))
             self.state_update(linger='no')
             self.role(dict(relay_connector_manage_service=True), success=False)
             self.assertEqual(self.commands, [])
+            self.state_update(linger='missing-session')
+            out=self.role(dict(relay_connector_manage_service=True), success=False)
+            self.assertIn('Converge worker linger through the reviewed account bootstrap', out)
             self.state_update(linger='yes', dropins='/unexpected/override.conf')
             self.role(dict(relay_connector_manage_service=True), success=False)
             self.assertFalse(any(c[0] in ['restart','start','enable'] for c in self.commands))
@@ -226,6 +241,15 @@ else: sys.exit('unexpected service command: '+repr(args))
         self.role(dict(relay_connector_manage_service=True), check=True)
         self.assertEqual(self.commands, [])
         self.assertEqual(self.receipt.read_bytes(), receipt)
+
+    def test_09_nonstandard_passwd_home_and_primary_group_are_derived(self):
+        nonstandard = str(self.root/'nonstandard-home')
+        self.state_update(passwdHome=nonstandard)
+        try:
+            out=self.role(check=True, omit=['relay_connector_home','relay_connector_group'])
+            self.assertIn('derived-account='+nonstandard+':'+grp.getgrgid(0).gr_name, out)
+            self.assertFalse(Path(nonstandard).exists())
+        finally: self.state_update(passwdHome=None)
 
 
 if __name__ == '__main__':
