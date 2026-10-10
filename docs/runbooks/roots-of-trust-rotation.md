@@ -571,8 +571,9 @@ All of these, then step 4. Nothing breaks while both keys verify, so the overlap
    first 3607 s: `subject: system:serviceaccount:satest:prober pod=prober-frozen`.)
    Restart that pod (a new pod gets a new token) or fix the client, and wait again.
 3. **TokenRequest tokens:** `$K -n openbao create job --from=cronjob/openbao-k8stoken-sync k8stoken-sync-sa-rotation`, wait for `Complete`, then
-   on each dev worker check that the two kubeconfigs carry the new key (header only):
-   `for f in ~/.helmtest/kubeconfig ~/.platform/kubeconfig; do yq '.users[0].user.token' $f | cut -d. -f1 | tr '_-' '/+' | awk '{while (length($0) % 4) $0 = $0 "="; print}' | base64 -d; echo; done`.
+   on each dev worker check that its kubeconfigs carry the new key (header only). As of 2026-10-10 no worker has
+   `~/.helmtest/kubeconfig` (ADR 0021 phase 3 never ran there), so the loop skips what does not exist:
+   `for f in ~/.helmtest/kubeconfig ~/.platform/kubeconfig; do [ -f $f ] || continue; yq '.users[0].user.token' $f | cut -d. -f1 | tr '_-' '/+' | awk '{while (length($0) % 4) $0 = $0 "="; print}' | base64 -d; echo; done`.
    Tell the owner that tokens minted by hand before the switch stop working at step 4.
 4. **Legacy Secrets,** only after step 2 is done on **all three** control planes (the controller re-fills a Secret with its own control plane's
    key; one not yet switched would re-mint an old-key token). First find who uses them: annotation `authentication.k8s.io/legacy-token` in the

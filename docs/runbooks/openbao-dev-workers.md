@@ -599,15 +599,10 @@ helm --kubeconfig ~/.helmtest/kubeconfig uninstall smoke
 **Rollback for one host:** `rm /etc/openbao-agent/renders-kubeconfigs`, restore `agent.hcl` from its
 `.bak`, `systemctl restart openbao-agent`, then re-run the role without the cutover flag.
 
-**Retiring the legacy tep tokens (done — the whole testpool tree went with ADR 0037).** The six
-`tep-dw<N>-token` Secrets are *declared* in `kubernetes/apps/infrastructure/testpool/tep-access.yaml`,
-so deleting the live object just lets Flux recreate it. After a worker's cutover is verified, remove
-**its** Secret block from that file, merge, let Flux reconcile, then confirm the object is gone and
-the old token is rejected. Keep the six ServiceAccounts — TokenRequest mints against them.
-
-Only once all six are done: delete `ansible/secrets/tep-tokens.sops.yaml`,
-`scripts/tep-render-kubeconfigs.py` and `templates/tep-kubeconfig.j2`. **After that,
-`dev_worker_enable_openbao: false` no longer provisions a kubeconfig at all** — the flag is a
+**The legacy tep tokens are gone** with the whole `testpool` tree (ADR 0037, 2026-10-10; the plan's
+execution log has the details). No worker ever reached this cutover (no `renders-kubeconfigs`
+marker on any of them), so the steps above describe the helmtest half only. With the SOPS writer
+gone, `dev_worker_enable_openbao: false` provisions no kubeconfig at all — the flag is a
 staged-rollout switch, not a supported steady state (ADR 0021).
 
 ## Host-owned codex logins (dev workers, since 2026-09-29)

@@ -418,3 +418,14 @@ against the repo. Dispositions:
 - **Step 3 pre-gates ✓.** Both Kustomizations are Ready, not suspended, with prune on. Their
   inventories list the Namespace, SC, RuntimeClass and 4 CRDs. No finalizer exists in `testpool`
   or on any agent-sandbox CR.
+  - `kubectl get sandboxes,sandboxclaims -A` is empty cluster-wide. The only CRs are testpool's
+    template and warm pool, and the `strive-sandboxes-ailab` pods are plain pods with no owner.
+    The platform-access comment "App sandboxes in strive-sandboxes-ailab" was stale.
+- **Step 3 split (review, #1219).**
+  - The review bots skip a PR whose reviewable diff exceeds 400 KB, and the vendored 425 KB
+    agent-sandbox manifest alone exceeds it.
+  - `dependsOn` orders reconciliation, not deletion, so pruning both Kustomizations in one commit
+    could delete the CRDs before testpool's own GC prunes its CRs.
+  - So PR-B removes **only `testpool`**. A follow-up removes the `agent-sandbox` Kustomization and
+    deletes its source tree, in two review-sized halves.
+  - Gate 3 adds "no Kustomization stuck in deletion".
