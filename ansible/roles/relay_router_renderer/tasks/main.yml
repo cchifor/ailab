@@ -1,0 +1,4 @@
+---
+- name: Configure isolated Relay router rendering when explicitly enabled
+  ansible.builtin.include_tasks: configure.yml
+  when: relay_router_enabled | bool

@@ -1,0 +1,194 @@
+---
+- name: Validate the reviewed deployment inputs before changing the worker
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Create content-addressed artifact directories
+  ansible.builtin.file:
+    path: "{{ relay_router_artifact_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ relay_router_artifact_owner }}"
+    group: "{{ relay_router_artifact_group }}"
+    mode: "0755"
+  loop:
+    - "{{ relay_router_renderer_sha256 }}"
+    - "{{ relay_router_bao_sha256 }}"
+
+- name: Install the verified renderer binary
+  ansible.builtin.copy:
+    src: "{{ relay_router_renderer_source }}"
+    dest: "{{ relay_router_artifact_dir }}/{{ relay_router_renderer_sha256 }}/relay-credential-renderer"
+    owner: "{{ relay_router_artifact_owner }}"
+    group: "{{ relay_router_artifact_group }}"
+    mode: "0755"
+  register: relay_router_renderer_artifact
+  notify: relay router renderers changed
+
+- name: Install the dedicated verified bao binary
+  ansible.builtin.copy:
+    src: "{{ relay_router_bao_source }}"
+    dest: "{{ relay_router_artifact_dir }}/{{ relay_router_bao_sha256 }}/bao"
+    owner: "{{ relay_router_artifact_owner }}"
+    group: "{{ relay_router_artifact_group }}"
+    mode: "0755"
+  notify: relay router authentication changed
+
+- name: Verify installed artifact bytes before staging units
+  ansible.builtin.stat:
+    path: "{{ relay_router_artifact_dir }}/{{ item.sha }}/{{ item.name }}"
+    checksum_algorithm: sha256
+  loop: "{{ relay_router_artifacts }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: relay_router_installed
+
+- name: Require the exact installed release digests
+  ansible.builtin.assert:
+    that: item.stat.checksum == item.item.sha
+    quiet: true
+  loop: "{{ relay_router_installed.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Create private configuration and credential directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0700"
+  loop:
+    - "{{ relay_router_config_dir }}"
+    - "{{ relay_router_config_dir }}/auth"
+    - "{{ relay_router_state_dir }}"
+
+- name: Remember binding ownership so inventory removal cannot orphan a renderer
+  ansible.builtin.copy:
+    content: "{{ ((relay_router_previous.content | default('W10=') | b64decode | from_json) + (relay_router_bindings | map(attribute='bindingId') | list)) | unique | sort | to_nice_json }}\n"
+    dest: "{{ relay_router_config_dir }}/bindings.json"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0600"
+
+- name: Create a private directory for each binding
+  ansible.builtin.file:
+    path: "{{ relay_router_state_dir }}/{{ item.bindingId }}"
+    state: directory
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0700"
+  loop: "{{ relay_router_bindings }}"
+  loop_control:
+    label: "{{ item.bindingId }}"
+
+- name: Install the reviewed private CA bundle for both OpenBao clients
+  ansible.builtin.copy:
+    src: "{{ relay_router_ca_source }}"
+    dest: "{{ relay_router_config_dir }}/ca.pem"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0600"
+  register: relay_router_ca
+  notify:
+    - relay router authentication changed
+    - relay router renderers changed
+
+- name: Install dedicated worker AppRole identity files
+  ansible.builtin.copy:
+    content: "{{ item.value }}\n"
+    dest: "{{ relay_router_config_dir }}/auth/{{ item.name }}"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0600"
+  loop:
+    - { name: role-id, value: "{{ relay_router_role_id }}" }
+    - { name: secret-id, value: "{{ relay_router_secret_id }}" }
+  no_log: true
+  diff: false
+  notify: relay router authentication changed
+
+- name: Install the independent authentication configuration
+  ansible.builtin.template:
+    src: agent.hcl.j2
+    dest: "{{ relay_router_config_dir }}/auth/agent.hcl"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0600"
+  notify: relay router authentication changed
+
+- name: Install reference-only renderer configuration for each binding
+  ansible.builtin.template:
+    src: renderer.json.j2
+    dest: "{{ relay_router_config_dir }}/{{ relay_binding.bindingId }}.json"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0600"
+  loop: "{{ relay_router_bindings }}"
+  loop_control:
+    loop_var: relay_binding
+    label: "{{ relay_binding.bindingId }}"
+  register: relay_router_binding_configs
+  notify: relay router renderers changed
+
+- name: Write the host-scoped reader policy for separate operator provisioning
+  ansible.builtin.template:
+    src: reader-policy.hcl.j2
+    dest: "{{ relay_router_config_dir }}/reader-policy.hcl"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0600"
+
+- name: Create the user unit directory
+  ansible.builtin.file:
+    path: "{{ relay_router_unit_dir }}"
+    state: directory
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0755"
+
+- name: Install the isolated authentication unit
+  ansible.builtin.template:
+    src: auth.service.j2
+    dest: "{{ relay_router_unit_dir }}/relay-router-auth.service"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0644"
+  notify: relay router authentication changed
+
+- name: Install independently supervised per-binding renderers
+  ansible.builtin.template:
+    src: renderer.service.j2
+    dest: "{{ relay_router_unit_dir }}/relay-router-render-{{ relay_binding.bindingId }}.service"
+    owner: "{{ relay_router_user }}"
+    group: "{{ relay_router_group }}"
+    mode: "0644"
+  loop: "{{ relay_router_bindings }}"
+  loop_control:
+    loop_var: relay_binding
+    label: "{{ relay_binding.bindingId }}"
+  register: relay_router_binding_units
+  notify: relay router renderers changed
+
+- name: Select only renderers affected by shared or per-binding changes
+  ansible.builtin.set_fact:
+    relay_router_render_restart_bindings: >-
+      {{ (relay_router_bindings | map(attribute='bindingId') | list)
+         if (relay_router_renderer_artifact.changed or relay_router_ca.changed)
+         else ((relay_router_binding_configs.results + relay_router_binding_units.results)
+               | selectattr('changed') | map(attribute='relay_binding.bindingId') | unique | list) }}
+
+- name: Apply unit/configuration changes before ensuring services are started
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start only the managed router services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    scope: user
+    daemon_reload: true
+    enabled: true
+    state: started
+  become: true
+  become_user: "{{ relay_router_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_router_uid }}"
+  loop: "{{ ['relay-router-auth.service'] + relay_router_bindings | map(attribute='bindingId') | map('regex_replace', '^(.*)$', 'relay-router-render-\\1.service') | list }}"
+  when: relay_router_manage_services | bool

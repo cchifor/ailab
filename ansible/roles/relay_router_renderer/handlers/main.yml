@@ -1,0 +1,27 @@
+---
+- name: Restart the independent router authentication service
+  listen: relay router authentication changed
+  ansible.builtin.systemd_service:
+    name: relay-router-auth.service
+    scope: user
+    daemon_reload: true
+    state: restarted
+  become: true
+  become_user: "{{ relay_router_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_router_uid }}"
+  when: relay_router_manage_services | bool
+
+- name: Restart only affected router renderers
+  listen: relay router renderers changed
+  ansible.builtin.systemd_service:
+    name: "relay-router-render-{{ item }}.service"
+    scope: user
+    daemon_reload: true
+    state: restarted
+  become: true
+  become_user: "{{ relay_router_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_router_uid }}"
+  loop: "{{ relay_router_render_restart_bindings }}"
+  when: relay_router_manage_services | bool

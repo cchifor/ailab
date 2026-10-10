@@ -1,0 +1,4 @@
+# Review/apply in OpenBao separately. No list, metadata, write, delete or destroy grant.
+path "{{ relay_router_bao_mount }}/data/{{ relay_router_bao_prefix }}/{{ relay_router_tenant_id }}/{{ relay_router_host_id }}/*" {
+  capabilities = ["read"]
+}

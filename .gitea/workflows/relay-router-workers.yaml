@@ -1,0 +1,32 @@
+name: relay-router-workers
+on:
+  pull_request:
+    paths:
+      - "ansible/roles/relay_router_renderer/**"
+      - "ansible/relay-router-workers.yml"
+      - "scripts/tests/integration/test_relay_router_workers.py"
+      - ".gitea/workflows/relay-router-workers.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "ansible/roles/relay_router_renderer/**"
+      - "ansible/relay-router-workers.yml"
+      - "scripts/tests/integration/test_relay_router_workers.py"
+      - ".gitea/workflows/relay-router-workers.yaml"
+jobs:
+  relay-router-workers:
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate private staging, idempotence, policy and unit contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v systemd-analyze
+          trap 'rm -rf .venv-relay-router-tests .relay-router-tests' EXIT
+          python3 -m venv .venv-relay-router-tests
+          .venv-relay-router-tests/bin/pip install ansible-core==2.20.0 PyYAML==6.0.3
+          mkdir -p .relay-router-tests
+          PATH="$PWD/.venv-relay-router-tests/bin:$PATH" TMPDIR="$PWD/.relay-router-tests" \
+            .venv-relay-router-tests/bin/python scripts/tests/integration/test_relay_router_workers.py

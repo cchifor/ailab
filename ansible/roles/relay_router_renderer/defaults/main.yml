@@ -1,0 +1,35 @@
+---
+# Opt-in only. No inventory enables this role until release/policy qualification.
+relay_router_enabled: false
+# false stages files only on a worker whose managed services are stopped.
+relay_router_manage_services: false
+relay_router_user: c4
+relay_router_group: "{{ relay_router_user }}"
+relay_router_home: "/home/{{ relay_router_user }}"
+relay_router_config_dir: "{{ relay_router_home }}/.config/relay/router-managed"
+relay_router_state_dir: "{{ relay_router_home }}/.local/state/relay/router-managed"
+relay_router_unit_dir: "{{ relay_router_home }}/.config/systemd/user"
+relay_router_artifact_dir: /opt/relay/router-worker
+relay_router_artifact_owner: root
+relay_router_artifact_group: root
+# Controller-local, reviewed release artifacts. Both bytes and SHA are required;
+# no worker build, mutable URL, global bao overwrite or latest-version fallback.
+relay_router_renderer_source: ""
+relay_router_renderer_sha256: ""
+relay_router_bao_source: ""
+relay_router_bao_sha256: ""
+relay_router_ca_source: "{{ role_path }}/../openbao_agent/files/ailab-root-ca.crt"
+relay_router_origin: https://relay.chifor.me
+relay_router_bao_origin: https://openbao.lan.chifor.me:30820
+relay_router_bao_mount: secret
+relay_router_bao_prefix: relay/router
+relay_router_tenant_id: ""
+relay_router_host_id: ""
+relay_router_connector_state_file: ""
+# SOPS-loaded map, separate AppRole from the legacy cred identity and hub writer.
+relay_router_credentials: {}
+relay_router_role_id: "{{ relay_router_credentials.get(inventory_hostname, {}).get('role_id', '') }}"
+relay_router_secret_id: "{{ relay_router_credentials.get(inventory_hostname, {}).get('secret_id', '') }}"
+# Full, administrator-approved HolderRouterPolicy objects. credentialFile must
+# be <relay_router_state_dir>/<bindingId>/credential.json. No raw router tokens.
+relay_router_bindings: []

@@ -1,0 +1,25 @@
+[Unit]
+Description=Relay dedicated OpenBao router reader authentication
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={{ relay_router_artifact_dir }}/{{ relay_router_bao_sha256 }}/bao agent -config={{ relay_router_config_dir }}/auth/agent.hcl
+Restart=always
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+RuntimeDirectory=relay-router-auth
+RuntimeDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateUsers=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/user/{{ relay_router_uid }}/relay-router-auth
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

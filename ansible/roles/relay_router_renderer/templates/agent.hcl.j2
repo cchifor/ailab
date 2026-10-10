@@ -1,0 +1,20 @@
+# Independent of openbao-agent.service and all legacy credential templates.
+vault {
+  address = {{ relay_router_bao_origin | to_json }}
+  ca_cert = {{ (relay_router_config_dir + '/ca.pem') | to_json }}
+}
+auto_auth {
+  method "approle" {
+    config = {
+      role_id_file_path = {{ (relay_router_config_dir + '/auth/role-id') | to_json }}
+      secret_id_file_path = {{ (relay_router_config_dir + '/auth/secret-id') | to_json }}
+      remove_secret_id_file_after_reading = false
+    }
+  }
+  sink "file" {
+    config = {
+      path = "/run/user/{{ relay_router_uid }}/relay-router-auth/token"
+      mode = 0600
+    }
+  }
+}

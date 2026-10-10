@@ -1,0 +1,10 @@
+{{ {
+  'version': 1,
+  'router': relay_binding,
+  'baoOrigin': relay_router_bao_origin,
+  'baoMount': relay_router_bao_mount,
+  'baoPrefix': relay_router_bao_prefix,
+  'baoTokenFile': '/run/user/' + relay_router_uid | string + '/relay-router-auth/token',
+  'baoCaFile': relay_router_config_dir + '/ca.pem',
+  'relay': {'origin': relay_router_origin, 'connectorStateFile': relay_router_connector_state_file}
+} | to_nice_json }}
