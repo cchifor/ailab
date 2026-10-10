@@ -212,7 +212,8 @@ needs a separate owner decision. It restores control-plane metadata only.
 - VM disks ignore `disk[0].import_from` (create-only), so a version bump is not a disk diff.
 - Before any apply: the plan must show 0 destroy / 0 replace, and the rendered machine config must be
   diffed against live (`talosctl get machineconfig`, the `v1alpha1` document) for **every** node.
-- A node with `apply_mode = "staged"` (env-node-1 was the only one; retired, ADR 0037) takes a tofu apply into its `persistent` config only.
+- **No node uses `apply_mode = "staged"` since env-node-1 was retired (ADR 0037).** This bullet and the
+  next one are kept for the day one does: a staged node takes a tofu apply into its `persistent` config only.
   The active `v1alpha1` keeps the old values until that node's next reboot. That is expected, so don't
   re-apply because of it.
 - **But a later no-reboot `talosctl patch` on that node discards the staged change.** It rebuilds

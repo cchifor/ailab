@@ -464,7 +464,8 @@ transaction whose volume still has a PV/PVC/`tridentvolume` or a LUN is NOT stal
 Trident. Each failed provisioning retry also leaves an `addVolume` transaction behind
 ("unable to process the preexisting transaction"); the same test applies.
 
-**Orphan testpool PVs — cleaned up 2026-10-10 (ADR 0037).** The `Released` testpool PVs (reclaim
+**Orphan testpool PVs — cleaned up 2026-10-10 (ADR 0037).** This closes the NAS-side cleanup that
+ailab#880 (the 09-26 warm-pool pause) left open; nothing of it is pending any more. The `Released` testpool PVs (reclaim
 policy flipped to `Retain` on 2026-09-27, because each failed delete re-queued a full sweep) and
 their NAS side went with the test-env pool. What worked, for the next orphan of this kind:
 - **NAS first, one LUN at a time.** Resolve the `lunID` from the exact `trident-pvc-<uuid>` name
