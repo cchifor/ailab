@@ -102,6 +102,13 @@ class Monitoring(unittest.TestCase):
         self.assertEqual(json.loads(target.read_text()), self.config)
         self.assertFalse((directory / 'config.json.new').exists())
 
+    def test_expired_verifier_does_not_block_application_restart(self):
+        # The endpoint checks expiry on each scrape; old verifiers grant no access.
+        self.config['expiresAt'] = '2000-01-01T00:00:00Z'
+        self.seed()
+        self.run_setup()
+        self.assertEqual(json.loads((self.root / 'output/private/config.json').read_text()), self.config)
+
     def test_invalid_inputs_fail_closed_and_keep_last_complete_file(self):
         self.run_setup()
         target = self.root / 'output/private/config.json'
@@ -109,7 +116,6 @@ class Monitoring(unittest.TestCase):
         for filename, bad in [
             ('tenant-id', 'PRIVATE_CANARY'), ('tenant-id', '0' * 36),
             ('token-sha256', 'PRIVATE_CANARY'), ('token-sha256', 'a' * 129),
-            ('expires-at', '2000-01-01T00:00:00Z'),
             ('expires-at', '2099-02-30T00:00:00Z'), ('expires-at', 'PRIVATE_CANARY'),
         ]:
             with self.subTest(filename=filename, case=len(bad)):
@@ -147,6 +153,13 @@ class Monitoring(unittest.TestCase):
     def test_application_only_mounts_verifier_and_preserves_base_workloads(self):
         base_docs = list(yaml.safe_load_all((ROOT / 'kubernetes/apps/apps/relay/relay.yaml').read_text()))
         base = named(base_docs, 'Deployment', 'relay')['spec']['template']['spec']
+        # Kubelet uses this fsGroup for 0440 projected Secret readability. The
+        # native host-user fixture alone cannot establish cluster file ownership.
+        self.assertEqual(base['securityContext']['fsGroup'], 1000)
+        self.assertEqual(self.spec['securityContext']['fsGroup'], 1000)
+        initializer = next(c for c in self.spec['initContainers'] if c['name'] == 'metrics-files')
+        self.assertEqual(initializer['securityContext']['runAsUser'], 1000)
+        self.assertEqual(initializer['securityContext']['runAsGroup'], 1000)
         self.assertEqual([c for c in self.spec['initContainers'] if c['name'] not in ('metrics-files', 'notification-files')], base['initContainers'])
         application = next(c for c in self.spec['containers'] if c['name'] == 'relay')
         self.assertEqual(application['image'], next(c for c in base['containers'] if c['name'] == 'relay')['image'])

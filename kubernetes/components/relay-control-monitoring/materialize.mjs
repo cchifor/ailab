@@ -20,7 +20,7 @@ try {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(tenantId) ||
       !/^[a-f0-9]{64}$/.test(tokenSha256) ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(expiresAt) ||
-      !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) throw Error();
+      !Number.isFinite(Date.parse(expiresAt))) throw Error();
   // Reject dates that Date.parse normalizes, such as February 30.
   if (new Date(expiresAt).toISOString().slice(0, 19) !== expiresAt.slice(0, 19)) throw Error();
   await mkdir('/output/private', { recursive: true, mode: 0o700 });

@@ -33,8 +33,8 @@ spec:
         description: Inspect collection and database availability. Do not infer holder liveness or replay uncertain
           work from missing observations.
     - alert: RelayHolderObservationMissing
-      expr: relay_control_holder_reports_stale{job="relay-control-plane"} + relay_control_holders_unreported{job="relay-control-plane"}
-        + relay_control_holder_journal_reports_missing{job="relay-control-plane"} > 0
+      expr: (relay_control_holder_reports_stale{job="relay-control-plane"} > 0) or (relay_control_holders_unreported{job="relay-control-plane"}
+        > 0) or (relay_control_holder_journal_reports_missing{job="relay-control-plane"} > 0)
       for: 5m
       labels:
         severity: warning
@@ -64,9 +64,9 @@ spec:
         description: Inspect journal ingestion and the sealed retention procedure. This measures journal bytes,
           not whole-filesystem or native-home capacity.
     - alert: RelayControlUnknownOutcome
-      expr: relay_control_control_commands_unknown{job="relay-control-plane"} + relay_control_permission_decisions_unknown{job="relay-control-plane"}
-        + relay_control_question_answers_unknown{job="relay-control-plane"} + relay_control_router_credentials_unknown{job="relay-control-plane"}
-        + relay_control_router_installations_unknown{job="relay-control-plane"} > 0
+      expr: (relay_control_control_commands_unknown{job="relay-control-plane"} > 0) or (relay_control_permission_decisions_unknown{job="relay-control-plane"}
+        > 0) or (relay_control_question_answers_unknown{job="relay-control-plane"} > 0) or (relay_control_router_credentials_unknown{job="relay-control-plane"}
+        > 0) or (relay_control_router_installations_unknown{job="relay-control-plane"} > 0)
       for: 5m
       labels:
         severity: warning
@@ -76,8 +76,8 @@ spec:
         description: Inspect exact operation receipts and holder/router observations. Do not repeat a command or
           credential mutation merely because its outcome is unknown.
     - alert: RelayRouterCleanupPending
-      expr: relay_control_router_revocations_pending{job="relay-control-plane"} + relay_control_router_escrow_cleanup_pending{job="relay-control-plane"}
-        > 0
+      expr: (relay_control_router_revocations_pending{job="relay-control-plane"} > 0) or (relay_control_router_escrow_cleanup_pending{job="relay-control-plane"}
+        > 0)
       for: 10m
       labels:
         severity: warning
@@ -127,3 +127,14 @@ spec:
         summary: Relay scheduled backup has no recent successful run
         description: Inspect the daily coordinated database/artifact backup and its storage. Job success is not
           restore verification; the named artifact/database restore gate remains required.
+    - alert: RelayControlMetricSchemaIncomplete
+      expr: up{job="relay-control-plane"} == 1 unless on(job, instance) (count by(job, instance) ({__name__=~"relay_control_(holder_reports_stale|holders_unreported|holder_journal_reports_missing|control_commands_unknown|permission_decisions_unknown|question_answers_unknown|router_credentials_unknown|router_installations_unknown|router_revocations_pending|router_escrow_cleanup_pending)",job="relay-control-plane"})
+        == 10)
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay critical metric schema is incomplete
+        description: A successful scrape omitted a required holder, delivery or cleanup observation. Check release
+          compatibility; missing series must not look like a healthy zero.

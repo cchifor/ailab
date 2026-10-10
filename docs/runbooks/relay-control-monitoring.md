@@ -25,6 +25,8 @@ Relay receives only the verifier metadata. Its pinned Node initializer reads the
 kubelet projection, validates bounded inputs, and writes an atomic regular 0600
 configuration file under a private 0700 directory in a 1 MiB memory-backed volume.
 It runs as UID/GID 1000 with a read-only root filesystem and no Linux capabilities.
+The base Relay pod's `fsGroup: 1000` makes the 0440 projected Secret readable;
+the integration test asserts this prerequisite in both base and rendered pods.
 The application mounts only that completed volume read-only, not the input Secret
 or collector token. Invalid input prevents startup without printing values.
 
@@ -55,6 +57,8 @@ grant Relay API authority; the collector credential works only at the metrics pa
    `components: [../../../components/relay-control-monitoring]`.
    The resources have explicit Relay/monitoring namespaces. Do not add a namespace
    transformer to that Kustomization. The notification component can coexist.
+   Update the integration test's explicit not-yet-activated assertion in that
+   same rollout PR; it deliberately guards the currently disabled deployment.
 4. After Flux convergence, confirm initializer success and private output
    ownership. Confirm exactly the intended Relay target with the fixed job label,
    `up=1`, a fresh `relay_control_observed_timestamp_seconds`, and the expected
@@ -71,7 +75,8 @@ grant Relay API authority; the collector credential works only at the metrics pa
    This establishes scheduling visibility only. Verify a named artifact/database
    restore separately; successful jobs do not prove recoverability.
 
-The 11 rules cover collector failure, stale/missing observations, missing holder
+The 12 rules cover collector failure, stale/missing observations, an incomplete
+critical metric schema, missing holder
 measurements, journal history gaps and quota pressure, unknown delivery, router
 revocation/escrow cleanup, queued controls, old unacknowledged messages, collector
 expiration and scheduled backup freshness. Thresholds are conservative initial
@@ -81,6 +86,12 @@ authorize a wake, permission approval or an access grant. Journal quotas are not
 whole-filesystem/native-home usage.
 
 ## Rotation, rollback and evidence
+
+An expired verifier does not stop the initializer or application startup. It
+loads normally and the metrics endpoint returns 401 until rotation. A missing
+Secret or malformed/unreadable configured verifier still blocks startup as an
+explicit opt-in deployment error; provision and validate it before activation.
+Remove the component through GitOps if that configuration cannot be restored.
 
 Relay reads verifier configuration at startup and checks expiration on every
 scrape, including expiry during a query. Updating a projected Secret alone does
@@ -98,9 +109,10 @@ not produce a permanent missing-target alert. Preserve existing notification,
 backup, network and application resources. Confirm no stale ServiceMonitor or
 PrometheusRule remains.
 
-Local validation uses four isolated Node/container and rendered-resource tests
-plus 23 Prometheus fault, threshold, missing-series and recovery scenarios. Native
+Local validation uses five isolated Node/container and rendered-resource tests
+plus Prometheus fault, threshold, missing-series and recovery scenarios. Native
 `promtool` evaluates the real rules; repository-wide rule lint discovers this
-component even while it is opt-in. These tests do not establish deployed scrape
+component even while it is opt-in; its unfiltered push/PR workflow runs separately
+from the path-filtered native setup workflow. These tests do not establish deployed scrape
 discovery, token provisioning, live alert delivery or restore acceptance. Record
 operator results in the Relay handoff file without credential values.

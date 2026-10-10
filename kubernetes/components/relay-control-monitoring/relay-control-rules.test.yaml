@@ -531,3 +531,187 @@ tests:
   - eval_time: 26h45m
     alertname: RelayBackupScheduleStale
     exp_alerts: []
+- name: holder_reports_stale still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayHolderObservationMissing
+    exp_alerts:
+    - exp_labels: &id007
+        job: relay-control-plane
+        instance: relay:80
+        severity: warning
+        service: relay
+      exp_annotations: &id008
+        summary: Relay holder observations need attention
+        description: A holder report is stale, missing for the active incarnation, or lacks journal measurements.
+          Inspect supported holder versions and connectivity before interpreting journal totals.
+- name: holders_unreported still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayHolderObservationMissing
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: *id008
+- name: holder_journal_reports_missing still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayHolderObservationMissing
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: *id008
+- name: control_commands_unknown still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayControlUnknownOutcome
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: &id009
+        summary: Relay control or credential delivery has an unknown outcome
+        description: Inspect exact operation receipts and holder/router observations. Do not repeat a command or
+          credential mutation merely because its outcome is unknown.
+- name: permission_decisions_unknown still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayControlUnknownOutcome
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: *id009
+- name: question_answers_unknown still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayControlUnknownOutcome
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: *id009
+- name: router_credentials_unknown still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayControlUnknownOutcome
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: *id009
+- name: router_installations_unknown still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayControlUnknownOutcome
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: *id009
+- name: router_revocations_pending still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayRouterCleanupPending
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: &id010
+        summary: Relay router revocation or escrow cleanup is pending
+        description: Inspect the scoped router bridge and OpenBao reconciliation. These are retained operation states,
+          not proof of remote key authority.
+- name: router_escrow_cleanup_pending still fires when all other operands are absent
+  interval: 1m
+  input_series:
+  - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x12
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: RelayRouterCleanupPending
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations: *id010
+- name: partial critical schema warns
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels: *id007
+      exp_annotations:
+        summary: Relay critical metric schema is incomplete
+        description: A successful scrape omitted a required holder, delivery or cleanup observation. Check release
+          compatibility; missing series must not look like a healthy zero.
+- name: complete critical schema stays healthy
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts: []
