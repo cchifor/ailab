@@ -375,3 +375,62 @@ against the repo. Dispositions:
     admin and no other interactive users.
 
 <!-- codex-review-status: finalized -->
+
+## Execution log
+
+- **Step 1 (PR-A, #1217, merged as `658e5858`).** Flux `openbao` applied it, and a manual
+  `openbao-k8stoken-sync` run printed `validated 8/8 fields`. The testpool mint Role was pruned.
+  - Review rounds hardened `files/tep-retire-gate.sh`: nanosecond timestamps, and fail-closed short
+    of a confirmed stop. They also fixed the stale-backup `find` (`read_whole_file`).
+- **Gate 1 — deviation.** The hand-run converge was killed by the workstation's Claude Code harness
+  (host memory pressure) before it touched any host; `agent.hcl` on dw1..dw4 is unchanged since
+  09-30. A read-only check then showed that **no worker ever cut over to agent-rendered kubeconfigs**
+  (ADR 0021 phase 3).
+  - No host has `/etc/openbao-agent/renders-kubeconfigs`.
+  - `agent.hcl` has no kubeconfig stanzas.
+  - `~/.helmtest/kubeconfig` was never rendered.
+  - `~/.tep/kubeconfig` is the SOPS-written file with the legacy `tep-dwN-token`. That is the
+    unidentified legacy-token client.
+
+  So the hazard Gate 1 guarded against cannot occur, because the converge's tep/helmtest verify
+  only runs on cut-over hosts. PR-B proceeds on the sync evidence alone. Each worker's `tep`/`~/.tep`
+  cleanup lands at its next converge: `tep-retire-gate.sh` reads `safe` there (no stanza; agent
+  started 10-06, after the 09-30 config).
+  - `converge.log`'s last entry is the 2026-10-08 06:35 run: the scheduled converge did not log
+    on 10-09 or 10-10.
+- **Step 2 (Gate 2 ✓).** VSC set to `Retain`. The VolumeSnapshot and VSC are gone. csi-snapshotter
+  only removed its finalizer; no `DeleteSnapshot`.
+- **Step 5 (Gate 5 ✓), done before Step 4 (both are k8s-independent).**
+  - Pre-gates held: no Pending PVC, all VAs attached, no transactions, last night's Velero
+    `Completed`, CNPG archiving healthy, no iSCSI errors.
+  - A provisioning probe before the removals passed: bind, attach and write in 30 s; deleting it
+    with `Delete` removed its LUN.
+  - The `lunList` CGI answered `-1/-22` while provisioning was healthy, so it is not a health signal.
+  - LUNs 4, 43, 44 and 11 were removed one at a time. Each removal left the full LUN and target
+    lists unchanged except for that entry, with its zvol and SCST device gone. 55 → 51; set check:
+    exactly the four expected names gone.
+  - The placeholder zvol could not be destroyed (QuTS: "cannot destroy snapshots: permission
+    denied", no holds). It is left, 84.8K and unreferenced.
+- **Step 4 (Gate 4 ✓).** The 8 Released PVs are deleted. Each carried a stale
+  `external-attacher/csi-trident-qnap-io` finalizer, which the attacher removed itself ("no VA
+  found"). The provisioner made no `DeleteVolume`, and Trident and storage-api-server logged
+  nothing about them.
+- **Step 3 pre-gates ✓.** Both Kustomizations are Ready, not suspended, with prune on. Their
+  inventories list the Namespace, SC, RuntimeClass and 4 CRDs. No finalizer exists in `testpool`
+  or on any agent-sandbox CR.
+  - `kubectl get sandboxes,sandboxclaims -A` is empty cluster-wide. The only CRs are testpool's
+    template and warm pool, and the `strive-sandboxes-ailab` pods are plain pods with no owner.
+    The platform-access comment "App sandboxes in strive-sandboxes-ailab" was stale.
+- **Step 3 split (review, #1219).**
+  - The review bots skip a PR whose reviewable diff exceeds 400 KB, and the vendored 425 KB
+    agent-sandbox manifest alone exceeds it.
+  - `dependsOn` orders reconciliation, not deletion, so pruning both Kustomizations in one commit
+    could delete the CRDs before testpool's own GC prunes its CRs.
+  - So PR-B removes **only `testpool`**. A follow-up removes the `agent-sandbox` Kustomization and
+    deletes its source tree, in two review-sized halves.
+  - Gate 3 adds "no Kustomization stuck in deletion". After PR-B, Gate 3 expects only
+    `ns testpool`, `sc testpool-iscsi` and `runtimeclass kata-env` NotFound. `agent-sandbox-system`
+    and the CRDs stay until the follow-up.
+  - **Accepted gap:** `TestpoolOperatorDown` goes with the testpool rules in PR-B, while the
+    agent-sandbox controller keeps running until the follow-up. It is unmonitored for that window,
+    but it manages nothing (no CRs once testpool is pruned), so an outage there costs nothing.

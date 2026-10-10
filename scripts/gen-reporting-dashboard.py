@@ -4,10 +4,10 @@
 Emits kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml — a ConfigMap labeled
 grafana_dashboard=1 so the kube-prometheus-stack Grafana sidecar auto-loads it (and it is the default
 home dashboard via grafana.ini default_home_dashboard_path). Sections (collapsible rows):
-  Estate Health — FIRST: is anything down right now (nodes + hypervisors, Flux + stuck teardowns,
-                 test envs) and what alerted in the selected range + a per-node readiness
-                 timeline and the alert table. Added after the 2026-09-20 env-node outage, which
-                 this dashboard could only show as "Envs Ready = 0" in its eighth row.
+  Estate Health — FIRST: is anything down right now (nodes + hypervisors, Flux + stuck pods) and
+                 what alerted in the selected range + a per-node readiness timeline and the alert
+                 table. Added after the 2026-09-20 env-node outage, which this dashboard could
+                 only show as "Envs Ready = 0" in the (since retired, ADR 0037) test-pool row.
   Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node")
   Instances    — pve-exporter per-guest (VMs + LXCs), label `id` = qemu/<vmid> | lxc/<vmid>
   AI           — amdgpu_* (iGPU) + llamacpp:* + AI-node CPU (node_exporter on the LXCs)
@@ -668,55 +668,6 @@ panels += [
        "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
 ]
 
-# ───────────────────────── Test Env Pool ─────────────────────────
-# The leasable test-environment pool (kubernetes/apps/infrastructure/testpool + the env-pool Talos
-# worker). Sources: kube-state-metrics (env pods are created_by_kind="Sandbox"; the pre-pull
-# DaemonSet is deliberately excluded by that filter), node_exporter on the env node(s), and
-# kubelet volume stats. cAdvisor is BLIND to kata pods on this estate — node-level panels instead.
-ENVNODE = 'instance=~"192.168.0.37:9100"'   # env-pool Talos worker node_exporter (extend when env-node-2 lands)
-TP = 'namespace="testpool"'
-TPPOD = f'kube_pod_info{{{TP},created_by_kind="Sandbox"}}'
-WARM_POOL = 'sum(agentsandbox_warmpool_spec_replicas{exported_namespace="testpool"})'
-# Ready envs (warm + leased) of the warm-pool size. Red at none - the TestpoolNoWarmCapacity
-# condition - orange while part of the pool is still refilling after leases, green at the size.
-# "paused" while the pool is DELIBERATELY at 0 (#880, 2026-09-27): the old red 0 sat on the
-# dashboard for the whole pause, exactly the false alarm the alert's `unless` already removes.
-# FAIL-OPEN like that alert: with no spec metric there is no "paused" and no pool size, and the
-# tile reads as before the pool had one - green at 1+ Ready, red at 0 (total_fallback 1).
-ENVS_READY = ready_item(
-    "envs", f'(kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}',
-    WARM_POOL, 'kube_pod_info', paused=f'{WARM_POOL} == 0', of="· warm pool", total_fallback=1,
-    steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1}, {"color": "green", "value": 100}])
-ENVS_READY_DESC = ("Ready test environments (warm + leased) of the warm-pool size. "
-                   "\"paused\" while the SandboxWarmPool is deliberately at 0 replicas.")
-panels.append(row("Test Env Pool (leasable Kata DinD environments — testpool)", 124))
-panels += [
-    multistat("Envs Ready", 0, 125, 4, 4, [ENVS_READY], mappings=NO_DATA_MAP + PAUSED_MAP,
-              description=ENVS_READY_DESC),
-    stat("Envs Total (warm + leased)", 4, 125, 4, 4, f'(count({TPPOD}) or vector(0))'),
-    stat("Env Volumes (PVCs)", 8, 125, 4, 4, f'(count(kube_persistentvolumeclaim_info{{{TP}}}) or vector(0))'),
-    stat("Operator Up", 12, 125, 4, 4,
-         'kube_deployment_status_replicas_available{namespace="agent-sandbox-system",deployment="agent-sandbox-controller"}',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
-    stat("Avg Env Node CPU", 16, 125, 4, 4,
-         f'100 * (1 - avg(rate(node_cpu_seconds_total{{{ENVNODE},mode="idle"}}[5m])))',
-         unit="percent", decimals=1, steps=PCT, avg=True),
-    stat("Avg Env Node Mem", 20, 125, 4, 4,
-         f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{ENVNODE}}}) / sum(node_memory_MemTotal_bytes{{{ENVNODE}}}))',
-         unit="percent", decimals=1, steps=PCT, avg=True),
-    ts("Environments over Time (Ready / total)", 0, 129, 8, 7,
-       [f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
-        f'(count({TPPOD}) or vector(0))'],
-       "short", legends=["ready", "total"], decimals=0),
-    ts("Env Node CPU / Memory %", 8, 129, 8, 7,
-       [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{ENVNODE},mode="idle"}}[5m])))',
-        f'100 * (1 - node_memory_MemAvailable_bytes{{{ENVNODE}}} / node_memory_MemTotal_bytes{{{ENVNODE}}})'],
-       "percent", legends=["{{instance}} cpu", "{{instance}} mem"], maxv=100),
-    ts("Env Volume Usage", 16, 129, 8, 7,
-       [f'kubelet_volume_stats_used_bytes{{{TP}}}'],
-       "bytes", legends=["{{persistentvolumeclaim}}"]),
-]
-
 # ───────────────────────── PR Reviewers ─────────────────────────
 # The automatic LLM review bots (ansible/roles/pr_reviewer; plan: agentforge
 # plans/2026-09-02-ai-pr-review-plan.md). Source: reviewbot_* textfile metrics through the
@@ -852,11 +803,11 @@ panels += [
 
 # ───────────────────────── Estate Health (prepended) ─────────────────────────
 # "Is anything down right now" — the question the 2026-09-20 outage showed this dashboard could not
-# answer: talos-env-node-1 was NotReady for 3 h and the only trace was "Envs Ready = 0" in the eighth
-# row. Everything here is a status signal (colour MEANS good/bad, so green/red is used only where
+# answer: talos-env-node-1 (the test-env pool node, retired 2026-10-10 with the pool, ADR 0037) was
+# NotReady for 3 h and the only trace was "Envs Ready = 0" in the pool's row. Everything here is a status signal (colour MEANS good/bad, so green/red is used only where
 # a value is a state, and every state also carries a number or a text label — never colour alone).
 #
-# FOUR TILES, not eight (2026-10-10): the first cut had a tile per signal, several saying the same
+# THREE TILES, not eight (2026-10-10; a fourth, Test Envs, left with the pool): the first cut had a tile per signal, several saying the same
 # thing twice (Nodes NotReady beside Hypervisors Up, Kubelet Targets Down beside both). They are
 # grouped now, and every "how many are fine" value reads "N of total" — green only when ALL are,
 # red below — instead of a count of bad things that is green at 0 (multistat/ready_item above):
@@ -864,7 +815,6 @@ panels += [
 #                 kubelet target was down 6 h before it wedged, so an unscraped node is not fine)
 #   Alerts        critical · warning raised IN THE SELECTED TIME RANGE (FIRING below)
 #   Workloads     flux (not failed) · stuck (pods Terminating > 5 m: the hung-Kata-teardown signature)
-#   Test Envs     Ready envs of the warm-pool size ("paused" while the pool is deliberately at 0)
 # The timeline turns an outage into a bar of its exact duration on the default 6 h range.
 ALERT_SEVERITY_MAP = [{"type": "value", "options": {
     "critical": {"text": "critical", "color": "red", "index": 0},
@@ -905,21 +855,21 @@ ALERT_SINCE = (f'((max_over_time(ALERTS_FOR_STATE[$__range]) * 1000 and ignoring
                f' or ignoring(alertstate) ({alerts_in_range()} * 0))')
 
 
-health = [row("Estate Health (nodes / alerts / workloads / test envs — what is down, what fired in the range)", 0)]
+health = [row("Estate Health (nodes / alerts / workloads — what is down, what fired in the range)", 0)]
 health += [
-    multistat("Nodes Ready", 0, 1, 6, 4, [
+    multistat("Nodes Ready", 0, 1, 8, 4, [
         ready_item("hosts", f'up{{{HOSTS}}} == 1', f'count(up{{{HOSTS}}})', f'up{{{HOSTS}}}'),
         ready_item("k8s", f'({NODE_READY} == 1) and on(node) ({KUBELET_METRICS} == 1)',
                    'count(kube_node_info)', 'kube_node_info'),
     ], mappings=NO_DATA_MAP,
         description="hosts: Proxmox hypervisors whose node_exporter answers. k8s: nodes Ready AND whose "
                     "kubelet /metrics target is up. Green only when all are; the timeline below says which."),
-    multistat("Alerts Raised in Range", 6, 1, 6, 4, [
+    multistat("Alerts Raised in Range", 8, 1, 8, 4, [
         count_item("critical", f'count({alerts_in_range("critical")}) or vector(0)', RED_AT_1),
         count_item("warning", f'count({alerts_in_range("warning")}) or vector(0)', ORANGE_AT_1),
     ], description="Alerts that STARTED firing inside the selected time range (resolved ones included), "
                    "plus every critical still firing however old. Widen the range to see older warnings."),
-    multistat("Workloads", 12, 1, 6, 4, [
+    multistat("Workloads", 16, 1, 8, 4, [
         # A Flux object with no Ready condition (an OCI HelmRepository) is in neither count; Unknown
         # is mid-reconcile (<= 8 at once over 24 h) and counts as fine, as in the old Not Ready tile.
         ready_item("flux", 'gotk_resource_info{ready=~"True|Unknown"}',
@@ -931,8 +881,6 @@ health += [
     ], mappings=NO_DATA_MAP,
         description="flux: Flux objects not failed, of all with a Ready condition. stuck: pods Terminating "
                     "for more than 5 minutes anywhere (the hung-Kata-teardown signature)."),
-    multistat("Test Envs", 18, 1, 6, 4, [ENVS_READY], mappings=NO_DATA_MAP + PAUSED_MAP,
-              description=ENVS_READY_DESC),
     # 3 = Ready and scraped, 2 = Ready but its kubelet /metrics target is down (or undiscovered: the
     # `or on(node)` arm), below 2 = NotReady - the verdict the k8s value above counts.
     state_timeline("Node Readiness (k8s nodes — a red bar is an outage)", 0, 5, 12, 8,

@@ -194,9 +194,9 @@ needs a separate owner decision. It restores control-plane metadata only.
   need no CI (`upgrade-k8s`, the kubelet roll, Cilium) can run between PR hops when every component
   supports the target.
 - **talosctl clients must follow the Talos minor everywhere**, not just on the workstation. cri-log-relay
-  drove 1.14 nodes with talosctl 1.11.6 until the Renovate bound was moved (#1182). Bump the
-  `ghcr.io/siderolabs/talosctl` allowedVersions and the image in the same change as a Talos upgrade, and
-  do the same for the `alpine/k8s` kubectl Jobs (window 1.34 for the 1.33 -> 1.35 program).
+  (retired with the test-env pool, ADR 0037) drove 1.14 nodes with talosctl 1.11.6 until its Renovate
+  bound was moved (#1182). Any in-cluster talosctl image moves in the same change as a Talos upgrade,
+  and so does the `alpine/k8s` kubectl Jobs' window (1.34 for the 1.33 -> 1.35 program).
 
 ## Tofu after an upgrade (never apply blindly)
 

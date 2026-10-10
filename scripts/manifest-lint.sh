@@ -71,11 +71,10 @@ KUBECONFORM_IMAGE="ghcr.io/yannh/kubeconform:v0.6.7@sha256:0925177fb05b44ce18574
 #   defect, it is the shape at-rest encryption produces, and decrypting to validate around it is
 #   explicitly out of scope (this gate must NEVER decrypt anything; scripts/check-inline-hashes.py
 #   and af-verify-brokers cover derived-value drift on the encrypted document without opening it).
-#   Cost: this also stops validating the handful of Secrets this repo does NOT encrypt (six opaque
-#   `tep-dw*-token` Secrets in kubernetes/apps/infrastructure/testpool, first run: 2026-09-02) —
-#   accepted, since kubeconform has no way to skip only the encrypted ones and those six are
-#   already the simplest possible Secret shape (a bare opaque token) with the least for `-strict`
-#   to usefully catch. Revisit if kubeconform ever grows a per-document skip.
+#   Cost: this also stops validating any Secret this repo does NOT encrypt (at first run, 2026-09-02,
+#   the opaque `tep-dw*-token` Secrets of the since-retired testpool tree, ADR 0037) — accepted,
+#   since kubeconform has no way to skip only the encrypted ones. Revisit if kubeconform ever grows
+#   a per-document skip.
 SKIP_ARGS=(-skip Secret)
 
 "$PY" --version

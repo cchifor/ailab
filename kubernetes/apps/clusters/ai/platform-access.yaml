@@ -2,7 +2,7 @@
 # Strive platform namespaces, and the openbao-platform-pg-sync CronJob. DEDICATED Kustomization,
 # wait:false, no decryption — nothing here is a secret.
 #
-# No dependsOn, on purpose (the helmtest/testpool reasoning): the RoleBindings and the CronJob land in
+# No dependsOn, on purpose (the helmtest reasoning): the RoleBindings and the CronJob land in
 # namespaces the `platform` Kustomization creates, and the two syncs that consume this tree live in
 # `openbao`. Coupling this layer to either with dependsOn would let an unrelated platform or vault
 # failure freeze a read-only RBAC change; a missing namespace is just an apply error retried every

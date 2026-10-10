@@ -29,7 +29,6 @@ FILES=(
   kubernetes/apps/infrastructure/platform-access/rbac.yaml
   kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
   kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml
-  kubernetes/apps/infrastructure/testpool/tep-access.yaml
   kubernetes/apps/infrastructure/helmtest/namespaces.yaml
   kubernetes/infra/dev-workers/variables.tf
   inventory/hosts.yml
@@ -69,11 +68,6 @@ edit kubernetes/apps/infrastructure/platform-access/rbac.yaml \
   's.replace("  - { kind: ServiceAccount, name: platform-dw4, namespace: platform-access }\n", "", 1)'
 expect_fail "a RoleBinding missing one subject" "DIFF"
 restore kubernetes/apps/infrastructure/platform-access/rbac.yaml
-
-edit kubernetes/apps/infrastructure/testpool/tep-access.yaml \
-  's.replace("metadata: { name: tep-dw4, namespace: testpool }", "metadata: { name: tep-dwX, namespace: testpool }", 1)'
-expect_fail "a tep ServiceAccount removed" "DIFF"
-restore kubernetes/apps/infrastructure/testpool/tep-access.yaml
 
 edit inventory/hosts.yml 's.replace("        dev-worker-4:\n", "", 1)'
 expect_fail "an inventory host removed" "DIFF"
@@ -163,7 +157,6 @@ RBAC=kubernetes/apps/infrastructure/platform-access/rbac.yaml
 PGSYNC=kubernetes/apps/infrastructure/platform-access/pg-sync.yaml
 K8STOKEN=kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml
 PROVISION=kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml
-TEP=kubernetes/apps/infrastructure/testpool/tep-access.yaml
 HELMTEST=kubernetes/apps/infrastructure/helmtest/namespaces.yaml
 TOFU=kubernetes/infra/dev-workers/variables.tf
 INVENTORY=inventory/hosts.yml
@@ -192,7 +185,6 @@ edit_all "$PGSYNC" 'value: "5 6"' 'value: "4 5 6"' 2
 edit_all "$K8STOKEN" 'for _n in (1, 2, 3, 4):' 'for _n in (1, 2, 3):' 1
 edit_all "$PROVISION" 'for host in dev-worker-1 dev-worker-2 dev-worker-3 dev-worker-4; do' 'for host in dev-worker-1 dev-worker-2 dev-worker-3; do' 1
 edit_all "$PROVISION" 'RETIRED_SLOTS="dev-worker-5 dev-worker-6"' 'RETIRED_SLOTS="dev-worker-4 dev-worker-5 dev-worker-6"' 1
-edit_all "$TEP" 'metadata: { name: tep-dw4, namespace: testpool }' 'metadata: { name: tep-retired, namespace: testpool }' 1
 edit_all "$HELMTEST" 'kind: Namespace\nmetadata:\n  name: helmtest-dw4\n' 'kind: Namespace\nmetadata:\n  name: helmtest-retired\n' 1
 edit_all "$TOFU" '"dev-worker-4" = {' '"retired-4" = {' 1
 edit_all "$INVENTORY" '        dev-worker-4:\n' '' 1
@@ -203,7 +195,7 @@ run_check || fail "a complete retirement of slot 4 must pass"
 grep -q "live slots (reference): \[1, 2, 3\]" "$WORK/.out" || fail "[F] the retirement did not take effect"
 grep -q "retired slots (reference): \[4, 5, 6\]" "$WORK/.out" || fail "[F] slot 4 is not recorded as retired"
 echo "  ok  retiring slot 4 everywhere goes green (live [1, 2, 3], retired [4, 5, 6])"
-for f in "$RBAC" "$PGSYNC" "$K8STOKEN" "$PROVISION" "$TEP" "$HELMTEST" "$TOFU" "$INVENTORY" "$TS" "$TSA" "$E2E"; do restore "$f"; done
+for f in "$RBAC" "$PGSYNC" "$K8STOKEN" "$PROVISION" "$HELMTEST" "$TOFU" "$INVENTORY" "$TS" "$TSA" "$E2E"; do restore "$f"; done
 
 run_check || fail "the tree must pass again after every fixture is restored"
 echo "test-check-slot-enumerations: OK (mismatch, removal, reformat and live/retired overlap all fail closed)"

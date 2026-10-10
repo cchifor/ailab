@@ -410,14 +410,12 @@ decision at the end of this section.
 - **Clients that never re-read their token:** `serviceaccount_stale_tokens_total` counts uses of an extended token after its first 3607 s, i.e.
   a client still holding a token kubelet has already replaced. It rose by **0** on all three control planes over the last 7 days (one event on
   cp1 between 7 and 8 days ago): today every client re-reads its projected token.
-- **TokenRequest tokens:** `openbao/openbao-k8stoken-sync` (CronJob, `17 3 * * *` UTC) mints **720 h** tokens for the dev workers' `tep`,
+- **TokenRequest tokens:** `openbao/openbao-k8stoken-sync` (CronJob, `17 3 * * *` UTC) mints **720 h** tokens for the dev workers'
   `helmtest` and `platform` kubeconfigs and publishes them to OpenBao KV; the openbao-agent on each worker renders them to
-  `~/.tep/kubeconfig`, `~/.helmtest/kubeconfig` and `~/.platform/kubeconfig`. Tokens minted before the switch keep the old signature for 30 days
+  `~/.helmtest/kubeconfig` and `~/.platform/kubeconfig` (the `tep` kubeconfig went with the test-env pool, ADR 0037). Tokens minted before the switch keep the old signature for 30 days
   unless re-minted. Hand-minted `kubectl create token` tokens are not inventoried.
-- **Legacy `kubernetes.io/service-account-token` Secrets (never refresh): 4**, all in `testpool`: `tep-dw1-token`, `tep-dw2-token`,
-  `tep-dw3-token`, `tep-dw4-token` (ServiceAccounts `tep-dw1` ... `tep-dw4`), declared in git in
-  `kubernetes/apps/infrastructure/testpool/tep-access.yaml` (Flux `testpool`). `serviceaccount_legacy_tokens_total` rose by 3 on cp1 in 7 days,
-  so at least one is still used although the kubeconfigs moved to k8stoken-sync: find who in the audit log before re-issuing (step 3). Re-take:
+- **Legacy `kubernetes.io/service-account-token` Secrets (never refresh): 0** since 2026-10-10. The four that existed,
+  `tep-dw1-token` ... `tep-dw4-token` in `testpool`, were deleted with the test-env pool (ADR 0037). Re-take:
   `kubectl --context admin@ai get secrets -A --field-selector type=kubernetes.io/service-account-token -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name`.
 - **Where the key lives:** the OpenTofu state (`talos_machine_secrets.this` in `kubernetes/infra/`, `certs.k8s_serviceaccount.key`) and the DR copy
   `kubernetes/infra/talos-secrets-bundle.sops.yaml` (`stringData."secrets.yaml"`, `certs.k8sserviceaccount.key`). Worker machine configs
@@ -573,18 +571,20 @@ All of these, then step 4. Nothing breaks while both keys verify, so the overlap
    first 3607 s: `subject: system:serviceaccount:satest:prober pod=prober-frozen`.)
    Restart that pod (a new pod gets a new token) or fix the client, and wait again.
 3. **TokenRequest tokens:** `$K -n openbao create job --from=cronjob/openbao-k8stoken-sync k8stoken-sync-sa-rotation`, wait for `Complete`, then
-   on each dev worker check that the three kubeconfigs carry the new key (header only):
-   `for f in ~/.tep/kubeconfig ~/.helmtest/kubeconfig ~/.platform/kubeconfig; do yq '.users[0].user.token' $f | cut -d. -f1 | tr '_-' '/+' | awk '{while (length($0) % 4) $0 = $0 "="; print}' | base64 -d; echo; done`.
+   on each dev worker check that its kubeconfigs carry the new key (header only). As of 2026-10-10 no worker has
+   `~/.helmtest/kubeconfig` (ADR 0021 phase 3 never ran there), so the loop skips what does not exist:
+   `for f in ~/.helmtest/kubeconfig ~/.platform/kubeconfig; do [ -f $f ] || continue; yq '.users[0].user.token' $f | cut -d. -f1 | tr '_-' '/+' | awk '{while (length($0) % 4) $0 = $0 "="; print}' | base64 -d; echo; done`.
    Tell the owner that tokens minted by hand before the switch stop working at step 4.
 4. **Legacy Secrets,** only after step 2 is done on **all three** control planes (the controller re-fills a Secret with its own control plane's
    key; one not yet switched would re-mint an old-key token). First find who uses them: annotation `authentication.k8s.io/legacy-token` in the
    same audit logs. Then, per Secret, with its consumer ready to take the new value at once (the old value dies on the spot):
 
    ```bash
-   $K -n testpool patch secret tep-dw1-token --type=json -p '[{"op":"remove","path":"/data/token"}]'
-   $K -n testpool get secret tep-dw1-token -o jsonpath='{.data.token}' | base64 -d | hdr   # kid = new key
+   $K -n <ns> patch secret <name> --type=json -p '[{"op":"remove","path":"/data/token"}]'
+   $K -n <ns> get secret <name> -o jsonpath='{.data.token}' | base64 -d | hdr   # kid = new key
    ```
-   If nothing uses them any more, retiring them from `tep-access.yaml` is better than re-issuing.
+   If nothing uses them any more, retiring them from git is better than re-issuing. (None exist since
+   2026-10-10, see the inventory above; the step is kept for any that appear.)
 
 ### Step 4 — drop the old verifier (no reboot)
 
