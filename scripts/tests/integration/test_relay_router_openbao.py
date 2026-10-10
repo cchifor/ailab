@@ -19,7 +19,7 @@ import uuid
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 TEMPLATES = ROOT / 'ansible/roles/relay_router_renderer/templates'
 BAO = os.environ.get('BAO_BIN', '/usr/local/bin/bao')
 RENDERER = os.environ['RELAY_RENDERER_BIN']

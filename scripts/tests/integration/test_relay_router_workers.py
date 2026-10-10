@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ import uuid
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 ROLE = ROOT / "ansible/roles/relay_router_renderer"
 SECRET = "relay_fixture_secret_id_never_log"
 TOKEN = "relay_fixture_connector_token_never_log"
@@ -60,8 +61,38 @@ class WorkerRole(unittest.TestCase):
                 credentialFile=str(home / ".local/state/relay/router-managed" / binding / "credential.json"),
                 protocol="codex-responses", selection=dict(kind="model", model="qualified-fixture"))],
         )
+        # Observe the real role/handlers through a strict systemctl boundary fixture.
+        # No fixture command can reach the actual user manager or change host units.
+        commands = cls.root / "commands"
+        commands.mkdir()
+        cls.command_log = cls.root / "commands.jsonl"
+        cls.service_state = cls.root / "service-state.json"
+        cls.service_state.write_text("[]")
+        systemctl = commands / "systemctl"
+        systemctl.write_text("#!/usr/bin/env python3\n" +
+            "import json, pathlib, sys\n" +
+            f"root = pathlib.Path({str(cls.root)!r})\n" +
+            "args = [x for x in sys.argv[1:] if x not in ('--user', '-l')]\n" +
+            "with (root/'commands.jsonl').open('a') as log: log.write(json.dumps(args)+'\\n')\n" +
+            "if args == ['list-units', '--all', '--type=service', '--output=json', '--no-pager', 'relay-router-*.service']:\n" +
+            "    state = (root/'service-state.json').read_text()\n" +
+            "    if state == 'unreachable': sys.exit(1)\n" +
+            "    print(state)\n" +
+            "elif args[0] == 'show' and args[-1].startswith('relay-router-'):\n" +
+            "    print('LoadState=loaded\\nActiveState=active\\nUnitFileState=enabled')\n" +
+            "elif args[0] == 'is-enabled' and args[-1].startswith('relay-router-'): print('enabled')\n" +
+            "elif args == ['daemon-reload']: pass\n" +
+            "elif args[0] == 'restart' and args[-1].startswith('relay-router-'): pass\n" +
+            "else: sys.exit('unexpected systemctl call: '+repr(args))\n")
+        systemctl.chmod(0o755)
+        loginctl = commands / "loginctl"
+        loginctl.write_text("#!/usr/bin/env python3\nimport sys\n" +
+            f"assert sys.argv[1:] == ['show-user', '{os.getuid()}', '--property=Linger', '--value']\n" +
+            "print('yes')\n")
+        loginctl.chmod(0o755)
         cls.play = cls.root / "play.yml"
         cls.play.write_text(yaml.safe_dump([dict(hosts="localhost", gather_facts=False,
+            environment=dict(PATH=str(commands) + ":" + os.environ["PATH"]),
             roles=[dict(role="relay_router_renderer")])]))
         cfg = cls.root / "ansible.cfg"
         cfg.write_text("[defaults]\nroles_path=" + str(ROOT / "ansible/roles") + "\nretry_files_enabled=False\n")
@@ -73,6 +104,7 @@ class WorkerRole(unittest.TestCase):
         cls.temporary.cleanup()
 
     def run_role(self, updates=None, success=True):
+        self.command_log.write_text("")
         values = {**self.variables, **(updates or {})}
         extra = self.root / "vars.json"
         extra.write_text(json.dumps(values))
@@ -83,7 +115,18 @@ class WorkerRole(unittest.TestCase):
         self.assertNotIn(SECRET, output)
         self.assertNotIn(TOKEN, output)
         self.assertEqual(result.returncode == 0, success, output[-5000:])
+        self.commands = [json.loads(line) for line in self.command_log.read_text().splitlines()]
+        if not values['relay_router_manage_services']:
+            self.assertTrue(all(c[0] == 'list-units' for c in self.commands), self.commands)
         return output
+
+    def restarted(self):
+        return [c[-1] for c in self.commands if c[0] == 'restart']
+
+    def new_binding(self):
+        binding = {**self.variables['relay_router_bindings'][0], 'bindingId': str(uuid.uuid4())}
+        binding['credentialFile'] = str(Path(binding['credentialFile']).parent.parent / binding['bindingId'] / 'credential.json')
+        return binding
 
     def test_01_disabled_role_has_no_side_effects(self):
         output = self.run_role(dict(relay_router_enabled=False, relay_router_renderer_sha256="invalid"))
@@ -147,7 +190,8 @@ class WorkerRole(unittest.TestCase):
         original = state.read_bytes()
         try:
             state.chmod(0o640)
-            self.run_role(success=False)
+            output = self.run_role(success=False)
+            self.assertIn('Connector identity must be a private 0600 regular file', output)
             state.chmod(0o600)
             value = json.loads(original)
             value['phase'] = 'pending'
@@ -156,6 +200,76 @@ class WorkerRole(unittest.TestCase):
         finally:
             state.write_bytes(original)
             state.chmod(0o600)
+
+    def test_07_staging_rejects_running_unknown_and_unreadable_services_before_writes(self):
+        original = self.variables['relay_router_bindings'][0]
+        changed = {**original, 'selection': dict(kind='model', model='must-not-be-staged')}
+        config_dir = Path(self.variables['relay_router_home']) / '.config/relay/router-managed'
+        snapshot = {p: p.read_bytes() for p in config_dir.rglob('*') if p.is_file()}
+        try:
+            for state in ['active', 'activating', 'deactivating', 'failed', 'unknown']:
+                # Include a service not in requested inventory: check the entire namespace.
+                self.service_state.write_text(json.dumps([dict(unit='relay-router-untracked.service',
+                    active=state, sub='running')]))
+                with self.subTest(state=state):
+                    self.run_role(dict(relay_router_bindings=[changed]), success=False)
+            for state in ['unreachable', 'invalid-json', '{}',
+                          json.dumps([dict(active='inactive', sub='dead', job='start')])]:
+                self.service_state.write_text(state)
+                with self.subTest(state=state):
+                    self.run_role(dict(relay_router_bindings=[changed]), success=False)
+            self.assertEqual(snapshot, {p: p.read_bytes() for p in config_dir.rglob('*') if p.is_file()})
+        finally:
+            self.service_state.write_text('[]')
+
+    def test_08_interrupted_install_preserves_binding_ownership(self):
+        binding = self.new_binding()
+        config_dir = Path(self.variables['relay_router_home']) / '.config/relay/router-managed'
+        manifest = config_dir / 'bindings.json'
+        original = manifest.read_bytes()
+        invalid_unit_dir = self.root / 'not-a-directory'
+        invalid_unit_dir.write_text('force failure after staging binding files')
+        try:
+            self.run_role(dict(relay_router_bindings=[*self.variables['relay_router_bindings'], binding],
+                               relay_router_unit_dir=str(invalid_unit_dir)), success=False)
+            self.assertTrue((config_dir / (binding['bindingId'] + '.json')).exists())
+            self.assertEqual(json.loads(manifest.read_text()),
+                sorted([self.variables['relay_router_bindings'][0]['bindingId'], binding['bindingId']]))
+            output = self.run_role(success=False)
+            self.assertIn('Revoke/drain removed bindings', output)
+        finally:
+            # The disposable credential was never created and no real service was installed.
+            (config_dir / (binding['bindingId'] + '.json')).unlink(missing_ok=True)
+            shutil.rmtree(Path(binding['credentialFile']).parent, ignore_errors=True)
+            manifest.write_bytes(original)
+
+    def test_09_managed_changes_restart_only_the_affected_services(self):
+        first = self.variables['relay_router_bindings'][0]
+        second = self.new_binding()
+        updates = dict(relay_router_manage_services=True, relay_router_bindings=[first, second])
+        self.run_role(updates)
+        self.assertEqual(self.restarted(), ['relay-router-render-' + second['bindingId'] + '.service'])
+        changed = {**first, 'selection': dict(kind='model', model='updated-model')}
+        updates['relay_router_bindings'] = [changed, second]
+        self.run_role(updates)
+        self.assertEqual(self.restarted(), ['relay-router-render-' + first['bindingId'] + '.service'])
+        self.run_role(updates)
+        self.assertEqual(self.restarted(), [])
+        updates['relay_router_role_id'] = 'rotated-role-id'
+        self.run_role(updates)
+        self.assertEqual(self.restarted(), ['relay-router-auth.service'])
+        artifact = self.root / 'new-renderer'
+        artifact.write_bytes(Path(self.variables['relay_router_renderer_source']).read_bytes() + b'new-version')
+        updates.update(relay_router_renderer_source=str(artifact),
+                       relay_router_renderer_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
+        self.run_role(updates)
+        renders = ['relay-router-render-' + b['bindingId'] + '.service' for b in [first, second]]
+        self.assertCountEqual(self.restarted(), renders)
+        ca = self.root / 'new-ca'
+        ca.write_bytes((ROLE.parent / 'openbao_agent/files/ailab-root-ca.crt').read_bytes() + b'\n')
+        updates['relay_router_ca_source'] = str(ca)
+        self.run_role(updates)
+        self.assertCountEqual(self.restarted(), ['relay-router-auth.service', *renders])
 
 
 if __name__ == '__main__':

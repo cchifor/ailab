@@ -43,7 +43,7 @@
 
 - name: Derive pinned artifact and runtime locations
   ansible.builtin.set_fact:
-    relay_router_uid: "{{ getent_passwd[relay_router_user][1] }}"
+    relay_router_uid: "{{ ansible_facts['getent_passwd'][relay_router_user][1] }}"
     relay_router_artifacts:
       - { name: relay-credential-renderer, source: "{{ relay_router_renderer_source }}", sha: "{{ relay_router_renderer_sha256 }}" }
       - { name: bao, source: "{{ relay_router_bao_source }}", sha: "{{ relay_router_bao_sha256 }}" }
@@ -88,10 +88,12 @@
           - relay_router_connector_stat.stat.mode | default('') == '0600'
           - relay_router_connector_stat.stat.size | default(0) <= 65536
         quiet: true
+        fail_msg: Connector identity must be a private 0600 regular file owned by the execution user, with one link and at most 65536 bytes.
     - name: Read the existing connector identity without logging it
       ansible.builtin.slurp:
         src: "{{ relay_router_connector_state_file }}"
       register: relay_router_connector_bytes
+      no_log: true
     - name: Require explicit approved identity and separate AppRole credentials
       ansible.builtin.assert:
         that:
@@ -104,9 +106,10 @@
           - relay_router_role_id is match('^[A-Za-z0-9_-]+$')
           - relay_router_secret_id is match('^[A-Za-z0-9_-]+$')
         quiet: true
+        fail_msg: Connector approval, identity or dedicated AppRole credentials do not match the reviewed deployment.
+      no_log: true
       vars:
         relay_state: "{{ relay_router_connector_bytes.content | b64decode | from_json }}"
-  no_log: true
 
 - name: Require complete identity-matched holder policies and dedicated destinations
   ansible.builtin.assert:
@@ -164,3 +167,30 @@
     fail_msg: Enable worker linger through the reviewed worker bootstrap before starting these services.
     quiet: true
   when: relay_router_manage_services | bool
+
+- name: Inspect every router service before staging files
+  ansible.builtin.command:
+    argv: [systemctl, --user, list-units, --all, --type=service, --output=json, --no-pager, 'relay-router-*.service']
+  become: true
+  become_user: "{{ relay_router_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_router_uid }}"
+  register: relay_router_staging_services
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not (relay_router_manage_services | bool)
+
+- name: Require a readable user manager and stopped router services for staging
+  ansible.builtin.assert:
+    that:
+      - relay_router_staging_services.rc == 0
+      - (relay_router_staging_services.stdout | from_json) is sequence
+      - (relay_router_staging_services.stdout | from_json) is not string
+      - (relay_router_staging_services.stdout | from_json) is not mapping
+      - (relay_router_staging_services.stdout | from_json) | rejectattr('active', 'equalto', 'inactive') | list | length == 0
+      - (relay_router_staging_services.stdout | from_json) | rejectattr('sub', 'equalto', 'dead') | list | length == 0
+      - (relay_router_staging_services.stdout | from_json) | selectattr('job', 'defined') | rejectattr('job', 'equalto', '') | list | length == 0
+    fail_msg: Staging requires a reachable user manager and every relay-router service inactive/dead with no pending job. Stop the services through the reviewed operator procedure before retrying; an unreadable manager is not evidence that services are stopped.
+    quiet: true
+  when: not (relay_router_manage_services | bool)

@@ -4,18 +4,18 @@ on:
     paths:
       - "ansible/roles/relay_router_renderer/**"
       - "ansible/relay-router-workers.yml"
-      - "scripts/tests/test_relay_router_workers.py"
+      - "scripts/tests/integration/test_relay_router_workers.py"
       - ".gitea/workflows/relay-router-workers.yaml"
   push:
     branches: [main]
     paths:
       - "ansible/roles/relay_router_renderer/**"
       - "ansible/relay-router-workers.yml"
-      - "scripts/tests/test_relay_router_workers.py"
+      - "scripts/tests/integration/test_relay_router_workers.py"
       - ".gitea/workflows/relay-router-workers.yaml"
 jobs:
   relay-router-workers:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -29,4 +29,4 @@ jobs:
           .venv-relay-router-tests/bin/pip install ansible-core==2.20.0 PyYAML==6.0.3
           mkdir -p .relay-router-tests
           PATH="$PWD/.venv-relay-router-tests/bin:$PATH" TMPDIR="$PWD/.relay-router-tests" \
-            .venv-relay-router-tests/bin/python scripts/tests/test_relay_router_workers.py
+            .venv-relay-router-tests/bin/python scripts/tests/integration/test_relay_router_workers.py

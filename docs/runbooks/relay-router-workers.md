@@ -100,7 +100,9 @@ against another malicious process with that UID.
 
 Use `ansible/relay-router-workers.yml --limit <reviewed-host>` with the SOPS and inventory inputs.
 Stage with `relay_router_manage_services: false` on a host where the managed services are stopped;
-this writes files and units but never contacts the user manager. Rerunning unchanged staging is
+the role first reads the user manager and refuses to write if any `relay-router-*.service`
+is not inactive/dead, has a pending job, or service state cannot be read. It never changes
+service state in staging mode. Stop services separately before staging. Rerunning unchanged staging is
 idempotent. Inspect the reference-only configuration and host-scoped policy, verify unit syntax,
 verify real AppRole scope/TLS and then enable service management in a reviewed inventory change.
 The role verifies that user linger is already enabled; it never changes linger automatically.
@@ -118,12 +120,16 @@ remote revocation and cleanup. Do not equate an active systemd unit or a rendere
 ready holder binding. No services or real worker credentials were changed in this milestone.
 
 When replacing artifacts/configuration, keep reconciliation running and disable new launches
-until the change passes qualification. A managed apply restarts only these authentication and
-renderer units; holders and unrelated worker credentials are untouched. Roll back by repinning
+until the change passes qualification. A managed apply restarts authentication only for its binary, identity, configuration, unit
+or CA changes. Binding configuration/unit changes restart only that renderer; a shared renderer
+binary or CA change restarts all renderers. The independent auth sink survives binding-only
+updates; holders and unrelated worker credentials are untouched. Roll back by repinning
 the previously verified artifact hashes/configuration and applying the role. Never restore an
 old token file or force an old credential reference. Keep the previous artifact directory until
 rollback validation is complete; remove obsolete directories afterward rather than archiving them.
 
+The sorted union of previous and requested binding IDs is recorded before any per-binding
+files or directories are created, so an interrupted install remains tracked for cleanup.
 Inventory removal fails closed if a previously managed binding disappears. Revoke/drain it in
 Relay, confirm the durable cleanup receipt and absence of its local credential, stop and disable
 that binding's unit, remove its unit/configuration, reload the user manager, and remove only its
@@ -134,13 +140,17 @@ connector's identity or unrelated login material.
 
 ## Validation
 
-`scripts/tests/test_relay_router_workers.py` runs the real Ansible role against disposable local
+`scripts/tests/integration/test_relay_router_workers.py` runs the real Ansible role against disposable local
 paths. It checks disabled mode, wrong SHA rejection before installation, private ownership,
 secret-free output/diffs, a zero-change rerun, offline systemd parsing, matching configuration,
-invalid/cross-identity policies, shared/unapproved connector identities and orphan prevention.
+invalid/cross-identity policies, shared/unapproved connector identities, interrupted-install
+ownership, fail-closed staging and selective managed restarts. Service-manager commands use
+strict local fixtures; no real service is changed. External integration scripts live under
+`scripts/tests/integration/` and are invoked explicitly; the generic script unit suite does not
+import them or silently skip missing Ansible/OpenBao dependencies.
 `.gitea/workflows/relay-router-workers.yaml` runs that test without credentials, sudo or services.
 
-`scripts/tests/test_relay_router_openbao.py` runs real OpenBao 2.5.5 in TLS dev mode with ephemeral
+`scripts/tests/integration/test_relay_router_openbao.py` runs real OpenBao 2.5.5 in TLS dev mode with ephemeral
 AppRole credentials and the rendered policy/configuration. It verifies periodic renewal past
 the initial TTL, cross-tenant/host and write/list/destroy denials, exact-version rendering even
 with a newer KV version, rejection of deleted versions and cleanup without auth/CA availability.
