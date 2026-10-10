@@ -16,7 +16,7 @@ subtree) and a root-owned `bao agent` that keeps a **periodic** token renewed. T
 credentials (today: `~/.git-credentials`) and drops its token in a group-readable sink; the
 `cred` helper reads that sink so an interactive Claude/Codex agent can fetch a secret **without ever
 holding a vault token and without printing the value**. `cred exec … -- <cmd>` injects the value
-straight into a child process environment — that is the form the managed CLAUDE.md block tells the
+straight into a child process environment — that is the form the managed agent-guide block tells the
 agents to prefer.
 
 Everything above the secret-id is declarative (Flux + Ansible). The **only** hand ceremony is minting
@@ -36,7 +36,7 @@ Secret.
 | `bao agent` + unit | `ansible/roles/dev_worker/templates/openbao-agent.hcl.j2`, `openbao-agent.service.j2` | AppRole auto-auth → periodic token → sink + template rendering. |
 | sink `/run/openbao-agent/token` | tmpfs (systemd `RuntimeDirectory=`) | Group-readable (`openbao-agent`) token for `cred`. Gone on reboot; re-created on login. |
 | `/usr/local/bin/cred` | `ansible/roles/dev_worker/files/cred` | `cred list` · `cred get <name> <field>` · `cred exec <name> <field> <VAR> -- <cmd>`. |
-| managed CLAUDE.md block | per user, `~/.claude/CLAUDE.md` | Tells the agents to use `cred` and to never print values. |
+| managed agent-guide block | per user, `~/.claude/CLAUDE.md` (Claude Code) and, since 2026-10-10, `~/.codex/AGENTS.md` (Codex) | Tells the agents to use `cred`, to never print values, and which of the three Gitea tokens carries which scope (a scope 403 almost always means the wrong token). |
 | CronJob `openbao-platform-pg-sync` (+ its script/CA ConfigMaps and bootstrap Job) | `kubernetes/apps/infrastructure/platform-access/pg-sync.yaml` | ADR 0028: maintains the per-slot read-only Postgres login on the platform's CNPG cluster and publishes `platform_pg_*` into this same KV subtree. Runs in ns `strive-ailab` (it mounts the CNPG superuser Secret) and logs in with the k8s-auth role `platform-pg-sync`, which shares this file's `k8stoken-sync` KV-write policy. |
 | ClusterRole `dev-worker-platform-observer` + per-slot SAs | `kubernetes/apps/infrastructure/platform-access/rbac.yaml` | ADR 0028: the observe-only identities behind `platform_kubeconfig` (no secrets, no exec, no writes). |
 

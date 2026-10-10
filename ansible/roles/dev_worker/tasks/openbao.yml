@@ -481,31 +481,34 @@
 - name: Pin the git.chifor.me credential username (shared with the other credential path)
   ansible.builtin.import_tasks: pin_gitea_username.yml
 
-# credentials.yml already owns this directory; repeated here (like herdr.yml repeats linger/getent)
-# so a `-t openbao` run does not depend on a task file its tag excludes. blockinfile creates the
-# file below but not its parent.
-- name: Ensure each user's ~/.claude exists
+# credentials.yml and codex.yml already own these directories; repeated here (like herdr.yml repeats
+# linger/getent) so a `-t openbao` run does not depend on a task file its tag excludes. blockinfile
+# creates the files below but not their parents.
+- name: Ensure each user's ~/.claude and ~/.codex exist
   ansible.builtin.file:
-    path: "{{ item.home }}/.claude"
+    path: "{{ item.0.home }}/{{ item.1 }}"
     state: directory
-    owner: "{{ item.name }}"
-    group: "{{ item.name }}"
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
     mode: "0700"
-  loop: "{{ dev_worker_users }}"
+  loop: "{{ dev_worker_users | product(['.claude', '.codex']) | list }}"
   loop_control:
-    label: "{{ item.name }}"
+    label: "{{ item.0.name }}: {{ item.1 }}"
 
-# Agents read ~/.claude/CLAUDE.md at session start; this is how they learn that secrets come from
-# `cred` and that values must never be printed. A managed block rather than a whole file, so the
-# operator's own notes in the same file survive. HTML-comment markers because the file is markdown —
-# blockinfile's default `#` marker would render as an H1 heading in the agent's context.
-- name: Publish the credential instructions to each user's CLAUDE.md
+# Agents read their instructions file at session start (Claude Code ~/.claude/CLAUDE.md, Codex
+# ~/.codex/AGENTS.md); this is how they learn that secrets come from `cred`, that values must never
+# be printed, and which Gitea token carries which scope. Until 2026-10-10 only CLAUDE.md got it, so a
+# Codex agent on dev-worker-3 tried package reads with gitea_pat, got 403, and asked for package
+# access the worker already had in gitea_package_pat. A managed block rather than a whole file, so
+# the operator's own notes in the same file survive. HTML-comment markers because the files are
+# markdown — blockinfile's default `#` marker would render as an H1 heading in the agent's context.
+- name: Publish the credential instructions to each agent's instructions file
   ansible.builtin.blockinfile:
-    path: "{{ item.home }}/.claude/CLAUDE.md"
+    path: "{{ item.0.home }}/{{ item.1 }}"
     marker: "<!-- {mark} ANSIBLE MANAGED - openbao credentials -->"
     create: true
-    owner: "{{ item.name }}"
-    group: "{{ item.name }}"
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
     mode: "0644"
     block: |
       ## Credentials (OpenBao)
@@ -520,6 +523,23 @@
 
       NEVER print credential values into the conversation, logs, or files — use names/lengths when
       discussing them. Git credentials for git.chifor.me are already provisioned; just use git.
+
+      ## Gitea (git.chifor.me): three tokens, three jobs
+
+      All three are fields of `cred` name `common` and authenticate as the non-admin
+      `{{ dev_worker_gitea_user }}`; they differ only in scope. A 403 saying "token does not have at
+      least one of required scope(s)" usually means the wrong token, not missing access: switch to
+      the token below that carries the scope. Ask the operator only when none of the three does.
+
+      - `gitea_pat` (`write:repository,write:issue,read:organization,read:user`): git, PRs, issues,
+        comments. It is the token in `~/.git-credentials`, so plain `git` already uses it.
+      - `gitea_repo_pat` (`write:organization,write:repository,read:user`): creating a repository in
+        org `cchifor`. `cred exec common gitea_repo_pat GITEA_TOKEN -- <cmd>`.
+      - `gitea_package_pat` (`write:package,read:repository,read:user`): packages and container images
+        under owner `cchifor` (`https://git.chifor.me/api/packages/cchifor/...`), reading or
+        publishing (`write:package` includes `read:package`). For a Forge release:
+        `cred exec common gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>` with
+        `FORGE_RELEASE_USERNAME={{ dev_worker_gitea_user }}`; the same field serves `FORGE_CATALOG_TOKEN`.
       {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
 
       ## Kubernetes: two kubeconfigs, two different jobs
@@ -591,6 +611,6 @@
 
       Runbook: `docs/runbooks/dev-worker-platform-access.md` in the ailab repo.
       {% endif %}
-  loop: "{{ dev_worker_users }}"
+  loop: "{{ dev_worker_users | product(['.claude/CLAUDE.md', '.codex/AGENTS.md']) | list }}"
   loop_control:
-    label: "{{ item.name }}"
+    label: "{{ item.0.name }}: {{ item.1 }}"
