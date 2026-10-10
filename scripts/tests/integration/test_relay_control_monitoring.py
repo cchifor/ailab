@@ -128,7 +128,7 @@ class Monitoring(unittest.TestCase):
             (self.root / 'policy' / key).write_text(value + '\n')
         self.run_setup(recovery='1')
         expected = {**self.config, 'recoveryEvidence': {'path': '/run/relay-recovery/private/evidence.json',
-                    'verifierSha256': policy['verifier-sha256'], 'schemaVersion': 42}}
+                    'verifierSha256': policy['verifier-sha256'], 'schemaVersion': int(policy['schema-version'])}}
         target = self.root / 'output/private/config.json'
         self.assertEqual(json.loads(target.read_text()), expected)
         application = next(c for c in spec['containers'] if c['name'] == 'relay')
