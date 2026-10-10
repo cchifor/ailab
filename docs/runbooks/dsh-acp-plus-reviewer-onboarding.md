@@ -16,6 +16,11 @@ restricted to `reviewer-claude` and `reviewer-codex`; both have scoped repositor
 write access. Direct and force pushes are disabled and administrator merge
 override is blocked. This confirmation precedes allowlist activation; recheck
 the same settings before any later convergence.
+The verification endpoints are
+`GET /api/v1/repos/cchifor/dsh-acp-plus/branch_protections/main` and
+`GET /api/v1/repos/cchifor/dsh-acp-plus/collaborators`; their responses contain
+protection/access metadata, not credential values. The PR description was
+updated to the confirmed state before this follow-up revision.
 
 The holder CI job still needs the organization owner to provision the read-only
 `RELAY_SOURCE_READ_TOKEN` Actions secret for the private pinned Relay checkout.
