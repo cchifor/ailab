@@ -284,11 +284,21 @@ fi
 # 2026-10-10 it reached Claude's file alone, so a Codex agent read packages with the git token, got a
 # 403 and asked for package access the worker already had.
 guide_block="$(awk '/ANSIBLE MANAGED - openbao credentials/{f=1} f && /^  loop:/{exit} f' "$TASKS")"
-guide_loop="$(awk '/ANSIBLE MANAGED - openbao credentials/{f=1} f && /^  loop:/{print; exit}' "$TASKS")"
-case "$guide_loop" in
-*".claude/CLAUDE.md"*".codex/AGENTS.md"*) ok "D7: the credentials guide is published to CLAUDE.md and AGENTS.md" ;;
-*) bad "D7: the credentials guide is not published to both ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md" ;;
-esac
+# The task's keys AFTER its block (loop, loop_control), however the loop is laid out. The block ends
+# at its first line indented under 6, so a path mentioned in the guide's own prose cannot satisfy D7.
+guide_targets="$(awk '
+  /ANSIBLE MANAGED - openbao credentials/ { f = 1; next }
+  f && /^- / { exit }
+  f && /^    block: \|/ { inblock = 1; next }
+  f && inblock == 1 && (/^      / || /^[[:space:]]*$/) { next }
+  f && inblock { inblock = 2; print }
+' "$TASKS")"
+if printf '%s\n' "$guide_targets" | grep -qF '.claude/CLAUDE.md' &&
+  printf '%s\n' "$guide_targets" | grep -qF '.codex/AGENTS.md'; then
+  ok "D7: the credentials guide is published to CLAUDE.md and AGENTS.md"
+else
+  bad "D7: the credentials guide is not published to both ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md"
+fi
 for field in gitea_pat gitea_repo_pat gitea_package_pat; do
   if printf '%s\n' "$guide_block" | grep -q "\`$field\`"; then
     ok "D8: the credentials guide names $field"
