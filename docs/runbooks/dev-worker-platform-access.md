@@ -63,7 +63,7 @@ platform kubectl -n flux-system get kustomization trueswarm-admin-migration -o w
 # forge object-store certificate bootstrap (dw2 only, until 2026-10-24)
 platform kubectl get clusterissuer ailab-ca -o jsonpath='{.status.conditions}'
 platform kubectl -n flux-system get kustomization platform-objectstore -o jsonpath='{.spec.dependsOn}'
-platform kubectl get certificate objectstore-forge-tls -o jsonpath='{.metadata.generation} {.status.conditions}'
+platform kubectl -n strive-ailab get certificate objectstore-forge-tls -o jsonpath='{.metadata.generation} {.status.conditions}'
 ```
 
 The worker needs nothing new for this. It is the same ServiceAccount and the same
