@@ -3,7 +3,7 @@
 ## Context
 
 The owner asked whether the leasable test-env pool is worth keeping. Decision (owner go,
-2026-10-10): **remove it.** Evidence, measured 2026-10-10:
+2026-10-10): **remove it.** ADR 0037 records it. Evidence, measured 2026-10-10:
 
 - **Off since 2026-09-26.** `SandboxWarmPool env-std-pool` is at `replicas: 0` (#880, after the
   shared golden-clone iSCSI target died). None of the restore steps in #972 has been started.
@@ -18,71 +18,103 @@ The owner asked whether the leasable test-env pool is worth keeping. Decision (o
   left the dangling LUN 9 that broke **all** new `qnap-iscsi` provisioning, which blocked the
   `strive-pg` replica re-clone. Kata guest freezes wedged the env node's kubelet twice (09-20,
   09-24); that root cause is still open.
-- **It still costs.** The env node takes 16 GiB fixed RAM and 8 vCPU on ai-node2 (about 24 GiB
-  available there). It holds orphaned LUNs on the NAS, and each NAS attach/detach sweep is
-  O(LUNs²) (`docs/runbooks/qnap-storage-setup.md` §9). It runs a controller, the env-reaper,
-  cri-log-relay at containerd `[debug]`, alerts and dashboard rows. Every Talos upgrade carries the
-  env node.
+- **It still costs.**
+  - The env node takes 16 GiB fixed RAM and 8 vCPU on ai-node2 (about 24 GiB available there).
+  - Its LUNs sit on the NAS, and every attach/detach sweep is O(LUNs²) (`qnap-storage-setup.md` §9).
+  - The controller, env-reaper, cri-log-relay, alerts and dashboard rows keep running.
+    (`kata_debug` has defaulted to false since 2026-10-09, so the relay now ships ordinary-level
+    lines.)
+  - Every Talos upgrade carries the env node.
 - **No isolation gain.** The testpool README calls it a "trusted-code-only pool, same posture as a
   dev-worker".
-
-ADR 0037 (this branch) records the decision.
 
 ### Inventory (read-only, 2026-10-10; NAS config backups in `kubernetes/infra/_out/qnap-*.20261010-testpool-retire-inventory`)
 
 | Layer | Object | State |
 |---|---|---|
-| k8s | ns `testpool`: SandboxTemplate `env-std`, SandboxWarmPool `env-std-pool` (0), SAs + token Secrets `tep-dw1..4`, DS `env-image-prepull`, NetworkPolicy, RBAC | Flux ks `testpool` (prune) |
-| k8s | `agent-sandbox-system` controller + 4 CRDs | Flux ks `agent-sandbox` (prune). Nothing else uses the CRDs: no Sandbox, Template or Claim outside `testpool` |
-| k8s | VolumeSnapshot `testpool/golden-v1` → VSC `snapcontent-c004c88c…` | `deletionPolicy: Delete`. Finalizers include a stale `volumesnapshot-as-source-protection` |
-| k8s | 8 Released PVs, `testpool-iscsi` class, all `Retain` | `pvc-1aacdbdc`, `3e4f4cbc`, `43285e38`, `48c73270`, `743aa279`, `842a2790`, `864c27c9`, `f75344b3` |
-| k8s | DS `kube-system/env-reaper`, Deploy `monitoring/cri-log-relay` (+ SOPS talosconfig), `testpool-rules`, `env-node-rules`, Alloy redaction stage for the relay, KSM warm-pool metrics, dashboard row | in the monitoring / testpool trees |
+| k8s | ns `testpool`: SandboxTemplate `env-std`, SandboxWarmPool `env-std-pool` (0), SAs + token Secrets `tep-dw1..4`, DS `env-image-prepull`, NetworkPolicy, RBAC | Flux ks `testpool` (prune). No finalizers on the CRs |
+| k8s | `agent-sandbox-system` controller + 4 CRDs | Flux ks `agent-sandbox` (prune) |
+| k8s | VolumeSnapshot `testpool/golden-v1` → VSC `snapcontent-c004c88c…` | `deletionPolicy: Delete`. Finalizers include a stale `volumesnapshot-as-source-protection`. The only snapshot/VSC in the cluster |
+| k8s | 8 Released PVs, `testpool-iscsi` class, all `Retain` | `pvc-1aacdbdc`, `3e4f4cbc`, `43285e38`, `48c73270`, `743aa279`, `842a2790`, `864c27c9`, `f75344b3`. No VolumeAttachment names any of them |
+| k8s | DS `kube-system/env-reaper`, Deploy `monitoring/cri-log-relay` (+ SOPS talosconfig), `testpool-rules`, `env-node-rules`, Alloy redaction stage for the relay, KSM warm-pool metrics + RBAC, dashboard row + Estate Health "Test Envs" tile | monitoring / testpool trees |
 | k8s | StorageClass `testpool-iscsi`, RuntimeClass `kata-env` | testpool tree. **`kata` RuntimeClass and the kata schematic stay**: agent-node-3 uses them |
-| Trident | 9 TridentVolumes (the 8 above + source `pvc-8e290587`, state `deleting`) + 1 TridentSnapshot | No publications or transactions. No log activity in 24 h: **inert** |
-| NAS | LUNs **11** (`pvc-8e290587`, zfs284), **4** (`864c27c9`, zfs277), **43** (`f75344b3`, zfs316), **44** (`842a2790`, zfs317) | All 60 G thin, about 5 GiB used each, **unmapped** (no target). SCST devices present. Target 11 no longer exists |
+| k8s | spike leftovers (`testpool-spike`, `kata-env-spike`, `testpool-spike-iscsi`, `golden-spike-v2`) | **gone** (checked) |
+| Trident | 9 TridentVolumes (the 8 above + source `pvc-8e290587`, state `deleting`) + TridentSnapshot `pvc-8e290587-snapshot-c004c88c…`; TridentNode `talos-env-node-1` | No publications, no transactions, no log activity in 24 h: **inert** |
+| NAS | LUNs **4** (`864c27c9`, zfs277), **43** (`f75344b3`, zfs316), **44** (`842a2790`, zfs317), **11** (`pvc-8e290587`, zfs284, the golden source) | All 60 G thin, ~5 GiB used, **unmapped**, pool 1, real zvols, SCST devices present. The clone zvols have `origin -`: full copies, not ZFS clones. Target 11 no longer exists |
 | NAS | zvol `zpool1/orphan_placeholder_from_lun9_20260927` (+ `@tmpdel`, `@scratch`) | No LUN, no SCST device. Leftover of the 09-27 LUN-9 repair |
-| NAS | 5 of the Released PVs (`1aacdbdc`, `3e4f4cbc`, `43285e38`, `48c73270`, `743aa279`) | **no LUN and no zvol**: the backend is already gone |
-| VM | 4401 `talos-env-node-1`, ai-node2, `.37`, tofu `kubernetes/infra/env-pool` (state in the ops checkout) | Ready; DaemonSets only |
-| dev-workers | `/usr/local/bin/tep`, `~/.tep/kubeconfig` (openbao-agent template), KV field `tep_kubeconfig`, the managed CLAUDE.md block, the feature-implementation/review-pr skill rule "lease tep" | Ansible `dev_worker`; daily converge 06:35 from `main` |
-| sync | `openbao-k8stoken-sync` mints `tep_kubeconfig` for 4 slots, plus a mint Role in `testpool` | It mints ALL targets before writing any: a missing SA fails the whole run |
+| NAS | 5 of the Released PVs (`1aacdbdc`, `3e4f4cbc`, `43285e38`, `48c73270`, `743aa279`) | **no LUN and no zvol** |
+| VM | 4401 `talos-env-node-1`, ai-node2, `.37`, tofu `kubernetes/infra/env-pool` (state + tfvars in the ops checkout) | Ready; DaemonSets only |
+| dev-workers | `/usr/local/bin/tep`, `~/.tep/kubeconfig` (openbao-agent template), KV field `tep_kubeconfig`, managed CLAUDE.md block, the skill rule "lease tep" | Ansible `dev_worker`; daily converge 06:35 from `main` |
+| sync | `openbao-k8stoken-sync` mints `tep_kubeconfig` for 4 slots + a mint Role in `testpool` | Mints ALL targets before writing any |
+| outside ailab | `agentforge` (`dashboard/e2e-pool.sh`) and `agentforge-platform` (`webapp/e2e-pool.sh` + a unit test that requires Playwright inside `tep run`) wrap `tep` | Already failing since 09-26 (pool at 0). AgentForge is out of scope (owner 2026-10-08): **flagged, not changed** |
+| legacy tokens | `serviceaccount_legacy_tokens_total` on cp1 rose 3× on 09-26 (the #877 live test) and 3× on 10-03 ~19Z | The client cannot be identified (apiserver audit logs rotate within hours). Its next attempt gets a 401 from a pool that has been off since 09-26. Accepted |
+| platform | `platform-access/rbac.yaml` grants read on `agents.x-k8s.io` kinds ("App sandboxes") | Platform main never references agent-sandbox (grep, 2026-10-10); airlock uses plain pods. The RBAC rule becomes inert and is removed in PR-B |
 
 ## Approach
 
-Four PRs plus out-of-band steps, strictly in order. Each gate must hold before the next step:
-reviewer bots auto-merge on approval (`reviewbot-auto-merge`), so a dependent PR is opened only
-after its prerequisite is live.
+Four ailab PRs plus out-of-band steps, strictly in order. Each gate must hold before the next
+step. The reviewer bots auto-merge on approval (`reviewbot-auto-merge`), so a dependent PR is opened
+only after its prerequisite is live. Every live change is watched at the time, never left to the
+06:35 converge.
 
-### Step 1 — PR-A: the dev-worker side (ansible + agent guidance) + this plan + ADR 0037
+### Step 1 — PR-A: the worker side, the sync side, this plan and ADR 0037
 
-- `tasks/tep.yml` becomes a removal task: `/usr/local/bin/tep` and `~<user>/.tep` absent for
-  every `dev_worker_users` entry. Drop `dev_worker_tep_enabled` and `dev_worker_tep_namespace`.
-  `dev_worker_tep_server` is used by the openbao kubeconfig check, so rename it to a neutral
-  `dev_worker_kube_server` (same value).
-- `tasks/openbao.yml` + `templates/openbao-agent.hcl.j2`: drop the tep template stanza, the
-  `tep_kubeconfig` field from the KV pre-flight, the `~/.tep` verify (`get sandboxclaims`), `.tep`
-  from the destination-dir loop, and the tep lines of the managed CLAUDE.md block. helmtest and
-  platform stay byte-identical in behaviour.
-- Delete `templates/tep-kubeconfig.j2`, `templates/tep-kubeconfig.ctmpl.j2`, `files/tep` and
-  `ansible/secrets/tep-tokens.sops.yaml` (dead since the ADR 0021 cutover), plus the `.sops.yaml`
-  rule for it.
-- **Agent guidance:** replace the estate safeguard "Playwright / heavy compose never run directly
-  on a dev-worker — lease a pool env (`tep`)" in `files/feature-implementation-skill.md` and the
-  tep routing in `files/review-pr-skill.md`. New rule: follow the target repo's "Where tests run"
-  section. Without one, run lint/unit/integration locally and leave full-stack e2e to CI. One
-  full compose stack per worker at a time (`docker compose ls` first), `down -v` when done. For PRs
-  not authored by the operator or estate bots, there is no local execution (static review only).
-- **Gate 1:** PR-A merged. Run the fleet converge once by hand (`scripts/fleet-converge-bootstrap.sh`
-  in WSL, same as the 06:35 task); it must exit 0. On dw1..dw4: `tep` absent, `~/.tep` absent,
-  `systemctl is-active openbao-agent` active, `~/.helmtest/kubeconfig` and `~/.platform/kubeconfig`
-  re-rendered and `kubectl auth can-i` passes with each. The reviewers' converge is unaffected
-  (the role is not applied there).
+- **`tasks/tep.yml` becomes guarded removal tasks,** imported **unconditionally** after
+  `openbao.yml` in `main.yml`. It removes `/usr/local/bin/tep`, then `~<user>/.tep` and
+  `/etc/openbao-agent/tep-kubeconfig.ctmpl` for every `dev_worker_users` entry, **only if**:
+  - `agent.hcl` has no `tep-kubeconfig` stanza, and
+  - the running agent started after `agent.hcl` was written.
+
+  Otherwise the agent could re-create `~/.tep` as root, or a rescued `openbao.yml` (which restores
+  the old `agent.hcl`) could lose its template source. `dev_worker_tep_enabled` and
+  `dev_worker_tep_namespace` go; `dev_worker_tep_server` becomes `dev_worker_kube_server` (same
+  value).
+- **`openbao.yml` + `openbao-agent.hcl.j2`:**
+  - drop the tep template stanza and the `.tep` destination dir;
+  - stop laying down the tep `.ctmpl` (the file itself is removed by `tep.yml`, after the verify);
+  - drop `tep_kubeconfig` from the KV pre-flight and the `get sandboxclaims` verify;
+  - rewrite the texts that describe the SOPS writer: the rescue comment, the fail message, the
+    marker content, and the CLAUDE.md block, including "cannot deploy into `testpool`".
+- **Deletions:**
+  - `files/tep`, `templates/tep-kubeconfig{.j2,.ctmpl.j2}`;
+  - `ansible/secrets/tep-tokens.sops.yaml` with its `.sops.yaml` rule, **and**
+    `scripts/tep-render-kubeconfigs.py`. Leaving the script behind its deleted rule would open a
+    plaintext window;
+  - move the `.ctmpl` contract text into `helmtest-kubeconfig.ctmpl.j2`.
+- **The sync side moves here from PR-B.** `openbao` dependsOn `infrastructure` (wait:true), so a
+  single PR-B commit would not be atomic: flux-system can prune the tep SAs well before the new
+  script applies.
+  - `k8stoken-sync.yaml` drops the tep TARGETS and its mint Role/RoleBinding in `testpool`. That
+    is safe while the SAs still exist.
+  - The sync PATCHes, so `tep_kubeconfig` stays in KV and a worker that has not converged keeps
+    rendering it.
+- **Agent guidance:**
+  - The feature-implementation estate safeguard and the review-pr execution rule now defer to the
+    target repo's "Where tests run" section. Without one: lint/unit/in-memory integration run
+    locally and full-stack e2e runs in CI on the PR.
+  - At most **one** compose stack per worker at a time (`docker compose ls` first, `down -v` when
+    done), whatever a repo says. A repo section may narrow this, never widen it.
+  - The review skill reads conventions from the BASE commit (it already does) and never re-runs
+    full-stack/Playwright tiers locally.
+- **Gate 1:**
+  - PR-A merged; Flux `openbao` `lastAppliedRevision` = the merge SHA.
+  - A manual `create job --from=cronjob/openbao-k8stoken-sync` completes with `validated 8/8`.
+  - Then a hand-run fleet converge: `converge.log` shows the PR-A SHA as `source:` and four
+    dev-worker PLAY RECAPs with `failed=0`. Exit 0 alone proves nothing; the lock path also exits 0.
+  - On dw1..dw4:
+    - `grep -c tep-kubeconfig /etc/openbao-agent/agent.hcl` = 0;
+    - `tep` and `~/.tep` absent;
+    - `openbao-agent` active;
+    - `~/.helmtest/kubeconfig` and `~/.platform/kubeconfig` pass a live `kubectl` call.
 
 ### Step 2 — out-of-band, NAS-inert: retire the golden snapshot objects
 
-The VolumeSnapshot is not in Flux's inventory: `hack/golden-refresh.sh` created it. Deleting the
-namespace with it in place would call CSI DeleteSnapshot through a Trident path that loops on
-NAS-side "not found". Each loop iteration is an O(LUNs²) sweep, and a stuck finalizer would leave
-the namespace `Terminating`.
+The VolumeSnapshot is not in Flux's inventory: `golden-refresh.sh` created it. If the namespace is
+deleted with it in place, CSI DeleteSnapshot runs through Trident's QNAP not-found loop.
+
+**Pre-checks:**
+- the VSC has no `deletionTimestamp` and no `volumesnapshot-being-deleted` annotation;
+- `kubectl -n testpool get pvc` is empty.
 
 ```sh
 K="kubectl --context admin@ai"
@@ -93,134 +125,253 @@ $K -n testpool patch volumesnapshot golden-v1 --type json -p '[{"op":"remove","p
 $K delete volumesnapshotcontent snapcontent-c004c88c-5f06-4b70-9fd8-a828a44220f0   # Retain: no CSI call
 ```
 
-**Gate 2:** both objects are gone. Trident logs no `DeleteSnapshot` for `snapshot-c004c88c`.
+The TridentSnapshot **stays**: it keeps the source volume parked in `deleting`. Deleting it alone
+would let Trident delete the parent and re-enter the not-found loop (ADR 0037).
 
-### Step 3 — PR-B: the cluster side (opened only after Gate 1 and Gate 2)
+**Gate 2:** both objects are gone. Neither Trident's `trident-main` log nor the `csi-snapshotter`
+sidecar log shows a `DeleteSnapshot` for `snapshot-c004c88c`.
 
-- Delete `kubernetes/apps/clusters/ai/{testpool,agent-sandbox}.yaml` and the trees
-  `kubernetes/apps/infrastructure/{testpool,agent-sandbox}/`. Flux deletes both Kustomizations and
-  garbage-collects their inventory: namespace, CRDs, controller, StorageClass `testpool-iscsi`,
-  RuntimeClass `kata-env`, `env-reaper`. No CR carries a finalizer.
-- `security/openbao/k8stoken-sync.yaml`: drop the tep TARGETS and the mint Role/RoleBinding in
-  `testpool`, **in the same commit** as the SA removal. A target whose SA is gone fails the whole
-  sync run, and a Role in a deleted namespace fails the openbao Kustomization. The KV field
-  `tep_kubeconfig` is left in place: a dead token, and no consumer after Gate 1.
-- Monitoring: remove `testpool-rules{,.test}.yaml`, `env-node-rules{,.test}.yaml`,
-  `cri-log-relay.yaml` + `cri-log-relay-talosconfig.sops.yaml`, the Alloy `cri-log-relay`
-  redaction stage, and the KSM agent-sandbox custom-resource metrics. Remove the "Test Env Pool"
-  row from `scripts/gen-reporting-dashboard.py` and regenerate `reporting-dashboard.yaml`.
-- CI and scripts: `.gitea/workflows/env-image.yaml`, `env-image/`, the unittest/busybox steps in
-  `manifests.yaml`, `scripts/{env-pool-soak.py,tep-render-kubeconfigs.py}` and their tests,
-  `test_ready_watchdog.py`, `test-env-reaper.sh`, and the testpool paths in
-  `test_manifest_paths.py`, `check-slot-enumerations.py` (+ its shell test) and
-  `manifest-lint.sh`. Remove the velero `excludedNamespaces: testpool` entries and their
-  recovery-contract comments, and the `renovate.json` mentions.
-- **Deliberately left:** the `dedicated=env:NoSchedule` tolerations on velero node-agent, Alloy
-  and storage-fabric-probe. They are harmless once no node has the taint, and removing them would
-  roll three DaemonSets for nothing. Only their comments change. The Zot `testpool` sync prefix
-  stays too: it needs a registry-LXC apply for no benefit, and its repos can be GC'd later.
-- **Gate 3:** merged → GitHub mirror → Flux. All Kustomizations Ready. `testpool` and
-  `agent-sandbox-system` gone, nothing stuck `Terminating`, `crd | grep agents.x-k8s.io` empty. A
-  manual run of the token sync (`create job --from=cronjob/…`) completes, and the next daily
-  converge is clean.
+### Step 3 — PR-B: the cluster side (opened after Gates 1 and 2)
+
+- **Delete the trees.** Remove `clusters/ai/{testpool,agent-sandbox}.yaml` and
+  `infrastructure/{testpool,agent-sandbox}/`. Flux garbage-collects namespace, CRDs, controller,
+  StorageClass `testpool-iscsi`, RuntimeClass `kata-env` and `env-reaper`.
+  **Pre-gate:**
+  - both Kustomizations are Ready and **not suspended** (deleting a suspended one skips GC);
+  - their `.status.inventory` lists the Namespace, SC, RuntimeClass and CRDs;
+  - every object in `testpool`, and every `*.agents.x-k8s.io` CR, has empty finalizers. The CRDs
+    may then go concurrently with the CRs; the vendored manifest has no webhooks.
+- **Monitoring:**
+  - remove `testpool-rules{,.test}`, `env-node-rules{,.test}`, `cri-log-relay` and its talosconfig;
+  - remove the KSM SandboxWarmPool custom-resource metrics **and** their `rbac.extraRules`;
+  - drop the dashboard's Test Env Pool row **and** the Estate Health "Test Envs" tile; the three
+    remaining tiles share the row.
+  - The Alloy redaction stage stays until PR-C, so it outlives the relay.
+  - The relay's talosconfig cannot be revoked: the os:reader cert expires about 2026-12-20, and
+    the ADR records it.
+- **CI and scripts:**
+  - remove `env-image.yaml` and `env-image/`, plus the unittest and busybox steps in
+    `manifests.yaml`;
+  - remove `env-pool-soak.py` and its test, `test_ready_watchdog.py` and `test-env-reaper.sh`;
+  - remove the testpool paths from `test_manifest_paths.py`, `check-slot-enumerations.py` (+ its
+    test) and `manifest-lint.sh`;
+  - drop the talosctl Renovate bound, whose only consumer was the relay;
+  - drop the agent-sandbox read rules in `platform-access/rbac.yaml`.
+- **Deliberately not changed (no rollout for nothing):**
+  - the velero `excludedNamespaces: testpool` entry; only its comments change. YAML comments never
+    reach the API, so the HelmRelease does not upgrade;
+  - the `dedicated=env` tolerations on Alloy, velero node-agent and storage-fabric-probe (comments
+    only);
+  - the Zot `testpool` sync prefix.
+- **Gate 3:**
+  - All Kustomizations are Ready.
+  - `ns testpool`, `ns agent-sandbox-system`, `sc testpool-iscsi`, `runtimeclass kata-env` and
+    `crd *.agents.x-k8s.io` are all NotFound, with nothing `Terminating`.
+  - The token sync and KSM logs are clean.
 
 ### Step 4 — out-of-band, NAS-inert: delete the 8 Released PV objects
 
-All 8 are `Retain`, so `kubectl delete pv` makes no CSI call. Re-check `reclaimPolicy` immediately
-before deleting. **Gate 4:** no `testpool-iscsi` PV remains.
+Immediately before deleting, check that:
+- `reclaimPolicy: Retain`;
+- the finalizers hold only `kubernetes.io/pv-protection` (no `external-attacher/…`);
+- no VolumeAttachment names the PV or `talos-env-node-1`.
 
-### Step 5 — NAS: remove LUNs 11, 4, 43, 44 and the placeholder zvol (independent of k8s)
+Delete one PV and watch the Trident and attacher logs for 5 min, then delete the rest.
+**Gate 4:** no `testpool-iscsi` PV, and no new Trident or attacher activity.
 
-Constraints learned on 09-27: `qcli_iscsi -r` can print "Apply remove LUN ok" and do nothing.
-Hand-editing `/etc/config/hero_*.json` or reloading the iSCSI service is an escalation, not part
-of this plan.
+### Step 5 — NAS: remove LUNs 4, 43, 44, then 11, and the placeholder zvol
 
-1. Back up the config files again (`_out/qnap-*.20261010-before-testpool-lun-removal`).
-2. For each LUN, **one at a time**: re-verify that its name is the expected `trident-pvc-<uuid>`,
-   it has no target mapping (`hero_iscsi_scst.json`), no live PV/PVC references it, and its
-   `blkdev_name` matches. Then remove it with the QuTS-native path: `qcli_iscsi -r lunID=<n>` from
-   an authenticated qcli session (`qcli -l … saveauthsid=yes`), equivalent to the UI's remove.
-3. Verify after each removal: the entry is gone from `hero_zfs_lun.json` and `qcli_iscsi -l`; the
-   zvol and SCST device are gone; `iscsi_lun_setting.cgi?func=extra_get&lunList=1` returns
-   `result 0` (the 09-27 estate-wide breakage showed up as `-22` here); Trident's
-   `storage-api-server` logs no new `Lun is not ready`. **Stop at the first anomaly.**
-4. After all four: confirm a fresh `qnap-iscsi` provision with a 1 Gi scratch PVC + pod (bind,
-   write, delete). Then destroy the placeholder zvol: `zfs destroy -r
-   zpool1/orphan_placeholder_from_lun9_20260927`, after checking its creation date is 2026-09-27
-   and that no LUN or SCST device references it.
+Hand-editing `/etc/config/hero_*.json` or reloading the iSCSI service is an escalation, not part of
+this plan; 09-27 showed that `qcli_iscsi -r` can print "ok" and do nothing.
 
-**Trident records** (9 TridentVolumes + 1 TridentSnapshot) **stay as inert residue**, documented
-in ADR 0037. Driving their deletion through Trident calls the QNAP driver's delete, which loops on
-NAS "not found" with an O(LUNs²) sweep per attempt (09-27 evidence). Deleting the CRs under a
-running controller is unsupported. **Gate 5:** LUN count 55 → 51, provisioning probe green.
+1. **Pre-gates:**
+   - a quiet window: no Pending PVC, every VolumeAttachment attached, no CNPG re-clone;
+   - `tridenttransactions` empty;
+   - last night's Velero and CNPG backups completed;
+   - no iSCSI errors in `talosctl dmesg` on the CPs.
+
+   Back up the config files again (`_out/qnap-*.20261010-before-testpool-lun-removal`), plus the
+   full `qcli_iscsi -l` / `-L` output.
+2. **For each LUN, one at a time.** The clones go first; the source (11) goes last.
+   - Resolve its `lunID` **from the expected `trident-pvc-<uuid>` name** right before the call.
+   - Re-verify: unmapped, pool 1, zvol `blkdev_name` as inventoried, no PV references it.
+   - Remove it with `qcli_iscsi -r lunID=<n>` in a qcli session opened through
+     `scripts/qnap-ssh.py`, and log the session out afterwards.
+   - Never retry by ID alone.
+3. **Verify after each removal:**
+   - the full LUN and target-mapping lists, diffed against the backup: **only** that entry is gone;
+   - its zvol and SCST device are gone;
+   - `iscsi_lun_setting.cgi … lunList` returns `result 0`;
+   - no new `Lun is not ready` in `storage-api-server`;
+   - no iSCSI errors on the nodes.
+
+   **Stop at the first anomaly.**
+4. **After all four:**
+   - Run a provisioning probe: a 1 Gi `qnap-iscsi` PVC + pod (bind, write). Patch its PV to
+     `Delete` **before** deleting the PVC, so the class's Retain policy does not leak a new LUN,
+     and confirm that its LUN disappears.
+   - Destroy the placeholder: run `zfs get -r clones,origin` and `zfs destroy -nvr` on it first,
+     check it was created 2026-09-27 with no LUN or SCST reference, then
+     `zfs destroy -r zpool1/orphan_placeholder_from_lun9_20260927`.
+
+**Trident records** (9 TridentVolumes, 1 TridentSnapshot, listed in ADR 0037) stay as inert
+residue. Driving their deletion through Trident loops on NAS "not found", with an O(LUNs²) sweep
+per attempt; deleting the CRs under a running controller is unsupported. They come out at the next
+planned Trident/operator restart, with controller and operator scaled to 0.
+
+**Gate 5:**
+- exactly the four expected names are gone and every other LUN's name, ID and mapping is unchanged;
+- the probe is green and its LUN is gone;
+- `lunList` returns result 0.
 
 ### Step 6 — destroy the env node (tofu, by hand from Windows)
 
-1. Back up the state: `_out/env-pool.tfstate.20261010-pre-destroy`.
-2. Run `tofu -chdir=kubernetes/infra/env-pool init -backend-config="path=…/home/ailab/…/terraform.tfstate"`,
-   then `plan -destroy -out`. Expect exactly 5 destroys: VM, talos apply, labels, taint, and the
-   import-only state (no other module touched).
-3. `kubectl cordon`/`drain --ignore-daemonsets talos-env-node-1` (only DaemonSets), then
-   `apply` the destroy plan. `stop_on_destroy` hard-stops the VM, and nothing on it needs saving.
-4. `kubectl delete node talos-env-node-1`. Confirm the CiliumNode is gone and the node-exporter
-   target has disappeared (no lasting `NodeExporterDown`/`KubeNodeNotReady`).
+1. Back up the state to `_out/env-pool.tfstate.20261010-pre-destroy`.
+2. From a main worktree, run `tofu init -reconfigure -backend-config=path=<ops>/…/terraform.tfstate`
+   and `-var-file=<ops>/…/terraform.tfvars` (tfvars exists only in the ops checkout).
+3. Run `tofu state rm` on `kubernetes_labels.env_pool` and `kubernetes_node_taint.env`, so the
+   destroy cannot lift the taint and let non-tolerating DaemonSets land on the node.
+4. `plan -destroy -out`: expect **2 to destroy** (the VM and the no-op talos apply) and nothing
+   else.
+5. Cordon and `drain --ignore-daemonsets` the node, then `apply` the plan. `stop_on_destroy`
+   hard-stops the VM, and nothing on it needs saving.
+6. `kubectl delete node talos-env-node-1`. Watch Trident during the delete.
 
-**Gate 6:** `qm list` on ai-node2 has no 4401 and its disk LV is gone. ai-node2 `MemAvailable` is up
-by about 16 GiB. The dw2/dw4 balloons get that headroom automatically; no sizing change.
+**Gate 6:**
+- `qm list` on ai-node2 has no 4401, and its disk is gone;
+- the CiliumNode and TridentNode for the node are gone, and no VolumeAttachment names it;
+- no lasting node alerts;
+- `.37` no longer answers.
 
-### Step 7 — PR-C: infra code + docs (opened after Gate 6)
+Then measure ai-node2's used % and dw2/dw4's balloon sizes. The headroom is real only below PVE's
+~80% auto-balloon threshold. Report the numbers; this plan makes no sizing change.
 
-- Delete `kubernetes/infra/env-pool/` (the state file stays in the ops checkout, gitignored and
-  renamed `*.retired-20261010`), the `env-pool-*` justfile recipes, and `docs/runbooks/env-pool.md`.
-- `CLAUDE.md`: modules/recipes lines and the inventory row. `docs/network-plan.md`: `.37` freed,
-  the `.39` reservation released (#835 closed). Comments in `talos-schematics.yaml`,
-  `infra/variables.tf`, `vms.tf`, `agent-nodes/{main,variables}.tf`, `reviewers/backend.tf`,
-  `inventory/hosts.yml`, `dev-workers/variables.tf` (the "heavy stacks lease kata envs via tep"
-  claim), `docs/runbooks/talos-upgrade.md` and the other runbooks that list the env node.
-- ADR 0021/0028 and helmtest docs: drop the tep/testpool cross-references where they would now
-  point at nothing. Historical `plans/` are not rewritten.
-- **Gate 7:** merged; `just --list` has no env-pool recipe; a tofu plan of `infra/` and `agent-nodes/`
-  is still `No changes` (comment-only edits).
+Finally, age-encrypt the retired state file and the pre-destroy backup (they embed the cluster
+machine secrets via remote state) and shred the plaintext copies.
 
-### Step 8 — issues and the platform side
+### Step 7 — PR-C: infra code, docs, and the Alloy stage (opened after Gate 6)
 
-- Close #972 and #865 with the outcome. Leave a note on the `feat/env-node-2` branch (#835) that it
-  is superseded.
-- Platform PR (independent of 1–7): a "Where tests run" section in `CLAUDE.md`, taking the table
-  from the unmerged `feat/e2e-pool-routing` without the pool.
-  - Lint, unit and in-memory integration run locally.
-  - The slim stack + targeted journeys run locally, one stack per worker.
-  - The full journey matrix and the contract producer are CI-only.
-  - k8s-only failure classes (netpol, Helm values, Kyverno, live drift) are caught by the
-    helm-render guards and the post-deploy `ailab-journeys` lane.
-  - While there, correct the stale "8-shard" line to 4. No AI attribution in that repo.
+- **Delete:**
+  - `kubernetes/infra/env-pool/`;
+  - the `env-pool-*` justfile recipes;
+  - `docs/runbooks/env-pool.md`; ADR 0037 summarises its Kata lessons and links to the last
+    commit that had it.
+- **Remove the Alloy `cri-log-relay` redaction stage.** The relay is gone by now.
+- **Edits:**
+  - `CLAUDE.md` (modules, recipes, IPAM line, inventory row);
+  - `docs/network-plan.md`: `.37` free, `.39` released;
+  - `talos-upgrade.md`: no env node in the kubelet roll, `talos_version` in two modules, the kata
+    smoke on agent-node-3;
+  - `node-maintenance.md`;
+  - comments that describe the env node as current, in `talos-schematics.yaml`,
+    `infra/variables.tf`, `agent-nodes/variables.tf`, `dev-workers/variables.tf` and `inventory`.
+- **Not touched:**
+  - `machine-config/controlplane.yaml.tftpl`: it is rendered into the CP config, so even a comment
+    edit would show in the CP plan;
+  - history sections, ADRs other than 0021 (a "superseded in part by 0037" line), `plans/` and
+    `docs/superpowers/`.
+- **Gate 7:** merged; `just --list` has no env-pool recipe; tofu plans of `infra/` and
+  `agent-nodes/` are `No changes`.
+
+### Step 8 — issues and the platform side (after Gate 6)
+
+- #972: close with the outcome. #835's branch: note that it is superseded.
+- #865: check every item first. It is also cited for the attacher timeout (`qnap-storage-setup.md`
+  §9, fixed by #908) and for the registry pull identity (fixed by #875/#877). Close it only if
+  nothing is left open; otherwise comment.
+- Update `qnap-storage-setup.md` §9's orphan-LUN paragraph.
+- Report the AgentForge `e2e-pool.sh` dependency to the owner (out of scope for changes).
+- Platform PR: the "Where tests run" section in `CLAUDE.md`, and "8-shard" → "4-shard". Lands after
+  Gate 6, so the slim-stack guidance arrives once node2's RAM is back. No AI attribution in that
+  repo.
 
 ## Critical files
 
 `ansible/roles/dev_worker/{tasks/tep.yml,tasks/openbao.yml,tasks/main.yml,defaults/main.yml,templates/openbao-agent.hcl.j2,files/*-skill.md}`,
-`kubernetes/apps/clusters/ai/{testpool,agent-sandbox}.yaml`, `kubernetes/apps/infrastructure/{testpool,agent-sandbox}/`,
-`kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml`, `kubernetes/apps/infrastructure/monitoring/*`,
+`kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml`, `kubernetes/apps/clusters/ai/{testpool,agent-sandbox}.yaml`,
+`kubernetes/apps/infrastructure/{testpool,agent-sandbox}/`, `kubernetes/apps/infrastructure/monitoring/*`,
 `kubernetes/infra/env-pool/`, `scripts/{check-slot-enumerations.py,gen-reporting-dashboard.py}`, `CLAUDE.md`,
 `docs/network-plan.md`, `docs/decisions/0037-retire-the-test-env-pool.md`; platform `CLAUDE.md`.
 
 ## Verification
 
 Each gate above, plus, at the end:
-- All Flux Kustomizations are Ready.
-- `kubectl get pv | grep testpool` is empty, and the NAS LUN list holds 51 entries with
-  `lunList` returning result 0.
-- A `qnap-iscsi` provision probe is green.
-- The 06:35 converge the next morning exits 0.
-- ai-node2 `MemAvailable` is up by about 16 GiB.
-- No `Testpool*` / `EnvNode*` series in `ALERTS`.
+- All Flux Kustomizations are Ready, and no `Testpool*` / `EnvNode*` series appear in `ALERTS`.
+- Nothing pool-related remains:
+  - no `testpool-iscsi` PV, and `tridenttransactions` empty;
+  - no TridentNode or VolumeAttachment for `talos-env-node-1`;
+  - none of the spike names;
+  - no `tep-kubeconfig` in any worker's `agent.hcl`.
+- The NAS LUN set equals the pre-removal set minus the four, `lunList` returns result 0, and a
+  `qnap-iscsi` provision probe is green.
+- The 06:35 converge the next morning shows `failed=0` for all four workers.
 
 ## Rollback
 
-- **Steps 1–3** are git reverts, and Flux recreates the trees. The golden snapshot would need
-  rebuilding (`golden-refresh.sh`), which #972 required anyway.
-- **Step 6** is reversible by re-applying the module from git history: the VM is re-created from
-  the staged image and joins as before.
-- **Step 5** is not reversible. That is acceptable, because the four LUNs hold only a rebuildable
-  docker cache.
+- **Steps 1–3:** revert PR-B **before** PR-A. The restored verify block needs the tep SAs and CRDs
+  back first. Flux recreates the trees; the golden snapshot would need rebuilding (#972 required
+  that anyway).
+- **Step 6 is not a re-apply.** A new VM needs `apply_mode = "auto"`, no `imports.tf`, and a
+  v1.14.2 agent image staged on ai-node2. That is new provisioning, accepted.
+- **Step 5 is irreversible.** That is accepted: the four LUNs hold only a rebuildable docker cache.
 
-<!-- codex-review-status: pending -->
+## Review trail
+
+**Round 1 (2026-10-10).** Codex was unavailable: the LiteLLM route returned 429 and the native seat
+is capped until 10-14. An independent Claude Plan agent reviewed the draft (`90a80218`) instead,
+against the repo. Dispositions:
+
+- **Accepted, and folded in above:**
+  - **Ordering:**
+    - the token-sync change moves to PR-A (Flux non-atomicity);
+    - Flux GC pre-gates;
+    - the Alloy stage removal moves to PR-C;
+    - the NAS order is clones first; LUN IDs are resolved by name;
+    - `tofu state rm` of the label/taint before the destroy;
+    - revert PR-B before PR-A;
+    - the platform PR lands after Gate 6.
+  - **Gates and checks:**
+    - real converge evidence for Gate 1;
+    - VSC pre-checks and the csi-snapshotter log;
+    - PV finalizer and VolumeAttachment checks;
+    - NAS quiet window, backups, set-based diff and node iSCSI health;
+    - TridentNode check;
+    - measuring balloon headroom instead of assuming it;
+    - extra end-state checks.
+  - **Code:**
+    - the `tep.yml` guard and unconditional import;
+    - remove the stale `.ctmpl` after the verify;
+    - delete the render script in PR-A;
+    - move the contract text;
+    - rewrite the stale texts;
+    - the KSM `extraRules`;
+    - the Estate Health tile;
+    - the platform-access agent-sandbox rules;
+    - leave the velero value alone;
+    - leave `controlplane.yaml.tftpl` alone.
+  - **Facts:**
+    - 2 destroys after the state rm, not 5;
+    - `kata_debug` is off;
+    - tfvars exist only in the ops checkout;
+    - the probe PV must be patched to Delete;
+    - the placeholder needs a dry-run destroy;
+    - the talosconfig cert expires ~12-20;
+    - the TridentSnapshot must stay;
+    - the residue is listed in ADR 0037;
+    - age-encrypt the retired state;
+    - the Step 6 rollback is not a re-apply;
+    - #865's wider scope;
+    - grep the sibling repos (found the AgentForge wrappers);
+    - spike leftovers (verified gone);
+    - the legacy-token user (dated; not identifiable).
+- **Pushed back:**
+  - **Deleting `tep_kubeconfig` from KV after a soak.** After Gate 1 no worker's agent references
+    the field (grep on every host), so a vault wipe cannot hurt anything. Deleting it would be a
+    write into every worker's KV path for hygiene only. It is dropped from the recovery docs
+    instead.
+  - **Keeping `qcli -l` off the command line entirely.** It is partly accepted: the session goes
+    through `qnap-ssh.py` (no shell history) and is logged out afterwards. The password still
+    appears briefly in the NAS process table, as in `scripts/qnap-setup.sh`. The NAS has a single
+    admin and no other interactive users.
+
+<!-- codex-review-status: finalized -->
