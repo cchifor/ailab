@@ -44,7 +44,7 @@ next scrape. The policy currently pins schema 42 and the exact reviewed verifier
 source SHA256; a verifier/schema upgrade requires a matching GitOps change.
 Enabling this schema-42 policy requires a successful isolated restore of schema
 42; any existing schema-41 `evidence.json` becomes unavailable on the next scrape.
-The unchanged verifier validates a contiguous migration inventory, actual table
+The unchanged verifier validates a strictly increasing migration inventory, actual table
 readability and forced RLS, and hashes the restored artifact inventory. It does
 not impose column-specific ownership or recovery-claim semantics; those are
 qualified by Relay's native recovery tests, separately from restore evidence.
