@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Opt-in; no shared ntfy restart or account changes until explicitly included.
+configMapGenerator:
+- name: relay-notification-setup
+  namespace: monitoring
+  files:
+  - materialize.mjs
+patches:
+- path: deployment.yaml

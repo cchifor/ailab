@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ntfy
+  namespace: monitoring
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: relay-notification-config
+        image: docker.io/library/node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
+        command: [node, /setup/materialize.mjs]
+        securityContext:
+          # ntfy currently runs as root; the generated 0600 file has the same owner.
+          runAsUser: 0
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile: {type: RuntimeDefault}
+        resources:
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {cpu: '1', memory: 128Mi}
+        volumeMounts:
+        - {name: notification-setup, mountPath: /setup, readOnly: true}
+        - {name: notification-input, mountPath: /input, readOnly: true}
+        - {name: config, mountPath: /base, readOnly: true}
+        - {name: notification-config, mountPath: /output}
+      containers:
+      - name: ntfy
+        image: binwiederhier/ntfy:v2.29.0@sha256:4c599cf0818965782f93f652bd843e92714992e84d6b88ad17713dc0951cda1f
+        volumeMounts:
+        - name: notification-config
+          mountPath: /etc/ntfy/server.yml
+          subPath: server.yml
+          readOnly: true
+      volumes:
+      - name: notification-setup
+        configMap:
+          name: relay-notification-setup
+      - name: notification-input
+        secret:
+          secretName: ntfy-relay-auth
+          defaultMode: 0400
+          items:
+          - {key: publisher-hash, path: publisher-hash}
+          - {key: subscriber-hash, path: subscriber-hash}
+          - {key: publisher-token, path: publisher-token}
+          - {key: subscriber-token, path: subscriber-token}
+      - name: notification-config
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
