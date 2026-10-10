@@ -750,7 +750,13 @@ If you skip this, the old image:
 - refuses writes that touch pool routes;
 - drops the pool settings.
 
-Rolling forward again adopts the unmarked pool routes, but restores the shipped pool settings.
+Only in that case (the pre-rollback steps were skipped, and the old image stripped the routes' `managedBy` mark),
+rolling forward adopts the unmarked pool routes, but restores the shipped pool settings.
+
+**The old image still carries the Codex model-refresh bug.** After a rollback, its refresh again rewrites `*` targets
+on router-owned Codex logins to a fixed model, within about 40 minutes. That includes `sub-codex-5`, restored to
+`codex-5:*` in acceptance step 1, which becomes `gpt-6-astra` again. The workers pin `gpt-6-astra`, so they keep
+working. After rolling forward again, re-pin `sub-codex-5` to `codex-5:*`.
 
 **Image.**
 - Archive `router-0.1.0-20261010-smart-pools.tar.gz`, SHA-256
@@ -760,7 +766,8 @@ Rolling forward again adopts the unmarked pool routes, but restores the shipped 
 - [Image CI 79636](https://git.chifor.me/cchifor/relay/actions/runs/79636);
   [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-79636.json).
 - **Before merge:**
-  - 1588 tests passed and 0 failed; typecheck, build and `check:architecture` passed (#79 only).
+  - 1588 tests passed and 0 failed; typecheck and build passed; `check:architecture` reported only its known finding
+    (llm-router issue #79, `packages/modules/inference/index.ts`).
   - Nine tasks were each reviewed, then a whole-branch review with one fix wave.
   - The reviewers proved a production-like first start writes only the two pool routes, and that a rollback cycle
     heals.
