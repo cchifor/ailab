@@ -38,15 +38,20 @@ class Monitoring(unittest.TestCase):
         raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
                      'build', str(wrapper.relative_to(ROOT))).stdout
         cls.docs = list(yaml.safe_load_all(raw))
+        configuration = yaml.safe_load((wrapper / 'kustomization.yaml').read_text())
+        configuration['components'].append(os.path.relpath(ROOT / 'kubernetes/components/relay-recovery-monitoring', wrapper))
+        (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
+        cls.recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+            'build', str(wrapper.relative_to(ROOT))).stdout))
         cls.spec = named(cls.docs, 'Deployment', 'relay')['spec']['template']['spec']
         init = next(c for c in cls.spec['initContainers'] if c['name'] == 'metrics-files')
         cls.node_image = init['image']
         cm_name = next(v['configMap']['name'] for v in cls.spec['volumes'] if v['name'] == 'metrics-setup')
         cm = named(cls.docs, 'ConfigMap', cm_name)
         (cls.root / 'materialize.mjs').write_text(cm['data']['materialize.mjs'])
-        checked = [d for d in cls.docs if d['kind'] in ('Deployment', 'Service', 'ConfigMap', 'NetworkPolicy')]
+        checked = [d for d in cls.recovery_docs if d['kind'] in ('Deployment', 'Service', 'ConfigMap', 'NetworkPolicy', 'PersistentVolumeClaim')]
         docker('run', '--rm', '-i', KUBECONFORM, '-strict', '-summary', data=yaml.safe_dump_all(checked).encode())
-        for name in ['input', 'output']:
+        for name in ['input', 'output', 'policy']:
             (cls.root / name).mkdir()
         cls.container = 'relay-metrics-test-' + uuid.uuid4().hex[:10]
         cls.addClassCleanup(lambda: docker('rm', '-fv', cls.container, check=False))
@@ -55,10 +60,11 @@ class Monitoring(unittest.TestCase):
                '--user', f'{os.getuid()}:{os.getgid()}',
                '-v', f'{cls.root}/materialize.mjs:/setup/materialize.mjs:ro',
                '-v', f'{cls.root}/input:/input:ro', '-v', f'{cls.root}/output:/output',
+               '-v', f'{cls.root}/policy:/recovery-policy:ro',
                cls.node_image, 'node', '-e', 'setInterval(()=>{}, 1000)')
 
     def setUp(self):
-        for name in ['input', 'output']:
+        for name in ['input', 'output', 'policy']:
             for entry in (self.root / name).iterdir():
                 if entry.is_dir() and not entry.is_symlink():
                     shutil.rmtree(entry)
@@ -73,8 +79,9 @@ class Monitoring(unittest.TestCase):
         for filename, key in [('tenant-id', 'tenantId'), ('token-sha256', 'tokenSha256'), ('expires-at', 'expiresAt')]:
             (self.root / 'input' / filename).write_text(self.config[key] + '\n')
 
-    def run_setup(self, ok=True):
-        result = docker('exec', self.container, 'node', '/setup/materialize.mjs', check=False)
+    def run_setup(self, ok=True, recovery=''):
+        result = docker('exec', '-e', 'RELAY_RECOVERY_EVIDENCE=' + recovery,
+                       self.container, 'node', '/setup/materialize.mjs', check=False)
         output = (result.stdout + result.stderr).decode()
         for value in self.config.values():
             if isinstance(value, str):
@@ -108,6 +115,39 @@ class Monitoring(unittest.TestCase):
         self.seed()
         self.run_setup()
         self.assertEqual(json.loads((self.root / 'output/private/config.json').read_text()), self.config)
+
+    def test_optional_recovery_policy_and_readonly_evidence_placement(self):
+        spec = named(self.recovery_docs, 'Deployment', 'relay')['spec']['template']['spec']
+        init = next(c for c in spec['initContainers'] if c['name'] == 'metrics-files')
+        self.assertIn({'name': 'RELAY_RECOVERY_EVIDENCE', 'value': '1'}, init['env'])
+        policy_name = next(v['configMap']['name'] for v in spec['volumes'] if v['name'] == 'recovery-policy')
+        policy = named(self.recovery_docs, 'ConfigMap', policy_name)['data']
+        self.assertRegex(policy['verifier-sha256'], r'^[a-f0-9]{64}$')
+        self.assertEqual(policy['schema-version'], '41')
+        for key, value in policy.items():
+            (self.root / 'policy' / key).write_text(value + '\n')
+        self.run_setup(recovery='1')
+        expected = {**self.config, 'recoveryEvidence': {'path': '/run/relay-recovery/private/evidence.json',
+                    'verifierSha256': policy['verifier-sha256'], 'schemaVersion': 41}}
+        target = self.root / 'output/private/config.json'
+        self.assertEqual(json.loads(target.read_text()), expected)
+        application = next(c for c in spec['containers'] if c['name'] == 'relay')
+        mount = next(m for m in application['volumeMounts'] if m['name'] == 'recovery-evidence')
+        self.assertEqual(mount, {'name': 'recovery-evidence', 'mountPath': '/run/relay-recovery', 'readOnly': True})
+        self.assertNotIn('subPath', mount)
+        self.assertNotIn('recovery-policy', {v['name'] for v in application['volumeMounts']})
+        pvc = named(self.recovery_docs, 'PersistentVolumeClaim', 'relay-recovery-evidence')
+        self.assertEqual(pvc['spec']['accessModes'], ['ReadWriteMany'])
+        self.assertEqual(pvc['spec']['resources']['requests']['storage'], '1Mi')
+        self.assertNotIn('relay-recovery-monitoring', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
+        for key, bad in [('verifier-sha256', 'PRIVATE_CANARY'), ('schema-version', '0'),
+                         ('schema-version', '41\n42'), ('schema-version', '10000')]:
+            for filename, value in policy.items():
+                (self.root / 'policy' / filename).write_text(value)
+            (self.root / 'policy' / key).write_text(bad)
+            self.run_setup(False, recovery='1')
+            self.assertEqual(json.loads(target.read_text()), expected)
+        self.run_setup(False, recovery='2')
 
     def test_invalid_inputs_fail_closed_and_keep_last_complete_file(self):
         self.run_setup()

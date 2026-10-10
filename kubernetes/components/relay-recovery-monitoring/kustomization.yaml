@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+- relay-recovery-rules.yaml
+- evidence.yaml
+configMapGenerator:
+- name: relay-recovery-policy
+  namespace: relay
+  literals:
+  # Exact source used by `npm run recovery:verify` in the matching Relay PR.
+  - verifier-sha256=79f8b0161c77e52d1278b94c3a62b6ab694d48c511e7c15e60570adf2b11d095
+  - schema-version=41
+patches:
+- path: deployment.yaml

@@ -1,0 +1,38 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: relay-recovery
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: relay-recovery
+    rules:
+    - alert: RelayRestoreMetricSchemaIncomplete
+      expr: up{job="relay-control-plane"} == 1 unless on(job,instance) (count by(job,instance) ({job="relay-control-plane",__name__=~"relay_control_restore_(verification_available|verified_timestamp_seconds|backup_timestamp_seconds|schema_version)"}) == 4)
+      for: 5m
+      labels:
+        severity: critical
+        service: relay
+      annotations:
+        summary: Relay restore verification metrics are incomplete
+        description: A successful scrape lacks required restore evidence metrics. Check the matching Relay release and collector configuration; backup job success cannot replace these observations.
+    - alert: RelayRestoreVerificationMissing
+      expr: relay_control_restore_verification_available{job="relay-control-plane"} == 0
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay has no matching completed restore verification
+        description: Run the reviewed isolated database/artifact verifier and publish its private completed receipt through the approved operator route. Missing, invalid, future-dated, wrong-verifier or wrong-schema evidence is unavailable.
+    - alert: RelayRestoreVerificationStale
+      expr: (label_replace(time() - relay_control_restore_verified_timestamp_seconds{job="relay-control-plane"} > 604800, "reason", "verification_old", "", "") or label_replace(time() - relay_control_restore_backup_timestamp_seconds{job="relay-control-plane"} > 604800, "reason", "backup_old", "", "")) and on(job,instance) (relay_control_restore_verification_available{job="relay-control-plane"} == 1)
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay restore verification is older than seven days
+        description: Inspect the reason label. Verify a recent coordinated backup generation; rerunning verification on an old backup must not refresh the backup-age gate. This evidence does not establish live credential reconciliation or native session recovery.
