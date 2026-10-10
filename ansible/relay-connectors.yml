@@ -1,0 +1,8 @@
+---
+# Explicit adoption of already-enrolled identities; never imported by site.yml.
+- name: Reconcile pinned Relay connector user services
+  hosts: dev_workers
+  become: true
+  gather_facts: false
+  roles:
+    - role: relay_connector

@@ -1,0 +1,17 @@
+[Unit]
+Description=Relay persistent tmux connector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector --state {{ relay_connector_state_file }} serve
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

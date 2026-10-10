@@ -1,0 +1,166 @@
+---
+- name: Require an exact reviewed release and existing worker identity
+  ansible.builtin.assert:
+    that:
+      - relay_connector_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - relay_connector_host_id is match('^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
+      - relay_connector_origin is match('^https://[a-z0-9][a-z0-9.-]*(?::[1-9][0-9]{0,4})?$')
+      - relay_connector_arch in ['amd64', 'arm64']
+      - relay_connector_release.version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+      - relay_connector_release.sourceCommit is match('^[a-f0-9]{40}$')
+      - relay_connector_release.sha256[relay_connector_arch] is match('^[a-f0-9]{64}$')
+      - relay_connector_name | length > 0
+      - relay_connector_name | length <= 80
+      - relay_connector_sockets is sequence and relay_connector_sockets is not string and relay_connector_sockets is not mapping
+      - relay_connector_sockets | length > 0
+      - relay_connector_sockets | length <= 16
+    quiet: true
+
+- name: Reject unsafe systemd and filesystem paths
+  ansible.builtin.assert:
+    that:
+      - item is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - "'/../' not in item + '/' and '/./' not in item + '/'"
+    quiet: true
+  loop:
+    - "{{ relay_connector_home }}"
+    - "{{ relay_connector_unit_dir }}"
+    - "{{ relay_connector_artifact_dir }}"
+    - "{{ relay_connector_source }}"
+    - "{{ relay_connector_state_file }}"
+
+- name: Check reviewed tmux sockets
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item == '' or item is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - item | length <= 512
+      - "'/../' not in item + '/' and '/./' not in item + '/'"
+    quiet: true
+  loop: "{{ relay_connector_sockets }}"
+
+- name: Resolve the existing execution account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ relay_connector_user }}"
+
+- name: Derive managed locations without changing identity
+  ansible.builtin.set_fact:
+    relay_connector_uid: "{{ ansible_facts['getent_passwd'][relay_connector_user][1] }}"
+    relay_connector_unit: "relay-connector-{{ relay_connector_host_id }}.service"
+    relay_connector_sha: "{{ relay_connector_release.sha256[relay_connector_arch] }}"
+
+- name: Check worker architecture
+  ansible.builtin.command:
+    argv: [uname, -m]
+  register: relay_connector_machine
+  changed_when: false
+  check_mode: false
+
+- name: Require the binary architecture for this worker
+  ansible.builtin.assert:
+    that: relay_connector_machine.stdout | trim == {'amd64':'x86_64', 'arm64':'aarch64'}[relay_connector_arch]
+    quiet: true
+
+- name: Verify controller artifact bytes
+  ansible.builtin.stat:
+    path: "{{ relay_connector_source }}"
+    checksum_algorithm: sha256
+    follow: false
+  delegate_to: localhost
+  become: false
+  register: relay_connector_source_stat
+
+- name: Reject missing, linked or mismatched release bytes
+  ansible.builtin.assert:
+    that:
+      - relay_connector_source_stat.stat.isreg | default(false)
+      - not relay_connector_source_stat.stat.islnk | default(true)
+      - relay_connector_source_stat.stat.checksum | default('') == relay_connector_sha
+    quiet: true
+
+- name: Inspect private existing connector identity
+  ansible.builtin.stat:
+    path: "{{ relay_connector_state_file }}"
+    follow: false
+  register: relay_connector_identity_stat
+
+- name: Require owner-only regular identity storage
+  ansible.builtin.assert:
+    that:
+      - relay_connector_identity_stat.stat.isreg | default(false)
+      - not relay_connector_identity_stat.stat.islnk | default(true)
+      - relay_connector_identity_stat.stat.nlink | default(0) == 1
+      - relay_connector_identity_stat.stat.uid | default(-1) | int == relay_connector_uid | int
+      - relay_connector_identity_stat.stat.mode | default('') == '0600'
+      - relay_connector_identity_stat.stat.size | default(0) <= 65536
+    quiet: true
+
+- name: Read identity only for bounded validation
+  ansible.builtin.slurp:
+    src: "{{ relay_connector_state_file }}"
+  register: relay_connector_identity_bytes
+  no_log: true
+
+- name: Require the approved identity and exact service settings
+  ansible.builtin.assert:
+    that:
+      - identity.id == relay_connector_host_id
+      - identity.url == relay_connector_origin
+      - identity.phase | default('approved') == 'approved'
+      - identity.token is match('^[!-~]{20,8192}$')
+      - identity.service.account == relay_connector_user
+      - identity.service.name == relay_connector_name
+      - identity.service.sockets == relay_connector_sockets
+    quiet: true
+    fail_msg: Existing identity must be approved and match the reviewed host, origin, execution account, name and sockets.
+  no_log: true
+  vars:
+    identity: "{{ relay_connector_identity_bytes.content | b64decode | from_json }}"
+
+- name: Release the temporary credential-bearing fact
+  ansible.builtin.set_fact:
+    relay_connector_identity_bytes: {}
+  no_log: true
+
+- name: Inspect persistent user-manager configuration
+  ansible.builtin.command:
+    argv: [loginctl, show-user, "{{ relay_connector_uid }}", --property=Linger, --value]
+  register: relay_connector_linger
+  changed_when: false
+  check_mode: false
+  when: relay_connector_manage_service | bool
+
+- name: Require linger before any managed service changes
+  ansible.builtin.assert:
+    that: relay_connector_linger.stdout | trim == 'yes'
+    quiet: true
+    fail_msg: Converge worker linger through the reviewed account bootstrap before enabling connector management.
+  when: relay_connector_manage_service | bool
+
+- name: Inspect the selected connector service before staging
+  ansible.builtin.command:
+    argv: [systemctl, --user, list-units, --all, --type=service, --output=json, --no-pager, "{{ relay_connector_unit }}"]
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_connector_uid }}"
+  register: relay_connector_staging_service
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not (relay_connector_manage_service | bool)
+
+- name: Require a reachable manager and stopped service before staging files
+  ansible.builtin.assert:
+    that:
+      - relay_connector_staging_service.rc == 0
+      - (relay_connector_staging_service.stdout | from_json) is sequence
+      - (relay_connector_staging_service.stdout | from_json) is not string
+      - (relay_connector_staging_service.stdout | from_json) is not mapping
+      - (relay_connector_staging_service.stdout | from_json) | rejectattr('active', 'equalto', 'inactive') | list | length == 0
+      - (relay_connector_staging_service.stdout | from_json) | rejectattr('sub', 'equalto', 'dead') | list | length == 0
+      - (relay_connector_staging_service.stdout | from_json) | selectattr('job', 'defined') | rejectattr('job', 'equalto', '') | list | length == 0
+    quiet: true
+    fail_msg: Staging requires the selected connector inactive/dead with no queued job and a reachable user manager.
+  when: not (relay_connector_manage_service | bool)
