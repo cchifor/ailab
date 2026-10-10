@@ -654,8 +654,14 @@ llm-router.
 - **No route has `placement` at rollout**, so nothing changes until one opts in. Routes without it behave as before,
   including the `x-router-*` disclosure headers.
 
-**Schema.** SQLite `user_version` 7 adds a `placements` table. The migration is `CREATE … IF NOT EXISTS`, so an older
-image starts on the same volume and ignores the table.
+**Schema.** SQLite `user_version` 7 adds a `placements` table (`CREATE … IF NOT EXISTS`). The older image never reads
+`user_version`: it only runs its own idempotent migrations and then sets the version to 6. So it starts on a v7 volume,
+writes 6, and leaves `placements` untouched. Re-upgrading sets 7 again, with the rows intact.
+
+Verified on 2026-10-10 by running the two workers in turn on one database file:
+1. the new worker (`076dff0`): v7, one placement written;
+2. the old worker (`473c9e0`): it starts, and the version is 6 with the table kept;
+3. the new worker again: v7, the placement loads.
 
 **The dev-worker pool is held.** The design's first pool was `pool-codex` over `codex-2`/`codex-3`/`codex-4`. It is
 not created, for these reasons:
