@@ -428,4 +428,9 @@ against the repo. Dispositions:
     could delete the CRDs before testpool's own GC prunes its CRs.
   - So PR-B removes **only `testpool`**. A follow-up removes the `agent-sandbox` Kustomization and
     deletes its source tree, in two review-sized halves.
-  - Gate 3 adds "no Kustomization stuck in deletion".
+  - Gate 3 adds "no Kustomization stuck in deletion". After PR-B, Gate 3 expects only
+    `ns testpool`, `sc testpool-iscsi` and `runtimeclass kata-env` NotFound. `agent-sandbox-system`
+    and the CRDs stay until the follow-up.
+  - **Accepted gap:** `TestpoolOperatorDown` goes with the testpool rules in PR-B, while the
+    agent-sandbox controller keeps running until the follow-up. It is unmonitored for that window,
+    but it manages nothing (no CRs once testpool is pruned), so an outage there costs nothing.
