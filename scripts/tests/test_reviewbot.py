@@ -2363,7 +2363,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
 
     EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
                 "cchifor/agentforge-platform", "cchifor/dsh-team-conductor",
-                "cchifor/forge"]
+                "cchifor/forge", "cchifor/relay", "cchifor/llm-router"]
 
     @staticmethod
     def _parse_repos(text):
