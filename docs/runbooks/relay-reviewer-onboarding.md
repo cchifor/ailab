@@ -44,7 +44,9 @@ checks its own merge gates, but those are not forge-enforced branch protections.
    establish that the requested review loop is active.
 
 Existing merge gates remain both personas clean at the current head, successful CI,
-an allowed author and absence of `no-automerge`, plus repository branch protection.
+an allowed author and absence of `no-automerge`. Forge-enforced branch protection is
+separate from these application checks and is the operator prerequisite in step 1;
+it is currently absent on the two target main branches.
 `dev-worker-bot` and `workstation-bot` are already allowed authors. This change adds no
 persona, author exception, review-policy exception or protection change.
 

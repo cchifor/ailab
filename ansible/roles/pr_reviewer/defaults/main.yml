@@ -63,6 +63,9 @@ pr_reviewer_repos:
   # Relay control-plane implementation and its router dependency require reviewer-owned
   # merges (operator request, 2026-10-10). See docs/runbooks/relay-reviewer-onboarding.md
   # for access/protection checks and live activation; source alone is not activation.
+  # Their PRs use dev-worker-bot/workstation-bot, already allowed authors: once admitted,
+  # they automerge when both personas are clean at head, CI is green and no no-automerge
+  # label is set. No additional author grant or merge-gate exception is introduced.
   - cchifor/relay
   - cchifor/llm-router
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
