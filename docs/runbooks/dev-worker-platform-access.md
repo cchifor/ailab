@@ -54,11 +54,16 @@ denied.
 | Project | Slots | Namespaces | Flux (`flux-system`, get by name) | Defined in |
 |---|---|---|---|---|
 | Trueswarm | `platform-dw2`, `platform-dw4` | `trueswarm`, `trueswarm-admin`, `trueswarm-recovery`, plus `get` on the 5 `trueswarm-executor-*` ValidatingAdmissionPolicies | Kustomizations `trueswarm`, `trueswarm-git-auth`, `trueswarm-admin*`, `trueswarm-platform-*`; GitRepositories `trueswarm`, `trueswarm-admin`; Jobs `trueswarm{,-admin}-git-bootstrap`, `trueswarm-admin-executor-bootstrap` | ailab `kubernetes/apps/clusters/ai/trueswarm{,-admin}-observer.yaml` **and** `cchifor/trueswarm-admin` `deploy/{platform,foundation,recovery-foundation,security}/observer.yaml` (+ `deploy/platform/backup-observer.yaml`) |
+| Forge object-store certificate bootstrap ([platform#2221](https://git.chifor.me/cchifor/platform/pulls/2221); **temporary, remove by 2026-10-24**, [#1225](https://git.chifor.me/cchifor/ailab/issues/1225); ADR 0028 amendment 2026-10-10) | `platform-dw2` | `strive-ailab`: `get` Certificate `objectstore-forge-tls`; cluster: `get` ClusterIssuer `ailab-ca` | Kustomizations `platform`, `platform-objectstore`, `platform-objectstore-certificate`; GitRepository `platform` | ailab `kubernetes/apps/infrastructure/platform-access/rbac.yaml` (`forge-objectstore-cert-observer-dw2`) |
 
 ```sh
 platform kubectl -n trueswarm-admin get deploy,jobs,clusters.postgresql.cnpg.io,backups.postgresql.cnpg.io
 platform kubectl -n trueswarm logs job/<migration-job>
 platform kubectl -n flux-system get kustomization trueswarm-admin-migration -o wide   # by name; a bare `get kustomizations` is denied
+# forge object-store certificate bootstrap (dw2 only, until 2026-10-24)
+platform kubectl get clusterissuer ailab-ca -o jsonpath='{.status.conditions}'
+platform kubectl -n flux-system get kustomization platform-objectstore -o jsonpath='{.spec.dependsOn}'
+platform kubectl get certificate objectstore-forge-tls -o jsonpath='{.metadata.generation} {.status.conditions}'
 ```
 
 The worker needs nothing new for this. It is the same ServiceAccount and the same
