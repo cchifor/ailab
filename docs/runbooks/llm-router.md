@@ -739,6 +739,21 @@ Nothing else changes, and nothing uses the pools until a pointer or key is moved
    - It smokes through a temporary `pool-mixed-smoke` route and key, and removes both even when interrupted.
    - Enable the pool only if it passes.
 
+**Cutover done (2026-10-10, about 22:25 UTC):**
+- **Release.** The image rolled out at 22:20. The start sync wrote one revision, 1259 (`pools.synced`, added
+  `pool-codex` and `pool-claude`).
+- **Revision 1260:** `sub-codex-5` restored to `codex-5:*`.
+- **Revision 1261:** `dw-1` … `dw-4` repointed to `pool-codex`. All four workers pass `validate-codex-host.sh`. The
+  journal shows `route: pool-codex`, strategy `smart`, codex-3 selected, and placement `new` then `bound`.
+- **Revision 1262:** `dw-pool` deleted.
+- **The `pool-mixed` smoke FAILED, so the pool stays off.** All 24 requests with a tool went to codex-3, because every
+  Claude account is `tools_unsupported`. The router's Claude provider runs `transport: print` (single-turn text, no
+  tools), so Claude accounts never serve requests that carry tools, in `pool-claude` or the `claude` route either.
+  - `pool-claude` serves plain chat only.
+  - Enabling Claude tools means switching `provider-claude` to `transport: sdk-resume`. That is a global change for
+    every Claude client and the owner's call. After it, re-run the smoke before enabling `pool-mixed`.
+  - The smoke removed its temporary key and pool.
+
 **Rollback.** Revert the image through a reviewed GitOps PR to
 `registry.chifor.me/llm-router/router@sha256:39517806cf64c29efb4d5b526720491dbed78d2ed684787d0be53bb49cabfce1`
 (`router-0.1.0-20261010-placement`, source `076dff0`). **First**:
