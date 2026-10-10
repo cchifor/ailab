@@ -617,3 +617,76 @@ acceptance** workflow checks the pod and the public endpoints.
     3. Then revert the image.
     4. Then remove `sub-codex-5` and the `dw-N` pointers.
     5. Then revoke the per-key `dw-N` keys.
+
+## Per-key routing release: quota-aware routing and conversation placement (2026-10-10)
+
+`router-0.1.0-20261010-placement` deploys merged llm-router main
+`076dff0cc0e487c81fd6266d4ed75824fc3e00a6`. It contains PR B
+([#92](https://git.chifor.me/cchifor/llm-router/pulls/92)) and PR C
+([#93](https://git.chifor.me/cchifor/llm-router/pulls/93)) of the design `docs/design/per-key-routing.md` in
+llm-router.
+
+**PR B: routing follows each subscription's real limits.**
+- The plan-limit readings the router already records become routing input on **every** route. They come from Codex
+  reply headers, the Claude provider and the usage check (Status → "Check now", `/usage`).
+- A full window rules its account out until the window resets.
+- **Credits exception:** a full window whose reading shows usable credits keeps the account eligible. The `usage`
+  strategy ranks it last. A `priority` route keeps sending to it while it is the first target.
+- Claude per-family weekly windows bound only that family's model id. This includes `seven_day_overage_included`,
+  which therefore never rules a whole account out.
+- A reading counts only for the signed-in seat that recorded it.
+  - Readings saved by an older image carry no seat stamp, so they **do not route** until the account's next reply or
+    check.
+  - The rollout therefore changes nothing at first; each account joins as it is next used or checked.
+- Expected at rollout, from the 2026-10-10 readings:
+  - `codex` and `codex-4` are at 100 % with no credits until 10-14 / 10-15. They leave the `codex`, `gpt-6-luna` and
+    `default` rotations after their next reading, where today the upstream refuses them.
+  - `codex-5`, the dev workers' `sub-codex-5`, is at 100 % **on credits**. It keeps serving, as today.
+
+**PR C: conversation placement**, opt-in per route (`placement: "conversation"`, `placementIdleHours`).
+- It keeps each Codex conversation (`thread-id`, else `prompt_cache_key`) on one subscription of a pool, so its prompt
+  cache stays warm.
+- If the bound account is busy, the turn is served elsewhere for that turn only. If it is gone, the conversation
+  moves.
+- On a `usage` route, an account spending credits while a sibling has quota counts as gone.
+- Responses carry `x-router-placement: new|bound|inherited|spilled|moved`. The journal and
+  `GET/DELETE /admin/v1/bindings` hold only a hash of the conversation id.
+- **No route has `placement` at rollout**, so nothing changes until one opts in. Routes without it behave as before,
+  including the `x-router-*` disclosure headers.
+
+**Schema.** SQLite `user_version` 7 adds a `placements` table. The migration is `CREATE … IF NOT EXISTS`, so an older
+image starts on the same volume and ignores the table.
+
+**The dev-worker pool is held.** The design's first pool was `pool-codex` over `codex-2`/`codex-3`/`codex-4`. It is
+not created, for these reasons:
+- Each of those accounts has concurrency 1 and serves the shared `codex`, `gpt-6-luna` and `default` routes. A pool
+  would take those slots from other agents.
+- On 2026-10-10, `codex-4` was exhausted until 10-15.
+- `codex-5` now has concurrency 16, enough for the four workers.
+
+Create a pool only from subscriptions dedicated to the dev workers. Then repoint ONE `dw-N` and watch it:
+- `x-router-placement` mostly `bound`;
+- `usage.cachedInputTokens` staying high across turns;
+- the spill rate.
+
+Only then move the others.
+
+**Image.** Built from the merged source in the pinned Node 26.10.0 runtime image: frozen install, build, production
+install, production smoke. Published by relay `release/router-placement-image`.
+- Archive `router-0.1.0-20261010-placement.tar.gz`, SHA-256
+  `e52b52e6b2d14ce240285f919081e644343d9d1cd3caa44f977fa08141b31c34` (a relay v0.2.0 asset).
+- Image: `registry.chifor.me/llm-router/router@sha256:39517806cf64c29efb4d5b526720491dbed78d2ed684787d0be53bb49cabfce1`.
+- [Image CI 77889](https://git.chifor.me/cchifor/relay/actions/runs/77889);
+  [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-77889.json).
+- Before merge: 1455 tests passed. The only failures were the known environmental ones (the image store's free-space
+  guard, `claude-sdk` timing). Each task was reviewed, and each PR had a final whole-branch review with one fix wave.
+- The usual single-replica Recreate rollout briefly interrupts service. **Router rollout acceptance** checks the pod
+  and the public endpoints.
+
+**Rollback.** Revert the image and annotations through a reviewed GitOps PR, to
+`registry.chifor.me/llm-router/router@sha256:3a106b220aa2cbb6911f90edff698b93fec5628534a4ac4c7f57b8b081df8dd7`
+(source `473c9e0f3bbf92659326a0122e1cb872665083b3`, release `router-0.1.0-20261009-model-mode`).
+- The per-key keys, `sub-codex-5` and the `dw-N` pointers keep working: PR A's features are in both images.
+- The older image ignores quota readings for routing, as before this release.
+- Its next config write drops `placement` and `placementIdleHours` from routes. Remove those first if a pool exists,
+  so that nothing depends on placement after the revert.

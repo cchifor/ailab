@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 473c9e0f3bbf92659326a0122e1cb872665083b3
-        chifor.me/release: router-0.1.0-20261009-model-mode
+        chifor.me/source-commit: 076dff0cc0e487c81fd6266d4ed75824fc3e00a6
+        chifor.me/release: router-0.1.0-20261010-placement
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,7 +121,7 @@ spec:
       terminationGracePeriodSeconds: 60 # let SIGTERM close HTTP + SQLite
       containers:
         - name: router
-          image: registry.chifor.me/llm-router/router@sha256:3a106b220aa2cbb6911f90edff698b93fec5628534a4ac4c7f57b8b081df8dd7
+          image: registry.chifor.me/llm-router/router@sha256:39517806cf64c29efb4d5b526720491dbed78d2ed684787d0be53bb49cabfce1
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
