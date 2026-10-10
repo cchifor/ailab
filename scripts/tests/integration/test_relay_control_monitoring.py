@@ -140,7 +140,12 @@ class Monitoring(unittest.TestCase):
         service = named(self.docs, 'Service', 'relay')
         for key, value in monitor['spec']['selector']['matchLabels'].items():
             self.assertEqual(service['metadata']['labels'][key], value)
-        self.assertEqual(endpoint['port'], service['spec']['ports'][0]['name'])
+        service_port = next(p for p in service['spec']['ports'] if p['name'] == endpoint['port'])
+        application = next(c for c in self.spec['containers'] if c['name'] == 'relay')
+        target_port = service_port.get('targetPort', service_port['port'])
+        if isinstance(target_port, str):
+            target_port = next(p['containerPort'] for p in application['ports'] if p['name'] == target_port)
+        self.assertEqual(target_port, 8788)
         self.assertEqual(endpoint['relabelings'], [{'targetLabel': 'job', 'replacement': 'relay-control-plane'}])
         ingress = named(self.docs, 'NetworkPolicy', 'relay-control-metrics')['spec']
         self.assertEqual(ingress['podSelector'], {'matchLabels': {'app': 'relay'}})

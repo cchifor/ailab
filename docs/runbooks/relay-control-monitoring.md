@@ -35,6 +35,8 @@ and selects only the labelled Relay Service in namespace `relay`. It scrapes
 `/metrics/agent-control-plane` every 30 seconds with a 10-second timeout and a
 100-sample ceiling. Redirects are disabled. A fixed `job="relay-control-plane"`
 label connects the scrape and rules. No tenant or agent labels come from Relay.
+Exceeding the sample ceiling rejects the entire scrape and fires
+`RelayControlCollectorUnavailable`, rather than the incomplete-schema alert.
 
 The additional ingress policy admits only the kube-prometheus-stack Prometheus
 pods in the monitoring namespace to Relay's port 8788. Existing ingress and
