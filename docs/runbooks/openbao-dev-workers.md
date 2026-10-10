@@ -599,7 +599,7 @@ helm --kubeconfig ~/.helmtest/kubeconfig uninstall smoke
 **Rollback for one host:** `rm /etc/openbao-agent/renders-kubeconfigs`, restore `agent.hcl` from its
 `.bak`, `systemctl restart openbao-agent`, then re-run the role without the cutover flag.
 
-**Retiring the legacy tep tokens (superseded — the whole testpool tree goes with ADR 0037).** The six
+**Retiring the legacy tep tokens (done — the whole testpool tree went with ADR 0037).** The six
 `tep-dw<N>-token` Secrets are *declared* in `kubernetes/apps/infrastructure/testpool/tep-access.yaml`,
 so deleting the live object just lets Flux recreate it. After a worker's cutover is verified, remove
 **its** Secret block from that file, merge, let Flux reconcile, then confirm the object is gone and

@@ -12,7 +12,7 @@ spec:
     name: flux-system
   # Six per-worker Helm deploy namespaces (ADR 0021). No dependsOn: these are plain core objects plus
   # one CiliumNetworkPolicy and one Kyverno ClusterPolicy, whose CRDs are established long before this
-  # layer. wait:false matches testpool/openbao — a namespace tree has no meaningful readiness, and a
+  # layer. wait:false matches openbao — a namespace tree has no meaningful readiness, and a
   # Kustomization that waits on one can only wedge the layer.
   #
   # ORDERING vs the token sync: openbao-k8stoken-sync (in the `openbao` Kustomization) mints tokens

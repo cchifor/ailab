@@ -35,7 +35,7 @@ metadata:
 #     the namespaces listed below.
 # pods/portforward is what reaches every ClusterIP (Postgres, Valkey, Hatchet, Keycloak admin, any
 # service's internal API) over the authenticated, audited API-server path instead of a LAN NodePort.
-# create+get on it mirrors tep-access.yaml (the 1.31->1.37 SPDY/WebSocket RBAC-verb transition).
+# create+get on it is the 1.31->1.37 SPDY/WebSocket RBAC-verb transition (the retired tep-access.yaml had the same).
 rules:
   - apiGroups: [""]
     resources:
@@ -123,7 +123,7 @@ rules:
     verbs: ["get", "list", "watch"]
 ---
 # Minting rights for openbao-k8stoken-sync, scoped by resourceNames to the observer SAs and nothing
-# else in this namespace — the same shape as the tep/helmtest mint Roles in k8stoken-sync.yaml, kept
+# else in this namespace — the same shape as the helmtest mint Roles in k8stoken-sync.yaml, kept
 # HERE next to the SAs it names so a slot change touches one file for this plane.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

@@ -23,12 +23,9 @@ spec:
       # a node-level log agent doesn't compromise it. (2026-07-22)
       tolerations:
         - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
-        # 2026-09-07: talos-env-node-1 joined 2026-09-01 with dedicated=env:NoSchedule and this
-        # list only had `agent`, so the node fell out of desiredNumberScheduled while the pod
-        # placed before the taint kept running -- controller-owned but permanently
-        # misscheduled, i.e. working yet unmanaged: not rolled on upgrade, and not recreated
-        # if deleted. Explicit value=env rather than operator=Exists on the key, so a future
-        # dedicated node class has to opt in deliberately instead of inheriting access.
+        # value=env was added 2026-09-07 for talos-env-node-1 (the test-env pool node). That node
+        # was retired 2026-10-10 (ADR 0037), so no node carries the taint; the entry is inert and
+        # kept so this DaemonSet is not rolled for nothing. Drop it with the next real change here.
         - { key: dedicated, operator: Equal, value: env, effect: NoSchedule }
     alloy:
       resources:
@@ -90,47 +87,6 @@ spec:
             stage.drop {
               expression          = "remotecfg.+noop client"
               drop_counter_reason = "alloy_remotecfg_noop"
-            }
-            // cri-log-relay ships the env node's containerd log at [debug] level (ailab#806/#807, the
-            // Kata debug evidence). At that level containerd logs every `Exec … with command [...]`
-            // verbatim and dumps each container's OCI spec (Env/Args), and the kata-agent echoes
-            // `process command: [...]` on the guest console — a lease's tokens in argv/env would land
-            // in Loki, which is unauthenticated on the LAN (loki-lan.yaml). Verified live with a
-            // synthetic secret at gate G2 (2026-09-21): both paths leaked. Redact the payloads and
-            // keep the sandbox ids, timings and kernel/agent state the investigation needs. Only this
-            // stream: the selector keeps every other pod's log untouched.
-            stage.match {
-              selector = "{app=\"cri-log-relay\"}"
-              // Every capture below is greedy to the LAST "]" of the record (RE2, no lookahead), so a
-              // bracket inside a payload ("[ok]", JSON args, array flags) cannot end the redaction
-              // early; over-redaction to the right is the safe side. The join keys the investigation
-              // needs (sandbox=<id>, container ids) sit to the LEFT of every payload.
-              //
-              // containerd's OCI spec dumps ("… spec: (*specs.Spec)…", ~37 KB per line: the whole
-              // Env/Args/mounts of a container) carry nothing about a freeze and are dropped outright.
-              stage.drop {
-                expression          = "spec: \\(\\*specs\\.Spec\\)"
-                drop_counter_reason = "cri_log_relay_oci_spec_dump"
-              }
-              // containerd: Exec/ExecSync for "<id>" with command [...], tty … / and timeout …
-              stage.replace {
-                expression = "with command \\[(.*)\\]"
-                replace    = "<redacted>"
-              }
-              // kata-agent on the guest console: "process command: [...]" (JSON-escaped)
-              stage.replace {
-                expression = "process command: \\[(.*)\\]"
-                replace    = "<redacted>"
-              }
-              // second layer for any spec-shaped record the drop did not match
-              stage.replace {
-                expression = "(?:Env|Args):\\(\\[\\]string\\)\\[(.*)\\]"
-                replace    = "<redacted>"
-              }
-              stage.replace {
-                expression = "(?i)(?:[A-Z0-9_]*(?:token|secret|password|passwd|credential|api_?key)[A-Z0-9_]*)=([^\\s\\]\\\\\"]+)"
-                replace    = "<redacted>"
-              }
             }
             forward_to = [loki.write.default.receiver]
           }

@@ -53,7 +53,6 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: The local paths below are checked against actual kustomization.yaml files.
 EXPECTED_LOCAL_PATHS = frozenset(
     {
-        "./kubernetes/apps/infrastructure/agent-sandbox",
         "./kubernetes/apps/infrastructure/agentforge-broker",
         "./kubernetes/apps/infrastructure/agentforge-ci-runners",
         "./kubernetes/apps/infrastructure/agentforge-codex-refresh",
@@ -98,7 +97,6 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # 2026-09-29 — Kyverno cleanup policies (terminated ReplicaSet pods), after platform-kyverno
         # for the same CRD-ordering reason as storage-policies. Added deliberately.
         "./kubernetes/apps/cluster-hygiene",
-        "./kubernetes/apps/infrastructure/testpool",
     }
 )
 

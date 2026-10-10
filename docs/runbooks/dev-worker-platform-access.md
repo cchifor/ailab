@@ -247,7 +247,6 @@ the same live set, and retired slots must appear in both `RETIRED_SLOTS` lists:
 | 2 | `kubernetes/apps/infrastructure/platform-access/pg-sync.yaml` | `LIVE_SLOTS` and `RETIRED_SLOTS` — **in both the CronJob and the bootstrap Job** |
 | 3 | `kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml` | the `for _n in (…)` loop |
 | 4 | `kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml` | `for host in …` and `RETIRED_SLOTS` |
-| 5 | `kubernetes/apps/infrastructure/testpool/tep-access.yaml` | the `tep-dw<N>` SAs (+ token Secret) |
 | 6 | `kubernetes/apps/infrastructure/helmtest/namespaces.yaml` (+ `rbac.yaml`, `networkpolicy.yaml`) | the per-slot namespace tree |
 | 7 | `kubernetes/infra/dev-workers/variables.tf` | the map key |
 | 8 | `inventory/hosts.yml` | the host |

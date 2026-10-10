@@ -1,15 +1,13 @@
 # helmtest — six per-worker, Helm-capable DEPLOY namespaces (ADR 0021).
 #
-# WHY SIX AND NOT ONE: `testpool` is a LEASE namespace (claim a Kata sandbox, exec into it); it is
-# deliberately not a deploy target, and widening tep-worker there would let an agent schedule a plain
-# pod alongside the Kata-isolated leases and bypass the boundary the pool exists to provide. These are
-# the deploy target instead, one per dev-worker, so six concurrent agents cannot collide on a release
+# WHY SIX AND NOT ONE: when this was written, `testpool` was the only agent namespace, a LEASE
+# namespace (Kata sandboxes, retired with the pool in ADR 0037) that deliberately was not a deploy
+# target. These are the deploy target, one per dev-worker, so six concurrent agents cannot collide on a release
 # name and one runaway chart is contained to one worker's quota.
 #
 # PSA enforce=restricted is THE control that makes `create pods` here safe: without it, pod-create in
-# a namespace is a node-compromise primitive (hostPath / privileged / hostNetwork). Note this is the
-# OPPOSITE of testpool's enforce=privileged — testpool needs privileged for DinD and confines it with
-# Kata; nothing here runs under Kata, so nothing here may be privileged.
+# a namespace is a node-compromise primitive (hostPath / privileged / hostNetwork). Nothing here runs
+# under Kata, so nothing here may be privileged.
 #
 # Consequence, documented in docs/runbooks/helmtest.md: `restricted` rejects ORDINARY charts, not just
 # privileged ones. Any container — init containers and Helm hook pods included — that omits

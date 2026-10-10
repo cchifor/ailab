@@ -2,7 +2,7 @@
 r"""Fail when the dev-worker SLOT enumerations disagree across the repo.
 
 A dev-worker "slot" (dev-worker-N / dwN) is named in many places — OpenBao AppRoles, the two
-credential syncs, the per-slot ServiceAccounts in three trees, tofu, the ansible inventory — and a
+credential syncs, the per-slot ServiceAccounts in two trees, tofu, the ansible inventory — and a
 slot retirement (plans/2026-09-21-retire-dev-workers-3-6-plan.md) or addition has to touch every
 one of them. This is the gate codex asked for in the ADR 0028 plan review: it extracts the LIVE and
 RETIRED slot sets from each file with a narrow, file-specific regex and prints every source next to
@@ -36,7 +36,6 @@ PROVISION = ROOT / "kubernetes/apps/infrastructure/security/openbao/devworker-pr
 PA_RBAC = ROOT / "kubernetes/apps/infrastructure/platform-access/rbac.yaml"
 PA_PGSYNC = ROOT / "kubernetes/apps/infrastructure/platform-access/pg-sync.yaml"
 E2E_SYNC = ROOT / "kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml"
-TEP = ROOT / "kubernetes/apps/infrastructure/testpool/tep-access.yaml"
 HELMTEST_NS = ROOT / "kubernetes/apps/infrastructure/helmtest/namespaces.yaml"
 TOFU = ROOT / "kubernetes/infra/dev-workers/variables.tf"
 INVENTORY = ROOT / "inventory/hosts.yml"
@@ -113,8 +112,6 @@ def live_sets():
     out["trueswarm-e2e-tokens/token-sync.yaml: LIVE_SLOTS"] = env_values(
         read(E2E_SYNC), "LIVE_SLOTS", "trueswarm-e2e-tokens/token-sync.yaml")
 
-    out["testpool/tep-access.yaml: ServiceAccounts"] = ints(
-        re.findall(r"^metadata: \{ name: tep-dw(\d+), namespace: testpool \}", read(TEP), re.M))
     out["helmtest/namespaces.yaml: Namespaces"] = ints(
         re.findall(r"^kind: Namespace\nmetadata:\n  name: helmtest-dw(\d+)$", read(HELMTEST_NS), re.M))
     out["infra/dev-workers/variables.tf: map keys"] = ints(
