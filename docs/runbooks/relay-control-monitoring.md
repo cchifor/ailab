@@ -118,3 +118,27 @@ component even while it is opt-in; its unfiltered push/PR workflow runs separate
 from the path-filtered native setup workflow. These tests do not establish deployed scrape
 discovery, token provisioning, live alert delivery or restore acceptance. Record
 operator results in the Relay handoff file without credential values.
+
+## Bounded holder storage observations
+
+After the matching Relay storage-observation release is reviewed, the collector
+checks fresh filesystem block/inode capacity separately from journal retention.
+Repeated reports of the same volume are deduplicated. Native-home measurements
+are metadata-only, bounded scans; missing, incomplete or expired samples are
+excluded from totals and produce an alert. No filesystem or native-home path
+becomes a metric label.
+
+`RelayHolderFilesystemNearCapacity` warns below ten percent available blocks or
+inodes. `RelayHolderStorageObservationMissing` warns when bounded-volume or
+complete native-home observations are unavailable, with a fixed `reason` label
+(`filesystem_missing`, `native_home_missing`, or `native_home_incomplete`).
+Expired native scans are included in `native_home_incomplete`; simultaneous
+faults remain separate alerts. The critical schema check
+requires these new series so an old/mismatched release cannot silently appear
+healthy. Deploy this component with the matching reviewed Relay release; older
+legacy holders need the bounded-volume policy to report filesystem capacity.
+Use sealed maintenance and the storage-volume runbook before changing a volume;
+never delete an uncertain journal or replay work in response to an alert.
+
+This change adds no secret or live activation. The existing operator rollout
+request still owns actual scrape, rotation, alert delivery and recovery evidence.

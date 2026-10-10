@@ -711,6 +711,14 @@ tests:
     values: 0+0x8
   - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
     values: 0+0x8
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystems_near_capacity{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_incomplete{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
   alert_rule_test:
   - eval_time: 6m
     alertname: RelayControlMetricSchemaIncomplete
@@ -780,7 +788,341 @@ tests:
     values: 0+0x8
   - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80",scope="extra"}
     values: 0+0x8
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystems_near_capacity{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_incomplete{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
   alert_rule_test:
   - eval_time: 6m
     alertname: RelayControlMetricSchemaIncomplete
     exp_alerts: []
+
+- name: holder_filesystem_reports_missing fires and clears on recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x7 0+0x3
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        reason: filesystem_missing
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage.
+  - eval_time: 9m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+- name: holder_native_home_reports_missing fires and clears on recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x7 0+0x3
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        reason: native_home_missing
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage.
+  - eval_time: 9m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+- name: holder_native_home_reports_incomplete fires and clears on recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_native_home_reports_incomplete{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x7 0+0x3
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        reason: native_home_incomplete
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage.
+  - eval_time: 9m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+- name: holder_filesystems_near_capacity fires and clears on recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_filesystems_near_capacity{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x7 0+0x3
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: RelayHolderFilesystemNearCapacity
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayHolderFilesystemNearCapacity
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay holder filesystem has less than ten percent capacity available
+        description: Inspect block and inode capacity on the approved volume and use sealed maintenance before
+          changing storage. The hard limit remains enforced; do not discard journals or replay uncertain work
+          to free space.
+  - eval_time: 9m
+    alertname: RelayHolderFilesystemNearCapacity
+    exp_alerts: []
+- name: missing new series holder_filesystem_reports_missing triggers schema alert
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystems_near_capacity{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_incomplete{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay critical metric schema is incomplete
+        description: A successful scrape omitted a required holder, delivery or cleanup observation. Check
+          release compatibility; missing series must not look like a healthy zero.
+- name: missing new series holder_native_home_reports_missing triggers schema alert
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystems_near_capacity{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_incomplete{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay critical metric schema is incomplete
+        description: A successful scrape omitted a required holder, delivery or cleanup observation. Check
+          release compatibility; missing series must not look like a healthy zero.
+- name: missing new series holder_native_home_reports_incomplete triggers schema alert
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystems_near_capacity{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay critical metric schema is incomplete
+        description: A successful scrape omitted a required holder, delivery or cleanup observation. Check
+          release compatibility; missing series must not look like a healthy zero.
+- name: missing new series holder_filesystems_near_capacity triggers schema alert
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_reports_stale{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holders_unreported{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_journal_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_control_commands_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_permission_decisions_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_question_answers_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_credentials_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_installations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_revocations_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_router_escrow_cleanup_pending{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_holder_native_home_reports_incomplete{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayControlMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay critical metric schema is incomplete
+        description: A successful scrape omitted a required holder, delivery or cleanup observation. Check
+          release compatibility; missing series must not look like a healthy zero.
+- name: simultaneous missing storage observations retain each reason
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_holder_native_home_reports_incomplete{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        reason: filesystem_missing
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage.
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        reason: native_home_missing
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage.
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        reason: native_home_incomplete
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage.

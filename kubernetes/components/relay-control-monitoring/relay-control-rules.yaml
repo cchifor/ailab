@@ -129,8 +129,8 @@ spec:
           restore verification; the named artifact/database restore gate remains required.
     - alert: RelayControlMetricSchemaIncomplete
       expr: up{job="relay-control-plane"} == 1 unless on(job, instance) (count by(job, instance) (count by(__name__,
-        job, instance) ({__name__=~"relay_control_(holder_reports_stale|holders_unreported|holder_journal_reports_missing|control_commands_unknown|permission_decisions_unknown|question_answers_unknown|router_credentials_unknown|router_installations_unknown|router_revocations_pending|router_escrow_cleanup_pending)",job="relay-control-plane"}))
-        == 10)
+        job, instance) ({__name__=~"relay_control_(holder_reports_stale|holders_unreported|holder_journal_reports_missing|control_commands_unknown|permission_decisions_unknown|question_answers_unknown|router_credentials_unknown|router_installations_unknown|router_revocations_pending|router_escrow_cleanup_pending|holder_filesystem_reports_missing|holder_filesystems_near_capacity|holder_native_home_reports_missing|holder_native_home_reports_incomplete)",job="relay-control-plane"}))
+        == 14)
       for: 5m
       labels:
         severity: warning
@@ -139,3 +139,21 @@ spec:
         summary: Relay critical metric schema is incomplete
         description: A successful scrape omitted a required holder, delivery or cleanup observation. Check release
           compatibility; missing series must not look like a healthy zero.
+    - alert: RelayHolderStorageObservationMissing
+      expr: label_replace(relay_control_holder_filesystem_reports_missing{job="relay-control-plane"} > 0, "reason", "filesystem_missing", "", "") or label_replace(relay_control_holder_native_home_reports_missing{job="relay-control-plane"} > 0, "reason", "native_home_missing", "", "") or label_replace(relay_control_holder_native_home_reports_incomplete{job="relay-control-plane"} > 0, "reason", "native_home_incomplete", "", "")
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label. Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are excluded from capacity totals and never establish zero usage.
+    - alert: RelayHolderFilesystemNearCapacity
+      expr: relay_control_holder_filesystems_near_capacity{job="relay-control-plane"} > 0
+      for: 2m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay holder filesystem has less than ten percent capacity available
+        description: Inspect block and inode capacity on the approved volume and use sealed maintenance before changing storage. The hard limit remains enforced; do not discard journals or replay uncertain work to free space.
