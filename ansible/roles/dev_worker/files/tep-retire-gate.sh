@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# tep-retire-gate.sh [agent.hcl] — may tasks/tep.yml delete ~/.tep and the agent's tep template yet?
+# (ADR 0037). Prints exactly one word on stdout and exits 0:
+#   safe                  no agent.hcl, or it has no tep stanza and the running agent (if any) was
+#                         started AFTER that config was written — i.e. it is running it
+#   unsafe-config         agent.hcl still renders ~/.tep/kubeconfig
+#   unsafe-stale-process  the running agent started before (or at the same instant as) the config it
+#                         should be running, so it may still hold the old tep stanza
+#   unsafe-unknown        the service state or a timestamp could not be established (a failed
+#                         query, a transitional state such as deactivating, a stopped unit that
+#                         still has a main PID); fail closed
+# Deleting a template's destination directory under a live stanza is a render failure, and the
+# agent's exit_on_retry_failure turns that into a dead agent (and no ~/.git-credentials).
+#
+# Timestamps are compared at NANOSECOND precision (stat %.9Y, systemd --timestamp=us+utc). Whole
+# seconds are not enough: on the normal path the handler restarts the agent within the same second
+# as the template write, and a restart that happened just BEFORE the write in that same second must
+# read as stale (reviewer-codex on ailab#1217).
+set -uo pipefail
+
+hcl="${1:-/etc/openbao-agent/agent.hcl}"
+
+if [ ! -f "$hcl" ]; then echo safe; exit 0; fi
+if grep -q 'tep-kubeconfig' "$hcl"; then echo unsafe-config; exit 0; fi
+# Only two answers are proof of anything: `active` (then the start time decides) or a confirmed stop
+# (inactive/failed AND no main PID left). Everything else — activating, deactivating, reloading, an
+# empty answer from a failed query — may still have the OLD agent process alive: fail closed
+# (reviewer-codex, ailab#1217).
+state=$(systemctl is-active openbao-agent 2>/dev/null)
+case "$state" in
+  active) ;;
+  inactive|failed)
+    pid=$(systemctl show openbao-agent -p MainPID --value 2>/dev/null)
+    if [ "$pid" = 0 ]; then echo safe; else echo unsafe-unknown; fi
+    exit 0 ;;
+  *) echo unsafe-unknown; exit 0 ;;
+esac
+
+# Every fail-closed exit names its reason on stderr, so "~/.tep never goes away" can be told apart
+# (an old systemd without --timestamp=us+utc, i.e. < 247, from a genuinely stale process).
+unknown() { echo "tep-retire-gate: $*" >&2; echo unsafe-unknown; exit 0; }
+started_raw=$(systemctl show openbao-agent -p ExecMainStartTimestamp --timestamp=us+utc --value 2>&1) ||
+  unknown "systemctl show --timestamp=us+utc failed (systemd >= 247 needed): $started_raw"
+# `date -d ""` means today's midnight, not an error, so an empty value must be caught here.
+[ -n "$started_raw" ] || unknown "empty ExecMainStartTimestamp"
+started=$(date -u -d "$started_raw" +%s%N 2>/dev/null) || unknown "unparseable start time: $started_raw"
+written=$(stat -c %.9Y "$hcl" 2>/dev/null | tr -d .) || unknown "stat %.9Y failed on $hcl"
+case "$started" in ''|*[!0-9]*) unknown "start time is not a number: $started" ;; esac
+case "$written" in ''|*[!0-9]*) unknown "agent.hcl mtime is not a number: $written" ;; esac
+
+if [ "$started" -gt "$written" ]; then echo safe; else echo unsafe-stale-process; fi

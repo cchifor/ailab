@@ -189,30 +189,31 @@ Secret.
   NOT installed on the ailab Proxmox nodes (192.168.0.2/.3/.4). Those accept no operator key either
   — `authorized_keys` there holds only inter-node RSA keys — so anything reaching them still uses
   the password fallback. Extending this key to them is a separate decision.
-- `af/dev-workers/<inventory_hostname>` — per-worker. Fields: `tep_kubeconfig`,
-  `helmtest_kubeconfig` (ADR 0021). Also where per-worker Gitea bot PATs will land (ADR 0020
+- `af/dev-workers/<inventory_hostname>` — per-worker. Fields: `helmtest_kubeconfig` (ADR 0021),
+  the `platform_*` fields (ADR 0028), and a stale `tep_kubeconfig` (no longer written or rendered
+  since the test-env pool was retired, ADR 0037; its token's ServiceAccount is deleted). Also where per-worker Gitea bot PATs will land (ADR 0020
   follow-up, still outstanding). `llm_router_codex_key` (since 2026-10-09) is this worker's
   router.chifor.me API key, which its Codex sends through `/usr/local/bin/codex-router-key` (`cred
   get <hostname> llm_router_codex_key`; `dev-workers.md` § "Codex through the router"). It is
   **SEEDED**: `dev-worker-N.json` in `devworker-seeds.sops.yaml` (seed-wins), unlike the two
   sync-owned fields below.
 
-  These two are **SYNC-OWNED, and that is a FOURTH precedence in this repo — not the seed-wins
+  The kubeconfig fields are **SYNC-OWNED, and that is a FOURTH precedence in this repo — not the seed-wins
   contract the rest of this page describes.** They are written by the `openbao-k8stoken-sync`
   CronJob (`kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml`), which mints a
   bound token per worker via the Kubernetes TokenRequest API and publishes a complete rendered
   kubeconfig. They are deliberately **absent from `devworker-seeds.sops.yaml`**: a seeded copy would
   be re-applied by the daily seed-wins loop and revert every worker to a stale bearer token.
 
-  > **Consequence, stated plainly: a vault wipe LOSES these two fields until a successful sync.**
+  > **Consequence, stated plainly: a vault wipe LOSES these fields until a successful sync.**
   > They are cluster-derived, so no operator action re-creates them — but "no action needed" is not
   > the same as "instant". The recovery ordering is in `openbao-recovery.md` § the *sync-owned* path
   > class, and it matters: the workers' agents exit on a missing field, so they must be restarted
   > **after** the sync completes, not before.
 
-  Both are readable with `cred get <hostname> tep_kubeconfig` — the per-worker policy already
+  They are readable with `cred get <hostname> helmtest_kubeconfig` — the per-worker policy already
   granted `read` on this subtree, so ADR 0021 needed no policy change. The agents consume them as
-  rendered files (`~/.tep/kubeconfig`, `~/.helmtest/kubeconfig`), not via `cred`.
+  rendered files (`~/.helmtest/kubeconfig`, `~/.platform/kubeconfig`), not via `cred`.
 
   **Since ADR 0028 the same per-worker path also carries four SYNC-OWNED platform-access fields**,
   and they are the same precedence class as the two above (cluster-derived, deliberately unseeded, a
@@ -544,8 +545,9 @@ git ls-remote https://git.chifor.me/cchifor/ailab.git HEAD >/dev/null && echo "f
 
 ## kubeconfig cutover (ADR 0021) — one host at a time
 
-Moves a worker's `~/.tep/kubeconfig` off the ansible+SOPS writer and onto `bao agent`, and adds
-`~/.helmtest/kubeconfig`. **This is the step that can brick every worker**, so it is gated and
+Hands a worker's `~/.helmtest/kubeconfig` to `bao agent` (every live worker cut over in 2026-09;
+until ADR 0037 retired the test-env pool this also moved `~/.tep/kubeconfig` off the ansible+SOPS
+writer — the tep steps below are history). **This is the step that can brick every worker**, so it is gated and
 serial rather than a fleet run.
 
 Why it is dangerous: `error_on_missing_key = true` plus `template_config.exit_on_retry_failure =
@@ -580,7 +582,7 @@ The role does the gating itself — you do not have to run a checklist:
    old, still-healthy process and passes regardless), then requires: the running process newer than
    `agent.hcl`, `NRestarts` unchanged across a 20s settle, `~/.git-credentials` still rendered, both
    kubeconfigs at 0600 owned by the user, and each one **actually authenticating**.
-4. On any failure: restores the previous `agent.hcl`, removes the marker so the SOPS writer resumes,
+4. On any failure: restores the previous `agent.hcl`, removes the marker if this run wrote it,
    restarts, and fails the play. **Stop the rollout there.**
 
 Verify by hand before moving to the next host, then repeat for `-l dev-worker-2` … `-6`.
@@ -592,13 +594,12 @@ helm --kubeconfig ~/.helmtest/kubeconfig upgrade --install smoke \
   -f ~/ailab/kubernetes/apps/infrastructure/helmtest/hack/values-restricted.yaml --wait --history-max 3
 helm --kubeconfig ~/.helmtest/kubeconfig test smoke --logs   # must RUN and PASS
 helm --kubeconfig ~/.helmtest/kubeconfig uninstall smoke
-tep lease -t 10 && tep run -- true && tep release            # the migrated tep path still works
 ```
 
 **Rollback for one host:** `rm /etc/openbao-agent/renders-kubeconfigs`, restore `agent.hcl` from its
 `.bak`, `systemctl restart openbao-agent`, then re-run the role without the cutover flag.
 
-**Retiring the legacy tep tokens — a git change, not a `kubectl delete`.** The six
+**Retiring the legacy tep tokens (superseded — the whole testpool tree goes with ADR 0037).** The six
 `tep-dw<N>-token` Secrets are *declared* in `kubernetes/apps/infrastructure/testpool/tep-access.yaml`,
 so deleting the live object just lets Flux recreate it. After a worker's cutover is verified, remove
 **its** Secret block from that file, merge, let Flux reconcile, then confirm the object is gone and

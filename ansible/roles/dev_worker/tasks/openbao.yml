@@ -23,10 +23,9 @@
 
 # ---- kubeconfig ownership (ADR 0021) -------------------------------------------------------------
 # DURABLE per-host state, deliberately not an in-play variable. It answers one question — "does the
-# bao agent own this host's kubeconfigs, or does the SOPS writer in tep.yml?" — and BOTH sides read
-# it, so the two writers are mutually exclusive by construction rather than by task ordering. An
-# in-play fact would be re-derived by a later tag-limited run and could hand the file back to the
-# SOPS writer while the agent is still rendering it, which is a silent flapping-credential bug.
+# bao agent render this host's kubeconfigs?" Until the test-env pool was retired (ADR 0037) it also
+# stood down tep.yml's SOPS writer of ~/.tep/kubeconfig, which is why it is durable: an in-play fact
+# would be re-derived by a later tag-limited run and could flip ownership while the agent renders.
 - name: Check whether this host has cut over to agent-rendered kubeconfigs
   ansible.builtin.stat:
     path: /etc/openbao-agent/renders-kubeconfigs
@@ -55,10 +54,10 @@
     openbao_agent_sink_readers: "{{ dev_worker_users | map(attribute='name') | list }}"
     openbao_agent_unit_description: "OpenBao agent (dev-worker credential plumbing)"
 
-# Destination directories for the kubeconfig templates, for EVERY dev_worker_users entry — tep.yml
-# only ever created ~/.tep for dev_worker_agent_user, while the agent renders for all of them. These
+# Destination directories for the kubeconfig templates, for EVERY dev_worker_users entry. These
 # must exist BEFORE the agent starts or restarts: a template whose destination directory is missing
-# is a render failure, and exit_on_retry_failure turns that into a dead agent.
+# is a render failure, and exit_on_retry_failure turns that into a dead agent. (~/.tep is no longer
+# one of them, ADR 0037; tep.yml removes it only once the running agent no longer renders into it.)
 - name: Ensure the kubeconfig destination directories exist
   ansible.builtin.file:
     path: "{{ item.0.home }}/{{ item.1 }}"
@@ -66,7 +65,7 @@
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
     mode: "0700"
-  loop: "{{ dev_worker_users | product(['.tep', '.helmtest', '.platform']) | list }}"
+  loop: "{{ dev_worker_users | product(['.helmtest', '.platform']) | list }}"
   loop_control:
     label: "{{ item.0.name }}:{{ item.1 }}"
 
@@ -78,7 +77,6 @@
     group: openbao-agent
     mode: "0640"
   loop:
-    - tep-kubeconfig
     - helmtest-kubeconfig
     - platform-kubeconfig # ADR 0028
     - platform-pgpass # ADR 0028
@@ -173,8 +171,8 @@
 # Adding the template stanzas is the one genuinely dangerous step in ADR 0021: a stanza pointing at a
 # KV field that is not populated yet exits the agent, and Restart=always then holds it in a restart
 # loop with ~/.git-credentials no longer maintained — on every host that got the config. So the
-# marker is written ONLY after this host proves, under its own AppRole identity, that both fields are
-# present, parseable, and carry a usable token.
+# marker is written ONLY after this host proves, under its own AppRole identity, that the kubeconfig
+# field is present, parseable, and carries a usable token. (Two fields until ADR 0037 retired tep.)
 #
 # Deliberately re-run on THIS host immediately before ITS cutover rather than once for all six up
 # front: a serial rollout takes time and the fields can change underneath it.
@@ -182,7 +180,7 @@
   ansible.builtin.shell: |
     set -o pipefail
     host="$(hostname -s)"
-    for field in tep_kubeconfig helmtest_kubeconfig; do
+    for field in helmtest_kubeconfig; do
       # `cred` exit status, NOT the pipeline's — `cred get ... | python3` reports python's status,
       # so a permission error would read as success.
       kc="$(/usr/local/bin/cred get "$host" "$field")" || { echo "cred get $host/$field FAILED" >&2; exit 91; }
@@ -191,7 +189,7 @@
     d = json.loads(sys.stdin.read())          # the sync writes JSON, which is valid YAML
     ctx = next(c for c in d["contexts"] if c["name"] == d["current-context"])["context"]
     cl = next(c for c in d["clusters"] if c["name"] == ctx["cluster"])["cluster"]
-    assert cl["server"] == "{{ dev_worker_tep_server }}", cl["server"]
+    assert cl["server"] == "{{ dev_worker_kube_server }}", cl["server"]
     assert base64.b64decode(cl["certificate-authority-data"]).startswith(b"-----BEGIN CERTIFICATE")
     tok = next(u for u in d["users"] if u["name"] == ctx["user"])["user"]["token"]
     p = tok.split(".")[1]; p += "=" * (-len(p) % 4)
@@ -214,10 +212,8 @@
   ansible.builtin.copy:
     content: |
       # Written by ansible (role: dev_worker, ADR 0021) after this host's KV pre-flight passed.
-      # PRESENT  -> openbao-agent renders ~/.tep/kubeconfig and ~/.helmtest/kubeconfig, and
-      #             tasks/tep.yml stands its SOPS writer down.
-      # ABSENT   -> the legacy SOPS path owns ~/.tep/kubeconfig and the agent emits no kubeconfig
-      #             stanzas. Deleting this file is the rollback.
+      # PRESENT  -> openbao-agent renders ~/.helmtest/kubeconfig.
+      # ABSENT   -> the agent emits no kubeconfig stanzas. Deleting this file is the rollback.
       cutover={{ ansible_date_time.iso8601 }}
     dest: /etc/openbao-agent/renders-kubeconfigs
     owner: root
@@ -349,14 +345,13 @@
         {% endfor %}
         {% endif %}
         {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
-        # 4. post-cutover only. Mode and existence alone would happily accept the OLD SOPS-written
-        #    ~/.tep/kubeconfig sitting at the same path, so each one is also used for a live call.
+        # 4. post-cutover only. Mode and existence alone would accept a stale file at the same path,
+        #    so the kubeconfig is also used for a live call.
         {% for user in dev_worker_users %}
-        for kc in {{ user.home }}/.tep/kubeconfig {{ user.home }}/.helmtest/kubeconfig; do
+        for kc in {{ user.home }}/.helmtest/kubeconfig; do
           [ -s "$kc" ] || { echo "$kc not rendered" >&2; exit 1; }
           [ "$(stat -c '%a %U' "$kc")" = "600 {{ user.name }}" ] || { echo "$kc wrong mode/owner" >&2; exit 1; }
         done
-        kubectl --kubeconfig {{ user.home }}/.tep/kubeconfig get sandboxclaims >/dev/null           || { echo "tep kubeconfig does not authenticate" >&2; exit 1; }
         kubectl --kubeconfig {{ user.home }}/.helmtest/kubeconfig auth can-i create secrets >/dev/null           || { echo "helmtest kubeconfig does not authenticate" >&2; exit 1; }
         {% endfor %}
         {% endif %}
@@ -415,14 +410,12 @@
       changed_when: false
 
   rescue:
-    # Without this, a failed cutover leaves the host with NO kubeconfig writer at all: the agent is
-    # dead and tep.yml has already stood down.
-    # The marker is removed ONLY IF THIS RUN CREATED IT. Removing it unconditionally is wrong on an
-    # already-migrated host: a routine `-t openbao` run that trips the health check for an unrelated
-    # reason (a briefly sealed vault, say) would hand ownership back to a SOPS writer whose
-    # tep-tokens.sops.yaml has since been DELETED, leaving the host with no kubeconfig writer at all
-    # and no obvious sign of it. On an already-cut-over host the correct rollback is the agent config
-    # alone — ownership is not in question there.
+    # Without this, a failed cutover leaves the host with a dead agent and no kubeconfig writer.
+    # The marker is removed ONLY IF THIS RUN CREATED IT: on an already-cut-over host the correct
+    # rollback is the agent config alone (a routine `-t openbao` run can trip the health check for an
+    # unrelated reason, e.g. a briefly sealed vault). Restoring the previous agent.hcl may bring back
+    # a config that still renders ~/.tep/kubeconfig on a host converging past ADR 0037 — which is why
+    # tep.yml runs after this file and deletes ~/.tep only once the live config no longer uses it.
     - name: Restore the previous agent config, and ownership only if this run took it
       ansible.builtin.shell: |
         set -eu
@@ -440,7 +433,7 @@
       ansible.builtin.fail:
         msg: >-
           openbao-agent did not come up healthy on {{ inventory_hostname }}. The previous agent.hcl
-          was restored and kubeconfig ownership returned to the SOPS writer. STOP the rollout - do
+          was restored (and the kubeconfig marker removed if this run wrote it). STOP the rollout - do
           not run the remaining workers until this is understood
           (docs/runbooks/openbao-dev-workers.md, "kubeconfig cutover").
 
@@ -542,12 +535,11 @@
         `FORGE_RELEASE_USERNAME={{ dev_worker_gitea_user }}`; the same field serves `FORGE_CATALOG_TOKEN`.
       {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
 
-      ## Kubernetes: two kubeconfigs, two different jobs
+      ## Kubernetes: your helm test namespace
 
-      Both are rendered by the local bao agent and refresh themselves — never edit or copy them.
+      Rendered by the local bao agent; it refreshes itself — never edit or copy it. (There is no
+      test-env pool and no `tep` any more; where a repo's tests run is in that repo's own docs.)
 
-      - `~/.tep/kubeconfig` — namespace `testpool`. LEASE a sandbox (`tep lease`, `tep run`,
-        `tep release`). It can claim sandboxes and exec into them; it CANNOT deploy.
       - `~/.helmtest/kubeconfig` — namespace `{{ dev_worker_helmtest_namespace }}`, yours alone.
         This is where you `helm install`. The namespace is already the current context:
 
@@ -566,7 +558,7 @@
          NetworkPolicies, DaemonSets, CRDs or anything cluster-scoped. A chart whose own Role asks
          for permissions you lack (events, endpoints, leases) is REJECTED by the RBAC escalation
          check — that is a chart-compatibility problem, not a broken cluster.
-      4. You cannot deploy into `testpool`, into another worker's namespace, or anywhere else.
+      4. You cannot deploy into another worker's namespace, or anywhere else.
          If you need more than this namespace allows, say so — do not go looking for a wider
          credential.
       {% endif %}

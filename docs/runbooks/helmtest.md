@@ -1,8 +1,8 @@
 # Runbook: `helmtest` — deploying a chart from a dev-worker
 
 Six per-worker namespaces (`helmtest-dw1..6`) where an agent may actually `helm install`, and the
-credential that reaches them. Design + rejected alternatives: **ADR 0021**. The lease pool this is
-*not*: `kubernetes/apps/infrastructure/testpool/README.md`. The credential plane it rides on:
+credential that reaches them. Design + rejected alternatives: **ADR 0021** (its `tep` half, the Kata
+lease pool, was retired by **ADR 0037**). The credential plane it rides on:
 `docs/runbooks/openbao-dev-workers.md`.
 
 **Context for every command:** `kubectl --context admin@ai` (the default context flip-flops — always
@@ -12,11 +12,11 @@ pass it explicitly), repo root as CWD.
 
 | File | Namespace | For |
 |---|---|---|
-| `~/.tep/kubeconfig` | `testpool` | **Leasing** a Kata sandbox: `tep lease` / `tep run` / `tep release`. Can claim sandboxes and exec into them. **Cannot deploy** — no create on anything. |
 | `~/.helmtest/kubeconfig` | `helmtest-dw<N>` | **Deploying**: `helm install/upgrade/test/uninstall`. Yours alone; no other worker can reach it. |
 
-Both are rendered by the local `bao agent` from `af/dev-workers/<hostname>` and refresh themselves.
-**Never edit, copy, or hand one to anything else** — the next render overwrites it, and a copy is a
+It is rendered by the local `bao agent` from `af/dev-workers/<hostname>` and refreshes itself.
+(`~/.tep/kubeconfig` and the `tep` CLI are gone, ADR 0037.)
+**Never edit, copy, or hand it to anything else** — the next render overwrites it, and a copy is a
 bearer token with a month of life on it.
 
 If a file is missing, the host has not cut over yet (ADR 0021 Phase 3); see
@@ -108,9 +108,9 @@ Anything it flags either gets disabled through chart values, or becomes a review
 `service.type: ClusterIP`.
 
 Network: same-namespace traffic is allowed (so `helm test` hooks can reach their Service). Everything
-else is denied — other `helmtest` namespaces, `testpool`, the OpenBao ClusterIP and NodePort, the LAN,
+else is denied — other `helmtest` namespaces, the OpenBao ClusterIP and NodePort, the LAN,
 the node IPs, and the internet. DNS resolves cluster-local names only. If your chart needs to pull
-something at runtime, it will not work here; bake it into the image or use a leased sandbox.
+something at runtime, it will not work here; bake it into the image.
 
 Image *pulls* are unaffected — containerd does those on the node, outside pod policy.
 
