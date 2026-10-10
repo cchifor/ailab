@@ -4,10 +4,10 @@
 Emits kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml — a ConfigMap labeled
 grafana_dashboard=1 so the kube-prometheus-stack Grafana sidecar auto-loads it (and it is the default
 home dashboard via grafana.ini default_home_dashboard_path). Sections (collapsible rows):
-  Estate Health — FIRST: is anything down right now (nodes, hypervisors, critical alerts, Flux,
-                 stuck teardowns, warm envs, kubelet targets) + a per-node readiness timeline and
-                 the firing-alert table. Added after the 2026-09-20 env-node outage, which this
-                 dashboard could only show as "Envs Ready = 0" in its eighth row.
+  Estate Health — FIRST: is anything down right now (nodes + hypervisors, Flux + stuck teardowns,
+                 test envs) and what alerted in the selected range + a per-node readiness
+                 timeline and the alert table. Added after the 2026-09-20 env-node outage, which
+                 this dashboard could only show as "Envs Ready = 0" in its eighth row.
   Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node")
   Instances    — pve-exporter per-guest (VMs + LXCs), label `id` = qemu/<vmid> | lxc/<vmid>
   AI           — amdgpu_* (iGPU) + llamacpp:* + AI-node CPU (node_exporter on the LXCs)
@@ -81,22 +81,105 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
 
 
 def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="value", graph="area",
-         mappings=None, value_size=None):
+         mappings=None, value_size=None, avg=False, description=None):
+    """`avg=True` is for a utilisation tile: a RANGE query reduced to its mean, so the number is
+    the average over the selected time range and the sparkline draws the range. Every other
+    tile is an instant query, read at the END of the range (a state: up, queue depth, age)."""
     defaults = {"unit": unit, "decimals": decimals,
                 "thresholds": {"mode": "absolute", "steps": steps or [{"color": "blue", "value": None}]}}
     if mappings:
         defaults["mappings"] = mappings
-    options = {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+    options = {"reduceOptions": {"calcs": ["mean" if avg else "lastNotNull"], "fields": "", "values": False},
                "colorMode": color, "graphMode": graph, "textMode": "auto", "justifyMode": "auto"}
     if value_size:
         options["text"] = {"valueSize": value_size}
-    return {
+    panel = {
         "id": _nid(), "type": "stat", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": {"defaults": defaults, "overrides": []},
         "options": options,
-        "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "instant": True}],
+        "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "instant": not avg, "range": avg}],
     }
+    if description or avg:
+        panel["description"] = description or "Mean over the selected time range; the sparkline draws it."
+    return panel
+
+
+def multistat(title, x, y, w, h, items, mappings=None, description=None):
+    """ONE tile carrying several values side by side, each with its own name and colour. An item is
+    a count_item (absolute thresholds) or a ready_item: "N ready", green only when N reaches the
+    LIVE total and red below. The total is not hard-coded - it is a second, instant query (refId
+    T<i>) that a "Config from query results" transformation turns into that value's `max`, so the
+    percentage thresholds (100 = all) follow the estate as nodes or Flux objects come and go; the
+    transformation also removes the T frame, so it never renders. The total also rides on the
+    value as label `of` (count_values), which the name shows: "k8s of 7"."""
+    targets, overrides, transformations = [], [], []
+    for i, it in enumerate(items):
+        ref = f"R{i}"
+        if "total" in it:
+            v = it["value"]
+            expr = f'(({v}) + on() group_left(of) (0 * count_values("of", {it["total"]}))) or on() ({v})'
+            targets.append({"refId": ref, "datasource": _ds(), "expr": expr, "instant": True,
+                            "legendFormat": f"{it['name']} {it['of']} {{{{of}}}}"})
+            targets.append({"refId": f"T{i}", "datasource": _ds(), "expr": it["max"], "instant": True,
+                            "legendFormat": "max"})
+            transformations.append({"id": "configFromData", "options": {
+                "configRefId": f"T{i}", "mappings": [{"fieldName": "max", "handlerKey": "max"}],
+                "applyTo": {"id": "byFrameRefID", "options": ref}}})
+            props = [{"id": "min", "value": 0},
+                     {"id": "thresholds", "value": {"mode": "percentage", "steps": it["steps"]}}]
+        else:
+            targets.append({"refId": ref, "datasource": _ds(), "expr": it["expr"], "instant": True,
+                            "legendFormat": it["name"]})
+            props = [{"id": "thresholds", "value": {"mode": "absolute", "steps": it["steps"]}}]
+        overrides.append({"matcher": {"id": "byFrameRefID", "options": ref}, "properties": props})
+    defaults = {"unit": "none", "decimals": 0,
+                "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": None}]}}
+    if mappings:
+        defaults["mappings"] = mappings
+    panel = {
+        "id": _nid(), "type": "stat", "title": title, "datasource": _ds(),
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "fieldConfig": {"defaults": defaults, "overrides": overrides},
+        "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+                    "colorMode": "value", "graphMode": "none", "textMode": "value_and_name",
+                    "justifyMode": "center", "orientation": "auto"},
+        "transformations": transformations,
+        "targets": targets,
+    }
+    if description:
+        panel["description"] = description
+    return panel
+
+
+# Percentage of the item's live total (multistat): red below it, green at it.
+READY_STEPS = [{"color": "red", "value": None}, {"color": "green", "value": 100}]
+# "0 bad things" must be distinguishable from "the exporter is gone" — `or vector(0)` alone renders
+# absent telemetry as a healthy green 0, during exactly the monitoring failure the Estate Health row
+# exists to expose (the 2026-09-20 outage story started with a target down for 6 h;
+# reviewer-claude/codex on #801). So a fail-safe value is: the count -> else count(live)*0 (the
+# exporter is there, the answer is 0) -> else absent(live)*-1, mapped to an orange "no data".
+NO_DATA_MAP = [{"type": "value", "options": {"-1": {"text": "no data", "color": "orange", "index": 0}}}]
+PAUSED_MAP = [{"type": "value", "options": {"-2": {"text": "paused", "color": "blue", "index": 0}}}]
+
+
+def count_item(name, expr, steps):
+    return {"name": name, "expr": expr, "steps": steps}
+
+
+def ready_item(name, ready, total, live, paused=None, steps=READY_STEPS, of="of", total_fallback=None):
+    """`ready`: the series set counted as ready. `total`: a label-less expression for how many there
+    should be; `of` is the word between the name and it. `total_fallback`: the `max` to use when
+    `total` returns nothing - without one Grafana falls back to an automatic max, the value itself,
+    and ANY value reads green (reviewer-claude on #1211). Only needed where `total` and `live`
+    come from different metrics; the name's total then reads blank. `live`: a series set whose
+    presence proves the exporter is up (NO_DATA_MAP).
+    `paused`: an expression that returns a series while the thing is DELIBERATELY at zero - then
+    nothing ready reads "paused" (-2, PAUSED_MAP), not a red 0."""
+    pz = f' or on() (vector(-2) and on() ({paused}))' if paused else ''
+    value = f'count({ready}){pz} or on() (count({live}) * 0) or on() (absent({live}) * -1)'
+    return {"name": name, "value": value, "total": total, "steps": steps, "of": of,
+            "max": f'({total}) or on() vector({total_fallback})' if total_fallback is not None else total}
 
 
 def bargauge(title, x, y, w, h, expr, unit="percent", legend="{{id}}", maxv=100, steps=None):
@@ -183,9 +266,12 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
     # single instant query -> table (no join); for label-carrying gauges like node_cpu_scaling_governor.
     # `order` lists ORIGINAL column names left to right (unlisted ones keep their place); `sort`
     # names the ORIGINAL column rows are sorted by, ascending, and runs BEFORE organize — so a
-    # helper column (a `rank` label) can decide the order and then be dropped; `include`
-    # (ORIGINAL names) keeps ONLY those columns — the way to bound a table whose label set varies
-    # per row (alerts).
+    # helper column (a `rank` label) can decide the order and then be dropped. `sort` may also be a
+    # list of (column, desc) pairs, LEAST significant first: each is its own sortBy, and the sort is
+    # stable, so the last pair decides and the earlier ones break its ties. `include` (ORIGINAL
+    # names) keeps ONLY those columns — the way to bound a table whose label set varies per row
+    # (alerts).
+    sorts = [(sort, False)] if isinstance(sort, str) else (sort or [])
     return {
         "id": _nid(), "type": "table", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
@@ -193,7 +279,7 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
                                                 "cellOptions": {"type": "auto"}}},
                         "overrides": overrides or []},
         "options": {"showHeader": True, "footer": {"show": False}, "cellHeight": "sm"},
-        "transformations": ([{"id": "sortBy", "options": {"sort": [{"field": sort, "desc": False}]}}] if sort else [])
+        "transformations": [{"id": "sortBy", "options": {"sort": [{"field": f, "desc": d}]}} for f, d in sorts]
         + [{"id": "organize", "options": {
             "excludeByName": {k: True for k in exclude}, "renameByName": rename,
             "indexByName": {n: i for i, n in enumerate(order or [])},
@@ -402,13 +488,14 @@ panels += [
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
     stat("Physical CPU Cores", 4, 1, 4, 4, f'count(node_cpu_seconds_total{{{HOSTS},mode="idle"}})'),
     stat("Physical Memory", 8, 1, 4, 4, f'sum(node_memory_MemTotal_bytes{{{HOSTS}}})', unit="bytes", decimals=1),
-    stat("Fleet CPU Used", 12, 1, 4, 4,
+    stat("Avg Fleet CPU", 12, 1, 4, 4,
          f'100 * (1 - avg(rate(node_cpu_seconds_total{{{HOSTS},mode="idle"}}[5m])))',
-         unit="percent", decimals=1, steps=PCT),
-    stat("Fleet Memory Used", 16, 1, 4, 4,
+         unit="percent", decimals=1, steps=PCT, avg=True),
+    stat("Avg Fleet Memory", 16, 1, 4, 4,
          f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{HOSTS}}}) / sum(node_memory_MemTotal_bytes{{{HOSTS}}}))',
-         unit="percent", decimals=1, steps=PCT),
-    stat("Fleet Load (1m sum)", 20, 1, 4, 4, f'sum(node_load1{{{HOSTS}}})', unit="short", decimals=2),
+         unit="percent", decimals=1, steps=PCT, avg=True),
+    stat("Avg Fleet Load", 20, 1, 4, 4, f'sum(node_load1{{{HOSTS}}})', unit="short", decimals=2, avg=True,
+         description="The hosts' 1-minute load averages, summed; mean over the selected time range."),
     ts("CPU % per Hypervisor", 0, 5, 8, 8,
        [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{HOSTS},mode="idle"}}[5m])))'],
        "percent", maxv=100),
@@ -441,8 +528,8 @@ panels += [
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 6}]),
     stat("vCPUs Allocated", 6, 22, 6, 4, f'sum(pve_cpu_usage_limit{{{GUEST}}})'),
     stat("Memory Allocated", 12, 22, 6, 4, f'sum(pve_memory_size_bytes{{{GUEST}}})', unit="bytes", decimals=1),
-    stat("CPU Used by Instances (cores)", 18, 22, 6, 4,
-         f'sum(pve_cpu_usage_ratio{{{GUEST}}} * pve_cpu_usage_limit{{{GUEST}}})', decimals=2),
+    stat("Avg CPU Used by Instances (cores)", 18, 22, 6, 4,
+         f'sum(pve_cpu_usage_ratio{{{GUEST}}} * pve_cpu_usage_limit{{{GUEST}}})', decimals=2, avg=True),
     ts("CPU Rate per Instance (cores)", 0, 26, 12, 8,
        [gl(f'(pve_cpu_usage_ratio{{{GUEST}}} * pve_cpu_usage_limit{{{GUEST}}})')], "short",
        legends=["{{name}}"], decimals=2),
@@ -531,12 +618,12 @@ panels += [
          steps=[{"color": "blue", "value": None}, {"color": "orange", "value": 1}, {"color": "green", "value": 12}]),
     stat("Runner Cores", 8, 87, 4, 4, f'count(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}) or vector(0)'),
     stat("Runner Memory", 12, 87, 4, 4, f'sum(node_memory_MemTotal_bytes{{{RUNNERS}}}) or vector(0)', unit="bytes", decimals=1),
-    stat("Fleet CPU Used", 16, 87, 4, 4,
+    stat("Avg Fleet CPU", 16, 87, 4, 4,
          f'100 * (1 - avg(rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))',
-         unit="percent", decimals=1, steps=PCT),
-    stat("Fleet Memory Used", 20, 87, 4, 4,
+         unit="percent", decimals=1, steps=PCT, avg=True),
+    stat("Avg Fleet Memory", 20, 87, 4, 4,
          f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{RUNNERS}}}) / sum(node_memory_MemTotal_bytes{{{RUNNERS}}}))',
-         unit="percent", decimals=1, steps=PCT),
+         unit="percent", decimals=1, steps=PCT, avg=True),
     ts("CPU % per Runner", 0, 91, 12, 7,
        [f'100 * (1 - avg by (instance, nodename) (rate(node_cpu_seconds_total{{{RUNNERS},mode="idle"}}[5m])))'],
        "percent", maxv=100, legends=[RUNNER_LEGEND]),
@@ -560,12 +647,12 @@ panels += [
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
     stat("Worker Cores", 4, 106, 4, 4, f'count(node_cpu_seconds_total{{{WORKERS},mode="idle"}}) or vector(0)'),
     stat("Worker Memory", 8, 106, 4, 4, f'sum(node_memory_MemTotal_bytes{{{WORKERS}}}) or vector(0)', unit="bytes", decimals=1),
-    stat("Fleet CPU Used", 12, 106, 6, 4,
+    stat("Avg Fleet CPU", 12, 106, 6, 4,
          f'100 * (1 - avg(rate(node_cpu_seconds_total{{{WORKERS},mode="idle"}}[5m])))',
-         unit="percent", decimals=1, steps=PCT),
-    stat("Fleet Memory Used", 18, 106, 6, 4,
+         unit="percent", decimals=1, steps=PCT, avg=True),
+    stat("Avg Fleet Memory", 18, 106, 6, 4,
          f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{WORKERS}}}) / sum(node_memory_MemTotal_bytes{{{WORKERS}}}))',
-         unit="percent", decimals=1, steps=PCT),
+         unit="percent", decimals=1, steps=PCT, avg=True),
     ts("CPU % per Worker", 0, 110, 12, 7,
        [f'100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{{{WORKERS},mode="idle"}}[5m])))'],
        "percent", maxv=100),
@@ -589,22 +676,34 @@ panels += [
 ENVNODE = 'instance=~"192.168.0.37:9100"'   # env-pool Talos worker node_exporter (extend when env-node-2 lands)
 TP = 'namespace="testpool"'
 TPPOD = f'kube_pod_info{{{TP},created_by_kind="Sandbox"}}'
+WARM_POOL = 'sum(agentsandbox_warmpool_spec_replicas{exported_namespace="testpool"})'
+# Ready envs (warm + leased) of the warm-pool size. Red at none - the TestpoolNoWarmCapacity
+# condition - orange while part of the pool is still refilling after leases, green at the size.
+# "paused" while the pool is DELIBERATELY at 0 (#880, 2026-09-27): the old red 0 sat on the
+# dashboard for the whole pause, exactly the false alarm the alert's `unless` already removes.
+# FAIL-OPEN like that alert: with no spec metric there is no "paused" and no pool size, and the
+# tile reads as before the pool had one - green at 1+ Ready, red at 0 (total_fallback 1).
+ENVS_READY = ready_item(
+    "envs", f'(kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}',
+    WARM_POOL, 'kube_pod_info', paused=f'{WARM_POOL} == 0', of="· warm pool", total_fallback=1,
+    steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1}, {"color": "green", "value": 100}])
+ENVS_READY_DESC = ("Ready test environments (warm + leased) of the warm-pool size. "
+                   "\"paused\" while the SandboxWarmPool is deliberately at 0 replicas.")
 panels.append(row("Test Env Pool (leasable Kata DinD environments — testpool)", 124))
 panels += [
-    stat("Envs Ready", 0, 125, 4, 4,
-         f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
+    multistat("Envs Ready", 0, 125, 4, 4, [ENVS_READY], mappings=NO_DATA_MAP + PAUSED_MAP,
+              description=ENVS_READY_DESC),
     stat("Envs Total (warm + leased)", 4, 125, 4, 4, f'(count({TPPOD}) or vector(0))'),
     stat("Env Volumes (PVCs)", 8, 125, 4, 4, f'(count(kube_persistentvolumeclaim_info{{{TP}}}) or vector(0))'),
     stat("Operator Up", 12, 125, 4, 4,
          'kube_deployment_status_replicas_available{namespace="agent-sandbox-system",deployment="agent-sandbox-controller"}',
          steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
-    stat("Env Node CPU Used", 16, 125, 4, 4,
+    stat("Avg Env Node CPU", 16, 125, 4, 4,
          f'100 * (1 - avg(rate(node_cpu_seconds_total{{{ENVNODE},mode="idle"}}[5m])))',
-         unit="percent", decimals=1, steps=PCT),
-    stat("Env Node Memory Used", 20, 125, 4, 4,
+         unit="percent", decimals=1, steps=PCT, avg=True),
+    stat("Avg Env Node Mem", 20, 125, 4, 4,
          f'100 * (1 - sum(node_memory_MemAvailable_bytes{{{ENVNODE}}}) / sum(node_memory_MemTotal_bytes{{{ENVNODE}}}))',
-         unit="percent", decimals=1, steps=PCT),
+         unit="percent", decimals=1, steps=PCT, avg=True),
     ts("Environments over Time (Ready / total)", 0, 129, 8, 7,
        [f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
         f'(count({TPPOD}) or vector(0))'],
@@ -634,10 +733,19 @@ panels += [
 # Two panel-level traps this row is written to avoid:
 #   * The "Quarantined" stat used reviewbot_quarantined_jobs, the CUMULATIVE gauge, which
 #     never falls — after any single quarantine it is permanently red and therefore ignored.
-#     The 24h-windowed twin is the one that answers "is something wrong NOW".
+#     It is read as increase() over the selected range now (below).
 #   * Counters must be shown as increase() over a window, not as raw totals: a monotonic
 #     total climbs forever and its slope is invisible at a glance.
-panels.append(row("PR Reviewers (automatic LLM review bots — reviewbot)", 136))
+# THE WINDOW IS THE TIME PICKER'S (2026-10-10): the counts and maxima read $__range, so they
+# answer for the range on screen; they were fixed at 1 h / 24 h / the daemon's lifetime and showed
+# the same figure on every range. round(): increase() extrapolates (1.0003 failures).
+def gauge_rises(metric):
+    """How much a count-GAUGE rose in the range: the sum of its positive 1 m steps. Falls are
+    ignored instead of read as counter resets, which is what increase() would do."""
+    return f'sum(sum_over_time(clamp_min({metric} - {metric} offset 1m, 0)[$__range:1m]))'
+
+
+panels.append(row("PR Reviewers (automatic LLM review bots — reviewbot; counts are over the selected range)", 136))
 panels += [
     stat("Claude Bot Heartbeat Age", 0, 137, 4, 4,
          'time() - reviewbot_heartbeat_timestamp_seconds{persona="claude"}',
@@ -654,21 +762,25 @@ panels += [
          'max(reviewbot_oldest_job_age_seconds) or vector(0)', unit="s",
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 1800},
                 {"color": "red", "value": 7200}]),
-    # Orange at 3 mirrors ReviewbotReviewFailures / ReviewbotReviewTimeouts exactly, so the
-    # panel turning amber and the alert firing mean the same thing. Healthy is a flat 0:
-    # every one of the 66 failures in the 48h around 2026-09-06 was the same broken PR.
-    stat("Review Failures (1h)", 16, 137, 4, 4,
-         'sum(increase(reviewbot_llm_failures_total[1h])) or vector(0)',
+    # Orange at 3 is ReviewbotReviewFailures / ReviewbotReviewTimeouts' count (theirs is per
+    # hour, this is per range). Healthy is a flat 0: every one of the 66 failures in the 48h
+    # around 2026-09-06 was the same broken PR.
+    stat("Review Failures", 16, 137, 4, 4,
+         'round(sum(increase(reviewbot_llm_failures_total[$__range]))) or vector(0)',
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
-                {"color": "red", "value": 10}]),
-    stat("Deadline Timeouts (1h)", 20, 137, 4, 4,
-         'sum(increase(reviewbot_llm_timeouts_total[1h])) or vector(0)',
+                {"color": "red", "value": 10}], description="In the selected time range."),
+    stat("Deadline Timeouts", 20, 137, 4, 4,
+         'round(sum(increase(reviewbot_llm_timeouts_total[$__range]))) or vector(0)',
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
-                {"color": "red", "value": 10}]),
-    # 24h window, NOT the cumulative gauge — see the header.
-    stat("Quarantined (24h)", 0, 141, 4, 4,
-         'sum(reviewbot_quarantined_recent_jobs) or vector(0)',
-         steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}]),
+                {"color": "red", "value": 10}], description="In the selected time range."),
+    # The cumulative gauge's RISES in the range, NOT its value — see the header. Not increase():
+    # the gauge can fall (a quarantined job requeued: once in 30 days), and increase() reads a
+    # fall as a counter reset and adds the gauge's whole value - a false red 9 for one requeue
+    # (reviewer-claude on #1211). The daemon's own 24 h twin, reviewbot_quarantined_recent_jobs,
+    # is a fixed window and stays in the Errors panel below.
+    stat("Quarantined", 0, 141, 4, 4, f'{gauge_rises("reviewbot_quarantined_jobs")} or vector(0)',
+         steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}],
+         description="In the selected time range."),
     # A job held this long is wedged, not working: one attempt is capped at llm_timeout_s
     # (900s claude / 600s codex) including the fallback. Matches ReviewbotWorkerStuck.
     stat("Running Job Age", 4, 141, 4, 4,
@@ -679,21 +791,26 @@ panels += [
     # because the deadlines differ (claude 900s, codex 600s): a single max() across both,
     # thresholded on claude's budget, renders a codex run one second from ITS deadline as
     # green — blind for the tighter persona, which is the one that would break first.
-    # Orange at two thirds of each persona's own budget.
+    # Orange at two thirds of each persona's own budget. The longest IN THE RANGE: the max of
+    # the per-review `_last` gauge over it (reviewbot_llm_seconds_max is the daemon's lifetime
+    # max). The gauge holds a review's figure until the next one lands, so a quiet range still
+    # shows the last review before it.
     stat("Longest Review — claude", 8, 141, 4, 4,
-         'max(reviewbot_llm_seconds_max{persona="claude"}) or vector(0)', unit="s",
+         'max(max_over_time(reviewbot_llm_seconds_last{persona="claude"}[$__range])) or vector(0)', unit="s",
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 600},
                 {"color": "red", "value": 900}]),
     stat("Longest Review — codex", 12, 141, 4, 4,
-         'max(reviewbot_llm_seconds_max{persona="codex"}) or vector(0)', unit="s",
+         'max(max_over_time(reviewbot_llm_seconds_last{persona="codex"}[$__range])) or vector(0)', unit="s",
          steps=[{"color": "green", "value": None}, {"color": "orange", "value": 400},
                 {"color": "red", "value": 600}]),
     stat("Peak Output Tokens", 16, 141, 4, 4,
-         'max(reviewbot_llm_output_tokens_max) or vector(0)'),
-    # 24h, not the cumulative total: the total only ever climbs and says nothing about now.
-    # The "Reviews Completed over Time" panel below carries the running figure.
-    stat("Reviews Done (24h)", 20, 141, 4, 4,
-         'sum(increase(reviewbot_jobs_done[24h])) or vector(0)'),
+         'max(max_over_time(reviewbot_llm_output_tokens_last[$__range])) or vector(0)'),
+    # The range's rises, not the cumulative total: the total only ever climbs and says nothing
+    # about now. A COUNT of done jobs, not a counter - a migration can move done jobs out
+    # (reviewbot.py's size-cap requeue) - so gauge_rises, as for Quarantined. The "Reviews
+    # Completed over Time" panel below carries the running figure.
+    stat("Reviews Done", 20, 141, 4, 4, f'{gauge_rises("reviewbot_jobs_done")} or vector(0)',
+         description="In the selected time range."),
     # THE ERROR PANEL. Failures and timeouts are separate series because they mean different
     # things and have different remedies: a timeout says the deadline is too tight for the
     # work, a failure says the review could not be produced at all (unparseable output, an
@@ -738,84 +855,125 @@ panels += [
 # answer: talos-env-node-1 was NotReady for 3 h and the only trace was "Envs Ready = 0" in the eighth
 # row. Everything here is a status signal (colour MEANS good/bad, so green/red is used only where
 # a value is a state, and every state also carries a number or a text label — never colour alone).
-# 31 warnings were firing on a healthy day, so the Warnings tile is deliberately NOT red-thresholded;
-# the outage-class tiles (nodes, hypervisors, criticals, Flux, stuck teardowns, warm envs, kubelet)
-# are. The timeline turns an outage into a red bar of its exact duration on the default 6 h range.
+#
+# FOUR TILES, not eight (2026-10-10): the first cut had a tile per signal, several saying the same
+# thing twice (Nodes NotReady beside Hypervisors Up, Kubelet Targets Down beside both). They are
+# grouped now, and every "how many are fine" value reads "N of total" — green only when ALL are,
+# red below — instead of a count of bad things that is green at 0 (multistat/ready_item above):
+#   Nodes Ready   hosts (Proxmox) · k8s (Ready AND its kubelet /metrics scraped: the env node's
+#                 kubelet target was down 6 h before it wedged, so an unscraped node is not fine)
+#   Alerts        critical · warning raised IN THE SELECTED TIME RANGE (FIRING below)
+#   Workloads     flux (not failed) · stuck (pods Terminating > 5 m: the hung-Kata-teardown signature)
+#   Test Envs     Ready envs of the warm-pool size ("paused" while the pool is deliberately at 0)
+# The timeline turns an outage into a bar of its exact duration on the default 6 h range.
 ALERT_SEVERITY_MAP = [{"type": "value", "options": {
     "critical": {"text": "critical", "color": "red", "index": 0},
     "warning": {"text": "warning", "color": "orange", "index": 1},
     "info": {"text": "info", "color": "blue", "index": 2}}}]
 RED_AT_1 = [{"color": "green", "value": None}, {"color": "red", "value": 1}]
+ORANGE_AT_1 = [{"color": "green", "value": None}, {"color": "orange", "value": 1}]
 KUBELET_METRICS = 'up{job="kubelet",metrics_path="/metrics"}'
-# "0 bad things" must be distinguishable from "the exporter is gone" — `or vector(0)` alone renders
-# absent telemetry as a healthy green 0, during exactly the monitoring failure this row exists to
-# expose (the outage story started with a target down for 6 h; reviewer-claude/codex on #801).
-# count(bad) is empty when nothing is bad, so: count(bad) -> else count(all)*0 (the exporter is
-# there, the answer is 0) -> else absent(all)*-1, mapped to an orange "no data".
-NO_DATA_MAP = [{"type": "value", "options": {"-1": {"text": "no data", "color": "orange", "index": 0}}}]
+NODE_READY = 'kube_node_status_condition{condition="Ready",status="true"}'
+
+# ALERTS FOLLOW THE TIME PICKER. The tiles and the table used to read ALERTS at the end of the range
+# only, so the default 6 h view counted 23 warnings, 19 of them firing for 10 h to 12 days
+# (2026-10-10) - the same number on every range. Now an alert counts when it STARTED FIRING inside
+# the range: a RISING EDGE - a 1 m step where it fires and did not 1 m earlier - anywhere in it
+# (the subquery). So a re-fired alert counts too: one firing at the range's start that resolved and
+# fired again inside it (a first cut compared the start and end only, and dropped exactly those
+# flapping alerts - reviewer-claude on #1211). Read from the ALERTS samples themselves, not from
+# activeAt, which a Prometheus restart resets for short-`for` rules (a resolved alert gets a
+# staleness marker; a short restart does not). Includes alerts that have since resolved; the
+# table's State column says which. A chronic warning drops out of a short range and comes back on
+# a wider one, but a CRITICAL still firing never drops out, however old: the critical value and the
+# table add every critical firing now. Watchdog/InfoInhibitor are the always-firing meta-alerts.
+# Grafana evaluates an instant query at the range's END with $__range as the lookback, so a past
+# absolute range works the same way.
+FIRING = 'ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"%s}'
+FIRING_CRIT = FIRING % ',severity="critical"'
 
 
-def fail_safe_count(bad, live):
-    return f'(count({bad}) or (count({live}) * 0)) or (absent({live}) * -1)'
+def alerts_in_range(sev=None):
+    f = FIRING % (f',severity="{sev}"' if sev else "")
+    raised = f'max_over_time(({f} unless {f} offset 1m)[$__range:1m])'
+    return f'({raised} or {FIRING_CRIT})' if sev in (None, "critical") else raised
 
 
-health = [row("Estate Health (nodes / hypervisors / alerts / Flux / teardowns — what is down right now)", 0)]
+# The table's value: activeAt in ms (ALERTS_FOR_STATE; the latest in the range), or 0 -> "n/a" for an
+# alert that has no such series.
+ALERT_SINCE = (f'((max_over_time(ALERTS_FOR_STATE[$__range]) * 1000 and ignoring(alertstate) {alerts_in_range()})'
+               f' or ignoring(alertstate) ({alerts_in_range()} * 0))')
+
+
+health = [row("Estate Health (nodes / alerts / workloads / test envs — what is down, what fired in the range)", 0)]
 health += [
-    stat("Nodes NotReady", 0, 1, 3, 4,
-         fail_safe_count('kube_node_status_condition{condition="Ready",status="true"} == 0',
-                         'kube_node_status_condition{condition="Ready",status="true"}'),
-         steps=RED_AT_1, mappings=NO_DATA_MAP),
-    stat("Hypervisors Up", 3, 1, 3, 4, f'count(up{{{HOSTS}}} == 1) or vector(0)',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 3}]),
-    stat("Critical Alerts", 6, 1, 3, 4,
-         'count(ALERTS{alertstate="firing",severity="critical"}) or vector(0)', steps=RED_AT_1),
-    stat("Warnings", 9, 1, 3, 4,
-         'count(ALERTS{alertstate="firing",severity="warning"}) or vector(0)',
-         steps=[{"color": "blue", "value": None}]),
-    stat("Flux Not Ready", 12, 1, 3, 4,
-         fail_safe_count('gotk_resource_info{ready="False"}', 'gotk_resource_info'),
-         steps=RED_AT_1, mappings=NO_DATA_MAP),
-    # A pod Terminating > 5 m anywhere: the hung-Kata-teardown signature, cluster-wide.
-    # kube_pod_deletion_timestamp only exists while something is Terminating, so kube-state-metrics'
-    # liveness is read from kube_pod_info instead.
-    stat("Stuck Terminating", 15, 1, 3, 4,
-         fail_safe_count('(time() - kube_pod_deletion_timestamp) > 300', 'kube_pod_info'),
-         steps=RED_AT_1, mappings=NO_DATA_MAP),
-    stat("Envs Ready", 18, 1, 3, 4,
-         f'(count((kube_pod_status_ready{{{TP},condition="true"}} == 1) * on (namespace, pod) group_left () {TPPOD}) or vector(0))',
-         steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
-    # The env node's kubelet /metrics target was down 6 h before it wedged; this counts them all.
-    stat("Kubelet Targets Down", 21, 1, 3, 4,
-         fail_safe_count(f'{KUBELET_METRICS} == 0', KUBELET_METRICS),
-         steps=RED_AT_1, mappings=NO_DATA_MAP),
+    multistat("Nodes Ready", 0, 1, 6, 4, [
+        ready_item("hosts", f'up{{{HOSTS}}} == 1', f'count(up{{{HOSTS}}})', f'up{{{HOSTS}}}'),
+        ready_item("k8s", f'({NODE_READY} == 1) and on(node) ({KUBELET_METRICS} == 1)',
+                   'count(kube_node_info)', 'kube_node_info'),
+    ], mappings=NO_DATA_MAP,
+        description="hosts: Proxmox hypervisors whose node_exporter answers. k8s: nodes Ready AND whose "
+                    "kubelet /metrics target is up. Green only when all are; the timeline below says which."),
+    multistat("Alerts Raised in Range", 6, 1, 6, 4, [
+        count_item("critical", f'count({alerts_in_range("critical")}) or vector(0)', RED_AT_1),
+        count_item("warning", f'count({alerts_in_range("warning")}) or vector(0)', ORANGE_AT_1),
+    ], description="Alerts that STARTED firing inside the selected time range (resolved ones included), "
+                   "plus every critical still firing however old. Widen the range to see older warnings."),
+    multistat("Workloads", 12, 1, 6, 4, [
+        # A Flux object with no Ready condition (an OCI HelmRepository) is in neither count; Unknown
+        # is mid-reconcile (<= 8 at once over 24 h) and counts as fine, as in the old Not Ready tile.
+        ready_item("flux", 'gotk_resource_info{ready=~"True|Unknown"}',
+                   'count(gotk_resource_info{ready=~"True|False|Unknown"})', 'gotk_resource_info'),
+        # kube_pod_deletion_timestamp only exists while something is Terminating, so kube-state-metrics'
+        # liveness is read from kube_pod_info instead.
+        count_item("stuck", '(count((time() - kube_pod_deletion_timestamp) > 300)'
+                            ' or on() (count(kube_pod_info) * 0)) or on() (absent(kube_pod_info) * -1)', RED_AT_1),
+    ], mappings=NO_DATA_MAP,
+        description="flux: Flux objects not failed, of all with a Ready condition. stuck: pods Terminating "
+                    "for more than 5 minutes anywhere (the hung-Kata-teardown signature)."),
+    multistat("Test Envs", 18, 1, 6, 4, [ENVS_READY], mappings=NO_DATA_MAP + PAUSED_MAP,
+              description=ENVS_READY_DESC),
+    # 3 = Ready and scraped, 2 = Ready but its kubelet /metrics target is down (or undiscovered: the
+    # `or on(node)` arm), below 2 = NotReady - the verdict the k8s value above counts.
     state_timeline("Node Readiness (k8s nodes — a red bar is an outage)", 0, 5, 12, 8,
-                   ['kube_node_status_condition{condition="Ready",status="true"}'], ["{{node}}"],
+                   [f'(2 * {NODE_READY} + on(node) group_left() max by (node) ({KUBELET_METRICS}))'
+                    f' or on(node) (2 * {NODE_READY})'], ["{{node}}"],
                    [{"type": "value", "options": {
-                       "1": {"text": "● Ready", "color": "green", "index": 0},
-                       "0": {"text": "● NotReady", "color": "red", "index": 1}}}]),
-    # Since = ALERTS_FOR_STATE (activeAt, unix seconds -> ms for dateTimeFromNow) where Prometheus
-    # tracks it (rules with `for:`); rules without one get 0 -> "n/a". Watchdog/InfoInhibitor are
-    # the always-firing meta-alerts. `target` folds node/pod/instance into ONE column: an alert's
-    # label set varies, and every label became a column (the table scrolled sideways on the first
-    # render, 2026-09-20) — `include` keeps exactly five.
-    # Ordering: alphabetical severity would put "info" above "warning" (reviewer-claude on #801),
-    # so a `rank` label decides (catch-all 9 first, then critical 1 / warning 2 / info 3 override
-    # it); qtable sorts on it before organize drops the column.
-    qtable("Firing Alerts (critical first)", 12, 5, 12, 8,
+                       "3": {"text": "● Ready", "color": "green", "index": 0},
+                       "2": {"text": "● Ready · kubelet unscraped", "color": "orange", "index": 1},
+                       "1": {"text": "● NotReady", "color": "red", "index": 2},
+                       "0": {"text": "● NotReady", "color": "red", "index": 3}}}]),
+    # The set the Alerts tile counts (alerts_in_range), any severity. State = firing at the range's
+    # end, or resolved since. `target` folds node/pod/instance into ONE column: an alert's label set
+    # varies, and every label became a column (the table scrolled sideways on the first render,
+    # 2026-09-20) — `include` keeps exactly six. Ordering: alphabetical severity would put "info"
+    # above "warning" (reviewer-claude on #801), so a `rank` label decides (catch-all 9 first, then
+    # critical 1 / warning 2 / info 3 override it), newest first within a severity.
+    qtable("Alerts Raised in Range (critical first, newest first)", 12, 5, 12, 8,
            'label_replace(label_replace(label_replace(label_replace(label_join('
-           '(ALERTS_FOR_STATE and ignoring(alertstate) ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"}) * 1000 '
-           'or ignoring(alertstate) (ALERTS{alertstate="firing",alertname!~"Watchdog|InfoInhibitor"} * 0),'
+           f'label_replace({ALERT_SINCE} and ignoring(alertstate) {FIRING % ""}, "state", "firing", "", "") or '
+           f'label_replace({ALERT_SINCE} unless ignoring(alertstate) {FIRING % ""}, "state", "resolved", "", ""),'
            ' "target", " ", "node", "pod", "instance"),'
            ' "rank", "9", "severity", ".*"), "rank", "1", "severity", "critical"),'
            ' "rank", "2", "severity", "warning"), "rank", "3", "severity", "info")',
            rename={"alertname": "Alert", "severity": "Severity", "namespace": "Namespace",
-                   "target": "Node / pod / instance", "Value": "Since"},
-           exclude=[], include=["alertname", "severity", "namespace", "target", "Value"],
-           order=["alertname", "severity", "namespace", "target", "Value"],
-           sort="rank", filterable=True,
-           overrides=[_ov("Severity", [{"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                   "target": "Node / pod / instance", "state": "State", "Value": "Since"},
+           exclude=[], include=["alertname", "severity", "namespace", "target", "state", "Value"],
+           order=["alertname", "severity", "namespace", "target", "state", "Value"],
+           sort=[("Value", True), ("rank", False)], filterable=True,
+           # Fixed widths for all but Alert, so six columns fit half a 1500px window unscrolled.
+           overrides=[_ov("Severity", [{"id": "custom.width", "value": 82},
+                                       {"id": "custom.cellOptions", "value": {"type": "color-text"}},
                                        {"id": "mappings", "value": ALERT_SEVERITY_MAP}]),
-                      _ov("Since", [{"id": "unit", "value": "dateTimeFromNow"},
+                      _ov("Namespace", [{"id": "custom.width", "value": 110}]),
+                      _ov("Node / pod / instance", [{"id": "custom.width", "value": 140}]),
+                      _ov("State", [{"id": "custom.width", "value": 82},
+                                    {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+                                    {"id": "mappings", "value": [{"type": "value", "options": {
+                                        "firing": {"text": "firing", "color": "orange", "index": 0},
+                                        "resolved": {"text": "resolved", "color": "green", "index": 1}}}]}]),
+                      _ov("Since", [{"id": "custom.width", "value": 132},
+                                    {"id": "unit", "value": "dateTimeFromNow"},
                                     {"id": "mappings", "value": [{"type": "value", "options": {
                                         "0": {"text": "n/a", "index": 0}}}]}])]),
 ]
