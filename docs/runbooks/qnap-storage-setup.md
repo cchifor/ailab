@@ -464,9 +464,31 @@ transaction whose volume still has a PV/PVC/`tridentvolume` or a LUN is NOT stal
 Trident. Each failed provisioning retry also leaves an `addVolume` transaction behind
 ("unable to process the preexisting transaction"); the same test applies.
 
-**Orphan PVs pending NAS cleanup** (`Released`, annotation `ailab.io/retain-reason`): their reclaim
-policy was flipped to `Retain` on 2026-09-27 because each failed delete re-queued a full sweep. They
-are ailab#880's scope (NAS-side LUN/target removal). Do not flip them back to `Delete` before that.
+**Orphan testpool PVs — cleaned up 2026-10-10 (ADR 0037).** This closes the NAS-side cleanup that
+ailab#880 (the 09-26 warm-pool pause) left open; nothing of it is pending any more. The `Released` testpool PVs (reclaim
+policy flipped to `Retain` on 2026-09-27, because each failed delete re-queued a full sweep) and
+their NAS side went with the test-env pool. What worked, for the next orphan of this kind:
+- **NAS first, one LUN at a time.** Resolve the `lunID` from the exact `trident-pvc-<uuid>` name
+  right before each call (QNAP reuses indexes), and confirm it is unmapped. Remove it with
+  `qcli_iscsi -r lunID=<n>` (in a `qcli -l … saveauthsid=yes` session). Then diff the full LUN and
+  target lists against a backup taken before the run: only that entry may be gone, and its zvol and
+  SCST device with it. Four testpool LUNs (55 → 51) went this way with no side effects; healthy LUNs
+  (pool 1, a real zvol) remove cleanly, unlike the 09-27 dangling LUN 9.
+- **Then the PV objects.** With `Retain`, `kubectl delete pv` makes no CSI call. A leftover
+  `external-attacher/csi-trident-qnap-io` finalizer is dropped by the attacher itself when no
+  VolumeAttachment names the PV ("no VA found, removing finalizer"). Delete one and watch
+  `csi-attacher`, `trident-main` and `storage-api-server` before doing the rest.
+- **Trident's own records stay** (TridentVolumes/TridentSnapshot listed in ADR 0037). Deleting them
+  through Trident re-enters the not-found loop.
+- **Health signal = a provisioning probe, not the LUN-list CGI.**
+  `iscsi_lun_setting.cgi?func=extra_get&lunList=1` returned `result -1` / `errorcode -22` on
+  2026-10-10 while provisioning was healthy, so it is not the 09-27 symptom by itself. Prove the
+  NAS with a 1 Gi `qnap-iscsi` PVC + pod, and patch its PV to `Delete` before deleting the PVC
+  (`qnap-iscsi` is `Retain`, so a plain delete leaks a LUN).
+- **QuTS refuses `zfs destroy` of snapshots from the shell** ("permission denied", even as root, no
+  holds). `zpool1/orphan_placeholder_from_lun9_20260927` (84.8K, no LUN, no SCST device, from the
+  09-27 repair) is left for that reason. It is harmless; remove it from the QuTS UI if it ever
+  matters.
 
 **Recycling airlock sandboxes** (so a new pod picks up new resource defaults): never delete the
 pod; `scripts/airlock-recycle-sandbox.sh` runs airlock's own teardown → deploy with a tenant

@@ -92,9 +92,10 @@ variable "dev_worker_memory_mib" {
   # 16 GiB default ceiling. Genuinely reachable via ballooning: the rarely-used heavyweight LLMs on
   # node2/node3 are behind llama-swap (idle-unload), so once a node's model is unloaded pvestatd can
   # inflate a busy worker up to this ceiling. See docs/runbooks/dev-workers.md.
-  # Since the testpool went live (2026-09-01) the heavy compose stacks (L/XL/Playwright) lease kata
-  # envs via `tep` instead of running on the worker, so this ceiling is oversized: the busiest
-  # worker's 10-day peak was 7.9 GiB (dw4, measured 2026-09-01, pre-pool load included). dev-worker-6
+  # The test-env pool (2026-09-01..10-10, retired by ADR 0037) was meant to take the heavy compose
+  # stacks (L/XL/Playwright) off the workers; it never did (#865), so they still run here — one at a
+  # time per worker by policy. The busiest worker's 10-day peak was 7.9 GiB (dw4, measured
+  # 2026-09-01). dev-worker-6
   # ran a 12 GiB POC via the per-worker memory_mib override until its retirement (2026-09-21); it
   # idled at 3.7 GiB RSS, so the POC never exercised the ceiling — a fleet-wide reduction is decided
   # from the survivors' measured working sets. See docs/runbooks/dev-workers.md.
@@ -146,7 +147,8 @@ variable "dev_worker_ssh_public_key" {
 # OPTIONAL per-worker sizing overrides (memory_floating_mib and memory_mib, both documented below).
 # Placement (fault isolation): dw1/3 -> node1, dw2/4 -> node2, NO dev-worker on node3 since PR-C2
 # (2026-09-23): dev-worker-6 was retired 2026-09-21 and slot 3's original VM (4203) on 2026-09-23,
-# and node3 hosts the second testpool env node instead (plans/2026-09-21-retire-dev-workers-3-6-plan.md).
+# to fund a second testpool env node on node3 that was never built (the pool was retired, ADR 0037;
+# plans/2026-09-21-retire-dev-workers-3-6-plan.md).
 # SLOT != VMID since that re-slot: the surviving VMs kept their vmids and moved DOWN a slot to close
 # the numbering gap (4204 -> dev-worker-3, 4205 -> dev-worker-4) by a `tofu state mv` through a
 # temporary key — a bare map-key edit would be destroy + create, and Proxmox cannot rename a vmid.
@@ -222,15 +224,15 @@ variable "dev_worker_nodes" {
     "dev-worker-3" = { node_name = "ai-node1", vm_id = 4204, ip = "192.168.0.10", hostname = "dev-worker-3", memory_floating_mib = 12288 }
     # Slot 4 = the VM that was dev-worker-5 until 2026-09-23 (vmid 4205, ai-node2), re-slotted the same
     # way (.12 -> .11, hostname dev-worker-4). It KEEPS its 6 GiB floor: the 2026-09-01 swap-death
-    # incident — ai-node2 sits ~93% used since talos-env-node-1 (16 GiB fixed, env pool) joined it,
-    # so ballooning never inflates this worker and a 4 GiB floor thrashed a working session to
+    # incident — ai-node2 sat ~93% used while talos-env-node-1 (16 GiB fixed, env pool; retired
+    # 2026-10-10, ADR 0037) ran there, so ballooning never inflated this worker and a 4 GiB floor thrashed a working session to
     # death (swap full, 20M major faults; same signature as the dw1 2026-08-11 panic). Hand-applied
     # `qm set 4205 --balloon 6144` + monitor-inflate during recovery; codified so every apply keeps
     # it. Shrink back to the uniform floor only after node2's budget has real balloon headroom.
     "dev-worker-4" = { node_name = "ai-node2", vm_id = 4205, ip = "192.168.0.11", hostname = "dev-worker-4", memory_floating_mib = 6144 }
     # Slot 3's ORIGINAL VM (vm_id 4203, .10, ai-node3) RETIRED 2026-09-23 (PR-C2, gate G3a-2) once the
     # operator declared its work done: the last dev-worker on node3, 16.3 GiB measured, retired to fund
-    # the second testpool env node there. Its 2026-09-11 starvation story (pinned at the 4 GiB floor
+    # a second testpool env node there (never built, ADR 0037). Its 2026-09-11 starvation story (pinned at the 4 GiB floor
     # with 145 MiB free and 46.5M major faults when ~69 GiB of new guests landed on node3; the fix was
     # a hand-applied 12 GiB floor) went with it — the new slot 3 sits on node1 with node1's floor.
     # dev-worker-6 (vm_id 4206, .13, ai-node3) RETIRED 2026-09-21 (PR-C1, gate G3a-1) for the same

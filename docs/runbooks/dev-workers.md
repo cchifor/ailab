@@ -99,10 +99,12 @@ when a heavyweight is loaded on demand) + runner (24 GiB ceiling / **10 GiB floo
 ×1 node3) + dev-worker (16 GiB ceiling / **4 GiB floor** — **12 GiB on dw1/dw3**, 6 GiB on dw4,
 ×2 per node; node1's two raised floors add 16 GiB of guaranteed allocation there). In steady
 state (heavyweight unloaded) node3 sits ~45% used and its workers balloon freely toward the
-ceiling. **node2 no longer has that headroom**: `talos-env-node-1` (16 GiB fixed, the test-env
-pool node — `kubernetes/infra/env-pool/`) joined it 2026-09-01 and steady-state sits ~93% used,
-above PVE's ~80% auto-balloon threshold — node2's workers are effectively floor-pinned. That
-floor-pinned the node2 worker (dw5 then, dw4 since the 2026-09-23 re-slot — vmid 4205) into swap-death during a working session the same day (the dw1 2026-08-11
+ceiling. **node2 did not have that headroom** while `talos-env-node-1` (16 GiB fixed, the test-env
+pool node, retired 2026-10-10 with ADR 0037) ran there: from 2026-09-01 it sat ~93% used,
+above PVE's ~80% auto-balloon threshold, so node2's workers were effectively floor-pinned. After
+the retirement node2 measured ~79-80% used (2026-10-10: the VM had only ~4 GiB of touched pages to
+give back), i.e. at the threshold rather than clearly below it, so dw4's 6 GiB floor stays until node2
+is re-measured under load. That floor-pinned the node2 worker (dw5 then, dw4 since the 2026-09-23 re-slot — vmid 4205) into swap-death during a working session the same day (the dw1 2026-08-11
 signature: swap full, huge major-fault rate, SSH banner timeouts while ping answers); it now
 carries a codified 6 GiB floor (`memory_floating_mib = 6144`). Recovery that worked, twice now:
 raise the floor (`qm set <vmid> --balloon <MiB>`) so pvestatd cannot re-pin, then force-inflate

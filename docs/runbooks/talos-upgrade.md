@@ -82,7 +82,7 @@ gated on application health (`talosctl upgrade-k8s` alone patches all kubelets i
    - Wait for `TridentOrchestrator` `Installed` **and** 5 quiet minutes in each trident-node log before
      starting the kubelet roll. The roll's pre-gate stops on any trident error in the last 5 min, and
      it did stop once in the 1.35 hop until the window passed.
-6. **Kubelets, one node at a time:** env-node-1, agent-node-1/2/3, then cp1, cp2, cp3. Each restart
+6. **Kubelets, one node at a time:** agent-node-1/2/3, then cp1, cp2, cp3. Each restart
    takes 7-19 s to Ready.
    - **Pre-gate:**
      - all CNPG clusters writable;
@@ -116,7 +116,8 @@ gated on application health (`talosctl upgrade-k8s` alone patches all kubelets i
    - `cilium-dbg status` on 7/7;
    - a QNAP PVC smoke (write on cp1, delete the pod, read back on cp2, then confirm the PV and the
      TridentVolume are gone);
-   - a kata smoke on the env node.
+   - a kata smoke on agent-node-3 (the kata_gvisor schematic's only node since the env node was retired,
+     ADR 0037).
 
    Then bump tofu `kubernetes_version` (see below).
 
@@ -200,8 +201,8 @@ needs a separate owner decision. It restores control-plane metadata only.
 
 ## Tofu after an upgrade (never apply blindly)
 
-- `talos_version` / `kubernetes_version` = what runs. Bump `talos_version` in **all three** modules (infra,
-  agent-nodes, env-pool) in the same change as a Talos upgrade, and `kubernetes_version` right after each
+- `talos_version` / `kubernetes_version` = what runs. Bump `talos_version` in **both** modules (infra,
+  agent-nodes) in the same change as a Talos upgrade, and `kubernetes_version` right after each
   `upgrade-k8s` hop. `machine.install.image` (the reinstall/reset image) is derived from `talos_version` plus
   each node's schematic (`image.tf` for the CPs, `talos-schematics.yaml` for kata/gvisor), so a lagging
   variable would make a reset install an older Talos. A node whose extensions change needs its schematic
@@ -211,7 +212,8 @@ needs a separate owner decision. It restores control-plane metadata only.
 - VM disks ignore `disk[0].import_from` (create-only), so a version bump is not a disk diff.
 - Before any apply: the plan must show 0 destroy / 0 replace, and the rendered machine config must be
   diffed against live (`talosctl get machineconfig`, the `v1alpha1` document) for **every** node.
-- A node with `apply_mode = "staged"` (env-node-1) takes a tofu apply into its `persistent` config only.
+- **No node uses `apply_mode = "staged"` since env-node-1 was retired (ADR 0037).** This bullet and the
+  next one are kept for the day one does: a staged node takes a tofu apply into its `persistent` config only.
   The active `v1alpha1` keeps the old values until that node's next reboot. That is expected, so don't
   re-apply because of it.
 - **But a later no-reboot `talosctl patch` on that node discards the staged change.** It rebuilds

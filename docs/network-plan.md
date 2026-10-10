@@ -46,9 +46,9 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.32 / .33` | 🔒 **cloudlab** CI runner VMs `cloud-ci-1/2` (cloud1, opportunistic Gitea Actions runners — online only while the cloud cluster is up; ADR 0032) | 6101–6102 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.34 / .35` | 🔒 **cloudlab** CI runner VMs `cloud-ci-3/4` (cloud3, same) — cloudlab's unbuilt Talos-GPU-worker spec had pencilled `.32`–`.34`; it re-reserves elsewhere when built | 6103–6104 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
-| `.37` | Talos env-node `talos-env-node-1` (k8s member; runbook `docs/runbooks/env-pool.md`) | 4401 | `kubernetes/infra/env-pool/variables.tf` (adopted 2026-09-21) |
+| `.37` | **free** since 2026-10-10 — was Talos env-node `talos-env-node-1` (4401), retired with the test-env pool (ADR 0037) | — | — |
 | `.38` | 🔒 **cloudlab** Windows 11 Pro VM `constantin-win-01` (renamed from `cloud-win-1` 2026-09-30; cloud3; RDP + key-only SSH; admin credential `af/estate/cloudlab-win11`; allocated 2026-09-30). The guest sets the address itself — no cloud-init — from `guest.json` | 6201 | `../cloudlab/kubernetes/infra/windows-vm/guest.json` |
-| `.39` | **RESERVED** for Talos env-node `talos-env-node-2` (ai-node3; NOT built — #835 is parked behind #972, gate G3b). Held here so the address can't be handed out again while the PR waits: its first claim, `.38`, was only in the unmerged branch and went to `cloud-win-1` (#987) | 4402 (reserved — no VM yet) | #835 → `kubernetes/infra/env-pool/variables.tf` |
+| `.39` | **free** since 2026-10-10 — was reserved for `talos-env-node-2` (#835, never built), released with the test-env pool (ADR 0037) | — | — |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
 | `.44` | 🔒 **cloudlab** CI runner VM `cloud-ci-10` (cloud2, second; 2026-10-04) — was AI LLM LXC `ai-llm-1` (5001), destroyed 2026-10-02 | 6110 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
@@ -57,12 +57,12 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | 🔒 **cloudlab** CI runner VM `cloud-ci-11` (cloud2, third; 2026-10-04, disk on `local-nvme`) | 6111 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: none** (since 2026-10-04, when the last five — `.7`, `.12`, `.13`, `.44`, `.50` —
-went to the cloudlab CI runner VMs `cloud-ci-9..13`; `.29`, `.30` and `.32`–`.35` went to cloud runners
-on 2026-09-23, `.5`/`.6` on 2026-09-30; `.38` to the cloudlab Windows VM `constantin-win-01` on
-2026-09-30; `.39` is reserved for `talos-env-node-2` (#835)).
-Nothing in `.2`–`.50` is available. The next static address needs either a release (a retired guest's
-row going back to free) or a deliberate shrink of the router's DHCP pool — never an address from `.51`+
+**Free static space: `.37` and `.39`** (released 2026-10-10 with the test-env pool, ADR 0037). Before
+that there was none since 2026-10-04, when the last five — `.7`, `.12`, `.13`, `.44`, `.50` — went to the
+cloudlab CI runner VMs `cloud-ci-9..13`; `.29`, `.30` and `.32`–`.35` went to cloud runners on
+2026-09-23, `.5`/`.6` on 2026-09-30, and `.38` to the cloudlab Windows VM `constantin-win-01` on
+2026-09-30. Beyond `.37`/`.39`, the next static address needs either a release (a retired guest's row
+going back to free) or a deliberate shrink of the router's DHCP pool — never an address from `.51`+
 while the router can still lease it.
 
 > **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+
@@ -76,10 +76,9 @@ out-of-band, so `tofu plan` cannot see their addresses and will not warn when a 
 given one of them. Until they are imported, this table is their only record — treat it as
 load-bearing.
 
-> **ADOPTED 2026-09-21:** `talos-env-node-1` (4401, `.37`) was listed here as unmanaged. The spike's
-> state was lost, so the VM was imported into `kubernetes/infra/env-pool` (state in the main
-> checkout) and the module proven to reproduce its running config with no changes —
-> `plans/2026-09-20-env-pool-root-cause-followup-plan.md`, T1.
+> **ADOPTED 2026-09-21, RETIRED 2026-10-10:** `talos-env-node-1` (4401, `.37`) was listed here as
+> unmanaged until it was imported into `kubernetes/infra/env-pool`; that module and the VM were
+> removed with the test-env pool (ADR 0037).
 
 > **CORRECTED 2026-09-16:** `ci-runner-6..10` were listed here as unmanaged. They were IMPORTED on
 > 2026-09-07 and are in `terraform.tfstate` (serial 43), so that claim had been wrong for nine days.

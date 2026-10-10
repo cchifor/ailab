@@ -419,7 +419,7 @@ decision at the end of this section.
   `kubectl --context admin@ai get secrets -A --field-selector type=kubernetes.io/service-account-token -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name`.
 - **Where the key lives:** the OpenTofu state (`talos_machine_secrets.this` in `kubernetes/infra/`, `certs.k8s_serviceaccount.key`) and the DR copy
   `kubernetes/infra/talos-secrets-bundle.sops.yaml` (`stringData."secrets.yaml"`, `certs.k8sserviceaccount.key`). Worker machine configs
-  (`agent-nodes`, `env-pool`) do not carry it (checked on the rehearsal's worker).
+  (`agent-nodes`; `env-pool` until its retirement, ADR 0037) do not carry it (checked on the rehearsal's worker).
 
 ## Before a real run: make the change survive `tofu apply` (not rehearsed)
 

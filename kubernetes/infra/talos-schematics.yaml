@@ -1,11 +1,11 @@
 # Talos Image Factory schematic IDs that are NOT modelled as a talos_image_factory_schematic resource.
 # Single source for every root module that needs them (yamldecode(file(...))), so the agent-nodes and
-# env-pool pools cannot drift apart. The control-plane schematic is the resource in image.tf.
+# (until ADR 0037) env-pool pools could not drift apart. The control-plane schematic is the resource in image.tf.
 #
 # Each value must equal what the nodes run: `talosctl get extensions` (the `schematic` entry), which
 # is also what scripts/talos-upgrade-node.sh upgrades with. Changing a node's extensions = a new
 # schematic here + a wrapper upgrade of that node, in the same change.
 
 # qemu-guest-agent + iscsi-tools + util-linux-tools + kata-containers + gvisor.
-# Runs on agent-node-3 (since AgentForge P2) and on the env pool (env-node-1).
+# Runs on agent-node-3 (since AgentForge P2); env-node-1 ran it too until its retirement (ADR 0037).
 kata_gvisor: 0839748ecac818fa6db9bc8bad2cc054eed752a32cd83226e18aa382a3a384f7

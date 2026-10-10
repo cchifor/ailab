@@ -24,8 +24,8 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 ## Workflow / GitOps
 - **Kubernetes** (`kubernetes/apps/**`): **Flux** reconciles `main` **from the GitHub mirror** (`github.com/cchifor/ailab`, W5 — see the box above) — merge to Gitea to ship; it mirrors in ~4s. Push/PRs still go to **Gitea** (squash-merge).
 - **VMs/LXCs** (`kubernetes/infra/**`): **OpenTofu**, applied by hand via `just` (Flux does NOT manage these).
-  Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/agent-nodes/` (Talos workers, AgentForge v2) · `infra/env-pool/` (the testpool env node; `staged` applies) · `infra/ai-lxc/` · `infra/registry-lxc/`.
-  Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just env-pool-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
+  Modules: `infra/` (Talos CPs) · `infra/runners/` · `infra/dev-workers/` · `infra/agent-nodes/` (Talos workers, AgentForge v2) · `infra/ai-lxc/` · `infra/registry-lxc/`.
+  Recipes: `just plan|apply|fmt` (Talos CPs) · `just runners` · `just dev-workers` · `just agent-nodes-plan/apply` · `just registry` (+ `*-plan/apply`). `just --list` for all.
 - Secrets = **SOPS + age** (`.sops.yaml`, key at **`kubernetes/infra/_out/age.agekey`** — matches README; `_out/` is gitignored so it does NOT exist in a git worktree, resolve the main checkout's copy via `"$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)"`). **Never commit `_out/`** — kubeconfig, talosconfig, age key, and tofu creds all live there (gitignored).
 - Run **tofu on Windows** (`~/.tofubin/tofu.exe`): providers are `windows_amd64` and **WSL has no internet**, so Ansible-over-`/mnt/c` and tofu provider downloads fail there. State is **local** (`kubernetes/infra/**/terraform.tfstate`).
 
@@ -49,7 +49,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 **`docs/network-plan.md` is the IPAM registry — read it before allocating ANY address.** The LAN is
 shared with the `cloudlab` GPU cluster (`.20`–`.22`, `.26`–`.28`), which is invisible to ailab tooling.
-Free static space: **none** since 2026-10-04 (`.7`, `.12`, `.13`, `.44`, `.50` went to the cloudlab CI runner VMs cloud-ci-9..13; `.39` is reserved for `talos-env-node-2`, #835). The next address needs a release or a router DHCP-pool shrink — see `docs/network-plan.md`.
+Free static space: **`.37` and `.39`** since 2026-10-10 (released with the test-env pool, ADR 0037; before that none since 2026-10-04, when `.7`, `.12`, `.13`, `.44`, `.50` went to the cloudlab CI runner VMs cloud-ci-9..13). Beyond those, the next address needs a release or a router DHCP-pool shrink — see `docs/network-plan.md`.
 
 | Role | IPs | vmid |
 |---|---|---|
@@ -59,7 +59,6 @@ Free static space: **none** since 2026-10-04 (`.7`, `.12`, `.13`, `.44`, `.50` w
 | CI runners (adopted into tofu 2026-09-07; `ci-runner-8`/.30/4108 retired 2026-09-12, `ci-runner-7`/.29/4107 retired 2026-09-16) | .19 / .31 / .23 | 4106, 4109, 4110 |
 | dev-workers `dev-worker-1..4` (**slot ≠ vmid** since the 2026-09-23 re-slot: dw3 = vmid 4204, dw4 = vmid 4205; 4206 retired 2026-09-21, 4203 on 2026-09-23 — `plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | .8–.11 (user `c4`; also the agentforge hosts, ADR 0018) | 4201, 4202, 4204, 4205 |
 | Agent nodes (Talos workers, AgentForge v2, ADR 0019) | .47 / .48 / .49 | 4301–4303 |
-| Talos env-node (`infra/env-pool/`, adopted 2026-09-21; `staged` applies — reboot via talosctl) | .37 | 4401 |
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs (node2/node3; ai-llm-1 .44/5001 destroyed 2026-10-02) | .45 / .46 | 5002–5003 |
 | registry LXC (node1) | .36 | 5004 |
