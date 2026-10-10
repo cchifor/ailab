@@ -6,7 +6,9 @@
 #   unsafe-config         agent.hcl still renders ~/.tep/kubeconfig
 #   unsafe-stale-process  the running agent started before (or at the same instant as) the config it
 #                         should be running, so it may still hold the old tep stanza
-#   unsafe-unknown        a timestamp could not be read; fail closed
+#   unsafe-unknown        the service state or a timestamp could not be established (a failed
+#                         query, a transitional state such as deactivating, a stopped unit that
+#                         still has a main PID); fail closed
 # Deleting a template's destination directory under a live stanza is a render failure, and the
 # agent's exit_on_retry_failure turns that into a dead agent (and no ~/.git-credentials).
 #
@@ -20,7 +22,19 @@ hcl="${1:-/etc/openbao-agent/agent.hcl}"
 
 if [ ! -f "$hcl" ]; then echo safe; exit 0; fi
 if grep -q 'tep-kubeconfig' "$hcl"; then echo unsafe-config; exit 0; fi
-if [ "$(systemctl is-active openbao-agent 2>/dev/null)" != active ]; then echo safe; exit 0; fi
+# Only two answers are proof of anything: `active` (then the start time decides) or a confirmed stop
+# (inactive/failed AND no main PID left). Everything else — activating, deactivating, reloading, an
+# empty answer from a failed query — may still have the OLD agent process alive: fail closed
+# (reviewer-codex, ailab#1217).
+state=$(systemctl is-active openbao-agent 2>/dev/null)
+case "$state" in
+  active) ;;
+  inactive|failed)
+    pid=$(systemctl show openbao-agent -p MainPID --value 2>/dev/null)
+    if [ "$pid" = 0 ]; then echo safe; else echo unsafe-unknown; fi
+    exit 0 ;;
+  *) echo unsafe-unknown; exit 0 ;;
+esac
 
 started_raw=$(systemctl show openbao-agent -p ExecMainStartTimestamp --timestamp=us+utc --value 2>/dev/null)
 # `date -d ""` means today's midnight, not an error, so an empty value must be caught here.

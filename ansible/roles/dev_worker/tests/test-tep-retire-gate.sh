@@ -9,14 +9,18 @@ t=$(mktemp -d)
 trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# Stub systemctl: is-active answers $STUB_ACTIVE; `show ... ExecMainStartTimestamp` answers
+# Stub systemctl: is-active answers $STUB_ACTIVE (or fails with STUB_ACTIVE_FAIL=1); `show -p MainPID`
+# answers $STUB_MAINPID (unset = 0, empty stays empty); `show ... ExecMainStartTimestamp` answers
 # $STUB_STARTED in the --timestamp=us+utc format.
 mkdir -p "$t/bin"
 cat >"$t/bin/systemctl" <<'EOF'
 #!/bin/bash
 case "$1" in
-  is-active) echo "${STUB_ACTIVE:-active}" ;;
-  show) echo "${STUB_STARTED:-}" ;;
+  is-active) [ "${STUB_ACTIVE_FAIL:-0}" = 1 ] && exit 1; echo "${STUB_ACTIVE:-active}" ;;
+  show) case "$*" in
+          *MainPID*) echo "${STUB_MAINPID-0}" ;;
+          *) echo "${STUB_STARTED:-}" ;;
+        esac ;;
 esac
 EOF
 chmod +x "$t/bin/systemctl"
@@ -38,9 +42,19 @@ expect safe "no agent.hcl"
 printf 'template {\n  source = "/etc/openbao-agent/tep-kubeconfig.ctmpl"\n}\n' >"$hcl"
 STUB_ACTIVE=active STUB_STARTED="Fri 2026-10-10 12:00:05.000000 UTC" expect unsafe-config "tep stanza on disk"
 
-# 3. Clean config, agent not running: nothing can render.
+# 3. Clean config, agent confirmed stopped (inactive or failed, no main PID): nothing can render.
 clean_hcl
-STUB_ACTIVE=inactive expect safe "agent inactive"
+STUB_ACTIVE=inactive STUB_MAINPID=0 expect safe "agent inactive, no main PID"
+STUB_ACTIVE=failed STUB_MAINPID=0 expect safe "agent failed, no main PID"
+
+# 3b. REGRESSION (reviewer-codex, ailab#1217): anything short of a confirmed stop fails closed — a
+#     transitional state may still have the OLD process alive, and a failed query proves nothing.
+STUB_ACTIVE=deactivating expect unsafe-unknown "deactivating"
+STUB_ACTIVE=activating expect unsafe-unknown "activating"
+STUB_ACTIVE=reloading expect unsafe-unknown "reloading"
+STUB_ACTIVE_FAIL=1 expect unsafe-unknown "is-active query failed (no output)"
+STUB_ACTIVE=inactive STUB_MAINPID=4242 expect unsafe-unknown "inactive but a main PID remains"
+STUB_ACTIVE=inactive STUB_MAINPID="" expect unsafe-unknown "inactive, MainPID unreadable"
 
 # 4. Clean config written 12:00:00.200, agent started a second later: it runs the new config.
 clean_hcl; touch -d "2026-10-10 12:00:00.200000000 UTC" "$hcl"

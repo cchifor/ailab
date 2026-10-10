@@ -582,7 +582,7 @@ The role does the gating itself — you do not have to run a checklist:
    old, still-healthy process and passes regardless), then requires: the running process newer than
    `agent.hcl`, `NRestarts` unchanged across a 20s settle, `~/.git-credentials` still rendered, both
    kubeconfigs at 0600 owned by the user, and each one **actually authenticating**.
-4. On any failure: restores the previous `agent.hcl`, removes the marker so the SOPS writer resumes,
+4. On any failure: restores the previous `agent.hcl`, removes the marker if this run wrote it,
    restarts, and fails the play. **Stop the rollout there.**
 
 Verify by hand before moving to the next host, then repeat for `-l dev-worker-2` … `-6`.
@@ -594,7 +594,6 @@ helm --kubeconfig ~/.helmtest/kubeconfig upgrade --install smoke \
   -f ~/ailab/kubernetes/apps/infrastructure/helmtest/hack/values-restricted.yaml --wait --history-max 3
 helm --kubeconfig ~/.helmtest/kubeconfig test smoke --logs   # must RUN and PASS
 helm --kubeconfig ~/.helmtest/kubeconfig uninstall smoke
-tep lease -t 10 && tep run -- true && tep release            # the migrated tep path still works
 ```
 
 **Rollback for one host:** `rm /etc/openbao-agent/renders-kubeconfigs`, restore `agent.hcl` from its

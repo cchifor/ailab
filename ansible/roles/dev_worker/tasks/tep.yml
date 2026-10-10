@@ -7,19 +7,15 @@
 # down with it. So ~/.tep goes only when the RUNNING agent no longer renders into it:
 #   - main.yml imports this file AFTER openbao.yml, whose flush_handlers restarted the agent onto
 #     the new agent.hcl (no tep stanza) and verified it;
-#   - and this file re-checks that on its own, because a tag-limited run (`-t tep`) or a rescued
-#     openbao.yml (which restores the PREVIOUS agent.hcl, tep stanza included) would otherwise
-#     delete the directory out from under a live stanza. In that case ~/.tep stays until a run whose
-#     openbao.yml succeeded.
+#   - and this file re-checks that on its own (files/tep-retire-gate.sh), because a run where
+#     openbao.yml was skipped (dev_worker_enable_openbao false) or rescued (the rescue restores the
+#     PREVIOUS agent.hcl, tep stanza included, and fails the play) must not delete the directory out
+#     from under a live stanza. In that case ~/.tep stays until a run whose openbao.yml succeeded.
+# Once safe it also deletes the agent.hcl BACKUPS that still carry the tep stanza: the runbook's manual
+# rollback ("restore agent.hcl from its .bak") would otherwise bring the stanza back after its
+# template source and destination directory are gone, and the agent would exit (reviewer-claude,
+# ailab#1217).
 # Delete this file once every dev-worker has converged past it.
-
-- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
-  ansible.builtin.set_fact:
-    dev_worker_users: >-
-      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
-         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
-          if dev_worker_agent_user != dev_worker_admin_user else []) }}
-  when: dev_worker_users is not defined
 
 - name: Remove the tep CLI
   ansible.builtin.file:
@@ -45,6 +41,23 @@
     path: "{{ item }}"
     state: absent
   loop: "{{ (dev_worker_users | map(attribute='home') | map('regex_replace', '$', '/.tep') | list) + ['/etc/openbao-agent/tep-kubeconfig.ctmpl'] }}"
+  when: tep_retire_gate.stdout == 'safe'
+
+- name: Find agent.hcl backups that still render ~/.tep/kubeconfig
+  ansible.builtin.find:
+    paths: /etc/openbao-agent
+    patterns: "agent.hcl.*"
+    contains: "tep-kubeconfig"
+  register: tep_stale_hcl_backups
+  when: tep_retire_gate.stdout == 'safe'
+
+- name: Remove those backups (a manual restore of one would kill the agent)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ tep_stale_hcl_backups.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
   when: tep_retire_gate.stdout == 'safe'
 
 - name: Say why ~/.tep was kept
