@@ -747,11 +747,17 @@ Nothing else changes, and nothing uses the pools until a pointer or key is moved
 
 If you skip this, the old image:
 - answers pool requests with 503 `STRATEGY_UNAVAILABLE`;
-- refuses writes that touch pool routes;
-- drops the pool settings.
+- drops the pool settings (its loader does not know the plugin);
+- strips the pool routes' `managedBy` mark at its first **internal** write. Its own trusted writes (the Codex model
+  refresh about 20 s after start, token renewals) save the whole configuration through the old schema, which drops the
+  unknown field, and they skip the strategy check.
+- refuses **administrator and chat-tool** writes until then: dropping the mark counts as changing a route whose
+  strategy (`smart`) the old image does not know, so `STRATEGY_UNAVAILABLE`. After that internal write, writes that
+  change a pool route itself (removing an account in it, for example) stay refused for the whole rollback.
 
-Only in that case (the pre-rollback steps were skipped, and the old image stripped the routes' `managedBy` mark),
-rolling forward adopts the unmarked pool routes, but restores the shipped pool settings.
+So when the procedure was skipped, the pool routes reach the roll-forward unmarked. Rolling forward then adopts them
+(strategy `smart`, every target `<pool>:<account>`) instead of reporting a collision, but restores the shipped pool
+settings: re-apply any custom ones. With the procedure followed, there is nothing to adopt; the pools are re-created.
 
 **The old image still carries the Codex model-refresh bug.** After a rollback, its refresh again rewrites `*` targets
 on router-owned Codex logins to a fixed model, within about 40 minutes. That includes `sub-codex-5`, restored to
