@@ -434,3 +434,28 @@ against the repo. Dispositions:
   - **Accepted gap:** `TestpoolOperatorDown` goes with the testpool rules in PR-B, while the
     agent-sandbox controller keeps running until the follow-up. It is unmonitored for that window,
     but it manages nothing (no CRs once testpool is pruned), so an outage there costs nothing.
+- **Step 3 (PR-B, #1219, merged as `6fbd9886`; Gate 3 ✓).**
+  - Flux pruned the `testpool` Kustomization and its whole inventory: `ns testpool`,
+    `sc testpool-iscsi`, `runtimeclass kata-env`, `env-reaper`, `cri-log-relay` and both rule sets
+    are NotFound, with nothing `Terminating`.
+  - Every Kustomization is Ready; eight blipped DependencyNotReady for about a minute while
+    `infrastructure` reconciled.
+  - No pool or KSM alerts, and the KSM log is clean.
+  - The `agent-sandbox` Kustomization went in #1220 (+ a second half that deletes the vendored file).
+- **Step 6 (Gate 6 ✓).**
+  - No `terraform.tfvars` existed for env-pool: the Proxmox inputs came from
+    `agent-nodes/terraform.tfvars`, with `infra_state_path` and `kubeconfig_path` passed explicitly.
+  - `tofu state rm` removed the label and taint, so the destroy was 2 resources (the VM and the
+    no-op talos apply).
+  - Cordon and drain moved only DaemonSet pods. `qm` 4401 and its disks are gone, and `.37` no
+    longer answers.
+  - The node, CiliumNode and TridentNode are deleted (Trident: "No volumes publications remain for
+    node, removing node CR"), with no VolumeAttachment.
+  - **Memory:** ai-node2 `MemAvailable` went from about 25.0 to 29.0 GiB, not +16. A fixed-memory
+    VM commits only the pages its guest touched, and a DaemonSets-only Talos node had touched about
+    4 GiB. What went away is 16 GiB of possible commitment.
+    - The host sits at about 79-80% used (99/124 GB), at PVE's auto-balloon threshold.
+    - dw2 and dw4 balloons read 10.1 and 10.8 GiB (floors 4 and 6 GiB). No sizing change made.
+  - The state, its backups and the old env-pool plans are bundled into
+    `_out/env-pool-retired-20261010.tar.age` (decrypt check: 14 entries); the plaintext copies are
+    deleted.

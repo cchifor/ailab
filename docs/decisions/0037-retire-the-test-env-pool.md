@@ -102,6 +102,14 @@ rule, never widen it. This is in the dev-worker skills (`ansible/roles/dev_worke
 - **The `cri-log-relay` talosconfig.** Its `os:reader` client cert, minted 2026-09-21, cannot be
   revoked (Talos has no CRL) and expires about **2026-12-20**. Only the SOPS copy in git history
   remains.
+- **The NAS placeholder zvol `zpool1/orphan_placeholder_from_lun9_20260927`.** It is 84.8K, with no
+  LUN and no SCST device; it was left by the 09-27 LUN-9 repair. QuTS refuses to destroy its
+  snapshots from the shell ("permission denied", even as root, no holds). It is harmless; remove it
+  from the QuTS UI if it ever matters.
+- **The retired tofu state.** The `kubernetes/infra/env-pool` state, its backups and the old plans
+  embed the cluster machine secrets via remote state. They now exist only as
+  `kubernetes/infra/_out/env-pool-retired-20261010.tar.age` (estate age key) in the ops checkout;
+  the plaintext copies were deleted.
 
 ## Consequences
 
