@@ -280,6 +280,23 @@ else
   bad "D6: git-credentials.ctmpl.j2 does not read a 'af/data/dev-workers/...' path"
 fi
 
+# The agent guide is the only place an agent learns which Gitea token carries which scope. Until
+# 2026-10-10 it reached Claude's file alone, so a Codex agent read packages with the git token, got a
+# 403 and asked for package access the worker already had.
+guide_block="$(awk '/ANSIBLE MANAGED - openbao credentials/{f=1} f && /^  loop:/{exit} f' "$TASKS")"
+guide_loop="$(awk '/ANSIBLE MANAGED - openbao credentials/{f=1} f && /^  loop:/{print; exit}' "$TASKS")"
+case "$guide_loop" in
+*".claude/CLAUDE.md"*".codex/AGENTS.md"*) ok "D7: the credentials guide is published to CLAUDE.md and AGENTS.md" ;;
+*) bad "D7: the credentials guide is not published to both ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md" ;;
+esac
+for field in gitea_pat gitea_repo_pat gitea_package_pat; do
+  if printf '%s\n' "$guide_block" | grep -q "\`$field\`"; then
+    ok "D8: the credentials guide names $field"
+  else
+    bad "D8: the credentials guide does not name $field"
+  fi
+done
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "ALL PASS"
