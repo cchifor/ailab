@@ -36,11 +36,15 @@ configuration to the existing private collector verifier JSON:
 }
 ```
 
-Enable this component after `relay-control-monitoring`. It provides a separate
-nonsecret policy ConfigMap, opts the existing materializer into the extension,
-and mounts a dedicated 1 MiB RWX `nfs-csi` evidence PVC read-only into Relay. It
-does not use a file `subPath`, so an atomic receipt replacement is visible on the
-next scrape. The policy currently pins schema 43 and the exact reviewed verifier
+After the matching Relay #105 release is merged, deployed and its isolated restore
+verified, add `relay-recovery-monitoring-schema43` after the original
+`relay-recovery-monitoring` component (which follows `relay-control-monitoring`).
+The original component provides the nonsecret policy ConfigMap, opts the existing
+materializer into the extension, and mounts a dedicated 1 MiB RWX `nfs-csi` evidence
+PVC read-only into Relay. Its evidence mount does not use a file `subPath`, so an
+atomic receipt replacement is visible on the next scrape. The original component keeps its schema-42 policy. The separate opt-in
+`relay-recovery-monitoring-schema43` component follows it and overrides only the
+schema to 43, retaining the exact reviewed verifier
 source SHA256; a verifier/schema upgrade requires a matching GitOps change.
 Enabling this schema-43 policy requires a successful isolated restore of schema
 43; any existing schema-42 `evidence.json` becomes unavailable on the next scrape.
@@ -101,7 +105,13 @@ all provisioning/bootstrap workers first and prevent automatic restart. Perform
 and verify the isolated restore, migrate it, then run the matching Relay
 `npm run recovery:fence -- <expected-restored-database-name>` with the same
 generation file and the deployment's schema-owner connection, without RLS bypass.
-Provisioning workers need that same file/path configuration before restarting.
+This component does not install or patch separate provisioning/bootstrap worker
+workloads; no such workload manifest is currently provided by this component.
+Their deployment owner must wire the same generation file/path before restarting.
+The matching Relay worker commands call the same startup guard as the application:
+a fenced database with the variable missing, an unreadable file or a mismatched
+generation is refused. They do not run unfenced against a database that has a
+fence receipt.
 Do not change database role privileges or enable RLS bypass for this operation.
 
 Relay refuses startup when the generation does not match a completed fence, and
@@ -112,3 +122,25 @@ capacity. Inventory router/OpenBao/Incus/native resources created after the back
 before admitting new work: those resources are absent from the restored rows.
 The detailed behavioral contract and tested command are in Relay's
 `restored-authority-fence.md`. No component is enabled in the live overlay.
+
+Create the nonsecret file on the operator control host, then render a manifest for
+normal GitOps review (this command does not apply it):
+
+```sh
+python3 -c 'import json,uuid; print(json.dumps({"version":1,"generation":str(uuid.uuid4())}))' > generation.json
+kubectl -n relay create configmap relay-recovery-generation --from-file=generation.json --dry-run=client -o yaml > relay-recovery-generation.yaml
+```
+
+After the reviewed ConfigMap is provisioned, verify its exact data against the
+operator's source file:
+
+```sh
+kubectl -n relay get configmap relay-recovery-generation -o json | jq --slurpfile expected generation.json -e '(.data["generation.json"] | fromjson) == $expected[0]'
+```
+
+Keep `generation.json` outside restored state, and use that same file for the
+offline fence. The shape is exactly `{"version":1,"generation":"<fresh UUID>"}`.
+Replacing the ConfigMap alone does not change a running subPath mount; deliberate
+pod/worker replacement follows successful fencing. The original monitoring
+component continues accepting schema 42 until the operator explicitly chooses
+the schema-43 component. No live overlay references either new component.

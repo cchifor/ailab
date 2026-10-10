@@ -39,7 +39,7 @@ class Monitoring(unittest.TestCase):
                      'build', str(wrapper.relative_to(ROOT))).stdout
         cls.docs = list(yaml.safe_load_all(raw))
         configuration = yaml.safe_load((wrapper / 'kustomization.yaml').read_text())
-        configuration.setdefault('components', []).extend(os.path.relpath(ROOT / 'kubernetes/components' / component, wrapper) for component in ['relay-recovery-monitoring', 'relay-restore-fencing'])
+        configuration.setdefault('components', []).extend(os.path.relpath(ROOT / 'kubernetes/components' / component, wrapper) for component in ['relay-recovery-monitoring', 'relay-recovery-monitoring-schema43', 'relay-restore-fencing'])
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
         cls.recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
             'build', str(wrapper.relative_to(ROOT))).stdout))
@@ -158,9 +158,12 @@ class Monitoring(unittest.TestCase):
         self.assertIn({'name': 'restore-generation', 'configMap': {'name': 'relay-recovery-generation',
                        'defaultMode': 292, 'items': [{'key': 'generation.json', 'path': 'generation.json'}]}}, spec['volumes'])
         self.assertFalse(any(d['kind'] == 'ConfigMap' and d['metadata']['name'] == 'relay-recovery-generation' for d in self.recovery_docs))
-        for init in spec['initContainers']:
+        for init in spec.get('initContainers', []):
             self.assertNotIn('restore-generation', {m['name'] for m in init.get('volumeMounts', [])})
         self.assertNotIn('relay-restore-fencing', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
+        self.assertNotIn('relay-recovery-monitoring-schema43', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
+        baseline = yaml.safe_load((ROOT / 'kubernetes/components/relay-recovery-monitoring/kustomization.yaml').read_text())
+        self.assertIn('schema-version=42', baseline['configMapGenerator'][0]['literals'])
 
     def test_invalid_inputs_fail_closed_and_keep_last_complete_file(self):
         self.run_setup()
