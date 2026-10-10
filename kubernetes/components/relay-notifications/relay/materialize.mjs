@@ -3,6 +3,8 @@
 import { constants } from 'node:fs';
 import { chmod, mkdir, open, rename, rm } from 'node:fs/promises';
 
+let stage = 'read tenant-id';
+
 async function bounded(path, max) {
   // Deliberately follow the kubelet's projected-volume symlink on INPUT only.
   const f = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -17,6 +19,7 @@ async function bounded(path, max) {
 }
 
 async function write(name, value) {
+  stage = `write ${name}`;
   const path = `/output/private/${name}`;
   // A killed init container can leave a partial temporary file. No application
   // container runs until this single init writer succeeds.
@@ -28,9 +31,13 @@ async function write(name, value) {
 
 try {
   const tenant = await bounded('/input/tenant-id', 128);
+  stage = 'read publisher-token';
   const token = await bounded('/input/publisher-token', 128);
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(tenant)
-      || !/^tk_[A-Za-z0-9]{29}$/.test(token)) throw new Error('invalid input');
+  stage = 'validate tenant-id';
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(tenant)) throw new Error('invalid input');
+  stage = 'validate publisher-token';
+  if (!/^tk_[A-Za-z0-9]{29}$/.test(token)) throw new Error('invalid input');
+  stage = 'create private directory';
   await mkdir('/output/private', { mode: 0o700, recursive: true });
   await chmod('/output/private', 0o700);
   await write('publisher-token', token);
@@ -39,8 +46,9 @@ try {
     url: 'https://ntfy.chifor.me/relay-actions',
     tokenFile: '/run/relay-notifications/private/publisher-token',
   }]) + '\n');
-} catch {
+} catch (error) {
   // Node exceptions can contain file contents; never surface raw errors here.
-  console.error('Relay notification file setup failed; inspect Secret shape and volume permissions.');
+  const code = /^E[A-Z]{1,20}$/.test(error?.code ?? '') ? error.code : 'INVALID_INPUT';
+  console.error(`Relay notification file setup failed: ${stage} (${code}).`);
   process.exitCode = 1;
 }

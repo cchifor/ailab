@@ -4,6 +4,8 @@
 import { constants } from 'node:fs';
 import { open, rename, rm } from 'node:fs/promises';
 
+let stage = 'read base configuration';
+
 async function bounded(path, max) {
   const f = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
@@ -20,15 +22,20 @@ try {
   const base = await bounded('/base/server.yml', 65536);
   // This component owns ntfy's declarative provisioning set. Do not silently
   // override another component's accounts, or remove them during reconciliation.
+  stage = 'validate base configuration';
   if (/^\s*auth-(users|access|tokens)\s*:/m.test(base)) throw new Error('already provisioned');
-  if (!/^auth-default-access: "deny-all"$/m.test(base)) throw new Error('deny-all required');
+  if (!/^auth-default-access:[ \t]*(?:"deny-all"|'deny-all'|deny-all)[ \t]*(?:#.*)?$/m.test(base)) throw new Error('deny-all required');
   const users = [], tokens = [];
   const seen = new Set();
   for (const role of ['publisher', 'subscriber']) {
+    stage = `read ${role}-hash`;
     const hash = await bounded(`/input/${role}-hash`, 128);
+    stage = `read ${role}-token`;
     const token = await bounded(`/input/${role}-token`, 128);
-    if (!/^\$2[aby]\$(10|11|12)\$[./A-Za-z0-9]{53}$/.test(hash)
-        || !/^tk_[A-Za-z0-9]{29}$/.test(token) || seen.has(token)) throw new Error('invalid input');
+    stage = `validate ${role}-hash`;
+    if (!/^\$2[aby]\$(10|11|12)\$[./A-Za-z0-9]{53}$/.test(hash)) throw new Error('invalid input');
+    stage = `validate ${role}-token`;
+    if (!/^tk_[A-Za-z0-9]{29}$/.test(token) || seen.has(token)) throw new Error('invalid input');
     seen.add(token);
     users.push(`relay-${role}:${hash}:user`);
     tokens.push(`relay-${role}:${token}:relay-${role}`);
@@ -37,11 +44,13 @@ try {
     'relay-publisher:*:deny-all', 'relay-publisher:relay-actions:write-only',
     'relay-subscriber:*:deny-all', 'relay-subscriber:relay-actions:read-only',
   ])}\nauth-tokens: ${JSON.stringify(tokens)}\n`;
+  stage = 'write private server configuration';
   await rm('/output/server.yml.new', { force: true });
   const f = await open('/output/server.yml.new', 'wx', 0o600);
   try { await f.writeFile(value); await f.sync(); } finally { await f.close(); }
   await rename('/output/server.yml.new', '/output/server.yml');
-} catch {
-  console.error('ntfy Relay configuration failed; inspect Secret shape, base configuration and volume permissions.');
+} catch (error) {
+  const code = /^E[A-Z]{1,20}$/.test(error?.code ?? '') ? error.code : 'INVALID_INPUT';
+  console.error(`ntfy Relay configuration failed: ${stage} (${code}).`);
   process.exitCode = 1;
 }

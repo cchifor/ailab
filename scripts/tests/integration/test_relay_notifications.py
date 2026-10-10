@@ -35,7 +35,10 @@ def docker(*args, check=True, timeout=90, env=None, data=None):
     result = subprocess.run(["docker", *args], input=data, capture_output=True, timeout=timeout, env=env)
     if check and result.returncode:
         # Do not echo a failed native command's arbitrary credential-bearing output.
-        raise AssertionError("Docker notification fixture failed (exit %d)" % result.returncode)
+        # Pull/build/schema commands consume only static repository content.
+        diagnostic = result.stderr.decode(errors="replace")[-4000:] if (
+            args[0] == "pull" or KUSTOMIZE in args or KUBECONFORM in args) else ""
+        raise AssertionError("Docker notification fixture failed (exit %d): %s" % (result.returncode, diagnostic))
     return result
 
 
@@ -124,6 +127,7 @@ class Notifications(unittest.TestCase):
                         self.node_image, "node", "/setup/materialize.mjs", check=False)
         self.assertEqual(result.returncode == 0, good, "unexpected materializer result")
         self.no_secrets(result.stdout + result.stderr)
+        return result
 
     def no_secrets(self, output):
         for value in self.secret_values:
@@ -202,9 +206,21 @@ class Notifications(unittest.TestCase):
         app = next(c for c in deployment["containers"] if c["name"] == "relay")
         self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", [e["name"] for e in app["env"]])
         self.assertEqual(app["image"], next(c for c in base["containers"] if c["name"] == "relay")["image"])
+        initializer = next(c for c in deployment["initContainers"] if c["name"] == "notification-files")
+        self.assertEqual(deployment["securityContext"]["fsGroup"], initializer["securityContext"]["runAsGroup"])
+        self.assertEqual(deployment["securityContext"]["runAsUser"], initializer["securityContext"]["runAsUser"])
+        for name, docs in self.rendered.items():
+            pod = named(docs, "Deployment", name)["spec"]["template"]["spec"]
+            volumes = {v["name"] for v in pod["volumes"]}
+            for container in pod.get("initContainers", []) + pod["containers"]:
+                for mount in container.get("volumeMounts", []):
+                    self.assertIn(mount["name"], volumes, "mounted volume is absent from rendered pod")
         for directory in ["apps/relay", "infrastructure/monitoring"]:
-            k = yaml.safe_load((ROOT / "kubernetes/apps" / directory / "kustomization.yaml").read_text())
-            self.assertFalse(k.get("components"), "live opt-in requires a separate rollout PR")
+            base = ROOT / "kubernetes/apps" / directory
+            k = yaml.safe_load((base / "kustomization.yaml").read_text())
+            for component in k.get("components", []):
+                self.assertFalse((base / component).resolve().is_relative_to(COMPONENTS),
+                                 "notification opt-in requires a separate rollout PR")
         mount = next(m for m in self.native["volumeMounts"] if m["mountPath"] == "/etc/ntfy/server.yml")
         self.assertEqual(mount["name"], "notification-config")
         self.assertEqual(len([m for m in self.native["volumeMounts"] if m["mountPath"] == "/etc/ntfy/server.yml"]), 1)
@@ -259,6 +275,21 @@ class Notifications(unittest.TestCase):
                      self.base["server.yml"].replace('"deny-all"', '"read-write"')]:
             (self.path / "base/server.yml").write_text(base)
             self.materialize("ntfy", good=False)
+
+    def test_equivalent_deny_all_formatting_and_value_free_diagnostics(self):
+        for value in ['deny-all', "'deny-all'", '"deny-all"  # restricted']:
+            base = self.base["server.yml"].replace('"deny-all"', value)
+            (self.path / "base/server.yml").write_text(base)
+            self.materialize("ntfy")
+            self.assertEqual(yaml.safe_load((self.path / "output/server.yml").read_text())["auth-default-access"], "deny-all")
+        (self.path / "input/publisher-token").unlink()
+        result = self.materialize("relay", good=False)
+        self.assertIn(b'read publisher-token (ENOENT)', result.stderr)
+        self.seed_inputs()
+        (self.path / "input/subscriber-hash").write_text("private-malformed-verifier")
+        self.secret_values.append("private-malformed-verifier")
+        result = self.materialize("ntfy", good=False)
+        self.assertIn(b'validate subscriber-hash (INVALID_INPUT)', result.stderr)
 
     def test_native_accounts_reconcile_rotate_restore_and_withdraw(self):
         # Start with the existing shared service and its real reconciliation hook.
