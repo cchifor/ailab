@@ -110,7 +110,7 @@ python scripts/node-ssh.py <host-ip> "ps -eo pid,stat,wchan:24,comm | awk '\$2 ~
 **while sshd is still alive**:
 
 ```bash
-# 1. Talos guests (CP + any agent/env node on this host) -- these DRAIN, so they go first
+# 1. Talos guests (CP + any agent node on this host) -- these DRAIN, so they go first
 _out/talosctl-1142.exe shutdown -n <cp-ip>            # repeat per Talos guest on the host
 
 # 2. QEMU VMs (runners, dev-workers)

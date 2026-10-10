@@ -73,7 +73,7 @@ variable "talos_config_contract" {
   type    = string
   default = "v1.11.2"
   validation {
-    # Identical in infra, agent-nodes and env-pool (and in talos_machine_secrets state): a drifted copy
+    # Identical in infra and agent-nodes (and in talos_machine_secrets state): a drifted copy
     # would render a different config schema for that pool. Move all three together, by plan.
     condition     = var.talos_config_contract == "v1.11.2"
     error_message = "talos_config_contract must stay v1.11.2 (the contract in state); moving it is a reviewed migration - see docs/runbooks/talos-upgrade.md."
