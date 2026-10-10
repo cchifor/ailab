@@ -115,12 +115,6 @@ rules:
   - apiGroups: ["wgpolicyk8s.io"]
     resources: ["policyreports"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["agents.x-k8s.io"] # App sandboxes in strive-sandboxes-ailab
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["get", "list", "watch"]
 ---
 # Minting rights for openbao-k8stoken-sync, scoped by resourceNames to the observer SAs and nothing
 # else in this namespace — the same shape as the helmtest mint Roles in k8stoken-sync.yaml, kept

@@ -203,7 +203,7 @@ spec:
           snapshotVolumes: false
           resourcePolicy: { kind: configmap, name: velero-volume-policy } # skip emptyDirs — volume-policy.yaml
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain (testpool was excluded until its retirement, ADR 0037)
+          excludedNamespaces: [kube-system, velero, trivy-system, testpool] # trivy DB cache is rebuildable — keep it out of the off-site chain. testpool: retired 2026-10-10 (ADR 0037); the entry is inert and stays until the next real velero change (editing it alone would upgrade the release for nothing)
       weekly:
         disabled: false
         schedule: "0 3 * * 0"
@@ -213,7 +213,7 @@ spec:
           snapshotVolumes: false
           resourcePolicy: { kind: configmap, name: velero-volume-policy } # skip emptyDirs — volume-policy.yaml
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero, trivy-system] # trivy DB cache is rebuildable — keep it out of the off-site chain (testpool was excluded until its retirement, ADR 0037)
+          excludedNamespaces: [kube-system, velero, trivy-system, testpool] # trivy DB cache is rebuildable — keep it out of the off-site chain. testpool: retired 2026-10-10 (ADR 0037); the entry is inert and stays until the next real velero change (editing it alone would upgrade the release for nothing)
     resources:
       # ephemeral-storage request (2026-09-27): all 13 lingering velero-594c8b58fd-* pods were evicted
       # from talos-cp1 under DiskPressure (09-09 "Container velero was using 361712Ki, request is 0";
