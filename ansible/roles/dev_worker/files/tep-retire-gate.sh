@@ -36,11 +36,16 @@ case "$state" in
   *) echo unsafe-unknown; exit 0 ;;
 esac
 
-started_raw=$(systemctl show openbao-agent -p ExecMainStartTimestamp --timestamp=us+utc --value 2>/dev/null)
+# Every fail-closed exit names its reason on stderr, so "~/.tep never goes away" can be told apart
+# (an old systemd without --timestamp=us+utc, i.e. < 247, from a genuinely stale process).
+unknown() { echo "tep-retire-gate: $*" >&2; echo unsafe-unknown; exit 0; }
+started_raw=$(systemctl show openbao-agent -p ExecMainStartTimestamp --timestamp=us+utc --value 2>&1) ||
+  unknown "systemctl show --timestamp=us+utc failed (systemd >= 247 needed): $started_raw"
 # `date -d ""` means today's midnight, not an error, so an empty value must be caught here.
-[ -n "$started_raw" ] || { echo unsafe-unknown; exit 0; }
-started=$(date -u -d "$started_raw" +%s%N 2>/dev/null) || { echo unsafe-unknown; exit 0; }
-written=$(stat -c %.9Y "$hcl" 2>/dev/null | tr -d .) || { echo unsafe-unknown; exit 0; }
-case "$started$written" in *[!0-9]*|'') echo unsafe-unknown; exit 0 ;; esac
+[ -n "$started_raw" ] || unknown "empty ExecMainStartTimestamp"
+started=$(date -u -d "$started_raw" +%s%N 2>/dev/null) || unknown "unparseable start time: $started_raw"
+written=$(stat -c %.9Y "$hcl" 2>/dev/null | tr -d .) || unknown "stat %.9Y failed on $hcl"
+case "$started" in ''|*[!0-9]*) unknown "start time is not a number: $started" ;; esac
+case "$written" in ''|*[!0-9]*) unknown "agent.hcl mtime is not a number: $written" ;; esac
 
 if [ "$started" -gt "$written" ]; then echo safe; else echo unsafe-stale-process; fi

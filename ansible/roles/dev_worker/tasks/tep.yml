@@ -47,7 +47,11 @@
   ansible.builtin.find:
     paths: /etc/openbao-agent
     patterns: "agent.hcl.*"
+    # read_whole_file: `contains` is then a re.search over the whole file. Without it, it is a
+    # re.match per LINE (anchored at column 0), and the indented `source = ".../tep-kubeconfig.ctmpl"`
+    # lines would never match (reviewer-codex, ailab#1217).
     contains: "tep-kubeconfig"
+    read_whole_file: true
   register: tep_stale_hcl_backups
   when: tep_retire_gate.stdout == 'safe'
 
