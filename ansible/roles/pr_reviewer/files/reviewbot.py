@@ -32,6 +32,21 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
+
+
+def chunk_enabled(repo):
+    return repo in CFG.get("chunk_review_repos", [])
+
+
+def chunk_call(name, *args):
+    # Lazy: the ordinary path and its established behavior remain unchanged by default.
+    # Only centrally deployed sibling modules are imported, never reviewed repository code.
+    directory = os.path.dirname(os.path.abspath(__file__))
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import review_chunk_adapter
+    return getattr(review_chunk_adapter, name)(SimpleNamespace(**globals()), *args)
 
 def _read(path):
     with io.open(path, encoding="utf-8") as f:
@@ -212,6 +227,8 @@ def inhibited():
 def enqueue(repo, pr, head_sha, source):
     if repo not in CFG["repos"]:
         return
+    if chunk_enabled(repo):
+        chunk_call("refresh_job", repo, pr, head_sha, source)
     with db_lock:
         c = db()
         # When this head was FIRST seen in any state, 'superseded' included. For a delayed
@@ -2452,6 +2469,8 @@ def marker_of(rv):
 
 
 def existing_marker(repo, pr, head_sha):
+    if chunk_enabled(repo):
+        return chunk_call("existing", repo, pr, head_sha)
     for rv in iter_reviews(repo, pr):
         m = marker_of(rv)
         if m and m.group(1) == CFG["persona"] and m.group(2) == head_sha:
@@ -2461,6 +2480,8 @@ def existing_marker(repo, pr, head_sha):
 
 def persona_verdicts(repo, pr, head_sha):
     """Latest authenticated marker verdict per persona at this head."""
+    if chunk_enabled(repo):
+        return chunk_call("verdicts", repo, pr, head_sha)
     out = {}
     for rv in iter_reviews(repo, pr):
         m = marker_of(rv)
@@ -2572,6 +2593,8 @@ def maybe_merge(repo, pr):
                    if needed else "no merge_personas configured"))
             return "verdicts"
         try:
+            if chunk_enabled(repo) and not chunk_call("merge_guard", repo, pr, head):
+                return
             api(f"/repos/{repo}/pulls/{pr}/merge", "POST",
                 {"Do": "merge", "head_commit_id": head})
         except urllib.error.HTTPError as e:
@@ -2579,7 +2602,7 @@ def maybe_merge(repo, pr):
             # Branch protection wants approvals and this persona's clean review predates
             # the APPROVED-on-clean behavior (ailab#465 sat unmerged for an hour behind a
             # silently-swallowed 405): upgrade our own clean verdict to an approval, retry.
-            if e.code == 405 and "approval" in msg.lower() and \
+            if not chunk_enabled(repo) and e.code == 405 and "approval" in msg.lower() and \
                     verdicts.get(CFG["persona"]) == "clean":
                 mine = f"reviewer-{CFG['persona']}"
                 already = any((rv.get("user") or {}).get("login") == mine
@@ -2670,6 +2693,8 @@ def convergence_context(repo, pr, head_sha, rnd):
 
 
 def review_job(job_id, repo, pr, head_sha):
+    if chunk_enabled(repo):
+        return chunk_call("review_job", job_id, repo, pr, head_sha)
     d = pr_ok(repo, pr, head_sha)
     if d is None:
         return ("superseded", None, "pr closed/draft")
@@ -3533,7 +3558,8 @@ def requeue(repo, pr, force=False):
     return 0
 
 
-USAGE = "usage: reviewbot.py <config> [--requeue <owner/repo> <pr> [--force]]"
+USAGE = ("usage: reviewbot.py <config> [--requeue <owner/repo> <pr> [--force] | "
+         "--restart-skipped <owner/repo> <pr> <expected-base-sha> <expected-head-sha>]")
 
 
 def main():
@@ -3541,6 +3567,15 @@ def main():
     # never a silent fall-through into starting the daemon.
     argv = sys.argv[2:]
     if argv:
+        if argv[0] == "--restart-skipped":
+            if len(argv) != 5:
+                print(USAGE, file=sys.stderr)
+                return 2
+            try:
+                return chunk_call("restart_skipped", argv[1], int(argv[2]), argv[3], argv[4])
+            except ValueError as error:
+                print(str(error), file=sys.stderr)
+                return 2
         if argv[0] != "--requeue":
             print(f"unknown option {argv[0]!r}\n{USAGE}", file=sys.stderr)
             return 2
@@ -3557,12 +3592,22 @@ def main():
         return requeue(rest[0], pr, force=force)
     os.makedirs(os.path.dirname(CFG["state_db"]), exist_ok=True)
     c = db()
+    # A crash after the chunk POST began has an ambiguous remote outcome. Keep it
+    # quarantined until an operator checks Gitea; do not silently issue a second POST.
+    for repo in CFG.get("chunk_review_repos", []):
+        c.execute("UPDATE jobs SET state='quarantined',note=? WHERE repo=? AND state='posting'",
+                  ("ambiguous POST: complete-review service interrupted during publication", repo))
     # Restart recovery: a killed in-flight run leaves 'running' (and rarely 'posting')
     # rows nothing would ever pick again - deploy restarts orphaned two jobs on day one.
     # Re-queueing 'posting' is safe: the pre-post marker check dedupes an already-landed
     # review. Retry timers also reset so a restart never waits out stale backoff.
-    n = c.execute("UPDATE jobs SET state='queued', next_at=0, updated=? WHERE state IN "
-                  "('running','posting')", (time.time(),)).rowcount
+    chunk_repos = CFG.get("chunk_review_repos", [])
+    excluded = ",".join("?" * len(chunk_repos)) or "NULL"
+    n = c.execute(
+        "UPDATE jobs SET state='queued', next_at=0, updated=? WHERE state='running' "
+        f"OR (state='posting' AND repo NOT IN ({excluded}))",
+        [time.time(), *chunk_repos],
+    ).rowcount
     c.execute("UPDATE jobs SET next_at=0 WHERE state='retry'")
     c.commit()
     c.close()
