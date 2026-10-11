@@ -91,7 +91,7 @@ shutdown waited its full 60 s grace on open streams. The first rollout behind th
 With the router's drain the gap is about 45 s at most: 20 s drain, up to 12 s cleanup, about 13 s to ready. 85 s
 also leaves room under Cloudflare's roughly 100 s time-to-first-byte for a held stream, which gets its first byte
 (`: ok`) as soon as the router selects an account (the router already gives images a 90 s execution budget, and a longer hold would
-let Cloudflare time out first). Active health checks poll the router's `/ready` every 2 s, with a 5 s timeout; two failures in a row mark it down. (`/ready` waits behind the router's SQLite worker, and a heavy admin query such as the week usage took 2.7 s on 2026-10-11; with a 2 s timeout every Status page load marked the router down for about 2 s.) A request that was never sent
+let Cloudflare time out first). Active health checks poll the router's `/ready` every 3 s, with a 3 s timeout; two failures in a row mark it down, so a draining router (503 at once) is marked down within about 6 s, a hung one within about 9 s, and a recovered one is marked up within 3 s. (`/ready` waits behind the router's SQLite worker, and a heavy admin query such as the week usage took 2.7 s on 2026-10-11; with a 2 s timeout every Status page load marked the router down for about 2 s. The interval is not shorter than the timeout, so probes never pile up on that worker.) A request that was never sent
 (dial failure) is safe to hold and retry. After the router has accepted a request, Caddy may replay a GET within
 `lb_try_duration`, but never a POST (its default retry match is GET-only), so a held POST was never sent.
 Caddy's own readiness is a TCP probe, so it does not flap with the router.

@@ -23,9 +23,12 @@ data:
   # chifor.me/caddyfile-revision on the Deployment whenever this changes: a ConfigMap edit
   # alone does not roll the pods.
   # Health checks: the router's /ready waits behind its one SQLite worker, so a heavy admin query
-  # (the week usage took 2.7 s on 2026-10-11) delays it. A 5 s timeout and two failures in a row
-  # keep that from marking the router down. A draining router answers 503 at once, and requests
-  # that cannot connect are held whatever the health state.
+  # (the week usage took 2.7 s on 2026-10-11) delays it. A 3 s timeout and two failures in a row
+  # keep that from marking the router down. The interval is not shorter than the timeout: Caddy
+  # starts a probe every interval whether or not the last one finished, and overlapping probes
+  # would queue on that same worker. So the edge marks a draining router (503 at once) down within
+  # about 6 s, a hung one within about 9 s, and a recovered one up within 3 s. Rollouts do not
+  # depend on it: requests that cannot connect are held whatever the health state.
   Caddyfile: |
     {
     	admin off
@@ -41,16 +44,16 @@ data:
     		lb_try_duration 10s
     		lb_try_interval 250ms
     		health_uri /ready
-    		health_interval 2s
-    		health_timeout 5s
+    		health_interval 3s
+    		health_timeout 3s
     		health_fails 2
     	}
     	reverse_proxy llm-router.llm-router.svc.cluster.local:80 {
     		lb_try_duration 85s
     		lb_try_interval 250ms
     		health_uri /ready
-    		health_interval 2s
-    		health_timeout 5s
+    		health_interval 3s
+    		health_timeout 3s
     		health_fails 2
     	}
     }
