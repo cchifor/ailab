@@ -91,29 +91,70 @@ With exactly two whitelisted approvers, two required approvals and one required 
 one reviewer-host outage or a renamed CI context stops every merge on these repositories.
 Lowering `required_approvals` alone recovers nothing: the reviewbot still merges only on
 both personas' clean verdicts, the merge whitelist names only the two reviewers, and the
-admin override is blocked, so nobody else can merge either. Recovery is therefore an
-**owner merge of one specific PR at its exact head**, with a one-shot `chifor` token under
-the same discipline as `scripts/gitea-owner-merge.sh` (minted in the Gitea pod, never
-printed, deleted after use, its 401 proven). That script cannot do it: its gate requires
-both reviewer approvals at the head.
+admin override is blocked, so nobody else can merge either. Relaxing only
+`block_admin_merge_override` is not enough: Gitea 1.26.1's `CheckPullMergeable` asks whether
+the user may merge (the merge whitelist) BEFORE it considers `force_merge`, so `chifor`
+is still refused; and disabling the merge whitelist would admit every repository writer.
 
-1. Open an issue in the affected repository: the reason, the time (UTC), the PR and its
-   full head SHA. Check that head's CI yourself: a forced merge bypasses the required
-   context.
-2. Mint the token (`--scopes write:repository`; [`owner-credentials.md`](owner-credentials.md)
-   § Break-glass, step 2) and save the rule as it is:
-   `GET /repos/cchifor/<repo>/branch_protections/main`.
-3. `PATCH` the rule with the minimum: `block_admin_merge_override: false`, which lets the
-   site-admin owner merge with `force_merge`. Relax `enable_merge_whitelist` or
-   `enable_approvals_whitelist` only if Gitea still refuses, one field at a time, each
-   noted in the issue.
-4. Merge exactly that PR: `POST /repos/cchifor/<repo>/pulls/<n>/merge` with
-   `{"Do": "merge", "head_commit_id": "<full head sha>", "force_merge": true}`.
-5. `PATCH` every changed field back to its saved value, `GET` the rule and compare it field
-   by field with the saved copy (and the table above).
-6. Delete the token (`delete from access_token where name='<name>'` on the infra-pg
-   primary, database `gitea`) and confirm that its next use answers 401. Close the issue
-   with the merge SHA and the read-back.
+Recovery is therefore an **owner merge of one specific PR at its exact head**, with a
+one-shot `chifor` token under the same discipline as `scripts/gitea-owner-merge.sh` (that
+script cannot do it: its gate requires both reviewer approvals at the head). The rule is
+opened by exactly two fields, `chifor` added to `merge_whitelist_usernames` and
+`block_admin_merge_override: false`; the approvals whitelist and everything else stay.
+
+1. Open an issue in the affected repository: the reason, the time (UTC), the PR and its full
+   head SHA. Check that head's CI yourself: a forced merge bypasses the required context.
+2. Run the script below in WSL bash, as a FILE (`bash break-glass.sh`), not pasted into an
+   interactive shell: its `EXIT` trap is what restores the rule, reads it back and deletes the
+   token, also when the merge or anything before it fails. `K`, `GP`, `DB` and `sql` are the
+   shared setup of `s2s-identity.md` § "Enrol a worker identity".
+
+   ```bash
+   set -u
+   REPO=relay PR=<n> HEAD=<full head sha>
+   API=https://git.chifor.me/api/v1/repos/cchifor/$REPO; W=/dev/shm/break-glass; rm -rf $W; mkdir -m 700 $W
+   NAME=owner-op-$REPO-$PR-breakglass-$(date -u +%Y%m%d%H%M%S); T=""
+   g() { printf 'Authorization: token %s\n' "$T" | curl -q -sS --proto =https --max-redirs 0 -H @- "$@"; }
+   finish() {                                     # ALWAYS: rule back, read back, token gone
+     if [ -s $W/restore.json ]; then
+       g -X PATCH -H 'Content-Type: application/json' --data-binary @$W/restore.json \
+         -o /dev/null -w 'restore: HTTP %{http_code}\n' "$API/branch_protections/main"
+       g -o $W/after.json "$API/branch_protections/main"
+       python3 -c 'import json,sys; a,b=(json.load(open(f)) for f in sys.argv[1:])
+   d=sorted(k for k in set(a)|set(b) if k!="updated_at" and a.get(k)!=b.get(k))
+   print("read-back:", "identical to the record" if not d else "DIFFERS in %s - fix it now" % d)' \
+         $W/rule.json $W/after.json
+     fi
+     printf "delete from access_token where uid=(select id from \"user\" where name='chifor') and name='%s';\n" \
+       "$NAME" | sql
+     g -o /dev/null -w 'token after delete: HTTP %{http_code} (must be 401)\n' https://git.chifor.me/api/v1/user
+     T=""
+   }
+   trap finish EXIT
+   T=$($K -n gitea exec "$GP" -c gitea -- gitea admin user generate-access-token --username chifor \
+     --token-name "$NAME" --scopes write:repository --raw 2>/dev/null | tr -d '\r\n')
+   [[ $T =~ ^[0-9a-f]{40}$ ]] || { echo "mint failed"; exit 1; }
+   g -f -o $W/rule.json "$API/branch_protections/main" || exit 1         # the record
+   python3 - $W <<'PY' || exit 1
+   import json, sys
+   w = sys.argv[1]; r = json.load(open(w + "/rule.json"))
+   keep = {"merge_whitelist_usernames": r["merge_whitelist_usernames"],
+           "block_admin_merge_override": r["block_admin_merge_override"]}
+   json.dump(keep, open(w + "/restore.json", "w"))
+   json.dump({"merge_whitelist_usernames": keep["merge_whitelist_usernames"] + ["chifor"],
+              "block_admin_merge_override": False}, open(w + "/open.json", "w"))
+   PY
+   g -f -X PATCH -H 'Content-Type: application/json' --data-binary @$W/open.json \
+     -o /dev/null -w 'open: HTTP %{http_code}\n' "$API/branch_protections/main" || exit 1
+   printf '{"Do":"merge","head_commit_id":"%s","force_merge":true}' "$HEAD" > $W/merge.json
+   g -X POST -H 'Content-Type: application/json' --data-binary @$W/merge.json \
+     -w 'merge: HTTP %{http_code}\n' "$API/pulls/$PR/merge"
+   ```
+
+3. Expect `merge: HTTP 200`, `read-back: identical to the record` and `token after delete:
+   HTTP 401`. Anything else is the incident now: fix the rule by hand with a fresh one-shot
+   token and read it back against the table above. Record the result (merge SHA or the
+   refusal, and the read-back) in the issue, then close it.
 
 For a renamed CI context, the fix is a `PATCH` of `status_check_contexts` under the same
 token discipline, recorded and read back the same way.
