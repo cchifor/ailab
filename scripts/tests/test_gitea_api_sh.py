@@ -301,6 +301,18 @@ class GiteaApiShTest(unittest.TestCase):
         _, sent = self.send("POST", self.COMMENTS, dw, AILAB_RUN_ID=self.RUN)
         self.assertEqual(sent, dw)
 
+    def test_a_marker_anywhere_in_the_body_is_never_doubled(self):
+        # An edited comment keeps its original marker with new prose after it; a marker can also sit
+        # inline. Either way the body already names a run, and a second marker could name another.
+        for body in ("first\n<!-- worker: workstation run: old-run -->\nedited: one more thing",
+                     "see <!-- worker: workstation run: old-run --> above, and more"):
+            with self.subTest(body=body):
+                raw = json.dumps({"body": body}).encode()
+                r, sent = self.send("PATCH", "/repos/cchifor/ailab/issues/comments/345", raw,
+                                    AILAB_RUN_ID=self.RUN)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(sent, raw)
+
     def test_a_payload_without_a_string_body_is_byte_identical(self):
         for raw in (b'{"event": "APPROVED", "commit_id": "abc"}', b'{"body": null}', b'{"body": 5}'):
             with self.subTest(raw=raw):

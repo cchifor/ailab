@@ -16,9 +16,10 @@
 # credential, so a comment or review names the RUN that wrote it. With AILAB_RUN_ID set, a comment or
 # review write (POST issues/N/comments, PATCH issues/comments/ID, POST pulls/N/reviews[/ID]) gets
 # `\n<!-- worker: workstation run: <id> -->` appended to its JSON `body`. Unset or empty: no marker, never
-# a guessed id. Sent as the ORIGINAL file, byte for byte: every other endpoint, a body that already ends
-# in a worker marker, and a command body - one whose whole text is `approve-pin <sha>`, which the
-# owner-ack gate counts only as a one-line body.
+# a guessed id. Sent as the ORIGINAL file, byte for byte: every other endpoint, a body that already
+# carries a worker marker ANYWHERE (an edit of a marked comment keeps its one original attribution), and a
+# command body - one whose whole text is `approve-pin <sha>`, which the owner-ack gate counts only as a
+# one-line body.
 # Prints `HTTP <status>` and the response body; exits 1 on a 4xx/5xx, 2 on bad input, 3 when no
 # credential resolves, 4 when the identity guard refuses, 5 when curl fails at the transport level
 # (DNS, TLS, connection), whatever curl's own exit code was.
@@ -60,8 +61,7 @@ if not isinstance(d, dict):
 b = d.get("body")
 if not isinstance(b, str) or re.fullmatch(r"approve-pin [0-9A-Fa-f]{7,40}", b.strip()):
     sys.exit(10)
-last = (b.strip().splitlines() or [""])[-1].strip()
-if re.fullmatch(r"<!-- worker: [^>]* -->", last):
+if re.search(r"<!-- worker: [^>]* -->", b):
     sys.exit(10)
 d["body"] = b + "\n<!-- worker: workstation run: " + run + " -->"
 with open(dst, "w", encoding="utf-8") as f:
