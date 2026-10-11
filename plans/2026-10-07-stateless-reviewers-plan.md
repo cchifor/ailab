@@ -233,14 +233,23 @@ is resolved only when one of these is observed, never because time passed:
 | Evidence | Meaning | Resolution |
 | --- | --- | --- |
 | Authenticated marker of this kind at the right's head (review), or an APPROVED review by the bot at the head (approval) | The request landed | `pubfin<G>` |
-| A **PENDING review by the bot** on the PR | The request ended without submitting (spike 3: a failed POST leaves one) | Delete it under the held right, then `pubfin<G>` |
-| The operator attests that the **forge process restarted after `pubsent<G>`** (`--forge-restarted`) | In-flight requests died with the process | `pubvoid<G>` (section 9) |
+| A **PENDING review by the bot** on the PR, **and** the owner's POST was answered by the forge itself with a 5xx (Gitea's own JSON error body, not a proxy's 502/503/504) | The handler returned, leaving its pending review behind (spike 3: an invalid position answers 500 and leaves one) | Delete it under the held right, then `pubfin<G>` |
+| The operator attests that the **forge process restarted after `pubsent<G>`** (`--forge-restarted`) | In-flight requests died with the process | Re-run the landing check **after** the restart completed: landed → `pubfin<G>`; not landed → `pubvoid<G>` (section 9) |
 
-The **owner** checks the first two itself while it lives (every sweep), so most unanswered POSTs
-resolve without an operator. With no evidence the PR stays blocked for this kind and alerts; a human
-resolves it (restart the forge and attest, or review and merge by hand). On GitHub, whether a failed
-POST leaves a pending review is a Phase 0b question; without that evidence, only landing or a human
-resolves it.
+**A PENDING review alone is not evidence** (Codex, review round 10). It is also the visible
+intermediate state of a review POST that is still executing: Gitea creates the pending review and
+its comments before it submits the review, so an observer can see PENDING while the original
+request is still running. Spike 3 proves only that a request which *answered* left one. After a
+timeout, a crash, or a proxy 5xx, the owner never saw the handler return, so a PENDING review does
+not resolve the right. Only landing or an attested forge restart does.
+
+The **owner** checks the first two rows itself while it lives (every sweep), so a POST that the forge
+answered resolves without an operator. With no evidence the PR stays blocked for this kind and
+alerts. A human resolves it, either by restarting the forge and attesting, or by reviewing and merging
+by hand. On GitHub, whether a failed POST leaves a pending review is a Phase 0b question. Without that
+evidence, only landing or a human resolves it. Phase 0 adds one Gitea measurement: a review POST with
+several inline comments, slowed down server-side, polled for PENDING while it is in flight. That
+confirms the intermediate state this rule assumes.
 
 **State of a PR's publication** (pure function over its rights and reviews, for this kind; rows are
 evaluated in this order):
@@ -344,9 +353,15 @@ rebuilds them from the first listing. `maybe_merge` runs on every instance (idem
      - never sent (no `pubsent<G>`): require `--owner-stopped <instance>` (printed from the right's
        message; a migrated right's legacy service is stopped by the cut-over), then `pubvoid<G>`;
      - possibly sent (`pubsent<G>`, no `pubfin<G>`): require **evidence** (section 5): landing
-       evidence → `pubfin<G>`; a bot PENDING review → `pubfin<G>` (deleted in step 2); or
+       evidence → `pubfin<G>`; or
        `--owner-stopped` **and** `--forge-restarted` (the operator confirms the forge process restarted
-       after the `pubsent` time) → `pubvoid<G>`. No evidence → refuse, and print what would count.
+       after the `pubsent` time) → re-read the landing evidence **now**, after the restart completed.
+       If it landed, write `pubfin<G>`: a request that committed just before the restart must never be
+       voided, or a second review would be minted. If it did not land, write `pubvoid<G>`. A bot
+       PENDING review that is still there is a leftover of the killed request, and step 2 deletes it.
+       A bot PENDING review on its own does **not** count
+       here: the operator never saw the POST answered (section 5). No evidence → refuse, and print
+       what would count.
   2. **Clean up under a right of its own:** `create_owned(pub<G+1>)` with `purpose: operator`; delete
      the bot's PENDING reviews on the PR; finish the right. All rights are then resolved and the PR is
      open.
@@ -408,14 +423,14 @@ PR, owner instance),
 | 2 | Create answers 201/409/422/500/timeout | Readback decides |
 | 3 | Create timed out and landed later | My nonce on readback → a claim is my lease; a right is finished at once |
 | 4 | Owner crashes before `pub` | Lease expires → abandoned (charged); another instance claims |
-| 5 | Owner crashes between `pubsent` and the answer | Ambiguous; resolved only on evidence (landing, a bot pending review, or forge restart attested) |
-| 5a | Owner alive after a POST timeout | Right stays held; the owner resolves it on evidence each sweep; never by time |
+| 5 | Owner crashes between `pubsent` and the answer | Ambiguous; resolved only on evidence (landing, or forge restart attested); a bot pending review alone is not evidence |
+| 5a | Owner alive after a POST timeout | Right stays held; the owner resolves it on landing evidence each sweep; never by time, never by a pending review alone |
 | 5b | My own sweep meets my in-flight right | Held → treated like a peer's (wait/skip), never finished |
 | 5c | Persistent 4xx on the review POST | `fail` (charged) → head exhausted after 5 |
 | 6 | Owner never sent (pre-send check failed) | Consumed + `pubfin`; void at once |
 | 7 | Owner paused before sending | Self-fence (monotonic) → finish, no send |
 | 8 | Review deleted after a 2xx | `pubfin` exists → `--force` voids at once |
-| 9 | Failed POST left a PENDING review | PR ambiguous for this kind; operator cleanup under its own right deletes it |
+| 9 | Failed POST left a PENDING review | Forge-answered 5xx: the owner deletes it under its held right and finishes. Otherwise the PR is ambiguous for this kind, and operator cleanup under its own right deletes it only after landing evidence or an attested forge restart |
 | 9a | `pubfin` write fails after finishing | Consumed in-process, never sent; the write is retried for the process's life |
 | 9e | A peer holds a right when I want to publish | Wait for it within my budget, then publish; else `rel.pub` |
 | 9f | Stuck right (crash in the post window) | Blocks the PR for this kind until the operator; alert names PR and owner (stated residual) |
