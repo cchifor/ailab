@@ -1,9 +1,10 @@
 """scripts/openbao-revoke-slot-holder.sh: cut a re-slotted dev-worker slot's previous machine out of OpenBao.
 
-Runs the script against a fake `bao` and `kubectl` on PATH. Proves the sweep spares exactly the replacement
-(its SecretID accessor and the tokens tagged with its holder), revokes the previous holder's tokens, and fails
-closed: a denied, sealed or unreachable vault, a failed destroy or revoke, or a missing replacement accessor
-exits 1, and a failed enumeration never reads as "nothing to revoke".
+Runs the script against a fake `bao` and `kubectl` on PATH. Proves the sweep destroys EVERY SecretID of the
+role and revokes EVERY token the role issued (it runs before the replacement's SecretID exists, so it spares
+nothing), leaves other roles' tokens alone, and fails closed: a denied, sealed or unreachable vault, unparsable
+output, or a failed lookup, destroy or revoke exits 1, and a failed enumeration never reads as "nothing to
+revoke".
 """
 import os
 import shutil
@@ -25,14 +26,15 @@ FAKE_BAO = textwrap.dedent(r"""
     case "$1 $2 $3" in
       "list -format=json auth/approle/role/dev-worker-3/secret-id")
         case "${SID_MODE:-ok}" in
-          ok) echo '["keepacc","oldacc1","oldacc2"]';;
+          ok) echo '["oldacc1","oldacc2"]';;
           empty) echo '{}'; exit 2;;
           denied) echo '{"errors":["1 error occurred:\n\t* permission denied\n\n"]}'; exit 2;;
           garbage) echo 'WARNING! something odd'; exit 0;;
         esac;;
       "list -format=json auth/token/accessors")
         case "${ACC_MODE:-ok}" in
-          ok) echo '["t-old","t-new","t-other","t-gone","t-nometa"]';;
+          ok) echo '["t-old","t-old2","t-other","t-gone","t-nometa"]';;
+          empty) echo '{}'; exit 2;;
           down) echo 'Get "https://127.0.0.1:8200/v1/auth/token/accessors": dial tcp: connection refused'; exit 2;;
           sealed) echo '{"errors":["Vault is sealed"]}'; exit 2;;
         esac;;
@@ -41,7 +43,7 @@ FAKE_BAO = textwrap.dedent(r"""
       "token lookup -format=json")
         case "$5" in
           t-old) echo '{"data":{"meta":{"role_name":"dev-worker-3"}}}';;
-          t-new) echo '{"data":{"meta":{"role_name":"dev-worker-3","holder":"vm4207"}}}';;
+          t-old2) echo '{"data":{"meta":{"role_name":"dev-worker-3","other":"x"}}}';;
           t-other) echo '{"data":{"meta":{"role_name":"dev-worker-1"}}}';;
           t-nometa) [ "${LOOKUP_MODE:-ok}" = denied ] && { echo "Code: 403. permission denied"; exit 2; }
                     echo '{"data":{"meta":null}}';;
@@ -81,25 +83,31 @@ class RevokeSlotHolderTest(unittest.TestCase):
         e["PATH"] = self.bin + os.pathsep + e["PATH"]
         e["FAKE_LOG"] = self.log
         e.update(env)
-        args = args or ("dev-worker-3", "keepacc", "vm4207")
+        args = args or ("dev-worker-3",)
         return subprocess.run([BASH, SCRIPT, *args], capture_output=True, text=True, env=e, timeout=60)
 
     def calls(self):
         with open(os.path.join(self.log, "calls"), encoding="utf-8") as f:
             return f.read()
 
-    def test_sweeps_the_previous_holder_and_spares_the_replacement(self):
+    def test_sweeps_every_secret_id_and_every_token_of_the_role(self):
         r = self.run_script()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("2 secret-id accessors destroyed, 1 tokens revoked", r.stdout)
+        self.assertIn("2 secret-id accessors destroyed, 2 tokens revoked", r.stdout)
         calls = self.calls()
         self.assertIn("secret_id_accessor=oldacc1", calls)
         self.assertIn("secret_id_accessor=oldacc2", calls)
-        self.assertNotIn("secret_id_accessor=keepacc", calls)
-        self.assertIn("revoke -accessor t-old", calls)
-        for spared in ("t-new", "t-other", "t-nometa", "t-gone"):
+        self.assertIn("revoke -accessor t-old\n", calls)
+        self.assertIn("revoke -accessor t-old2\n", calls)
+        for spared in ("t-other", "t-nometa", "t-gone"):          # another role, no role, expired
             self.assertNotIn("revoke -accessor " + spared, calls)
         self.assertNotIn("roottok", r.stdout + r.stderr)
+
+    def test_a_converged_role_reports_nothing_left(self):
+        # The proof run: the documented empty answers are "nothing to do", and say so.
+        r = self.run_script(SID_MODE="empty", ACC_MODE="empty")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("0 secret-id accessors destroyed, 0 tokens revoked", r.stdout)
 
     def test_a_failed_enumeration_never_reads_as_nothing_to_revoke(self):
         for env, why in (({"SID_MODE": "denied"}, "permission denied"),
@@ -113,12 +121,6 @@ class RevokeSlotHolderTest(unittest.TestCase):
                 self.assertIn(why, r.stderr)
                 self.assertNotIn("revoke -accessor", self.calls())
 
-    def test_an_empty_listing_without_the_replacement_aborts(self):
-        r = self.run_script(SID_MODE="empty")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("not listed", r.stderr)
-        self.assertNotIn("destroy", self.calls())
-
     def test_a_denied_lookup_or_a_failed_destroy_or_revoke_aborts(self):
         for env, why in (({"LOOKUP_MODE": "denied"}, "token lookup t-nometa"),
                          ({"DESTROY_MODE": "fail"}, "destroying secret-id accessor"),
@@ -130,7 +132,7 @@ class RevokeSlotHolderTest(unittest.TestCase):
                 self.assertIn(why, r.stderr)
 
     def test_bad_usage_never_reaches_the_vault(self):
-        for args in (("dev-worker-3", "keepacc"), ("dev-worker-3", "", "vm4207"), ("dev|x", "a", "b")):
+        for args in (("dev-worker-3", "extra"), ("",), ("dev-worker-3", "keepacc", "vm4207")):
             with self.subTest(args=args):
                 r = self.run_script(*args)
                 self.assertEqual(r.returncode, 2)
