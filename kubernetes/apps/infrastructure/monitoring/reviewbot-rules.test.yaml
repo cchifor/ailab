@@ -728,6 +728,36 @@ tests:
         alertname: ReviewbotMergeBlocked
         exp_alerts: []
 
+  # ------------------------------------------------ dependency-bot PR held by the verdict gate
+  # Same 1m interval, for the same staleness reason as the fixture above.
+  - interval: 1m
+    name: a renovate PR held past 4h pages, the slowest healthy renovate merge does not
+    input_series:
+      # 5h - the shape of ailab#1133/#1165/#1176: one persona's finding, nobody to act on it.
+      - series: 'reviewbot_merge_blocked_dependency_seconds{job="reviewer-node",instance="192.168.0.24:9100",persona="claude"}'
+        values: "18000x60"
+      # 3.3h - the MEASURED maximum last-push-to-merge lag over the 97 renovate PRs the reviewers
+      # merged on their own (2026-09-20..10-11, ailab#1045). Must stay silent.
+      - series: 'reviewbot_merge_blocked_dependency_seconds{job="reviewer-node",instance="192.168.0.25:9100",persona="codex"}'
+        values: "11844x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: ReviewbotDependencyPRHeld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: reviewer-node
+              instance: 192.168.0.24:9100
+              persona: claude
+            exp_annotations:
+              summary: "reviewbot (claude) has a dependency-bot PR held >4h by the verdict gate"
+              description: >-
+                A renovate-bot PR on 192.168.0.24:9100 is merge-eligible in every respect except that the personas are not all clean at its current head, and has been for over 4h. Its author never answers a review or pushes a fix, so it will not move on its own. Find it with `journalctl -u reviewbot | grep 'held at'` and read the blocking finding. If the bump breaks a constraint the repo states, close the PR and add the renovate.json packageRule the review names (an `allowedVersions` hold, say), so Renovate stops proposing it. If the finding is a false positive, merge over it. Setting `no-automerge` says a human owns it and clears this alert.
+      # Not yet at the 30m hold.
+      - eval_time: 20m
+        alertname: ReviewbotDependencyPRHeld
+        exp_alerts: []
+
   # ------------------------------------------------------- primary model exhausted
   # 10m is fine HERE, unlike the fixture above: increase() reads a range vector, which does not
   # depend on the instant-staleness window the way `series > threshold` does.

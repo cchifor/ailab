@@ -302,6 +302,24 @@ spec:
             summary: "reviewbot ({{ $labels.persona }}) has a PR held >24h by the verdict gate"
             description: >-
               A PR on {{ $labels.instance }} is merge-eligible in every respect except that the personas are not all clean at its current head, and has been for over 24h. This is the shape that has NO self-healing path: the severity ladder relaxes only from round 3, review_round() counts distinct fully-reviewed HEADS, and a bot author (renovate-bot, agentforge-ci-bot) never pushes a new one — so a round-1 `important` holds the merge forever. Find it with `journalctl -u reviewbot | grep 'held at'`, then either fix the finding, or merge over it if it is a false positive, or set `no-automerge` to say a human owns it (which clears this alert).
+        # The same hold, for a DEPENDENCY-BOT author only (pr_reviewer_dependency_authors:
+        # renovate-bot), on a separate gauge so it can page sooner. The 24h above is set by
+        # human-authored PRs, which legitimately trail their last review by half a day; a renovate
+        # PR held by the verdict gate is stranded from the first minute - its author never answers
+        # a review. THRESHOLD IS MEASURED: over the 97 renovate PRs the reviewers merged on their
+        # own (2026-09-20..10-11) the last-push-to-merge lag ran median ~0.2h, MAX 3.29h
+        # (ailab#1045); 4h + `for: 30m` sits clear of that whole tail. The 7 that needed a human
+        # in the same window sat 9-86h (ailab#1133 63.6h, #1138 85.7h). With DEPENDENCY_RUBRIC in
+        # reviewbot.py a hold that remains is meant to be real, so the usual remedy is a
+        # renovate.json rule, not a merge-over.
+        - alert: ReviewbotDependencyPRHeld
+          expr: reviewbot_merge_blocked_dependency_seconds > 14400
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "reviewbot ({{ $labels.persona }}) has a dependency-bot PR held >4h by the verdict gate"
+            description: >-
+              A renovate-bot PR on {{ $labels.instance }} is merge-eligible in every respect except that the personas are not all clean at its current head, and has been for over 4h. Its author never answers a review or pushes a fix, so it will not move on its own. Find it with `journalctl -u reviewbot | grep 'held at'` and read the blocking finding. If the bump breaks a constraint the repo states, close the PR and add the renovate.json packageRule the review names (an `allowedVersions` hold, say), so Renovate stops proposing it. If the finding is a false positive, merge over it. Setting `no-automerge` says a human owns it and clears this alert.
         # A safety net in CONTINUOUS use means the thing it protects is gone. Deliberately reads
         # the fallback counter and not llm_primary_failed_total: a primary failure the fallback
         # rescues produces correct reviews, so nothing else in this group can see it.

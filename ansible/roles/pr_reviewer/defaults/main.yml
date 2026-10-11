@@ -81,6 +81,16 @@ pr_reviewer_ignore_authors:
 # PRs from these authors get the stricter pin-lane rubric prepended to the review prompt.
 pr_reviewer_pin_authors:
   - agentforge-ci-bot
+# Dependency-update bots: their PRs get DEPENDENCY_RUBRIC (reviewbot.py) and their own held-PR
+# gauge, reviewbot_merge_blocked_dependency_seconds (alert ReviewbotDependencyPRHeld, 4 h). Such
+# an author never answers a review or pushes a fix, so the rubric reserves blocking severities for
+# a concrete defect shown in the diff - above all a bump that contradicts a constraint the repo
+# writes beside the line - and names the renovate.json rule that resolves it. Added 2026-10-11
+# (operator-directed): 7 of 113 renovate PRs sat 9-86 h on findings no author could act on.
+# Merge eligibility is unchanged and separate: the author must still be in pr_reviewer_merge_authors.
+# The pin lane wins for an author listed in both.
+pr_reviewer_dependency_authors:
+  - renovate-bot
 # The headless LLM command (argv list; -p/--output-format/tool restrictions are appended
 # by the service). The claude binary lives in the agent user's ~/.local/bin.
 pr_reviewer_llm_cmd:
@@ -232,9 +242,10 @@ pr_reviewer_merge_personas: [claude, codex]
 # everyone else's — every persona clean at the current head, CI green, no `no-automerge`
 # label. Deliberately NOT added to pr_reviewer_pin_authors: the pin-lane rubric is written
 # for digest-only bumps of images this estate builds, and renovate also moves base-image
-# tags and major versions, which that rubric does not describe. It reviews under the
-# general rubric instead. `no-automerge` remains the per-PR brake for a bump that wants a
-# human — a major runtime bump touching something load-bearing, say.
+# tags and major versions, which that rubric does not describe. It reviewed under the
+# general rubric until 2026-10-11 and under the dependency-lane rubric since
+# (pr_reviewer_dependency_authors). `no-automerge` remains the per-PR brake for a bump that
+# wants a human — a major runtime bump touching something load-bearing, say.
 # dev-worker-bot: the dev workers' own non-admin identity since 2026-10-06 (ailab plan
 # 2026-10-06-s2s-identity-openbao, owner decision D1), replacing their use of `chifor`. This is
 # PARITY, not a new grant: worker PRs were already automerge-eligible as `chifor`. Owner-protected
