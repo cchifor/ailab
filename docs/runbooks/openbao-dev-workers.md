@@ -639,6 +639,14 @@ by the next one: a missing credential forces the render. If the next one's pre-f
 verified login before failing, and says so. The agent is only ever restarted by that guarded task —
 no handler restarts it — so a failed restart, whatever needed it, is rolled back the same way.
 
+**A fresh or rebuilt slot whose `host_vars` already set the gate** (the end state of every slot) has
+no agent sink token yet, so `cred` cannot read the vault on its first converge. The pre-flight then
+checks only the hostname and DEFERS the field checks, and the switch seeds the shared login as the
+slot's rollback target. The field checks run inside the guarded switch, after the agent has started
+and the render is verified. A missing field, or a field that is the shared token, therefore rolls
+the fresh slot back to `dev-worker-bot` like any other failed switch. No operator gate-flipping is
+needed.
+
 **4. Verify on the slot** (then the canary checks in the plan's Phase 4 step 5). The acceptance is
 the RENDERED credential authenticating as the right account — not the vault's copy, which step 1
 already checked:
