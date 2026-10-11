@@ -124,8 +124,9 @@ edit ansible/group_vars/dev_workers.yml 's.replace("dev_worker_gitea_users:", "d
 expect_fail "the Gitea login list renamed away" "no match for"
 restore ansible/group_vars/dev_workers.yml
 
+# Valid YAML naming the same four logins: the text reader still refuses a shape it does not parse.
 edit ansible/group_vars/dev_workers.yml \
-  's.replace("dev_worker_gitea_users:\n", "dev_worker_gitea_users: [dev-worker-1-bot]\n", 1)'
+  's.replace("dev_worker_gitea_users:\n" + "".join("  - dev-worker-%d-bot\n" % n for n in (1, 2, 3, 4)), "dev_worker_gitea_users: [" + ", ".join("dev-worker-%d-bot" % n for n in (1, 2, 3, 4)) + "]\n", 1)'
 expect_fail "the Gitea login list reflowed to a flow list" "must be a block list"
 restore ansible/group_vars/dev_workers.yml
 
@@ -138,16 +139,25 @@ expect_fail "a slot's Gitea login listed twice" "names a slot twice"
 restore ansible/group_vars/dev_workers.yml
 
 edit ansible/group_vars/dev_workers.yml 's + "dev_worker_gitea_users:\n  - dev-worker-1-bot\n"'
-expect_fail "the Gitea login list defined twice" "defined twice"
+expect_fail "the Gitea login list defined twice" "duplicate key"
 restore ansible/group_vars/dev_workers.yml
 
 # YAML keeps the LAST definition, so a quoted duplicate would hand Ansible an empty list.
 edit ansible/group_vars/dev_workers.yml 's + chr(34) + "dev_worker_gitea_users" + chr(34) + ": []\n"'
-expect_fail "a double-quoted second definition of the Gitea login list" "defined twice"
+expect_fail "a double-quoted second definition of the Gitea login list" "duplicate key"
 restore ansible/group_vars/dev_workers.yml
 
 edit ansible/group_vars/dev_workers.yml 's + chr(39) + "dev_worker_gitea_users" + chr(39) + " : []\n"'
-expect_fail "a single-quoted second definition of the Gitea login list" "defined twice"
+expect_fail "a single-quoted second definition of the Gitea login list" "duplicate key"
+restore ansible/group_vars/dev_workers.yml
+
+# Spellings no text match sees: an explicit `? key`, and a quoted key with an escape (chr(92) = \).
+edit ansible/group_vars/dev_workers.yml 's + "? dev_worker_gitea_users\n: []\n"'
+expect_fail "an explicit-key second definition of the Gitea login list" "duplicate key"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's + chr(34) + "dev_worker_gitea_" + chr(92) + "u0075sers" + chr(34) + ": []\n"'
+expect_fail "an escaped quoted second definition of the Gitea login list" "duplicate key"
 restore ansible/group_vars/dev_workers.yml
 
 # Exact login spelling: each of these is a DIFFERENT Gitea account (or a different string) from slot 4's.

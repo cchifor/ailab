@@ -80,6 +80,44 @@ def env_values(text, var, source):
     return ints(values[0].split())
 
 
+def strict_yaml(text, source):
+    """The document as YAML decodes it, refusing a repeated mapping key. Text matching cannot see every
+    spelling of a key (an explicit `? key`, a quoted key with escapes), and YAML keeps the LAST one, so
+    a repeat would hand Ansible a value the text check never read. PyYAML is the runner's system package
+    (see .gitea/workflows/broker-inventory.yaml); without it this check fails rather than skips."""
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("%s: PyYAML is needed to read it as YAML; failing closed" % source)
+
+    class UniqueKeyLoader(yaml.SafeLoader):
+        pass
+
+    def mapping(loader, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = loader.construct_object(key_node, deep=True)
+            try:
+                repeated = key in seen
+            except TypeError:
+                raise yaml.constructor.ConstructorError(None, None, "unhashable key",
+                                                        key_node.start_mark)
+            if repeated:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "duplicate key %r (YAML keeps the LAST one silently)" % (key,),
+                    key_node.start_mark)
+            seen.add(key)
+        return loader.construct_mapping(node, deep=deep)
+
+    UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    try:
+        return yaml.load(text, Loader=UniqueKeyLoader)
+    except yaml.YAMLError as e:
+        sys.exit("%s: not loadable as YAML: %s" % (source, e))
+
+
 def gitea_user_slots(text, source):
     """The slots of `dev_worker_gitea_users` (one `dev-worker-N-bot` login per live slot, ailab plan
     2026-10-11-worker-identities). Read to the END of its block, like the reviewbot allowlist test
@@ -90,9 +128,13 @@ def gitea_user_slots(text, source):
     The login must be spelled exactly as Gitea knows it, `dev-worker-<n>-bot`: no zero padding
     (`dev-worker-04-bot` is a different account), no quoting, nothing trailing. A YAML comment needs
     whitespace before its `#`, so `- dev-worker-4-bot  # note` is slot 4 while `- dev-worker-4-bot#x`
-    is the literal string `dev-worker-4-bot#x` and fails. A second definition of the key in ANY quoting
-    (`"dev_worker_gitea_users": []` below the real one) fails too: YAML keeps the last one, so Ansible
-    would read a list this check never saw."""
+    is the literal string `dev-worker-4-bot#x` and fails. A second definition of the key, in any
+    spelling, fails too: YAML keeps the last one, so Ansible would read a list this check never saw.
+
+    TWO readers, and they must agree: this text parser, and the file decoded as YAML by a loader that
+    refuses any repeated key (strict_yaml). Whatever YAML could make of the file that the text does not
+    show - an explicit or escaped duplicate key, an anchor, a tag - fails the comparison."""
+    decoded = strict_yaml(text, source)
     if len(re.findall(r"""^(["']?)dev_worker_gitea_users\1[ \t]*:""", text, re.M)) > 1:
         sys.exit("%s: dev_worker_gitea_users is defined twice (YAML keeps the LAST one silently)"
                  % source)
@@ -116,6 +158,14 @@ def gitea_user_slots(text, source):
         sys.exit("%s: dev_worker_gitea_users entries are indented inconsistently" % source)
     if len(slots) != len(set(slots)):
         sys.exit("%s: dev_worker_gitea_users names a slot twice: %s" % (source, sorted(slots)))
+    as_yaml = decoded.get("dev_worker_gitea_users") if isinstance(decoded, dict) else None
+    if not isinstance(as_yaml, list) or not all(
+            isinstance(u, str) and re.fullmatch(r"dev-worker-[1-9][0-9]*-bot", u) for u in as_yaml):
+        sys.exit("%s: dev_worker_gitea_users decodes to %r, not a list of canonical dev-worker-N-bot "
+                 "logins" % (source, as_yaml))
+    if as_yaml != ["dev-worker-%d-bot" % n for n in slots]:
+        sys.exit("%s: dev_worker_gitea_users decodes to %r, but its text lists %r"
+                 % (source, as_yaml, ["dev-worker-%d-bot" % n for n in slots]))
     return frozenset(slots)
 
 
