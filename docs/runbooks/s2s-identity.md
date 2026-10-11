@@ -350,29 +350,45 @@ or a sibling:
    deleted token fails at once.
 
 **Re-slot (a different VM takes the slot).** The account name stays; the tokens and the vault access do
-not. Rotation's publish-first order would let the previous holder read the replacement tokens, and
-destroying its AppRole SecretIDs does not revoke the periodic, renewable tokens it already holds. So:
-1. **Revoke the previous holder's vault access first**: destroy every SecretID accessor of AppRole
-   `dev-worker-N` and revoke every issued token whose metadata names that role. These are the two sweeps
-   the provision Job's `RETIRED_SLOTS` step runs (`devworker-provision-job.yaml`), done by hand for one
-   role while the role itself stays (break-glass token and `BAO_ADDR` as in `openbao-dev-workers.md`
-   § Rotation; accessors are safe to print, values never):
+not. Rotation's publish-first order would let the previous holder read the replacement tokens,
+destroying its AppRole SecretIDs does not revoke the periodic, renewable tokens it already holds, and
+enabling the replacement before the old PATs are gone leaves two machines writing as one account. So, in
+this order, and stop at the first step that fails:
+1. **Hold the replacement's workloads**: no agent sessions, no `claude-job` units, no AgentForge work.
+2. **Bootstrap its AppRole SecretID**, minted as in `openbao-dev-workers.md` § (e) for this one host but
+   tagged, so the sweep in step 3 can tell its logins apart; record the accessor (not a secret):
 
    ```bash
-   R=dev-worker-$N; ids() { python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin) or []))'; }
-   for a in $(bao list -format=json auth/approle/role/$R/secret-id 2>/dev/null | ids); do
-     bao write auth/approle/role/$R/secret-id-accessor/destroy secret_id_accessor="$a" >/dev/null; done
-   for a in $(bao list -format=json auth/token/accessors | ids); do
-     bao token lookup -format=json -accessor "$a" 2>/dev/null | grep -q "\"role_name\": *\"$R\"" \
-       && bao token revoke -accessor "$a" >/dev/null && echo "revoked $a"; done
+   R=dev-worker-$N; HOLDER=vm<new vmid>          # BAO_ADDR etc. and $MINT as in § (e), umask 077
+   BAO_TOKEN="$(kubectl --context admin@ai -n openbao get secret openbao-breakglass-token \
+     -o jsonpath='{.data.root_token}' | base64 -d)" \
+     bao write -format=json "auth/approle/role/$R/secret-id" metadata="{\"holder\":\"$HOLDER\"}" \
+     | python3 -c 'import json, sys
+   d = json.load(sys.stdin)["data"]
+   open(sys.argv[1], "w").write(d["secret_id"])
+   print(d["secret_id_accessor"])' "$MINT/$R.secret-id"     # prints the accessor only
    ```
 
-2. **Prove it**: re-run both loops and see nothing left to destroy or revoke; if the old VM is still up,
-   `cred list` there must fail.
-3. **Only then** mint and publish the replacement PATs (steps 4–8), mint the new machine's SecretID
-   (`openbao-dev-workers.md` § (e)) and enable the new machine.
-4. Delete the old PATs by name and read the token names back, as in rotation step 4. If the old VM is
-   still up, its cached `~/.git-credentials` must now answer 401 on `GET /user`.
+   Store it in SOPS and converge the replacement as § (e)–(f) do; its bao agent logs in, its workloads
+   stay held.
+3. **Cut the previous holder out of the vault** with `scripts/openbao-revoke-slot-holder.sh "$R"
+   <accessor from step 2> "$HOLDER"`. It destroys every other SecretID of the role and revokes every
+   token the role issued that is not tagged with `$HOLDER`, and it checks every list, lookup, destroy and
+   revoke: only an empty `{}`/"No value found" listing or an "invalid accessor" (a token that expired
+   meanwhile) count as nothing to do, and anything else (a denial, a sealed or unreachable vault,
+   unparsable output) exits 1. **Stop on any non-zero exit.** Then prove it: run it again and expect `0
+   secret-id accessors destroyed, 0 tokens revoked`; if the old VM is still up, `cred list` there must
+   fail. A run during an OpenBao outage proves nothing; repeat it when the vault is healthy.
+4. **Mint, publish and verify the new PATs**: enrolment steps 4–8 above, including the fingerprint
+   comparison of rotation step 3. Enrolment step 8's AppRole checks run on the replacement, whose SecretID
+   exists since step 2. Before the Job in enrolment step 7 replaces them, read the three OLD values from
+   `af/dev-workers/dev-worker-N` (`bao kv get -mount=af -field=<field>`, break-glass token) into shell
+   variables, never printed, for step 5.
+5. **Delete ALL the old PATs** by name (enrolment step 5's delete, with the old date), read the account's
+   token names back (only the three new ones may remain), and prove that each retained old value answers
+   401 on `GET /user` (the token on curl's stdin, as in enrolment step 8). Then unset the old values. If
+   the old VM is still up, its cached `~/.git-credentials` must answer 401 too.
+6. **Only then release the replacement's workloads.**
 
 A **retired** slot's account is disabled (tokens deleted first, then `prohibit_login`), never deleted, and
 its login leaves `dev_worker_gitea_users` (`ansible/group_vars/dev_workers.yml`;
