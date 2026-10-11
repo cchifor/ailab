@@ -325,6 +325,10 @@ minting, list or watch grant. Other slots and the generic observer are unchanged
 
 After reviewer merge and reconciliation:
 
+The Probe in #1245 explicitly sets `spec.jobName: objectstore-tls`, so the query
+below uses its stable `job` label rather than the operator-generated scrape-pool
+name. Recheck that field if the probe is changed.
+
 ```bash
 platform kubectl -n monitoring get deployment objectstore-tls-probe
 platform kubectl -n monitoring get probe objectstore-tls
