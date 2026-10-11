@@ -22,6 +22,13 @@ data:
   # request when the client disconnects) and no response/read timeouts. Bump
   # chifor.me/caddyfile-revision on the Deployment whenever this changes: a ConfigMap edit
   # alone does not roll the pods.
+  # Health checks: the router's /ready waits behind its one SQLite worker, so a heavy admin query
+  # (the week usage took 2.7 s on 2026-10-11) delays it. A 3 s timeout and two failures in a row
+  # keep that from marking the router down. The interval is not shorter than the timeout: Caddy
+  # starts a probe every interval whether or not the last one finished, and overlapping probes
+  # would queue on that same worker. So the edge marks a draining router (503 at once) down within
+  # about 6 s, a hung one within about 9 s, and a recovered one up within 3 s. Rollouts do not
+  # depend on it: requests that cannot connect are held whatever the health state.
   Caddyfile: |
     {
     	admin off
@@ -37,15 +44,17 @@ data:
     		lb_try_duration 10s
     		lb_try_interval 250ms
     		health_uri /ready
-    		health_interval 2s
-    		health_timeout 2s
+    		health_interval 3s
+    		health_timeout 3s
+    		health_fails 2
     	}
     	reverse_proxy llm-router.llm-router.svc.cluster.local:80 {
     		lb_try_duration 85s
     		lb_try_interval 250ms
     		health_uri /ready
-    		health_interval 2s
-    		health_timeout 2s
+    		health_interval 3s
+    		health_timeout 3s
+    		health_fails 2
     	}
     }
 ---
@@ -76,7 +85,7 @@ spec:
         app.kubernetes.io/part-of: llm-router
       annotations:
         # Bump when the Caddyfile in ConfigMap llm-router-edge-caddy changes (rolls the pods).
-        chifor.me/caddyfile-revision: "1"
+        chifor.me/caddyfile-revision: "2"
     spec:
       automountServiceAccountToken: false # Caddy needs no API access
       tolerations:
