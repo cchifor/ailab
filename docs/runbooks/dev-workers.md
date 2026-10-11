@@ -347,6 +347,23 @@ disabled". The role pins `[features] api_key_model_discovery = false`: discovery
 At that prompt, **1. Run without daemon this time** is always safe. **2. Restart with these settings**
 restarts the daemon and interrupts the TUIs attached to it.
 
+**Retry budget.** The router provider sets `stream_max_retries = 8` and `request_max_retries = 6`
+(`dev_worker_codex_router_stream_max_retries` / `_request_max_retries`) so a router restart does not
+fail the agent's turn; it is a safety net under the edge hold proxy and the router drain. Codex 0.162.1's
+defaults are 5 and 4. Measured on dev-worker-1 against a stub that always answers 502 (request
+errors) or cuts the SSE stream after `response.created` (stream errors):
+
+| | defaults (5 / 4) | 8 / 6 |
+|---|---|---|
+| 502 on every POST | 30 POSTs, about 25 s ("Reconnecting... 5/5") | 57 POSTs, about 164 s ("Reconnecting... 8/8") |
+| stream cut every time | 6 POSTs, about 9.5 s | 9 POSTs, about 56 s |
+
+Backoff grows with each attempt, so the router has about a minute to come back for a cut stream and
+about two and a half minutes for 502s. The values are written into `~/.codex/config.toml`, but a running
+app-server daemon keeps the configuration it started with and TUIs attach to it: the new budget applies
+to a worker only after `codex app-server daemon restart` (see below), which interrupts attached TUIs.
+Applying the role alone changes nothing for sessions already running.
+
 **After any change to the provider settings,** restart the managed app-server daemon as the user:
 `codex app-server daemon restart`, then restart open TUIs. Codex >= 0.158 keeps the provider the
 daemon started with. Check for attached TUIs first: a client of the daemon socket is a session whose

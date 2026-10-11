@@ -130,6 +130,11 @@ dev_worker_codex_router_enabled: false
 dev_worker_codex_router_provider: "llm-router"
 dev_worker_codex_router_base_url: "https://router.chifor.me/v1"
 dev_worker_codex_router_key_field: "llm_router_codex_key"
+# Codex retry budget for the router provider, so a router restart is ridden out instead of failing the
+# turn. Codex 0.162 defaults are 5 (stream) and 4 (request); with them it gave up after ~10-25 s.
+# Measured values and when they take effect (daemon restart): docs/runbooks/dev-workers.md, "Retry budget".
+dev_worker_codex_router_stream_max_retries: 8
+dev_worker_codex_router_request_max_retries: 6
 
 # ---- feature toggles ----
 dev_worker_install_docker: true
