@@ -398,3 +398,58 @@ roleRef:
   kind: Role
   name: objectstore-backup-observer-dw2
   apiGroup: rbac.authorization.k8s.io
+---
+# Temporary live monitor qualification for ailab#1245 / platform#2219.
+# One slot, named GETs only. GET service proxy reaches Prometheus query/target/rule
+# APIs and exposes all its stored telemetry; it cannot restrict queries by job.
+# No POST/PUT proxy, pod forwarding, Secrets, process access or workload writes.
+# Remove both documents by 2026-10-18 (ailab#1247); RBAC has no native TTL.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: objectstore-monitor-observer-dw2
+  namespace: monitoring
+  annotations:
+    platform-access.chifor.me/remove-by: "2026-10-18"
+    platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1247"
+    platform-access.chifor.me/purpose: "Observe served-TLS probe readiness, discovery and Prometheus evaluations"
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["objectstore-tls-probe"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["objectstore-tls-probe", "kube-prometheus-stack-prometheus"]
+    verbs: ["get"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["probes", "prometheusrules"]
+    resourceNames: ["objectstore-tls"]
+    verbs: ["get"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheuses"]
+    resourceNames: ["kube-prometheus-stack-prometheus"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    resourceNames: ["objectstore-tls-probe"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: ["http:kube-prometheus-stack-prometheus:9090"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: objectstore-monitor-observer-dw2
+  namespace: monitoring
+  annotations:
+    platform-access.chifor.me/remove-by: "2026-10-18"
+    platform-access.chifor.me/removal-issue: "https://git.chifor.me/cchifor/ailab/issues/1247"
+subjects:
+  - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }
+roleRef:
+  kind: Role
+  name: objectstore-monitor-observer-dw2
+  apiGroup: rbac.authorization.k8s.io

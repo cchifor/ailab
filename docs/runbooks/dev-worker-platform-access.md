@@ -305,6 +305,52 @@ expiry. The permission contract makes subsequent CI runs fail after that date
 while the grant remains; it does not revoke live permissions itself. The generic
 observer and every other slot remain unchanged.
 
+## Temporary objectstore monitoring observer (remove by 2026-10-18)
+
+`objectstore-monitor-observer-dw2` lets only `platform-dw2` read the named
+objectstore probe Deployment, Service, NetworkPolicy, Probe and PrometheusRule,
+and the named Prometheus Service and Prometheus custom resource in `monitoring`.
+It also permits **GET-only** service proxy requests to
+`http:kube-prometheus-stack-prometheus:9090`. This allows live scrape discovery,
+metric and rule checks for [ailab #1245](https://git.chifor.me/cchifor/ailab/pulls/1245)
+before the separate shared-storage rollout in platform #2219.
+
+The proxy exposes Prometheus's entire GET API, including stored metrics, targets,
+labels and rendered configuration. Kubernetes RBAC cannot restrict its query
+strings or URL suffixes to the objectstore job. Use only the observations below;
+never print unrelated telemetry or retrieve configuration. Prometheus enables its
+remote-write receiver, but writes use POST, which this grant does not permit.
+There is no pod forwarding, workload mutation, Secret access, exec, credential
+minting, list or watch grant. Other slots and the generic observer are unchanged.
+
+After reviewer merge and reconciliation:
+
+The Probe in #1245 explicitly sets `spec.jobName: objectstore-tls`, so the query
+below uses its stable `job` label rather than the operator-generated scrape-pool
+name. Recheck that field if the probe is changed.
+
+```bash
+platform kubectl -n monitoring get deployment objectstore-tls-probe
+platform kubectl -n monitoring get probe objectstore-tls
+platform kubectl -n monitoring get prometheusrule objectstore-tls
+platform kubectl get --raw '/api/v1/namespaces/monitoring/services/http:kube-prometheus-stack-prometheus:9090/proxy/api/v1/query?query=up%7Bjob%3D%22objectstore-tls%22%7D'
+```
+
+Observe the exact job's target health and rule evaluation, `probe_success`,
+`probe_ssl_earliest_cert_expiry`, the Certificate expiry metric and the Service
+inventory gate. Before the HTTPS Service exists, a failed handshake is expected
+and all five gated alerts should be inactive; exporter readiness and scrape
+success can still be proven. Scrape discovery does not prove tailnet access,
+network-policy denial cases or actual notification delivery. Do not send a test
+notification as part of this read-only qualification.
+
+Remove both RBAC documents, this section and
+`scripts/tests/test_objectstore_monitor_observer.py` after qualification or by
+**2026-10-18**, whichever comes first. Track removal in
+[ailab #1247](https://git.chifor.me/cchifor/ailab/issues/1247). RBAC has no runtime
+expiry; the contract test fails subsequent CI after the deadline but does not
+revoke the live grant.
+
 ## Failure modes
 
 | Symptom | Cause | Fix |
