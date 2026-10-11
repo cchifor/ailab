@@ -725,16 +725,27 @@ VER=$(BAO_TOKEN="$T" bao kv metadata get -format=json af/operator/broker/openai/
 BAO_TOKEN="$T" bao kv put -cas="$VER" af/operator/broker/openai/codex-pro/oauth auth.json=@"$SEED/auth.json"
 rm -rf "$SEED"
 # 3. ESO re-syncs broker-openai-codex-oauth and the broker reloads (~1 min). Kick the CronJob once: it
-#    proves the new family self-refreshes AND publishes the host projection (af/dev-workers/codex-auth),
-#    which is what the hosts re-render from (~5 min) — they do NOT see step 2's write directly:
+#    proves the OpenBao side (k8s-auth login, read, status stamp) AND publishes the host projection
+#    (af/dev-workers/codex-auth), which is what the hosts re-render from (~5 min) — they do NOT see
+#    step 2's write directly. It does NOT prove the refresh token: a fresh seed has ~10 days left, more
+#    than the 8-day skew, so this run takes the no-op arm (status record `outcome=fresh`) and never
+#    contacts OpenAI:
 kubectl --context admin@ai -n agentforge-broker create job --from=cronjob/af-codex-refresh af-codex-refresh-manual-$(date +%s)
 # 4. Un-suspend the nightly rotation (suspended since 2026-10-11). Step 3's Job runs anyway, since
-#    `create job --from` ignores `suspend`, but nothing rotates nightly until this lands. Only after
-#    step 3's Job succeeded: un-suspending a CronJob whose login is still dead buys a 401 every night.
-#    In kubernetes/apps/infrastructure/agentforge-codex-refresh/cronjob.yaml set `suspend: false` and
-#    update its SUSPENDED notes, open the PR and merge it, then reconcile and verify:
+#    `create job --from` ignores `suspend`, but nothing rotates nightly until this lands. Do it once
+#    step 3's Job succeeded, and right away: the seeded access token lasts ~10 days and nothing else
+#    refreshes it. In kubernetes/apps/infrastructure/agentforge-codex-refresh/cronjob.yaml set
+#    `suspend: false` and update its SUSPENDED notes, open the PR and merge it, then reconcile and verify:
 flux --context admin@ai reconcile kustomization agentforge-codex-refresh --with-source
 kubectl --context admin@ai -n agentforge-broker get cronjob af-codex-refresh -o jsonpath='{.spec.suspend}'   # must print false
+# 5. The first REAL refresh is the first nightly run with <= 8 days left, about two nights after the
+#    seed. Only that run proves the refresh token. Check it the morning after: the status record shows
+#    `outcome=rotated` and `credential_version` one higher than step 2's write. A 401 that night means
+#    the new family is already revoked, and KubeJobFailed fires on the failed Job. Days later, step 2's
+#    token is long gone, so log in again the same way:
+JWT=$(kubectl --context admin@ai -n agentforge-broker create token af-codex-refresher --duration=10m)
+T=$(bao write -field=token auth/kubernetes/login role=af-codex-refresher jwt="$JWT")
+BAO_TOKEN="$T" bao kv metadata get -format=json af/operator/broker/openai/codex-pro/oauth | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d["current_version"], d["custom_metadata"])'
 ```
 
 The status record (`bao kv metadata get …` → `custom_metadata`: `credential_version`, `expires_at`,
