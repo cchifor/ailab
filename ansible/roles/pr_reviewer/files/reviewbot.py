@@ -389,6 +389,47 @@ these rules on top of everything else:
 
 """
 
+# Dependency-update lane for third-party version bumps (renovate-bot). Measured over the 113
+# renovate PRs of 2026-09-20..10-11: 97 merged through the reviewers (median 12 min), 7 sat
+# 9-86 h behind one persona's `important` that nobody could act on - an upstream changelog item
+# not tied to the diff (#1133, #1149, #1138), a title still naming the previous version because
+# Renovate edits the description minutes after it pushes (#1149), a comment about modules outside
+# the diff (#1138). The bot never answers a review, so every such finding waits for a human.
+# The holds below are the class that DID earn its keep: #931/#932/#938/#948 were stopped only by
+# a finding that the bump contradicted a constraint written beside the line, two of them with CI
+# green and the peer approving. Those stay severity=blocker, so the round-3 ladder never relaxes
+# them either.
+DEPENDENCY_RUBRIC = """This PR is an AUTOMATED DEPENDENCY UPDATE opened by a bot (Renovate). The bot
+cannot reply to a review or push a fix: a finding at severity blocker or important leaves the PR
+for a human, so those severities are reserved for a concrete defect you can show in the diff.
+Everything else is severity=nit, or belongs in the summary.
+
+HOLD the merge (severity=blocker) when:
+- The update contradicts a constraint the repository states in the diff or its context lines:
+  a comment pinning the version, requiring it to match a server, cluster or another image, a
+  version-skew window, or saying the pin is deliberate and re-pins must be deliberate. Name the
+  constraint, and name the renovate.json packageRule that would encode it (an `allowedVersions`
+  hold on the package, or disabling this update type for that file) - that rule is how a human
+  resolves the hold.
+- The diff changes anything other than version, tag or digest references, their lockfile
+  entries and hashes, and comments Renovate maintains.
+- References that must move together do not: the diff or its comments show a set (an image
+  repeated across manifests, a server and its client tools, a provider pinned in several stacks)
+  and only part of it moves.
+- The new tag, digest, version constraint and lockfile entry disagree with each other.
+- The release notes in the PR description announce a breaking or removed behaviour AND the diff
+  shows this repository using the affected option, flag or feature. Quote both.
+
+Do NOT hold the merge for these (severity=nit at most, or only the summary):
+- Upstream changelog or release-note items you cannot tie to a line in the diff. Mention the
+  notable ones in the summary.
+- Advice to verify after merge, run a plan, watch logs or test elsewhere first.
+- The PR title or description naming a different version than the diff: Renovate edits the
+  description minutes after it pushes, so the diff is authoritative.
+- Claims about files that are not in the diff.
+
+"""
+
 PROMPT = """You are a code reviewer. Review ONLY the unified diff below.
 Respond with a single JSON object, no prose around it, shaped exactly:
 {"summary": "<3-6 sentence overall assessment>",
@@ -2517,6 +2558,23 @@ def merge_author_ok(repo, author):
     return a in allowed
 
 
+def is_dependency_author(author):
+    """A dependency-update bot (renovate-bot): its PRs get DEPENDENCY_RUBRIC and their own
+    held-PR gauge. Absent from an older config.json means no such lane, as before."""
+    return (author or "").lower() in [x.lower() for x in (CFG.get("dependency_authors") or [])]
+
+
+def author_rubric(author):
+    """The lane rubric for a PR by `author`, or "" for the general review. The pin lane is
+    checked FIRST: it is the stricter rubric, written for images this estate builds, and an
+    author listed in both must not be reviewed under the looser dependency rules."""
+    if (author or "").lower() in [x.lower() for x in CFG.get("pin_authors", [])]:
+        return PIN_RUBRIC
+    if is_dependency_author(author):
+        return DEPENDENCY_RUBRIC
+    return ""
+
+
 def diff_paths(raw):
     """Every path a unified diff touches, both sides of every per-file section, read by the
     SAME parser the coverage planner uses (split_sections/section_paths): git C-quotes a
@@ -2564,9 +2622,12 @@ def maybe_merge(repo, pr):
     merges; third-party PRs are never merged.
 
     Returns "verdicts" when the personas are not all clean at this head AND nothing else is
-    holding the PR - CI green, author allowlisted, no no-automerge label. The reconciler
-    tallies those into the merge_blocked gauges, so that "sole remaining blocker" reading is
-    what ReviewbotMergeBlocked pages on. Every other outcome returns None."""
+    holding the PR - CI green, author allowlisted, no no-automerge label - and "no-review"
+    for the same hold when every persona short of clean simply has no review at this head
+    yet (a parked seat holds every PR this way at once). The reconciler tallies both into the
+    merge_blocked gauges, so that "sole remaining blocker" reading is what
+    ReviewbotMergeBlocked pages on; only "verdicts" - a posted finding someone can act on -
+    feeds the dependency gauge. Every other outcome returns None."""
     if not CFG.get("automerge") or posting_disabled():
         return
     try:
@@ -2607,6 +2668,8 @@ def maybe_merge(repo, pr):
             log(f"merge {repo}#{pr} held at {head[:9]}: "
                 + (", ".join(f"{p}={verdicts.get(p) or 'no review'}" for p in short)
                    if needed else "no merge_personas configured"))
+            if needed and not any(verdicts.get(p) for p in short):
+                return "no-review"
             return "verdicts"
         try:
             if chunk_enabled(repo) and not chunk_call("merge_guard", repo, pr, head):
@@ -2763,7 +2826,7 @@ def review_job(job_id, repo, pr, head_sha):
 
     commentable = parse_hunks(diff)
     author = ((d.get("user") or {}).get("login") or "").lower()
-    rubric = PIN_RUBRIC if author in [a.lower() for a in CFG.get("pin_authors", [])] else ""
+    rubric = author_rubric(author)
     rnd = review_round(repo, pr)
     rubric = convergence_context(repo, pr, head_sha, rnd) + rubric
     if dropped:
@@ -2978,7 +3041,8 @@ def write_metrics():
                 "'llm_seconds','llm_seconds_max','llm_output_tokens','llm_output_tokens_max',"
                 "'reviews_full_total','reviews_partial_total','reviews_skipped_total',"
                 "'findings_dropped_total','llm_rate_limited_total','merge_blocked_prs',"
-                "'merge_blocked_seconds','llm_primary_failed_total','llm_fallback_used_total',"
+                "'merge_blocked_seconds','merge_blocked_dependency_seconds',"
+                "'llm_primary_failed_total','llm_fallback_used_total',"
                 "'llm_seat_switches_total','llm_credscan_skipped_total',"
                 "'llm_model_switches_total')")}
             # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
@@ -3131,6 +3195,10 @@ def write_metrics():
                             # fall on their own - see commit_sweep.
                             ("merge_blocked_prs", "reviewbot_merge_blocked_prs"),
                             ("merge_blocked_seconds", "reviewbot_merge_blocked_seconds"),
+                            # The same age over dependency-bot PRs only (renovate-bot), which
+                            # no author will ever unblock - ReviewbotDependencyPRHeld.
+                            ("merge_blocked_dependency_seconds",
+                             "reviewbot_merge_blocked_dependency_seconds"),
                             # The fallback model is a safety net, and a net in CONTINUOUS use
                             # means the primary is gone. Counted apart from llm_failures_total,
                             # which by design does not see a review the fallback rescued.
@@ -3434,11 +3502,17 @@ def commit_sweep(results, now, merge_blocked=None):
     under the old stamp. So a cycle is all-or-nothing: on any failure the PREVIOUS completed
     snapshot survives intact and the outer handler retries.
 
-    `merge_blocked` is {repo: [(pr, head_sha)]} for the PRs this sweep found held by the
-    verdict gate. RECOMPUTED FROM SCRATCH EVERY SWEEP rather than accumulated, which is what
-    keeps it from latching the way a cumulative counter would: a PR that merges, closes or
-    gets a new head simply stops appearing, with no reaper to write. Passing None leaves both
-    gauges untouched (the sweep did not measure them); passing {} publishes a clean zero."""
+    `merge_blocked` is {repo: [(pr, head_sha, dependency_finding)]} for the PRs this sweep found
+    held by the verdict gate; dependency_finding is true for a dependency-bot PR held by a
+    posted non-clean verdict (not merely a missing review). RECOMPUTED FROM SCRATCH EVERY SWEEP rather than accumulated, which
+    is what keeps it from latching the way a cumulative counter would: a PR that merges, closes
+    or gets a new head simply stops appearing, with no reaper to write. Passing None leaves the
+    gauges untouched (the sweep did not measure them); passing {} publishes a clean zero.
+
+    merge_blocked_dependency_seconds is the same age over those dependency-bot findings ONLY.
+    It exists for a shorter alert: such an author never pushes a fix, so a held one is stranded
+    from the first minute, while a human-authored PR legitimately trails its last review by
+    half a day."""
     with db_lock:
         c = db()
         try:
@@ -3446,9 +3520,9 @@ def commit_sweep(results, now, merge_blocked=None):
                 c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)",
                           (REPO_FAILED_PREFIX + repo, str(int(failed))))
             if merge_blocked is not None:
-                n, oldest = 0, 0.0
+                n, oldest, dep_oldest = 0, 0.0, 0.0
                 for repo, held in merge_blocked.items():
-                    for pr, head in held:
+                    for pr, head, dependency_finding in held:
                         n += 1
                         # Age is measured from when THIS persona's review landed on the head
                         # that is still current - the only "blocked since" the state store
@@ -3462,12 +3536,17 @@ def commit_sweep(results, now, merge_blocked=None):
                             "AND head_sha=? AND state='done'", (repo, pr, head)).fetchone()
                         if row and row[0]:
                             try:
-                                oldest = max(oldest, now - float(row[0]))
+                                age = now - float(row[0])
                             except (TypeError, ValueError):
-                                pass
+                                continue
+                            oldest = max(oldest, age)
+                            if dependency_finding:
+                                dep_oldest = max(dep_oldest, age)
                 c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_prs',?)", (str(n),))
                 c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_seconds',?)",
                           (str(int(oldest)),))
+                c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_dependency_seconds',?)",
+                          (str(int(dep_oldest)),))
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)", (str(now),))
             c.commit()
         finally:
@@ -3479,7 +3558,8 @@ def reconciler():
         try:
             # repo -> 0/1, IN MEMORY until the whole sweep succeeds (see commit_sweep).
             results = {}
-            # repo -> [(pr, head_sha)] held by the verdict gate, same deferred publication.
+            # repo -> [(pr, head_sha, dependency_finding)] held by the verdict gate, same deferred
+            # publication.
             blocked = {}
             for repo in CFG["repos"]:
                 failed = 0
@@ -3509,8 +3589,13 @@ def reconciler():
                             enqueue(repo, number, sha, "reconcile")
                         else:
                             op = "merge"
-                            if maybe_merge(repo, number) == "verdicts":
-                                held.append((number, sha))
+                            gate = maybe_merge(repo, number)
+                            if gate in ("verdicts", "no-review"):
+                                # The dependency gauge takes only a POSTED finding: a missing
+                                # review is the seat alerts' business, and the dependency
+                                # alert's remedy (read the finding) has nothing to act on.
+                                held.append((number, sha, gate == "verdicts"
+                                             and is_dependency_author(author)))
                 # ORDER IS LOAD-BEARING: sqlite3.Error must be caught ABOVE Exception. The state
                 # store is not repo-scoped, so its failure is fatal to the CYCLE - swallowing it
                 # here would file a dead database as "one repo is sad" and let the sweep stamp a

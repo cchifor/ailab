@@ -2568,18 +2568,23 @@ class ReconcileAdmissionTest(unittest.TestCase):
         self.assertEqual(_jobs(self.m, "o/kept"), 1)
 
 
-def _held_sweep(m, prs, failing=(), verdict_blocked=()):
+def _held_sweep(m, prs, failing=(), verdict_blocked=(), logins=None, awaiting_review=()):
     """One reconciler() pass where every PR already HAS this persona's marker, so the body
     reaches maybe_merge() instead of enqueue(). `verdict_blocked` are the PR numbers whose
-    maybe_merge reports the verdict gate."""
+    maybe_merge reports a posted non-clean verdict, `awaiting_review` those held only because
+    a persona has not reviewed the head yet; `logins` maps a PR number to its author (default
+    "human")."""
     def api(path, *a, **kw):
         repo = path.split("/repos/", 1)[1].split("/pulls", 1)[0]
         if repo in failing:
             raise RuntimeError("HTTP Error 404: " + repo)
-        return [_pr(n) for n in prs.get(repo, ())] if path.endswith("page=1") else []
+        return ([_pr(n, login=(logins or {}).get(n, "human")) for n in prs.get(repo, ())]
+                if path.endswith("page=1") else [])
 
     def maybe_merge(repo, pr):
-        return "verdicts" if pr in verdict_blocked else None
+        if pr in verdict_blocked:
+            return "verdicts"
+        return "no-review" if pr in awaiting_review else None
 
     def sleep(secs):
         if secs == m.CFG["reconcile_s"]:
@@ -2672,8 +2677,16 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
         self._pr_api(m, {"claude": "clean"})
         logged = []
         with mock.patch.object(m, "log", lambda *a: logged.append(" ".join(map(str, a)))):
-            self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
+            self.assertEqual("no-review", m.maybe_merge("o/r", 7))
         self.assertIn("codex=no review", " ".join(logged))
+
+    def test_a_posted_finding_outranks_a_missing_review(self):
+        """claude=findings with codex parked is still a finding someone must act on - the
+        missing peer review must not hide it from the dependency gauge."""
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=["claude", "codex"], persona="claude")
+        self._pr_api(m, {"claude": "findings"})
+        self.assertEqual("verdicts", m.maybe_merge("o/r", 7))
 
     def test_a_pr_held_for_a_DIFFERENT_reason_is_not_reported_as_a_verdict_block(self):
         """no-automerge is a deliberate human brake, not a stall - counting it would make the
@@ -2751,6 +2764,169 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
         self.assertIn('reviewbot_merge_blocked_seconds{persona="test"}', exported)
         self.assertEqual(3.0, exported['reviewbot_llm_primary_failed_total{persona="test"}'])
         self.assertEqual(2.0, exported['reviewbot_llm_fallback_used_total{persona="test"}'])
+
+
+def _done_row(m, pr, age_s, sha="a" * 40):
+    """This persona's finished review on `sha`, landed `age_s` ago - the "blocked since" the
+    merge-blocked gauges date a held PR from."""
+    c = m.db()
+    try:
+        ts = real_time.time() - age_s
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                  "VALUES('o/r',?,?,'done',?,?)", (pr, sha, ts, ts))
+        c.commit()
+    finally:
+        c.close()
+
+
+class DependencyLaneTest(unittest.TestCase):
+    """Dependency-bot PRs (renovate-bot) get their own rubric and their own held-PR gauge.
+
+    THE INCIDENT SHAPE (2026-09-20..10-11, 113 renovate PRs on ailab): 97 merged through the
+    reviewers in a median 12 min, but 7 sat 9-86 h behind a single persona's `important` that
+    no author could act on - an upstream changelog item it could not tie to the diff (#1133,
+    #1149, #1138), a PR title still describing the previous version because Renovate edits the
+    description minutes after it pushes (#1149), a comment naming modules outside the diff
+    (#1138). Renovate never answers a review and never pushes a fix, so each one waited for a
+    human. The same persona's findings were ALSO the only thing that stopped #932 (talosctl
+    skew) and #938 (OpenBao CLI ahead of its server) with CI green and the peer approving - so
+    the rubric narrows what holds instead of relaxing the gate."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _rubric_for(self, author, **cfg):
+        """The rubric review_job hands the model for a one-file PR by `author`."""
+        m = load(self.tmp.name, **cfg)
+        m.pr_ok = lambda repo, pr, head: {"head": {"sha": head}, "user": {"login": author},
+                                          "title": "t", "body": ""}
+        m.existing_marker = lambda repo, pr, head: None
+        m.maybe_merge = lambda repo, pr: None
+        m.convergence_context = lambda *a, **k: ""
+        m.review_round = lambda repo, pr: 1
+        calls = []
+
+        def run_llm(title, description, diff, rubric=""):
+            calls.append(rubric)
+            return {"findings": [], "summary": "fine"}
+        m.run_llm = run_llm
+
+        def api(path, method="GET", body=None, raw=False):
+            if path.endswith(".diff"):
+                return _sec("kubernetes/apps/x.yaml", b"+image: a:2\n")
+            if method == "POST":
+                return {"id": 1}
+            return {}
+        m.api = api
+        m.review_job(1, "o/r", 5, "c" * 40)
+        self.assertEqual(1, len(calls), "the model must be called exactly once")
+        return m, calls[0]
+
+    # --- the rubric ------------------------------------------------------------------------
+
+    def test_a_dependency_author_gets_the_dependency_rubric(self):
+        m, rubric = self._rubric_for("renovate-bot", dependency_authors=["renovate-bot"])
+        self.assertIn(m.DEPENDENCY_RUBRIC, rubric)
+
+    def test_the_author_match_ignores_case(self):
+        m, rubric = self._rubric_for("Renovate-Bot", dependency_authors=["renovate-bot"])
+        self.assertIn(m.DEPENDENCY_RUBRIC, rubric)
+
+    def test_any_other_author_gets_no_dependency_rubric(self):
+        m, rubric = self._rubric_for("dev-worker-1-bot", dependency_authors=["renovate-bot"])
+        self.assertNotIn(m.DEPENDENCY_RUBRIC, rubric)
+
+    def test_a_config_without_the_key_has_no_dependency_lane(self):
+        """A host still on the previous config.json must keep reviewing exactly as before."""
+        m, rubric = self._rubric_for("renovate-bot")
+        self.assertNotIn(m.DEPENDENCY_RUBRIC, rubric)
+
+    def test_the_pin_lane_wins_over_the_dependency_lane(self):
+        """The pin rubric is the stricter, estate-built-image one; an author listed in both must
+        not be reviewed under the looser dependency rules."""
+        m, rubric = self._rubric_for("agentforge-ci-bot", pin_authors=["agentforge-ci-bot"],
+                                     dependency_authors=["agentforge-ci-bot"])
+        self.assertIn(m.PIN_RUBRIC, rubric)
+        self.assertNotIn(m.DEPENDENCY_RUBRIC, rubric)
+
+    def test_the_rubric_keeps_the_holds_that_caught_real_bad_bumps(self):
+        """The narrowing must not drop the one class that earned its keep: #931/#932/#938/#948
+        were all held because the bump contradicted a constraint the repo writes down beside the
+        line (a pin to the cluster's / server's version, a skew window). And the human who acts
+        on such a hold should be told which renovate.json rule encodes it."""
+        m = load(self.tmp.name)
+        r = m.DEPENDENCY_RUBRIC
+        self.assertIn("cannot reply", r)
+        self.assertIn("constraint", r)
+        self.assertIn("renovate.json", r)
+        self.assertIn("allowedVersions", r)
+
+    def test_the_rubric_names_the_non_holds_that_stranded_prs(self):
+        m = load(self.tmp.name)
+        r = m.DEPENDENCY_RUBRIC
+        self.assertIn("changelog", r)           # #1133, #1149, #1138
+        self.assertIn("after merge", r)         # "verify after merge" / "run a plan" advice
+        self.assertIn("diff is authoritative", r)  # #1149: the title lagged the pushed commit
+
+    # --- the held-PR gauge -------------------------------------------------------------------
+
+    def test_the_dependency_gauge_dates_only_dependency_prs(self):
+        """A human PR held for a day must not page the 4 h dependency alert, and a renovate PR
+        held for two hours must show up in it."""
+        m = load(self.tmp.name, repos=["o/r"], dependency_authors=["renovate-bot"])
+        _done_row(m, 7, 7200)
+        _done_row(m, 8, 90000)
+        _held_sweep(m, {"o/r": [7, 8]}, verdict_blocked={7, 8},
+                    logins={7: "renovate-bot", 8: "human"})
+        meta = _meta(m)
+        self.assertGreater(float(meta["merge_blocked_seconds"]), 89000,
+                           "the overall gauge still covers every author")
+        dep = float(meta["merge_blocked_dependency_seconds"])
+        self.assertGreater(dep, 7000)
+        self.assertLess(dep, 9000, "the human PR's day-long hold leaked into the dependency gauge")
+
+    def test_a_missing_review_holds_the_merge_but_not_the_dependency_gauge(self):
+        """A parked persona (dev-workers.md: 313 `codex=no review` holds in one episode) holds
+        every PR at once. That is the seat alerts' business: the dependency alert's remedy -
+        read the finding, add a renovate.json hold - has nothing to act on. The general gauge
+        keeps counting it, exactly as before."""
+        m = load(self.tmp.name, repos=["o/r"], dependency_authors=["renovate-bot"])
+        _done_row(m, 7, 7200)
+        _held_sweep(m, {"o/r": [7]}, awaiting_review={7}, logins={7: "renovate-bot"})
+        meta = _meta(m)
+        self.assertEqual("1", meta["merge_blocked_prs"])
+        self.assertGreater(float(meta["merge_blocked_seconds"]), 7000)
+        self.assertEqual("0", meta["merge_blocked_dependency_seconds"])
+
+    def test_the_dependency_gauge_falls_when_its_pr_clears(self):
+        m = load(self.tmp.name, repos=["o/r"], dependency_authors=["renovate-bot"])
+        _done_row(m, 7, 7200)
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7}, logins={7: "renovate-bot"})
+        self.assertGreater(float(_meta(m)["merge_blocked_dependency_seconds"]), 7000)
+        _held_sweep(m, {"o/r": [7]}, logins={7: "renovate-bot"})   # now clean
+        self.assertEqual("0", _meta(m)["merge_blocked_dependency_seconds"])
+
+    def test_the_dependency_gauge_reaches_the_textfile(self):
+        m = load(self.tmp.name, repos=["o/r"], dependency_authors=["renovate-bot"])
+        _done_row(m, 7, 7200)
+        _held_sweep(m, {"o/r": [7]}, verdict_blocked={7}, logins={7: "renovate-bot"})
+        exported = _exported(m)
+        self.assertGreater(
+            exported['reviewbot_merge_blocked_dependency_seconds{persona="test"}'], 7000)
+
+    # --- the shipped role ----------------------------------------------------------------
+
+    def test_the_role_ships_renovate_as_a_dependency_author_and_renders_it(self):
+        role = ROOT / "ansible" / "roles" / "pr_reviewer"
+        defaults = AllowlistDefaultsTest._strict_yaml(
+            (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
+        self.assertEqual(["renovate-bot"], defaults["pr_reviewer_dependency_authors"])
+        self.assertIn("renovate-bot", defaults["pr_reviewer_merge_authors"],
+                      "the dependency lane is pointless for an author that may not merge")
+        template = (role / "templates" / "config.json.j2").read_text(encoding="utf-8")
+        self.assertIn('"dependency_authors": {{ pr_reviewer_dependency_authors | to_json }},',
+                      template)
 
 
 SEATS_3 = [{"name": "a", "sudo_user": "runa"},

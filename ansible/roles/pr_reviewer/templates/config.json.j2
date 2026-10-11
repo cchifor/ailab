@@ -29,6 +29,7 @@
   "unattended_authors": {{ pr_reviewer_unattended_authors | default([]) | to_json }},
   "guarded_paths": {{ pr_reviewer_guarded_paths | default([]) | to_json }},
   "pin_authors": {{ pr_reviewer_pin_authors | to_json }},
+  "dependency_authors": {{ pr_reviewer_dependency_authors | to_json }},
   "llm_timeout_s": {{ pr_reviewer_llm_timeout_s }},
   "llm_fallback_min_s": {{ pr_reviewer_llm_fallback_min_s }},
   "llm_seat_switch_min_s": {{ pr_reviewer_llm_seat_switch_min_s }},
