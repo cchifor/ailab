@@ -103,8 +103,9 @@ This rotates the SHARED `dev-worker-bot` tokens in `af/dev-workers/common`, whic
      printf '%s' "$v" | bao kv patch -mount=af dev-workers/common "$f=-"
    done; unset v
    ```
-   Do the SOPS edit too, or the next seed run restores the old values. Also re-encrypt
-   `ansible/secrets/dev-worker.sops.yaml` (`dev_worker_gitea_token`, the same value as `gitea_pat`).
+   Do the SOPS edit too, or the next seed run restores the old values. There is no second copy to update
+   any more: the companion dev_worker PR (`feat/worker-identities-dev-worker`) removes the SOPS
+   git-credential path and the `dev_worker_gitea_token` key from `ansible/secrets/dev-worker.sops.yaml`.
 4. Ensure `dev_worker_gitea_user: dev-worker-bot` (`ansible/roles/dev_worker/defaults/main.yml`, or
    group/host vars) and converge: reviewers first, then workers (`just dev-workers`, see
    [`dev-workers.md`](dev-workers.md)). Run it twice; the second run should report near-zero `changed`.
@@ -195,7 +196,8 @@ sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -
    TG=$(mint git write:repository,write:issue,read:organization,read:user)
    TR=$(mint repo write:organization,write:repository,read:user)
    TP=$(mint pkg write:package,read:repository,read:user)
-   for v in "$TG" "$TR" "$TP"; do [[ $v =~ ^[0-9a-f]{40}$ ]] && echo ok || echo BAD; done
+   for v in "$TG" "$TR" "$TP"; do                   # record these prefixes: step 8 compares against them
+     [[ $v =~ ^[0-9a-f]{40}$ ]] && printf '%s' "$v" | sha256sum | cut -c1-12 || echo BAD; done
    ```
 
 5. **Write all three into the seed in ONE `sops edit`**, so there is never a partial document. Not `sops
@@ -283,12 +285,31 @@ sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -
    git diff --stat      # devworker-seeds.sops.yaml only; every changed value line is ENC[...]
    ```
 
-7. **Ship it in a reviewed PR.** After merge, Flux recreates the provision Job, which patches
-   `af/dev-workers/dev-worker-N` seed-wins and keeps the sync-owned fields (force a run as in
-   `openbao-dev-workers.md` § "Timing trap").
+7. **Ship it in a reviewed PR, then run the Job.** A seed-only merge does NOT re-run the provision
+   Job: a completed Job is recreated only when `ttlSecondsAfterFinished` (24 h) reaps it, or when you
+   delete it and Flux recreates it. So after the merge:
 
-8. **Verify every token before any consumer uses it**, on the slot, through its own AppRole (`cred`). A
-   repository read alone cannot tell a slot token from the shared one; `GET /user` can.
+   ```bash
+   $K -n openbao delete job openbao-devworker-provision
+   flux --context admin@ai reconcile kustomization openbao -n flux-system
+   $K -n openbao logs job/openbao-devworker-provision | tail -1    # devworker provision complete
+   ```
+
+   The Job patches `af/dev-workers/dev-worker-N` seed-wins and keeps the sync-owned fields.
+
+8. **Verify every token before any consumer uses it**, on the slot, through its own AppRole (`cred`).
+   First, that the vault now serves the NEW values: `GET /user` cannot tell an old token of the same
+   account from a new one, so compare SHA-256 prefixes with the ones step 4 printed (prefixes only, never
+   values). Once the slot is cut over, the `gitea_pat` rendered into `~/.git-credentials` must match too
+   (before cut-over that file carries the shared token); restart `openbao-agent` if it has not re-rendered.
+
+   ```bash
+   for f in gitea_pat gitea_repo_pat gitea_package_pat; do
+     printf '%s %s\n' $f "$(cred get "$(hostname -s)" $f | tr -d '\n' | sha256sum | cut -c1-12)"; done
+   sed -n 's#^https://[^:/@]*:\([^@]*\)@git\.chifor\.me$#\1#p' ~/.git-credentials | tr -d '\n' | sha256sum | cut -c1-12
+   ```
+
+   Then the identity. A repository read alone cannot tell a slot token from the shared one; `GET /user` can.
 
    ```bash
    for f in gitea_pat gitea_repo_pat gitea_package_pat; do printf '%s ' $f
@@ -305,15 +326,57 @@ sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -
    own three fields, `cred get dev-worker-<M> gitea_pat` for a sibling slot is denied, and a write to its
    own document with the agent's token (`bao kv patch -mount=af dev-workers/<host> probe=1`) answers 403.
 
-**Rotation, per slot.** Mint-before-revoke, one slot at a time, never touching `common` or a sibling:
-mint `dw<N>-<kind>-<new date>` (step 4), seed it (steps 5–7), confirm `GET /user` from the slot
-(step 8), then delete the old tokens by name (step 5's delete with the old date) and prove each old value
-answers 401. The same applies when a different VM takes the slot: the account name stays, the tokens do
-not. Also revoke the previous holder's AppRole SecretIDs, as in ADR 0020's re-slot amendment, and prove the
-old credentials fail before the new machine is enabled. A **retired** slot's account is disabled
-(tokens deleted first, then `prohibit_login`), never deleted, and its login leaves
-`dev_worker_gitea_users` (`ansible/group_vars/dev_workers.yml`; `scripts/check-slot-enumerations.py`
-enforces it).
+**Consumers that key on the login (state on 2026-10-11).** A new slot account must reach each of them
+before its slot is cut over:
+- **Legacy reviewbot:** `pr_reviewer_merge_authors` names the four slot bots (merge eligibility keys on the
+  PR author); it takes effect when both reviewer hosts are converged. There a `merge_authors_by_repo`
+  entry ADDS to the global list.
+- **platform `OWNER_ACK_USERS`:** a repository variable, changed outside this repository (plan D3).
+- **Stateless reviewer (`cchifor/reviewer`): not deployed.** No coordination repository exists
+  (`cchifor/reviewer-coord` and `cchifor/reviewbot-coord` both answer 404), so there is no live
+  `policy.json` to update. Its deployment must name the four slot bots in `merge_authors` AND in every
+  `merge_authors_by_repo` override, because there an override REPLACES the global list for its repository,
+  with a transition test in that repository (`dev-worker-bot` and every slot bot eligible, an unrelated
+  author denied, per override).
+
+**Rotation, per slot (same machine).** Mint-before-revoke, one slot at a time, never touching `common`
+or a sibling:
+1. mint `dw<N>-<kind>-<new date>` (step 4) and keep the three printed prefixes;
+2. seed them (steps 5–6), merge, and run the Job (step 7) — the merge alone changes nothing;
+3. on the slot, the `cred get` prefixes, and once cut over the `~/.git-credentials` prefix, must equal
+   the minted ones (step 8). Until both match, the slot still uses the old tokens: do not revoke;
+4. only then delete the old tokens by name (step 5's delete, with the OLD date) and read the account's
+   token names back: only the three new ones may remain. Gitea re-reads a token's row on every use, so a
+   deleted token fails at once.
+
+**Re-slot (a different VM takes the slot).** The account name stays; the tokens and the vault access do
+not. Rotation's publish-first order would let the previous holder read the replacement tokens, and
+destroying its AppRole SecretIDs does not revoke the periodic, renewable tokens it already holds. So:
+1. **Revoke the previous holder's vault access first**: destroy every SecretID accessor of AppRole
+   `dev-worker-N` and revoke every issued token whose metadata names that role. These are the two sweeps
+   the provision Job's `RETIRED_SLOTS` step runs (`devworker-provision-job.yaml`), done by hand for one
+   role while the role itself stays (break-glass token and `BAO_ADDR` as in `openbao-dev-workers.md`
+   § Rotation; accessors are safe to print, values never):
+
+   ```bash
+   R=dev-worker-$N; ids() { python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin) or []))'; }
+   for a in $(bao list -format=json auth/approle/role/$R/secret-id 2>/dev/null | ids); do
+     bao write auth/approle/role/$R/secret-id-accessor/destroy secret_id_accessor="$a" >/dev/null; done
+   for a in $(bao list -format=json auth/token/accessors | ids); do
+     bao token lookup -format=json -accessor "$a" 2>/dev/null | grep -q "\"role_name\": *\"$R\"" \
+       && bao token revoke -accessor "$a" >/dev/null && echo "revoked $a"; done
+   ```
+
+2. **Prove it**: re-run both loops and see nothing left to destroy or revoke; if the old VM is still up,
+   `cred list` there must fail.
+3. **Only then** mint and publish the replacement PATs (steps 4–8), mint the new machine's SecretID
+   (`openbao-dev-workers.md` § (e)) and enable the new machine.
+4. Delete the old PATs by name and read the token names back, as in rotation step 4. If the old VM is
+   still up, its cached `~/.git-credentials` must now answer 401 on `GET /user`.
+
+A **retired** slot's account is disabled (tokens deleted first, then `prohibit_login`), never deleted, and
+its login leaves `dev_worker_gitea_users` (`ansible/group_vars/dev_workers.yml`;
+`scripts/check-slot-enumerations.py` enforces it).
 
 ## Phase 0: the owner gate on platform `main` (INSTALLED 2026-10-06)
 
