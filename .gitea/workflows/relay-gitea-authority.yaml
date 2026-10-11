@@ -1,0 +1,33 @@
+name: relay-gitea-authority
+on:
+  pull_request:
+    paths:
+    - 'kubernetes/components/relay-gitea-authority/**'
+    - 'kubernetes/components/relay-restore-fencing/**'
+    - 'kubernetes/components/relay-recovery-monitoring*/**'
+    - 'kubernetes/components/relay-control-monitoring/**'
+    - 'kubernetes/components/relay-notifications/relay/**'
+    - 'kubernetes/apps/apps/relay/**'
+    - 'scripts/tests/integration/test_relay_gitea_authority.py'
+    - 'scripts/tests/integration/test_relay_notifications.py'
+    - '.gitea/workflows/relay-gitea-authority.yaml'
+  push:
+    branches: [main]
+    paths:
+    - 'kubernetes/components/relay-gitea-authority/**'
+    - 'kubernetes/components/relay-restore-fencing/**'
+    - 'kubernetes/components/relay-recovery-monitoring*/**'
+    - 'kubernetes/components/relay-control-monitoring/**'
+    - 'kubernetes/components/relay-notifications/relay/**'
+    - 'kubernetes/apps/apps/relay/**'
+    - 'scripts/tests/integration/test_relay_gitea_authority.py'
+    - 'scripts/tests/integration/test_relay_notifications.py'
+    - '.gitea/workflows/relay-gitea-authority.yaml'
+jobs:
+  relay-gitea-authority:
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+    - name: Qualify private Gitea authority and independent reconciliation wiring
+      run: python3 -B scripts/tests/integration/test_relay_gitea_authority.py
