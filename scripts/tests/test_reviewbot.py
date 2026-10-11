@@ -1210,7 +1210,7 @@ class RateLimitTest(unittest.TestCase):
         state, attempts, next_at = c.execute(
             "SELECT state, attempts, next_at FROM jobs WHERE head_sha=?", (head,)).fetchone()
         c.close()
-        self.assertEqual("waiting", state)
+        self.assertEqual("retry", state)
         self.assertEqual(0, attempts, "the PR must not pay for the subscription")
         self.assertAlmostEqual(reset, next_at, delta=60,
                                msg="deferred to the reset, not an exponential backoff")
