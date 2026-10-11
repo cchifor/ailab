@@ -30,6 +30,14 @@ dev_worker_agent_user: "{{ dev_worker_admin_user }}"
 dev_worker_gitea_user: dev-worker-bot
 dev_worker_gitea_token: ""
 
+# ---- git commit identity (tasks/git_identity.yml) ----
+# Every commit names the slot that made it, whichever token pushes it. The address is the slot
+# login at Gitea's [service] NO_REPLY_ADDRESS, which Gitea maps to that account — not inferred: the
+# plan's acceptance reads the commit API's author.id once the slot accounts exist.
+dev_worker_gitea_noreply_domain: noreply.git.chifor.me
+dev_worker_git_user_name: "{{ inventory_hostname }}-bot"
+dev_worker_git_user_email: "{{ inventory_hostname }}-bot@{{ dev_worker_gitea_noreply_domain }}"
+
 # ---- /workspace data disk (the blank scsi1 disk the tofu module attaches) ----
 dev_worker_workspace_device: /dev/sdb
 dev_worker_workspace_label: workspace
