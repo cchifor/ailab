@@ -375,6 +375,12 @@ def _post(bot, job_id, plan, stage, body, comments, aggregate=None):
         # Keep unknown adapter failures visible without claiming that a remote mutation is
         # safe to repeat.  The operator can inspect the PR and use the explicit requeue path.
         return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
+    # A successful HTTP response does not prove that the forge accepted a usable review
+    # object.  Treat an empty, non-object, or otherwise malformed response as ambiguous so
+    # a remote mutation is never followed by merge handling or an unsafe duplicate retry.
+    if (type(result) is not dict or type(result.get("id")) is not int
+            or result["id"] <= 0):
+        return ("quarantined", None, "ambiguous POST: malformed review response")
     if stage == "final":
         bot.maybe_merge(value["repo"], value["pr"])
     return ("done" if stage == "final" else "waiting", result.get("id"),

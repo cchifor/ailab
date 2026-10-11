@@ -704,6 +704,36 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(note.startswith("ambiguous POST"))
         self.bot.maybe_merge.assert_not_called()
 
+    def test_malformed_success_response_quarantines_before_merge(self):
+        # The forge may commit the review and still return an empty or malformed body.
+        # Such a response is ambiguous: merge must wait for an operator-confirmed retry,
+        # and the adapter must not raise after the mutation (which would invite a duplicate).
+        for malformed in [{}, [], {"id": 0}, {"id": True}, {"id": "1"}]:
+            with self.subTest(malformed=malformed):
+                self.history = []
+                self.posts = []
+                self.bot.maybe_merge.reset_mock()
+
+                def accepted_but_malformed(path, method="GET", payload=None,
+                                           malformed=malformed):
+                    if method == "POST":
+                        self.api(path, method, payload)  # accepted remote mutation
+                        return malformed
+                    return self.api(path, method, payload)
+
+                self.bot.api.side_effect = accepted_but_malformed
+                state, review_id, note = adapter._post(
+                    self.bot, 1, self.plan, "final", "Complete.", [],
+                    {"verdict": "clean", "parts": 4, "files": 3}
+                )
+                self.assertEqual("quarantined", state)
+                self.assertIsNone(review_id)
+                self.assertEqual("ambiguous POST: malformed review response", note)
+                self.assertEqual(1, len(self.posts))
+                self.bot.maybe_merge.assert_not_called()
+
+        self.bot.api.side_effect = self.api
+
     def test_definite_http_rejection_uses_failure_budget_but_server_error_quarantines(self):
         for code in [403, 429, 500]:
             with self.subTest(code=code):
