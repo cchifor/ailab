@@ -70,12 +70,15 @@ of this backup and confirm DataUploads are absent before activation. Setting
 Do not download a backup archive to work around denied Secret access.
 
 The temporary inventory from [ailab #1255](https://git.chifor.me/cchifor/ailab/pulls/1255)
-returned an available receipt at **2026-10-11 14:50:51 UTC**, for the backup and UID
-above: all **6,198** expected resource-list entries were counted, with **zero
-DataUploads**. The acquired artifact SHA-256 is
+returned an available receipt at **2026-10-11 14:50:51 UTC**, for backup
+`velero-weekly-20261011030034`, UID `84590917-87e3-4dc9-b642-a1638e792214`:
+all **6,198** expected resource-list entries were counted, with **zero DataUploads**. The acquired artifact SHA-256 is
 `90724fd44d7621c636e3477f78057f58ab9315f01cc0bbca742dec7e62b03f96`.
-The sanitized receipt was preserved before removing the temporary component,
-including its Job, DownloadRequest, permissions and ConfigMaps. This establishes
+The [preserved sanitized receipt](evidence/objectstore-inventory-20261011.json)
+contains aggregate counts and observed identity only. Its file SHA-256 is
+`6356b4c055f0ecd7caa64901b2c04b73f06f4f93d5e3a3efbafdf7ef196b7f14`.
+It was preserved before removing the temporary component, including its Job,
+DownloadRequest, permissions and ConfigMaps. This establishes
 the inventory prerequisite for this exact backup only; it is not restore-success
 evidence or permission to restart production storage. A different backup needs
 its own inventory qualification. The isolated restore stages above remain pending.
