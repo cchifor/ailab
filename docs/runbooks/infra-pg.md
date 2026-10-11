@@ -40,11 +40,30 @@ kubectl delete pv <pv-name>                                     # only if Triden
 
 ## Automatic re-clone — CronJob `cnpg-lost-slot-reclone` (2026-09-28, ailab#923)
 
-`cnpg-lost-slot-reclone.yaml` + `cnpg-lost-slot-reclone.sh` (tests:
+`cnpg-lost-slot-reclone.yaml` + `cnpg-lost-slot-reclone.sh` + `cnpg-lost-slot-reclone-probe.sh` (tests:
 `python scripts/tests/cnpg-lost-slot-reclone-mock.py`). Every 5 min an init container probes the
 primary through `infra-pg-rw` as the LOGIN-only managed role `slotwatch`; the main container acts only
 on a physical, inactive, `lost` slot that maps to a replica of an allowlisted cluster (`CLUSTERS`),
 never on the primary, never during a transition, at most once per `MIN_INTERVAL_SECONDS` (6 h).
+
+**A primary that cannot be reached is not always a fault.** infra-pg runs `primaryUpdateMethod:
+restart`, so a rolling update restarts the primary in place, with no switchover, and `infra-pg-rw` has no
+endpoint until it is back. On 2026-10-09, during the operator upgrades, that happened six times, for 1.5
+to 3 minutes each; three probes landed in those windows, and each failed Job held `KubeJobFailed` for
+two days. The probe now makes up to `PROBE_ATTEMPTS` connection attempts, `PROBE_RETRY_SECONDS` apart,
+then hands off instead of failing. The main container excuses it (exit 0) only during a bounded CNPG
+transition:
+- the phase is in `transient_phase()` (upgrade, in-place restart, switchover, failover, applying
+  configuration, ...) and the Cluster has been unhealthy for at most `HANDOFF_TRANSIENT_MAX_SECONDS`
+  (30 min); CNPG logged `Cluster has become unhealthy` / `... healthy` around each 10-09 window;
+- or the Cluster became Ready less than `HANDOFF_HEALTHY_GRACE_SECONDS` (120 s) ago.
+Everything else exits 1 and pages, including a stuck or terminal phase such as `Waiting for user action`,
+an unhealthy spell longer than 30 min, and an overdue re-clone marker.
+`could not connect to the primary in 3 attempt(s)` followed by `not acting` means a failure was excused
+because of the Cluster's state: check the phase and the `psql: error:` line above it. Exit 2 also covers
+authentication, pg_hba and TLS refusals, so a rotated `slotwatch` secret looks the same and is excused
+while a transition lasts; the next run outside one pages. Followed by `failing`, it is the case to look
+at.
 
 Protocol on the Cluster's annotations:
 

@@ -16,11 +16,17 @@
 # topology, storage and recovery were examined), an init container `probe` asks the PRIMARY through the
 # cluster's -rw Service, as the LOGIN-only managed role `slotwatch` (no superuser, no pods/exec, no
 # pg_monitor - pg_replication_slots is readable by every role), for pg_is_in_recovery() and every
-# physical slot's active/wal_status. The main container maps slots to instances from the Cluster's own
-# .status.instanceNames + slotPrefix (exact match, not parsing), and acts only when: phase is "Cluster
-# in healthy state", the slot is physical, INACTIVE and LOST, the instance is not currentPrimary, its
-# pod carries cnpg.io/instanceRole=replica, no ailab.io/reclone-in-progress marker exists and the last
-# re-clone (ailab.io/last-reclone) is older than MIN_INTERVAL_SECONDS (a finite budget: <= 4/day).
+# physical slot's active/wal_status (cnpg-lost-slot-reclone-probe.sh, from the same ConfigMap). If it
+# cannot connect at all, after PROBE_ATTEMPTS tries, it hands off instead of failing. The main container
+# then exits 0 only during a bounded CNPG transition (a transient_phase() for at most
+# HANDOFF_TRANSIENT_MAX_SECONDS, e.g. the in-place primary restarts of 2026-10-09, or the first
+# HANDOFF_HEALTHY_GRACE_SECONDS after becoming Ready) and 1 otherwise.
+# The main container maps slots to instances from the Cluster's own .status.instanceNames + slotPrefix
+# (exact match, not parsing), and acts only when:
+# phase is "Cluster in healthy state", the slot is physical, INACTIVE and LOST, the instance is not
+# currentPrimary, its pod carries cnpg.io/instanceRole=replica, no ailab.io/reclone-in-progress marker
+# exists and the last re-clone (ailab.io/last-reclone) is older than MIN_INTERVAL_SECONDS (a finite
+# budget: <= 4/day).
 # It re-reads primary/phase/role immediately before mutating, writes the in-progress marker FIRST, then
 # deletes the PVC(s) and the pod and waits (bounded) for both to disappear. One re-clone per execution.
 # Later executions only OBSERVE while the marker exists: they clear it (and stamp last-reclone) once the
@@ -104,7 +110,10 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           initContainers:
             # The cluster's own image (infra-pg.yaml imageName), so psql matches the server and the
-            # image is already on every node. Writes the slot state for the main container.
+            # image is already on every node. Writes the slot state, or the unreachable hand-off, for the
+            # main container (cnpg-lost-slot-reclone-probe.sh). Connection-retry budget: 3 x 15 s connect
+            # timeout + 2 x 10 s sleeps = 65 s. A query that stalls after connecting is bounded only by
+            # activeDeadlineSeconds, as before.
             - name: probe
               image: ghcr.io/cloudnative-pg/postgresql:17.11
               imagePullPolicy: IfNotPresent
@@ -130,20 +139,23 @@ spec:
                   value: "15"
                 - name: PSQLRC
                   value: /dev/null
+                - name: SLOTS_FILE
+                  value: /work/slots.tsv
+                - name: PROBE_UNREACHABLE_FILE
+                  value: /work/probe-unreachable
+                - name: PROBE_ATTEMPTS
+                  value: "3"
+                - name: PROBE_RETRY_SECONDS
+                  value: "10"
                 - name: PGUSER
                   valueFrom: { secretKeyRef: { name: infra-pg-slotwatch, key: username } }
                 - name: PGPASSWORD
                   valueFrom: { secretKeyRef: { name: infra-pg-slotwatch, key: password } }
-              command: ["/bin/sh", "-euc"]
-              args:
-                - |
-                  psql -v ON_ERROR_STOP=1 -At -o /work/slots.tsv \
-                    -c "select 'in_recovery=' || pg_is_in_recovery()" \
-                    -c "select slot_name || '|' || slot_type || '|' || active || '|' || coalesce(wal_status, '') || '|' || coalesce(safe_wal_size::text, '') || '|' || coalesce(invalidation_reason, '') from pg_replication_slots order by slot_name"
-                  echo "probe: $(wc -l < /work/slots.tsv) line(s)"; cat /work/slots.tsv
+              command: ["/bin/sh", "/opt/reclone/cnpg-lost-slot-reclone-probe.sh"]
               volumeMounts:
                 - { name: work, mountPath: /work }
                 - { name: ca, mountPath: /ca, readOnly: true }
+                - { name: script, mountPath: /opt/reclone, readOnly: true }
           containers:
             - name: reclone
               image: docker.io/alpine/k8s:1.34.12@sha256:d50424976a0a888d2531f13035dce45c004ec2b6f877f233005ba35c0d61be5d
@@ -162,10 +174,16 @@ spec:
                   value: "infra-pg"
                 - name: SLOTS_FILE
                   value: /work/slots.tsv
+                - name: PROBE_UNREACHABLE_FILE
+                  value: /work/probe-unreachable
                 - name: DRY_RUN
                   value: "true"
                 - name: MIN_INTERVAL_SECONDS # >= 6 h between re-clones of one cluster: at most 4/day
                   value: "21600"
+                - name: HANDOFF_HEALTHY_GRACE_SECONDS # unreachable this soon after Ready => excused
+                  value: "120"
+                - name: HANDOFF_TRANSIENT_MAX_SECONDS # unreachable in a transient phase: excused this long
+                  value: "1800"
                 - name: STUCK_AFTER_SECONDS # unverified marker older than 45 min => exit 1 every run
                   value: "2700"
                 - name: DELETE_WAIT_SECONDS

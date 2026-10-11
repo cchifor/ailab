@@ -39,3 +39,4 @@ configMapGenerator:
     namespace: databases # the generator does not inherit one; without it Flux rejects the ConfigMap and the WHOLE layer stalls (2026-09-28)
     files:
       - cnpg-lost-slot-reclone.sh
+      - cnpg-lost-slot-reclone-probe.sh
