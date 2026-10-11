@@ -69,6 +69,17 @@ of this backup and confirm DataUploads are absent before activation. Setting
 `snapshotVolumes: false` or `snapshotMoveData: false` alone is insufficient.
 Do not download a backup archive to work around denied Secret access.
 
+The temporary inventory from [ailab #1255](https://git.chifor.me/cchifor/ailab/pulls/1255)
+returned an available receipt at **2026-10-11 14:50:51 UTC**, for the backup and UID
+above: all **6,198** expected resource-list entries were counted, with **zero
+DataUploads**. The acquired artifact SHA-256 is
+`90724fd44d7621c636e3477f78057f58ab9315f01cc0bbca742dec7e62b03f96`.
+The sanitized receipt was preserved before removing the temporary component,
+including its Job, DownloadRequest, permissions and ConfigMaps. This establishes
+the inventory prerequisite for this exact backup only; it is not restore-success
+evidence or permission to restart production storage. A different backup needs
+its own inventory qualification. The isolated restore stages above remain pending.
+
 ## Inert destination
 
 Pre-create `objectstore-data` in the isolated namespace. Prove its fresh backing
