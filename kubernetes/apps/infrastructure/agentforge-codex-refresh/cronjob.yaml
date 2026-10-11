@@ -1,7 +1,5 @@
-# STATUS 2026-10-11: the CronJob below is SUSPENDED (`suspend: true`). OpenAI revoked the login it
-# rotates (seat a, af/operator/broker/openai/codex-pro/oauth) on 2026-09-29, and every run since 10-01
-# has failed with `codex oauth refresh returned HTTP 401`. The notes below describe the design, not who
-# uses it today: no host renders the projection any more (see the suspend note on the CronJob).
+# STATUS 2026-10-11: the CronJob below is SUSPENDED. The comment on its `suspend:` field is the one
+# place that says why, who still used it, and how to resume. The notes below describe the design.
 # The wrapper the CronJob runs. Kept in a ConfigMap (mounted read-only) so the CronJob container can stay
 # on the orchestrator image with a hardened, readOnlyRootFilesystem securityContext. It is a pure-stdlib
 # python3 script (urllib) that talks to the OpenBao REST API directly — the orchestrator image ships NO

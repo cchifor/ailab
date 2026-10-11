@@ -735,7 +735,8 @@ kubectl --context admin@ai -n agentforge-broker create job --from=cronjob/af-cod
 #    `create job --from` ignores `suspend`, but nothing rotates nightly until this lands. Do it once
 #    step 3's Job succeeded, and right away: the seeded access token lasts ~10 days and nothing else
 #    refreshes it. In kubernetes/apps/infrastructure/agentforge-codex-refresh/cronjob.yaml set
-#    `suspend: false` and update its SUSPENDED notes, open the PR and merge it, then reconcile and verify:
+#    `suspend: false`, drop the comment on that field and the STATUS line at the top of the file, open
+#    the PR and merge it, then reconcile and verify:
 flux --context admin@ai reconcile kustomization agentforge-codex-refresh --with-source
 kubectl --context admin@ai -n agentforge-broker get cronjob af-codex-refresh -o jsonpath='{.spec.suspend}'   # must print false
 # 5. The first REAL refresh is the first nightly run with <= 8 days left, about two nights after the
