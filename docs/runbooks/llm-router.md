@@ -837,9 +837,9 @@ serves.
 - `default`, the router's default pointer;
 - `sub-codex-5`, the `dw-N` rollback target.
 
-**Leftover, by design:** `router.yaml`'s `api-openai.codexNative.routes` still lists the six deleted `dw-gpt-*` names.
-The list is only a membership check, so missing names are harmless. Changing it restarts the router, so drop it (and
-its comment) with the next router release's digest bump, not on its own.
+**Leftover, now gone:** `router.yaml`'s `api-openai.codexNative.routes` listed the six deleted `dw-gpt-*` names (a
+harmless membership check). It was dropped with the next digest bump, in "Activity source release (2026-10-11)"
+below, so the router restarted only once.
 
 ## Activity source release (2026-10-11)
 
@@ -868,7 +868,11 @@ filters use the existing `principal_id` column and the stats' `COALESCE($.route,
 - Before merge, 1600 tests passed and 0 failed; typecheck and build passed; `check:architecture` reported only its
   known finding (#79).
 
-**Rollback.** Revert the digest to
-`registry.chifor.me/llm-router/router@sha256:6ff09174b0a57f9983fcd566bfb47ca61217d862d8c3cba43fbb73631ca816b6`
-(`router-0.1.0-20261010-smart-pools`). Nothing else is needed: the pools are unchanged, and the dropped `codexNative`
-list named only deleted routes.
+**Rollback.** Revert, in `router.yaml`, the image digest and both pod-template annotations together, so the rolled-back
+pod advertises the right release:
+- `image: registry.chifor.me/llm-router/router@sha256:6ff09174b0a57f9983fcd566bfb47ca61217d862d8c3cba43fbb73631ca816b6`
+- `chifor.me/source-commit: 8786a3dcb2a44403a0730569abeb811b729cc563`
+- `chifor.me/release: router-0.1.0-20261010-smart-pools`
+
+Nothing else is needed: the pools are unchanged, and the dropped `codexNative` list named only deleted routes, so it
+need not come back.

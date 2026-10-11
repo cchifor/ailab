@@ -283,6 +283,10 @@ The router's console (Activity, API keys) shows each worker's requests under its
 | dev-worker-3 | `key_23f0823b6934` | `lrk_C3bB` | `dw-3` |
 | dev-worker-4 | `key_dc874b9d0a75` | `lrk_UNcf` | `dw-4` |
 
+**Routing.** Each key is limited to its pointer `dw-N`, which points at the smart pool `pool-codex` (every Codex
+subscription, Codex-native, conversation placement). To roll the workers back, repoint `dw-N` → `sub-codex-5`
+(`codex-5:*`).
+
 **Previous keys, revoked on 2026-10-11.** These keys and the six `dw-gpt-*` routes they were limited to are gone (see
 `llm-router.md` § "Claude tools and route cleanup (2026-10-11)"). They were:
 - `key_aa2543746716` (`lrk_w7bR`)
@@ -290,8 +294,7 @@ The router's console (Activity, API keys) shows each worker's requests under its
 - `key_65e07ec0f75a` (`lrk_meXV`)
 - `key_b06fc4e10a3c` (`lrk__1Wv`)
 
-The dev workers now go through `dw-N` → `pool-codex`; to roll them back, repoint `dw-N` → `sub-codex-5`. Their values
-are in the git history of
+The old keys' values are in the git history of
 `kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml`; this runbook only
 lists IDs and prefixes.
 
@@ -357,6 +360,7 @@ the host's own ChatGPT login. Revoke the keys on the router if they are no longe
 |---|---|
 | `401 UNAUTHORIZED` from the router | key revoked or expired: rotate (above) |
 | `codex-router-key: no router key` | vault unreachable and no cached copy yet: `cred list` (sink token, sealed vault), see `openbao-dev-workers.md` |
+| `403 ROUTE_NOT_ALLOWED` | the request named a route the key does not allow (each key is limited to `dw-N`): check the worker's `base_url`/model and the key's routes |
 | `400 MODEL_NOT_SUPPORTED` | the CLI asked for a model outside `pool-codex`'s allowlist (`allow`): add it with `configure_pool` |
 | `400 UNSUPPORTED_PARAMETER: include` | the request reached a route without `native: ["codex-responses"]` (subset parser): check where `dw-N` points |
 | `429 ... busy` | every account in `pool-codex` is at its concurrency: wait, or raise an account's `concurrency` |
