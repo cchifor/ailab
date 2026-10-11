@@ -97,8 +97,8 @@ dev_worker_codex_host_owned_login: true
 # `auth` command is /usr/local/bin/codex-router-key. That helper reads this host's router key from
 # OpenBao (`cred get <hostname> <field>`, af/dev-workers/<hostname>) on every call and keeps the last
 # good value in ~/.config/llm-router/codex.key, so a vault outage does not stop codex. The router
-# serves these requests on its Codex-native routes (llm-router `codexNative`), which pin one ChatGPT
-# subscription (codex-5); the key is limited to those routes. The host login stays on disk:
+# serves these requests through the worker's pointer `dw-N` and the smart pool `pool-codex` (Codex-native
+# pass-through over every Codex subscription); the key is limited to `dw-N`. The host login stays on disk:
 # `codex -p chatgpt` uses it. false = the provider table and the top-level key are removed.
 dev_worker_codex_router_enabled: false
 dev_worker_codex_router_provider: "llm-router"

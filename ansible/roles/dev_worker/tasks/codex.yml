@@ -117,8 +117,8 @@
     label: "{{ item.name }}"
 
 # ---- Codex through the estate's LLM router (defaults/main.yml: dev_worker_codex_router_*) ----
-# The CLI's own Responses protocol, served by the router's Codex-native routes (llm-router
-# `codexNative`), which pin the subscription the dev workers share (codex-5). Three edits per user, all
+# The CLI's own Responses protocol, passed through by the router's Codex-native pool (`dw-N` →
+# `pool-codex`, every Codex subscription). Three edits per user, all
 # table-aware like the ones above, so codex's [projects.*] trust tables and anything a user added stay:
 #   1. top-level `model_provider = "<provider>"` (absent = codex's built-in `openai`, the host login);
 #   2. the [model_providers.<provider>] table: base_url, wire_api and the `auth` command, which codex
