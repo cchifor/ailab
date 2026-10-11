@@ -4,6 +4,7 @@ Runs the script against a fake `git` (credential helper) and a fake `curl` that 
 tests can prove the token travels only on curl's stdin, the identity guard refuses anything but a non-admin
 workstation-bot, and bad input never reaches the network.
 """
+import json
 import os
 import shutil
 import stat
@@ -37,15 +38,17 @@ FAKE_CURL = textwrap.dedent("""\
     #!/usr/bin/env bash
     printf '%s\\n' "$*" >> "$FAKE_LOG/argv"
     if [ -n "${FAKE_CURL_EXIT:-}" ]; then echo "curl: (7) Failed to connect" >&2; exit "$FAKE_CURL_EXIT"; fi
-    out=""; url=""
+    out=""; url=""; data=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -o) out=$2; shift 2;;
+        --data-binary) data=${2#@}; shift 2;;
         https://*|http://*) url=$1; shift;;
         *) shift;;
       esac
     done
     cat >> "$FAKE_LOG/stdin"
+    if [ -n "$data" ]; then cat "$data" > "$FAKE_LOG/data"; fi
     case "$url" in
       */api/v1/user) body=$FAKE_USER_JSON; code=${FAKE_USER_CODE:-200};;
       *) body=${FAKE_BODY:-'{"ok":true}'}; code=${FAKE_CODE:-200};;
@@ -76,6 +79,7 @@ class GiteaApiShTest(unittest.TestCase):
 
     def run_script(self, *args, user_json='{"login":"workstation-bot","is_admin":false}', **env):
         e = dict(os.environ)
+        e.pop("AILAB_RUN_ID", None)  # a session's own id must not leak into the fixtures
         e["PATH"] = self.bin + os.pathsep + e["PATH"]
         e["FAKE_LOG"] = self.log
         e["FAKE_USER_JSON"] = user_json
@@ -213,6 +217,129 @@ class GiteaApiShTest(unittest.TestCase):
             self.assertIn("--proto =https", argv)
             self.assertIn("--max-redirs 0", argv)
             self.assertIn("https://git.chifor.me/api/v1/", argv)
+
+    # ---- run marker (worker-identities plan, Phase 1 item 4) ----
+    RUN = "0b6c8f3e-2f4d-4a51-9a7e-3f1d2c4b5a69"
+    MARK = "\n<!-- worker: workstation run: 0b6c8f3e-2f4d-4a51-9a7e-3f1d2c4b5a69 -->"
+    COMMENTS = "/repos/cchifor/ailab/issues/12/comments"
+
+    def send(self, method, path, raw, **kw):
+        """Run the script with `raw` as the body file; return (result, the bytes curl was given)."""
+        body = os.path.join(self.tmp, "body.json")
+        with open(body, "wb") as f:
+            f.write(raw)
+        open(os.path.join(self.log, "data"), "wb").close()
+        r = self.run_script(method, path, body, **kw)
+        with open(os.path.join(self.log, "data"), "rb") as f:
+            return r, f.read()
+
+    def test_marker_on_every_comment_and_review_write(self):
+        raw = json.dumps({"body": "LGTM, one nit.", "event": "COMMENT", "commit_id": "a" * 40,
+                          "comments": [{"path": "x", "body": "inline"}]}).encode()
+        for method, path in (("POST", self.COMMENTS),
+                             ("POST", self.COMMENTS + "?x=1"),
+                             ("PATCH", "/repos/cchifor/ailab/issues/comments/345"),
+                             ("POST", "/repos/cchifor/ailab/pulls/12/reviews"),
+                             ("POST", "/repos/cchifor/ailab/pulls/12/reviews/678")):
+            with self.subTest(method=method, path=path):
+                r, sent = self.send(method, path, raw, AILAB_RUN_ID=self.RUN)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                got, want = json.loads(sent), json.loads(raw)
+                self.assertEqual(got.pop("body"), want.pop("body") + self.MARK)
+                self.assertEqual(got, want, "only the top-level body changes")
+
+    def test_no_run_id_means_no_marker_and_identical_bytes(self):
+        raw = b'{ "body" : "LGTM \\u00e9",\n  "z": 1, "a": [1,2] }\n'
+        for env in ({}, {"AILAB_RUN_ID": ""}):
+            with self.subTest(env=env):
+                r, sent = self.send("POST", self.COMMENTS, raw, **env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(sent, raw)
+
+    def test_every_other_endpoint_is_byte_identical(self):
+        raw = b'{"body": "PR description",  "title": "t"}'
+        for method, path in (("POST", "/repos/cchifor/ailab/issues"),
+                             ("PATCH", "/repos/cchifor/ailab/issues/12"),
+                             ("POST", "/repos/cchifor/ailab/pulls"),
+                             ("PATCH", "/repos/cchifor/ailab/pulls/12"),
+                             ("PUT", self.COMMENTS),
+                             ("POST", "/repos/cchifor/ailab/issues/12/labels"),
+                             ("POST", "/repos/cchifor/ailab/pulls/12/merge"),
+                             ("POST", "/repos/cchifor/ailab/pulls/12/reviews/678/comments"),
+                             ("POST", self.COMMENTS + "/extra"),
+                             ("POST", "/repos/cchifor/ailab/x/issues/12/comments")):
+            with self.subTest(method=method, path=path):
+                r, sent = self.send(method, path, raw, AILAB_RUN_ID=self.RUN)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(sent, raw)
+
+    def test_a_command_body_is_never_touched(self):
+        # The owner-ack gate counts approve-pin only when it is the WHOLE body; a marker line would
+        # silently void the acknowledgement.
+        for text in ("approve-pin 0123abc", "approve-pin " + "f" * 40, "approve-pin 0123ABC\n"):
+            with self.subTest(text=text):
+                raw = json.dumps({"body": text}).encode()
+                r, sent = self.send("POST", "/repos/cchifor/platform/issues/7/comments", raw,
+                                    AILAB_RUN_ID=self.RUN)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(sent, raw)
+        # Not a command: prose after the pin, a second line, or a too-short sha is a plain comment.
+        for text in ("approve-pin 0123abc please", "approve-pin 0123abc\nthanks", "approve-pin 012"):
+            with self.subTest(text=text):
+                r, sent = self.send("POST", self.COMMENTS, json.dumps({"body": text}).encode(),
+                                    AILAB_RUN_ID=self.RUN)
+                self.assertEqual(json.loads(sent)["body"], text + self.MARK)
+
+    def test_marking_is_idempotent(self):
+        _, once = self.send("POST", self.COMMENTS, json.dumps({"body": "done"}).encode(),
+                            AILAB_RUN_ID=self.RUN)
+        _, twice = self.send("POST", self.COMMENTS, once, AILAB_RUN_ID="another-run")
+        self.assertEqual(twice, once)
+        self.assertEqual(1, json.loads(twice)["body"].count("<!-- worker:"))
+        # A dev-worker agent's own final marker counts as one too.
+        dw = json.dumps({"body": "x\n<!-- worker: dev-worker-1 agent: claude run: abc -->\n"}).encode()
+        _, sent = self.send("POST", self.COMMENTS, dw, AILAB_RUN_ID=self.RUN)
+        self.assertEqual(sent, dw)
+
+    def test_a_payload_without_a_string_body_is_byte_identical(self):
+        for raw in (b'{"event": "APPROVED", "commit_id": "abc"}', b'{"body": null}', b'{"body": 5}'):
+            with self.subTest(raw=raw):
+                r, sent = self.send("POST", "/repos/cchifor/ailab/pulls/12/reviews", raw,
+                                    AILAB_RUN_ID=self.RUN)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(sent, raw)
+
+    def test_a_bad_run_id_or_payload_never_reaches_curl(self):
+        good = json.dumps({"body": "x"}).encode()
+        for run_id, raw in (("x --> <b>", good), ("a" * 129, good), ("run id", good),
+                            (self.RUN, b"not json"), (self.RUN, b'["body"]'), (self.RUN, b'"body"')):
+            with self.subTest(run_id=run_id[:20], raw=raw):
+                r, _ = self.send("POST", self.COMMENTS, raw, AILAB_RUN_ID=run_id)
+                self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_the_identity_guard_and_the_token_rules_are_unchanged(self):
+        raw = json.dumps({"body": "x"}).encode()
+        r, sent = self.send("POST", self.COMMENTS, raw, AILAB_RUN_ID=self.RUN,
+                            user_json='{"login":"chifor","is_admin":true}')
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertEqual(len(self.calls()), 1)  # only the identity check ran
+        self.assertEqual(sent, b"")
+        r, sent = self.send("POST", self.COMMENTS, raw, AILAB_RUN_ID=self.RUN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for argv in self.calls():
+            self.assertNotIn(TOKEN, argv)
+            self.assertTrue(argv.startswith("-q "), argv)
+        self.assertNotIn(TOKEN, sent.decode())
+
+    def test_the_marked_copy_is_removed(self):
+        r, _ = self.send("POST", self.COMMENTS, json.dumps({"body": "x"}).encode(),
+                         AILAB_RUN_ID=self.RUN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        copy = self.calls()[-1].split("--data-binary @", 1)[1].split(" ", 1)[0]
+        self.assertNotEqual(copy, os.path.join(self.tmp, "body.json"))
+        gone = subprocess.run([BASH, "-c", 'test ! -e "$1"', "_", copy], timeout=30)
+        self.assertEqual(gone.returncode, 0, copy)
 
 
 if __name__ == "__main__":
