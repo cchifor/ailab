@@ -11,8 +11,7 @@
 # second copy of the shared dev-worker-bot token that would outlive that token's revocation, and it
 # cannot follow the per-slot cut-over (dev_worker_gitea_identity_cutover). A worker without OpenBao
 # now stops here instead of silently getting the shared token, or no forge access at all.
-# TODO(operator): nothing reads the key any more; remove it with
-#   sops unset ansible/secrets/dev-worker.sops.yaml '["dev_worker_gitea_token"]'
+# The key itself was removed from ansible/secrets/dev-worker.sops.yaml on 2026-10-11.
 - name: Require OpenBao, the only source of the forge credential
   ansible.builtin.assert:
     that: dev_worker_enable_openbao | bool
