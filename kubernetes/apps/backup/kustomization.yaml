@@ -6,3 +6,4 @@ resources:
   - velero # filesystem backup (Kopia via node-agent) -> versitygw S3 on the QNAP (ADR 0010)
   - talos-backup # daily age-encrypted etcd snapshot -> versitygw, + retention prune + the W4 round-trip probe
   - backup-offsite # nightly encrypted rclone sync of the versitygw buckets -> Google Drive (copy #3)
+  - objectstore-inventory # temporary aggregate-only backup receipt; remove by 2026-10-18

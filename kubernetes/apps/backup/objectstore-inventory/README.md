@@ -1,17 +1,19 @@
 # Temporary objectstore backup inventory
 
-This component is prepared but **not included in the backup Kustomization**.
+This temporary component is included in the backup Kustomization.
 It supports the isolated-restore prerequisite for
 [platform #2219](https://git.chifor.me/cchifor/platform/pulls/2219).
 It does not restore data, restart storage, or release Document Insights.
 
-Before activation, observe the actual Velero controller and node-agent images
-using the temporary grants in [ailab #1252](https://git.chifor.me/cchifor/ailab/pulls/1252).
-The implementation below depends on Velero 1.18.1 semantics. Confirm the pinned
-backup remains Completed with UID `84590917-87e3-4dc9-b642-a1638e792214`, 6,198
-items, zero errors, both snapshot flags false and zero asynchronous operations.
-Then include this directory from the parent Kustomization in a reviewed change.
-Do not run `kubectl apply` from a worker.
+The temporary grants in [ailab #1252](https://git.chifor.me/cchifor/ailab/pulls/1252)
+merged at `1b43c3903fb402f02acb24d09d7fb44dfe7b7784`. Read-only observation on
+2026-10-11 at 13:24 UTC confirmed that the Velero controller and node-agent both
+select `velero/velero:v1.18.1`, whose semantics this implementation uses. The
+pinned backup remained Completed with UID `84590917-87e3-4dc9-b642-a1638e792214`,
+6,198 items, zero errors, both snapshot flags false and zero asynchronous
+operations. The Job rechecks that backup before and after acquiring its resource
+list. Activation ships through this reviewed parent reference; workers never
+run `kubectl apply`.
 
 Flux creates the fixed-name `BackupResourceList` DownloadRequest. Its signed URL
 is a bearer capability: only the single-purpose Job receives a named GET. The
