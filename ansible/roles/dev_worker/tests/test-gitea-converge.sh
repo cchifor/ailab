@@ -457,6 +457,22 @@ grep -q 'dev-workers/dev-worker-3"' "$ETC/git-credentials.ctmpl.last-good" && ok
 play true
 expect_changed0 "13m: idempotent"
 
+echo "[13n] an ALREADY cut-over slot whose agent died at boot (field gone): the pre-flight fails, nothing changes"
+mv "$T/kv/dev-worker-3/gitea_pat" "$T/kv/held"
+rm -f "$T/agent/sink"; echo inactive >"$T/agent/state"   # /run is tmpfs: the dead agent left no sink token
+snapshot before
+play true
+expect_rc "13o: the play fails" 1
+expect_log "13p: ...at the pre-flight, naming the dead agent" "already switched to $BOT"
+expect_log "13q: ...and saying nothing was changed" "Nothing was changed"
+snapshot after
+cmp -s "$T/snap.before" "$T/snap.after" && ok "13r: nothing on disk changed" || bad "13r: nothing on disk changed"
+mv "$T/kv/held" "$T/kv/dev-worker-3/gitea_pat"
+echo stub-sink-token >"$T/agent/sink"; echo active >"$T/agent/state"  # the field is back; systemd restarts the agent
+play true
+expect_rc "13s: converges once the agent runs again" 0
+expect_login "13t" "$BOT" "$SLOT"
+
 echo "[9] converged again, idempotent, and --check is a no-op"
 play false
 expect_rc "9a: converges" 0
