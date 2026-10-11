@@ -159,6 +159,22 @@ spec:
       defaultVolumesToFsBackup: true
       # (`defaultSnapshotMoveData: true` removed here on 2026-08-30 — it is what armed the QTS clone
       # path on every schedule. The chart renders that arg with `with`, so absent == false == off.)
+      # TEMPORARY (2026-10-11, ailab#1240): delete this entry once the `databases` repo's full maintenance
+      # has succeeded and the dead index entries are gone. That repo's full maintenance failed every day
+      # from 09-17: the short-pack rewrite, which runs first and stops the whole pass on any failure, kept
+      # failing on contents whose packs were lost in the 2026-09-08 versitygw stall (all marked deleted;
+      # no snapshot uses them). So the later steps that would drop them never ran.
+      # The flag skips a rewrite failure only for a content already marked deleted; a missing pack under
+      # live data still fails maintenance. Velero copies this container's env into every repo-maintenance
+      # Job (buildJob -> GetEnvVarsFromVeleroServer). The chart also puts it on node-agent, where it is
+      # inert: node-agent never runs maintenance. Changing this list restarts both.
+      # Why not keep it: with it on, the next time storage drops acknowledged writes the only trace is an
+      # INFO line in a short-lived Job, not a failed maintenance Job and KubeJobFailed.
+      # To turn it off, REMOVE the entry. Velero's kopia fork (project-velero/kopia@d946b1e75197,
+      # repo/maintenance/content_rewrite.go) tests os.Getenv(...) != "", so value "false" still enables it.
+      extraEnvVars:
+        - name: KOPIA_IGNORE_MAINTENANCE_REWRITE_ERROR
+          value: "true"
       backupStorageLocation:
         - name: default
           provider: aws
