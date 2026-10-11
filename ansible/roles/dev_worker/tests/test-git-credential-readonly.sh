@@ -137,7 +137,7 @@ grep -q '^ *mode: "0755"$' "$TASKS/git_credential_helper.yml" || bad "the helper
 # openbao.yml is the only credential path (the SOPS one in git_forge.yml is gone), and must bring the
 # helper and the username pin with it.
 grep -q 'import_tasks: git_credential_helper.yml' "$TASKS/openbao.yml" || bad "openbao.yml does not import git_credential_helper.yml"
-grep -q 'import_tasks: pin_gitea_username.yml' "$TASKS/openbao.yml" || bad "openbao.yml does not import pin_gitea_username.yml"
+grep -q "import_tasks: openbao_switch.yml" "$TASKS/openbao.yml" && grep -q "import_tasks: pin_gitea_username.yml" "$TASKS/openbao_switch.yml" || bad "openbao.yml does not bring the username pin (via openbao_switch.yml)"
 if grep -q 'dest:.*git-credentials' "$TASKS/git_forge.yml"; then
   bad "git_forge.yml writes ~/.git-credentials again (the SOPS path was removed)"
 fi

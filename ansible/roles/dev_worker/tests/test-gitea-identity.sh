@@ -189,12 +189,15 @@ for state, v in (("off", OFF), ("on", ON)):
     check(pinned == rendered, "C2: gate %s pins the login the credential line carries (%s)" % (state, pinned), (pinned, rendered))
 
 print("[D] a switch removes the other login's file; the health check reads the login")
-drift = task("tasks/openbao.yml", "Find credential files whose login")["ansible.builtin.shell"]
-verify = task("tasks/openbao.yml", "Verify the agent restarted")["ansible.builtin.shell"]
+SW = "tasks/openbao_switch.yml"
+drift = task(SW, "Find credential files that are missing")["ansible.builtin.shell"]
+verify = task(SW, "Verify the agent restarted")["ansible.builtin.shell"]
 home = os.path.join(WORK, "home-drift")
 os.makedirs(home)
 cfile = os.path.join(home, ".git-credentials")
-login_check = next(l for l in verify.splitlines() if "does not name" in l).strip()
+vlines = verify.splitlines()
+at = next(i for i, l in enumerate(vlines) if "does not name" in l)
+login_check = vlines[at - 1].strip() + "\n" + vlines[at].strip()
 for label, want, other in (("cut-over", "on", "off"), ("rollback", "off", "on")):
     user = (ON if want == "on" else OFF)["dev_worker_gitea_user"]
     script = render(drift, dev_worker_users=[{"name": "u", "home": home}], dev_worker_gitea_user=user)
@@ -202,10 +205,10 @@ for label, want, other in (("cut-over", "on", "off"), ("rollback", "off", "on"))
     if os.path.exists(cfile):
         os.remove(cfile)
     rc, out, err = run_sh(script)
-    check(rc == 0 and out == "", "D1 %s: no rendered file yet -> nothing to remove" % label, (rc, out, err))
+    check(rc == 0 and out.strip() == "absent " + cfile, "D1 %s: a missing file forces the render" % label, (rc, out, err))
     open(cfile, "w").write(LINE[other])
     rc, out, err = run_sh(script)
-    check(rc == 0 and out.strip() == cfile, "D2 %s: the other login's file is listed for removal" % label, (rc, out, err))
+    check(rc == 0 and out.strip() == "other " + cfile, "D2 %s: the other login's file is listed for removal" % label, (rc, out, err))
     check(not leaked(out + err), "D3 %s: ...and no token reaches the output" % label, leaked(out + err))
     rc, out, err = run_sh(checker)
     check(rc != 0 and "does not name " + user in err and not leaked(out + err),
@@ -217,31 +220,40 @@ for label, want, other in (("cut-over", "on", "off"), ("rollback", "off", "on"))
     check(rc == 0, "D6 %s: the health check passes on this run's login" % label, (rc, out, err))
     open(cfile, "w").write("")
     rc, out, err = run_sh(script)
-    check(rc == 0 and out.strip() == cfile, "D7 %s: an empty or foreign file is re-rendered too" % label, (rc, out, err))
+    check(rc == 0 and out.strip() == "other " + cfile, "D7 %s: an empty or foreign file is re-rendered too" % label, (rc, out, err))
 sed_re = re.compile(r"sed -n '([^']+)'")
 check(sed_re.findall(drift) == [s for s in sed_re.findall(verify) if "chifor" in s] and len(sed_re.findall(drift)) == 1,
       "D8: the health check extracts the login exactly as the removal does")
 
-print("[E] ordering in openbao.yml: pre-flight first, removal before the restart, rescue restores")
+print("[E] structure: pre-flight first; the whole switch guarded; the rescue restores and verifies")
 OB = "tasks/openbao.yml"
 pre = position(OB, "Pre-flight this slot's own Gitea tokens")
-for prefix in ("Lay down the kubeconfig and platform render templates", "Lay down the bao agent config",
-               "Lay down the git-credentials render template", "Enable + start openbao-agent"):
+for prefix in ("Lay down the kubeconfig and platform render templates", "Switch the agent onto"):
     check(pre < position(OB, prefix), "E1: the Gitea pre-flight runs before '%s'" % prefix)
 check(task(OB, "Pre-flight this slot's own Gitea tokens").get("when") == "dev_worker_gitea_identity_cutover | bool",
       "E2: ...and only when the gate is on")
-ct = task(OB, "Lay down the git-credentials render template")
-check(ct["ansible.builtin.template"].get("backup") is True and ct.get("register") == "dev_worker_git_ctmpl",
-      "E3: the credential template keeps a backup and registers it")
-check(position(OB, "Lay down the git-credentials render template") < position(OB, "Find credential files whose login")
-      < position(OB, "Remove them, so the agent renders") < position(OB, "Apply the pending openbao-agent restart"),
-      "E4: template -> find -> remove -> restart, in that order")
-rm = task(OB, "Remove them, so the agent renders")
-check(rm.get("notify") == "Restart openbao-agent" and rm["ansible.builtin.file"].get("state") == "absent",
-      "E5: the removal deletes the file and restarts the agent")
-rescue = task(OB, "Restore the previous agent config")["ansible.builtin.shell"]
-check("dev_worker_git_ctmpl.backup_file" in rescue and "/etc/openbao-agent/git-credentials.ctmpl" in rescue,
-      "E6: the rescue restores the credential template this run changed")
+check(task(OB, "Switch the agent onto").get("ansible.builtin.import_tasks") == "openbao_switch.yml",
+      "E3: openbao.yml imports the switch")
+switch = task(SW, "Switch the agent onto")
+inside = [str(t.get("name", "")) for t in switch["block"]]
+order = ["Keep the current credential template", "Lay down the bao agent config", "Lay down the git-credentials render template",
+         "Find credential files that are missing", "Remove the ones that name another login", "Enable + start openbao-agent",
+         "Apply restarts queued elsewhere", "Restart openbao-agent onto", "Verify the agent restarted",
+         "Pin the git.chifor.me credential username", "Record this credential template as the last verified one"]
+idx = [next((i for i, n in enumerate(inside) if n.startswith(p)), -1) for p in order]
+check(-1 not in idx and idx == sorted(idx), "E4: every mutation, the start, the restart, the check and the pin are inside the block, in order",
+      list(zip(order, idx)))
+check(not any("notify" in t for t in switch["block"]), "E5: no restart is left to a handler inside the switch")
+restart = task(SW, "Restart openbao-agent onto")
+check("dev_worker_git_login_drift.stdout_lines | length > 0" in str(restart.get("when"))
+      and "dev_worker_git_ctmpl is changed" in str(restart.get("when")),
+      "E6: a missing or other-login file forces the restart even when no template changed")
+rescue = task(SW, "Roll back to the last verified config")["ansible.builtin.shell"]
+for needle, label in (("git-credentials.ctmpl.last-good", "the last verified template"),
+                      ('!= "$prev" ]; then rm -f', "removes a file that names another login"),
+                      ("credential.https://git.chifor.me.username \"$prev\"", "re-pins the restored login"),
+                      ("did NOT verify", "verifies the rollback before reporting it")):
+    check(needle in rescue, "E7: the rescue uses " + label if needle.endswith("last-good") else "E7: the rescue " + label)
 
 print("[F] the pre-flight, run against a stub cred and hostname")
 pre_sh = task(OB, "Pre-flight this slot's own Gitea tokens")["ansible.builtin.shell"]
