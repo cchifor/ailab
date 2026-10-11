@@ -585,6 +585,11 @@ There is no schema change: new route and key fields are optional, and trajectori
 columns. The usual single-replica Recreate rollout briefly interrupts service. The **Router rollout
 acceptance** workflow checks the pod and the public endpoints.
 
+> **Superseded on 2026-10-11.** The old-keys rollback below no longer exists. The four pre-per-key dev-worker keys are
+> revoked and the six `dw-gpt-*` routes are deleted (see "Claude tools and route cleanup (2026-10-11)"). To roll back
+> the dev workers, repoint `dw-1` … `dw-4` to `sub-codex-5` (`codex-5:*`). Every image since this release serves that
+> route.
+
 **Rollback.**
 - **Before the cutover above:** an image/annotation revert through a reviewed GitOps PR to
   `registry.chifor.me/llm-router/router@sha256:9f9661c8458479d9ed3b2915bd0be7bef73e6fa706f783d9410bad0fe8c0b49b`
