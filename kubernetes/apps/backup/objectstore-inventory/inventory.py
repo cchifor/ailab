@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import ssl
 import time
+import zlib
 from urllib.parse import urlsplit
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -74,7 +75,9 @@ def validate_request(value, now):
     require(value.get('spec', {}).get('target') == {'kind': 'BackupResourceList', 'name': BACKUP})
     require(status.get('phase') == 'Processed')
     remaining = (stamp(status.get('expiration')) - now).total_seconds()
-    require(0 < remaining <= 600)
+    # Velero grants ten minutes; allow one minute of inter-node clock skew.
+    # An already expired request still never qualifies.
+    require(0 < remaining <= 660)
     url = status.get('downloadURL')
     require(isinstance(url, str) and not any(c.isspace() for c in url))
     try:
@@ -109,7 +112,7 @@ def reduce_inventory(compressed, expected, now):
             raw = stream.read(MAX_EXPANDED + 1)
         require(len(raw) <= MAX_EXPANDED)
         resources = json_document(raw)
-    except (OSError, EOFError):
+    except (OSError, EOFError, zlib.error):
         raise InventoryUnavailable() from None
     require(isinstance(resources, dict) and bool(resources))
     counts = {}

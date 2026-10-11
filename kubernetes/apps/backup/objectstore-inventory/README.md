@@ -71,6 +71,10 @@ DataUpload versions, wrong backup identity, async operations, stale requests,
 malformed/truncated/compressed input, duplicate JSON keys and names, changed
 counts, redirects, TLS failures, the request-creation race, and exact RBAC/network
 scope. No backup payload is fetched by these tests.
+Fresh request timestamps allow up to one minute of controller/Job clock skew;
+expired requests still fail. Tests also exercise corrupt deflate streams and the
+actual HTTP opener's redirect refusal, disabled environment proxies, response
+size/status checks, and separation of API authorization from signed-URL requests.
 
 The explicit TLS probe performs three handshakes against the existing endpoint,
 without sending HTTP requests or using a signed URL. Run it under the exact Job

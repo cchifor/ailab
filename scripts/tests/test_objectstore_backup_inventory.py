@@ -1,6 +1,7 @@
 """A resource-list receipt must never contain names or bearer capabilities."""
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 import gzip
 import hashlib
 import importlib.util
@@ -9,8 +10,10 @@ import json
 from pathlib import Path
 import ssl
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
+from urllib.request import HTTPSHandler, ProxyHandler
+import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = ROOT / 'kubernetes/apps/backup/objectstore-inventory/inventory.py'
@@ -74,6 +77,26 @@ class InventoryTests(unittest.TestCase):
                 mod.reduce_inventory(body, 2, NOW)
         with patch.object(mod, 'MAX_EXPANDED', 8), self.assertRaises(mod.InventoryUnavailable):
             self.receipt({'v1/Pod': ['a/b']})
+
+    def test_corrupt_deflate_is_a_sanitized_unavailable_result(self):
+        # A valid gzip header followed by a reserved deflate block type.
+        corrupt = gzip.compress(b'[]')[:10] + b'\x07' + bytes(8)
+        with self.assertRaises(zlib.error):
+            gzip.decompress(corrupt)
+        with self.assertRaisesRegex(mod.InventoryUnavailable, '^inventory unavailable$'):
+            mod.reduce_inventory(corrupt, 2, NOW)
+
+    def test_fresh_request_allows_bounded_clock_skew_but_never_expiry(self):
+        for seconds in [600, 601, 660]:
+            candidate = download()
+            candidate['status']['expiration'] = (NOW + timedelta(seconds=seconds)).isoformat()
+            with self.subTest(seconds=seconds):
+                self.assertEqual(mod.validate_request(candidate, NOW), URL)
+        for seconds in [-1, 0, 660.001, 7200]:
+            candidate = download()
+            candidate['status']['expiration'] = (NOW + timedelta(seconds=seconds)).isoformat()
+            with self.subTest(seconds=seconds), self.assertRaises(mod.InventoryUnavailable):
+                mod.validate_request(candidate, NOW)
 
     def test_pin_and_expiry_are_checked_before_url_use(self):
         self.assertEqual(mod.validate_backup(backup(), NOW), 2)
@@ -158,6 +181,59 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaises(mod.InventoryUnavailable) as err:
             mod.NoRedirect().redirect_request(None, None, 302, 'moved', {}, URL)
         self.assertNotIn('never-emit-token', str(err.exception))
+
+    def test_fetch_installs_isolated_transport_without_forwarding_api_auth(self):
+        context = ssl.create_default_context()
+        with patch.object(mod, 'build_opener') as build:
+            response = build.return_value.open.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b'ok'
+            self.assertEqual(mod.fetch('https://api.example.invalid', context=context, limit=2,
+                                       headers={'Authorization': 'Bearer api-only-test'}), b'ok')
+            self.assertEqual(build.return_value.open.call_args.args[0].get_header('Authorization'),
+                             'Bearer api-only-test')
+            self.assertEqual(mod.fetch(URL, context=context, limit=2), b'ok')
+            proxy, redirect, https = build.call_args.args
+            self.assertIsInstance(proxy, ProxyHandler)
+            self.assertEqual(proxy.proxies, {})
+            self.assertIsInstance(redirect, mod.NoRedirect)
+            self.assertIsInstance(https, HTTPSHandler)
+            self.assertIs(https._context, context)
+            request = build.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, URL)
+            self.assertFalse(request.has_header('Authorization'))
+            build.return_value.open.assert_called_with(request, timeout=20)
+            response.read.assert_called_with(3)
+
+    def test_fetch_refuses_non_success_and_oversized_bodies(self):
+        for status, body in [(201, b'ok'), (302, b'ok'), (500, b'ok'), (200, b'abc')]:
+            with self.subTest(status=status, body=body), patch.object(mod, 'build_opener') as build:
+                response = build.return_value.open.return_value.__enter__.return_value
+                response.status = status
+                response.read.return_value = body
+                with self.assertRaisesRegex(mod.InventoryUnavailable, '^inventory unavailable$'):
+                    mod.fetch(URL, context=ssl.create_default_context(), limit=2)
+                if status != 200:
+                    response.read.assert_not_called()
+
+    def test_fetch_real_opener_never_follows_redirects_or_proxy_environment(self):
+        context = ssl.create_default_context()
+        with patch.dict(mod.os.environ, {'https_proxy': 'http://proxy.invalid:3128'}), \
+             patch.object(HTTPSHandler, 'https_open') as transport:
+            response = MagicMock()
+            response.status = response.code = 302
+            response.msg = 'Found'
+            headers = Message()
+            headers['Location'] = 'https://elsewhere.invalid/' + SECRET
+            response.info.return_value = headers
+            transport.return_value = response
+            with self.assertRaisesRegex(mod.InventoryUnavailable, '^inventory unavailable$'):
+                mod.fetch(URL, context=context, limit=2)
+            self.assertEqual(transport.call_count, 1)
+            request = transport.call_args.args[0]
+            self.assertEqual(request.host, '192.168.1.225:7070')
+            self.assertFalse(request.has_proxy())
+            self.assertFalse(request.has_header('Authorization'))
 
     def test_transport_errors_publish_only_a_generic_failure(self):
         for err in [ssl.SSLCertVerificationError(URL), HTTPError(URL, 500, URL, {}, io.BytesIO())]:
