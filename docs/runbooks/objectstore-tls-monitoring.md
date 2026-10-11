@@ -84,8 +84,10 @@ reviewed trust-distribution process. Never copy a CA private key into this probe
 
 `python3 -m unittest discover -s scripts/tests -p test_objectstore_tls_monitor.py -v`
 checks identity, trust and network boundaries. `bash scripts/rules-lint.sh`
-evaluates the alert expressions and their failure/recovery fixtures. Runtime
-qualification must additionally demonstrate valid and invalid real TLS handshakes
+evaluates the alert expressions, the one-minute threshold/hold fixtures and the
+hourly 90-day renewal companion fixture. Companion names follow
+`<rule-file-basename>.<scenario>.test.yaml` so the same CI gate discovers them.
+Runtime qualification must additionally demonstrate valid and invalid real TLS handshakes
 with the pinned exporter; Kubernetes policy enforcement remains a live check.
 
 Removing this monitor does not change the provider, certificates, buckets or PVC.

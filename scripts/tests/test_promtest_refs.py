@@ -71,7 +71,7 @@ class RealFixtureTest(unittest.TestCase):
         """The check rules-lint.sh performs, asserted here too so a rename that breaks it is
         caught by the unit suite and not only by the CI gate."""
         rules_dir = ROOT / "kubernetes" / "apps" / "infrastructure" / "monitoring"
-        fixtures = sorted(rules_dir.glob("*-rules.test.yaml"))
+        fixtures = sorted(rules_dir.glob("*.test.yaml"))
         self.assertTrue(fixtures, "expected at least one promtool fixture")
         for fixture in fixtures:
             with self.subTest(fixture=fixture.name):

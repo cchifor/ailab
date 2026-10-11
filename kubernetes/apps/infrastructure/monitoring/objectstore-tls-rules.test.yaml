@@ -322,3 +322,52 @@ tests:
       - eval_time: 20m
         alertname: ObjectstoreTLSIssuedCertificateAhead
         exp_alerts: []
+  - name: expiry starts one hour above threshold and fires only after crossing plus fifteen minutes
+    interval: 1m
+    input_series:
+    - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+      values: 1x80
+    - series: probe_success{job="objectstore-tls"}
+      values: 1x80
+    - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+      values: 1213200x80
+    - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+      values: 1213200x80
+    alert_rule_test:
+    - eval_time: 44m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 60m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 75m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 76m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: &threshold_expiry_alert
+      - exp_labels:
+          namespace: strive-ailab
+          severity: warning
+        exp_annotations:
+          summary: The served objectstore certificate chain expires within 14 days
+          description: 'Inspect issuance and the nginx reload supervisor. This measures the served chain,
+            not only Certificate Ready. Runbook: docs/runbooks/objectstore-tls-monitoring.md.'
+  - name: expiry one hour below threshold still requires the full fifteen minutes
+    interval: 1m
+    input_series:
+    - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+      values: 1x80
+    - series: probe_success{job="objectstore-tls"}
+      values: 1x80
+    - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+      values: 1206000x80
+    - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+      values: 1206000x80
+    alert_rule_test:
+    - eval_time: 14m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 15m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: *threshold_expiry_alert
