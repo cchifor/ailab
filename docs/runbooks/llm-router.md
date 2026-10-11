@@ -587,8 +587,16 @@ acceptance** workflow checks the pod and the public endpoints.
 
 > **Superseded on 2026-10-11.** The old-keys rollback below no longer exists. The four pre-per-key dev-worker keys are
 > revoked and the six `dw-gpt-*` routes are deleted (see "Claude tools and route cleanup (2026-10-11)"). To roll back
-> the dev workers, repoint `dw-1` … `dw-4` to `sub-codex-5` (`codex-5:*`). Every image since this release serves that
-> route.
+> the dev workers, repoint `dw-1` … `dw-4` to `fallback-codex` (see "Codex fallback route (2026-10-11)"). Every image
+> since `router-0.1.0-20261010-placement` serves that route. It replaced `sub-codex-5` (`codex-5:*`), removed on
+> 2026-10-11.
+>
+> **An image rollback older than `router-0.1.0-20261010-placement`, such as this section's own Rollback below, cannot
+> serve `fallback-codex`.** The route needs conversation placement, so `dw-N` would get 503. Before such a rollback:
+> 1. create a `priority` route with one Codex account, model `*`, `native: ["codex-responses"]` and the six-model
+>    `models` allowlist (the old `sub-codex-5` shape: one account, so it does not depend on placement);
+> 2. repoint `dw-1` … `dw-4` to it;
+> 3. only then revert the image.
 
 **Rollback.**
 - **Before the cutover above:** an image/annotation revert through a reviewed GitOps PR to
@@ -769,9 +777,12 @@ Nothing else changes, and nothing uses the pools until a pointer or key is moved
 **Rollback.** Revert the image through a reviewed GitOps PR to
 `registry.chifor.me/llm-router/router@sha256:39517806cf64c29efb4d5b526720491dbed78d2ed684787d0be53bb49cabfce1`
 (`router-0.1.0-20261010-placement`, source `076dff0`). **First**:
-1. repoint anything that uses a pool. For the dev workers: `dw-1` … `dw-4` → `sub-codex-5`, restored to `codex-5:*`
-   in revision 1260; the old image serves that route. Do not use `dw-pool`: it was deleted in revision 1262;
+1. repoint anything that uses a pool. For the dev workers: `dw-1` … `dw-4` → `fallback-codex` (see "Codex fallback
+   route (2026-10-11)"); the old image serves that route. Do not use `dw-pool`: it was deleted in revision 1262;
 2. then turn every pool off (`configure_pool … enabled: false`, or `remove_pool`), so their routes go.
+
+> **Changed on 2026-10-11.** Step 1 used to name `sub-codex-5` (`codex-5:*`, restored in revision 1260). That route
+> was removed on 2026-10-11 and replaced by `fallback-codex`.
 
 If you skip this, the old image:
 - answers pool requests with 503 `STRATEGY_UNAVAILABLE`;
@@ -788,9 +799,9 @@ So when the procedure was skipped, the pool routes reach the roll-forward unmark
 settings: re-apply any custom ones. With the procedure followed, there is nothing to adopt; the pools are re-created.
 
 **The old image still carries the Codex model-refresh bug.** After a rollback, its refresh again rewrites `*` targets
-on router-owned Codex logins to a fixed model, within about 40 minutes. That includes `sub-codex-5`, restored to
-`codex-5:*` in acceptance step 1, which becomes `gpt-6-astra` again. The workers pin `gpt-6-astra`, so they keep
-working. After rolling forward again, re-pin `sub-codex-5` to `codex-5:*`.
+on router-owned Codex logins to a fixed model, within about 40 minutes. That includes `fallback-codex`'s five
+targets. The bug turned `sub-codex-5`'s `*` into `gpt-6-astra`, the model the workers pin. After rolling forward
+again, re-pin `fallback-codex`'s targets to `*`.
 
 **Image.**
 - Archive `router-0.1.0-20261010-smart-pools.tar.gz`, SHA-256
@@ -828,14 +839,15 @@ reference from pointers, fallbacks and active keys):
   They could reach only those routes.
 
 The rollback described in "Per-key routing release: model mode" (going back to the old keys and the `dw-gpt-*` routes)
-**no longer exists**. The supported rollback is `dw-N → sub-codex-5`, which every image since `router-0.1.0-20261009-model-mode`
-serves.
+**no longer exists**. The supported rollback is `dw-N → fallback-codex`, which every image since
+`router-0.1.0-20261010-placement` serves (see "Codex fallback route (2026-10-11)").
 
 **Kept, though lightly used:**
 - `claude` (6 requests in 7 days; the router agent's binding uses it);
 - `qwen-image-2.1-cloud` and `qwen-image-2.1-fast-cloud`, which the TrueSwarm key scopes;
 - `default`, the router's default pointer;
-- `sub-codex-5`, the `dw-N` rollback target.
+- `sub-codex-5`, then the `dw-N` rollback target. It was removed later that day (revision 1299) and replaced by
+  `fallback-codex`.
 
 **Leftover, now gone:** `router.yaml`'s `api-openai.codexNative.routes` listed the six deleted `dw-gpt-*` names (a
 harmless membership check). It was dropped with the next digest bump, in "Activity source release (2026-10-11)"
@@ -858,7 +870,7 @@ The responses only gain `source: {id, name, kind}`; no key hash or prefix is exp
 filters use the existing `principal_id` column and the stats' `COALESCE($.route, model)` grouping.
 
 **Also in this rollout:** `router.yaml` drops `api-openai.codexNative.routes`, the six `dw-gpt-*` names deleted on
-2026-10-11. Codex-native pass-through is a per-route `native` setting (`sub-codex-5`, `pool-codex`).
+2026-10-11. Codex-native pass-through is a per-route `native` setting (`fallback-codex`, `pool-codex`).
 
 **Image.**
 - Archive `router-0.1.0-20261011-activity-source.tar.gz`, SHA-256
@@ -876,3 +888,40 @@ pod advertises the right release:
 
 Nothing else is needed: the pools are unchanged, and the dropped `codexNative` list named only deleted routes, so it
 need not come back.
+
+## Codex fallback route (2026-10-11)
+
+**Why.** The dev workers' pointers `dw-1` … `dw-4` target `pool-codex`, a smart pool that depends on the `smart-pools`
+plugin. `fallback-codex` is where to repoint them if that plugin is turned off or misbehaves, or if the image is rolled
+back to one older than `router-0.1.0-20261010-smart-pools`.
+- It needs no plugin. The `usage` strategy, `*` targets and conversation placement are served by every image since
+  `router-0.1.0-20261010-placement` (the PR B+C release, image `39517806`).
+- Unlike the old `sub-codex-5`, it follows quota across all five Codex accounts instead of spending codex-5's credits.
+  - All five targets stay eligible. `access: ["subscription"]` is the account class (subscription, not API or
+    local), not credit state.
+  - On a `usage` route, an account serving on credits (a full window with usable credits) ranks last. It is used only
+    when no other target has included quota left (`packages/modules/placement` QUOTA_RANKED).
+  - So codex-5, on credits until 10-14, is the last resort, not excluded.
+
+**Revision 1298** added route `fallback-codex`:
+- strategy `usage`, `access: ["subscription"]`, `maxAttempts: 2`;
+- five any-model targets, `fallback-codex:<account>` for `codex`, `codex-2`, `codex-3`, `codex-4` and `codex-5`, each
+  with model `*`;
+- `native: ["codex-responses"]` and `placement: "conversation"`;
+- `models`: the same six-model allowlist as `pool-codex`;
+- `timeoutMs` 300000, `idleTimeoutMs` 600000.
+
+**Smoke test.** Through a temporary key bound to the route (`defaultRoute: fallback-codex`), revoked afterwards:
+- chat completions were served by `codex`;
+- a native `/v1/responses` stream was served by `codex-2` and completed.
+
+**Revision 1299** deleted route `sub-codex-5`, the previous rollback target. It was a `priority` route over `codex-5:*`
+only, and `codex-5` is on credits until 10-14. No key or pointer referenced it.
+
+**To use it,** repoint `dw-1` … `dw-4` → `fallback-codex` (`PUT /admin/v1/config`, or the chat's `/point dw-N`).
+Nothing changes on the workers. Before an image rollback to `39517806`, do this first: see "Smart pools release
+(2026-10-10)", **Rollback**.
+
+**Caveat.** The pre-smart-pools image (`39517806`) still carries the Codex model-refresh bug. Within about 40 minutes it
+rewrites `*` targets on router-owned Codex logins to a fixed model, `fallback-codex`'s five included. After rolling
+forward again, re-pin `fallback-codex`'s targets to `*`. The same caveat applied to `sub-codex-5`.

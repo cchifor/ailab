@@ -166,7 +166,7 @@ spec:
             # Codex-native streams are bounded by the routes' own wait/idle timeouts (and kept alive past the edge's
             # idle limit by the router's 15 s SSE keepalives).
             # Codex-native pass-through is a per-route setting (`native: ["codex-responses"]`, llm-router #89) on
-            # sub-codex-5 and the smart pool pool-codex. The deployment-wide api-openai codexNative.routes list (#87)
+            # fallback-codex and the smart pool pool-codex. The deployment-wide api-openai codexNative.routes list (#87)
             # named the six dw-gpt-* routes, deleted with the old dev-worker keys on 2026-10-11, so it is gone.
             - name: ROUTER_PLUGIN_CONFIG
               value: >-

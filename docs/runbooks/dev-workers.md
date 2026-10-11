@@ -223,9 +223,10 @@ it.
 
 ### Codex through the router (since 2026-10-09)
 
-**All four workers' Codex runs on the estate's LLM router** (router.chifor.me), on ONE ChatGPT
-subscription the router holds: account `codex-5`. The workers do not use their own ChatGPT logins
-for this. Role `dev_worker`, `tasks/codex.yml`, `dev_worker_codex_router_enabled: true` in
+**All four workers' Codex runs on the estate's LLM router** (router.chifor.me). Until 2026-10-10 it ran on one
+router-held ChatGPT subscription, account `codex-5`. Since then it runs on the smart pool `pool-codex`, which spreads
+conversations over all five router-held subscriptions (`codex` … `codex-5`). The workers do not use their own ChatGPT
+logins for this. Role `dev_worker`, `tasks/codex.yml`, `dev_worker_codex_router_enabled: true` in
 `group_vars/dev_workers.yml`. Each user's `~/.codex/config.toml` gets:
 
 ```toml
@@ -259,14 +260,16 @@ How a request travels:
    - Each worker's key is limited to its own pointer route `dw-N`, which is also the key's
      `defaultRoute`.
    - The CLI's model name is not a route, so the router serves it in **model mode** on `dw-N`.
-     Today every `dw-N` points to `sub-codex-5`, one any-model target `codex-5:*`, with
-     `native: ["codex-responses"]`, so the request is passed through as sent.
-   - **Which models a worker may ask for.** `sub-codex-5` carries the allowlist `models` set to
-     the same six models the old `dw-gpt-*` routes served: `gpt-6-astra`, `gpt-6-sol`,
-     `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`. This is config revision 676.
+     Today every `dw-N` points to the smart pool `pool-codex`: every Codex subscription, any-model
+     (`*`) targets, conversation placement and `native: ["codex-responses"]`, so the request is
+     passed through as sent.
+   - **Which models a worker may ask for.** `pool-codex` carries an allowlist (the pool setting
+     `allow`) of the same six models the old `dw-gpt-*` routes served: `gpt-6-astra`, `gpt-6-sol`,
+     `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`. The rollback route
+     `fallback-codex` has the same six in its `models`.
      - Any other model name gets `400 MODEL_NOT_SUPPORTED` before any upstream call, as before.
-     - Even without the allowlist, codex-5's catalog (today exactly those six) would bound it.
-     - The allowlist keeps the per-key model set explicit if the catalog grows.
+     - Even without the allowlist, the accounts' catalogs would bound it.
+     - The allowlist keeps the per-key model set explicit if a catalog grows.
    - **To move one worker** to another subscription or a pool, repoint its `dw-N` (one config
      change, `PUT /admin/v1/config`, or the chat's `/point dw-N`). Nothing changes on the worker.
      Put the same `models` allowlist on the new target route.
@@ -284,8 +287,9 @@ The router's console (Activity, API keys) shows each worker's requests under its
 | dev-worker-4 | `key_dc874b9d0a75` | `lrk_UNcf` | `dw-4` |
 
 **Routing.** Each key is limited to its pointer `dw-N`, which points at the smart pool `pool-codex` (every Codex
-subscription, Codex-native, conversation placement). To roll the workers back, repoint `dw-N` → `sub-codex-5`
-(`codex-5:*`).
+subscription, Codex-native, conversation placement). To roll the workers back, repoint `dw-N` → `fallback-codex`.
+It is a plain `usage` route over all five Codex accounts (`*` targets, Codex-native, conversation placement) and does
+not need the `smart-pools` plugin. See `llm-router.md` § "Codex fallback route (2026-10-11)".
 
 **Previous keys, revoked on 2026-10-11.** These keys and the six `dw-gpt-*` routes they were limited to are gone (see
 `llm-router.md` § "Claude tools and route cleanup (2026-10-11)"). They were:
@@ -306,12 +310,17 @@ All keys expire on **2027-10-09** (365 days). The current values live only in
 (`dev-worker-N.json` → `af/dev-workers/dev-worker-N`, seed-wins). From there the
 `openbao-devworker-provision` Job writes them to the vault.
 
-**Shared quota and capacity.** The four workers share one subscription's windows. The router shows
-them on `codex-5` (Status; `GET /admin/v1/config` → account `codex-5`). `codex-5` serves only these
-routes: it was taken out of the shared `codex` route the same day. Its `concurrency` (6) caps how
-many requests the four workers run at once. A seventh gets `429 busy` with `Retry-After`, which
-Codex retries. A spent window answers 429 until it resets. Run `codex -p chatgpt` to work on the
-host's own login meanwhile.
+**Shared quota and capacity.** The four workers share the five Codex subscriptions of `pool-codex`.
+- The pool places each conversation on the account with the most included quota left per day until its reset. It
+  weights that by the account's current load and uses credits only when no account has quota left.
+- `GET /admin/v1/pools` shows each member's tier, score and the reason it is excluded; the Status page shows each
+  account's windows.
+- Each account's `concurrency` caps its requests in flight: `codex` 1, `codex-2`, `-3` and `-4` 4 each, `codex-5` 16.
+  - These are the live values, checked against `GET /admin/v1/config` on 2026-10-11.
+  - codex-5 was raised from the 6 documented earlier, and codex-2..4 from 1, with the owner's OK during the
+    smart-pools work on 2026-10-10. The pool spreads load, so the per-account caps were raised.
+  When every member is full, a request gets `429 busy` with `Retry-After`, which Codex retries.
+- Run `codex -p chatgpt` to work on the host's own login meanwhile.
 
 **CLI and daemon must agree on features.** Codex TUIs attach to the managed app-server daemon
 (`~/.codex/app-server-control/*.sock`), whose updater upgrades it on its own (0.162.0 on 2026-10-09
