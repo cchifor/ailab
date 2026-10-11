@@ -1,5 +1,9 @@
 # Relay and llm-router reviewer onboarding
 
+**Status: activated 2026-10-11** (worker-identities plan, Phase 0). What was applied is in
+§ "Activation record"; recovery when the protection stops every merge is in § "Break-glass". The
+account below is the state before activation.
+
 The operator requested review, feedback repair and reviewer-owned merges for the Relay
 control-plane stack and its llm-router token-management dependency. Both repositories
 are absent from the central reviewer allowlist at AILab main `903066b`. The allowlist
@@ -46,9 +50,61 @@ checks its own merge gates, but those are not forge-enforced branch protections.
 Existing merge gates remain both personas clean at the current head, successful CI,
 an allowed author and absence of `no-automerge`. Forge-enforced branch protection is
 separate from these application checks and is the operator prerequisite in step 1;
-it is currently absent on the two target main branches.
+it was absent on the two target main branches until the 2026-10-11 activation below.
 `dev-worker-bot` and `workstation-bot` are already allowed authors. This change adds no
-persona, author exception, review-policy exception or protection change.
+persona, author exception, review-policy exception or protection change. Since
+2026-10-11 the per-slot `dev-worker-1-bot` … `dev-worker-4-bot` are allowed authors too
+(`pr_reviewer_merge_authors`, `plans/2026-10-11-worker-identities-plan.md`).
+
+## Activation record (2026-10-11)
+
+Applied by the operator on 2026-10-11. Both repositories now carry the same `main`
+protection as `cchifor/forge`:
+
+| Setting | `cchifor/relay` | `cchifor/llm-router` |
+| --- | --- | --- |
+| Push and force push | disabled for everyone | disabled for everyone |
+| Required approvals | 2, approval whitelist `reviewer-claude`, `reviewer-codex` | same |
+| Merge whitelist | `reviewer-claude`, `reviewer-codex` | same |
+| Stale approvals | dismissed on push | dismissed on push |
+| Outdated branch | merge blocked (`block_on_outdated_branch`) | merge blocked |
+| Admin merge override | blocked | blocked |
+| Required status context | `Verify / verify (pull_request)` | `CI / verify (pull_request)` |
+
+- `reviewer-claude` and `reviewer-codex` are write collaborators on both repositories.
+- `reviewers.yml` was converged at 10:40Z, so the deployed reviewbot admits
+  `cchifor/relay`, `cchifor/llm-router` and `cchifor/dsh-acp-plus`.
+- Not part of this record (verify, then add the result here): a test PR event with a
+  successful org-webhook delivery (reviews appearing are not proof: the reconciler also
+  polls every 300 s), and the negative test, in which `workstation-bot` and a dev-worker
+  token are refused a push to `main` and a merge, and the reviewbot then merges that PR
+  with `merged_by` naming the reviewer.
+
+## Break-glass: when the protection stops every merge
+
+With exactly two whitelisted approvers, two required approvals and one required context,
+one reviewer-host outage or a renamed CI context stops every merge on these repositories.
+Recovery is an **owner operation**, with a one-shot `chifor` token handled the way
+`scripts/gitea-owner-merge.sh` handles its own (that script merges and posts `approve-pin`;
+it does not edit protection):
+
+1. Open an issue in the affected repository: the reason, the time (UTC) and what will be
+   relaxed.
+2. Mint the token in the Gitea pod, captured into a variable and never printed:
+   `gitea admin user generate-access-token --username chifor --token-name
+   owner-op-<repo>-protection-<UTC timestamp> --scopes write:repository --raw`
+   ([`owner-credentials.md`](owner-credentials.md) § Break-glass, step 2).
+3. Save the current rule (`GET /repos/cchifor/<repo>/branch_protections/main`), then relax
+   only what is broken with a `PATCH` to the same path: `required_approvals` to 0 while a
+   reviewer host is down, or `status_check_contexts` corrected for a renamed context.
+4. Delete the token at once (`delete from access_token where name='<name>'` on the
+   infra-pg primary, database `gitea`) and confirm that its next use answers 401.
+5. When the reviewers recover, restore the saved rule with a new one-shot token, read it
+   back against the table above, delete that token the same way, and close the issue with
+   the read-back.
+
+`gitea_admin` stays the last resort, as everywhere else
+([`owner-credentials.md`](owner-credentials.md) § Break-glass).
 
 ## Verification and rollback
 
