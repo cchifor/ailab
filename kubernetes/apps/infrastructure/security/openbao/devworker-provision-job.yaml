@@ -361,7 +361,11 @@ data:
     # The KV-v2 PATCH is a JSON merge patch: a null value DELETES that key and leaves the rest of the
     # document alone; nulling a key that is already gone is a no-op (both measured on 2.6.2). The JSON
     # carries field NAMES only, never a value, so nothing here can print a credential.
-    MOVED_FIELDS="dev-worker-3 strive_test_user strive_test_password"
+    #   common gitea_pat gitea_repo_pat gitea_package_pat: the shared dev-worker-bot tokens, retired once
+    #   every slot authenticates as its own dev-worker-<N>-bot from af/dev-workers/<slot> (worker identities
+    #   plan 2026-10-11, Phase 5). Only these three fields go; the rest of common stays.
+    MOVED_FIELDS="dev-worker-3 strive_test_user strive_test_password
+    common gitea_pat gitea_repo_pat gitea_package_pat"
     # Fed by a here-doc, NOT a pipe: a piped `while` runs in a subshell, where `exit 1` ends only
     # that subshell and the run aborts only because set -e sees the pipeline's status. Here the loop
     # runs in THIS shell, so `exit 1` ends the run directly (the test's H case proves it).
