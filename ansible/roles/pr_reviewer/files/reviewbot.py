@@ -23,6 +23,7 @@ import http.server
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -41,6 +42,21 @@ CFG = json.loads(_read(sys.argv[1] if len(sys.argv) > 1 else "/etc/reviewbot/con
 PAT = _read(CFG["pat_file"])
 HOOK_SECRET = _read(CFG["webhook_secret_file"]).encode()
 MARKER_RE = re.compile(r"<!-- review-bot:v1 persona=(\S+) head=([0-9a-f]{40})(?: verdict=(\S+))? -->")
+# Which HOST posted a review (ailab plan 2026-10-11-worker-identities, Phase 1 item 6): one
+# account per persona KIND, several hosts per kind once reviewers go stateless (#1127). An
+# INFORMATIONAL line written immediately BEFORE the canonical marker, which stays byte-for-byte
+# unchanged and the body's LAST marker - marker_of() trusts the last match, and cchifor/reviewer
+# parses the same marker with its own strict regex. Nothing reads this line. The short hostname
+# is reduced to [A-Za-z0-9._-], so it can neither close the comment nor spell a canonical marker.
+INSTANCE = re.sub(r"[^A-Za-z0-9._-]", "_", socket.gethostname().split(".")[0]) or "unknown"
+
+
+def review_marker(head_sha, verdict):
+    """The instance line, then the canonical marker. Every marker this bot writes comes from here."""
+    return (f"<!-- review-bot-instance: {INSTANCE} -->\n"
+            f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} verdict={verdict} -->")
+
+
 EVENTS = {"pull_request", "pull_request_sync", "pull_request_label", "pull_request_review_request"}
 # `meta` key prefix for the per-repo last-sweep result (0 = swept clean, 1 = sweep incomplete).
 # A PREFIX rather than a fixed key list because the repo set is config, not code - write_metrics()
@@ -2575,8 +2591,7 @@ def maybe_merge(repo, pr):
                     # policy): log once per pass, never spam further approvals.
                     log(f"merge {repo}#{pr} still needs approvals beyond ours")
                     return
-                marker = (f"<!-- review-bot:v1 persona={CFG['persona']} "
-                          f"head={head} verdict=clean -->")
+                marker = review_marker(head, "clean")
                 api(f"/repos/{repo}/pulls/{pr}/reviews", "POST",
                     {"commit_id": head, "event": "APPROVED",
                      "body": f"Approving per clean verdict at {head[:9]}.\n\n{marker}"})
@@ -2765,7 +2780,7 @@ def review_job(job_id, repo, pr, head_sha):
         body_note = (f"ESCALATION: round {rnd} still has blocking findings - a human "
                      f"should take over this PR (convergence policy).")
         out["summary"] = body_note + "\n\n" + out["summary"]
-    marker = f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} verdict={verdict} -->"
+    marker = review_marker(head_sha, verdict)
     body = out["summary"]
     if dropped:
         kept_files = total_files - len(dropped)
@@ -2788,7 +2803,7 @@ def skip_body(head_sha, nbytes, why=None, dropped=None, total_files=0):
     Carries the composition table when there is one: "code alone is 406 KB over the cap" is
     something the author can act on, "too big" is not."""
     cap = CFG["max_diff_bytes"]
-    marker = f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} verdict=skipped -->"
+    marker = review_marker(head_sha, "skipped")
     why = why or f"over this reviewer's {cap}-byte cap (`pr_reviewer_max_diff_bytes`)"
     body = (f"Not reviewed: the diff at {head_sha[:9]} is {nbytes:,} bytes, {why}. "
             f"Generated, vendored and binary files are already excluded automatically, so this "

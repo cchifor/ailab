@@ -12,8 +12,8 @@ against the GitRepository objects this tree actually declares (namespace + name,
 a declared object whose url is a different repo AND that object is a reviewed entry in
 EXPECTED_EXTERNAL_SOURCES; anything else (missing/non-mapping sourceRef, missing keys, an
 undeclared object, another namespace, a same-named object repointed elsewhere, an unreviewed
-external) is a non-zero exit, not a silent exclusion; (4) the stdlib regex fallback (what runs in
-CI, where PyYAML is not installed) agrees with PyYAML on every legal YAML layout it accepts and
+external) is a non-zero exit, not a silent exclusion; (4) the stdlib regex fallback (what runs
+wherever PyYAML is not importable) agrees with PyYAML on every legal YAML layout it accepts and
 raises DiscoveryError — never silently drops a document — on anything it cannot parse
 unambiguously. Run:
 
@@ -116,7 +116,7 @@ TENANTS_URL = "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/agentfor
 
 @contextlib.contextmanager
 def _regex_mode():
-    """Force the stdlib regex fallback (what the CI runner actually uses — no PyYAML there)."""
+    """Force the stdlib regex fallback (what runs wherever PyYAML is not importable)."""
     had_yaml = mp.yaml
     mp.yaml = None
     try:

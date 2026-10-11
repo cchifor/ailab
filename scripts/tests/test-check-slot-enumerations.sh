@@ -32,6 +32,7 @@ FILES=(
   kubernetes/apps/infrastructure/helmtest/namespaces.yaml
   kubernetes/infra/dev-workers/variables.tf
   inventory/hosts.yml
+  ansible/group_vars/dev_workers.yml
   kubernetes/apps/clusters/ai/trueswarm-observer.yaml
   kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
 )
@@ -78,6 +79,16 @@ edit kubernetes/infra/dev-workers/variables.tf \
 expect_fail "a tofu map key renumbered" "DIFF"
 restore kubernetes/infra/dev-workers/variables.tf
 
+edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "", 1)'
+expect_fail "a slot's Gitea login removed" "DIFF"
+restore ansible/group_vars/dev_workers.yml
+
+# Below a comment inside the block, so a parser that stopped at the first odd line would miss it.
+edit ansible/group_vars/dev_workers.yml \
+  's.replace("  - dev-worker-4-bot\n", "  - dev-worker-4-bot\n  # a later addition\n  - dev-worker-9-bot\n", 1)'
+expect_fail "a Gitea login for a slot that is not live" "DIFF"
+restore ansible/group_vars/dev_workers.yml
+
 echo "[C] a removed or reformatted source fails instead of dropping out"
 edit kubernetes/apps/infrastructure/platform-access/rbac.yaml \
   's[:s.index("kind: RoleBinding\nmetadata:\n  name: dev-worker-platform-observer\n  namespace: platform-edge") - 4]'
@@ -108,6 +119,75 @@ edit kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml \
   's.replace("    for _n in (1, 2, 3, 4):", "    for _n in LIVE:  # reformatted away from a literal")'
 expect_fail "the sync loop reformatted" "no match for"
 restore kubernetes/apps/infrastructure/security/openbao/k8stoken-sync.yaml
+
+edit ansible/group_vars/dev_workers.yml 's.replace("dev_worker_gitea_users:", "dev_worker_gitea_logins:", 1)'
+expect_fail "the Gitea login list renamed away" "no match for"
+restore ansible/group_vars/dev_workers.yml
+
+# Valid YAML naming the same four logins: the text reader still refuses a shape it does not parse.
+edit ansible/group_vars/dev_workers.yml \
+  's.replace("dev_worker_gitea_users:\n" + "".join("  - dev-worker-%d-bot\n" % n for n in (1, 2, 3, 4)), "dev_worker_gitea_users: [" + ", ".join("dev-worker-%d-bot" % n for n in (1, 2, 3, 4)) + "]\n", 1)'
+expect_fail "the Gitea login list reflowed to a flow list" "must be a block list"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "  - dev-worker-4-bot\n  - dev-worker-bot\n", 1)'
+expect_fail "a non-slot login inside the Gitea login list" "unparsable dev_worker_gitea_users entry"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "  - dev-worker-4-bot\n  - dev-worker-4-bot\n", 1)'
+expect_fail "a slot's Gitea login listed twice" "names a slot twice"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's + "dev_worker_gitea_users:\n  - dev-worker-1-bot\n"'
+expect_fail "the Gitea login list defined twice" "duplicate key"
+restore ansible/group_vars/dev_workers.yml
+
+# YAML keeps the LAST definition, so a quoted duplicate would hand Ansible an empty list.
+edit ansible/group_vars/dev_workers.yml 's + chr(34) + "dev_worker_gitea_users" + chr(34) + ": []\n"'
+expect_fail "a double-quoted second definition of the Gitea login list" "duplicate key"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's + chr(39) + "dev_worker_gitea_users" + chr(39) + " : []\n"'
+expect_fail "a single-quoted second definition of the Gitea login list" "duplicate key"
+restore ansible/group_vars/dev_workers.yml
+
+# Spellings no text match sees: an explicit `? key`, and a quoted key with an escape (chr(92) = \).
+edit ansible/group_vars/dev_workers.yml 's + "? dev_worker_gitea_users\n: []\n"'
+expect_fail "an explicit-key second definition of the Gitea login list" "duplicate key"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's + chr(34) + "dev_worker_gitea_" + chr(92) + "u0075sers" + chr(34) + ": []\n"'
+expect_fail "an escaped quoted second definition of the Gitea login list" "duplicate key"
+restore ansible/group_vars/dev_workers.yml
+
+# Exact login spelling: each of these is a DIFFERENT Gitea account (or a different string) from slot 4's.
+for bad in 'dev-worker-04-bot' 'dev-worker-4-bot#typo' 'dev-worker-4-bot-x' 'dev-worker-4-bot x' \
+           'dev-worker-0-bot'; do
+  edit ansible/group_vars/dev_workers.yml "s.replace('  - dev-worker-4-bot\n', '  - $bad\n', 1)"
+  expect_fail "a non-canonical Gitea login: $bad" "unparsable dev_worker_gitea_users entry"
+  restore ansible/group_vars/dev_workers.yml
+done
+edit ansible/group_vars/dev_workers.yml \
+  's.replace("  - dev-worker-4-bot\n", "  - " + chr(34) + "dev-worker-4-bot" + chr(34) + "\n", 1)'
+expect_fail "a quoted Gitea login" "unparsable dev_worker_gitea_users entry"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "    - dev-worker-4-bot\n", 1)'
+expect_fail "Gitea login entries indented inconsistently" "indented inconsistently"
+restore ansible/group_vars/dev_workers.yml
+
+# Ansible's own tags elsewhere in the file (a vaulted secret, an unsafe string) must not break the decoder.
+edit ansible/group_vars/dev_workers.yml \
+  's + "some_secret: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  61626364\nraw_text: !unsafe " + chr(39) + "{{ x }}" + chr(39) + "\n"'
+run_check || fail "a !vault / !unsafe value elsewhere in group_vars must not break the check"
+echo "  ok  !vault and !unsafe values elsewhere in the file are read as plain scalars"
+restore ansible/group_vars/dev_workers.yml
+
+# ...and a real YAML comment after the login is still slot 4.
+edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "  - dev-worker-4-bot  # canary\n", 1)'
+run_check || fail "a Gitea login followed by a YAML comment must still pass"
+echo "  ok  a Gitea login followed by a YAML comment is still slot 4"
+restore ansible/group_vars/dev_workers.yml
 
 echo "[D] a slot that is both live and retired fails"
 edit kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml \
@@ -170,6 +250,7 @@ INVENTORY=inventory/hosts.yml
 TS=kubernetes/apps/clusters/ai/trueswarm-observer.yaml
 TSA=kubernetes/apps/clusters/ai/trueswarm-admin-observer.yaml
 E2E=kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml
+GROUPVARS=ansible/group_vars/dev_workers.yml
 # edit_all <file> <old> <new> <expected count>: replace every occurrence; N+ means at least N.
 edit_all() {
   "$PY" - "$WORK/$1" "$2" "$3" "$4" <<'PY' || fail "[F] fixture edit did not match: $1"
@@ -198,11 +279,12 @@ edit_all "$INVENTORY" '        dev-worker-4:\n' '' 1
 edit_all "$TS" '- kind: ServiceAccount\n  name: platform-dw4\n  namespace: platform-access\n' '' 1
 edit_all "$TSA" '- kind: ServiceAccount\n  name: platform-dw4\n  namespace: platform-access\n' '' 1
 edit_all "$E2E" '{ name: LIVE_SLOTS, value: "1 2 3 4" }' '{ name: LIVE_SLOTS, value: "1 2 3" }' 2
+edit_all "$GROUPVARS" '  - dev-worker-4-bot\n' '' 1
 run_check || fail "a complete retirement of slot 4 must pass"
 grep -q "live slots (reference): \[1, 2, 3\]" "$WORK/.out" || fail "[F] the retirement did not take effect"
 grep -q "retired slots (reference): \[4, 5, 6\]" "$WORK/.out" || fail "[F] slot 4 is not recorded as retired"
 echo "  ok  retiring slot 4 everywhere goes green (live [1, 2, 3], retired [4, 5, 6])"
-for f in "$RBAC" "$PGSYNC" "$K8STOKEN" "$PROVISION" "$HELMTEST" "$TOFU" "$INVENTORY" "$TS" "$TSA" "$E2E"; do restore "$f"; done
+for f in "$RBAC" "$PGSYNC" "$K8STOKEN" "$PROVISION" "$HELMTEST" "$TOFU" "$INVENTORY" "$TS" "$TSA" "$E2E" "$GROUPVARS"; do restore "$f"; done
 
 run_check || fail "the tree must pass again after every fixture is restored"
 echo "test-check-slot-enumerations: OK (mismatch, removal, reformat and live/retired overlap all fail closed)"

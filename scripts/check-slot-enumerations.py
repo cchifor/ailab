@@ -2,11 +2,12 @@
 r"""Fail when the dev-worker SLOT enumerations disagree across the repo.
 
 A dev-worker "slot" (dev-worker-N / dwN) is named in many places — OpenBao AppRoles, the two
-credential syncs, the per-slot ServiceAccounts in two trees, tofu, the ansible inventory — and a
-slot retirement (plans/2026-09-21-retire-dev-workers-3-6-plan.md) or addition has to touch every
-one of them. This is the gate codex asked for in the ADR 0028 plan review: it extracts the LIVE and
-RETIRED slot sets from each file with a narrow, file-specific regex and prints every source next to
-its set, so a missed edit names the file rather than showing up as a red sync a day later.
+credential syncs, the per-slot ServiceAccounts in two trees, tofu, the ansible inventory, the
+per-slot Gitea logins — and a slot retirement (plans/2026-09-21-retire-dev-workers-3-6-plan.md) or
+addition has to touch every one of them. This is the gate codex asked for in the ADR 0028 plan
+review: it extracts the LIVE and RETIRED slot sets from each file with a narrow, file-specific regex
+and prints every source next to its set, so a missed edit names the file rather than showing up as a
+red sync a day later.
 
 FAIL-CLOSED, and that is the whole point: every source below is MANDATORY and so are the counts
 (three RoleBindings, two env blocks in pg-sync.yaml — the CronJob and its bootstrap Job). A regex
@@ -39,6 +40,7 @@ E2E_SYNC = ROOT / "kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml"
 HELMTEST_NS = ROOT / "kubernetes/apps/infrastructure/helmtest/namespaces.yaml"
 TOFU = ROOT / "kubernetes/infra/dev-workers/variables.tf"
 INVENTORY = ROOT / "inventory/hosts.yml"
+GROUP_VARS = ROOT / "ansible/group_vars/dev_workers.yml"
 APPS = ROOT / "kubernetes/apps"
 
 # One RoleBinding of the observer ClusterRole per platform namespace (platform-access/rbac.yaml),
@@ -76,6 +78,102 @@ def env_values(text, var, source):
     if len(set(values)) != 1:
         sys.exit("%s: the CronJob and the bootstrap Job disagree on %s" % (source, var))
     return ints(values[0].split())
+
+
+def strict_yaml(text, source):
+    """The document as YAML decodes it, refusing a repeated mapping key. Text matching cannot see every
+    spelling of a key (an explicit `? key`, a quoted key with escapes), and YAML keeps the LAST one, so
+    a repeat would hand Ansible a value the text check never read. Ansible's own tags (`!vault`,
+    `!unsafe`) load as their plain scalar, so a vaulted value elsewhere in the file cannot break the gate.
+
+    PyYAML is not installed by CI: it is the runner image's system package (python3-yaml on the Ubuntu
+    24.04 cloud image), the same dependency .gitea/workflows/manifests.yaml's LiteLLM drift step and
+    broker-inventory.yaml's "Script unit tests" step already rely on. Without it this check fails, never
+    skips."""
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("%s: PyYAML is needed to read it as YAML; failing closed" % source)
+
+    class UniqueKeyLoader(yaml.SafeLoader):
+        pass
+
+    def mapping(loader, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = loader.construct_object(key_node, deep=True)
+            try:
+                repeated = key in seen
+            except TypeError:
+                raise yaml.constructor.ConstructorError(None, None, "unhashable key",
+                                                        key_node.start_mark)
+            if repeated:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "duplicate key %r (YAML keeps the LAST one silently)" % (key,),
+                    key_node.start_mark)
+            seen.add(key)
+        return loader.construct_mapping(node, deep=deep)
+
+    UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    for tag in ("!vault", "!unsafe"):
+        UniqueKeyLoader.add_constructor(tag, lambda loader, node: loader.construct_scalar(node))
+    try:
+        return yaml.load(text, Loader=UniqueKeyLoader)
+    except yaml.YAMLError as e:
+        sys.exit("%s: not loadable as YAML: %s" % (source, e))
+
+
+def gitea_user_slots(text, source):
+    """The slots of `dev_worker_gitea_users` (one `dev-worker-N-bot` login per live slot, ailab plan
+    2026-10-11-worker-identities). Read to the END of its block, like the reviewbot allowlist test
+    does: a regex that stops at the first line it cannot match would let a stray login sit unseen
+    below a comment. Anything inside the block that is not a slot login — another account, a flow
+    list, a duplicate — is an error, never a skip.
+
+    The login must be spelled exactly as Gitea knows it, `dev-worker-<n>-bot`: no zero padding
+    (`dev-worker-04-bot` is a different account), no quoting, nothing trailing. A YAML comment needs
+    whitespace before its `#`, so `- dev-worker-4-bot  # note` is slot 4 while `- dev-worker-4-bot#x`
+    is the literal string `dev-worker-4-bot#x` and fails. A second definition of the key, in any
+    spelling, fails too: YAML keeps the last one, so Ansible would read a list this check never saw.
+
+    TWO readers, and they must agree: this text parser, and the file decoded as YAML by a loader that
+    refuses any repeated key (strict_yaml). Whatever YAML could make of the file that the text does not
+    show - an explicit or escaped duplicate key, an anchor, a tag - fails the comparison."""
+    decoded = strict_yaml(text, source)
+    if len(re.findall(r"""^(["']?)dev_worker_gitea_users\1[ \t]*:""", text, re.M)) > 1:
+        sys.exit("%s: dev_worker_gitea_users is defined twice (YAML keeps the LAST one silently)"
+                 % source)
+    key = one(r"^dev_worker_gitea_users[ \t]*:(.*)$", text, source)
+    if re.split(r"(?:^|\s)#", key.group(1), maxsplit=1)[0].strip():
+        sys.exit("%s: dev_worker_gitea_users must be a block list (one `- dev-worker-N-bot` per line), "
+                 "got %r" % (source, key.group(0)))
+    slots, indents = [], set()
+    for line in text[key.end():].splitlines()[1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue                      # blank / comment INSIDE the block: skip, don't stop
+        if not line[:1].isspace():
+            break                         # dedent to column 0 = the next top-level key
+        m = re.match(r"^([ \t]+)- dev-worker-([1-9][0-9]*)-bot(?:[ \t]+#.*)?[ \t]*$", line)
+        if m is None:
+            sys.exit("%s: unparsable dev_worker_gitea_users entry %r (expected `- dev-worker-N-bot`)"
+                     % (source, line))
+        indents.add(m.group(1))
+        slots.append(int(m.group(2)))
+    if len(indents) > 1:
+        sys.exit("%s: dev_worker_gitea_users entries are indented inconsistently" % source)
+    if len(slots) != len(set(slots)):
+        sys.exit("%s: dev_worker_gitea_users names a slot twice: %s" % (source, sorted(slots)))
+    as_yaml = decoded.get("dev_worker_gitea_users") if isinstance(decoded, dict) else None
+    if not isinstance(as_yaml, list) or not all(
+            isinstance(u, str) and re.fullmatch(r"dev-worker-[1-9][0-9]*-bot", u) for u in as_yaml):
+        sys.exit("%s: dev_worker_gitea_users decodes to %r, not a list of canonical dev-worker-N-bot "
+                 "logins" % (source, as_yaml))
+    if as_yaml != ["dev-worker-%d-bot" % n for n in slots]:
+        sys.exit("%s: dev_worker_gitea_users decodes to %r, but its text lists %r"
+                 % (source, as_yaml, ["dev-worker-%d-bot" % n for n in slots]))
+    return frozenset(slots)
 
 
 def live_sets():
@@ -118,6 +216,8 @@ def live_sets():
         re.findall(r'^\s{4}"dev-worker-(\d+)" = \{', read(TOFU), re.M))
     out["inventory/hosts.yml: dev_workers hosts"] = ints(
         re.findall(r"^\s{8}dev-worker-(\d+):\s*$", read(INVENTORY), re.M))
+    out["group_vars/dev_workers.yml: dev_worker_gitea_users"] = gitea_user_slots(
+        read(GROUP_VARS), "group_vars/dev_workers.yml")
     return out
 
 

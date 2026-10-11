@@ -72,6 +72,29 @@ Secret.
   `gitea_package_pat`, `strive_test_user`, `strive_test_password`, `proxmox_ssh_key`, `litellm_diag_key`,
   `litellm_diag_base`, `litellm_diag_models`.
 
+  **Gitea tokens: shared now, per slot next** (`plans/2026-10-11-worker-identities-plan.md`). Since
+  2026-10-11 every slot also has its own non-admin Gitea account `dev-worker-N-bot` (team
+  `automation` only) and three tokens with the SAME field names and scopes in its own document,
+  `af/dev-workers/dev-worker-N`, seeded from the `dev-worker-N.json` key of
+  `devworker-seeds.sops.yaml` (#1248). Until a slot is cut over (plan Phase 4) nothing renders or names
+  its own tokens: `~/.git-credentials`, the pinned username and the agent-guide block still use the
+  shared `common` tokens below, and `cred get common gitea_pat` keeps returning `dev-worker-bot`'s
+  token. The shared fields leave `common.json` in Phase 5, through `MOVED_FIELDS`, once every slot is
+  cut over and drained.
+
+  | Field | Scopes | `af/dev-workers/common` (`dev-worker-bot`, until Phase 5) | `af/dev-workers/dev-worker-N` (`dev-worker-N-bot`) |
+  | --- | --- | --- | --- |
+  | `gitea_pat` | `write:repository,write:issue,read:organization,read:user` | `dev-workers-20261006` | `dw<N>-git-20261011` |
+  | `gitea_repo_pat` | `write:organization,write:repository,read:user` | `dev-workers-repo-create-20261006` | `dw<N>-repo-20261011` |
+  | `gitea_package_pat` | `write:package,read:repository,read:user` | `dev-workers-package-20261006` | `dw<N>-pkg-20261011` |
+
+  Of the four workers, only the slot's own AppRole can read its document (each policy grants `read`
+  on its own `af/data/dev-workers/<host>`, never on a sibling's), so an agent reaches its own copy
+  with `cred exec <hostname> gitea_pat …`. No policy changed for this. The `-20261011` names are the
+  first enrolment's; every later ceremony names its tokens `dw<N>-<kind>-<UTC YYYYMMDDHHMMSS>`, and both
+  forms are valid. Minting, seeding and rotating them per slot:
+  [`s2s-identity.md`](s2s-identity.md) § "Enrol a worker identity".
+
   `strive_test_user` / `strive_test_password` (moved here 2026-09-25 from
   `af/dev-workers/dev-worker-3`, where they were added 2026-09-12, so every live worker can run the
   platform's live Playwright lane, not just one). A HOST PROJECTION of the `strive` realm's seeded
@@ -123,6 +146,9 @@ Secret.
   publishing settles on one worker, move the field to that worker's `af/dev-workers/<hostname>` path
   (seed `<hostname>.json`, drop it from `common.json`, and add it to `MOVED_FIELDS` so the shared copy
   is stripped from live KV).
+  **Being superseded (2026-10-11):** every slot now holds its own `gitea_package_pat` as
+  `dev-worker-N-bot`, so the reason for sharing it (no worker owns publishing) no longer forces one
+  token on all four. The shared copy stays until the worker-identities plan's Phase 5 strips it.
 
   `litellm_diag_*` (added 2026-09-22) is the fleet's **LiteLLM diagnostic credential**: a per-org
   VIRTUAL key on the `litellm-local` gateway (LAN NodePort `http://192.168.0.41:30400/v1`, the value
@@ -191,8 +217,10 @@ Secret.
   the password fallback. Extending this key to them is a separate decision.
 - `af/dev-workers/<inventory_hostname>` — per-worker. Fields: `helmtest_kubeconfig` (ADR 0021),
   the `platform_*` fields (ADR 0028), and a stale `tep_kubeconfig` (no longer written or rendered
-  since the test-env pool was retired, ADR 0037; its token's ServiceAccount is deleted). Also where per-worker Gitea bot PATs will land (ADR 0020
-  follow-up, still outstanding). `llm_router_codex_key` (since 2026-10-09) is this worker's
+  since the test-env pool was retired, ADR 0037; its token's ServiceAccount is deleted).
+  `gitea_pat`, `gitea_repo_pat` and `gitea_package_pat` (since 2026-10-11, the ADR 0020 per-worker
+  PAT follow-up) are this slot's own `dev-worker-N-bot` tokens, SEEDED from `dev-worker-N.json` and
+  not yet consumed (see the token table under `common` above). `llm_router_codex_key` (since 2026-10-09) is this worker's
   router.chifor.me API key, which its Codex sends through `/usr/local/bin/codex-router-key` (`cred
   get <hostname> llm_router_codex_key`; `dev-workers.md` § "Codex through the router"). It is
   **SEEDED**: `dev-worker-N.json` in `devworker-seeds.sops.yaml` (seed-wins), unlike the two

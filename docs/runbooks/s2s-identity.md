@@ -82,6 +82,10 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
 
 ### Rotation / re-do procedure
 
+This rotates the SHARED `dev-worker-bot` tokens in `af/dev-workers/common`, which stay until Phase 5 of
+`plans/2026-10-11-worker-identities-plan.md`. A per-slot `dev-worker-N-bot` is enrolled and rotated by
+§ "Enrol a worker identity" below.
+
 1. As Gitea site admin, create a NON-admin user (`dev-worker-bot`) and put it in the org team
    `automation` (write on the repos the workers need; never admin, never owner).
 2. Mint THREE tokens for that user, one per field of `af/dev-workers/common` (`gitea_pat`,
@@ -99,8 +103,9 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
      printf '%s' "$v" | bao kv patch -mount=af dev-workers/common "$f=-"
    done; unset v
    ```
-   Do the SOPS edit too, or the next seed run restores the old values. Also re-encrypt
-   `ansible/secrets/dev-worker.sops.yaml` (`dev_worker_gitea_token`, the same value as `gitea_pat`).
+   Do the SOPS edit too, or the next seed run restores the old values. There is no second copy to update
+   any more: the companion dev_worker PR (`feat/worker-identities-dev-worker`) removes the SOPS
+   git-credential path and the `dev_worker_gitea_token` key from `ansible/secrets/dev-worker.sops.yaml`.
 4. Ensure `dev_worker_gitea_user: dev-worker-bot` (`ansible/roles/dev_worker/defaults/main.yml`, or
    group/host vars) and converge: reviewers first, then workers (`just dev-workers`, see
    [`dev-workers.md`](dev-workers.md)). Run it twice; the second run should report near-zero `changed`.
@@ -114,6 +119,304 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
 6. **Revoke the `chifor` tokens that the workers held** (all three, one per field; Gitea UI as
    `chifor`: Settings, Applications, or delete the DB rows) and any other owner token copied to
    workers. Confirm each old token now gets 401.
+
+## Enrol a worker identity (one Gitea account per credential holder)
+
+One Gitea account per machine or slot that holds its own token, never per agent session: sessions on one
+machine share its credential store, so they are attributed in-band (commit trailers, run markers) instead.
+The account name belongs to the slot (`dev-worker-N-bot`; a homelab claude-worker would be
+`claude-worker-<n>-bot`). Design: `plans/2026-10-11-worker-identities-plan.md`, Phase 2.
+
+**Done for `dev-worker-1-bot` … `dev-worker-4-bot` on 2026-10-11** (ids 91–94, team `automation`, tokens
+`dw<N>-git|repo|pkg-20261011` seeded by #1248 into `af/dev-workers/dev-worker-N`). One deliberate
+deviation from the plan: `dev-worker-bot`'s explicit **admin** collaboration on `dsh-acp-plus` was not
+copied, because a repository admin can edit that repository's reviewer-only branch protection; team
+`automation` already gives write there. See `owner-credentials.md` for the follow-up on `dev-worker-bot`'s
+own grant.
+
+**Who writes what.** The operator runs the ceremony from the workstation, with cluster-admin `kubectl
+exec` into the Gitea pod and the infra-pg primary, and the SOPS age key. The `openbao-devworker-provision`
+Job writes OpenBao from the seed. No AppRole, policy or `k8stoken-sync` change is needed: each worker
+policy already reads its own `af/dev-workers/<host>`.
+
+Run it in WSL bash (for `/dev/shm`), from the repo root. Shared setup:
+
+```bash
+K="kubectl --context admin@ai"
+N=5; U=dev-worker-$N-bot                             # the slot being enrolled
+GP=$($K -n gitea get pod -l app.kubernetes.io/name=gitea,app.kubernetes.io/instance=gitea \
+  --field-selector=status.phase=Running -o name | head -1); GP=${GP#pod/}
+DB=$($K -n databases get pod -l cnpg.io/cluster=infra-pg,cnpg.io/instanceRole=primary -o name | head -1); DB=${DB#pod/}
+sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -tA -v ON_ERROR_STOP=1 -f -; }
+UIDQ="(select id from \"user\" where name='$U')"
+```
+
+1. **Create the user.** `--random-password` PRINTS the password, so stdout is discarded and only the exit
+   status is read. The password is never used; the account logs in only by token.
+
+   ```bash
+   $K -n gitea exec "$GP" -c gitea -- gitea admin user create --username "$U" \
+     --email "$U@noreply.git.chifor.me" --random-password --must-change-password=false >/dev/null \
+     && echo created || echo "CREATE FAILED"
+   ```
+
+2. **Read the flags back from the database before any token exists.** The API refuses token auth for a
+   must-change-password or prohibit-login account, so a wrong flag shows up later as a mysterious 401.
+
+   ```bash
+   printf '%s\n' "select id, name, is_active, must_change_password, prohibit_login, is_admin, is_restricted, visibility
+     from \"user\" where name in ('dev-worker-bot', '$U') order by id;" | sql
+   ```
+
+   Expect `is_active=t`, `must_change_password=f`, `prohibit_login=f`, `is_admin=f`, `is_restricted=f`, and
+   the same `visibility` as `dev-worker-bot`. `prohibit_login` is set only at retirement.
+
+3. **Team `automation` (id 37), with a one-shot owner token.** Parity, not a new grant: it is the only team
+   `dev-worker-bot` is in. Add no branch-protection whitelist entry (none names `dev-worker-bot`) and no
+   admin collaboration anywhere.
+
+   ```bash
+   OT=owner-op-enrol-$U-$(date -u +%Y%m%d%H%M%S)
+   T=$($K -n gitea exec "$GP" -c gitea -- gitea admin user generate-access-token --username chifor \
+     --token-name "$OT" --scopes write:organization --raw 2>/dev/null | tr -d '\r\n')
+   printf 'Authorization: token %s\n' "$T" | curl -q -sS --proto =https -o /dev/null -w '%{http_code}\n' \
+     -X PUT -H @- "https://git.chifor.me/api/v1/teams/37/members/$U"            # expect 204
+   printf "delete from access_token where uid=(select id from \"user\" where name='chifor') and name='%s';\n" "$OT" | sql
+   printf 'Authorization: token %s\n' "$T" | curl -q -sS --proto =https -o /dev/null -w '%{http_code}\n' \
+     -H @- https://git.chifor.me/api/v1/user                                     # expect 401
+   unset T
+   printf '%s\n' "select team_id from team_user where uid=(select id from \"user\" where name='$U');" | sql   # expect 37 only
+   ```
+
+4. **Mint the three tokens into shell variables only** (same scopes as the shared three,
+   `openbao-dev-workers.md` § the token table). Every name carries this ceremony's own operation id,
+   `dw<N>-<kind>-<UTC YYYYMMDDHHMMSS>`, so a same-day retry or rotation never reuses a name. The live
+   tokens minted on 2026-10-11 are `dw<N>-<kind>-20261011`; both forms are valid, and the plan's Phase 5
+   naming alarm must accept `^dw<N>-(git|repo|pkg)-[0-9]{8}([0-9]{6})?$`. If a name already exists, or
+   a mint returns no token, STOP: never delete a token to make room. The ceremony RECORDS the exact names
+   it minted and their token ids; every later delete names those ids, never a pattern.
+
+   ```bash
+   OP=$(date -u +%Y%m%d%H%M%S); MINTED=""
+   printf '%s\n' "select name from access_token where uid=$UIDQ and name like '%-$OP';" | sql   # expect nothing
+   mint() {   # mint KIND SCOPES VAR: the token into VAR, and its exact name into MINTED only if it came back
+     local v; v=$($K -n gitea exec "$GP" -c gitea -- gitea admin user generate-access-token --username "$U" \
+       --token-name "dw$N-$1-$OP" --scopes "$2" --raw 2>/dev/null | tr -d '\r\n')
+     [[ $v =~ ^[0-9a-f]{40}$ ]] || { echo "mint dw$N-$1-$OP FAILED: STOP"; return 1; }
+     printf -v "$3" '%s' "$v"; MINTED="${MINTED:+$MINTED,}'dw$N-$1-$OP'"
+   }
+   mint git write:repository,write:issue,read:organization,read:user TG &&
+     mint repo write:organization,write:repository,read:user TR &&
+     mint pkg write:package,read:repository,read:user TP
+   MINTED_IDS=$(printf '%s\n' "select string_agg(id::text, ',' order by id) from access_token
+     where uid=$UIDQ and name in (${MINTED:-''});" | sql)
+   echo "minted: $MINTED  ids: $MINTED_IDS"         # RECORD both (not secrets); run this even after a FAILED
+   for v in "$TG" "$TR" "$TP"; do                   # record these prefixes: step 8 compares against them
+     [[ $v =~ ^[0-9a-f]{40}$ ]] && printf '%s' "$v" | sha256sum | cut -c1-12 || echo BAD; done
+   ```
+
+   The `like` in the first line only READS (it proves this operation id is unused); nothing is ever
+   deleted by pattern. After a FAILED mint, delete exactly `$MINTED_IDS` as in step 5 and start again
+   with a new operation id.
+
+5. **Write all three into the seed in ONE `sops edit`**, so there is never a partial document. Not `sops
+   set`: the key `dev-worker-N.json` holds a JSON document as one YAML string, which `sops set` cannot
+   address a field inside, and `sops set` takes the value as an argument. Instead `EDITOR` is a patch shim
+   that reads the tokens from its stdin (`printf` is a shell builtin, so no value reaches any argv), and
+   `TMPDIR=/dev/shm` keeps sops' decrypted temp file in RAM. sops shlex-splits `EDITOR` and appends the
+   temp file as the LAST argument. The shim refuses, and sops then writes nothing, unless exactly that one
+   key changes and only its three gitea fields. The key must already exist in the seed (a new slot adds
+   `dev-worker-N.json` first, `openbao-dev-workers.md` § adding a worker).
+
+   ```bash
+   cat > /dev/shm/wi-seed-patch.py <<'PY'
+   import json, re, sys
+   import yaml
+
+   FIELDS = ("gitea_pat", "gitea_repo_pat", "gitea_package_pat")
+
+
+   def main(key, path):
+       if not re.fullmatch(r"[a-z0-9-]+\.json", key) or key == "common.json":
+           return "refusing: %r is not a per-slot seed key" % key
+       toks = sys.stdin.read().split("\n")[:3]
+       if len(toks) != 3 or not all(re.fullmatch(r"[0-9a-f]{40}", t) for t in toks):
+           return "refusing: expected three 40-hex tokens on stdin"
+       src = open(path, encoding="utf-8").read()
+       before = yaml.safe_load(src)
+       if key not in (before.get("stringData") or {}):
+           return "refusing: no stringData key %s" % key
+       old = json.loads(before["stringData"][key])
+       lines = src.split("\n")
+       hits = [n for n, ln in enumerate(lines) if re.match(r"^\s+" + re.escape(key) + r":(\s|$)", ln)]
+       if len(hits) != 1:
+           return "refusing: %d lines for %s" % (len(hits), key)
+       i = j = hits[0]
+       indent, rest = re.match(r"^(\s+)" + re.escape(key) + r":\s*(.*)$", lines[i]).groups()
+       j += 1
+       if rest[:1] in ("|", ">"):                # a block scalar: take its indented lines too
+           while j < len(lines) and (not lines[j].strip()
+                                     or len(lines[j]) - len(lines[j].lstrip()) > len(indent)):
+               j += 1
+       elif yaml.safe_load("v: " + rest)["v"] != before["stringData"][key]:
+           return "refusing: %s spans lines in a form this shim does not rewrite" % key
+       doc = dict(old, **dict(zip(FIELDS, toks)))
+       lines[i:j] = [indent + key + ": " + json.dumps(json.dumps(doc))]
+       out = "\n".join(lines)
+       out += "" if out.endswith("\n") else "\n"
+       want = dict(before, stringData=dict(before["stringData"], **{key: json.dumps(doc)}))
+       if yaml.safe_load(out) != want:
+           return "refusing: the edit would change more than this one value"
+       open(path, "w", encoding="utf-8", newline="\n").write(out)
+       print("%s: %s" % (key, ", ".join("%s len %d" % (f, len(t)) for f, t in zip(FIELDS, toks))),
+             file=sys.stderr)
+       return 0
+
+
+   try:
+       sys.exit(main(sys.argv[1], sys.argv[-1]))
+   except Exception as e:                        # never echo a parser's view of the plaintext
+       sys.exit("refusing: %s" % type(e).__name__)
+   PY
+   export SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey"
+   SEEDS=kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml
+   printf '%s\n%s\n%s\n' "$TG" "$TR" "$TP" \
+     | TMPDIR=/dev/shm EDITOR="python3 /dev/shm/wi-seed-patch.py dev-worker-$N.json" sops edit "$SEEDS"
+   unset TG TR TP
+   ```
+
+   If the edit failed, the minted tokens are live but stored nowhere: delete exactly the recorded ids at
+   once, prove they are gone, and start again at step 4 with a new operation id. Never leave an unrecorded
+   live token, and never delete by a name pattern: it could reach the working tokens.
+
+   ```bash
+   printf '%s\n' "delete from access_token where uid=$UIDQ and id in ($MINTED_IDS);" | sql
+   printf '%s\n' "select count(*) from access_token where id in ($MINTED_IDS);" | sql        # expect 0
+   ```
+
+6. **Verify the seed in memory**, printing field names, lengths and short hashes only. Run the same command
+   before step 5 too: every field other than the three must keep its hash.
+
+   ```bash
+   sops -d --extract "[\"stringData\"][\"dev-worker-$N.json\"]" "$SEEDS" | python3 -c '
+   import hashlib, json, re, sys
+   d = json.load(sys.stdin); g = ("gitea_pat", "gitea_repo_pat", "gitea_package_pat")
+   print({k: (len(v) if k in g else hashlib.sha256(str(v).encode()).hexdigest()[:12]) for k, v in d.items()})
+   sys.exit(0 if all(re.fullmatch(r"[0-9a-f]{40}", str(d.get(f, ""))) for f in g) else 1)'
+   git diff --stat      # devworker-seeds.sops.yaml only; every changed value line is ENC[...]
+   ```
+
+7. **Ship it in a reviewed PR, then run the Job.** A seed-only merge does NOT re-run the provision
+   Job: a completed Job is recreated only when `ttlSecondsAfterFinished` (24 h) reaps it, or when you
+   delete it and Flux recreates it. So after the merge:
+
+   ```bash
+   $K -n openbao delete job openbao-devworker-provision
+   flux --context admin@ai reconcile kustomization openbao -n flux-system
+   $K -n openbao logs job/openbao-devworker-provision | tail -1    # devworker provision complete
+   ```
+
+   The Job patches `af/dev-workers/dev-worker-N` seed-wins and keeps the sync-owned fields.
+
+8. **Verify every token before any consumer uses it**, on the slot, through its own AppRole (`cred`).
+   First, that the vault now serves the NEW values: `GET /user` cannot tell an old token of the same
+   account from a new one, so compare SHA-256 prefixes with the ones step 4 printed (prefixes only, never
+   values). Once the slot is cut over, the `gitea_pat` rendered into `~/.git-credentials` must match too
+   (before cut-over that file carries the shared token); restart `openbao-agent` if it has not re-rendered.
+
+   ```bash
+   for f in gitea_pat gitea_repo_pat gitea_package_pat; do
+     printf '%s %s\n' $f "$(cred get "$(hostname -s)" $f | tr -d '\n' | sha256sum | cut -c1-12)"; done
+   sed -n 's#^https://[^:/@]*:\([^@]*\)@git\.chifor\.me$#\1#p' ~/.git-credentials | tr -d '\n' | sha256sum | cut -c1-12
+   ```
+
+   Then the identity. A repository read alone cannot tell a slot token from the shared one; `GET /user` can.
+
+   ```bash
+   for f in gitea_pat gitea_repo_pat gitea_package_pat; do printf '%s ' $f
+     cred exec "$(hostname -s)" $f T -- sh -c 'printf "Authorization: token %s\n" "$T" \
+       | curl -q -s -H @- https://git.chifor.me/api/v1/user' \
+       | python3 -c 'import sys,json; u=json.load(sys.stdin); print(u["login"], u["id"], "is_admin=%s" % u["is_admin"])'
+   done   # every line: dev-worker-N-bot <its id> is_admin=False
+   ```
+
+   Then one in-scope call answers 200 and one out-of-scope call answers 403 per token: `gitea_pat` reads
+   `/repos/cchifor/ailab` but not `/packages/cchifor`; `gitea_package_pat` reads `/packages/cchifor` but not
+   `/orgs/cchifor/teams`; `gitea_repo_pat` reads `/orgs/cchifor` but not `/packages/cchifor`. Then the
+   AppRole isolation, server side (the `cred` unit test stubs `bao` and cannot prove it): the slot reads its
+   own three fields, `cred get dev-worker-<M> gitea_pat` for a sibling slot is denied, and a write to its
+   own document with the agent's token (`bao kv patch -mount=af dev-workers/<host> probe=1`) answers 403.
+
+**Consumers that key on the login (state on 2026-10-11).** A new slot account must reach each of them
+before its slot is cut over:
+- **Legacy reviewbot:** `pr_reviewer_merge_authors` names the four slot bots (merge eligibility keys on the
+  PR author); it takes effect when both reviewer hosts are converged. There a `merge_authors_by_repo`
+  entry ADDS to the global list.
+- **platform `OWNER_ACK_USERS`:** a repository variable, changed outside this repository (plan D3).
+- **Stateless reviewer (`cchifor/reviewer`): not deployed.** No coordination repository exists
+  (`cchifor/reviewer-coord` and `cchifor/reviewbot-coord` both answer 404), so there is no live
+  `policy.json` to update. Its deployment must name the four slot bots in `merge_authors` AND in every
+  `merge_authors_by_repo` override, because there an override REPLACES the global list for its repository,
+  with a transition test in that repository (`dev-worker-bot` and every slot bot eligible, an unrelated
+  author denied, per override).
+
+**Rotation, per slot (same machine).** Mint-before-revoke, one slot at a time, never touching `common`
+or a sibling:
+1. RECORD the tokens being replaced, before anything is minted: their ids and names are the only ones
+   step 4 may delete. Expect exactly the three current ones (git, repo, pkg).
+
+   ```bash
+   OLD_IDS=$(printf '%s\n' "select string_agg(id::text, ',' order by id) from access_token where uid=$UIDQ;" | sql)
+   printf '%s\n' "select id, name from access_token where id in ($OLD_IDS);" | sql      # record this
+   ```
+
+2. mint `dw<N>-<kind>-<new operation id>` (enrolment step 4, which records `MINTED`/`MINTED_IDS` and
+   the prefixes), seed them (steps 5–6), merge, and run the Job (step 7) — the merge alone changes nothing;
+3. on the slot, the `cred get` prefixes, and once cut over the `~/.git-credentials` prefix, must equal
+   the minted ones (step 8). Until both match, the slot still uses the old tokens: do not revoke;
+4. only then delete exactly the recorded old ids, and read the account's token names back: only the
+   three recorded new names may remain. Gitea re-reads a token's row on every use, so a deleted token
+   fails at once.
+
+   ```bash
+   printf '%s\n' "delete from access_token where uid=$UIDQ and id in ($OLD_IDS);" | sql
+   printf '%s\n' "select id, name from access_token where uid=$UIDQ order by id;" | sql   # = MINTED only
+   ```
+
+**Re-slot (a different VM takes the slot).** The account name stays; the tokens and the vault access do
+not. Rotation's publish-first order would let the previous holder read the replacement tokens,
+destroying its AppRole SecretIDs does not revoke the periodic, renewable tokens it already holds, and
+the previous holder's cached `~/.git-credentials` keeps working for as long as its PATs exist. The
+replacement is held until the end anyway, so the old PATs go at once. In this order, and stop at the
+first step that fails:
+1. **Hold the replacement's workloads**: no agent sessions, no `claude-job` units, no AgentForge work.
+2. **Cut the previous holder out, vault and forge, before the replacement has any SecretID.**
+   - **Vault:** `scripts/openbao-revoke-slot-holder.sh dev-worker-N` (`BAO_ADDR` etc. as in
+     `openbao-dev-workers.md` § (e)) destroys EVERY SecretID of the role and revokes EVERY token it
+     issued, the two sweeps the provision Job's `RETIRED_SLOTS` step runs. It checks every list, lookup,
+     destroy and revoke: only an empty `{}`/"No value found" listing or an "invalid accessor" (a token
+     that expired meanwhile) count as nothing to do, and anything else (a denial, a sealed or unreachable
+     vault, unparsable output) exits 1. **Stop on any non-zero exit.** Prove it: run it again and expect
+     `0 secret-id accessors destroyed, 0 tokens revoked`; if the old VM is still up, `cred list` there
+     must fail. A run during an OpenBao outage proves nothing; repeat it when the vault is healthy.
+     (This is how the 2026-09-23 re-slot of slot 3 was done: the previous holder's SecretIDs destroyed
+     and its tokens revoked, then the new machine's SecretID minted.)
+   - **Forge, straight after:** record `OLD_IDS` (rotation step 1), delete exactly those ids (rotation
+     step 4's delete), and read the account's tokens back: none may remain. Gitea re-reads a token's row
+     on every use, so a deleted PAT fails at once; if the old VM is still up, its cached
+     `~/.git-credentials` must now answer 401 on `GET /user`. The slot has no working Gitea token until
+     step 4, which is fine: nothing runs on it.
+3. **Only then mint the replacement's SecretID** (`openbao-dev-workers.md` § (e), for this one host),
+   store it in SOPS and converge the replacement (§ (f)); its bao agent logs in, its workloads stay held.
+4. **Mint, publish and verify the new PATs**: enrolment steps 4–8 above with a new operation id,
+   including the fingerprint comparison of rotation step 3. Enrolment step 8's AppRole checks run on the
+   replacement, whose SecretID exists since step 3. The account's tokens must then be exactly the three
+   recorded new names.
+5. **Only then release the replacement's workloads.**
+
+A **retired** slot's account is disabled (tokens deleted first, then `prohibit_login`), never deleted, and
+its login leaves `dev_worker_gitea_users` (`ansible/group_vars/dev_workers.yml`;
+`scripts/check-slot-enumerations.py` enforces it).
 
 ## Phase 0: the owner gate on platform `main` (INSTALLED 2026-10-06)
 

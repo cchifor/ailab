@@ -6,12 +6,11 @@ kubernetes/apps/apps/agentforge/deployment.yaml (the WS4 env block) rather than
 duplicating the literal here, so a future edit that breaks the invariants this
 guards is caught even if nobody remembers to update this test's expectations.
 
-stdlib-only (ipaddress + re) — no PyYAML. This repo's "Script unit tests" CI
-step (.gitea/workflows/broker-inventory.yaml) installs no dependencies and
-scripts/tests/test_manifest_paths.py documents that PyYAML is NOT on that
-runner (its regex fallback is "what runs in CI"); scripts/manifest-paths.py
-guards its own `import yaml` behind try/except ImportError for the same
-reason. A flow-mapping env entry like the one this test reads is a single
+stdlib-only (ipaddress + re) — no PyYAML needed. This repo's "Script unit tests"
+CI step (.gitea/workflows/broker-inventory.yaml) installs no dependencies; PyYAML
+is present there only as the runner image's system package (that step's comment
+records it), so a test that can do without it should. A flow-mapping env entry
+like the one this test reads is a single
 regular line, so a small targeted regex over the raw text is enough — no
 general YAML parser (real or fallback) is needed here. No docker, no network,
 no cluster access. Run:

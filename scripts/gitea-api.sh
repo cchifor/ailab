@@ -12,6 +12,14 @@
 #   - before the call, GET /user must answer login=workstation-bot with is_admin=false, read from the
 #     parsed JSON's top level (python3 or python; without one it refuses); any other identity (an owner
 #     or admin token in the helper) is refused, and nothing else is sent.
+# Run marker (worker-identities plan, Phase 1 item 4): every session on the workstation shares this one
+# credential, so a comment or review names the RUN that wrote it. With AILAB_RUN_ID set, a comment or
+# review write (POST issues/N/comments, PATCH issues/comments/ID, POST pulls/N/reviews[/ID]) gets
+# `\n<!-- worker: workstation run: <id> -->` appended to its JSON `body`. Unset or empty: no marker, never
+# a guessed id. Sent as the ORIGINAL file, byte for byte: every other endpoint, a body that already
+# carries a worker marker ANYWHERE (an edit of a marked comment keeps its one original attribution), and a
+# command body - one whose whole text is `approve-pin <sha>`, which the owner-ack gate counts only as a
+# one-line body.
 # Prints `HTTP <status>` and the response body; exits 1 on a 4xx/5xx, 2 on bad input, 3 when no
 # credential resolves, 4 when the identity guard refuses, 5 when curl fails at the transport level
 # (DNS, TLS, connection), whatever curl's own exit code was.
@@ -34,6 +42,54 @@ case "$method" in GET|POST|PUT|PATCH|DELETE) ;; *) die 2 "method must be GET, PO
 case "$path" in *//*|*..*) die 2 "PATH must not contain // or ..";; esac
 [ -z "$body" ] || [ -f "$body" ] || die 2 "body file not found: $body"
 
+# mark_body FILE OUT RUN_ID: 0 = OUT holds FILE's JSON with the marker appended to `body`; 10 = send
+# FILE unchanged (no string `body`, a command body, or already marked); anything else = refuse (not a
+# JSON object, or no working Python). Only a payload that is marked is re-serialised.
+mark_body() {
+  local py
+  for py in python3 python; do
+    if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import json' >/dev/null 2>&1; then
+      "$py" -c 'import json, re, sys
+src, dst, run = sys.argv[1:4]
+try:
+    with open(src, "rb") as f:
+        d = json.loads(f.read().decode("utf-8"))
+except Exception:
+    sys.exit(2)
+if not isinstance(d, dict):
+    sys.exit(2)
+b = d.get("body")
+if not isinstance(b, str) or re.fullmatch(r"approve-pin [0-9A-Fa-f]{7,40}", b.strip()):
+    sys.exit(10)
+if re.search(r"<!-- worker: [^>]* -->", b):
+    sys.exit(10)
+d["body"] = b + "\n<!-- worker: workstation run: " + run + " -->"
+with open(dst, "w", encoding="utf-8") as f:
+    json.dump(d, f)' "$@"
+      return
+    fi
+  done
+  return 1
+}
+
+send=$body
+marked=""
+MARK_RE='^/repos/[^/]+/[^/]+/(issues/[0-9]+/comments|issues/comments/[0-9]+|pulls/[0-9]+/reviews(/[0-9]+)?)$'
+RUN_ID_RE='^[A-Za-z0-9._:-]{1,128}$'
+if [ -n "${AILAB_RUN_ID:-}" ] && [ -n "$body" ] && [[ "$method" =~ ^(POST|PATCH)$ ]] \
+    && [[ "${path%%\?*}" =~ $MARK_RE ]]; then
+  [[ "$AILAB_RUN_ID" =~ $RUN_ID_RE ]] || die 2 "AILAB_RUN_ID must match $RUN_ID_RE (it is written into an HTML comment)"
+  marked=$(mktemp)
+  trap 'rm -f "$marked"' EXIT
+  rc=0
+  mark_body "$body" "$marked" "$AILAB_RUN_ID" || rc=$?
+  case "$rc" in
+    0) send=$marked;;
+    10) ;;
+    *) die 2 "cannot add the run marker: the body file is not a JSON object (or no Python): $body";;
+  esac
+fi
+
 # Never prompt: a missing credential is an error here, not a login dialog. A failed lookup must reach
 # the exit-3 diagnostic rather than end the script silently under `set -e`.
 token=$(printf 'protocol=https\nhost=git.chifor.me\n\n' \
@@ -42,7 +98,7 @@ token=$(printf 'protocol=https\nhost=git.chifor.me\n\n' \
 [ -n "$token" ] || die 3 "no credential for git.chifor.me in the git credential helper"
 
 out=$(mktemp)
-trap 'rm -f "$out"' EXIT
+trap 'rm -f "$out" ${marked:+"$marked"}' EXIT
 
 # call METHOD PATH [BODY_FILE] -> prints the status code; the body lands in $out.
 # `-q` must stay FIRST: it stops curl reading ~/.curlrc, which could add -v/--trace (printing the
@@ -80,7 +136,7 @@ if [ "$code" != 200 ] || ! identity_ok "$out"; then
   die 4 "refusing: the credential is not the non-admin $EXPECTED_USER (GET /user -> HTTP $code)"
 fi
 
-code=$(call "$method" "$path" "$body") || die 5 "curl transport failure on $method $path"
+code=$(call "$method" "$path" "$send") || die 5 "curl transport failure on $method $path"
 echo "HTTP $code"
 cat "$out"
 echo

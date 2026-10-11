@@ -229,6 +229,9 @@ never has to print a secret value in order to use it.
 
 - **Per-worker Gitea bot PATs** replacing the shared `chifor` PAT in `af/dev-workers/common` — the
   point of the per-worker subtree, and the change that makes a worker compromise actually contained.
+  *In progress (2026-10-11):* `plans/2026-10-11-worker-identities-plan.md`. The shared PAT has been
+  `dev-worker-bot`'s since 2026-10-06; accounts `dev-worker-1-bot` … `dev-worker-4-bot` exist and their
+  tokens are seeded into `af/dev-workers/dev-worker-N`, but no slot is cut over yet.
 - **Recover source-IP scoping**, which the SNAT path took away (Decision §1). An ingress CNP on the
   OpenBao pod cannot help while the client IP is rewritten to the ingress node; the options are
   `externalTrafficPolicy: Local` once OpenBao runs more than one replica (so every node has a local

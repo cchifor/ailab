@@ -13,7 +13,10 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 > `scripts/gitea-api.sh` for routine calls (the workstation's non-admin `workstation-bot`), and
 > `scripts/gitea-owner-merge.sh` for owner operations (protected-file merges, `approve-pin`; a one-shot
 > owner token; a DRY RUN unless `--execute`; `docs/runbooks/owner-credentials.md`). Log in at git.chifor.me
-> via Authelia.
+> via Authelia. **One Gitea account per credential holder:** `workstation-bot` here (`gitea-api.sh` marks
+> comments and reviews with the run when `AILAB_RUN_ID` is set), `dev-worker-N-bot` per dev-worker slot
+> (the shared `dev-worker-bot` until each slot's cut-over), one reviewer account per kind
+> (`owner-credentials.md` has the table).
 >
 > **Flux's bootstrap source is the GITHUB MIRROR** (`https://github.com/cchifor/ailab.git`,
 > unauthenticated — it is public, and a source with no credential cannot write). It used to be
