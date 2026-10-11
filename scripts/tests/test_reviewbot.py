@@ -2368,13 +2368,38 @@ class AllowlistDefaultsTest(unittest.TestCase):
                 "cchifor/forge", "cchifor/relay", "cchifor/llm-router", "cchifor/dsh-acp-plus"]
 
     @staticmethod
-    def _parse_repos(text, key="pr_reviewer_repos"):
-        """Read the whole `key` sequence (pr_reviewer_repos unless told otherwise), stdlib only,
-        FAILING CLOSED.
+    def _strict_yaml(text):
+        """The document as YAML decodes it, raising on any repeated mapping key: YAML keeps the LAST
+        one, and only a decoder sees every spelling of a key (an explicit `? key`, a quoted key with
+        escapes). Imported here rather than at module level, so a runner without PyYAML fails these
+        allowlist tests instead of taking the whole file down; PyYAML is that runner's system
+        package (.gitea/workflows/broker-inventory.yaml, "Script unit tests")."""
+        import yaml
 
-        Not PyYAML: the "Script unit tests" CI step installs no dependencies and PyYAML is NOT on
-        that runner (see test_cp_env's header), so a module-level `import yaml` would take every
-        test in this file down in the one place this guard has to run.
+        class UniqueKeyLoader(yaml.SafeLoader):
+            pass
+
+        def mapping(loader, node, deep=False):
+            seen = set()
+            for key_node, _ in node.value:
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    continue
+                k = loader.construct_object(key_node, deep=True)
+                if k in seen:
+                    raise AssertionError(f"duplicate key {k!r}")
+                seen.add(k)
+            return loader.construct_mapping(node, deep=deep)
+
+        UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+        return yaml.load(text, Loader=UniqueKeyLoader)
+
+    @staticmethod
+    def _parse_repos(text, key="pr_reviewer_repos"):
+        """Read the whole `key` sequence (pr_reviewer_repos unless told otherwise), FAILING CLOSED.
+
+        TWO readers that must agree. The text reader below is stdlib and strict about shape; the
+        YAML decoder (_strict_yaml) is what Ansible effectively sees, and refuses a repeated key in
+        any spelling. Anything YAML makes of the file that the text does not show fails.
 
         Not a single regex either. `^pr_reviewer_repos:\\n((?:\\s+-\\s+\\S+\\n)+)` stops at the
         first line it cannot match, so appending a comment and then the fixture underneath the
@@ -2382,6 +2407,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
         the block instead, and raises on anything it does not understand rather than returning a
         short list. A second definition of the key, in any quoting, raises too: YAML keeps the LAST
         one, so Ansible would read a list this parser never saw."""
+        decoded = AllowlistDefaultsTest._strict_yaml(text)
         if len(re.findall(r"""^(["']?)%s\1[ \t]*:""" % re.escape(key), text, re.M)) > 1:
             raise AssertionError(f"{key} is defined more than once")
         lines = text.splitlines()
@@ -2408,6 +2434,9 @@ class AllowlistDefaultsTest(unittest.TestCase):
             if item[:1] in ("'", '"'):                      # tolerate quoting
                 item = item[1:-1] if item[-1:] == item[:1] else item.strip("'\"")
             repos.append(item)
+        as_yaml = decoded.get(key) if isinstance(decoded, dict) else None
+        if as_yaml != repos:
+            raise AssertionError(f"{key} decodes to {as_yaml!r}, but its text lists {repos!r}")
         return repos
 
     def test_the_retired_fixture_is_not_in_the_role_defaults(self):
@@ -2440,6 +2469,20 @@ class AllowlistDefaultsTest(unittest.TestCase):
         for dup in ('"pr_reviewer_repos": []\n', "'pr_reviewer_repos' : []\n", "pr_reviewer_repos: []\n"):
             with self.subTest(dup=dup), self.assertRaises(AssertionError):
                 self._parse_repos("pr_reviewer_repos:\n  - cchifor/ailab\n" + dup)
+
+    def test_only_the_decoder_sees_some_duplicate_keys(self):
+        # An explicit `? key` and a quoted key with an escape (`_` is `_`) both repeat the key as
+        # YAML decodes it, while no text match sees them. Checked against every shipped list.
+        defaults = ROOT / "ansible" / "roles" / "pr_reviewer" / "defaults" / "main.yml"
+        for key, path in (("pr_reviewer_repos", defaults), ("pr_reviewer_merge_authors", defaults),
+                          ("dev_worker_gitea_users", ROOT / "ansible" / "group_vars" / "dev_workers.yml")):
+            text = path.read_text(encoding="utf-8")
+            self._parse_repos(text, key)                       # the file itself is fine
+            escaped = key.replace("_", "\\u005f", 1)
+            for tail in (f"? {key}\n: []\n", f'"{escaped}": []\n'):
+                with self.subTest(key=key, tail=tail), \
+                        self.assertRaisesRegex(AssertionError, "duplicate key"):
+                    self._parse_repos(text + tail, key)
 
     # The merge-author allowlist, same contract (ailab plan 2026-10-11-worker-identities, Phase 3).
     # dev-worker-bot STAYS next to the four slot bots: eligibility keys on the PR author, so its
