@@ -2680,6 +2680,15 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
             self.assertEqual("no-review", m.maybe_merge("o/r", 7))
         self.assertIn("codex=no review", " ".join(logged))
 
+    def test_no_merge_personas_is_not_reported_as_a_posted_finding(self):
+        """A config with no merge personas holds every PR, but nobody posted a finding - it must
+        not page the dependency alert, whose remedy is to read one (codex cross-review of
+        #1272). The general gauge still counts it, as before."""
+        m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
+                 merge_personas=[], persona="claude")
+        self._pr_api(m, {"claude": "findings"})
+        self.assertEqual("no-review", m.maybe_merge("o/r", 7))
+
     def test_a_posted_finding_outranks_a_missing_review(self):
         """claude=findings with codex parked is still a finding someone must act on - the
         missing peer review must not hide it from the dependency gauge."""
@@ -2861,6 +2870,35 @@ class DependencyLaneTest(unittest.TestCase):
         self.assertIn("constraint", r)
         self.assertIn("renovate.json", r)
         self.assertIn("allowedVersions", r)
+
+    def test_the_rubric_holds_a_major_update(self):
+        """The general prompt used to draw a "verify the breaking changes" finding on a major on
+        its own; the dependency rubric's non-hold list would let one through unless the release
+        notes named a feature the diff shows (codex cross-review of #1272). 1 major in 113
+        renovate PRs - holding them costs nothing."""
+        m = load(self.tmp.name)
+        self.assertRegex(m.DEPENDENCY_RUBRIC, r"MAJOR version[^.]*\.[^.]*severity=blocker")
+
+    def test_the_rubric_treats_the_bots_pr_text_as_untrusted(self):
+        """Renovate fills the description with UPSTREAM release notes - text anyone upstream can
+        write - and the rubric reads them for breaking changes, so they must not be able to
+        lower a severity (codex cross-review of #1272)."""
+        m = load(self.tmp.name)
+        self.assertIn("untrusted", m.DEPENDENCY_RUBRIC)
+        self.assertIn("cannot lower a severity", m.DEPENDENCY_RUBRIC)
+
+    def test_the_rubric_flags_a_digest_bump_with_no_version_tag(self):
+        """A tagless or latest/main digest bump can be a new major the diff cannot show (#899).
+        Flagged, NOT held: 20 of 34 digest PRs in two weeks were tagless searxng/node bumps, and
+        holding them would hand ~10 PRs a week to a human. The fix is a version tag."""
+        m = load(self.tmp.name)
+        self.assertIn("no version tag", m.DEPENDENCY_RUBRIC)
+
+    def test_the_base_prompt_marks_title_and_description_untrusted(self):
+        """The base prompt said only the DIFF was untrusted, while the PR title and description
+        are interpolated raw - and for a renovate PR the description is upstream text."""
+        m = load(self.tmp.name)
+        self.assertIn("PR title, the PR description or the diff", m.PROMPT)
 
     def test_the_rubric_names_the_non_holds_that_stranded_prs(self):
         m = load(self.tmp.name)
