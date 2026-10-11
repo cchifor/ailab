@@ -355,35 +355,24 @@ destroying its AppRole SecretIDs does not revoke the periodic, renewable tokens 
 enabling the replacement before the old PATs are gone leaves two machines writing as one account. So, in
 this order, and stop at the first step that fails:
 1. **Hold the replacement's workloads**: no agent sessions, no `claude-job` units, no AgentForge work.
-2. **Bootstrap its AppRole SecretID**, minted as in `openbao-dev-workers.md` § (e) for this one host but
-   tagged, so the sweep in step 3 can tell its logins apart; record the accessor (not a secret):
-
-   ```bash
-   R=dev-worker-$N; HOLDER=vm<new vmid>          # BAO_ADDR etc. and $MINT as in § (e), umask 077
-   BAO_TOKEN="$(kubectl --context admin@ai -n openbao get secret openbao-breakglass-token \
-     -o jsonpath='{.data.root_token}' | base64 -d)" \
-     bao write -format=json "auth/approle/role/$R/secret-id" metadata="{\"holder\":\"$HOLDER\"}" \
-     | python3 -c 'import json, sys
-   d = json.load(sys.stdin)["data"]
-   open(sys.argv[1], "w").write(d["secret_id"])
-   print(d["secret_id_accessor"])' "$MINT/$R.secret-id"     # prints the accessor only
-   ```
-
-   Store it in SOPS and converge the replacement as § (e)–(f) do; its bao agent logs in, its workloads
-   stay held.
-3. **Cut the previous holder out of the vault** with `scripts/openbao-revoke-slot-holder.sh "$R"
-   <accessor from step 2> "$HOLDER"`. It destroys every other SecretID of the role and revokes every
-   token the role issued that is not tagged with `$HOLDER`, and it checks every list, lookup, destroy and
-   revoke: only an empty `{}`/"No value found" listing or an "invalid accessor" (a token that expired
-   meanwhile) count as nothing to do, and anything else (a denial, a sealed or unreachable vault,
-   unparsable output) exits 1. **Stop on any non-zero exit.** Then prove it: run it again and expect `0
-   secret-id accessors destroyed, 0 tokens revoked`; if the old VM is still up, `cred list` there must
-   fail. A run during an OpenBao outage proves nothing; repeat it when the vault is healthy.
+2. **Cut the previous holder out of the vault**, before the replacement has any SecretID:
+   `scripts/openbao-revoke-slot-holder.sh dev-worker-N` (`BAO_ADDR` etc. as in `openbao-dev-workers.md`
+   § (e)) destroys EVERY SecretID of the role and revokes EVERY token it issued, the two sweeps the
+   provision Job's `RETIRED_SLOTS` step runs. It checks every list, lookup, destroy and revoke: only an
+   empty `{}`/"No value found" listing or an "invalid accessor" (a token that expired meanwhile) count as
+   nothing to do, and anything else (a denial, a sealed or unreachable vault, unparsable output) exits 1.
+   **Stop on any non-zero exit.** Then prove it: run it again and expect `0 secret-id accessors destroyed,
+   0 tokens revoked`; if the old VM is still up, `cred list` there must fail. A run during an OpenBao
+   outage proves nothing; repeat it when the vault is healthy. (This is how the 2026-09-23 re-slot of
+   slot 3 was done: the previous holder's SecretIDs destroyed and its tokens revoked, then the new
+   machine's SecretID minted.)
+3. **Only then mint the replacement's SecretID** (`openbao-dev-workers.md` § (e), for this one host),
+   store it in SOPS and converge the replacement (§ (f)); its bao agent logs in, its workloads stay held.
 4. **Mint, publish and verify the new PATs**: enrolment steps 4–8 above, including the fingerprint
-   comparison of rotation step 3. Enrolment step 8's AppRole checks run on the replacement, whose SecretID
-   exists since step 2. Before the Job in enrolment step 7 replaces them, read the three OLD values from
-   `af/dev-workers/dev-worker-N` (`bao kv get -mount=af -field=<field>`, break-glass token) into shell
-   variables, never printed, for step 5.
+   comparison of rotation step 3. Enrolment step 8's AppRole checks run on the replacement, whose
+   SecretID exists since step 3. Before the Job in enrolment step 7 replaces them, read the three OLD
+   values from `af/dev-workers/dev-worker-N` (`bao kv get -mount=af -field=<field>`, break-glass token)
+   into shell variables, never printed, for step 5.
 5. **Delete ALL the old PATs** by name (enrolment step 5's delete, with the old date), read the account's
    token names back (only the three new ones may remain), and prove that each retained old value answers
    401 on `GET /user` (the token on curl's stdin, as in enrolment step 8). Then unset the old values. If
