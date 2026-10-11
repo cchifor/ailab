@@ -259,14 +259,16 @@ How a request travels:
    - Each worker's key is limited to its own pointer route `dw-N`, which is also the key's
      `defaultRoute`.
    - The CLI's model name is not a route, so the router serves it in **model mode** on `dw-N`.
-     Today every `dw-N` points to `sub-codex-5`, one any-model target `codex-5:*`, with
-     `native: ["codex-responses"]`, so the request is passed through as sent.
-   - **Which models a worker may ask for.** `sub-codex-5` carries the allowlist `models` set to
-     the same six models the old `dw-gpt-*` routes served: `gpt-6-astra`, `gpt-6-sol`,
-     `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`. This is config revision 676.
+     Today every `dw-N` points to the smart pool `pool-codex`: every Codex subscription, any-model
+     (`*`) targets, conversation placement and `native: ["codex-responses"]`, so the request is
+     passed through as sent.
+   - **Which models a worker may ask for.** `pool-codex` carries an allowlist (the pool setting
+     `allow`) of the same six models the old `dw-gpt-*` routes served: `gpt-6-astra`, `gpt-6-sol`,
+     `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`. The rollback route
+     `fallback-codex` has the same six in its `models`.
      - Any other model name gets `400 MODEL_NOT_SUPPORTED` before any upstream call, as before.
-     - Even without the allowlist, codex-5's catalog (today exactly those six) would bound it.
-     - The allowlist keeps the per-key model set explicit if the catalog grows.
+     - Even without the allowlist, the accounts' catalogs would bound it.
+     - The allowlist keeps the per-key model set explicit if a catalog grows.
    - **To move one worker** to another subscription or a pool, repoint its `dw-N` (one config
      change, `PUT /admin/v1/config`, or the chat's `/point dw-N`). Nothing changes on the worker.
      Put the same `models` allowlist on the new target route.
@@ -284,8 +286,9 @@ The router's console (Activity, API keys) shows each worker's requests under its
 | dev-worker-4 | `key_dc874b9d0a75` | `lrk_UNcf` | `dw-4` |
 
 **Routing.** Each key is limited to its pointer `dw-N`, which points at the smart pool `pool-codex` (every Codex
-subscription, Codex-native, conversation placement). To roll the workers back, repoint `dw-N` → `sub-codex-5`
-(`codex-5:*`).
+subscription, Codex-native, conversation placement). To roll the workers back, repoint `dw-N` → `fallback-codex`.
+It is a plain `usage` route over all five Codex accounts (`*` targets, Codex-native, conversation placement) and does
+not need the `smart-pools` plugin. See `llm-router.md` § "Codex fallback route (2026-10-11)".
 
 **Previous keys, revoked on 2026-10-11.** These keys and the six `dw-gpt-*` routes they were limited to are gone (see
 `llm-router.md` § "Claude tools and route cleanup (2026-10-11)"). They were:
