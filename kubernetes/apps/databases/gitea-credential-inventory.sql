@@ -68,3 +68,40 @@ CREATE VIEW credential_inventory.site_admins AS
 SELECT count(*)::float8 AS total FROM "user" WHERE is_admin;
 REVOKE ALL ON credential_inventory.site_admins FROM PUBLIC;
 GRANT SELECT ON credential_inventory.site_admins TO pg_monitor;
+
+-- Per WORKER BOT (worker identities plan 2026-10-11, Phase 5): the shared dev-worker-bot and every
+-- per-slot dev-worker-<N>-bot. Same contract as above: AGGREGATES ONLY, and the token NAMES are judged
+-- inside the view, never exported. A slot bot's EXPECTED tokens are exactly its own three ceremonies'
+-- kinds, named dw<N>-(git|repo|pkg)-<UTC date or timestamp> (docs/runbooks/s2s-identity.md, "Enrol a
+-- worker identity"); anything else on a slot bot is tokens_unexpected. Every dev-worker-bot token is
+-- unexpected by construction (it has no slot), which is what retires it in the plan's Phase 5.
+--   active               1 when the account can log in (is_active and not prohibit_login), else 0
+--   tokens               all access tokens the account holds
+--   tokens_unexpected    tokens whose name is not one of this slot's dw<N>-<kind>-<stamp>
+--   kinds_present        distinct expected kinds present (3 = git, repo and pkg all there)
+--   max_tokens_per_kind  the most expected tokens of one kind (2 = a rotation in flight)
+-- The rows come from "user" (one per worker account), so an account with no tokens still yields a row
+-- of zeros, and a missing row means the account is gone.
+DROP VIEW IF EXISTS credential_inventory.worker_credentials;
+CREATE VIEW credential_inventory.worker_credentials AS
+WITH bots AS (
+  SELECT u.id, u.name, u.is_active, u.prohibit_login,
+         substring(u.name from '^dev-worker-([0-9]+)-bot$') AS slot
+  FROM "user" u
+  WHERE u.name ~ '^dev-worker-[0-9]+-bot$' OR u.name = 'dev-worker-bot'
+), toks AS (
+  SELECT b.id AS uid,
+         (b.slot IS NOT NULL AND t.name ~ ('^dw' || b.slot || '-(git|repo|pkg)-[0-9]{8}([0-9]{6})?$')) AS expected,
+         substring(t.name from '^dw[0-9]+-(git|repo|pkg)-') AS kind
+  FROM bots b JOIN access_token t ON t.uid = b.id
+)
+SELECT b.name AS worker,
+       (b.is_active AND NOT b.prohibit_login)::int::float8 AS active,
+       (SELECT count(*) FROM toks k WHERE k.uid = b.id)::float8 AS tokens,
+       (SELECT count(*) FROM toks k WHERE k.uid = b.id AND NOT k.expected)::float8 AS tokens_unexpected,
+       (SELECT count(DISTINCT k.kind) FROM toks k WHERE k.uid = b.id AND k.expected)::float8 AS kinds_present,
+       COALESCE((SELECT max(c) FROM (SELECT count(*) AS c FROM toks k WHERE k.uid = b.id AND k.expected
+                                     GROUP BY k.kind) x), 0)::float8 AS max_tokens_per_kind
+FROM bots b;
+REVOKE ALL ON credential_inventory.worker_credentials FROM PUBLIC;
+GRANT SELECT ON credential_inventory.worker_credentials TO pg_monitor;
