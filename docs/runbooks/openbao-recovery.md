@@ -213,7 +213,9 @@ rollback — restore the snapshot onto the version that took it instead.
    values start with `ENC[` AND the decrypt round-trip hash matches the live Secret.
 7. **Verify**: role probe matrix (positive + negative per role), `cas_required` on all broker
    oauth keys, all ExternalSecrets `SecretSynced`, broker generations unchanged, a manual
-   `af-codex-refresh` Job succeeds and stamps the status custom-metadata.
+   `af-codex-refresh` Job succeeds and stamps the status custom-metadata. (While that CronJob is
+   suspended, since 2026-10-11, the login it rotates is revoked and the Job can only `401`: skip this
+   check unless seat a was re-seeded; see `openbao-dev-workers.md` § "The shared codex login".)
 
 ## Adding a SEED path (making a static value self-heal)
 

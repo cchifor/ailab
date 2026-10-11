@@ -143,36 +143,28 @@ spec:
               {{ $labels.instance }} for >1h — docker/storage reclamation is stalled, so build cache +
               images will accumulate toward a full disk. Check `systemctl status gitea-runner-cleanup.timer`
               + `journalctl -t gitea-runner-cleanup`.
-        # Build cache is the runners' dominant disk consumer (10-33 GB/runner observed). The cleanup
-        # beacon reports the POST-cleanup resting size, so a value that stays high means the retention
-        # prune isn't clearing it (CI out-running the window, or a wedged cleanup) — a heads-up before
-        # CIRunnerDiskFilling. Post-cleanup (not a mid-run peak) so a spike that was immediately pruned
-        # can't false-fire. Migrated off the (now-absent) GitHub runner_docker_build_cache_bytes.
-        - alert: CIRunnerBuildCacheHigh
-          expr: gitea_runner_cleanup_build_cache_bytes{job="ci-runner-node"} > 14e9
-          for: 30m
-          labels: { severity: warning }
-          annotations:
-            summary: "CI runner {{ $labels.instance }} docker build cache >14 GB after cleanup"
-            description: >-
-              Runner {{ $labels.instance }} build cache is >14 GB even after gitea-runner-cleanup.sh
-              (post-cleanup value from its beacon), i.e. above BuildKit's configured maxUsedSpace of
-              10GB (github_runner/daemon.json.j2). MEASURED 2026-09-07, the fleet had BOTH failure
-              modes at once, so check which one this host has before acting:
-              (1) STALE SCHEMA — .14-.18 still carried a 2026-07-01 daemon.json using the deprecated
-              `defaultKeepStorage` key. Docker 26+ replaced it with reservedSpace/maxUsedSpace/
-              minFreeSpace and IGNORES the old key silently, so GC was simply off. Fix = re-run the
-              role (`just gitea-runners`) and restart docker; confirm with
-              `sudo grep -A6 builder /etc/docker/daemon.json`.
-              (2) CONFIG CORRECT BUT NOT HONOURED — .29 carried the current schema AND had loaded it
-              (daemon.json 22:34:25, dockerd started 22:35:25) yet still held 72 GB with 69 GB
-              reclaimable. So a correct daemon.json is NOT sufficient evidence that GC works; these
-              runners use the containerd snapshotter (driver-type io.containerd.snapshotter.v1).
-              Verify with `docker buildx du` (its Reclaimable can disagree with `docker system df`).
-              Neither mode is urgent on its own: gitea-runner-cleanup.sh's own CACHE_MAX_BYTES sweep is
-              gated behind disk >= 75%, and these runners sit at 58-73% on ~192 GB disks, so the cache
-              self-corrects once the disk gate opens. Threshold was 25 GB while the timer chased the
-              cache by hand.
+        # CIRunnerBuildCacheHigh (gitea_runner_cleanup_build_cache_bytes > 14e9) was REMOVED on 2026-10-11.
+        # Do not re-add a threshold on that metric. The beacon takes `docker system df`'s Build Cache SIZE,
+        # and under the containerd image store that counts snapshots the cache SHARES with images: on
+        # 2026-10-11 `docker buildx du --verbose` on ci-runner-9 listed 658 of 1049 records `Shared: true`
+        # and a 32.6 GB total, but only 9.7 GB Private (6.3 of 21.4 GB on ci-runner-5). BuildKit's GC
+        # policy (Max Used Space 10GiB, asserted by the github_runner role after every docker restart since
+        # 2026-09-27) holds the private part under the cap. The shared part goes only when its images go,
+        # which is the image prune's job, not the cache GC's. So the alert fired on normal operation: all
+        # 8 runners, 23-33 firing episodes each in the 7 days to 10-11, with disks at 55-77%. It flapped too,
+        # because the series vanished between sweeps. That trap applies to every gitea_runner_cleanup_*
+        # field: write_beacon replaces the whole textfile, and every early exit (heal, busy-skip, pressure
+        # deferral) writes only busy_skip, pressure_defer, midjob_prune, last_run_seconds and
+        # disk_used_percent. A `for:` rule on any other field (build_cache_bytes, images_bytes,
+        # disk_freed_percent, reaped_containers, workspaces*) resets whenever a busy runner skips a sweep.
+        # A cache that matters shows up as disk first, and the disk is what this file pages on:
+        # CIRunnerDiskPressureSustained (>=75% for 2h, the cache cap armed), CIRunnerCleanupStarved,
+        # CIRunnerDiskWillFillSoon, CIRunnerDiskFilling, CIRunnerDiskCritical. If a GC-regression signal
+        # is ever wanted, alert on PRIVATE cache bytes (`docker buildx du` Private), not on this total.
+        # When a disk alert does fire on a runner whose GC looks off, the two traps that switched it off
+        # before (the deprecated `defaultKeepStorage` key, and unprefixed `builder.gc` keys that dockerd
+        # drops while `--validate` still says OK) are written up in ansible/roles/github_runner/defaults/
+        # main.yml. The proof the cap is live is `docker buildx inspect default` showing "Max Used Space".
         # ---- dangling BuildKit record (gitea-runner-cleanup.sh section 0) ----
         # A cache record that points at a missing snapshot fails EVERY build reusing it, whatever the PR
         # (ci-runner-3 09-28, ci-runner-9 10-04, ci-runner-1 10-07 — each found by a human reading CI

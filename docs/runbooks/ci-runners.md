@@ -169,9 +169,13 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
 - **Beacons → node_exporter textfile** (`gitea_runner_{reclaim,cleanup}_*.prom`, mode **0644** so
   node_exporter can read them): `gitea_runner_cleanup_{disk_used_percent,disk_freed_percent,build_cache_bytes,
   images_bytes,reaped_containers,busy_skip,last_run_seconds}`. Alerts (`monitoring/ci-runners-rules.yaml`):
-  **CIRunnerDiskFilling** / **DiskWillFillSoon** (node_filesystem), **CIRunnerBuildCacheHigh** (>25 GB
-  post-cleanup), **CIRunnerCleanupStale** (timer not run >1h), **CIRunnerMaintenanceBeaconMissing** (gitea
-  reclaim beacon absent). These migrated off the retiring GitHub agent's `runner_reclaim_*` beacons.
+  **CIRunnerDiskFilling** / **DiskWillFillSoon** (node_filesystem), **CIRunnerCleanupStale** (timer not run
+  >1h), **CIRunnerMaintenanceBeaconMissing** (gitea reclaim beacon absent). These migrated off the retiring
+  GitHub agent's `runner_reclaim_*` beacons. **CIRunnerBuildCacheHigh was removed on 2026-10-11**:
+  `build_cache_bytes` is `docker system df`'s Build Cache SIZE, which under the containerd image store
+  includes snapshots shared with images, so it sat above any useful threshold while BuildKit's GC held the
+  private cache under its 10GiB cap. Check the cache with `docker buildx du` (Private vs Total); the rules
+  file has the measurements.
 - **Dangling BuildKit record heal** (section 0 of `gitea-runner-cleanup.sh`): when the docker journal has a
   `failed to commit <X> to <Y> during finalize: … snapshot <X> does not exist: not found` failure AND
   `docker builder du --verbose` still lists record `<Y>`, the next tick waits for a job gap, records the

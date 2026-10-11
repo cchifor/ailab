@@ -290,9 +290,12 @@ Then ESO re-syncs `broker-openai-codex-oauth` and each broker replica **reloads 
 - Do **NOT** patch the k8s Secret `broker-openai-codex-oauth` directly: ESO (`creationPolicy=Owner`)
   **drift-reverts** it within seconds. The fresh token MUST go to OpenBao (the source of truth).
 - The **`af-codex-refresh` CronJob** (ns `agentforge-broker`, schedule `0 3 * * *`, `--skew-seconds
-  172800`) is meant to automate this, but currently **fails `HTTP 400`** because the OpenBao role
-  **`af-codex-refresher` is missing** (a bootstrap-sentinel gap). Until that role exists, refresh is
-  the manual procedure above. Check it with:
+  691200`) automates this. The `af-codex-refresher` role it needed has existed since 2026-09-12. It is
+  **suspended since 2026-10-11**: OpenAI revoked the login it rotates on 2026-09-29, every run from
+  10-01 failed with `401`, and nothing in use depended on it any more. The suspend note in
+  `kubernetes/apps/infrastructure/agentforge-codex-refresh/cronjob.yaml` has the evidence;
+  `docs/runbooks/openbao-dev-workers.md` § "The shared codex login" has the re-seed and resume steps.
+  Check a run with:
   `kubectl --context admin@ai -n agentforge-broker logs job/<af-codex-refresh-…>`.
 
 ## KEDA scaling gotchas (the planner ScaledObject)

@@ -449,6 +449,12 @@ following stay OPERATOR steps:
   ESO sync (≤1h) → broker `credential_generation` match). To force an immediate sync:
   `kubectl --context admin@ai -n agentforge-broker annotate externalsecret <name> force-sync=$(date +%s) --overwrite`.
 - **Refresh now (codex only)**: UI button creates a Job from CronJob `af-codex-refresh` (VAP-pinned).
+- **codex-pro since 2026-10-11:** `af-codex-refresh` is **suspended** (its login was revoked
+  upstream). Rotate and Refresh now still work: the CP copies the CronJob's jobTemplate, which ignores
+  `suspend`. But a rotated codex auth.json then expires in ~10 days, because nothing refreshes it
+  nightly. After rotating, un-suspend the CronJob through Git per `openbao-dev-workers.md`
+  § "The shared codex login", "Re-seeding after a revocation", steps 4–5. The CP cannot do it: its
+  role (`agentforge-codex-refresh/rbac.yaml`) only `get`s the CronJob.
 - **Add account**: UI CAS-writes the cred, then opens an ailab PR via `agentforge-infra-bot`
   (AGit). Review + approve (reviewer-bot) + merge per the protected-main flow; the operation
   tracker advances to `active` once Flux/ESO/broker all report. Requires
