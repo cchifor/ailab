@@ -1206,8 +1206,10 @@ spec:
           # estimate into a Responses terminal event that carries none (ADR 0027 amendment). The release
           # tag makes Renovate propose real versions, each judged by the litellm-route-contract CI, not
           # opaque digest moves of the `main-stable` moving tag (#917). A bare digest would make it
-          # track `latest` (#899). Every LiteLLM update carries `no-automerge` (renovate.json): a human
-          # merges gateway upgrades. Bump the three refs together (litellm-local.yaml, litellm-vkeys.yaml).
+          # track `latest` (#899). Since 2026-10-11 LiteLLM updates merge through the reviewers like any
+          # other Renovate PR (operator-directed; the `no-automerge` rule left renovate.json): both
+          # personas clean, CI green, and that CI includes litellm-route-contract, triggered by this
+          # file. Bump the three refs together (litellm-local.yaml, litellm-vkeys.yaml).
           image: ghcr.io/berriai/litellm:v1.105.0@sha256:60947db020b57e204823d3fbc8bb295c85be890d7c9adcc77fb4f5fc2fe410b2
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
