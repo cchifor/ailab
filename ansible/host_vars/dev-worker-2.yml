@@ -2,6 +2,7 @@
 
 # Per-slot Gitea identity (plan 2026-10-11 worker identities, Phase 4, 2026-10-11): this slot
 # authenticates as its own `dev-worker-2-bot` with the tokens in af/dev-workers/dev-worker-2, not the shared
-# dev-worker-bot. Rollback = set false and converge (docs/runbooks/openbao-dev-workers.md,
+# dev-worker-bot. dev-worker-1, -3 and -4 pin the same gate in their own host_vars (#1264, #1267, #1268),
+# each opened by that slot's own bot. Rollback = set false and converge (docs/runbooks/openbao-dev-workers.md,
 # "Gitea identity cut-over (per slot)").
 dev_worker_gitea_identity_cutover: true
