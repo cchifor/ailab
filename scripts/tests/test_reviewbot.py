@@ -14,6 +14,9 @@ Stdlib `unittest` only, no pytest: .gitea/workflows/broker-inventory.yaml runs
 reviewbot.py reads its config at IMPORT time (`CFG = json.load(open(sys.argv[1] ...))`), so
 each test loads a fresh module object against a throwaway config + sqlite file.
 """
+import base64
+import copy
+import importlib
 import importlib.util
 import io
 import json
@@ -5537,6 +5540,92 @@ class DeadLoginProbeTest(unittest.TestCase):
                 self._install([doc])
                 self.m.poll_usage(self.now)
                 self.assertFalse(self.m.seat_parked("b"), label)
+
+
+class ChunkAdapterContractTest(unittest.TestCase):
+    """Exercise the real reviewbot -> chunk adapter boundary, rather than a hand-built bot."""
+
+    def test_real_module_dispatches_snapshot_helpers_and_llm(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        profile = {
+            "llm_kind": "claude", "llm_model": "m", "llm_fallback_model": "fb",
+            "llm_effort": "medium", "llm_models": None,
+        }
+        bot = load(
+            temporary.name, persona="codex", merge_personas=["claude", "codex"],
+            chunk_review_repos=["o/r"], chunk_review_policy_epoch="test-policy",
+            chunk_review_profiles={
+                "codex": dict(profile),
+                "claude": dict(profile, llm_model="peer-model"),
+            }, max_diff_bytes=4096,
+        )
+        adapter_dir = str(SRC.parent)
+        if adapter_dir not in sys.path:
+            sys.path.insert(0, adapter_dir)
+        chunk_adapter = importlib.import_module("review_chunk_adapter")
+        head = "2" * 40
+        data = {
+            "state": "open", "draft": False, "title": "Snapshot", "body": "Review it.",
+            "user": {"login": "allowed-author"},
+            "base": {"repo": {"full_name": "o/r"}, "ref": "main", "sha": "1" * 40},
+            "head": {"repo": {"full_name": "o/r"}, "ref": "feature", "sha": head},
+        }
+        history = []
+
+        def api(path, method="GET", body=None, raw=False):
+            prefix = "/repos/o/r/pulls/1"
+            if path == prefix and method == "GET":
+                return copy.deepcopy(data)
+            if path.startswith(prefix + "/reviews?") and method == "GET":
+                return copy.deepcopy(history) if path.endswith("page=1") else []
+            if path == prefix + "/reviews" and method == "POST":
+                review = dict(body, id=len(history) + 1,
+                              user={"login": "reviewer-" + bot.CFG["persona"]},
+                              state=body["event"])
+                history.append(review)
+                return {"id": review["id"]}
+            raise AssertionError(f"Unexpected offline API call: {method} {path}")
+
+        bot.api = api
+        bot.pr_ok = mock.Mock(return_value=data)
+        bot.run_llm = mock.Mock(return_value={"summary": "Looks coherent.", "findings": []})
+        bot.guard_findings = mock.Mock(return_value=[])
+        bot.maybe_merge = mock.Mock()
+        connection = bot.db()
+        connection.execute(
+            "INSERT INTO jobs(id,repo,pr,head_sha,state,created,updated) "
+            "VALUES(1,'o/r',1,?,'queued',0,0)", (head,)
+        )
+        connection.commit()
+        connection.close()
+
+        # chunk_call constructs the production SimpleNamespace from the imported module's
+        # globals. These calls therefore check the actual adapter attribute contract.
+        self.assertIsNone(bot.existing_marker("o/r", 1, head))
+        self.assertEqual({}, bot.persona_verdicts("o/r", 1, head))
+        binding = chunk_adapter.binding(bot.SimpleNamespace(**bot.__dict__), "o/r", 1, data)
+        raw = (b"diff --git a/src/example.py b/src/example.py\n"
+               b"index 1111111..2222222 100644\n"
+               b"--- a/src/example.py\n+++ b/src/example.py\n"
+               b"@@ -1 +1 @@\n-old\n+new\n")
+        plan = chunk_adapter.chunks.make_plan(binding, "3" * 40, raw, part_bytes=4096)
+        with mock.patch.object(chunk_adapter, "load_plan", return_value=plan):
+            state, _, _ = bot.review_job(1, "o/r", 1, head)
+        self.assertEqual("retry", state)
+        self.assertEqual(0, bot.run_llm.call_count)
+
+        peer = {"binding": binding, "snapshot": plan["id"],
+                "merge_base": plan["merge_base"], "raw_sha256": plan["raw_sha256"],
+                "persona": "claude", "stage": "ready"}
+        token = base64.urlsafe_b64encode(chunk_adapter.chunks.canonical(peer)).decode().rstrip("=")
+        history.append({"id": 2, "body": "<!-- review-bot:chunks:v1 " + token + " -->",
+                        "commit_id": head, "user": {"login": "reviewer-claude"},
+                        "state": "COMMENT"})
+        with mock.patch.object(chunk_adapter, "load_plan", return_value=plan):
+            state, _, _ = bot.review_job(1, "o/r", 1, head)
+        self.assertEqual("progress", state)
+        bot.run_llm.assert_called_once()
 
 
 if __name__ == "__main__":

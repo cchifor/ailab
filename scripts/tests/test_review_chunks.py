@@ -860,7 +860,10 @@ class ReviewbotStartupRecoveryTests(unittest.TestCase):
     def test_empty_rollout_allowlist_still_quarantines_chunk_posting_rows(self):
         # Import reviewbot through its isolated dummy config loader; do not start its
         # HTTP server or worker threads, and do not contact a forge.
-        from test_reviewbot import load as load_reviewbot
+        try:
+            from scripts.tests.test_reviewbot import load as load_reviewbot
+        except ModuleNotFoundError:
+            from test_reviewbot import load as load_reviewbot
 
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
