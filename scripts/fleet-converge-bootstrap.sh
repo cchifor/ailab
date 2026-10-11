@@ -66,7 +66,24 @@ exec 9>"$BASE/.lock"
 flock -n 9 || { echo "another converge is running; skipping" >> "$BASE/converge.log"; exit 0; }
 export CONVERGE_LOCK_HELD=1
 
-git -C "$REPO" fetch --quiet origin main
+# THE CLONE'S CREDENTIAL IS READ, NEVER WRITTEN, BY GIT. git's stock `store` helper ERASES the stored
+# line on any 401, and Gitea answers 401 to a valid token while its database is down: on 2026-10-09 a
+# few minutes of infra-pg downtime emptied $BASE/.git-credentials, and every converge after that hung on
+# a username prompt until Task Scheduler killed it (0xC000013A), with nothing in converge.log, for three
+# days. Same failure and same fix as the dev workers' git-credential-store-readonly (#1199): a helper that
+# answers only `get`. Enforced here on every run, so a re-created clone cannot regress. The credential
+# itself is a read-only workstation-bot token (read:repository) in $BASE/.git-credentials, 0600.
+READONLY_HELPER='!f() { case "$1" in get) git credential-store --file "$HOME/.ailab-converge/.git-credentials" get ;; *) cat >/dev/null ;; esac; }; f'
+if [ "$(git -C "$REPO" config --local --get-all credential.helper)" != "$READONLY_HELPER" ]; then
+  git -C "$REPO" config --local --replace-all credential.helper "$READONLY_HELPER"
+fi
+
+# Never prompt: with no usable credential the fetch must FAIL, loudly and in the log, not wait for a
+# terminal that a scheduled task does not have.
+if ! GIT_TERMINAL_PROMPT=0 git -C "$REPO" fetch --quiet origin main 2>>"$BASE/converge.log"; then
+  echo "=== bootstrap $(date -Is): fetch of origin main FAILED (credential in $BASE/.git-credentials?)" >> "$BASE/converge.log"
+  exit 1
+fi
 git -C "$REPO" reset --hard --quiet origin/main
 
 [ -f "$SRC" ] || { echo "bootstrap: $SRC missing on origin/main" >&2; exit 1; }
