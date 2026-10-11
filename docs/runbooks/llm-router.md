@@ -78,9 +78,9 @@ The router is a single replica on an RWO volume (`Recreate`), so every rollout h
 `llm-router-edge` Caddy proxy hides that gap from clients. Manifests: `kubernetes/apps/apps/llm-router/edge.yaml`.
 Design: llm-router `docs/design/live-status-and-upgrades.md`, section 5a.
 
-**Status: deployed but NOT yet on the tunnel.** Until the tunnel rule in `edge/cloudflared.yaml` points at
-`llm-router-edge`, the hold does nothing for public traffic. Verify the edge pods are Ready first
-(`kubectl --context admin@ai -n llm-router get deploy,pdb,svc llm-router-edge`).
+**Status: the edge is on the tunnel.** The `router.chifor.me` rule in `edge/cloudflared.yaml` points at
+`llm-router-edge`, so all public traffic passes through the hold. If the router looks unreachable, check the edge
+pods first (`kubectl --context admin@ai -n llm-router get deploy,pdb,svc llm-router-edge`).
 
 **The path:** cloudflared (namespace `edge`) -> `llm-router-edge:80` (Caddy, 2 replicas, port 8080) ->
 `llm-router:80` (container port 8787).
@@ -91,8 +91,9 @@ shutdown waited its full 60 s grace on open streams. The first rollout behind th
 With the router's drain the gap is about 45 s at most: 20 s drain, up to 12 s cleanup, about 13 s to ready. 85 s
 also leaves room under Cloudflare's roughly 100 s time-to-first-byte for a held stream, which gets its first byte
 (`: ok`) as soon as the router selects an account (the router already gives images a 90 s execution budget, and a longer hold would
-let Cloudflare time out first). Active health checks poll the router's `/ready` every 2 s. Caddy never replays a
-request the router accepted (its default retry match is GET-only), so a held POST is safe: it was never sent.
+let Cloudflare time out first). Active health checks poll the router's `/ready` every 2 s. A request that was never sent
+(dial failure) is safe to hold and retry. After the router has accepted a request, Caddy may replay a GET within
+`lb_try_duration`, but never a POST (its default retry match is GET-only), so a held POST was never sent.
 Caddy's own readiness is a TCP probe, so it does not flap with the router.
 
 **The router's drain:** on SIGTERM the router stops taking new work and drains in-flight requests for
@@ -104,7 +105,9 @@ work found unfinished at the next start is marked "Interrupted by restart".
   longer than the hold (a router that takes more than 85 s to become ready, for example after a volume moves node),
   the request gets a 502 when the hold ends; Codex's request retries then wait again behind the edge.
 - A stream cut by the drain makes Codex print `Reconnecting… n/5` and continue.
-- A request the router accepted and then lost to a reset reaches the client as a 502; Codex's request retries cover it.
+- A POST the router accepted and then lost to a reset (accepted-then-reset) reaches the client as a 502, because a
+  sent POST is never replayed; Codex's request retries cover it. A GET in the same situation may be replayed by Caddy
+  within `lb_try_duration`.
 - A long non-streaming request held near the limit can still hit Cloudflare's edge timeout (about 100-125 s).
   That is the same as before the hold.
 
@@ -116,8 +119,11 @@ new connections go to the other replica (`maxUnavailable: 0`, PDB `minAvailable:
 in ConfigMap `llm-router-edge-caddy`, bump the `chifor.me/caddyfile-revision` pod annotation in the same change, or the
 pods keep the old config.
 
-**Rollback:** point the tunnel rule back to `llm-router:80` (`http://llm-router.llm-router.svc.cluster.local:80`)
-in `edge/cloudflared.yaml` and bump `chifor.me/config-revision` so both connectors roll.
+**Rollback:** in `kubernetes/apps/apps/edge/cloudflared.yaml`, change the `router.chifor.me` rule's `service:` back to
+`http://llm-router.llm-router.svc.cluster.local:80` and change the pod-template annotation
+`chifor.me/config-revision` (currently `"2026-10-11-llm-router-edge"`) to a new value, so both connectors roll.
+This works only while the router NetworkPolicy still admits cloudflared on 8787; the follow-up that removes that
+ingress rule must be reverted first if it has been applied.
 
 ## Verification and operations
 

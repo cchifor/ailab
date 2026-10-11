@@ -39,8 +39,12 @@ data:
       # LLM Router has its own mandatory bearer authentication on /admin/v1/* and /v1/*.
       # Keep Access-free so ordinary OpenAI-compatible API clients work; no live accounts
       # are enabled by deployment. The public SPA is only a sign-in screen without a token.
+      # Traffic goes through llm-router-edge, the Caddy hold proxy (llm-router namespace), which
+      # holds requests across router rollouts; the router still authenticates every request itself.
+      # Rollback: point this back at http://llm-router.llm-router.svc.cluster.local:80 and bump
+      # chifor.me/config-revision below.
       - hostname: router.chifor.me
-        service: http://llm-router.llm-router.svc.cluster.local:80
+        service: http://llm-router-edge.llm-router.svc.cluster.local:80
       # Relay owns browser and connector authentication; no interactive Access gate.
       - hostname: relay.chifor.me
         service: http://relay.relay.svc.cluster.local:80
@@ -185,7 +189,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-10-01-relay"
+        chifor.me/config-revision: "2026-10-11-llm-router-edge"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:
