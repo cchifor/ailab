@@ -84,9 +84,10 @@
       "addLabels": ["no-automerge"]
     },
     {
-      "description": "Renovate's own image (kubernetes/apps/apps/renovate/cronjob.yaml) is proposed ONCE A WEEK, and only in versions at least 3 days old. Upstream releases several times a day: 35 self-update PRs in 13 days (2026-09-28..10-11), 31% of every PR this bot opened, each paying two reviewer runs and often a re-review when a newer release moved the head mid-review (#1149). The schedule is what cuts the count - a release-age wait alone only delays every PR by 3 days, since a new release crosses the threshold on almost every 4-hourly run. The window covers the CronJob's 00:00 and 04:00 UTC runs on Monday (Renovate's timezone defaults to UTC). The age gives an upstream regression time to surface before it runs here with a write token.",
+      "description": "Renovate's own image (kubernetes/apps/apps/renovate/cronjob.yaml) is proposed ONCE A WEEK, and only in versions at least 3 days old. Upstream releases several times a day: 35 self-update PRs in 13 days (2026-09-28..10-11), 31% of every PR this bot opened, each paying two reviewer runs and often a re-review when a newer release moved the head mid-review (#1149). The schedule is what cuts the count - a release-age wait alone only delays every PR by 3 days, since a new release crosses the threshold on almost every 4-hourly run. The window covers the CronJob's 00:00 and 04:00 UTC runs on Monday (Renovate's timezone defaults to UTC). The age gives an upstream regression time to surface before it runs here with a write token. updateNotScheduled=false keeps an ALREADY-OPEN self-update PR inside the window too: Renovate's default keeps rebasing and re-bumping an open branch outside its schedule, so one held past Monday by a finding would still move mid-week, which is the mid-review head move (#1149) this rule exists to stop (reviewer-claude on #1272).",
       "matchPackageNames": ["renovate/renovate"],
       "schedule": ["* 0-5 * * 1"],
+      "updateNotScheduled": false,
       "minimumReleaseAge": "3 days"
     },
     {
