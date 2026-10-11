@@ -91,8 +91,19 @@ the complete rule set** on both repositories, matching `forge` and `dsh-acp-plus
   - 2 required approvals, with the approval whitelist naming only the two reviewer users;
   - merge whitelist naming only the two reviewer users;
   - stale approvals dismissed on push;
-  - the repository's own CI as required status checks;
+  - the repository's own CI as required status checks, read from recent PRs:
+    - relay: `Verify / verify (pull_request)`;
+    - llm-router: `CI / verify (pull_request)`;
   - admin merge override blocked.
+- **Break-glass, written down before the switch.** With exactly two whitelisted approvers, two
+  required approvals and a required check, one reviewer-host outage or a renamed CI context stops
+  every merge on these repos. Recovery is an **owner operation**:
+  - a one-shot `chifor` token, minted and deleted as in `scripts/gitea-owner-merge.sh`, relaxes
+    the protection (approvals → 0, or the context list fixed);
+  - the change is recorded as an issue in the affected repo, naming the reason and the time;
+  - the protection is restored, and read back, once the reviewers recover.
+
+  `gitea_admin` stays the last resort, as everywhere else.
 - **Delivery, verified separately:**
   - the deployed `pr_reviewer_repos` list on both reviewer hosts contains both repos (read
     `/etc/reviewbot/config.json`);
@@ -142,6 +153,13 @@ is part of the goal.
    The run ID comes from the launcher:
    - Claude Code's session ID, or Codex's thread ID;
    - when no ID is available, the marker carries `run: unknown`. An ID is never invented.
+
+   **Command comments are exempt.** Some comments are parsed as a whole body. The platform owner-ack
+   gate counts a comment only when its **entire body is one line**, `approve-pin <head sha>`, and
+   "a second line… makes it not count" (`platform/docs/runbooks/owner-ack.md`). Appending the marker
+   to it would silently break every acknowledgement. Comments whose whole body is a command
+   (`approve-pin …`, and any other parsed command) are posted exactly as is, and are attributed by
+   their author, which after Phase 4 names the slot.
 4. **Workstation marker in `scripts/gitea-api.sh`.** Today it forwards the body file verbatim.
    Change it as follows:
    - Insert the marker **only** for comment and review POST/PATCH endpoints (`issues/*/comments`,
@@ -149,6 +167,8 @@ is part of the goal.
    - Parse the JSON payload and append `\n<!-- worker: workstation run: <id> -->` to its `body`
      field.
    - Make the insertion idempotent: no second marker if one is already present.
+   - Never touch a command body. A body whose whole text matches `^approve-pin [0-9a-f]{7,40}$`
+     is sent unchanged, as in item 3.
    - Leave every other endpoint's payload byte-identical.
    - The run ID comes from `AILAB_RUN_ID`, which a Claude Code `SessionStart` hook exports. If the
      harness cannot export it, the marker is omitted, never guessed.
@@ -166,6 +186,9 @@ is part of the goal.
    - mixed old and new reviews deduplicate correctly.
 
 Phase 1 alone fixes the worst symptom: worker commits no longer carry the owner's name.
+**Commit identity is independent of the Phase 4 cut-over gate.** It is per-slot on every worker as
+soon as Phase 1 is converged. The gate governs only the Gitea credential, the pinned username and
+the credential instructions.
 
 ### Phase 2 — Create the per-slot Gitea accounts and tokens (operator ceremony)
 
@@ -220,15 +243,25 @@ worker then follow the same steps.
 
    **Ceremony for one slot. All three tokens go into one seed edit, so there is never a partial
    document:**
-   1. Mint the three tokens in-pod with `--raw`. Pipe each value straight into the SOPS seed edit
-      (`sops set --value-stdin` on the seed key's JSON field; confirm the flag on the installed
-      sops, otherwise decrypt to a RAM-backed temp and re-encrypt). A value never reaches argv,
-      a terminal, a transcript or a persistent file.
-   2. Commit the seed. Flux recreates the Job, and the Job patches the document.
-   3. **If a token was minted but not durably stored** (the seed edit failed), delete that token
+   1. Mint the three tokens in-pod with `--raw`, captured into process memory only.
+   2. **Edit the seed with `sops edit`, not `sops set`.** The key `dev-worker-N.json` holds a JSON
+      document as **one YAML string**, so `sops set` cannot address a field inside it. `sops set`
+      also takes the value as an argv argument. The procedure:
+      - Run `sops edit` with `TMPDIR` on tmpfs (`/dev/shm` in WSL), so the decrypted temp file
+        lives in RAM.
+      - Set `EDITOR` to a small patch script. It parses that string, sets the three fields, and
+        writes the string back.
+      - The script receives the tokens on an **inherited pipe**, never as arguments.
+      - sops re-encrypts with the file's own creation rule and MAC.
+
+      No value reaches argv, a terminal, a transcript or persistent storage. The ceremony
+      script ships with the enrolment runbook, so the operator does not improvise.
+   3. Verify the result: decrypt in memory and confirm that the three fields are 40-hex and that
+      every other field of the document is unchanged. Print lengths and field names only.
+   4. Commit the seed in a reviewed PR. After merge, Flux recreates the Job, and the Job patches
+      the document.
+   5. **If a token was minted but not durably stored** (the seed edit failed), delete that token
       by ID straight away and mint it again. Never leave an unrecorded live token.
-   4. Delete the duplicate `dev_worker_gitea_token` in `ansible/secrets/dev-worker.sops.yaml`.
-      `owner-credentials.md:17` wrongly calls that file the source.
 5. **Verify each account before any consumer uses it.** For each of the twelve tokens:
    - authenticated `GET /user` returns the expected slot login and user ID, with `is_admin=false`.
      A repository read alone cannot tell a slot token from the old shared one;
@@ -258,9 +291,23 @@ worker then follow the same steps.
   - Identify the deployed location from its config.
   - Update the global list there, and **every** `merge_authors_by_repo` override. An override
     **replaces** the global list for its repo (`src/reviewer/engine.py:847`).
-- **platform `OWNER_ACK_USERS`** (repository variable; decision D3). Recommended: list the four slot
-  bots in place of `dev-worker-bot`. That is parity with today's instruction, and each
-  acknowledgement now names its slot. Removing `dev-worker-bot` waits until Phase 5.
+- **platform `OWNER_ACK_USERS`** (repository variable; decision D3). **Add** the four slot bots
+  **alongside** `dev-worker-bot`. Phase 3 lands before any slot is cut over, so the shared account
+  still posts acknowledgements until its slot switches. That is parity with today's instruction,
+  and each acknowledgement then names its slot. `dev-worker-bot` is removed only in Phase 5.
+- **The SOPS-path token `dev_worker_gitea_token`** (`ansible/secrets/dev-worker.sops.yaml`), a
+  second copy of the shared token. `owner-credentials.md:17` wrongly calls it the source.
+  - **Its consumer:** the SOPS credential path, `tasks/git_forge.yml:30`, used only when
+    `dev_worker_enable_openbao` is false. All four slots run with it true
+    (`group_vars/dev_workers.yml:16`).
+  - **The Phase 3 PR:**
+    - grep roles, playbooks and templates for the variable;
+    - converge one slot;
+    - then either delete it with the SOPS git path or make it per slot.
+  - **Recommended: delete it.** A fallback holding the shared token would survive Phase 5's
+    revocation in a second place.
+  - This is an ansible change with CI coverage, so it belongs in the code PR, not the operator
+    ceremony.
 - **`scripts/check-slot-enumerations.py`.** A new committed enumeration,
   `dev_worker_gitea_users` in `ansible/group_vars/dev_workers.yml`, joins the slot lists the check
   already parses. The check fails closed when that source is missing or malformed, and the
@@ -286,8 +333,11 @@ worker then follow the same steps.
   - **`check-slot-enumerations`** with the new list.
   - **`roles/dev_worker/tests/test-cred-helper.sh`**: the host name resolves to the host document.
   - **`test-git-credential-readonly.sh`.**
-  - **A new test:** the rendered credential line and the git identity carry `<host>-bot` when the
-    host is cut over, and stay `dev-worker-bot` when it is not.
+  - **A new test:**
+    - the rendered credential line and the pinned username carry `<host>-bot` when the host is
+      cut over, and stay `dev-worker-bot` when it is not;
+    - the git commit identity is `<host>-bot` in **both** cases (Phase 1 is independent of the
+      gate).
 
 ### Phase 4 — Switch slots one at a time (canary first)
 
@@ -295,8 +345,9 @@ worker then follow the same steps.
    `dev_worker_openbao_kubeconfig_cutover`.
    - A new `dev_worker_gitea_identity_cutover` defaults to `false`, and is set `true` per slot in
      `host_vars/` as each slot switches.
-   - While it is `false`, a full converge renders exactly what it renders today, so an unrelated
-     converge cannot switch a slot.
+   - While it is `false`, a full converge renders the same Gitea credential, pinned username and
+     credential instructions as today, so an unrelated converge cannot switch a slot. The Phase 1
+     commit identity is not governed by the gate.
    - When `true`, three things change **together**:
      - `dev_worker_gitea_user` becomes `{{ inventory_hostname }}-bot`;
      - `git-credentials.ctmpl.j2` reads `af/data/dev-workers/{{ inventory_hostname }}`;
@@ -381,9 +432,11 @@ worker then follow the same steps.
    - **Alert:** an *active* `dev-worker-N-bot` that is not in the slot list holds a token, a team
      grant, or `prohibit_login=false`. A disabled, credential-free account of a retired slot is the
      expected end state and stays silent.
-   - **Alert:** a slot bot holds tokens other than its expected names. A **rotation window** allows
-     at most two generations of each name for at most 24 h, so mint-before-revoke rotation does not
-     page.
+   - **Alert:** a slot bot holds a token whose name does not match `^dw<N>-(git|repo|pkg)-[0-9]{8}$`
+     for its own `N`. The kinds are grouped by the prefix `dw<N>-<kind>-`, and each kind must be
+     present. A **rotation window** allows at most two tokens per prefix for at most 24 h (by the
+     token's `created_unix`), so mint-before-revoke rotation does not page. The SQL view and the
+     rule tests use this one definition.
    - **Alert:** an expected slot account or its metric is **missing**.
    - Verify as `pg_monitor` that the exported aggregates contain no token material. Then plant a
      test token on a fixture account that the new query actually selects (a disabled
@@ -407,7 +460,7 @@ A retired slot's account is disabled, its tokens are deleted, and the account is
 | --- | --- | --- |
 | D1 | Naming | `dev-worker-N-bot`. It matches the slot name used by AppRoles and ansible, and reads plainly in the Gitea UI |
 | D2 | Commit author for automation | The worker's own `-bot` identity. The owner's name is used only for commits the owner makes by hand |
-| D3 | `OWNER_ACK_USERS` | Parity: the four slot bots replace `dev-worker-bot`. Narrowing it, e.g. back to `chifor` only, is a separate owner decision about the self-attested gate |
+| D3 | `OWNER_ACK_USERS` | Parity: add the four slot bots alongside `dev-worker-bot` in Phase 3, and remove `dev-worker-bot` in Phase 5. Narrowing it, e.g. back to `chifor` only, is a separate owner decision about the self-attested gate |
 | D4 | `gitea_repo_pat` (`write:organization`) | Keep it per slot for parity in this plan. Check its last use in the token audit and drop it in a follow-up if unused |
 | D5 | Phase 0 timing | First, independent of the rest. It is the only phase that changes what gets reviewed |
 
