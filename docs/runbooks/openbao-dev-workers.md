@@ -677,8 +677,9 @@ replaces working host logins with a revoked token.
 > own login. Re-seed below only if the broker's `openai/codex-pro` audience is wanted again; step 4
 > of the re-seed un-suspends the CronJob. The rest of this section describes the design.
 
-Every dev worker and reviewer-2 (the codex persona) runs codex on the SAME ChatGPT login, and
-nobody runs `codex login` on a host — ever. How it hangs together:
+**As designed** (the status note above has today's consumers, which are none of the hosts): every dev
+worker and reviewer-2 (the codex persona) ran codex on the SAME ChatGPT login, and nobody ran
+`codex login` on a host. How it hangs together:
 
 | Piece | Where | What it does |
 |---|---|---|
