@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: metrics-files
+        env:
+        - name: RELAY_RECOVERY_EVIDENCE
+          value: '1'
+        volumeMounts:
+        - name: recovery-policy
+          mountPath: /recovery-policy
+          readOnly: true
+      containers:
+      - name: relay
+        volumeMounts:
+        - name: recovery-evidence
+          mountPath: /run/relay-recovery
+          readOnly: true
+      volumes:
+      - name: recovery-policy
+        configMap:
+          name: relay-recovery-policy
+      - name: recovery-evidence
+        persistentVolumeClaim:
+          claimName: relay-recovery-evidence

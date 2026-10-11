@@ -2,8 +2,8 @@
 import { constants } from 'node:fs';
 import { chmod, mkdir, open, rename, rm } from 'node:fs/promises';
 
-async function bounded(name, max) {
-  const file = await open(`/input/${name}`, constants.O_RDONLY | constants.O_NONBLOCK);
+async function bounded(name, max, root = '/input') {
+  const file = await open(`${root}/${name}`, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
     if (!stat.isFile() || stat.size > max) throw Error();
@@ -23,13 +23,20 @@ try {
       !Number.isFinite(Date.parse(expiresAt))) throw Error();
   // Reject dates that Date.parse normalizes, such as February 30.
   if (new Date(expiresAt).toISOString().slice(0, 19) !== expiresAt.slice(0, 19)) throw Error();
+  let recoveryEvidence;
+  if (process.env.RELAY_RECOVERY_EVIDENCE === '1') {
+    const verifierSha256 = await bounded('verifier-sha256', 128, '/recovery-policy');
+    const schema = await bounded('schema-version', 8, '/recovery-policy');
+    if (!/^[a-f0-9]{64}$/.test(verifierSha256) || !/^[1-9][0-9]{0,3}$/.test(schema)) throw Error();
+    recoveryEvidence = {path: '/run/relay-recovery/private/evidence.json', verifierSha256, schemaVersion: Number(schema)};
+  } else if (process.env.RELAY_RECOVERY_EVIDENCE) throw Error();
   await mkdir('/output/private', { recursive: true, mode: 0o700 });
   await chmod('/output/private', 0o700);
   const target = '/output/private/config.json';
   await rm(target + '.new', { force: true });
   const file = await open(target + '.new', 'wx', 0o600);
   try {
-    await file.writeFile(JSON.stringify({version: 1, tenantId, tokenSha256, expiresAt}) + '\n');
+    await file.writeFile(JSON.stringify({version: 1, tenantId, tokenSha256, expiresAt, ...(recoveryEvidence ? {recoveryEvidence} : {})}) + '\n');
     await file.sync();
   } finally { await file.close(); }
   await rename(target + '.new', target);
