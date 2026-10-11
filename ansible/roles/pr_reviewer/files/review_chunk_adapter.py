@@ -379,7 +379,7 @@ def _post(bot, job_id, plan, stage, body, comments, aggregate=None):
         return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
     if stage == "final":
         bot.maybe_merge(value["repo"], value["pr"])
-    return ("done" if stage == "final" else "retry", result.get("id"),
+    return ("done" if stage == "final" else "waiting", result.get("id"),
             "complete chunk review" if stage == "final" else "chunk capability posted")
 
 
@@ -408,7 +408,7 @@ def review_job(bot, job_id, repo, pr, head):
                      "Waiting for the other reviewer to bind this same snapshot.", [])
     if any(found.get(p, (None, {}))[1].get("snapshot") != plan["id"]
            for p in ("claude", "codex")):
-        return ("retry", None, "awaiting both-host immutable snapshot handshake")
+        return ("waiting", None, "awaiting both-host immutable snapshot handshake")
     current(bot, value)
     connection = bot.db()
     try:

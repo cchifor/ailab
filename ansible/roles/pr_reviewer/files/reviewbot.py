@@ -233,7 +233,7 @@ def enqueue(repo, pr, head_sha, source):
         # review_job will fail closed when it tries to bind the opted-in snapshot.
         try:
             chunk_call("refresh_job", repo, pr, head_sha, source)
-        except ValueError as error:
+        except Exception as error:
             log(f"chunk refresh {repo}#{pr} refused: {error}")
     with db_lock:
         c = db()
@@ -3334,9 +3334,14 @@ def worker_once():
         # would stretch a complete review across the retry budget and potentially quarantine
         # it before the integration part runs.
         progressed = state == "progress"
-        persisted_state = "queued" if progressed else state
+        waiting = state == "waiting"
+        persisted_state = "queued" if progressed or waiting else state
         if progressed:
             next_at = 0.0
+        elif waiting:
+            # A peer-host handshake is expected control flow, not a failed attempt. Poll at a
+            # fixed interval while retaining the retry budget for actual provider failures.
+            next_at = time.time() + 60
         elif limited_until and usage_poller_enabled():
             next_at = min(limited_until, time.time() + DEFAULT_PARK_S)
         else:

@@ -588,7 +588,7 @@ class AdapterTests(unittest.TestCase):
                                   BINDING["head_sha"])
 
     def handshake(self):
-        self.assertEqual("retry", self.run_job()[0])
+        self.assertEqual("waiting", self.run_job()[0])
         self.assertEqual("COMMENT", self.posts[0]["event"])
         self.history.append(self.peer_review())
 
@@ -622,7 +622,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(peer_policy, adapter.policy(self.bot))
 
     def test_no_model_call_until_peer_has_same_authenticated_snapshot(self):
-        self.assertEqual("retry", self.run_job()[0])
+        self.assertEqual("waiting", self.run_job()[0])
         self.assertEqual(1, len(self.posts))
         for peer in [None, self.peer_review(snapshot="9" * 64),
                      dict(self.peer_review(), user={"login": "attacker"})]:
@@ -630,7 +630,7 @@ class AdapterTests(unittest.TestCase):
                 self.history = self.history[:1]
                 if peer:
                     self.history.append(peer)
-                self.assertEqual("retry", self.run_job()[0])
+                self.assertEqual("waiting", self.run_job()[0])
                 self.bot.run_llm.assert_not_called()
                 self.assertEqual(1, len(self.posts))
 

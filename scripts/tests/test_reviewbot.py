@@ -456,6 +456,19 @@ class WorkerIterationTest(unittest.TestCase):
         self.assertEqual(0, c.execute("SELECT next_at FROM jobs").fetchone()[0])
         c.close()
 
+    def test_chunk_handshake_wait_requeues_on_fixed_poll_without_retry_budget(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.review_job = lambda *a: ("waiting", None, "awaiting peer")
+        before = real_time.time()
+        self.assertIsNotNone(self.m.worker_once())
+        state, attempts, timeouts, note = self._job()
+        self.assertEqual(("queued", 0, 0, "awaiting peer"),
+                         (state, attempts, timeouts, note))
+        c = self.m.db()
+        next_at = c.execute("SELECT next_at FROM jobs").fetchone()[0]
+        c.close()
+        self.assertGreaterEqual(next_at, before + 59)
+
     def test_a_deadline_failure_persists_the_timeout_counter(self):
         self.m.enqueue("o/r", 1, self.A, "webhook")
         self.m.review_job = lambda *a: (_ for _ in ()).throw(
@@ -1197,7 +1210,7 @@ class RateLimitTest(unittest.TestCase):
         state, attempts, next_at = c.execute(
             "SELECT state, attempts, next_at FROM jobs WHERE head_sha=?", (head,)).fetchone()
         c.close()
-        self.assertEqual("retry", state)
+        self.assertEqual("waiting", state)
         self.assertEqual(0, attempts, "the PR must not pay for the subscription")
         self.assertAlmostEqual(reset, next_at, delta=60,
                                msg="deferred to the reset, not an exponential backoff")
@@ -5612,7 +5625,7 @@ class ChunkAdapterContractTest(unittest.TestCase):
         plan = chunk_adapter.chunks.make_plan(binding, "3" * 40, raw, part_bytes=4096)
         with mock.patch.object(chunk_adapter, "load_plan", return_value=plan):
             state, _, _ = bot.review_job(1, "o/r", 1, head)
-        self.assertEqual("retry", state)
+        self.assertEqual("waiting", state)
         self.assertEqual(0, bot.run_llm.call_count)
 
         peer = {"binding": binding, "snapshot": plan["id"],
