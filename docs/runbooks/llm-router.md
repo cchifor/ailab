@@ -585,6 +585,11 @@ There is no schema change: new route and key fields are optional, and trajectori
 columns. The usual single-replica Recreate rollout briefly interrupts service. The **Router rollout
 acceptance** workflow checks the pod and the public endpoints.
 
+> **Superseded on 2026-10-11.** The old-keys rollback below no longer exists. The four pre-per-key dev-worker keys are
+> revoked and the six `dw-gpt-*` routes are deleted (see "Claude tools and route cleanup (2026-10-11)"). To roll back
+> the dev workers, repoint `dw-1` … `dw-4` to `sub-codex-5` (`codex-5:*`). Every image since this release serves that
+> route.
+
 **Rollback.**
 - **Before the cutover above:** an image/annotation revert through a reviewed GitOps PR to
   `registry.chifor.me/llm-router/router@sha256:9f9661c8458479d9ed3b2915bd0be7bef73e6fa706f783d9410bad0fe8c0b49b`
@@ -800,3 +805,38 @@ working. After rolling forward again, re-pin `sub-codex-5` to `codex-5:*`.
   - Nine tasks were each reviewed, then a whole-branch review with one fix wave.
   - The reviewers proved a production-like first start writes only the two pool routes, and that a rollback cycle
     heals.
+
+## Claude tools and route cleanup (2026-10-11)
+
+**Claude multi-turn with tools.** On the owner's go:
+- The `provider-claude` plugin setting `transport` is now `sdk-resume` ("Multi-turn"). Claude Code 2.1.281 is on the
+  validated SDK list.
+- `capabilities.tools` is `true` on all five Claude accounts (config revision 1273).
+- Claude accounts now serve tool calls on the `claude` route, `pool-claude` and `pool-mixed`.
+
+**`pool-mixed` passed the live smoke and is enabled** (revision 1278).
+- Codex and Claude each served streaming and non-streaming tool calls.
+- The smoke ran with `pool-mixed`'s `spread` temporarily at 1. At the default 0.2, Claude's fresher quota outscores
+  Codex, so a sequential smoke never reaches Codex. `spread` was restored to 0.2 before the pool was enabled.
+
+**Unused routes removed** (revision 1280; the evidence is 7 days of `GET /admin/v1/stats?hours=168`, plus every
+reference from pointers, fallbacks and active keys):
+- `claude-5-test`: a test route. 1 request, on 10-07; nothing references it.
+- The six `dw-gpt-*` routes: legacy Codex-native routes for the pre-per-key dev-worker keys. `dw-gpt-6-astra` was last
+  used on 10-09 18:00, just before the per-key cutover; the other five were never used.
+- Their four keys (`key_aa2543746716`, `key_43132b508eaa`, `key_65e07ec0f75a`, `key_b06fc4e10a3c`) were revoked first.
+  They could reach only those routes.
+
+The rollback described in "Per-key routing release: model mode" (going back to the old keys and the `dw-gpt-*` routes)
+**no longer exists**. The supported rollback is `dw-N → sub-codex-5`, which every image since `router-0.1.0-20261009-model-mode`
+serves.
+
+**Kept, though lightly used:**
+- `claude` (6 requests in 7 days; the router agent's binding uses it);
+- `qwen-image-2.1-cloud` and `qwen-image-2.1-fast-cloud`, which the TrueSwarm key scopes;
+- `default`, the router's default pointer;
+- `sub-codex-5`, the `dw-N` rollback target.
+
+**Leftover, by design:** `router.yaml`'s `api-openai.codexNative.routes` still lists the six deleted `dw-gpt-*` names.
+The list is only a membership check, so missing names are harmless. Changing it restarts the router, so drop it (and
+its comment) with the next router release's digest bump, not on its own.
