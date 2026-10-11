@@ -1,0 +1,373 @@
+rule_files:
+  - objectstore-tls-rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: healthy current certificate
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 1x30
+      - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+        values: 10000000x30
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 10000000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: preactivation does not page
+    interval: 1m
+    input_series:
+      - series: probe_success{job="objectstore-tls"}
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: TLS or hostname verification failed
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: '0x30'
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 10000000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts:
+          - exp_labels:
+              namespace: strive-ailab
+              severity: critical
+            exp_annotations:
+              summary: Objectstore TLS verification is failing
+              description: 'Check the HTTPS Service, exact monitoring network peer, CA trust, hostname
+                and served certificate. Never disable TLS verification. Runbook: docs/runbooks/objectstore-tls-monitoring.md.'
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: exporter missing after activation
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 10000000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: strive-ailab
+              severity: critical
+            exp_annotations:
+              summary: Objectstore TLS probe has no observations
+              description: 'The TLS Service exists but the probe is not reporting. Check Probe discovery,
+                exporter readiness and Prometheus access. Runbook: docs/runbooks/objectstore-tls-monitoring.md.'
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: served certificate is expiring
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 1x30
+      - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+        values: 100000x30
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 100000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts:
+          - exp_labels:
+              namespace: strive-ailab
+              severity: warning
+            exp_annotations:
+              summary: The served objectstore certificate chain expires within 14 days
+              description: 'Inspect issuance and the nginx reload supervisor. This measures the served
+                chain, not only Certificate Ready. Runbook: docs/runbooks/objectstore-tls-monitoring.md.'
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: renewal not loaded
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 1x30
+      - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+        values: 10000000x30
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 20000000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts:
+          - exp_labels:
+              namespace: strive-ailab
+              severity: warning
+            exp_annotations:
+              summary: Objectstore serves an earlier expiry than its issued certificate
+              description: 'Check mounted-certificate propagation and nginx reload; also inspect CA/intermediate
+                expiry. An earlier-expiring chain member can produce this signal. Runbook: docs/runbooks/objectstore-tls-monitoring.md.'
+  - name: renewal propagation below tolerance
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 1x30
+      - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+        values: 10000000x30
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 10000300x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: cert-manager expiry is absent
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 1x30
+      - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+        values: 10000000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: strive-ailab
+              severity: warning
+            exp_annotations: &id001
+              summary: Objectstore certificate expiry comparison is unavailable
+              description: 'Check cert-manager scraping and the served-certificate expiry metric. Missing
+                telemetry is not evidence of successful renewal. Runbook: docs/runbooks/objectstore-tls-monitoring.md.'
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: served expiry is absent despite healthy probe
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 1x30
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 10000000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: strive-ailab
+              severity: warning
+            exp_annotations: *id001
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: both expiry observations absent without duplicate alerts
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 1x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: strive-ailab
+              severity: warning
+            exp_annotations: *id001
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: brief failure recovers before paging
+    interval: 1m
+    input_series:
+      - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+        values: 1x30
+      - series: probe_success{job="objectstore-tls"}
+        values: 0x3 1x27
+      - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+        values: 10000000x30
+      - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+        values: 10000000x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSProbeMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateTelemetryMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSCertificateExpiring
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ObjectstoreTLSIssuedCertificateAhead
+        exp_alerts: []
+  - name: expiry starts one hour above threshold and fires only after crossing plus fifteen minutes
+    interval: 1m
+    input_series:
+    - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+      values: 1x80
+    - series: probe_success{job="objectstore-tls"}
+      values: 1x80
+    - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+      values: 1213200x80
+    - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+      values: 1213200x80
+    alert_rule_test:
+    - eval_time: 44m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 60m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 75m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 76m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: &threshold_expiry_alert
+      - exp_labels:
+          namespace: strive-ailab
+          severity: warning
+        exp_annotations:
+          summary: The served objectstore certificate chain expires within 14 days
+          description: 'Inspect issuance and the nginx reload supervisor. This measures the served chain,
+            not only Certificate Ready. Runbook: docs/runbooks/objectstore-tls-monitoring.md.'
+  - name: expiry one hour below threshold still requires the full fifteen minutes
+    interval: 1m
+    input_series:
+    - series: kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}
+      values: 1x80
+    - series: probe_success{job="objectstore-tls"}
+      values: 1x80
+    - series: probe_ssl_earliest_cert_expiry{job="objectstore-tls"}
+      values: 1206000x80
+    - series: certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}
+      values: 1206000x80
+    alert_rule_test:
+    - eval_time: 14m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: []
+    - eval_time: 15m
+      alertname: ObjectstoreTLSCertificateExpiring
+      exp_alerts: *threshold_expiry_alert

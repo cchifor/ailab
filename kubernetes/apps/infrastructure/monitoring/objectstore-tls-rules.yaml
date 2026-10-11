@@ -1,0 +1,61 @@
+# Inert before the reviewed TLS Service exists. After activation, distinguish
+# handshake failure, missing observations, impending expiry and a stale served leaf.
+# Every alert uses the existing default ntfy / ailab-alerts receiver.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: objectstore-tls
+  namespace: monitoring
+  labels: {release: kube-prometheus-stack}
+spec:
+  groups:
+    - name: objectstore-tls
+      rules:
+        - alert: ObjectstoreTLSProbeFailed
+          expr: >-
+            (max(probe_success{job="objectstore-tls"}) == 0)
+            and on() (count(kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}) > 0)
+          for: 5m
+          labels: {severity: critical, namespace: strive-ailab}
+          annotations:
+            summary: "Objectstore TLS verification is failing"
+            description: "Check the HTTPS Service, exact monitoring network peer, CA trust, hostname and served certificate. Never disable TLS verification. Runbook: docs/runbooks/objectstore-tls-monitoring.md."
+        - alert: ObjectstoreTLSProbeMissing
+          expr: >-
+            max(absent(probe_success{job="objectstore-tls"}))
+            and on() (count(kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}) > 0)
+          for: 10m
+          labels: {severity: critical, namespace: strive-ailab}
+          annotations:
+            summary: "Objectstore TLS probe has no observations"
+            description: "The TLS Service exists but the probe is not reporting. Check Probe discovery, exporter readiness and Prometheus access. Runbook: docs/runbooks/objectstore-tls-monitoring.md."
+        - alert: ObjectstoreTLSCertificateTelemetryMissing
+          expr: >-
+            (max(absent(certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"}))
+             or (max(probe_success{job="objectstore-tls"}) == 1
+                 unless on() min(probe_ssl_earliest_cert_expiry{job="objectstore-tls"})))
+            and on() (count(kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}) > 0)
+          for: 10m
+          labels: {severity: warning, namespace: strive-ailab}
+          annotations:
+            summary: "Objectstore certificate expiry comparison is unavailable"
+            description: "Check cert-manager scraping and the served-certificate expiry metric. Missing telemetry is not evidence of successful renewal. Runbook: docs/runbooks/objectstore-tls-monitoring.md."
+        - alert: ObjectstoreTLSCertificateExpiring
+          expr: >-
+            (min(probe_ssl_earliest_cert_expiry{job="objectstore-tls"}) - time() < 14 * 86400)
+            and on() (count(kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}) > 0)
+          for: 15m
+          labels: {severity: warning, namespace: strive-ailab}
+          annotations:
+            summary: "The served objectstore certificate chain expires within 14 days"
+            description: "Inspect issuance and the nginx reload supervisor. This measures the served chain, not only Certificate Ready. Runbook: docs/runbooks/objectstore-tls-monitoring.md."
+        - alert: ObjectstoreTLSIssuedCertificateAhead
+          expr: >-
+            (max(certmanager_certificate_expiration_timestamp_seconds{namespace="strive-ailab",name="objectstore-forge-tls"})
+             - min(probe_ssl_earliest_cert_expiry{job="objectstore-tls"}) > 300)
+            and on() (count(kube_service_info{namespace="strive-ailab",service="objectstore-forge-tls"}) > 0)
+          for: 15m
+          labels: {severity: warning, namespace: strive-ailab}
+          annotations:
+            summary: "Objectstore serves an earlier expiry than its issued certificate"
+            description: "Check mounted-certificate propagation and nginx reload; also inspect CA/intermediate expiry. An earlier-expiring chain member can produce this signal. Runbook: docs/runbooks/objectstore-tls-monitoring.md."
