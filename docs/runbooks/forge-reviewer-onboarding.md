@@ -55,6 +55,10 @@ active, so the reconciler does not poll an inaccessible private repository.
 
 ## Large stacks of draft PRs
 
+For the consolidated single-PR delivery, see [complete bounded PR reviews](bounded-pr-reviews.md).
+That capability is default-off and retains both personas, complete source coverage,
+current-source reviews and protected CI; it requires an explicit reviewed rollout.
+
 The reconciler must read every page of open PRs before processing the snapshot.
 Forge reached 53 open PRs on 2026-10-06: a first-page-only scan saw PRs #94–#45,
 all drafts, and never revisited approved, green PR #42 on page two. Webhook review

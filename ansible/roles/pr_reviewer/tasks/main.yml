@@ -166,13 +166,14 @@
     - pr_reviewer_llm_sudo_user | length > 0
   tags: [openbao]
 
-- name: Install reviewbot.py
+- name: Install reviewed bot and default-off complete snapshot helpers
   ansible.builtin.copy:
-    src: reviewbot.py
-    dest: /usr/local/lib/reviewbot/reviewbot.py
+    src: "{{ item }}"
+    dest: "/usr/local/lib/reviewbot/{{ item }}"
     owner: root
     group: root
     mode: "0755"
+  loop: [reviewbot.py, review_chunks.py, review_chunk_adapter.py]
   notify: Restart reviewbot
 
 # The claude seat helpers: the entry point that lifts a seat's token into the CLI's
