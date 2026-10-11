@@ -4,8 +4,11 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from subprocess import run as run_process
+# Capture before test execution: reviewbot tests replace subprocess.run globally.
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,13 +57,23 @@ else:
         (self.rules / name).write_text(f'rule_files:\n  - {reference}\ntests: []\n')
 
     def run_gate(self, exit_code=0):
-        return subprocess.run(['bash', str(self.root / 'scripts/rules-lint.sh')],
-                              env={**self.env, 'DOCKER_TEST_EXIT': str(exit_code)},
-                              capture_output=True, text=True)
+        return run_process(['bash', str(self.root / 'scripts/rules-lint.sh')],
+                           env={**self.env, 'DOCKER_TEST_EXIT': str(exit_code)},
+                           capture_output=True, text=True)
 
     def test_primary_fixture_still_runs_without_companions(self):
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('/rules/example-rules.test.yaml', json.loads(self.receipt.read_text()))
+
+    def test_gate_runs_a_real_child_after_another_suite_mocks_subprocess(self):
+        # reviewbot's CLI tests replace this process-wide function. The rules
+        # gate must still execute, even when discovered after that module.
+        fake = subprocess.CompletedProcess([], 0, 'unrelated CLI response', '')
+        with mock.patch.object(subprocess, 'run', return_value=fake):
+            result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.receipt.exists(), 'the actual rules gate did not run')
         self.assertIn('/rules/example-rules.test.yaml', json.loads(self.receipt.read_text()))
 
     def test_companion_is_executed_and_its_failure_fails_the_gate(self):
