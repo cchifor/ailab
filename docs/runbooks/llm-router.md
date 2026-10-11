@@ -746,18 +746,26 @@ Nothing else changes, and nothing uses the pools until a pointer or key is moved
 - **Revision 1261:** `dw-1` … `dw-4` repointed to `pool-codex`. All four workers pass `validate-codex-host.sh`. The
   journal shows `route: pool-codex`, strategy `smart`, codex-3 selected, and placement `new` then `bound`.
 - **Revision 1262:** `dw-pool` deleted.
-- **The `pool-mixed` smoke FAILED, so the pool stays off.** All 24 requests with a tool went to codex-3, because every
-  Claude account is `tools_unsupported`. The router's Claude provider runs `transport: print` (single-turn text, no
-  tools), so Claude accounts never serve requests that carry tools, in `pool-claude` or the `claude` route either.
-  - `pool-claude` serves plain chat only.
-  - Enabling Claude tools means switching `provider-claude` to `transport: sdk-resume`. That is a global change for
-    every Claude client and the owner's call. After it, re-run the smoke before enabling `pool-mixed`.
-  - The smoke removed its temporary key and pool.
+- **The `pool-mixed` smoke FAILED, so the pool stays off.** All 24 tool-carrying requests went to codex-3. Every Claude
+  account is `tools_unsupported`, because the router's Claude provider runs `transport: print` (single-turn text, no
+  tools).
+- **What Claude clients get today, independently of pools.** A request that carries tools, on the existing `claude`
+  route or on `pool-claude`, gets **400 `UNSUPPORTED_CAPABILITY`** ("No target of route … can serve this request:
+  tools_unsupported"), with no fallback. Plain chat is served as before. Neither route can serve tool calls until the
+  transport changes.
+- **To enable Claude tools:** set the `provider-claude` plugin setting `transport` to `sdk-resume`. Use the router's
+  plugin settings editor, or `GET`/`PATCH /admin/v1/plugins/provider-claude/config` (the `transport` value).
+  - This is a global change for every Claude client. It is the owner's decision, recorded as pending on 2026-10-11.
+  - After the change, re-run the smoke (`SMOKE_POOL=pool-mixed`) before setting `pool-mixed` to `enabled: true`.
+- **Smoke cleanup.** The smoke creates a temporary pool `pool-mixed-smoke` (with its managed route of the same name) and
+  a temporary key limited to that route. It removed both: "temporary key revoked" and "temporary pool pool-mixed-smoke
+  removed".
 
 **Rollback.** Revert the image through a reviewed GitOps PR to
 `registry.chifor.me/llm-router/router@sha256:39517806cf64c29efb4d5b526720491dbed78d2ed684787d0be53bb49cabfce1`
 (`router-0.1.0-20261010-placement`, source `076dff0`). **First**:
-1. repoint anything that uses a pool (e.g. `dw-N` back to `sub-codex-5`);
+1. repoint anything that uses a pool. For the dev workers: `dw-1` … `dw-4` → `sub-codex-5`, restored to `codex-5:*`
+   in revision 1260; the old image serves that route. Do not use `dw-pool`: it was deleted in revision 1262;
 2. then turn every pool off (`configure_pool … enabled: false`, or `remove_pool`), so their routes go.
 
 If you skip this, the old image:
