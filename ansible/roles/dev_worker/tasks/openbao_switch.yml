@@ -1,0 +1,366 @@
+---
+# The Gitea pre-flight, the agent's config + render templates and the Gitea credential transition,
+# as ONE guarded unit (imported by openbao.yml; a separate file so tests/test-gitea-converge.sh can
+# drive exactly these tasks through ansible).
+#
+# Everything that can leave this host without a working forge credential is inside a block, so any
+# failure reaches a rescue that rolls back (openbao_rollback.yml) and VERIFIES the rollback:
+#   - the pre-flight, when the cut-over gate is on (openbao_gitea_preflight.yml; on a host whose agent
+#     has never run, its vault reads wait for the agent and run inside the switch). If it fails while
+#     a switch is UNFINISHED (the
+#     credential template is not the last verified one, or a ~/.git-credentials is missing or names
+#     another login), the rollback runs before the play fails, so an interrupted switch is never left
+#     behind just because the slot's token became unreadable in the meantime;
+#   - laying down the render templates, agent.hcl and the credential template, removing a
+#     ~/.git-credentials that names the other login, starting the agent, restarting it, the health
+#     check, the username pin and recording the result. The restart is a TASK fed by registered
+#     changes — this file's and the shared role's (dev_worker_agent_inputs_changed, openbao.yml) — and
+#     never a handler: a handler's failure is not rescued.
+#
+# Rollback state survives across runs. Every file this switch lays down and the agent loads
+# (dev_worker_openbao_switch_files, vars/main.yml: agent.hcl, the credential template and the
+# kubeconfig/platform render templates) has a <file>.last-good copy, the version that last passed
+# verification (seeded once from the file in place, then rewritten only after a verified switch).
+# The rollback restores ALL of them, so a replacement of any one that cannot render does not outlive
+# it, and a run that died half-way — new files laid down, credentials removed, no restart — can still
+# be rolled back by the next run, which also re-renders: a MISSING ~/.git-credentials, or one whose
+# login is not dev_worker_gitea_user, forces the restart whatever this run changed. The login to roll
+# back to is read out of the last verified credential template.
+
+- name: Look for the agent files this switch manages
+  ansible.builtin.stat:
+    path: "/etc/openbao-agent/{{ item }}"
+  loop: "{{ dev_worker_openbao_switch_files }}"
+  register: dev_worker_switch_files_now
+
+# The Gitea pre-flight (openbao_gitea_preflight.yml), before anything below can change what the agent
+# renders. On a host whose agent has never run there is no sink token for `cred` yet: the field checks
+# are then DEFERRED to the guarded switch below, after the agent has started.
+- name: Pre-flight this slot's Gitea tokens, and finish an unfinished switch if that fails
+  when: dev_worker_gitea_identity_cutover | bool
+  block:
+    - name: Pre-flight this slot's own Gitea tokens before the agent renders them
+      ansible.builtin.import_tasks: openbao_gitea_preflight.yml
+      vars:
+        dev_worker_gitea_preflight_may_defer: true
+
+    - name: Note whether the field checks wait until the agent has started
+      ansible.builtin.set_fact:
+        dev_worker_gitea_preflight_deferred: "{{ dev_worker_gitea_preflight.stdout is search('^deferred') }}"
+
+  rescue:
+    # Unfinished = what a run that died between laying down files and verifying them leaves: a
+    # managed file other than its last verified version, or a ~/.git-credentials that is missing or
+    # names another login than the last verified credential template. Logins only; no token is read.
+    - name: Look for an unfinished switch
+      ansible.builtin.shell: |
+        for f in{% for f in dev_worker_openbao_switch_files %} {{ ('/etc/openbao-agent/' ~ f) | quote }}{% endfor %}; do
+          if [ -f "$f.last-good" ] && ! cmp -s "$f.last-good" "$f"; then echo "$f is not the last verified version"; fi
+        done
+        good=/etc/openbao-agent/git-credentials.ctmpl.last-good
+        [ -f "$good" ] || exit 0
+        prev="$(sed -n 's#^.*https://\([^:/@]*\):.*$#\1#p' "$good" | head -n 1)"
+        {% for user in dev_worker_users %}
+        f={{ (user.home ~ '/.git-credentials') | quote }}
+        if [ ! -e "$f" ]; then echo "$f is missing"
+        elif [ "$(sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "$f")" != "$prev" ]; then echo "$f names another login than $prev"; fi
+        {% endfor %}
+        exit 0
+      args:
+        executable: /bin/bash
+      register: dev_worker_unfinished_switch
+      changed_when: false
+      check_mode: false # read-only
+
+    - name: Roll the unfinished switch back to the last verified login
+      ansible.builtin.import_tasks: openbao_rollback.yml
+      when:
+        - dev_worker_unfinished_switch.stdout_lines | length > 0
+        - not ansible_check_mode
+
+    - name: Fail, the Gitea pre-flight did not pass
+      ansible.builtin.fail:
+        msg: >-
+          The Gitea pre-flight failed on {{ inventory_hostname }}
+          ({{ ansible_failed_result.stderr | default('') | trim }}).
+          {% if dev_worker_unfinished_switch.stdout_lines | length == 0 %}Nothing was changed: the
+          agent still renders the last verified login.
+          {% elif ansible_check_mode %}An UNFINISHED switch was found
+          ({{ dev_worker_unfinished_switch.stdout_lines | join('; ') }}); a real run rolls it back.
+          {% elif dev_worker_rollback.rc | default(1) == 0 %}An UNFINISHED switch was found
+          ({{ dev_worker_unfinished_switch.stdout_lines | join('; ') }}) and ROLLED BACK AND VERIFIED:
+          every ~/.git-credentials and username pin names {{ dev_worker_rollback.stdout | trim }}.
+          {% else %}An UNFINISHED switch was found and THE ROLLBACK DID NOT VERIFY
+          ({{ dev_worker_rollback.stderr | default('') | trim }}): this host may have no working forge
+          credential.{% endif %}
+          Keep dev_worker_gitea_identity_cutover false for this slot until the pre-flight passes
+          (docs/runbooks/openbao-dev-workers.md, "Gitea identity cut-over").
+
+- name: Switch the agent onto this run's config and Gitea login, and roll back if it is unhealthy
+  block:
+    - name: Keep the current version of each managed file as the last verified one (seeded once)
+      ansible.builtin.copy:
+        src: "{{ item.stat.path }}"
+        dest: "{{ item.stat.path }}.last-good"
+        remote_src: true
+        force: false
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+      loop: "{{ dev_worker_switch_files_now.results | selectattr('stat.exists') | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # A fresh or rebuilt host has no credential template to keep, and its first converge may already
+    # be the cut-over (host_vars set the gate). It still gets a rollback target: the shared login, the
+    # state the cut-over starts from. A no-op wherever a last verified template exists.
+    - name: On a fresh host, keep the shared login as the credential template to fall back to
+      ansible.builtin.template:
+        src: git-credentials.ctmpl.j2
+        dest: /etc/openbao-agent/git-credentials.ctmpl.last-good
+        force: false
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+      vars:
+        dev_worker_gitea_user: dev-worker-bot
+        dev_worker_gitea_cred_name: common
+
+    - name: Lay down the kubeconfig and platform render templates
+      ansible.builtin.template:
+        src: "{{ item }}.ctmpl.j2"
+        dest: "/etc/openbao-agent/{{ item }}.ctmpl"
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+      loop:
+        - helmtest-kubeconfig
+        - platform-kubeconfig # ADR 0028
+        - platform-pgpass # ADR 0028
+      register: dev_worker_render_ctmpls
+
+    - name: Lay down the bao agent config
+      ansible.builtin.template:
+        src: openbao-agent.hcl.j2
+        dest: /etc/openbao-agent/agent.hcl
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+        backup: true # for a manual rollback; the rescue restores agent.hcl.last-good
+      register: dev_worker_agent_hcl
+
+    - name: Lay down the git-credentials render template
+      ansible.builtin.template:
+        src: git-credentials.ctmpl.j2
+        dest: /etc/openbao-agent/git-credentials.ctmpl
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+      register: dev_worker_git_ctmpl
+
+    # A Gitea identity switch (the cut-over, or flipping it back) changes the LOGIN in the rendered
+    # line. A file naming the other login is removed so the restart must render this run's from
+    # scratch: a template that cannot render then leaves NO credential, which the health check
+    # catches, instead of the other login's line passing it. "absent" lines force the restart too.
+    # Keyed on what is on disk, not on this run's diff. Only the login is read; no token is printed.
+    - name: Find credential files that are missing or name another login than this run's
+      ansible.builtin.shell: |
+        want={{ dev_worker_gitea_user | quote }}
+        {% for user in dev_worker_users %}
+        f={{ (user.home ~ '/.git-credentials') | quote }}
+        if [ ! -e "$f" ]; then echo "absent $f"
+        elif [ "$(sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "$f")" != "$want" ]; then echo "other $f"; fi
+        {% endfor %}
+        exit 0
+      args:
+        executable: /bin/bash
+      register: dev_worker_git_login_drift
+      changed_when: false
+      check_mode: false # read-only
+
+    - name: Remove the ones that name another login
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ dev_worker_git_login_drift.stdout_lines | select('match', '^other ') | map('regex_replace', '^other ', '') | list }}"
+
+    # Skipped in check mode for the same reason as herdr.yml's start task: with state set, the
+    # systemd module fails on a unit whose file a check run never actually wrote.
+    - name: Enable + start openbao-agent
+      ansible.builtin.systemd:
+        name: openbao-agent.service
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: not ansible_check_mode
+
+    # THE restart, for everything that changed what the agent loads: the render templates, agent.hcl,
+    # the credential template, a missing or other-login credential, and the shared role's unit,
+    # binary, CA, AppRole files or codex template. One rescued task, never a handler.
+    - name: Restart openbao-agent onto this run's config and credential
+      ansible.builtin.systemd:
+        name: openbao-agent.service
+        state: restarted
+        daemon_reload: true
+      when:
+        - not ansible_check_mode
+        - (dev_worker_render_ctmpls is changed) or (dev_worker_agent_hcl is changed) or (dev_worker_git_ctmpl is changed)
+          or (dev_worker_git_login_drift.stdout_lines | length > 0) or (dev_worker_agent_inputs_changed | default(false) | bool)
+
+    - name: Verify the agent restarted onto the new config and rendered everything
+      ansible.builtin.shell: |
+        set -euo pipefail
+        # 1. the RUNNING process must be newer than the config it is meant to have loaded
+        [ "$(systemctl is-active openbao-agent)" = active ] || { echo "openbao-agent not active" >&2; exit 1; }
+        started=$(date -d "$(systemctl show openbao-agent -p ExecMainStartTimestamp --value)" +%s)
+        written=$(stat -c %Y /etc/openbao-agent/agent.hcl)
+        [ "$started" -ge "$written" ] || { echo "agent started BEFORE agent.hcl was written - stale process" >&2; exit 1; }
+        # 2. still up after a settle window, i.e. not in a crash/restart loop
+        before=$(systemctl show openbao-agent -p NRestarts --value)
+        sleep 20
+        [ "$(systemctl is-active openbao-agent)" = active ] || { echo "openbao-agent died after start" >&2; exit 1; }
+        [ "$(systemctl show openbao-agent -p NRestarts --value)" = "$before" ] || { echo "openbao-agent is restart-looping" >&2; exit 1; }
+        # 3. the credential the agent has always owned is still being rendered. This is the check
+        #    that catches "the new stanzas killed the agent and took git auth with them".
+        #    Non-empty is not enough across a Gitea identity switch: the line must name the login of
+        #    THIS run, the one pin_gitea_username.yml pins next.
+        {% for user in dev_worker_users %}
+        [ -s "{{ user.home }}/.git-credentials" ] || { echo "{{ user.home }}/.git-credentials missing/empty" >&2; exit 1; }
+        f={{ (user.home ~ '/.git-credentials') | quote }}; want={{ dev_worker_gitea_user | quote }}
+        [ "$(sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "$f")" = "$want" ] || { echo "$f does not name $want" >&2; exit 1; }
+        {% endfor %}
+        {% if not dev_worker_codex_host_owned_login | bool %}
+        # 3b. the shared codex login rendered for every user: user-owned 0600, valid JSON with an
+        #     access_token that has more than a day left and NO refresh_token (the stripping is the
+        #     whole safety property — a host must never be able to rotate the shared family).
+        #     Skipped for host-owned logins: the agent renders none; the login belongs to the operator.
+        {% for user in dev_worker_users %}
+        f="{{ user.home }}/.codex/auth.json"
+        [ -s "$f" ] || { echo "$f not rendered" >&2; exit 1; }
+        [ "$(stat -c '%a %U' "$f")" = "600 {{ user.name }}" ] || { echo "$f wrong mode/owner" >&2; exit 1; }
+        python3 - "$f" <<'PY' || { echo "$f is not a usable access-token-only codex login" >&2; exit 1; }
+        import base64, json, sys, time
+        d = json.load(open(sys.argv[1]))
+        t = d["tokens"]
+        assert d["auth_mode"] == "chatgpt" and t["account_id"] and t["id_token"], "shape"
+        assert t["refresh_token"] == "", "refresh_token must be stripped"
+        p = t["access_token"].split(".")[1]; p += "=" * (-len(p) % 4)
+        left = json.loads(base64.urlsafe_b64decode(p))["exp"] - time.time()
+        assert left > 24 * 3600, f"access_token has only {left/3600:.1f}h left"
+        PY
+        {% endfor %}
+        {% endif %}
+        {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
+        # 4. post-cutover only. Mode and existence alone would accept a stale file at the same path,
+        #    so the kubeconfig is also used for a live call.
+        {% for user in dev_worker_users %}
+        for kc in {{ user.home }}/.helmtest/kubeconfig; do
+          [ -s "$kc" ] || { echo "$kc not rendered" >&2; exit 1; }
+          [ "$(stat -c '%a %U' "$kc")" = "600 {{ user.name }}" ] || { echo "$kc wrong mode/owner" >&2; exit 1; }
+        done
+        kubectl --kubeconfig {{ user.home }}/.helmtest/kubeconfig auth can-i create secrets >/dev/null           || { echo "helmtest kubeconfig does not authenticate" >&2; exit 1; }
+        {% endfor %}
+        {% endif %}
+        {% if dev_worker_platform_fields_present | default(false) | bool %}
+        # 5. platform access (ADR 0028). The NEGATIVE checks are the load-bearing ones: they prove the
+        #    kubeconfig is bound to the observer ClusterRole and not to something wider. `auth can-i`
+        #    is a SelfSubjectAccessReview — it needs no extra grant and reads nothing.
+        {% for user in dev_worker_users %}
+        for f in {{ user.home }}/.platform/kubeconfig {{ user.home }}/.platform/pgpass; do
+          [ -s "$f" ] || { echo "$f not rendered" >&2; exit 1; }
+          [ "$(stat -c '%a %U' "$f")" = "600 {{ user.name }}" ] || { echo "$f wrong mode/owner" >&2; exit 1; }
+        done
+        # the pgpass names THIS worker (a wrong slot would authenticate as another worker role)
+        # The SHORT hostname, derived exactly as the helper does. The bash variable HOSTNAME can
+        # carry the FQDN, which would expect dw3.example_platform_ro and fail a healthy rollout.
+        short_host="$(hostname -s)"
+        want_role="dw${short_host#dev-worker-}_platform_ro"
+        [ "$(cut -d: -f4 {{ user.home }}/.platform/pgpass)" = "$want_role" ] || { echo "{{ user.home }}/.platform/pgpass does not name $want_role" >&2; exit 1; }
+        # the client `platform psql` needs — without it the credentials verify and the tool fails
+        command -v psql >/dev/null || { echo "postgresql-client missing (platform psql would fail)" >&2; exit 1; }
+        command -v pg_isready >/dev/null || { echo "pg_isready missing (platform psql would hang)" >&2; exit 1; }
+        # Asked of the SERVER, not of `kubectl auth can-i`. On kubectl 1.30 (what the workers
+        # carry) can-i resolves a subresource through the RESTMapper, and this identity cannot do
+        # discovery - it answered a WRONG no for pods/portforward while the API server allowed it.
+        # The same false no would have made the NEGATIVE checks pass vacuously, which is the half
+        # that matters. So: POST a SelfSubjectAccessReview to a HARDCODED path with --raw, which
+        # bypasses client-side mapping altogether (create -f - would still need discovery to find
+        # the kind), and keep kubectl stderr so a broken token reads differently from a denial.
+        ssar() { # ssar <group> <verb> <resource> <subresource-or-empty> <expected true|false> <label>
+          _err="$(mktemp)"
+          _resp="$(printf '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"namespace":"strive-ailab","group":"%s","verb":"%s","resource":"%s","subresource":"%s"}}}' "$1" "$2" "$3" "$4" \
+            | kubectl --kubeconfig {{ user.home }}/.platform/kubeconfig create --raw /apis/authorization.k8s.io/v1/selfsubjectaccessreviews -f - 2>"$_err")"
+          # no jq on a worker: the field is a non-omitempty bool, so the literal is unambiguous
+          case "$_resp" in
+            *'"allowed":true'*)  _got=true ;;
+            *'"allowed":false'*) _got=false ;;
+            *) _got="" ;;
+          esac
+          [ "$_got" = "$5" ] || { echo "platform kubeconfig: $6 expected allowed=$5, got ${_got:-<no answer>} ($(tr -d "\n" <"$_err" | cut -c1-200))" >&2; rm -f "$_err"; exit 1; }
+          rm -f "$_err"
+        }
+        ssar ""     list   pods        ""          true  "list pods"
+        ssar ""     create pods        portforward true  "port-forward"
+        ssar ""     get    secrets     ""          false "read secrets"
+        ssar ""     create pods        exec        false "exec into a pod"
+        # The POSITIVE control for the apps group: if the group were wrong (deployments are NOT in
+        # the core group - the mistake this very check used to make) this would come back false and
+        # fail here, instead of the delete check passing vacuously below.
+        ssar apps   get    deployments ""          true  "list deployments (apps group wired)"
+        ssar apps   delete deployments ""          false "delete a deployment"
+        {% endfor %}
+        {% endif %}
+        echo agent-healthy
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: not ansible_check_mode
+
+    # The field checks the first pre-flight deferred (no sink token before the agent first ran). Inside
+    # the block, so a slot field that is unreadable, empty or the shared token rolls back to the
+    # shared login before anything is pinned or recorded. Not under --check: the agent is not started.
+    - name: Pre-flight this slot's Gitea tokens now that the agent runs (deferred on a fresh host)
+      ansible.builtin.import_tasks: openbao_gitea_preflight.yml
+      vars:
+        dev_worker_gitea_preflight_may_defer: false
+      when:
+        - dev_worker_gitea_identity_cutover | bool
+        - dev_worker_gitea_preflight_deferred | default(false) | bool
+        - not ansible_check_mode
+
+    # After the render is verified, so the pin never names a login whose line is not there yet; inside
+    # the block, so a failed pin is rolled back with the rest.
+    - name: Pin the git.chifor.me credential username
+      ansible.builtin.import_tasks: pin_gitea_username.yml
+
+    - name: Record every managed file as the last verified version
+      ansible.builtin.copy:
+        src: "/etc/openbao-agent/{{ item }}"
+        dest: "/etc/openbao-agent/{{ item }}.last-good"
+        remote_src: true
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+      loop: "{{ dev_worker_openbao_switch_files }}"
+      when: not ansible_check_mode
+
+  rescue:
+    # Without this, a failed switch leaves the host with a dead agent, no kubeconfig writer, or no
+    # forge credential; what comes back, and how it is checked, is openbao_rollback.yml. Restoring
+    # the previous agent.hcl may bring back a config that still renders ~/.tep/kubeconfig on a host
+    # converging past ADR 0037 — which is why tep.yml runs after openbao.yml and deletes ~/.tep only
+    # once the live config no longer uses it.
+    - name: Roll back to the last verified config and login, and verify the rollback
+      ansible.builtin.import_tasks: openbao_rollback.yml
+
+    - name: Fail loudly after rolling back
+      ansible.builtin.fail:
+        msg: >-
+          openbao-agent did not come up healthy on {{ inventory_hostname }}.
+          {% if dev_worker_rollback.rc | default(1) == 0 %}ROLLED BACK AND VERIFIED: the previous
+          agent.hcl (and kubeconfig marker) and the last verified credential template are back, and
+          every ~/.git-credentials and username pin names {{ dev_worker_rollback.stdout | trim }}.
+          {% else %}THE ROLLBACK DID NOT VERIFY ({{ dev_worker_rollback.stderr | default('') | trim }}):
+          this host may have no working forge credential.{% endif %}
+          STOP the rollout - do not run the remaining workers until this is understood
+          (docs/runbooks/openbao-dev-workers.md, "kubeconfig cutover" / "Gitea identity cut-over").

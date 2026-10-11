@@ -1,37 +1,23 @@
 ---
-# Gitea (git.chifor.me) forge access for the dev-worker users. Gitea is the master forge now
-# (ADR 0017), so agents/devs on the worker clone/push private cchifor/* repos over HTTPS. This writes a
-# per-user ~/.git-credentials line using a `dev-worker-bot` read/write-repository Gitea token
-# (dev_worker_gitea_token, SOPS) and points git at a read-only helper for it
-# (git_credential_helper.yml). No-op when the token isn't provided. Gitea SSH is in-cluster only
-# (not tunnelled), so HTTPS+token is the access path.
+# Gitea (git.chifor.me) forge access for the dev-worker users. Gitea is the master forge (ADR 0017),
+# so agents/devs on the worker clone/push private cchifor/* repos over HTTPS; Gitea SSH is in-cluster
+# only (not tunnelled), so HTTPS+token is the access path. The credential comes from OpenBao alone:
+# the bao agent renders ~/.git-credentials, and openbao.yml imports the read-only helper
+# (git_credential_helper.yml) and the username pin (pin_gitea_username.yml).
 #
-# YIELDS TO OPENBAO: when dev_worker_enable_openbao is on, the bao agent renders ~/.git-credentials
-# from af/dev-workers/common instead (ADR 0020), so this whole block stands down rather than fight
-# it — two writers of one file would flip it back and forth on every run, and a PAT rotated in
-# OpenBao would be silently reverted here to whatever the SOPS file still holds. openbao.yml imports
-# the same git_credential_helper.yml, since both paths need it.
-- name: Configure Gitea git credentials (per dev-worker user)
-  when:
-    - dev_worker_gitea_token | default('') | length > 0
-    - not (dev_worker_enable_openbao | bool)
-  block:
-    - name: Point git at the read-only credential helper (shared with the other credential path)
-      ansible.builtin.import_tasks: git_credential_helper.yml
-
-    - name: Pin the git.chifor.me credential username (shared with the other credential path)
-      ansible.builtin.import_tasks: pin_gitea_username.yml
-
-    - name: Write the git.chifor.me credential (per user, 0600)
-      # copy(content) owns the whole file — dev-workers use Gitea as the forge, so a single line is the
-      # intended state. Add other hosts' creds out-of-band if ever needed.
-      ansible.builtin.copy:
-        dest: "{{ item.home }}/.git-credentials"
-        content: "https://{{ dev_worker_gitea_user }}:{{ dev_worker_gitea_token }}@git.chifor.me\n"
-        owner: "{{ item.name }}"
-        group: "{{ item.name }}"
-        mode: "0600"
-      loop: "{{ dev_worker_users }}"
-      loop_control:
-        label: "{{ item.name }}"
-      no_log: true
+# The SOPS path that lived here is GONE (plan 2026-10-11 worker identities, Phase 3). With
+# dev_worker_enable_openbao off it wrote dev_worker_gitea_token from ansible/secrets/dev-worker.sops.yaml
+# into ~/.git-credentials. No slot has run it since 2026-08-31 (group_vars/dev_workers.yml), it is a
+# second copy of the shared dev-worker-bot token that would outlive that token's revocation, and it
+# cannot follow the per-slot cut-over (dev_worker_gitea_identity_cutover). A worker without OpenBao
+# now stops here instead of silently getting the shared token, or no forge access at all.
+# The key itself was removed from ansible/secrets/dev-worker.sops.yaml on 2026-10-11.
+- name: Require OpenBao, the only source of the forge credential
+  ansible.builtin.assert:
+    that: dev_worker_enable_openbao | bool
+    fail_msg: >-
+      dev_worker_enable_openbao is false on {{ inventory_hostname }}, and git credentials for
+      git.chifor.me now come only from OpenBao (the SOPS dev_worker_gitea_token path was removed).
+      Enable it and mint this host's AppRole first: docs/runbooks/openbao-dev-workers.md
+      § "Adding a worker".
+    quiet: true

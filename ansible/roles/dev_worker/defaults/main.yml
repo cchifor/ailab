@@ -19,16 +19,42 @@ dev_worker_admin_user: c4
 dev_worker_agent_user: "{{ dev_worker_admin_user }}"
 
 # ---- Gitea (git.chifor.me) forge access (ADR 0017 — Gitea is the master forge) ----
-# Configures per-user git credentials so agents/devs can clone/push private cchifor/* repos over HTTPS
-# without prompting. Token = a `dev-worker-bot` Gitea token (write:repository, write:issue,
-# read:organization, read:user); provide it via SOPS (ansible/secrets/dev-worker.sops.yaml ->
-# dev_worker_gitea_token). Empty = skip (no-op).
-# IDENTITY (2026-10-06, plan 2026-10-06-s2s-identity-openbao D1): workers authenticate as the
-# NON-ADMIN `dev-worker-bot` (member of org team `automation`: write on every cchifor repo, never
-# admin), NOT as the owner `chifor`. Owner-gated merges (protected files) therefore need the owner.
-# Never put a `chifor` token back here or in devworker-seeds.sops.yaml.
-dev_worker_gitea_user: dev-worker-bot
-dev_worker_gitea_token: ""
+# Per-user git credentials so agents/devs can clone/push private cchifor/* repos over HTTPS without
+# prompting. The bao agent renders them from OpenBao (tasks/openbao.yml, ADR 0020); the SOPS path
+# (dev_worker_gitea_token) is gone, see tasks/git_forge.yml.
+# IDENTITY (2026-10-06, plan 2026-10-06-s2s-identity-openbao D1): workers authenticate as a
+# NON-ADMIN bot (member of org team `automation`: write on every cchifor repo, never admin), NOT as
+# the owner `chifor`. Owner-gated merges (protected files) therefore need the owner. Never put a
+# `chifor` token back here or in devworker-seeds.sops.yaml.
+
+# ---- per-slot Gitea identity cut-over (plan 2026-10-11 worker identities, Phase 4) ----
+# false (the default): the shared `dev-worker-bot`, its tokens read from af/dev-workers/common —
+# the credential line, pinned username and agent instructions are exactly what they were before the
+# gate existed. true, set per slot in host_vars/<slot>.yml, switches all three TOGETHER to this
+# slot's own `<slot>-bot` and its tokens in the slot's flat document af/dev-workers/<slot>. Like
+# dev_worker_openbao_kubeconfig_cutover it is never a fleet switch, so a routine full run cannot
+# move a slot. openbao.yml pre-flights the slot's fields before rendering, and flipping it back is
+# the rollback (one converge re-renders and re-pins the old login). Runbook:
+# docs/runbooks/openbao-dev-workers.md § "Gitea identity cut-over (per slot)".
+dev_worker_gitea_identity_cutover: false
+dev_worker_gitea_slot_user: "{{ inventory_hostname }}-bot"
+dev_worker_gitea_user: "{{ dev_worker_gitea_slot_user if (dev_worker_gitea_identity_cutover | bool) else 'dev-worker-bot' }}"
+# The `cred` name (and af/dev-workers/<name> document) holding gitea_pat / gitea_repo_pat /
+# gitea_package_pat for that user.
+dev_worker_gitea_cred_name: "{{ inventory_hostname if (dev_worker_gitea_identity_cutover | bool) else 'common' }}"
+
+# ---- git commit identity (tasks/git_identity.yml; NOT governed by the cut-over gate) ----
+# Every commit names the slot that made it, whichever token pushes it. The address is the slot
+# login at Gitea's [service] NO_REPLY_ADDRESS, which Gitea maps to that account — not inferred: the
+# plan's acceptance reads the commit API's author.id once the slot accounts exist.
+dev_worker_gitea_noreply_domain: noreply.git.chifor.me
+dev_worker_git_user_name: "{{ dev_worker_gitea_slot_user }}"
+dev_worker_git_user_email: "{{ dev_worker_gitea_slot_user }}@{{ dev_worker_gitea_noreply_domain }}"
+# Checkouts (absolute paths; a path also covers everything under it) whose repository-level
+# user.name/user.email the owner sets deliberately: git_identity.yml neither removes nor reports
+# them. Everything else found under the users' homes and /workspace/<user> loses its repository
+# identity, so commits there carry the slot's.
+dev_worker_git_identity_keep_paths: []
 
 # ---- /workspace data disk (the blank scsi1 disk the tofu module attaches) ----
 dev_worker_workspace_device: /dev/sdb
@@ -298,6 +324,10 @@ dev_worker_openbao_hosts_entries:
   - "192.168.0.41 openbao.lan.chifor.me"
   - "192.168.0.42 openbao.lan.chifor.me"
   - "192.168.0.43 openbao.lan.chifor.me"
+# The agent's sink token: templates/openbao-agent.hcl.j2 writes it, files/cred reads it. It exists only
+# once the agent has run on this host, so the Gitea pre-flight defers its vault reads until then
+# (tasks/openbao_gitea_preflight.yml).
+dev_worker_openbao_sink_token: /run/openbao-agent/token
 # Pinned like herdr, but upstream DOES publish per-release checksums: this is the sha256 of
 # bao_<version>_Linux_x86_64.tar.gz from the release's checksums-linux.txt. Re-read it on a bump.
 dev_worker_openbao_version: "2.5.5"

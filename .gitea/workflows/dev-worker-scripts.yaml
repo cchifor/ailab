@@ -25,6 +25,10 @@ on:
       - "ansible/roles/dev_worker/tests/**"
       - "ansible/roles/dev_worker/templates/**"
       - "ansible/roles/dev_worker/tasks/**"
+      # the Gitea identity test resolves the role defaults and reads group_vars
+      - "ansible/roles/dev_worker/defaults/**"
+      - "ansible/roles/dev_worker/vars/**"
+      - "ansible/group_vars/**"
       # the cred-helper test reads the shared agent role's unit + tasks too
       - "ansible/roles/openbao_agent/**"
       - "scripts/dw-paste/**"
@@ -40,8 +44,9 @@ jobs:
   dev-worker-scripts:
     name: dev-worker-scripts
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    # The suite spawns a private tmux server and a handful of `sleep` panes; it finishes in seconds.
-    timeout-minutes: 10
+    # The suite spawns a private tmux server and a handful of `sleep` panes and finishes in seconds;
+    # the convergence step adds a pip install and 15 ansible-playbook runs.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -78,6 +83,34 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/dev_worker/tests/test-git-credential-readonly.sh
+
+      # The per-slot Gitea identity (plan 2026-10-11 worker identities): with the cut-over gate off the
+      # credential line, username pin and agent instructions render exactly as before; on, all three
+      # move together; a switch removes the other login's file and the health check reads the login;
+      # the pre-flight and the commit-identity audit run against fixtures and never print a value.
+      # Needs python3 with jinja2 + PyYAML, like scripts/tests/test_registry_zot_retention.py in
+      # broker-inventory.yaml; a missing library FAILS the step, it never skips.
+      - name: per-slot Gitea identity (cut-over gate, commit identity, audit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/dev_worker/tests/test-gitea-identity.sh
+
+      # The same switch and identity tasks CONVERGED through ansible-playbook: gate false -> true ->
+      # false, a failing render and a failing restart (each must roll back AND verify it), an
+      # interrupted switch, idempotence (changed=0) and --check (nothing changes). The runner
+      # provisioning (roles/gitea_runner) installs no ansible, so this step installs the pinned bundle
+      # into a throwaway venv, as relay-router-workers.yaml does: ansible==14.0.0 is ansible-core
+      # 2.21.0 plus community.general 13.0.1 (git_config). A failed install fails the step; it never
+      # skips.
+      - name: per-slot Gitea identity converged through ansible-playbook
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'rm -rf .venv-dev-worker-converge' EXIT
+          python3 -m venv .venv-dev-worker-converge
+          .venv-dev-worker-converge/bin/pip install --quiet ansible==14.0.0
+          PATH="$PWD/.venv-dev-worker-converge/bin:$PATH" bash ansible/roles/dev_worker/tests/test-gitea-converge.sh
 
       - name: codex router-key helper (vault, cache, fallback)
         shell: bash

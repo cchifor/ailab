@@ -5,6 +5,9 @@
 # parts — agent.hcl, the .ctmpl files, start, the health check + rollback — stayed with dev_worker
 # and were written fresh (smaller) for pr_reviewer. Handlers too: this role notifies topics and each
 # consumer listens with its own handlers (see handlers/main.yml here for why).
+# Every task that changes what the agent loads also REGISTERS its result (openbao_agent_*_result):
+# dev_worker restarts the agent in a rescued task from those, not from a handler (a handler's
+# failure is not rescued); pr_reviewer keeps listening to the topics.
 
 # Fails the play rather than deploying an agent that cannot log in: an empty secret-id would leave
 # openbao-agent crash-looping and every rendered credential unwritten. no_log is deliberately NOT
@@ -30,6 +33,7 @@
     owner: root
     group: root
     mode: "0644"
+  register: openbao_agent_ca_result
   notify:
     - "openbao-agent: ca changed"
     - "openbao-agent: config changed"
@@ -96,6 +100,7 @@
     group: root
     mode: "0755"
     creates: "/usr/local/bin/.bao-{{ openbao_agent_version }}"
+  register: openbao_agent_bin_result
   notify: "openbao-agent: config changed"
 
 - name: Mark the installed bao version
@@ -152,6 +157,7 @@
     group: openbao-agent
     mode: "0640"
   no_log: true
+  register: openbao_agent_role_id_result
   notify: "openbao-agent: config changed"
 
 - name: Install the AppRole secret-id
@@ -162,6 +168,7 @@
     group: root
     mode: "0600"
   no_log: true
+  register: openbao_agent_secret_id_result
   notify: "openbao-agent: config changed"
 
 - name: Install the openbao-agent systemd unit
@@ -171,6 +178,7 @@
     owner: root
     group: root
     mode: "0644"
+  register: openbao_agent_unit_result
   notify:
     - "openbao-agent: unit changed"
     - "openbao-agent: config changed"
@@ -187,4 +195,5 @@
     owner: root
     group: openbao-agent
     mode: "0640"
+  register: openbao_agent_codex_ctmpl_result
   notify: "openbao-agent: config changed"

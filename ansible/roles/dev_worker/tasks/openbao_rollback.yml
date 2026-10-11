@@ -1,0 +1,57 @@
+---
+# Roll the agent's config and the Gitea credential back to the last VERIFIED state, then CHECK it.
+# Imported by both rescues in openbao_switch.yml: a failed switch, and a failed pre-flight that found
+# an unfinished one. EVERY file the switch manages (dev_worker_openbao_switch_files: agent.hcl, the
+# credential template, the kubeconfig/platform render templates) goes back to its <file>.last-good,
+# the version that last passed verification — restoring agent.hcl alone would leave it pointing at
+# a replacement template that cannot render, and the restart would fail again. A file that is
+# already its last verified version is left alone, so on an already-cut-over host a routine
+# `-t openbao` run that trips the health check for an unrelated reason (a briefly sealed vault)
+# changes nothing but the restart. The kubeconfig marker goes only if this run wrote it. Then every
+# ~/.git-credentials naming another login than the restored credential template is removed, the
+# username is re-pinned to that login, and the agent restarted. The result is registered
+# (dev_worker_rollback) for the caller to report: rc 0 and the restored login on stdout, or why the
+# rollback did not verify on stderr.
+- name: Roll back to the last verified config and login, and verify the rollback
+  ansible.builtin.shell: |
+    set -u
+    good=/etc/openbao-agent/git-credentials.ctmpl.last-good
+    login_of() { sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "$1" 2>/dev/null; }
+    for f in{% for f in dev_worker_openbao_switch_files %} {{ ('/etc/openbao-agent/' ~ f) | quote }}{% endfor %}; do
+      if [ -f "$f.last-good" ] && ! cmp -s "$f.last-good" "$f"; then cp -p "$f.last-good" "$f"; fi
+    done
+    {% if dev_worker_marker_written.changed | default(false) | bool %}
+    rm -f /etc/openbao-agent/renders-kubeconfigs
+    {% endif %}
+    if [ ! -f "$good" ]; then
+      systemctl restart openbao-agent
+      echo "no last verified credential template ($good): the login could not be restored" >&2
+      exit 1
+    fi
+    prev="$(sed -n 's#^.*https://\([^:/@]*\):.*$#\1#p' "$good" | head -n 1)"
+    case "$prev" in
+      dev-worker-bot | dev-worker-[0-9]*-bot) ;;
+      *) echo "no slot login can be read from $good" >&2; exit 1 ;;
+    esac
+    {% for user in dev_worker_users %}
+    u={{ user.name | quote }}; f={{ (user.home ~ '/.git-credentials') | quote }}; g={{ (user.home ~ '/.gitconfig') | quote }}
+    if [ -e "$f" ] && [ "$(login_of "$f")" != "$prev" ]; then rm -f "$f"; fi
+    runuser -u "$u" -- git config --file "$g" credential.https://git.chifor.me.username "$prev" || { echo "could not re-pin $prev for $u" >&2; exit 1; }
+    {% endfor %}
+    systemctl restart openbao-agent || true
+    for _ in $(seq 1 30); do
+      ok=1
+      [ "$(systemctl is-active openbao-agent)" = active ] || ok=0
+      {% for user in dev_worker_users %}
+      [ "$(login_of {{ (user.home ~ '/.git-credentials') | quote }})" = "$prev" ] || ok=0
+      {% endfor %}
+      [ "$ok" = 1 ] && break
+      sleep 2
+    done
+    [ "$ok" = 1 ] || { echo "rollback to $prev did NOT verify: the agent is not active, or a ~/.git-credentials does not name $prev" >&2; exit 1; }
+    echo "$prev"
+  args:
+    executable: /bin/bash
+  register: dev_worker_rollback
+  changed_when: true
+  failed_when: false

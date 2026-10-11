@@ -12,11 +12,11 @@
   gather_facts: true
   pre_tasks:
     # Load the SOPS secrets whenever the (optional, gitignored-until-created) secrets file EXISTS —
-    # not only when a toggled feature needs it. git_forge.yml consumes dev_worker_gitea_token
-    # UNCONDITIONALLY (it has no feature toggle; the token itself is the on/off switch), so gating
-    # the load on the restic/cloudflared/password/agentforge toggles silently skipped the token and
-    # left the workers without forge credentials. File presence is the operator's signal; the two
-    # tasks stay safe on a fresh clone where only the .example exists.
+    # not only when a toggled feature needs it: the OpenBao AppRole logins and the web gate's LAN
+    # credential have no feature toggle of their own (and gating the load on the restic/cloudflared/
+    # password/agentforge toggles once left the workers without forge credentials, when those still
+    # came from here). File presence is the operator's signal; the two tasks stay safe on a fresh
+    # clone where only the .example exists.
     - name: Check for the dev-worker secrets file (control node)
       ansible.builtin.stat:
         path: "{{ playbook_dir }}/secrets/dev-worker.sops.yaml"

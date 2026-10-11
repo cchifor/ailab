@@ -1,0 +1,209 @@
+---
+# Per-slot git commit identity for the dev-worker users (plan 2026-10-11 worker identities, Phase 1).
+# Nothing set user.name/user.email here before, so agent commits went out as the owner, as
+# `Codex <codex@chifor.me>`, or as git's hostname fallback `Ubuntu <c4@dev-worker-N.lan>`: worker
+# work read as the owner's own in history. Every user now commits as this slot's bot
+# (dev_worker_git_user_name / _email). NOT gated on dev_worker_gitea_identity_cutover: who made a
+# commit does not depend on which token pushes it.
+#
+# Writes ~/.gitconfig BY NAME, like git_credential_helper.yml: `git config --global` reads
+# ~/.config/git/config too but writes only one of the two. The module's default add_mode,
+# replace-all, collapses duplicate values, so a second hand-added user.name cannot outrank this one.
+#
+# Tagged so it can be rolled out alone: ansible-playbook dev-workers.yml -t git-identity
+- name: Set each user's git commit identity to this slot's bot
+  become: true
+  become_user: "{{ item.0.name }}"
+  community.general.git_config:
+    name: "user.{{ item.1.key }}"
+    scope: file
+    file: "{{ item.0.home }}/.gitconfig"
+    value: "{{ item.1.value }}"
+  loop: "{{ dev_worker_users | product({'name': dev_worker_git_user_name, 'email': dev_worker_git_user_email} | dict2items) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: user.{{ item.1.key }}"
+  tags: [git-identity]
+
+# ~/.gitconfig is only one layer, and on the live workers it was not the one that mattered: with no
+# global identity, agents set user.name/user.email ad hoc in REPOSITORY config — `Constantin
+# <chifor@gmail.com>`, `Codex <codex@chifor.me>`, even `gitea_admin <gitea@local.domain>` in
+# /workspace/c4/* and /home/c4/platform (read-only survey of dw1/dw3/dw4, 2026-10-11). No global,
+# profile, environment or codex-config override was found. So this task, for each user:
+#   - finds that user's checkouts: a bounded walk (depth 4, tool caches and dependency trees skipped)
+#     of the home and /workspace/<user> for `.git` directories AND files (linked worktrees, external
+#     git dirs), plus every worktree the main checkouts register;
+#   - CORRECTS what the role now owns there: user.name/user.email in the repository's config and in
+#     the checkout's config.worktree are unset as that user (so the global identity applies), unless
+#     the checkout is under dev_worker_git_identity_keep_paths. Under --check it only says "would
+#     correct". The agents' instructions (openbao.yml) tell them never to set an identity again;
+#   - then asks git, AS THAT USER and in each checkout, which author and committer it would use (`git
+#     var`, config only — environment cleared), and reports every one that is not this slot's bot,
+#     and every checkout git refuses to open;
+#   - reports GIT_AUTHOR_*/GIT_COMMITTER_* exported by the users' profiles, the agent units or env
+#     files, or present in a running process (a job keeps what it inherited until it restarts), by
+#     NAME and line only — those files hold secrets;
+#   - lists, as inventory only, global config that MIGHT matter (author.*/committer.* keys, includes,
+#     XDG user.*, EMAIL) when it differs from the slot's identity.
+# Overrides are reported, never fatal: the converge does not fail on them. Acceptance stays a real
+# agent-made commit after the next job start.
+- name: Correct repository-level identities and audit the effective one in every checkout
+  ansible.builtin.shell: |
+    set -u
+    # From /: every path is absolute, and a repository around the working directory (or a broken
+    # one) must not be discovered — git fails even `--file` reads then.
+    cd /
+    check={{ ansible_check_mode | ternary('1', '0') }}
+    want_name={{ dev_worker_git_user_name | quote }}
+    want_email={{ dev_worker_git_user_email | quote }}
+    want="$want_name <$want_email>"
+    keep=({% for p in dev_worker_git_identity_keep_paths %} {{ p | quote }}{% endfor %} )
+    keys='^((user|author|committer)\.(name|email)|include(if)?\..*)$'
+    envpat='(GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)|(^|[^A-Za-z0-9_])EMAIL)"?[[:space:]]*[:=]'
+    declare -A seen wouldfix gnow gdir cdir keepc listed
+    kept() { local k; for k in "${keep[@]}"; do case "$1/" in "${k%/}/"*) return 0 ;; esac; done; return 1; }
+    # <user> <home> <dir or ""> <AUTHOR|COMMITTER>: the identity git resolves from config alone
+    ident() {
+      local c=() out rc
+      [ -z "$3" ] || c=(-C "$3")
+      out="$(runuser -u "$1" -- env -i HOME="$2" PATH=/usr/bin:/bin git "${c[@]}" var "GIT_$4_IDENT" 2>&1)"; rc=$?
+      printf '%s\n' "$out" | head -n 1 | sed 's/ [0-9]* [-+][0-9]*$//'
+      return "$rc"
+    }
+    scan_env() { # <file...>: the variable name and line, never the value
+      local f n m v
+      for f in "$@"; do
+        [ -f "$f" ] && [ -r "$f" ] || continue
+        grep -noE "$envpat" "$f" 2>/dev/null | while IFS=: read -r n m; do
+          v="$(printf '%s' "$m" | grep -oE 'GIT_[A-Z_]+|EMAIL' | head -n 1)"
+          case "$v" in EMAIL) echo "inventory: $f:$n: EMAIL is set (used only without user.email)" ;; *) echo "override: $f:$n: $v is set" ;; esac
+        done
+      done
+    }
+    # Phase 1, before anything changes: the git dir and SHARED config of every checkout, and
+    # whether that shared config is kept. It is kept when ANY worktree of the repository (as git
+    # lists them, wherever they are) is under dev_worker_git_identity_keep_paths — decided per
+    # repository, so the order in which the walk meets its checkouts cannot change the outcome.
+    resolve() { # <user> <home> <dir>
+      local u="$1" h="$2" d="$3" dirs common w
+      if ! dirs="$(runuser -u "$u" -- env -i HOME="$h" PATH=/usr/bin:/bin git -C "$d" rev-parse --path-format=absolute --git-dir --git-common-dir 2>&1)"; then
+        echo "inaccessible: $d: $(printf '%s' "$dirs" | head -n 1)"; return 0
+      fi
+      gdir[$d]="$(printf '%s\n' "$dirs" | sed -n 1p)"; common="$(printf '%s\n' "$dirs" | sed -n 2p)"; cdir[$d]="$common"
+      ! kept "$d" || keepc[$common]=1
+      [ -z "${listed[$common]:-}" ] || return 0
+      listed[$common]=1
+      while read -r w; do ! kept "$w" || keepc[$common]=1; done < <(
+        runuser -u "$u" -- env -i HOME="$h" PATH=/usr/bin:/bin git -C "$d" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+    }
+    # Phase 2: the shared config as decided for the whole repository, a config.worktree as decided
+    # for that checkout alone, then the identity git resolves there.
+    checkout() { # <user> <home> <dir>
+      local u="$1" h="$2" d="$3" gd="${gdir[$3]}" common="${cdir[$3]}" f k keys keepit got role ok note=""
+      for f in "$common/config" "$gd/config.worktree"; do
+        [ -f "$f" ] && [ -z "${seen[$f]:-}" ] || continue
+        seen[$f]=1; keys=""
+        for k in user.name user.email; do git config --file "$f" --get-all "$k" >/dev/null 2>&1 && keys="$keys $k"; done
+        [ -n "$keys" ] || continue
+        keepit=""
+        if [ "$f" = "$common/config" ]; then keepit="${keepc[$common]:-}"; elif kept "$d"; then keepit=1; fi
+        if [ -n "$keepit" ]; then echo "kept: $f:$keys (dev_worker_git_identity_keep_paths)"; continue; fi
+        if [ "$check" = 1 ]; then echo "would correct: $f:$keys"; wouldfix[$f]=1; continue; fi
+        ok=1
+        for k in $keys; do runuser -u "$u" -- git config --file "$f" --unset-all "$k" || ok=0; done
+        if [ "$ok" = 1 ]; then echo "corrected: $f:$keys"; else echo "could not correct: $f:$keys"; fi
+      done
+      ! kept "$d" || return 0 # deliberately configured by the owner: not an override
+      [ -z "${keepc[$common]:-}" ] || note=" (its repository config is kept for a worktree under dev_worker_git_identity_keep_paths)"
+      for role in AUTHOR COMMITTER; do
+        if ! got="$(ident "$u" "$h" "$d" "$role")"; then echo "inaccessible: $d: $got"; return 0; fi
+        [ "$got" != "$want" ] || continue
+        # --check: what this run would correct is already said once, not again per checkout
+        if [ "$check" = 1 ] && { [ -n "${wouldfix[$common/config]:-}" ] || [ -n "${wouldfix[$gd/config.worktree]:-}" ] ||
+          [ "$got" = "${gnow[$role]:-}" ]; }; then continue; fi
+        echo "override: $d: ${role,,} is '$got'$note"
+      done
+    }
+    {% for user in dev_worker_users %}
+    u={{ user.name | quote }}; h={{ user.home | quote }}; ws={{ (dev_worker_workspace_mount ~ '/' ~ user.name) | quote }}
+    gset=1
+    [ "$(git config --file "$h/.gitconfig" --get user.name 2>/dev/null)" = "$want_name" ] || gset=0
+    [ "$(git config --file "$h/.gitconfig" --get user.email 2>/dev/null)" = "$want_email" ] || gset=0
+    gnow=()
+    for role in AUTHOR COMMITTER; do
+      got="$(ident "$u" "$h" "" "$role")" || got="unresolvable"
+      [ "$check" = 1 ] && [ "$gset" = 0 ] && gnow[$role]="$got"
+      [ "$got" = "$want" ] || [ -n "${gnow[$role]:-}" ] || echo "override: $u outside any repository: ${role,,} is '$got'"
+    done
+    [ "$check" = 0 ] || [ "$gset" = 1 ] || echo "would correct: $h/.gitconfig: user.name user.email"
+    for f in "$h/.config/git/config" "$h/.gitconfig"; do
+      [ -f "$f" ] || continue
+      out="$(git config --file "$f" --get-regexp "$keys" 2>/dev/null)"; rc=$?
+      [ "$rc" -le 1 ] || { echo "inaccessible: $f: unreadable (git config exit $rc)"; continue; }
+      printf '%s\n' "$out" | while read -r k v; do
+        case "$f:$k" in "$h/.gitconfig:user.name" | "$h/.gitconfig:user.email" | "$f:") continue ;; esac
+        [ "$v" != "$want_name" ] && [ "$v" != "$want_email" ] || continue
+        echo "inventory: $f: $k = $v"
+      done
+    done
+    scan_env "$h/.profile" "$h/.bashrc" "$h/.bash_profile" "$h/.bash_login" "$h/.zshrc" "$h/.zshenv" \
+      "$h/.pam_environment" "$h"/.config/environment.d/*.conf "$h"/.config/systemd/user/*.service \
+      "$h"/.config/systemd/user/*.d/*.conf "$h/.claude/settings.json" "$h/.claude/settings.local.json" \
+      "$h/.codex/config.toml"
+    mapfile -t found < <(
+      find "$h" "$ws" -maxdepth 4 \( -name node_modules -o -name .cache -o -name .local -o -name .npm \
+          -o -name .npm-global -o -name .cargo -o -name .rustup -o -name .pnpm-store -o -name .codex \
+          -o -name .tmp -o -name lost+found \) -prune -o -name .git \( -type d -o -type f \) -print -prune 2>/dev/null |
+        sed 's#/\.git$##' | while read -r d; do
+          echo "$d"
+          [ -d "$d/.git" ] || continue
+          runuser -u "$u" -- env -i HOME="$h" PATH=/usr/bin:/bin git -C "$d" worktree list --porcelain 2>/dev/null </dev/null | sed -n 's/^worktree //p'
+        done | sort -u)
+    for d in "${found[@]}"; do [ ! -d "$d" ] || resolve "$u" "$h" "$d" </dev/null; done
+    for d in "${found[@]}"; do [ -z "${gdir[$d]:-}" ] || checkout "$u" "$h" "$d" </dev/null; done
+    {% endfor %}
+    scan_env /etc/environment /etc/profile /etc/bash.bashrc /etc/profile.d/*.sh \
+      /etc/systemd/system/{claude-job@,agentforge,herdr,claude-dashboard,ttyd}.service \
+      /etc/systemd/system/{claude-job@,agentforge,herdr,claude-dashboard,ttyd}.service.d/*.conf \
+      /etc/agentforge/agentforge.env {{ (dev_worker_workspace_mount ~ '/agent-jobs') | quote }}/*/job.env \
+      /etc/claude-code/managed-settings.json
+    users=({% for user in dev_worker_users %} {{ user.name | quote }}{% endfor %} )
+    is_user() { local x; for x in "${users[@]}"; do [ "$x" != "$1" ] || return 0; done; return 1; }
+    for p in /proc/[0-9]*; do
+      is_user "$(stat -c %U "$p" 2>/dev/null)" || continue
+      for v in $(tr '\0' '\n' <"$p/environ" 2>/dev/null | grep -oE '^(GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)|EMAIL)=' | tr -d =); do
+        case "$v" in
+          EMAIL) echo "inventory: pid ${p#/proc/} ($(cat "$p/comm" 2>/dev/null)) has EMAIL in its environment" ;;
+          *) echo "override: pid ${p#/proc/} ($(cat "$p/comm" 2>/dev/null)) has $v in its environment" ;;
+        esac
+      done
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: dev_worker_git_identity_audit
+  # Runs under --check too (it then only reports, check=1 above), so a check run predicts the real one.
+  check_mode: false
+  changed_when: >-
+    (dev_worker_git_identity_audit.stdout_lines | select('match', '^corrected: ') | list | length > 0)
+    or (ansible_check_mode and (dev_worker_git_identity_audit.stdout_lines | select('match', '^would correct: ') | list | length > 0))
+  tags: [git-identity]
+
+# Actionable lines (corrected / would correct / kept / override / inaccessible) are printed in full;
+# only the inventory is capped.
+- name: Report the commit identity corrections and the overrides that remain
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['Commit identity on ' ~ inventory_hostname ~ ' (wanted: ' ~ dev_worker_git_user_name ~ ' <'
+          ~ dev_worker_git_user_email ~ '>)' ~ (' - CHECK MODE, nothing was changed' if ansible_check_mode else '')
+          ~ '. corrected / would correct = repository identity this run removes; override = an effective'
+          ~ ' identity or variable that still differs (remove it, or list the checkout in'
+          ~ ' dev_worker_git_identity_keep_paths); inventory = config that may matter, not an override by itself:']
+         + dev_worker_git_identity_actionable
+         + dev_worker_git_identity_inventory[:40]
+         + (['... and ' ~ (dev_worker_git_identity_inventory | length - 40) ~ ' more inventory lines']
+            if dev_worker_git_identity_inventory | length > 40 else []) }}
+  vars:
+    dev_worker_git_identity_actionable: "{{ dev_worker_git_identity_audit.stdout_lines | default([]) | reject('match', '^inventory: ') | list }}"
+    dev_worker_git_identity_inventory: "{{ dev_worker_git_identity_audit.stdout_lines | default([]) | select('match', '^inventory: ') | list }}"
+  when: dev_worker_git_identity_audit.stdout_lines | default([]) | length > 0
+  tags: [git-identity]

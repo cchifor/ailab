@@ -50,6 +50,9 @@ STUB_HOST="dev-worker-test"
 TOKEN="stub-sink-token-000111222"
 SHARED_VALUE="stub-shared-gitea-pat-abcdef"
 HOST_VALUE="stub-host-only-value"
+# A slot's own Gitea token, in its FLAT document af/dev-workers/<hostname> (worker identities plan,
+# 2026-10-11): `cred get <hostname> gitea_pat` must reach it through the shared-path fallback.
+SLOT_VALUE="stub-slot-gitea-pat-333333"
 SINK="$WORK/token"
 printf '%s' "$TOKEN" >"$SINK"
 
@@ -79,6 +82,7 @@ case "\$sub" in
     case "\$path|\$field" in
       "dev-workers/common|gitea_pat") printf '%s' "$SHARED_VALUE"; exit 0 ;;
       "dev-workers/$STUB_HOST/personal|token") printf '%s' "$HOST_VALUE"; exit 0 ;;
+      "dev-workers/$STUB_HOST|gitea_pat") printf '%s' "$SLOT_VALUE"; exit 0 ;;
     esac
     echo "No value found at af/data/\$path" >&2; exit 2 ;;
   "kv list")
@@ -152,6 +156,16 @@ assert_eq "$OUT" "" "A3b: ...prints nothing on stdout"
 assert_contains "$ERR" "af/dev-workers/nope" "A3c: ...and names the shared candidate it tried"
 assert_contains "$ERR" "af/dev-workers/$STUB_HOST/nope" "A3d: ...and the host candidate"
 
+# The slot's flat document. <name> = the hostname makes the host-subtree candidate the DOUBLED path
+# af/dev-workers/<host>/<host>, which does not exist; the fallback must then read exactly
+# af/dev-workers/<host> — the document the agent's per-slot credential template reads too.
+run_cred get "$STUB_HOST" gitea_pat
+assert_eq "$RC" "0" "A5a: 'cred get <hostname> gitea_pat' succeeds"
+assert_eq "$OUT" "$SLOT_VALUE" "A5b: ...and prints the slot's own value"
+assert_contains "$(sed -n 1p "$CALLS")" "dev-workers/$STUB_HOST/$STUB_HOST" "A5c: the doubled host path is tried first, and misses"
+assert_eq "$(sed -n 2p "$CALLS" | grep -o 'dev-workers/[^ ]*')" "dev-workers/$STUB_HOST" "A5d: ...then exactly af/dev-workers/<hostname>"
+assert_eq "$(grep -c 'kv get' "$CALLS")" "2" "A5e: ...and nothing after that hit"
+
 run_cred list
 assert_eq "$RC" "0" "A4a: 'cred list' succeeds"
 assert_contains "$OUT" "common" "A4b: ...and lists the shared subtree"
@@ -166,6 +180,14 @@ assert_eq "$OUT" "${#SHARED_VALUE}" "B1b: ...with the secret in the named env va
 case "$OUT$ERR" in
 *"$SHARED_VALUE"*) bad "B2: the value leaked into cred's own output" ;;
 *) ok "B2: the value never appears in cred's stdout/stderr" ;;
+esac
+
+# shellcheck disable=SC2016 # the CHILD shell must expand it — that is the property under test
+run_cred exec "$STUB_HOST" gitea_pat GITEA_TOKEN -- sh -c 'printf %s "$GITEA_TOKEN" | sha256sum'
+assert_eq "$OUT" "$(printf %s "$SLOT_VALUE" | sha256sum)" "B1c: 'cred exec <hostname> gitea_pat' hands the child the slot's value"
+case "$OUT$ERR" in
+*"$SLOT_VALUE"*) bad "B2b: the slot value leaked into cred's own output" ;;
+*) ok "B2b: ...and never prints it" ;;
 esac
 
 run_cred exec common gitea_pat GITEA_PAT -- sh -c 'exit 7'

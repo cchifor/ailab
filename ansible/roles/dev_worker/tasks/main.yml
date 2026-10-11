@@ -14,6 +14,22 @@
     fail_msg: "dev_worker targets amd64 Ubuntu (24.04 noble) VMs only."
   tags: [always]
 
+# The slot name is substituted into shell, a consul-template KV path and Gitea logins (the
+# git_identity.yml, openbao.yml and git-credentials.ctmpl.j2 consumers), so it is validated once,
+# before any of them, on every tag: only a slot-shaped name can reach them.
+- name: Assert the slot name and the Gitea logins derived from it
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname is match('^dev-worker-[0-9]+$')
+      - dev_worker_gitea_slot_user is match('^dev-worker-[0-9]+-bot$')
+      - dev_worker_gitea_user is match('^dev-worker(-[0-9]+)?-bot$')
+      - dev_worker_gitea_cred_name is match('^(common|dev-worker-[0-9]+)$')
+    fail_msg: >-
+      '{{ inventory_hostname }}' is not a dev-worker slot name (^dev-worker-[0-9]+$), or a Gitea login
+      or cred name derived from it is malformed; nothing that substitutes them has run.
+    quiet: true
+  tags: [always]
+
 # BEFORE the first `update_cache: true` (packages.yml), unconditionally and on every tag: Caddy's
 # Cloudsmith apt repo answers 402 Payment Required since 2026-10-09 (caddyserver/caddy#8184), and one
 # dead source in sources.list.d fails every apt cache update in this role. Caddy now comes from its
@@ -128,7 +144,13 @@
 - name: Gitea (git.chifor.me) forge git credentials — Gitea is master (ADR 0017)
   ansible.builtin.import_tasks: git_forge.yml
 
-# Needs users (users.yml). Owns ~/.git-credentials when enabled — git_forge.yml yields (see there).
+# Per-slot commit identity + the override audit. Needs dev_worker_users (users.yml, tagged always).
+# Not gated on openbao or the Gitea cut-over. Own tag: --tags git-identity.
+- name: Git commit identity (this slot's bot, every user)
+  ansible.builtin.import_tasks: git_identity.yml
+  tags: [git-identity]
+
+# Needs users (users.yml). The only writer of ~/.git-credentials — git_forge.yml requires it.
 - name: OpenBao credential plumbing (bao agent + cred helper — ADR 0020)
   ansible.builtin.import_tasks: openbao.yml
   when: dev_worker_enable_openbao | bool

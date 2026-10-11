@@ -334,11 +334,15 @@ If step 3 shows the old SAN set, the pod restarted before cert-manager finished 
 
 **The initial PR (#431) already shipped this step done** — `devworker-seeds.sops.yaml` landed
 SOPS-encrypted with the live PAT, so on first activation just confirm
-`sops filestatus` says `{"encrypted": true}` and move on to (d). The rest of this section is the
-ceremony for the placeholder/re-seed case (e.g. after the seed file is ever reset or a new path is
-added): the value to put in is the PAT the workers already use (`dev_worker_gitea_token` in
-`ansible/secrets/dev-worker.sops.yaml`), copied across **programmatically** — never through the
-terminal, never through a shell argument.
+`sops filestatus` says `{"encrypted": true}` and move on to (d).
+
+**Re-seeding** (the seed file was reset, or a token in it is lost) has no second copy to copy from:
+`dev_worker_gitea_token` in `ansible/secrets/dev-worker.sops.yaml` was removed on 2026-10-11 with the
+SOPS git-credential path, and the seed is now the only stored copy of the dev-worker Gitea tokens.
+Mint a replacement in the Gitea pod instead, write it into the seed with `sops edit` and an `EDITOR`
+patch script that receives the value on an inherited pipe — never through the terminal or a shell
+argument — as in the per-slot enrolment ceremony (`plans/2026-10-11-worker-identities-plan.md`,
+Phase 2 step 4), and revoke the token it replaces (*Rotation*).
 
 **Timing trap:** the provision Job is a run-once-per-day converger. If it already `succeeded` before
 your seed change merged, the new value sits unapplied until the daily reap/re-apply — force it
@@ -349,39 +353,13 @@ kubectl --context admin@ai -n openbao delete job openbao-devworker-provision
 flux --context admin@ai reconcile kustomization openbao -n flux-system
 ```
 
+Before committing the seed change:
+
 ```bash
 export SOPS_AGE_KEY_FILE="$(pwd)/kubernetes/infra/_out/age.agekey"   # main checkout; _out/ is gitignored
 SEEDS=kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml
-sops filestatus "$SEEDS"        # {"encrypted": true} once the orchestrator has encrypted it
-```
-
-```bash
-python3 - "$SEEDS" <<'PY'
-import json, pathlib, re, subprocess, sys, yaml
-
-def plaintext(path):
-    """sops -d if the file is encrypted, else read it as-is (pre-first-encryption state)."""
-    status = json.loads(subprocess.run(["sops", "filestatus", path],
-                                       capture_output=True, text=True, check=True).stdout)
-    if not status.get("encrypted"):
-        return pathlib.Path(path).read_text()
-    return subprocess.run(["sops", "-d", path],
-                          capture_output=True, text=True, check=True).stdout
-
-pat = yaml.safe_load(plaintext("ansible/secrets/dev-worker.sops.yaml"))["dev_worker_gitea_token"]
-assert pat and not pat.startswith("CHANGE-ME"), "dev_worker_gitea_token is unset/placeholder"
-
-seeds = sys.argv[1]
-src = plaintext(seeds)
-new, n = re.subn(r'\{"gitea_pat": "[^"]*"\}', json.dumps({"gitea_pat": pat}), src)
-assert n == 1, f"expected exactly 1 gitea_pat value in {seeds}, found {n}"
-pathlib.Path(seeds).write_text(new)
-print(f"substituted 1 gitea_pat value, length {len(pat)}")   # NAME + length only, never the value
-PY
-
-sops -e -i "$SEEDS"
-sops filestatus "$SEEDS"                       # must now be {"encrypted": true}
-grep -E '^\s+common\.json: ENC\[' "$SEEDS"     # the value line must be ciphertext
+sops filestatus "$SEEDS"                       # must be {"encrypted": true}
+grep -E '^\s+common\.json: ENC\[' "$SEEDS"     # the value lines must be ciphertext
 git diff --stat -- "$SEEDS"                    # only this file
 ```
 
@@ -633,6 +611,94 @@ marker on any of them), so the steps above describe the helmtest half only. With
 gone, `dev_worker_enable_openbao: false` provisions no kubeconfig at all — the flag is a
 staged-rollout switch, not a supported steady state (ADR 0021).
 
+## Gitea identity cut-over (per slot)
+
+Moves ONE slot from the shared `dev-worker-bot` to its own `dev-worker-N-bot`
+(`plans/2026-10-11-worker-identities-plan.md`, Phase 4). `dev_worker_gitea_identity_cutover: true`
+in `ansible/host_vars/dev-worker-N.yml` switches three things together: the login and document behind
+`~/.git-credentials` (`af/dev-workers/common` → the slot's own `af/dev-workers/dev-worker-N`, fields
+`gitea_pat`/`gitea_repo_pat`/`gitea_package_pat`), the pinned
+`credential.https://git.chifor.me.username`, and `cred … common …` → `cred … dev-worker-N …` in the
+agents' instructions. With the gate false all three render exactly as before. Commit identity
+(`dev-worker-N-bot <dev-worker-N-bot@noreply.git.chifor.me>`) is already per slot and does not depend
+on it. Canary first, one slot per day, never in `group_vars`.
+
+**1. Pre-flight, on the slot.** The role repeats the vault half itself and stops before rendering
+anything if it fails; the `/user` call is yours (it needs the forge, a converge does not). Every
+`/user` call below sends the token as a header read from STDIN (`-H @-`, from the `printf` builtin),
+never in argv or on the terminal, with a browser User-Agent: Cloudflare answers 403 `error code:
+1010` to curl's own on git.chifor.me/api, which reads like a bad token.
+
+```bash
+ssh c4@<slot-ip>
+hostname -s                                                    # dev-worker-N
+for f in gitea_pat gitea_repo_pat gitea_package_pat; do        # lengths only, never values
+  printf '%s %s\n' "$f" "$(cred get dev-worker-N "$f" | wc -c)"; done
+cred exec dev-worker-N gitea_pat T -- sh -c 'printf "Authorization: token %s\n" "$T" |
+  curl -sS -A Mozilla/5.0 -H @- https://git.chifor.me/api/v1/user' |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["login"], d["is_admin"])'
+# expect: dev-worker-N-bot False
+```
+
+**2. Drain the slot.** The bao agent renders the new line before `pin_gitea_username.yml` re-pins,
+and git finds no credential in between. No agent job or interactive session may run during the
+converge: check `who`, `pgrep -a -u c4 'claude|codex'` and
+`systemctl list-units 'claude-job@*' --state=running`, and hold new work until step 4 passes.
+
+**3. Flip the gate (a reviewed PR to `host_vars/dev-worker-N.yml`) and converge that slot only:**
+
+```bash
+cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
+  ansible-playbook dev-workers.yml -l dev-worker-N -t openbao
+```
+
+The role: pre-flights (`hostname -s` is the inventory name; the three fields readable under the
+slot's own AppRole, non-empty, not the shared token), then switches as one guarded unit
+(`tasks/openbao_switch.yml`): lays down the template, removes a `~/.git-credentials` that names the
+other login, restarts the agent, requires the rendered line to name `dev-worker-N-bot`, pins it and
+records every file it manages (`agent.hcl`, the credential and kubeconfig/platform templates) as
+its last verified version (`<file>.last-good`). Any failure in there — the restart included — puts
+ALL of them back to their last verified versions, removes a line naming another login, re-pins that
+login, restarts, and checks the result: the play then fails with `ROLLED BACK AND VERIFIED` (the slot is on
+`dev-worker-bot` again) or `THE ROLLBACK DID NOT VERIFY` (no working forge credential — fix by hand
+before anything else). **Stop the rollout either way.** A converge that was interrupted is completed
+by the next one: a missing credential forces the render. If the next one's pre-flight fails instead
+(the slot's token became unreadable meanwhile), it rolls the unfinished switch back to the last
+verified login before failing, and says so. The agent is only ever restarted by that guarded task —
+no handler restarts it — so a failed restart, whatever needed it, is rolled back the same way.
+
+**A fresh or rebuilt slot whose `host_vars` already set the gate** (the end state of every slot) has
+no agent sink token yet, so `cred` cannot read the vault on its first converge. The pre-flight then
+checks only the hostname and DEFERS the field checks, and the switch seeds the shared login as the
+slot's rollback target. The field checks run inside the guarded switch, after the agent has started
+and the render is verified. A missing field, or a field that is the shared token, therefore rolls
+the fresh slot back to `dev-worker-bot` like any other failed switch. No operator gate-flipping is
+needed.
+
+**4. Verify on the slot** (then the canary checks in the plan's Phase 4 step 5). The acceptance is
+the RENDERED credential authenticating as the right account — not the vault's copy, which step 1
+already checked:
+
+```bash
+sed -n 's#^https://\([^:/@]*\):.*#\1#p' ~/.git-credentials       # dev-worker-N-bot (login only)
+git config --global credential.https://git.chifor.me.username     # dev-worker-N-bot
+# the token rendered into ~/.git-credentials, held in memory and sent on stdin; prints login + is_admin
+tok="$(sed -n 's#^https://[^:]*:\([^@]*\)@git\.chifor\.me$#\1#p' ~/.git-credentials)"
+printf 'Authorization: token %s\n' "$tok" | curl -sS -A Mozilla/5.0 -H @- https://git.chifor.me/api/v1/user |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["login"], d["is_admin"])'; unset tok
+# expect: dev-worker-N-bot False
+git ls-remote https://git.chifor.me/cchifor/ailab HEAD >/dev/null && echo ls-remote-ok
+```
+
+Sessions started before the converge keep the old instructions (`cred … common …`, which still
+works until Phase 5) until they restart.
+
+**Rollback:** set the gate back to `false` (or drop the line), drain, run the same converge. One run
+removes the `dev-worker-N-bot` line, re-renders `dev-worker-bot` from `common`, re-pins it and restores
+the `common` instructions; verify with step 4 — the rendered credential's `/user` must now print
+`dev-worker-bot False`. It needs `common`'s shared tokens, so it is available only until Phase 5
+revokes them.
+
 ## Host-owned codex logins (dev workers, since 2026-09-29)
 
 > **Since 2026-10-09 the dev workers' Codex runs on the LLM router**, not on these logins
@@ -784,11 +850,12 @@ manual reload above leaves `outcome` at whatever the last CronJob run stamped un
 
 ## Rotation
 
-**A seeded KV value (e.g. the Gitea PAT).** Two writes, one change — or the daily Job reverts you:
+**A seeded KV value (e.g. the Gitea PAT).** Change the seed, not live KV — the daily Job reverts a live edit:
 
 1. Mint the new PAT in Gitea.
-2. Update `ansible/secrets/dev-worker.sops.yaml` (`dev_worker_gitea_token`) **and**
-   `devworker-seeds.sops.yaml` (step (c) above re-runs unchanged and does both consistently).
+2. Update `devworker-seeds.sops.yaml` — the only stored copy (the second one,
+   `dev_worker_gitea_token` in `ansible/secrets/dev-worker.sops.yaml`, was removed on 2026-10-11 with
+   the SOPS git-credential path).
 3. Merge. The next `openbao-devworker-provision` run patches KV; each worker's `bao agent` re-renders
    `~/.git-credentials` when the template's source value changes.
 4. To make it immediate rather than within a day: delete the Job and let Flux recreate it
