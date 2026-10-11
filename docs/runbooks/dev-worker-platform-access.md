@@ -363,3 +363,35 @@ revoke the live grant.
 | `platform psql`: "FATAL: too many connections for role" | more than 10 concurrent sessions for this slot | close sessions; `pg_stat_activity` (readable via `pg_monitor`) shows them. The sync also refuses to rotate while a slot is at its limit (it would commit a password it could not then prove), so a run may exit with "capacity or transport" until the sessions drain — that is the safe outcome, not a fault |
 | A query on a replica is cancelled mid-scan | `max_standby_streaming_delay` | re-run with `--rw` |
 | `KubeJobFailed` on `openbao-platform-pg-sync` | see the Job's log — OpenBao login (role missing / sealed), Postgres unreachable, or a proof failure | nothing expires for 14 days; fix and let the next run converge |
+
+## Temporary objectstore restore planning observer (remove by 2026-10-18)
+
+`objectstore-restore-observer-dw2` permits only `platform-dw2` to read four
+named objects: the Velero Deployment and node-agent DaemonSet in `velero`,
+StorageClass `nfs-csi`, and production PV
+`pvc-73726d9c-d190-4de9-8057-f17bc8996a3b`. Its ADR 0028 amendment explains
+the cluster-scoped exception. Existing Backup/PVB/Restore/PVR observation is
+unchanged. This grant does not create a restore, touch storage, or add Secret,
+backup-download, exec, port-forward, log or write access.
+
+Read only the required fields, preserving the full image digest when available:
+
+```sh
+platform kubectl -n velero get deployment velero -o jsonpath='{.spec.template.spec.containers[*].image}'
+platform kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.containers[*].image}'
+platform kubectl get storageclass nfs-csi -o jsonpath='{.provisioner} {.reclaimPolicy} {.volumeBindingMode}'
+platform kubectl get pv pvc-73726d9c-d190-4de9-8057-f17bc8996a3b -o jsonpath='{.metadata.uid} {.spec.claimRef.uid} {.spec.csi.driver} {.spec.csi.volumeHandle} {.spec.persistentVolumeReclaimPolicy}'
+```
+
+The PV includes internal storage topology and may name credential references;
+the workloads include full pod templates. Keep evidence to image identities,
+volume identity and provisioning behavior; do not print environment values or
+fetch secret-bearing backup archives. See the staged
+[isolated restore plan](objectstore-isolated-restore.md) before preparing any
+activating change.
+
+Remove all four same-named RBAC objects and
+`scripts/tests/test_objectstore_restore_observer.py` after planning or by
+**2026-10-18**, whichever comes first. Removal is tracked by
+[ailab #1242](https://git.chifor.me/cchifor/ailab/issues/1242); the annotation
+has no automatic enforcement.

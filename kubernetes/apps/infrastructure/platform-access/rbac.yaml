@@ -453,3 +453,98 @@ roleRef:
   kind: Role
   name: objectstore-monitor-observer-dw2
   apiGroup: rbac.authorization.k8s.io
+
+---
+# Temporary restore planning observation; remove all four documents by 2026-10-18.
+# ADR 0028 amendment 2026-10-11; removal tracker ailab#1242.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: objectstore-restore-observer-dw2
+  namespace: velero
+  annotations:
+    platform-access.chifor.me/remove-by: '2026-10-18'
+    platform-access.chifor.me/removal-issue: https://git.chifor.me/cchifor/ailab/issues/1242
+    platform-access.chifor.me/purpose: Inspect exact Velero versions and source volume
+      identity for isolated restore planning
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  resourceNames:
+  - velero
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  resourceNames:
+  - node-agent
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: objectstore-restore-observer-dw2
+  namespace: velero
+  annotations:
+    platform-access.chifor.me/remove-by: '2026-10-18'
+    platform-access.chifor.me/removal-issue: https://git.chifor.me/cchifor/ailab/issues/1242
+    platform-access.chifor.me/purpose: Inspect exact Velero versions and source volume
+      identity for isolated restore planning
+subjects:
+- kind: ServiceAccount
+  name: platform-dw2
+  namespace: platform-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: objectstore-restore-observer-dw2
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: objectstore-restore-observer-dw2
+  annotations:
+    platform-access.chifor.me/remove-by: '2026-10-18'
+    platform-access.chifor.me/removal-issue: https://git.chifor.me/cchifor/ailab/issues/1242
+    platform-access.chifor.me/purpose: Inspect exact Velero versions and source volume
+      identity for isolated restore planning
+rules:
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  resourceNames:
+  - nfs-csi
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - persistentvolumes
+  resourceNames:
+  - pvc-73726d9c-d190-4de9-8057-f17bc8996a3b
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: objectstore-restore-observer-dw2
+  annotations:
+    platform-access.chifor.me/remove-by: '2026-10-18'
+    platform-access.chifor.me/removal-issue: https://git.chifor.me/cchifor/ailab/issues/1242
+    platform-access.chifor.me/purpose: Inspect exact Velero versions and source volume
+      identity for isolated restore planning
+subjects:
+- kind: ServiceAccount
+  name: platform-dw2
+  namespace: platform-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: objectstore-restore-observer-dw2

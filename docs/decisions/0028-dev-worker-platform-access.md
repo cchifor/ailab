@@ -333,6 +333,37 @@ apply every minute instead.
 annotation records the date. Kubernetes does not enforce it. The grant lets the workers observe and
 record. Merging #2221 and activating the later TLS stage stay owner decisions.
 
+## Amendment 2026-10-11 — temporary restore planning observer (dw2)
+
+**Trigger.** Platform [#2219](https://git.chifor.me/cchifor/platform/pulls/2219)
+needs evidence that the shared object store can be restored before changing its
+serving path. Completed Velero backups are observable, but the live controller
+version and backing-volume identity are not. This grant establishes those facts;
+it does not authorize or activate a Restore.
+
+**Grant.** Four objects named `objectstore-restore-observer-dw2` in
+`kubernetes/apps/infrastructure/platform-access/rbac.yaml`, bound only to
+`platform-access/platform-dw2`. The Role permits named `get` on
+`velero/Deployment/velero` and `velero/DaemonSet/node-agent`. The ClusterRole
+permits named `get` on StorageClass `nfs-csi` and PV
+`pvc-73726d9c-d190-4de9-8057-f17bc8996a3b`. No list/watch, Secret, ConfigMap,
+DownloadRequest, exec, log, port-forward or write grant is added.
+
+**Cluster-scoped exception.** StorageClass and PersistentVolume have no
+namespaced equivalent. This amendment permits exactly these two named reads,
+not storage inventory discovery. PV observation exposes the NFS server/share,
+CSI driver and volume handle, claim UID and reclaim policy. Secret reference
+names can be visible; referenced credentials remain denied. Version observation
+exposes the two workload specifications, including image identities and reference
+names. Only sanitized identity/version receipts should enter review evidence;
+do not print environment values or collect the backup archive.
+
+**Temporary.** Remove all four RBAC objects and their regression test after
+planning or by **2026-10-18**, whichever comes first, tracked by
+[ailab #1242](https://git.chifor.me/cchifor/ailab/issues/1242). The date is an
+explicit cleanup obligation; RBAC has no automatic expiry. Future scratch
+namespace observation requires a separately reviewed grant.
+
 ## Follow-ups
 
 - **OpenBao's `database` secrets engine** for per-lease Postgres credentials, if revocation ever
