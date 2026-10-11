@@ -159,26 +159,19 @@ spec:
       defaultVolumesToFsBackup: true
       # (`defaultSnapshotMoveData: true` removed here on 2026-08-30 — it is what armed the QTS clone
       # path on every schedule. The chart renders that arg with `with`, so absent == false == off.)
-      # Lets Kopia's full maintenance get past a short-pack rewrite failure, but only when the content
-      # that failed is ALREADY MARKED DELETED, i.e. bytes no snapshot references. Added 2026-10-11 for a
-      # deadlock on the `databases` repo, whose full maintenance had failed every day since 09-17 with
-      # "error rewriting contents in short packs: failed to rewrite 14 contents":
-      #   - 17 pack blobs of one Kopia session, written 2026-09-08 02:04Z during the versitygw USB stall
-      #     described at fsBackupTimeout above, never landed. A read-only `kopia content verify
-      #     --include-deleted` on 10-11 found 134 contents in those 17 missing packs, all marked deleted,
-      #     and `kopia snapshot verify` over every snapshot found nothing that needs them.
-      #   - runFullMaintenance (repo/maintenance/maintenance_run.go, upstream and Velero's fork) runs that
-      #     rewrite FIRST and returns on any failure. Dropping deleted index entries, deleting orphaned
-      #     packs, and epoch and log cleanup come after it, so none of them had run on that repo since
-      #     09-16. The only step that can drop the dead entries is one the failure prevents. The 10-10
-      #     run's GC reported 227.2 GB of unused contents still sitting in the bucket.
-      # The flag is checked in content_rewrite.go: a failure on a deleted content is logged as IGNORED,
-      # and a failure on a live content still fails maintenance. Velero copies this container's env into
-      # every repo-maintenance Job (buildJob -> GetEnvVarsFromVeleroServer), and that is the only way to
-      # reach those Jobs. The chart also renders configuration.extraEnvVars into the node-agent
-      # DaemonSet, where it is inert: node-agent runs backup uploads and restores, never maintenance.
-      # Changing this list restarts both. It stays on permanently: storage loss confined to garbage would
-      # otherwise stop GC again, and on a repo with no such loss it changes nothing.
+      # TEMPORARY (2026-10-11, ailab#1240): delete this entry once the `databases` repo's full maintenance
+      # has succeeded and the dead index entries are gone. That repo's full maintenance failed every day
+      # from 09-17: the short-pack rewrite, which runs first and stops the whole pass on any failure, kept
+      # failing on contents whose packs were lost in the 2026-09-08 versitygw stall (all marked deleted;
+      # no snapshot uses them). So the later steps that would drop them never ran.
+      # The flag skips a rewrite failure only for a content already marked deleted; a missing pack under
+      # live data still fails maintenance. Velero copies this container's env into every repo-maintenance
+      # Job (buildJob -> GetEnvVarsFromVeleroServer). The chart also puts it on node-agent, where it is
+      # inert: node-agent never runs maintenance. Changing this list restarts both.
+      # Why not keep it: with it on, the next time storage drops acknowledged writes the only trace is an
+      # INFO line in a short-lived Job, not a failed maintenance Job and KubeJobFailed.
+      # To turn it off, REMOVE the entry. Velero's kopia fork (project-velero/kopia@d946b1e75197,
+      # repo/maintenance/content_rewrite.go) tests os.Getenv(...) != "", so value "false" still enables it.
       extraEnvVars:
         - name: KOPIA_IGNORE_MAINTENANCE_REWRITE_ERROR
           value: "true"
