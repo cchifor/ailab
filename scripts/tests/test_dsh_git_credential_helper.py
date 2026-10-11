@@ -430,6 +430,14 @@ class Wiring(unittest.TestCase):
         # One scoped section, no unscoped `[credential]` that would widen it.
         self.assertNotIn("\n[credential]\n", seeded)
 
+    def test_gitconfig_sets_one_commit_identity_linked_to_the_dsh_account(self):
+        # Worker identities, Phase 1 item 5: every dsh commit names the account that pushes it.
+        # The address is Gitea's no-reply form of the `dsh` login, which Gitea links to the account.
+        seeded = GITCONFIG.read_text(encoding="utf-8")
+        self.assertEqual(seeded.count("\n[user]\n"), 1)
+        self.assertIn("\tname = dsh\n", seeded)
+        self.assertIn("\temail = dsh@noreply.git.chifor.me\n", seeded)
+
     def test_helper_authority_matches_the_gitconfig_scope(self):
         # Two scoping layers, one authority: the gitconfig section and the
         # helper's own guard must name the same host and protocol.
