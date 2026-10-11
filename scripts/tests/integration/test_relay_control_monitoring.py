@@ -39,7 +39,11 @@ class Monitoring(unittest.TestCase):
                      'build', str(wrapper.relative_to(ROOT))).stdout
         cls.docs = list(yaml.safe_load_all(raw))
         configuration = yaml.safe_load((wrapper / 'kustomization.yaml').read_text())
-        configuration.setdefault('components', []).extend(os.path.relpath(ROOT / 'kubernetes/components' / component, wrapper) for component in ['relay-recovery-monitoring', 'relay-recovery-monitoring-schema43', 'relay-restore-fencing'])
+        configuration.setdefault('components', []).append(os.path.relpath(ROOT / 'kubernetes/components/relay-recovery-monitoring', wrapper))
+        (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
+        cls.baseline_recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+            'build', str(wrapper.relative_to(ROOT))).stdout))
+        configuration['components'].extend(os.path.relpath(ROOT / 'kubernetes/components' / component, wrapper) for component in ['relay-recovery-monitoring-schema43', 'relay-restore-fencing'])
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
         cls.recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
             'build', str(wrapper.relative_to(ROOT))).stdout))
@@ -49,7 +53,7 @@ class Monitoring(unittest.TestCase):
         cm_name = next(v['configMap']['name'] for v in cls.spec['volumes'] if v['name'] == 'metrics-setup')
         cm = named(cls.docs, 'ConfigMap', cm_name)
         (cls.root / 'materialize.mjs').write_text(cm['data']['materialize.mjs'])
-        checked = [d for d in cls.recovery_docs if d['kind'] in ('Deployment', 'Service', 'ConfigMap', 'NetworkPolicy', 'PersistentVolumeClaim')]
+        checked = [d for d in [*cls.docs, *cls.baseline_recovery_docs, *cls.recovery_docs] if d['kind'] in ('Deployment', 'Service', 'ConfigMap', 'NetworkPolicy', 'PersistentVolumeClaim')]
         docker('run', '--rm', '-i', KUBECONFORM, '-strict', '-summary', data=yaml.safe_dump_all(checked).encode())
         for name in ['input', 'output', 'policy']:
             (cls.root / name).mkdir()
@@ -125,7 +129,7 @@ class Monitoring(unittest.TestCase):
         self.assertRegex(policy['verifier-sha256'], r'^[a-f0-9]{64}$')
         self.assertEqual(policy['schema-version'], '43')
         for key, value in policy.items():
-            (self.root / 'policy' / key).write_text(value + '\n')
+            (self.root / 'policy' / key).write_text(value)
         self.run_setup(recovery='1')
         expected = {**self.config, 'recoveryEvidence': {'path': '/run/relay-recovery/private/evidence.json',
                     'verifierSha256': policy['verifier-sha256'], 'schemaVersion': int(policy['schema-version'])}}
@@ -147,6 +151,8 @@ class Monitoring(unittest.TestCase):
             (self.root / 'policy' / key).write_text(bad)
             self.run_setup(False, recovery='1')
             self.assertEqual(json.loads(target.read_text()), expected)
+        for filename, value in policy.items():
+            (self.root / 'policy' / filename).write_text(value)
         self.run_setup(False, recovery='2')
 
     def test_restore_generation_is_external_canonical_readonly_and_opt_in(self):
@@ -164,6 +170,9 @@ class Monitoring(unittest.TestCase):
         self.assertNotIn('relay-recovery-monitoring-schema43', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
         baseline = yaml.safe_load((ROOT / 'kubernetes/components/relay-recovery-monitoring/kustomization.yaml').read_text())
         self.assertIn('schema-version=42', baseline['configMapGenerator'][0]['literals'])
+        baseline_spec = named(self.baseline_recovery_docs, 'Deployment', 'relay')['spec']['template']['spec']
+        baseline_name = next(v['configMap']['name'] for v in baseline_spec['volumes'] if v['name'] == 'recovery-policy')
+        self.assertEqual(named(self.baseline_recovery_docs, 'ConfigMap', baseline_name)['data']['schema-version'], '42')
 
     def test_invalid_inputs_fail_closed_and_keep_last_complete_file(self):
         self.run_setup()
