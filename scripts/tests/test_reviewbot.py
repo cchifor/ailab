@@ -2681,9 +2681,12 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
         self.assertIn("codex=no review", " ".join(logged))
 
     def test_no_merge_personas_is_not_reported_as_a_posted_finding(self):
-        """A config with no merge personas holds every PR, but nobody posted a finding - it must
-        not page the dependency alert, whose remedy is to read one (codex cross-review of
-        #1272). The general gauge still counts it, as before."""
+        """With no merge personas configured, NO persona's verdict is part of the merge gate -
+        not even a finding this persona really posted, which the setup does on purpose. The PR
+        is held by the configuration, not by a finding anyone can act on, so it must not page
+        the dependency alert, whose remedy is to read one (codex cross-review of #1272). A
+        persona outside merge_personas never counts toward that alert. The general gauge still
+        counts the hold, as before (reviewer-claude on #1273 asked for this to be explicit)."""
         m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
                  merge_personas=[], persona="claude")
         self._pr_api(m, {"claude": "findings"})
@@ -2877,7 +2880,19 @@ class DependencyLaneTest(unittest.TestCase):
         notes named a feature the diff shows (codex cross-review of #1272). 1 major in 113
         renovate PRs - holding them costs nothing."""
         m = load(self.tmp.name)
-        self.assertRegex(m.DEPENDENCY_RUBRIC, r"MAJOR version[^.]*\.[^.]*severity=blocker")
+        bullet = re.search(r"^- The update is a MAJOR version change.*?(?=^- |\Z)",
+                           m.DEPENDENCY_RUBRIC, re.M | re.S)
+        self.assertIsNotNone(bullet, "the MAJOR hold is gone from the rubric")
+        self.assertIn("severity=blocker", bullet.group(0))
+        self.assertLess(m.DEPENDENCY_RUBRIC.index(bullet.group(0)),
+                        m.DEPENDENCY_RUBRIC.index("Do NOT hold the merge"),
+                        "the MAJOR bullet must sit under HOLD, not under the non-holds")
+
+    def test_a_calendar_version_year_roll_is_not_a_major(self):
+        """"The leading number moves" also matches 2025.x -> 2026.x, which is a routine release
+        for a calendar-versioned package, not a breaking one (reviewer-claude on #1273)."""
+        m = load(self.tmp.name)
+        self.assertIn("calendar version", m.DEPENDENCY_RUBRIC)
 
     def test_the_rubric_treats_the_bots_pr_text_as_untrusted(self):
         """Renovate fills the description with UPSTREAM release notes - text anyone upstream can
