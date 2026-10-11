@@ -2681,9 +2681,12 @@ class MergeBlockedVisibilityTest(unittest.TestCase):
         self.assertIn("codex=no review", " ".join(logged))
 
     def test_no_merge_personas_is_not_reported_as_a_posted_finding(self):
-        """A config with no merge personas holds every PR, but nobody posted a finding - it must
-        not page the dependency alert, whose remedy is to read one (codex cross-review of
-        #1272). The general gauge still counts it, as before."""
+        """With no merge personas configured, NO persona's verdict is part of the merge gate -
+        not even a finding this persona really posted, which the setup does on purpose. The PR
+        is held by the configuration, not by a finding anyone can act on, so it must not page
+        the dependency alert, whose remedy is to read one (codex cross-review of #1272). A
+        persona outside merge_personas never counts toward that alert. The general gauge still
+        counts the hold, as before (reviewer-claude on #1273 asked for this to be explicit)."""
         m = load(self.tmp.name, automerge=True, merge_authors=["renovate-bot"],
                  merge_personas=[], persona="claude")
         self._pr_api(m, {"claude": "findings"})
@@ -2877,7 +2880,29 @@ class DependencyLaneTest(unittest.TestCase):
         notes named a feature the diff shows (codex cross-review of #1272). 1 major in 113
         renovate PRs - holding them costs nothing."""
         m = load(self.tmp.name)
-        self.assertRegex(m.DEPENDENCY_RUBRIC, r"MAJOR version[^.]*\.[^.]*severity=blocker")
+        bullet = re.search(r"^- The update is a MAJOR version change.*?(?=^- |\Z)",
+                           m.DEPENDENCY_RUBRIC, re.M | re.S)
+        self.assertIsNotNone(bullet, "the MAJOR hold is gone from the rubric")
+        self.assertIn("severity=blocker", bullet.group(0))
+        self.assertLess(m.DEPENDENCY_RUBRIC.index(bullet.group(0)),
+                        m.DEPENDENCY_RUBRIC.index("Do NOT hold the merge"),
+                        "the MAJOR bullet must sit under HOLD, not under the non-holds")
+
+    def test_a_calendar_version_roll_is_held_like_any_major(self):
+        """NO calendar-version carve-out. Two rounds tried one (reviewer-claude on #1273, #1274):
+        exempting the leading-number trigger alone changed nothing, because Renovate's update
+        table labels a year roll `major`; exempting both let ubuntu:22.04 -> 24.04 through - a
+        calendar-versioned OS base image whose roll IS the breaking case. A qualifier ("unless a
+        base image") is one more model judgment that can silently widen. Held instead: no
+        calendar-versioned dependency is tracked today, and a routine roll costs one human
+        merge. This pins that the bullet says so and that no exemption creeps back in."""
+        m = load(self.tmp.name)
+        bullet = re.search(r"^- The update is a MAJOR version change.*?(?=^- |\Z)",
+                           m.DEPENDENCY_RUBRIC, re.M | re.S).group(0)
+        flat = " ".join(bullet.split())
+        self.assertIn("calendar versions are held too", flat)
+        self.assertNotIn("Exception", flat)
+        self.assertNotIn("whatever the update table says", flat)
 
     def test_the_rubric_treats_the_bots_pr_text_as_untrusted(self):
         """Renovate fills the description with UPSTREAM release notes - text anyone upstream can
