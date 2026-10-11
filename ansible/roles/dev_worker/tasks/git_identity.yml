@@ -27,9 +27,9 @@
 # ~/.gitconfig is only one layer. What still outranks it: a repository's (or linked worktree's)
 # config, author.*/committer.* keys anywhere (they beat user.*), an include, and GIT_AUTHOR_* /
 # GIT_COMMITTER_* in an agent's environment. REPORTED, not changed: none of those is this role's —
-# the role owns exactly user.name/user.email in ~/.gitconfig, set above, and tests/
-# test-gitea-identity.sh keeps the role itself from ever exporting an identity variable. A finding is
-# for the operator to remove (or bring into the role); a converge does not fail on it.
+# the role owns exactly user.name/user.email in ~/.gitconfig, set above, and
+# tests/test-gitea-identity.sh keeps the role itself from ever exporting an identity variable. A
+# finding is for the operator to remove (or bring into the role); a converge does not fail on it.
 #
 # Read-only and bounded:
 #   - `git var` outside any repository with a cleared environment: the config layers as git resolves
@@ -112,7 +112,7 @@
       {{ ['Commit identity overrides on ' ~ inventory_hostname ~ ' (wanted: ' ~ dev_worker_git_user_name ~ ' <'
           ~ dev_worker_git_user_email ~ '>). Reported, not changed; remove each or bring it into the role:']
          + dev_worker_git_identity_audit.stdout_lines[:60]
-         + ([] if dev_worker_git_identity_audit.stdout_lines | length <= 60
-            else ['... and ' ~ (dev_worker_git_identity_audit.stdout_lines | length - 60) ~ ' more'])) }}
+         + (['... and ' ~ (dev_worker_git_identity_audit.stdout_lines | length - 60) ~ ' more']
+            if dev_worker_git_identity_audit.stdout_lines | length > 60 else []) }}
   when: dev_worker_git_identity_audit.stdout_lines | default([]) | length > 0
   tags: [git-identity]
