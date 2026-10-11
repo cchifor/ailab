@@ -328,10 +328,12 @@ spec:
   # (af_broker_tokens_used_total). The dev workers left this login on 2026-09-29
   # (dev_worker_codex_host_owned_login) and have run Codex through the LLM router since 10-09.
   # reviewer-2 does not render it (pr_reviewer_enable_openbao: false); its seat a holds its own login.
-  # Suspended rather than deleted so that bringing it back is one line. To resume: re-seed per
-  # openbao-dev-workers.md § "Re-seeding after a revocation", prove it with a manual Job
-  # (`kubectl create job --from=cronjob/af-codex-refresh …` copies the jobTemplate and ignores
-  # `suspend`), then set this back to false.
+  # Suspended rather than deleted so that bringing it back is one line. To resume, follow
+  # openbao-dev-workers.md § "The shared codex login", "Re-seeding after a revocation": re-seed,
+  # prove it with a manual Job (`kubectl create job --from=cronjob/af-codex-refresh …` copies the
+  # jobTemplate and ignores `suspend`), then set this back to false. Setting it to false starts no
+  # catch-up run: startingDeadlineSeconds 300 below drops any missed schedule older than 5 minutes,
+  # so the next run is the next 03:00 UTC, unless the flip lands in the five minutes after one.
   suspend: true
   schedule: "0 3 * * *"
   timeZone: "Etc/UTC"

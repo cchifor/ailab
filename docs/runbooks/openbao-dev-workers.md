@@ -728,9 +728,13 @@ rm -rf "$SEED"
 #    proves the new family self-refreshes AND publishes the host projection (af/dev-workers/codex-auth),
 #    which is what the hosts re-render from (~5 min) — they do NOT see step 2's write directly:
 kubectl --context admin@ai -n agentforge-broker create job --from=cronjob/af-codex-refresh af-codex-refresh-manual-$(date +%s)
-# 4. Since 2026-10-11 the CronJob is suspended. Step 3's Job runs anyway (`create job --from` ignores
-#    `suspend`), but nothing rotates nightly until `suspend: false` is merged in
-#    kubernetes/apps/infrastructure/agentforge-codex-refresh/cronjob.yaml.
+# 4. Un-suspend the nightly rotation (suspended since 2026-10-11). Step 3's Job runs anyway, since
+#    `create job --from` ignores `suspend`, but nothing rotates nightly until this lands. Only after
+#    step 3's Job succeeded: un-suspending a CronJob whose login is still dead buys a 401 every night.
+#    In kubernetes/apps/infrastructure/agentforge-codex-refresh/cronjob.yaml set `suspend: false` and
+#    update its SUSPENDED notes, open the PR and merge it, then reconcile and verify:
+flux --context admin@ai reconcile kustomization agentforge-codex-refresh --with-source
+kubectl --context admin@ai -n agentforge-broker get cronjob af-codex-refresh -o jsonpath='{.spec.suspend}'   # must print false
 ```
 
 The status record (`bao kv metadata get …` → `custom_metadata`: `credential_version`, `expires_at`,

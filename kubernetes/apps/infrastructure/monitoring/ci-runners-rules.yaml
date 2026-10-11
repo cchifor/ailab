@@ -152,11 +152,19 @@ spec:
         # 2026-09-27) holds the private part under the cap. The shared part goes only when its images go,
         # which is the image prune's job, not the cache GC's. So the alert fired on normal operation: all
         # 8 runners, 23-33 firing episodes each in the 7 days to 10-11, with disks at 55-77%. It flapped too,
-        # because the busy-skip beacon omits build_cache_bytes and the series vanished between sweeps. A
-        # cache that matters shows up as disk first, and the disk is what this file pages on:
+        # because the series vanished between sweeps. That trap applies to every gitea_runner_cleanup_*
+        # field: write_beacon replaces the whole textfile, and every early exit (heal, busy-skip, pressure
+        # deferral) writes only busy_skip, pressure_defer, midjob_prune, last_run_seconds and
+        # disk_used_percent. A `for:` rule on any other field (build_cache_bytes, images_bytes,
+        # disk_freed_percent, reaped_containers, workspaces*) resets whenever a busy runner skips a sweep.
+        # A cache that matters shows up as disk first, and the disk is what this file pages on:
         # CIRunnerDiskPressureSustained (>=75% for 2h, the cache cap armed), CIRunnerCleanupStarved,
         # CIRunnerDiskWillFillSoon, CIRunnerDiskFilling, CIRunnerDiskCritical. If a GC-regression signal
         # is ever wanted, alert on PRIVATE cache bytes (`docker buildx du` Private), not on this total.
+        # When a disk alert does fire on a runner whose GC looks off, the two traps that switched it off
+        # before (the deprecated `defaultKeepStorage` key, and unprefixed `builder.gc` keys that dockerd
+        # drops while `--validate` still says OK) are written up in ansible/roles/github_runner/defaults/
+        # main.yml. The proof the cap is live is `docker buildx inspect default` showing "Max Used Space".
         # ---- dangling BuildKit record (gitea-runner-cleanup.sh section 0) ----
         # A cache record that points at a missing snapshot fails EVERY build reusing it, whatever the PR
         # (ci-runner-3 09-28, ci-runner-9 10-04, ci-runner-1 10-07 — each found by a human reading CI
