@@ -14,7 +14,8 @@
 # import (dev_worker_gitea_preflight_may_defer) then checks the hostname, prints "deferred" and
 # passes, and the second — inside the guarded switch, after the agent has started and the render is
 # verified, before the username pin — runs the field checks, where a failure rolls back to the shared
-# login like any other. Not deferred, a missing token is a failure.
+# login like any other. Not deferred, a missing token is a failure. Only a first switch defers: on a
+# slot already switched to its own bot (last verified template), no sink token means a dead agent.
 - name: Pre-flight this slot's own Gitea tokens (values never printed)
   ansible.builtin.shell: |
     set -o pipefail
@@ -22,6 +23,17 @@
     [ "$(hostname -s)" = "$slot" ] || { echo "hostname -s is '$(hostname -s)', not $slot" >&2; exit 90; }
     if [ ! -r {{ dev_worker_openbao_sink_token | quote }} ]; then
     {% if dev_worker_gitea_preflight_may_defer | bool %}
+      # Defer only a FIRST switch. A slot whose last verified credential template already names its
+      # own bot has been cut over before, so a missing sink token there means its agent is down (/run
+      # is tmpfs: a slot field gone from KV kills it at boot). Deferring would start that dying agent
+      # and roll back onto the same slot template; failing here says what is wrong and changes nothing.
+      good=/etc/openbao-agent/git-credentials.ctmpl.last-good
+      prev=""
+      [ -f "$good" ] && prev="$(sed -n 's#^.*https://\([^:/@]*\):.*$#\1#p' "$good" | head -n 1)"
+      if [ -n "$prev" ] && [ "$prev" != dev-worker-bot ]; then
+        echo "no agent sink token, but this slot was already switched to $prev: openbao-agent is not running (check its journal and af/dev-workers/$slot)" >&2
+        exit 95
+      fi
       echo "deferred: the agent has not run on this host yet, so there is no sink token to read with"
       exit 0
     {% else %}
