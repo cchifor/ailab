@@ -1,3 +1,7 @@
+# STATUS 2026-10-11: the CronJob below is SUSPENDED (`suspend: true`). OpenAI revoked the login it
+# rotates (seat a, af/operator/broker/openai/codex-pro/oauth) on 2026-09-29, and every run since 10-01
+# has failed with `codex oauth refresh returned HTTP 401`. The notes below describe the design, not who
+# uses it today: no host renders the projection any more (see the suspend note on the CronJob).
 # The wrapper the CronJob runs. Kept in a ConfigMap (mounted read-only) so the CronJob container can stay
 # on the orchestrator image with a hardened, readOnlyRootFilesystem securityContext. It is a pure-stdlib
 # python3 script (urllib) that talks to the OpenBao REST API directly — the orchestrator image ships NO
@@ -315,6 +319,20 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
+  # SUSPENDED 2026-10-11. The login this rotates was revoked server-side on 2026-09-29 (~09:49Z,
+  # `token_revoked`; docs/runbooks/openbao-dev-workers.md). The last success was 2026-09-30 03:00Z,
+  # a night with more than 8 days left, so no refresh was attempted. Every run from 10-01 failed with
+  # `codex oauth refresh returned HTTP 401`, and each failed Job re-raised KubeJobFailed.
+  # Who still depended on it, measured 2026-10-11: only broker-openai-codex, whose usage probe gets
+  # 401 and which, like every other broker, served 0 tokens in the preceding 14 days
+  # (af_broker_tokens_used_total). The dev workers left this login on 2026-09-29
+  # (dev_worker_codex_host_owned_login) and have run Codex through the LLM router since 10-09.
+  # reviewer-2 does not render it (pr_reviewer_enable_openbao: false); its seat a holds its own login.
+  # Suspended rather than deleted so that bringing it back is one line. To resume: re-seed per
+  # openbao-dev-workers.md § "Re-seeding after a revocation", prove it with a manual Job
+  # (`kubectl create job --from=cronjob/af-codex-refresh …` copies the jobTemplate and ignores
+  # `suspend`), then set this back to false.
+  suspend: true
   schedule: "0 3 * * *"
   timeZone: "Etc/UTC"
   concurrencyPolicy: Forbid
