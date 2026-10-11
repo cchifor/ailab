@@ -55,7 +55,7 @@ class GiteaAuthority(unittest.TestCase):
         cls.docs = list(yaml.safe_load_all(raw))
         cls.web = named(cls.docs, 'Deployment', 'relay')['spec']['template']['spec']
         cls.worker = named(cls.docs, 'Deployment', 'relay-gitea-reconciler')['spec']['template']['spec']
-        checked = [d for d in cls.docs if d['kind'] in ('Deployment', 'ConfigMap', 'Service', 'NetworkPolicy', 'PersistentVolumeClaim')]
+        checked = [d for d in cls.docs if d['kind'] in ('Deployment', 'StatefulSet', 'ConfigMap', 'Service', 'NetworkPolicy', 'PersistentVolumeClaim')]
         docker('run', '--rm', '-i', KUBECONFORM, '-strict', '-summary', data=yaml.safe_dump_all(checked).encode())
         init = next(c for c in cls.web['initContainers'] if c['name'] == 'gitea-files')
         cm = next(v['configMap']['name'] for v in cls.web['volumes'] if v['name'] == 'gitea-setup')
@@ -177,6 +177,8 @@ class GiteaAuthority(unittest.TestCase):
         self.assertEqual(refs, {k: {'name': 'relay-secrets', 'key': k} for k in ['DATABASE_URL', 'APP_DATABASE_URL']})
         self.assertFalse(self.worker['automountServiceAccountToken'])
         self.assertEqual(self.worker['securityContext']['runAsUser'], 1000)
+        self.assertEqual(self.worker['securityContext']['fsGroup'], 1000)
+        self.assertEqual(self.web['securityContext']['fsGroup'], 1000)
         self.assertEqual(worker['securityContext']['capabilities'], {'drop': ['ALL']})
         self.assertTrue(worker['securityContext']['readOnlyRootFilesystem'])
         self.assertEqual(set(v['name'] for v in self.worker['volumes']),
@@ -209,9 +211,28 @@ class GiteaAuthority(unittest.TestCase):
         self.assertEqual(policy['policyTypes'], ['Ingress', 'Egress'])
         self.assertEqual([p['port'] for rule in policy['egress'] for p in rule['ports']], [53, 53, 5432, 443])
         public = policy['egress'][2]['to'][0]['ipBlock']
-        self.assertEqual(public['except'], ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'])
+        self.assertEqual(public['except'], ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10'])
         postgres = named(self.docs, 'NetworkPolicy', 'relay-postgres-gitea-worker')['spec']
         self.assertEqual(postgres['ingress'][0]['from'], [{'podSelector': {'matchLabels': labels}}])
+        db_labels = named(self.docs, 'StatefulSet', 'relay-postgres')['spec']['template']['metadata']['labels']
+        web_labels = named(self.docs, 'Deployment', 'relay')['spec']['template']['metadata']['labels']
+        def selects(selector, pod_labels):
+            return not selector.get('matchExpressions') and all(pod_labels.get(k) == v for k, v in selector.get('matchLabels', {}).items())
+        self.assertTrue(selects(postgres['podSelector'], db_labels))
+        self.assertTrue(selects(policy['egress'][1]['to'][0]['podSelector'], db_labels))
+        # NetworkPolicies are additive: preserve the base web/staging/backup ingress.
+        base_db = named(self.docs, 'NetworkPolicy', 'relay-postgres')['spec']
+        self.assertTrue(selects(base_db['podSelector'], db_labels))
+        admitted = [source['podSelector'] for rule in base_db['ingress']
+                    if {'protocol': 'TCP', 'port': 5432} in rule['ports']
+                    for source in rule['from'] if set(source) == {'podSelector'}]
+        for source_labels in [web_labels, {'app': 'relay-stage'}, {'app': 'relay-backup'}]:
+            self.assertTrue(any(selects(selector, source_labels) for selector in admitted))
+        web_policy = named(self.docs, 'NetworkPolicy', 'relay')['spec']
+        self.assertTrue(selects(web_policy['podSelector'], web_labels))
+        self.assertTrue(any({'protocol': 'TCP', 'port': 5432} in rule['ports'] and any(
+            set(dest) == {'podSelector'} and selects(dest['podSelector'], db_labels)
+            for dest in rule['to']) for rule in web_policy['egress']))
         configmaps = [d for d in self.docs if d['kind'] == 'ConfigMap' and d['metadata']['name'].startswith('relay-recovery-policy-')]
         self.assertEqual(len(configmaps), 1)
         self.assertEqual(configmaps[0]['data']['schema-version'], '46')
