@@ -573,7 +573,10 @@ spec:
             # dsh's ONE commit identity (worker identities plan 2026-10-11, Phase 1 item 5). The same
             # name/email as gitconfig.seed's [user], but as environment: GIT_AUTHOR_*/GIT_COMMITTER_* outrank
             # every git config level (repo .git/config, `-c user.*`, ~/.gitconfig), which is where dsh's
-            # three old identities came from (no env and no global user.* were set, 2026-10-11).
+            # three old identities came from (no env and no global user.* were set, 2026-10-11). Only an
+            # explicit `git commit --author=` still overrides the AUTHOR (never the committer). Scoped to this
+            # container on purpose: only dsh commits here; the dev-worker slots are separate VMs with their
+            # own identities (ansible dev_worker role).
             - { name: GIT_AUTHOR_NAME, value: dsh }
             - { name: GIT_AUTHOR_EMAIL, value: dsh@noreply.git.chifor.me }
             - { name: GIT_COMMITTER_NAME, value: dsh }
