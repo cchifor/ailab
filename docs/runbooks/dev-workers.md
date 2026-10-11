@@ -316,6 +316,9 @@ All keys expire on **2027-10-09** (365 days). The current values live only in
 - `GET /admin/v1/pools` shows each member's tier, score and the reason it is excluded; the Status page shows each
   account's windows.
 - Each account's `concurrency` caps its requests in flight: `codex` 1, `codex-2`, `-3` and `-4` 4 each, `codex-5` 16.
+  - These are the live values, checked against `GET /admin/v1/config` on 2026-10-11.
+  - codex-5 was raised from the 6 documented earlier, and codex-2..4 from 1, with the owner's OK during the
+    smart-pools work on 2026-10-10. The pool spreads load, so the per-account caps were raised.
   When every member is full, a request gets `429 busy` with `Retry-After`, which Codex retries.
 - Run `codex -p chatgpt` to work on the host's own login meanwhile.
 

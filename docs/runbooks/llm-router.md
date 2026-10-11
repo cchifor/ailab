@@ -590,6 +590,13 @@ acceptance** workflow checks the pod and the public endpoints.
 > the dev workers, repoint `dw-1` … `dw-4` to `fallback-codex` (see "Codex fallback route (2026-10-11)"). Every image
 > since `router-0.1.0-20261010-placement` serves that route. It replaced `sub-codex-5` (`codex-5:*`), removed on
 > 2026-10-11.
+>
+> **An image rollback older than `router-0.1.0-20261010-placement`, such as this section's own Rollback below, cannot
+> serve `fallback-codex`.** The route needs conversation placement, so `dw-N` would get 503. Before such a rollback:
+> 1. create a `priority` route with one Codex account, model `*`, `native: ["codex-responses"]` and the six-model
+>    `models` allowlist (the old `sub-codex-5` shape: one account, so it does not depend on placement);
+> 2. repoint `dw-1` … `dw-4` to it;
+> 3. only then revert the image.
 
 **Rollback.**
 - **Before the cutover above:** an image/annotation revert through a reviewed GitOps PR to
@@ -890,6 +897,11 @@ back to one older than `router-0.1.0-20261010-smart-pools`.
 - It needs no plugin. The `usage` strategy, `*` targets and conversation placement are served by every image since
   `router-0.1.0-20261010-placement` (the PR B+C release, image `39517806`).
 - Unlike the old `sub-codex-5`, it follows quota across all five Codex accounts instead of spending codex-5's credits.
+  - All five targets stay eligible. `access: ["subscription"]` is the account class (subscription, not API or
+    local), not credit state.
+  - On a `usage` route, an account serving on credits (a full window with usable credits) ranks last. It is used only
+    when no other target has included quota left (`packages/modules/placement` QUOTA_RANKED).
+  - So codex-5, on credits until 10-14, is the last resort, not excluded.
 
 **Revision 1298** added route `fallback-codex`:
 - strategy `usage`, `access: ["subscription"]`, `maxAttempts: 2`;
