@@ -1,6 +1,6 @@
 # Implementation review — worker-identities (dev_worker role) — round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
