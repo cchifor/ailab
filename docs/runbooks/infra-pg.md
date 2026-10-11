@@ -182,6 +182,7 @@ and `cnpg_gitea_site_admins_total`. Counts and ages only, never a token hash, na
   Until then `GiteaCredentialInventoryMissing` fires after 30 minutes, which is the intended signal.
 - **No series?** `kubectl -n databases logs <primary> -c postgres | grep 'Error collecting user query'`
   names the failing query; `cnpg_collector_last_collection_error` is 1 while any query fails.
+- **Worker bots (2026-10-11):** the same file also defines `credential_inventory.worker_credentials` (per `dev-worker-bot` / `dev-worker-<N>-bot`: active, tokens, tokens judged unexpected by name, kinds present, most tokens of one kind; counts only), exported by query `gitea_worker_credentials`, alerted on by `monitoring/gitea-worker-credential-rules.yaml`. Re-run the file after merging a change to it.
 
 ## strive-pg (the PLATFORM's cluster, not this one): the harness role and database
 
