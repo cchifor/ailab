@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: gitea-files
+        image: docker.io/library/node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
+        command:
+        - node
+        - /setup/materialize.mjs
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: '1'
+            memory: 128Mi
+        volumeMounts:
+        - name: gitea-setup
+          mountPath: /setup
+          readOnly: true
+        - name: gitea-input
+          mountPath: /input
+          readOnly: true
+        - name: gitea-files
+          mountPath: /output
+      containers:
+      - name: relay
+        env:
+        - name: RELAY_GITEA_ISSUERS_FILE
+          value: /run/relay-gitea/private/deployments.json
+        volumeMounts:
+        - name: gitea-files
+          mountPath: /run/relay-gitea
+          readOnly: true
+      volumes:
+      - name: gitea-setup
+        configMap:
+          name: relay-gitea-setup
+      - name: gitea-input
+        secret:
+          secretName: relay-gitea-issuers
+          defaultMode: 288
+      - name: gitea-files
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
