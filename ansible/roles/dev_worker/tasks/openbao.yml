@@ -373,8 +373,8 @@
         [ "$(systemctl show openbao-agent -p NRestarts --value)" = "$before" ] || { echo "openbao-agent is restart-looping" >&2; exit 1; }
         # 3. the credential the agent has always owned is still being rendered. This is the check
         #    that catches "the new stanzas killed the agent and took git auth with them".
-        #    Non-empty is not enough across a Gitea identity switch: the line must name THIS run's
-        #    login, the one pin_gitea_username.yml pins next.
+        #    Non-empty is not enough across a Gitea identity switch: the line must name the login of
+        #    THIS run, the one pin_gitea_username.yml pins next.
         {% for user in dev_worker_users %}
         [ -s "{{ user.home }}/.git-credentials" ] || { echo "{{ user.home }}/.git-credentials missing/empty" >&2; exit 1; }
         [ "$(sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "{{ user.home }}/.git-credentials")" = "{{ dev_worker_gitea_user }}" ] || { echo "{{ user.home }}/.git-credentials does not name {{ dev_worker_gitea_user }}" >&2; exit 1; }

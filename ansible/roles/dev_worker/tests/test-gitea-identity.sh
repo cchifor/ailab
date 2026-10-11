@@ -412,6 +412,31 @@ for sub in ("tasks", "templates", "files"):
                     hits.append("%s:%d" % (os.path.relpath(p, ROLE), n))
 check(not hits, "I1: no task, template or file exports GIT_AUTHOR_*/GIT_COMMITTER_*/EMAIL", hits)
 
+print("[J] every free-form shell in the role's tasks loads")
+# ansible splits a free-form shell like an argument list, comments included, and refuses the whole
+# play on an unbalanced quote ("failed at splitting arguments"): one `run's` in a comment of the
+# health check did exactly that. Quote parity outside Jinja and backslash escapes is that property.
+
+
+def balanced(s):
+    s = re.sub(r"\\.", "", re.sub(r"\{\{.*?\}\}|\{%.*?%\}", "", s, flags=re.S))
+    sq = dq = False
+    for ch in s:
+        if ch == "'" and not dq:
+            sq = not sq
+        elif ch == '"' and not sq:
+            dq = not dq
+    return not (sq or dq)
+
+
+unbalanced = []
+for name in sorted(os.listdir(os.path.join(ROLE, "tasks"))):
+    for t in tasks_in(os.path.join("tasks", name)):
+        for k in ("ansible.builtin.shell", "ansible.builtin.command"):
+            if isinstance(t.get(k), str) and not balanced(t[k]):
+                unbalanced.append("%s: %s" % (name, t.get("name")))
+check(not unbalanced, "J1: no shell task has an unbalanced quote", unbalanced)
+
 print()
 print("ALL PASS" if fails == 0 else "%d CHECK(S) FAILED" % fails)
 sys.exit(1 if fails else 0)
