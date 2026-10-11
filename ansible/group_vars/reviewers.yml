@@ -1,0 +1,18 @@
+# Draft rollout for the consolidated Forge bounded-review lane.
+# Keep this opt-in in a reviewed PR; host convergence is a separate operator step.
+pr_reviewer_chunk_review_repos:
+  - cchifor/forge
+pr_reviewer_chunk_review_policy_epoch: forge-304-20261011T230723Z
+pr_reviewer_chunk_review_profiles:
+  claude:
+    llm_kind: claude
+    llm_model: fable
+    llm_fallback_model: opus
+    llm_effort: medium
+    llm_models: [fable, opus, sonnet]
+  codex:
+    llm_kind: codex
+    llm_model: gpt-6-astra
+    llm_fallback_model: ""
+    llm_effort: medium
+    llm_models: []
