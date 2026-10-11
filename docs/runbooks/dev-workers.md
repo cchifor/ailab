@@ -225,10 +225,17 @@ it.
 **Commit identity** (`tasks/git_identity.yml`, `-t git-identity`). Each user's `~/.gitconfig` sets
 `user.name`/`user.email` to `<slot>-bot <<slot>-bot@noreply.git.chifor.me>`, whichever Gitea login
 the slot pushes with (that one moves per slot: `openbao-dev-workers.md` § "Gitea identity cut-over
-(per slot)"). The same task reports, without failing the run or printing values, what still outranks
-it: author/committer keys and includes, a repository's or worktree's own config, and
-`GIT_AUTHOR_*`/`GIT_COMMITTER_*`/`EMAIL` in profiles, agent units or running processes. Remove each
-finding or bring it into the role. A running job keeps its environment until it restarts.
+(per slot)"). Before this, agents set identities per repository when git had none — `Constantin
+<chifor@gmail.com>`, `Codex <codex@chifor.me>`, `gitea_admin <gitea@local.domain>` in
+`/workspace/c4/*` and `/home/c4/platform` (2026-10-11). The task therefore removes `user.name`/
+`user.email` from the repository config and `config.worktree` of every checkout it finds under the
+users' homes and `/workspace/<user>` (depth 4, plus registered worktrees), except under
+`dev_worker_git_identity_keep_paths`; `--check` only says "would correct". It then reports, without
+failing the run or printing values, every checkout whose effective author or committer (`git var`,
+as that user) is still not the slot's, every checkout git cannot open, and
+`GIT_AUTHOR_*`/`GIT_COMMITTER_*` in profiles, agent units or running processes; other global config
+that may matter is listed as capped inventory. A running job keeps its environment until it
+restarts.
 
 ### Codex through the router (since 2026-10-09)
 

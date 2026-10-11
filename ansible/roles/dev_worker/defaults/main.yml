@@ -50,6 +50,11 @@ dev_worker_gitea_cred_name: "{{ inventory_hostname if (dev_worker_gitea_identity
 dev_worker_gitea_noreply_domain: noreply.git.chifor.me
 dev_worker_git_user_name: "{{ dev_worker_gitea_slot_user }}"
 dev_worker_git_user_email: "{{ dev_worker_gitea_slot_user }}@{{ dev_worker_gitea_noreply_domain }}"
+# Checkouts (absolute paths; a path also covers everything under it) whose repository-level
+# user.name/user.email the owner sets deliberately: git_identity.yml neither removes nor reports
+# them. Everything else found under the users' homes and /workspace/<user> loses its repository
+# identity, so commits there carry the slot's.
+dev_worker_git_identity_keep_paths: []
 
 # ---- /workspace data disk (the blank scsi1 disk the tofu module attaches) ----
 dev_worker_workspace_device: /dev/sdb

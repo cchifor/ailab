@@ -75,6 +75,7 @@ ENV.filters["bool"] = to_bool
 ENV.filters["regex_replace"] = lambda s, pat, rep="": re.sub(pat, rep, s)
 ENV.filters["quote"] = lambda s: shlex.quote(str(s))  # ansible's `quote` is shlex.quote
 ENV.tests["match"] = lambda v, pat: re.match(pat, str(v)) is not None  # ansible's `match` test
+ENV.filters["ternary"] = lambda v, yes, no: yes if v else no
 
 
 def render(text, **v):
@@ -364,7 +365,7 @@ check(all("cutover" not in str(t.get("when", "")) for t in tasks_in(gi))
 check(position("tasks/main.yml", "Git commit identity") < position("tasks/main.yml", "OpenBao credential plumbing")
       and "when" not in task("tasks/main.yml", "Git commit identity"), "H4: imported unconditionally, not under openbao")
 
-audit = task(gi, "Audit what can still override")["ansible.builtin.shell"]
+audit = task(gi, "Correct repository-level identities")["ansible.builtin.shell"]
 me = pwd.getpwuid(os.getuid()).pw_name
 h, ws = os.path.join(WORK, "home-audit"), os.path.join(WORK, "ws")
 os.makedirs(os.path.join(h, ".config", "git"))
@@ -376,43 +377,89 @@ open(os.path.join(h, ".bashrc"), "w").write("# a profile\nexport PATH=$PATH:/x\n
 genv = dict(os.environ, HOME=h, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
 for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL"):
     genv.pop(k, None)
+# runuser needs root; the stub runs the command as this user, which is the user the audit names.
+with open(os.path.join(stubs, "runuser"), "w") as f:
+    f.write('#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+os.chmod(os.path.join(stubs, "runuser"), 0o755)
+aenv = {"PATH": stubs + ":" + os.environ["PATH"]}
 
 
 def git(*args, cwd=None):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "init.defaultBranch=main", *args],
-                   cwd=cwd, env=genv, check=True, capture_output=True)
+                   cwd=cwd or "/", env=genv, check=True, capture_output=True)
 
 
-proj = os.path.join(ws, me, "proj")
+def repo_value(path, key):
+    # from /: a repository around the caller's directory (or a broken one) must not be discovered
+    r = subprocess.run(["git", "config", "--file", path, "--get", key], capture_output=True, text=True, cwd="/")
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+proj, kept_repo, wt = os.path.join(ws, me, "proj"), os.path.join(ws, me, "kept"), os.path.join(ws, me, "wt")
 git("init", "-q", proj)
 git("config", "user.name", "Owner Name", cwd=proj)
 git("commit", "-q", "--allow-empty", "-m", "x", cwd=proj)
 git("config", "extensions.worktreeConfig", "true", cwd=proj)
-git("worktree", "add", "-q", os.path.join(ws, me, "wt"), cwd=proj)
-git("config", "--worktree", "user.email", "wt@example.invalid", cwd=os.path.join(ws, me, "wt"))
-dep = os.path.join(ws, me, "node_modules", "dep")  # depth 4: inside find's bound, so only the prune skips it
+git("worktree", "add", "-q", wt, cwd=proj)
+git("config", "--worktree", "user.email", "wt@example.invalid", cwd=wt)
+git("init", "-q", kept_repo)
+git("config", "user.name", "Deliberate Owner", cwd=kept_repo)
+dep = os.path.join(ws, me, "node_modules", "dep")  # depth 3: inside find's bound, so only the prune skips it
 git("init", "-q", dep)
 git("config", "user.name", "Pruned Dep", cwd=dep)
-script = render(audit, dev_worker_users=[{"name": me, "home": h}], dev_worker_git_user_name=BOT,
-                dev_worker_git_user_email=EMAIL, dev_worker_workspace_mount=ws,
-                dev_worker_archive_dir=os.path.join(ws, "archive"))
-rc, out, err = run_sh(script)
-check(rc == 0, "H5: the audit never fails the run", (rc, err))
+os.makedirs(os.path.join(ws, me, "broken"))
+open(os.path.join(ws, me, "broken", ".git"), "w").write("gitdir: /nonexistent/gitdir\n")
+
+
+def audit_run(check_mode):
+    script = render(audit, dev_worker_users=[{"name": me, "home": h}], dev_worker_git_user_name=BOT,
+                    dev_worker_git_user_email=EMAIL, dev_worker_workspace_mount=ws,
+                    dev_worker_git_identity_keep_paths=[kept_repo], ansible_check_mode=check_mode)
+    return run_sh(script, aenv)
+
+
+rc, out, err = audit_run(True)
+check(rc == 0, "H5: --check: the audit never fails the run", (rc, err))
+check("would correct: %s/.git/config: user.name" % proj in out and repo_value(proj + "/.git/config", "user.name") == "Owner Name",
+      "H6: --check says 'would correct' for a repository identity and changes nothing", out)
+check("corrected:" not in out and "override: %s:" % proj not in out,
+      "H7: --check does not also report what it would correct as an override", out)
+rc, out, err = audit_run(False)
+check(rc == 0, "H8: the audit never fails the run", (rc, err))
 expect = {
-    "H6: an XDG author.email (outranks user.email)": "%s/.config/git/config: author.email = codex@chifor.me" % h,
-    "H7: ...and the effective author it produces": "git var GIT_AUTHOR_IDENT outside a repository is '%s <codex@chifor.me>'" % BOT,
-    "H8: an includeIf in ~/.gitconfig": "%s/.gitconfig: includeif.gitdir:~/elsewhere/.path = ~/elsewhere.inc" % h,
-    "H9: a repository's own user.name": "%s/.git/config: user.name = Owner Name" % proj,
-    "H10: a linked worktree's config.worktree": "config.worktree: user.email = wt@example.invalid",
-    "H11: a profile export, by name and line": "%s/.bashrc:3: GIT_COMMITTER_NAME is set" % h,
-    "H12: a live process environment, by name": "pid %s (sleep) has GIT_AUTHOR_NAME in its environment" % SLEEPER,
+    "H9: a repository's own user.name is removed": "corrected: %s/.git/config: user.name" % proj,
+    "H10: ...and a linked worktree's config.worktree user.email": "corrected: %s/.git/worktrees/wt/config.worktree: user.email" % proj,
+    "H11: a checkout under dev_worker_git_identity_keep_paths is kept": "kept: %s/.git/config: user.name" % kept_repo,
+    "H12: the effective author per checkout, as git resolves it": "override: %s: author is '%s <codex@chifor.me>'" % (wt, BOT),
+    "H13: ...and outside any repository (an XDG author.email)": "override: %s outside any repository: author is '%s <codex@chifor.me>'" % (me, BOT),
+    "H14: a checkout git cannot open is reported, not skipped": "inaccessible: %s/broken:" % os.path.join(ws, me),
+    "H15: a profile export, by name and line": "override: %s/.bashrc:3: GIT_COMMITTER_NAME is set" % h,
+    "H16: a live process environment, by name": "override: pid %s (sleep) has GIT_AUTHOR_NAME in its environment" % SLEEPER,
+    "H17: the XDG author key is inventory": "inventory: %s/.config/git/config: author.email = codex@chifor.me" % h,
+    "H18: ...and so is an include": "inventory: %s/.gitconfig: includeif.gitdir:~/elsewhere/.path = ~/elsewhere.inc" % h,
 }
 for label, needle in expect.items():
     check(needle in out, label, out)
-check("GIT_COMMITTER_IDENT" not in out, "H13: the committer identity is not reported (it is right)", out)
-check(".gitconfig: user." not in out, "H14: the role's own user.* in ~/.gitconfig is not an override", out)
-check("Pruned Dep" not in out, "H15: dependency trees are not walked", out)
-check(not leaked(out + err), "H16: no value of a profile or process variable is printed", leaked(out + err))
+check(repo_value(proj + "/.git/config", "user.name") is None
+      and repo_value(proj + "/.git/worktrees/wt/config.worktree", "user.email") is None
+      and repo_value(kept_repo + "/.git/config", "user.name") == "Deliberate Owner",
+      "H19: the repository identities are really gone, the kept one is not")
+check("committer is" not in out, "H20: the committer identity is right, so it is not reported", out)
+check(".gitconfig: user." not in out, "H21: the role's own user.* in ~/.gitconfig is not reported", out)
+check("Pruned Dep" not in out and "node_modules" not in out, "H22: dependency trees are not walked", out)
+check("override: %s:" % kept_repo not in out, "H23: a kept checkout is not reported as an override", out)
+check(not leaked(out + err), "H24: no value of a profile or process variable is printed", leaked(out + err))
+rc, out2, err = audit_run(False)
+check("corrected:" not in out2, "H25: a second run has nothing left to correct", out2)
+report = task(gi, "Report the commit identity corrections")["ansible.builtin.debug"]["msg"]
+lines = ["inventory: %d" % i for i in range(50)] + ["override: x", "corrected: y"]
+rendered = render(report, inventory_hostname=HOST, dev_worker_git_user_name=BOT, dev_worker_git_user_email=EMAIL,
+                  ansible_check_mode=False,
+                  dev_worker_git_identity_actionable=[l for l in lines if not l.startswith("inventory: ")],
+                  dev_worker_git_identity_inventory=[l for l in lines if l.startswith("inventory: ")])
+check("override: x" in rendered and "corrected: y" in rendered and "inventory: 39" in rendered
+      and "inventory: 40'" not in rendered and "10 more inventory lines" in rendered,
+      "H26: the report prints every actionable line and caps only the inventory", rendered[-300:])
 
 print("[I] the role never sets an identity variable itself")
 pat = re.compile(r"GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)\s*[=:]|(^|[^A-Za-z0-9_])EMAIL\s*=")
