@@ -57,9 +57,6 @@ def _path(raw, prefixed=True):
     try:
         if not isinstance(raw, bytes):
             raise ValueError("Diff path must be bytes")
-        # Unified-diff headers may append a timestamp after a literal tab. Git quotes
-        # literal tabs in paths, so an unquoted tab is the separator, never path data.
-        raw = raw.split(b"\t", 1)[0]
         if raw.startswith(b'"'):
             # Git C-quotes non-ASCII bytes using octal escapes. Never eval code.
             value = ast.literal_eval(raw.decode("ascii"))
@@ -95,7 +92,10 @@ def _paths(section):
     old = re.search(br"(?m)^--- (.+)$", header)
     new = re.search(br"(?m)^\+\+\+ (.+)$", header)
     if old and new:
-        a, b = _path(old[1]), _path(new[1])
+        # Git appends exactly one literal tab to these headers for unquoted paths with
+        # spaces. Strip that separator only here; embedded tabs or timestamp payloads
+        # are not part of the immutable `git diff` transport and must fail closed.
+        a, b = _path(old[1].removesuffix(b"\t")), _path(new[1].removesuffix(b"\t"))
         if a is None and b is None:
             raise ValueError("Diff section has no path")
         return a, b

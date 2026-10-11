@@ -1,11 +1,13 @@
 """Offline regressions for complete, immutable bounded review snapshots.
 
-No bot import, credentials, providers or network are needed. These tests exercise
-byte coverage and the persisted approval boundary, including damaged/replayed state.
+No live credentials, providers or network are needed. These tests exercise byte
+coverage, isolated bot recovery and the persisted approval boundary, including
+damaged/replayed state.
 """
 import base64
 import copy
 import hashlib
+import http.client
 import io
 import importlib.util
 import json
@@ -259,24 +261,29 @@ class SnapshotPlanTests(unittest.TestCase):
                 self.assertEqual((old, new), (plan["files"][0]["old"], plan["files"][0]["new"]))
                 self.assertEqual(raw, plan["parts"][0]["text"].encode())
 
-    def test_git_header_tab_suffix_is_metadata_and_control_paths_fail_closed(self):
+    def test_git_space_path_header_tab_is_metadata_and_control_paths_fail_closed(self):
         raw = (
-            b"diff --git a/src/example.py b/src/example.py\n"
+            b"diff --git a/src/run task.py b/src/run task.py\n"
             b"index 1111111..2222222 100644\n"
-            b"--- a/src/example.py\t2026-10-11 12:34:56 +0000\n"
-            b"+++ b/src/example.py\t2026-10-11 12:34:57 +0000\n"
+            b"--- a/src/run task.py\t\n"
+            b"+++ b/src/run task.py\t\n"
             b"@@ -1 +1 @@\n-old\n+new\n"
         )
         plan = chunks.make_plan(BINDING, MERGE_BASE, raw)
-        self.assertEqual("src/example.py", plan["files"][0]["old"])
-        self.assertEqual("src/example.py", plan["files"][0]["new"])
+        self.assertEqual("src/run task.py", plan["files"][0]["old"])
+        self.assertEqual("src/run task.py", plan["files"][0]["new"])
+        self.assertEqual(raw, plan["parts"][0]["text"].encode())
         for bad in [
             b"a/control\n", b"a/control\r", b"a/control\x00",
             b"a/control\x1b", b"a/control\x7f",
+            b"a/control\tname", b"a/control\t",
             b'"a/control\\011name"',
         ]:
             with self.subTest(path=bad), self.assertRaises(ValueError):
                 chunks._path(bad)
+        for suffix in [b"\t\t", b"\t2026-10-11 12:34:56 +0000"]:
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                chunks.make_plan(BINDING, MERGE_BASE, raw.replace(b"\t\n", suffix + b"\n"))
 
 
 class LedgerTests(unittest.TestCase):
@@ -697,8 +704,8 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(note.startswith("ambiguous POST"))
         self.bot.maybe_merge.assert_not_called()
 
-    def test_definite_http_rejection_retries_but_server_error_quarantines(self):
-        for code, expected in [(403, "retry"), (500, "quarantined")]:
+    def test_definite_http_rejection_uses_failure_budget_but_server_error_quarantines(self):
+        for code in [403, 429, 500]:
             with self.subTest(code=code):
                 error = urllib.error.HTTPError(
                     "https://git.invalid", code, "response", {}, io.BytesIO(b"rejected")
@@ -708,16 +715,35 @@ class AdapterTests(unittest.TestCase):
                         raise error
                     return self.api(path, method, payload)
                 self.bot.api.side_effect = fail_post
-                state, review_id, note = adapter._post(
-                    self.bot, 1, self.plan, "ready", "Prepared.", []
-                )
-                self.assertEqual(expected, state)
-                self.assertIsNone(review_id)
                 if code == 500:
+                    state, review_id, note = adapter._post(
+                        self.bot, 1, self.plan, "ready", "Prepared.", []
+                    )
+                    self.assertEqual("quarantined", state)
+                    self.assertIsNone(review_id)
                     self.assertTrue(note.startswith("ambiguous POST"))
                 else:
-                    self.assertIn("HTTP 403", note)
+                    with self.assertRaises(urllib.error.HTTPError):
+                        adapter._post(self.bot, 1, self.plan, "ready", "Prepared.", [])
                 self.bot.api.side_effect = self.api
+
+    def test_only_proven_preconnection_url_errors_can_repeat_post(self):
+        for reason in [ConnectionRefusedError("refused"),
+                       http.client.RemoteDisconnected("response lost"),
+                       TimeoutError("timed out"), "unknown transport failure"]:
+            with self.subTest(reason=reason):
+                def fail_post(path, method="GET", payload=None, reason=reason):
+                    if method == "POST":
+                        raise urllib.error.URLError(reason)
+                    return self.api(path, method, payload)
+                self.bot.api.side_effect = fail_post
+                if isinstance(reason, ConnectionRefusedError):
+                    with self.assertRaises(urllib.error.URLError):
+                        adapter._post(self.bot, 1, self.plan, "ready", "Prepared.", [])
+                else:
+                    state, _, note = adapter._post(self.bot, 1, self.plan, "ready", "Prepared.", [])
+                    self.assertEqual("quarantined", state)
+                    self.assertTrue(note.startswith("ambiguous POST"))
 
     def test_final_guard_is_applied_to_every_path_and_prevents_approval(self):
         self.handshake()

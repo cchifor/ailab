@@ -25,7 +25,9 @@ input have separate limits. An overflow is a refusal, never prefix truncation.
 
 SQLite stores the complete immutable manifest and ordered per-persona results. One
 part is processed per worker claim, retaining the established timeout, rate-limit,
-retry and quarantine policies. Completed matching parts survive restarts. Neither
+retry and quarantine policies for failures. Persisted parts requeue immediately without
+spending failure attempts; waiting for the peer snapshot polls every 60 seconds without
+failure backoff. Completed matching parts survive restarts. Neither
 persona can use the other's receipts. A required final integration pass receives every
 changed path, ordered part digest and prior part result; it cannot erase a prior
 blocking finding. Incomplete, corrupted, missing or conflicting receipts cannot
@@ -94,6 +96,10 @@ An interrupted model call resumes through the normal retry budget. A service cra
 while posting quarantines the job as an ambiguous POST; inspect the actual remote
 review before the existing operator recovery procedure. Never clear that quarantine
 with the skipped-review command or a database edit.
+Explicit HTTP rejection and proven connection-refused/DNS failures use the existing
+failure budget. Unknown transport failures, lost responses and server errors retain
+the ambiguous-publication quarantine. Removing the opt-in during rollback does not
+erase a durable chunk job's publication quarantine on restart.
 
 The receipt database is service-owned state, not an external approval API. Protect and
 back it up with existing reviewer state. Snapshots are intentionally retained for

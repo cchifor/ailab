@@ -5558,6 +5558,28 @@ class DeadLoginProbeTest(unittest.TestCase):
 class ChunkAdapterContractTest(unittest.TestCase):
     """Exercise the real reviewbot -> chunk adapter boundary, rather than a hand-built bot."""
 
+    def test_refresh_errors_do_not_drop_enqueue_and_invalid_policy_cannot_approve(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        bot = load(temporary.name, chunk_review_repos=["o/r"])
+        errors = [ValueError("policy drift"), KeyError("head"), TypeError("bad identity"),
+                  urllib.error.HTTPError("https://git.invalid", 500, "unavailable", {}, None),
+                  urllib.error.URLError("unavailable")]
+        for pr, error in enumerate(errors, 1):
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(bot, "chunk_call", side_effect=error):
+                bot.enqueue("o/r", pr, "a" * 40, "reconcile")
+        connection = bot.db()
+        try:
+            self.assertEqual(len(errors), connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE state='queued'"
+            ).fetchone()[0])
+        finally:
+            connection.close()
+        with mock.patch.object(bot, "chunk_call", side_effect=ValueError("policy drift")):
+            self.assertIsNone(bot.existing_marker("o/r", 1, "a" * 40))
+            self.assertEqual({}, bot.persona_verdicts("o/r", 1, "a" * 40))
+
     def test_real_module_dispatches_snapshot_helpers_and_llm(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

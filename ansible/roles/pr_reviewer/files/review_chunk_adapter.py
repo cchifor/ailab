@@ -338,7 +338,7 @@ def _post(bot, job_id, plan, stage, body, comments, aggregate=None):
         return ("retry", None, "posting disabled")
     mine = latest(bot, value).get(bot.CFG["persona"])
     if mine and mine[1]["snapshot"] == plan["id"] and mine[1]["stage"] == stage:
-        return ("done" if stage == "final" else "retry", mine[0]["id"], "chunk marker already present")
+        return ("done" if stage == "final" else "waiting", mine[0]["id"], "chunk marker already present")
     doc = dict(binding=value, snapshot=plan["id"], merge_base=plan["merge_base"],
                raw_sha256=plan["raw_sha256"], persona=bot.CFG["persona"], stage=stage)
     if aggregate:
@@ -360,20 +360,18 @@ def _post(bot, job_id, plan, stage, body, comments, aggregate=None):
                          dict(commit_id=value["head_sha"], event=event,
                               body=body, comments=comments))
     except urllib.error.HTTPError as error:
-        # A completed HTTP response is unambiguous.  Retry client rejection; quarantine
-        # server errors because Gitea may have committed the mutation before replying.
-        if error.code >= 500 or error.code in (408, 429):
-            return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
-        return ("retry", None, f"chunk review POST rejected with HTTP {error.code}")
-    except urllib.error.URLError as error:
-        reason = error.reason
-        if isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError,
-                               BrokenPipeError)) or "timed out" in str(reason).lower():
-            return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
-        return ("retry", None, "chunk review POST connection failed")
-    except (TimeoutError, socket.timeout, ConnectionResetError, BrokenPipeError):
+        # Only explicit rejection is safe to retry. Let the worker count it against the
+        # existing failure budget, rather than retrying a revoked credential forever.
+        if error.code in (400, 401, 403, 404, 405, 413, 415, 422, 429):
+            raise
         return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
-    except Exception as error:
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
+            raise  # No connection was established; no POST could have been committed.
+        return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
+    except ConnectionRefusedError:
+        raise
+    except Exception:
         # Keep unknown adapter failures visible without claiming that a remote mutation is
         # safe to repeat.  The operator can inspect the PR and use the explicit requeue path.
         return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
