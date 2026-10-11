@@ -570,6 +570,14 @@ spec:
             - { name: DSH_TEAM_CONDUCTOR_CONFIG, value: /conductor-release/conductor.runtime.json }
             - name: DSH_POD_UID
               valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            # dsh's ONE commit identity (worker identities plan 2026-10-11, Phase 1 item 5). The same
+            # name/email as gitconfig.seed's [user], but as environment: GIT_AUTHOR_*/GIT_COMMITTER_* outrank
+            # every git config level (repo .git/config, `-c user.*`, ~/.gitconfig), which is where dsh's
+            # three old identities came from (no env and no global user.* were set, 2026-10-11).
+            - { name: GIT_AUTHOR_NAME, value: dsh }
+            - { name: GIT_AUTHOR_EMAIL, value: dsh@noreply.git.chifor.me }
+            - { name: GIT_COMMITTER_NAME, value: dsh }
+            - { name: GIT_COMMITTER_EMAIL, value: dsh@noreply.git.chifor.me }
             # The LiteLLM credential, synced from OpenBao by External Secrets (openbao-eso.yaml).
             # settings.yaml references it as `apiKeyEnv: LITELLM_API_KEY` rather than embedding a
             # value, so the secret never lands in git and never lands in the seed ConfigMap either.
