@@ -83,8 +83,13 @@ def env_values(text, var, source):
 def strict_yaml(text, source):
     """The document as YAML decodes it, refusing a repeated mapping key. Text matching cannot see every
     spelling of a key (an explicit `? key`, a quoted key with escapes), and YAML keeps the LAST one, so
-    a repeat would hand Ansible a value the text check never read. PyYAML is the runner's system package
-    (see .gitea/workflows/broker-inventory.yaml); without it this check fails rather than skips."""
+    a repeat would hand Ansible a value the text check never read. Ansible's own tags (`!vault`,
+    `!unsafe`) load as their plain scalar, so a vaulted value elsewhere in the file cannot break the gate.
+
+    PyYAML is not installed by CI: it is the runner image's system package (python3-yaml on the Ubuntu
+    24.04 cloud image), the same dependency .gitea/workflows/manifests.yaml's LiteLLM drift step and
+    broker-inventory.yaml's "Script unit tests" step already rely on. Without it this check fails, never
+    skips."""
     try:
         import yaml
     except ImportError:
@@ -112,6 +117,8 @@ def strict_yaml(text, source):
         return loader.construct_mapping(node, deep=deep)
 
     UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    for tag in ("!vault", "!unsafe"):
+        UniqueKeyLoader.add_constructor(tag, lambda loader, node: loader.construct_scalar(node))
     try:
         return yaml.load(text, Loader=UniqueKeyLoader)
     except yaml.YAMLError as e:

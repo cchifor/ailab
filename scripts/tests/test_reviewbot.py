@@ -2371,9 +2371,13 @@ class AllowlistDefaultsTest(unittest.TestCase):
     def _strict_yaml(text):
         """The document as YAML decodes it, raising on any repeated mapping key: YAML keeps the LAST
         one, and only a decoder sees every spelling of a key (an explicit `? key`, a quoted key with
-        escapes). Imported here rather than at module level, so a runner without PyYAML fails these
-        allowlist tests instead of taking the whole file down; PyYAML is that runner's system
-        package (.gitea/workflows/broker-inventory.yaml, "Script unit tests")."""
+        escapes). Ansible's own tags (`!vault`, `!unsafe`) load as their plain scalar.
+
+        PyYAML is not installed by CI: it is the runner image's system package (python3-yaml on the
+        Ubuntu 24.04 cloud image), as .gitea/workflows/broker-inventory.yaml's "Script unit tests"
+        step records, and test_worker_probes.py already imports it at module level in that same run.
+        Imported here rather than at module level, so a runner without it fails these allowlist tests
+        (an ImportError is an error, never a skip) without taking the rest of this file down."""
         import yaml
 
         class UniqueKeyLoader(yaml.SafeLoader):
@@ -2391,6 +2395,8 @@ class AllowlistDefaultsTest(unittest.TestCase):
             return loader.construct_mapping(node, deep=deep)
 
         UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+        for tag in ("!vault", "!unsafe"):
+            UniqueKeyLoader.add_constructor(tag, lambda loader, node: loader.construct_scalar(node))
         return yaml.load(text, Loader=UniqueKeyLoader)
 
     @staticmethod
@@ -2469,6 +2475,11 @@ class AllowlistDefaultsTest(unittest.TestCase):
         for dup in ('"pr_reviewer_repos": []\n', "'pr_reviewer_repos' : []\n", "pr_reviewer_repos: []\n"):
             with self.subTest(dup=dup), self.assertRaises(AssertionError):
                 self._parse_repos("pr_reviewer_repos:\n  - cchifor/ailab\n" + dup)
+
+    def test_ansible_tags_elsewhere_in_the_file_do_not_break_the_decoder(self):
+        text = ("secret: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162\nraw: !unsafe '{{ x }}'\n"
+                "pr_reviewer_repos:\n  - cchifor/ailab\n")
+        self.assertEqual(["cchifor/ailab"], self._parse_repos(text))
 
     def test_only_the_decoder_sees_some_duplicate_keys(self):
         # An explicit `? key` and a quoted key with an escape (`_` is `_`) both repeat the key as

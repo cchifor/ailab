@@ -176,6 +176,13 @@ edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "  
 expect_fail "Gitea login entries indented inconsistently" "indented inconsistently"
 restore ansible/group_vars/dev_workers.yml
 
+# Ansible's own tags elsewhere in the file (a vaulted secret, an unsafe string) must not break the decoder.
+edit ansible/group_vars/dev_workers.yml \
+  's + "some_secret: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  61626364\nraw_text: !unsafe " + chr(39) + "{{ x }}" + chr(39) + "\n"'
+run_check || fail "a !vault / !unsafe value elsewhere in group_vars must not break the check"
+echo "  ok  !vault and !unsafe values elsewhere in the file are read as plain scalars"
+restore ansible/group_vars/dev_workers.yml
+
 # ...and a real YAML comment after the login is still slot 4.
 edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "  - dev-worker-4-bot  # canary\n", 1)'
 run_check || fail "a Gitea login followed by a YAML comment must still pass"
