@@ -134,7 +134,7 @@
   ansible.builtin.import_tasks: git_identity.yml
   tags: [git-identity]
 
-# Needs users (users.yml). Owns ~/.git-credentials when enabled — git_forge.yml yields (see there).
+# Needs users (users.yml). The only writer of ~/.git-credentials — git_forge.yml requires it.
 - name: OpenBao credential plumbing (bao agent + cred helper — ADR 0020)
   ansible.builtin.import_tasks: openbao.yml
   when: dev_worker_enable_openbao | bool

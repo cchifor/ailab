@@ -175,8 +175,7 @@
       cluster, then re-run with -t openbao — docs/runbooks/dev-worker-platform-access.md.
   when: not dev_worker_platform_fields_present | bool
 
-# DUPLICATED from packages.yml on purpose — the same pattern git_forge.yml's credential-store task
-# uses. The documented rollout is `-t openbao`, which does NOT run packages.yml, so without this an
+# DUPLICATED from packages.yml on purpose — the same pattern the old SOPS credential path used. The documented rollout is `-t openbao`, which does NOT run packages.yml, so without this an
 # existing worker gets the helper and the credentials and then fails at first use with "psql is not
 # installed". apt is idempotent, so the base run is unaffected.
 - name: Ensure the postgres client is installed (platform psql)
@@ -529,14 +528,12 @@
     executable: /bin/bash
   changed_when: false
 
-# Shared with git_forge.yml: that file yields ~/.git-credentials to the agent when this plumbing is on
-# (and skips itself entirely), but the file is useless without a helper that reads it, so whichever
-# path writes the credential must also set this. The helper is read-only, so git never deletes the
-# line the agent rendered (files/git-credential-store-readonly).
-- name: Point git at the read-only credential helper (shared with the other credential path)
+# The rendered ~/.git-credentials is useless without a helper that reads it. The helper is read-only,
+# so git never deletes the line the agent rendered (files/git-credential-store-readonly).
+- name: Point git at the read-only credential helper
   ansible.builtin.import_tasks: git_credential_helper.yml
 
-- name: Pin the git.chifor.me credential username (shared with the other credential path)
+- name: Pin the git.chifor.me credential username
   ansible.builtin.import_tasks: pin_gitea_username.yml
 
 # credentials.yml and codex.yml already own these directories; repeated here (like herdr.yml repeats

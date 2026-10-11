@@ -756,11 +756,12 @@ manual reload above leaves `outcome` at whatever the last CronJob run stamped un
 
 ## Rotation
 
-**A seeded KV value (e.g. the Gitea PAT).** Two writes, one change — or the daily Job reverts you:
+**A seeded KV value (e.g. the Gitea PAT).** Change the seed, not live KV — the daily Job reverts a live edit:
 
 1. Mint the new PAT in Gitea.
-2. Update `ansible/secrets/dev-worker.sops.yaml` (`dev_worker_gitea_token`) **and**
-   `devworker-seeds.sops.yaml` (step (c) above re-runs unchanged and does both consistently).
+2. Update `devworker-seeds.sops.yaml`. (`dev_worker_gitea_token` in
+   `ansible/secrets/dev-worker.sops.yaml` is no longer read by anything — the SOPS git path is gone,
+   `tasks/git_forge.yml` — so it needs no update; `sops unset` it.)
 3. Merge. The next `openbao-devworker-provision` run patches KV; each worker's `bao agent` re-renders
    `~/.git-credentials` when the template's source value changes.
 4. To make it immediate rather than within a day: delete the Job and let Flux recreate it

@@ -134,9 +134,13 @@ inst="$(sed -n 's/^ *dest: \(.*\)$/\1/p' "$TASKS/git_credential_helper.yml")"
 grep -q '^ *src: git-credential-store-readonly$' "$TASKS/git_credential_helper.yml" || bad "the task does not install files/git-credential-store-readonly"
 # git runs an absolute-path helper directly, so a non-executable install breaks every forge call.
 grep -q '^ *mode: "0755"$' "$TASKS/git_credential_helper.yml" || bad "the helper is not installed 0755"
-for f in git_forge.yml openbao.yml; do
-  grep -q 'import_tasks: git_credential_helper.yml' "$TASKS/$f" || bad "$f does not import git_credential_helper.yml"
-done
+# openbao.yml is the only credential path (the SOPS one in git_forge.yml is gone), and must bring the
+# helper and the username pin with it.
+grep -q 'import_tasks: git_credential_helper.yml' "$TASKS/openbao.yml" || bad "openbao.yml does not import git_credential_helper.yml"
+grep -q 'import_tasks: pin_gitea_username.yml' "$TASKS/openbao.yml" || bad "openbao.yml does not import pin_gitea_username.yml"
+if grep -q 'dest:.*git-credentials' "$TASKS/git_forge.yml"; then
+  bad "git_forge.yml writes ~/.git-credentials again (the SOPS path was removed)"
+fi
 if grep -rn 'credential\.helper store' "$TASKS"; then bad "a task still configures the erasing 'store' helper"; fi
 
 if [ "$fails" -gt 0 ]; then echo "$fails failure(s)" >&2; exit 1; fi

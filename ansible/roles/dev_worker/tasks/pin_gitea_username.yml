@@ -1,7 +1,7 @@
 ---
 # Pin the git.chifor.me credential username to the forge identity in ~/.gitconfig. Imported (static)
-# by BOTH credential paths, git_forge.yml (SOPS) and openbao.yml (bao agent), so it inherits the
-# importer's tags and `when`, and the two paths cannot drift apart.
+# by openbao.yml (the SOPS path that also imported it is gone, see git_forge.yml), so it inherits
+# that file's tags and `when`.
 #
 # The credential store matches on username: an out-of-band
 # credential.https://git.chifor.me.username=chifor (found on every worker on 2026-10-06, after the

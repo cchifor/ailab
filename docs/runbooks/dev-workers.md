@@ -203,15 +203,16 @@ every sandboxed command runs in an empty network namespace, and `git push` fails
 **git only reads `~/.git-credentials`** (`tasks/git_credential_helper.yml`). Each user's
 `credential.helper` in `~/.gitconfig` is `/usr/local/bin/git-credential-store-readonly`. It answers
 `get` from that file only, and ignores `store` and `erase`, because the file already has an owner: the
-OpenBao agent, or Ansible on the SOPS path. With git's stock `store` helper, a 401 to the credential git
-had sent deleted the line. On 2026-10-09 a CNPG operator upgrade restarted infra-pg, and for those
+OpenBao agent. With git's stock `store` helper, a 401 to the credential git had sent deleted the
+line. On 2026-10-09 a CNPG operator upgrade restarted infra-pg, and for those
 ~3.5 minutes Gitea answered 401 to VALID tokens, because it could not look them up in its database.
 dev-worker-3 lost its only credential that way, and its agent stopped to ask for a credential refresh
 until the OpenBao agent's next periodic render put the line back. Now the credential survives the
 outage: requests made during it still fail and are not retried, but the next attempt after Gitea
 recovers authenticates. A token that really is revoked keeps getting 401s until the source the file
-comes from has the new one: OpenBao (§ Rotation in `openbao-dev-workers.md`), or
-`dev_worker_gitea_token` and a playbook run on the SOPS path.
+comes from has the new one: OpenBao (§ Rotation in `openbao-dev-workers.md`). The SOPS path
+(`dev_worker_gitea_token`) is gone: without `dev_worker_enable_openbao` the role now stops in
+`tasks/git_forge.yml`.
 
 The task stops, naming the value, rather than overwrite a helper it did not set: anything in
 `~/.gitconfig` other than `store`, the read-only path, or nothing (an empty entry included, since it
@@ -389,9 +390,10 @@ Off by default (`dev_worker_enable_openbao: false`). When it is on, the worker s
 hand-distributed copy of the shared forge PAT and instead gets its **own AppRole identity** in
 OpenBao, held by a root-owned `bao agent`. Three things change on the box:
 
-- **`~/.git-credentials` becomes agent-rendered**, from `af/dev-workers/common` in the vault, instead
-  of being written by `git_forge.yml` (that task yields ownership of the file — two writers of one
-  path would flap). Rotation becomes a vault + seeds change, not a playbook run against all six hosts.
+- **`~/.git-credentials` becomes agent-rendered**, from `af/dev-workers/common` in the vault (or the
+  slot's own document once cut over, `openbao-dev-workers.md`), instead of being written by
+  `git_forge.yml` — whose SOPS path is gone, so a worker without OpenBao now stops there. Rotation
+  becomes a vault + seeds change, not a playbook run against all six hosts.
 - **`/usr/local/bin/cred` appears** for everything else: `cred list`, `cred get <name> <field>`, and
   `cred exec <name> <field> <ENV_VAR> -- <cmd>` — the last of which hands a secret to a child process
   without it ever appearing in the terminal, which is the form agents are told to prefer. It reads

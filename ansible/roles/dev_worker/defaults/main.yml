@@ -19,15 +19,13 @@ dev_worker_admin_user: c4
 dev_worker_agent_user: "{{ dev_worker_admin_user }}"
 
 # ---- Gitea (git.chifor.me) forge access (ADR 0017 — Gitea is the master forge) ----
-# Configures per-user git credentials so agents/devs can clone/push private cchifor/* repos over HTTPS
-# without prompting. Token = a `dev-worker-bot` Gitea token (write:repository, write:issue,
-# read:organization, read:user); provide it via SOPS (ansible/secrets/dev-worker.sops.yaml ->
-# dev_worker_gitea_token). Empty = skip (no-op).
+# Per-user git credentials so agents/devs can clone/push private cchifor/* repos over HTTPS without
+# prompting. The bao agent renders them from OpenBao (tasks/openbao.yml, ADR 0020); the SOPS path
+# (dev_worker_gitea_token) is gone, see tasks/git_forge.yml.
 # IDENTITY (2026-10-06, plan 2026-10-06-s2s-identity-openbao D1): workers authenticate as a
 # NON-ADMIN bot (member of org team `automation`: write on every cchifor repo, never admin), NOT as
 # the owner `chifor`. Owner-gated merges (protected files) therefore need the owner. Never put a
 # `chifor` token back here or in devworker-seeds.sops.yaml.
-dev_worker_gitea_token: ""
 
 # ---- per-slot Gitea identity cut-over (plan 2026-10-11 worker identities, Phase 4) ----
 # false (the default): the shared `dev-worker-bot`, its tokens read from af/dev-workers/common —
