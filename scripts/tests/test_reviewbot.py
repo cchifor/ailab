@@ -2890,9 +2890,19 @@ class DependencyLaneTest(unittest.TestCase):
 
     def test_a_calendar_version_year_roll_is_not_a_major(self):
         """"The leading number moves" also matches 2025.x -> 2026.x, which is a routine release
-        for a calendar-versioned package, not a breaking one (reviewer-claude on #1273)."""
+        for a calendar-versioned package, not a breaking one (reviewer-claude on #1273). The
+        carve-out must sit INSIDE the MAJOR bullet and override BOTH triggers: Renovate's
+        docker/semver versioning labels a year roll `major` in its update table, so an exemption
+        of the leading-number trigger alone changed nothing (reviewer-claude on #1274). It is
+        judged from the diff's own version strings - the description is untrusted, and must not
+        be able to declare a real major a "calendar roll"."""
         m = load(self.tmp.name)
-        self.assertIn("calendar version", m.DEPENDENCY_RUBRIC)
+        bullet = re.search(r"^- The update is a MAJOR version change.*?(?=^- |\Z)",
+                           m.DEPENDENCY_RUBRIC, re.M | re.S).group(0)
+        flat = " ".join(bullet.split())
+        self.assertIn("calendar version", flat)
+        self.assertIn("whatever the update table says", flat)
+        self.assertIn("version strings in the diff", flat)
 
     def test_the_rubric_treats_the_bots_pr_text_as_untrusted(self):
         """Renovate fills the description with UPSTREAM release notes - text anyone upstream can

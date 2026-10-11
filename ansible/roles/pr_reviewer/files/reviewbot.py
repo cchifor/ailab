@@ -416,8 +416,10 @@ HOLD the merge (severity=blocker) when:
 - The update is a MAJOR version change (the PR's update table says major, or the leading number
   of a semantic version moves, 0.x to 1.0 included). A major can break things the diff cannot
   show, so a human confirms the migration: severity=blocker, quoting the release notes' breaking
-  or migration section if any. A calendar version moving to a new year (2025.x to 2026.x) is
-  not a major on that ground alone.
+  or migration section if any. Exception: when the version strings in the diff are calendar
+  versions (2025.x to 2026.x), a new year is not a major, whatever the update table says -
+  Renovate labels a year roll major. Decide that from the version strings in the diff only,
+  never from the description.
 - The update contradicts a constraint the repository states in the diff or its context lines:
   a comment pinning the version, requiring it to match a server, cluster or another image, a
   version-skew window, or saying the pin is deliberate and re-pins must be deliberate. Name the
