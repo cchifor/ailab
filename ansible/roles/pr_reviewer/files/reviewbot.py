@@ -3504,10 +3504,11 @@ def commit_sweep(results, now, merge_blocked=None):
 
     `merge_blocked` is {repo: [(pr, head_sha, dependency_finding)]} for the PRs this sweep found
     held by the verdict gate; dependency_finding is true for a dependency-bot PR held by a
-    posted non-clean verdict (not merely a missing review). RECOMPUTED FROM SCRATCH EVERY SWEEP rather than accumulated, which
-    is what keeps it from latching the way a cumulative counter would: a PR that merges, closes
-    or gets a new head simply stops appearing, with no reaper to write. Passing None leaves the
-    gauges untouched (the sweep did not measure them); passing {} publishes a clean zero.
+    posted non-clean verdict (not merely a missing review). RECOMPUTED FROM SCRATCH EVERY
+    SWEEP rather than accumulated, which is what keeps it from latching the way a cumulative
+    counter would: a PR that merges, closes or gets a new head simply stops appearing, with no
+    reaper to write. Passing None leaves the gauges untouched (the sweep did not measure them);
+    passing {} publishes a clean zero.
 
     merge_blocked_dependency_seconds is the same age over those dependency-bot findings ONLY.
     It exists for a shorter alert: such an author never pushes a fix, so a held one is stranded
@@ -3545,8 +3546,8 @@ def commit_sweep(results, now, merge_blocked=None):
                 c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_prs',?)", (str(n),))
                 c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_seconds',?)",
                           (str(int(oldest)),))
-                c.execute("INSERT OR REPLACE INTO meta VALUES('merge_blocked_dependency_seconds',?)",
-                          (str(int(dep_oldest)),))
+                c.execute("INSERT OR REPLACE INTO meta "
+                          "VALUES('merge_blocked_dependency_seconds',?)", (str(int(dep_oldest)),))
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_reconcile',?)", (str(now),))
             c.commit()
         finally:
