@@ -67,12 +67,13 @@
 - name: Pre-flight this slot's own Gitea tokens before the agent renders them (values never printed)
   ansible.builtin.shell: |
     set -o pipefail
-    [ "$(hostname -s)" = "{{ inventory_hostname }}" ] || { echo "hostname -s is '$(hostname -s)', not {{ inventory_hostname }}" >&2; exit 90; }
+    slot={{ inventory_hostname | quote }}
+    [ "$(hostname -s)" = "$slot" ] || { echo "hostname -s is '$(hostname -s)', not $slot" >&2; exit 90; }
     for field in gitea_pat gitea_repo_pat gitea_package_pat; do
-      mine="$(/usr/local/bin/cred get "{{ inventory_hostname }}" "$field")" || { echo "cannot read $field for {{ inventory_hostname }}" >&2; exit 91; }
-      [ -n "$mine" ] || { echo "$field is empty in af/dev-workers/{{ inventory_hostname }}" >&2; exit 92; }
+      mine="$(/usr/local/bin/cred get "$slot" "$field")" || { echo "cannot read $field for $slot" >&2; exit 91; }
+      [ -n "$mine" ] || { echo "$field is empty in af/dev-workers/$slot" >&2; exit 92; }
       shared="$(/usr/local/bin/cred get common "$field" 2>/dev/null)" || shared=""
-      [ "$mine" != "$shared" ] || { echo "$field in af/dev-workers/{{ inventory_hostname }} is the shared dev-worker-bot token" >&2; exit 93; }
+      [ "$mine" != "$shared" ] || { echo "$field in af/dev-workers/$slot is the shared dev-worker-bot token" >&2; exit 93; }
     done
     echo preflight-ok
   args:

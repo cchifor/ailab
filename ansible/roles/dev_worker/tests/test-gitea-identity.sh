@@ -33,7 +33,7 @@ env GIT_AUTHOR_NAME=stub-env-value-7777 sleep 120 &
 SLEEPER=$!
 
 "$PY" - "$ROLE" "$WORK" "$SLEEPER" <<'PY'
-import os, pwd, re, subprocess, sys
+import os, pwd, re, shlex, subprocess, sys
 
 try:
     import jinja2
@@ -73,6 +73,8 @@ def to_bool(v):  # ansible's `bool` filter
 ENV = jinja2.Environment(undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
 ENV.filters["bool"] = to_bool
 ENV.filters["regex_replace"] = lambda s, pat, rep="": re.sub(pat, rep, s)
+ENV.filters["quote"] = lambda s: shlex.quote(str(s))  # ansible's `quote` is shlex.quote
+ENV.tests["match"] = lambda v, pat: re.match(pat, str(v)) is not None  # ansible's `match` test
 
 
 def render(text, **v):
@@ -436,6 +438,28 @@ for name in sorted(os.listdir(os.path.join(ROLE, "tasks"))):
             if isinstance(t.get(k), str) and not balanced(t[k]):
                 unbalanced.append("%s: %s" % (name, t.get("name")))
 check(not unbalanced, "J1: no shell task has an unbalanced quote", unbalanced)
+
+print("[K] only a slot-shaped name reaches the shell, the KV path and the logins")
+slot_assert = task("tasks/main.yml", "Assert the slot name")
+check("always" in slot_assert.get("tags", []), "K1: the slot assert runs on every tag")
+check(position("tasks/main.yml", "Assert the slot name") < position("tasks/main.yml", "Git commit identity")
+      and position("tasks/main.yml", "Assert the slot name") < position("tasks/main.yml", "OpenBao credential plumbing"),
+      "K2: ...before the identity and OpenBao task files")
+
+
+def slot_ok(host, gate):
+    v = dict(DEFAULTS, inventory_hostname=host, dev_worker_gitea_identity_cutover=gate)
+    for _ in range(5):
+        for k, val in list(v.items()):
+            if k.startswith("dev_worker_git") and isinstance(val, str) and "{{" in val:
+                v[k] = render(val, **v)
+    return all(render("{{ %s }}" % c, **v) == "True" for c in slot_assert["ansible.builtin.assert"]["that"])
+
+
+for host in ("dev-worker-1", "dev-worker-12"):
+    check(slot_ok(host, False) and slot_ok(host, True), "K3: %s passes with the gate off and on" % host)
+for host in ('dev-worker-3"; touch /tmp/x; "', "dev-worker-3 ", "dev-worker-x", "reviewer-1", "dev-worker-3\n"):
+    check(not slot_ok(host, False) and not slot_ok(host, True), "K4: %r is refused" % host)
 
 print()
 print("ALL PASS" if fails == 0 else "%d CHECK(S) FAILED" % fails)
