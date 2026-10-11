@@ -2,9 +2,10 @@
 # OpenBao credential plumbing (ADR 0020). Gives this worker its own AppRole identity: a root-owned
 # `bao agent` logs in with the per-VM secret-id, keeps a PERIODIC token renewed (a token with a
 # period has no max-TTL, so the 768h expiry that locked the estate out of OpenBao on 2026-08-25
-# cannot repeat here), renders ~/.git-credentials from the shared KV path, and drops a
-# group-readable sink token that /usr/local/bin/cred uses for ad-hoc reads. Interactive agents
-# therefore fetch secrets on demand and never hold the vault token.
+# cannot repeat here), renders ~/.git-credentials from KV (the shared document, or the slot's own
+# once dev_worker_gitea_identity_cutover is set), and drops a group-readable sink token that
+# /usr/local/bin/cred uses for ad-hoc reads. Interactive agents therefore fetch secrets on demand and
+# never hold the vault token.
 #
 # Opt-in: main.yml imports this only when dev_worker_enable_openbao. The cluster side (the
 # openbao-lan NodePort, the AppRole roles/policies, the af/dev-workers/* KV) and the per-worker
@@ -53,6 +54,32 @@
     openbao_agent_sha256: "{{ dev_worker_openbao_sha256 }}"
     openbao_agent_sink_readers: "{{ dev_worker_users | map(attribute='name') | list }}"
     openbao_agent_unit_description: "OpenBao agent (dev-worker credential plumbing)"
+
+# ---- per-slot Gitea identity (plan 2026-10-11 worker identities, Phase 4) ------------------------
+# With dev_worker_gitea_identity_cutover the agent renders ~/.git-credentials from THIS slot's flat
+# document instead of common. The `<no value>` guard (error_on_missing_key) would then stop the whole
+# agent on a missing field: failure detection, not a gate. This is the gate, and it runs before
+# anything below can change what the agent renders: the short hostname must be the inventory name
+# (`cred` finds the slot by hostname, the template by inventory name), and all three Gitea fields
+# must be readable under this host's own AppRole, non-empty, and not a copy of the shared token.
+# Values stay in shell variables, never on stdout. Whether the token really is `<slot>-bot` (GET
+# /user) is the runbook's pre-flight: it needs the forge, which a converge does not depend on.
+- name: Pre-flight this slot's own Gitea tokens before the agent renders them (values never printed)
+  ansible.builtin.shell: |
+    set -o pipefail
+    [ "$(hostname -s)" = "{{ inventory_hostname }}" ] || { echo "hostname -s is '$(hostname -s)', not {{ inventory_hostname }}" >&2; exit 90; }
+    for field in gitea_pat gitea_repo_pat gitea_package_pat; do
+      mine="$(/usr/local/bin/cred get "{{ inventory_hostname }}" "$field")" || { echo "cannot read $field for {{ inventory_hostname }}" >&2; exit 91; }
+      [ -n "$mine" ] || { echo "$field is empty in af/dev-workers/{{ inventory_hostname }}" >&2; exit 92; }
+      shared="$(/usr/local/bin/cred get common "$field" 2>/dev/null)" || shared=""
+      [ "$mine" != "$shared" ] || { echo "$field in af/dev-workers/{{ inventory_hostname }} is the shared dev-worker-bot token" >&2; exit 93; }
+    done
+    echo preflight-ok
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false # read-only, so a check run reports the failure the real run would hit
+  when: dev_worker_gitea_identity_cutover | bool
 
 # Destination directories for the kubeconfig templates, for EVERY dev_worker_users entry. These
 # must exist BEFORE the agent starts or restarts: a template whose destination directory is missing
@@ -251,6 +278,33 @@
     owner: root
     group: openbao-agent
     mode: "0640"
+    backup: true # the rescue's rollback target when this run switched the Gitea identity
+  register: dev_worker_git_ctmpl
+  notify: Restart openbao-agent
+
+# A Gitea identity switch (the cut-over, or flipping it back) changes the LOGIN in the rendered line.
+# The old file is removed so the restart below must render the new one from scratch: a template that
+# cannot render then leaves NO credential, which the health check catches, instead of the other
+# login's line still sitting there, non-empty, passing it. Keyed on the login actually on disk, not
+# on this run's template diff, so a run that died between the template and the restart is still
+# caught by the next one. Only the login is extracted; the token never reaches stdout.
+- name: Find credential files whose login is not this run's Gitea user
+  ansible.builtin.shell: |
+    {% for user in dev_worker_users %}
+    f="{{ user.home }}/.git-credentials"
+    if [ -e "$f" ] && [ "$(sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "$f")" != "{{ dev_worker_gitea_user }}" ]; then echo "$f"; fi
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  register: dev_worker_git_login_drift
+  changed_when: false
+  check_mode: false # read-only
+
+- name: Remove them, so the agent renders this run's login afresh
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ dev_worker_git_login_drift.stdout_lines }}"
   notify: Restart openbao-agent
 
 # With dev_worker_codex_host_owned_login (the default since 2026-09-29) the agent renders NO codex
@@ -320,8 +374,11 @@
         [ "$(systemctl show openbao-agent -p NRestarts --value)" = "$before" ] || { echo "openbao-agent is restart-looping" >&2; exit 1; }
         # 3. the credential the agent has always owned is still being rendered. This is the check
         #    that catches "the new stanzas killed the agent and took git auth with them".
+        #    Non-empty is not enough across a Gitea identity switch: the line must name THIS run's
+        #    login, the one pin_gitea_username.yml pins next.
         {% for user in dev_worker_users %}
         [ -s "{{ user.home }}/.git-credentials" ] || { echo "{{ user.home }}/.git-credentials missing/empty" >&2; exit 1; }
+        [ "$(sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "{{ user.home }}/.git-credentials")" = "{{ dev_worker_gitea_user }}" ] || { echo "{{ user.home }}/.git-credentials does not name {{ dev_worker_gitea_user }}" >&2; exit 1; }
         {% endfor %}
         {% if not dev_worker_codex_host_owned_login | bool %}
         # 3b. the shared codex login rendered for every user: user-owned 0600, valid JSON with an
@@ -416,12 +473,19 @@
     # unrelated reason, e.g. a briefly sealed vault). Restoring the previous agent.hcl may bring back
     # a config that still renders ~/.tep/kubeconfig on a host converging past ADR 0037 — which is why
     # tep.yml runs after this file and deletes ~/.tep only once the live config no longer uses it.
+    # The credential template likewise only if this run changed it (a Gitea identity switch): the
+    # agent then renders the previous login again, and the play fails before pin_gitea_username.yml
+    # could move the pinned username away from it.
     - name: Restore the previous agent config, and ownership only if this run took it
       ansible.builtin.shell: |
         set -eu
         BAK="{{ dev_worker_agent_hcl.backup_file | default('') }}"
         if [ -n "$BAK" ] && [ -f "$BAK" ]; then
           cp "$BAK" /etc/openbao-agent/agent.hcl
+        fi
+        CT_BAK="{{ dev_worker_git_ctmpl.backup_file | default('') }}"
+        if [ -n "$CT_BAK" ] && [ -f "$CT_BAK" ]; then
+          cp "$CT_BAK" /etc/openbao-agent/git-credentials.ctmpl
         fi
         {% if dev_worker_marker_written.changed | default(false) | bool %}
         rm -f /etc/openbao-agent/renders-kubeconfigs
@@ -433,9 +497,10 @@
       ansible.builtin.fail:
         msg: >-
           openbao-agent did not come up healthy on {{ inventory_hostname }}. The previous agent.hcl
-          was restored (and the kubeconfig marker removed if this run wrote it). STOP the rollout - do
+          was restored (and the kubeconfig marker removed, and the credential template restored, if
+          this run changed them). STOP the rollout - do
           not run the remaining workers until this is understood
-          (docs/runbooks/openbao-dev-workers.md, "kubeconfig cutover").
+          (docs/runbooks/openbao-dev-workers.md, "kubeconfig cutover" / "Gitea identity cut-over").
 
 # Host-owned logins: the agent renders no ~/.codex/auth.json and the verify step no longer reads it,
 # so a projection the agent rendered BEFORE the switch (refresh_token "") survives on disk. It works
@@ -521,7 +586,7 @@
 
       ## Gitea (git.chifor.me): three tokens, three jobs
 
-      All three are fields of `cred` name `common` and authenticate as the non-admin
+      All three are fields of `cred` name `{{ dev_worker_gitea_cred_name }}` and authenticate as the non-admin
       `{{ dev_worker_gitea_user }}`; they differ only in scope. A 403 saying "token does not have at
       least one of required scope(s)" usually means the wrong token, not missing access: switch to
       the token below that carries the scope. Ask the operator only when none of the three does.
@@ -529,11 +594,11 @@
       - `gitea_pat` (`write:repository,write:issue,read:organization,read:user`): git, PRs, issues,
         comments. It is the token in `~/.git-credentials`, so plain `git` already uses it.
       - `gitea_repo_pat` (`write:organization,write:repository,read:user`): creating a repository in
-        org `cchifor`. `cred exec common gitea_repo_pat GITEA_TOKEN -- <cmd>`.
+        org `cchifor`. `cred exec {{ dev_worker_gitea_cred_name }} gitea_repo_pat GITEA_TOKEN -- <cmd>`.
       - `gitea_package_pat` (`write:package,read:repository,read:user`): packages and container images
         under owner `cchifor` (`https://git.chifor.me/api/packages/cchifor/...`), reading or
         publishing (`write:package` includes `read:package`). For a Forge release:
-        `cred exec common gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>` with
+        `cred exec {{ dev_worker_gitea_cred_name }} gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>` with
         `FORGE_RELEASE_USERNAME={{ dev_worker_gitea_user }}`; the same field serves `FORGE_CATALOG_TOKEN`.
 
       ## Attribution: say which worker and which run wrote it

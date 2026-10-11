@@ -8,6 +8,10 @@
 # identity split moved ~/.git-credentials to dev-worker-bot) made git skip the stored line and
 # prompt for the owner's password. Owning the key here keeps it equal to the user in the file, and
 # the module (unlike a shell task) reports that drift under --check.
+#
+# dev_worker_gitea_user follows dev_worker_gitea_identity_cutover (defaults/main.yml), so this pin
+# moves with a cut-over or its rollback. The agent renders the new credential line BEFORE this runs,
+# and git finds no credential in between: the slot is drained for that converge (runbook).
 - name: Pin the git.chifor.me credential username to the forge identity
   become: true
   become_user: "{{ item.name }}"
