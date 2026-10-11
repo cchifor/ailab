@@ -8,9 +8,17 @@
 #   lines 2+: <slot_name>|<slot_type>|<active true/false>|<wal_status>|<safe_wal_size>|<invalidation_reason>
 # (booleans concatenated into text come out as true/false; bare psql -At output would be t/f - both accepted)
 # When the probe could not connect to the primary at all, it writes PROBE_UNREACHABLE_FILE instead of
-# SLOTS_FILE. That is expected while CNPG restarts or switches the primary, and CNPG then reports the
-# Cluster as not healthy: this script logs it and exits 0. While the Cluster reports healthy, an
-# unreachable primary is a real fault: exit 1 (KubeJobFailed pages). An unreadable Cluster is exit 1 too.
+# SLOTS_FILE. This script then exits 0 only when CNPG itself is taking the primary down or moving it,
+# for a bounded time:
+#   - the phase is one of transient_phase() (CNPG 1.29 api/v1 constants) AND the Ready condition has
+#     been False for at most HANDOFF_TRANSIENT_MAX_SECONDS (CNPG sets phase and Ready in one patch, so
+#     its lastTransitionTime is when the Cluster became unhealthy); or
+#   - the phase is healthy but Ready turned True less than HANDOFF_HEALTHY_GRACE_SECONDS ago (a restart
+#     finishing: -rw can lag the phase by seconds).
+# Everything else exits 1 and KubeJobFailed pages: unhealthy for longer than that bound, healthy for
+# longer than the grace, a stuck or terminal phase ("Waiting for user action", "... unrecoverable ..."),
+# an unknown or empty phase, a missing Ready condition, an unreadable Cluster, and an overdue re-clone
+# marker (the STUCK_AFTER_SECONDS page must not be hidden by an unreachable primary).
 # This script only talks to the Kubernetes API (kubectl + jq, namespaced RBAC). POSIX sh so that
 # scripts/tests/cnpg-lost-slot-reclone-mock.py can drive it with a fake kubectl on PATH.
 #
@@ -30,14 +38,14 @@
 #       role unchanged), take the marker with a resourceVersion precondition (a competing execution
 #       cannot overwrite it), then delete PVCs -> pod -> bounded wait until pod and PVC UIDs are gone;
 #       an API error while waiting is "unknown", never "gone". One re-clone per execution.
-# Exit: 0 acted, nothing to do, or primary unreachable while the Cluster is not healthy; 1 failure/
-#       refusal/stuck, or primary unreachable while the Cluster reports healthy; 3 probe saw a
-#       non-primary (switchover).
+# Exit: 0 acted, nothing to do, or primary unreachable during a transient CNPG phase; 1 failure/
+#       refusal/stuck, or primary unreachable in any other state; 3 probe saw a non-primary (switchover).
 set -eu
 
 : "${NAMESPACE:?}" "${CLUSTERS:?}"
 : "${SLOTS_FILE:=/work/slots.tsv}" "${PROBE_UNREACHABLE_FILE:=/work/probe-unreachable}"
 : "${DRY_RUN:=true}" "${MIN_INTERVAL_SECONDS:=21600}"
+: "${HANDOFF_HEALTHY_GRACE_SECONDS:=120}" "${HANDOFF_TRANSIENT_MAX_SECONDS:=1800}"
 : "${STUCK_AFTER_SECONDS:=2700}" "${DELETE_WAIT_SECONDS:=150}" "${POLL_SECONDS:=5}" "${WORK:=/tmp}" "${K_TIMEOUT:=25}"
 IN_PROGRESS=ailab.io/reclone-in-progress
 LAST=ailab.io/last-reclone
@@ -67,16 +75,40 @@ present() { # kind name [uid] -> 0 present, 1 gone (NotFound, or replaced by a s
   return 2
 }
 expected_slot() { printf '%s%s' "$prefix" "$(printf '%s' "$1" | tr '-' '_')"; }
+# Phases in which CNPG itself takes the primary down or moves it, so -rw may have no endpoint. Exact
+# strings from CNPG 1.29 api/v1/cluster_types.go. Stuck and terminal phases are deliberately absent.
+transient_phase() {
+  case "$1" in
+    "Upgrading cluster" | "Upgrading Postgres major version" | "Primary instance is being restarted in-place" | \
+      "Primary instance is being restarted without a switchover" | "Switchover in progress" | "Failing over" | \
+      "Setting up primary" | "Waiting for the instances to become active" | "Applying configuration") return 0 ;;
+  esac
+  return 1
+}
 
 if [ -e "$PROBE_UNREACHABLE_FILE" ]; then
   rc=0
   for cluster in $CLUSTERS; do
     read_cluster "$cluster" || { rc=1; continue; }
     phase=$(cf '.status.phase // ""')
-    if [ "$phase" = "$HEALTHY" ]; then
-      echo "$cluster: probe could not connect to the primary while the Cluster reports healthy - failing"; rc=1
+    marker=$(cf ".metadata.annotations[\"$IN_PROGRESS\"] // \"\"")
+    ready=$(cf '[.status.conditions[]? | select(.type == "Ready")][0] | if . == null then "" else .status + " " + .lastTransitionTime end')
+    ready_status=${ready%% *}; ready_at=${ready#* }; ready_age=""
+    if [ -n "$ready" ] && rep=$(epoch_of "$ready_at"); then ready_age=$(( $(now) - rep )); fi
+    if [ -n "$marker" ]; then
+      if mep=$(epoch_of "${marker%%/*}"); then mage=$(( $(now) - mep )); else mage=$((STUCK_AFTER_SECONDS + 1)); fi
+      if [ "$mage" -gt "$STUCK_AFTER_SECONDS" ]; then
+        echo "$cluster: re-clone marker '$marker' is ${mage}s old and the probe could not connect to the primary - operator needed"; rc=1; continue
+      fi
+    fi
+    if transient_phase "$phase" && [ "$ready_status" = False ] && [ -n "$ready_age" ] && [ "$ready_age" -le "$HANDOFF_TRANSIENT_MAX_SECONDS" ]; then
+      echo "$cluster: probe could not connect to the primary; Cluster phase is '$phase', unhealthy for ${ready_age}s (CNPG is taking the primary down or moving it) - not acting"
+    elif [ "$phase" = "$HEALTHY" ] && [ "$ready_status" = True ] && [ -n "$ready_age" ] && [ "$ready_age" -lt "$HANDOFF_HEALTHY_GRACE_SECONDS" ]; then
+      echo "$cluster: probe could not connect to the primary; the Cluster became Ready ${ready_age}s ago (a restart is finishing) - not acting"
+    elif [ "$phase" = "$HEALTHY" ]; then
+      echo "$cluster: probe could not connect to the primary while the Cluster reports healthy (Ready: '${ready:-none}') - failing"; rc=1
     else
-      echo "$cluster: probe could not connect to the primary; Cluster phase is '$phase' (CNPG restarting or switching the primary) - not acting"
+      echo "$cluster: probe could not connect to the primary; phase '$phase', Ready: '${ready:-none}' is not a bounded CNPG transition - failing"; rc=1
     fi
   done
   exit $rc

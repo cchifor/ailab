@@ -83,7 +83,8 @@ def fake_kubectl(argv):
             save()
             return out(json.dumps({"metadata": {"name": name, "annotations": c["annotations"], "resourceVersion": str(c["rv"])},
                                    "spec": {"instances": c["want"], "replicationSlots": {"highAvailability": {"enabled": True, "slotPrefix": c.get("prefix", "_cnpg_")}}},
-                                   "status": {"phase": c["phase"], "currentPrimary": c["currentPrimary"], "instanceNames": c["instances"]}}))
+                                   "status": {"phase": c["phase"], "currentPrimary": c["currentPrimary"], "instanceNames": c["instances"],
+                                              "conditions": c.get("conditions", [])}}))
         if kind == "pod":
             name = names[0]
             st["pod_reads"] = st.get("pod_reads", 0) + 1
@@ -145,13 +146,13 @@ def fake_psql(argv):
     st["calls"] = st.get("calls", 0) + 1
     rc = st["rcs"][min(st["calls"], len(st["rcs"])) - 1]
     json.dump(st, open(st_path, "w"))
+    out = argv[argv.index("-o") + 1]
+    open(out, "w").write("in_recovery=false\n" if rc == 2 else "")  # worst case: partial output
     if rc == 0:
-        out = argv[argv.index("-o") + 1]
         open(out, "w").write(SLOTS_OK)
         return 0
-    sys.stderr.write({1: "psql: error: out of memory\n",
-                      2: 'psql: error: connection to server at "infra-pg-rw" (10.0.0.1), port 5432 failed: No route to host\n',
-                      3: "psql:<stdin>:1: ERROR:  relation does not exist\n"}.get(rc, "psql: error\n"))
+    sys.stderr.write({1: "ERROR:  relation \"pg_replication_slots\" does not exist\n",
+                      2: 'psql: error: connection to server at "infra-pg-rw" (10.0.0.1), port 5432 failed: No route to host\n'}.get(rc, "psql: error\n"))
     return rc
 
 
@@ -161,7 +162,8 @@ def fake_psql(argv):
 def base_state(**over):
     st = {"ns": "databases",
           "clusters": {"infra-pg": {"phase": HEALTHY, "currentPrimary": "infra-pg-2", "instances": ["infra-pg-2", "infra-pg-5"],
-                                    "want": 2, "prefix": "_cnpg_", "annotations": {}, "rv": 100}},
+                                    "want": 2, "prefix": "_cnpg_", "annotations": {}, "rv": 100,
+                                    "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}]}},
           "pods": {"infra-pg-2": {"role": "primary"}, "infra-pg-5": {"role": "replica"}},
           "pvcs": {"infra-pg-2": {"uid": "u2", "pv": "pvc-aaa"}, "infra-pg-5": {"uid": "u5", "pv": "pvc-bbb"},
                    "infra-pg-5-wal": {"uid": "u5w", "pv": "pvc-ccc"}}}
@@ -362,12 +364,39 @@ def main():
 
     # the probe could not connect at all (it hands off instead of failing). CNPG restarts the primary in
     # place on every operator/image upgrade and reports the Cluster unhealthy meanwhile: not a fault.
-    st = base_state(); st["clusters"]["infra-pg"]["phase"] = "Upgrading cluster"
-    rc, out, calls, _ = run("unreachable-upgrading", st, "", unreachable=True)
+    def unready(phase, since):  # CNPG patches phase and Ready together: Ready=False since `since`
+        st = base_state(); st["clusters"]["infra-pg"]["phase"] = phase
+        st["clusters"]["infra-pg"]["conditions"] = [{"type": "Ready", "status": "False", "lastTransitionTime": iso(since)}]
+        return st
+    rc, out, calls, _ = run("unreachable-upgrading", unready("Upgrading cluster", time.time() - 120), "", unreachable=True)
     check("unreachable while Cluster not healthy: exit 0, no calls", rc == 0 and not calls and "not acting" in out, out)
+    rc, out, calls, _ = run("unreachable-upgrading-long", unready("Upgrading cluster", time.time() - 7200), "", unreachable=True)
+    check("unreachable, transient phase but unhealthy for 2h: exit 1", rc == 1 and not calls and "failing" in out, out)
+    st = base_state(); st["clusters"]["infra-pg"]["phase"] = "Upgrading cluster"; st["clusters"]["infra-pg"]["conditions"] = []
+    rc, out, calls, _ = run("unreachable-upgrading-no-ready", st, "", unreachable=True)
+    check("unreachable, transient phase, no Ready condition: exit 1", rc == 1 and not calls and "failing" in out, out)
+    st = unready("Upgrading cluster", time.time() - 120)
+    st["clusters"]["infra-pg"]["annotations"][MARKER] = iso(time.time() - 4000) + "/infra-pg-5"
+    rc, out, calls, _ = run("unreachable-stuck-marker", st, "", unreachable=True)
+    check("unreachable never hides an overdue re-clone marker: exit 1", rc == 1 and not calls and "operator needed" in out, out)
+    rc, out, calls, _ = run("unreachable-restart", unready("Primary instance is being restarted without a switchover", time.time() - 60), "", unreachable=True)
+    check("unreachable during in-place primary restart: exit 0", rc == 0 and not calls and "not acting" in out, out)
+    # stuck / terminal / unknown phases are NOT maintenance: an unreachable primary there must page
+    for label, phase in (("unrecoverable", "Cluster is unrecoverable and needs manual intervention"),
+                         ("waiting-user", "Waiting for user action"),
+                         ("empty", "")):
+        rc, out, calls, _ = run("unreachable-" + label, unready(phase, time.time() - 60), "", unreachable=True)
+        check(f"unreachable in phase '{phase}': exit 1", rc == 1 and not calls and "failing" in out, out)
     # ... but unreachable while CNPG says healthy is a real fault and must still page
     rc, out, calls, _ = run("unreachable-healthy", base_state(), "", unreachable=True)
     check("unreachable while Cluster healthy: exit 1, no calls", rc == 1 and not calls and "reports healthy" in out, out)
+    # ... unless it became healthy moments ago: the restart is finishing (-rw lags the phase by seconds)
+    st = base_state(); st["clusters"]["infra-pg"]["conditions"][0]["lastTransitionTime"] = iso(time.time() - 30)
+    rc, out, calls, _ = run("unreachable-just-healthy", st, "", unreachable=True)
+    check("unreachable, Ready for 30s: exit 0", rc == 0 and not calls and "not acting" in out, out)
+    st = base_state(); st["clusters"]["infra-pg"]["conditions"] = []
+    rc, out, calls, _ = run("unreachable-healthy-no-ready", st, "", unreachable=True)
+    check("unreachable, healthy, no Ready condition: exit 1", rc == 1 and not calls and "reports healthy" in out, out)
     # ... and an unreadable Cluster is never taken as "not healthy"
     rc, out, calls, _ = run("unreachable-cluster-read-fails", base_state(fail_cluster_read=True), "", unreachable=True)
     check("unreachable + Cluster unreadable: exit 1, no calls", rc == 1 and not calls and "cannot read Cluster" in out, out)
@@ -380,10 +409,10 @@ def main():
     rc, out, slots, handoff, n = run_probe([2, 2, 2])
     check("probe hands off after PROBE_ATTEMPTS connection failures",
           rc == 0 and slots is None and handoff and n == 3 and "could not connect" in out, out)
-    rc, out, slots, handoff, n = run_probe([3])
-    check("probe: SQL error (psql 3) fails the run, no retry", rc == 3 and not handoff and n == 1, out)
     rc, out, slots, handoff, n = run_probe([1])
-    check("probe: psql's own error (1) fails the run, no retry", rc == 1 and not handoff and n == 1, out)
+    check("probe: SQL error in a -c command (psql 1) fails the run, no retry", rc == 1 and not handoff and n == 1, out)
+    rc, out, slots, handoff, n = run_probe([3])
+    check("probe: any other non-2 exit fails the run, no retry", rc == 3 and not handoff and n == 1, out)
     rc, out, slots, handoff, n = run_probe([0], pre_existing=True)
     check("probe clears a previous run's hand-off file", rc == 0 and slots == SLOTS_OK and not handoff, out)
 

@@ -17,10 +17,12 @@
 # cluster's -rw Service, as the LOGIN-only managed role `slotwatch` (no superuser, no pods/exec, no
 # pg_monitor - pg_replication_slots is readable by every role), for pg_is_in_recovery() and every
 # physical slot's active/wal_status (cnpg-lost-slot-reclone-probe.sh, from the same ConfigMap). If it
-# cannot connect at all, after PROBE_ATTEMPTS tries, it hands off instead of failing, and the main
-# container exits 0 when the Cluster's phase is not healthy (CNPG restarting the primary in place on an
-# upgrade, as on 2026-10-09) and 1 when it is healthy. The main container maps slots to instances from
-# the Cluster's own .status.instanceNames + slotPrefix (exact match, not parsing), and acts only when:
+# cannot connect at all, after PROBE_ATTEMPTS tries, it hands off instead of failing. The main container
+# then exits 0 only during a bounded CNPG transition (a transient_phase() for at most
+# HANDOFF_TRANSIENT_MAX_SECONDS, e.g. the in-place primary restarts of 2026-10-09, or the first
+# HANDOFF_HEALTHY_GRACE_SECONDS after becoming Ready) and 1 otherwise.
+# The main container maps slots to instances from the Cluster's own .status.instanceNames + slotPrefix
+# (exact match, not parsing), and acts only when:
 # phase is "Cluster in healthy state", the slot is physical, INACTIVE and LOST, the instance is not
 # currentPrimary, its pod carries cnpg.io/instanceRole=replica, no ailab.io/reclone-in-progress marker
 # exists and the last re-clone (ailab.io/last-reclone) is older than MIN_INTERVAL_SECONDS (a finite
@@ -109,9 +111,9 @@ spec:
           initContainers:
             # The cluster's own image (infra-pg.yaml imageName), so psql matches the server and the
             # image is already on every node. Writes the slot state, or the unreachable hand-off, for the
-            # main container (cnpg-lost-slot-reclone-probe.sh). Worst case 3 x 15 s connect timeout + 2 x
-            # 10 s = 65 s, well inside activeDeadlineSeconds; when it hands off, the main container only
-            # reads the Cluster.
+            # main container (cnpg-lost-slot-reclone-probe.sh). Connection-retry budget: 3 x 15 s connect
+            # timeout + 2 x 10 s sleeps = 65 s. A query that stalls after connecting is bounded only by
+            # activeDeadlineSeconds, as before.
             - name: probe
               image: ghcr.io/cloudnative-pg/postgresql:17.11
               imagePullPolicy: IfNotPresent
@@ -178,6 +180,10 @@ spec:
                   value: "true"
                 - name: MIN_INTERVAL_SECONDS # >= 6 h between re-clones of one cluster: at most 4/day
                   value: "21600"
+                - name: HANDOFF_HEALTHY_GRACE_SECONDS # unreachable this soon after Ready => excused
+                  value: "120"
+                - name: HANDOFF_TRANSIENT_MAX_SECONDS # unreachable in a transient phase: excused this long
+                  value: "1800"
                 - name: STUCK_AFTER_SECONDS # unverified marker older than 45 min => exit 1 every run
                   value: "2700"
                 - name: DELETE_WAIT_SECONDS
