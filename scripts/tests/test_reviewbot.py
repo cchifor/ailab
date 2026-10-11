@@ -2380,7 +2380,10 @@ class AllowlistDefaultsTest(unittest.TestCase):
         first line it cannot match, so appending a comment and then the fixture underneath the
         four real entries left it GREEN — the truncation IS the bypass. This walks to the end of
         the block instead, and raises on anything it does not understand rather than returning a
-        short list."""
+        short list. A second definition of the key, in any quoting, raises too: YAML keeps the LAST
+        one, so Ansible would read a list this parser never saw."""
+        if len(re.findall(r"""^(["']?)%s\1[ \t]*:""" % re.escape(key), text, re.M)) > 1:
+            raise AssertionError(f"{key} is defined more than once")
         lines = text.splitlines()
         for i, ln in enumerate(lines):
             if ln.startswith(key + ":"):
@@ -2434,6 +2437,9 @@ class AllowlistDefaultsTest(unittest.TestCase):
             self._parse_repos("pr_reviewer_repos: [cchifor/ailab]\n")
         with self.assertRaises(AssertionError):
             self._parse_repos("some_other_key: 1\n")
+        for dup in ('"pr_reviewer_repos": []\n', "'pr_reviewer_repos' : []\n", "pr_reviewer_repos: []\n"):
+            with self.subTest(dup=dup), self.assertRaises(AssertionError):
+                self._parse_repos("pr_reviewer_repos:\n  - cchifor/ailab\n" + dup)
 
     # The merge-author allowlist, same contract (ailab plan 2026-10-11-worker-identities, Phase 3).
     # dev-worker-bot STAYS next to the four slot bots: eligibility keys on the PR author, so its
