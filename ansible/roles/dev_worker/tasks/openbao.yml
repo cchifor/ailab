@@ -492,8 +492,10 @@
 # ~/.codex/AGENTS.md); this is how they learn that secrets come from `cred`, that values must never
 # be printed, and which Gitea token carries which scope. Until 2026-10-10 only CLAUDE.md got it, so a
 # Codex agent on dev-worker-3 tried package reads with gitea_pat, got 403, and asked for package
-# access the worker already had in gitea_package_pat. A managed block rather than a whole file, so
-# the operator's own notes in the same file survive. HTML-comment markers because the files are
+# access the worker already had in gitea_package_pat. It also carries the attribution rules (commit
+# trailers and the run marker, plan 2026-10-11 worker identities): one account per slot names the
+# machine, only the agent can name its run. A managed block rather than a whole file, so the
+# operator's own notes in the same file survive. HTML-comment markers because the files are
 # markdown — blockinfile's default `#` marker would render as an H1 heading in the agent's context.
 - name: Publish the credential instructions to each agent's instructions file
   ansible.builtin.blockinfile:
@@ -533,6 +535,25 @@
         publishing (`write:package` includes `read:package`). For a Forge release:
         `cred exec common gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>` with
         `FORGE_RELEASE_USERNAME={{ dev_worker_gitea_user }}`; the same field serves `FORGE_CATALOG_TOKEN`.
+
+      ## Attribution: say which worker and which run wrote it
+
+      This is worker `{{ inventory_hostname }}`, and git already commits as `{{ dev_worker_git_user_name }}`:
+      never override that (`--author`, `-c user.name=...`, `GIT_AUTHOR_*`). End every commit message
+      with these trailers:
+
+          Worker: {{ inventory_hostname }}
+          Agent: {{ 'claude' if item.1.startswith('.claude/') else 'codex' }}
+          Run: <run id>
+
+      and end every PR body, comment and review you post on git.chifor.me with this as its last line:
+
+          <!-- worker: {{ inventory_hostname }} agent: {{ 'claude' if item.1.startswith('.claude/') else 'codex' }} run: <run id> -->
+
+      `<run id>` is your Claude Code session id or Codex thread id when your harness shows it to you,
+      otherwise `unknown` — never invent one. EXCEPTION: a comment whose whole body is a command
+      (`approve-pin <sha>`, or any other body a bot parses as a command) is posted exactly as is, with
+      no marker: platform's owner-ack gate counts only a one-line body, so a marker voids it silently.
       {% if dev_worker_openbao_renders_kubeconfigs | default(false) | bool %}
 
       ## Kubernetes: your helm test namespace
