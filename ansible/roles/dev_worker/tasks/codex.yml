@@ -175,7 +175,9 @@
          {'key': 'name', 'value': '"' ~ dev_worker_codex_router_provider ~ '"'},
          {'key': 'base_url', 'value': '"' ~ dev_worker_codex_router_base_url ~ '"'},
          {'key': 'wire_api', 'value': '"responses"'},
-         {'key': 'auth', 'value': '{ command = "/usr/local/bin/codex-router-key" }'}
+         {'key': 'auth', 'value': '{ command = "/usr/local/bin/codex-router-key" }'},
+         {'key': 'stream_max_retries', 'value': dev_worker_codex_router_stream_max_retries | string},
+         {'key': 'request_max_retries', 'value': dev_worker_codex_router_request_max_retries | string}
        ]) | list }}
   loop_control:
     label: "{{ item.0.name }} {{ item.1.key }}"
