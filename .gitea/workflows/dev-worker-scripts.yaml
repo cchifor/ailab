@@ -27,6 +27,7 @@ on:
       - "ansible/roles/dev_worker/tasks/**"
       # the Gitea identity test resolves the role defaults and reads group_vars
       - "ansible/roles/dev_worker/defaults/**"
+      - "ansible/roles/dev_worker/vars/**"
       - "ansible/group_vars/**"
       # the cred-helper test reads the shared agent role's unit + tasks too
       - "ansible/roles/openbao_agent/**"

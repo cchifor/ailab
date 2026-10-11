@@ -15,17 +15,21 @@
 #     changes — this file's and the shared role's (dev_worker_agent_inputs_changed, openbao.yml) — and
 #     never a handler: a handler's failure is not rescued.
 #
-# Rollback state survives across runs. /etc/openbao-agent/git-credentials.ctmpl.last-good is the
-# credential template that last passed verification (seeded once from the template in place, then
-# rewritten only after a verified switch), so a run that died half-way — new template laid down,
-# credentials removed, no restart — can still be rolled back by the next run, which also re-renders:
-# a MISSING ~/.git-credentials, or one whose login is not dev_worker_gitea_user, forces the restart
-# whatever this run changed. The login to roll back to is read out of that template.
+# Rollback state survives across runs. Every file this switch lays down and the agent loads
+# (dev_worker_openbao_switch_files, vars/main.yml: agent.hcl, the credential template and the
+# kubeconfig/platform render templates) has a <file>.last-good copy, the version that last passed
+# verification (seeded once from the file in place, then rewritten only after a verified switch).
+# The rollback restores ALL of them, so a replacement of any one that cannot render does not outlive
+# it, and a run that died half-way — new files laid down, credentials removed, no restart — can still
+# be rolled back by the next run, which also re-renders: a MISSING ~/.git-credentials, or one whose
+# login is not dev_worker_gitea_user, forces the restart whatever this run changed. The login to roll
+# back to is read out of the last verified credential template.
 
-- name: Look for the credential template the agent renders now
+- name: Look for the agent files this switch manages
   ansible.builtin.stat:
-    path: /etc/openbao-agent/git-credentials.ctmpl
-  register: dev_worker_git_ctmpl_now
+    path: "/etc/openbao-agent/{{ item }}"
+  loop: "{{ dev_worker_openbao_switch_files }}"
+  register: dev_worker_switch_files_now
 
 # With dev_worker_gitea_identity_cutover the agent renders ~/.git-credentials from THIS slot's flat
 # document instead of common. The `<no value>` guard (error_on_missing_key) would then stop the whole
@@ -56,15 +60,17 @@
       check_mode: false # read-only, so a check run reports the failure the real run would hit
 
   rescue:
-    # Unfinished = what a run that died between laying down a template and verifying it leaves: a
-    # credential template other than the last verified one, or a ~/.git-credentials that is missing
-    # or names another login than that template. Logins only; no token is read out.
+    # Unfinished = what a run that died between laying down files and verifying them leaves: a
+    # managed file other than its last verified version, or a ~/.git-credentials that is missing or
+    # names another login than the last verified credential template. Logins only; no token is read.
     - name: Look for an unfinished switch
       ansible.builtin.shell: |
+        for f in{% for f in dev_worker_openbao_switch_files %} {{ ('/etc/openbao-agent/' ~ f) | quote }}{% endfor %}; do
+          if [ -f "$f.last-good" ] && ! cmp -s "$f.last-good" "$f"; then echo "$f is not the last verified version"; fi
+        done
         good=/etc/openbao-agent/git-credentials.ctmpl.last-good
         [ -f "$good" ] || exit 0
         prev="$(sed -n 's#^.*https://\([^:/@]*\):.*$#\1#p' "$good" | head -n 1)"
-        cmp -s "$good" /etc/openbao-agent/git-credentials.ctmpl || echo "the credential template is not the last verified one"
         {% for user in dev_worker_users %}
         f={{ (user.home ~ '/.git-credentials') | quote }}
         if [ ! -e "$f" ]; then echo "$f is missing"
@@ -103,16 +109,18 @@
 
 - name: Switch the agent onto this run's config and Gitea login, and roll back if it is unhealthy
   block:
-    - name: Keep the current credential template as the last verified one (seeded once)
+    - name: Keep the current version of each managed file as the last verified one (seeded once)
       ansible.builtin.copy:
-        src: /etc/openbao-agent/git-credentials.ctmpl
-        dest: /etc/openbao-agent/git-credentials.ctmpl.last-good
+        src: "{{ item.stat.path }}"
+        dest: "{{ item.stat.path }}.last-good"
         remote_src: true
         force: false
         owner: root
         group: openbao-agent
         mode: "0640"
-      when: dev_worker_git_ctmpl_now.stat.exists
+      loop: "{{ dev_worker_switch_files_now.results | selectattr('stat.exists') | list }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: Lay down the kubeconfig and platform render templates
       ansible.builtin.template:
@@ -134,7 +142,7 @@
         owner: root
         group: openbao-agent
         mode: "0640"
-        backup: true # the rescue's rollback target for the agent config
+        backup: true # for a manual rollback; the rescue restores agent.hcl.last-good
       register: dev_worker_agent_hcl
 
     - name: Lay down the git-credentials render template
@@ -309,14 +317,15 @@
     - name: Pin the git.chifor.me credential username
       ansible.builtin.import_tasks: pin_gitea_username.yml
 
-    - name: Record this credential template as the last verified one
+    - name: Record every managed file as the last verified version
       ansible.builtin.copy:
-        src: /etc/openbao-agent/git-credentials.ctmpl
-        dest: /etc/openbao-agent/git-credentials.ctmpl.last-good
+        src: "/etc/openbao-agent/{{ item }}"
+        dest: "/etc/openbao-agent/{{ item }}.last-good"
         remote_src: true
         owner: root
         group: openbao-agent
         mode: "0640"
+      loop: "{{ dev_worker_openbao_switch_files }}"
       when: not ansible_check_mode
 
   rescue:

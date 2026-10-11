@@ -244,11 +244,11 @@ check(pre_rescue[:1] == ["Look for an unfinished switch"]
       "E4: a failed pre-flight rolls an UNFINISHED switch back before failing", pre_rescue)
 switch = task(SW, "Switch the agent onto")
 inside = [str(t.get("name", "")) for t in switch["block"]]
-order = ["Keep the current credential template", "Lay down the kubeconfig and platform render templates",
+order = ["Keep the current version of each managed file", "Lay down the kubeconfig and platform render templates",
          "Lay down the bao agent config", "Lay down the git-credentials render template",
          "Find credential files that are missing", "Remove the ones that name another login", "Enable + start openbao-agent",
          "Restart openbao-agent onto", "Verify the agent restarted",
-         "Pin the git.chifor.me credential username", "Record this credential template as the last verified one"]
+         "Pin the git.chifor.me credential username", "Record every managed file as the last verified version"]
 idx = [next((i for i, n in enumerate(inside) if n.startswith(p)), -1) for p in order]
 check(-1 not in idx and idx == sorted(idx), "E5: every mutation, the start, the restart, the check and the pin are inside the block, in order",
       list(zip(order, idx)))
@@ -274,6 +274,16 @@ check(notifiers and all(t.get("register") and t["register"] in inputs for t in n
       "E11: every shared-role task that changes what the agent loads is registered and counted",
       [(t.get("name"), t.get("register")) for t in notifiers])
 rescue = task(RB, "Roll back to the last verified config")["ansible.builtin.shell"]
+# Every file the switch lays down is a managed file, so every one has a last verified version the
+# rollback restores (restoring agent.hcl alone would keep pointing at a broken replacement).
+managed = yaml.safe_load(read("vars/main.yml"))["dev_worker_openbao_switch_files"]
+laid = [os.path.basename(str(t.get("ansible.builtin.template", {}).get("dest", ""))) for t in switch["block"]
+        if "ansible.builtin.template" in t]
+laid = [d.replace("{{ item }}", i) for d in laid for i in (["helmtest-kubeconfig", "platform-kubeconfig", "platform-pgpass"]
+                                                       if "{{ item }}" in d else [""])]
+check(laid and all(d in managed for d in laid), "E13: every file the switch lays down is a managed file", (laid, managed))
+check("dev_worker_openbao_switch_files" in rescue and '"$f.last-good" "$f"' in rescue,
+      "E14: the rollback restores every managed file's last verified version")
 for needle, label in (("git-credentials.ctmpl.last-good", "uses the last verified template"),
                       ('!= "$prev" ]; then rm -f', "removes a file that names another login"),
                       ("credential.https://git.chifor.me.username \"$prev\"", "re-pins the restored login"),

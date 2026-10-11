@@ -9,17 +9,19 @@
 #   template changed in the same run also needed; a restart for the shared role's changes alone; an
 #   interrupted switch (new template in place, credentials removed, no restart) completed by the next
 #   run, rolled back when its render fails, and rolled back when the PRE-FLIGHT fails; a pre-flight
-#   failure with nothing unfinished changing nothing; repository identities removed except under
+#   failure with nothing unfinished changing nothing; a replacement kubeconfig template that cannot
+#   render, rolled back with every other managed file; repository identities removed except under
 #   dev_worker_git_identity_keep_paths.
 #
 # What is simulated, and nothing else:
 #   - a COPY of the role, with /etc/openbao-agent/ moved under a temp dir, /usr/local/bin/cred
 #     pointed at a stub, `become`/`become_user` dropped and `owner`/`group: root|openbao-agent`
 #     dropped (no root here);
-#   - systemctl: a stub whose start/restart is a tiny bao agent — it renders every git-credentials
-#     template agent.hcl names into its destination from a fixture KV, and dies (is-active: failed)
-#     when a field is missing or a render is told to fail, as error_on_missing_key +
-#     exit_on_retry_failure make the real one;
+#   - systemctl: a stub whose start/restart is a tiny bao agent — it renders EVERY template agent.hcl
+#     names into its destination (git-credentials from a fixture KV, the others copied through), and
+#     dies (is-active: failed) when a KV field is missing, a template source is missing or carries
+#     the word BROKEN, or a render is told to fail, as error_on_missing_key + exit_on_retry_failure
+#     make the real one; kubectl (the helmtest kubeconfig check): answers yes;
 #   - cred: reads that fixture KV; hostname: the slot name; runuser (needs root): runs the command
 #     as this user; sleep: returns at once.
 # Linux only. Needs ansible-playbook with community.general (CI: ansible==14.0.0 in a venv,
@@ -49,7 +51,7 @@ import yaml
 
 role, t = sys.argv[1], sys.argv[2]
 dst = os.path.join(t, "roles", "dev_worker")
-for sub in ("defaults", "tasks", "templates", "handlers", "meta"):
+for sub in ("defaults", "vars", "tasks", "templates", "handlers", "meta"):
     shutil.copytree(os.path.join(role, sub), os.path.join(dst, sub))
 etc = os.path.join(t, "etc", "openbao-agent") + "/"
 
@@ -106,7 +108,7 @@ rd = lambda p: open(p).read().strip()
 def wr(p, s):
     with open(p, "w") as f:
         f.write(s)
-def render():  # the fake bao agent: git-credentials templates only (the only ones this test emits)
+def render():  # the fake bao agent: every template agent.hcl names
     wr(A + "restarts", str(int(rd(A + "restarts")) + 1))
     left = int(rd(A + "fail-renders"))
     if left > 0:  # a render failure: the agent exits
@@ -115,14 +117,18 @@ def render():  # the fake bao agent: git-credentials templates only (the only on
         return
     hcl = open(ETC + "agent.hcl").read()
     for src, dst in re.findall(r'source\s*=\s*"([^"]+)"\s*\n\s*destination\s*=\s*"([^"]+)"', hcl):
-        if not src.endswith("git-credentials.ctmpl"):
-            continue
-        m = re.fullmatch(r'\{\{ with secret "af/data/dev-workers/([^"]+)" \}\}(.*)\{\{ end \}\}\n?', open(src).read(), re.S)
-        field = T + "/kv/" + m.group(1) + "/gitea_pat"
-        if not os.path.exists(field):  # error_on_missing_key: the agent exits
+        if not os.path.exists(src) or "BROKEN" in open(src).read():  # a template that cannot render
             wr(A + "state", "failed")
             return
-        wr(dst, m.group(2).replace("{{ .Data.data.gitea_pat }}", rd(field)) + "\n")
+        text = open(src).read()
+        if src.endswith("git-credentials.ctmpl"):
+            m = re.fullmatch(r'\{\{ with secret "af/data/dev-workers/([^"]+)" \}\}(.*)\{\{ end \}\}\n?', text, re.S)
+            field = T + "/kv/" + m.group(1) + "/gitea_pat"
+            if not os.path.exists(field):  # error_on_missing_key: the agent exits
+                wr(A + "state", "failed")
+                return
+            text = m.group(2).replace("{{ .Data.data.gitea_pat }}", rd(field)) + "\n"
+        wr(dst, text)
         os.chmod(dst, 0o600)
     wr(A + "state", "active")
     wr(A + "started", datetime.datetime.now(datetime.timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC"))
@@ -164,6 +170,7 @@ sys.exit(2)
 EOF
 printf '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n' >"$T/stubs/runuser"
 printf '#!/bin/sh\necho dev-worker-3\n' >"$T/stubs/hostname"
+printf '#!/bin/sh\necho yes\n' >"$T/stubs/kubectl"
 # cred get <name> <field>, from the fixture KV (the real helper is tested in test-cred-helper.sh)
 printf '#!/bin/sh\n[ "$1" = get ] && [ -f "$CONVERGE_T/kv/$2/$3" ] || { echo "cred: no field $3" >&2; exit 1; }\ncat "$CONVERGE_T/kv/$2/$3"\n' >"$T/stubs/cred"
 printf '#!/bin/sh\nexit 0\n' >"$T/stubs/sleep"
@@ -172,7 +179,7 @@ chmod +x "$T/stubs/"*
 # ---- the simulated worker: two users, both global config files, repository identities ------------
 gitq() { git -C / -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
 for u in a b; do
-  mkdir -p "$T/home-$u/.config/git" "$T/home-$u/.claude" "$T/home-$u/.codex"
+  mkdir -p "$T/home-$u/.config/git" "$T/home-$u/.claude" "$T/home-$u/.codex" "$T/home-$u/.helmtest"
   printf '[core]\n\teditor = vi\n' >"$T/home-$u/.gitconfig"
   printf '[color]\n\tui = auto\n' >"$T/home-$u/.config/git/config"
 done
@@ -200,7 +207,7 @@ cat >"$T/play.yml" <<EOF
       - {name: "$ME", home: "$T/home-b"}
     dev_worker_workspace_mount: "$T/ws"
     dev_worker_git_identity_keep_paths: ["$T/ws/$ME/kept"]
-    dev_worker_openbao_renders_kubeconfigs: false
+    dev_worker_openbao_renders_kubeconfigs: true # so agent.hcl renders a non-Gitea template too
     dev_worker_platform_fields_present: false
   tasks:
     - name: Commit identity
@@ -255,9 +262,14 @@ expect_login "1b" dev-worker-bot "$SHARED"
   && [ -z "$(cfg "$T/home-a/platform/.git/config" user.name)" ] && ok "1e: repository identities are removed" \
   || bad "1e: repository identities are removed" "$(grep -E 'corrected|override|inaccessible' "$T/log")"
 [ "$(cfg "$T/ws/$ME/kept/.git/config" user.name)" = "Deliberate Owner" ] && ok "1f: ...except under keep_paths" || bad "1f: ...except under keep_paths"
-cmp -s "$ETC/git-credentials.ctmpl" "$ETC/git-credentials.ctmpl.last-good" && ok "1g: the verified template is recorded" \
-  || bad "1g: the verified template is recorded"
-no_token_in_log "1h"
+good=1
+for f in agent.hcl git-credentials.ctmpl helmtest-kubeconfig.ctmpl platform-kubeconfig.ctmpl platform-pgpass.ctmpl; do
+  cmp -s "$ETC/$f" "$ETC/$f.last-good" || good=0
+done
+[ "$good" = 1 ] && ok "1g: every managed file is recorded as its last verified version" \
+  || bad "1g: every managed file is recorded as its last verified version" "$(ls -l "$ETC")"
+[ -s "$T/home-a/.helmtest/kubeconfig" ] && ok "1h: the non-Gitea template renders too" || bad "1h: the non-Gitea template renders too"
+no_token_in_log "1i"
 
 echo "[2] gate false again, and under --check"
 play false
@@ -359,7 +371,13 @@ play true
 expect_rc "10a: the play fails" 1
 expect_log "10b: ...saying the rollback was verified" "ROLLED BACK AND VERIFIED"
 expect_login "10c" dev-worker-bot "$SHARED"
-grep -q stale "$ETC/helmtest-kubeconfig.ctmpl" && bad "10d: the other template was laid down" || ok "10d: the other template was laid down"
+# The rescue must leave every managed file at its last verified version, not at what this run laid
+# down — the other template included.
+good=1
+for f in agent.hcl git-credentials.ctmpl helmtest-kubeconfig.ctmpl platform-kubeconfig.ctmpl platform-pgpass.ctmpl; do
+  cmp -s "$ETC/$f" "$ETC/$f.last-good" || good=0
+done
+[ "$good" = 1 ] && ok "10d: the rescue restored every managed file to its last verified version"   || bad "10d: the rescue restored every managed file to its last verified version" "$(ls -l "$ETC")"
 grep -qF 'RUNNING HANDLER' "$T/log" && bad "10e: no handler ran" "$(grep -F 'RUNNING HANDLER' "$T/log")" || ok "10e: no handler ran"
 
 echo "[10b] on a converged worker, a restart needed only by another template fails: rescued too"
@@ -372,6 +390,21 @@ play false
 expect_rc "10b-b: the play fails" 1
 expect_log "10b-c: ...saying the rollback was verified" "ROLLED BACK AND VERIFIED"
 expect_login "10b-d" dev-worker-bot "$SHARED"
+
+echo "[12] a replacement kubeconfig template that cannot render is rolled back with every managed file"
+play false
+expect_rc "12a: converged" 0
+HT="$T/roles/dev_worker/templates/helmtest-kubeconfig.ctmpl.j2"
+cp "$HT" "$T/helmtest.j2.good"
+echo BROKEN >>"$HT"
+play false
+expect_rc "12b: the play fails" 1
+expect_log "12c: ...saying the rollback was verified" "ROLLED BACK AND VERIFIED"
+expect_login "12d" dev-worker-bot "$SHARED"
+cmp -s "$ETC/helmtest-kubeconfig.ctmpl" "$ETC/helmtest-kubeconfig.ctmpl.last-good" && ! grep -q BROKEN "$ETC/helmtest-kubeconfig.ctmpl" \
+  && ok "12e: the last verified kubeconfig template is back" || bad "12e: the last verified kubeconfig template is back"
+[ "$(cat "$T/agent/state")" = active ] && ok "12f: the agent runs again" || bad "12f: the agent runs again"
+cp "$T/helmtest.j2.good" "$HT"
 
 echo "[11] the shared role's changes alone restart the agent, in the switch"
 play false

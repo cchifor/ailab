@@ -1,0 +1,14 @@
+---
+# Role-internal constants, not settings.
+
+# Every file in /etc/openbao-agent that tasks/openbao_switch.yml lays down and the bao agent loads.
+# Each has a <file>.last-good copy, the version that last passed the post-restart verification:
+# seeded once from the file in place, rewritten only after a verified switch, kept across runs.
+# tasks/openbao_rollback.yml restores ALL of them before it restarts the agent, so a replacement
+# that cannot render — the credential template or any other — cannot survive a rollback.
+dev_worker_openbao_switch_files:
+  - agent.hcl
+  - git-credentials.ctmpl
+  - helmtest-kubeconfig.ctmpl
+  - platform-kubeconfig.ctmpl
+  - platform-pgpass.ctmpl

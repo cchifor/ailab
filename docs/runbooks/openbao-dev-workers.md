@@ -628,9 +628,10 @@ The role: pre-flights (`hostname -s` is the inventory name; the three fields rea
 slot's own AppRole, non-empty, not the shared token), then switches as one guarded unit
 (`tasks/openbao_switch.yml`): lays down the template, removes a `~/.git-credentials` that names the
 other login, restarts the agent, requires the rendered line to name `dev-worker-N-bot`, pins it and
-records the template as the last verified one. Any failure in there — the restart included — rolls
-back to the last verified template, removes a line naming another login, re-pins that login,
-restarts, and checks the result: the play then fails with `ROLLED BACK AND VERIFIED` (the slot is on
+records every file it manages (`agent.hcl`, the credential and kubeconfig/platform templates) as
+its last verified version (`<file>.last-good`). Any failure in there — the restart included — puts
+ALL of them back to their last verified versions, removes a line naming another login, re-pins that
+login, restarts, and checks the result: the play then fails with `ROLLED BACK AND VERIFIED` (the slot is on
 `dev-worker-bot` again) or `THE ROLLBACK DID NOT VERIFY` (no working forge credential — fix by hand
 before anything else). **Stop the rollout either way.** A converge that was interrupted is completed
 by the next one: a missing credential forces the render. If the next one's pre-flight fails instead
