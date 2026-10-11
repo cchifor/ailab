@@ -10,8 +10,10 @@
 #   interrupted switch (new template in place, credentials removed, no restart) completed by the next
 #   run, rolled back when its render fails, and rolled back when the PRE-FLIGHT fails; a pre-flight
 #   failure with nothing unfinished changing nothing; a replacement kubeconfig template that cannot
-#   render, rolled back with every other managed file; repository identities removed except under
-#   dev_worker_git_identity_keep_paths.
+#   render, rolled back with every other managed file; a FRESH slot (agent never ran, no sink token)
+#   whose gate is already on: converging straight to its own login, and rolling back to the shared
+#   login when a slot field is missing or is the shared token; repository identities removed except
+#   under dev_worker_git_identity_keep_paths.
 #
 # What is simulated, and nothing else:
 #   - a COPY of the role, with /etc/openbao-agent/ moved under a temp dir, /usr/local/bin/cred
@@ -22,8 +24,9 @@
 #     dies (is-active: failed) when a KV field is missing, a template source is missing or carries
 #     the word BROKEN, or a render is told to fail, as error_on_missing_key + exit_on_retry_failure
 #     make the real one; kubectl (the helmtest kubeconfig check): answers yes;
-#   - cred: reads that fixture KV; hostname: the slot name; runuser (needs root): runs the command
-#     as this user; sleep: returns at once.
+#   - cred: reads that fixture KV, and fails like the real one while there is no sink token (the
+#     simulated agent writes one once it has rendered); hostname: the slot name; runuser (needs
+#     root): runs the command as this user; sleep: returns at once.
 # Linux only. Needs ansible-playbook with community.general (CI: ansible==14.0.0 in a venv,
 # .gitea/workflows/dev-worker-scripts.yaml) — a missing one FAILS the suite, it never skips.
 #
@@ -131,6 +134,7 @@ def render():  # the fake bao agent: every template agent.hcl names
         wr(dst, text)
         os.chmod(dst, 0o600)
     wr(A + "state", "active")
+    wr(A + "sink", "stub-sink-token")
     wr(A + "started", datetime.datetime.now(datetime.timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC"))
 argv = sys.argv[1:]
 verb = argv[0] if argv else ""
@@ -172,7 +176,7 @@ printf '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done\nshift
 printf '#!/bin/sh\necho dev-worker-3\n' >"$T/stubs/hostname"
 printf '#!/bin/sh\necho yes\n' >"$T/stubs/kubectl"
 # cred get <name> <field>, from the fixture KV (the real helper is tested in test-cred-helper.sh)
-printf '#!/bin/sh\n[ "$1" = get ] && [ -f "$CONVERGE_T/kv/$2/$3" ] || { echo "cred: no field $3" >&2; exit 1; }\ncat "$CONVERGE_T/kv/$2/$3"\n' >"$T/stubs/cred"
+printf '#!/bin/sh\n[ -f "$CONVERGE_T/agent/sink" ] || { echo "cred: cannot read the sink token" >&2; exit 1; }\n[ "$1" = get ] && [ -f "$CONVERGE_T/kv/$2/$3" ] || { echo "cred: no field $3" >&2; exit 1; }\ncat "$CONVERGE_T/kv/$2/$3"\n' >"$T/stubs/cred"
 printf '#!/bin/sh\nexit 0\n' >"$T/stubs/sleep"
 chmod +x "$T/stubs/"*
 
@@ -208,6 +212,7 @@ cat >"$T/play.yml" <<EOF
     dev_worker_workspace_mount: "$T/ws"
     dev_worker_git_identity_keep_paths: ["$T/ws/$ME/kept"]
     dev_worker_openbao_renders_kubeconfigs: true # so agent.hcl renders a non-Gitea template too
+    dev_worker_openbao_sink_token: "$T/agent/sink"
     dev_worker_platform_fields_present: false
   tasks:
     - name: Commit identity
@@ -414,6 +419,43 @@ play false -e dev_worker_agent_inputs_changed=true
 expect_rc "11b: converges" 0
 [ "$(cat "$T/agent/restarts")" -gt "$before" ] && ok "11c: the agent was restarted" || bad "11c: the agent was restarted"
 expect_login "11d" dev-worker-bot "$SHARED"
+
+fresh() { # a rebuilt slot: the agent never ran, nothing in /etc/openbao-agent, no credential, no pin
+  rm -rf "$ETC"; mkdir -p "$ETC"
+  rm -f "$T"/home-[ab]/.git-credentials "$T"/home-[ab]/.helmtest/kubeconfig "$T/agent/sink"
+  echo inactive >"$T/agent/state"
+  for h in a b; do git -C / config --file "$T/home-$h/.gitconfig" --unset-all credential.https://git.chifor.me.username; done
+}
+
+echo "[13] a FRESH slot with the gate already on, a slot field missing: rolled back to the shared login"
+fresh
+mv "$T/kv/dev-worker-3/gitea_pat" "$T/kv/held"
+play true
+expect_rc "13a: the play fails" 1
+expect_log "13b: ...saying the rollback was verified" "ROLLED BACK AND VERIFIED"
+expect_login "13c" dev-worker-bot "$SHARED"
+mv "$T/kv/held" "$T/kv/dev-worker-3/gitea_pat"
+
+echo "[13d] a FRESH slot with the gate on whose slot field is the shared token: the deferred check rolls back"
+fresh
+cp "$T/kv/dev-worker-3/gitea_repo_pat" "$T/kv/held"
+cp "$T/kv/common/gitea_repo_pat" "$T/kv/dev-worker-3/gitea_repo_pat"
+play true
+expect_rc "13e: the play fails" 1
+expect_log "13f: ...at the shared-token check" "is the shared dev-worker-bot token"
+expect_log "13g: ...saying the rollback was verified" "ROLLED BACK AND VERIFIED"
+expect_login "13h" dev-worker-bot "$SHARED"
+mv "$T/kv/held" "$T/kv/dev-worker-3/gitea_repo_pat"
+
+echo "[13i] a FRESH slot with the gate already on converges straight to its own login"
+fresh
+play true
+expect_rc "13j: converges" 0
+expect_login "13k" "$BOT" "$SLOT"
+grep -q 'dev-workers/dev-worker-3"' "$ETC/git-credentials.ctmpl.last-good" && ok "13l: its own template is the last verified one" \
+  || bad "13l: its own template is the last verified one"
+play true
+expect_changed0 "13m: idempotent"
 
 echo "[9] converged again, idempotent, and --check is a no-op"
 play false

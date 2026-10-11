@@ -244,16 +244,26 @@ check(pre_rescue[:1] == ["Look for an unfinished switch"]
       "E4: a failed pre-flight rolls an UNFINISHED switch back before failing", pre_rescue)
 switch = task(SW, "Switch the agent onto")
 inside = [str(t.get("name", "")) for t in switch["block"]]
-order = ["Keep the current version of each managed file", "Lay down the kubeconfig and platform render templates",
+order = ["Keep the current version of each managed file", "On a fresh host, keep the shared login",
+         "Lay down the kubeconfig and platform render templates",
          "Lay down the bao agent config", "Lay down the git-credentials render template",
          "Find credential files that are missing", "Remove the ones that name another login", "Enable + start openbao-agent",
-         "Restart openbao-agent onto", "Verify the agent restarted",
+         "Restart openbao-agent onto", "Verify the agent restarted", "Pre-flight this slot's Gitea tokens now that the agent runs",
          "Pin the git.chifor.me credential username", "Record every managed file as the last verified version"]
 idx = [next((i for i, n in enumerate(inside) if n.startswith(p)), -1) for p in order]
 check(-1 not in idx and idx == sorted(idx), "E5: every mutation, the start, the restart, the check and the pin are inside the block, in order",
       list(zip(order, idx)))
 check(any(t.get("ansible.builtin.import_tasks") == "openbao_rollback.yml" for t in switch["rescue"]),
       "E6: ...and its rescue is the same rollback")
+deferred = task(SW, "Pre-flight this slot's Gitea tokens now that the agent runs")
+check(deferred.get("ansible.builtin.import_tasks") == "openbao_gitea_preflight.yml"
+      and deferred.get("vars", {}).get("dev_worker_gitea_preflight_may_defer") is False
+      and "dev_worker_gitea_preflight_deferred" in str(deferred.get("when")),
+      "E6b: field checks deferred on a fresh host run inside the switch, where they cannot defer again")
+fallback = task(SW, "On a fresh host, keep the shared login")
+check(fallback["ansible.builtin.template"].get("force") is False
+      and fallback.get("vars") == {"dev_worker_gitea_user": "dev-worker-bot", "dev_worker_gitea_cred_name": "common"},
+      "E6c: a fresh host gets the shared login as its rollback target, never overwriting a verified one")
 restart_when = str(task(SW, "Restart openbao-agent onto").get("when"))
 for needle in ("dev_worker_render_ctmpls is changed", "dev_worker_agent_hcl is changed", "dev_worker_git_ctmpl is changed",
                "dev_worker_git_login_drift.stdout_lines | length > 0", "dev_worker_agent_inputs_changed"):
@@ -278,7 +288,7 @@ rescue = task(RB, "Roll back to the last verified config")["ansible.builtin.shel
 # rollback restores (restoring agent.hcl alone would keep pointing at a broken replacement).
 managed = yaml.safe_load(read("vars/main.yml"))["dev_worker_openbao_switch_files"]
 laid = [os.path.basename(str(t.get("ansible.builtin.template", {}).get("dest", ""))) for t in switch["block"]
-        if "ansible.builtin.template" in t]
+        if "ansible.builtin.template" in t and not str(t["ansible.builtin.template"].get("dest", "")).endswith(".last-good")]
 laid = [d.replace("{{ item }}", i) for d in laid for i in (["helmtest-kubeconfig", "platform-kubeconfig", "platform-pgpass"]
                                                        if "{{ item }}" in d else [""])]
 check(laid and all(d in managed for d in laid), "E13: every file the switch lays down is a managed file", (laid, managed))
@@ -291,7 +301,8 @@ for needle, label in (("git-credentials.ctmpl.last-good", "uses the last verifie
     check(needle in rescue, "E12: the rollback " + label)
 
 print("[F] the pre-flight, run against a stub cred and hostname")
-pre_sh = task(SW, "Pre-flight this slot's own Gitea tokens")["ansible.builtin.shell"]
+PF = "tasks/openbao_gitea_preflight.yml"
+pre_sh = task(PF, "Pre-flight this slot's own Gitea tokens")["ansible.builtin.shell"]
 fix, stubs = os.path.join(WORK, "kv"), os.path.join(WORK, "stubs")
 os.makedirs(stubs)
 with open(os.path.join(stubs, "cred"), "w") as f:  # `cred get <name> <field>` from $FIX/<name>/<field>
@@ -301,8 +312,15 @@ with open(os.path.join(stubs, "hostname"), "w") as f:
     f.write('#!/bin/sh\nprintf "%s\\n" "$STUB_HOSTNAME"\n')
 for s in ("cred", "hostname"):
     os.chmod(os.path.join(stubs, s), 0o755)
-# The task calls cred by absolute path; only that path is swapped for the stub.
-pre_run = render(pre_sh, inventory_hostname=HOST).replace("/usr/local/bin/cred", os.path.join(stubs, "cred"))
+# The task calls cred by absolute path; only that path is swapped for the stub. The sink token is a
+# fixture file: present for the field checks, absent for the fresh-host cases below.
+sink = os.path.join(WORK, "sink-token")
+open(sink, "w").write("stub-sink")
+
+
+def pre_run(may_defer):
+    return render(pre_sh, inventory_hostname=HOST, dev_worker_openbao_sink_token=sink,
+                  dev_worker_gitea_preflight_may_defer=may_defer).replace("/usr/local/bin/cred", os.path.join(stubs, "cred"))
 
 
 def kv(slot_fields):
@@ -328,9 +346,24 @@ cases = [
 ]
 for label, fields, hn, want in cases:
     kv(fields)
-    rc, out, err = run_sh(pre_run, dict(penv, STUB_HOSTNAME=hn))
+    rc, out, err = run_sh(pre_run(False), dict(penv, STUB_HOSTNAME=hn))
     check(rc == want, "F1: %s -> exit %d" % (label, want), (rc, out, err))
     check(not leaked(out + err), "F2: %s -> no value printed" % label, leaked(out + err))
+# A host whose agent never ran has no sink token: the first pre-flight defers the vault reads (the
+# hostname check still runs), the one inside the switch fails closed.
+os.remove(sink)
+kv(good)
+rc, out, err = run_sh(pre_run(True), penv)
+check(rc == 0 and out.startswith("deferred"), "F3: no sink token yet -> the first pre-flight defers", (rc, out, err))
+rc, out, err = run_sh(pre_run(True), dict(penv, STUB_HOSTNAME="dev-worker-9"))
+check(rc == 90, "F4: ...but still checks the hostname", (rc, out, err))
+rc, out, err = run_sh(pre_run(False), penv)
+check(rc == 94, "F5: the deferred one, inside the switch, fails without a sink token", (rc, out, err))
+hcl_sink = re.search(r'^\s*path\s*=\s*"([^"]+)"', read("templates/openbao-agent.hcl.j2"), re.M).group(1)
+cred_sink = re.search(r'CRED_TOKEN_FILE:-([^}]+)\}', read("files/cred")).group(1)
+check(DEFAULTS["dev_worker_openbao_sink_token"] == hcl_sink == cred_sink,
+      "F6: the pre-flight looks for the sink token where the agent writes and cred reads it",
+      (DEFAULTS["dev_worker_openbao_sink_token"], hcl_sink, cred_sink))
 
 print("[G] the agent instructions")
 blk = task(OB, "Publish the credential instructions")

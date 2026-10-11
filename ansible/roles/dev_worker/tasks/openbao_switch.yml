@@ -5,7 +5,9 @@
 #
 # Everything that can leave this host without a working forge credential is inside a block, so any
 # failure reaches a rescue that rolls back (openbao_rollback.yml) and VERIFIES the rollback:
-#   - the pre-flight, when the cut-over gate is on. If it fails while a switch is UNFINISHED (the
+#   - the pre-flight, when the cut-over gate is on (openbao_gitea_preflight.yml; on a host whose agent
+#     has never run, its vault reads wait for the agent and run inside the switch). If it fails while
+#     a switch is UNFINISHED (the
 #     credential template is not the last verified one, or a ~/.git-credentials is missing or names
 #     another login), the rollback runs before the play fails, so an interrupted switch is never left
 #     behind just because the slot's token became unreadable in the meantime;
@@ -31,33 +33,20 @@
   loop: "{{ dev_worker_openbao_switch_files }}"
   register: dev_worker_switch_files_now
 
-# With dev_worker_gitea_identity_cutover the agent renders ~/.git-credentials from THIS slot's flat
-# document instead of common. The `<no value>` guard (error_on_missing_key) would then stop the whole
-# agent on a missing field: failure detection, not a gate. This is the gate, and it runs before
-# anything below can change what the agent renders: the short hostname must be the inventory name
-# (`cred` finds the slot by hostname, the template by inventory name), and all three Gitea fields
-# must be readable under this host's own AppRole, non-empty, and not a copy of the shared token.
-# Values stay in shell variables, never on stdout. Whether the token really is `<slot>-bot` (GET
-# /user) is the runbook's pre-flight: it needs the forge, which a converge does not depend on.
+# The Gitea pre-flight (openbao_gitea_preflight.yml), before anything below can change what the agent
+# renders. On a host whose agent has never run there is no sink token for `cred` yet: the field checks
+# are then DEFERRED to the guarded switch below, after the agent has started.
 - name: Pre-flight this slot's Gitea tokens, and finish an unfinished switch if that fails
   when: dev_worker_gitea_identity_cutover | bool
   block:
-    - name: Pre-flight this slot's own Gitea tokens before the agent renders them (values never printed)
-      ansible.builtin.shell: |
-        set -o pipefail
-        slot={{ inventory_hostname | quote }}
-        [ "$(hostname -s)" = "$slot" ] || { echo "hostname -s is '$(hostname -s)', not $slot" >&2; exit 90; }
-        for field in gitea_pat gitea_repo_pat gitea_package_pat; do
-          mine="$(/usr/local/bin/cred get "$slot" "$field")" || { echo "cannot read $field for $slot" >&2; exit 91; }
-          [ -n "$mine" ] || { echo "$field is empty in af/dev-workers/$slot" >&2; exit 92; }
-          shared="$(/usr/local/bin/cred get common "$field" 2>/dev/null)" || shared=""
-          [ "$mine" != "$shared" ] || { echo "$field in af/dev-workers/$slot is the shared dev-worker-bot token" >&2; exit 93; }
-        done
-        echo preflight-ok
-      args:
-        executable: /bin/bash
-      changed_when: false
-      check_mode: false # read-only, so a check run reports the failure the real run would hit
+    - name: Pre-flight this slot's own Gitea tokens before the agent renders them
+      ansible.builtin.import_tasks: openbao_gitea_preflight.yml
+      vars:
+        dev_worker_gitea_preflight_may_defer: true
+
+    - name: Note whether the field checks wait until the agent has started
+      ansible.builtin.set_fact:
+        dev_worker_gitea_preflight_deferred: "{{ dev_worker_gitea_preflight.stdout is search('^deferred') }}"
 
   rescue:
     # Unfinished = what a run that died between laying down files and verifying them leaves: a
@@ -121,6 +110,21 @@
       loop: "{{ dev_worker_switch_files_now.results | selectattr('stat.exists') | list }}"
       loop_control:
         label: "{{ item.item }}"
+
+    # A fresh or rebuilt host has no credential template to keep, and its first converge may already
+    # be the cut-over (host_vars set the gate). It still gets a rollback target: the shared login, the
+    # state the cut-over starts from. A no-op wherever a last verified template exists.
+    - name: On a fresh host, keep the shared login as the credential template to fall back to
+      ansible.builtin.template:
+        src: git-credentials.ctmpl.j2
+        dest: /etc/openbao-agent/git-credentials.ctmpl.last-good
+        force: false
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+      vars:
+        dev_worker_gitea_user: dev-worker-bot
+        dev_worker_gitea_cred_name: common
 
     - name: Lay down the kubeconfig and platform render templates
       ansible.builtin.template:
@@ -311,6 +315,18 @@
         executable: /bin/bash
       changed_when: false
       when: not ansible_check_mode
+
+    # The field checks the first pre-flight deferred (no sink token before the agent first ran). Inside
+    # the block, so a slot field that is unreadable, empty or the shared token rolls back to the
+    # shared login before anything is pinned or recorded. Not under --check: the agent is not started.
+    - name: Pre-flight this slot's Gitea tokens now that the agent runs (deferred on a fresh host)
+      ansible.builtin.import_tasks: openbao_gitea_preflight.yml
+      vars:
+        dev_worker_gitea_preflight_may_defer: false
+      when:
+        - dev_worker_gitea_identity_cutover | bool
+        - dev_worker_gitea_preflight_deferred | default(false) | bool
+        - not ansible_check_mode
 
     # After the render is verified, so the pin never names a login whose line is not there yet; inside
     # the block, so a failed pin is rolled back with the rest.

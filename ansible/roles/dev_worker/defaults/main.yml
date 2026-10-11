@@ -324,6 +324,10 @@ dev_worker_openbao_hosts_entries:
   - "192.168.0.41 openbao.lan.chifor.me"
   - "192.168.0.42 openbao.lan.chifor.me"
   - "192.168.0.43 openbao.lan.chifor.me"
+# The agent's sink token: templates/openbao-agent.hcl.j2 writes it, files/cred reads it. It exists only
+# once the agent has run on this host, so the Gitea pre-flight defers its vault reads until then
+# (tasks/openbao_gitea_preflight.yml).
+dev_worker_openbao_sink_token: /run/openbao-agent/token
 # Pinned like herdr, but upstream DOES publish per-release checksums: this is the sha256 of
 # bao_<version>_Linux_x86_64.tar.gz from the release's checksums-linux.txt. Re-read it on a bump.
 dev_worker_openbao_version: "2.5.5"
