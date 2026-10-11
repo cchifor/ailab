@@ -74,34 +74,49 @@ protection as `cchifor/forge`:
 - `reviewer-claude` and `reviewer-codex` are write collaborators on both repositories.
 - `reviewers.yml` was converged at 10:40Z, so the deployed reviewbot admits
   `cchifor/relay`, `cchifor/llm-router` and `cchifor/dsh-acp-plus`.
-- Not part of this record (verify, then add the result here): a test PR event with a
-  successful org-webhook delivery (reviews appearing are not proof: the reconciler also
-  polls every 300 s), and the negative test, in which `workstation-bot` and a dev-worker
-  token are refused a push to `main` and a merge, and the reviewbot then merges that PR
-  with `merged_by` naming the reviewer.
+- **Negative test (2026-10-11):** `workstation-bot`, in team `automation` with the same
+  grants as the dev-worker bots, reads `user_can_push=false` and `user_can_merge=false`
+  on `main` in both repositories.
+- **Webhook delivery and reviews (2026-10-11):** the deployed reviewbot logged webhook
+  deliveries for relay (`hook:pull_request` relay#123 at 11:02Z, `hook:pull_request_sync`
+  relay#118–#122 at 11:03Z), not just reconciler polls, and posted reviews:
+  `reviewer-codex` clean on relay#118–#122, `reviewer-claude` findings on relay#123 at
+  11:17Z.
+- **Still pending when this was written:** the first reviewer-owned relay merge, the one
+  whose `merged_by` names a reviewer. Add it here when it lands.
 
 ## Break-glass: when the protection stops every merge
 
 With exactly two whitelisted approvers, two required approvals and one required context,
 one reviewer-host outage or a renamed CI context stops every merge on these repositories.
-Recovery is an **owner operation**, with a one-shot `chifor` token handled the way
-`scripts/gitea-owner-merge.sh` handles its own (that script merges and posts `approve-pin`;
-it does not edit protection):
+Lowering `required_approvals` alone recovers nothing: the reviewbot still merges only on
+both personas' clean verdicts, the merge whitelist names only the two reviewers, and the
+admin override is blocked, so nobody else can merge either. Recovery is therefore an
+**owner merge of one specific PR at its exact head**, with a one-shot `chifor` token under
+the same discipline as `scripts/gitea-owner-merge.sh` (minted in the Gitea pod, never
+printed, deleted after use, its 401 proven). That script cannot do it: its gate requires
+both reviewer approvals at the head.
 
-1. Open an issue in the affected repository: the reason, the time (UTC) and what will be
-   relaxed.
-2. Mint the token in the Gitea pod, captured into a variable and never printed:
-   `gitea admin user generate-access-token --username chifor --token-name
-   owner-op-<repo>-protection-<UTC timestamp> --scopes write:repository --raw`
-   ([`owner-credentials.md`](owner-credentials.md) § Break-glass, step 2).
-3. Save the current rule (`GET /repos/cchifor/<repo>/branch_protections/main`), then relax
-   only what is broken with a `PATCH` to the same path: `required_approvals` to 0 while a
-   reviewer host is down, or `status_check_contexts` corrected for a renamed context.
-4. Delete the token at once (`delete from access_token where name='<name>'` on the
-   infra-pg primary, database `gitea`) and confirm that its next use answers 401.
-5. When the reviewers recover, restore the saved rule with a new one-shot token, read it
-   back against the table above, delete that token the same way, and close the issue with
-   the read-back.
+1. Open an issue in the affected repository: the reason, the time (UTC), the PR and its
+   full head SHA. Check that head's CI yourself: a forced merge bypasses the required
+   context.
+2. Mint the token (`--scopes write:repository`; [`owner-credentials.md`](owner-credentials.md)
+   § Break-glass, step 2) and save the rule as it is:
+   `GET /repos/cchifor/<repo>/branch_protections/main`.
+3. `PATCH` the rule with the minimum: `block_admin_merge_override: false`, which lets the
+   site-admin owner merge with `force_merge`. Relax `enable_merge_whitelist` or
+   `enable_approvals_whitelist` only if Gitea still refuses, one field at a time, each
+   noted in the issue.
+4. Merge exactly that PR: `POST /repos/cchifor/<repo>/pulls/<n>/merge` with
+   `{"Do": "merge", "head_commit_id": "<full head sha>", "force_merge": true}`.
+5. `PATCH` every changed field back to its saved value, `GET` the rule and compare it field
+   by field with the saved copy (and the table above).
+6. Delete the token (`delete from access_token where name='<name>'` on the infra-pg
+   primary, database `gitea`) and confirm that its next use answers 401. Close the issue
+   with the merge SHA and the read-back.
+
+For a renamed CI context, the fix is a `PATCH` of `status_check_contexts` under the same
+token discipline, recorded and read back the same way.
 
 `gitea_admin` stays the last resort, as everywhere else
 ([`owner-credentials.md`](owner-credentials.md) § Break-glass).
