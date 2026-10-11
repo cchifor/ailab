@@ -66,7 +66,32 @@ exec 9>"$BASE/.lock"
 flock -n 9 || { echo "another converge is running; skipping" >> "$BASE/converge.log"; exit 0; }
 export CONVERGE_LOCK_HELD=1
 
-git -C "$REPO" fetch --quiet origin main
+# THE CLONE'S CREDENTIAL IS READ, NEVER WRITTEN, BY GIT. git's stock `store` helper ERASES the stored
+# line on any 401, and Gitea answers 401 to a valid token while its database is down: on 2026-10-09 a
+# few minutes of infra-pg downtime emptied $BASE/.git-credentials, and every converge after that hung on
+# a username prompt until Task Scheduler killed it (0xC000013A), with nothing in converge.log, for three
+# days. Same failure and same fix as the dev workers' git-credential-store-readonly (#1199): a helper that
+# answers only `get`. Enforced here on every run, so a re-created clone cannot regress. The credential
+# itself is a read-only workstation-bot token (read:repository) in $BASE/.git-credentials, 0600.
+# The helper LIST is reset first: a --local entry alone does not remove helpers inherited from the
+# system or global config (git runs every configured helper in order, and a global one such as Git
+# Credential Manager would still see store/erase), so an EMPTY entry clears the list and the get-only
+# helper is the only one left. Its file path is built from $BASE, the one place it is defined.
+READONLY_HELPER="!f() { case \"\$1\" in get) git credential-store --file \"$BASE/.git-credentials\" get ;; *) cat >/dev/null ;; esac; }; f"
+if [ "$(git -C "$REPO" config --local --get-all credential.helper)" != "$(printf '\n%s' "$READONLY_HELPER")" ]; then
+  git -C "$REPO" config --local --replace-all credential.helper ""
+  git -C "$REPO" config --local --add credential.helper "$READONLY_HELPER"
+fi
+
+# Never prompt: with no usable credential the fetch must FAIL, loudly and in the log, not wait for a
+# terminal that a scheduled task does not have. GIT_TERMINAL_PROMPT=0 alone covers only the terminal:
+# an inherited GIT_ASKPASS/SSH_ASKPASS, a configured core.askPass or GCM's own GUI would still prompt,
+# so all of them are switched off for this one command.
+if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= GCM_INTERACTIVE=never \
+    git -C "$REPO" -c core.askPass= fetch --quiet origin main 2>>"$BASE/converge.log"; then
+  echo "=== bootstrap $(date -Is): fetch of origin main FAILED (credential in $BASE/.git-credentials?)" >> "$BASE/converge.log"
+  exit 1
+fi
 git -C "$REPO" reset --hard --quiet origin/main
 
 [ -f "$SRC" ] || { echo "bootstrap: $SRC missing on origin/main" >&2; exit 1; }
