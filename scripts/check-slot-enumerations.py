@@ -2,11 +2,12 @@
 r"""Fail when the dev-worker SLOT enumerations disagree across the repo.
 
 A dev-worker "slot" (dev-worker-N / dwN) is named in many places — OpenBao AppRoles, the two
-credential syncs, the per-slot ServiceAccounts in two trees, tofu, the ansible inventory — and a
-slot retirement (plans/2026-09-21-retire-dev-workers-3-6-plan.md) or addition has to touch every
-one of them. This is the gate codex asked for in the ADR 0028 plan review: it extracts the LIVE and
-RETIRED slot sets from each file with a narrow, file-specific regex and prints every source next to
-its set, so a missed edit names the file rather than showing up as a red sync a day later.
+credential syncs, the per-slot ServiceAccounts in two trees, tofu, the ansible inventory, the
+per-slot Gitea logins — and a slot retirement (plans/2026-09-21-retire-dev-workers-3-6-plan.md) or
+addition has to touch every one of them. This is the gate codex asked for in the ADR 0028 plan
+review: it extracts the LIVE and RETIRED slot sets from each file with a narrow, file-specific regex
+and prints every source next to its set, so a missed edit names the file rather than showing up as a
+red sync a day later.
 
 FAIL-CLOSED, and that is the whole point: every source below is MANDATORY and so are the counts
 (three RoleBindings, two env blocks in pg-sync.yaml — the CronJob and its bootstrap Job). A regex
@@ -39,6 +40,7 @@ E2E_SYNC = ROOT / "kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml"
 HELMTEST_NS = ROOT / "kubernetes/apps/infrastructure/helmtest/namespaces.yaml"
 TOFU = ROOT / "kubernetes/infra/dev-workers/variables.tf"
 INVENTORY = ROOT / "inventory/hosts.yml"
+GROUP_VARS = ROOT / "ansible/group_vars/dev_workers.yml"
 APPS = ROOT / "kubernetes/apps"
 
 # One RoleBinding of the observer ClusterRole per platform namespace (platform-access/rbac.yaml),
@@ -76,6 +78,35 @@ def env_values(text, var, source):
     if len(set(values)) != 1:
         sys.exit("%s: the CronJob and the bootstrap Job disagree on %s" % (source, var))
     return ints(values[0].split())
+
+
+def gitea_user_slots(text, source):
+    """The slots of `dev_worker_gitea_users` (one `dev-worker-N-bot` login per live slot, ailab plan
+    2026-10-11-worker-identities). Read to the END of its block, like the reviewbot allowlist test
+    does: a regex that stops at the first line it cannot match would let a stray login sit unseen
+    below a comment. Anything inside the block that is not a slot login — another account, a flow
+    list, a duplicate — is an error, never a skip."""
+    if len(re.findall(r"^dev_worker_gitea_users:", text, re.M)) > 1:
+        sys.exit("%s: dev_worker_gitea_users is defined twice (YAML keeps the LAST one silently)"
+                 % source)
+    key = one(r"^dev_worker_gitea_users:(.*)$", text, source)
+    if re.split(r"(?:^|\s)#", key.group(1), maxsplit=1)[0].strip():
+        sys.exit("%s: dev_worker_gitea_users must be a block list (one `- dev-worker-N-bot` per line), "
+                 "got %r" % (source, key.group(0)))
+    slots = []
+    for line in text[key.end():].splitlines()[1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue                      # blank / comment INSIDE the block: skip, don't stop
+        if not line[:1].isspace():
+            break                         # dedent to column 0 = the next top-level key
+        m = re.match(r"^\s+- dev-worker-(\d+)-bot\s*(?:#.*)?$", line)
+        if m is None:
+            sys.exit("%s: unparsable dev_worker_gitea_users entry %r (expected `- dev-worker-N-bot`)"
+                     % (source, line))
+        slots.append(int(m.group(1)))
+    if len(slots) != len(set(slots)):
+        sys.exit("%s: dev_worker_gitea_users names a slot twice: %s" % (source, sorted(slots)))
+    return frozenset(slots)
 
 
 def live_sets():
@@ -118,6 +149,8 @@ def live_sets():
         re.findall(r'^\s{4}"dev-worker-(\d+)" = \{', read(TOFU), re.M))
     out["inventory/hosts.yml: dev_workers hosts"] = ints(
         re.findall(r"^\s{8}dev-worker-(\d+):\s*$", read(INVENTORY), re.M))
+    out["group_vars/dev_workers.yml: dev_worker_gitea_users"] = gitea_user_slots(
+        read(GROUP_VARS), "group_vars/dev_workers.yml")
     return out
 
 

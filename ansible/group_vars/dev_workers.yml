@@ -22,6 +22,19 @@ dev_worker_codex_router_enabled: true
 # dev_worker_enable_herdr — PILOT, deliberately NOT flipped here: it is per-host in
 # host_vars/dev-worker-4.yml so only that worker runs it (runbook § "herdr pilot").
 
+# One Gitea identity per slot (plans/2026-10-11-worker-identities-plan.md): dev-worker-N-bot, created
+# 2026-10-11, non-admin, in team `automation` only. A committed ENUMERATION, held to the live slot
+# list by scripts/check-slot-enumerations.py: a retired slot's login leaves this list (the account is
+# disabled, never deleted). No task reads it yet: the workers still authenticate as the shared
+# dev-worker-bot until each slot's cut-over (plan Phase 4). pr_reviewer_merge_authors names the same
+# logins (scripts/tests/test_reviewbot.py holds that). Whether the accounts and tokens exist LIVE is
+# the enrolment readback (docs/runbooks/s2s-identity.md § Enrol a worker identity), not this list.
+dev_worker_gitea_users:
+  - dev-worker-1-bot
+  - dev-worker-2-bot
+  - dev-worker-3-bot
+  - dev-worker-4-bot
+
 # Web terminal gate (roles/dev_worker/tasks/web_gate.yml): each worker's Cloudflare Access app AUD tag,
 # which dw-access-verify requires in the tunnel JWT. Not secret (every JWT carries it). Source of
 # truth: `tofu -chdir=kubernetes/infra/cloudflare output dev_worker_access_aud`; the tag changes only
