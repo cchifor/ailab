@@ -408,13 +408,33 @@ dep = os.path.join(ws, me, "node_modules", "dep")  # depth 3: inside find's boun
 git("init", "-q", dep)
 git("config", "user.name", "Pruned Dep", cwd=dep)
 os.makedirs(os.path.join(ws, me, "broken"))
+
+
+# A repository shares ONE config among all its worktrees. When one worktree is kept, that shared
+# config is kept for all of them, whichever checkout the walk meets first; each config.worktree
+# still follows its own checkout. Two repositories, one met in each order (the walk is sorted).
+def repo_with_kept_worktree(main, wt):
+    git("init", "-q", main)
+    git("config", "user.name", "Shared Owner", cwd=main)
+    git("commit", "-q", "--allow-empty", "-m", "x", cwd=main)
+    git("config", "extensions.worktreeConfig", "true", cwd=main)
+    git("config", "--worktree", "user.email", "main@example.invalid", cwd=main)
+    git("worktree", "add", "-q", wt, cwd=main)
+    git("config", "--worktree", "user.email", "kept-wt@example.invalid", cwd=wt)
+
+
+ORDERS = {"kept worktree first": (os.path.join(ws, me, "b-main"), os.path.join(ws, me, "a-kept-wt")),
+          "main checkout first": (os.path.join(ws, me, "c-main"), os.path.join(ws, me, "d-kept-wt"))}
+for main_dir, wt_dir in ORDERS.values():
+    repo_with_kept_worktree(main_dir, wt_dir)
 open(os.path.join(ws, me, "broken", ".git"), "w").write("gitdir: /nonexistent/gitdir\n")
 
 
 def audit_run(check_mode):
     script = render(audit, dev_worker_users=[{"name": me, "home": h}], dev_worker_git_user_name=BOT,
                     dev_worker_git_user_email=EMAIL, dev_worker_workspace_mount=ws,
-                    dev_worker_git_identity_keep_paths=[kept_repo], ansible_check_mode=check_mode)
+                    dev_worker_git_identity_keep_paths=[kept_repo] + [w for _, w in ORDERS.values()],
+                    ansible_check_mode=check_mode)
     return run_sh(script, aenv)
 
 
@@ -444,11 +464,23 @@ check(repo_value(proj + "/.git/config", "user.name") is None
       and repo_value(proj + "/.git/worktrees/wt/config.worktree", "user.email") is None
       and repo_value(kept_repo + "/.git/config", "user.name") == "Deliberate Owner",
       "H19: the repository identities are really gone, the kept one is not")
-check("committer is" not in out, "H20: the committer identity is right, so it is not reported", out)
+check("override: %s: committer is" % proj not in out, "H20: the committer identity is right, so it is not reported", out)
 check(".gitconfig: user." not in out, "H21: the role's own user.* in ~/.gitconfig is not reported", out)
 check("Pruned Dep" not in out and "node_modules" not in out, "H22: dependency trees are not walked", out)
 check("override: %s:" % kept_repo not in out, "H23: a kept checkout is not reported as an override", out)
 check(not leaked(out + err), "H24: no value of a profile or process variable is printed", leaked(out + err))
+for order, (main_dir, wt_dir) in ORDERS.items():
+    wt_cfg = "%s/.git/worktrees/%s/config.worktree" % (main_dir, os.path.basename(wt_dir))
+    check(repo_value(main_dir + "/.git/config", "user.name") == "Shared Owner"
+          and "kept: %s/.git/config: user.name" % main_dir in out,
+          "H27 %s: the shared config of a repository with a kept worktree is kept" % order, out)
+    check(repo_value(main_dir + "/.git/config.worktree", "user.email") is None
+          and "corrected: %s/.git/config.worktree: user.email" % main_dir in out,
+          "H28 %s: ...while the unkept main checkout's own config.worktree is still corrected" % order, out)
+    check(repo_value(wt_cfg, "user.email") == "kept-wt@example.invalid",
+          "H29 %s: ...and the kept worktree's own config.worktree is kept" % order)
+    check("override: %s: author is 'Shared Owner <codex@chifor.me>'" % main_dir in out and "is kept for a worktree" in out,
+          "H30 %s: the main checkout reports the kept shared identity, and why" % order, out)
 rc, out2, err = audit_run(False)
 check("corrected:" not in out2, "H25: a second run has nothing left to correct", out2)
 report = task(gi, "Report the commit identity corrections")["ansible.builtin.debug"]["msg"]
