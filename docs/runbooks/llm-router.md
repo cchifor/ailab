@@ -72,6 +72,53 @@ The exact deployed release, including production `node_modules`, was exported as
 - AILab `main` is protected. The deployment agent cannot push/merge main. Merge the deployment PR through the existing review gate; Flux then adopts the application resources and rolls the tunnel. Do not suspend shared reconciliation or patch the live tunnel to evade that gate.
 - Before the PR merges, the application can be healthy internally while the public hostname returns the tunnel's catch-all 404. DNS creation alone does not expose the origin.
 
+## Upgrades: edge hold and drain
+
+The router is a single replica on an RWO volume (`Recreate`), so every rollout has a gap with no router pod. The
+`llm-router-edge` Caddy proxy hides that gap from clients. Manifests: `kubernetes/apps/apps/llm-router/edge.yaml`.
+Design: llm-router `docs/design/live-status-and-upgrades.md`, section 5a.
+
+**Status: deployed but NOT yet on the tunnel.** Until the tunnel rule in `edge/cloudflared.yaml` points at
+`llm-router-edge`, the hold does nothing for public traffic. Verify the edge pods are Ready first
+(`kubectl --context admin@ai -n llm-router get deploy,pdb,svc llm-router-edge`).
+
+**The path:** cloudflared (namespace `edge`) -> `llm-router-edge:80` (Caddy, 2 replicas, port 8080) ->
+`llm-router:80` (container port 8787).
+
+**What is held, and for how long:** Caddy retries dial failures and "no healthy upstream" every 250 ms, for 85 s,
+or for 10 s on `/v1/images/*`. The 85 s cover the longest measured gap: 76–79 s on 2026-10-10/11, when the old
+shutdown waited its full 60 s grace on open streams. The first rollout behind the edge still replaces such a pod.
+With the router's drain the gap is about 45 s at most: 20 s drain, up to 12 s cleanup, about 13 s to ready. 85 s
+also leaves room under Cloudflare's roughly 100 s time-to-first-byte for a held stream, which gets its first byte
+(`: ok`) as soon as the router selects an account (the router already gives images a 90 s execution budget, and a longer hold would
+let Cloudflare time out first). Active health checks poll the router's `/ready` every 2 s. Caddy never replays a
+request the router accepted (its default retry match is GET-only), so a held POST is safe: it was never sent.
+Caddy's own readiness is a TCP probe, so it does not flap with the router.
+
+**The router's drain:** on SIGTERM the router stops taking new work and drains in-flight requests for
+`ROUTER_DRAIN_MS`. Streams still open when it ends are cut and recorded as `cancelled` with reason `SHUTDOWN`;
+work found unfinished at the next start is marked "Interrupted by restart".
+
+**What clients see:**
+- A request that arrives during the gap waits (up to the hold above) and is then served by the new pod. If the gap is
+  longer than the hold (a router that takes more than 85 s to become ready, for example after a volume moves node),
+  the request gets a 502 when the hold ends; Codex's request retries then wait again behind the edge.
+- A stream cut by the drain makes Codex print `Reconnecting… n/5` and continue.
+- A request the router accepted and then lost to a reset reaches the client as a 502; Codex's request retries cover it.
+- A long non-streaming request held near the limit can still hit Cloudflare's edge timeout (about 100-125 s).
+  That is the same as before the hold.
+
+**How to check after a rollout:** read the router journal for the rollout window. There must be no `abandoned`
+entries; only `cancelled` / `SHUTDOWN` for streams the drain cut.
+
+**An edge rollout** lets open streams finish (Caddy `grace_period 90s`, `preStop` sleep 5, `terminationGracePeriodSeconds: 100`);
+new connections go to the other replica (`maxUnavailable: 0`, PDB `minAvailable: 1`). If you change the Caddyfile
+in ConfigMap `llm-router-edge-caddy`, bump the `chifor.me/caddyfile-revision` pod annotation in the same change, or the
+pods keep the old config.
+
+**Rollback:** point the tunnel rule back to `llm-router:80` (`http://llm-router.llm-router.svc.cluster.local:80`)
+in `edge/cloudflared.yaml` and bump `chifor.me/config-revision` so both connectors roll.
+
 ## Verification and operations
 
 ```sh

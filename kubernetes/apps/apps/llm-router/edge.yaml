@@ -1,0 +1,240 @@
+# llm-router-edge — Caddy "hold" proxy in front of the router (design: llm-router
+# docs/design/live-status-and-upgrades.md, section 5a).
+#
+#   cloudflared -> llm-router-edge (Caddy, 2 replicas) -> llm-router (1 replica)
+#
+# While the single router pod restarts, Caddy retries dial failures and "no healthy
+# upstream" for up to 85 s (10 s for /v1/images/*) instead of failing the request. It
+# never replays a request the router accepted, so it is safe for POST. The Cloudflare
+# tunnel is NOT pointed at this Service yet (a separate, later change does that).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-router-edge-caddy
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router-edge
+    app.kubernetes.io/component: edge
+    app.kubernetes.io/part-of: llm-router
+data:
+  # No flush_interval (SSE flushes by Content-Type; -1 would stop cancelling the upstream
+  # request when the client disconnects) and no response/read timeouts. Bump
+  # chifor.me/caddyfile-revision on the Deployment whenever this changes: a ConfigMap edit
+  # alone does not roll the pods.
+  Caddyfile: |
+    {
+    	admin off
+    	auto_https off
+    	grace_period 90s
+    	servers {
+    		trusted_proxies static private_ranges
+    	}
+    }
+    :8080 {
+    	@images path /v1/images/*
+    	reverse_proxy @images llm-router.llm-router.svc.cluster.local:80 {
+    		lb_try_duration 10s
+    		lb_try_interval 250ms
+    		health_uri /ready
+    		health_interval 2s
+    		health_timeout 2s
+    	}
+    	reverse_proxy llm-router.llm-router.svc.cluster.local:80 {
+    		lb_try_duration 85s
+    		lb_try_interval 250ms
+    		health_uri /ready
+    		health_interval 2s
+    		health_timeout 2s
+    	}
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-router-edge
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router-edge
+    app.kubernetes.io/component: edge
+    app.kubernetes.io/part-of: llm-router
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-router-edge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-router-edge
+        app.kubernetes.io/component: edge
+        app.kubernetes.io/part-of: llm-router
+      annotations:
+        # Bump when the Caddyfile in ConfigMap llm-router-edge-caddy changes (rolls the pods).
+        chifor.me/caddyfile-revision: "1"
+    spec:
+      automountServiceAccountToken: false # Caddy needs no API access
+      tolerations:
+        - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Open streams finish on an edge rollout (Caddy grace_period 90s); new ones go to the other replica.
+      terminationGracePeriodSeconds: 100
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: llm-router-edge
+      containers:
+        - name: caddy
+          # Docker Hub library/caddy 2.11.7-alpine (multi-arch index digest, resolved 2026-10-11).
+          image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+          imagePullPolicy: IfNotPresent
+          command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+          env:
+            - {name: XDG_DATA_HOME, value: /data}
+            - {name: XDG_CONFIG_HOME, value: /config}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # TCP only: Caddy's own readiness must not flap with the router's /ready.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: [sleep, "5"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 48Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              # The official image's caddy binary carries file capability
+              # cap_net_bind_service+ep; with every capability dropped the kernel refuses
+              # to exec it ("Operation not permitted", verified with docker --cap-drop ALL).
+              # NET_BIND_SERVICE is the one add the restricted Pod Security profile allows.
+              add:
+                - NET_BIND_SERVICE
+          volumeMounts:
+            - {name: caddyfile, mountPath: /etc/caddy, readOnly: true}
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config}
+      volumes:
+        - name: caddyfile
+          configMap:
+            name: llm-router-edge-caddy
+        - name: data
+          emptyDir: {}
+        - name: config
+          emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: llm-router-edge
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router-edge
+    app.kubernetes.io/component: edge
+    app.kubernetes.io/part-of: llm-router
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-router-edge
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-router-edge
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router-edge
+    app.kubernetes.io/component: edge
+    app.kubernetes.io/part-of: llm-router
+spec:
+  selector:
+    app.kubernetes.io/name: llm-router-edge
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http # -> containerPort 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-router-edge
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router-edge
+    app.kubernetes.io/component: edge
+    app.kubernetes.io/part-of: llm-router
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: llm-router-edge
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the Cloudflare tunnel in the "edge" namespace, on 8080.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Cluster DNS (kube-dns runs in kube-system).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The router pods, on the container port (the Service front door is 80).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: llm-router
+      ports:
+        - protocol: TCP
+          port: 8787

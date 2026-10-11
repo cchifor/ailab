@@ -259,6 +259,14 @@ spec:
       ports:
         - protocol: TCP
           port: 8787
+    # The llm-router-edge Caddy hold proxy (edge.yaml), same namespace.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: llm-router-edge
+      ports:
+        - protocol: TCP
+          port: 8787
   egress:
     # Cluster DNS (kube-dns runs in kube-system).
     - to:
