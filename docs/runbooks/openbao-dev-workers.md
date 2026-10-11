@@ -90,7 +90,9 @@ Secret.
 
   Of the four workers, only the slot's own AppRole can read its document (each policy grants `read`
   on its own `af/data/dev-workers/<host>`, never on a sibling's), so an agent reaches its own copy
-  with `cred exec <hostname> gitea_pat …`. No policy changed for this. Minting, seeding and rotating them per slot:
+  with `cred exec <hostname> gitea_pat …`. No policy changed for this. The `-20261011` names are the
+  first enrolment's; every later ceremony names its tokens `dw<N>-<kind>-<UTC YYYYMMDDHHMMSS>`, and both
+  forms are valid. Minting, seeding and rotating them per slot:
   [`s2s-identity.md`](s2s-identity.md) § "Enrol a worker identity".
 
   `strive_test_user` / `strive_test_password` (moved here 2026-09-25 from

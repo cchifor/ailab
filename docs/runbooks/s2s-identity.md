@@ -143,11 +143,12 @@ Run it in WSL bash (for `/dev/shm`), from the repo root. Shared setup:
 
 ```bash
 K="kubectl --context admin@ai"
-N=5; U=dev-worker-$N-bot; D=$(date -u +%Y%m%d)       # the slot being enrolled
+N=5; U=dev-worker-$N-bot                             # the slot being enrolled
 GP=$($K -n gitea get pod -l app.kubernetes.io/name=gitea,app.kubernetes.io/instance=gitea \
   --field-selector=status.phase=Running -o name | head -1); GP=${GP#pod/}
 DB=$($K -n databases get pod -l cnpg.io/cluster=infra-pg,cnpg.io/instanceRole=primary -o name | head -1); DB=${DB#pod/}
 sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -tA -v ON_ERROR_STOP=1 -f -; }
+UIDQ="(select id from \"user\" where name='$U')"
 ```
 
 1. **Create the user.** `--random-password` PRINTS the password, so stdout is discarded and only the exit
@@ -188,17 +189,35 @@ sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -
    ```
 
 4. **Mint the three tokens into shell variables only** (same scopes as the shared three,
-   `openbao-dev-workers.md` § the token table):
+   `openbao-dev-workers.md` § the token table). Every name carries this ceremony's own operation id,
+   `dw<N>-<kind>-<UTC YYYYMMDDHHMMSS>`, so a same-day retry or rotation never reuses a name. The live
+   tokens minted on 2026-10-11 are `dw<N>-<kind>-20261011`; both forms are valid, and the plan's Phase 5
+   naming alarm must accept `^dw<N>-(git|repo|pkg)-[0-9]{8}([0-9]{6})?$`. If a name already exists, or
+   a mint returns no token, STOP: never delete a token to make room. The ceremony RECORDS the exact names
+   it minted and their token ids; every later delete names those ids, never a pattern.
 
    ```bash
-   mint() { $K -n gitea exec "$GP" -c gitea -- gitea admin user generate-access-token --username "$U" \
-     --token-name "dw$N-$1-$D" --scopes "$2" --raw 2>/dev/null | tr -d '\r\n'; }
-   TG=$(mint git write:repository,write:issue,read:organization,read:user)
-   TR=$(mint repo write:organization,write:repository,read:user)
-   TP=$(mint pkg write:package,read:repository,read:user)
+   OP=$(date -u +%Y%m%d%H%M%S); MINTED=""
+   printf '%s\n' "select name from access_token where uid=$UIDQ and name like '%-$OP';" | sql   # expect nothing
+   mint() {   # mint KIND SCOPES VAR: the token into VAR, and its exact name into MINTED only if it came back
+     local v; v=$($K -n gitea exec "$GP" -c gitea -- gitea admin user generate-access-token --username "$U" \
+       --token-name "dw$N-$1-$OP" --scopes "$2" --raw 2>/dev/null | tr -d '\r\n')
+     [[ $v =~ ^[0-9a-f]{40}$ ]] || { echo "mint dw$N-$1-$OP FAILED: STOP"; return 1; }
+     printf -v "$3" '%s' "$v"; MINTED="${MINTED:+$MINTED,}'dw$N-$1-$OP'"
+   }
+   mint git write:repository,write:issue,read:organization,read:user TG &&
+     mint repo write:organization,write:repository,read:user TR &&
+     mint pkg write:package,read:repository,read:user TP
+   MINTED_IDS=$(printf '%s\n' "select string_agg(id::text, ',' order by id) from access_token
+     where uid=$UIDQ and name in (${MINTED:-''});" | sql)
+   echo "minted: $MINTED  ids: $MINTED_IDS"         # RECORD both (not secrets); run this even after a FAILED
    for v in "$TG" "$TR" "$TP"; do                   # record these prefixes: step 8 compares against them
      [[ $v =~ ^[0-9a-f]{40}$ ]] && printf '%s' "$v" | sha256sum | cut -c1-12 || echo BAD; done
    ```
+
+   The `like` in the first line only READS (it proves this operation id is unused); nothing is ever
+   deleted by pattern. After a FAILED mint, delete exactly `$MINTED_IDS` as in step 5 and start again
+   with a new operation id.
 
 5. **Write all three into the seed in ONE `sops edit`**, so there is never a partial document. Not `sops
    set`: the key `dev-worker-N.json` holds a JSON document as one YAML string, which `sops set` cannot
@@ -266,11 +285,13 @@ sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -
    unset TG TR TP
    ```
 
-   If the edit failed, the three tokens are live but stored nowhere: delete them at once and start again
-   at step 4. Never leave an unrecorded live token.
+   If the edit failed, the minted tokens are live but stored nowhere: delete exactly the recorded ids at
+   once, prove they are gone, and start again at step 4 with a new operation id. Never leave an unrecorded
+   live token, and never delete by a name pattern: it could reach the working tokens.
 
    ```bash
-   printf "delete from access_token where uid=(select id from \"user\" where name='%s') and name like 'dw%s-%%-%s';\n" "$U" "$N" "$D" | sql
+   printf '%s\n' "delete from access_token where uid=$UIDQ and id in ($MINTED_IDS);" | sql
+   printf '%s\n' "select count(*) from access_token where id in ($MINTED_IDS);" | sql        # expect 0
    ```
 
 6. **Verify the seed in memory**, printing field names, lengths and short hashes only. Run the same command
@@ -341,13 +362,26 @@ before its slot is cut over:
 
 **Rotation, per slot (same machine).** Mint-before-revoke, one slot at a time, never touching `common`
 or a sibling:
-1. mint `dw<N>-<kind>-<new date>` (step 4) and keep the three printed prefixes;
-2. seed them (steps 5–6), merge, and run the Job (step 7) — the merge alone changes nothing;
+1. RECORD the tokens being replaced, before anything is minted: their ids and names are the only ones
+   step 4 may delete. Expect exactly the three current ones (git, repo, pkg).
+
+   ```bash
+   OLD_IDS=$(printf '%s\n' "select string_agg(id::text, ',' order by id) from access_token where uid=$UIDQ;" | sql)
+   printf '%s\n' "select id, name from access_token where id in ($OLD_IDS);" | sql      # record this
+   ```
+
+2. mint `dw<N>-<kind>-<new operation id>` (enrolment step 4, which records `MINTED`/`MINTED_IDS` and
+   the prefixes), seed them (steps 5–6), merge, and run the Job (step 7) — the merge alone changes nothing;
 3. on the slot, the `cred get` prefixes, and once cut over the `~/.git-credentials` prefix, must equal
    the minted ones (step 8). Until both match, the slot still uses the old tokens: do not revoke;
-4. only then delete the old tokens by name (step 5's delete, with the OLD date) and read the account's
-   token names back: only the three new ones may remain. Gitea re-reads a token's row on every use, so a
-   deleted token fails at once.
+4. only then delete exactly the recorded old ids, and read the account's token names back: only the
+   three recorded new names may remain. Gitea re-reads a token's row on every use, so a deleted token
+   fails at once.
+
+   ```bash
+   printf '%s\n' "delete from access_token where uid=$UIDQ and id in ($OLD_IDS);" | sql
+   printf '%s\n' "select id, name from access_token where uid=$UIDQ order by id;" | sql   # = MINTED only
+   ```
 
 **Re-slot (a different VM takes the slot).** The account name stays; the tokens and the vault access do
 not. Rotation's publish-first order would let the previous holder read the replacement tokens,
@@ -368,15 +402,16 @@ this order, and stop at the first step that fails:
    machine's SecretID minted.)
 3. **Only then mint the replacement's SecretID** (`openbao-dev-workers.md` § (e), for this one host),
    store it in SOPS and converge the replacement (§ (f)); its bao agent logs in, its workloads stay held.
-4. **Mint, publish and verify the new PATs**: enrolment steps 4–8 above, including the fingerprint
+4. **Mint, publish and verify the new PATs**: record the old tokens' ids first (rotation step 1,
+   `OLD_IDS`), then enrolment steps 4–8 above with a new operation id, including the fingerprint
    comparison of rotation step 3. Enrolment step 8's AppRole checks run on the replacement, whose
    SecretID exists since step 3. Before the Job in enrolment step 7 replaces them, read the three OLD
    values from `af/dev-workers/dev-worker-N` (`bao kv get -mount=af -field=<field>`, break-glass token)
    into shell variables, never printed, for step 5.
-5. **Delete ALL the old PATs** by name (enrolment step 5's delete, with the old date), read the account's
-   token names back (only the three new ones may remain), and prove that each retained old value answers
-   401 on `GET /user` (the token on curl's stdin, as in enrolment step 8). Then unset the old values. If
-   the old VM is still up, its cached `~/.git-credentials` must answer 401 too.
+5. **Delete ALL the old PATs**, exactly the recorded `OLD_IDS` (rotation step 4), read the account's
+   token names back (only the three recorded new names may remain), and prove that each retained old
+   value answers 401 on `GET /user` (the token on curl's stdin, as in enrolment step 8). Then unset the old
+   values. If the old VM is still up, its cached `~/.git-credentials` must answer 401 too.
 6. **Only then release the replacement's workloads.**
 
 A **retired** slot's account is disabled (tokens deleted first, then `prohibit_login`), never deleted, and
