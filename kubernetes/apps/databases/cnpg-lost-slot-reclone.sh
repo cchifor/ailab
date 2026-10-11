@@ -3,10 +3,14 @@
 #
 # Runs as the main container of the cnpg-lost-slot-reclone CronJob (kubernetes/apps/databases/
 # cnpg-lost-slot-reclone.yaml, which holds the why). An init container has already written SLOTS_FILE
-# with the primary's slot state (see probe in that manifest):
+# with the primary's slot state (cnpg-lost-slot-reclone-probe.sh):
 #   line 1:  in_recovery=<true|false>
 #   lines 2+: <slot_name>|<slot_type>|<active true/false>|<wal_status>|<safe_wal_size>|<invalidation_reason>
 # (booleans concatenated into text come out as true/false; bare psql -At output would be t/f - both accepted)
+# When the probe could not connect to the primary at all, it writes PROBE_UNREACHABLE_FILE instead of
+# SLOTS_FILE. That is expected while CNPG restarts or switches the primary, and CNPG then reports the
+# Cluster as not healthy: this script logs it and exits 0. While the Cluster reports healthy, an
+# unreachable primary is a real fault: exit 1 (KubeJobFailed pages). An unreadable Cluster is exit 1 too.
 # This script only talks to the Kubernetes API (kubectl + jq, namespaced RBAC). POSIX sh so that
 # scripts/tests/cnpg-lost-slot-reclone-mock.py can drive it with a fake kubectl on PATH.
 #
@@ -26,11 +30,14 @@
 #       role unchanged), take the marker with a resourceVersion precondition (a competing execution
 #       cannot overwrite it), then delete PVCs -> pod -> bounded wait until pod and PVC UIDs are gone;
 #       an API error while waiting is "unknown", never "gone". One re-clone per execution.
-# Exit: 0 acted or nothing to do; 1 failure/refusal/stuck; 3 probe saw a non-primary (switchover).
+# Exit: 0 acted, nothing to do, or primary unreachable while the Cluster is not healthy; 1 failure/
+#       refusal/stuck, or primary unreachable while the Cluster reports healthy; 3 probe saw a
+#       non-primary (switchover).
 set -eu
 
 : "${NAMESPACE:?}" "${CLUSTERS:?}"
-: "${SLOTS_FILE:=/work/slots.tsv}" "${DRY_RUN:=true}" "${MIN_INTERVAL_SECONDS:=21600}"
+: "${SLOTS_FILE:=/work/slots.tsv}" "${PROBE_UNREACHABLE_FILE:=/work/probe-unreachable}"
+: "${DRY_RUN:=true}" "${MIN_INTERVAL_SECONDS:=21600}"
 : "${STUCK_AFTER_SECONDS:=2700}" "${DELETE_WAIT_SECONDS:=150}" "${POLL_SECONDS:=5}" "${WORK:=/tmp}" "${K_TIMEOUT:=25}"
 IN_PROGRESS=ailab.io/reclone-in-progress
 LAST=ailab.io/last-reclone
@@ -61,6 +68,19 @@ present() { # kind name [uid] -> 0 present, 1 gone (NotFound, or replaced by a s
 }
 expected_slot() { printf '%s%s' "$prefix" "$(printf '%s' "$1" | tr '-' '_')"; }
 
+if [ -e "$PROBE_UNREACHABLE_FILE" ]; then
+  rc=0
+  for cluster in $CLUSTERS; do
+    read_cluster "$cluster" || { rc=1; continue; }
+    phase=$(cf '.status.phase // ""')
+    if [ "$phase" = "$HEALTHY" ]; then
+      echo "$cluster: probe could not connect to the primary while the Cluster reports healthy - failing"; rc=1
+    else
+      echo "$cluster: probe could not connect to the primary; Cluster phase is '$phase' (CNPG restarting or switching the primary) - not acting"
+    fi
+  done
+  exit $rc
+fi
 [ -s "$SLOTS_FILE" ] || { echo "probe output $SLOTS_FILE missing or empty"; exit 1; }
 in_recovery=$(sed -n '1s/^in_recovery=//p' "$SLOTS_FILE" | tr -d '\r')
 case "$in_recovery" in

@@ -27,6 +27,7 @@ if dry not in ("true", "false"):
 docs = list(yaml.safe_load_all(open(ROOT / "kubernetes/apps/databases/cnpg-lost-slot-reclone.yaml", encoding="utf-8")))
 cron = next(d for d in docs if d["kind"] == "CronJob")
 script = open(ROOT / "kubernetes/apps/databases/cnpg-lost-slot-reclone.sh", encoding="utf-8").read()
+probe_script = open(ROOT / "kubernetes/apps/databases/cnpg-lost-slot-reclone-probe.sh", encoding="utf-8").read()
 labels = {"ailab.io/drill": "reclone"}
 
 
@@ -43,7 +44,8 @@ out = [
     {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta("reclone-drill-runner"),
      "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "reclone-drill-runner"},
      "subjects": [{"kind": "ServiceAccount", "name": "reclone-drill-runner", "namespace": "databases"}]},
-    {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta("reclone-drill-script"), "data": {"cnpg-lost-slot-reclone.sh": script}},
+    {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta("reclone-drill-script"), "data": {"cnpg-lost-slot-reclone.sh": script,
+                                                                                               "cnpg-lost-slot-reclone-probe.sh": probe_script}},
 ]
 
 pod = copy.deepcopy(cron["spec"]["jobTemplate"]["spec"]["template"])

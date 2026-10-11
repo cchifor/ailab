@@ -40,11 +40,21 @@ kubectl delete pv <pv-name>                                     # only if Triden
 
 ## Automatic re-clone — CronJob `cnpg-lost-slot-reclone` (2026-09-28, ailab#923)
 
-`cnpg-lost-slot-reclone.yaml` + `cnpg-lost-slot-reclone.sh` (tests:
+`cnpg-lost-slot-reclone.yaml` + `cnpg-lost-slot-reclone.sh` + `cnpg-lost-slot-reclone-probe.sh` (tests:
 `python scripts/tests/cnpg-lost-slot-reclone-mock.py`). Every 5 min an init container probes the
 primary through `infra-pg-rw` as the LOGIN-only managed role `slotwatch`; the main container acts only
 on a physical, inactive, `lost` slot that maps to a replica of an allowlisted cluster (`CLUSTERS`),
 never on the primary, never during a transition, at most once per `MIN_INTERVAL_SECONDS` (6 h).
+
+**A primary that cannot be reached is not always a fault.** CNPG restarts the primary in place, with no
+switchover, on every operator or image upgrade, and `infra-pg-rw` has no endpoint until it is back. On
+2026-10-09 that happened six times, for 1.5 to 3 minutes each. Three probes landed in those
+windows, and each failed Job held `KubeJobFailed` for two days. The probe now retries a connection
+failure (`PROBE_ATTEMPTS` x `PROBE_RETRY_SECONDS`), then hands off instead of failing. The main container
+exits 0 when the Cluster's phase is not `Cluster in healthy state` (CNPG logs `Cluster has become
+unhealthy` for exactly that window) and 1 when it is. So an unreachable primary on a Cluster that CNPG
+calls healthy still pages. A probe log line `could not connect to the primary in 3 attempt(s)` followed
+by `not acting` is a restart; the same line followed by `failing` is the case to look at.
 
 Protocol on the Cluster's annotations:
 
