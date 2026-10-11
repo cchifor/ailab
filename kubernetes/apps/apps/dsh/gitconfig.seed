@@ -11,3 +11,12 @@
 # deployment.yaml's seed-settings script; scripts/tests/test_dsh_git_credential_helper.py pins that.
 [credential "https://git.chifor.me"]
 	helper = /dsh-home/.local/bin/git-credential-openbao
+
+# One commit identity for dsh (ailab plan 2026-10-11 worker identities, Phase 1 item 5). Before this the
+# file set none, and dsh's commits went out under whatever each process chose — `DSH Operator
+# <dsh-team@users.noreply…>`, `DSH <dsh@chifor.me>`, `dsh agent <dsh-agent@chifor.me>`. The address
+# is the Gitea account's no-reply address (login `dsh` at [service] NO_REPLY_ADDRESS), which Gitea
+# links to that account, so every dsh commit is attributed to the same identity that pushes it.
+[user]
+	name = dsh
+	email = dsh@noreply.git.chifor.me

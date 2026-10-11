@@ -430,6 +430,24 @@ class Wiring(unittest.TestCase):
         # One scoped section, no unscoped `[credential]` that would widen it.
         self.assertNotIn("\n[credential]\n", seeded)
 
+    def test_gitconfig_sets_one_commit_identity_linked_to_the_dsh_account(self):
+        # Worker identities, Phase 1 item 5: every dsh commit names the account that pushes it.
+        # The address is Gitea's no-reply form of the `dsh` login, which Gitea links to the account.
+        # Parsed by section, so a stray `name =` elsewhere cannot satisfy it.
+        seeded = GITCONFIG.read_text(encoding="utf-8")
+        self.assertEqual(seeded.count("\n[user]\n"), 1)
+        block = seeded.split("\n[user]\n", 1)[1].split("\n[", 1)[0]
+        keys = dict(line.strip().split(" = ", 1) for line in block.splitlines()
+                    if line.strip() and not line.strip().startswith("#"))
+        self.assertEqual(keys, {"name": "dsh", "email": "dsh@noreply.git.chifor.me"})
+
+    def test_container_env_pins_the_same_identity_above_every_git_config_level(self):
+        # ~/.gitconfig is the LOWEST identity source; GIT_AUTHOR_*/GIT_COMMITTER_* outrank repo config
+        # and `-c user.*`, so the dsh container carries the same identity as environment.
+        for var, value in (("GIT_AUTHOR_NAME", "dsh"), ("GIT_AUTHOR_EMAIL", "dsh@noreply.git.chifor.me"),
+                           ("GIT_COMMITTER_NAME", "dsh"), ("GIT_COMMITTER_EMAIL", "dsh@noreply.git.chifor.me")):
+            self.assertIn(f"- {{ name: {var}, value: {value} }}", self.deployment)
+
     def test_helper_authority_matches_the_gitconfig_scope(self):
         # Two scoping layers, one authority: the gitconfig section and the
         # helper's own guard must name the same host and protocol.
