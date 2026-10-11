@@ -71,6 +71,10 @@ resources:
   - objectstore-tls-rules.yaml # activates when the TLS Service exists; existing ntfy routing
 
 configMapGenerator:
+  - name: objectstore-tls-probe
+    namespace: monitoring
+    files:
+      - blackbox.yml=objectstore-blackbox.yaml
   - name: objectstore-tls-ca
     namespace: monitoring
     files:

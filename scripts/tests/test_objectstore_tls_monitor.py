@@ -16,7 +16,7 @@ class ObjectstoreTLSMonitorTests(unittest.TestCase):
         return next(d for d in self.docs if d['kind'] == kind)
 
     def test_probe_verifies_the_browser_hostname_with_the_estate_public_ca(self):
-        config = yaml.safe_load(self.kind('ConfigMap')['data']['blackbox.yml'])
+        config = yaml.safe_load((MONITORING / 'objectstore-blackbox.yaml').read_text())
         module = config['modules']['objectstore_tls']
         self.assertEqual(module['prober'], 'tcp')
         self.assertTrue(module['tcp']['tls'])
@@ -78,6 +78,15 @@ class ObjectstoreTLSMonitorTests(unittest.TestCase):
             'name': ca['configMap']['name'], 'namespace': 'monitoring',
             'files': ['ca.crt=objectstore-tls-ca.crt'],
         }, kustomization.get('configMapGenerator', []))
+        config = next(v for v in self.kind('Deployment')['spec']['template']['spec']['volumes']
+                      if v['name'] == 'config')
+        self.assertIn({
+            'name': config['configMap']['name'], 'namespace': 'monitoring',
+            'files': ['blackbox.yml=objectstore-blackbox.yaml'],
+        }, kustomization.get('configMapGenerator', []))
+        self.assertFalse(kustomization.get('generatorOptions', {}).get('disableNameSuffixHash', False))
+        for generator in kustomization.get('configMapGenerator', []):
+            self.assertFalse(generator.get('options', {}).get('disableNameSuffixHash', False))
         rules = yaml.safe_load((MONITORING / 'objectstore-tls-rules.yaml').read_text())
         self.assertEqual(rules['metadata']['labels']['release'], 'kube-prometheus-stack')
         for rule in rules['spec']['groups'][0]['rules']:

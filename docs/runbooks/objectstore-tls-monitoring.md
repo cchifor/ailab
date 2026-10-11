@@ -7,6 +7,9 @@ the committed **public** ailab root CA, whose bytes are checked against the
 existing OpenBao-agent trust root. It sends no S3 request or credential and
 requires no Kubernetes API permissions. It does not test tailnet reachability,
 signed transfers, bucket isolation or certificate serial equality.
+Both the module configuration and public CA use content-hashed ConfigMaps, so
+changes to either update the Deployment's volume references and replace the
+exporter pod. They never replace the shared objectstore pod.
 
 The exporter runs without a service-account token or Secrets, as UID 65534 on a
 read-only filesystem. Its NetworkPolicy accepts Prometheus in `monitoring` and
