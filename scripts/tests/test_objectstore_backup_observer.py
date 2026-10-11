@@ -1,5 +1,6 @@
 """Keep the temporary recovery observer read-only and confined to one slot."""
 from pathlib import Path
+from datetime import date
 import unittest
 
 import yaml
@@ -28,6 +29,10 @@ class BackupObserverTests(unittest.TestCase):
             self.assertEqual(doc["metadata"]["namespace"], "velero")
             annotations = doc["metadata"]["annotations"]
             self.assertEqual(annotations["platform-access.chifor.me/remove-by"], "2026-10-18")
+            self.assertLessEqual(
+                date.today(), date.fromisoformat(annotations["platform-access.chifor.me/remove-by"]),
+                "temporary observer past remove-by; delete the RBAC documents (ailab#1242)",
+            )
             self.assertEqual(annotations["platform-access.chifor.me/removal-issue"],
                              "https://git.chifor.me/cchifor/ailab/issues/1242")
 

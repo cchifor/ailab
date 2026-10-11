@@ -365,8 +365,10 @@ roleRef:
 ---
 # Temporary recovery evidence for cchifor/platform#2219. The worker needs the
 # timestamped Backup/PodVolumeBackup names before it can inspect their status;
-# resourceNames cannot constrain list. These CRs expose metadata/status, not
-# backed-up file contents. No credentials, logs, forwarding, process access or writes.
+# resourceNames cannot constrain list. Across protected namespaces, these CRs expose
+# pod/PVC/node inventory, uploader type, repository locations and snapshot IDs,
+# plus spec/status. No backed-up file contents, credentials, logs, forwarding,
+# process access or writes. Restore reads look for an existing recovery receipt.
 # Remove both documents by 2026-10-18; RBAC has no native TTL (ailab#1242).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

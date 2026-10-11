@@ -284,8 +284,12 @@ denials on every playbook run (it would go red, which is the point).
 The storage rollout in platform #2219 needs volume-specific recovery evidence;
 configured Kopia schedules alone do not prove a usable copy. Backup names are
 timestamped, so discovery needs `list`; the grant consequently exposes these
-four CR kinds across that namespace. It does not expose backup contents or
+four CR kinds across that namespace. This reveals the backed-up pod/PVC/node
+inventory across protected namespaces, uploader types, repository URLs/paths
+and snapshot IDs, as well as spec/status. It does not expose backup contents or
 credentials and grants no restore creation, workload access or other writes.
+Restore-side reads check whether an earlier recovery operation already supplies
+the missing evidence; the existence or absence of that evidence is still unknown.
 
 After reconciliation, inspect `spec.pod.namespace` and the pod/PVC identity on
 the PodVolumeBackup records for `strive-ailab/objectstore-data`, then read their
@@ -297,7 +301,9 @@ Remove both purpose-named RBAC documents, this paragraph and
 `scripts/tests/test_objectstore_backup_observer.py` after the investigation or
 by **2026-10-18**, whichever comes first. Track removal in
 [ailab #1242](https://git.chifor.me/cchifor/ailab/issues/1242); RBAC has no automatic
-expiry. The generic observer and every other slot remain unchanged.
+expiry. The permission contract makes subsequent CI runs fail after that date
+while the grant remains; it does not revoke live permissions itself. The generic
+observer and every other slot remain unchanged.
 
 ## Failure modes
 
