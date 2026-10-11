@@ -85,25 +85,35 @@ def gitea_user_slots(text, source):
     2026-10-11-worker-identities). Read to the END of its block, like the reviewbot allowlist test
     does: a regex that stops at the first line it cannot match would let a stray login sit unseen
     below a comment. Anything inside the block that is not a slot login — another account, a flow
-    list, a duplicate — is an error, never a skip."""
-    if len(re.findall(r"^dev_worker_gitea_users:", text, re.M)) > 1:
+    list, a duplicate — is an error, never a skip.
+
+    The login must be spelled exactly as Gitea knows it, `dev-worker-<n>-bot`: no zero padding
+    (`dev-worker-04-bot` is a different account), no quoting, nothing trailing. A YAML comment needs
+    whitespace before its `#`, so `- dev-worker-4-bot  # note` is slot 4 while `- dev-worker-4-bot#x`
+    is the literal string `dev-worker-4-bot#x` and fails. A second definition of the key in ANY quoting
+    (`"dev_worker_gitea_users": []` below the real one) fails too: YAML keeps the last one, so Ansible
+    would read a list this check never saw."""
+    if len(re.findall(r"""^(["']?)dev_worker_gitea_users\1[ \t]*:""", text, re.M)) > 1:
         sys.exit("%s: dev_worker_gitea_users is defined twice (YAML keeps the LAST one silently)"
                  % source)
-    key = one(r"^dev_worker_gitea_users:(.*)$", text, source)
+    key = one(r"^dev_worker_gitea_users[ \t]*:(.*)$", text, source)
     if re.split(r"(?:^|\s)#", key.group(1), maxsplit=1)[0].strip():
         sys.exit("%s: dev_worker_gitea_users must be a block list (one `- dev-worker-N-bot` per line), "
                  "got %r" % (source, key.group(0)))
-    slots = []
+    slots, indents = [], set()
     for line in text[key.end():].splitlines()[1:]:
         if not line.strip() or line.lstrip().startswith("#"):
             continue                      # blank / comment INSIDE the block: skip, don't stop
         if not line[:1].isspace():
             break                         # dedent to column 0 = the next top-level key
-        m = re.match(r"^\s+- dev-worker-(\d+)-bot\s*(?:#.*)?$", line)
+        m = re.match(r"^([ \t]+)- dev-worker-([1-9][0-9]*)-bot(?:[ \t]+#.*)?[ \t]*$", line)
         if m is None:
             sys.exit("%s: unparsable dev_worker_gitea_users entry %r (expected `- dev-worker-N-bot`)"
                      % (source, line))
-        slots.append(int(m.group(1)))
+        indents.add(m.group(1))
+        slots.append(int(m.group(2)))
+    if len(indents) > 1:
+        sys.exit("%s: dev_worker_gitea_users entries are indented inconsistently" % source)
     if len(slots) != len(set(slots)):
         sys.exit("%s: dev_worker_gitea_users names a slot twice: %s" % (source, sorted(slots)))
     return frozenset(slots)

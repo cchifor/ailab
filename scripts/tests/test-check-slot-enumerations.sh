@@ -141,6 +141,37 @@ edit ansible/group_vars/dev_workers.yml 's + "dev_worker_gitea_users:\n  - dev-w
 expect_fail "the Gitea login list defined twice" "defined twice"
 restore ansible/group_vars/dev_workers.yml
 
+# YAML keeps the LAST definition, so a quoted duplicate would hand Ansible an empty list.
+edit ansible/group_vars/dev_workers.yml 's + chr(34) + "dev_worker_gitea_users" + chr(34) + ": []\n"'
+expect_fail "a double-quoted second definition of the Gitea login list" "defined twice"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's + chr(39) + "dev_worker_gitea_users" + chr(39) + " : []\n"'
+expect_fail "a single-quoted second definition of the Gitea login list" "defined twice"
+restore ansible/group_vars/dev_workers.yml
+
+# Exact login spelling: each of these is a DIFFERENT Gitea account (or a different string) from slot 4's.
+for bad in 'dev-worker-04-bot' 'dev-worker-4-bot#typo' 'dev-worker-4-bot-x' 'dev-worker-4-bot x' \
+           'dev-worker-0-bot'; do
+  edit ansible/group_vars/dev_workers.yml "s.replace('  - dev-worker-4-bot\n', '  - $bad\n', 1)"
+  expect_fail "a non-canonical Gitea login: $bad" "unparsable dev_worker_gitea_users entry"
+  restore ansible/group_vars/dev_workers.yml
+done
+edit ansible/group_vars/dev_workers.yml \
+  's.replace("  - dev-worker-4-bot\n", "  - " + chr(34) + "dev-worker-4-bot" + chr(34) + "\n", 1)'
+expect_fail "a quoted Gitea login" "unparsable dev_worker_gitea_users entry"
+restore ansible/group_vars/dev_workers.yml
+
+edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "    - dev-worker-4-bot\n", 1)'
+expect_fail "Gitea login entries indented inconsistently" "indented inconsistently"
+restore ansible/group_vars/dev_workers.yml
+
+# ...and a real YAML comment after the login is still slot 4.
+edit ansible/group_vars/dev_workers.yml 's.replace("  - dev-worker-4-bot\n", "  - dev-worker-4-bot  # canary\n", 1)'
+run_check || fail "a Gitea login followed by a YAML comment must still pass"
+echo "  ok  a Gitea login followed by a YAML comment is still slot 4"
+restore ansible/group_vars/dev_workers.yml
+
 echo "[D] a slot that is both live and retired fails"
 edit kubernetes/apps/infrastructure/security/openbao/devworker-provision-job.yaml \
   's.replace("RETIRED_SLOTS=" + chr(34) + "dev-worker-5 dev-worker-6" + chr(34), "RETIRED_SLOTS=" + chr(34) + "dev-worker-4 dev-worker-5 dev-worker-6" + chr(34), 1)'
