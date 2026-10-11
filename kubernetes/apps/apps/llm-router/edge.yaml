@@ -4,7 +4,7 @@
 #   cloudflared -> llm-router-edge (Caddy, 2 replicas) -> llm-router (1 replica)
 #
 # While the single router pod restarts, Caddy retries dial failures and "no healthy
-# upstream" for up to 60 s (10 s for /v1/images/*) instead of failing the request. It
+# upstream" for up to 85 s (10 s for /v1/images/*) instead of failing the request. It
 # never replays a request the router accepted, so it is safe for POST. The Cloudflare
 # tunnel is NOT pointed at this Service yet (a separate, later change does that).
 ---
@@ -41,7 +41,7 @@ data:
     		health_timeout 2s
     	}
     	reverse_proxy llm-router.llm-router.svc.cluster.local:80 {
-    		lb_try_duration 60s
+    		lb_try_duration 85s
     		lb_try_interval 250ms
     		health_uri /ready
     		health_interval 2s
