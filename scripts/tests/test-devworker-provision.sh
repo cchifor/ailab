@@ -141,12 +141,19 @@ case "$1 $2" in
       [ -f "$STATE/FAIL_DW3_PROBE" ] && { echo "Error reading af/data/dev-workers/dev-worker-3: permission denied" >&2; exit 2; }
       exit 0
     fi
+    # common exists once the seed loop has created it, so its moved-fields strip (the retired shared
+    # dev-worker-bot Gitea fields) patches it too
+    if [ "$4" = dev-workers/common ] && [ -f "$STATE/common-exists" ]; then exit 0; fi
     nvf "af/data/$4" ;;
   "patch af/data/dev-workers/dev-worker-3")   # KV-v2 merge patch, JSON body on stdin
     [ "$3" = "-" ] || { echo "stub: patch without stdin body: $*" >&2; exit 3; }
     cat >> "$STATE/patch-body"; echo >> "$STATE/patch-body"; exit 0 ;;
+  "patch af/data/dev-workers/common")
+    [ "$3" = "-" ] || { echo "stub: patch without stdin body: $*" >&2; exit 3; }
+    cat >> "$STATE/patch-body-common"; echo >> "$STATE/patch-body-common"; exit 0 ;;
   "kv put"|"kv patch")
     case "$*" in *" dev-workers/dev-worker-3 "*) touch "$STATE/dw3-exists" ;; esac
+    case "$*" in *" dev-workers/common "*) touch "$STATE/common-exists" ;; esac
     exit 0 ;;
   *) echo "stub: unhandled: bao $*" >&2; exit 3 ;;
 esac
@@ -195,6 +202,11 @@ expect "$out1" "moved fields stripped from dev-workers/dev-worker-3: strive_test
 expect "$out2" "moved fields stripped from dev-workers/dev-worker-3: strive_test_user strive_test_password"
 # field NAMES nulled, nothing else in the body; issued on both runs (idempotent)
 [ "$(grep -cxF '{"data":{"strive_test_user":null,"strive_test_password":null}}' "$WORK/state/patch-body")" = 2 ]   || { echo "moved-fields patch body wrong or not issued on both runs" >&2; cat "$WORK/state/patch-body" >&2; exit 1; }
+# The SECOND MOVED_FIELDS record (multi-line value): the retired shared dev-worker-bot Gitea fields leave
+# common on both runs, exactly those three names nulled and nothing else (worker identities, Phase 5).
+expect "$out1" "moved fields stripped from dev-workers/common: gitea_pat gitea_repo_pat gitea_package_pat"
+expect "$out2" "moved fields stripped from dev-workers/common: gitea_pat gitea_repo_pat gitea_package_pat"
+[ "$(grep -cxF '{"data":{"gitea_pat":null,"gitea_repo_pat":null,"gitea_package_pat":null}}' "$WORK/state/patch-body-common")" = 2 ]   || { echo "common moved-fields patch body wrong or not issued on both runs" >&2; cat "$WORK/state/patch-body-common" >&2; exit 1; }
 expect "$out2" "retired dev-worker-6: converged (no secret-ids, no tokens; role/policy/KV absent)"
 expect "$out2" "seed dev-worker-6.json names a retired slot; skipped"
 expect "$out2" "devworker provision complete"
