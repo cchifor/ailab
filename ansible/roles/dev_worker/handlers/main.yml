@@ -115,8 +115,7 @@
 # The shared openbao_agent role notifies TOPICS ("openbao-agent: ... changed") rather than handler
 # names, because dev-workers.yml applies both this role and pr_reviewer and a shared handler name
 # would be shadowed by the reviewer role's (conditional) copy — see openbao_agent/handlers/main.yml.
-# These are this role's own listeners; tasks/openbao.yml also notifies "Restart openbao-agent" by
-# name.
+# These are this role's own listeners.
 # Dropping a certificate into /usr/local/share/ca-certificates does nothing until the bundle is
 # rebuilt; there is no module for it.
 - name: Update CA trust
@@ -129,13 +128,11 @@
     daemon_reload: true
   listen: "openbao-agent: unit changed"
 
-# The check-mode guard is the same concern the agentforge/herdr handlers above solve implicitly (the
-# command module is skipped in check mode): a first-run --check preview never really writes the unit
-# file, and the systemd module fails on a unit it cannot find. Spelled out here because this handler
-# uses the module.
-- name: Restart openbao-agent
-  ansible.builtin.systemd:
-    name: openbao-agent.service
-    state: restarted
-  when: not ansible_check_mode
+# NOT a restart. On a dev worker the agent is restarted only by a task inside
+# tasks/openbao_switch.yml's guarded block, which reads the shared role's registered results
+# (tasks/openbao.yml): a restart that fails there is rolled back and verified, while a failing
+# handler is not rescued. This listener only keeps the shared role's topic answered.
+- name: Leave the openbao-agent restart to the guarded switch (tasks/openbao_switch.yml)
+  ansible.builtin.debug:
+    msg: openbao-agent inputs changed; the restart is a rescued task in tasks/openbao_switch.yml
   listen: "openbao-agent: config changed"

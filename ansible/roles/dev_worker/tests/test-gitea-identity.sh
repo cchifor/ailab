@@ -226,38 +226,62 @@ sed_re = re.compile(r"sed -n '([^']+)'")
 check(sed_re.findall(drift) == [s for s in sed_re.findall(verify) if "chifor" in s] and len(sed_re.findall(drift)) == 1,
       "D8: the health check extracts the login exactly as the removal does")
 
-print("[E] structure: pre-flight first; the whole switch guarded; the rescue restores and verifies")
+print("[E] structure: pre-flight first; the whole switch guarded; restarts are rescued tasks, never handlers")
 OB = "tasks/openbao.yml"
-pre = position(OB, "Pre-flight this slot's own Gitea tokens")
-for prefix in ("Lay down the kubeconfig and platform render templates", "Switch the agent onto"):
-    check(pre < position(OB, prefix), "E1: the Gitea pre-flight runs before '%s'" % prefix)
-check(task(OB, "Pre-flight this slot's own Gitea tokens").get("when") == "dev_worker_gitea_identity_cutover | bool",
-      "E2: ...and only when the gate is on")
+RB = "tasks/openbao_rollback.yml"
 check(task(OB, "Switch the agent onto").get("ansible.builtin.import_tasks") == "openbao_switch.yml",
-      "E3: openbao.yml imports the switch")
+      "E1: openbao.yml imports the switch")
+top = [str(t.get("name", "")) for t in yaml.safe_load(read(SW))]
+check(top.index("Pre-flight this slot's Gitea tokens, and finish an unfinished switch if that fails")
+      < top.index("Switch the agent onto this run's config and Gitea login, and roll back if it is unhealthy"),
+      "E2: the Gitea pre-flight runs before anything in the switch", top)
+pre_blk = task(SW, "Pre-flight this slot's Gitea tokens, and finish")
+check(pre_blk.get("when") == "dev_worker_gitea_identity_cutover | bool", "E3: ...and only when the gate is on")
+pre_rescue = [str(t.get("name", "")) for t in pre_blk["rescue"]]
+check(pre_rescue[:1] == ["Look for an unfinished switch"]
+      and any(t.get("ansible.builtin.import_tasks") == "openbao_rollback.yml" for t in pre_blk["rescue"])
+      and "dev_worker_unfinished_switch.stdout_lines | length > 0" in str(pre_blk["rescue"][1].get("when")),
+      "E4: a failed pre-flight rolls an UNFINISHED switch back before failing", pre_rescue)
 switch = task(SW, "Switch the agent onto")
 inside = [str(t.get("name", "")) for t in switch["block"]]
-order = ["Keep the current credential template", "Lay down the bao agent config", "Lay down the git-credentials render template",
+order = ["Keep the current credential template", "Lay down the kubeconfig and platform render templates",
+         "Lay down the bao agent config", "Lay down the git-credentials render template",
          "Find credential files that are missing", "Remove the ones that name another login", "Enable + start openbao-agent",
-         "Apply restarts queued elsewhere", "Restart openbao-agent onto", "Verify the agent restarted",
+         "Restart openbao-agent onto", "Verify the agent restarted",
          "Pin the git.chifor.me credential username", "Record this credential template as the last verified one"]
 idx = [next((i for i, n in enumerate(inside) if n.startswith(p)), -1) for p in order]
-check(-1 not in idx and idx == sorted(idx), "E4: every mutation, the start, the restart, the check and the pin are inside the block, in order",
+check(-1 not in idx and idx == sorted(idx), "E5: every mutation, the start, the restart, the check and the pin are inside the block, in order",
       list(zip(order, idx)))
-check(not any("notify" in t for t in switch["block"]), "E5: no restart is left to a handler inside the switch")
-restart = task(SW, "Restart openbao-agent onto")
-check("dev_worker_git_login_drift.stdout_lines | length > 0" in str(restart.get("when"))
-      and "dev_worker_git_ctmpl is changed" in str(restart.get("when")),
-      "E6: a missing or other-login file forces the restart even when no template changed")
-rescue = task(SW, "Roll back to the last verified config")["ansible.builtin.shell"]
-for needle, label in (("git-credentials.ctmpl.last-good", "the last verified template"),
+check(any(t.get("ansible.builtin.import_tasks") == "openbao_rollback.yml" for t in switch["rescue"]),
+      "E6: ...and its rescue is the same rollback")
+restart_when = str(task(SW, "Restart openbao-agent onto").get("when"))
+for needle in ("dev_worker_render_ctmpls is changed", "dev_worker_agent_hcl is changed", "dev_worker_git_ctmpl is changed",
+               "dev_worker_git_login_drift.stdout_lines | length > 0", "dev_worker_agent_inputs_changed"):
+    check(needle in restart_when, "E7: the restart task covers %s" % needle, restart_when)
+# No handler restarts the agent: no task notifies one, no handler restarts it, nothing is flushed in
+# the switch (a flushed handler's failure would skip the rescue).
+role_tasks = [t for n in sorted(os.listdir(os.path.join(ROLE, "tasks"))) for t in tasks_in(os.path.join("tasks", n))]
+check(not any("openbao-agent" in str(t.get("notify", "")) for t in role_tasks), "E8: no dev_worker task notifies an openbao-agent handler")
+handlers = yaml.safe_load(read("handlers/main.yml"))
+check(not any("openbao-agent" in str((h.get("ansible.builtin.systemd") or {}).get("name", "")) for h in handlers),
+      "E9: no dev_worker handler restarts openbao-agent")
+check(not any("flush_handlers" in str(t.get("ansible.builtin.meta", "")) for t in tasks_in(SW)),
+      "E10: the switch flushes no handlers")
+inputs = task(OB, "Note whether the shared role changed what the agent loads")["ansible.builtin.set_fact"]["dev_worker_agent_inputs_changed"]
+agent_role = yaml.safe_load(open(os.path.join(ROLE, "..", "openbao_agent", "tasks", "main.yml"), encoding="utf-8"))
+notifiers = [t for t in agent_role if "openbao-agent: config changed" in str(t.get("notify", ""))]
+check(notifiers and all(t.get("register") and t["register"] in inputs for t in notifiers),
+      "E11: every shared-role task that changes what the agent loads is registered and counted",
+      [(t.get("name"), t.get("register")) for t in notifiers])
+rescue = task(RB, "Roll back to the last verified config")["ansible.builtin.shell"]
+for needle, label in (("git-credentials.ctmpl.last-good", "uses the last verified template"),
                       ('!= "$prev" ]; then rm -f', "removes a file that names another login"),
                       ("credential.https://git.chifor.me.username \"$prev\"", "re-pins the restored login"),
                       ("did NOT verify", "verifies the rollback before reporting it")):
-    check(needle in rescue, "E7: the rescue uses " + label if needle.endswith("last-good") else "E7: the rescue " + label)
+    check(needle in rescue, "E12: the rollback " + label)
 
 print("[F] the pre-flight, run against a stub cred and hostname")
-pre_sh = task(OB, "Pre-flight this slot's own Gitea tokens")["ansible.builtin.shell"]
+pre_sh = task(SW, "Pre-flight this slot's own Gitea tokens")["ansible.builtin.shell"]
 fix, stubs = os.path.join(WORK, "kv"), os.path.join(WORK, "stubs")
 os.makedirs(stubs)
 with open(os.path.join(stubs, "cred"), "w") as f:  # `cred get <name> <field>` from $FIX/<name>/<field>

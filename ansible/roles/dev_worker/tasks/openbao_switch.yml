@@ -1,13 +1,19 @@
 ---
-# The agent's config + the Gitea credential transition, as ONE guarded unit (imported by openbao.yml;
-# a separate file so tests/test-gitea-converge.sh can drive exactly these tasks through ansible).
+# The Gitea pre-flight, the agent's config + render templates and the Gitea credential transition,
+# as ONE guarded unit (imported by openbao.yml; a separate file so tests/test-gitea-converge.sh can
+# drive exactly these tasks through ansible).
 #
-# Everything that can leave this host without a working forge credential is inside the block, so any
-# failure — a template that will not lay down, a removal, the service start, the restart itself, the
-# health check, the username pin — reaches the rescue: laying down agent.hcl and the credential
-# template, removing a ~/.git-credentials that names the other login, starting the agent, restarting
-# it EXPLICITLY (a task, not a handler: a handler's failure is not reliably rescued on every
-# ansible-core), verifying the render, pinning the username and recording the result.
+# Everything that can leave this host without a working forge credential is inside a block, so any
+# failure reaches a rescue that rolls back (openbao_rollback.yml) and VERIFIES the rollback:
+#   - the pre-flight, when the cut-over gate is on. If it fails while a switch is UNFINISHED (the
+#     credential template is not the last verified one, or a ~/.git-credentials is missing or names
+#     another login), the rollback runs before the play fails, so an interrupted switch is never left
+#     behind just because the slot's token became unreadable in the meantime;
+#   - laying down the render templates, agent.hcl and the credential template, removing a
+#     ~/.git-credentials that names the other login, starting the agent, restarting it, the health
+#     check, the username pin and recording the result. The restart is a TASK fed by registered
+#     changes — this file's and the shared role's (dev_worker_agent_inputs_changed, openbao.yml) — and
+#     never a handler: a handler's failure is not rescued.
 #
 # Rollback state survives across runs. /etc/openbao-agent/git-credentials.ctmpl.last-good is the
 # credential template that last passed verification (seeded once from the template in place, then
@@ -21,6 +27,80 @@
     path: /etc/openbao-agent/git-credentials.ctmpl
   register: dev_worker_git_ctmpl_now
 
+# With dev_worker_gitea_identity_cutover the agent renders ~/.git-credentials from THIS slot's flat
+# document instead of common. The `<no value>` guard (error_on_missing_key) would then stop the whole
+# agent on a missing field: failure detection, not a gate. This is the gate, and it runs before
+# anything below can change what the agent renders: the short hostname must be the inventory name
+# (`cred` finds the slot by hostname, the template by inventory name), and all three Gitea fields
+# must be readable under this host's own AppRole, non-empty, and not a copy of the shared token.
+# Values stay in shell variables, never on stdout. Whether the token really is `<slot>-bot` (GET
+# /user) is the runbook's pre-flight: it needs the forge, which a converge does not depend on.
+- name: Pre-flight this slot's Gitea tokens, and finish an unfinished switch if that fails
+  when: dev_worker_gitea_identity_cutover | bool
+  block:
+    - name: Pre-flight this slot's own Gitea tokens before the agent renders them (values never printed)
+      ansible.builtin.shell: |
+        set -o pipefail
+        slot={{ inventory_hostname | quote }}
+        [ "$(hostname -s)" = "$slot" ] || { echo "hostname -s is '$(hostname -s)', not $slot" >&2; exit 90; }
+        for field in gitea_pat gitea_repo_pat gitea_package_pat; do
+          mine="$(/usr/local/bin/cred get "$slot" "$field")" || { echo "cannot read $field for $slot" >&2; exit 91; }
+          [ -n "$mine" ] || { echo "$field is empty in af/dev-workers/$slot" >&2; exit 92; }
+          shared="$(/usr/local/bin/cred get common "$field" 2>/dev/null)" || shared=""
+          [ "$mine" != "$shared" ] || { echo "$field in af/dev-workers/$slot is the shared dev-worker-bot token" >&2; exit 93; }
+        done
+        echo preflight-ok
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false # read-only, so a check run reports the failure the real run would hit
+
+  rescue:
+    # Unfinished = what a run that died between laying down a template and verifying it leaves: a
+    # credential template other than the last verified one, or a ~/.git-credentials that is missing
+    # or names another login than that template. Logins only; no token is read out.
+    - name: Look for an unfinished switch
+      ansible.builtin.shell: |
+        good=/etc/openbao-agent/git-credentials.ctmpl.last-good
+        [ -f "$good" ] || exit 0
+        prev="$(sed -n 's#^.*https://\([^:/@]*\):.*$#\1#p' "$good" | head -n 1)"
+        cmp -s "$good" /etc/openbao-agent/git-credentials.ctmpl || echo "the credential template is not the last verified one"
+        {% for user in dev_worker_users %}
+        f={{ (user.home ~ '/.git-credentials') | quote }}
+        if [ ! -e "$f" ]; then echo "$f is missing"
+        elif [ "$(sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "$f")" != "$prev" ]; then echo "$f names another login than $prev"; fi
+        {% endfor %}
+        exit 0
+      args:
+        executable: /bin/bash
+      register: dev_worker_unfinished_switch
+      changed_when: false
+      check_mode: false # read-only
+
+    - name: Roll the unfinished switch back to the last verified login
+      ansible.builtin.import_tasks: openbao_rollback.yml
+      when:
+        - dev_worker_unfinished_switch.stdout_lines | length > 0
+        - not ansible_check_mode
+
+    - name: Fail, the Gitea pre-flight did not pass
+      ansible.builtin.fail:
+        msg: >-
+          The Gitea pre-flight failed on {{ inventory_hostname }}
+          ({{ ansible_failed_result.stderr | default('') | trim }}).
+          {% if dev_worker_unfinished_switch.stdout_lines | length == 0 %}Nothing was changed: the
+          agent still renders the last verified login.
+          {% elif ansible_check_mode %}An UNFINISHED switch was found
+          ({{ dev_worker_unfinished_switch.stdout_lines | join('; ') }}); a real run rolls it back.
+          {% elif dev_worker_rollback.rc | default(1) == 0 %}An UNFINISHED switch was found
+          ({{ dev_worker_unfinished_switch.stdout_lines | join('; ') }}) and ROLLED BACK AND VERIFIED:
+          every ~/.git-credentials and username pin names {{ dev_worker_rollback.stdout | trim }}.
+          {% else %}An UNFINISHED switch was found and THE ROLLBACK DID NOT VERIFY
+          ({{ dev_worker_rollback.stderr | default('') | trim }}): this host may have no working forge
+          credential.{% endif %}
+          Keep dev_worker_gitea_identity_cutover false for this slot until the pre-flight passes
+          (docs/runbooks/openbao-dev-workers.md, "Gitea identity cut-over").
+
 - name: Switch the agent onto this run's config and Gitea login, and roll back if it is unhealthy
   block:
     - name: Keep the current credential template as the last verified one (seeded once)
@@ -33,6 +113,19 @@
         group: openbao-agent
         mode: "0640"
       when: dev_worker_git_ctmpl_now.stat.exists
+
+    - name: Lay down the kubeconfig and platform render templates
+      ansible.builtin.template:
+        src: "{{ item }}.ctmpl.j2"
+        dest: "/etc/openbao-agent/{{ item }}.ctmpl"
+        owner: root
+        group: openbao-agent
+        mode: "0640"
+      loop:
+        - helmtest-kubeconfig
+        - platform-kubeconfig # ADR 0028
+        - platform-pgpass # ADR 0028
+      register: dev_worker_render_ctmpls
 
     - name: Lay down the bao agent config
       ansible.builtin.template:
@@ -89,20 +182,18 @@
         daemon_reload: true
       when: not ansible_check_mode
 
-    # Restarts queued by tasks outside this file (the shared role's unit/identity topics, the
-    # kubeconfig and platform render templates). Flushed here, inside the block, so the check below
-    # observes the agent that runs the new config.
-    - name: Apply restarts queued elsewhere
-      ansible.builtin.meta: flush_handlers
-
+    # THE restart, for everything that changed what the agent loads: the render templates, agent.hcl,
+    # the credential template, a missing or other-login credential, and the shared role's unit,
+    # binary, CA, AppRole files or codex template. One rescued task, never a handler.
     - name: Restart openbao-agent onto this run's config and credential
       ansible.builtin.systemd:
         name: openbao-agent.service
         state: restarted
+        daemon_reload: true
       when:
         - not ansible_check_mode
-        - (dev_worker_agent_hcl is changed) or (dev_worker_git_ctmpl is changed)
-          or (dev_worker_git_login_drift.stdout_lines | length > 0)
+        - (dev_worker_render_ctmpls is changed) or (dev_worker_agent_hcl is changed) or (dev_worker_git_ctmpl is changed)
+          or (dev_worker_git_login_drift.stdout_lines | length > 0) or (dev_worker_agent_inputs_changed | default(false) | bool)
 
     - name: Verify the agent restarted onto the new config and rendered everything
       ansible.builtin.shell: |
@@ -230,59 +321,12 @@
 
   rescue:
     # Without this, a failed switch leaves the host with a dead agent, no kubeconfig writer, or no
-    # forge credential. agent.hcl comes back only if this run replaced it, and the kubeconfig marker
-    # goes only if this run wrote it: on an already-cut-over host a routine `-t openbao` run can trip
-    # the health check for an unrelated reason (a briefly sealed vault), and the right rollback is
-    # then the config alone. Restoring the previous agent.hcl may bring back a config that still
-    # renders ~/.tep/kubeconfig on a host converging past ADR 0037 — which is why tep.yml runs after
-    # openbao.yml and deletes ~/.tep only once the live config no longer uses it.
-    # The credential goes back to the last VERIFIED template (whatever this or an interrupted earlier
-    # run laid down), every ~/.git-credentials naming another login is removed, the username is
-    # re-pinned to that template's login, and the agent restarted. Then the rollback is CHECKED — the
-    # agent up and every rendered line naming that login — before the play reports it.
+    # forge credential; what comes back, and how it is checked, is openbao_rollback.yml. Restoring
+    # the previous agent.hcl may bring back a config that still renders ~/.tep/kubeconfig on a host
+    # converging past ADR 0037 — which is why tep.yml runs after openbao.yml and deletes ~/.tep only
+    # once the live config no longer uses it.
     - name: Roll back to the last verified config and login, and verify the rollback
-      ansible.builtin.shell: |
-        set -u
-        good=/etc/openbao-agent/git-credentials.ctmpl.last-good
-        login_of() { sed -n 's#^https://\([^:/@]*\):.*@git\.chifor\.me$#\1#p' "$1" 2>/dev/null; }
-        bak={{ (dev_worker_agent_hcl.backup_file | default('')) | quote }}
-        if [ -n "$bak" ] && [ -f "$bak" ]; then cp "$bak" /etc/openbao-agent/agent.hcl; fi
-        {% if dev_worker_marker_written.changed | default(false) | bool %}
-        rm -f /etc/openbao-agent/renders-kubeconfigs
-        {% endif %}
-        if [ ! -f "$good" ]; then
-          systemctl restart openbao-agent
-          echo "no last verified credential template ($good): the login could not be restored" >&2
-          exit 1
-        fi
-        prev="$(sed -n 's#^.*https://\([^:/@]*\):.*$#\1#p' "$good" | head -n 1)"
-        case "$prev" in
-          dev-worker-bot | dev-worker-[0-9]*-bot) ;;
-          *) echo "no slot login can be read from $good" >&2; exit 1 ;;
-        esac
-        cmp -s "$good" /etc/openbao-agent/git-credentials.ctmpl || cp -p "$good" /etc/openbao-agent/git-credentials.ctmpl
-        {% for user in dev_worker_users %}
-        u={{ user.name | quote }}; f={{ (user.home ~ '/.git-credentials') | quote }}; g={{ (user.home ~ '/.gitconfig') | quote }}
-        if [ -e "$f" ] && [ "$(login_of "$f")" != "$prev" ]; then rm -f "$f"; fi
-        runuser -u "$u" -- git config --file "$g" credential.https://git.chifor.me.username "$prev" || { echo "could not re-pin $prev for $u" >&2; exit 1; }
-        {% endfor %}
-        systemctl restart openbao-agent || true
-        for _ in $(seq 1 30); do
-          ok=1
-          [ "$(systemctl is-active openbao-agent)" = active ] || ok=0
-          {% for user in dev_worker_users %}
-          [ "$(login_of {{ (user.home ~ '/.git-credentials') | quote }})" = "$prev" ] || ok=0
-          {% endfor %}
-          [ "$ok" = 1 ] && break
-          sleep 2
-        done
-        [ "$ok" = 1 ] || { echo "rollback to $prev did NOT verify: the agent is not active, or a ~/.git-credentials does not name $prev" >&2; exit 1; }
-        echo "$prev"
-      args:
-        executable: /bin/bash
-      register: dev_worker_rollback
-      changed_when: true
-      failed_when: false
+      ansible.builtin.import_tasks: openbao_rollback.yml
 
     - name: Fail loudly after rolling back
       ansible.builtin.fail:

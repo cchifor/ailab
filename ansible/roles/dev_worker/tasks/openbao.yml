@@ -55,33 +55,6 @@
     openbao_agent_sink_readers: "{{ dev_worker_users | map(attribute='name') | list }}"
     openbao_agent_unit_description: "OpenBao agent (dev-worker credential plumbing)"
 
-# ---- per-slot Gitea identity (plan 2026-10-11 worker identities, Phase 4) ------------------------
-# With dev_worker_gitea_identity_cutover the agent renders ~/.git-credentials from THIS slot's flat
-# document instead of common. The `<no value>` guard (error_on_missing_key) would then stop the whole
-# agent on a missing field: failure detection, not a gate. This is the gate, and it runs before
-# anything below can change what the agent renders: the short hostname must be the inventory name
-# (`cred` finds the slot by hostname, the template by inventory name), and all three Gitea fields
-# must be readable under this host's own AppRole, non-empty, and not a copy of the shared token.
-# Values stay in shell variables, never on stdout. Whether the token really is `<slot>-bot` (GET
-# /user) is the runbook's pre-flight: it needs the forge, which a converge does not depend on.
-- name: Pre-flight this slot's own Gitea tokens before the agent renders them (values never printed)
-  ansible.builtin.shell: |
-    set -o pipefail
-    slot={{ inventory_hostname | quote }}
-    [ "$(hostname -s)" = "$slot" ] || { echo "hostname -s is '$(hostname -s)', not $slot" >&2; exit 90; }
-    for field in gitea_pat gitea_repo_pat gitea_package_pat; do
-      mine="$(/usr/local/bin/cred get "$slot" "$field")" || { echo "cannot read $field for $slot" >&2; exit 91; }
-      [ -n "$mine" ] || { echo "$field is empty in af/dev-workers/$slot" >&2; exit 92; }
-      shared="$(/usr/local/bin/cred get common "$field" 2>/dev/null)" || shared=""
-      [ "$mine" != "$shared" ] || { echo "$field in af/dev-workers/$slot is the shared dev-worker-bot token" >&2; exit 93; }
-    done
-    echo preflight-ok
-  args:
-    executable: /bin/bash
-  changed_when: false
-  check_mode: false # read-only, so a check run reports the failure the real run would hit
-  when: dev_worker_gitea_identity_cutover | bool
-
 # Destination directories for the kubeconfig templates, for EVERY dev_worker_users entry. These
 # must exist BEFORE the agent starts or restarts: a template whose destination directory is missing
 # is a render failure, and exit_on_retry_failure turns that into a dead agent. (~/.tep is no longer
@@ -96,19 +69,6 @@
   loop: "{{ dev_worker_users | product(['.helmtest', '.platform']) | list }}"
   loop_control:
     label: "{{ item.0.name }}:{{ item.1 }}"
-
-- name: Lay down the kubeconfig and platform render templates
-  ansible.builtin.template:
-    src: "{{ item }}.ctmpl.j2"
-    dest: "/etc/openbao-agent/{{ item }}.ctmpl"
-    owner: root
-    group: openbao-agent
-    mode: "0640"
-  loop:
-    - helmtest-kubeconfig
-    - platform-kubeconfig # ADR 0028
-    - platform-pgpass # ADR 0028
-  notify: Restart openbao-agent
 
 # ---- platform access (ADR 0028) ------------------------------------------------------------------
 # A DIFFERENT question from the ADR 0021 marker above, and deliberately not durable state: that one
@@ -288,8 +248,26 @@
     group: root
     mode: "0755"
 
-# The agent's config, the Gitea credential and the username pin switch as one guarded unit with a
-# verified rollback (and the per-host kubeconfig/platform health checks run inside it): see there.
+# The shared role still notifies its topics (pr_reviewer restarts from them), but on a dev worker the
+# agent is restarted only by a TASK inside openbao_switch.yml's guarded block, so a failed restart is
+# rolled back like any other failure (a handler's failure is not rescued). This is how that task
+# learns the shared role changed something the agent loads.
+- name: Note whether the shared role changed what the agent loads
+  ansible.builtin.set_fact:
+    dev_worker_agent_inputs_changed: >-
+      {{ [openbao_agent_ca_result | default({}), openbao_agent_bin_result | default({}),
+          openbao_agent_role_id_result | default({}), openbao_agent_secret_id_result | default({}),
+          openbao_agent_unit_result | default({}), openbao_agent_codex_ctmpl_result | default({})]
+         | select('changed') | list | length > 0 }}
+
+# Handlers queued so far (systemd reloads, CA trust, other services) run here, as they did before the
+# switch was split out; none of them restarts openbao-agent any more.
+- name: Apply the handlers queued so far (none restarts openbao-agent)
+  ansible.builtin.meta: flush_handlers
+
+# The Gitea pre-flight, the agent's config and render templates, the Gitea credential and the
+# username pin switch as one guarded unit with a verified rollback (and the per-host kubeconfig/
+# platform health checks run inside it): see there.
 - name: Switch the agent onto this run's config and Gitea login (guarded, with verified rollback)
   ansible.builtin.import_tasks: openbao_switch.yml
 
