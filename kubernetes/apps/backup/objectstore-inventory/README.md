@@ -27,6 +27,12 @@ TLS uses the existing public trust from
 [the Talos backup CA](../talos-backup/versitygw-ca.yaml). The test compares its
 DER fingerprint and exact bytes. It does not inherit the older BackupStorageLocation
 TLS bypass. No signed URL, resource name, payload or transport exception is logged.
+The endpoint presents that self-signed certificate directly. A real handshake
+under the Job's pinned Python 3.14.8 / OpenSSL 3.5.7 runtime passed with strict
+verification, hostname checking and `CERT_REQUIRED` unchanged; wrong-hostname
+and untrusted-chain controls both failed. The certificate's non-critical Basic
+Constraints and absent Key Usage did not reject this directly trusted endpoint
+certificate. No compatibility flag or verification bypass is used.
 Only counts by API-version/Kind, the pinned backup identity, acquisition time and
 artifact SHA-256 reach the receipt. Invalid, expired, truncated, duplicate-key,
 count-mismatched or unavailable artifacts produce `status: unavailable`, without
@@ -65,3 +71,14 @@ DataUpload versions, wrong backup identity, async operations, stale requests,
 malformed/truncated/compressed input, duplicate JSON keys and names, changed
 counts, redirects, TLS failures, the request-creation race, and exact RBAC/network
 scope. No backup payload is fetched by these tests.
+
+The explicit TLS probe performs three handshakes against the existing endpoint,
+without sending HTTP requests or using a signed URL. Run it under the exact Job
+runtime from the repository root (it is separate from offline unit discovery):
+
+```sh
+docker run --rm --network host -v "$PWD:/repo:ro" \
+  --entrypoint python3 \
+  mirror.gcr.io/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 \
+  /repo/scripts/tests/probe-objectstore-inventory-tls.py
+```
