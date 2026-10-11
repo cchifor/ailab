@@ -16,28 +16,51 @@ do not grant general access to its parameterized `/probe` endpoint.
 
 ## Ordered activation
 
-1. Merge and observe this monitor through the reviewer before shared-storage TLS
+1. Before merging this monitor or making platform #2219 ready, re-check its
+   **current reviewed head**, not only the historical draft. The contract checked
+   at `96f4baba6` is: Deployment `objectstore` has pod label
+   `strive.io/service: objectstore`; Service `objectstore-forge-tls` selects that
+   label and maps TCP 443 to container port 8443; its ingress peer admits only
+   namespace `monitoring` with `app.kubernetes.io/name=objectstore-tls-probe`.
+   Compare `deploy/components/objectstore/deployment.yaml`, `forge-services.yaml`
+   and `forge-netpol.yaml` with this probe's target and egress policy. Record the
+   checked full commit on both PRs. If the selector or target port changes,
+   update and requalify both sides before either rollout; a literal local guard
+   cannot establish another repository's current contract.
+2. Merge and observe this monitor through the reviewer before shared-storage TLS
    activation. Verify the Deployment, Probe selection, target scrape and
    cert-manager metrics. A failed handshake is expected before the TLS Service
    exists. These five custom alerts are gated on the exact Service's
    `kube_service_info` series and remain quiet before activation or after deliberate
    Service removal. Kubernetes inventory availability is a monitoring dependency.
-2. Complete platform #2221 certificate bootstrap independently; observe its
+3. Complete platform #2221 certificate bootstrap independently; observe its
    current-generation Certificate and installed Flux dependency. Keep platform
    #2219 draft until its separate restore, access and maintenance prerequisites
    are satisfied. This monitoring change itself does not restart storage.
-3. On #2219 activation, verify `probe_success{job="objectstore-tls"} == 1`, an
+4. On #2219 activation, verify `probe_success{job="objectstore-tls"} == 1`, an
    observed `probe_ssl_earliest_cert_expiry`, and
    `certmanager_certificate_expiration_timestamp_seconds` for
    `strive-ailab/objectstore-forge-tls`. A successful certificate reload request
    alone is insufficient. Compare served-chain and issued-leaf expiry after renewal.
-4. Confirm the existing Alertmanager `ntfy` receiver and `ailab-alerts` subscription
+5. Confirm the existing Alertmanager `ntfy` receiver and `ailab-alerts` subscription
    reach the responsible infrastructure operator. Source routing is established;
    actual receipt and recipient availability must be confirmed before rollout.
    Never publish test notifications or read notification credentials merely to
    validate source configuration.
 
 ## Alerts and response
+
+The threshold is specific to platform #2221's reviewed Certificate at
+`639e449ec937904b59773dd03688ab6ceb8a9eff`: `duration: 2160h` (90 days) and
+`renewBefore: 720h` (30 days). Normal renewal starts around day 60, leaving a
+16-day margin before the 14-day served-expiry warning. This is not a general
+threshold for shorter certificates. Re-check these two fields in
+`deploy/gitops/flux/clusters/ailab/objectstore-certificate/certificate.yaml`
+before merging this monitor and observe actual `notAfter`/`renewalTime` after
+bootstrap; an issuer can choose a different effective lifetime. A changed or
+shortened lifetime requires adjusting the threshold and its fixtures before
+activation. The 90-day steady-state fixture covers renewal at day 60 through
+the original expiry date without a permanent warning.
 
 | Alert | Condition | Response |
 | --- | --- | --- |

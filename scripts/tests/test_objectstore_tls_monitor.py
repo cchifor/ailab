@@ -68,9 +68,16 @@ class ObjectstoreTLSMonitorTests(unittest.TestCase):
         ])
 
     def test_monitor_and_rules_are_reconciled_and_alerts_use_existing_receiver(self):
-        resources = yaml.safe_load((MONITORING / 'kustomization.yaml').read_text())['resources']
+        kustomization = yaml.safe_load((MONITORING / 'kustomization.yaml').read_text())
+        resources = kustomization['resources']
         for name in ['objectstore-tls-probe.yaml', 'objectstore-tls-rules.yaml']:
             self.assertIn(name, resources)
+        ca = next(v for v in self.kind('Deployment')['spec']['template']['spec']['volumes']
+                  if v['name'] == 'ca')
+        self.assertIn({
+            'name': ca['configMap']['name'], 'namespace': 'monitoring',
+            'files': ['ca.crt=objectstore-tls-ca.crt'],
+        }, kustomization.get('configMapGenerator', []))
         rules = yaml.safe_load((MONITORING / 'objectstore-tls-rules.yaml').read_text())
         self.assertEqual(rules['metadata']['labels']['release'], 'kube-prometheus-stack')
         for rule in rules['spec']['groups'][0]['rules']:
