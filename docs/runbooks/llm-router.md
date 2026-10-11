@@ -696,3 +696,84 @@ install, production smoke. Published by relay `release/router-placement-image`.
 - The older image ignores quota readings for routing, as before this release.
 - Its next config write drops `placement` and `placementIdleHours` from routes. Remove those first if a pool exists,
   so that nothing depends on placement after the revert.
+
+## Smart pools release (2026-10-10)
+
+`router-0.1.0-20261010-smart-pools` deploys merged llm-router main `8786a3dcb2a44403a0730569abeb811b729cc563`
+([#95](https://git.chifor.me/cchifor/llm-router/pulls/95)). The design is `docs/design/smart-pools.md` in llm-router.
+
+**What it adds.** **Smart pools**: routes that spread their clients over every subscription that can serve them.
+- **The `smart-pools` plugin** keeps one managed route per enabled pool (`managedBy: smart-pools`) in step with the
+  accounts. The pools themselves are runtime plugin settings, editable in:
+  - the settings editor;
+  - `PATCH /admin/v1/plugins/smart-pools/config`;
+  - the chat tools `list_pools`, `configure_pool` and `remove_pool`.
+- **The `smart` strategy** chooses an account like this:
+  - quota that would be lost at the next reset goes first;
+  - accounts spending credits go last;
+  - near-limit accounts (`reservePercent`) are held back;
+  - busy accounts are discounted by load;
+  - near-ties rotate.
+- **`GET /admin/v1/pools`** shows each member's tier, score, load and reset.
+- **The model-refresh fix:** the Codex model refresh no longer rewrites `*` targets or pools' routes. That bug had
+  turned `sub-codex-5`'s `*` into `gpt-6-astra`.
+
+**At start** the plugin writes one revision as `plugin:smart-pools` (`pools.synced`):
+- `pool-codex` gets every Codex account, `*` targets limited to the six `dw` models, Codex-native and conversation
+  placement.
+- `pool-claude` gets every Claude account on `sonnet`.
+- `pool-mixed` (Codex `gpt-6-astra` + Claude `sonnet`) ships **disabled**.
+
+Nothing else changes, and nothing uses the pools until a pointer or key is moved to one.
+
+**After acceptance** (each step through the admin API):
+1. **Restore `sub-codex-5`'s target to `codex-5:*`.** It is the rollback route for the per-key keys.
+2. **Repoint `dw-1` … `dw-4` from the stopgap `dw-pool` to `pool-codex`.**
+   - Validate with `scripts/validate-codex-host.sh` on each worker.
+   - In the journal, check `route: dw-N`, routing `pool-codex` with strategy `smart`, and `x-router-placement` mostly
+     `bound`.
+3. **Delete `dw-pool`**, the hand-built 2026-10-10 stopgap: `usage` and placement over codex-3, codex-2 and codex-5.
+4. **`pool-mixed`.**
+   - Run `scripts/smoke-pool.mjs` from an llm-router checkout, with `ROUTER_BASE_URL=https://router.chifor.me`,
+     `ROUTER_ADMIN_TOKEN` read from `llm-router-auth`, and `SMOKE_POOL=pool-mixed`.
+   - It smokes through a temporary `pool-mixed-smoke` route and key, and removes both even when interrupted.
+   - Enable the pool only if it passes.
+
+**Rollback.** Revert the image through a reviewed GitOps PR to
+`registry.chifor.me/llm-router/router@sha256:39517806cf64c29efb4d5b526720491dbed78d2ed684787d0be53bb49cabfce1`
+(`router-0.1.0-20261010-placement`, source `076dff0`). **First**:
+1. repoint anything that uses a pool (e.g. `dw-N` back to `sub-codex-5`);
+2. then turn every pool off (`configure_pool … enabled: false`, or `remove_pool`), so their routes go.
+
+If you skip this, the old image:
+- answers pool requests with 503 `STRATEGY_UNAVAILABLE`;
+- drops the pool settings (its loader does not know the plugin);
+- strips the pool routes' `managedBy` mark at its first **internal** write. Its own trusted writes (the Codex model
+  refresh about 20 s after start, token renewals) save the whole configuration through the old schema, which drops the
+  unknown field, and they skip the strategy check.
+- refuses **administrator and chat-tool** writes until then: dropping the mark counts as changing a route whose
+  strategy (`smart`) the old image does not know, so `STRATEGY_UNAVAILABLE`. After that internal write, writes that
+  change a pool route itself (removing an account in it, for example) stay refused for the whole rollback.
+
+So when the procedure was skipped, the pool routes reach the roll-forward unmarked. Rolling forward then adopts them
+(strategy `smart`, every target `<pool>:<account>`) instead of reporting a collision, but restores the shipped pool
+settings: re-apply any custom ones. With the procedure followed, there is nothing to adopt; the pools are re-created.
+
+**The old image still carries the Codex model-refresh bug.** After a rollback, its refresh again rewrites `*` targets
+on router-owned Codex logins to a fixed model, within about 40 minutes. That includes `sub-codex-5`, restored to
+`codex-5:*` in acceptance step 1, which becomes `gpt-6-astra` again. The workers pin `gpt-6-astra`, so they keep
+working. After rolling forward again, re-pin `sub-codex-5` to `codex-5:*`.
+
+**Image.**
+- Archive `router-0.1.0-20261010-smart-pools.tar.gz`, SHA-256
+  `b3a392a3ad4d4121c5be2dfa00e60fe022086a7338372fe5a20720425e5132a6` (relay v0.2.0 asset); relay branch
+  `release/router-smart-pools-image`.
+- Image: `registry.chifor.me/llm-router/router@sha256:6ff09174b0a57f9983fcd566bfb47ca61217d862d8c3cba43fbb73631ca816b6`.
+- [Image CI 79636](https://git.chifor.me/cchifor/relay/actions/runs/79636);
+  [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-79636.json).
+- **Before merge:**
+  - 1588 tests passed and 0 failed; typecheck and build passed; `check:architecture` reported only its known finding
+    (llm-router issue #79, `packages/modules/inference/index.ts`).
+  - Nine tasks were each reviewed, then a whole-branch review with one fix wave.
+  - The reviewers proved a production-like first start writes only the two pool routes, and that a rollback cycle
+    heals.
