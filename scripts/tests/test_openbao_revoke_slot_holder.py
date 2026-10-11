@@ -54,7 +54,8 @@ FAKE_BAO = textwrap.dedent(r"""
       *) echo "unexpected bao call: $*" >&2; exit 9;;
     esac
     """).lstrip()
-FAKE_KUBECTL = "#!/usr/bin/env bash\nprintf '%s' cm9vdHRvaw==\n"   # base64 of the fake root token
+# Logs every call (the break-glass token fetch), then prints base64 of the fake root token.
+FAKE_KUBECTL = "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$FAKE_LOG/kubectl\"\nprintf '%s' cm9vdHRvaw==\n"
 
 
 @unittest.skipIf(BASH is None, "bash not available")
@@ -132,11 +133,22 @@ class RevokeSlotHolderTest(unittest.TestCase):
                 self.assertIn(why, r.stderr)
 
     def test_bad_usage_never_reaches_the_vault(self):
-        for args in (("dev-worker-3", "extra"), ("",), ("dev-worker-3", "keepacc", "vm4207")):
+        # A ROLE goes into vault paths, so anything but dev-worker-<n> is refused before the break-glass
+        # token is even fetched: a path separator, a glob, padding, another role.
+        for args in (("dev-worker-3", "extra"), ("",), ("dev-worker-3", "keepacc", "vm4207"),
+                     ("dev-worker-3/../common",), ("dev-worker-*",), ("dev-worker-03",), ("dev-worker-0",),
+                     ("reviewer-1",), ("dev-worker-3 ",), ("k8stoken-sync",)):
             with self.subTest(args=args):
                 r = self.run_script(*args)
-                self.assertEqual(r.returncode, 2)
+                self.assertEqual(r.returncode, 2, r.stderr)
         self.assertEqual(self.calls(), "")
+        self.assertFalse(os.path.exists(os.path.join(self.log, "kubectl")), "the token was fetched")
+
+    def test_a_valid_role_fetches_the_token_once(self):
+        r = self.run_script("dev-worker-3", SID_MODE="empty", ACC_MODE="empty")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.log, "kubectl"), encoding="utf-8") as f:
+            self.assertEqual(1, len(f.read().splitlines()))
 
 
 if __name__ == "__main__":

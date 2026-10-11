@@ -20,6 +20,8 @@ set -uo pipefail
 
 [ $# -eq 1 ] && [ -n "$1" ] || { echo "usage: $0 ROLE" >&2; exit 2; }
 R=$1
+# ROLE goes into vault paths: only a slot role name, checked before the break-glass token is fetched.
+[[ $R =~ ^dev-worker-[1-9][0-9]*$ ]] || { echo "ROLE must be dev-worker-<n>, got: $R" >&2; exit 2; }
 
 fail() { echo "ABORT: $*" >&2; exit 1; }
 TOK=$(kubectl --context admin@ai -n openbao get secret openbao-breakglass-token \
