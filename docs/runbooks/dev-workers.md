@@ -223,9 +223,10 @@ it.
 
 ### Codex through the router (since 2026-10-09)
 
-**All four workers' Codex runs on the estate's LLM router** (router.chifor.me), on ONE ChatGPT
-subscription the router holds: account `codex-5`. The workers do not use their own ChatGPT logins
-for this. Role `dev_worker`, `tasks/codex.yml`, `dev_worker_codex_router_enabled: true` in
+**All four workers' Codex runs on the estate's LLM router** (router.chifor.me). Until 2026-10-10 it ran on one
+router-held ChatGPT subscription, account `codex-5`. Since then it runs on the smart pool `pool-codex`, which spreads
+conversations over all five router-held subscriptions (`codex` … `codex-5`). The workers do not use their own ChatGPT
+logins for this. Role `dev_worker`, `tasks/codex.yml`, `dev_worker_codex_router_enabled: true` in
 `group_vars/dev_workers.yml`. Each user's `~/.codex/config.toml` gets:
 
 ```toml
@@ -309,12 +310,14 @@ All keys expire on **2027-10-09** (365 days). The current values live only in
 (`dev-worker-N.json` → `af/dev-workers/dev-worker-N`, seed-wins). From there the
 `openbao-devworker-provision` Job writes them to the vault.
 
-**Shared quota and capacity.** The four workers share one subscription's windows. The router shows
-them on `codex-5` (Status; `GET /admin/v1/config` → account `codex-5`). `codex-5` serves only these
-routes: it was taken out of the shared `codex` route the same day. Its `concurrency` (6) caps how
-many requests the four workers run at once. A seventh gets `429 busy` with `Retry-After`, which
-Codex retries. A spent window answers 429 until it resets. Run `codex -p chatgpt` to work on the
-host's own login meanwhile.
+**Shared quota and capacity.** The four workers share the five Codex subscriptions of `pool-codex`.
+- The pool places each conversation on the account with the most included quota left per day until its reset. It
+  weights that by the account's current load and uses credits only when no account has quota left.
+- `GET /admin/v1/pools` shows each member's tier, score and the reason it is excluded; the Status page shows each
+  account's windows.
+- Each account's `concurrency` caps its requests in flight: `codex` 1, `codex-2`, `-3` and `-4` 4 each, `codex-5` 16.
+  When every member is full, a request gets `429 busy` with `Retry-After`, which Codex retries.
+- Run `codex -p chatgpt` to work on the host's own login meanwhile.
 
 **CLI and daemon must agree on features.** Codex TUIs attach to the managed app-server daemon
 (`~/.codex/app-server-control/*.sock`), whose updater upgrades it on its own (0.162.0 on 2026-10-09
