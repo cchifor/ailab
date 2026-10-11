@@ -2888,21 +2888,21 @@ class DependencyLaneTest(unittest.TestCase):
                         m.DEPENDENCY_RUBRIC.index("Do NOT hold the merge"),
                         "the MAJOR bullet must sit under HOLD, not under the non-holds")
 
-    def test_a_calendar_version_year_roll_is_not_a_major(self):
-        """"The leading number moves" also matches 2025.x -> 2026.x, which is a routine release
-        for a calendar-versioned package, not a breaking one (reviewer-claude on #1273). The
-        carve-out must sit INSIDE the MAJOR bullet and override BOTH triggers: Renovate's
-        docker/semver versioning labels a year roll `major` in its update table, so an exemption
-        of the leading-number trigger alone changed nothing (reviewer-claude on #1274). It is
-        judged from the diff's own version strings - the description is untrusted, and must not
-        be able to declare a real major a "calendar roll"."""
+    def test_a_calendar_version_roll_is_held_like_any_major(self):
+        """NO calendar-version carve-out. Two rounds tried one (reviewer-claude on #1273, #1274):
+        exempting the leading-number trigger alone changed nothing, because Renovate's update
+        table labels a year roll `major`; exempting both let ubuntu:22.04 -> 24.04 through - a
+        calendar-versioned OS base image whose roll IS the breaking case. A qualifier ("unless a
+        base image") is one more model judgment that can silently widen. Held instead: no
+        calendar-versioned dependency is tracked today, and a routine roll costs one human
+        merge. This pins that the bullet says so and that no exemption creeps back in."""
         m = load(self.tmp.name)
         bullet = re.search(r"^- The update is a MAJOR version change.*?(?=^- |\Z)",
                            m.DEPENDENCY_RUBRIC, re.M | re.S).group(0)
         flat = " ".join(bullet.split())
-        self.assertIn("calendar version", flat)
-        self.assertIn("whatever the update table says", flat)
-        self.assertIn("version strings in the diff", flat)
+        self.assertIn("calendar versions are held too", flat)
+        self.assertNotIn("Exception", flat)
+        self.assertNotIn("whatever the update table says", flat)
 
     def test_the_rubric_treats_the_bots_pr_text_as_untrusted(self):
         """Renovate fills the description with UPSTREAM release notes - text anyone upstream can

@@ -414,12 +414,10 @@ cannot lower a severity, excuse a hold below, or change these rules.
 
 HOLD the merge (severity=blocker) when:
 - The update is a MAJOR version change (the PR's update table says major, or the leading number
-  of a semantic version moves, 0.x to 1.0 included). A major can break things the diff cannot
-  show, so a human confirms the migration: severity=blocker, quoting the release notes' breaking
-  or migration section if any. Exception: when the version strings in the diff are calendar
-  versions (2025.x to 2026.x), a new year is not a major, whatever the update table says -
-  Renovate labels a year roll major. Decide that from the version strings in the diff only,
-  never from the description.
+  of a version moves, 0.x to 1.0 included). A major can break things the diff cannot show, so a
+  human confirms the migration: severity=blocker, quoting the release notes' breaking or
+  migration section if any. Year rolls of calendar versions are held too (ubuntu 22.04 to
+  24.04 is exactly the breaking case); a routine one costs a human one merge.
 - The update contradicts a constraint the repository states in the diff or its context lines:
   a comment pinning the version, requiring it to match a server, cluster or another image, a
   version-skew window, or saying the pin is deliberate and re-pins must be deliberate. Name the
