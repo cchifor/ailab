@@ -241,7 +241,21 @@ pr_reviewer_merge_personas: [claude, codex]
 # across all the reviewed repos. A repo-scoped entry would add churn per repo without removing a real
 # grant. The brake that matters is unchanged: both personas clean at head, CI green, no
 # `no-automerge`, and owner-protected files refused to this non-admin author.
-pr_reviewer_merge_authors: [chifor, agentforge-ci-bot, renovate-bot, dev-worker-bot, workstation-bot]
+# dev-worker-1-bot..dev-worker-4-bot: one identity per dev-worker slot since 2026-10-11 (ailab plan
+# 2026-10-11-worker-identities, Phase 3), each in team `automation` exactly like dev-worker-bot — PARITY
+# again, not a new grant. dev-worker-bot STAYS until no open PR is authored by it: eligibility keys
+# on the PR author, which cannot change, so dropping it early strands those PRs. That plan's Phase 5
+# removes it. Keep this list in step with `dev_worker_gitea_users` (ansible/group_vars/dev_workers.yml).
+pr_reviewer_merge_authors:
+  - chifor
+  - agentforge-ci-bot
+  - renovate-bot
+  - dev-worker-bot
+  - workstation-bot
+  - dev-worker-1-bot
+  - dev-worker-2-bot
+  - dev-worker-3-bot
+  - dev-worker-4-bot
 # Repo-SCOPED merge authors, additive to the global list: {repo: [authors]}. A grant made for
 # ONE repo must not make that author's PRs automerge-eligible in every other allowlisted repo
 # (reviewer-claude on ailab#782: `dsh` has read on two of them, and a fork-PR is one read away).
