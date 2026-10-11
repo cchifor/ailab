@@ -502,4 +502,4 @@ A retired slot's account is disabled, its tokens are deleted, and the account is
    - the alarm fires on the planted fixture token, then clears;
    - the alarm stays silent for the retired fixture account.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
