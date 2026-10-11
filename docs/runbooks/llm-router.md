@@ -837,6 +837,42 @@ serves.
 - `default`, the router's default pointer;
 - `sub-codex-5`, the `dw-N` rollback target.
 
-**Leftover, by design:** `router.yaml`'s `api-openai.codexNative.routes` still lists the six deleted `dw-gpt-*` names.
-The list is only a membership check, so missing names are harmless. Changing it restarts the router, so drop it (and
-its comment) with the next router release's digest bump, not on its own.
+**Leftover, now gone:** `router.yaml`'s `api-openai.codexNative.routes` listed the six deleted `dw-gpt-*` names (a
+harmless membership check). It was dropped with the next digest bump, in "Activity source release (2026-10-11)"
+below, so the router restarted only once.
+
+## Activity source release (2026-10-11)
+
+`router-0.1.0-20261011-activity-source` deploys merged llm-router main `cf6e0a23d23d12902ebbc3a2fe9677d3f24bafbe`
+([#96](https://git.chifor.me/cchifor/llm-router/pulls/96)).
+
+**What it adds.** The Activity page shows who made each request:
+- the **Source** column carries the API key's name (e.g. `dev-worker-3 codex per-key`, with `(revoked)` or `(expired)`
+  when that applies), resolved within the row's namespace;
+- **Route** is the route the caller entered (`dw-3`);
+- **Model** is the model asked for (`gpt-6-astra`);
+- **Source** and **Route** filters run on the server (`GET /admin/v1/trajectories?principal=…&route=…`);
+- the detail header reads `gpt-6-astra · from dev-worker-3 codex per-key via dw-3 → pool-codex`.
+
+The responses only gain `source: {id, name, kind}`; no key hash or prefix is exposed. There is no schema change: the
+filters use the existing `principal_id` column and the stats' `COALESCE($.route, model)` grouping.
+
+**Also in this rollout:** `router.yaml` drops `api-openai.codexNative.routes`, the six `dw-gpt-*` names deleted on
+2026-10-11. Codex-native pass-through is a per-route `native` setting (`sub-codex-5`, `pool-codex`).
+
+**Image.**
+- Archive `router-0.1.0-20261011-activity-source.tar.gz`, SHA-256
+  `b312f7fdfe7a47aac8beb72f695a5a43eaba5955af1a3e3fed96dba742aff8f1`; relay branch
+  `release/router-activity-source-image`, [run 80376](https://git.chifor.me/cchifor/relay/actions/runs/80376).
+- Image `registry.chifor.me/llm-router/router@sha256:33b4298abd96062003cf8cd30fac023eccc4ae82032d3c7b49fc91a62db37e2e`.
+- Before merge, 1600 tests passed and 0 failed; typecheck and build passed; `check:architecture` reported only its
+  known finding (#79).
+
+**Rollback.** Revert, in `router.yaml`, the image digest and both pod-template annotations together, so the rolled-back
+pod advertises the right release:
+- `image: registry.chifor.me/llm-router/router@sha256:6ff09174b0a57f9983fcd566bfb47ca61217d862d8c3cba43fbb73631ca816b6`
+- `chifor.me/source-commit: 8786a3dcb2a44403a0730569abeb811b729cc563`
+- `chifor.me/release: router-0.1.0-20261010-smart-pools`
+
+Nothing else is needed: the pools are unchanged, and the dropped `codexNative` list named only deleted routes, so it
+need not come back.
