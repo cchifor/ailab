@@ -633,7 +633,10 @@ back to the last verified template, removes a line naming another login, re-pins
 restarts, and checks the result: the play then fails with `ROLLED BACK AND VERIFIED` (the slot is on
 `dev-worker-bot` again) or `THE ROLLBACK DID NOT VERIFY` (no working forge credential — fix by hand
 before anything else). **Stop the rollout either way.** A converge that was interrupted is completed
-by the next one: a missing credential forces the render.
+by the next one: a missing credential forces the render. If the next one's pre-flight fails instead
+(the slot's token became unreadable meanwhile), it rolls the unfinished switch back to the last
+verified login before failing, and says so. The agent is only ever restarted by that guarded task —
+no handler restarts it — so a failed restart, whatever needed it, is rolled back the same way.
 
 **4. Verify on the slot** (then the canary checks in the plan's Phase 4 step 5). The acceptance is
 the RENDERED credential authenticating as the right account — not the vault's copy, which step 1
