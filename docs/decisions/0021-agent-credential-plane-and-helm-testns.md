@@ -182,7 +182,8 @@ recoverability.
 - **Re-grant `ingresses`** behind a Kyverno policy constraining `ingressClassName` and host suffix.
 - **Per-worker Gitea PATs** (ADR 0020's outstanding follow-up). Until then `af/dev-workers/common`
   still holds one shared PAT and one shared hypervisor root key, so per-worker Helm namespaces do not
-  by themselves make the six workers independent end to end.
+  by themselves make the six workers independent end to end. *In progress (2026-10-11)* for the PAT:
+  `plans/2026-10-11-worker-identities-plan.md`. The hypervisor key stays shared.
 - **Alerting on minimum remaining token lifetime**, not just on sync success: a sync that runs daily
   but mints short-lived tokens is a healthy-looking outage. The fail-closed floor covers the
   dangerous case today; a metric would surface it earlier.

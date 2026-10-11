@@ -82,6 +82,10 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
 
 ### Rotation / re-do procedure
 
+This rotates the SHARED `dev-worker-bot` tokens in `af/dev-workers/common`, which stay until Phase 5 of
+`plans/2026-10-11-worker-identities-plan.md`. A per-slot `dev-worker-N-bot` is enrolled and rotated by
+§ "Enrol a worker identity" below.
+
 1. As Gitea site admin, create a NON-admin user (`dev-worker-bot`) and put it in the org team
    `automation` (write on the repos the workers need; never admin, never owner).
 2. Mint THREE tokens for that user, one per field of `af/dev-workers/common` (`gitea_pat`,
@@ -114,6 +118,202 @@ which defeats any owner-review gate. The split was executed on 2026-10-06.
 6. **Revoke the `chifor` tokens that the workers held** (all three, one per field; Gitea UI as
    `chifor`: Settings, Applications, or delete the DB rows) and any other owner token copied to
    workers. Confirm each old token now gets 401.
+
+## Enrol a worker identity (one Gitea account per credential holder)
+
+One Gitea account per machine or slot that holds its own token, never per agent session: sessions on one
+machine share its credential store, so they are attributed in-band (commit trailers, run markers) instead.
+The account name belongs to the slot (`dev-worker-N-bot`; a homelab claude-worker would be
+`claude-worker-<n>-bot`). Design: `plans/2026-10-11-worker-identities-plan.md`, Phase 2.
+
+**Done for `dev-worker-1-bot` … `dev-worker-4-bot` on 2026-10-11** (ids 91–94, team `automation`, tokens
+`dw<N>-git|repo|pkg-20261011` seeded by #1248 into `af/dev-workers/dev-worker-N`). One deliberate
+deviation from the plan: `dev-worker-bot`'s explicit **admin** collaboration on `dsh-acp-plus` was not
+copied, because a repository admin can edit that repository's reviewer-only branch protection; team
+`automation` already gives write there. See `owner-credentials.md` for the follow-up on `dev-worker-bot`'s
+own grant.
+
+**Who writes what.** The operator runs the ceremony from the workstation, with cluster-admin `kubectl
+exec` into the Gitea pod and the infra-pg primary, and the SOPS age key. The `openbao-devworker-provision`
+Job writes OpenBao from the seed. No AppRole, policy or `k8stoken-sync` change is needed: each worker
+policy already reads its own `af/dev-workers/<host>`.
+
+Run it in WSL bash (for `/dev/shm`), from the repo root. Shared setup:
+
+```bash
+K="kubectl --context admin@ai"
+N=5; U=dev-worker-$N-bot; D=$(date -u +%Y%m%d)       # the slot being enrolled
+GP=$($K -n gitea get pod -l app.kubernetes.io/name=gitea,app.kubernetes.io/instance=gitea \
+  --field-selector=status.phase=Running -o name | head -1); GP=${GP#pod/}
+DB=$($K -n databases get pod -l cnpg.io/cluster=infra-pg,cnpg.io/instanceRole=primary -o name | head -1); DB=${DB#pod/}
+sql() { $K -n databases exec -i "$DB" -c postgres -- psql -U postgres -d gitea -tA -v ON_ERROR_STOP=1 -f -; }
+```
+
+1. **Create the user.** `--random-password` PRINTS the password, so stdout is discarded and only the exit
+   status is read. The password is never used; the account logs in only by token.
+
+   ```bash
+   $K -n gitea exec "$GP" -c gitea -- gitea admin user create --username "$U" \
+     --email "$U@noreply.git.chifor.me" --random-password --must-change-password=false >/dev/null \
+     && echo created || echo "CREATE FAILED"
+   ```
+
+2. **Read the flags back from the database before any token exists.** The API refuses token auth for a
+   must-change-password or prohibit-login account, so a wrong flag shows up later as a mysterious 401.
+
+   ```bash
+   printf '%s\n' "select id, name, is_active, must_change_password, prohibit_login, is_admin, is_restricted, visibility
+     from \"user\" where name in ('dev-worker-bot', '$U') order by id;" | sql
+   ```
+
+   Expect `is_active=t`, `must_change_password=f`, `prohibit_login=f`, `is_admin=f`, `is_restricted=f`, and
+   the same `visibility` as `dev-worker-bot`. `prohibit_login` is set only at retirement.
+
+3. **Team `automation` (id 37), with a one-shot owner token.** Parity, not a new grant: it is the only team
+   `dev-worker-bot` is in. Add no branch-protection whitelist entry (none names `dev-worker-bot`) and no
+   admin collaboration anywhere.
+
+   ```bash
+   OT=owner-op-enrol-$U-$(date -u +%Y%m%d%H%M%S)
+   T=$($K -n gitea exec "$GP" -c gitea -- gitea admin user generate-access-token --username chifor \
+     --token-name "$OT" --scopes write:organization --raw 2>/dev/null | tr -d '\r\n')
+   printf 'Authorization: token %s\n' "$T" | curl -q -sS --proto =https -o /dev/null -w '%{http_code}\n' \
+     -X PUT -H @- "https://git.chifor.me/api/v1/teams/37/members/$U"            # expect 204
+   printf "delete from access_token where uid=(select id from \"user\" where name='chifor') and name='%s';\n" "$OT" | sql
+   printf 'Authorization: token %s\n' "$T" | curl -q -sS --proto =https -o /dev/null -w '%{http_code}\n' \
+     -H @- https://git.chifor.me/api/v1/user                                     # expect 401
+   unset T
+   printf '%s\n' "select team_id from team_user where uid=(select id from \"user\" where name='$U');" | sql   # expect 37 only
+   ```
+
+4. **Mint the three tokens into shell variables only** (same scopes as the shared three,
+   `openbao-dev-workers.md` § the token table):
+
+   ```bash
+   mint() { $K -n gitea exec "$GP" -c gitea -- gitea admin user generate-access-token --username "$U" \
+     --token-name "dw$N-$1-$D" --scopes "$2" --raw 2>/dev/null | tr -d '\r\n'; }
+   TG=$(mint git write:repository,write:issue,read:organization,read:user)
+   TR=$(mint repo write:organization,write:repository,read:user)
+   TP=$(mint pkg write:package,read:repository,read:user)
+   for v in "$TG" "$TR" "$TP"; do [[ $v =~ ^[0-9a-f]{40}$ ]] && echo ok || echo BAD; done
+   ```
+
+5. **Write all three into the seed in ONE `sops edit`**, so there is never a partial document. Not `sops
+   set`: the key `dev-worker-N.json` holds a JSON document as one YAML string, which `sops set` cannot
+   address a field inside, and `sops set` takes the value as an argument. Instead `EDITOR` is a patch shim
+   that reads the tokens from its stdin (`printf` is a shell builtin, so no value reaches any argv), and
+   `TMPDIR=/dev/shm` keeps sops' decrypted temp file in RAM. sops shlex-splits `EDITOR` and appends the
+   temp file as the LAST argument. The shim refuses, and sops then writes nothing, unless exactly that one
+   key changes and only its three gitea fields. The key must already exist in the seed (a new slot adds
+   `dev-worker-N.json` first, `openbao-dev-workers.md` § adding a worker).
+
+   ```bash
+   cat > /dev/shm/wi-seed-patch.py <<'PY'
+   import json, re, sys
+   import yaml
+
+   FIELDS = ("gitea_pat", "gitea_repo_pat", "gitea_package_pat")
+
+
+   def main(key, path):
+       if not re.fullmatch(r"[a-z0-9-]+\.json", key) or key == "common.json":
+           return "refusing: %r is not a per-slot seed key" % key
+       toks = sys.stdin.read().split("\n")[:3]
+       if len(toks) != 3 or not all(re.fullmatch(r"[0-9a-f]{40}", t) for t in toks):
+           return "refusing: expected three 40-hex tokens on stdin"
+       src = open(path, encoding="utf-8").read()
+       before = yaml.safe_load(src)
+       if key not in (before.get("stringData") or {}):
+           return "refusing: no stringData key %s" % key
+       old = json.loads(before["stringData"][key])
+       lines = src.split("\n")
+       hits = [n for n, ln in enumerate(lines) if re.match(r"^\s+" + re.escape(key) + r":(\s|$)", ln)]
+       if len(hits) != 1:
+           return "refusing: %d lines for %s" % (len(hits), key)
+       i = j = hits[0]
+       indent, rest = re.match(r"^(\s+)" + re.escape(key) + r":\s*(.*)$", lines[i]).groups()
+       j += 1
+       if rest[:1] in ("|", ">"):                # a block scalar: take its indented lines too
+           while j < len(lines) and (not lines[j].strip()
+                                     or len(lines[j]) - len(lines[j].lstrip()) > len(indent)):
+               j += 1
+       elif yaml.safe_load("v: " + rest)["v"] != before["stringData"][key]:
+           return "refusing: %s spans lines in a form this shim does not rewrite" % key
+       doc = dict(old, **dict(zip(FIELDS, toks)))
+       lines[i:j] = [indent + key + ": " + json.dumps(json.dumps(doc))]
+       out = "\n".join(lines)
+       out += "" if out.endswith("\n") else "\n"
+       want = dict(before, stringData=dict(before["stringData"], **{key: json.dumps(doc)}))
+       if yaml.safe_load(out) != want:
+           return "refusing: the edit would change more than this one value"
+       open(path, "w", encoding="utf-8", newline="\n").write(out)
+       print("%s: %s" % (key, ", ".join("%s len %d" % (f, len(t)) for f, t in zip(FIELDS, toks))),
+             file=sys.stderr)
+       return 0
+
+
+   try:
+       sys.exit(main(sys.argv[1], sys.argv[-1]))
+   except Exception as e:                        # never echo a parser's view of the plaintext
+       sys.exit("refusing: %s" % type(e).__name__)
+   PY
+   export SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey"
+   SEEDS=kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml
+   printf '%s\n%s\n%s\n' "$TG" "$TR" "$TP" \
+     | TMPDIR=/dev/shm EDITOR="python3 /dev/shm/wi-seed-patch.py dev-worker-$N.json" sops edit "$SEEDS"
+   unset TG TR TP
+   ```
+
+   If the edit failed, the three tokens are live but stored nowhere: delete them at once and start again
+   at step 4. Never leave an unrecorded live token.
+
+   ```bash
+   printf "delete from access_token where uid=(select id from \"user\" where name='%s') and name like 'dw%s-%%-%s';\n" "$U" "$N" "$D" | sql
+   ```
+
+6. **Verify the seed in memory**, printing field names, lengths and short hashes only. Run the same command
+   before step 5 too: every field other than the three must keep its hash.
+
+   ```bash
+   sops -d --extract "[\"stringData\"][\"dev-worker-$N.json\"]" "$SEEDS" | python3 -c '
+   import hashlib, json, re, sys
+   d = json.load(sys.stdin); g = ("gitea_pat", "gitea_repo_pat", "gitea_package_pat")
+   print({k: (len(v) if k in g else hashlib.sha256(str(v).encode()).hexdigest()[:12]) for k, v in d.items()})
+   sys.exit(0 if all(re.fullmatch(r"[0-9a-f]{40}", str(d.get(f, ""))) for f in g) else 1)'
+   git diff --stat      # devworker-seeds.sops.yaml only; every changed value line is ENC[...]
+   ```
+
+7. **Ship it in a reviewed PR.** After merge, Flux recreates the provision Job, which patches
+   `af/dev-workers/dev-worker-N` seed-wins and keeps the sync-owned fields (force a run as in
+   `openbao-dev-workers.md` § "Timing trap").
+
+8. **Verify every token before any consumer uses it**, on the slot, through its own AppRole (`cred`). A
+   repository read alone cannot tell a slot token from the shared one; `GET /user` can.
+
+   ```bash
+   for f in gitea_pat gitea_repo_pat gitea_package_pat; do printf '%s ' $f
+     cred exec "$(hostname -s)" $f T -- sh -c 'printf "Authorization: token %s\n" "$T" \
+       | curl -q -s -H @- https://git.chifor.me/api/v1/user' \
+       | python3 -c 'import sys,json; u=json.load(sys.stdin); print(u["login"], u["id"], "is_admin=%s" % u["is_admin"])'
+   done   # every line: dev-worker-N-bot <its id> is_admin=False
+   ```
+
+   Then one in-scope call answers 200 and one out-of-scope call answers 403 per token: `gitea_pat` reads
+   `/repos/cchifor/ailab` but not `/packages/cchifor`; `gitea_package_pat` reads `/packages/cchifor` but not
+   `/orgs/cchifor/teams`; `gitea_repo_pat` reads `/orgs/cchifor` but not `/packages/cchifor`. Then the
+   AppRole isolation, server side (the `cred` unit test stubs `bao` and cannot prove it): the slot reads its
+   own three fields, `cred get dev-worker-<M> gitea_pat` for a sibling slot is denied, and a write to its
+   own document with the agent's token (`bao kv patch -mount=af dev-workers/<host> probe=1`) answers 403.
+
+**Rotation, per slot.** Mint-before-revoke, one slot at a time, never touching `common` or a sibling:
+mint `dw<N>-<kind>-<new date>` (step 4), seed it (steps 5–7), confirm `GET /user` from the slot
+(step 8), then delete the old tokens by name (step 5's delete with the old date) and prove each old value
+answers 401. The same applies when a different VM takes the slot: the account name stays, the tokens do
+not. Also revoke the previous holder's AppRole SecretIDs, as in ADR 0020's re-slot amendment, and prove the
+old credentials fail before the new machine is enabled. A **retired** slot's account is disabled
+(tokens deleted first, then `prohibit_login`), never deleted, and its login leaves
+`dev_worker_gitea_users` (`ansible/group_vars/dev_workers.yml`; `scripts/check-slot-enumerations.py`
+enforces it).
 
 ## Phase 0: the owner gate on platform `main` (INSTALLED 2026-10-06)
 
