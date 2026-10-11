@@ -9,10 +9,12 @@ import os
 import re
 import selectors
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 from pathlib import Path
 
 import review_chunks as chunks
@@ -357,7 +359,23 @@ def _post(bot, job_id, plan, stage, body, comments, aggregate=None):
         result = bot.api(f"/repos/{value['repo']}/pulls/{value['pr']}/reviews", "POST",
                          dict(commit_id=value["head_sha"], event=event,
                               body=body, comments=comments))
-    except Exception:
+    except urllib.error.HTTPError as error:
+        # A completed HTTP response is unambiguous.  Retry client rejection; quarantine
+        # server errors because Gitea may have committed the mutation before replying.
+        if error.code >= 500 or error.code in (408, 429):
+            return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
+        return ("retry", None, f"chunk review POST rejected with HTTP {error.code}")
+    except urllib.error.URLError as error:
+        reason = error.reason
+        if isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError,
+                               BrokenPipeError)) or "timed out" in str(reason).lower():
+            return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
+        return ("retry", None, "chunk review POST connection failed")
+    except (TimeoutError, socket.timeout, ConnectionResetError, BrokenPipeError):
+        return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
+    except Exception as error:
+        # Keep unknown adapter failures visible without claiming that a remote mutation is
+        # safe to repeat.  The operator can inspect the PR and use the explicit requeue path.
         return ("quarantined", None, "ambiguous POST: chunk review outcome unknown")
     if stage == "final":
         bot.maybe_merge(value["repo"], value["pr"])
@@ -413,7 +431,7 @@ def review_job(bot, job_id, repo, pr, head):
             result = bot.run_llm(title, description, part["text"], rubric)
             current(bot, value)
             ledger.record(plan, bot.CFG["persona"], part["index"], result)
-            return ("retry", None, f"snapshot part {part['index']} persisted")
+            return ("progress", None, f"snapshot part {part['index']} persisted")
         aggregate = ledger.aggregate(plan, bot.CFG["persona"])
     finally:
         connection.close()

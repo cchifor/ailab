@@ -55,6 +55,11 @@ def valid_binding(binding):
 
 def _path(raw, prefixed=True):
     try:
+        if not isinstance(raw, bytes):
+            raise ValueError("Diff path must be bytes")
+        # Unified-diff headers may append a timestamp after a literal tab. Git quotes
+        # literal tabs in paths, so an unquoted tab is the separator, never path data.
+        raw = raw.split(b"\t", 1)[0]
         if raw.startswith(b'"'):
             # Git C-quotes non-ASCII bytes using octal escapes. Never eval code.
             value = ast.literal_eval(raw.decode("ascii"))
@@ -71,7 +76,8 @@ def _path(raw, prefixed=True):
         if value[:2] not in ("a/", "b/"):
             raise ValueError("Unexpected diff path prefix")
         value = value[2:]
-    if (not value or value.startswith("/") or "\x00" in value
+    if (not value or value.startswith("/")
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
             or any(p in ("", ".", "..") for p in value.split("/"))):
         raise ValueError("Unsafe diff path")
     return value

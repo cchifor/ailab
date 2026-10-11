@@ -441,6 +441,18 @@ class WorkerIterationTest(unittest.TestCase):
     def test_idle_worker_returns_none(self):
         self.assertIsNone(self.m.worker_once())
 
+    def test_chunk_progress_requeues_immediately_without_spending_retry_budget(self):
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.review_job = lambda *a: ("progress", None, "snapshot part persisted")
+        self.assertIsNotNone(self.m.worker_once())
+        state, attempts, timeouts, note = self._job()
+        self.assertEqual("queued", state)
+        self.assertEqual((0, 0), (attempts, timeouts))
+        self.assertEqual("snapshot part persisted", note)
+        c = self.m.db()
+        self.assertEqual(0, c.execute("SELECT next_at FROM jobs").fetchone()[0])
+        c.close()
+
     def test_a_deadline_failure_persists_the_timeout_counter(self):
         self.m.enqueue("o/r", 1, self.A, "webhook")
         self.m.review_job = lambda *a: (_ for _ in ()).throw(

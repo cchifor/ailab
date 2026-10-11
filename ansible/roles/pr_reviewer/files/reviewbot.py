@@ -228,7 +228,13 @@ def enqueue(repo, pr, head_sha, source):
     if repo not in CFG["repos"]:
         return
     if chunk_enabled(repo):
-        chunk_call("refresh_job", repo, pr, head_sha, source)
+        # A partial rollout or a policy epoch mismatch must not turn a webhook into a
+        # 400 (and make the reconciler abandon the PR).  Keep the ordinary enqueue below;
+        # review_job will fail closed when it tries to bind the opted-in snapshot.
+        try:
+            chunk_call("refresh_job", repo, pr, head_sha, source)
+        except ValueError as error:
+            log(f"chunk refresh {repo}#{pr} refused: {error}")
     with db_lock:
         c = db()
         # When this head was FIRST seen in any state, 'superseded' included. For a delayed
@@ -2470,7 +2476,11 @@ def marker_of(rv):
 
 def existing_marker(repo, pr, head_sha):
     if chunk_enabled(repo):
-        return chunk_call("existing", repo, pr, head_sha)
+        try:
+            return chunk_call("existing", repo, pr, head_sha)
+        except ValueError as error:
+            log(f"chunk marker lookup {repo}#{pr} refused: {error}")
+            return None
     for rv in iter_reviews(repo, pr):
         m = marker_of(rv)
         if m and m.group(1) == CFG["persona"] and m.group(2) == head_sha:
@@ -2481,7 +2491,13 @@ def existing_marker(repo, pr, head_sha):
 def persona_verdicts(repo, pr, head_sha):
     """Latest authenticated marker verdict per persona at this head."""
     if chunk_enabled(repo):
-        return chunk_call("verdicts", repo, pr, head_sha)
+        try:
+            return chunk_call("verdicts", repo, pr, head_sha)
+        except ValueError as error:
+            # An incomplete binding is never evidence of a clean review.  Returning an
+            # empty set keeps the merge gate closed while allowing the reconciler to heal.
+            log(f"chunk verdict lookup {repo}#{pr} refused: {error}")
+            return {}
     out = {}
     for rv in iter_reviews(repo, pr):
         m = marker_of(rv)
@@ -3312,14 +3328,23 @@ def worker_once():
         # the poll then takes effect within minutes instead of at the wall the job was deferred
         # to (codex review of PR 2). Without a poller nothing unparks before the wall, so the
         # wall itself is the exact wake-up and the legacy deferral is unchanged.
-        if limited_until and usage_poller_enabled():
+        # A chunk part was durably recorded, so requeue immediately without consuming an
+        # ordinary failure attempt or applying exponential backoff.  Each part is already
+        # bounded and independently validated; treating progress as a transient failure
+        # would stretch a complete review across the retry budget and potentially quarantine
+        # it before the integration part runs.
+        progressed = state == "progress"
+        persisted_state = "queued" if progressed else state
+        if progressed:
+            next_at = 0.0
+        elif limited_until and usage_poller_enabled():
             next_at = min(limited_until, time.time() + DEFAULT_PARK_S)
         else:
             next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
         c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, next_at=?, "
                   "updated=?, review_id=?, note=? WHERE id=?",
-                  (state, attempts, timeouts, next_at, time.time(), rid, note, jid))
-        if state == "done":
+                  (persisted_state, attempts, timeouts, next_at, time.time(), rid, note, jid))
+        if persisted_state == "done":
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
                       (str(time.time()),))
             # A head that reviewed cleanly settles the PR, so any quarantine left on an
@@ -3558,6 +3583,29 @@ def requeue(repo, pr, force=False):
     return 0
 
 
+def recover_startup_jobs(connection, now=None):
+    """Recover orphaned jobs without losing an ambiguous chunk publication.
+
+    The rollout allowlist is configuration, so it may be empty during a restart even
+    though the database still contains a chunk job from an earlier process. The durable
+    ``chunk_jobs`` receipt, rather than the current allowlist, identifies those rows.
+    """
+    now = time.time() if now is None else now
+    connection.execute("CREATE TABLE IF NOT EXISTS chunk_jobs("
+                       "job INTEGER PRIMARY KEY, binding TEXT NOT NULL)")
+    quarantined = connection.execute(
+        "UPDATE jobs SET state='quarantined',note=? WHERE state='posting' "
+        "AND id IN (SELECT job FROM chunk_jobs)",
+        ("ambiguous POST: complete-review service interrupted during publication",),
+    ).rowcount
+    queued = connection.execute(
+        "UPDATE jobs SET state='queued', next_at=0, updated=? WHERE state='running' "
+        "OR (state='posting' AND id NOT IN (SELECT job FROM chunk_jobs))",
+        (now,),
+    ).rowcount
+    return quarantined, queued
+
+
 USAGE = ("usage: reviewbot.py <config> [--requeue <owner/repo> <pr> [--force] | "
          "--restart-skipped <owner/repo> <pr> <expected-base-sha> <expected-head-sha>]")
 
@@ -3592,25 +3640,17 @@ def main():
         return requeue(rest[0], pr, force=force)
     os.makedirs(os.path.dirname(CFG["state_db"]), exist_ok=True)
     c = db()
-    # A crash after the chunk POST began has an ambiguous remote outcome. Keep it
-    # quarantined until an operator checks Gitea; do not silently issue a second POST.
-    for repo in CFG.get("chunk_review_repos", []):
-        c.execute("UPDATE jobs SET state='quarantined',note=? WHERE repo=? AND state='posting'",
-                  ("ambiguous POST: complete-review service interrupted during publication", repo))
     # Restart recovery: a killed in-flight run leaves 'running' (and rarely 'posting')
     # rows nothing would ever pick again - deploy restarts orphaned two jobs on day one.
-    # Re-queueing 'posting' is safe: the pre-post marker check dedupes an already-landed
-    # review. Retry timers also reset so a restart never waits out stale backoff.
-    chunk_repos = CFG.get("chunk_review_repos", [])
-    excluded = ",".join("?" * len(chunk_repos)) or "NULL"
-    n = c.execute(
-        "UPDATE jobs SET state='queued', next_at=0, updated=? WHERE state='running' "
-        f"OR (state='posting' AND repo NOT IN ({excluded}))",
-        [time.time(), *chunk_repos],
-    ).rowcount
+    # Re-queueing ordinary 'posting' is safe: its pre-post marker check dedupes an
+    # already-landed review. Chunk 'posting' remains quarantined because its outcome is
+    # ambiguous and the current rollout allowlist may be empty.
+    quarantined, n = recover_startup_jobs(c)
     c.execute("UPDATE jobs SET next_at=0 WHERE state='retry'")
     c.commit()
     c.close()
+    if quarantined:
+        log(f"startup: quarantined {quarantined} ambiguous chunk publication(s)")
     if n:
         log(f"startup: re-queued {n} orphaned job(s)")
     # Before any thread exists, so the rebind cannot race the worker or the ticker.

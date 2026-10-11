@@ -6,6 +6,7 @@ byte coverage and the persisted approval boundary, including damaged/replayed st
 import base64
 import copy
 import hashlib
+import io
 import importlib.util
 import json
 import pathlib
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import threading
 import types
+import urllib.error
 import unittest
 from unittest import mock
 
@@ -256,6 +258,25 @@ class SnapshotPlanTests(unittest.TestCase):
                 plan = chunks.make_plan(BINDING, MERGE_BASE, raw)
                 self.assertEqual((old, new), (plan["files"][0]["old"], plan["files"][0]["new"]))
                 self.assertEqual(raw, plan["parts"][0]["text"].encode())
+
+    def test_git_header_tab_suffix_is_metadata_and_control_paths_fail_closed(self):
+        raw = (
+            b"diff --git a/src/example.py b/src/example.py\n"
+            b"index 1111111..2222222 100644\n"
+            b"--- a/src/example.py\t2026-10-11 12:34:56 +0000\n"
+            b"+++ b/src/example.py\t2026-10-11 12:34:57 +0000\n"
+            b"@@ -1 +1 @@\n-old\n+new\n"
+        )
+        plan = chunks.make_plan(BINDING, MERGE_BASE, raw)
+        self.assertEqual("src/example.py", plan["files"][0]["old"])
+        self.assertEqual("src/example.py", plan["files"][0]["new"])
+        for bad in [
+            b"a/control\n", b"a/control\r", b"a/control\x00",
+            b"a/control\x1b", b"a/control\x7f",
+            b'"a/control\\011name"',
+        ]:
+            with self.subTest(path=bad), self.assertRaises(ValueError):
+                chunks._path(bad)
 
 
 class LedgerTests(unittest.TestCase):
@@ -616,7 +637,7 @@ class AdapterTests(unittest.TestCase):
     def test_end_to_end_one_part_per_attempt_then_single_complete_approval(self):
         self.handshake()
         for index in range(4):
-            self.assertEqual("retry", self.run_job()[0])
+            self.assertEqual("progress", self.run_job()[0])
             self.assertEqual(index + 1, self.bot.run_llm.call_count)
             self.assertEqual(1, len(self.posts), "No approval before integration completes")
         self.assertEqual("done", self.run_job()[0])
@@ -675,6 +696,28 @@ class AdapterTests(unittest.TestCase):
         self.assertIsNone(review_id)
         self.assertTrue(note.startswith("ambiguous POST"))
         self.bot.maybe_merge.assert_not_called()
+
+    def test_definite_http_rejection_retries_but_server_error_quarantines(self):
+        for code, expected in [(403, "retry"), (500, "quarantined")]:
+            with self.subTest(code=code):
+                error = urllib.error.HTTPError(
+                    "https://git.invalid", code, "response", {}, io.BytesIO(b"rejected")
+                )
+                def fail_post(path, method="GET", payload=None, error=error):
+                    if method == "POST":
+                        raise error
+                    return self.api(path, method, payload)
+                self.bot.api.side_effect = fail_post
+                state, review_id, note = adapter._post(
+                    self.bot, 1, self.plan, "ready", "Prepared.", []
+                )
+                self.assertEqual(expected, state)
+                self.assertIsNone(review_id)
+                if code == 500:
+                    self.assertTrue(note.startswith("ambiguous POST"))
+                else:
+                    self.assertIn("HTTP 403", note)
+                self.bot.api.side_effect = self.api
 
     def test_final_guard_is_applied_to_every_path_and_prevents_approval(self):
         self.handshake()
@@ -812,6 +855,49 @@ class AdapterTests(unittest.TestCase):
                 self.assertEqual((state, 2, 1), connection.execute(
                     "SELECT state,attempts,timeout_attempts FROM jobs").fetchone())
                 connection.close()
+
+class ReviewbotStartupRecoveryTests(unittest.TestCase):
+    def test_empty_rollout_allowlist_still_quarantines_chunk_posting_rows(self):
+        # Import reviewbot through its isolated dummy config loader; do not start its
+        # HTTP server or worker threads, and do not contact a forge.
+        from test_reviewbot import load as load_reviewbot
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        bot = load_reviewbot(temporary.name, chunk_review_repos=[])
+        connection = bot.db()
+        try:
+            connection.execute(
+                "CREATE TABLE chunk_jobs(job INTEGER PRIMARY KEY, binding TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO jobs(repo,pr,head_sha,state,attempts,next_at,created,updated,note) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                ("o/r", 1, "1" * 40, "posting", 1, 99, 1, 1, "legacy"),
+            ).lastrowid
+            chunk = connection.execute(
+                "INSERT INTO jobs(repo,pr,head_sha,state,attempts,next_at,created,updated,note) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                ("o/r", 2, "2" * 40, "posting", 3, 99, 1, 1, "chunk"),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO chunk_jobs(job,binding) VALUES(?,?)", (chunk, "immutable-binding")
+            )
+            connection.commit()
+            quarantined, queued = bot.recover_startup_jobs(connection, now=123)
+            self.assertEqual((1, 1), (quarantined, queued))
+            rows = connection.execute(
+                "SELECT id,state,next_at,note FROM jobs ORDER BY id"
+            ).fetchall()
+            self.assertEqual("queued", rows[0][1])
+            self.assertEqual(0, rows[0][2])
+            self.assertEqual("quarantined", rows[1][1])
+            self.assertIn("ambiguous POST", rows[1][3])
+            self.assertEqual(99, connection.execute(
+                "SELECT next_at FROM jobs WHERE id=?", (chunk,)
+            ).fetchone()[0])
+        finally:
+            connection.close()
 
 
 if __name__ == "__main__":
