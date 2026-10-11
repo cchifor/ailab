@@ -605,6 +605,68 @@ marker on any of them), so the steps above describe the helmtest half only. With
 gone, `dev_worker_enable_openbao: false` provisions no kubeconfig at all — the flag is a
 staged-rollout switch, not a supported steady state (ADR 0021).
 
+## Gitea identity cut-over (per slot)
+
+Moves ONE slot from the shared `dev-worker-bot` to its own `dev-worker-N-bot`
+(`plans/2026-10-11-worker-identities-plan.md`, Phase 4). `dev_worker_gitea_identity_cutover: true`
+in `ansible/host_vars/dev-worker-N.yml` switches three things together: the login and document behind
+`~/.git-credentials` (`af/dev-workers/common` → the slot's own `af/dev-workers/dev-worker-N`, fields
+`gitea_pat`/`gitea_repo_pat`/`gitea_package_pat`), the pinned
+`credential.https://git.chifor.me.username`, and `cred … common …` → `cred … dev-worker-N …` in the
+agents' instructions. With the gate false all three render exactly as before. Commit identity
+(`dev-worker-N-bot <dev-worker-N-bot@noreply.git.chifor.me>`) is already per slot and does not depend
+on it. Canary first, one slot per day, never in `group_vars`.
+
+**1. Pre-flight, on the slot.** The role repeats the vault half itself and stops before rendering
+anything if it fails; the `/user` call is yours (it needs the forge, a converge does not):
+
+```bash
+ssh c4@<slot-ip>
+hostname -s                                                    # dev-worker-N
+for f in gitea_pat gitea_repo_pat gitea_package_pat; do        # lengths only, never values
+  printf '%s %s\n' "$f" "$(cred get dev-worker-N "$f" | wc -c)"; done
+# the token goes to curl on stdin (printf is a builtin): never in argv or the terminal
+cred exec dev-worker-N gitea_pat T -- sh -c 'printf "header = \"Authorization: token %s\"\n" "$T" |
+  curl -sS -A Mozilla/5.0 -K - https://git.chifor.me/api/v1/user' |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["login"], d["id"], d["is_admin"])'
+# expect: dev-worker-N-bot <id> False   (a 403 "error code: 1010" is Cloudflare's User-Agent filter)
+```
+
+**2. Drain the slot.** The bao agent renders the new line before `pin_gitea_username.yml` re-pins,
+and git finds no credential in between. No agent job or interactive session may run during the
+converge: check `who`, `pgrep -a -u c4 'claude|codex'` and
+`systemctl list-units 'claude-job@*' --state=running`, and hold new work until step 4 passes.
+
+**3. Flip the gate (a reviewed PR to `host_vars/dev-worker-N.yml`) and converge that slot only:**
+
+```bash
+cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
+  ansible-playbook dev-workers.yml -l dev-worker-N -t openbao
+```
+
+The role: pre-flights (`hostname -s` is the inventory name; the three fields readable under the
+slot's own AppRole, non-empty, not the shared token), lays down the template, removes a
+`~/.git-credentials` that names the other login, restarts the agent, requires the rendered line to
+name `dev-worker-N-bot`, then pins it and rewrites the instructions. If the health check fails it
+restores the previous template and `agent.hcl` and fails before the pin, so the slot stays on
+`dev-worker-bot`. **Stop the rollout there.**
+
+**4. Verify on the slot** (then the canary checks in the plan's Phase 4 step 5):
+
+```bash
+sed -n 's#^https://\([^:/@]*\):.*#\1#p' ~/.git-credentials       # dev-worker-N-bot (login only)
+git config --global credential.https://git.chifor.me.username     # dev-worker-N-bot
+git ls-remote https://git.chifor.me/cchifor/ailab HEAD >/dev/null && echo ls-remote-ok
+```
+
+and the `/user` call from step 1. Sessions started before the converge keep the old instructions
+(`cred … common …`, which still works until Phase 5) until they restart.
+
+**Rollback:** set the gate back to `false` (or drop the line), drain, run the same converge. One run
+removes the `dev-worker-N-bot` line, re-renders `dev-worker-bot` from `common`, re-pins it and restores
+the `common` instructions; verify with step 4, expecting `dev-worker-bot`. It needs `common`'s shared
+tokens, so it is available only until Phase 5 revokes them.
+
 ## Host-owned codex logins (dev workers, since 2026-09-29)
 
 > **Since 2026-10-09 the dev workers' Codex runs on the LLM router**, not on these logins

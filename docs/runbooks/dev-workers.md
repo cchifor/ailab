@@ -222,6 +222,14 @@ or bring it into the role. The old `unable to get credential storage lock ... Re
 line inside the Codex sandbox came from `store` rewriting the file after each success, and is gone with
 it.
 
+**Commit identity** (`tasks/git_identity.yml`, `-t git-identity`). Each user's `~/.gitconfig` sets
+`user.name`/`user.email` to `<slot>-bot <<slot>-bot@noreply.git.chifor.me>`, whichever Gitea login
+the slot pushes with (that one moves per slot: `openbao-dev-workers.md` § "Gitea identity cut-over
+(per slot)"). The same task reports, without failing the run or printing values, what still outranks
+it: author/committer keys and includes, a repository's or worktree's own config, and
+`GIT_AUTHOR_*`/`GIT_COMMITTER_*`/`EMAIL` in profiles, agent units or running processes. Remove each
+finding or bring it into the role. A running job keeps its environment until it restarts.
+
 ### Codex through the router (since 2026-10-09)
 
 **All four workers' Codex runs on the estate's LLM router** (router.chifor.me). Until 2026-10-10 it ran on one
