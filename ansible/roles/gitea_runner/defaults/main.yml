@@ -147,6 +147,34 @@ gitea_runner_reclaim_dirs:
 gitea_runner_reclaim_beacon: true
 gitea_runner_reclaim_textfile_dir: /var/lib/prometheus/node-exporter
 
+# ---- /tmp bounds (every job on the host shares one /tmp) ────────────────────
+# Ubuntu 24.04 ships /usr/lib/tmpfiles.d/tmp.conf as `D /tmp 1777 root root 30d`, so job leftovers in
+# /tmp lived a month. Measured 2026-10-12: 9-22 GB of /tmp per runner, mostly pytest-of-runner (10.5 GB
+# on ci-runner-6) and node-compile-cache (8 GB). The cloud runners lose /tmp at every nightly power-off
+# (the `D` boot wipe); the 24/7 ailab pool never did.
+#
+# WHY AGES AND NOT A PER-JOB WIPE: pytest reuses its pytest-of-<user> parent across sessions, so
+# deleting under a running job races it. Any path a live job created or modified is younger than the
+# job timeout (gitea_runner_job_timeout, 3h), so every age here MUST stay above 3h. relatime refreshes
+# atime at most daily, so a file a job only READ can look older than it is. That is acceptable only
+# because the sub-day ages below are on caches (pytest temp, node compile cache), where a vanished
+# entry costs a re-create, never a wrong result.
+#
+# On busy runners pytest's own retention (3 sessions) sizes pytest-of-runner more than age does. Setting
+# tmp_path_retention_count is left to each repo: as a global PYTEST_ADDOPTS it raises
+# PytestConfigWarning on older pytest, which fails jobs that run with `-W error`.
+gitea_runner_tmp_manage: true
+# Overrides the vendor tmp.conf BY NAME (/etc/tmpfiles.d/tmp.conf). A second line claiming /tmp in
+# another file would be a duplicate: tmpfiles keeps the first one parsed and silently drops the other.
+gitea_runner_tmp_age: 2d
+# A tmpfiles line for /tmp itself (any type letter + modifiers, then the path /tmp, then whitespace).
+gitea_runner_tmp_line_re: '^\s*[A-Za-z][-+!=~^]*\s+/tmp\s'
+gitea_runner_tmp_subdir_ages:
+  - { path: "/tmp/pytest-of-{{ gitea_runner_user }}", age: 6h }
+  - { path: /tmp/node-compile-cache, age: 1d }
+# How often systemd-tmpfiles-clean applies the ages (the Ubuntu default is daily).
+gitea_runner_tmpfiles_clean_interval: 1h
+
 # ---- docker + storage cleanup (bounds disk; the reclaim above only handles workspace artifact dirs) ──
 # A full CI run leaves tens of GB on the SHARED Docker daemon: build cache (unbounded, 10-33 GB/runner
 # observed), stale image layers, and occasionally leaked containers/networks/volumes. A full root disk

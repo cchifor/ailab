@@ -1,0 +1,6 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Faster ageing for the heavy per-job trees under /tmp.
+# `e` only cleans existing directories' contents by age; it never creates the path. Each path differs
+# from /tmp itself, so none of these collides with the `D /tmp` line in tmp.conf.
+{% for d in gitea_runner_tmp_subdir_ages %}
+e {{ d.path }} - - - {{ d.age }}
+{% endfor %}
