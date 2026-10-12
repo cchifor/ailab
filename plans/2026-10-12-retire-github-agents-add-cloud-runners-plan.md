@@ -161,4 +161,73 @@ Three workstreams. WS1 is independent. WS2 gates WS3.
 - **WS3:** `started = false` per VM (the quarantine switch), pause in Gitea, revert the inventory and
   scrape entries.
 
-<!-- codex-review-status: pending -->
+## Revision 1 (2026-10-12): independent review + operator decisions
+
+An independent Claude review stood in for Codex, whose seat is out of quota. It found one blocker
+and a set of ordering and coverage fixes. The operator then chose a placement. Every change below
+supersedes the sections above.
+
+**Placement (blocker: the RAM math).** A cloud runner VM costs the host its full allocation, not
+the ~11 GiB a job uses, because the guest page cache stays resident.
+- Measured host RSS is 23.0-23.8 GiB per runner on cloud1 and cloud2.
+- cloud2's 7-day low (35.2 GiB) has no room above ADR 0032's 30 GiB floor.
+- cloud1's low (72.6 GiB) fits one 24 GiB runner.
+- **Operator decision:** three runners, ALL ON CLOUD1, at **12 GiB / 6 vCPU**, the size of the
+  smaller ailab runners, which run the same jobs under the same 10 GiB job cap:
+  - `cloud-ci-6` (.29, 6106, REBUILT);
+  - `cloud-ci-14` (.37, 6114);
+  - `cloud-ci-15` (.39, 6115).
+- cloud1's expected low is ~36 GiB, which passes the floor. cloud2 is untouched.
+- The host CPU p99 target for cloud1 becomes 75 % (amended in ADR 0032), from 5 runners on 32
+  threads.
+- Disks go on cloud1's `local-nvme` (2.5 % used); `local-lvm` is 38 %.
+
+**cloud1 RAM gate: DONE before this revision.**
+- Round 1 (40 GiB) found **8 contiguous bad pages**, `0x153f6c0000`-`0x153f6c7fff`, all byte
+  lane 5. They were soft-offlined; each page's HWPOISON flag is verified, and HardwareCorrupted is
+  32 kB.
+- Round 2 found 0. As the review noted, that is inconclusive rather than proof of health.
+- WS2 is now only the cloudlab table PR, which makes the 8 pages durable.
+
+**WS1 fixes:**
+- `just runners` gets `*args`.
+- retire.yml runs via `import_tasks` with the tag, because a tag on `include_tasks` does not reach
+  its tasks.
+- The `actions-runner/` creation moves into agent.yml, so a retire run is a true no-op elsewhere.
+- **The `~/.docker` self-heal and `runner_docker_config_root_owned` move into the Gitea reclaim**,
+  which writes its own textfile. retire.yml deletes `runner_health.prom`.
+- The dsh_validator_pin check of `runner-reclaim.sh` runs only while the agent is enabled
+  (test updated).
+- **Agents are stopped before anything on GitHub.** The registrations are not deleted with the key:
+  GitHub drops self-hosted runners that stay offline for 14 days, and this avoids decrypting the key
+  on the workstation.
+- The operator revokes the App key. The OpenBao seed (`af/estate/github`) and the estate MATRIX
+  entry are removed together, in a follow-up after the revocation.
+- The peer-service default `none` is rolled out to the env files of all three scripts that read it
+  (cleanup, reclaim, reap).
+
+**WS3 fixes:**
+- **Order:**
+  1. ailab PR with the IPAM rows (.37/.39 allocated), the inventory and the ADR amendment, merged
+     FIRST, with an ARP/ping check of the three addresses;
+  2. cloudlab tofu PR;
+  3. apply;
+  4. acceptance scans;
+  5. `just cloud-runners -l ...` from a WSL clone;
+  6. the ailab scrape-target PR LAST, because `CloudCIRunnerDownWhileHostUp` fires on a target that
+     is not configured yet.
+- **tofu:**
+  - per-node optional `cores` / `memory_mib` / `floating_mib`;
+  - `cloud-ci-6` gets `-replace` (fresh disk; its old caches were written while its RAM was
+    corrupting);
+  - the plan guard expects exactly: 3 VMs to add, of which 1 is a replace, plus their
+    `terraform_data.enable_guest_agent`.
+  - Apply from the worktree with `-state=` pointing at the main checkout's state, plus the
+    `.env`/tfvars needed by node-ssh.py.
+  - Done while the cloud-power scheduler is idle.
+- **Acceptance scan:** findbad inside each new VM BEFORE the role registers it. If a page is bad,
+  translate it through QEMU's pagemap WHILE THE VM RUNS, retire it on the host, then rescan.
+  - The old cloud-ci-6 Gitea registration is deleted after the new one registers. It has been
+    offline since 09-24, so no job of its can be in the watchdog window.
+
+<!-- codex-review-status: finalized -->
