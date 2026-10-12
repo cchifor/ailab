@@ -1346,8 +1346,13 @@ There were two causes:
     to wait for.
   - **Window 3:** it starts 15 minutes after the 14:06 rollout, per "Wait first". In that window every request stayed
     on its conversation's account, at a median of 99 % cached.
-  - **Counting:** an account change counts both the spill and the return home. That is why window 2 has 37 changes from
-    20 spills.
+  - **Counting:** an account change is any request on a different account from the conversation's previous request.
+    - Window 2 (20 spills, 37 changes): 18 home → spill, 18 spill → home, 1 spill → another spill account; 1 spill
+      followed a spill on the same account, which is no change.
+    - Window 1 (412 spills, 351 changes): 130 home → spill, 124 spill → home, 93 spill → another spill account and 4
+      moves. 188 spills followed a spill on the same account (runs while `codex`, at concurrency 1, stayed busy) and
+      are no change.
+    - The 93 spill-to-spill changes on another account are the scattering warm spills prevent.
   - **Which threshold matters:** the old image at concurrency 4 already met the cold-change bar (0.4 %). The account-change
     bar (3 %) is the one that told the windows apart.
   - **The concurrency raise removed the hops.** With no spill since the rollout, the warm-spill path itself is **not
