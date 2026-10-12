@@ -208,6 +208,30 @@ gitea_runner_tmp_subdir_ages:
 gitea_runner_tmpfiles_clean_interval: 1h
 gitea_runner_tmpfiles_clean_boot_delay: 15min
 
+# ---- shared-cache integrity check (gitea-runner-cache-verify.py) ────────────────────────────────
+# Every job shares ~/.npm/_cacache and ~/.cache/uv, so ONE corrupt entry fails every later job that
+# uses it: a corrupt cryptography-50.0.2 .so in cloud-ci-5's uv cache segfaulted every kartra-ai job
+# that installed it, and cloud-ci-7 held 14 npm entries failing their own sha512 (2026-10-12). Nightly,
+# as `runner`: hash npm content against the digest its path encodes and uv archives against their
+# RECORD, queue the bad entries, and purge them only inside act_runner's start (the reclaim at its
+# ExecStartPre; gitea-runner-cleanup.sh restarts it in an idle gap, at most every 6h, to get there).
+# Plan: PR 3 of plans/2026-10-12-runner-between-job-cleanup-plan.md; review: ailab#1288.
+gitea_runner_cache_verify_enabled: true
+gitea_runner_cache_verify_bin: /usr/local/bin/gitea-runner-cache-verify.py
+gitea_runner_cache_verify_env: /etc/gitea-runner-cache-verify.env
+gitea_runner_cache_verify_state_dir: /var/lib/gitea-runner-cache
+# Literal, not a Jinja composition of the state dir (test-cleanup.sh [M] reads defaults as literal
+# scalars); tasks/main.yml asserts it lives in the state dir.
+gitea_runner_cache_verify_queue: /var/lib/gitea-runner-cache/purge.queue
+gitea_runner_cache_verify_service: gitea-runner-cache-verify.service
+gitea_runner_cache_verify_timer: gitea-runner-cache-verify.timer
+# Persistent=true runs a missed 04:30 at the next boot (the cloud hosts are off at night), spread by the
+# random delay so 12 cloud VMs on 3 hosts do not all hash at once in the morning.
+gitea_runner_cache_verify_on_calendar: "*-*-* 04:30"
+gitea_runner_cache_verify_random_delay: 2h
+gitea_runner_cache_verify_read_bandwidth: 50M # IOReadBandwidthMax on / (ionice is ignored under the `none` scheduler)
+gitea_runner_cache_verify_memory_high: 512M # MemoryHigh: reclaims the verify's own page cache first
+
 # ---- docker + storage cleanup (bounds disk; the reclaim above only handles workspace artifact dirs) ──
 # A full CI run leaves tens of GB on the SHARED Docker daemon: build cache (unbounded, 10-33 GB/runner
 # observed), stale image layers, and occasionally leaked containers/networks/volumes. A full root disk

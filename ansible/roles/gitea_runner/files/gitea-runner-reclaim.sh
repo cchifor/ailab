@@ -50,6 +50,10 @@ TEXTFILE_DIR="${GITEA_RECLAIM_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 # handles mode `off` itself, so the kill switch still publishes a mode=0 beacon.
 REAP_BIN="${GITEA_REAP_BIN:-/usr/local/bin/gitea-runner-reap.py}"
 REAP_TIMEOUT="${GITEA_REAP_TIMEOUT_SEC:-60}"
+CACHE_VERIFY_BIN="${GITEA_CACHE_VERIFY_BIN:-/usr/local/bin/gitea-runner-cache-verify.py}"
+CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
+CACHE_PURGE_ATTEMPT="${GITEA_CACHE_PURGE_ATTEMPT_STAMP:-/var/lib/gitea-runner-reclaim/cache-purge.attempt}"
+RECLAIM_CGROUP_FILE="${GITEA_RECLAIM_CGROUP_FILE:-/proc/self/cgroup}"   # tests: a fixture
 
 log() { logger -t gitea-runner-reclaim -- "$*" 2>/dev/null || true; }
 
@@ -164,9 +168,44 @@ run_reaper() {
   timeout -k 5 "$REAP_TIMEOUT" "$REAP_BIN" || log "reaper exited rc=$?"
 }
 
+# Shared-cache purge queue: applied ONLY when this reclaim IS act_runner's ExecStartPre. systemd runs
+# ExecStartPre in the unit's own cgroup and starts the daemon only after it exits, so that start
+# transaction holds every Gitea job off for the WHOLE purge. A MainPID-0 reading from the timer would
+# not: act_runner can start (Restart=always, an operator) while the purge runs (ailab#1288 review).
+# The cleanup never purges; in an idle gap it restarts act_runner (at most every 6h) to get here. A
+# co-located GitHub agent shares the caches: a GitHub job (Runner.Worker) running when the purge would
+# start defers it to the next start (checked once; the agent is dormant on every runner, 2026-10-12).
+# The attempt stamp, written AFTER apply (which leaves an unchanged queue untouched), keeps a
+# crash-looping act_runner from re-running a failing purge on every start: an unchanged queue is
+# retried at most every 10 minutes. The 300s budget, with the reaper and the workspace pass, fits the
+# unit's TimeoutStartSec=10min (tests/test-reclaim.sh asserts it).
+in_runner_start() {
+  local cg mainpid
+  cg="$(cat "$RECLAIM_CGROUP_FILE" 2>/dev/null)" || return 1
+  case "$cg" in
+    *"/$SERVICE"|*"/$SERVICE"$'\n'*|*"/$SERVICE/.control"|*"/$SERVICE/.control"$'\n'*) ;;
+    *) return 1 ;;
+  esac
+  mainpid="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)" || return 1
+  [ "$mainpid" = 0 ]   # belt and braces: inside ExecStartPre there is no main process yet
+}
+
+apply_cache_purges() {
+  [ -s "$CACHE_PURGE_QUEUE" ] && [ -x "$CACHE_VERIFY_BIN" ] || return 0
+  in_runner_start || return 0
+  pgrep -f 'Runner\.Worker' >/dev/null 2>&1 && return 0
+  if [ -e "$CACHE_PURGE_ATTEMPT" ] && ! [ "$CACHE_PURGE_QUEUE" -nt "$CACHE_PURGE_ATTEMPT" ] \
+     && [ $(( $(date +%s) - $(stat -c %Y "$CACHE_PURGE_ATTEMPT" 2>/dev/null || echo 0) )) -lt 600 ]; then
+    return 0
+  fi
+  timeout -k 5 300 "$CACHE_VERIFY_BIN" apply 2>&1 | logger -t gitea-runner-cache-purge 2>/dev/null || true
+  mkdir -p "$(dirname "$CACHE_PURGE_ATTEMPT")" 2>/dev/null; touch "$CACHE_PURGE_ATTEMPT" 2>/dev/null || true
+}
+
 main() {
   local status=ok foreign=0 cleaned=0 ws
   run_reaper
+  apply_cache_purges
   if daemon_busy; then
     status=busy
     log "skip: gitea job in flight (daemon has child processes)"

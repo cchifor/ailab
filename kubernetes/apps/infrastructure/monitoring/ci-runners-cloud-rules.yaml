@@ -112,6 +112,75 @@ spec:
             description: >-
               See CIRunnerBuildkitHealRunnerHeld: the heal stopped gitea-act-runner on
               {{ $labels.nodename }} and every tick's start has not brought it back.
+        # ---- shared-cache integrity + dead root filesystem, host-gated (see the CIRunner* twins in
+        # ci-runners-rules.yaml). The cloud hosts boot daily and a missed 04:30 run catches up at boot
+        # (Persistent=true + up to 2h random delay), so the beacon-missing wait is 6h after 4h of uptime.
+        - alert: CloudCIRunnerCacheCorruptPending
+          expr: >-
+            max by (instance, nodename, cloud_host, cache) (
+              gitea_runner_cache_corrupt_pending{job="ci-runner-cloud"}
+            ) > 0 and on (cloud_host) cloud_host:up == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} has corrupt {{ $labels.cache }} cache entries not yet purged"
+            description: >-
+              See CIRunnerCacheCorruptPending. {{ $labels.nodename }} on {{ $labels.cloud_host }} still queues
+              corrupt {{ $labels.cache }} cache entries; corruption on a cloud runner points at its host.
+        - alert: CloudCIRunnerCacheVerifyBeaconMissing
+          expr: >-
+            (
+              up{job="ci-runner-cloud"} == 1
+                unless on (instance) gitea_runner_cache_verify_last_run_seconds{job="ci-runner-cloud"}
+            ) and on (instance) (time() - node_boot_time_seconds{job="ci-runner-cloud"}) > 14400
+              and on (cloud_host) cloud_host:up == 1
+          for: 6h
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} has never published a cache-verify beacon"
+            description: >-
+              See CIRunnerCacheVerifyBeaconMissing. {{ $labels.nodename }} has been up for hours without a
+              gitea_runner_cache_verify_last_run_seconds series.
+        - alert: CloudCIRunnerCacheVerifyStale
+          expr: >-
+            (time() - gitea_runner_cache_verify_last_run_seconds{job="ci-runner-cloud"}) > 259200
+              and on (instance) up{job="ci-runner-cloud"} == 1
+              and on (instance) (time() - node_boot_time_seconds{job="ci-runner-cloud"}) > 14400
+              and on (cloud_host) cloud_host:up == 1
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} cache verify has not run for over 3 days"
+            description: >-
+              See CIRunnerCacheVerifyStale. Gated on 4h of uptime, so a cluster left off over a weekend does
+              not fire on Monday morning.
+        - alert: CloudCIRunnerRootFilesystemFailed
+          expr: >-
+            (
+              node_textfile_scrape_error{job="ci-runner-cloud"} == 1
+                unless on (instance) node_textfile_mtime_seconds{job="ci-runner-cloud"}
+            ) and on (cloud_host) cloud_host:up == 1
+          for: 3m
+          labels: { severity: critical }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} cannot read any node_exporter textfile (root filesystem failed?)"
+            description: >-
+              See CIRunnerRootFilesystemFailed. Confirm through the guest agent on {{ $labels.cloud_host }}
+              (`pvesh get .../agent/file-read --file /sys/fs/ext4/sda1/errors_count`), pause the runner in
+              Gitea, then `qm reset` it.
+        - alert: CloudCIRunnerTextfileBeaconUnreadable
+          expr: >-
+            (
+              node_textfile_scrape_error{job="ci-runner-cloud"} == 1
+                and on (instance) node_textfile_mtime_seconds{job="ci-runner-cloud"}
+            ) and on (cloud_host) cloud_host:up == 1
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} has a textfile beacon node_exporter cannot parse"
+            description: >-
+              See CIRunnerTextfileBeaconUnreadable: one malformed beacon on {{ $labels.nodename }}, the
+              other textfiles still parse.
         # INHIBITION SOURCE ONLY — Alertmanager routes it to "null" and uses it to mute the chart's
         # generic TargetDown for the three cloudlab scrape jobs (cloud-node, ci-runner-cloud, cloud-pve;
         # kube-prometheus-stack.yaml inhibit_rules). The rules in this file are host-gated, but

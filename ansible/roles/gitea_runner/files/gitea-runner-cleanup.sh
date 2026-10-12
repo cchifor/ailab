@@ -119,6 +119,10 @@ HEAL_LOOKBACK_SEC="${GITEA_CLEANUP_HEAL_LOOKBACK_SEC:-604800}"
 # heal is not retried at all: it stays on the alert for a human.
 HEAL_COOLDOWN_SEC="${GITEA_CLEANUP_HEAL_COOLDOWN_SEC:-21600}"
 HEAL_STATE="${GITEA_CLEANUP_HEAL_STATE:-/var/lib/gitea-runner-cleanup/buildkit-heal.state}"
+# Shared-cache purge queue written by gitea-runner-cache-verify.py (nightly, as runner).
+CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
+CACHE_PURGE_STAMP="${GITEA_CLEANUP_CACHE_PURGE_STAMP:-$(dirname "$HEAL_STATE")/cache-purge-restart.stamp}"
+CACHE_PURGE_RESTART_MIN_SEC="${GITEA_CLEANUP_CACHE_PURGE_RESTART_MIN_SEC:-21600}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -563,6 +567,34 @@ else
     write_beacon "busy_skip 0" "pressure_defer 0" "midjob_prune 0" "last_run_seconds $(date +%s)" \
       "disk_used_percent $(disk_pct)"
     exit 0
+  fi
+fi
+
+# ---- shared-cache purge queue ------------------------------------------------------------------
+# Corrupt npm/uv cache entries are purged only inside act_runner's start: the reclaim applies the queue
+# only as the unit's ExecStartPre, and systemd starts the daemon only after it exits. An idle check is
+# not a barrier - a job can start between the check and a purge, and a uv install hardlinks from the
+# archive being removed - so this never purges itself. In a CONFIRMED idle gap it queues a restart of
+# act_runner instead (--no-block), whose ExecStartPre purges. If a job slips in first, the stop drains it
+# (shutdown_timeout) before the purge runs. At most one such restart per CACHE_PURGE_RESTART_MIN_SEC
+# (6h), so a purge that keeps failing cannot restart the runner every 15 minutes; until it succeeds,
+# gitea_runner_cache_corrupt_pending stays up and alerts.
+# Only a queue the applier will accept: a regular file owned like its (runner-owned) state dir. A
+# root-owned one, say from a manual `sudo ... verify`, is refused at every restart, so restarting for
+# it would loop silently every 6h.
+if [ -s "$CACHE_PURGE_QUEUE" ] && { [ -L "$CACHE_PURGE_QUEUE" ] || [ ! -f "$CACHE_PURGE_QUEUE" ] \
+     || [ "$(stat -c %u "$CACHE_PURGE_QUEUE" 2>/dev/null)" != "$(stat -c %u "$(dirname "$CACHE_PURGE_QUEUE")" 2>/dev/null)" ]; }; then
+  log "cache purge queue $CACHE_PURGE_QUEUE is not a regular file owned by its state dir's owner: ignored (fix its owner)"
+elif [ -s "$CACHE_PURGE_QUEUE" ]; then
+  last="$(stat -c %Y "$CACHE_PURGE_STAMP" 2>/dev/null || echo 0)"
+  if is_num "$last" && [ $(( $(date +%s) - last )) -lt "$CACHE_PURGE_RESTART_MIN_SEC" ]; then
+    log "cache purge pending: a restart for it was queued $(( ($(date +%s) - last) / 60 ))m ago; not again yet"
+  elif idle_confirmed; then
+    mkdir -p "$(dirname "$CACHE_PURGE_STAMP")" 2>/dev/null; touch "$CACHE_PURGE_STAMP" 2>/dev/null || true
+    log "cache purge: queueing a restart of $SERVICE in an idle gap; its ExecStartPre applies the queue with the daemon down"
+    systemctl restart --no-block "$SERVICE" >/dev/null 2>&1 || log "cache purge: FAILED to queue a restart of $SERVICE"
+  else
+    log "cache purge deferred: a job is running (the queue is kept)"
   fi
 fi
 

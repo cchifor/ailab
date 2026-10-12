@@ -1,0 +1,24 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Nightly shared-cache integrity check (see the script header).
+# The hashing runs as the runner user: cache paths and RECORD contents are job-controlled, so it must not
+# run as root. Only the beacon publish (ExecStartPost=+) is root, because node_exporter's textfile
+# directory is root-owned; it reads the verifier's result and validates every field.
+[Unit]
+Description=Verify the runner's npm/uv caches against their own hashes
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User={{ gitea_runner_user }}
+Group={{ gitea_runner_group }}
+EnvironmentFile=-{{ gitea_runner_cache_verify_env }}
+ExecStart={{ gitea_runner_cache_verify_bin }} verify
+ExecStartPost=+{{ gitea_runner_cache_verify_bin }} publish
+# Throttled: it reads every cache file once, possibly during the CI day (a missed run catches up at boot).
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=100%
+IOWeight=10
+IOReadBandwidthMax=/ {{ gitea_runner_cache_verify_read_bandwidth }}
+# Reading every cache file once fills the page cache; cap it so the read cannot squeeze a running job.
+MemoryHigh={{ gitea_runner_cache_verify_memory_high }}
+TimeoutStartSec=2h

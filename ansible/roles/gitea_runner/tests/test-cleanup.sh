@@ -188,6 +188,13 @@ EOF
 
 # logger: keep the script's log lines (the last argument) in $WORK/logger.log, so a case can assert WHICH
 # record a heal acted on, not only that one ran.
+# Shared-cache purge applier: records "cacheverify <args>" into the same call log.
+cat >"$BIN/cacheverify" <<EOF
+#!/usr/bin/env bash
+echo "cacheverify \$*" >> "$CALLS"
+EOF
+chmod +x "$BIN/cacheverify"
+
 cat >"$BIN/logger" <<EOF
 #!/usr/bin/env bash
 for a in "\$@"; do last="\$a"; done
@@ -210,6 +217,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
     MOCK_MAINPID="${MOCK_MAINPID:-4242}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
+    GITEA_CACHE_PURGE_QUEUE="${QUEUEFILE:-/nonexistent/queue}" GITEA_CLEANUP_CACHE_PURGE_STAMP="$WORK/purge.stamp" \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
     GITEA_CLEANUP_IDLE_WAIT_SEC="${IDLEWAIT:-2}" GITEA_CLEANUP_IDLE_POLL_SEC=1 \
@@ -947,6 +955,26 @@ if [ -n "$role_envfile" ] && [ "$role_envfile" = "$script_envfile" ]; then
 else
   bad "M: env-file path DRIFT — the script reads '$script_envfile' but the role writes '$role_envfile'; every knob would silently fall back to its built-in default"
 fi
+
+echo "[R] a non-empty purge queue makes the cleanup RESTART act_runner in a confirmed idle gap (never purge itself)"
+QUEUEFILE="$WORK/purge.queue"
+echo "uv AAAAAAAAAAAAAAAAAAAA" > "$QUEUEFILE"
+rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
+assert_has "systemctl restart --no-block gitea-act-runner.service" "R1: idle + queue -> act_runner restart queued (its ExecStartPre purges)"
+if grep -q 'cacheverify' "$CALLS"; then bad "R1: the cleanup must never run the applier itself"; else ok "R1: the cleanup never purges itself"; fi
+QUEUEFILE="$QUEUEFILE" run_case 0 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R2: a second restart within 6h"; else ok "R2: restart rate-limited to one per 6h"; fi
+rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 1 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R3: busy must not restart"; else ok "R3: busy -> deferred, no restart"; fi
+: > "$QUEUEFILE"; rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R4: an empty queue must not restart"; else ok "R4: empty queue -> nothing"; fi
+# A queue the applier would refuse (here a symlink; in life a root-owned file) must not restart act_runner
+# every 6h for nothing.
+echo "uv AAAAAAAAAAAAAAAAAAAA" > "$WORK/real.queue"; rm -f "$QUEUEFILE"; ln -s "$WORK/real.queue" "$QUEUEFILE"
+rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R5: a refused (symlinked) queue must not restart"; else ok "R5: a queue the applier would refuse -> no restart"; fi
+rm -f "$QUEUEFILE" "$WORK/real.queue"
+unset QUEUEFILE
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
