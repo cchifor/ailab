@@ -1656,6 +1656,23 @@ class TextifyNulSectionsTest(unittest.TestCase):
         self.assertIn("--- a/gone.ts\n+++ /dev/null\n", diff)
         self.assertIn("-x\u2400y\n", diff)
 
+    def test_line_boundaries_are_git_s_lf_ones_and_an_unterminated_last_line_is_marked(self):
+        """codex on #1276: only LF ends a line (a bare CR, a form feed or U+2028 is content, as for git), and a last
+        line without one gets git's own marker instead of a fabricated newline."""
+        old = b"a\x00\ny\rz\x0cw\xe2\x80\xa8v\nlast"
+        new = b"a\x00\ny\rz\x0cw\xe2\x80\xa8v2\nlast2"
+        fetch, _ = self.blobs({("a.ts", "base"): old, ("a.ts", "head"): new})
+        raw2, rendered = self.m.textify_nul_sections(_binsec("a.ts"), fetch)
+        self.assertEqual(["a.ts"], rendered)
+        diff = self.m.plan_coverage(raw2)[0]
+        # difflib groups the removals before the additions.
+        self.assertIn("-y\rz\x0cw\u2028v\n-last\n\\ No newline at end of file\n"
+                      "+y\rz\x0cw\u2028v2\n+last2\n\\ No newline at end of file\n", diff)
+        # The hunk coordinates count git's lines: three on each side.
+        self.assertIn("@@ -1,3 +1,3 @@\n", diff)
+        # The line budget counts the same lines difflib gets: CR-separated content is one line.
+        self.assertEqual(1, len(self.m._lf_lines("a\rb\rc")))
+
     def test_a_change_the_normalisation_erases_keeps_the_marker(self):
         """CRLF to LF only (or a NUL for a NUL): an empty rendered diff would read as "nothing changed" and be counted
         as reviewed, so the marker and the cap stay."""

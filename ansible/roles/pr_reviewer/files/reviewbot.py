@@ -764,7 +764,14 @@ def _textify(blob):
         text = bytes(blob).replace(b"\x00", NUL_SHOWN.encode()).replace(b"\r\n", b"\n").decode("utf-8")
     except UnicodeDecodeError:
         return None
-    return text if text.count("\n") <= TEXTIFY_MAX_LINES else None
+    return text if len(_lf_lines(text)) <= TEXTIFY_MAX_LINES else None
+
+
+def _lf_lines(text):
+    """The lines git sees: split on LF only (a bare CR, a form feed or U+2028 is content, as for git), each keeping its
+    LF, and a last line without one kept as it is."""
+    parts = text.split("\n")
+    return [part + "\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
 
 
 def textify_nul_sections(raw, fetch_blob):
@@ -792,10 +799,11 @@ def textify_nul_sections(raw, fetch_blob):
             out.append(data)
             continue
         budget -= size
-        lines = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+        lines = difflib.unified_diff(_lf_lines(old), _lf_lines(new),
                                      "/dev/null" if a in NULL_PATHS else f"a/{a}",
                                      "/dev/null" if b in NULL_PATHS else f"b/{b}", n=3)
-        body = "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+        # A line without its LF is the file's unterminated last line: git's own marker follows it, as in any diff.
+        body = "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines)
         out.append(data[:marker.start()] + body.encode("utf-8"))
         rendered.append(a if b in NULL_PATHS else b)
     return b"".join(out), rendered
