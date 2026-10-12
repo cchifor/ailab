@@ -1004,18 +1004,25 @@ forward again, re-pin `fallback-codex`'s targets to `*`. The same caveat applied
   send a keepalive every 5 s. A watchdog exits the process at `ROUTER_DRAIN_MS` + 15 s.
 
 **Configuration.** `router.yaml` sets `ROUTER_DRAIN_MS: "20000"`, the default, written out so it is visible next to the
-grace period. The router's watchdog exits at `ROUTER_DRAIN_MS` + 15 s (35 s), which must stay below
+grace period. There is no `preStop` delay, on purpose: the router closes its listener at SIGTERM while Kubernetes is
+still removing its endpoint, so for a moment the edge's connections to it are refused. With one replica (`Recreate`)
+there is no other pod to send them to either way, and Caddy retries a refused connection (a dial failure) every 250 ms
+within its hold, so such a request waits for the next pod instead of failing. The router's watchdog exits at `ROUTER_DRAIN_MS` + 15 s (35 s), which must stay below
 `terminationGracePeriodSeconds` (60). The router refuses to start with a value above 40000.
 
 **First start.** The schema step that runs at every start creates index `trajectory_started` on
 `trajectories(started_at)` once. On 2026-10-11 the journal held 41,195 rows (335 MB). The same build over a synthetic
-journal of that size (41,195 rows, 361 MB) took 204 ms on a local disk; on the iSCSI volume with a cold cache, expect
-seconds at most, inside the edge's 85 s hold. `user_version` stays 7.
+journal of that size (41,195 rows, 361 MB) took 204 ms on a local disk. On the volume the build is bound by reading
+the journal: 405 MB on 2026-10-12, read from the page cache in 0.06 s, but a rollout detaches and re-attaches the
+volume, so the first start reads it cold, about 2-4 s at an iSCSI rate of 100-200 MB/s. `user_version` stays 7.
 
 **The first rollout still uses the old shutdown.** Kubernetes stops the old pod, which has no drain: it waits up to
-60 s on open streams and is then killed, as in earlier releases (a gap of about 76–79 s). The edge holds new requests
-meanwhile, but the streams the old pod held are lost: expect those rows as **Interrupted by restart** after the new pod
-starts. To verify the drain itself, run one deliberate `kubectl --context admin@ai -n llm-router rollout restart
+60 s on open streams and is then killed, as in earlier releases (a gap of about 76–79 s), and the new pod's first start
+adds the index build (a few seconds cold, above): about 80–83 s, close to the edge's 85 s hold. The edge holds new
+requests meanwhile, but the streams the old pod held are lost: expect those rows as **Interrupted by restart** after the
+new pod starts. If the gap does pass the hold, a request held for the full 85 s gets a 502 from the edge; Codex retries
+it (request retries, with backoff) and the retry reaches the new pod, so a turn shows a retry, not a failure. Later
+rollouts drain, so their gap is about 45 s at most. To verify the drain itself, run one deliberate `kubectl --context admin@ai -n llm-router rollout restart
 deploy/llm-router` once the new pod is up. Expect the following:
 - the pod log shows `SIGTERM, draining`, then `drained in … ms` (or `… request(s) still running: ending them (SHUTDOWN)`);
 - the journal for that window has no new **Interrupted by restart** rows, only `cancelled` / `SHUTDOWN` for streams
