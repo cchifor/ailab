@@ -48,6 +48,12 @@ cat >"$BIN/pgrep" <<EOF
 if [ "\$1" = "-f" ] && [ "\$2" = 'Runner\.Worker' ]; then [ "\${MOCK_GH_WORKER:-0}" = 1 ]; exit; fi
 exec "$REAL_PGREP" "\$@"
 EOF
+# getent: the runner user's passwd home is $WORK/pwhome, so the reclaim's DEFAULT ~/.docker derivation
+# can be exercised without touching the real home of whoever runs this suite.
+cat >"$BIN/getent" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = passwd ] && echo "\$2:x:1000:1000::$WORK/pwhome:/bin/bash"
+EOF
 chmod +x "$BIN"/*
 
 # ---- fixture: many reused workspaces, like a runner after weeks of agentforge ephemeral repos ----
@@ -69,7 +75,7 @@ run_reclaim() {
     GITEA_RUNNER_USER="$(id -un)" GITEA_RUNNER_GROUP="$(id -gn 2>/dev/null || id -g)" \
     GITEA_RUNNER_CONFIG_DIR="$WORK/cfg" \
     GITEA_RECLAIM_BEACON="${BEACON_OVERRIDE:-0}" GITEA_RECLAIM_TEXTFILE_DIR="${TF_OVERRIDE:-/nonexistent}" \
-    GITEA_RECLAIM_DOCKER_CFG="${DOCKERCFG_OVERRIDE:-$WORK/home/.docker}" \
+    GITEA_RECLAIM_DOCKER_CFG="${DOCKERCFG_OVERRIDE-$WORK/home/.docker}" \
     PATH="$BIN:$PATH" bash "$SCRIPT" "$@" >/dev/null 2>&1
 }
 
@@ -147,8 +153,19 @@ mkdir -p "$WORK/elsewhere"; rm -rf "$WORK/home2"; mkdir -p "$WORK/home2"; ln -s 
 DOCKERCFG_OVERRIDE="$WORK/home2/.docker" run_reclaim
 [ ! -L "$WORK/home2/.docker" ] && [ -d "$WORK/elsewhere" ] && ok "G: a symlinked ~/.docker is dropped, its target untouched" \
   || bad "G: symlinked ~/.docker not dropped"
-: > "$CALLS"; MOCK_MAINPID=1 BEACON_OVERRIDE=1 TF_OVERRIDE="$WORK/tf2" run_reclaim; mkdir -p "$WORK/tf2"
-[ ! -e "$WORK/tf2/gitea_runner_docker_config.prom" ] && ok "G: no heal while a job runs" || bad "G: healed under a running job"
+# Busy (MainPID 1 has children): the beacon dir EXISTS and ~/.docker is a symlink, so a heal that ran
+# anyway would both write the beacon and drop the link. Neither may happen.
+mkdir -p "$WORK/tf2" "$WORK/elsewhere3"; rm -rf "$WORK/home3"; mkdir -p "$WORK/home3"; ln -s "$WORK/elsewhere3" "$WORK/home3/.docker"
+: > "$CALLS"; MOCK_MAINPID=1 BEACON_OVERRIDE=1 TF_OVERRIDE="$WORK/tf2" DOCKERCFG_OVERRIDE="$WORK/home3/.docker" run_reclaim
+[ ! -e "$WORK/tf2/gitea_runner_docker_config.prom" ] && [ -L "$WORK/home3/.docker" ] \
+  && ok "G: no heal while a job runs (no beacon, symlink untouched)" || bad "G: healed under a running job"
+# The DEFAULT path: no override, so ~/.docker comes from the (mocked) passwd home $WORK/pwhome.
+mkdir -p "$WORK/pwhome/.docker" "$WORK/tf3"; : > "$WORK/tf3/runner_health.prom"
+: > "$CALLS"; BEACON_OVERRIDE=1 TF_OVERRIDE="$WORK/tf3" DOCKERCFG_OVERRIDE="" run_reclaim
+grep -q '^runner_docker_config_root_owned 0$' "$WORK/tf3/gitea_runner_docker_config.prom" 2>/dev/null \
+  && ok "G: default ~/.docker from the passwd home -> healed + beacon" || bad "G: the default DOCKER_CFG path does not heal/publish"
+[ ! -e "$WORK/tf3/runner_health.prom" ] && ok "G: the retired agent's runner_health.prom (same gauge) is removed" \
+  || bad "G: stale runner_health.prom left (duplicate series)"
 
 echo "[F] act_runner's start budget covers the reclaim's worst case at ExecStartPre"
 UNIT_T="$(dirname "$SCRIPT")/../templates/gitea-act-runner.service.j2"

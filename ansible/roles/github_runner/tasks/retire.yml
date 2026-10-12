@@ -11,12 +11,22 @@
 # The ~/.docker ownership self-heal and its runner_docker_config_root_owned beacon moved to
 # gitea-runner-reclaim.sh, so runner_health.prom is deleted here. Every task is idempotent and a no-op
 # on a host that never had the agent. To re-enable, see group_vars/github_runners.yml.
+- name: Read whether the GitHub agent unit exists
+  ansible.builtin.command: systemctl show -p LoadState --value {{ github_runner_service }}
+  register: github_runner_unit_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Only an EXISTING unit is stopped, and a stop that fails FAILS the play: nothing below may delete the
+# agent's files while its process may still be running. An absent unit (the cloud runners, or a
+# re-run after retirement) is skipped, not tolerated as an error.
 - name: Stop and disable the GitHub agent service
   ansible.builtin.systemd:
     name: "{{ github_runner_service }}"
     state: stopped
     enabled: false
-  failed_when: false
+  when: (github_runner_unit_state.stdout | default('') | trim) not in ['', 'not-found']
 
 - name: Remove the agent's unit, drop-ins, scripts, App key, install dir and beacon
   ansible.builtin.file:
@@ -26,6 +36,7 @@
     - "/etc/systemd/system/{{ github_runner_service }}"
     - "/etc/systemd/system/{{ github_runner_service }}.d"
     - "{{ github_runner_home }}/ephemeral-runner.sh"
+    - "{{ github_runner_dir }}/hooks/job-started.sh" # the job-started hook (also inside the dir below)
     - /usr/local/bin/runner-reclaim.sh
     - /etc/runner
     - "{{ github_runner_dir }}"

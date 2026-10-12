@@ -54,7 +54,10 @@ CACHE_VERIFY_BIN="${GITEA_CACHE_VERIFY_BIN:-/usr/local/bin/gitea-runner-cache-ve
 CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
 CACHE_PURGE_ATTEMPT="${GITEA_CACHE_PURGE_ATTEMPT_STAMP:-/var/lib/gitea-runner-reclaim/cache-purge.attempt}"
 RECLAIM_CGROUP_FILE="${GITEA_RECLAIM_CGROUP_FILE:-/proc/self/cgroup}"   # tests: a fixture
-DOCKER_CFG="${GITEA_RECLAIM_DOCKER_CFG:-$(getent passwd "$RUNNER_USER" 2>/dev/null | cut -d: -f6)/.docker}"
+# ~/.docker of the runner user: its passwd home, else /home/<user> (a failed lookup must not turn into
+# "/.docker", which the heal would refuse, silently leaving CIRunnerDockerConfigRootOwned blind).
+RUNNER_HOME="$(getent passwd "$RUNNER_USER" 2>/dev/null | cut -d: -f6)"
+DOCKER_CFG="${GITEA_RECLAIM_DOCKER_CFG:-${RUNNER_HOME:-/home/$RUNNER_USER}/.docker}"
 
 log() { logger -t gitea-runner-reclaim -- "$*" 2>/dev/null || true; }
 
@@ -216,6 +219,10 @@ heal_docker_config() {
   [ -L "$DOCKER_CFG" ] && rm -f -- "$DOCKER_CFG"
   [ -d "$DOCKER_CFG" ] && chown -R -- "$RUNNER_USER:$RUNNER_GROUP" "$DOCKER_CFG" >/dev/null 2>&1
   [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
+  # The retired GitHub agent's runner_health.prom carried the same gauge; node_exporter rejects a
+  # series duplicated across files (the whole textfile scrape errors). Drop it here, but only while
+  # the agent is really gone, so the deploy order of the two roles cannot matter.
+  [ -e /usr/local/bin/runner-reclaim.sh ] || rm -f "$TEXTFILE_DIR/runner_health.prom" 2>/dev/null
   root_owned=$(find "$DOCKER_CFG" -user root -print -quit 2>/dev/null | grep -c . || true)
   tmp="$TEXTFILE_DIR/gitea_runner_docker_config.prom.$$"
   {
