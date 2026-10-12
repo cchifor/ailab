@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 1a7bb7e85d4053daef8771df18fc10d047c791e6
-        chifor.me/release: router-0.1.0-20261011-live-status
+        chifor.me/source-commit: 9163faa9c5390a0dd1c31b7e52c8950ffa1e82d6
+        chifor.me/release: router-0.1.0-20261012-followups
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -118,10 +118,10 @@ spec:
         fsGroup: 1000 # makes the PVC root group-writable for uid 1000
         seccompProfile:
           type: RuntimeDefault
-      terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 15 s watchdog) fits inside
+      terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          image: registry.chifor.me/llm-router/router@sha256:10c0828a04a12ae64205184aea0c74892f5d62a0c00513eb5c574962fe22117a
+          image: registry.chifor.me/llm-router/router@sha256:562f48f323a94be8dbe3d983cf2838892bf954dd30de503f8f10cefad9e01f16
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -138,7 +138,7 @@ spec:
               value: /data/router.sqlite
             - name: ROUTER_WEB_ROOT
               value: /app/dist/web
-            # SIGTERM drain: in-flight requests get this long, the watchdog exits at + 15 s; keep that
+            # SIGTERM drain: in-flight requests get this long, the watchdog exits at + 17 s; keep that
             # below terminationGracePeriodSeconds (60). The router refuses values above 40000.
             - name: ROUTER_DRAIN_MS
               value: "20000"
