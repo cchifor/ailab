@@ -48,7 +48,7 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
 | `.37` | 🔒 **cloudlab** CI runner VM `cloud-ci-14` (cloud1, 12 GiB / 6 vCPU; 2026-10-12) — was Talos env-node `talos-env-node-1` (4401), retired with the test-env pool (ADR 0037) | 6114 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.38` | 🔒 **cloudlab** Windows 11 Pro VM `constantin-win-01` (renamed from `cloud-win-1` 2026-09-30; cloud3; RDP + key-only SSH; admin credential `af/estate/cloudlab-win11`; allocated 2026-09-30). The guest sets the address itself — no cloud-init — from `guest.json` | 6201 | `../cloudlab/kubernetes/infra/windows-vm/guest.json` |
-| `.39` | 🔒 **cloudlab** CI runner VM `cloud-ci-15` (cloud1, 12 GiB / 6 vCPU; 2026-10-12) — was reserved for `talos-env-node-2` (#835, never built) | 6115 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.39` | 🔒 **cloudlab** CI runner VM `cloud-ci-15` (cloud1, 12 GiB / 6 vCPU; 2026-10-12) — was reserved for `talos-env-node-2` (#835, never built), released with the test-env pool (ADR 0037) | 6115 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
 | `.44` | 🔒 **cloudlab** CI runner VM `cloud-ci-10` (cloud2, second; 2026-10-04) — was AI LLM LXC `ai-llm-1` (5001), destroyed 2026-10-02 | 6110 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |

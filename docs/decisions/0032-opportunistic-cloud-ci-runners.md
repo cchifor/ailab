@@ -168,7 +168,14 @@ cloud1's was 72.6 GiB.
 2. **cloud1 runs five runners.** cloud-ci-1/2 stay at 24 GiB / 8 vCPU. cloud-ci-6 (.29, rebuilt on a
    fresh disk), cloud-ci-14 (.37) and cloud-ci-15 (.39) run at **12 GiB / 6 vCPU**, the size of the
    smaller ailab runners, which run the same jobs under the same 10 GiB job cap.
-   - Expected cloud1 low: ~36 GiB, so it passes the 30 GiB gate.
+   - Expected cloud1 low: 72.6 - 3 x 12 = **~36.6 GiB**, which passes the 30 GiB gate by ~6 GiB.
+   - That assumes a 12 GiB guest costs its host ~its full allocation, as the 24 GiB ones were
+     measured to. It is not yet measured at 12 GiB; the two-day gate below checks it.
+   - vCPUs: 2 x 8 + 3 x 6 = **34 on 32 host threads**, a slight oversubscription.
+     - Measured runner CPU is ~4.4 vCPU at p99 (this ADR), so five runners need ~22 threads at
+       their p99.
+     - The 10 GiB job cap keeps the jobs themselves bounded.
+     - Hence the 75 % CPU gate and the job-duration check below.
    - Disks go on `local-nvme`.
    - Each new VM's RAM is scanned before it takes a job, and it gets a short canary (segfaults, EXT4
      errors, failure rate) before it counts as in service.
