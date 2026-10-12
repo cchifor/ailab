@@ -434,11 +434,45 @@ def container_view(c):
     }
 
 
+def _is(x, t):
+    return isinstance(x, t)
+
+
+def valid_container(c):
+    st, cf, ns = c.get("State"), c.get("Config"), c.get("NetworkSettings")
+    return (_is(c.get("Id"), str) and _is(c.get("Name"), str) and _is(c.get("Created"), str)
+            and _is(st, dict) and _is(st.get("StartedAt"), str) and _is(cf, dict)
+            and _is(cf.get("Labels") or {}, dict) and _is(c.get("Mounts"), list)
+            and _is(ns, dict) and _is(ns.get("Networks"), dict))
+
+
+def valid_network(n):
+    # Containers is the reference set: a network without it must never read as unreferenced.
+    return (_is(n.get("Id"), str) and _is(n.get("Name"), str) and _is(n.get("Created"), str)
+            and _is(n.get("Labels"), dict) and _is(n.get("Containers"), dict))
+
+
+def valid_volume(v):
+    # Docker reports Labels as null for a volume without labels (seen on Docker 29.8.1).
+    return (_is(v.get("Name"), str) and _is(v.get("CreatedAt"), str)
+            and (v.get("Labels") is None or _is(v.get("Labels"), dict)))
+
+
 def docker_snapshot():
-    containers = [container_view(c) for c in inventory("container")]
+    """All three inventories, each object structurally validated; anything missing or malformed raises
+    Incomplete, so a partial record can never read as 'unreferenced' (the shapes are those Docker 29.8.1
+    returns on these hosts: networks always carry Containers and Labels, volumes may have null Labels)."""
+    raw_c, nets, vols = inventory("container"), inventory("network"), inventory("volume")
+    if not all(isinstance(c, dict) and valid_container(c) for c in raw_c):
+        raise Incomplete("a container record is incomplete")
+    if not all(isinstance(n, dict) and valid_network(n) for n in nets):
+        raise Incomplete("a network record is incomplete")
+    if not all(isinstance(v, dict) and valid_volume(v) for v in vols):
+        raise Incomplete("a volume record is incomplete")
+    containers = [container_view(c) for c in raw_c]
     if any(c["created"] is None or c["started"] is None for c in containers):
         raise Incomplete("a container timestamp did not parse")
-    return containers, inventory("network"), inventory("volume")
+    return containers, nets, vols
 
 
 def docker_candidates(e_epoch, b_epoch, snapshot):
@@ -470,7 +504,7 @@ def docker_candidates(e_epoch, b_epoch, snapshot):
             continue
         if created >= e_epoch or keep_by_label(labels) or n.get("Name") in used_nets or project in live_projects:
             continue
-        if set((n.get("Containers") or {}).keys()) - cand_ids:
+        if set(n["Containers"].keys()) - cand_ids:
             continue
         if not peers_none() and project not in gitea_projects:
             continue
@@ -739,8 +773,13 @@ def main():
         containers = None
         if any(w["kind"] != "process" for w in pending) and not over_deadline():
             try:
-                containers = snapshot[0] if snapshot is not None else [container_view(c) for c in inventory("container")]
-                if any(c["created"] is None or c["started"] is None for c in containers):
+                if snapshot is not None:
+                    containers = snapshot[0]
+                else:
+                    raw = inventory("container")
+                    containers = [container_view(c) for c in raw] if all(
+                        isinstance(c, dict) and valid_container(c) for c in raw) else None
+                if containers is not None and any(c["created"] is None or c["started"] is None for c in containers):
                     containers = None
             except Incomplete:
                 containers = None

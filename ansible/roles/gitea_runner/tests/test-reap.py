@@ -334,9 +334,33 @@ class DockerTests(Base):
         self.assertEqual(self.fx.would(), [])
         self.assertIn("gitea_runner_reap_docker_skipped 1", self.fx.prom())
 
+    def test_network_without_its_reference_set_fails_closed(self):
+        self.fx.docker(networks=[{"Id": "n1", "Name": "stale_default", "Created": iso(20_000),
+                                  "Labels": {"com.docker.compose.project": "stale"}}])   # no Containers
+        self.fx.run()
+        self.assertEqual(self.fx.would(), [])
+        self.assertIn("gitea_runner_reap_docker_skipped 1", self.fx.prom())
+
+    def test_malformed_volume_or_container_record_fails_closed(self):
+        for fx_kw in ({"volumes": [{"Name": "platform_x", "CreatedAt": 12345, "Labels": {"com.docker.compose.project": "p"}}]},
+                      {"containers": [{"Id": "c1", "Name": "/x", "Created": iso(100), "State": {}, "Config": {}, "Mounts": [],
+                                       "NetworkSettings": {"Networks": {}}}]}):
+            with self.subTest(**{k: "malformed" for k in fx_kw}):
+                (self.fx.root / "state.json").unlink(missing_ok=True)
+                self.fx.docker(**fx_kw)
+                self.fx.run()
+                self.assertEqual(self.fx.would(), [])
+                self.assertIn("gitea_runner_reap_docker_skipped 1", self.fx.prom())
+
+    def test_volume_with_null_labels_is_valid_and_kept(self):
+        self.fx.docker(volumes=[{"Name": "named_cache", "CreatedAt": iso(100), "Labels": None}])
+        self.fx.run()
+        self.assertEqual(self.fx.would(), [])
+        self.assertIn("gitea_runner_reap_docker_skipped 0", self.fx.prom())
+
     def test_missing_timestamps_are_never_ancient(self):
-        self.fx.docker(volumes=[{"Name": "noage", "Labels": {"com.docker.compose.project": "p"}}],
-                       networks=[{"Id": "n9", "Name": "noage_net", "Labels": {"com.docker.compose.project": "p"}, "Containers": {}}])
+        self.fx.docker(volumes=[{"Name": "noage", "CreatedAt": "", "Labels": {"com.docker.compose.project": "p"}}],
+                       networks=[{"Id": "n9", "Name": "noage_net", "Created": "garbage", "Labels": {"com.docker.compose.project": "p"}, "Containers": {}}])
         self.fx.run()
         self.assertEqual(self.fx.would(), [])
 
