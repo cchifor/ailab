@@ -28,6 +28,13 @@
     enabled: true
     daemon_reload: true
 
+# Picks up the hourly OnUnitActiveSec drop-in. Safe: the timer only runs systemd-tmpfiles --clean.
+- name: Restart systemd-tmpfiles-clean timer
+  ansible.builtin.systemd:
+    name: systemd-tmpfiles-clean.timer
+    state: restarted
+    daemon_reload: true
+
 # Re-reads /etc/systemd/resolved.conf.d/*.conf. Safe: does not touch the act_runner daemon or a job.
 - name: Restart systemd-resolved
   ansible.builtin.systemd:

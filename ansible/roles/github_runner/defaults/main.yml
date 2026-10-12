@@ -39,6 +39,14 @@ github_runner_dir: /home/runner/actions-runner
 # boot and every ephemeral cycle of a co-located GitHub agent and would otherwise remove it and then
 # prune the untagged image it exists to retain (docs/runbooks/dsh.md).
 github_runner_reclaim_keep_re: ""
+# A Gitea act_runner unit that shares this host's Docker daemon. When it is ENABLED or ACTIVE here, the reclaim
+# skips its whole docker block (containers, buildx builders, image/volume/network/builder prunes),
+# because that block runs at agent start with no idea whether a Gitea job is mid-flight and would
+# `docker rm -f` its stack. On such hosts gitea_runner's cleanup timer owns docker hygiene.
+# The rest of the reclaim still runs: journal vacuum, old _diag logs, the ~/.docker ownership repair and
+# its beacon (without the build-cache size, which comes from the skipped docker block).
+# Empty = no Gitea runner here; the ephemeral contract is unchanged.
+github_runner_reclaim_gitea_unit: gitea-act-runner.service
 github_runner_service: actions.runner.cchifor-platform.service
 
 # ---- guest swap (cchifor/platform#620: heavy e2e peaks spill to the VM's own disk, not OOM) ----

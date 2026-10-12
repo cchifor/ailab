@@ -1,0 +1,12 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Overrides /usr/lib/tmpfiles.d/tmp.conf BY NAME, so it
+# replaces that file rather than adding a second /tmp line (tmpfiles keeps the first line it parses for
+# a path and drops any duplicate). It is the vendor file re-rendered with ONE change: the age field of
+# its single /tmp line becomes {{ gitea_runner_tmp_age }}. Every other vendor line is kept as-is, and so
+# is the `D` type (the boot wipe). Rationale and the >job-timeout rule: gitea_runner_tmp_age in defaults.
+{% for line in gitea_runner_tmp_vendor_lines %}
+{% if line is match(gitea_runner_tmp_line_re) %}
+{{ line | regex_replace(gitea_runner_tmp_age_rewrite_re, '\\1 ' ~ gitea_runner_tmp_age ~ '\\3') }}
+{% else %}
+{{ line }}
+{% endif %}
+{% endfor %}

@@ -223,6 +223,79 @@
   notify: Restart systemd-resolved
   when: gitea_runner_enabled | bool
 
+# ── 4e. bounded /tmp (every job shares one /tmp; Ubuntu ages it at 30d) ─────
+# Ages, not a per-job wipe: see gitea_runner_tmp_age in defaults. `validate` runs systemd-tmpfiles under
+# --root=<a path that does not exist>: it parses every field (type, path, mode, user, group, age) and
+# applies nothing, and any bad field exits 65, so a broken file is never installed. NOT --prefix: that
+# skips a line before parsing its fields, so a bad age or user still exits 0 (measured on systemd 255).
+# Under --root only `root` and `-` resolve as users, which is all these files use. Nothing here
+# touches the act_runner daemon or a job.
+# The override REPLACES the vendor file, so it is rendered from it: every vendor line is carried over and
+# only the age of its single /tmp line changes. Read it, then refuse to proceed unless there is exactly
+# one /tmp line to re-age (a changed vendor file needs a human look, not a guess).
+- name: Read the vendor tmp.conf (the override keeps its other lines)
+  ansible.builtin.slurp:
+    src: /usr/lib/tmpfiles.d/tmp.conf
+  register: _gitea_runner_vendor_tmpconf
+  when: gitea_runner_tmp_manage | bool
+
+- name: Assert the vendor tmp.conf has exactly one /tmp line, and that the rewrite really re-ages it
+  ansible.builtin.assert:
+    that:
+      - (_vendor_lines | select('match', gitea_runner_tmp_line_re) | list | length) == 1
+      - (_vendor_lines | select('match', gitea_runner_tmp_line_re) | first
+         | regex_replace(gitea_runner_tmp_age_rewrite_re, '\\1 ' ~ gitea_runner_tmp_age ~ '\\3'))
+        is match('^\s*\S+\s+/tmp\s+\S+\s+\S+\s+\S+\s+' ~ gitea_runner_tmp_age ~ '(\s|$)')
+    fail_msg: >-
+      /usr/lib/tmpfiles.d/tmp.conf must have exactly one /tmp line, and gitea_runner_tmp_age_rewrite_re
+      must be able to re-age it to {{ gitea_runner_tmp_age }}. Found:
+      {{ _vendor_lines | select('match', gitea_runner_tmp_line_re) | list }}. The override re-renders
+      that file with one changed age; review the new vendor file before overriding it.
+  vars:
+    _vendor_lines: "{{ (_gitea_runner_vendor_tmpconf.content | b64decode).splitlines() }}"
+  when: gitea_runner_tmp_manage | bool
+
+- name: Override the vendor /tmp age (tmp.conf, by name, rendered from the vendor file)
+  ansible.builtin.template:
+    src: tmpfiles-tmp.conf.j2
+    dest: /etc/tmpfiles.d/tmp.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: systemd-tmpfiles --root=/nonexistent-ansible-validate --clean %s
+  vars:
+    gitea_runner_tmp_vendor_lines: "{{ (_gitea_runner_vendor_tmpconf.content | b64decode).splitlines() }}"
+  when: gitea_runner_tmp_manage | bool
+
+- name: Age the heavy per-job /tmp trees faster
+  ansible.builtin.template:
+    src: tmpfiles-gitea-runner.conf.j2
+    dest: /etc/tmpfiles.d/gitea-runner-tmp.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: systemd-tmpfiles --root=/nonexistent-ansible-validate --clean %s
+  when: gitea_runner_tmp_manage | bool
+
+- name: Ensure the systemd-tmpfiles-clean.timer drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/systemd-tmpfiles-clean.timer.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: gitea_runner_tmp_manage | bool
+
+- name: Apply the /tmp ages hourly instead of daily
+  ansible.builtin.template:
+    src: tmpfiles-clean.timer.override.j2
+    dest: /etc/systemd/system/systemd-tmpfiles-clean.timer.d/10-gitea-runner.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart systemd-tmpfiles-clean timer
+  when: gitea_runner_tmp_manage | bool
+
 # ── 5. systemd unit ──────────────────────────────────────────────────────────
 - name: Install the act_runner systemd unit
   ansible.builtin.template:
