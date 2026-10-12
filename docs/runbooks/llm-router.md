@@ -117,6 +117,46 @@ drain above 40000 ms (a 57 s watchdog).
 **How to check after a rollout:** read the router journal for the rollout window. There must be no `abandoned`
 entries; only `cancelled` / `SHUTDOWN` for streams the drain cut.
 
+**To restart the router** (for example to verify a drain), send its process SIGTERM inside the container:
+
+```sh
+# 1. PID 1 must be the router itself: this prints `node dist/apps/router/main.js`.
+kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sh -c 'tr "\0" " " < /proc/1/cmdline; echo'
+# 2. Watch the drain, then signal it.
+kubectl --context admin@ai -n llm-router logs -f deploy/llm-router -c router &
+kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sh -c 'kill -TERM 1'
+```
+
+- **If PID 1 is anything else** (a shell or an init wrapper in a future image), signal the node process's own PID
+  instead. Find it with its own exec, `kubectl ... exec deploy/llm-router -c router -- pgrep -f 'dist/apps/router/main[.]js'`;
+  the `[.]` keeps the pattern from matching a wrapping `sh -c` command line. Then run
+  `kubectl ... exec ... -- kill -TERM <pid>`. A wrapper that does not forward SIGTERM gives no drain and leaves the
+  container running, and nothing reports it. The log must show `SIGTERM, draining`. Checked 2026-10-12: PID 1 is node,
+  the image has `sh`, `kill` and `pgrep`, and that lookup prints `1`.
+- **What happens:** the router drains exactly as on any SIGTERM. Its watchdog bounds that at `ROUTER_DRAIN_MS` + 17 s.
+  Then it exits, and the kubelet restarts the container in the same pod (`restartPolicy: Always`, after a back-off of
+  about 10 s), with the same volume.
+- **What traffic sees:** the router closes its listener at SIGTERM, so new connections to the pod are refused from the
+  start, and the edge holds them (dial failures are retried for up to 85 s), as in a rollout.
+  - The pod stays in the Service until its readiness probe fails (`/ready`, 5 s × 3, so within about 15 s), while a
+    rollout removes it soon after SIGTERM. The endpoints therefore change later, but clients are held all the same.
+  - The edge's own health check marks the router down within about 6 s.
+  - Once the new process is ready, the probe passes and the endpoint returns.
+- **Probe events:** the liveness probe (`/health`, 10 s × 3) can fail during a long drain and log "will be restarted".
+  The kubelet's kill is then a second SIGTERM, which the drain ignores (`SIGTERM while draining: ignored`). Its SIGKILL
+  comes only after the 60 s grace, after the watchdog.
+- **What to check:** the pod's RESTARTS count goes up by one, and `kubectl logs --previous` shows the drained process.
+  The backgrounded `logs -f` ends when the drained container exits: run it again to follow the new process.
+  The Deployment does not change, so Flux has nothing to undo, and no second router can start.
+- **Not `kubectl rollout restart`:** it adds a `restartedAt` annotation to the pod template. Flux removes the
+  annotation at its next apply of `apps`, which restarts the router a second time. This was seen on 2026-10-12 at 07:42
+  and 08:51, about 10 minutes after each deliberate restart.
+- **Not `kubectl delete pod`:** the ReplicaSet starts a replacement at once, outside the `Recreate` strategy. On the
+  same node, that would run two routers on one SQLite volume while the old one drains.
+- **Not scaling to 0 and back:** if Flux re-applies `replicas: 1` while the old pod still drains, the same second
+  router starts.
+- This procedure had not been exercised yet when it was written (2026-10-12).
+
 **An edge rollout** lets open streams finish (Caddy `grace_period 90s`, `preStop` sleep 5, `terminationGracePeriodSeconds: 100`);
 new connections go to the other replica (`maxUnavailable: 0`, PDB `minAvailable: 1`). If you change the Caddyfile
 in ConfigMap `llm-router-edge-caddy`, bump the `chifor.me/caddyfile-revision` pod annotation in the same change, or the
@@ -1038,8 +1078,8 @@ adds the index build (a few seconds cold, above): about 80–83 s, close to the 
 requests meanwhile, but the streams the old pod held are lost: expect those rows as **Interrupted by restart** after the
 new pod starts. If the gap does pass the hold, a request held for the full 85 s gets a 502 from the edge; Codex retries
 it (request retries, with backoff) and the retry reaches the new pod, so a turn shows a retry, not a failure. Later
-rollouts drain, so their gap is about 45 s at most. To verify the drain itself, run one deliberate `kubectl --context admin@ai -n llm-router rollout restart
-deploy/llm-router` once the new pod is up. Expect the following:
+rollouts drain, so their gap is about 45 s at most. To verify the drain itself, restart the router once the new pod is up (see "To restart the router" above; the
+`rollout restart` used on 2026-10-12 caused a second restart when Flux next applied). Expect the following:
 - the pod log shows `SIGTERM, draining`, then `drained in … ms` (or `… request(s) still running: ending them (SHUTDOWN)`);
 - the journal for that window has no new **Interrupted by restart** rows, only `cancelled` / `SHUTDOWN` for streams
   that outlived the 20 s;
@@ -1096,8 +1136,8 @@ one more index update per journal write. A rollback is itself a rollout of the N
 
 **How to check after the rollout.** The old pod (the live-status image) already drains, so expect a gap of about 35 s,
 with requests held by the edge. Its drain does not flush the journal yet, so streams it cuts at the deadline may still be
-found `abandoned`, as on 2026-10-12. To verify the fix, run one deliberate `kubectl --context admin@ai -n llm-router
-rollout restart deploy/llm-router` once the new pod is up; that drain runs the new code:
+found `abandoned`, as on 2026-10-12. To verify the fix, restart the router once the new pod is up (see "To restart the router" above); that drain runs
+the new code:
 - its log ends with `runtime closed in … ms`, then `drained in … ms`;
 - the journal has no `abandoned` rows for the restart: streams the deadline cut are `cancelled` / `SHUTDOWN` (Activity:
   "Interrupted by restart").
@@ -1129,12 +1169,14 @@ overload count starts over).
 
 **Why.** After the follow-ups release, Codex turns on the dev workers still ended with "Selected model is at
 capacity. Please try a different model." That is the Codex CLI's text for an error code of `server_is_overloaded`, and
-it ends the turn without a retry. It happened in two ways (08:41-09:00 UTC):
-- **Before output:** every attempt met the overload. The router failed over to another account, but the backend routes
-  by the conversation's `prompt_cache_key`, so the second account met the same overload. The router's final
-  `response.failed` then carried the upstream code (dw-2: 3 requests).
-- **After output:** the backend's own `response.failed` arrived after output had started and went out unchanged
-  (dw-1, dw-4: 6 requests).
+it ends the turn without a retry. Between 08:41 and 09:32 UTC about 23 requests ended this way (about 4% of all
+requests). It happened on all four dev workers, and on the reviewer bots' model-mode keys, whose journal rows have no
+`route` (reviewer-codex, model `codex`). It happened in two ways:
+- **Before output (about 6):** every attempt met the overload. The router failed over to another account, but the
+  backend routes by the conversation's `prompt_cache_key`, so the second account met the same overload. The router's
+  final `response.failed` then carried the upstream code.
+- **After output (about 17):** the backend's own `response.failed` arrived after output had started and went out
+  unchanged.
 
 Because each turn ended after at most 2 overloaded attempts, the conversation never reached the 3 in a row that re-key
 it.
@@ -1147,6 +1189,9 @@ it.
 - Each retry fails over again, and the 3rd overloaded attempt in a row re-keys the conversation onto another backend
   (`conversation.rekeyed`).
 - Every other upstream code still goes out as before. The CLI acts on some of them, e.g. `context_length_exceeded`.
+- **Counting overloads:** a client now sees `server_error`, so count overloads from the journal's `upstreamCode` (or
+  the event's `upstream_code`), never from the code the client saw. No alert keyed on the client-facing code when this
+  shipped (checked 2026-10-12).
 
 **How to check after the rollout.** In the journal, failures with `upstreamCode: server_is_overloaded` should now be
 followed by a retry of the same conversation within seconds. After 3 overloaded attempts in a row there should be a
