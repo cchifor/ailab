@@ -460,6 +460,19 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     `sudo systemctl start gitea-act-runner`. The persistent `dsh-conductor-image-pin` container on
     ci-runner-1 is `unless-stopped` and comes back with dockerd. Cost: the runner's warm images and
     cache (ci-runner-1 on 10-07: 43 GB images + 9.4 GB cache), re-pulled from the registry mirror.
+- **Jobs that install system packages fail at once on ONE runner with `E: dpkg was interrupted, you must
+  manually run 'sudo dpkg --configure -a' to correct the problem`** (e.g. `npx playwright install --with-deps`;
+  the same job passes on a rerun that lands elsewhere): an unattended-upgrade on that guest was cut off
+  mid-configure (a hang or `qm reset` during the nightly run), leaving a package half-configured, and every
+  later `apt`/`dpkg` refuses to run. Seen on cloud-ci-2 on 2026-10-12: `linux-image-6.8.0-146-generic` had
+  been half-configured since the 2026-10-10 06:34 unattended-upgrade, and llm-router #100's CI failed on it.
+  - *Confirm:* `sudo dpkg --audit` lists the package; `/var/log/dpkg.log` ends on `status half-configured`.
+  - *Repair* (safe while a job runs; apt waits on the lock): `sudo DEBIAN_FRONTEND=noninteractive dpkg
+    --configure -a`. For a kernel package this finishes initramfs and grub. No reboot is needed: the guest
+    keeps its running kernel and boots the new one next time. Then `dpkg --audit` prints nothing.
+  - *Sweep the pool:* check the other runners too. For the cloud runners (cloud-ci-6 at `.29` is stopped, §9):
+    `for ip in 5 6 7 12 13 30 32 33 34 35 44 50; do ssh ubuntu@192.168.0.$ip 'hostname; sudo -n dpkg --audit | head -3';
+    done`. On 2026-10-12 only cloud-ci-2 was affected.
 - **`just runners` / a direct `ansible-playbook` does nothing ("skipping: no hosts matched"):** on WSL,
   `/mnt/c` is world-writable, so Ansible silently ignores `ansible.cfg` (and thus the inventory). The
   `just` recipes now set `ANSIBLE_CONFIG` explicitly; invoking `ansible-playbook` by hand needs
