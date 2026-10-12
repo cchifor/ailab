@@ -88,17 +88,20 @@ pods first (`kubectl --context admin@ai -n llm-router get deploy,pdb,svc llm-rou
 **What is held, and for how long:** Caddy retries dial failures and "no healthy upstream" every 250 ms, for 85 s,
 or for 10 s on `/v1/images/*`. The 85 s cover the longest measured gap: 76–79 s on 2026-10-10/11, when the old
 shutdown waited its full 60 s grace on open streams. The first rollout behind the edge still replaces such a pod.
-With the router's drain the gap is about 45 s at most: 20 s drain, up to 12 s cleanup, about 13 s to ready. 85 s
+With the router's drain the gap is about 50 s at most: 20 s drain, up to 12 s cleanup, up to 5 s for the journal's flush and the runtime's close, about 13 s to ready (35 s measured on 2026-10-12, with streams still running at the deadline). 85 s
 also leaves room under Cloudflare's roughly 100 s time-to-first-byte for a held stream, which gets its first byte
 (`: ok`) as soon as the router selects an account (the router already gives images a 90 s execution budget, and a longer hold would
-let Cloudflare time out first). Active health checks poll the router's `/ready` every 3 s, with a 3 s timeout; two failures in a row mark it down, so a draining router (503 at once) is marked down within about 6 s, a hung one within about 9 s, and a recovered one is marked up within 3 s. (`/ready` waits behind the router's SQLite worker, and a heavy admin query such as the week usage took 2.7 s on 2026-10-11; with a 2 s timeout every Status page load marked the router down for about 2 s. The interval is not shorter than the timeout, so probes never pile up on that worker. Under a worst-case Status page load, measured 2026-10-11 (24 h stats, week stats and usage fired together, usage itself taking 5.2 s), `/ready` answered in 2.13 s at 0 s and at 3 s, inside the 3 s timeout; a single slow probe never marks the router down, as that takes two in a row.) A request that was never sent
+let Cloudflare time out first). Active health checks poll the router's `/ready` every 3 s, with a 3 s timeout; two failures in a row mark it down, so a draining router (503 at once) is marked down within about 6 s, a hung one within about 9 s, and a recovered one is marked up within 3 s. (Until the follow-ups release of 2026-10-12, `/ready` waited behind the router's SQLite worker, and a heavy admin query such as the week usage took 2.7 s on 2026-10-11; with a 2 s timeout every Status page load marked the router down for about 2 s, which is why the timeout is 3 s. Since that release `/ready` asks the worker whether it is alive and moving (opened, not failed, no call waiting past 10 s) without a round trip, so admin queries no longer delay it; a hung worker turns it 503 after 10 s, so the edge marks the router down about 16 s after the first call the worker holds. The check cannot tell a hang from a long query, so an admin query that itself runs 10 s or more also turns `/ready` 503 until it ends; the edge then holds new requests (up to 85 s) while requests in flight continue. The slowest measured is 5.2 s (the Status page's usage under load); before that release any query over 3 s did this. The bound is `stallMs` in llm-router's `SqliteStore.responsive()`: raising it trades slower hang detection for longer admin queries. The interval is not shorter than the timeout, so probes never pile up; a single slow probe never marks the router down, as that takes two in a row.) A request that was never sent
 (dial failure) is safe to hold and retry. After the router has accepted a request, Caddy may replay a GET within
 `lb_try_duration`, but never a POST (its default retry match is GET-only), so a held POST was never sent.
 Caddy's own readiness is a TCP probe, so it does not flap with the router.
 
 **The router's drain:** on SIGTERM the router stops taking new work and drains in-flight requests for
 `ROUTER_DRAIN_MS`. Streams still open when it ends are cut and recorded as `cancelled` with reason `SHUTDOWN`;
-work found unfinished at the next start is marked "Interrupted by restart".
+the router writes those journal entries before it exits (for at most 3 s; then `runtime closed in … ms`, `drained in … ms`).
+Work found unfinished at the next start is marked "Interrupted by restart". A watchdog exits the process at
+`ROUTER_DRAIN_MS` + 17 s (37 s), which must stay below `terminationGracePeriodSeconds` (60); the router refuses a
+drain above 40000 ms (a 57 s watchdog).
 
 **What clients see:**
 - A request that arrives during the gap waits (up to the hold above) and is then served by the new pod. If the gap is
@@ -1062,3 +1065,59 @@ or a short body and retries. Behind the edge this needs a reader that is applyin
 
 `ROUTER_DRAIN_MS` can stay: older images ignore it. The new index stays too; older images do not use it, and it costs
 one more index update per journal write. A rollback is itself a rollout of the NEW image's pod, so it drains.
+
+## Follow-ups release (2026-10-12)
+
+`router-0.1.0-20261012-followups` deploys merged llm-router main `9163faa9c5390a0dd1c31b7e52c8950ffa1e82d6`
+([#98](https://git.chifor.me/cchifor/llm-router/pulls/98)). It fixes what the live-status release surfaced.
+
+**What it changes.**
+- **The drain writes the journal before it exits.** On the 2026-10-12 verification restart, 2 of the 3 streams the
+  deadline cut were found `abandoned`: their SHUTDOWN was still queued in the recorder when the runtime closed. The drain
+  now flushes the journal first (for at most 3 s; a flush that does not finish is logged) and logs
+  `runtime closed in N ms`.
+- **Watchdog:** `ROUTER_DRAIN_MS` + 17 s (was + 15 s): the 12 s cleanup, then 5 s for the journal's flush and the
+  runtime's close. At the 40 s maximum that is 57 s, inside the 60 s grace.
+- **`/ready` no longer waits behind admin queries.** It asks the storage worker whether it is alive and moving (opened,
+  not failed, no call stuck past 10 s), without a round trip. An admin query that runs 10 s or more still turns it 503
+  until it ends (above: before, any query over 3 s did). The edge's health checks (3 s / 3 s / 2 failures) stay as they
+  are.
+- **Codex conversations stuck on an overloaded backend recover.**
+  - An overload (`server_is_overloaded`, `server_error`) that arrives before any output now fails over to another
+    account, as does a stream the backend ends before any output. The router holds back the stream's opening
+    `response.created`/`in_progress` until real output, so it can.
+  - After 3 overloads in a row, a conversation's upstream `prompt_cache_key` gets a suffix (`-rk1`, …). The backend
+    routes by that key, so the conversation lands on another backend, at the cost of its prompt cache once. It is
+    journaled as `conversation.rekeyed`.
+  - This is the case dev-worker-2 hit on 2026-10-12: one conversation failed about 83% of the time, on every account.
+- **Activity:** cancellations of older rows classify as Superseded again; the principal comes from the backfilled column.
+- **Status page:** route rows no longer repeat "Healthy" and "· N running". A subscription that is not healthy shows its
+  reason in red.
+
+**How to check after the rollout.** The old pod (the live-status image) already drains, so expect a gap of about 35 s,
+with requests held by the edge. Its drain does not flush the journal yet, so streams it cuts at the deadline may still be
+found `abandoned`, as on 2026-10-12. To verify the fix, run one deliberate `kubectl --context admin@ai -n llm-router
+rollout restart deploy/llm-router` once the new pod is up; that drain runs the new code:
+- its log ends with `runtime closed in … ms`, then `drained in … ms`;
+- the journal has no `abandoned` rows for the restart: streams the deadline cut are `cancelled` / `SHUTDOWN` (Activity:
+  "Interrupted by restart").
+
+**Image.**
+- Archive `router-0.1.0-20261012-followups.tar.gz`, SHA-256
+  `a40176589b3e625702fff9b06a8117f714181552b538c925757900ce54f2fdec`; relay branch
+  `release/router-followups-image`, [run 82520](https://git.chifor.me/cchifor/relay/actions/runs/82520).
+- Image `registry.chifor.me/llm-router/router@sha256:562f48f323a94be8dbe3d983cf2838892bf954dd30de503f8f10cefad9e01f16`.
+- Before merge: 1743 tests passed, 0 failed, on Linux CI
+  ([run 82515](https://git.chifor.me/cchifor/llm-router/actions/runs/82515)); typecheck, build, the production smoke and
+  the browser tests passed there. The archive's production smoke passed again in the pinned Node 26 image. Both reviewer
+  bots approved.
+
+**Rollback.** In `router.yaml`, revert the image digest and both pod-template annotations together:
+- `image: registry.chifor.me/llm-router/router@sha256:10c0828a04a12ae64205184aea0c74892f5d62a0c00513eb5c574962fe22117a`
+- `chifor.me/source-commit: 1a7bb7e85d4053daef8771df18fc10d047c791e6`
+- `chifor.me/release: router-0.1.0-20261011-live-status`
+
+Nothing else changes: no schema change, no new setting. The journal's `conversation.rekeyed` events stay, and the
+live-status image's Activity skips event types it does not know. The re-key lives in the router's memory only and
+changes just the copy of the body sent upstream, so after a rollback every conversation sends its own key again (and its
+overload count starts over).
