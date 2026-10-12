@@ -582,7 +582,9 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
   job carries them, and a workflow that never installs them passes there. A fresh VM lacks them until
   something installs them. Seen on 2026-10-12: kartra-ai's `verify` failed on the new cloud-ci-14 because
   chrome-headless-shell could not load `libatk-1.0.so.0`.
-  - *Confirm:* `sudo ldd /home/runner/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | grep 'not found'`.
+  - *Confirm:* `sudo sh -c 'ldd /home/runner/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell' | grep 'not found'`.
+    The glob must expand as root (`sh -c`): `/home/runner` is mode 0750, so the operator's own shell
+    cannot list it, leaves the pattern literal, and `ldd` reports a missing file instead.
   - *Repair:* the `github_runner` role installs `github_runner_ci_job_packages` (`just cloud-runners` for
     cloud-ci-N, `just runners` for ci-runner-N).
     On a live runner, pause it in Gitea and wait until it is idle first. A non-interactive `apt-get` does not
