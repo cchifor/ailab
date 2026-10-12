@@ -1,0 +1,3 @@
+# Required status contexts on cchifor/relay main.
+# Copied from the live protected branch on 2026-10-12.
+Verify / verify (pull_request)
