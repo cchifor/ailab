@@ -269,8 +269,11 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   - Every cloud3 runner logged segfaults in python/libc/libcrypto/rustc/postgres (cloud-ci-3: 59 in
     8.8 h), while the cloud1/2 runners had none in ~200 h. All cloud3 guests were ballooned (cloud3 at
     199 of 251 GB); none of the cloud1/2 guests were.
-  - Count a runner's crashes: `sudo dmesg | grep -c " segfault at "`. Confirm a flap by re-reading the
-    file with `posix_fadvise(DONTNEED)` before each read and hashing it.
+  - Count a runner's crashes: `sudo dmesg | grep -c " segfault at "`. Confirm a flap by hashing the file
+    a few times past the page cache: `sudo dd if=<file> iflag=direct bs=1M status=none | sha256sum`.
+    Dropping the cache (`posix_fadvise(DONTNEED)`, `drop_caches`) is NOT enough while a job keeps the
+    file mapped (uv `.so` files hardlinked into live venvs): every re-read hits the same bad page.
+    A paused runner can test its own RAM: `memtester <size>` found the bad page on cloud-ci-7.
   - Pause the runner in Gitea (`PATCH /api/v1/orgs/cchifor/actions/runners/<id> {"disabled": true}`,
     org-owner token), then investigate its host. The cleanup never starts a stopped act_runner for a
     purge, so a quarantine sticks.

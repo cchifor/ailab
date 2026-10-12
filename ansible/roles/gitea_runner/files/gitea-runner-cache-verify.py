@@ -165,45 +165,55 @@ def digest(path, algo):
     return h, st
 
 
+def dropped_cache_digest(path, algo):
+    """Drop the file's page cache (clean, unmapped pages only), then hash it normally. The fallback where
+    O_DIRECT is refused. -> hash object or None (not there); a read error raises OSError."""
+    fd = open_regular(path)
+    if fd is None:
+        return None
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+    h, _st = digest(path, algo)
+    return h
+
+
 def fresh_digest(path, algo):
     """Hash `path` WITHOUT the page cache: O_DIRECT into a newly mapped, page-aligned buffer, so neither a
     corrupt cached page (even one a running job keeps mmap'd, which POSIX_FADV_DONTNEED cannot drop) nor
-    the buffer of an earlier read is reused. Where O_DIRECT is refused (EINVAL: tmpfs), the file's page
-    cache is dropped and it is read normally. -> hash object, or None when it cannot be read at all."""
+    the buffer of an earlier read is reused. EINVAL (O_DIRECT refused at open, as on tmpfs, or on read,
+    as with an odd block size or a stacking filesystem) falls back to dropped_cache_digest().
+    -> hash object; None when the file is not there (vanished, a symlink, not a regular file). Any other
+    read error RAISES OSError, so it is reported as unreadable instead of passing for a vanished file."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_DIRECT)
     except OSError as e:
-        if e.errno != errno.EINVAL:
+        if e.errno == errno.EINVAL:
+            return dropped_cache_digest(path, algo)
+        if e.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
             return None
-        fd = open_regular(path)
-        if fd is None:
-            return None
-        try:
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-        except OSError:
-            pass
-        finally:
-            os.close(fd)
-        try:
-            h, _st = digest(path, algo)
-        except OSError:
-            return None
-        return h
+        raise
     buf = mmap.mmap(-1, CHUNK)   # fresh anonymous pages, page-aligned as O_DIRECT requires
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
         h = hashlib.new(algo)
         while True:
-            n = os.readv(fd, [buf])
+            try:
+                n = os.readv(fd, [buf])
+            except OSError as e:
+                if e.errno == errno.EINVAL:
+                    return dropped_cache_digest(path, algo)
+                raise
             if n <= 0:
                 break
             h.update(buf[:n])
             if n % 4096:   # a short, unaligned read is the end of the file
                 break
         return h
-    except OSError:
-        return None
     finally:
         os.close(fd)
         buf.close()
@@ -213,14 +223,29 @@ def reread(path, algo, ok):
     """Re-read a file that just hashed wrong, up to REREADS times, bypassing the page cache.
     -> ("ok", n): right on fresh read n+1, so the file is intact and n+1 reads were corrupted (a flap);
        ("bad", n): wrong on every one of the n fresh reads, so the file is corrupt;
-       ("gone", n): a re-read could not be done (vanished, unreadable): inconclusive, never corrupt."""
+       ("gone", n): the file is no longer there: inconclusive (counted as vanished), never corrupt;
+       ("error", n): a re-read failed (EIO, EACCES, ...): inconclusive (counted as unreadable and
+       logged with the errno), never corrupt."""
     for n in range(REREADS):
-        h = fresh_digest(path, algo)
+        try:
+            h = fresh_digest(path, algo)
+        except OSError as e:
+            print(f"re-read error {path}: {e}", flush=True)
+            return "error", n
         if h is None:
             return "gone", n
         if ok(h):
             return "ok", n
     return "bad", REREADS
+
+
+def inconclusive(verdict):
+    """Count a re-read that settled nothing; True when the caller must skip the file."""
+    if verdict == "gone":
+        SKIPPED["vanished"] += 1
+    elif verdict == "error":
+        SKIPPED["unreadable"] += 1
+    return verdict in ("gone", "error")
 
 
 def flap(cache, key, rel, bad_reads):
@@ -294,8 +319,7 @@ def verify_npm():
                         if verdict == "ok":
                             flap("npm", f"{algo}:{want}", "", n + 1)
                             continue
-                        if verdict == "gone":
-                            SKIPPED["vanished"] += 1
+                        if inconclusive(verdict):
                             continue
                         bad.append({"cache": "npm", "key": f"{algo}:{want}", "nlink": st.st_nlink,
                                     "size": st.st_size, "mtime": int(st.st_mtime), "inplace": None})
@@ -359,6 +383,7 @@ def verify_uv():
     unhashed row was RECORD itself, and every hash was sha256 (all urlsafe-base64 but one uv-0.8.2-built
     wheel's hex rows). So anything else marks the archive corrupt."""
     checked, bad, no_record, envs = 0, [], 0, 0
+    missing = []  # (aid, rel, path, algo, want): listed files not there on the first look
     linked = {}   # (dev, ino) -> entries whose corrupt inode is shared
 
     def corrupt(aid, rel, reason):
@@ -419,7 +444,7 @@ def verify_uv():
                     if not os.path.lexists(adir):
                         SKIPPED["vanished"] += 1
                         break
-                    corrupt(aid, row[0], "missing or not a regular file")
+                    missing.append((aid, row[0], path, algo, want))
                     continue
                 checked += 1
                 if uv_digest_ok(h, want):
@@ -428,8 +453,7 @@ def verify_uv():
                 if verdict == "ok":
                     flap("uv", aid, row[0], n + 1)
                     continue
-                if verdict == "gone":
-                    SKIPPED["vanished"] += 1
+                if inconclusive(verdict):
                     continue
                 # mtime, not ctime: link()/unlink() of another hardlink also bumps ctime, and every uv
                 # install hardlinks from the archive. Only a content write moves mtime past the unpack.
@@ -439,6 +463,20 @@ def verify_uv():
                 if st.st_nlink > 1:
                     linked.setdefault((st.st_dev, st.st_ino), []).append(entry)
                 bad.append(entry)
+    # A listed file that was missing (or not a regular file) gets a SECOND, fresh look after the pass, so
+    # an archive being replaced or pruned is not queued on one look: there and intact now = a transient.
+    for aid, rel, path, algo, want in missing:
+        try:
+            h = fresh_digest(path, algo)
+        except OSError as e:
+            print(f"re-look error {path}: {e}", flush=True)
+            SKIPPED["unreadable"] += 1
+            continue
+        if h is not None and uv_digest_ok(h, want):
+            SKIPPED["vanished"] += 1
+            continue
+        corrupt(aid, rel, "missing or not a regular file (on two looks)" if h is None
+                else "missing on the first look, wrong on the second")
     # An archive being deleted (a job's `uv cache prune`) can look like missing files mid-walk; if it is
     # gone by the end of the pass, its findings are a vanish, not corruption.
     gone = {b["key"] for b in bad if not os.path.lexists(os.path.join(base, b["key"]))}

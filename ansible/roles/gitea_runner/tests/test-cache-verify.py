@@ -11,6 +11,7 @@ import base64
 import getpass
 import hashlib
 import importlib.util
+import json
 import os
 import stat
 import tempfile
@@ -356,6 +357,42 @@ class VerifyTests(Base):
         self.fx.uv_archive(aid, {"pkg/_f.so": b"\x7fELF intact"})
         self._verify_with_reads("_f.so", ["bad", "gone"])
         self.assertEqual([l for l in self.fx.queue() if l], [], "a vanished re-read is never queued")
+
+    def test_a_reread_error_is_counted_unreadable_and_not_queued(self):
+        aid = "R" * 19 + "S"
+        self.fx.uv_archive(aid, {"pkg/_g.so": b"\x7fELF intact"})
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_eio_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real = mod.digest
+
+            def first_bad(path, algo):
+                h, st = real(path, algo)
+                return (hashlib.new(algo, b"wrong"), st) if "_g.so" in path else (h, st)
+
+            def eio(path, algo):
+                raise OSError(5, "Input/output error", path)
+            mod.digest, mod.fresh_digest = first_bad, eio
+            mod.main(["x", "verify"])
+        self.assertEqual([l for l in self.fx.queue() if l], [], "a failed re-read is inconclusive")
+        res = json.loads((self.fx.state / "result.json").read_text())
+        self.assertEqual(res["skipped_unreadable"], 1)
+
+    def test_a_file_missing_on_the_first_look_but_intact_on_the_second_is_not_queued(self):
+        aid = "T" * 19 + "U"
+        self.fx.uv_archive(aid, {"pkg/_h.py": b"x = 1\n"})
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_relook_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real = mod.digest
+
+            def missing_once(path, algo):   # uv replacing the archive while it is walked
+                return (None, None) if "_h.py" in path else real(path, algo)
+            mod.digest = missing_once
+            mod.main(["x", "verify"])
+        self.assertEqual([l for l in self.fx.queue() if l], [])
 
     def test_fresh_digest_reads_the_real_content(self):
         with mock.patch.dict(os.environ, self.fx.env()):
