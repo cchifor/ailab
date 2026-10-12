@@ -28,6 +28,15 @@
     enabled: true
     daemon_reload: true
 
+# Persistent=true does not fire on a timer's first enable (there is no stamp yet), so without this the
+# first beacon would wait for the next 04:30 or boot and the beacon-missing alerts would fire on a
+# fresh install. --no-block: the throttled run continues in the background.
+- name: Run a first cache verify
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_cache_verify_service }}"
+    state: started
+    no_block: true
+
 # Timer-only; the verify service never touches act_runner or a job.
 - name: Restart gitea cache-verify timer
   ansible.builtin.systemd:

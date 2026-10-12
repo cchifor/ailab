@@ -217,7 +217,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
     MOCK_MAINPID="${MOCK_MAINPID:-4242}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
-    GITEA_CACHE_VERIFY_BIN="$BIN/cacheverify" GITEA_CACHE_PURGE_QUEUE="${QUEUEFILE:-/nonexistent/queue}" \
+    GITEA_CACHE_PURGE_QUEUE="${QUEUEFILE:-/nonexistent/queue}" GITEA_CLEANUP_CACHE_PURGE_STAMP="$WORK/purge.stamp" \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
     GITEA_CLEANUP_IDLE_WAIT_SEC="${IDLEWAIT:-2}" GITEA_CLEANUP_IDLE_POLL_SEC=1 \
@@ -956,16 +956,18 @@ else
   bad "M: env-file path DRIFT — the script reads '$script_envfile' but the role writes '$role_envfile'; every knob would silently fall back to its built-in default"
 fi
 
-echo "[N] the shared-cache purge queue is applied only inside a CONFIRMED idle window"
+echo "[R] a non-empty purge queue makes the cleanup RESTART act_runner in a confirmed idle gap (never purge itself)"
 QUEUEFILE="$WORK/purge.queue"
 echo "uv AAAAAAAAAAAAAAAAAAAA" > "$QUEUEFILE"
+rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
+assert_has "systemctl restart --no-block gitea-act-runner.service" "R1: idle + queue -> act_runner restart queued (its ExecStartPre purges)"
+if grep -q 'cacheverify' "$CALLS"; then bad "R1: the cleanup must never run the applier itself"; else ok "R1: the cleanup never purges itself"; fi
 QUEUEFILE="$QUEUEFILE" run_case 0 50
-assert_has "cacheverify apply" "N1: idle + non-empty queue -> applier runs"
-QUEUEFILE="$QUEUEFILE" run_case 1 50
-if grep -q '^cacheverify' "$CALLS"; then bad "N2: busy must defer the purge"; else ok "N2: busy -> purge deferred, queue kept"; fi
-: > "$QUEUEFILE"
-QUEUEFILE="$QUEUEFILE" run_case 0 50
-if grep -q '^cacheverify' "$CALLS"; then bad "N3: an empty queue must not run the applier"; else ok "N3: empty queue -> no applier"; fi
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R2: a second restart within 6h"; else ok "R2: restart rate-limited to one per 6h"; fi
+rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 1 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R3: busy must not restart"; else ok "R3: busy -> deferred, no restart"; fi
+: > "$QUEUEFILE"; rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R4: an empty queue must not restart"; else ok "R4: empty queue -> nothing"; fi
 unset QUEUEFILE
 
 echo

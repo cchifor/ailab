@@ -388,9 +388,10 @@ spec:
             description: >-
               The nightly cache verify found {{ $labels.cache }} cache entries on {{ $labels.instance }} whose
               content no longer matches their own hash, and they are still in the purge queue, so every job
-              that installs them fails. The queue is applied while act_runner is down or inside the cleanup's
-              confirmed idle window; a runner that is never idle keeps them. `systemctl restart
-              gitea-act-runner` applies it at once (waits for the running job). Then read
+              that installs them fails (uv; npm re-fetches). The queue is applied with act_runner down, at
+              its next restart; the cleanup restarts it in an idle gap at most every 6h, so a never-idle
+              runner keeps them. `systemctl restart gitea-act-runner` applies it at once (waits for the
+              running job). Then read
               /var/lib/gitea-runner-cache/result.json and `journalctl -t gitea-runner-cache-purge`. Corruption
               points at the host, not the job: see docs/runbooks/ci-runners.md.
         # Absent-series trap: a verify that never ran publishes nothing, so the staleness rule below is
@@ -423,17 +424,32 @@ spec:
               days ago. Check `systemctl status gitea-runner-cache-verify.service` and its journal.
         # A shut-down ext4 root (seen on cloud-ci-5/-7, 2026-10-12) keeps node_exporter running from
         # memory and the VM pingable while every read returns EIO; node_filesystem_readonly stays 0. The
-        # textfile collector's read error is the signal, within about a minute. Critical: such a runner
-        # keeps polling Gitea and fails every job it is given.
+        # textfile collector then reads NOTHING: scrape_error 1 and no node_textfile_mtime_seconds at all
+        # (exactly what Prometheus recorded 09:56-10:00Z that day). One malformed beacon instead leaves the
+        # other files' mtime series in place: that is the warning below, not a page. Critical: a runner
+        # with a dead root keeps polling Gitea and fails every job it is given.
         - alert: CIRunnerRootFilesystemFailed
-          expr: node_textfile_scrape_error{job="ci-runner-node"} == 1
+          expr: >-
+            node_textfile_scrape_error{job="ci-runner-node"} == 1
+              unless on (instance) node_textfile_mtime_seconds{job="ci-runner-node"}
           for: 3m
           labels: { severity: critical }
           annotations:
-            summary: "CI runner {{ $labels.instance }} cannot read its node_exporter textfiles (root filesystem failing?)"
+            summary: "CI runner {{ $labels.instance }} cannot read any node_exporter textfile (root filesystem failed?)"
             description: >-
-              node_exporter on {{ $labels.instance }} fails to read its textfile directory. Either the root
-              filesystem has shut down (SSH resets during key exchange, commands fail with EIO), or a
-              textfile beacon is malformed (SSH works). For the first, see docs/runbooks/ci-runners.md
-              "A runner whose root filesystem has died": confirm via the guest agent, pause the runner in
-              Gitea, then `qm reset`.
+              node_exporter on {{ $labels.instance }} reads none of its textfiles. That is a shut-down root
+              filesystem: SSH resets during key exchange and commands fail with EIO. See
+              docs/runbooks/ci-runners.md "A runner whose root filesystem has died": confirm via the guest
+              agent, pause the runner in Gitea, then `qm reset`.
+        - alert: CIRunnerTextfileBeaconUnreadable
+          expr: >-
+            node_textfile_scrape_error{job="ci-runner-node"} == 1
+              and on (instance) node_textfile_mtime_seconds{job="ci-runner-node"}
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} has a textfile beacon node_exporter cannot parse"
+            description: >-
+              One of the gitea_runner beacons in /var/lib/prometheus/node-exporter on {{ $labels.instance }}
+              is malformed (the other files still parse). Its alerts are blind until it is fixed; check
+              `journalctl -u prometheus-node-exporter` for the file name.

@@ -298,8 +298,20 @@
     src: gitea-runner-cache-verify.timer.j2
     dest: "/etc/systemd/system/{{ gitea_runner_cache_verify_timer }}"
     mode: "0644"
-  notify: Restart gitea cache-verify timer
+  notify:
+    - Restart gitea cache-verify timer
+    - Run a first cache verify
   when: gitea_runner_cache_verify_enabled | bool
+
+# The kill switch: gitea_runner_cache_verify_enabled: false stops the nightly run (the queue applier
+# in the reclaim stays, harmless with an empty queue).
+- name: Stop the cache-verify timer when the check is disabled
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_cache_verify_timer }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: not (gitea_runner_cache_verify_enabled | bool)
 
 # ── 4e. bounded /tmp (every job shares one /tmp; Ubuntu ages it at 30d) ─────
 # Ages, not a per-job wipe: see gitea_runner_tmp_age in defaults. `validate` runs systemd-tmpfiles under

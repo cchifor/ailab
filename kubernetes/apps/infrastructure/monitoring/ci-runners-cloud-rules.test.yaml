@@ -361,7 +361,7 @@ tests:
               summary: cloud CI runner cloud-ci-1 has corrupt npm cache entries not yet purged
               description: See CIRunnerCacheCorruptPending. cloud-ci-1 on cloud1 still queues corrupt npm cache entries; corruption on a cloud runner points at its host.
   - interval: 1m
-    name: a cloud runner up 4h+ with no verify beacon fires after 6h; one with the beacon does not
+    name: a cloud runner up 4h+ with no verify beacon fires after 6h; one with the beacon, or just booted, does not
     input_series:
       - series: up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100"}
         values: 1+0x960
@@ -372,6 +372,10 @@ tests:
       - series: node_boot_time_seconds{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100"}
         values: 0+0x960
       - series: gitea_runner_cache_verify_last_run_seconds{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100"}
+        values: 0+60x960
+      - series: up{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-2", instance="192.168.0.33:9100"}
+        values: 1+0x960
+      - series: node_boot_time_seconds{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-2", instance="192.168.0.33:9100"}
         values: 0+60x960
       - series: up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}
         values: 1+0x960
@@ -421,16 +425,18 @@ tests:
         alertname: CloudCIRunnerCacheVerifyStale
         exp_alerts: []
   - interval: 1m
-    name: a cloud runner's textfile read error fires critical while its host is up
+    name: a cloud runner reading no textfile pages critical while its host is up; a bad beacon warns
     input_series:
       - series: node_textfile_scrape_error{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100"}
         values: 1+0x20
       - series: node_textfile_scrape_error{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100"}
         values: 1+0x20
+      - series: node_textfile_mtime_seconds{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100", file="/x/a.prom"}
+        values: 1+0x20
       - series: up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}
         values: 1+0x20
       - series: up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}
-        values: 0+0x20
+        values: 1+0x20
     alert_rule_test:
       - eval_time: 10m
         alertname: CloudCIRunnerRootFilesystemFailed
@@ -442,6 +448,18 @@ tests:
               instance: 192.168.0.32:9100
               severity: critical
             exp_annotations:
-              summary: cloud CI runner cloud-ci-1 cannot read its node_exporter textfiles (root filesystem failing?)
+              summary: cloud CI runner cloud-ci-1 cannot read any node_exporter textfile (root filesystem failed?)
               description: See CIRunnerRootFilesystemFailed. Confirm through the guest agent on cloud1 (`pvesh get .../agent/file-read --file /sys/fs/ext4/sda1/errors_count`), pause the runner in Gitea, then
                 `qm reset` it.
+      - eval_time: 18m
+        alertname: CloudCIRunnerTextfileBeaconUnreadable
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-cloud
+              cloud_host: cloud3
+              nodename: cloud-ci-3
+              instance: 192.168.0.34:9100
+              severity: warning
+            exp_annotations:
+              summary: cloud CI runner cloud-ci-3 has a textfile beacon node_exporter cannot parse
+              description: 'See CIRunnerTextfileBeaconUnreadable: one malformed beacon on cloud-ci-3, the other textfiles still parse.'

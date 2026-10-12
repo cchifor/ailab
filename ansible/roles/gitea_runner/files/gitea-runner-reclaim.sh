@@ -52,6 +52,7 @@ REAP_BIN="${GITEA_REAP_BIN:-/usr/local/bin/gitea-runner-reap.py}"
 REAP_TIMEOUT="${GITEA_REAP_TIMEOUT_SEC:-60}"
 CACHE_VERIFY_BIN="${GITEA_CACHE_VERIFY_BIN:-/usr/local/bin/gitea-runner-cache-verify.py}"
 CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
+CACHE_PURGE_ATTEMPT="${GITEA_CACHE_PURGE_ATTEMPT_STAMP:-/var/lib/gitea-runner-reclaim/cache-purge.attempt}"
 
 log() { logger -t gitea-runner-reclaim -- "$*" 2>/dev/null || true; }
 
@@ -167,8 +168,10 @@ run_reaper() {
 }
 
 # Shared-cache purge queue: applied here ONLY while act_runner is DOWN (MainPID 0): its ExecStartPre,
-# or any stretch the daemon is stopped. No job can then be installing from an entry while it is
-# removed. The cleanup timer applies it too, inside its confirmed idle window.
+# or any stretch the daemon is stopped, so no Gitea job can be installing from an entry while it is
+# removed. The cleanup never purges; in an idle gap it restarts act_runner to get here. A co-located
+# GitHub agent shares the caches, so a running GitHub job (Runner.Worker) also defers the purge. While
+# the daemon stays down, an unchanged queue is retried at most every 10 minutes, not every tick.
 daemon_down() {
   local mainpid
   mainpid="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)" || return 1
@@ -178,6 +181,12 @@ daemon_down() {
 apply_cache_purges() {
   [ -s "$CACHE_PURGE_QUEUE" ] && [ -x "$CACHE_VERIFY_BIN" ] || return 0
   daemon_down || return 0
+  pgrep -f 'Runner\.Worker' >/dev/null 2>&1 && return 0
+  if [ -e "$CACHE_PURGE_ATTEMPT" ] && ! [ "$CACHE_PURGE_QUEUE" -nt "$CACHE_PURGE_ATTEMPT" ] \
+     && [ $(( $(date +%s) - $(stat -c %Y "$CACHE_PURGE_ATTEMPT" 2>/dev/null || echo 0) )) -lt 600 ]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$CACHE_PURGE_ATTEMPT")" 2>/dev/null; touch "$CACHE_PURGE_ATTEMPT" 2>/dev/null || true
   timeout -k 5 60 "$CACHE_VERIFY_BIN" apply 2>&1 | logger -t gitea-runner-cache-purge 2>/dev/null || true
 }
 

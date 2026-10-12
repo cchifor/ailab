@@ -28,11 +28,11 @@ tests:
             exp_annotations:
               summary: CI runner 192.168.0.15:9100 has corrupt uv cache entries not yet purged
               description: 'The nightly cache verify found uv cache entries on 192.168.0.15:9100 whose content no longer matches their own hash, and they are still in the purge queue, so every job that
-                installs them fails. The queue is applied while act_runner is down or inside the cleanup''s confirmed idle window; a runner that is never idle keeps them. `systemctl restart gitea-act-runner`
-                applies it at once (waits for the running job). Then read /var/lib/gitea-runner-cache/result.json and `journalctl -t gitea-runner-cache-purge`. Corruption points at the host, not the job:
-                see docs/runbooks/ci-runners.md.'
+                installs them fails (uv; npm re-fetches). The queue is applied with act_runner down, at its next restart; the cleanup restarts it in an idle gap at most every 6h, so a never-idle runner
+                keeps them. `systemctl restart gitea-act-runner` applies it at once (waits for the running job). Then read /var/lib/gitea-runner-cache/result.json and `journalctl -t gitea-runner-cache-purge`.
+                Corruption points at the host, not the job: see docs/runbooks/ci-runners.md.'
   - interval: 1m
-    name: no verify beacon for 30h on a long-up runner fires; a runner with the beacon does not
+    name: no verify beacon for 30h on a long-up runner fires; one with the beacon, or just booted, does not
     input_series:
       - series: up{job="ci-runner-node", instance="192.168.0.15:9100"}
         values: 1+0x2880
@@ -43,6 +43,10 @@ tests:
       - series: node_boot_time_seconds{job="ci-runner-node", instance="192.168.0.16:9100"}
         values: 0+0x2880
       - series: gitea_runner_cache_verify_last_run_seconds{job="ci-runner-node", instance="192.168.0.16:9100"}
+        values: 0+60x2880
+      - series: up{job="ci-runner-node", instance="192.168.0.17:9100"}
+        values: 1+0x2880
+      - series: node_boot_time_seconds{job="ci-runner-node", instance="192.168.0.17:9100"}
         values: 0+60x2880
     alert_rule_test:
       - eval_time: 20h
@@ -60,7 +64,7 @@ tests:
               description: '192.168.0.15:9100 is scraped but has no gitea_runner_cache_verify_last_run_seconds: the nightly gitea-runner-cache-verify.timer has never completed a run there. Check `systemctl
                 status gitea-runner-cache-verify.timer gitea-runner-cache-verify.service`.'
   - interval: 1m
-    name: a verify that last ran over 3 days ago fires; a nightly one does not
+    name: a verify that last ran over 3 days ago fires; a nightly one, or a just-booted runner, does not
     input_series:
       - series: up{job="ci-runner-node", instance="192.168.0.15:9100"}
         values: 1+0x5400
@@ -74,6 +78,12 @@ tests:
         values: 0+0x5400
       - series: gitea_runner_cache_verify_last_run_seconds{job="ci-runner-node", instance="192.168.0.16:9100"}
         values: 0+60x5400
+      - series: up{job="ci-runner-node", instance="192.168.0.17:9100"}
+        values: 1+0x5400
+      - series: node_boot_time_seconds{job="ci-runner-node", instance="192.168.0.17:9100"}
+        values: 0+60x5400
+      - series: gitea_runner_cache_verify_last_run_seconds{job="ci-runner-node", instance="192.168.0.17:9100"}
+        values: 0+0x5400
     alert_rule_test:
       - eval_time: 70h
         alertname: CIRunnerCacheVerifyStale
@@ -89,17 +99,28 @@ tests:
               summary: CI runner 192.168.0.15:9100 cache verify has not run for over 3 days
               description: The nightly shared-cache integrity check on 192.168.0.15:9100 last finished more than 3 days ago. Check `systemctl status gitea-runner-cache-verify.service` and its journal.
   - interval: 1m
-    name: a textfile read error for 3m fires critical; a single blip does not
+    name: nothing readable (no mtime series) pages critical; one bad beacon is a warning; a blip is nothing
     input_series:
       - series: node_textfile_scrape_error{job="ci-runner-node", instance="192.168.0.15:9100"}
-        values: 0+0x5 1+0x20
+        values: 0+0x5 1+0x30
+      - series: node_textfile_mtime_seconds{job="ci-runner-node", instance="192.168.0.15:9100", file="/x/a.prom"}
+        values: 1+0x5 _x30
       - series: node_textfile_scrape_error{job="ci-runner-node", instance="192.168.0.16:9100"}
-        values: 0+0x5 1 0+0x19
+        values: 0+0x5 1+0x30
+      - series: node_textfile_mtime_seconds{job="ci-runner-node", instance="192.168.0.16:9100", file="/x/a.prom"}
+        values: 1+0x35
+      - series: node_textfile_scrape_error{job="ci-runner-node", instance="192.168.0.17:9100"}
+        values: 0+0x5 1 0+0x29
+      - series: node_textfile_mtime_seconds{job="ci-runner-node", instance="192.168.0.17:9100", file="/x/a.prom"}
+        values: 1+0x35
     alert_rule_test:
       - eval_time: 7m
         alertname: CIRunnerRootFilesystemFailed
         exp_alerts: []
       - eval_time: 12m
+        alertname: CIRunnerRootFilesystemFailed
+        exp_alerts: []
+      - eval_time: 16m
         alertname: CIRunnerRootFilesystemFailed
         exp_alerts:
           - exp_labels:
@@ -107,7 +128,20 @@ tests:
               instance: 192.168.0.15:9100
               severity: critical
             exp_annotations:
-              summary: CI runner 192.168.0.15:9100 cannot read its node_exporter textfiles (root filesystem failing?)
-              description: 'node_exporter on 192.168.0.15:9100 fails to read its textfile directory. Either the root filesystem has shut down (SSH resets during key exchange, commands fail with EIO), or
-                a textfile beacon is malformed (SSH works). For the first, see docs/runbooks/ci-runners.md "A runner whose root filesystem has died": confirm via the guest agent, pause the runner in Gitea,
-                then `qm reset`.'
+              summary: CI runner 192.168.0.15:9100 cannot read any node_exporter textfile (root filesystem failed?)
+              description: 'node_exporter on 192.168.0.15:9100 reads none of its textfiles. That is a shut-down root filesystem: SSH resets during key exchange and commands fail with EIO. See docs/runbooks/ci-runners.md
+                "A runner whose root filesystem has died": confirm via the guest agent, pause the runner in Gitea, then `qm reset`.'
+      - eval_time: 12m
+        alertname: CIRunnerTextfileBeaconUnreadable
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CIRunnerTextfileBeaconUnreadable
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.16:9100
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.16:9100 has a textfile beacon node_exporter cannot parse
+              description: One of the gitea_runner beacons in /var/lib/prometheus/node-exporter on 192.168.0.16:9100 is malformed (the other files still parse). Its alerts are blind until it is fixed; check
+                `journalctl -u prometheus-node-exporter` for the file name.

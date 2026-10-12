@@ -19,4 +19,6 @@ IOSchedulingClass=idle
 CPUQuota=100%
 IOWeight=10
 IOReadBandwidthMax=/ {{ gitea_runner_cache_verify_read_bandwidth }}
+# Reading every cache file once fills the page cache; cap it so the read cannot squeeze a running job.
+MemoryHigh={{ gitea_runner_cache_verify_memory_high }}
 TimeoutStartSec=2h

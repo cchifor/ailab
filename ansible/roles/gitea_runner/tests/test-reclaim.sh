@@ -39,6 +39,14 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/logger"
 printf '#!/usr/bin/env bash\necho "reap $*" >> "%s"\n' "$CALLS" >"$BIN/reap-mock"
 # The cache purge applier: a recording mock (the real one is root-only on the host).
 printf '#!/usr/bin/env bash\necho "cacheverify $*" >> "%s"\n' "$CALLS" >"$BIN/cacheverify-mock"
+# pgrep: the co-located GitHub job probe (`pgrep -f Runner\.Worker`) answers MOCK_GH_WORKER, so a real GitHub
+# job on the VM running this suite cannot skew [E]; every other call is the real pgrep.
+REAL_PGREP="$(command -v pgrep)"
+cat >"$BIN/pgrep" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "-f" ] && [ "\$2" = 'Runner\.Worker' ]; then [ "\${MOCK_GH_WORKER:-0}" = 1 ]; exit; fi
+exec "$REAL_PGREP" "\$@"
+EOF
 chmod +x "$BIN"/*
 
 # ---- fixture: many reused workspaces, like a runner after weeks of agentforge ephemeral repos ----
@@ -55,6 +63,7 @@ run_reclaim() {
   GITEA_RECLAIM_ENV_FILE=/nonexistent \
     GITEA_REAP_BIN="${REAP_BIN_OVERRIDE:-$BIN/reap-mock}" \
     GITEA_CACHE_VERIFY_BIN="$BIN/cacheverify-mock" GITEA_CACHE_PURGE_QUEUE="${QUEUE_OVERRIDE:-$WORK/no-queue}" \
+    GITEA_CACHE_PURGE_ATTEMPT_STAMP="$WORK/purge.attempt" \
     GITEA_RUNNER_WORKDIR_PARENT="$WSROOT" \
     GITEA_RUNNER_USER="$(id -un)" GITEA_RUNNER_GROUP="$(id -gn 2>/dev/null || id -g)" \
     GITEA_RUNNER_CONFIG_DIR="$WORK/cfg" \
@@ -104,8 +113,16 @@ unset REAP_BIN_OVERRIDE
 
 echo "[E] the cache purge queue is applied only while act_runner is down (MainPID 0), and only when non-empty"
 echo "npm sha512:$(printf 'a%.0s' $(seq 128))" > "$WORK/queue"
-: > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim
+rm -f "$WORK/purge.attempt"; : > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim
 grep -q '^cacheverify apply' "$CALLS" && ok "E: daemon down applies a non-empty queue" || bad "E: daemon down applies a non-empty queue"
+: > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim
+grep -q '^cacheverify' "$CALLS" && bad "E: an unchanged queue must not be retried every tick" || ok "E: unchanged queue -> not retried within 10m"
+touch -d 'now + 5 seconds' "$WORK/queue"; : > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim
+grep -q '^cacheverify apply' "$CALLS" && ok "E: a queue rewritten since the last attempt is applied at once" || bad "E: a queue rewritten since the last attempt is applied at once"
+rm -f "$WORK/purge.attempt"
+: > "$CALLS"; MOCK_GH_WORKER=1 QUEUE_OVERRIDE="$WORK/queue" run_reclaim
+grep -q '^cacheverify' "$CALLS" && bad "E: a running GitHub job must defer the purge" || ok "E: co-located GitHub job running -> purge deferred"
+rm -f "$WORK/purge.attempt"
 : > "$CALLS"; MOCK_MAINPID=1 QUEUE_OVERRIDE="$WORK/queue" run_reclaim
 grep -q '^cacheverify' "$CALLS" && bad "E: a running daemon must not get the queue applied" || ok "E: daemon running -> queue left alone"
 : > "$WORK/queue"; : > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim

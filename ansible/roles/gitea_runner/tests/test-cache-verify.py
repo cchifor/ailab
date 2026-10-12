@@ -8,6 +8,7 @@ deletion as the current user. Nothing here reads or writes the host's real cache
 Usage: python3 ansible/roles/gitea_runner/tests/test-cache-verify.py   (exit 0 = pass)
 """
 import base64
+import getpass
 import hashlib
 import importlib.util
 import os
@@ -74,8 +75,9 @@ class Fx:
         return a
 
     def env(self, **over):
+        # The root applier only trusts state files owned by the runner user: here, whoever runs the suite.
         e = {"FX": str(self.root), "GITEA_CACHE_VERIFY_ENV_FILE": "/nonexistent",
-             "GITEA_RUNNER_USER": "runner", "GITEA_RUNNER_HOME": str(self.home),
+             "GITEA_RUNNER_USER": getpass.getuser(), "GITEA_RUNNER_HOME": str(self.home),
              "GITEA_CACHE_NPM_DIR": str(self.npm), "GITEA_CACHE_UV_DIR": str(self.uv),
              "GITEA_CACHE_STATE_DIR": str(self.state), "GITEA_CACHE_TEXTFILE_DIR": str(self.textfile),
              "GITEA_CACHE_BEACON": "1", "GITEA_CACHE_RUNUSER": str(self.bin / "runuser"),
@@ -160,7 +162,9 @@ class VerifyTests(Base):
         t0 = time.time()
         self.fx.run("verify")
         self.assertLess(time.time() - t0, 10)
-        self.assertEqual([l for l in self.fx.queue() if l], [])
+        # the npm symlink is skipped (never followed); the FIFO standing in for a RECORD-listed file makes
+        # that archive unusable, so it is queued - and neither one hangs the open
+        self.assertEqual([l for l in self.fx.queue() if l], ["uv " + "D" * 20])
 
     def test_record_paths_that_escape_the_archive_are_ignored(self):
         a = self.fx.uv_archive("E" * 20, {"pkg/a.py": b"a"})
@@ -171,14 +175,65 @@ class VerifyTests(Base):
         self.fx.run("verify")
         self.assertEqual([l for l in self.fx.queue() if l], [])
 
-    def test_hardlinked_venv_is_recorded_for_removal(self):
+    def test_hardlinked_venv_is_recorded_and_a_mere_hardlink_is_not_inplace(self):
         a = self.fx.uv_archive("F" * 20, {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",))
+        time.sleep(1.1)   # the link below bumps the inode's ctime well past the archive dir's: mtime must not move
         venv = self.fx.pytest / "pytest-7/test_x0/.venv"
         (venv / "lib/python3.12/site-packages/pkg").mkdir(parents=True)
         (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
         os.link(a / "pkg/m.so", venv / "lib/python3.12/site-packages/pkg/m.so")
         self.fx.run("verify")
+        self.fx.run("publish")
         self.assertIn("venv pytest pytest-7/test_x0/.venv", self.fx.queue())
+        self.assertIn('gitea_runner_cache_corrupt_inplace_evidence{cache="uv"} 0', self.fx.prom())
+
+    def test_a_cached_uv_environment_sharing_a_corrupt_inode_is_queued(self):
+        a = self.fx.uv_archive("J" * 20, {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",))
+        env = self.fx.uv / "archive-v0" / ("K" * 20)   # a uvx / `uv run --with` environment
+        (env / "lib/python3.12/site-packages/pkg").mkdir(parents=True)
+        (env / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        os.link(a / "pkg/m.so", env / "lib/python3.12/site-packages/pkg/m.so")
+        self.fx.run("verify")
+        q = [l for l in self.fx.queue() if l]
+        self.assertIn("uv " + "J" * 20, q)
+        self.assertIn("uv " + "K" * 20, q, "the cached env would keep serving the corrupt inode")
+        self.fx.run("apply")
+        self.assertFalse(env.exists())
+
+    def test_missing_recorded_file_and_unreadable_record_are_corrupt(self):
+        a = self.fx.uv_archive("M" * 20, {"pkg/a.py": b"a", "pkg/b.so": b"b"})
+        os.unlink(a / "pkg/b.so")
+        r = self.fx.uv_archive("R" * 20, {"pkg/a.py": b"a"}, pointer=False)
+        (r / "pkg-1.0.dist-info/RECORD").write_bytes(b"\xff\xfe not utf-8")
+        self.fx.run("verify")
+        q = self.fx.queue()
+        self.assertIn("uv " + "M" * 20, q)
+        self.assertIn("uv " + "R" * 20, q)
+
+    def test_a_deferred_purge_does_not_grow_the_queue(self):
+        self.fx.npm_put(b"tarball", corrupt=True)
+        self.fx.run("verify")
+        self.fx.run("verify")
+        self.fx.run("publish")
+        self.assertEqual(len([l for l in self.fx.queue() if l]), 1)
+        self.assertIn('gitea_runner_cache_corrupt_pending{cache="npm"} 1', self.fx.prom())
+
+    def test_an_archive_vanishing_mid_walk_does_not_abort_the_pass(self):
+        self.fx.uv_archive("V" * 20, {"pkg/a.py": b"a"})
+        h, _ = self.fx.npm_put(b"tarball", corrupt=True)
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_vanish_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real = mod.digest
+
+            def flaky(path, algo):
+                if "VVVV" in path:
+                    raise FileNotFoundError(path)
+                return real(path, algo)
+            mod.digest = flaky
+            self.assertEqual(mod.main(["x", "verify"]), 0)
+        self.assertIn(f"npm sha512:{h}", self.fx.queue(), "the rest of the pass still ran")
 
 
 class ApplyTests(Base):
@@ -199,7 +254,8 @@ class ApplyTests(Base):
         self.assertTrue((self.fx.pytest / "pytest-3").exists(), "only the venv root goes, not its parents")
         self.assertEqual([l for l in self.fx.queue() if l], [])
         log = (self.fx.root / "runuser.log").read_text()
-        self.assertTrue(all(l.startswith("-u runner -- rm -rf --one-file-system -- ") for l in log.splitlines()), log)
+        me = getpass.getuser()
+        self.assertTrue(all(l.startswith(f"-u {me} -- rm -rf --one-file-system -- ") for l in log.splitlines()), log)
         self.assertIn('gitea_runner_cache_corrupt_pending{cache="uv"} 0', self.fx.prom())
 
     def test_forged_queue_lines_are_rejected_and_nothing_outside_the_roots_is_touched(self):
@@ -221,6 +277,21 @@ class ApplyTests(Base):
         self.assertFalse((self.fx.root / "runuser.log").exists(), "no deletion may run for a forged line")
         self.assertEqual([l for l in self.fx.queue() if l], [], "rejected lines are dropped, not retried")
 
+    def test_a_symlinked_queue_is_refused_and_its_target_untouched(self):
+        victim = self.fx.root / "victim.txt"
+        victim.write_text("precious\n")
+        (self.fx.state / "purge.queue").symlink_to(victim)
+        self.fx.run("apply")
+        self.assertEqual(victim.read_text(), "precious\n")
+        self.assertFalse((self.fx.root / "runuser.log").exists())
+
+    def test_a_queue_not_owned_by_the_runner_user_is_refused(self):
+        q = self.fx.state / "purge.queue"
+        q.write_text("npm sha512:" + "a" * 128 + "\n")
+        self.fx.run("apply", GITEA_RUNNER_USER="root" if getpass.getuser() != "root" else "nobody")
+        self.assertEqual(q.read_text(), "npm sha512:" + "a" * 128 + "\n")
+        self.assertFalse((self.fx.root / "runuser.log").exists())
+
     def test_venv_entry_must_really_be_a_venv(self):
         d = self.fx.work / "abc/hostexecutor/src"
         d.mkdir(parents=True)
@@ -229,9 +300,28 @@ class ApplyTests(Base):
         self.fx.run("apply")
         self.assertTrue((d / "code.py").exists())
 
+    def test_a_symlinked_uv_bucket_is_not_walked(self):
+        aid = "L" * 20
+        outside = self.fx.root / "outside"
+        outside.mkdir()
+        (outside / "names-the-id").write_bytes(b"pointer " + aid.encode())
+        (self.fx.uv / "evil-v0").symlink_to(outside)
+        self.fx.state.joinpath("purge.queue").write_text(f"uv {aid}\n")
+        self.fx.run("apply")
+        self.assertTrue((outside / "names-the-id").exists())
+
     def test_publish_without_a_result_writes_no_beacon(self):
         self.fx.run("publish")
         self.assertEqual(self.fx.prom(), "")
+
+    def test_a_non_finite_result_writes_no_beacon(self):
+        res = self.fx.state / "result.json"
+        base = '"checked": {"npm": 1, "uv": 1}, "found": {"npm": 0, "uv": 0}, "inplace": {"npm": 0, "uv": 0}'
+        for bad in ('"finished": 1e999, "duration": 1.0', '"finished": 1, "duration": NaN',
+                    '"finished": 1, "duration": -5'):
+            res.write_text("{" + bad + ", " + base + "}")
+            self.fx.run("publish")
+            self.assertEqual(self.fx.prom(), "", bad)
 
 
 if __name__ == "__main__":

@@ -120,8 +120,9 @@ HEAL_LOOKBACK_SEC="${GITEA_CLEANUP_HEAL_LOOKBACK_SEC:-604800}"
 HEAL_COOLDOWN_SEC="${GITEA_CLEANUP_HEAL_COOLDOWN_SEC:-21600}"
 HEAL_STATE="${GITEA_CLEANUP_HEAL_STATE:-/var/lib/gitea-runner-cleanup/buildkit-heal.state}"
 # Shared-cache purge queue written by gitea-runner-cache-verify.py (nightly, as runner).
-CACHE_VERIFY_BIN="${GITEA_CACHE_VERIFY_BIN:-/usr/local/bin/gitea-runner-cache-verify.py}"
 CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
+CACHE_PURGE_STAMP="${GITEA_CLEANUP_CACHE_PURGE_STAMP:-$(dirname "$HEAL_STATE")/cache-purge-restart.stamp}"
+CACHE_PURGE_RESTART_MIN_SEC="${GITEA_CLEANUP_CACHE_PURGE_RESTART_MIN_SEC:-21600}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -570,13 +571,22 @@ else
 fi
 
 # ---- shared-cache purge queue ------------------------------------------------------------------
-# Corrupt npm/uv cache entries found by the nightly verify are removed only inside a CONFIRMED idle
-# gap: a uv install in flight hardlinks from the archive being removed. The confirmation narrows that
-# race, it does not close it, so the reclaim's ExecStartPre (daemon down) applies the queue too. A
-# deferral keeps the queue; gitea_runner_cache_corrupt_pending stays up until it is applied.
-if [ -s "$CACHE_PURGE_QUEUE" ] && [ -x "$CACHE_VERIFY_BIN" ]; then
-  if idle_confirmed; then
-    timeout -k 5 120 "$CACHE_VERIFY_BIN" apply 2>&1 | logger -t gitea-runner-cache-purge 2>/dev/null || true
+# Corrupt npm/uv cache entries are purged only while act_runner is DOWN: the reclaim applies the queue
+# when the unit's MainPID is 0 (its ExecStartPre). An idle check is not a barrier - a job can start
+# between the check and a purge, and a uv install hardlinks from the archive being removed - so this
+# never purges itself. In a CONFIRMED idle gap it queues a restart of act_runner instead (--no-block):
+# the restart's ExecStartPre purges with the daemon down. If a job slips in first, the stop drains it
+# (shutdown_timeout) before the purge runs. At most one such restart per CACHE_PURGE_RESTART_MIN_SEC
+# (6h), so a purge that keeps failing cannot restart the runner every 15 minutes; until it succeeds,
+# gitea_runner_cache_corrupt_pending stays up and alerts.
+if [ -s "$CACHE_PURGE_QUEUE" ]; then
+  last="$(stat -c %Y "$CACHE_PURGE_STAMP" 2>/dev/null || echo 0)"
+  if is_num "$last" && [ $(( $(date +%s) - last )) -lt "$CACHE_PURGE_RESTART_MIN_SEC" ]; then
+    log "cache purge pending: a restart for it was queued $(( ($(date +%s) - last) / 60 ))m ago; not again yet"
+  elif idle_confirmed; then
+    mkdir -p "$(dirname "$CACHE_PURGE_STAMP")" 2>/dev/null; touch "$CACHE_PURGE_STAMP" 2>/dev/null || true
+    log "cache purge: queueing a restart of $SERVICE in an idle gap; its ExecStartPre applies the queue with the daemon down"
+    systemctl restart --no-block "$SERVICE" >/dev/null 2>&1 || log "cache purge: FAILED to queue a restart of $SERVICE"
   else
     log "cache purge deferred: a job is running (the queue is kept)"
   fi

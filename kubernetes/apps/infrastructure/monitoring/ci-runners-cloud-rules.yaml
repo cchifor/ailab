@@ -156,16 +156,31 @@ spec:
               not fire on Monday morning.
         - alert: CloudCIRunnerRootFilesystemFailed
           expr: >-
-            node_textfile_scrape_error{job="ci-runner-cloud"} == 1
-              and on (cloud_host) cloud_host:up == 1
+            (
+              node_textfile_scrape_error{job="ci-runner-cloud"} == 1
+                unless on (instance) node_textfile_mtime_seconds{job="ci-runner-cloud"}
+            ) and on (cloud_host) cloud_host:up == 1
           for: 3m
           labels: { severity: critical }
           annotations:
-            summary: "cloud CI runner {{ $labels.nodename }} cannot read its node_exporter textfiles (root filesystem failing?)"
+            summary: "cloud CI runner {{ $labels.nodename }} cannot read any node_exporter textfile (root filesystem failed?)"
             description: >-
               See CIRunnerRootFilesystemFailed. Confirm through the guest agent on {{ $labels.cloud_host }}
               (`pvesh get .../agent/file-read --file /sys/fs/ext4/sda1/errors_count`), pause the runner in
               Gitea, then `qm reset` it.
+        - alert: CloudCIRunnerTextfileBeaconUnreadable
+          expr: >-
+            (
+              node_textfile_scrape_error{job="ci-runner-cloud"} == 1
+                and on (instance) node_textfile_mtime_seconds{job="ci-runner-cloud"}
+            ) and on (cloud_host) cloud_host:up == 1
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} has a textfile beacon node_exporter cannot parse"
+            description: >-
+              See CIRunnerTextfileBeaconUnreadable: one malformed beacon on {{ $labels.nodename }}, the
+              other textfiles still parse.
         # INHIBITION SOURCE ONLY — Alertmanager routes it to "null" and uses it to mute the chart's
         # generic TargetDown for the three cloudlab scrape jobs (cloud-node, ci-runner-cloud, cloud-pve;
         # kube-prometheus-stack.yaml inhibit_rules). The rules in this file are host-gated, but
