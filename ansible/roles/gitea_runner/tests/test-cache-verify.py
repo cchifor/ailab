@@ -11,6 +11,7 @@ import base64
 import getpass
 import hashlib
 import importlib.util
+import json
 import os
 import stat
 import tempfile
@@ -298,6 +299,135 @@ class VerifyTests(Base):
         finally:
             odd.chmod(0o755)
         self.assertIn(f"npm sha512:{h}", self.fx.queue(), "the rest of the pass still ran")
+
+    def _verify_with_reads(self, needle, outcomes):
+        """Run verify with the reads of the one file whose path contains `needle` scripted: outcomes[k] is
+        "bad" (a wrong hash), "ok" (the true hash) or "gone" (unreadable) for read k, the first via
+        digest(), the re-reads via fresh_digest(). Reads past the script are true. -> the module."""
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_flap_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real_digest, real_fresh, k = mod.digest, mod.fresh_digest, [0]
+
+            def scripted(kind):
+                o = outcomes[k[0]] if k[0] < len(outcomes) else "ok"
+                k[0] += 1
+                return o
+
+            def digest(path, algo):
+                h, st = real_digest(path, algo)
+                if needle in path:
+                    if scripted("first") == "bad":
+                        return hashlib.new(algo, b"a page read wrong"), st
+                return h, st
+
+            def fresh(path, algo):
+                h = real_fresh(path, algo)
+                if needle in path:
+                    o = scripted("fresh")
+                    if o == "bad":
+                        return hashlib.new(algo, b"a page read wrong again")
+                    if o == "gone":
+                        return None
+                return h
+            mod.digest, mod.fresh_digest = digest, fresh
+            mod.main(["x", "verify"])
+            self.assertGreater(k[0], 0, "the scripted reads were exercised")
+            return mod
+
+    def _verify_with_one_bad_read(self, needle):
+        self._verify_with_reads(needle, ["bad"])
+
+    def test_bad_bad_ok_is_a_flap_with_two_bad_reads(self):
+        aid = "J" * 19 + "K"
+        self.fx.uv_archive(aid, {"pkg/_d.so": b"\x7fELF intact"})
+        mod = self._verify_with_reads("_d.so", ["bad", "bad", "ok"])
+        self.assertEqual([l for l in self.fx.queue() if l], [], "still a flap within REREADS")
+        self.assertEqual(mod.FLAPPED[0]["bad_reads"], 2)
+
+    def test_wrong_on_every_read_up_to_rereads_is_queued(self):
+        aid = "M" * 19 + "N"
+        self.fx.uv_archive(aid, {"pkg/_e.so": b"\x7fELF intact"})
+        self._verify_with_reads("_e.so", ["bad", "bad", "bad", "ok"])   # the 4th read is past REREADS
+        self.assertIn("uv " + aid, self.fx.queue())
+
+    def test_a_reread_that_cannot_be_done_is_inconclusive_not_corrupt(self):
+        aid = "P" * 19 + "Q"
+        self.fx.uv_archive(aid, {"pkg/_f.so": b"\x7fELF intact"})
+        self._verify_with_reads("_f.so", ["bad", "gone"])
+        self.assertEqual([l for l in self.fx.queue() if l], [], "a vanished re-read is never queued")
+
+    def test_a_reread_error_is_counted_unreadable_and_not_queued(self):
+        aid = "R" * 19 + "S"
+        self.fx.uv_archive(aid, {"pkg/_g.so": b"\x7fELF intact"})
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_eio_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real = mod.digest
+
+            def first_bad(path, algo):
+                h, st = real(path, algo)
+                return (hashlib.new(algo, b"wrong"), st) if "_g.so" in path else (h, st)
+
+            def eio(path, algo):
+                raise OSError(5, "Input/output error", path)
+            mod.digest, mod.fresh_digest = first_bad, eio
+            mod.main(["x", "verify"])
+        self.assertEqual([l for l in self.fx.queue() if l], [], "a failed re-read is inconclusive")
+        res = json.loads((self.fx.state / "result.json").read_text())
+        self.assertEqual(res["skipped_unreadable"], 1)
+
+    def test_a_file_missing_on_the_first_look_but_intact_on_the_second_is_not_queued(self):
+        aid = "T" * 19 + "U"
+        self.fx.uv_archive(aid, {"pkg/_h.py": b"x = 1\n"})
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_relook_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real = mod.digest
+
+            def missing_once(path, algo):   # uv replacing the archive while it is walked
+                return (None, None) if "_h.py" in path else real(path, algo)
+            mod.digest = missing_once
+            mod.main(["x", "verify"])
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+
+    def test_fresh_digest_reads_the_real_content(self):
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_fresh_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            for size in (0, 1, 4095, 4096, 4097, (1 << 20) + 123):
+                p = self.fx.root / f"f{size}"
+                data = os.urandom(size)
+                p.write_bytes(data)
+                self.assertEqual(mod.fresh_digest(str(p), "sha256").hexdigest(), hashlib.sha256(data).hexdigest(), size)
+            self.assertIsNone(mod.fresh_digest(str(self.fx.root / "nope"), "sha256"))
+
+    def test_a_uv_file_read_wrong_once_is_a_read_flap_not_corruption(self):
+        self.fx.uv_archive("F" * 19 + "L", {"pkg/_c.so": b"\x7fELF fine"})
+        self._verify_with_one_bad_read("_c.so")
+        self.assertEqual([l for l in self.fx.queue() if l], [], "an intact file is never queued")
+        self.fx.run("publish")
+        prom = self.fx.prom()
+        self.assertIn('gitea_runner_cache_read_flaps{cache="uv"} 1', prom)
+        self.assertIn('gitea_runner_cache_corrupt_found{cache="uv"} 0', prom)
+
+    def test_an_npm_entry_read_wrong_once_is_a_read_flap_not_corruption(self):
+        h, _ = self.fx.npm_put(b"tarball that is fine on disk")
+        self._verify_with_one_bad_read(h[4:])
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+        self.fx.run("publish")
+        self.assertIn('gitea_runner_cache_read_flaps{cache="npm"} 1', self.fx.prom())
+
+    def test_a_file_wrong_on_every_read_is_still_corrupt_and_not_a_flap(self):
+        self.fx.uv_archive("G" * 19 + "Z", {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",))
+        self.fx.run("verify")
+        self.assertIn("uv " + "G" * 19 + "Z", self.fx.queue())
+        self.fx.run("publish")
+        self.assertIn('gitea_runner_cache_read_flaps{cache="uv"} 0', self.fx.prom())
 
     def test_an_archive_deleted_during_the_pass_is_not_reported_corrupt(self):
         import shutil

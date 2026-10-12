@@ -16,6 +16,10 @@ host. Nothing checked either.
            does not mass-purge). Evidence per bad file: nlink, whether its CONTENT changed after unpack
            (mtime against the archive dir's ctime; ctime moves on every hardlink/unlink), and which
            venvs and cached uv environments share the inode. New entries are appended to the queue.
+           A mismatch is re-read with O_DIRECT (no page cache) before it is judged: a file that hashes right on
+           a re-read was READ wrong, not stored wrong. That is a `read flap`, counted and published
+           (a host corrupting memory) but never queued: cloud-ci-7, 2026-10-12, read an intact .so
+           bad/ok/bad/ok, one 4 KiB page wrong per bad read, while its jobs segfaulted at random.
   publish  (root, ExecStartPost=+) - validate the result and write the node_exporter beacon.
   apply    (root) - validate the queue and hand the valid lines to `purge`, run as runner. Runs only
            as act_runner's ExecStartPre (the reclaim, inside the unit's start transaction), and
@@ -31,12 +35,14 @@ what runner itself could.
 """
 import base64
 import csv
+import errno
 import fcntl
 import hashlib
 import io
 import json
 import signal
 import math
+import mmap
 import os
 import pwd
 import re
@@ -96,6 +102,9 @@ NPM_KEY = re.compile(r"^(sha512:[0-9a-f]{128}|sha1:[0-9a-f]{40})$")
 UV_KEY = re.compile(r"^[A-Za-z0-9_-]{16,32}$")
 REL = re.compile(r"^[A-Za-z0-9._+@=-]+(/[A-Za-z0-9._+@=-]+)*$")
 SKIPPED = {"vanished": 0, "unreadable": 0}
+REREADS = 2                       # fresh re-reads of a mismatching file before it is judged corrupt
+FLAPS = {"npm": 0, "uv": 0}      # files that hashed wrong once and right on a re-read
+FLAPPED = []
 
 
 def runner_uid():
@@ -156,6 +165,105 @@ def digest(path, algo):
     return h, st
 
 
+def dropped_cache_digest(path, algo):
+    """Drop the file's page cache (clean, unmapped pages only), then hash it normally. The fallback where
+    O_DIRECT is refused. -> hash object or None (not there); a read error raises OSError."""
+    fd = open_regular(path)
+    if fd is None:
+        return None
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+    h, _st = digest(path, algo)
+    return h
+
+
+def fresh_digest(path, algo):
+    """Hash `path` WITHOUT the page cache: O_DIRECT into a newly mapped, page-aligned buffer, so neither a
+    corrupt cached page (even one a running job keeps mmap'd, which POSIX_FADV_DONTNEED cannot drop) nor
+    the buffer of an earlier read is reused. EINVAL (O_DIRECT refused at open, as on tmpfs, or on read,
+    as with an odd block size or a stacking filesystem) falls back to dropped_cache_digest().
+    -> hash object; None when the file is not there (vanished, a symlink, not a regular file). Any other
+    read error RAISES OSError, so it is reported as unreadable instead of passing for a vanished file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_DIRECT)
+    except OSError as e:
+        if e.errno == errno.EINVAL:
+            return dropped_cache_digest(path, algo)
+        if e.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            return None
+        raise
+    buf = mmap.mmap(-1, CHUNK)   # fresh anonymous pages, page-aligned as O_DIRECT requires
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        h = hashlib.new(algo)
+        while True:
+            try:
+                n = os.readv(fd, [buf])
+            except OSError as e:
+                if e.errno == errno.EINVAL:
+                    return dropped_cache_digest(path, algo)
+                raise
+            if n <= 0:
+                break
+            h.update(buf[:n])
+            if n % 4096:   # a short, unaligned read is the end of the file
+                break
+        return h
+    finally:
+        os.close(fd)
+        buf.close()
+
+
+def reread(path, algo, ok):
+    """Re-read a file that just hashed wrong, up to REREADS times, bypassing the page cache.
+    -> ("ok", n): right on fresh read n+1, so the file is intact and n+1 reads were corrupted (a flap);
+       ("bad", n): wrong on every one of the n fresh reads, so the file is corrupt;
+       ("gone", n): the file is no longer there: inconclusive (counted as vanished), never corrupt;
+       ("error", n): a re-read failed (EIO, EACCES, ...): inconclusive (counted as unreadable and
+       logged with the errno), never corrupt."""
+    for n in range(REREADS):
+        try:
+            h = fresh_digest(path, algo)
+        except OSError as e:
+            print(f"re-read error {path}: {e}", flush=True)
+            return "error", n
+        if h is None:
+            return "gone", n
+        if ok(h):
+            return "ok", n
+    return "bad", REREADS
+
+
+def inconclusive(verdict):
+    """Count a re-read that settled nothing; True when the caller must skip the file."""
+    if verdict == "gone":
+        SKIPPED["vanished"] += 1
+    elif verdict == "error":
+        SKIPPED["unreadable"] += 1
+    return verdict in ("gone", "error")
+
+
+def flap(cache, key, rel, bad_reads):
+    FLAPS[cache] += 1
+    if len(FLAPPED) < 50:
+        FLAPPED.append({"cache": cache, "key": key, "file": rel, "bad_reads": bad_reads})
+    print(f"read flap {cache} {key} {rel}: hashed wrong {bad_reads}x, then right on a fresh (O_DIRECT)"
+          " read: the READ was corrupted, the file is intact", flush=True)
+
+
+def uv_digest_ok(h, want):
+    # The spec says urlsafe-base64, but uv 0.8.2's build backend wrote HEX digests: the
+    # ag_ui_protocol 0.1.14 wheel on PyPI (on every runner, every hex digest matching its file,
+    # 2026-10-12). A full-length digest in either encoding proves the content; corruption
+    # matches neither.
+    return want in (base64.urlsafe_b64encode(h.digest()).rstrip(b"=").decode(), h.hexdigest())
+
+
 def safe_rel(rel):
     """A relative path that is safe to put on a whitespace-separated queue line (root parses it)."""
     return bool(REL.match(rel)) and ".." not in rel.split("/")
@@ -207,6 +315,12 @@ def verify_npm():
                         continue
                     checked += 1
                     if h.hexdigest() != want:
+                        verdict, n = reread(os.path.join(p2, rest), algo, lambda g, w=want: g.hexdigest() == w)
+                        if verdict == "ok":
+                            flap("npm", f"{algo}:{want}", "", n + 1)
+                            continue
+                        if inconclusive(verdict):
+                            continue
                         bad.append({"cache": "npm", "key": f"{algo}:{want}", "nlink": st.st_nlink,
                                     "size": st.st_size, "mtime": int(st.st_mtime), "inplace": None})
     return checked, bad
@@ -269,6 +383,7 @@ def verify_uv():
     unhashed row was RECORD itself, and every hash was sha256 (all urlsafe-base64 but one uv-0.8.2-built
     wheel's hex rows). So anything else marks the archive corrupt."""
     checked, bad, no_record, envs = 0, [], 0, 0
+    missing = []  # (aid, rel, path, algo, want): listed files not there on the first look
     linked = {}   # (dev, ino) -> entries whose corrupt inode is shared
 
     def corrupt(aid, rel, reason):
@@ -329,14 +444,16 @@ def verify_uv():
                     if not os.path.lexists(adir):
                         SKIPPED["vanished"] += 1
                         break
-                    corrupt(aid, row[0], "missing or not a regular file")
+                    missing.append((aid, row[0], path, algo, want))
                     continue
                 checked += 1
-                # The spec says urlsafe-base64, but uv 0.8.2's build backend wrote HEX digests: the
-                # ag_ui_protocol 0.1.14 wheel on PyPI (on every runner, every hex digest matching its file,
-                # 2026-10-12). A full-length digest in either encoding proves the content; corruption
-                # matches neither.
-                if want in (base64.urlsafe_b64encode(h.digest()).rstrip(b"=").decode(), h.hexdigest()):
+                if uv_digest_ok(h, want):
+                    continue
+                verdict, n = reread(path, algo, lambda g, w=want: uv_digest_ok(g, w))
+                if verdict == "ok":
+                    flap("uv", aid, row[0], n + 1)
+                    continue
+                if inconclusive(verdict):
                     continue
                 # mtime, not ctime: link()/unlink() of another hardlink also bumps ctime, and every uv
                 # install hardlinks from the archive. Only a content write moves mtime past the unpack.
@@ -346,6 +463,20 @@ def verify_uv():
                 if st.st_nlink > 1:
                     linked.setdefault((st.st_dev, st.st_ino), []).append(entry)
                 bad.append(entry)
+    # A listed file that was missing (or not a regular file) gets a SECOND, fresh look after the pass, so
+    # an archive being replaced or pruned is not queued on one look: there and intact now = a transient.
+    for aid, rel, path, algo, want in missing:
+        try:
+            h = fresh_digest(path, algo)
+        except OSError as e:
+            print(f"re-look error {path}: {e}", flush=True)
+            SKIPPED["unreadable"] += 1
+            continue
+        if h is not None and uv_digest_ok(h, want):
+            SKIPPED["vanished"] += 1
+            continue
+        corrupt(aid, rel, "missing or not a regular file (on two looks)" if h is None
+                else "missing on the first look, wrong on the second")
     # An archive being deleted (a job's `uv cache prune`) can look like missing files mid-walk; if it is
     # gone by the end of the pass, its findings are a vanish, not corruption.
     gone = {b["key"] for b in bad if not os.path.lexists(os.path.join(base, b["key"]))}
@@ -393,6 +524,7 @@ def cmd_verify():
               "skipped_vanished": SKIPPED["vanished"], "skipped_unreadable": SKIPPED["unreadable"],
               "found": {"npm": len(n_bad), "uv": len({b["key"] for b in u_bad})},
               "inplace": {"npm": 0, "uv": sum(1 for b in u_bad if b["inplace"])},
+              "read_flaps": dict(FLAPS), "flapped": FLAPPED,
               "bad": bad[:200]}
     tmp = RESULT + f".{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -402,6 +534,7 @@ def cmd_verify():
         print(f"corrupt {b['cache']} {b['key']} {b.get('file', '')} ({b.get('reason', 'hash mismatch')})"
               f" nlink={b['nlink']} inplace={b['inplace']} links={b.get('links', [])}", flush=True)
     print(f"verified npm={n_checked} uv={u_checked} bad_npm={len(n_bad)} bad_uv_files={len(u_bad)}"
+          f" read_flaps_npm={FLAPS['npm']} read_flaps_uv={FLAPS['uv']}"
           f" uv_no_record={no_record} uv_envs={envs} skipped_vanished={SKIPPED['vanished']} in {result['duration']}s", flush=True)
     return 0
 
@@ -583,7 +716,10 @@ def write_beacon():
         checked = {k: int(r["checked"][k]) for k in ("npm", "uv")}
         found = {k: int(r["found"][k]) for k in ("npm", "uv")}
         inplace = {k: int(r["inplace"][k]) for k in ("npm", "uv")}
-        if not all(math.isfinite(x) and x >= 0 for x in [last, dur, *checked.values(), *found.values(), *inplace.values()]):
+        rf = r.get("read_flaps") or {}   # absent in a result written before the re-read existed
+        flaps = {k: int(rf.get(k, 0)) for k in ("npm", "uv")}
+        if not all(math.isfinite(x) and x >= 0
+                   for x in [last, dur, *checked.values(), *found.values(), *inplace.values(), *flaps.values()]):
             return
     except (ValueError, KeyError, TypeError, OverflowError):
         return  # no valid result: publish nothing. Before the first beacon the beacon-missing alert
@@ -604,6 +740,9 @@ def write_beacon():
       [f'gitea_runner_cache_corrupt_pending{{cache="{k}"}} {v}' for k, v in pend.items()])
     g("corrupt_inplace_evidence", "Corrupt uv files whose content changed after unpack (a job wrote through a hardlink).",
       [f'gitea_runner_cache_corrupt_inplace_evidence{{cache="{k}"}} {v}' for k, v in inplace.items()])
+    g("read_flaps", "Files the last verification read wrong, then right on a fresh (O_DIRECT) re-read: the host corrupted"
+      " the READ (memory), the file is intact. Never queued.",
+      [f'gitea_runner_cache_read_flaps{{cache="{k}"}} {v}' for k, v in flaps.items()])
     tmp = os.path.join(TEXTFILE_DIR, f"gitea_runner_cache_verify.prom.{os.getpid()}")
     try:
         with open(tmp, "w", encoding="utf-8") as fh:

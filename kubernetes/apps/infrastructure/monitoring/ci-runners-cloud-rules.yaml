@@ -115,6 +115,18 @@ spec:
         # ---- shared-cache integrity + dead root filesystem, host-gated (see the CIRunner* twins in
         # ci-runners-rules.yaml). The cloud hosts boot daily and a missed 04:30 run catches up at boot
         # (Persistent=true + up to 2h random delay), so the beacon-missing wait is 6h after 4h of uptime.
+        - alert: CloudCIRunnerCacheReadFlaps
+          expr: >-
+            max by (instance, nodename, cloud_host, cache) (
+              gitea_runner_cache_read_flaps{job="ci-runner-cloud"}
+            ) > 0 and on (cloud_host) cloud_host:up == 1
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} read different bytes from an intact {{ $labels.cache }} cache file"
+            description: >-
+              See CIRunnerCacheReadFlaps. {{ $labels.nodename }} on {{ $labels.cloud_host }} corrupts data in
+              memory: pause it in Gitea and look at {{ $labels.cloud_host }} (memory pressure, ballooning).
         - alert: CloudCIRunnerCacheCorruptPending
           expr: >-
             max by (instance, nodename, cloud_host, cache) (

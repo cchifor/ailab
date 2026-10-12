@@ -379,6 +379,20 @@ spec:
         # ---- shared-cache integrity + dead root filesystem (gitea-runner-cache-verify.py; PR 3 of
         # plans/2026-10-12-runner-between-job-cleanup-plan.md). The verifier publishes
         # gitea_runner_cache_verify.prom once a night; corrupt_pending is what still sits in the purge queue.
+        # An intact cache file read back different bytes (the verify hashed it wrong, then right on a
+        # fresh re-read). Not a cache problem: the host corrupts data in memory, so its jobs crash at
+        # random. Seen on cloud3's guests 2026-10-12 (cloud-ci-3: 59 segfaults in 8.8 h).
+        - alert: CIRunnerCacheReadFlaps
+          expr: max by (instance, cache) (gitea_runner_cache_read_flaps{job="ci-runner-node"}) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} read different bytes from an intact {{ $labels.cache }} cache file"
+            description: >-
+              The last nightly cache verify on {{ $labels.instance }} hashed a {{ $labels.cache }} file wrong,
+              then right on a fresh re-read: the file is intact and the READ was corrupted in memory. Jobs on
+              this runner crash at random (segfaults in python, libc, rustc). Pause the runner in Gitea and
+              investigate its host: docs/runbooks/ci-runners.md "A runner that corrupts memory".
         - alert: CIRunnerCacheCorruptPending
           expr: max by (instance, cache) (gitea_runner_cache_corrupt_pending{job="ci-runner-node"}) > 0
           for: 30m

@@ -142,3 +142,25 @@ tests:
               summary: CI runner 192.168.0.16:9100 has a textfile beacon node_exporter cannot parse
               description: One of the gitea_runner beacons in /var/lib/prometheus/node-exporter on 192.168.0.16:9100 is malformed (the other files still parse). Its alerts are blind until it is fixed; check
                 `journalctl -u prometheus-node-exporter` for the file name.
+  - interval: 1m
+    name: a verify that saw read flaps (an intact file read wrong) warns after 5m; a clean runner does not
+    input_series:
+      - series: gitea_runner_cache_read_flaps{job="ci-runner-node", instance="192.168.0.15:9100", cache="uv"}
+        values: 1+0x20
+      - series: gitea_runner_cache_read_flaps{job="ci-runner-node", instance="192.168.0.16:9100", cache="uv"}
+        values: 0+0x20
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CIRunnerCacheReadFlaps
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CIRunnerCacheReadFlaps
+        exp_alerts:
+          - exp_labels:
+              instance: 192.168.0.15:9100
+              cache: uv
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.15:9100 read different bytes from an intact uv cache file
+              description: 'The last nightly cache verify on 192.168.0.15:9100 hashed a uv file wrong, then right on a fresh re-read: the file is intact and the READ was corrupted in memory. Jobs on this
+                runner crash at random (segfaults in python, libc, rustc). Pause the runner in Gitea and investigate its host: docs/runbooks/ci-runners.md "A runner that corrupts memory".'

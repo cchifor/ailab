@@ -233,7 +233,10 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   - `verify` (as `runner`, throttled) hashes npm content against the digest its path encodes and uv archives
     against their `RECORD`, and queues bad entries in `/var/lib/gitea-runner-cache/purge.queue`. For uv it
     records whether the file changed after unpack (`corrupt_inplace_evidence`: a job wrote through a
-    hardlink) and which venvs share the inode.
+    hardlink) and which venvs share the inode. A mismatch is re-read up to twice with O_DIRECT (no page
+    cache, a fresh buffer); if a re-read hashes right, the file is intact and the READ was corrupted: a
+    `read_flaps` count with the number of bad reads, never queued (see "A runner that corrupts memory"
+    below). A re-read that cannot be done (the file vanished) is inconclusive, never corrupt.
   - `apply` (root) purges the queue only as act_runner's ExecStartPre (systemd starts the daemon only after
     it exits, so no Gitea job runs during the purge; the reclaim timer never purges), and
     not when a co-located GitHub job is running at its start (checked once). The cleanup never purges
@@ -243,7 +246,7 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     that share a corrupt inode are purged too. A queue not owned by `runner` is ignored and logged.
     To purge now: `systemctl restart gitea-act-runner` (drains the running job first).
   - Beacon `gitea_runner_cache_verify.prom`: `checked`, `corrupt_found`, `corrupt_pending`,
-    `corrupt_inplace_evidence` (by `cache`), `verify_last_run_seconds`, `verify_duration_seconds`. Read
+    `corrupt_inplace_evidence`, `read_flaps` (by `cache`), `verify_last_run_seconds`, `verify_duration_seconds`. Read
     `/var/lib/gitea-runner-cache/result.json`, `journalctl -u gitea-runner-cache-verify` (the nightly run)
     and `journalctl -t gitea-runner-cache-purge` (the purges). A fresh install (or any timer change)
     runs one verify at once, so the first beacon does not wait for 04:30. Kill switch:
@@ -257,6 +260,23 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     directory `/var/lib/prometheus/node-exporter` is missing (removed by hand, or node_exporter started
     before the role created it). Check `journalctl -u prometheus-node-exporter` for which one.
     `corrupt_found` alone pages nobody; corruption on a runner points at its host.
+    `…CacheReadFlaps` (warning): see the next item.
+- **A runner that corrupts memory** (`…CacheReadFlaps`, or random segfaults across unrelated programs):
+  an intact file reads back different bytes. Found 2026-10-12 on cloud3's guests:
+  - cloud-ci-7 read an intact `_greenlet...so` BAD/ok/BAD/ok (mtime, ctime and nlink unchanged, the
+    per-byte majority matching RECORD). Each bad read had exactly one 4 KiB page wrong, at the same 16
+    single-byte offsets.
+  - Every cloud3 runner logged segfaults in python/libc/libcrypto/rustc/postgres (cloud-ci-3: 59 in
+    8.8 h), while the cloud1/2 runners had none in ~200 h. All cloud3 guests were ballooned (cloud3 at
+    199 of 251 GB); none of the cloud1/2 guests were.
+  - Count a runner's crashes: `sudo dmesg | grep -c " segfault at "`. Confirm a flap by hashing the file
+    a few times past the page cache: `sudo dd if=<file> iflag=direct bs=1M status=none | sha256sum`.
+    Dropping the cache (`posix_fadvise(DONTNEED)`, `drop_caches`) is NOT enough while a job keeps the
+    file mapped (uv `.so` files hardlinked into live venvs): every re-read hits the same bad page.
+    A paused runner can test its own RAM: `memtester <size>` found the bad page on cloud-ci-7.
+  - Pause the runner in Gitea (`PATCH /api/v1/orgs/cchifor/actions/runners/<id> {"disabled": true}`,
+    org-owner token), then investigate its host. The cleanup never starts a stopped act_runner for a
+    purge, so a quarantine sticks.
 - **GitHub agent reclaim on Gitea hosts:** the dormant GitHub agent's `runner-reclaim.sh` runs at every
   agent (re)start and used to `docker rm -f` every container and prune volumes, images and buildx builders,
   with no idea whether a Gitea job was mid-flight. From ailab#1284 (once `/usr/local/bin/runner-reclaim.sh`

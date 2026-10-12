@@ -974,6 +974,10 @@ echo "uv AAAAAAAAAAAAAAAAAAAA" > "$WORK/real.queue"; rm -f "$QUEUEFILE"; ln -s "
 rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
 if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R5: a refused (symlinked) queue must not restart"; else ok "R5: a queue the applier would refuse -> no restart"; fi
 rm -f "$QUEUEFILE" "$WORK/real.queue"
+echo "uv AAAAAAAAAAAAAAAAAAAA" > "$QUEUEFILE"; rm -f "$WORK/purge.stamp"
+MOCK_RUNNER_STATE=inactive QUEUEFILE="$QUEUEFILE" run_case 0 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R6: a STOPPED runner must not be started for a purge"; else ok "R6: a stopped (quarantined) runner is never started for a purge"; fi
+rm -f "$QUEUEFILE"
 unset QUEUEFILE
 
 echo
