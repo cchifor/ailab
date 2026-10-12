@@ -1279,3 +1279,61 @@ or setting change.
 - `chifor.me/release: router-0.1.0-20261012-codex-retries`
 
 Nothing else changes: no schema change, no new setting.
+
+## Warm spills release and `codex` concurrency (2026-10-12)
+
+`router-0.1.0-20261012-sticky-spills` deploys merged llm-router main `ccfbd1dbe1310ce11b2d9b659ddf6a3d72aba597`
+([#101](https://git.chifor.me/cchifor/llm-router/pulls/101)). Earlier the same day, a live config change raised the
+concurrency of account `codex` from 1 to 4.
+
+**Why.** The dev workers' Codex conversations live on `pool-codex` with `placement: "conversation"`. The subscription
+backend caches prompts per account, so a turn on an account that has not seen the conversation is sent uncached.
+
+Measured 08:10-12:56 UTC on 3,909 dev-worker requests (median input 118k tokens):
+- 10 % of turns spilled.
+- 27 of 39 conversations touched several accounts, with 339 account changes.
+- A turn on an account new to the conversation had a median 33 % of its input cached; one on the same account had 99 %.
+- Account changes were 8 % of turns but 25 % of all uncached input.
+
+There were two causes:
+- **`codex` concurrency 1.** Every second request in flight on a conversation bound to `codex` spilled. That was 317 of
+  the 412 spills in those 5 hours.
+- **Scattered spills.** Each spill went to whichever account the strategy picked.
+
+**What changes.**
+- **Live config revision 1400 (13:09 UTC), at the owner's request:** `codex` concurrency 1 → 4, like codex-2/3/4.
+  - In the first 8 minutes (159 requests) spills fell from 9.9 % to 2.5 %. Conversations bound to `codex` spilled once.
+  - Rollback: set it back to 1 (a full `PUT /admin/v1/config` with `If-Match`; change only that field).
+- **The image:** a spilled turn goes to the conversation's spill account, while that account answered one of its
+  spills within 15 minutes and can take the turn.
+  - Passed over: an account serving on credits while another candidate has included quota. In that case, or with no
+    warm spill account, the strategy places the spill as before.
+  - The spill account is noted when an account answers (first content), never by an attempt that failed first. Each
+    answered spill renews the 15 minutes.
+  - The record is the router's memory only; a restart forgets it. The binding is unchanged.
+- **README fix:** the router's README no longer claims that encrypted reasoning only decrypts on the account that produced
+  it. That was measured portable between Pro subscriptions. The Pro ↔ Pro Lite check is still open: codex-3 and
+  codex-4 are Pro Lite.
+
+**How to check after the rollout.**
+- In the journal, a spilled turn whose conversation spilled within 15 minutes shows
+  `routing.evaluated.placement.warmSpill` (`GET /admin/v1/trajectories/:id`).
+- Over an hour of dev-worker traffic, the share of turns on an account new to the conversation, and its uncached input,
+  should be well below the numbers above.
+
+**Image.**
+- Archive `router-0.1.0-20261012-sticky-spills.tar.gz`, SHA-256
+  `e7cabb9f43567680e1d5fa62782e1405114215444642249c633e95ac120f2b48`; relay branch `release/router-sticky-spills-image`,
+  [run 83008](https://git.chifor.me/cchifor/relay/actions/runs/83008).
+- Image `registry.chifor.me/llm-router/router@sha256:f8ddc9ce9353f6e3a5f7bcc75b8ff16d2cfa29cf0a5e801358b57d9dbc4bec54`.
+  The receipt `deployment-images-83008.json` (relay release v0.2.0) pins it from `source ccfbd1db…`, archive
+  `sha256 e7cabb9f…` and `packagingCommit c12bc466…`.
+- Before merge: 1775 tests passed, 0 failed, and Playwright passed, on Linux CI
+  ([run 82979](https://git.chifor.me/cchifor/llm-router/actions/runs/82979)). Both reviewer bots approved.
+
+**Rollback.** In `router.yaml`, revert the image digest and both pod-template annotations together:
+- `image: registry.chifor.me/llm-router/router@sha256:2127e3943e48d5262c41058f314446c1801ff33530f1217dfe353763c12c387b`
+- `chifor.me/source-commit: 0b0b2514eab20a2257782444ec058508dc16c241`
+- `chifor.me/release: router-0.1.0-20261012-activity-table`
+
+Nothing else changes: no schema change, no new setting. The `codex` concurrency is separate config and stays.
