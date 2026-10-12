@@ -471,3 +471,27 @@ tests:
             exp_annotations:
               summary: cloud CI runner cloud-ci-3 has a textfile beacon node_exporter cannot parse
               description: 'See CIRunnerTextfileBeaconUnreadable: one malformed beacon on cloud-ci-3, the other textfiles still parse.'
+  - interval: 1m
+    name: read flaps on a cloud runner warn while its host is up; a powered-off host is silent
+    input_series:
+      - series: gitea_runner_cache_read_flaps{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100", cache="npm"}
+        values: 2+0x20
+      - series: gitea_runner_cache_read_flaps{job="ci-runner-cloud", cloud_host="cloud2", nodename="cloud-ci-5", instance="192.168.0.36:9100", cache="npm"}
+        values: 2+0x20
+      - series: up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}
+        values: 1+0x20
+      - series: up{job="cloud-node", nodename="cloud2", instance="192.168.0.21:9100"}
+        values: 0+0x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CloudCIRunnerCacheReadFlaps
+        exp_alerts:
+          - exp_labels:
+              instance: 192.168.0.32:9100
+              nodename: cloud-ci-1
+              cloud_host: cloud1
+              cache: npm
+              severity: warning
+            exp_annotations:
+              summary: cloud CI runner cloud-ci-1 read different bytes from an intact npm cache file
+              description: 'See CIRunnerCacheReadFlaps. cloud-ci-1 on cloud1 corrupts data in memory: pause it in Gitea and look at cloud1 (memory pressure, ballooning).'

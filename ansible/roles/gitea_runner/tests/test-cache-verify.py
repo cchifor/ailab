@@ -299,6 +299,48 @@ class VerifyTests(Base):
             odd.chmod(0o755)
         self.assertIn(f"npm sha512:{h}", self.fx.queue(), "the rest of the pass still ran")
 
+    def _verify_with_one_bad_read(self, needle):
+        """Run verify with digest() returning a WRONG hash on the first read of the one file whose path
+        contains `needle`, and the true hash on every later read (the host corrupted one read)."""
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_flap_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real, seen = mod.digest, []
+
+            def once_bad(path, algo):
+                h, st = real(path, algo)
+                if needle in path and not seen:
+                    seen.append(path)
+                    return hashlib.new(algo, b"a page read wrong"), st
+                return h, st
+            mod.digest = once_bad
+            mod.main(["x", "verify"])
+            self.assertTrue(seen, "the flaky read was exercised")
+
+    def test_a_uv_file_read_wrong_once_is_a_read_flap_not_corruption(self):
+        self.fx.uv_archive("F" * 19 + "L", {"pkg/_c.so": b"\x7fELF fine"})
+        self._verify_with_one_bad_read("_c.so")
+        self.assertEqual([l for l in self.fx.queue() if l], [], "an intact file is never queued")
+        self.fx.run("publish")
+        prom = self.fx.prom()
+        self.assertIn('gitea_runner_cache_read_flaps{cache="uv"} 1', prom)
+        self.assertIn('gitea_runner_cache_corrupt_found{cache="uv"} 0', prom)
+
+    def test_an_npm_entry_read_wrong_once_is_a_read_flap_not_corruption(self):
+        h, _ = self.fx.npm_put(b"tarball that is fine on disk")
+        self._verify_with_one_bad_read(h[4:])
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+        self.fx.run("publish")
+        self.assertIn('gitea_runner_cache_read_flaps{cache="npm"} 1', self.fx.prom())
+
+    def test_a_file_wrong_on_every_read_is_still_corrupt_and_not_a_flap(self):
+        self.fx.uv_archive("G" * 19 + "Z", {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",))
+        self.fx.run("verify")
+        self.assertIn("uv " + "G" * 19 + "Z", self.fx.queue())
+        self.fx.run("publish")
+        self.assertIn('gitea_runner_cache_read_flaps{cache="uv"} 0', self.fx.prom())
+
     def test_an_archive_deleted_during_the_pass_is_not_reported_corrupt(self):
         import shutil
         a = self.fx.uv_archive("Y" * 20, {"pkg/a.py": b"a", "pkg/b.py": b"b"})
