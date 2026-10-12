@@ -114,7 +114,9 @@
     enabled: true
     state: started
 
-# ── 3. workload toolchain: Node, uv, k6 (Playwright runs in-container, not on the host) ──
+# ── 3. workload toolchain: Node, uv, k6, and the system packages jobs expect ──
+# Playwright runs on the host too: jobs download its browsers into ~runner/.cache/ms-playwright, and
+# those browsers need the shared libraries in github_runner_ci_job_packages.
 - name: Add NodeSource apt signing key
   ansible.builtin.get_url:
     url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
@@ -158,6 +160,28 @@
     extra_opts: ["--strip-components=1", "--wildcards", "*/k6"]
     creates: /usr/local/bin/k6
   when: github_runner_install_k6 | bool
+
+# The packages jobs install for themselves (defaults: github_runner_ci_job_packages). The names are
+# noble's (t64, libicu74, libavcodec60, …): on another release apt would fail mid-role with "Unable to
+# locate package", so say that instead.
+- name: Assert the CI job package list matches this release
+  ansible.builtin.assert:
+    that: ansible_distribution_release == 'noble'
+    fail_msg: >-
+      github_runner_ci_job_packages holds Ubuntu 24.04 (noble) package names, but this host is
+      {{ ansible_distribution }} {{ ansible_distribution_release }}. Re-derive the list for this release.
+  when: github_runner_ci_job_packages | length > 0
+
+# No update_cache: the base-packages task above already refreshes a cache older than an hour in the
+# same run, and without it this task takes no apt lock when every package is present (ansible-core
+# 2.21 returns ok while another process holds the dpkg lock). On a live runner that lacks some, run
+# it while the runner is idle: a job's own `apt-get` does not wait for the dpkg lock an install holds.
+- name: Install the system packages CI jobs expect (Playwright browser deps, build tooling)
+  ansible.builtin.apt:
+    name: "{{ github_runner_ci_job_packages }}"
+    state: present
+    install_recommends: false
+  when: github_runner_ci_job_packages | length > 0
 
 # ── 4. runner user (in the docker group, so jobs can use the Docker socket) ──
 - name: Create runner group
