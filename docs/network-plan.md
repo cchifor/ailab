@@ -40,15 +40,15 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.24 / .25` | Reviewer VMs `reviewer-1/2` | 4501–4502 | ⚠️ unmanaged — see note below |
 | `.26` | 🔒 **cloudlab** LXC `cloud-llm-3` | 5101 | `../cloudlab/README.md` |
 | `.27 / .28` | 🔒 **cloudlab** LXCs `cloud-exec-1/2` | 5102–5103 | `../cloudlab/kubernetes/infra/executor-lxc/variables.tf` |
-| `.29` | 🔒 **cloudlab** CI runner VM `cloud-ci-6` (cloud1, third; added 2026-09-23 evening on measured headroom) — was `ci-runner-7`, retired 2026-09-16 | 6106 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
+| `.29` | 🔒 **cloudlab** CI runner VM `cloud-ci-6` (cloud1; quarantined 2026-09-24 for cloud1's bad RAM, #848; REBUILT 2026-10-12 at 12 GiB / 6 vCPU after its 8 bad pages were retired) — was `ci-runner-7`, retired 2026-09-16 | 6106 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.30` | 🔒 **cloudlab** CI runner VM `cloud-ci-5` (cloud3, third; the sizing gate was met 2026-09-23: 195 GiB available with two runners at ceiling) — was `ci-runner-8`, retired 2026-09-12 | 6105 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.31` | CI runner VM `ci-runner-9` (moved off `.22` on 2026-09-03; moved ai-node2→ai-node1 on 2026-09-07) | 4109 | `kubernetes/infra/runners/variables.tf` |
 | `.32 / .33` | 🔒 **cloudlab** CI runner VMs `cloud-ci-1/2` (cloud1, opportunistic Gitea Actions runners — online only while the cloud cluster is up; ADR 0032) | 6101–6102 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.34 / .35` | 🔒 **cloudlab** CI runner VMs `cloud-ci-3/4` (cloud3, same) — cloudlab's unbuilt Talos-GPU-worker spec had pencilled `.32`–`.34`; it re-reserves elsewhere when built | 6103–6104 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.36` | OCI registry LXC `ai-registry` | 5004 | `kubernetes/infra/registry-lxc/variables.tf` |
-| `.37` | **free** since 2026-10-10 — was Talos env-node `talos-env-node-1` (4401), retired with the test-env pool (ADR 0037) | — | — |
+| `.37` | 🔒 **cloudlab** CI runner VM `cloud-ci-14` (cloud1, 12 GiB / 6 vCPU; 2026-10-12) — was Talos env-node `talos-env-node-1` (4401), retired with the test-env pool (ADR 0037) | 6114 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.38` | 🔒 **cloudlab** Windows 11 Pro VM `constantin-win-01` (renamed from `cloud-win-1` 2026-09-30; cloud3; RDP + key-only SSH; admin credential `af/estate/cloudlab-win11`; allocated 2026-09-30). The guest sets the address itself — no cloud-init — from `guest.json` | 6201 | `../cloudlab/kubernetes/infra/windows-vm/guest.json` |
-| `.39` | **free** since 2026-10-10 — was reserved for `talos-env-node-2` (#835, never built), released with the test-env pool (ADR 0037) | — | — |
+| `.39` | 🔒 **cloudlab** CI runner VM `cloud-ci-15` (cloud1, 12 GiB / 6 vCPU; 2026-10-12) — was reserved for `talos-env-node-2` (#835, never built), released with the test-env pool (ADR 0037) | 6115 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.40` | Talos control-plane VIP (k8s API `:6443`) | — | `kubernetes/infra/variables.tf` |
 | `.41 / .42 / .43` | Talos control-plane VMs `talos-cp1/2/3` | 4001–4003 | `kubernetes/infra/variables.tf` |
 | `.44` | 🔒 **cloudlab** CI runner VM `cloud-ci-10` (cloud2, second; 2026-10-04) — was AI LLM LXC `ai-llm-1` (5001), destroyed 2026-10-02 | 6110 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
@@ -57,11 +57,12 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.50` | 🔒 **cloudlab** CI runner VM `cloud-ci-11` (cloud2, third; 2026-10-04, disk on `local-nvme`) | 6111 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.51`–`.254` | router DHCP pool | — | router |
 
-**Free static space: `.37` and `.39`** (released 2026-10-10 with the test-env pool, ADR 0037). Before
+**Free static space: NONE** since 2026-10-12, when `.37`/`.39` went to the cloud1 CI runners
+`cloud-ci-14`/`15` (they had been released 2026-10-10 with the test-env pool, ADR 0037). Before
 that there was none since 2026-10-04, when the last five — `.7`, `.12`, `.13`, `.44`, `.50` — went to the
 cloudlab CI runner VMs `cloud-ci-9..13`; `.29`, `.30` and `.32`–`.35` went to cloud runners on
 2026-09-23, `.5`/`.6` on 2026-09-30, and `.38` to the cloudlab Windows VM `constantin-win-01` on
-2026-09-30. Beyond `.37`/`.39`, the next static address needs either a release (a retired guest's row
+2026-09-30. The next static address needs either a release (a retired guest's row
 going back to free) or a deliberate shrink of the router's DHCP pool — never an address from `.51`+
 while the router can still lease it.
 
