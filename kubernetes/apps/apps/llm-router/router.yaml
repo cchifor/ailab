@@ -157,14 +157,16 @@ spec:
             # ports only sees two harmless GETs (the .189:8080 403 in the smoke test was exactly that).
             # server-registration (off until an administrator turns it on) rate-limits enrolment per real client
             # using cf-connecting-ip. That header is trustworthy here: ingress admits only the llm-router-edge
-            # proxy (NetworkPolicy below), which only the edge cloudflared pods reach, and Cloudflare's edge sets/overwrites CF-Connecting-IP on every request,
-            # so a client cannot supply its own value through the tunnel. api-keys uses it the same way for the
+            # proxy (NetworkPolicy below); NetworkPolicy llm-router-edge in edge.yaml admits only the cloudflared
+            # pods of namespace edge (on 8080), and Cloudflare's edge sets/overwrites CF-Connecting-IP on every
+            # request, so a client cannot supply its own value through the tunnel. api-keys uses it the same way for the
             # public agent access requests (/agent/v1/*: per-address limits), and publicUrl for the public skill
             # (/agent/skill.md) and approved keys' replies: never the request's Host header.
             # api-openai imageProxy: an image generation (POST /v1/images/generations) sends nothing until the image
             # is ready, and Cloudflare's edge gives the origin 100 s (then a bare 524 that SDKs retry, replaying the
             # generation). Requests carrying cf-ray (set by the edge on every request; all ingress is the edge
-            # cloudflared via llm-router-edge, see the NetworkPolicy) get a 90 s whole-request deadline, so the router answers first:
+            # cloudflared via llm-router-edge, see the NetworkPolicies) get a 90 s whole-request deadline, so the
+            # router answers first:
             # 504 with x-should-retry: false. In-pod callers (validate-live) keep the route's own deadline. This deadline
             # is applied by the image endpoints only: inference (/v1/chat/completions, /v1/responses) passes none, so
             # Codex-native streams are bounded by the routes' own wait/idle timeouts (and kept alive past the edge's
