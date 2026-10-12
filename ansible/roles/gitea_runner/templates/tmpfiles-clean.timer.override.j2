@@ -1,5 +1,9 @@
 # MANAGED BY ANSIBLE (role: gitea_runner). Apply the /tmp ages hourly instead of daily, so a sub-day age
-# (pytest-of-runner) can take effect at all. The empty assignment clears the vendor OnUnitActiveSec=1d.
+# (pytest-of-runner) can take effect at all.
+# An empty assignment to ANY trigger resets ALL of this timer's triggers (systemd.timer(5)), not just
+# that one. So the vendor OnBootSec is restated after the reset: without it a freshly booted host has
+# no first activation, and OnUnitActiveSec alone never fires.
 [Timer]
-OnUnitActiveSec=
+OnBootSec=
+OnBootSec={{ gitea_runner_tmpfiles_clean_boot_delay }}
 OnUnitActiveSec={{ gitea_runner_tmpfiles_clean_interval }}

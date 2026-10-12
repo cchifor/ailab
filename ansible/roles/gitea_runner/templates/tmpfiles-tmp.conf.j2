@@ -5,7 +5,7 @@
 # is the `D` type (the boot wipe). Rationale and the >job-timeout rule: gitea_runner_tmp_age in defaults.
 {% for line in gitea_runner_tmp_vendor_lines %}
 {% if line is match(gitea_runner_tmp_line_re) %}
-{{ line | regex_replace('^(\\s*\\S+\\s+/tmp\\s+\\S+\\s+\\S+\\s+\\S+)(\\s+\\S+)?(.*)$', '\\1 ' ~ gitea_runner_tmp_age ~ '\\3') }}
+{{ line | regex_replace(gitea_runner_tmp_age_rewrite_re, '\\1 ' ~ gitea_runner_tmp_age ~ '\\3') }}
 {% else %}
 {{ line }}
 {% endif %}

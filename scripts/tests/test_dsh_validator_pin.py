@@ -689,7 +689,7 @@ class TestGithubReclaimKeepList(unittest.TestCase):
         self.assertIsNone(re.search(r'\{\{\s*\w+\s*\}\}', block), 'an unrendered template variable survived')
         return block
 
-    def run_block(self, keep_re, failing_inspect=(), gitea_enabled=False):
+    def run_block(self, keep_re, failing_inspect=(), gitea_enabled=False, gitea_active=False):
         with tempfile.TemporaryDirectory() as tmp:
             binp = Path(tmp) / 'bin'; binp.mkdir()
             log = Path(tmp) / 'docker.log'
@@ -708,7 +708,10 @@ class TestGithubReclaimKeepList(unittest.TestCase):
             # never writes into the runner's journal.
             fake_systemctl = ('#!/usr/bin/env bash\n'
                               'printf "%s\\n" "systemctl $*" >> "' + str(log).replace('\\', '/') + '"\n'
-                              + ('exit 0\n' if gitea_enabled else 'exit 1\n'))
+                              'case "$1" in\n'
+                              '  is-enabled) exit ' + ('0' if gitea_enabled else '1') + ' ;;\n'
+                              '  is-active) exit ' + ('0' if gitea_active else '3') + ' ;;\n'
+                              'esac\nexit 1\n')
             (binp / 'systemctl').write_text(fake_systemctl, encoding='utf-8')
             (binp / 'logger').write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
             os.chmod(binp / 'systemctl', 0o755)
@@ -750,8 +753,20 @@ class TestGithubReclaimKeepList(unittest.TestCase):
         self.assertIn('systemctl is-enabled --quiet gitea-act-runner.service', calls, calls)
         self.assertEqual([c for c in calls if not c.startswith('systemctl ')], [], calls)
 
+    def test_guard_names_the_unit_the_gitea_role_installs(self):
+        """The guard and the gitea_runner role must agree on the unit name, or the skip silently never fires."""
+        gh = yaml.safe_load(GITHUB_RECLAIM_DEFAULTS.read_text(encoding='utf-8'))
+        gt = yaml.safe_load(RUNNER_DEFAULTS_PATH.read_text(encoding='utf-8'))
+        self.assertEqual(gh['github_runner_reclaim_gitea_unit'], gt['gitea_runner_service'])
+
+    def test_active_but_disabled_gitea_unit_also_skips_docker(self):
+        """`systemctl disable` without --now leaves the daemon running with jobs in flight: still skip."""
+        calls = self.run_block('', gitea_enabled=False, gitea_active=True)
+        self.assertIn('systemctl is-active --quiet gitea-act-runner.service', calls, calls)
+        self.assertEqual([c for c in calls if not c.startswith('systemctl ')], [], calls)
+
     def test_disabled_gitea_unit_keeps_the_ephemeral_contract(self):
-        calls = self.run_block('', gitea_enabled=False)
+        calls = self.run_block('', gitea_enabled=False, gitea_active=False)
         self.assertTrue([c for c in calls if c.startswith('rm -f ')], calls)
         self.assertTrue([c for c in calls if c.startswith('volume prune')], calls)
 

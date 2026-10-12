@@ -253,9 +253,12 @@
   when: gitea_runner_enabled | bool
 
 # ── 4e. bounded /tmp (every job shares one /tmp; Ubuntu ages it at 30d) ─────
-# Ages, not a per-job wipe: see gitea_runner_tmp_age in defaults. `validate` parses the rendered file
-# with systemd-tmpfiles under a prefix that matches nothing. A syntax error exits 65 and the file is
-# not installed. Nothing here touches the act_runner daemon or a job.
+# Ages, not a per-job wipe: see gitea_runner_tmp_age in defaults. `validate` runs systemd-tmpfiles under
+# --root=<a path that does not exist>: it parses every field (type, path, mode, user, group, age) and
+# applies nothing, and any bad field exits 65, so a broken file is never installed. NOT --prefix: that
+# skips a line before parsing its fields, so a bad age or user still exits 0 (measured on systemd 255).
+# Under --root only `root` and `-` resolve as users, which is all these files use. Nothing here
+# touches the act_runner daemon or a job.
 # The override REPLACES the vendor file, so it is rendered from it: every vendor line is carried over and
 # only the age of its single /tmp line changes. Read it, then refuse to proceed unless there is exactly
 # one /tmp line to re-age (a changed vendor file needs a human look, not a guess).
@@ -265,14 +268,18 @@
   register: _gitea_runner_vendor_tmpconf
   when: gitea_runner_tmp_manage | bool
 
-- name: Assert the vendor tmp.conf has exactly one /tmp line to re-age
+- name: Assert the vendor tmp.conf has exactly one /tmp line, and that the rewrite really re-ages it
   ansible.builtin.assert:
     that:
       - (_vendor_lines | select('match', gitea_runner_tmp_line_re) | list | length) == 1
+      - (_vendor_lines | select('match', gitea_runner_tmp_line_re) | first
+         | regex_replace(gitea_runner_tmp_age_rewrite_re, '\\1 ' ~ gitea_runner_tmp_age ~ '\\3'))
+        is match('^\s*\S+\s+/tmp\s+\S+\s+\S+\s+\S+\s+' ~ gitea_runner_tmp_age ~ '(\s|$)')
     fail_msg: >-
-      /usr/lib/tmpfiles.d/tmp.conf does not have exactly one /tmp line
-      ({{ _vendor_lines | select('match', gitea_runner_tmp_line_re) | list }}). The override
-      re-renders that file with one changed age; review the new vendor file before overriding it.
+      /usr/lib/tmpfiles.d/tmp.conf must have exactly one /tmp line, and gitea_runner_tmp_age_rewrite_re
+      must be able to re-age it to {{ gitea_runner_tmp_age }}. Found:
+      {{ _vendor_lines | select('match', gitea_runner_tmp_line_re) | list }}. The override re-renders
+      that file with one changed age; review the new vendor file before overriding it.
   vars:
     _vendor_lines: "{{ (_gitea_runner_vendor_tmpconf.content | b64decode).splitlines() }}"
   when: gitea_runner_tmp_manage | bool
@@ -284,7 +291,7 @@
     owner: root
     group: root
     mode: "0644"
-    validate: systemd-tmpfiles --clean --prefix=/nonexistent-ansible-validate %s
+    validate: systemd-tmpfiles --root=/nonexistent-ansible-validate --clean %s
   vars:
     gitea_runner_tmp_vendor_lines: "{{ (_gitea_runner_vendor_tmpconf.content | b64decode).splitlines() }}"
   when: gitea_runner_tmp_manage | bool
@@ -296,7 +303,7 @@
     owner: root
     group: root
     mode: "0644"
-    validate: systemd-tmpfiles --clean --prefix=/nonexistent-ansible-validate %s
+    validate: systemd-tmpfiles --root=/nonexistent-ansible-validate --clean %s
   when: gitea_runner_tmp_manage | bool
 
 - name: Ensure the systemd-tmpfiles-clean.timer drop-in directory exists

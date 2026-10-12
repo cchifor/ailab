@@ -191,11 +191,17 @@ gitea_runner_tmp_manage: true
 gitea_runner_tmp_age: 2d
 # A tmpfiles line for /tmp itself (any type letter + modifiers, then the path /tmp, then whitespace).
 gitea_runner_tmp_line_re: '^\s*[A-Za-z][-+!=~^]*\s+/tmp\s'
+# Rewrites that line's age field (type path mode user group [age] [argument]). tasks/main.yml asserts the
+# rewrite really produced the new age BEFORE the template uses it, so an unexpected vendor line shape
+# fails the play instead of silently shipping the vendor age.
+gitea_runner_tmp_age_rewrite_re: '^(\s*\S+\s+/tmp\s+\S+\s+\S+\s+\S+)(\s+\S+)?(.*)$'
 gitea_runner_tmp_subdir_ages:
   - { path: "/tmp/pytest-of-{{ gitea_runner_user }}", age: 6h }
   - { path: /tmp/node-compile-cache, age: 1d }
-# How often systemd-tmpfiles-clean applies the ages (the Ubuntu default is daily).
+# How often systemd-tmpfiles-clean applies the ages (the Ubuntu default is daily). The drop-in resets the
+# timer's triggers, so it restates the first-run delay too (the Ubuntu vendor value is 15min).
 gitea_runner_tmpfiles_clean_interval: 1h
+gitea_runner_tmpfiles_clean_boot_delay: 15min
 
 # ---- docker + storage cleanup (bounds disk; the reclaim above only handles workspace artifact dirs) ──
 # A full CI run leaves tens of GB on the SHARED Docker daemon: build cache (unbounded, 10-33 GB/runner
