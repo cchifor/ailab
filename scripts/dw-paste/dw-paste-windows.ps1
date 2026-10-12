@@ -75,8 +75,24 @@ if ($Install) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*dw-paste-windows.ps1*-Run*' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Milliseconds 500  # IgnoreNew would drop the start while the old instance is still winding down
+    # IgnoreNew silently drops a start while the old instance still counts as running: wait it out.
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-ScheduledTask -TaskName $TaskName).State -eq 'Running' -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    $logLines = @(Get-Content -LiteralPath $LogFile -ErrorAction SilentlyContinue).Count
     Start-ScheduledTask -TaskName $TaskName
+    # The helper logs "running (pid N)" only once it holds Ctrl+Shift+V, so that line, and not the
+    # task state, is what proves the start worked.
+    $deadline = (Get-Date).AddSeconds(30)
+    $outcome = $null
+    while (-not $outcome -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $outcome = Get-Content -LiteralPath $LogFile -ErrorAction SilentlyContinue | Select-Object -Skip $logLines |
+            Where-Object { $_ -match ' running \(pid \d+\)|already registered' } | Select-Object -First 1
+    }
+    if ($outcome -notmatch ' running \(pid \d+\)') {
+        $why = if ($outcome) { $outcome } else { "no 'running' line in $LogFile within 30 s" }
+        throw "task '$TaskName' is registered, but the helper did not start: $why"
+    }
     Write-Output "installed: $dest runs at logon and unlock (task '$TaskName') and is running now; tray icon 'dw-paste'"
     return
 }
