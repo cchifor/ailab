@@ -57,15 +57,43 @@ function Write-Log([string]$msg) {
 if ($Install) {
     $dest = Join-Path $AppDir 'dw-paste-windows.ps1'
     Copy-Item -LiteralPath $PSCommandPath -Destination $dest -Force
-    $arg = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$dest`" -Run"
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+    # A headless conhost, not powershell.exe directly: Windows 11 hands a new console to Windows
+    # Terminal (the default terminal), and -WindowStyle Hidden does not hide that WT window. It looks
+    # like an empty PowerShell; closing it kills the helper with 0xC000013A, and Ctrl+Shift+V silently
+    # falls back to the text paste. A headless conhost never delegates, so there is no window.
+    $arg = "--headless powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$dest`" -Run"
+    $action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument $arg
+    # Unlock as well as logon: after a Windows Update restart the session is signed in automatically
+    # and you only ever unlock it, so a helper that died is otherwise not restarted until the next
+    # sign-out. While it runs, an unlock does nothing (MultipleInstances IgnoreNew, then the mutex).
+    $user = "$env:USERDOMAIN\$env:USERNAME"
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $unlockClass = Get-CimClass -Namespace Root/Microsoft/Windows/TaskScheduler -ClassName MSFT_TaskSessionStateChangeTrigger
+    $unlock = New-CimInstance -CimClass $unlockClass -ClientOnly -Property @{ StateChange = 8; UserId = $user; Enabled = $true }  # 8 = TASK_SESSION_UNLOCK
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($logon, $unlock) -Settings $settings -Force | Out-Null
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*dw-paste-windows.ps1*-Run*' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    # IgnoreNew silently drops a start while the old instance still counts as running: wait it out.
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-ScheduledTask -TaskName $TaskName).State -eq 'Running' -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+    $logLines = @(Get-Content -LiteralPath $LogFile -ErrorAction SilentlyContinue).Count
     Start-ScheduledTask -TaskName $TaskName
-    Write-Output "installed: $dest runs at logon (task '$TaskName') and is running now; tray icon 'dw-paste'"
+    # The helper logs "running (pid N)" only once it holds Ctrl+Shift+V, so that line, and not the
+    # task state, is what proves the start worked.
+    $deadline = (Get-Date).AddSeconds(30)
+    $outcome = $null
+    while (-not $outcome -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $outcome = Get-Content -LiteralPath $LogFile -ErrorAction SilentlyContinue | Select-Object -Skip $logLines |
+            Where-Object { $_ -match ' running \(pid \d+\)|already registered' } | Select-Object -First 1
+    }
+    if ($outcome -notmatch ' running \(pid \d+\)') {
+        $why = if ($outcome) { $outcome } else { "no 'running' line in $LogFile within 30 s" }
+        throw "task '$TaskName' is registered, but the helper did not start: $why"
+    }
+    Write-Output "installed: $dest runs at logon and unlock (task '$TaskName') and is running now; tray icon 'dw-paste'"
     return
 }
 if ($Uninstall) {
