@@ -141,6 +141,7 @@ mirror-image src dst:
 test-gitea-runner:
     bash {{ansible_dir}}/roles/gitea_runner/tests/test-cleanup.sh
     bash {{ansible_dir}}/roles/gitea_runner/tests/test-reclaim.sh
+    python3 {{ansible_dir}}/roles/gitea_runner/tests/test-reap.py
 
 # Test the dev-worker tmux persistence wiring (drives a private tmux server; no VM needed).
 # On Windows/Git Bash there is no tmux, so section [A] reports NOT RUN — CI sets REQUIRE_TMUX=1.

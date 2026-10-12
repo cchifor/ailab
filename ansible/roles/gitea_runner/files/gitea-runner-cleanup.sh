@@ -21,6 +21,9 @@
 #     The prune's containerd GC pass can reap an in-flight pull's lease regardless of the filter, so
 #     concurrency is governed by the busy gate below, never by the window. (2026-08-08 RCA.)
 #   * NO `docker volume prune` (a job's data volumes are irreplaceable — reclaimed only via image/cache).
+#     This script still never removes a volume. The job-boundary reaper (gitea-runner-reap.py, run by the
+#     reclaim tick) removes compose-labelled and anonymous volumes of EARLIER jobs, but only in
+#     gitea_runner_reap_mode=enforce, and only volumes no container references (see the role defaults).
 # THREE OPERATIONS ARE DELIBERATELY NOT SAFE-BY-CONSTRUCTION, and nothing about the window argument
 # above covers any of them:
 #   * the build-cache SIZE cap in section 3b runs `builder prune -af`, which has NO retention window and

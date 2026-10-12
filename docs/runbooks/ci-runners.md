@@ -187,6 +187,28 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   `/etc/tmpfiles.d/tmp.conf`, `/etc/tmpfiles.d/gitea-runner-tmp.conf` and
   `/etc/systemd/system/systemd-tmpfiles-clean.timer.d/10-gitea-runner.conf` as the role renders them, then
   `systemctl daemon-reload && systemctl restart systemd-tmpfiles-clean.timer`. Neither touches act_runner.
+- **Job-boundary leftover reaper** (`gitea-runner-reap.py`, ailab#1284's follow-up PR; runs on the reclaim
+  tick, never under ExecStartPre; ships in **log** mode). act_runner logs `task <N> repo is <repo>` as a task
+  starts, and with capacity 1 the previous task is over by then. So anything CREATED before that line and not
+  part of the new job is a leftover of an earlier job. In scope: processes in the runner cgroup,
+  containers, and compose or anonymous volumes and networks that nothing references.
+  - Examples it found on 2026-10-12: a 58h-old `vite preview --port 4786 --strictPort` chain on
+    cloud-ci-13, and `hostexecutor_relay-db` plus 4 anonymous volumes on cloud-ci-8.
+  - Membership is decided by creation time, never by process ancestry: a live job's Playwright browsers
+    were not descendants of act_runner.
+  - Boundary for a pass: `max(task start - 5s, now - (job timeout + 10min))`. The periodic pass (15 min)
+    uses only the timeout term, so it never touches something a long job took over by name.
+  - It refuses outright (`gitea_runner_reap_refused 1`) if `capacity` is not 1.
+  - Kept, always: the `buildx`/`buildkit` builders, anything matching `gitea_runner_cleanup_infra_exclude_re`
+    (ci-runner-1's dsh pin), and anything carrying a label key `ci.keep` or `io.dsh.conductor.image-pin`.
+  - On hosts with a co-located GitHub agent, only containers whose compose `working_dir` or a bind mount
+    is under the Gitea workdir.
+  - Read it: `journalctl -t gitea-runner-reap` (`would-reap …` / `reap …` / `ADOPTED …`) and
+    `gitea_runner_reap.prom` (`boundary_age_seconds` is -1 until a task line parses; `adopted_total`).
+  - **Switching to enforce** (`gitea_runner_reap_mode: enforce`) is its own reviewed change. It needs two or
+    more CI days of log data on every runner showing `adopted_total == 0`, `boundary_age_seconds >= 0`, and
+    no would-reap object that lines up with a failed job.
+  - Kill switch per host: `GITEA_REAP_MODE=off` in `/etc/gitea-runner-reclaim.env`, read on the next tick.
 - **GitHub agent reclaim on Gitea hosts:** the dormant GitHub agent's `runner-reclaim.sh` runs at every
   agent (re)start and used to `docker rm -f` every container and prune volumes, images and buildx builders,
   with no idea whether a Gitea job was mid-flight. From ailab#1284 (once `/usr/local/bin/runner-reclaim.sh`
