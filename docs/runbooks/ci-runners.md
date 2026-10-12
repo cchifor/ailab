@@ -252,8 +252,10 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     `…CacheVerifyStale` (>3d, after 4h of uptime), `…CacheVerifyBeaconMissing` (never ran: 30h on the 24/7
     pool, 6h after 4h of uptime on cloud), `…RootFilesystemFailed` (critical: the textfile collector reads
     NO file, the fast signal of a shut-down root, see section 9) and `…TextfileBeaconUnreadable` (warning:
-    one malformed beacon, the others still parse). If the critical fires but SSH works, check for a
-    malformed beacon first: a host whose ONLY .prom is malformed reads the same as a dead root.
+    one malformed beacon, the others still parse). If the critical fires but SSH works, it is not a
+    dead root; two other states read the same: the ONLY .prom on the host is malformed, or the textfile
+    directory `/var/lib/prometheus/node-exporter` is missing (removed by hand, or node_exporter started
+    before the role created it). Check `journalctl -u prometheus-node-exporter` for which one.
     `corrupt_found` alone pages nobody; corruption on a runner points at its host.
 - **GitHub agent reclaim on Gitea hosts:** the dormant GitHub agent's `runner-reclaim.sh` runs at every
   agent (re)start and used to `docker rm -f` every container and prune volumes, images and buildx builders,
