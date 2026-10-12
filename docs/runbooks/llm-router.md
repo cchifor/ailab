@@ -1316,10 +1316,70 @@ There were two causes:
   codex-4 are Pro Lite.
 
 **How to check after the rollout.**
-- In the journal, a spilled turn whose conversation spilled within 15 minutes shows
-  `routing.evaluated.placement.warmSpill` (`GET /admin/v1/trajectories/:id`).
-- Over an hour of dev-worker traffic, the share of turns on an account new to the conversation, and its uncached input,
-  should be well below the numbers above.
+- **Wait first.** The spill record lives in memory and the rollout is Recreate, so the new pod starts with none. Each
+  conversation's first spill after a restart is placed by the strategy, so measure from about 15 minutes after the
+  rollout, over at least 30 minutes of dev-worker traffic.
+- **Query.** Port-forward `svc/llm-router` and page `GET /admin/v1/trajectories?limit=500&before=<oldest startedAt>`
+  over the window. Keep rows whose `source.name` starts with `dev-worker`, then group by `principalId` +
+  `conversation` in `startedAt` order. Per request:
+  - `placement`;
+  - whether `accountId` differs from the conversation's previous request (an account change);
+  - whether that account served the conversation in the previous 15 minutes (a warm change) or not (a cold change);
+  - `usage.cachedInputTokens / usage.inputTokens`.
+  For a spilled request, `GET /admin/v1/trajectories/:id` shows `routing.evaluated` with `placement.warmSpill` when
+  the warm spill account was used.
+- **Pass:**
+  - account changes under 3 % of turns;
+  - cold changes under 1 % of turns;
+  - same-account turns at a median of at least 95 % cached;
+  - every spill of a conversation that spilled in the previous 15 minutes either names `warmSpill`, or its
+    `routing.evaluated` decisions show that account not eligible (busy, offline, credits beside quota).
+- **Measured** (dev workers, `pool-codex`; the same query in three windows). Percentages are of the window's turns:
+
+  | Window (UTC) | Requests | Spilled | Account changes | Cold changes | Uncached input from changes |
+  |---|---|---|---|---|---|
+  | 08:10-13:09, `codex` concurrency 1, old image | 4,129 | 412 (10.0 %) | 351 (8.5 %) | 74 (1.8 %) | 25 % |
+  | 13:09-14:06, concurrency 4 (rev 1400), old image | 794 | 20 (2.5 %) | 37 (4.7 %) | 3 (0.4 %) | 23 % |
+  | 14:21-14:58, concurrency 4, warm-spills image | 562 | 0 | 0 | 0 | n/a (no changes) |
+
+  - **Window 2:** it starts at a config change, not a restart. The old image keeps no spill record, so there was nothing
+    to wait for.
+  - **Window 3:** it starts 15 minutes after the 14:06 rollout, per "Wait first". In that window every request stayed
+    on its conversation's account, at a median of 99 % cached.
+  - **Counting:** an account change is any request on a different account from the conversation's previous request.
+    - Window 2 (20 spills, 37 changes): 18 home → spill, 18 spill → home, 1 spill → another spill account; 1 spill
+      followed a spill on the same account, which is no change.
+    - Window 1 (412 spills, 351 changes): 130 home → spill, 124 spill → home, 93 spill → another spill account and 4
+      moves. 188 spills followed a spill on the same account (runs while `codex`, at concurrency 1, stayed busy) and
+      are no change. The 412th spill was its conversation's first request in the window, with no previous request to
+      compare.
+    - The 93 spill-to-spill changes on another account are the scattering warm spills prevent.
+  - **Which threshold matters:** the old image at concurrency 4 already met the cold-change bar (0.4 %). The account-change
+    bar (3 %) is the one that told the windows apart.
+  - **The concurrency raise removed the hops.** With no spill since the rollout, the warm-spill path itself is **not
+    yet exercised in production**, and the `warmSpill` criterion is unverified. The engine tests cover it.
+  - **To exercise it on purpose:** lower one account's concurrency for about 30 minutes (live config) and rerun the
+    query. That costs the dev workers cache while it lasts, so it is an owner decision. Otherwise check it the next
+    time spills appear, for example when a subscription reaches its limit.
+- **Pro and Pro Lite.** codex-3 and codex-4 are Pro Lite; codex, codex-2 and codex-5 are Pro. Encrypted reasoning was
+  measured portable between Pro subscriptions only (llm-router `docs/design/per-key-routing.md` §2.2).
+  - An account becomes a spill account only once it answers (first content), so one that refuses foreign reasoning
+    with an error never becomes one.
+  - A silent loss would not fail the request: the answer succeeds, but without the earlier reasoning. Sticky spills
+    would then repeat it for that conversation for as long as its spills stay on that account.
+  - **Interim signal:** dropped reasoning items should make the prompt smaller than the previous turn. So compare
+    `usage.inputTokens` of a turn after a plan-crossing account change with the previous turn's, against same-plan
+    changes. Only changes where both turns completed count: a failed, cancelled or open turn has no comparable usage.
+    On 2026-10-12 (08:10-14:58) that was 268 of the 388 account changes; the other 120 had a turn that did not
+    complete. The median next/previous ratio was:
+    - Pro → Pro Lite: 1.018 (n = 43);
+    - Pro Lite → Pro: 1.000 (n = 42);
+    - same plan: 1.007 (n = 183);
+    - no change: 1.005.
+    That is no systematic drop. It is weak evidence only: the backend may count input it then ignores, and a local
+    compaction also shrinks the prompt.
+  - Until the Pro ↔ Pro Lite check is done, that is the open risk. If the check fails, prefer spills within the home
+    account's plan type, or split the pool by plan type.
 
 **Image.**
 - Archive `router-0.1.0-20261012-sticky-spills.tar.gz`, SHA-256
