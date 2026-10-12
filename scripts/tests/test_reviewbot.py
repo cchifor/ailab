@@ -1534,6 +1534,99 @@ class PlanCoverageTest(unittest.TestCase):
             self._plan(b"not a diff at all\n", 100000)
 
 
+def _binsec(path, old=None):
+    """A section git emits for a file it marks binary (a NUL byte in either version)."""
+    a = "/dev/null" if old == "/dev/null" else "a/" + (old or path)
+    return (b"diff --git a/" + (old if old and old != "/dev/null" else path).encode() + b" b/" + path.encode() + b"\n"
+            b"index 1111111..2222222 100644\n"
+            b"Binary files " + a.encode() + b" and b/" + path.encode() + b" differ\n")
+
+
+class TextifyNulSectionsTest(unittest.TestCase):
+    """llm-router#97: two raw NULs in a TypeScript string literal made git mark the whole file binary, so both bots
+    excluded it and capped every verdict on the PR at partial although the file is plain source. Such a section is
+    rebuilt from the two blobs as text (NULs shown, CRLF normalised); anything that cannot be keeps the marker."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, max_diff_bytes=100000)
+
+    def blobs(self, files):
+        calls = []
+
+        def fetch(path, side):
+            calls.append((path, side))
+            return files.get((path, side))
+        return fetch, calls
+
+    def test_a_nul_only_binary_section_is_reviewed_as_text_and_the_verdict_is_not_capped(self):
+        old = b"const sep = `${ns}\x00key`;\r\nexport const a = 1;\r\n"
+        new = b"const sep = `${ns}\\u0000key`;\nexport const a = 1;\nexport const b = 2;\n"
+        fetch, calls = self.blobs({("src/rec.ts", "base"): old, ("src/rec.ts", "head"): new})
+        raw = _binsec("src/rec.ts") + _sec("good.py", b"+ok\n")
+        raw2, rendered = self.m.textify_nul_sections(raw, fetch)
+        self.assertEqual(["src/rec.ts"], rendered)
+        self.assertEqual([("src/rec.ts", "base"), ("src/rec.ts", "head")], calls)
+        diff, dropped, coverage = self.m.plan_coverage(raw2)
+        self.assertEqual("full", coverage)
+        self.assertEqual([], dropped)
+        self.assertIn("--- a/src/rec.ts\n+++ b/src/rec.ts\n", diff)
+        self.assertIn("-const sep = `${ns}\u2400key`;\n", diff)
+        self.assertIn("+const sep = `${ns}\\u0000key`;\n", diff)
+        self.assertIn("+export const b = 2;\n", diff)
+        # CRLF normalised: the unchanged line is context, not a removal and an addition.
+        self.assertIn(" export const a = 1;\n", diff)
+        self.assertNotIn("Binary files", diff)
+        self.assertIn("good.py", diff)
+
+    def test_a_new_file_with_a_nul_is_shown_whole(self):
+        fetch, _ = self.blobs({("payload.sh", "head"): b"#!/bin/sh\necho a\x00b\n"})
+        raw2, rendered = self.m.textify_nul_sections(_binsec("payload.sh", old="/dev/null"), fetch)
+        self.assertEqual(["payload.sh"], rendered)
+        diff, dropped, coverage = self.m.plan_coverage(raw2)
+        self.assertEqual("full", coverage)
+        self.assertIn("--- /dev/null\n+++ b/payload.sh\n", diff)
+        self.assertIn("+echo a\u2400b\n", diff)
+
+    def test_policy_binaries_are_never_fetched(self):
+        fetch, calls = self.blobs({})
+        raw = _binsec("img/logo.png") + _binsec("uv.lock")
+        self.assertEqual((raw, []), self.m.textify_nul_sections(raw, fetch))
+        self.assertEqual([], calls)
+
+    def test_what_cannot_be_rendered_keeps_the_marker_and_the_cap(self):
+        big = b"x" * (self.m.TEXTIFY_MAX_BYTES + 1)
+        for name, files in (("not utf-8", {("a.ts", "base"): b"caf\xf6\x00", ("a.ts", "head"): b"ok\n"}),
+                            ("unreadable", {("a.ts", "base"): None, ("a.ts", "head"): b"ok\n"}),
+                            ("too large", {("a.ts", "base"): b"a\x00", ("a.ts", "head"): big})):
+            with self.subTest(name):
+                fetch, _ = self.blobs(files)
+                raw = _binsec("a.ts") + _sec("good.py", b"+ok\n")
+                raw2, rendered = self.m.textify_nul_sections(raw, fetch)
+                self.assertEqual((raw, []), (raw2, rendered))
+                self.assertEqual("partial", self.m.plan_coverage(raw2)[2])
+
+    def test_an_unpartitionable_diff_is_returned_unchanged(self):
+        fetch, calls = self.blobs({})
+        self.assertEqual((b"junk", []), self.m.textify_nul_sections(b"junk", fetch))
+        self.assertEqual([], calls)
+
+    def test_fetch_blob_reads_the_merge_base_and_the_head(self):
+        seen = []
+        self.m.api = lambda path, method="GET", body=None, raw=False: seen.append((path, raw)) or b"data"
+        pr = {"merge_base": "b" * 40, "base": {"sha": "c" * 40}, "head": {"sha": "h" * 40}}
+        self.assertEqual(b"data", self.m.fetch_blob("o/r", pr, "dir/a b.ts", "base"))
+        self.assertEqual(b"data", self.m.fetch_blob("o/r", pr, "dir/a b.ts", "head"))
+        self.assertEqual([(f"/repos/o/r/raw/dir/a%20b.ts?ref={'b' * 40}", True),
+                          (f"/repos/o/r/raw/dir/a%20b.ts?ref={'h' * 40}", True)], seen)
+
+        def boom(*a, **k):
+            raise OSError("down")
+        self.m.api = boom
+        self.assertIsNone(self.m.fetch_blob("o/r", pr, "x.ts", "head"))
+
+
 class CoverageTableTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1791,6 +1884,43 @@ class SizeCapTest(unittest.TestCase):
                 return {"id": 77}
             return {}
         self.m.api = api
+
+    def test_a_nul_only_binary_file_is_reviewed_as_text_and_named_in_the_rubric(self):
+        """llm-router#97 end to end: the section git marked binary reaches the model as text (both versions read at
+        the merge base and the head), the rubric names it, and the verdict is not capped."""
+        head, base = "e" * 40, "f" * 40
+        m = load(self.tmp.name, max_diff_bytes=100000)
+        m.pr_ok = lambda repo, pr, h: {"head": {"sha": h}, "merge_base": base, "user": {"login": "someone"},
+                                       "title": "t", "body": ""}
+        m.existing_marker = lambda repo, pr, h: None
+        m.maybe_merge = lambda repo, pr: None
+        m.convergence_context = lambda *a, **k: ""
+        m.review_round = lambda repo, pr: 1
+        llm, posted = [], []
+        m.run_llm = lambda *a, **k: llm.append(a) or {"findings": [], "summary": "fine"}
+
+        def api(path, method="GET", body=None, raw=False):
+            if path.endswith(".diff"):
+                return _binsec("r.ts")
+            if path == f"/repos/o/r/raw/r.ts?ref={base}":
+                return b"a\x00b\r\n"
+            if path == f"/repos/o/r/raw/r.ts?ref={head}":
+                return b"a\\u0000b\n"
+            if method == "POST":
+                posted.append((path, body))
+                return {"id": 9}
+            return {}
+        m.api = api
+        state, _, _ = m.review_job(1, "o/r", 5, head)
+        self.assertEqual("done", state)
+        _title, _body, diff, rubric = llm[0]
+        self.assertIn("-a\u2400b\n", diff)
+        self.assertIn("+a\\u0000b\n", diff)
+        self.assertIn("FILES SHOWN AS TEXT", rubric)
+        self.assertIn("r.ts", rubric)
+        review = posted[-1][1]["body"]
+        self.assertNotIn("binary content", review)
+        self.assertIn(f"head={head} verdict=clean", review)
 
     def test_over_cap_posts_a_visible_skip_and_never_calls_the_model(self):
         """Unchanged contract: CODE alone over the cap is still an honest skip, visible in
