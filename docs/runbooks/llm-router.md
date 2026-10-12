@@ -128,9 +128,11 @@ kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sh 
 ```
 
 - **If PID 1 is anything else** (a shell or an init wrapper in a future image), signal the node process's own PID
-  instead (`pgrep -f dist/apps/router/main.js`). A wrapper that does not forward SIGTERM gives no drain and leaves the
+  instead. Find it with its own exec, `kubectl ... exec deploy/llm-router -c router -- pgrep -f 'dist/apps/router/main[.]js'`;
+  the `[.]` keeps the pattern from matching a wrapping `sh -c` command line. Then run
+  `kubectl ... exec ... -- kill -TERM <pid>`. A wrapper that does not forward SIGTERM gives no drain and leaves the
   container running, and nothing reports it. The log must show `SIGTERM, draining`. Checked 2026-10-12: PID 1 is node,
-  and the image has `sh` and `kill`.
+  the image has `sh`, `kill` and `pgrep`, and that lookup prints `1`.
 - **What happens:** the router drains exactly as on any SIGTERM. Its watchdog bounds that at `ROUTER_DRAIN_MS` + 17 s.
   Then it exits, and the kubelet restarts the container in the same pod (`restartPolicy: Always`, after a back-off of
   about 10 s), with the same volume.
@@ -144,6 +146,7 @@ kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sh 
   The kubelet's kill is then a second SIGTERM, which the drain ignores (`SIGTERM while draining: ignored`). Its SIGKILL
   comes only after the 60 s grace, after the watchdog.
 - **What to check:** the pod's RESTARTS count goes up by one, and `kubectl logs --previous` shows the drained process.
+  The backgrounded `logs -f` ends when the drained container exits: run it again to follow the new process.
   The Deployment does not change, so Flux has nothing to undo, and no second router can start.
 - **Not `kubectl rollout restart`:** it adds a `restartedAt` annotation to the pod template. Flux removes the
   annotation at its next apply of `apps`, which restarts the router a second time. This was seen on 2026-10-12 at 07:42
