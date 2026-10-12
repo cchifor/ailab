@@ -1351,7 +1351,8 @@ There were two causes:
       followed a spill on the same account, which is no change.
     - Window 1 (412 spills, 351 changes): 130 home → spill, 124 spill → home, 93 spill → another spill account and 4
       moves. 188 spills followed a spill on the same account (runs while `codex`, at concurrency 1, stayed busy) and
-      are no change.
+      are no change. The 412th spill was its conversation's first request in the window, with no previous request to
+      compare.
     - The 93 spill-to-spill changes on another account are the scattering warm spills prevent.
   - **Which threshold matters:** the old image at concurrency 4 already met the cold-change bar (0.4 %). The account-change
     bar (3 %) is the one that told the windows apart.
@@ -1368,7 +1369,9 @@ There were two causes:
     would then repeat it for that conversation for as long as its spills stay on that account.
   - **Interim signal:** dropped reasoning items should make the prompt smaller than the previous turn. So compare
     `usage.inputTokens` of a turn after a plan-crossing account change with the previous turn's, against same-plan
-    changes. On 2026-10-12 (08:10-14:58), the median next/previous ratio was:
+    changes. Only changes where both turns completed count: a failed, cancelled or open turn has no comparable usage.
+    On 2026-10-12 (08:10-14:58) that was 268 of the 388 account changes; the other 120 had a turn that did not
+    complete. The median next/previous ratio was:
     - Pro → Pro Lite: 1.018 (n = 43);
     - Pro Lite → Pro: 1.000 (n = 42);
     - same plan: 1.007 (n = 183);
