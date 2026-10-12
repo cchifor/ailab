@@ -1121,3 +1121,49 @@ Nothing else changes: no schema change, no new setting. The journal's `conversat
 live-status image's Activity skips event types it does not know. The re-key lives in the router's memory only and
 changes just the copy of the body sent upstream, so after a rollback every conversation sends its own key again (and its
 overload count starts over).
+
+## Codex overload retries release (2026-10-12)
+
+`router-0.1.0-20261012-codex-retries` deploys merged llm-router main `4f1fb4f6a79fe3df2a42712448309dc8568d1613`
+([#99](https://git.chifor.me/cchifor/llm-router/pulls/99)).
+
+**Why.** After the follow-ups release, Codex turns on the dev workers still ended with "Selected model is at
+capacity. Please try a different model." That is the Codex CLI's text for an error code of `server_is_overloaded`, and
+it ends the turn without a retry. It happened in two ways (08:41-09:00 UTC):
+- **Before output:** every attempt met the overload. The router failed over to another account, but the backend routes
+  by the conversation's `prompt_cache_key`, so the second account met the same overload. The router's final
+  `response.failed` then carried the upstream code (dw-2: 3 requests).
+- **After output:** the backend's own `response.failed` arrived after output had started and went out unchanged
+  (dw-1, dw-4: 6 requests).
+
+Because each turn ended after at most 2 overloaded attempts, the conversation never reached the 3 in a row that re-key
+it.
+
+**What it changes.**
+- An overload reaches the Codex CLI as `server_error`, the code it retries, before or after output. The upstream code
+  goes beside it as `upstream_code`, and the rest of the event is unchanged.
+- Measured with the Codex CLI 0.162.1 against a local mock: `server_is_overloaded` ends the turn at once, while
+  `server_error` is retried (5 reconnects by default, 8 on the dev workers).
+- Each retry fails over again, and the 3rd overloaded attempt in a row re-keys the conversation onto another backend
+  (`conversation.rekeyed`).
+- Every other upstream code still goes out as before. The CLI acts on some of them, e.g. `context_length_exceeded`.
+
+**How to check after the rollout.** In the journal, failures with `upstreamCode: server_is_overloaded` should now be
+followed by a retry of the same conversation within seconds. After 3 overloaded attempts in a row there should be a
+`conversation.rekeyed` event. On a dev worker, an overload shows as `Reconnecting... n/8`, not as "Selected model is at
+capacity".
+
+**Image.**
+- Archive `router-0.1.0-20261012-codex-retries.tar.gz`, SHA-256
+  `39673ce276e8ad9fd7a34d870f27252f944589aa7b745375b8cf7c691e3d8c34`; relay branch `release/router-codex-retries-image`,
+  [run 82585](https://git.chifor.me/cchifor/relay/actions/runs/82585).
+- Image `registry.chifor.me/llm-router/router@sha256:ce27f28df7900daf807892684939a204041611e9843e3e65c8e23ce5f7c3555e`.
+- Before merge: 1745 tests passed, 0 failed, on Linux CI ([run 82571](https://git.chifor.me/cchifor/llm-router/actions/runs/82571)). Both reviewer
+  bots approved.
+
+**Rollback.** In `router.yaml`, revert the image digest and both pod-template annotations together:
+- `image: registry.chifor.me/llm-router/router@sha256:562f48f323a94be8dbe3d983cf2838892bf954dd30de503f8f10cefad9e01f16`
+- `chifor.me/source-commit: 9163faa9c5390a0dd1c31b7e52c8950ffa1e82d6`
+- `chifor.me/release: router-0.1.0-20261012-followups`
+
+Nothing else changes: no schema change, no new setting.
