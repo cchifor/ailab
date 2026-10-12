@@ -89,9 +89,13 @@ if [ -d "$tf_dir" ]; then
     echo '# HELP runner_reclaim_last_success_seconds Unix time of the last completed between-jobs reclaim.'
     echo '# TYPE runner_reclaim_last_success_seconds gauge'
     echo "runner_reclaim_last_success_seconds $(date +%s)"
-    echo '# HELP runner_docker_build_cache_bytes Docker build cache size in bytes after reclaim prune (healthy at/below the builder --keep-storage floor).'
-    echo '# TYPE runner_docker_build_cache_bytes gauge'
-    echo "runner_docker_build_cache_bytes ${bc_bytes:-0}"
+    # Only when the docker block ran: a skipped block (Gitea host) or a down daemon has no measurement,
+    # and publishing 0 would read as an empty cache.
+    if [ -n "${bc_bytes:-}" ]; then
+      echo '# HELP runner_docker_build_cache_bytes Docker build cache size in bytes after reclaim prune (healthy at/below the builder --keep-storage floor).'
+      echo '# TYPE runner_docker_build_cache_bytes gauge'
+      echo "runner_docker_build_cache_bytes ${bc_bytes}"
+    fi
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$tf_dir/runner_health.prom" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 fi
 exit 0

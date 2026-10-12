@@ -753,6 +753,12 @@ class TestGithubReclaimKeepList(unittest.TestCase):
         self.assertIn('systemctl is-enabled --quiet gitea-act-runner.service', calls, calls)
         self.assertEqual([c for c in calls if not c.startswith('systemctl ')], [], calls)
 
+    def test_guard_names_the_unit_the_gitea_role_installs(self):
+        """The guard and the gitea_runner role must agree on the unit name, or the skip silently never fires."""
+        gh = yaml.safe_load(GITHUB_RECLAIM_DEFAULTS.read_text(encoding='utf-8'))
+        gt = yaml.safe_load(RUNNER_DEFAULTS_PATH.read_text(encoding='utf-8'))
+        self.assertEqual(gh['github_runner_reclaim_gitea_unit'], gt['gitea_runner_service'])
+
     def test_active_but_disabled_gitea_unit_also_skips_docker(self):
         """`systemctl disable` without --now leaves the daemon running with jobs in flight: still skip."""
         calls = self.run_block('', gitea_enabled=False, gitea_active=True)
