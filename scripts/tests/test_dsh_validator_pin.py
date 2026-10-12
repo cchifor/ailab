@@ -661,6 +661,11 @@ class TestCleanupExclusionDrift(unittest.TestCase):
         first_assert = next(i for i, t in enumerate(tasks) if 'KEEP_RE=' in str((t.get('ansible.builtin.assert') or {}).get('that', '')))
         first_copy = next(i for i, t in enumerate(tasks) if t.get('ansible.builtin.copy'))
         self.assertLess(first_assert, first_copy)
+        # both run only while the GitHub agent (and so runner-reclaim.sh) exists; it is retired
+        for t in tasks:
+            if t.get('ansible.builtin.slurp', {}).get('src') == '/usr/local/bin/runner-reclaim.sh' \
+                    or 'KEEP_RE=' in str((t.get('ansible.builtin.assert') or {}).get('that', '')):
+                self.assertIn('github_runner_agent_enabled', str(t.get('when', '')), t['name'])
 
     def test_exemption_task_runs_after_the_unit_validated_the_container(self):
         """A foreign container squatting on the reserved name must fail the unit BEFORE the

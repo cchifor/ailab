@@ -200,18 +200,18 @@
     group: "{{ github_runner_group }}"
     recurse: true
 
-# ── 5. runner agent (pinned bootstrap; auto-updates on connect) ──────────────
-- name: Ensure runner dir
-  ansible.builtin.file:
-    path: "{{ github_runner_dir }}"
-    state: directory
-    owner: "{{ github_runner_user }}"
-    group: "{{ github_runner_group }}"
-    mode: "0755"
-
 # ── 5-7. the GitHub agent itself: download, App key, ephemeral wrapper, hooks, unit, enable ──
 # Skipped where github_runner_agent_enabled is false (the cloud Gitea-only runners). Everything
 # above is the shared base toolchain; nothing in agent.yml is needed by the gitea_runner role.
 - name: Install the GitHub Actions agent (tasks/agent.yml)
   ansible.builtin.include_tasks: agent.yml
   when: github_runner_agent_enabled | bool
+
+# ── 5-7b. RETIRE the agent where it is disabled (2026-10-12; plans/2026-10-12-retire-github-agents-
+# add-cloud-runners-plan.md). import_tasks, not include_tasks: a tag on a dynamic include does not reach
+# the tasks inside, and `just runners --tags github_runner_retire` must run exactly these. A no-op on a
+# host that never had the agent (the cloud runners).
+- name: Retire the GitHub Actions agent (tasks/retire.yml)
+  ansible.builtin.import_tasks: retire.yml
+  when: not (github_runner_agent_enabled | bool)
+  tags: [github_runner_retire]

@@ -54,6 +54,7 @@ CACHE_VERIFY_BIN="${GITEA_CACHE_VERIFY_BIN:-/usr/local/bin/gitea-runner-cache-ve
 CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
 CACHE_PURGE_ATTEMPT="${GITEA_CACHE_PURGE_ATTEMPT_STAMP:-/var/lib/gitea-runner-reclaim/cache-purge.attempt}"
 RECLAIM_CGROUP_FILE="${GITEA_RECLAIM_CGROUP_FILE:-/proc/self/cgroup}"   # tests: a fixture
+DOCKER_CFG="${GITEA_RECLAIM_DOCKER_CFG:-$(getent passwd "$RUNNER_USER" 2>/dev/null | cut -d: -f6)/.docker}"
 
 log() { logger -t gitea-runner-reclaim -- "$*" 2>/dev/null || true; }
 
@@ -202,6 +203,29 @@ apply_cache_purges() {
   mkdir -p "$(dirname "$CACHE_PURGE_ATTEMPT")" 2>/dev/null; touch "$CACHE_PURGE_ATTEMPT" 2>/dev/null || true
 }
 
+# ~/.docker ownership self-heal. It moved here from the retired GitHub agent's runner-reclaim.sh
+# (2026-10-12), which was the only thing doing it.
+# A job that ran docker/buildx under sudo leaves root-owned files under ~/.docker
+# (buildx/{instances,certs}), and the NEXT job's buildx fails with "permission denied". This runs only
+# between jobs (the not-busy branch, and ExecStartPre). A symlinked ~/.docker is dropped first, so the
+# recursive root chown cannot be steered outside the home dir. The beacon
+# runner_docker_config_root_owned feeds CIRunnerDockerConfigRootOwned: 1 means the heal failed.
+heal_docker_config() {
+  local root_owned tmp
+  case "$DOCKER_CFG" in /?*/.docker) ;; *) log "docker-config heal skipped: implausible path '$DOCKER_CFG'"; return 0 ;; esac
+  [ -L "$DOCKER_CFG" ] && rm -f -- "$DOCKER_CFG"
+  [ -d "$DOCKER_CFG" ] && chown -R -- "$RUNNER_USER:$RUNNER_GROUP" "$DOCKER_CFG" >/dev/null 2>&1
+  [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
+  root_owned=$(find "$DOCKER_CFG" -user root -print -quit 2>/dev/null | grep -c . || true)
+  tmp="$TEXTFILE_DIR/gitea_runner_docker_config.prom.$$"
+  {
+    echo '# HELP runner_docker_config_root_owned Root-owned files under ~/.docker after the reclaim self-heal (1=heal failed).'
+    echo '# TYPE runner_docker_config_root_owned gauge'
+    echo "runner_docker_config_root_owned ${root_owned:-0}"
+  } > "$tmp" 2>/dev/null && chmod 0644 "$tmp" && mv -f "$tmp" "$TEXTFILE_DIR/gitea_runner_docker_config.prom" \
+    || rm -f "$tmp" 2>/dev/null
+}
+
 main() {
   local status=ok foreign=0 cleaned=0 ws
   run_reaper
@@ -210,6 +234,7 @@ main() {
     status=busy
     log "skip: gitea job in flight (daemon has child processes)"
   else
+    heal_docker_config
     collect_busy_mounts
     collect_busy_proc_paths
     if [ -d "$WORKDIR_PARENT" ]; then

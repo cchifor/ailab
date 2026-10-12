@@ -277,7 +277,17 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   - Pause the runner in Gitea (`PATCH /api/v1/orgs/cchifor/actions/runners/<id> {"disabled": true}`,
     org-owner token), then investigate its host. The cleanup never starts a stopped act_runner for a
     purge, so a quarantine sticks.
-- **GitHub agent reclaim on Gitea hosts:** the dormant GitHub agent's `runner-reclaim.sh` runs at every
+- **The GitHub agents are RETIRED (2026-10-12).** `github_runner_agent_enabled: false`
+  (group_vars/github_runners.yml), and `tasks/retire.yml` removed the unit, scripts, App key and
+  `~/actions-runner` from ci-runner-1..6/9/10.
+  - Why: ADR 0017 disabled Actions on the GitHub mirror, so they never got a job, while the App key
+    (Administration: read/write) sat in a runner-owned file every Gitea CI job could read.
+  - The key was revoked on GitHub.
+  - The `~/.docker` self-heal and `runner_docker_config_root_owned` moved to `gitea-runner-reclaim.sh`.
+  - `gitea_runner_cleanup_peer_services` is `none`.
+  - To bring an agent back: mint a NEW App key into SOPS, flip the flag, `just runners`.
+  - The paragraph below is history.
+- **GitHub agent reclaim on Gitea hosts (historical):** the dormant GitHub agent's `runner-reclaim.sh` runs at every
   agent (re)start and used to `docker rm -f` every container and prune volumes, images and buildx builders,
   with no idea whether a Gitea job was mid-flight. From ailab#1284 (once `/usr/local/bin/runner-reclaim.sh`
   is updated on the host) it skips its whole docker block whenever `gitea-act-runner.service` is enabled

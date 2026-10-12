@@ -33,6 +33,8 @@
   ansible.builtin.slurp:
     src: /usr/local/bin/runner-reclaim.sh
   register: pin_github_reclaim
+  # Only while the agent exists: it is retired (group_vars/github_runners.yml), and with it the script.
+  when: github_runner_agent_enabled | default(true) | bool
 
 - name: Refuse until the GitHub reclaim keeps the pin (run runners.yml -l ci-runner-1 first)
   ansible.builtin.assert:
@@ -43,6 +45,7 @@
     fail_msg: >-
       /usr/local/bin/runner-reclaim.sh on this host does not carry github_runner_reclaim_keep_re;
       render it first with `ansible-playbook runners.yml -l ci-runner-1`.
+  when: github_runner_agent_enabled | default(true) | bool
 
 - name: Ensure the root-owned operator script directory exists
   ansible.builtin.file:

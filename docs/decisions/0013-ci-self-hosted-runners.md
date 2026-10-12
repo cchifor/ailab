@@ -1,6 +1,9 @@
 # ADR 0013 — Self-hosted CI runners on the Proxmox lab (VMs)
 
-**Status:** ACCEPTED + DEPLOYED (2026-06-16). GitHub App `ailab-ci-runners` created; 3 VMs applied
+**Status:** AGENTS RETIRED 2026-10-12 (plans/2026-10-12-retire-github-agents-add-cloud-runners-plan.md):
+since ADR 0017 the GitHub mirror has Actions disabled, so the agents got no jobs, and their App key
+was readable by every Gitea CI job. The VMs and the base toolchain remain; they serve Gitea Actions.
+Was: ACCEPTED + DEPLOYED (2026-06-16). GitHub App `ailab-ci-runners` created; 3 VMs applied
 (`tofu`), runners registered to the `self-hosted-hv` pool, runner-health canary passing on the
 Proxmox runners (the legacy 7G Hyper-V runners fail it). Memory ballooning 1→24 GiB. WSL was down, so
 the runner host config was driven over SSH (mirrors the role); `just runners` from WSL converges.

@@ -45,10 +45,10 @@ ENV_FILE="${GITEA_CLEANUP_ENV_FILE:-/etc/gitea-runner-cleanup.env}"
 
 SERVICE="${GITEA_RUNNER_SERVICE:-gitea-act-runner.service}"
 # Co-located runner services to ALSO treat as "busy" (shared Docker daemon). Space-separated.
-# The literal `none` means NO peers (the cloud Gitea-only runners): an EMPTY value cannot mean that,
-# because `${VAR:-default}` reads empty as unset and falls back to the GitHub agent's unit — so a
-# group_vars `""` would silently re-enable the peer probe it was trying to remove.
-PEER_SERVICES="${GITEA_CLEANUP_PEER_SERVICES:-actions.runner.cchifor-platform.service}"
+# The literal `none` means NO peers, which is the default since the GitHub agent was retired
+# (2026-10-12). An EMPTY value cannot mean "none", because `${VAR:-default}` reads empty as unset; so
+# to re-add a peer, name its unit.
+PEER_SERVICES="${GITEA_CLEANUP_PEER_SERVICES:-none}"
 [ "$PEER_SERVICES" = "none" ] && PEER_SERVICES=""
 DISK_PATH="${GITEA_CLEANUP_DISK_PATH:-/}"
 # EVERY default below must equal the role default that renders the env file (defaults/main.yml ->
