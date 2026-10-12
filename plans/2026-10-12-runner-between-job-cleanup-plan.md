@@ -1,169 +1,250 @@
 # Gitea runner: cleanup between jobs, and cache integrity
 
+Round-1 review and per-finding resolutions: `2026-10-12-runner-between-job-cleanup-review-r1.md`. The Codex seat was out of quota (it resets 2026-10-18), so an independent Claude Plan agent reviewed this plan instead.
+
 ## Context
 
-The `gitea_runner` pool runs act_runner 0.6.1 in **host mode**. Every job on a runner shares one Unix user (`runner`) and one `$HOME`, so it also shares `~/.cache/uv`, `~/.npm`, mise, zig and cargo. Jobs also share `/tmp`, one Docker daemon and one systemd cgroup (`gitea-act-runner.service`, MemoryMax 10G). act_runner has **no per-job hook**. The only job-boundary signal it emits is the journal line `task <N> repo is <owner>/<repo> …`, logged when a task starts. Nothing is logged at the end of a task. Jobs are short (median 14 s, p90 31 s), and about 96% of the gaps between jobs are under 10 s. So any check of the form "is the runner idle right now?" cannot reliably tell one job from the next (the existing cleanup needs 3 consecutive idle polls just to reject the false idle between steps).
+The `gitea_runner` pool runs act_runner 0.6.1 in **host mode** with `capacity: 1`. Every job on a runner shares the following:
+- one Unix user (`runner`) and one `$HOME`, so also `~/.cache/uv`, `~/.npm`, mise, zig and cargo;
+- `/tmp`;
+- one Docker daemon (29.x, containerd store);
+- one systemd cgroup (`gitea-act-runner.service`, MemoryMax 10G).
 
-A fleet audit on 2026-10-12 (20 runners) found these gaps:
+act_runner has **no per-job hook**. The only job boundary it emits is the `task <N> repo is <owner>/<repo> …` line, logged by act_runner itself when a task starts. Nothing is logged at the end. Jobs are short (median 14 s), and about 96% of the gaps between jobs are under 10 s. So "is the runner idle right now?" cannot reliably tell one job from the next.
 
-1. **Processes left by a job are never killed.** On cloud-ci-13, a `vite preview --port 4786 --strictPort` from a job had been running for 57 h (PPID 1, still in the runner cgroup). Any later job that needs port 4786 fails, and the process counts against the 10G cgroup cap. The reclaim script's idle check (`pgrep -P <MainPID>`) cannot see re-parented processes.
-2. **Leftover Compose volumes and networks are never removed.** `gitea-runner-cleanup.sh` never prunes volumes. Unused `platform_*` volumes and anonymous volumes pile up. Every repo's workspace folder is named `hostexecutor`, so **Compose's default project name is `hostexecutor` for every repo**. That is how a volume named `hostexecutor_relay-db` ended up on cloud-ci-8: one repo's leftovers fall into the next repo's project namespace.
-3. **`/tmp` grows to 9–22 GB per runner.** On ci-runner-6, `pytest-of-runner` is 10.5 GB and `node-compile-cache` 8 GB. Ubuntu's `tmp.conf` only ages `/tmp` entries out after **30 days**.
-4. **Shared caches are never verified, so one corrupted entry repeats on every job.**
-   - The uv cache on cloud-ci-5 held a corrupted `cryptography-50.0.2` `_rust.abi3.so`, so every kartra-ai job that installed it segfaulted (PR #21/#22).
-   - 14 npm `_cacache` entries on cloud-ci-7 no longer matched their own sha512.
-   - uv **hardlinks** packages into venvs from the shared cache. The corrupted `.so` had 3 extra links inside `/tmp/pytest-of-runner/…/.venv`, so any in-place write by a test or tool corrupts the cache for every later job.
-   - The cause of the cloud3 corruption itself is out of scope here (a KSM-off experiment is running).
-5. **On ailab runners**, the dormant GitHub agent's `ExecStartPre=runner-reclaim.sh` force-removes **every** container and runs `volume prune -af` without checking for a live Gitea job. This is latent: it fires only when the agent restarts, but then it kills a running Gitea job's stack.
-6. **A runner whose filesystem has died raises no alert.** cloud-ci-5 and cloud-ci-7 hit an ext4 shutdown (every read returned EIO, sshd reset connections) and nothing fired. node_exporter kept running from memory.
+The fleet audit on 2026-10-12 found:
+
+1. **Processes left by a job are never killed.** On cloud-ci-13, a job's `vite preview --port 4786 --strictPort` had been running for 57 h (PPID 1, still in the runner cgroup). It blocks that port for later jobs and counts against the 10G cap.
+2. **Compose volumes and networks are never removed** (`gitea-runner-cleanup.sh` never prunes volumes). Unused `platform_*` and anonymous volumes pile up. Every workspace folder is named `hostexecutor`, so Compose's default project name is **`hostexecutor` for every repo**. That is how cloud-ci-8 ended up with a `hostexecutor_relay-db` volume: repos land in each other's namespace.
+3. **`/tmp` holds 9–22 GB per runner.** On ci-runner-6, `pytest-of-runner` is 10.5 GB and `node-compile-cache` 8 GB. Ubuntu 24.04 ships `D /tmp 1777 root root 30d`, so entries are only aged out after 30 days. The cloud runners also lose `/tmp` at boot on nightly power-off. The 24/7 ailab pool does not.
+4. **Shared caches are never verified, so one corrupt entry repeats on every job.**
+   - A corrupt `cryptography-50.0.2` `.so` in cloud-ci-5's uv cache segfaulted every kartra-ai job that installed it.
+   - 14 npm `_cacache` entries on cloud-ci-7 failed their own sha512.
+   - uv hardlinks installs from the cache, and that `.so` also had 3 hardlinks inside `/tmp/pytest-of-runner` venvs. That proves the inode was shared, not that anything wrote to it. So "jobs write through hardlinks" stays a hypothesis until the verifier records evidence.
+5. **On ailab runners** the dormant GitHub agent's `ExecStartPre=runner-reclaim.sh` force-removes every container and prunes images, volumes and buildx builders. It has no Gitea check. It is latent: it fires on any agent restart.
+6. **A runner whose root filesystem has died gets no fast alert.**
+   - cloud-ci-5 and cloud-ci-7 hit an ext4 shutdown at 09:55–09:56Z. Every read returned EIO, while node_exporter kept serving.
+   - `node_textfile_scrape_error` went to 1 within about 1 min. `node_filesystem_readonly` stayed 0.
+   - `CloudCIRunnerCleanupBeaconMissing` went only *pending* (its `for` is 30 min). A reset cleared it about 4 min later.
+   - So nothing would have paged for half an hour, while a dead runner keeps polling Gitea and failing every job it is given.
 
 Out of scope:
-- Finding the root cause of the cloud3 corruption.
-- Dirty action clones under `work/<sha>`. Checked: the only change is act's own deletion of `.gitignore`, which is harmless.
+- The cloud3 corruption itself. A KSM-off experiment is running.
+- Action clones. The only change in them is act's own deletion of `.gitignore`, which is harmless.
 - Replacing act_runner or moving to ephemeral VMs.
+- Retiring the dormant GitHub agents (follow-up).
 
-## Approach
+## Approach — three PRs, ordered by risk
 
-Two PRs from this one plan. PR 1 covers items 1–3 and 5 (cleanup between jobs). PR 2 covers items 4 and 6 (cache integrity and filesystem health).
+### PR 1 (low risk): bounded `/tmp`, GitHub reclaim guard, runbook refresh
 
-### PR 1-A — job-boundary leftover reaper (new phase of `gitea-runner-reclaim.sh`)
+**1-B /tmp.**
+- Override the vendor file by name with `/etc/tmpfiles.d/tmp.conf`, containing `D /tmp 1777 root root 2d`. That keeps the boot wipe and changes only the age.
+- `/etc/tmpfiles.d/gitea-runner-tmp.conf` adds `e /tmp/pytest-of-runner - - - 6h` and `e /tmp/node-compile-cache - - - 1d`. These are different paths, so no duplicate-line collision.
+- A `systemd-tmpfiles-clean.timer` drop-in sets `OnUnitActiveSec=1h`.
+- Why this is safe: anything a live job created or modified is under 3 h old (the job timeout), and the smallest age here is 6 h. Under relatime a file a job only *reads* can look older. That only affects caches (node-compile-cache), where losing an entry costs a recompile.
+- Verify with `systemd-tmpfiles --cat-config` (no "Duplicate line" warning) and `systemd-tmpfiles --clean` exiting 0.
+- On busy runners pytest's retention count (3 sessions), not age, sets the size of `pytest-of-runner`. Per-repo `tmp_path_retention_count` is a follow-up. It is not set globally, because PytestConfigWarning on older pytest plus `-W error` would fail jobs.
 
-**Boundary.** Let `B` be the wall-clock time of the newest `task <N> repo is` line in `journalctl -u gitea-act-runner`. Read it incrementally with a journal cursor stored in `/var/lib/gitea-runner-reclaim/state`, so each 5 s tick reads only new lines. With `capacity: 1`, act_runner takes a task only after the previous one finished, so at `B` the previous job is over.
+**1-D GitHub reclaim guard** (`github_runner/templates/runner-reclaim.sh.j2`).
+- When `gitea-act-runner.service` is enabled on the host, skip the **whole** docker block: `rm -f` of containers, `volume prune -af`, image/builder prune, and `buildx rm --all-inactive`. Log the skip.
+- The workspace and `~/.docker` repair still run.
+- Docker hygiene on those hosts belongs to the Gitea cleanup. This is race-free and needs no busy detection.
+- Add `ansible/roles/github_runner/**` to the `runner-scripts.yaml` path filter. Keep the guard inside the block that `scripts/tests/test_dsh_validator_pin.py::TestGithubReclaimKeepList` extracts, or update that extraction, and add a test that the guard exists.
 
-**Leftover criterion (race-free, needs no idle detection).** An object is a leftover if and only if:
-- it was **created before `B − margin`** (margin 2 s), and
-- it is not act_runner itself, and not a descendant of its MainPID.
+**Docs.**
+- `docs/runbooks/ci-runners.md` §7: real timings (5 s reclaim; cleanup 24 h / 75% / 4 h floor / `-af` at 88%) and the `/tmp` policy.
+- §9: reading a dead root fs (`/sys/fs/ext4/sda1/errors_count` via `pvesh … agent/file-read`; recovery is `qm reset`, since the on-disk fsck was clean), and the runbook action of disabling the runner in Gitea.
 
-The current job's processes, containers and volumes are all created after `B`, so they are never touched, even mid-job. That includes a server it backgrounds for later steps.
+### PR 2 (medium risk, ships in log-only mode): job-boundary leftover reaper
 
-**Start time, not ancestry, is the rule that protects the current job.** Measured on 2026-10-12 on cloud-ci-10, during a live kartra-ai job:
-- The job's Playwright `node` and `chrome-headless` processes, started 439 s earlier, were in the runner cgroup.
-- They were **not** descendants of act_runner's MainPID: their parent chain broke at a parent that had already exited.
-- So "kill non-descendants" on its own would kill a live job's browser. The descendant exclusion is only a second guard.
+This is a new phase of `gitea-runner-reclaim.sh`. It runs on the existing 5 s timer, **before** the `daemon_busy` early return. It is skipped under ExecStartPre (`--no-reap`): with `KillMode=mixed` the cgroup is already empty at start, and keeping docker calls off the start path avoids repeating the 2026-07-28 outage.
 
-**Edge-triggered.** The reap runs once each time `B` advances (once per job start), plus a periodic re-pass every 15 min. Docker is therefore queried once per job, not every 5 s.
+**Preconditions (otherwise skip and report `reap_state=refused`):**
+- `gitea_runner_capacity == 1`: an Ansible assert while reaping is enabled, plus the script parses `config.yaml`.
+- The act_runner MainPID is numeric and > 0.
 
-**Stale-idle rule.** If no new task has started for longer than the job timeout + 10 min (3h10m), the last job is certainly over, so the boundary becomes `now − 10 s`. Leftovers from the last job of the day still get reaped.
+**Boundary `B`.**
+- Read new journal entries since a stored cursor: `journalctl _SYSTEMD_UNIT=<svc> _PID=<MainPID> -o json --after-cursor=…`.
+- Accept only messages from `_COMM=act_runner` whose `MESSAGE` matches the anchored `^time="([^"]+)" level=info msg="task [0-9]+ repo is [A-Za-z0-9._/-]+ `. That ignores `logger` lines from job processes, which journald attributes to the same unit.
+- For each accepted line, compute two boot-relative estimates and take the **earlier** one:
+  - logrus `time=` (floored to the second, act_runner's own clock at the log call), converted with the current `btime`;
+  - `__MONOTONIC_TIMESTAMP` (journald receive time, with the same `_BOOT_ID`).
 
-**Fresh-start guard.** Just before acting, re-read the newest task line. If it changed, recompute `B` and take a fresh snapshot.
+  Then subtract a margin of 5 s. Receive lag only ever pushes B later, which is the unsafe direction, so taking the earlier estimate and the margin guard against it.
+- State lives in `/var/lib/gitea-runner-reclaim/reap.state`: `boot_id`, `b_boot_ns`, `cursor` (parsed with its own reader, since cursors contain `;=`), `last_edge_b`, `last_periodic`. A new boot id resets B.
 
-**What gets reaped:**
+**Effective boundary.** `E = max(B, now − (job_timeout + 10 min))`. If B is missing, `E = now − (job_timeout + 10 min)`. No job can be older than its timeout, so `E` never reaches into a live job. There is no other fallback.
 
-a. **Processes.** Read every PID in the service cgroup, recursively, from `/sys/fs/cgroup/system.slice/gitea-act-runner.service`. Each process's start time is `btime + starttime/CLK_TCK`, from `/proc/stat` and `/proc/<pid>/stat`. Keep MainPID and its descendants; reap whatever started before the boundary.
-   - Send SIGTERM, wait up to 10 s, then SIGKILL.
-   - Cap at 64 processes per pass, and log each one (pid, age, cmdline trimmed to 120 characters).
-   - The GitHub agent runs in a different cgroup, so it is never seen.
+**When it acts.**
+- **Edge pass**: once, when B advances. It uses `E`, so at a job start that is that job's B.
+- **Periodic pass**: every 15 min, using only the timeout term, `now − (job_timeout + 10 min)`. It never uses B, so an object a long job took over can never be hit mid-job.
+- Just before acting, the edge pass re-reads the journal. If B moved again, it recomputes.
 
-b. **Containers.** A container is reaped when it was created before `B`, is not on the keep-list, and is attributable to this pool.
-   - Keep-list: image or name matches `INFRA_EXCLUDE_RE` (`buildkit|buildx`), or the container has a label matching `GITEA_REAP_KEEP_LABEL_RE` (default `^(io\.dsh\.conductor\.image-pin|ci\.keep)$`). That covers the deliberate `dsh-conductor-image-pin` on ci-runner-1.
-   - Attribution: on hosts with no peer runner (`peer_services=none`, the cloud runners), every container counts. On hosts with peers (ailab), a container counts only if its Compose `working_dir` label or one of its bind-mount sources is under `WORKDIR_PARENT`. Anything else is left to the existing 4 h age reaper.
-   - Removal: `docker rm -f`.
+**What counts as a leftover** (created before `E`, and not protected):
 
-c. **Compose networks and volumes.** Remove those labelled `com.docker.compose.project` that were created before `B` and that no container references. Also remove anonymous dangling volumes (64-hex names, no labels) created before `B`. Named volumes without Compose labels are kept, because they may be deliberate caches.
+a. **Processes.**
+   - Take the PIDs in the service cgroup, recursively. Skip MainPID, its descendants and zombies.
+   - start = `btime + starttime/CLK_TCK`; a process is a candidate if start < E.
+   - Live evidence (cloud-ci-10, 2026-10-12): a running job's Playwright `node`/`chrome-headless` were **not** descendants of MainPID. Start time is the rule that protects them; ancestry is only a second guard.
+   - Re-read `/proc/<pid>/stat` starttime right before SIGTERM, and again before SIGKILL (guards against PID reuse).
+   - One shared 10 s wait for the whole batch, capped at 64 processes per pass.
+   - Every signal goes through the `REAP_KILL` indirection, so tests can mock it.
 
-**Fail-safe.** No boundary found (journal unreadable, or the message format changed on an act_runner upgrade) means no reaping. The existing reclaim behaviour is unchanged. The beacon exports `gitea_runner_reap_boundary_age_seconds` and `gitea_runner_reap_last_{processes,containers,volumes}`. A new reap-specific `GITEA_REAP_ENABLED` switch defaults to on.
+b. **Containers.**
+   - Candidate when `Created < E` **and** `State.StartedAt < E`. A container started or restarted by the current job, or brought back by a restart policy, is kept.
+   - Never reaped: image or name matching `INFRA_EXCLUDE_RE`, or a label **key** matching `REAP_KEEP_LABEL_RE` (default `^(io\.dsh\.conductor\.image-pin|ci\.keep)$`).
+   - Attribution: on hosts with `peer_services=none` (cloud), all candidates count. On hosts with peers, a container counts only if its Compose `working_dir` label or a bind-mount source resolves under `WORKDIR_PARENT`. Values containing `..` are rejected.
+   - The reclaim env renders the **same** role vars as cleanup (`gitea_runner_cleanup_infra_exclude_re`, `_peer_services`), so ci-runner-1's pin exemption and the cloud `none` sentinel apply. `test_dsh_validator_pin.py` gets a case covering the reclaim env too.
 
-### PR 1-B — bounded `/tmp`
+c. **Networks and volumes.**
+   - Computed **after** the container pass.
+   - Compose-labelled networks and volumes, and anonymous volumes (label `com.docker.volume.anonymous`, confirmed on 29.8.1), created before `E` and referenced by no container (running or stopped). The keep-label key also applies here.
+   - Named non-Compose volumes are kept, as possible deliberate caches.
+   - This reverses cleanup.sh's "never prune volumes" model, so update that header and the runbook.
 
-`/tmp` is not cleaned per job, because pytest reuses its `pytest-of-<user>` parent and deleting during a job would race. Instead, use `systemd-tmpfiles` ageing, which checks atime, mtime and ctime per entry, so anything in use stays fresh:
-- `/etc/tmpfiles.d/gitea-runner-tmp.conf`:
-  - `e /tmp/pytest-of-runner - - - 6h`
-  - `e /tmp/node-compile-cache - - - 1d`
-  - `e /tmp - - - 2d`
-- A drop-in for `systemd-tmpfiles-clean.timer` with `OnUnitActiveSec=1h`.
-- 6 h is more than the 3 h job timeout, so nothing a live job touched can be aged out.
+**Modes.**
+- `gitea_runner_reap_mode`: `off | log | enforce`, default **`log`**. Log mode writes `would-reap <kind> <id> age=… reason=…`.
+- **Adoption probe** (log mode): on each later edge, check whether objects reported as would-reap are still in use by the current job. A process still alive and holding a listening port the job connected to is hard to prove, so the probe tracks the evidence that matters: a container, network or volume reported earlier that is now attached to a running container started ≥ B. A non-zero `gitea_runner_reap_adopted_total` blocks the switch to enforce.
+- Measure task line → first `docker compose up` per repo from the journal and logs, to size the take-over window.
 
-### PR 1-C — keep jobs from writing into the shared uv cache
+**Beacon:**
+- `gitea_runner_reap_boundary_age_seconds` (−1 when missing)
+- `gitea_runner_reap_mode`
+- `gitea_runner_reap_last_candidates{kind}`
+- `gitea_runner_reap_last_reaped{kind}`
+- `gitea_runner_reap_adopted_total`
+- `gitea_runner_reap_refused`
 
-Set `UV_LINK_MODE=copy` in act_runner's `runner.envs` (new role var `gitea_runner_uv_link_mode`, default `copy`). A job or test that writes into a venv file then changes its own copy, not the cache that every later job hardlinks from.
-- Cost: venv installs copy instead of hardlinking. Measure job durations for forge, kartra-ai and platform on one canary runner over 24 h before rolling out to the fleet.
-- If the cost turns out large, fall back to `clone`, which behaves as copy on ext4, so the decision stays the same.
+**Switching to enforce** is a one-line role var change in a follow-up PR. It happens after two or more CI days of log data with zero adoption and no would-reap object that later failed a job.
 
-### PR 1-D — GitHub reclaim guard (`github_runner/templates/runner-reclaim.sh.j2`)
+### PR 3 (medium): cache integrity verifier, purge queue, alerts
 
-Before removing containers and volumes, check whether the Gitea daemon is busy: `gitea-act-runner` MainPID has children, or the newest task line is under 2 min old. If busy, skip the container and volume removal, log it, and still do the workspace and `~/.docker` repair. The agent is dormant, so this only guards restarts.
+**Verifier.** `gitea-runner-cache-verify.py` is a single Python process run as `User=runner`.
+- Opens files with `O_NOFOLLOW` and hashes regular files only. Skips `..` and RECORD lines with no hash.
+- npm: `content-v2/sha512` and `content-v2/sha1` digests must equal the path.
+- uv: `archive-v0/<id>` is checked against every `*.dist-info/RECORD` sha256 (urlsafe-b64). Archives without a RECORD are counted, not failed.
+- For each bad file it records evidence: `nlink`; `mtime`/`ctime` against the archive dir's ctime (a later write means modified in place); size and path.
 
-### PR 2-A — nightly cache integrity check (`gitea-runner-cache-verify.sh`, new)
+**Purge queue.** Bad entries are appended to `/var/lib/gitea-runner-cache/purge.queue` (owned by runner). The queue is applied only inside race-free windows:
+- reclaim ExecStartPre (daemon down; the cloud runners boot daily);
+- `gitea-runner-cleanup.sh`, inside its **existing** `idle_confirmed` window. One call, no new copy of the idle logic.
 
-**Schedule.** A timer with `OnCalendar=*-*-* 04:30`, `RandomizedDelaySec=2h`, `Persistent=true` and `OnBootSec=45min`. The cloud hosts are powered off at night, so the persistent and boot triggers make sure it still runs. Runs under `nice -n 19` and `ionice -c3`.
+Purge actions:
+- npm: run `npm cache verify` as runner. It rehashes, removes bad content and rewrites index-v5.
+- uv: remove the `archive-v0/<id>` dir, plus every non-archive file under the uv cache whose bytes name `<id>`. This does not depend on the uv version: the host's uv 0.5.11 is older than the setup-uv versions that write the cache, so `uv cache clean` could miss newer buckets.
+- If `nlink > 1`, `find` the other links under `~/.local/share/uv`, `/tmp/pytest-of-runner` and `~/act-runner/work` with `-xdev -samefile`, and remove each one's venv root (nearest `pyvenv.cfg`) or pytest session dir.
 
-**Checks:**
-- npm: `~/.npm/_cacache/content-v2/{sha512,sha1}/aa/bb/<rest>`, where each file's digest must equal its path.
-- uv: `~/.cache/uv/archive-v0/<id>/` against every `*.dist-info/RECORD` sha256 line, covering all files, not just `.so`. Archives without a RECORD are skipped and counted.
-
-**Purge.**
-- npm: delete the bad content file.
-- uv: delete the archive folder, plus every `wheels-v*/**.http|.msgpack` pointer whose bytes contain that archive id.
-- Purging happens **only inside a confirmed idle gap**, using the same `any_job_running` / `idle_confirmed` logic as the cleanup script (one wait budget of up to 10 min). Otherwise it is deferred to the next run and the metric still reports the problem.
+**Schedule and limits.**
+- Timer: `OnCalendar=04:30`, `RandomizedDelaySec=2h`, `Persistent=true`, `OnBootSec=45min`.
+- Unit: `CPUQuota=100%`, `IOWeight=10`, `IOReadBandwidthMax=/ 50M`, `Nice=19`.
 
 **Beacon** (`gitea_runner_cache_verify.prom`):
-- `gitea_runner_cache_verify_last_run_seconds`
-- `gitea_runner_cache_checked{cache}`
-- `gitea_runner_cache_corrupt{cache}`
-- `gitea_runner_cache_purged{cache}`
-- `gitea_runner_cache_verify_duration_seconds`
+- `…_last_run_seconds`
+- `…_duration_seconds`
+- `…_checked{cache}`
+- `…_corrupt_found{cache}`
+- `…_corrupt_pending{cache}`
+- `…_corrupt_inplace_evidence{cache}`
 
-### PR 2-B — alerts
+**Alerts.** Keep the existing split: `CIRunner*` with `job="ci-runner-node"` in `ci-runners-rules.yaml`, and `CloudCIRunner*` with `job="ci-runner-cloud"` plus `and on (cloud_host) cloud_host:up == 1` in the cloud file.
 
-In `ci-runners-rules.yaml` (ailab VMs) and `ci-runners-cloud-rules.yaml` (cloud, gated on the host being up like the existing rules):
-- `CIRunnerCacheCorrupt`: `gitea_runner_cache_corrupt > 0`, warning.
-- `CIRunnerCacheVerifyStale`: last run more than 3 d ago while up.
-- `CIRunnerFilesystemFailed`: `node_textfile_scrape_error == 1`, or the reclaim beacon older than 5 min while node_exporter is up. This catches the "pingable, node_exporter up, root fs dead" state.
+| Alert | Condition | Severity |
+|---|---|---|
+| `…CacheCorruptPending` | `corrupt_pending > 0` for 30m | warning |
+| `…CacheCorruptFound` | `corrupt_found > 0` (points at the host) | info |
+| `…CacheVerifyStale` | last run > 3d and `time() - node_boot_time_seconds > 4h` | warning |
+| `…RootFilesystemFailed` | `node_textfile_scrape_error == 1` for 3m | **critical**; the runbook says disable the runner in Gitea from outside |
 
-Add promtool test cases for each rule.
+Add `ci-runners-rules.test.yaml` (new; rules-lint auto-discovers siblings) and extend `ci-runners-cloud-rules.test.yaml`.
 
-### Docs
+### Deferred: 1-C uv in-place-write protection
 
-- `docs/runbooks/ci-runners.md` §7: replace the stale timings (the runbook says 30 s / 48h-80%-1h / "never -af"; the code does 5 s / 24h-75% with a 4 h floor / `-af` at 88%), and document the reaper, the tmpfiles ageing, `UV_LINK_MODE` and the verify job.
-- §9: the cloud specifics, including how to read a dead root filesystem (`/sys/fs/ext4/sda1/errors_count` via `pvesh … agent/file-read`).
+Ship this only if the verifier's `corrupt_inplace_evidence` is ever non-zero. If it ships, the preferred form is `chmod a-w` on archive files: hardlinks are kept, and in-place writes fail loudly with EACCES. The other option is `UV_LINK_MODE=copy` via `/etc/uv/uv.toml` (no daemon restart). Copy mode was rejected for now: unproven benefit, real disk cost under `/tmp`, and a fleet-wide drain.
+
+### Follow-ups (issues, not this change)
+
+- Compose project names in platform, kartra-ai and relay: `name:` in their compose files, or `COMPOSE_PROJECT_NAME: ${{ github.event.repository.name }}`.
+- Per-repo pytest `tmp_path_retention_count`.
+- Retire the dormant GitHub agents.
 
 ## Critical files
 
-- `ansible/roles/gitea_runner/files/gitea-runner-reclaim.sh`: the reaper phase, journal cursor state, new beacon fields.
-- `ansible/roles/gitea_runner/templates/gitea-runner-reclaim.env.j2`, `defaults/main.yml`: knobs (`gitea_runner_reap_enabled`, `_reap_margin_sec`, `_reap_keep_label_re`, `_reap_max_procs`, `_tmp_ages`, `_uv_link_mode`, `_cache_verify_*`).
-- `ansible/roles/gitea_runner/tasks/main.yml`: tmpfiles drop-in, tmpfiles-clean timer drop-in, verify script, service and timer, state dir.
-- `ansible/roles/gitea_runner/templates/config.yaml.j2`: `runner.envs: UV_LINK_MODE`.
-- `ansible/roles/gitea_runner/files/gitea-runner-cache-verify.sh` (new) and `templates/gitea-runner-cache-verify.{service,timer,env}.j2` (new).
-- `ansible/roles/gitea_runner/tests/test-reclaim.sh` (extend) and `tests/test-cache-verify.sh` (new).
-- `.gitea/workflows/runner-scripts.yaml` and `justfile`: run the new test.
-- `ansible/roles/github_runner/templates/runner-reclaim.sh.j2`: the Gitea-busy guard.
-- `kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml`, `ci-runners-cloud-rules.yaml` and `ci-runners-cloud-rules.test.yaml`: alerts and tests.
-- `docs/runbooks/ci-runners.md`: §7 and §9.
+- PR 1:
+  - `ansible/roles/gitea_runner/{tasks/main.yml,defaults/main.yml}` and new templates `tmpfiles-tmp.conf.j2`, `tmpfiles-gitea-runner.conf.j2`, `tmpfiles-clean.timer.override.j2`
+  - `ansible/roles/github_runner/templates/runner-reclaim.sh.j2`
+  - `scripts/tests/test_dsh_validator_pin.py`
+  - `.gitea/workflows/runner-scripts.yaml`
+  - `docs/runbooks/ci-runners.md`
+- PR 2:
+  - `ansible/roles/gitea_runner/files/gitea-runner-reclaim.sh`
+  - `templates/gitea-runner-reclaim.env.j2`, `templates/gitea-act-runner.service.j2` (`--no-reap` on ExecStartPre)
+  - `defaults/main.yml`, `tasks/main.yml` (state dir, capacity assert)
+  - `files/gitea-runner-cleanup.sh` (safety-model header)
+  - `tests/test-reclaim.sh`
+  - `scripts/tests/test_dsh_validator_pin.py`
+  - runbook
+- PR 3:
+  - `files/gitea-runner-cache-verify.py` (new)
+  - `templates/gitea-runner-cache-verify.{service,timer}.j2` (new)
+  - `files/gitea-runner-cleanup.sh` (purge-queue call in the idle window)
+  - `gitea-runner-reclaim.sh` (purge queue under ExecStartPre)
+  - `tests/test-cache-verify.sh` (new), `.gitea/workflows/runner-scripts.yaml`, `justfile`
+  - `kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml`, `ci-runners-rules.test.yaml` (new), `ci-runners-cloud-rules.yaml`, `ci-runners-cloud-rules.test.yaml`
+  - runbook
 
 ## Verification
 
-**Unit (CI, `runner-scripts` workflow).** The paths for `/proc`, `/sys/fs/cgroup`, `journalctl` and `docker` become overridable via env, the same way `test-reclaim.sh` already mocks `systemctl`/`docker`. Fixtures:
-- Processes:
-  - A process started before the boundary and not a descendant is killed.
-  - A process started after the boundary (a job's own backgrounded server) is kept.
-  - MainPID descendants are kept.
-- Containers:
-  - The `buildx` and `image-pin` containers are kept.
-  - On a host with peers, only workdir-attributed containers are reaped.
-- Compose volumes are removed only when unused **and** created before the boundary. A named non-Compose volume is kept.
-- Failure modes:
-  - No task line, or an unparsable one: nothing is reaped, and the beacon reports `boundary_age = -1`.
-  - The boundary changes between snapshot and act: the pass is recomputed.
-- The single-pass `/proc` scan test still holds, with no per-workspace fan-out.
-- `test-cache-verify.sh`:
-  - A corrupt npm file and a RECORD-mismatched uv file are both detected.
-  - Purge is skipped while busy and runs when idle.
-  - The metrics are correct.
-  - Pointer files for a purged archive are removed.
+**Unit tests (`runner-scripts` CI, which runs on the live runners as `runner`).** Every external dependency is injectable via env: `/proc` root, cgroup root, `journalctl`, `docker`, `REAP_KILL`, `config.yaml` path, `btime`. A guard test asserts that no real PID was signalled.
 
-**Lint.** `shellcheck` on the new and changed scripts; `promtool test rules` on the rule files.
+Reaper cases:
+- A pre-E non-descendant is killed (log mode: logged only).
+- A post-B background process is kept.
+- Descendants and zombies are kept.
+- PID reuse: starttime changes between snapshot and signal, so it is skipped.
+- A taken-over container (`Created < B`, `StartedAt ≥ B`) is kept.
+- `buildx`, the pin label and `ci.keep` are kept.
+- With peers, only workdir-attributed containers count; a working_dir containing `..` is rejected.
+- Compose and anonymous (label) volumes are reaped only when unreferenced and pre-E; a named non-Compose volume is kept.
+- A `logger`-forged task line from another PID is ignored.
+- An unparsable or missing line never reaps anything newer than the timeout boundary.
+- Capacity ≠ 1 is refused.
+- B moving mid-pass triggers a recompute.
+- Env-var drift check (as in test-cleanup.sh [M]).
+- The existing single-pass `/proc` test still holds.
 
-**Canary.** Roll out to `cloud-ci-9` first (cloud2, the host with no corruption) with `just cloud-runners --limit cloud-ci-9`. For 24 h, watch the `reap` log lines (`journalctl -t gitea-runner-reclaim | grep reap`), the job failure rate on cloud-ci-9 against the pool (the same task→status method used in the audit), job durations under `UV_LINK_MODE=copy`, the `/tmp` size, and one manual `systemctl start gitea-runner-cache-verify` with its `.prom`. Then roll out to all cloud runners, then the ailab pool (`just gitea-runners`).
+`test-cache-verify.sh`:
+- A corrupt npm file and a RECORD mismatch are found.
+- In-place evidence is flagged when ctime is newer than the archive.
+- The queue is written; purge happens only through the queue appliers; pointer files are removed; a hardlinked venv root is removed.
+- O_NOFOLLOW: a symlink to a FIFO does not hang.
 
-**Live acceptance.** The cloud-ci-13 orphan `vite preview` (or its equivalent at that point) is gone after the next job starts. No job failures are attributable to reaping. `/tmp` stays under about 2 GB after 24 h. The verify beacon is present on every runner.
+`test_dsh_validator_pin.py`: the reclaim env exemption and the GitHub reclaim guard. `promtool test rules` covers all new rules. `shellcheck` on the changed scripts.
+
+**Rollout.**
+- Runbook §7 says this control node cannot run Ansible: the pool is installed by hand over SSH, mirroring the role. Confirm at deploy time whether the WSL converge path can run `cloud-runners.yml --limit`. If not, the steps are written out per PR (files, units, `daemon-reload`, timers), mirroring `tasks/main.yml`.
+- **Canary:** cloud-ci-9 (cloud2) first, for one CI day, then all cloud runners, then the ailab pool.
+
+**Synthetic acceptance on the canary (PR 2, log mode, then once briefly in enforce on the canary only).**
+- As root, start `sleep 99999` as runner and move it into the service cgroup with `echo $pid > …/cgroup.procs`.
+- `docker run -d --label com.docker.compose.project=reaptest alpine sleep 99999`.
+- `docker volume create --label com.docker.compose.project=reaptest reaptest_v`.
+- At the next job start, the would-reap log (or, in enforce, the reap log) must name all three, and the job running at that moment must succeed.
+
+**Live checks per PR:**
+- PR 1: `/tmp` on the 24/7 pool no longer grows (`du` daily). No GitHub reclaim docker actions in the journal on hosts running Gitea.
+- PR 2: reap beacon present; adoption counter 0; failure rate on cloud-ci-9 within the pool range (the task→status method from the audit); no `lease does not exist` failures that line up with reaper actions.
+- PR 3: one manual `systemctl start gitea-runner-cache-verify` per runner, `.prom` present. Purge on the canary: copy one uv archive, flip a byte, wait for the queue to apply, then `uv pip install` that package in a temp venv and confirm it re-downloads.
 
 ## Risks (likelihood × impact, with mitigation)
 
-1. **A job relies on a leftover from a previous job** (low × medium). That is a hidden cross-job dependency, and surfacing it is intended. Mitigation: the keep label (`ci.keep=true`) and a per-host kill switch (`GITEA_REAP_ENABLED=0` in the env file).
-2. **act_runner changes its log text** (medium on an upgrade × low). No boundary means no reaping, which fails safe. The boundary-age metric shows it, and a test pins the regex.
-3. **Clock mismatch between the journal and `/proc` start times** (low × high). Both come from the same host realtime clock: convert starttime with `btime` and use the 2 s margin. Tests cover a process started 1 s after the boundary.
-4. **`UV_LINK_MODE=copy` slows jobs** (medium × low). Measure on the canary before the fleet rollout. The role var allows a quick revert.
-5. **tmpfiles ages out a long job's file** (very low × medium). The 6 h minimum is twice the job timeout, and atime, mtime and ctime all have to be stale.
-6. **Docker load from the reaper** (low × low). It is edge-triggered once per job start, plus every 15 min.
+1. **A new job takes over a pre-B object by name before the edge pass** (medium × medium). Ships log-only with an adoption counter; StartedAt ≥ B is kept; periodic passes use only the timeout boundary; Compose-name follow-ups shrink the window.
+2. **Capacity raised above 1** (low × high). Ansible assert plus script refusal.
+3. **A forged or accidental task line** (low × high). `_PID`/`_COMM` match and anchored regex.
+4. **act_runner log format changes** (medium on an upgrade × low). No B means only the timeout boundary applies, which is safe. Beacon `boundary_age = -1`.
+5. **Clock skew** (low × high). Both estimates are boot-relative, the earlier one is taken, and the margin is 5 s.
+6. **A slow docker daemon stretches the reclaim tick** (low × medium). Docker calls only on the edge and periodic passes, each with `timeout 15`.
+7. **tmpfiles removes a cache file mid-job** (low × low). Caches only. Job-created files are under 3 h old against a 6 h minimum.
+8. **The verifier's I/O during the CI day** (medium × low). CPUQuota, IOWeight and bandwidth caps.
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
