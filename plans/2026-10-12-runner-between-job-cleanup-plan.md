@@ -36,6 +36,11 @@ Two PRs from this one plan. PR 1 covers items 1–3 and 5 (cleanup between jobs)
 
 The current job's processes, containers and volumes are all created after `B`, so they are never touched, even mid-job. That includes a server it backgrounds for later steps.
 
+**Start time, not ancestry, is the rule that protects the current job.** Measured on 2026-10-12 on cloud-ci-10, during a live kartra-ai job:
+- The job's Playwright `node` and `chrome-headless` processes, started 439 s earlier, were in the runner cgroup.
+- They were **not** descendants of act_runner's MainPID: their parent chain broke at a parent that had already exited.
+- So "kill non-descendants" on its own would kill a live job's browser. The descendant exclusion is only a second guard.
+
 **Edge-triggered.** The reap runs once each time `B` advances (once per job start), plus a periodic re-pass every 15 min. Docker is therefore queried once per job, not every 5 s.
 
 **Stale-idle rule.** If no new task has started for longer than the job timeout + 10 min (3h10m), the last job is certainly over, so the boundary becomes `now − 10 s`. Leftovers from the last job of the day still get reaped.
