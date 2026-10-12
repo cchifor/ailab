@@ -16,7 +16,7 @@ host. Nothing checked either.
            does not mass-purge). Evidence per bad file: nlink, whether its CONTENT changed after unpack
            (mtime against the archive dir's ctime; ctime moves on every hardlink/unlink), and which
            venvs and cached uv environments share the inode. New entries are appended to the queue.
-           A mismatch is re-read (page cache dropped) before it is judged: a file that hashes right on
+           A mismatch is re-read with O_DIRECT (no page cache) before it is judged: a file that hashes right on
            a re-read was READ wrong, not stored wrong. That is a `read flap`, counted and published
            (a host corrupting memory) but never queued: cloud-ci-7, 2026-10-12, read an intact .so
            bad/ok/bad/ok, one 4 KiB page wrong per bad read, while its jobs segfaulted at random.
@@ -35,12 +35,14 @@ what runner itself could.
 """
 import base64
 import csv
+import errno
 import fcntl
 import hashlib
 import io
 import json
 import signal
 import math
+import mmap
 import os
 import pwd
 import re
@@ -163,14 +165,19 @@ def digest(path, algo):
     return h, st
 
 
-def reread_ok(path, algo, ok):
-    """True if any of REREADS fresh re-reads of `path` passes `ok`. The file's page cache is dropped
-    first (POSIX_FADV_DONTNEED drops only clean, unmapped pages), so each re-read comes from the disk
-    into newly allocated memory, not from the page that was read wrong."""
-    for _ in range(REREADS):
+def fresh_digest(path, algo):
+    """Hash `path` WITHOUT the page cache: O_DIRECT into a newly mapped, page-aligned buffer, so neither a
+    corrupt cached page (even one a running job keeps mmap'd, which POSIX_FADV_DONTNEED cannot drop) nor
+    the buffer of an earlier read is reused. Where O_DIRECT is refused (EINVAL: tmpfs), the file's page
+    cache is dropped and it is read normally. -> hash object, or None when it cannot be read at all."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_DIRECT)
+    except OSError as e:
+        if e.errno != errno.EINVAL:
+            return None
         fd = open_regular(path)
         if fd is None:
-            return False
+            return None
         try:
             os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
         except OSError:
@@ -180,18 +187,48 @@ def reread_ok(path, algo, ok):
         try:
             h, _st = digest(path, algo)
         except OSError:
-            return False
-        if h is not None and ok(h):
-            return True
-    return False
+            return None
+        return h
+    buf = mmap.mmap(-1, CHUNK)   # fresh anonymous pages, page-aligned as O_DIRECT requires
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        h = hashlib.new(algo)
+        while True:
+            n = os.readv(fd, [buf])
+            if n <= 0:
+                break
+            h.update(buf[:n])
+            if n % 4096:   # a short, unaligned read is the end of the file
+                break
+        return h
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+        buf.close()
 
 
-def flap(cache, key, rel):
+def reread(path, algo, ok):
+    """Re-read a file that just hashed wrong, up to REREADS times, bypassing the page cache.
+    -> ("ok", n): right on fresh read n+1, so the file is intact and n+1 reads were corrupted (a flap);
+       ("bad", n): wrong on every one of the n fresh reads, so the file is corrupt;
+       ("gone", n): a re-read could not be done (vanished, unreadable): inconclusive, never corrupt."""
+    for n in range(REREADS):
+        h = fresh_digest(path, algo)
+        if h is None:
+            return "gone", n
+        if ok(h):
+            return "ok", n
+    return "bad", REREADS
+
+
+def flap(cache, key, rel, bad_reads):
     FLAPS[cache] += 1
     if len(FLAPPED) < 50:
-        FLAPPED.append({"cache": cache, "key": key, "file": rel})
-    print(f"read flap {cache} {key} {rel}: hashed wrong once, right on a fresh re-read (the READ was"
-          " corrupted, the file is intact)", flush=True)
+        FLAPPED.append({"cache": cache, "key": key, "file": rel, "bad_reads": bad_reads})
+    print(f"read flap {cache} {key} {rel}: hashed wrong {bad_reads}x, then right on a fresh (O_DIRECT)"
+          " read: the READ was corrupted, the file is intact", flush=True)
 
 
 def uv_digest_ok(h, want):
@@ -253,8 +290,12 @@ def verify_npm():
                         continue
                     checked += 1
                     if h.hexdigest() != want:
-                        if reread_ok(os.path.join(p2, rest), algo, lambda g, w=want: g.hexdigest() == w):
-                            flap("npm", f"{algo}:{want}", "")
+                        verdict, n = reread(os.path.join(p2, rest), algo, lambda g, w=want: g.hexdigest() == w)
+                        if verdict == "ok":
+                            flap("npm", f"{algo}:{want}", "", n + 1)
+                            continue
+                        if verdict == "gone":
+                            SKIPPED["vanished"] += 1
                             continue
                         bad.append({"cache": "npm", "key": f"{algo}:{want}", "nlink": st.st_nlink,
                                     "size": st.st_size, "mtime": int(st.st_mtime), "inplace": None})
@@ -383,8 +424,12 @@ def verify_uv():
                 checked += 1
                 if uv_digest_ok(h, want):
                     continue
-                if reread_ok(path, algo, lambda g, w=want: uv_digest_ok(g, w)):
-                    flap("uv", aid, row[0])
+                verdict, n = reread(path, algo, lambda g, w=want: uv_digest_ok(g, w))
+                if verdict == "ok":
+                    flap("uv", aid, row[0], n + 1)
+                    continue
+                if verdict == "gone":
+                    SKIPPED["vanished"] += 1
                     continue
                 # mtime, not ctime: link()/unlink() of another hardlink also bumps ctime, and every uv
                 # install hardlinks from the archive. Only a content write moves mtime past the unpack.
@@ -657,7 +702,7 @@ def write_beacon():
       [f'gitea_runner_cache_corrupt_pending{{cache="{k}"}} {v}' for k, v in pend.items()])
     g("corrupt_inplace_evidence", "Corrupt uv files whose content changed after unpack (a job wrote through a hardlink).",
       [f'gitea_runner_cache_corrupt_inplace_evidence{{cache="{k}"}} {v}' for k, v in inplace.items()])
-    g("read_flaps", "Files the last verification read wrong once and right on a fresh re-read: the host corrupted"
+    g("read_flaps", "Files the last verification read wrong, then right on a fresh (O_DIRECT) re-read: the host corrupted"
       " the READ (memory), the file is intact. Never queued.",
       [f'gitea_runner_cache_read_flaps{{cache="{k}"}} {v}' for k, v in flaps.items()])
     tmp = os.path.join(TEXTFILE_DIR, f"gitea_runner_cache_verify.prom.{os.getpid()}")

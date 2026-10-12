@@ -233,9 +233,10 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   - `verify` (as `runner`, throttled) hashes npm content against the digest its path encodes and uv archives
     against their `RECORD`, and queues bad entries in `/var/lib/gitea-runner-cache/purge.queue`. For uv it
     records whether the file changed after unpack (`corrupt_inplace_evidence`: a job wrote through a
-    hardlink) and which venvs share the inode. A mismatch is re-read twice with the file's page cache
-    dropped first; if a re-read hashes right, the file is intact and the READ was corrupted: a
-    `read_flaps` count, never queued (see "A runner that corrupts memory" below).
+    hardlink) and which venvs share the inode. A mismatch is re-read up to twice with O_DIRECT (no page
+    cache, a fresh buffer); if a re-read hashes right, the file is intact and the READ was corrupted: a
+    `read_flaps` count with the number of bad reads, never queued (see "A runner that corrupts memory"
+    below). A re-read that cannot be done (the file vanished) is inconclusive, never corrupt.
   - `apply` (root) purges the queue only as act_runner's ExecStartPre (systemd starts the daemon only after
     it exits, so no Gitea job runs during the purge; the reclaim timer never purges), and
     not when a co-located GitHub job is running at its start (checked once). The cleanup never purges

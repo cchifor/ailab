@@ -589,11 +589,13 @@ elif [ -s "$CACHE_PURGE_QUEUE" ]; then
   last="$(stat -c %Y "$CACHE_PURGE_STAMP" 2>/dev/null || echo 0)"
   if is_num "$last" && [ $(( $(date +%s) - last )) -lt "$CACHE_PURGE_RESTART_MIN_SEC" ]; then
     log "cache purge pending: a restart for it was queued $(( ($(date +%s) - last) / 60 ))m ago; not again yet"
-  elif ! systemctl is-active --quiet "$SERVICE"; then
+  elif runner_state="$(systemctl is-active "$SERVICE" 2>/dev/null)"; [ "$runner_state" != active ]; then
     # A stopped runner reads as idle (MainPID 0), and `restart` STARTS a stopped unit: an operator's stop
     # (a quarantined runner, cloud-ci-7 2026-10-12) must never be undone for a purge. The queue waits for
     # whoever starts it.
-    log "cache purge pending: $SERVICE is not running; not starting it for a purge (the queue is kept)"
+    # inactive = stopped (an operator?); failed = crashed. Either way not started here; the state is logged
+    # so a crashed runner silently holding a purge queue is told apart from a deliberate stop.
+    log "cache purge pending: $SERVICE is ${runner_state:-unknown}, not active; not starting it for a purge (the queue is kept)"
   elif idle_confirmed; then
     mkdir -p "$(dirname "$CACHE_PURGE_STAMP")" 2>/dev/null; touch "$CACHE_PURGE_STAMP" 2>/dev/null || true
     log "cache purge: queueing a restart of $SERVICE in an idle gap; its ExecStartPre applies the queue with the daemon down"
