@@ -45,13 +45,11 @@ BEACON="${GITEA_RECLAIM_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_RECLAIM_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 # Job-boundary leftover reaper (gitea-runner-reap.py). Runs on every timer tick BEFORE the busy gate:
 # the moment a new task starts is "busy" by definition, and its safety comes from creation time, not
-# from idleness. Never under ExecStartPre (--no-reap): with KillMode=mixed the unit's cgroup is already
-# empty at start, and docker calls on the start path are the shape of the 2026-07-28 fleet outage.
+# from idleness. Under ExecStartPre it does nothing: there is no act_runner MainPID yet, and the reaper
+# refuses before any journal or docker call (so the 2026-07-28 start-path shape cannot recur). It also
+# handles mode `off` itself, so the kill switch still publishes a mode=0 beacon.
 REAP_BIN="${GITEA_REAP_BIN:-/usr/local/bin/gitea-runner-reap.py}"
-REAP_MODE="${GITEA_REAP_MODE:-log}"
-REAP_TIMEOUT="${GITEA_REAP_TIMEOUT_SEC:-90}"
-NO_REAP=0
-[ "${1:-}" = "--no-reap" ] && NO_REAP=1
+REAP_TIMEOUT="${GITEA_REAP_TIMEOUT_SEC:-60}"
 
 log() { logger -t gitea-runner-reclaim -- "$*" 2>/dev/null || true; }
 
@@ -160,10 +158,9 @@ write_beacon() {
 }
 
 run_reaper() {
-  [ "$NO_REAP" = 1 ] && return 0
-  [ "$REAP_MODE" = off ] && return 0
   [ -x "$REAP_BIN" ] || return 0
-  # Bounded so a slow docker daemon cannot hold the oneshot past its TimeoutStartSec (120s).
+  # Bounded (and the reaper keeps its own 45s deadline) so a slow docker daemon cannot hold this
+  # oneshot past its TimeoutStartSec (120s) together with the reclaim's own docker/find/chown work.
   timeout -k 5 "$REAP_TIMEOUT" "$REAP_BIN" || log "reaper exited rc=$?"
 }
 

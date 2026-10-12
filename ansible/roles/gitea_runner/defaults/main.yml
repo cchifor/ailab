@@ -147,13 +147,18 @@ gitea_runner_reclaim_dirs:
 # act_runner `task <N> repo is` line (minus a margin), and not part of the job that line started, are
 # leftovers of earlier jobs: a 57h-old `vite preview --strictPort` on cloud-ci-13, unused platform_*
 # volumes, `hostexecutor_relay-db` from the shared compose project name. Boundary for a pass:
-# max(task start, now - (job timeout + grace)), so it never reaches into a live job even when no task
-# line parses. Plan: plans/2026-10-12-runner-between-job-cleanup-plan.md (PR 2).
+# max(task start, now - (job timeout + grace)) - the task start only while that edge is fresh (20s),
+# the timeout floor otherwise - so it never reaches into a live job even when no task line parses. A
+# compose project with a container created since the task start is left alone, and any incomplete
+# docker inventory skips the docker part of the pass. Plan: plans/2026-10-12-runner-between-job-
+# cleanup-plan.md (PR 2); review: ailab#1285.
 #
 # off | log | enforce. `log` only reports `would-reap ...` (journal tag gitea-runner-reap) and runs the
 # adoption probe. Do NOT switch to enforce until, over two or more CI days of log data on every runner:
-# gitea_runner_reap_adopted_total == 0, gitea_runner_reap_boundary_age_seconds >= 0 (the task line
+# gitea_runner_reap_adopted_48h == 0, gitea_runner_reap_boundary_age_seconds >= 0 (the task line
 # parses), and no would-reap object lines up with a failed job. The switch is its own reviewed change.
+# `off` is the kill switch: set it here (or as a host_var), not only in the env file, which the next role
+# run re-renders.
 gitea_runner_reap_mode: log
 gitea_runner_reap_bin: /usr/local/bin/gitea-runner-reap.py
 gitea_runner_reap_state: /var/lib/gitea-runner-reclaim/reap.state

@@ -50,7 +50,7 @@ done
 
 run_reclaim() {
   GITEA_RECLAIM_ENV_FILE=/nonexistent \
-    GITEA_REAP_BIN="$BIN/reap-mock" GITEA_REAP_MODE="${REAP_MODE_OVERRIDE:-log}" \
+    GITEA_REAP_BIN="${REAP_BIN_OVERRIDE:-$BIN/reap-mock}" \
     GITEA_RUNNER_WORKDIR_PARENT="$WSROOT" \
     GITEA_RUNNER_USER="$(id -un)" GITEA_RUNNER_GROUP="$(id -gn 2>/dev/null || id -g)" \
     GITEA_RUNNER_CONFIG_DIR="$WORK/cfg" \
@@ -91,14 +91,12 @@ else
   echo "  SKIP: /proc/<pid>/cwd not available on this platform (runs on the Linux runner VMs)"
 fi
 
-echo "[D] the job-boundary reaper runs on a timer tick, and never under ExecStartPre (--no-reap) or mode off"
+echo "[D] every reclaim run calls the job-boundary reaper once (it refuses on its own without a MainPID)"
 : > "$CALLS"; run_reclaim
 [ "$(grep -c '^reap' "$CALLS")" -eq 1 ] && ok "D: tick calls the reaper once" || bad "D: tick calls the reaper once"
-: > "$CALLS"; run_reclaim --no-reap
-grep -q '^reap' "$CALLS" && bad "D: --no-reap must not call the reaper" || ok "D: --no-reap skips the reaper"
-: > "$CALLS"; REAP_MODE_OVERRIDE=off run_reclaim
-grep -q '^reap' "$CALLS" && bad "D: mode off must not call the reaper" || ok "D: mode off skips the reaper"
-unset REAP_MODE_OVERRIDE
+: > "$CALLS"; REAP_BIN_OVERRIDE="$WORK/no-such-reaper" run_reclaim
+[ -d "$WSROOT" ] && ok "D: a missing reaper binary does not break the reclaim" || bad "D: a missing reaper binary does not break the reclaim"
+unset REAP_BIN_OVERRIDE
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
