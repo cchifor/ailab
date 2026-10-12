@@ -29,7 +29,8 @@ echo "readlink \$#" >> "$CALLS"
 exec "$REAL_READLINK" "\$@"
 EOF
 # systemctl show -p MainPID --value -> 0: daemon down (the ExecStartPre situation) => not busy.
-printf '#!/usr/bin/env bash\necho 0\n' >"$BIN/systemctl"
+# MOCK_MAINPID unset -> 0: daemon down (the ExecStartPre situation) => not busy.
+printf '#!/usr/bin/env bash\necho "${MOCK_MAINPID:-0}"\n' >"$BIN/systemctl"
 # docker ps -q -> no containers (no bind-mount busy paths).
 printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/docker"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/logger"
@@ -52,7 +53,7 @@ done
 
 run_reclaim() {
   GITEA_RECLAIM_ENV_FILE=/nonexistent \
-    GITEA_REAP_BIN="$BIN/reap-mock" GITEA_REAP_MODE="${REAP_MODE_OVERRIDE:-log}" \
+    GITEA_REAP_BIN="${REAP_BIN_OVERRIDE:-$BIN/reap-mock}" \
     GITEA_CACHE_VERIFY_BIN="$BIN/cacheverify-mock" GITEA_CACHE_PURGE_QUEUE="${QUEUE_OVERRIDE:-$WORK/no-queue}" \
     GITEA_RUNNER_WORKDIR_PARENT="$WSROOT" \
     GITEA_RUNNER_USER="$(id -un)" GITEA_RUNNER_GROUP="$(id -gn 2>/dev/null || id -g)" \
@@ -94,22 +95,20 @@ else
   echo "  SKIP: /proc/<pid>/cwd not available on this platform (runs on the Linux runner VMs)"
 fi
 
-echo "[D] the job-boundary reaper runs on a timer tick, and never under ExecStartPre (--no-reap) or mode off"
+echo "[D] every reclaim run calls the job-boundary reaper once (it refuses on its own without a MainPID)"
 : > "$CALLS"; run_reclaim
 [ "$(grep -c '^reap' "$CALLS")" -eq 1 ] && ok "D: tick calls the reaper once" || bad "D: tick calls the reaper once"
-: > "$CALLS"; run_reclaim --no-reap
-grep -q '^reap' "$CALLS" && bad "D: --no-reap must not call the reaper" || ok "D: --no-reap skips the reaper"
-: > "$CALLS"; REAP_MODE_OVERRIDE=off run_reclaim
-grep -q '^reap' "$CALLS" && bad "D: mode off must not call the reaper" || ok "D: mode off skips the reaper"
-unset REAP_MODE_OVERRIDE
+: > "$CALLS"; REAP_BIN_OVERRIDE="$WORK/no-such-reaper" run_reclaim
+[ -d "$WSROOT" ] && ok "D: a missing reaper binary does not break the reclaim" || bad "D: a missing reaper binary does not break the reclaim"
+unset REAP_BIN_OVERRIDE
 
-echo "[E] the cache purge queue is applied under ExecStartPre (--no-reap) only, and only when non-empty"
+echo "[E] the cache purge queue is applied only while act_runner is down (MainPID 0), and only when non-empty"
 echo "npm sha512:$(printf 'a%.0s' $(seq 128))" > "$WORK/queue"
-: > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim --no-reap
-grep -q '^cacheverify apply' "$CALLS" && ok "E: ExecStartPre applies a non-empty queue" || bad "E: ExecStartPre applies a non-empty queue"
 : > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim
-grep -q '^cacheverify' "$CALLS" && bad "E: a timer tick must not apply the queue" || ok "E: a timer tick leaves the queue alone"
-: > "$WORK/queue"; : > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim --no-reap
+grep -q '^cacheverify apply' "$CALLS" && ok "E: daemon down applies a non-empty queue" || bad "E: daemon down applies a non-empty queue"
+: > "$CALLS"; MOCK_MAINPID=1 QUEUE_OVERRIDE="$WORK/queue" run_reclaim
+grep -q '^cacheverify' "$CALLS" && bad "E: a running daemon must not get the queue applied" || ok "E: daemon running -> queue left alone"
+: > "$WORK/queue"; : > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim
 grep -q '^cacheverify' "$CALLS" && bad "E: an empty queue must not run the applier" || ok "E: an empty queue is a no-op"
 unset QUEUE_OVERRIDE
 
