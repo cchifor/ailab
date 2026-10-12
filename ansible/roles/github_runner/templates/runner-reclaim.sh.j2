@@ -11,10 +11,13 @@ DOCKER_CFG="{{ github_runner_home }}/.docker"
 KEEP_RE='{{ github_runner_reclaim_keep_re }}'
 # A Gitea act_runner on this host shares the Docker daemon, and this script cannot tell whether one of
 # its jobs is running: it fires at every agent (re)start, not between Gitea jobs. When that unit is
-# enabled, skip the docker block entirely; gitea-runner-cleanup.sh owns docker hygiene here.
+# enabled OR active, skip the docker block entirely; gitea-runner-cleanup.sh owns docker hygiene here.
+# Both, because the hazard is a RUNNING daemon (a unit `disable`d without --now is still active), and
+# an enabled unit that is stopped right now will be running again at its next start.
 GITEA_UNIT='{{ github_runner_reclaim_gitea_unit }}'
-if [ -n "$GITEA_UNIT" ] && systemctl is-enabled --quiet "$GITEA_UNIT" 2>/dev/null; then
-  logger -t runner-reclaim -- "skip docker reclaim: $GITEA_UNIT is enabled on this host and owns docker hygiene" 2>/dev/null || true
+if [ -n "$GITEA_UNIT" ] && { systemctl is-enabled --quiet "$GITEA_UNIT" 2>/dev/null \
+                            || systemctl is-active --quiet "$GITEA_UNIT" 2>/dev/null; }; then
+  logger -t runner-reclaim -- "skip docker reclaim: $GITEA_UNIT is enabled or active on this host and owns docker hygiene" 2>/dev/null || true
 elif command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
   ids=$(docker ps -aq 2>/dev/null || true)
   if [ -n "$KEEP_RE" ] && [ -n "$ids" ]; then

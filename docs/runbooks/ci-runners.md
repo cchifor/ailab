@@ -388,7 +388,7 @@ this way on 2026-09-24 (#848).
   - QEMU reports the virtual disk healthy, and `node_filesystem_readonly` stays 0.
   - `node_textfile_scrape_error` for that instance goes to **1 within about a minute**. That is the fast signal; the beacon-missing alerts take 30 min.
 - **Cause:** an ext4 error (`htree_dirblock_to_tree` on a directory block) shut the filesystem down. The kernel 6.8 shutdown flag is not a read-only remount, so `/proc/mounts` still says `rw`.
-- **Confirm without SSH:** `pvesh get /nodes/<host>/qemu/<vmid>/agent/file-read --file /sys/fs/ext4/sda1/errors_count`. A non-zero count confirms it; `first_error_func` and `first_error_ino` in the same directory name the failing call and inode. This works because the guest agent is still resident.
+- **Confirm without SSH:** `pvesh get /nodes/<host>/qemu/<vmid>/agent/file-read --file /sys/fs/ext4/sda1/errors_count`. `sda1` because these VMs boot from `scsi0` (check with `qm config <vmid>`; a virtio-blk root would be `vda1`). A non-zero count confirms it; `first_error_func` and `first_error_ino` in the same directory name the failing call and inode. This works because the guest agent is still resident.
 - **Recover:**
   1. First check it is still dead: another session or operator may already have reset it. Re-read `errors_count`, and check the PVE task log `/var/log/pve/tasks/index`.
   2. Run `qm reset <vmid>`. The boot replays the journal; the on-disk fsck found the directory intact both times.

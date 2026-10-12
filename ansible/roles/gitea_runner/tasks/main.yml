@@ -236,10 +236,13 @@
   register: _gitea_runner_vendor_tmpconf
   when: gitea_runner_tmp_manage | bool
 
-- name: Assert the vendor tmp.conf has exactly one /tmp line to re-age
+- name: Assert the vendor tmp.conf has exactly one /tmp line, and that the rewrite really re-ages it
   ansible.builtin.assert:
     that:
       - (_vendor_lines | select('match', gitea_runner_tmp_line_re) | list | length) == 1
+      - (_vendor_lines | select('match', gitea_runner_tmp_line_re) | first
+         | regex_replace(gitea_runner_tmp_age_rewrite_re, '\\1 ' ~ gitea_runner_tmp_age ~ '\\3'))
+        is match('^\s*\S+\s+/tmp\s+\S+\s+\S+\s+\S+\s+' ~ gitea_runner_tmp_age ~ '(\s|$)')
     fail_msg: >-
       /usr/lib/tmpfiles.d/tmp.conf does not have exactly one /tmp line
       ({{ _vendor_lines | select('match', gitea_runner_tmp_line_re) | list }}). The override
