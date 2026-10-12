@@ -1212,3 +1212,46 @@ capacity".
 - `chifor.me/release: router-0.1.0-20261012-followups`
 
 Nothing else changes: no schema change, no new setting.
+
+## Activity directory table release (2026-10-12)
+
+`router-0.1.0-20261012-activity-table` deploys merged llm-router main `0b0b2514eab20a2257782444ec058508dc16c241`
+([#100](https://git.chifor.me/cchifor/llm-router/pulls/100)). It is a web console change only: no server, API, schema
+or setting change.
+
+**What it changes.** The Activity page uses the directory table of the TrueSwarm admin's Agents page (trueswarm-admin
+`RecordTable` / `DirectoryToolbar` / `TableFooter`, ported to React as `apps/web/table/`):
+- **Toolbar:** a search box (request id, model, account; the endpoint's `search`) and a **+ Filter** menu with removable
+  chips. Its fields are Result, Source, Route, Served by and Model (`status`, `principal`, `route`, `accountId`, `model`
+  on `/admin/v1/trajectories`). Then a Comfortable/Compact toggle and a Columns menu.
+- **Rows and headers:** headers sort the loaded rows. Each row shows the source name with the request id under it,
+  Result (status pill), Route, Model, Served by, Latency and Time.
+- **Loading:** the newest 100 requests. Load more, or scrolling to the end, adds 100 at a time up to the endpoint's 500.
+  One query refreshes every loaded row each 10 s.
+- **Detail:** it opens only when a row is clicked (× closes it). At 900 px or narrower the open request replaces the
+  list.
+- **Browser storage:** density and hidden columns are kept per browser (`router.activity.density`,
+  `router.activity.hidden`).
+
+**How to check after the rollout.** Open router.chifor.me → Activity:
+- The table and its **+ Filter** menu should render.
+- Filtering by Source should send `principal=` (visible in the browser's network tab).
+- Clicking a row should open the request beside the list.
+
+**Image.**
+- Archive `router-0.1.0-20261012-activity-table.tar.gz`, SHA-256
+  `1c8a4ed293c58004817cf51ab64d819ddbe57757963e2529be2cab26b62ad8f8`; relay branch
+  `release/router-activity-table-image`, [run 82819](https://git.chifor.me/cchifor/relay/actions/runs/82819).
+- Image `registry.chifor.me/llm-router/router@sha256:2127e3943e48d5262c41058f314446c1801ff33530f1217dfe353763c12c387b`.
+- Before merge: 1768 tests passed, 0 failed, and Playwright passed 22 plus the drag test, on Linux CI
+  ([run 82814](https://git.chifor.me/cchifor/llm-router/actions/runs/82814)). Both reviewer bots approved.
+- **CI host fix during the review:** cloud-ci-2 had a kernel package left half-configured by an interrupted
+  unattended-upgrade (2026-10-10), so `playwright install --with-deps` failed with `dpkg was interrupted`. Fixed with
+  `dpkg --configure -a`; no other cloud runner was affected.
+
+**Rollback.** In `router.yaml`, revert the image digest and both pod-template annotations together:
+- `image: registry.chifor.me/llm-router/router@sha256:ce27f28df7900daf807892684939a204041611e9843e3e65c8e23ce5f7c3555e`
+- `chifor.me/source-commit: 4f1fb4f6a79fe3df2a42712448309dc8568d1613`
+- `chifor.me/release: router-0.1.0-20261012-codex-retries`
+
+Nothing else changes: no schema change, no new setting.
