@@ -88,10 +88,10 @@ pods first (`kubectl --context admin@ai -n llm-router get deploy,pdb,svc llm-rou
 **What is held, and for how long:** Caddy retries dial failures and "no healthy upstream" every 250 ms, for 85 s,
 or for 10 s on `/v1/images/*`. The 85 s cover the longest measured gap: 76–79 s on 2026-10-10/11, when the old
 shutdown waited its full 60 s grace on open streams. The first rollout behind the edge still replaces such a pod.
-With the router's drain the gap is about 45 s at most: 20 s drain, up to 12 s cleanup, about 13 s to ready. 85 s
+With the router's drain the gap is about 50 s at most: 20 s drain, up to 12 s cleanup, up to 5 s for the journal's flush and the runtime's close, about 13 s to ready (35 s measured on 2026-10-12, with streams still running at the deadline). 85 s
 also leaves room under Cloudflare's roughly 100 s time-to-first-byte for a held stream, which gets its first byte
 (`: ok`) as soon as the router selects an account (the router already gives images a 90 s execution budget, and a longer hold would
-let Cloudflare time out first). Active health checks poll the router's `/ready` every 3 s, with a 3 s timeout; two failures in a row mark it down, so a draining router (503 at once) is marked down within about 6 s, a hung one within about 9 s, and a recovered one is marked up within 3 s. (Until the follow-ups release of 2026-10-12, `/ready` waited behind the router's SQLite worker, and a heavy admin query such as the week usage took 2.7 s on 2026-10-11; with a 2 s timeout every Status page load marked the router down for about 2 s, which is why the timeout is 3 s. Since that release `/ready` asks the worker whether it is alive and moving (opened, not failed, no call waiting past 10 s) without a round trip, so admin queries no longer delay it; a hung worker turns it 503 after 10 s, so the edge marks the router down about 16 s after the first call the worker holds. The interval is not shorter than the timeout, so probes never pile up; a single slow probe never marks the router down, as that takes two in a row.) A request that was never sent
+let Cloudflare time out first). Active health checks poll the router's `/ready` every 3 s, with a 3 s timeout; two failures in a row mark it down, so a draining router (503 at once) is marked down within about 6 s, a hung one within about 9 s, and a recovered one is marked up within 3 s. (Until the follow-ups release of 2026-10-12, `/ready` waited behind the router's SQLite worker, and a heavy admin query such as the week usage took 2.7 s on 2026-10-11; with a 2 s timeout every Status page load marked the router down for about 2 s, which is why the timeout is 3 s. Since that release `/ready` asks the worker whether it is alive and moving (opened, not failed, no call waiting past 10 s) without a round trip, so admin queries no longer delay it; a hung worker turns it 503 after 10 s, so the edge marks the router down about 16 s after the first call the worker holds. The check cannot tell a hang from a long query, so an admin query that itself runs 10 s or more also turns `/ready` 503 until it ends; the edge then holds new requests (up to 85 s) while requests in flight continue. The slowest measured is 5.2 s (the Status page's usage under load); before that release any query over 3 s did this. The bound is `stallMs` in llm-router's `SqliteStore.responsive()`: raising it trades slower hang detection for longer admin queries. The interval is not shorter than the timeout, so probes never pile up; a single slow probe never marks the router down, as that takes two in a row.) A request that was never sent
 (dial failure) is safe to hold and retry. After the router has accepted a request, Caddy may replay a GET within
 `lb_try_duration`, but never a POST (its default retry match is GET-only), so a held POST was never sent.
 Caddy's own readiness is a TCP probe, so it does not flap with the router.
@@ -1079,7 +1079,8 @@ one more index update per journal write. A rollback is itself a rollout of the N
 - **Watchdog:** `ROUTER_DRAIN_MS` + 17 s (was + 15 s): the 12 s cleanup, then 5 s for the journal's flush and the
   runtime's close. At the 40 s maximum that is 57 s, inside the 60 s grace.
 - **`/ready` no longer waits behind admin queries.** It asks the storage worker whether it is alive and moving (opened,
-  not failed, no call stuck past 10 s), without a round trip. The edge's health checks (3 s / 3 s / 2 failures) stay as they
+  not failed, no call stuck past 10 s), without a round trip. An admin query that runs 10 s or more still turns it 503
+  until it ends (above: before, any query over 3 s did). The edge's health checks (3 s / 3 s / 2 failures) stay as they
   are.
 - **Codex conversations stuck on an overloaded backend recover.**
   - An overload (`server_is_overloaded`, `server_error`) that arrives before any output now fails over to another
@@ -1116,4 +1117,7 @@ rollout restart deploy/llm-router` once the new pod is up; that drain runs the n
 - `chifor.me/source-commit: 1a7bb7e85d4053daef8771df18fc10d047c791e6`
 - `chifor.me/release: router-0.1.0-20261011-live-status`
 
-Nothing else changes: no schema change, no new setting.
+Nothing else changes: no schema change, no new setting. The journal's `conversation.rekeyed` events stay, and the
+live-status image's Activity skips event types it does not know. The re-key lives in the router's memory only and
+changes just the copy of the body sent upstream, so after a rollback every conversation sends its own key again (and its
+overload count starts over).

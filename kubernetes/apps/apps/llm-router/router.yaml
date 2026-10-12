@@ -139,7 +139,8 @@ spec:
             - name: ROUTER_WEB_ROOT
               value: /app/dist/web
             # SIGTERM drain: in-flight requests get this long, the watchdog exits at + 17 s; keep that
-            # below terminationGracePeriodSeconds (60). The router refuses values above 40000.
+            # below terminationGracePeriodSeconds (60). The router refuses values above 40000: at that cap the
+            # watchdog fires at 57 s, 3 s before the grace ends, so raise the grace before going near it.
             - name: ROUTER_DRAIN_MS
               value: "20000"
             - name: ROUTER_ADMIN_TOKEN
