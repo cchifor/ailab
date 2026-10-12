@@ -235,16 +235,18 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     records whether the file changed after unpack (`corrupt_inplace_evidence`: a job wrote through a
     hardlink) and which venvs share the inode.
   - `apply` (root) purges the queue only with act_runner DOWN (MainPID 0: its ExecStartPre, any stop), and
-    not while a co-located GitHub job runs. The cleanup never purges itself: in a confirmed idle gap it
-    restarts act_runner (at most every 6h) so the ExecStartPre does. Lines are validated, paths are built
-    from fixed roots, state files must be runner-owned regular files (no symlinks), and deletion runs as
-    `runner`. Cached uv environments (uvx / `uv run --with`) that share a corrupt inode are purged too.
+    not when a co-located GitHub job is running at its start (checked once). The cleanup never purges
+    itself: in a confirmed idle gap it restarts act_runner (at most every 6h) so the ExecStartPre does.
+    Root only validates the queue (runner-owned regular file, strict lines, fixed roots); the purge and
+    the uv pointer scan run as `runner`, archives first. Cached uv environments (uvx / `uv run --with`)
+    that share a corrupt inode are purged too. A queue not owned by `runner` is ignored and logged.
     To purge now: `systemctl restart gitea-act-runner` (drains the running job first).
   - Beacon `gitea_runner_cache_verify.prom`: `checked`, `corrupt_found`, `corrupt_pending`,
     `corrupt_inplace_evidence` (by `cache`), `verify_last_run_seconds`, `verify_duration_seconds`. Read
     `/var/lib/gitea-runner-cache/result.json`, `journalctl -u gitea-runner-cache-verify` (the nightly run)
-    and `journalctl -t gitea-runner-cache-purge` (the purges). A fresh install runs one verify at once,
-    so the first beacon does not wait for 04:30.
+    and `journalctl -t gitea-runner-cache-purge` (the purges). A fresh install (or any timer change)
+    runs one verify at once, so the first beacon does not wait for 04:30. Kill switch:
+    `gitea_runner_cache_verify_enabled: false` stops it and drops the queue and the beacon.
   - Alerts: `CIRunnerCacheCorruptPending` / `CloudCIRunnerCacheCorruptPending` (queued 30m),
     `…CacheVerifyStale` (>3d, after 4h of uptime), `…CacheVerifyBeaconMissing` (never ran: 30h on the 24/7
     pool, 6h after 4h of uptime on cloud), `…RootFilesystemFailed` (critical: the textfile collector reads

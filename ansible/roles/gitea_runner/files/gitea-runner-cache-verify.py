@@ -10,20 +10,24 @@ re-fetches, so a corrupt npm entry costs a download, but cloud-ci-7 held 14 of t
 host. Nothing checked either.
 
   verify   (systemd User=runner, nightly) - hash every npm content file against the digest its path
-           encodes, and every file of every uv archive against its *.dist-info/RECORD sha256. A file
-           RECORD lists that is missing or not a regular file, or a RECORD that cannot be read, makes the
-           archive unusable too (0 such files in 95k real archives on 3 runners, so this does not mass-
-           purge). Evidence per bad file: nlink, whether its CONTENT changed after unpack (mtime against
-           the archive dir's ctime; ctime would move on every hardlink/unlink), and which venvs share
-           the inode. New entries are appended to the purge queue (deduplicated).
+           encodes, and every file of every uv archive against its *.dist-info/RECORD. An archive with
+           no RECORD, a RECORD row without a usable hash, or a listed file that is missing or not
+           regular is corrupt too (0 such rows in 72k real archives on 2 runners, 2026-10-12, so this
+           does not mass-purge). Evidence per bad file: nlink, whether its CONTENT changed after unpack
+           (mtime against the archive dir's ctime; ctime moves on every hardlink/unlink), and which
+           venvs and cached uv environments share the inode. New entries are appended to the queue.
   publish  (root, ExecStartPost=+) - validate the result and write the node_exporter beacon.
-  apply    (root) - purge queued entries. Runs only while act_runner is DOWN (MainPID 0): the reclaim
-           runs it then, and gitea-runner-cleanup.sh restarts act_runner in an idle gap to get there.
+  apply    (root) - validate the queue and hand the valid lines to `purge`, run as runner. Runs only
+           while act_runner is DOWN (MainPID 0): the reclaim runs it then, and
+           gitea-runner-cleanup.sh restarts act_runner in an idle gap to get there.
+  purge    (runner, started by apply via runuser) - delete the queued entries, then the uv pointers
+           that name a purged archive; print `ok <line>` per finished line.
 
-The state dir is runner-owned, so its files are untrusted input to root: they are opened with
-O_NOFOLLOW (and O_NONBLOCK) and must be regular files owned by the runner uid; each queue line must
-match a strict pattern; every path is built here from fixed roots; deletion runs as `runner` (runuser),
-so a forged line can at most delete what runner itself could.
+The state dir and the caches are runner-owned, so root treats them as untrusted: state files are opened
+with O_NOFOLLOW (and O_NONBLOCK) and must be regular files owned by the runner uid; each queue line
+must match a strict pattern; every path is built from fixed roots; and root never walks a cache. The
+walking and the deletion run as `runner`, so a forged line or a swapped directory can at most touch
+what runner itself could.
 """
 import base64
 import csv
@@ -31,6 +35,7 @@ import fcntl
 import hashlib
 import io
 import json
+import signal
 import math
 import os
 import pwd
@@ -82,6 +87,8 @@ LINK_ROOTS = {
 }
 RUNUSER = os.environ.get("GITEA_CACHE_RUNUSER", "runuser")   # tests: a recording fake (process env only)
 MAX_POINTER_BYTES = 1 << 20
+# The runner-side purge must finish (or be killed) inside the reclaim's `timeout 300` around apply.
+PURGE_TIMEOUT = 240
 MAX_STATE_BYTES = 8 << 20
 CHUNK = 1 << 20
 
@@ -150,7 +157,15 @@ def digest(path, algo):
 
 
 def safe_rel(rel):
+    """A relative path that is safe to put on a whitespace-separated queue line (root parses it)."""
     return bool(REL.match(rel)) and ".." not in rel.split("/")
+
+
+def record_path_ok(rel):
+    """A RECORD path to hash inside its archive: relative, no `..` component, no NUL. Any other character
+    is legal in a wheel: setuptools ships `script (dev).tmpl`, and project templates ship `{{project_slug}}/`
+    (both on every runner, 2026-10-12), so safe_rel's character set would call them corrupt."""
+    return bool(rel) and not rel.startswith("/") and "\x00" not in rel and ".." not in rel.split("/")
 
 
 def listdir(path):
@@ -246,24 +261,37 @@ def venv_root_for(path, root, name):
 
 
 def verify_uv():
-    checked, bad, no_record = 0, [], 0
+    """Every wheel archive must carry a RECORD that hashes every file it lists. Measured 2026-10-12 on
+    cloud-ci-9 (7518 archives) and ci-runner-4 (64954): every non-environment archive had one, the only
+    unhashed row was RECORD itself, and every hash was sha256. So anything else marks the archive corrupt."""
+    checked, bad, no_record, envs = 0, [], 0, 0
     linked = {}   # (dev, ino) -> entries whose corrupt inode is shared
+
+    def corrupt(aid, rel, reason):
+        bad.append({"cache": "uv", "key": aid, "file": rel, "nlink": 0, "size": 0, "mtime": 0,
+                    "inplace": False, "reason": reason})
+
     base = os.path.join(UV_DIR, "archive-v0")
     for aid in listdir(base) if os.path.isdir(base) else []:
         adir = os.path.join(base, aid)
         try:
             if not UV_KEY.match(aid) or os.path.islink(adir) or not os.path.isdir(adir):
                 continue
-            records = [os.path.join(adir, e, "RECORD") for e in listdir(adir) if e.endswith(".dist-info")]
-            records = [r for r in records if os.path.isfile(r) and not os.path.islink(r)]
-            if not records:
-                no_record += 1
-                continue
+            ents = listdir(adir)
+            dinfo = [e for e in ents if e.endswith(".dist-info")]
+            if not dinfo and "pyvenv.cfg" in ents:
+                envs += 1   # a cached uv environment (uvx / `uv run --with`): its files are wheel hardlinks
+                continue    # checked through their archive; find_links queues the env with it
             dir_ctime = os.stat(adir).st_ctime
         except OSError:
             SKIPPED["vanished"] += 1
             continue
-        for rec in records:
+        if not dinfo:
+            if os.path.lexists(adir):
+                no_record += 1
+                corrupt(aid, "", "no .dist-info (no RECORD to verify against)")
+            continue
+        for rec in [os.path.join(adir, e, "RECORD") for e in dinfo]:
             fd = open_regular(rec)
             rows = None
             if fd is not None:
@@ -274,16 +302,22 @@ def verify_uv():
                 finally:
                     os.close(fd)
             if rows is None:
-                if os.path.lexists(rec):   # vanished mid-walk is a skip; present but unreadable is corrupt
-                    bad.append({"cache": "uv", "key": aid, "file": os.path.relpath(rec, adir), "nlink": 0,
-                                "size": 0, "mtime": 0, "inplace": False, "reason": "unreadable RECORD"})
+                if os.path.lexists(adir):   # the archive vanishing mid-walk is a skip; a bad RECORD is corrupt
+                    corrupt(aid, os.path.relpath(rec, adir), "missing, non-regular or unreadable RECORD")
                 continue
             for row in rows:
-                if len(row) < 2 or not row[1].startswith("sha256=") or not safe_rel(row[0]):
-                    continue  # RECORD itself, .pyc and other unhashed lines; never a path that escapes
+                if not row or not row[0]:
+                    continue
+                name = row[0].rsplit("/", 1)[-1]
+                algo, _, want = (row[1] if len(row) > 1 else "").partition("=")
+                if not algo and (name in ("RECORD", "RECORD.jws", "RECORD.p7s") or name.endswith(".pyc")):
+                    continue   # the only rows the wheel spec (and installers, for .pyc) leave unhashed
+                if algo not in ("sha256", "sha384", "sha512") or not want or not record_path_ok(row[0]):
+                    corrupt(aid, row[0][:200], "RECORD row without a usable hash or with an escaping path")
+                    continue   # never opened: an escaping path is judged, not followed
                 path = os.path.join(adir, row[0])
                 try:
-                    h, st = digest(path, "sha256")
+                    h, st = digest(path, algo)
                 except OSError:
                     SKIPPED["vanished"] += 1
                     continue
@@ -291,11 +325,10 @@ def verify_uv():
                     if not os.path.lexists(adir):
                         SKIPPED["vanished"] += 1
                         break
-                    bad.append({"cache": "uv", "key": aid, "file": row[0], "nlink": 0, "size": 0, "mtime": 0,
-                                "inplace": False, "reason": "missing or not a regular file"})
+                    corrupt(aid, row[0], "missing or not a regular file")
                     continue
                 checked += 1
-                if base64.urlsafe_b64encode(h.digest()).rstrip(b"=").decode() == row[1][7:]:
+                if base64.urlsafe_b64encode(h.digest()).rstrip(b"=").decode() == want:
                     continue
                 # mtime, not ctime: link()/unlink() of another hardlink also bumps ctime, and every uv
                 # install hardlinks from the archive. Only a content write moves mtime past the unpack.
@@ -305,10 +338,18 @@ def verify_uv():
                 if st.st_nlink > 1:
                     linked.setdefault((st.st_dev, st.st_ino), []).append(entry)
                 bad.append(entry)
+    # An archive being deleted (a job's `uv cache prune`) can look like missing files mid-walk; if it is
+    # gone by the end of the pass, its findings are a vanish, not corruption.
+    gone = {b["key"] for b in bad if not os.path.lexists(os.path.join(base, b["key"]))}
+    if gone:
+        SKIPPED["vanished"] += len(gone)
+        bad = [b for b in bad if b["key"] not in gone]
+        linked = {k: [e for e in v if e["key"] not in gone] for k, v in linked.items()}
+        linked = {k: v for k, v in linked.items() if v}
     for key, hits in find_links(set(linked)).items():
         for entry in linked[key]:
             entry["links"] = sorted(h for h in hits if not (h[0] == "uv" and h[1] == entry["key"]))
-    return checked, bad, no_record
+    return checked, bad, no_record, envs
 
 
 def queue_lines(bad):
@@ -326,7 +367,7 @@ def queue_lines(bad):
 def cmd_verify():
     t0 = time.time()
     n_checked, n_bad = verify_npm()
-    u_checked, u_bad, no_record = verify_uv()
+    u_checked, u_bad, no_record, envs = verify_uv()
     bad = n_bad + u_bad
     os.makedirs(STATE_DIR, exist_ok=True)
     new = queue_lines(bad)
@@ -340,7 +381,7 @@ def cmd_verify():
                 fh.seek(0, os.SEEK_END)
                 fh.write("\n".join(add) + "\n")
     result = {"finished": int(time.time()), "duration": round(time.time() - t0, 1),
-              "checked": {"npm": n_checked, "uv": u_checked}, "uv_no_record": no_record,
+              "checked": {"npm": n_checked, "uv": u_checked}, "uv_no_record": no_record, "uv_envs": envs,
               "skipped_vanished": SKIPPED["vanished"],
               "found": {"npm": len(n_bad), "uv": len({b["key"] for b in u_bad})},
               "inplace": {"npm": 0, "uv": sum(1 for b in u_bad if b["inplace"])},
@@ -353,7 +394,7 @@ def cmd_verify():
         print(f"corrupt {b['cache']} {b['key']} {b.get('file', '')} ({b.get('reason', 'hash mismatch')})"
               f" nlink={b['nlink']} inplace={b['inplace']} links={b.get('links', [])}", flush=True)
     print(f"verified npm={n_checked} uv={u_checked} bad_npm={len(n_bad)} bad_uv_files={len(u_bad)}"
-          f" uv_no_record={no_record} skipped_vanished={SKIPPED['vanished']} in {result['duration']}s", flush=True)
+          f" uv_no_record={no_record} uv_envs={envs} skipped_vanished={SKIPPED['vanished']} in {result['duration']}s", flush=True)
     return 0
 
 
@@ -380,29 +421,44 @@ def parse_queue_line(line):
     return None
 
 
-def rm_as_runner(path):
+def rm_tree(path):
+    """rm -rf as the CURRENT user (purge runs as runner); a symlink is removed, never followed."""
     if not os.path.lexists(path):
         return True
-    r = subprocess.run([RUNUSER, "-u", RUNNER_USER, "--", "rm", "-rf", "--one-file-system", "--", path],
-                       timeout=60, check=False, capture_output=True, text=True)
+    r = subprocess.run(["rm", "-rf", "--one-file-system", "--", path], timeout=60, check=False,
+                       capture_output=True, text=True)
     return r.returncode == 0
 
 
 def uv_pointer_files(ids):
-    """{archive id: [non-archive uv cache files that name it]} in ONE walk for all ids (wheel index
-    pointers, whatever their bucket version). Version-agnostic on purpose: the host uv is older than
-    the setup-uv versions that write this cache, so `uv cache clean` could miss newer buckets."""
+    """{archive id: [uv cache entries that point at it]} in ONE scan (as runner). Measured 2026-10-12 on
+    cloud-ci-9 and ci-runner-4: pointers are symlinks into archive-v0 (sdists-v*, wheels-v*,
+    environments-v*) plus `.http`/`.rev` files under wheels-v*; nothing else named an archive. So
+    symlinks are resolved everywhere but file CONTENTS are read only under wheels-*: reading every file
+    (sdists-v9 alone is 236k on ci-runner-4) took 161s. Bucket versions are matched by prefix on purpose:
+    the host uv is older than the setup-uv versions that write this cache."""
     hits = {i: [] for i in ids}
     if not ids or not os.path.isdir(UV_DIR):
         return hits
     needles = {i: i.encode() for i in ids}
     for top in listdir(UV_DIR):
         tp = os.path.join(UV_DIR, top)
-        if top.startswith("archive-") or top.startswith(".") or os.path.islink(tp) or not os.path.isdir(tp):
+        if top.startswith(("archive-", "simple-", ".")) or os.path.islink(tp) or not os.path.isdir(tp):
             continue  # never walk through a symlinked bucket
-        for dirpath, _dirs, files in os.walk(os.path.join(UV_DIR, top)):
-            for f in files:
-                p = os.path.join(dirpath, f)
+        read_files = top.startswith("wheels-")
+        for dirpath, dirs, files in os.walk(tp):
+            for name in files + [d for d in dirs if os.path.islink(os.path.join(dirpath, d))]:
+                p = os.path.join(dirpath, name)
+                if os.path.islink(p):
+                    try:
+                        target = os.path.basename(os.path.normpath(os.readlink(p)))
+                    except OSError:
+                        continue
+                    if target in hits:
+                        hits[target].append(p)
+                    continue
+                if not read_files or not name.endswith((".http", ".rev", ".msgpack")):
+                    continue
                 fd = open_regular(p)
                 if fd is None:
                     continue
@@ -418,6 +474,55 @@ def uv_pointer_files(ids):
     return hits
 
 
+def cmd_purge():
+    """As runner: delete every valid line's target FIRST (a corrupt archive must stop being served even if
+    the pointer scan is cut short), then the pointers naming a purged archive. `ok <line>` = fully done."""
+    if os.geteuid() == 0:
+        print("refuse: purge runs as the runner user (apply starts it via runuser)", flush=True)
+        return 2
+    parsed = []
+    for line in dict.fromkeys(l.strip() for l in sys.stdin.read(MAX_STATE_BYTES).splitlines() if l.strip()):
+        p = parse_queue_line(line)
+        if p is not None:
+            parsed.append((line, p))
+    failed = set()
+    for line, (kind, what) in parsed:
+        if not rm_tree(os.path.join(UV_DIR, "archive-v0", what) if kind == "uv" else what):
+            failed.add(line)
+    pointers = uv_pointer_files([what for line, (kind, what) in parsed if kind == "uv" and line not in failed])
+    for line, (kind, what) in parsed:
+        if line not in failed and not all(rm_tree(p) for p in pointers.get(what, [])):
+            failed.add(line)
+        n = len(pointers.get(what, [])) if kind == "uv" else 0
+        print(f"{'FAILED' if line in failed else 'ok'} {line}" + (f" (+{n} pointers)" if n else ""), flush=True)
+    return 0
+
+
+def purge_as_runner(lines):
+    """Run `purge` as runner in its own process group; on timeout, or if root is told to stop (the
+    reclaim's `timeout`), the whole group is killed, so no runner-side purge outlives apply."""
+    proc = subprocess.Popen([RUNUSER, "-u", RUNNER_USER, "--", sys.executable, os.path.abspath(__file__), "purge"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True)
+
+    def kill_group(*_):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    old = signal.signal(signal.SIGTERM, lambda *a: (kill_group(), sys.exit(143)))
+    try:
+        out, _ = proc.communicate("\n".join(lines) + "\n", timeout=PURGE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        kill_group()
+        out, _ = proc.communicate()
+        print(f"purge: timed out after {PURGE_TIMEOUT}s; unfinished lines stay queued", flush=True)
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    print((out or "").rstrip(), flush=True)
+    return {l[3:].split(" (+")[0] for l in (out or "").splitlines() if l.startswith("ok ")}
+
+
 def cmd_apply():
     owner = runner_uid()
     fd = open_regular(QUEUE, os.O_RDWR, owner=owner) if owner is not None else None
@@ -428,26 +533,21 @@ def cmd_apply():
         return 0
     with os.fdopen(fd, "r+", encoding="utf-8", errors="replace") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        lines = list(dict.fromkeys(l.strip() for l in fh.read(MAX_STATE_BYTES).splitlines() if l.strip()))
-        parsed = []
+        raw = [l.strip() for l in fh.read(MAX_STATE_BYTES).splitlines() if l.strip()]
+        lines = list(dict.fromkeys(raw))
+        valid = []
         for line in lines:
-            p = parse_queue_line(line)
-            if p is None:
+            if parse_queue_line(line) is None:
                 print(f"reject queue line {line[:120]!r}", flush=True)
             else:
-                parsed.append((line, p))
-        pointers = uv_pointer_files([what for _l, (kind, what) in parsed if kind == "uv"])
-        keep = []
-        for line, (kind, what) in parsed:
-            targets = ([os.path.join(UV_DIR, "archive-v0", what)] + pointers.get(what, [])) if kind == "uv" else [what]
-            ok = all(rm_as_runner(t) for t in targets)
-            print(f"purge {kind} {line.split()[-1][:80]}: {'ok' if ok else 'FAILED, kept for retry'}", flush=True)
-            if not ok:
-                keep.append(line)
-        fh.seek(0)
-        fh.truncate()
-        if keep:
-            fh.write("\n".join(keep) + "\n")
+                valid.append(line)
+        done = purge_as_runner(valid) if valid else set()
+        keep = [l for l in valid if l not in done]
+        if keep != raw:   # an unchanged queue keeps its mtime: the reclaim's retry limit compares it
+            fh.seek(0)
+            fh.truncate()
+            if keep:
+                fh.write("\n".join(keep) + "\n")
     write_beacon()
     return 0
 
@@ -478,7 +578,8 @@ def write_beacon():
         if not all(math.isfinite(x) and x >= 0 for x in [last, dur, *checked.values(), *found.values(), *inplace.values()]):
             return
     except (ValueError, KeyError, TypeError, OverflowError):
-        return  # no (valid) verify result yet: publish nothing, so the beacon-missing alert can fire
+        return  # no valid result: publish nothing. Before the first beacon the beacon-missing alert
+        #         fires; after it, the old beacon stays and ages into the stale alert.
     pend = pending_counts(owner)
     out = []
 
@@ -517,7 +618,9 @@ def main(argv):
         return 0
     if cmd == "apply":
         return cmd_apply()
-    print(f"usage: {argv[0]} verify|publish|apply", file=sys.stderr)
+    if cmd == "purge":
+        return cmd_purge()
+    print(f"usage: {argv[0]} verify|publish|apply|purge", file=sys.stderr)
     return 2
 
 

@@ -968,6 +968,12 @@ rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 1 50
 if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R3: busy must not restart"; else ok "R3: busy -> deferred, no restart"; fi
 : > "$QUEUEFILE"; rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
 if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R4: an empty queue must not restart"; else ok "R4: empty queue -> nothing"; fi
+# A queue the applier would refuse (here a symlink; in life a root-owned file) must not restart act_runner
+# every 6h for nothing.
+echo "uv AAAAAAAAAAAAAAAAAAAA" > "$WORK/real.queue"; rm -f "$QUEUEFILE"; ln -s "$WORK/real.queue" "$QUEUEFILE"
+rm -f "$WORK/purge.stamp"; QUEUEFILE="$QUEUEFILE" run_case 0 50
+if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R5: a refused (symlinked) queue must not restart"; else ok "R5: a queue the applier would refuse -> no restart"; fi
+rm -f "$QUEUEFILE" "$WORK/real.queue"
 unset QUEUEFILE
 
 echo

@@ -425,7 +425,7 @@ tests:
         alertname: CloudCIRunnerCacheVerifyStale
         exp_alerts: []
   - interval: 1m
-    name: a cloud runner reading no textfile pages critical while its host is up; a bad beacon warns
+    name: a cloud runner reading no textfile pages critical while its host is up; a bad beacon warns; a host that is down silences both
     input_series:
       - series: node_textfile_scrape_error{job="ci-runner-cloud", cloud_host="cloud1", nodename="cloud-ci-1", instance="192.168.0.32:9100"}
         values: 1+0x20
@@ -433,10 +433,18 @@ tests:
         values: 1+0x20
       - series: node_textfile_mtime_seconds{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-3", instance="192.168.0.34:9100", file="/x/a.prom"}
         values: 1+0x20
+      - series: node_textfile_scrape_error{job="ci-runner-cloud", cloud_host="cloud2", nodename="cloud-ci-5", instance="192.168.0.36:9100"}
+        values: 1+0x20
+      - series: node_textfile_scrape_error{job="ci-runner-cloud", cloud_host="cloud2", nodename="cloud-ci-6", instance="192.168.0.37:9100"}
+        values: 1+0x20
+      - series: node_textfile_mtime_seconds{job="ci-runner-cloud", cloud_host="cloud2", nodename="cloud-ci-6", instance="192.168.0.37:9100", file="/x/a.prom"}
+        values: 1+0x20
       - series: up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}
         values: 1+0x20
       - series: up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}
         values: 1+0x20
+      - series: up{job="cloud-node", nodename="cloud2", instance="192.168.0.21:9100"}
+        values: 0+0x20
     alert_rule_test:
       - eval_time: 10m
         alertname: CloudCIRunnerRootFilesystemFailed

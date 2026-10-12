@@ -166,14 +166,50 @@ class VerifyTests(Base):
         # that archive unusable, so it is queued - and neither one hangs the open
         self.assertEqual([l for l in self.fx.queue() if l], ["uv " + "D" * 20])
 
-    def test_record_paths_that_escape_the_archive_are_ignored(self):
+    def test_record_paths_that_escape_the_archive_mark_it_corrupt_and_are_never_opened(self):
         a = self.fx.uv_archive("E" * 20, {"pkg/a.py": b"a"})
         secret = self.fx.root / "secret"
         secret.write_bytes(b"not part of the archive")
         rec = a / "pkg-1.0.dist-info/RECORD"
         rec.write_text(rec.read_text() + f"../../../secret,sha256={b64(b'other')},1\n/etc/passwd,sha256=AAAA,1\n")
+        opened = []
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_escape_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            real = mod.digest
+
+            def spy(path, algo):
+                opened.append(path)
+                return real(path, algo)
+            mod.digest = spy
+            mod.main(["x", "verify"])
+        self.assertEqual([l for l in self.fx.queue() if l], ["uv " + "E" * 20])
+        self.assertFalse([p for p in opened if "secret" in p or "passwd" in p], opened)
+
+    def test_archives_without_a_usable_record_are_corrupt_but_a_uv_environment_is_not(self):
+        nodi = self.fx.uv / "archive-v0" / ("N" * 20)          # no .dist-info at all
+        (nodi / "pkg").mkdir(parents=True)
+        (nodi / "pkg/a.py").write_text("x")
+        norec = self.fx.uv_archive("O" * 20, {"pkg/a.py": b"a"}, pointer=False)
+        os.unlink(norec / "pkg-1.0.dist-info/RECORD")          # a dist-info without its RECORD
+        unhashed = self.fx.uv_archive("P" * 20, {"pkg/a.py": b"a"}, pointer=False)
+        rec = unhashed / "pkg-1.0.dist-info/RECORD"
+        rec.write_text(rec.read_text() + "pkg/b.so,,\n")      # a package file listed without a hash
+        strong = self.fx.uv_archive("Q" * 20, {"pkg/a.py": b"a"}, pointer=False)
+        (strong / "pkg/c.py").write_bytes(b"c")
+        d = base64.urlsafe_b64encode(hashlib.sha512(b"c").digest()).rstrip(b"=").decode()
+        rec = strong / "pkg-1.0.dist-info/RECORD"
+        rec.write_text(rec.read_text() + f"pkg/c.py,sha512={d},1\n")   # sha512 is allowed by the spec
+        env = self.fx.uv / "archive-v0" / ("S" * 20)             # a cached uv environment: no RECORD of its own
+        (env / "lib").mkdir(parents=True)
+        (env / "pyvenv.cfg").write_text("home = /usr/bin\n")
         self.fx.run("verify")
-        self.assertEqual([l for l in self.fx.queue() if l], [])
+        q = [l for l in self.fx.queue() if l]
+        for aid in ("N", "O", "P"):
+            self.assertIn("uv " + aid * 20, q)
+        self.assertNotIn("uv " + "Q" * 20, q)
+        self.assertNotIn("uv " + "S" * 20, q)
 
     def test_hardlinked_venv_is_recorded_and_a_mere_hardlink_is_not_inplace(self):
         a = self.fx.uv_archive("F" * 20, {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",))
@@ -235,6 +271,25 @@ class VerifyTests(Base):
             self.assertEqual(mod.main(["x", "verify"]), 0)
         self.assertIn(f"npm sha512:{h}", self.fx.queue(), "the rest of the pass still ran")
 
+    def test_an_archive_deleted_during_the_pass_is_not_reported_corrupt(self):
+        import shutil
+        a = self.fx.uv_archive("Y" * 20, {"pkg/a.py": b"a", "pkg/b.py": b"b"})
+        with mock.patch.dict(os.environ, self.fx.env()):
+            spec = importlib.util.spec_from_file_location(f"cv_prune_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            calls = []
+
+            def pruned(path, algo):   # a job's `uv cache prune` empties the archive while it is hashed:
+                calls.append(path)    # the first file is already gone, the dir goes a moment later
+                if len(calls) > 1:
+                    shutil.rmtree(a, ignore_errors=True)
+                return None, None
+            mod.digest = pruned
+            mod.main(["x", "verify"])
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+
 
 class ApplyTests(Base):
     def test_apply_purges_npm_uv_pointer_and_linked_venv_as_runner(self):
@@ -253,10 +308,51 @@ class ApplyTests(Base):
         self.assertFalse(venv.exists())
         self.assertTrue((self.fx.pytest / "pytest-3").exists(), "only the venv root goes, not its parents")
         self.assertEqual([l for l in self.fx.queue() if l], [])
-        log = (self.fx.root / "runuser.log").read_text()
+        log = (self.fx.root / "runuser.log").read_text().splitlines()
         me = getpass.getuser()
-        self.assertTrue(all(l.startswith(f"-u {me} -- rm -rf --one-file-system -- ") for l in log.splitlines()), log)
+        # root starts ONE runner-side purge; the walking and every rm happen inside it, as runner
+        self.assertEqual(len(log), 1, log)
+        self.assertTrue(log[0].startswith(f"-u {me} -- ") and log[0].endswith(" purge"), log)
         self.assertIn('gitea_runner_cache_corrupt_pending{cache="uv"} 0', self.fx.prom())
+
+    def test_symlink_pointers_to_a_purged_archive_or_env_are_removed(self):
+        aid, eid = "T" * 20, "U" * 20
+        a = self.fx.uv_archive(aid, {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",), pointer=False)
+        env = self.fx.uv / "archive-v0" / eid
+        (env / "lib").mkdir(parents=True)
+        (env / "pyvenv.cfg").write_text("x\n")
+        os.link(a / "pkg/m.so", env / "lib/m.so")
+        built = self.fx.uv / "sdists-v9/pypi/pkg/1.0/abc"
+        built.mkdir(parents=True)
+        (built / "pkg-1.0-py3-none-any").symlink_to(Path("../../../../../archive-v0") / aid)
+        envs = self.fx.uv / "environments-v2"
+        envs.mkdir()
+        (envs / "tool-1234").symlink_to(env)
+        other = self.fx.uv / "sdists-v9/pypi/other"
+        other.mkdir(parents=True)
+        (other / "keep").symlink_to(self.fx.uv / "archive-v0" / ("W" * 20))
+        self.fx.run("verify")
+        self.fx.run("apply")
+        self.assertFalse(a.exists() or env.exists())
+        self.assertFalse(os.path.lexists(built / "pkg-1.0-py3-none-any"))
+        self.assertFalse(os.path.lexists(envs / "tool-1234"))
+        self.assertTrue(os.path.lexists(other / "keep"), "a pointer to another archive stays")
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+
+    def test_a_failing_purge_keeps_the_queue_and_leaves_its_mtime_alone(self):
+        aid = "X" * 20
+        self.fx.uv_archive(aid, {"pkg/a.py": b"a"}, pointer=False)
+        q = self.fx.state / "purge.queue"
+        q.write_text(f"uv {aid}\n")
+        os.utime(q, (1_000_000_000, 1_000_000_000))
+        base = self.fx.uv / "archive-v0"
+        base.chmod(0o555)   # the runner cannot unlink inside it: the rm fails
+        try:
+            self.fx.run("apply")
+        finally:
+            base.chmod(0o755)
+        self.assertEqual(q.read_text(), f"uv {aid}\n")
+        self.assertEqual(q.stat().st_mtime, 1_000_000_000, "an unchanged queue must not be rewritten")
 
     def test_forged_queue_lines_are_rejected_and_nothing_outside_the_roots_is_touched(self):
         victim = self.fx.root / "victim"
@@ -305,7 +401,7 @@ class ApplyTests(Base):
         outside = self.fx.root / "outside"
         outside.mkdir()
         (outside / "names-the-id").write_bytes(b"pointer " + aid.encode())
-        (self.fx.uv / "evil-v0").symlink_to(outside)
+        (self.fx.uv / "wheels-v9").symlink_to(outside)   # a bucket whose files WOULD be read
         self.fx.state.joinpath("purge.queue").write_text(f"uv {aid}\n")
         self.fx.run("apply")
         self.assertTrue((outside / "names-the-id").exists())

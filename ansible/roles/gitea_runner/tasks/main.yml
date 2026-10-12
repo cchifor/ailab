@@ -303,14 +303,27 @@
     - Run a first cache verify
   when: gitea_runner_cache_verify_enabled | bool
 
-# The kill switch: gitea_runner_cache_verify_enabled: false stops the nightly run (the queue applier
-# in the reclaim stays, harmless with an empty queue).
-- name: Stop the cache-verify timer when the check is disabled
+# The kill switch: gitea_runner_cache_verify_enabled: false stops the timer and any running verify,
+# drops the queue (so the cleanup stops restarting act_runner for it; known-bad entries then stay in
+# the cache) and removes the beacon (so the stale alert does not fire on a deliberate stop).
+- name: Stop the cache-verify timer and service when the check is disabled
   ansible.builtin.systemd:
-    name: "{{ gitea_runner_cache_verify_timer }}"
+    name: "{{ item }}"
     state: stopped
-    enabled: false
+    enabled: "{{ omit if item.endswith('.service') else false }}"
+  loop:
+    - "{{ gitea_runner_cache_verify_timer }}"
+    - "{{ gitea_runner_cache_verify_service }}"
   failed_when: false
+  when: not (gitea_runner_cache_verify_enabled | bool)
+
+- name: Drop the purge queue and the beacon when the check is disabled
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ gitea_runner_cache_verify_queue }}"
+    - "{{ gitea_runner_reclaim_textfile_dir }}/gitea_runner_cache_verify.prom"
   when: not (gitea_runner_cache_verify_enabled | bool)
 
 # ── 4e. bounded /tmp (every job shares one /tmp; Ubuntu ages it at 30d) ─────

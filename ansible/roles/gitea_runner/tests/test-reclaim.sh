@@ -38,7 +38,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/logger"
 # /usr/local/bin/gitea-runner-reap.py, so every run_reclaim must point GITEA_REAP_BIN here.
 printf '#!/usr/bin/env bash\necho "reap $*" >> "%s"\n' "$CALLS" >"$BIN/reap-mock"
 # The cache purge applier: a recording mock (the real one is root-only on the host).
-printf '#!/usr/bin/env bash\necho "cacheverify $*" >> "%s"\n' "$CALLS" >"$BIN/cacheverify-mock"
+# It rewrites the queue (touch) the way a failing real apply can, which must not defeat the retry limit.
+printf '#!/usr/bin/env bash\necho "cacheverify $*" >> "%s"\ntouch "$GITEA_CACHE_PURGE_QUEUE"\n' "$CALLS" >"$BIN/cacheverify-mock"
 # pgrep: the co-located GitHub job probe (`pgrep -f Runner\.Worker`) answers MOCK_GH_WORKER, so a real GitHub
 # job on the VM running this suite cannot skew [E]; every other call is the real pgrep.
 REAL_PGREP="$(command -v pgrep)"

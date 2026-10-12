@@ -579,7 +579,13 @@ fi
 # (shutdown_timeout) before the purge runs. At most one such restart per CACHE_PURGE_RESTART_MIN_SEC
 # (6h), so a purge that keeps failing cannot restart the runner every 15 minutes; until it succeeds,
 # gitea_runner_cache_corrupt_pending stays up and alerts.
-if [ -s "$CACHE_PURGE_QUEUE" ]; then
+# Only a queue the applier will accept: a regular file owned like its (runner-owned) state dir. A
+# root-owned one, say from a manual `sudo ... verify`, is refused at every restart, so restarting for
+# it would loop silently every 6h.
+if [ -s "$CACHE_PURGE_QUEUE" ] && { [ -L "$CACHE_PURGE_QUEUE" ] || [ ! -f "$CACHE_PURGE_QUEUE" ] \
+     || [ "$(stat -c %u "$CACHE_PURGE_QUEUE" 2>/dev/null)" != "$(stat -c %u "$(dirname "$CACHE_PURGE_QUEUE")" 2>/dev/null)" ]; }; then
+  log "cache purge queue $CACHE_PURGE_QUEUE is not a regular file owned by its state dir's owner: ignored (fix its owner)"
+elif [ -s "$CACHE_PURGE_QUEUE" ]; then
   last="$(stat -c %Y "$CACHE_PURGE_STAMP" 2>/dev/null || echo 0)"
   if is_num "$last" && [ $(( $(date +%s) - last )) -lt "$CACHE_PURGE_RESTART_MIN_SEC" ]; then
     log "cache purge pending: a restart for it was queued $(( ($(date +%s) - last) / 60 ))m ago; not again yet"

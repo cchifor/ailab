@@ -170,8 +170,10 @@ run_reaper() {
 # Shared-cache purge queue: applied here ONLY while act_runner is DOWN (MainPID 0): its ExecStartPre,
 # or any stretch the daemon is stopped, so no Gitea job can be installing from an entry while it is
 # removed. The cleanup never purges; in an idle gap it restarts act_runner to get here. A co-located
-# GitHub agent shares the caches, so a running GitHub job (Runner.Worker) also defers the purge. While
-# the daemon stays down, an unchanged queue is retried at most every 10 minutes, not every tick.
+# GitHub agent shares the caches: a GitHub job (Runner.Worker) running when the purge would start
+# defers it (checked once, at the start; the agent is dormant on every runner as of 2026-10-12). The
+# stamp is written AFTER apply (which leaves an unchanged queue untouched), so while the daemon stays
+# down an unchanged queue is retried at most every 10 minutes. 300s fits act_runner's 10min start.
 daemon_down() {
   local mainpid
   mainpid="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)" || return 1
@@ -186,8 +188,8 @@ apply_cache_purges() {
      && [ $(( $(date +%s) - $(stat -c %Y "$CACHE_PURGE_ATTEMPT" 2>/dev/null || echo 0) )) -lt 600 ]; then
     return 0
   fi
+  timeout -k 5 300 "$CACHE_VERIFY_BIN" apply 2>&1 | logger -t gitea-runner-cache-purge 2>/dev/null || true
   mkdir -p "$(dirname "$CACHE_PURGE_ATTEMPT")" 2>/dev/null; touch "$CACHE_PURGE_ATTEMPT" 2>/dev/null || true
-  timeout -k 5 60 "$CACHE_VERIFY_BIN" apply 2>&1 | logger -t gitea-runner-cache-purge 2>/dev/null || true
 }
 
 main() {
