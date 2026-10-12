@@ -120,13 +120,29 @@ entries; only `cancelled` / `SHUTDOWN` for streams the drain cut.
 **To restart the router** (for example to verify a drain), send its process SIGTERM inside the container:
 
 ```sh
-kubectl --context admin@ai -n llm-router logs -f deploy/llm-router -c router &   # to watch the drain
+# 1. PID 1 must be the router itself: this prints `node dist/apps/router/main.js`.
+kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sh -c 'tr "\0" " " < /proc/1/cmdline; echo'
+# 2. Watch the drain, then signal it.
+kubectl --context admin@ai -n llm-router logs -f deploy/llm-router -c router &
 kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sh -c 'kill -TERM 1'
 ```
 
-- **What happens:** PID 1 is the router (`node dist/apps/router/main.js`), so it drains exactly as on any SIGTERM. Its
-  watchdog bounds that at `ROUTER_DRAIN_MS` + 17 s. Then it exits, and the kubelet restarts the container in the same
-  pod (`restartPolicy: Always`, after a back-off of about 10 s), with the same volume.
+- **If PID 1 is anything else** (a shell or an init wrapper in a future image), signal the node process's own PID
+  instead (`pgrep -f dist/apps/router/main.js`). A wrapper that does not forward SIGTERM gives no drain and leaves the
+  container running, and nothing reports it. The log must show `SIGTERM, draining`. Checked 2026-10-12: PID 1 is node,
+  and the image has `sh` and `kill`.
+- **What happens:** the router drains exactly as on any SIGTERM. Its watchdog bounds that at `ROUTER_DRAIN_MS` + 17 s.
+  Then it exits, and the kubelet restarts the container in the same pod (`restartPolicy: Always`, after a back-off of
+  about 10 s), with the same volume.
+- **What traffic sees:** the router closes its listener at SIGTERM, so new connections to the pod are refused from the
+  start, and the edge holds them (dial failures are retried for up to 85 s), as in a rollout.
+  - The pod stays in the Service until its readiness probe fails (`/ready`, 5 s × 3, so within about 15 s), while a
+    rollout removes it soon after SIGTERM. The endpoints therefore change later, but clients are held all the same.
+  - The edge's own health check marks the router down within about 6 s.
+  - Once the new process is ready, the probe passes and the endpoint returns.
+- **Probe events:** the liveness probe (`/health`, 10 s × 3) can fail during a long drain and log "will be restarted".
+  The kubelet's kill is then a second SIGTERM, which the drain ignores (`SIGTERM while draining: ignored`). Its SIGKILL
+  comes only after the 60 s grace, after the watchdog.
 - **What to check:** the pod's RESTARTS count goes up by one, and `kubectl logs --previous` shows the drained process.
   The Deployment does not change, so Flux has nothing to undo, and no second router can start.
 - **Not `kubectl rollout restart`:** it adds a `restartedAt` annotation to the pod template. Flux removes the
