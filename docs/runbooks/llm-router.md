@@ -28,7 +28,7 @@ Manifests: `kubernetes/apps/apps/llm-router/` (wired into the apps Kustomization
 - Requests 100m CPU/384Mi memory; limits 2 CPU/1280Mi memory (Assistant image jobs: see the comment in router.yaml). May schedule on the existing `dedicated=agent` worker pool; no existing taints, cordons or workloads were changed.
 - `llm-router-data`: 5Gi RWO `qnap-iscsi`, mounted at `/data`, SQLite `/data/router.sqlite`. **Never move WAL onto NFS.**
 - `router-releases`: 2Gi RWX `nfs-csi`, retained for legacy release archives and rollback only. It is no longer mounted into the live router. The CI-built OCI image carries application code and frozen production dependencies; there is no dependency install at startup.
-- NetworkPolicy admits :8787 only from `edge` cloudflared pods. Egress permits cluster DNS, public HTTPS (RFC1918 excluded), seat hosts in the namespace on :8791, and the mgmt LAN `192.168.0.0/24` on the model-server ports only (8080, 8081, 8082, 18020, 11434, 1234, 8000).
+- NetworkPolicy admits :8787 only from the `llm-router-edge` pods (cloudflared reaches the router through them). Egress permits cluster DNS, public HTTPS (RFC1918 excluded), seat hosts in the namespace on :8791, and the mgmt LAN `192.168.0.0/24` on the model-server ports only (8080, 8081, 8082, 18020, 11434, 1234, 8000).
 
 ### Legacy staged-release procedure
 
@@ -122,8 +122,21 @@ pods keep the old config.
 **Rollback:** in `kubernetes/apps/apps/edge/cloudflared.yaml`, change the `router.chifor.me` rule's `service:` back to
 `http://llm-router.llm-router.svc.cluster.local:80` and change the pod-template annotation
 `chifor.me/config-revision` (currently `"2026-10-11-llm-router-edge"`) to a new value, so both connectors roll.
-This works only while the router NetworkPolicy still admits cloudflared on 8787; the follow-up that removes that
-ingress rule must be reverted first if it has been applied.
+The router NetworkPolicy no longer admits cloudflared on 8787, so in the same change add this rule back to the
+`llm-router` NetworkPolicy's `ingress:` list in `kubernetes/apps/apps/llm-router/router.yaml`:
+
+```yaml
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 8787
+```
 
 ## Verification and operations
 
