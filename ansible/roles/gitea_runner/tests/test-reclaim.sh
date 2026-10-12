@@ -76,6 +76,7 @@ run_reclaim() {
     GITEA_RUNNER_CONFIG_DIR="$WORK/cfg" \
     GITEA_RECLAIM_BEACON="${BEACON_OVERRIDE:-0}" GITEA_RECLAIM_TEXTFILE_DIR="${TF_OVERRIDE:-/nonexistent}" \
     GITEA_RECLAIM_DOCKER_CFG="${DOCKERCFG_OVERRIDE-$WORK/home/.docker}" \
+    GITEA_RECLAIM_GITHUB_RECLAIM_BIN="${GHRECLAIM_OVERRIDE:-$WORK/no-github-reclaim}" \
     PATH="$BIN:$PATH" bash "$SCRIPT" "$@" >/dev/null 2>&1
 }
 
@@ -166,6 +167,13 @@ grep -q '^runner_docker_config_root_owned 0$' "$WORK/tf3/gitea_runner_docker_con
   && ok "G: default ~/.docker from the passwd home -> healed + beacon" || bad "G: the default DOCKER_CFG path does not heal/publish"
 [ ! -e "$WORK/tf3/runner_health.prom" ] && ok "G: the retired agent's runner_health.prom (same gauge) is removed" \
   || bad "G: stale runner_health.prom left (duplicate series)"
+# While the GitHub agent's reclaim still EXISTS (deployed before the retire), it owns the gauge: this
+# must not write a second file with the same series, nor delete the agent's.
+mkdir -p "$WORK/tf4"; : > "$WORK/tf4/runner_health.prom"; : > "$WORK/fake-github-reclaim"
+: > "$CALLS"; BEACON_OVERRIDE=1 TF_OVERRIDE="$WORK/tf4" GHRECLAIM_OVERRIDE="$WORK/fake-github-reclaim" run_reclaim
+[ ! -e "$WORK/tf4/gitea_runner_docker_config.prom" ] && [ -e "$WORK/tf4/runner_health.prom" ] \
+  && ok "G: agent still present -> no duplicate gauge file, its runner_health.prom kept" \
+  || bad "G: wrote a duplicate runner_docker_config_root_owned while the agent's file exists"
 
 echo "[F] act_runner's start budget covers the reclaim's worst case at ExecStartPre"
 UNIT_T="$(dirname "$SCRIPT")/../templates/gitea-act-runner.service.j2"

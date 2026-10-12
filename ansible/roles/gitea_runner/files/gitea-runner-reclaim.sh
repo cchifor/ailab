@@ -58,6 +58,7 @@ RECLAIM_CGROUP_FILE="${GITEA_RECLAIM_CGROUP_FILE:-/proc/self/cgroup}"   # tests:
 # "/.docker", which the heal would refuse, silently leaving CIRunnerDockerConfigRootOwned blind).
 RUNNER_HOME="$(getent passwd "$RUNNER_USER" 2>/dev/null | cut -d: -f6)"
 DOCKER_CFG="${GITEA_RECLAIM_DOCKER_CFG:-${RUNNER_HOME:-/home/$RUNNER_USER}/.docker}"
+GITHUB_RECLAIM_BIN="${GITEA_RECLAIM_GITHUB_RECLAIM_BIN:-/usr/local/bin/runner-reclaim.sh}"   # the GitHub agent's (retired)
 
 log() { logger -t gitea-runner-reclaim -- "$*" 2>/dev/null || true; }
 
@@ -217,12 +218,19 @@ heal_docker_config() {
   local root_owned tmp
   case "$DOCKER_CFG" in /?*/.docker) ;; *) log "docker-config heal skipped: implausible path '$DOCKER_CFG'"; return 0 ;; esac
   [ -L "$DOCKER_CFG" ] && rm -f -- "$DOCKER_CFG"
-  [ -d "$DOCKER_CFG" ] && chown -R -- "$RUNNER_USER:$RUNNER_GROUP" "$DOCKER_CFG" >/dev/null 2>&1
+  # -P (also chown's default under -R): never follow a symlink, whether it is the argument itself
+  # (lchown'd, not followed) or one met in the walk. coreutils' fts guards the traversal against
+  # swaps, so a job that races a symlink in after the -L check above still cannot steer this root
+  # chown outside ~/.docker.
+  [ -d "$DOCKER_CFG" ] && chown -R -P -- "$RUNNER_USER:$RUNNER_GROUP" "$DOCKER_CFG" >/dev/null 2>&1
   [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
-  # The retired GitHub agent's runner_health.prom carried the same gauge; node_exporter rejects a
-  # series duplicated across files (the whole textfile scrape errors). Drop it here, but only while
-  # the agent is really gone, so the deploy order of the two roles cannot matter.
-  [ -e /usr/local/bin/runner-reclaim.sh ] || rm -f "$TEXTFILE_DIR/runner_health.prom" 2>/dev/null
+  # The GitHub agent's runner_health.prom carries the SAME gauge, and node_exporter rejects a series
+  # duplicated across files: the whole textfile scrape errors. So:
+  # - while the agent's reclaim exists, it publishes the gauge and this does not;
+  # - once it is gone, its stale file is dropped and this publishes.
+  # Never both, so the deploy order of the two roles does not matter.
+  [ -e "$GITHUB_RECLAIM_BIN" ] && return 0
+  rm -f "$TEXTFILE_DIR/runner_health.prom" 2>/dev/null
   root_owned=$(find "$DOCKER_CFG" -user root -print -quit 2>/dev/null | grep -c . || true)
   tmp="$TEXTFILE_DIR/gitea_runner_docker_config.prom.$$"
   {
