@@ -1248,8 +1248,8 @@ or setting change.
   `packagingCommit 1088e062…`.
 - Before merge: 1768 tests passed, 0 failed, and Playwright passed 22 plus the drag test, on Linux CI
   ([run 82814](https://git.chifor.me/cchifor/llm-router/actions/runs/82814)). Both reviewer bots approved. One red
-  run during the review was a CI host fault, not this change (see `ci-runners.md`, Troubleshooting, `dpkg was
-  interrupted`).
+  run during the review was a CI host fault, not this change: [ci-runners.md, Troubleshooting, `dpkg was
+  interrupted`](ci-runners.md#troubleshooting).
 
 **Rollout (2026-10-12, ailab [#1286](https://git.chifor.me/cchifor/ailab/pulls/1286), `96185e0b`).**
 - **Drain:** the Deployment changed at 12:31:16 UTC. The old pod drained in 20.2 s, ending 4 long streams as
@@ -1258,11 +1258,20 @@ or setting change.
 - **Checks:** [router acceptance](https://git.chifor.me/cchifor/ailab/actions/runs/82859) passed on the new pod. A
   headless browser on the live Activity page showed the new table with no page errors. A Source filter sent
   `principal=`, a row opened its detail, and the check session signed out.
-- **Endpoint baseline:** right after the rollout, `GET /admin/v1/trajectories?limit=100` took 9-26 ms (69 KB)
-  and `limit=500` took 27-49 ms (349 KB).
-  - An open Activity tab asks for 100 rows every 10 s, as the previous image did. It asks for 500 only after
-    Load more.
-  - If many open consoles ever make this endpoint slow, these numbers are the comparison.
+- **Endpoint baseline** (`GET /admin/v1/trajectories`, admin token), measured 2026-10-12 12:37 UTC:
+
+  | Query | Samples | Min | Median | Max | Size |
+  |---|---|---|---|---|---|
+  | `limit=100` | 5 | 8 ms | 9 ms | 16 ms | 68.5 KB |
+  | `limit=500` | 5 | 25 ms | 29 ms | 33 ms | 348.6 KB |
+
+  - **Path:** `kubectl port-forward svc/llm-router` from the workstation on the mgmt LAN. That skips the edge and
+    Cloudflare, so a reading through router.chifor.me adds their latency on top.
+  - **Store at the time:** `GET /admin/v1/status` reported `storage.bytes` 268,271,509 (the SQLite store, journal
+    included) and `evicted` 5,700. Compare a later reading with that size in mind.
+  - **What the console asks for**, as of image `2127e394`: in llm-router `apps/web/pages/Activity.tsx`,
+    `refetchInterval: 10_000`, `PAGE = 100` and `MOST = 500`. An open Activity tab asks for 100 rows every 10 s,
+    as the previous image did. It asks for up to 500 only after Load more or scrolling to the end.
 
 **Rollback.** In `router.yaml`, revert the image digest and both pod-template annotations together:
 - `image: registry.chifor.me/llm-router/router@sha256:ce27f28df7900daf807892684939a204041611e9843e3e65c8e23ce5f7c3555e`

@@ -467,12 +467,15 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
   later `apt`/`dpkg` refuses to run. Seen on cloud-ci-2 on 2026-10-12: `linux-image-6.8.0-146-generic` had
   been half-configured since the 2026-10-10 06:34 unattended-upgrade, and llm-router #100's CI failed on it.
   - *Confirm:* `sudo dpkg --audit` lists the package; `/var/log/dpkg.log` ends on `status half-configured`.
-  - *Repair* (safe while a job runs; apt waits on the lock): `sudo DEBIAN_FRONTEND=noninteractive dpkg
-    --configure -a`. For a kernel package this finishes initramfs and grub. No reboot is needed: the guest
-    keeps its running kernel and boots the new one next time. Then `dpkg --audit` prints nothing.
-  - *Sweep the pool:* check the other runners too. For the cloud runners (cloud-ci-6 at `.29` is stopped, §9):
-    `for ip in 5 6 7 12 13 30 32 33 34 35 44 50; do ssh ubuntu@192.168.0.$ip 'hostname; sudo -n dpkg --audit | head -3';
-    done`. On 2026-10-12 only cloud-ci-2 was affected.
+  - *Repair:* `sudo DEBIAN_FRONTEND=noninteractive dpkg --configure -a`. It is safe next to a running job, but dpkg
+    does not wait for a held lock. If a job's apt step holds it, the command fails at once with `unable to lock the
+    administration directory`. Wait for that step (`sudo fuser /var/lib/dpkg/lock-frontend` names the holder) and
+    run it again. For a kernel package it finishes initramfs and grub. No reboot is needed: the guest keeps its running
+    kernel and boots the new one next time. Afterwards `dpkg --audit` prints nothing.
+  - *Sweep the pool* from the inventory, which `just cloud-runners` and `just gitea-runners` use too:
+    `cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible cloud_gitea_runners:gitea_runners -b -m command -a
+    'dpkg --audit'`. A healthy runner prints nothing. A stopped VM (cloud-ci-6, §9) or a cloud runner offline at
+    night shows as UNREACHABLE. On 2026-10-12 only cloud-ci-2 was affected.
 - **`just runners` / a direct `ansible-playbook` does nothing ("skipping: no hosts matched"):** on WSL,
   `/mnt/c` is world-writable, so Ansible silently ignores `ansible.cfg` (and thus the inventory). The
   `just` recipes now set `ANSIBLE_CONFIG` explicitly; invoking `ansible-playbook` by hand needs
