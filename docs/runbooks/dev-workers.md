@@ -893,10 +893,12 @@ extension rules would have read (`binary content` — one NUL inside `payload.sh
 produce it). All three triggers are bytes the PR author controls inside an otherwise reviewable
 file, so leaving them at `clean` would let a PR quarantine its own payload and merge it unread.
 A `binary content` section is first rebuilt from the two blobs (merge base and head, read
-through the API) as a text diff, with each NUL shown as `␀` and CRLF normalised: when both
-sides are UTF-8 that way and each is at most 512 KiB, the file is reviewed like any other and
-named in the prompt ("FILES SHOWN AS TEXT"), so it no longer caps the verdict. Only what cannot
-be rendered keeps the marker and the cap. (llm-router#97: two raw NULs in a TypeScript string
+through the API) as a text diff, keeping git's header lines, with each NUL shown as `␀` and
+CRLF normalised. When both sides are UTF-8 that way, each within `TEXTIFY_MAX_BYTES` (256 KiB) and
+`TEXTIFY_MAX_LINES` (5000 lines), all rendered sides together within `TEXTIFY_TOTAL_BYTES` (1 MiB),
+and a change remains after the normalisation, the file is reviewed like any other and named in the
+prompt ("FILES SHOWN AS TEXT"), so it no longer caps the verdict. Anything else keeps the marker
+and the cap; the raw intake bound applies to the rebuilt diff too. (llm-router#97: two raw NULs in a TypeScript string
 literal made both bots cap every review of the PR.)
 Prose shed largest-first for capacity caps the verdict the same way. Code is never truncated:
 if the code alone is over the cap the review is skipped and the notice names the largest files
