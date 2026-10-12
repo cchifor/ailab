@@ -38,10 +38,11 @@ subsets:
   - addresses:
       - { ip: 192.168.0.32, hostname: cloud-ci-1 } # vmid 6101
       - { ip: 192.168.0.33, hostname: cloud-ci-2 } # vmid 6102
-      # cloud-ci-6 (.29, vmid 6106) is QUARANTINED since 2026-09-24 (#848, cloudlab runner_nodes
-      # started = false): its VM is off while cloud1 is up, so leaving the address here would fire
-      # CloudCIRunnerDownWhileHostUp. Put it back in the same change that flips started to true:
-      # - { ip: 192.168.0.29, hostname: cloud-ci-6 }
+      # cloud-ci-6 was quarantined 2026-09-24 (#848, cloud1's bad RAM). Rebuilt 2026-10-12 on a fresh disk
+      # (cloudlab #42) after its host's 8 bad pages were retired at every boot (cloudlab #41).
+      - { ip: 192.168.0.29, hostname: cloud-ci-6 } # vmid 6106, 12 GiB / 6 vCPU
+      - { ip: 192.168.0.37, hostname: cloud-ci-14 } # vmid 6114, 12 GiB / 6 vCPU, added 2026-10-12
+      - { ip: 192.168.0.39, hostname: cloud-ci-15 } # vmid 6115, 12 GiB / 6 vCPU, added 2026-10-12
     ports:
       - { name: metrics, port: 9100, protocol: TCP }
 ---
