@@ -589,6 +589,19 @@ class TestCleanupExclusionDrift(unittest.TestCase):
                 self.assertFalse(pattern.search(image_pin.IMAGE + ' /dsh-validation-1234'))
                 self.assertFalse(pattern.search('node:24 /' + image_pin.NAME + '-old'))
 
+    def test_reaper_env_renders_the_same_exemption_as_the_cleanup(self):
+        """gitea-runner-reap.py (the job-boundary reaper) reads GITEA_CLEANUP_INFRA_EXCLUDE_RE from the RECLAIM
+        env file. It must be rendered there from the same role var as in the cleanup env, or ci-runner-1's
+        pin regex would protect the pin from one reaper and not the other."""
+        templates = BASE_DIR / 'ansible' / 'roles' / 'gitea_runner' / 'templates'
+        line = 'GITEA_CLEANUP_INFRA_EXCLUDE_RE="{{ gitea_runner_cleanup_infra_exclude_re }}"'
+        for name in ('gitea-runner-cleanup.env.j2', 'gitea-runner-reclaim.env.j2'):
+            with self.subTest(template=name):
+                self.assertIn(line, (templates / name).read_text(encoding='utf-8').splitlines())
+        reaper = (BASE_DIR / 'ansible' / 'roles' / 'gitea_runner' / 'files' / 'gitea-runner-reap.py').read_text(encoding='utf-8')
+        self.assertIn('cfg("GITEA_CLEANUP_INFRA_EXCLUDE_RE"', reaper)
+        self.assertIn("f\"{c['image']} /{c['name']}\"", reaper, 'the reaper must match the same <image> /<name> shape')
+
     def test_github_reclaim_keeps_the_same_container_and_nothing_fleet_wide(self):
         host_vars = yaml.safe_load(HOST_VARS_PATH.read_text(encoding='utf-8'))
         self.assertEqual(host_vars['github_runner_reclaim_keep_re'], self.PIN_ALTERNATIVE.lstrip('|'))

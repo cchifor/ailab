@@ -56,3 +56,12 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/gitea_runner/tests/test-reclaim.sh
+
+      # Fake /proc, cgroup tree, journal, docker, systemctl, logger and kill: this suite runs as the same
+      # user act_runner runs as, so a test that reached the host could signal the real daemon. A guard
+      # case asserts os.kill is never reached.
+      - name: job-boundary reaper behaviour (mocked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ansible/roles/gitea_runner/tests/test-reap.py
