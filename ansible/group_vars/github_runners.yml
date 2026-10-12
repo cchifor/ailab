@@ -6,12 +6,19 @@
 # Setup: see docs/runbooks/ci-runners.md.
 github_runner_enabled: true
 
+# The GitHub AGENT is RETIRED (2026-10-12): ADR 0017 disabled Actions on the GitHub mirror, so it never
+# got a job, while its App key sat in a runner-owned file every Gitea CI job could read. With this false,
+# the role installs only the shared base toolchain and tasks/retire.yml removes the agent (unit, scripts,
+# key, ~/actions-runner). The App key was revoked on GitHub. To bring the agent back: mint a NEW App key
+# into ansible/secrets/github-runner.sops.yaml, set this to true, `just runners`.
+github_runner_agent_enabled: false
+
 # GitHub App `ailab-ci-runners` (github.com/apps/ailab-ci-runners), created 2026-06-16:
 github_runner_app_id: "4070577"
 github_runner_app_installation_id: "140722927" # App installed on the cchifor account (2026-06-16)
 
 # Enable node_exporter's textfile collector ONLY on the runners (the shared node_exporter role stays
-# flagless on Proxmox/AI-LXC/dev-workers). runner-reclaim.sh drops a health beacon here each cycle
-# (runner_docker_config_root_owned / runner_reclaim_last_success_seconds) → CIRunner* alert rules.
+# flagless on Proxmox/AI-LXC/dev-workers). The gitea_runner beacons land here (runner_docker_config_root_owned
+# now comes from gitea-runner-reclaim.sh; the retired GitHub agent's runner_health.prom is gone).
 # Path matches node_exporter_textfile_dir (kept literal to avoid var-ordering surprises).
 node_exporter_extra_args: "--collector.textfile.directory=/var/lib/prometheus/node-exporter"

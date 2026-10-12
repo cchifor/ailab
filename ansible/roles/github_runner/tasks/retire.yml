@@ -1,0 +1,55 @@
+---
+# Retires the GitHub Actions agent (ADR 0013) where github_runner_agent_enabled is false.
+#
+# Why: ADR 0017 disabled Actions on the GitHub mirror, so the agent never got a job (0 since
+# 09-30/10-02 on all 8 hosts). Meanwhile:
+# - it kept the GitHub App private key (Administration: read/write on cchifor/platform) in a
+#   runner-owned file that every Gitea CI job could read (host mode, same user);
+# - its ExecStartPre reclaim could force-remove Docker state under a running Gitea job (guarded only
+#   since #1284).
+#
+# The ~/.docker ownership self-heal and its runner_docker_config_root_owned beacon moved to
+# gitea-runner-reclaim.sh, so runner_health.prom is deleted here. Every task is idempotent and a no-op
+# on a host that never had the agent. To re-enable, see group_vars/github_runners.yml.
+- name: Read whether the GitHub agent unit exists
+  ansible.builtin.command: systemctl show -p LoadState --value {{ github_runner_service }}
+  register: github_runner_unit_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Only an EXISTING unit is stopped, and a stop that fails FAILS the play: nothing below may delete the
+# agent's files while its process may still be running. An absent unit (the cloud runners, or a
+# re-run after retirement) is skipped, not tolerated as an error.
+- name: Stop and disable the GitHub agent service
+  ansible.builtin.systemd:
+    name: "{{ github_runner_service }}"
+    state: stopped
+    enabled: false
+  when: (github_runner_unit_state.stdout | default('') | trim) not in ['', 'not-found']
+
+- name: Remove the agent's unit, drop-ins, scripts, App key, install dir and beacon
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/systemd/system/{{ github_runner_service }}"
+    - "/etc/systemd/system/{{ github_runner_service }}.d"
+    - "{{ github_runner_home }}/ephemeral-runner.sh"
+    - "{{ github_runner_dir }}/hooks/job-started.sh" # the job-started hook (also inside the dir below)
+    - /usr/local/bin/runner-reclaim.sh
+    - /etc/runner
+    - "{{ github_runner_dir }}"
+    - "/tmp/actions-runner-{{ github_runner_version }}.tar.gz"
+    - /var/lib/prometheus/node-exporter/runner_health.prom
+  register: github_runner_retired
+
+- name: Reload systemd after removing the agent unit
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: github_runner_retired is changed
+
+- name: Clear the removed unit's failed state
+  ansible.builtin.command: systemctl reset-failed {{ github_runner_service }}
+  changed_when: false
+  failed_when: false

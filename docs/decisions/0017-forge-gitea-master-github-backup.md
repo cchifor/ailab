@@ -1,5 +1,8 @@
 # ADR 0017 — Self-hosted Gitea as master forge; GitHub as backup; CI on Gitea Actions
 
+**Note 2026-10-12:** the GitHub agents (ADR 0013) were retired and their App key revoked. Re-enabling
+GitHub Actions now also needs a new App key + `github_runner_agent_enabled: true` + `just runners`.
+
 **Status:** PROPOSED (2026-07-09). Plan approved + adversarially reviewed; Phase 0–1 code landing on
 `feat/gitea-actions-migration`. Nothing cut over yet — GitHub Actions stays primary until Gitea CI is
 proven. **Relates to:** ADR 0013 (self-hosted GitHub runners — this is its successor), 0010 (versitygw

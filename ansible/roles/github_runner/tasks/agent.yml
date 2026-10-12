@@ -6,6 +6,14 @@
 # Section numbers continue main.yml's.
 
 # ── 5. runner agent ──────────────────────────────────────────────────────────
+- name: Ensure runner dir (only the agent uses it)
+  ansible.builtin.file:
+    path: "{{ github_runner_dir }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_group }}"
+    mode: "0755"
+
 - name: Download runner agent {{ github_runner_version }}
   ansible.builtin.get_url:
     url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-{{ github_runner_arch }}-{{ github_runner_version }}.tar.gz"

@@ -217,6 +217,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
     MOCK_MAINPID="${MOCK_MAINPID:-4242}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
+    GITEA_CLEANUP_PEER_SERVICES="${PEER_SERVICES_OVERRIDE:-actions.runner.cchifor-platform.service}" \
     GITEA_CACHE_PURGE_QUEUE="${QUEUEFILE:-/nonexistent/queue}" GITEA_CLEANUP_CACHE_PURGE_STAMP="$WORK/purge.stamp" \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
@@ -340,6 +341,11 @@ assert_has "image prune -af --filter until=86400s" "I1: peer idle (supervisor ch
 
 MOCK_PEER_JOB=1 run_case 0 50
 assert_none "I2: peer running a real job -> sweep skipped (shared daemon)"
+# The production default is now `none` (the GitHub agent was retired 2026-10-12); the cases above
+# name a peer explicitly (run_case) because the mechanism stays for a re-enable. With `none`, a
+# matching process on the host must not block the sweep.
+MOCK_PEER_JOB=1 PEER_SERVICES_OVERRIDE=none run_case 0 50
+assert_has "image prune -af --filter until=86400s" "I3: no peer configured (default 'none') -> a stray peer process does not block the sweep"
 unset MOCK_PEER_JOB
 
 echo "[J] every UNCERTAIN busy signal must read BUSY, never idle"

@@ -84,7 +84,7 @@ DEADLINE_SEC = float(cfg("GITEA_REAP_DEADLINE_SEC", "45"))
 ADOPT_CPU_TICKS = int(cfg("GITEA_REAP_ADOPT_CPU_TICKS", "200"))
 KEEP_LABEL_RE = cfg("GITEA_REAP_KEEP_LABEL_RE", r"^(io\.dsh\.conductor\.image-pin|ci\.keep)$")
 INFRA_EXCLUDE_RE = cfg("GITEA_CLEANUP_INFRA_EXCLUDE_RE", "buildkit|buildx")
-PEER_SERVICES = cfg("GITEA_CLEANUP_PEER_SERVICES", "actions.runner.cchifor-platform.service")
+PEER_SERVICES = cfg("GITEA_CLEANUP_PEER_SERVICES", "none")   # no co-located peer since the GitHub agent was retired (2026-10-12)
 STATE_PATH = cfg("GITEA_REAP_STATE", "/var/lib/gitea-runner-reclaim/reap.state")
 BEACON = cfg("GITEA_RECLAIM_BEACON", "1") == "1"
 TEXTFILE_DIR = cfg("GITEA_RECLAIM_TEXTFILE_DIR", "/var/lib/prometheus/node-exporter")

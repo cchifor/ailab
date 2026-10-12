@@ -46,9 +46,10 @@ ping:
 # Create the VMs first (tofu -chdir=kubernetes/infra/runners apply) + the github-runner SOPS secret.
 # Dedicated playbook (not site.yml), so a full `just net` never touches the runner VMs.
 # See docs/runbooks/ci-runners.md.
-runners:
+# Extra args pass through (`just runners --tags github_runner_retire --check --diff`, `-l ci-runner-1`).
+runners *args:
     cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey \
-      ansible-playbook runners.yml
+      ansible-playbook runners.yml {{args}}
 
 # Ansible: connectivity check for the runner VMs
 ping-runners:

@@ -320,7 +320,9 @@ gitea_runner_cleanup_reap_age_sec: 14400
 gitea_runner_cleanup_infra_exclude_re: "buildkit|buildx"
 # Co-located runner services that ALSO share this Docker daemon — treated as "busy" so cleanup skips work
 # while EITHER pool runs a job (the GitHub self-hosted agent during the forge-migration bake-in).
-gitea_runner_cleanup_peer_services: "actions.runner.cchifor-platform.service"
+# "none" since the GitHub agent was retired (2026-10-12): no co-located runner shares these hosts'
+# docker daemon any more. Re-enabling the agent means setting this back to its unit name.
+gitea_runner_cleanup_peer_services: "none"
 # Set to the literal `none` for a host with NO co-located runner (cloud_gitea_runners): the script
 # reads it as "no peers". An empty string is NOT that — `${VAR:-default}` treats empty as unset and
 # falls back to the GitHub unit above, so "" would keep probing a service that does not exist.

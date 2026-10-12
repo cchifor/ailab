@@ -110,7 +110,8 @@ spec:
               The reclaim self-heal on runner {{ $labels.instance }} did NOT restore runner ownership
               of ~/.docker — the buildx-permission regression (root-owned ~/.docker/buildx) is back
               and docker-build jobs will fail. Inspect: `sudo ls -la /home/runner/.docker/buildx` and
-              confirm runner-reclaim.sh runs as root (20-reclaim.conf ExecStartPre=+).
+              `journalctl -t gitea-runner-reclaim` (the heal runs in gitea-runner-reclaim.sh, as root,
+              between jobs; it moved there when the GitHub agent was retired, 2026-10-12).
         # Is the gitea_runner maintenance running at all? Uses ABSENCE of the reclaim beacon (the gauge
         # persists once written, so this does NOT false-fire on idle runners). `for: 30m` rides over the
         # first-boot window before the first reclaim writes the beacon. Migrated off the retiring GitHub
