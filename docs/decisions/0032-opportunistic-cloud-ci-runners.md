@@ -164,7 +164,10 @@ cloud1's was 72.6 GiB.
    - The pause persists across the nightly power cycle, because the cloud-power drain never
      re-enables a runner that was already disabled.
    - Re-enable with `PATCH /api/v1/orgs/cchifor/actions/runners/<id> {"disabled": false}` (org-owner
-     token).
+     token). That endpoint is Gitea
+     1.26.1's `updateOrgRunner` (`EditActionRunnerOption {disabled: boolean}`), checked in this
+     instance's `/swagger.v1.json`, and it is how the seven were paused (each PATCH returned 200, and
+     GET then shows `disabled: true`).
 2. **cloud1 runs five runners.** cloud-ci-1/2 stay at 24 GiB / 8 vCPU. cloud-ci-6 (.29, rebuilt on a
    fresh disk), cloud-ci-14 (.37) and cloud-ci-15 (.39) run at **12 GiB / 6 vCPU**, the size of the
    smaller ailab runners, which run the same jobs under the same 10 GiB job cap.
