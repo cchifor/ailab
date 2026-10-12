@@ -29,17 +29,29 @@ on:
       - "ansible/roles/gitea_runner/tests/**"
       - "ansible/roles/gitea_runner/templates/**"
       - "ansible/roles/gitea_runner/defaults/**"
+      # The dsh image-pin exemptions and the GitHub agent's reclaim (which shares the Docker daemon on
+      # ailab runners) are pinned by test_dsh_validator_pin.py, which nothing else runs.
+      - "ansible/roles/github_runner/templates/runner-reclaim.sh.j2"
+      - "ansible/roles/github_runner/defaults/**"
+      - "ansible/roles/dsh_validator_pin/**"
+      - "ansible/host_vars/ci-runner-1.yml"
+      - "scripts/tests/test_dsh_validator_pin.py"
       - ".gitea/workflows/runner-scripts.yaml"
   push:
     branches: [main]
     paths:
       - "ansible/roles/gitea_runner/**"
+      - "ansible/roles/github_runner/templates/runner-reclaim.sh.j2"
+      - "ansible/roles/github_runner/defaults/**"
+      - "ansible/roles/dsh_validator_pin/**"
+      - "ansible/host_vars/ci-runner-1.yml"
+      - "scripts/tests/test_dsh_validator_pin.py"
 
 jobs:
   runner-scripts:
     name: runner-scripts
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    # Both suites are mocked (no docker, no VM) and finish in ~1-2 minutes. 10 is generous headroom
+    # All three suites are mocked (no docker, no VM) and finish in ~1-2 minutes. 10 is generous headroom
     # that still fails fast if a case regresses into the hang these tests are meant to prevent.
     timeout-minutes: 10
     steps:
@@ -56,3 +68,10 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/gitea_runner/tests/test-reclaim.sh
+
+      # Mocked (fake docker/systemctl/logger on PATH); stdlib + PyYAML, both on the runner image.
+      - name: dsh image-pin exemptions + GitHub reclaim guard (mocked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.tests.test_dsh_validator_pin

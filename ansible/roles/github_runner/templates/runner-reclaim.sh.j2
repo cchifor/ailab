@@ -9,7 +9,13 @@ RUNNER_DIR="{{ github_runner_dir }}"
 DOCKER_CFG="{{ github_runner_home }}/.docker"
 # Containers to keep across the reclaim (github_runner_reclaim_keep_re; empty = keep nothing).
 KEEP_RE='{{ github_runner_reclaim_keep_re }}'
-if command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
+# A Gitea act_runner on this host shares the Docker daemon, and this script cannot tell whether one of
+# its jobs is running: it fires at every agent (re)start, not between Gitea jobs. When that unit is
+# enabled, skip the docker block entirely; gitea-runner-cleanup.sh owns docker hygiene here.
+GITEA_UNIT='{{ github_runner_reclaim_gitea_unit }}'
+if [ -n "$GITEA_UNIT" ] && systemctl is-enabled --quiet "$GITEA_UNIT" 2>/dev/null; then
+  logger -t runner-reclaim -- "skip docker reclaim: $GITEA_UNIT is enabled on this host and owns docker hygiene" 2>/dev/null || true
+elif command -v docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1; then
   ids=$(docker ps -aq 2>/dev/null || true)
   if [ -n "$KEEP_RE" ] && [ -n "$ids" ]; then
     # Same match as gitea-runner-cleanup.sh's reap loop: `<image> <name>`, case-insensitive. A kept

@@ -677,7 +677,8 @@ class TestGithubReclaimKeepList(unittest.TestCase):
     def render_docker_block(self, keep_re, home):
         text = GITHUB_RECLAIM_TEMPLATE.read_text(encoding='utf-8')
         values = {'github_runner_dir': home + '/actions-runner', 'github_runner_home': home,
-                  'github_runner_reclaim_keep_re': keep_re}
+                  'github_runner_reclaim_keep_re': keep_re,
+                  'github_runner_reclaim_gitea_unit': 'gitea-act-runner.service'}
         text = text.replace('{% raw %}', '').replace('{% endraw %}', '')
         text = re.sub(r'\{\{\s*(\w+)\s*\}\}', lambda m: values.get(m.group(1), m.group(0)), text)
         lines = text.splitlines()
@@ -688,7 +689,7 @@ class TestGithubReclaimKeepList(unittest.TestCase):
         self.assertIsNone(re.search(r'\{\{\s*\w+\s*\}\}', block), 'an unrendered template variable survived')
         return block
 
-    def run_block(self, keep_re, failing_inspect=()):
+    def run_block(self, keep_re, failing_inspect=(), gitea_enabled=False):
         with tempfile.TemporaryDirectory() as tmp:
             binp = Path(tmp) / 'bin'; binp.mkdir()
             log = Path(tmp) / 'docker.log'
@@ -702,6 +703,16 @@ class TestGithubReclaimKeepList(unittest.TestCase):
                     'esac\nexit 0\n')
             (binp / 'docker').write_text(fake, encoding='utf-8')
             os.chmod(binp / 'docker', 0o755)
+            # These tests run ON the runner VMs, where gitea-act-runner IS enabled: the real systemctl
+            # would answer for the host, not for the case under test. logger is stubbed so a test run
+            # never writes into the runner's journal.
+            fake_systemctl = ('#!/usr/bin/env bash\n'
+                              'printf "%s\\n" "systemctl $*" >> "' + str(log).replace('\\', '/') + '"\n'
+                              + ('exit 0\n' if gitea_enabled else 'exit 1\n'))
+            (binp / 'systemctl').write_text(fake_systemctl, encoding='utf-8')
+            (binp / 'logger').write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+            os.chmod(binp / 'systemctl', 0o755)
+            os.chmod(binp / 'logger', 0o755)
             script = Path(tmp) / 'reclaim.sh'
             script.write_text(self.render_docker_block(keep_re, tmp), encoding='utf-8')
             env = dict(os.environ, PATH=str(binp) + os.pathsep + os.environ.get('PATH', ''))
@@ -730,6 +741,19 @@ class TestGithubReclaimKeepList(unittest.TestCase):
         self.assertEqual(len(rm), 1, calls)
         self.assertEqual(set(rm[0].split()[2:]), set(self.IDS), calls)
         self.assertFalse([c for c in calls if c.startswith('inspect ')], 'no per-container inspect when nothing is kept')
+
+    def test_enabled_gitea_unit_skips_the_whole_docker_block(self):
+        """On a host where gitea-act-runner is enabled, this reclaim cannot know whether a Gitea job is
+        mid-flight (it fires at agent start, not between Gitea jobs), so it must not touch docker at all:
+        no rm -f, no buildx rm, no prune of any kind."""
+        calls = self.run_block(' /dsh-conductor-image-pin$', gitea_enabled=True)
+        self.assertIn('systemctl is-enabled --quiet gitea-act-runner.service', calls, calls)
+        self.assertEqual([c for c in calls if not c.startswith('systemctl ')], [], calls)
+
+    def test_disabled_gitea_unit_keeps_the_ephemeral_contract(self):
+        calls = self.run_block('', gitea_enabled=False)
+        self.assertTrue([c for c in calls if c.startswith('rm -f ')], calls)
+        self.assertTrue([c for c in calls if c.startswith('volume prune')], calls)
 
 
 if __name__ == '__main__':
