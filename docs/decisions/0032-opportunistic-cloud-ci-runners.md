@@ -139,3 +139,47 @@ Advanced CPU Settings → SVM Mode).
   at p90 while the disks are ~6 % busy at p50 and no task is blocked on I/O. Judge disks by
   in-guest latency instead.
 - **Watch NVMe wear.** cloud3's boot NV3 wrote 14.5 TB that week. Check SMART `percentage_used`.
+
+## Amendment 2026-10-12: cloud3 paused (bad DRAM); cloud1 grows to five smaller runners
+
+**Why.** On 2026-10-12 every cloud3 guest was corrupting data in memory.
+- Random segfaults hit the cloud3 runners (cloud-ci-3: 59 in 8.8 h), and none hit the cloud1/2 runners
+  (~200 h of uptime).
+- Files in the CI caches went corrupt. Twice that day a root filesystem died: cloud-ci-5/7 in the
+  morning, and cloud-ci-7 again at ~22:00 after it had been returned to service. It then failed 39
+  of 42 jobs.
+- memtester inside cloud-ci-7 found a page that does not hold writes (byte lane 4). It was retired
+  at every boot (cloudlab `host/retired-pages.tsv`), but cloud3 kept crashing, so the fault is wider
+  than that page.
+- cloud1 has the #848 fault: a host scan found 8 bad pages (byte lane 5), now also retired.
+
+The operator also asked for three more runners on cloud1/cloud2. Each runner VM costs its host about
+its full allocation: 23-24 GiB RSS per 24 GiB runner, because the guest page cache stays resident.
+cloud2's 7-day MemAvailable low was 35.2 GiB, which is no room above this ADR's 30 GiB gate.
+cloud1's was 72.6 GiB.
+
+**Decision.**
+1. **All seven cloud3 runners (cloud-ci-3/4/5/7/8/12/13) are PAUSED in Gitea** until cloud3's DIMMs
+   are tested or replaced.
+   - The pause persists across the nightly power cycle, because the cloud-power drain never
+     re-enables a runner that was already disabled.
+   - Re-enable with `PATCH /api/v1/orgs/cchifor/actions/runners/<id> {"disabled": false}` (org-owner
+     token).
+2. **cloud1 runs five runners.** cloud-ci-1/2 stay at 24 GiB / 8 vCPU. cloud-ci-6 (.29, rebuilt on a
+   fresh disk), cloud-ci-14 (.37) and cloud-ci-15 (.39) run at **12 GiB / 6 vCPU**, the size of the
+   smaller ailab runners, which run the same jobs under the same 10 GiB job cap.
+   - Expected cloud1 low: ~36 GiB, so it passes the 30 GiB gate.
+   - Disks go on `local-nvme`.
+   - Each new VM's RAM is scanned before it takes a job, and it gets a short canary (segfaults, EXT4
+     errors, failure rate) before it counts as in service.
+3. **The daytime pool:** 8 ailab + 3 cloud2 + 5 cloud1 = **16** while cloud3 is paused (23 once it
+   returns).
+
+**Gates (cloud1), after two busy days:**
+- host MemAvailable never below 30 GiB;
+- host CPU p99 < **75 %**, amended from 50 % for five runners on 32 threads; judge job durations
+  alongside it;
+- in-guest write latency p99 < 15 ms;
+- no segfault or EXT4 error on the cloud1 runners.
+
+Roll back one runner with `started = false`.
