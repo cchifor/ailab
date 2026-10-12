@@ -65,3 +65,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 ansible/roles/gitea_runner/tests/test-reap.py
+
+      # Throwaway npm/uv cache fixtures and a fake runuser: never the host's real caches.
+      - name: shared-cache verify / purge behaviour (fixtures)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ansible/roles/gitea_runner/tests/test-cache-verify.py

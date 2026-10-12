@@ -224,6 +224,27 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   - Kill switch: `gitea_runner_reap_mode: off` (role default or host_var). For an immediate stop also set
     `GITEA_REAP_MODE=off` in `/etc/gitea-runner-reclaim.env` (read on the next tick; the next role run
     re-renders that file from the var). The beacon then reports `gitea_runner_reap_mode 0`.
+- **Shared-cache integrity check** (`gitea-runner-cache-verify.py`, nightly `gitea-runner-cache-verify.timer`
+  at 04:30 + up to 2h random, `Persistent=true` so a host that was off catches up at boot). Every job shares
+  `~/.npm/_cacache` and `~/.cache/uv`, so one corrupt entry fails every later job that uses it: a corrupt
+  `cryptography-50.0.2` `.so` on cloud-ci-5 segfaulted every kartra-ai job that installed it (2026-10-12).
+  - `verify` (as `runner`, throttled) hashes npm content against the digest its path encodes and uv archives
+    against their `RECORD`, and queues bad entries in `/var/lib/gitea-runner-cache/purge.queue`. For uv it
+    records whether the file changed after unpack (`corrupt_inplace_evidence`: a job wrote through a
+    hardlink) and which venvs share the inode.
+  - `apply` (root) purges the queue only where no job can be using it: whenever act_runner is down (its
+    ExecStartPre, any stop) and inside the cleanup's confirmed idle window. Lines are validated, paths are
+    built from fixed roots, and deletion runs as `runner`. To purge now: `systemctl restart
+    gitea-act-runner` (drains the running job first).
+  - Beacon `gitea_runner_cache_verify.prom`: `checked`, `corrupt_found`, `corrupt_pending`,
+    `corrupt_inplace_evidence` (by `cache`), `verify_last_run_seconds`, `verify_duration_seconds`. Read
+    `/var/lib/gitea-runner-cache/result.json` and `journalctl -u gitea-runner-cache-verify -t
+    gitea-runner-cache-purge`.
+  - Alerts: `CIRunnerCacheCorruptPending` / `CloudCIRunnerCacheCorruptPending` (queued 30m),
+    `…CacheVerifyStale` (>3d, after 4h of uptime), `…CacheVerifyBeaconMissing` (never ran: 30h on the 24/7
+    pool, 6h after 4h of uptime on cloud), and `…RootFilesystemFailed` (critical: the textfile collector
+    cannot read, the fast signal of a shut-down root, see section 9). `corrupt_found` alone pages nobody;
+    corruption on a runner points at its host.
 - **GitHub agent reclaim on Gitea hosts:** the dormant GitHub agent's `runner-reclaim.sh` runs at every
   agent (re)start and used to `docker rm -f` every container and prune volumes, images and buildx builders,
   with no idea whether a Gitea job was mid-flight. From ailab#1284 (once `/usr/local/bin/runner-reclaim.sh`
