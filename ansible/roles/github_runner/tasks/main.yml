@@ -114,7 +114,9 @@
     enabled: true
     state: started
 
-# ── 3. workload toolchain: Node, uv, k6 (Playwright runs in-container, not on the host) ──
+# ── 3. workload toolchain: Node, uv, k6, and the system packages jobs expect ──
+# Playwright runs on the host too: jobs download its browsers into ~runner/.cache/ms-playwright, and
+# those browsers need the shared libraries in github_runner_ci_job_packages.
 - name: Add NodeSource apt signing key
   ansible.builtin.get_url:
     url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
@@ -158,6 +160,18 @@
     extra_opts: ["--strip-components=1", "--wildcards", "*/k6"]
     creates: /usr/local/bin/k6
   when: github_runner_install_k6 | bool
+
+# The packages jobs install for themselves (defaults: github_runner_ci_job_packages). A no-op on a
+# runner that already ran those jobs. On a live runner that lacks some, run this when it is idle: a
+# job's own `apt-get` does not wait for the dpkg lock this task holds while it installs.
+- name: Install the system packages CI jobs expect (Playwright browser deps, build tooling)
+  ansible.builtin.apt:
+    name: "{{ github_runner_ci_job_packages }}"
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+  when: github_runner_ci_job_packages | length > 0
 
 # ── 4. runner user (in the docker group, so jobs can use the Docker socket) ──
 - name: Create runner group

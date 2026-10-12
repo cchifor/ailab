@@ -10,7 +10,7 @@ See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_run
 | OS | Ubuntu 24.04 cloud image (cloud-init: static IP + `ubuntu` user + the ansible SSH key) |
 | Label | `self-hosted-hv` (repo var `RUNNER_LABEL`; workflows use `runs-on: ${{ vars.RUNNER_LABEL }}`) |
 | Registration | Ephemeral, GitHub App auth → `ephem-<host>-<epoch>-<8hex>`, one job per cycle |
-| Toolchain | Docker CE + Compose v2.31.0 + Buildx, uv, k6, Node 20 (Playwright runs in-container) |
+| Toolchain | Docker CE + Compose v2.31.0 + Buildx, uv, k6, Node 20, plus the system packages jobs expect (`github_runner_ci_job_packages`: Playwright's browser libraries for jobs that run Playwright on the host, build-essential, postgresql-client, ffmpeg, …) |
 
 ## 1. Create the GitHub App (one-time)
 1. GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App**. Name it (e.g.
@@ -576,6 +576,18 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     `cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible cloud_gitea_runners:gitea_runners -b -m command -a
     'dpkg --audit'`. A healthy runner prints nothing. A stopped VM (cloud-ci-6, §9) or a cloud runner offline at
     night shows as UNREACHABLE. On 2026-10-12 only cloud-ci-2 was affected.
+- **Every Playwright test of a job fails at `browserType.launch: Target page, context or browser has been
+  closed`, on a freshly built runner only:** the browser cannot load its shared libraries. Jobs install them
+  themselves (`npx playwright install --with-deps` through the runner's sudo), so a runner that has run such a
+  job carries them, and a workflow that never installs them passes there. A fresh VM lacks them until
+  something installs them. Seen on 2026-10-12: kartra-ai's `verify` failed on the new cloud-ci-14 because
+  chrome-headless-shell could not load `libatk-1.0.so.0`.
+  - *Confirm:* `sudo ldd /home/runner/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | grep 'not found'`.
+  - *Repair:* the `github_runner` role installs `github_runner_ci_job_packages` (`just cloud-runners` for
+    cloud-ci-N, `just runners` for ci-runner-N).
+    On a live runner, pause it in Gitea and wait until it is idle first. A non-interactive `apt-get` does not
+    wait for a held dpkg lock: on Ubuntu 24.04's apt 2.8.3 it exits 100 at once with `Could not get lock
+    /var/lib/dpkg/lock-frontend`. So an install that runs next to a job's own apt step fails that job.
 - **`just runners` / a direct `ansible-playbook` does nothing ("skipping: no hosts matched"):** on WSL,
   `/mnt/c` is world-writable, so Ansible silently ignores `ansible.cfg` (and thus the inventory). The
   `just` recipes now set `ANSIBLE_CONFIG` explicitly; invoking `ansible-playbook` by hand needs
