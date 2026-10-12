@@ -1,5 +1,0 @@
-# MANAGED BY ANSIBLE (role: gitea_runner). Apply the /tmp ages hourly instead of daily, so a sub-day age
-# (pytest-of-runner) can take effect at all. The empty assignment clears the vendor OnUnitActiveSec=1d.
-[Timer]
-OnUnitActiveSec=
-OnUnitActiveSec={{ gitea_runner_tmpfiles_clean_interval }}
