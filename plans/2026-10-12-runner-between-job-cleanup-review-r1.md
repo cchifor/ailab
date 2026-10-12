@@ -70,3 +70,18 @@ The original review is pasted below, verbatim apart from line wrapping. Each fin
 | 43 | The control node cannot run Ansible. | FACT | Runbook §7 l.195: the pool is installed by hand over SSH. The rollout steps are written out manually (mirroring the role) unless the WSL converge path works. Verify at deploy time. |
 | 44 | cloud-ci-13's orphan won't survive a power-off; use a synthetic acceptance test. | ACCEPT | Root moves a planted `sleep` into the service cgroup and plants a labelled container and volume. The would-reap / reap log must name them. |
 | 45 | Add risks: capacity, forged lines, take-over, a slow docker daemon stretching ticks. | ACCEPT | Done. |
+
+## Round 2 (same reviewer, on the two pushbacks and the revised plan)
+
+- **#22 dropped:** the per-repo follow-up stands. The reviewer's idea for later: let the reaper's edge pass remove `pytest-of-runner/pytest-N` dirs created before E.
+- **#31 dropped:** the version-agnostic uv purge stands, with the canary re-download check.
+
+New defects in the revision, all ACCEPTED and folded into the finalized plan:
+1. The adoption probe missed Compose taking over a running container. It now uses `docker events --since B` for the would-reap ids.
+2. The task-line regex must come from a captured real line and handle the tz offset. Enforce also requires `boundary_age ≥ 0`.
+3. The `tmp.conf` override must keep every other vendor line. It is now rendered from the vendor file.
+4. The runner-writable purge queue is applied as root. Hardened: strict id regex, the applier builds the paths, deletes run via `runuser`, walks are bounded, and everything is under a timeout.
+5. Unbounded work and a GC race in the purge appliers. npm now deletes only the listed files (no `npm cache verify`), everything has a hard timeout, and ExecStartPre does deletion only.
+6. A missing verify beacon went unalerted, and `info` still pages. Added `CacheVerifyBeaconMissing` and dropped the `CacheCorruptFound` alert (dashboard series only).
+
+Plan finalized after round 2. Per the two-round cap, no further rounds.
