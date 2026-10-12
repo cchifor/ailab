@@ -1621,10 +1621,60 @@ class TextifyNulSectionsTest(unittest.TestCase):
         self.assertEqual([(f"/repos/o/r/raw/dir/a%20b.ts?ref={'b' * 40}", True),
                           (f"/repos/o/r/raw/dir/a%20b.ts?ref={'h' * 40}", True)], seen)
 
+        # Never the base branch's tip: without a merge base the base side is unreadable (the marker stays).
+        seen.clear()
+        self.assertIsNone(self.m.fetch_blob("o/r", {"base": {"sha": "c" * 40}, "head": {"sha": "h" * 40}}, "x.ts", "base"))
+        self.assertEqual([], seen)
+
         def boom(*a, **k):
             raise OSError("down")
         self.m.api = boom
         self.assertIsNone(self.m.fetch_blob("o/r", pr, "x.ts", "head"))
+
+    def test_every_header_line_is_kept_only_the_marker_is_replaced(self):
+        sec = (b"diff --git a/run.sh b/run.sh\n"
+               b"old mode 100644\nnew mode 100755\n"
+               b"index 1111111..2222222\n"
+               b"Binary files a/run.sh and b/run.sh differ\n")
+        fetch, _ = self.blobs({("run.sh", "base"): b"echo a\x00\n", ("run.sh", "head"): b"echo b\x00\n"})
+        raw2, rendered = self.m.textify_nul_sections(sec, fetch)
+        self.assertEqual(["run.sh"], rendered)
+        self.assertTrue(raw2.startswith(b"diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
+                                        b"index 1111111..2222222\n--- a/run.sh\n+++ b/run.sh\n"), raw2)
+        self.assertNotIn(b"Binary files", raw2)
+        self.assertIn("+echo b\u2400\n", self.m.plan_coverage(raw2)[0])
+
+    def test_a_deleted_file_is_shown_and_named_by_its_path(self):
+        sec = (b"diff --git a/gone.ts b/gone.ts\ndeleted file mode 100644\nindex 1111111..0000000\n"
+               b"Binary files a/gone.ts and /dev/null differ\n")
+        fetch, _ = self.blobs({("gone.ts", "base"): b"x\x00y\n"})
+        raw2, rendered = self.m.textify_nul_sections(sec, fetch)
+        self.assertEqual(["gone.ts"], rendered)
+        diff, dropped, coverage = self.m.plan_coverage(raw2)
+        self.assertEqual("full", coverage)
+        self.assertIn("deleted file mode 100644\n", diff)
+        self.assertIn("--- a/gone.ts\n+++ /dev/null\n", diff)
+        self.assertIn("-x\u2400y\n", diff)
+
+    def test_a_change_the_normalisation_erases_keeps_the_marker(self):
+        """CRLF to LF only (or a NUL for a NUL): an empty rendered diff would read as "nothing changed" and be counted
+        as reviewed, so the marker and the cap stay."""
+        fetch, _ = self.blobs({("a.ts", "base"): b"x\x00\r\ny\r\n", ("a.ts", "head"): b"x\x00\ny\n"})
+        raw = _binsec("a.ts")
+        self.assertEqual((raw, []), self.m.textify_nul_sections(raw, fetch))
+
+    def test_line_and_total_budgets_keep_the_marker(self):
+        many = b"l\x00\n" * (self.m.TEXTIFY_MAX_LINES + 1)
+        fetch, _ = self.blobs({("a.ts", "base"): b"a\x00\n", ("a.ts", "head"): many})
+        raw = _binsec("a.ts")
+        self.assertEqual((raw, []), self.m.textify_nul_sections(raw, fetch))
+        # The total: the first file fits, the second would pass the budget and keeps its marker.
+        self.m.TEXTIFY_TOTAL_BYTES = 60  # one file's two sides are 52 bytes rendered
+        files = {(n, side): (b"%s-%s\x00\n" % (n.encode(), side.encode())) * 2 for n in ("a.ts", "b.ts") for side in ("base", "head")}
+        fetch, _ = self.blobs(files)
+        raw2, rendered = self.m.textify_nul_sections(_binsec("a.ts") + _binsec("b.ts"), fetch)
+        self.assertEqual(["a.ts"], rendered)
+        self.assertIn(b"Binary files a/b.ts and b/b.ts differ", raw2)
 
 
 class CoverageTableTest(unittest.TestCase):
@@ -1921,6 +1971,33 @@ class SizeCapTest(unittest.TestCase):
         review = posted[-1][1]["body"]
         self.assertNotIn("binary content", review)
         self.assertIn(f"head={head} verdict=clean", review)
+
+    def test_the_intake_bound_applies_to_the_rebuilt_diff(self):
+        head, base = "e" * 40, "f" * 40
+        m = load(self.tmp.name, max_diff_bytes=100000, max_raw_bytes=2000)
+        m.pr_ok = lambda repo, pr, h: {"head": {"sha": h}, "merge_base": base, "user": {"login": "someone"},
+                                       "title": "t", "body": ""}
+        m.existing_marker = lambda repo, pr, h: None
+        m.maybe_merge = lambda repo, pr: None
+        llm, posted = [], []
+        m.run_llm = lambda *a, **k: llm.append(a) or {"findings": [], "summary": "fine"}
+
+        def api(path, method="GET", body=None, raw=False):
+            if path.endswith(".diff"):
+                return _binsec("r.ts")
+            if path == f"/repos/o/r/raw/r.ts?ref={base}":
+                return b"a\x00\n"
+            if path == f"/repos/o/r/raw/r.ts?ref={head}":
+                return b"b\x00\n" * 1500
+            if method == "POST":
+                posted.append((path, body))
+                return {"id": 9}
+            return {}
+        m.api = api
+        state, _, note = m.review_job(1, "o/r", 5, head)
+        self.assertEqual([], llm)
+        self.assertIn("over raw bound", note)
+        self.assertIn("verdict=skipped", posted[-1][1]["body"])
 
     def test_over_cap_posts_a_visible_skip_and_never_calls_the_model(self):
         """Unchanged contract: CODE alone over the cap is still an honest skip, visible in

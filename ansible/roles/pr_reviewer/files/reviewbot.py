@@ -745,20 +745,26 @@ def section_reason(sec):
 # say) is a file to read, not to exclude: its section is rebuilt from the two blobs as a unified text diff, so the
 # review sees the change, and the verdict is not capped for a file that was in fact read. A NUL is shown as U+2400 (the
 # reviewer sees it: a NUL in a script is itself worth a remark) and CRLF is normalised to LF (git never treated the file
-# as text, so it was never normalised: its first textual diff would otherwise be every line). Only for a section the glob
-# and extension rules would read (section_reason says "binary content"), each side within TEXTIFY_MAX_BYTES and UTF-8
-# once its NULs are replaced; anything else keeps git's marker, and its cap.
+# as text, so it was never normalised: its first textual diff would otherwise be every line). The section keeps every
+# header line git wrote (modes, new/deleted file, rename, index); only git's binary marker is replaced. Only for a
+# section the glob and extension rules would read (section_reason says "binary content"), each side UTF-8 once its NULs
+# are replaced and within TEXTIFY_MAX_BYTES and TEXTIFY_MAX_LINES (difflib is quadratic in the worst case, on author-
+# controlled input), all rendered sides within TEXTIFY_TOTAL_BYTES, and a change that survives the normalisation;
+# anything else keeps git's marker, and its cap. The caller re-applies its raw intake bound to the rebuilt diff.
 NUL_SHOWN = "\u2400"
-TEXTIFY_MAX_BYTES = 512 * 1024
+TEXTIFY_MAX_BYTES = 256 * 1024
+TEXTIFY_MAX_LINES = 5000
+TEXTIFY_TOTAL_BYTES = 1024 * 1024
 
 
 def _textify(blob):
     if not isinstance(blob, (bytes, bytearray)) or len(blob) > TEXTIFY_MAX_BYTES:
         return None
     try:
-        return blob.replace(b"\x00", NUL_SHOWN.encode()).replace(b"\r\n", b"\n").decode("utf-8")
+        text = bytes(blob).replace(b"\x00", NUL_SHOWN.encode()).replace(b"\r\n", b"\n").decode("utf-8")
     except UnicodeDecodeError:
         return None
+    return text if text.count("\n") <= TEXTIFY_MAX_LINES else None
 
 
 def textify_nul_sections(raw, fetch_blob):
@@ -769,31 +775,37 @@ def textify_nul_sections(raw, fetch_blob):
         sections = split_sections(raw)
     except ValueError:
         return raw, []
-    out, rendered = [], []
+    out, rendered, budget = [], [], TEXTIFY_TOTAL_BYTES
     for sec in sections:
         data = sec["data"]
-        if section_reason(sec) != "binary content":
+        marker = BIN_MARKER_RE.search(data)
+        if section_reason(sec) != "binary content" or marker is None:
             out.append(data)
             continue
         a, b = sec["a"], sec["b"]
         old = "" if a in NULL_PATHS else _textify(fetch_blob(a, "base"))
         new = "" if b in NULL_PATHS else _textify(fetch_blob(b, "head"))
-        if old is None or new is None:
+        size = len((old or "").encode()) + len((new or "").encode())
+        if old is None or new is None or old == new or size > budget:
+            # Unreadable, too large, or no change left once NULs and line endings are normalised (a CRLF-only or
+            # NUL-for-NUL change): git's marker stays, and so does the cap.
             out.append(data)
             continue
+        budget -= size
         lines = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
                                      "/dev/null" if a in NULL_PATHS else f"a/{a}",
                                      "/dev/null" if b in NULL_PATHS else f"b/{b}", n=3)
         body = "".join(line if line.endswith("\n") else line + "\n" for line in lines)
-        out.append(data.split(b"\n", 1)[0] + b"\n" + body.encode("utf-8"))
-        rendered.append(b)
+        out.append(data[:marker.start()] + body.encode("utf-8"))
+        rendered.append(a if b in NULL_PATHS else b)
     return b"".join(out), rendered
 
 
 def fetch_blob(repo, pr_json, path, side):
-    """A file's bytes at the PR's merge base ("base") or head ("head"), or None when it cannot be read."""
-    ref = ((pr_json.get("merge_base") or (pr_json.get("base") or {}).get("sha")) if side == "base"
-           else (pr_json.get("head") or {}).get("sha"))
+    """A file's bytes at the PR's merge base ("base") or head ("head"), or None when it cannot be read. Never the base
+    branch's tip: Gitea's .diff is against the merge base, and a newer tip would show the PR undoing changes it did not
+    make."""
+    ref = pr_json.get("merge_base") if side == "base" else (pr_json.get("head") or {}).get("sha")
     if not ref:
         return None
     try:
@@ -2878,8 +2890,15 @@ def review_job(job_id, repo, pr, head_sha):
                            skip_body(head_sha, len(diff_bytes), "over the raw intake bound"),
                            "COMMENT", [], f"diff {len(diff_bytes)} B over raw bound - skipped",
                            verdict="skipped", coverage="none")
-    # A text file git marks binary only because it holds a NUL byte is read as text, not excluded.
+    # A text file git marks binary only because it holds a NUL byte is read as text, not excluded; the intake bound
+    # applies to the rebuilt diff too.
     diff_bytes, rendered = textify_nul_sections(diff_bytes, lambda path, side: fetch_blob(repo, d, path, side))
+    if len(diff_bytes) > CFG.get("max_raw_bytes", 10 * 1024 * 1024):
+        bump_meta("reviews_skipped_total")
+        return post_review(job_id, repo, pr, head_sha,
+                           skip_body(head_sha, len(diff_bytes), "over the raw intake bound"),
+                           "COMMENT", [], f"diff {len(diff_bytes)} B over raw bound - skipped",
+                           verdict="skipped", coverage="none")
     try:
         diff, dropped, coverage = plan_coverage(diff_bytes)
     except ValueError as e:
