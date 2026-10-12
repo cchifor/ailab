@@ -978,3 +978,67 @@ Nothing changes on the workers. Before an image rollback to `39517806`, do this 
 **Caveat.** The pre-smart-pools image (`39517806`) still carries the Codex model-refresh bug. Within about 40 minutes it
 rewrites `*` targets on router-owned Codex logins to a fixed model, `fallback-codex`'s five included. After rolling
 forward again, re-pin `fallback-codex`'s targets to `*`. The same caveat applied to `sub-codex-5`.
+
+## Live status and upgrades release (2026-10-11)
+
+`router-0.1.0-20261011-live-status` deploys merged llm-router main `1a7bb7e85d4053daef8771df18fc10d047c791e6`
+([#97](https://git.chifor.me/cchifor/llm-router/pulls/97)). Design: llm-router
+`docs/design/live-status-and-upgrades.md`.
+
+**What it adds.**
+- **Status, time window:** the stats cards take a window of 30 min, 1 h, 3 h, 6 h, 12 h or 24 h
+  (`GET /admin/v1/stats?window=…`, 24 buckets aligned to the clock). The week usage card stays on 7 days.
+- **Status, live serving:** each route shows the account serving it right now in bold green with "N running", then
+  "served N s ago", from `GET /admin/v1/live`. The page polls it every 5 s while it is visible.
+- **Running** is an accent pill that pulses, in the Activity list and the request detail.
+- **Cancellation reasons:** a cancelled request is labelled **Superseded** (the same conversation sent its next request
+  right after, e.g. a Codex multi-agent follow-up), **Interrupted by restart**, or **Cancelled** (the client left).
+  `explain_request` returns the reason.
+- **Activity layout:** a divider between the list and the detail can be dragged (or moved with the arrow keys,
+  double-click resets it). The list scrolls sideways on its own.
+- **Drain on SIGTERM:** `/ready` turns 503 and the listener closes, so the edge holds new requests. In-flight requests
+  finish for `ROUTER_DRAIN_MS`; every response sent meanwhile says `Connection: close`, so the edge opens a fresh
+  connection (to the next pod) for its next request. At the deadline the engine shuts down: streams still open are cut
+  with no terminal event and journaled as `cancelled` with cause `SHUTDOWN` (Codex reconnects through the edge), and a
+  request still arriving is refused with a reset. A stream already sending its own final event ends normally. Streams
+  send a keepalive every 5 s. A watchdog exits the process at `ROUTER_DRAIN_MS` + 15 s.
+
+**Configuration.** `router.yaml` sets `ROUTER_DRAIN_MS: "20000"`, the default, written out so it is visible next to the
+grace period. The router's watchdog exits at `ROUTER_DRAIN_MS` + 15 s (35 s), which must stay below
+`terminationGracePeriodSeconds` (60). The router refuses to start with a value above 40000.
+
+**First start.** The schema step that runs at every start creates index `trajectory_started` on
+`trajectories(started_at)` once. On 2026-10-11 the journal held 41,195 rows (335 MB). The same build over a synthetic
+journal of that size (41,195 rows, 361 MB) took 204 ms on a local disk; on the iSCSI volume with a cold cache, expect
+seconds at most, inside the edge's 85 s hold. `user_version` stays 7.
+
+**The first rollout still uses the old shutdown.** Kubernetes stops the old pod, which has no drain: it waits up to
+60 s on open streams and is then killed, as in earlier releases (a gap of about 76–79 s). The edge holds new requests
+meanwhile, but the streams the old pod held are lost: expect those rows as **Interrupted by restart** after the new pod
+starts. To verify the drain itself, run one deliberate `kubectl --context admin@ai -n llm-router rollout restart
+deploy/llm-router` once the new pod is up. Expect the following:
+- the pod log shows `SIGTERM, draining`, then `drained in … ms` (or `… request(s) still running: ending them (SHUTDOWN)`);
+- the journal for that window has no new **Interrupted by restart** rows, only `cancelled` / `SHUTDOWN` for streams
+  that outlived the 20 s;
+- the dev workers' turns continue; a cut stream shows as Codex's `Reconnecting… n/5` and recovers.
+
+**Known residual (llm-router ruling R11).** When the drain starts, Node's `server.close()` closes idle kept-alive
+connections once, and it counts a response as idle as soon as the response has ended, even while a slow reader still
+has its tail queued in the router. A response that ends at that instant can lose its tail; the client sees a cut stream
+or a short body and retries. Behind the edge this needs a reader that is applying backpressure at that exact moment.
+
+**Image.**
+- Archive `router-0.1.0-20261011-live-status.tar.gz`, SHA-256 `e6115e21a5aaae30ef78f0b665149d2536b7d236ef2d7741016ccd81ca4b77d6`; relay branch
+  `release/router-live-status-image`, [run 82431](https://git.chifor.me/cchifor/relay/actions/runs/82431).
+- Image `registry.chifor.me/llm-router/router@sha256:10c0828a04a12ae64205184aea0c74892f5d62a0c00513eb5c574962fe22117a`.
+- Before merge: 1721 tests passed, 0 failed, on Linux CI (Node 24), and on the production Node 26 image; typecheck,
+  build, the production smoke and the browser tests passed. Both reviewer bots approved it once ailab #1276 let them
+  read `trajectory-recorder/index.ts`, which git had marked binary for two raw NULs (now escapes).
+
+**Rollback.** In `router.yaml`, revert the image digest and both pod-template annotations together:
+- `image: registry.chifor.me/llm-router/router@sha256:33b4298abd96062003cf8cd30fac023eccc4ae82032d3c7b49fc91a62db37e2e`
+- `chifor.me/source-commit: cf6e0a23d23d12902ebbc3a2fe9677d3f24bafbe`
+- `chifor.me/release: router-0.1.0-20261011-activity-source`
+
+`ROUTER_DRAIN_MS` can stay: older images ignore it. The new index stays too; older images do not use it, and it costs
+one more index update per journal write. A rollback is itself a rollout of the NEW image's pod, so it drains.
