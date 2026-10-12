@@ -53,11 +53,12 @@ fail instead of prompting.
 powershell -ExecutionPolicy Bypass -File scripts\dw-paste\dw-paste-windows.ps1 -Install
 ```
 
-This copies itself to `%LOCALAPPDATA%\dw-paste\`, registers a logon Scheduled Task named `dw-paste`
-and starts it now. It runs hidden with a tray icon (right-click → *Open log* / *Quit*) and registers
-the global hotkey Ctrl+Shift+V. When the press is not for a dev-worker window, it re-sends
-Ctrl+Shift+V to the focused app, so Windows Terminal's text paste and other apps' Ctrl+Shift+V keep
-working.
+This copies itself to `%LOCALAPPDATA%\dw-paste\`, registers a Scheduled Task named `dw-paste`
+(at logon and at every unlock; an unlock while it runs does nothing) and starts it now. It runs
+under a headless `conhost`, so no window appears, with a tray icon (right-click → *Open log* /
+*Quit*), and registers the global hotkey Ctrl+Shift+V. When the press is not for a dev-worker
+window, it re-sends Ctrl+Shift+V to the focused app, so Windows Terminal's text paste and other
+apps' Ctrl+Shift+V keep working.
 
 - `-Uninstall` removes the task and stops the helper.
 - `-Once -Target c4@192.168.0.10` uploads the clipboard and puts the worker path(s) on your
@@ -106,7 +107,7 @@ terminals and most applications treat as paste.
 
 | | how | result |
 |---|---|---|
-| Windows | `-SelfTest`/`-Once` against dev-worker-4: a screenshot, and a PDF (spaces/parens in the name) + a PNG copied together; the `-Run` helper registering Ctrl+Shift+V and a second instance exiting | all pass. The keystroke injection into a live Windows Terminal and the focus guard are exercised by real use, not by an automated test. |
+| Windows | `-SelfTest`/`-Once` against dev-worker-4: a screenshot, and a PDF (spaces/parens in the name) + a PNG copied together; the `-Run` helper registering Ctrl+Shift+V and a second instance exiting; `-Install` on Windows 11 with Windows Terminal as the default terminal: the helper runs under `conhost --headless`, no Terminal window opens, Ctrl+Shift+V is held, the logon and unlock triggers are registered | all pass. The unlock restart is not exercised by a test. The keystroke injection into a live Windows Terminal and the focus guard are exercised by real use, not by an automated test. |
 | Linux X11 | `scripts/dw-paste/test-linux.sh`: Ubuntu container with Xvfb, an xterm titled with the marker, a pane recording raw input, a stand-in scp | 11/11: screenshot and file-list upload; real run → `ESC[200~/workspace/c4/pastes/…png ESC[201~` + typed space, no Enter; clipboard restored; text pastes normally; no upload from an unmarked window; no stale PRIMARY pasted; a `gnome-terminal-server` window (15-char `comm` truncation) recognised; focus moved during a slow upload → nothing pasted, path left on the clipboard |
 | Linux Wayland | — | not tested (needs a compositor) |
 | macOS | `luac5.4 -p` and a load test | syntax and module load only; Hammerspoon's APIs need a Mac. File names never reach a shell (copies use Lua I/O). |
@@ -117,6 +118,10 @@ terminals and most applications treat as paste.
   image only from a *pasted* path, and Codex only when the paste holds exactly one path. Run
   `bash ansible/roles/dev_worker/tests/check-agent-image-paste.sh` on the worker after agent
   upgrades.
+- **Ctrl+Shift+V pastes text again, even in a dev-worker window.** The helper is not running (no
+  tray icon). Installs from before the headless launcher opened a stray, empty-looking
+  *powershell.exe* Windows Terminal window at every logon, and closing it killed the helper with
+  no `stopped` line in the log. Re-run `-Install`. Since then, locking and unlocking also restarts it.
 - **Nothing happens / the old local path is pasted.** The window title lacks `[user@ip]`: the worker
   has not had the role's tmux change yet (`ansible-playbook dev-workers.yml -l <worker> -t tmux`),
   the terminal suppresses application titles, or you are outside tmux.
