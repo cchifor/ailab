@@ -571,11 +571,11 @@ else
 fi
 
 # ---- shared-cache purge queue ------------------------------------------------------------------
-# Corrupt npm/uv cache entries are purged only while act_runner is DOWN: the reclaim applies the queue
-# when the unit's MainPID is 0 (its ExecStartPre). An idle check is not a barrier - a job can start
-# between the check and a purge, and a uv install hardlinks from the archive being removed - so this
-# never purges itself. In a CONFIRMED idle gap it queues a restart of act_runner instead (--no-block):
-# the restart's ExecStartPre purges with the daemon down. If a job slips in first, the stop drains it
+# Corrupt npm/uv cache entries are purged only inside act_runner's start: the reclaim applies the queue
+# only as the unit's ExecStartPre, and systemd starts the daemon only after it exits. An idle check is
+# not a barrier - a job can start between the check and a purge, and a uv install hardlinks from the
+# archive being removed - so this never purges itself. In a CONFIRMED idle gap it queues a restart of
+# act_runner instead (--no-block), whose ExecStartPre purges. If a job slips in first, the stop drains it
 # (shutdown_timeout) before the purge runs. At most one such restart per CACHE_PURGE_RESTART_MIN_SEC
 # (6h), so a purge that keeps failing cannot restart the runner every 15 minutes; until it succeeds,
 # gitea_runner_cache_corrupt_pending stays up and alerts.

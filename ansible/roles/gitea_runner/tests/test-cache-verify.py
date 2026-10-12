@@ -271,6 +271,17 @@ class VerifyTests(Base):
             self.assertEqual(mod.main(["x", "verify"]), 0)
         self.assertIn(f"npm sha512:{h}", self.fx.queue(), "the rest of the pass still ran")
 
+    def test_an_unreadable_directory_is_skipped_not_fatal(self):
+        h, _ = self.fx.npm_put(b"tarball", corrupt=True)
+        odd = self.fx.npm / "content-v2/sha512/zz"
+        odd.mkdir(parents=True)
+        odd.chmod(0)   # a job dropped a 000-mode dir into the cache
+        try:
+            self.assertEqual(self.fx.run("verify"), 0)
+        finally:
+            odd.chmod(0o755)
+        self.assertIn(f"npm sha512:{h}", self.fx.queue(), "the rest of the pass still ran")
+
     def test_an_archive_deleted_during_the_pass_is_not_reported_corrupt(self):
         import shutil
         a = self.fx.uv_archive("Y" * 20, {"pkg/a.py": b"a", "pkg/b.py": b"b"})

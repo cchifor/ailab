@@ -18,7 +18,7 @@ host. Nothing checked either.
            venvs and cached uv environments share the inode. New entries are appended to the queue.
   publish  (root, ExecStartPost=+) - validate the result and write the node_exporter beacon.
   apply    (root) - validate the queue and hand the valid lines to `purge`, run as runner. Runs only
-           while act_runner is DOWN (MainPID 0): the reclaim runs it then, and
+           as act_runner's ExecStartPre (the reclaim, inside the unit's start transaction), and
            gitea-runner-cleanup.sh restarts act_runner in an idle gap to get there.
   purge    (runner, started by apply via runuser) - delete the queued entries, then the uv pointers
            that name a purged archive; print `ok <line>` per finished line.
@@ -95,7 +95,7 @@ CHUNK = 1 << 20
 NPM_KEY = re.compile(r"^(sha512:[0-9a-f]{128}|sha1:[0-9a-f]{40})$")
 UV_KEY = re.compile(r"^[A-Za-z0-9_-]{16,32}$")
 REL = re.compile(r"^[A-Za-z0-9._+@=-]+(/[A-Za-z0-9._+@=-]+)*$")
-SKIPPED = {"vanished": 0}
+SKIPPED = {"vanished": 0, "unreadable": 0}
 
 
 def runner_uid():
@@ -170,12 +170,15 @@ def record_path_ok(rel):
 
 def listdir(path):
     """os.listdir that tolerates the cache changing under the walk (a job's prune, uv replacing an
-    archive): a vanished directory is skipped and counted, never fatal to the whole pass."""
+    archive) or holding an odd entry (a 000-mode dir, a dir swapped for a file): skipped and counted,
+    never fatal to the whole pass."""
     try:
         return sorted(os.listdir(path))
     except FileNotFoundError:
         SKIPPED["vanished"] += 1
-        return []
+    except OSError:
+        SKIPPED["unreadable"] += 1
+    return []
 
 
 # ---------------------------------------------------------------------------------------------- verify
@@ -382,7 +385,7 @@ def cmd_verify():
                 fh.write("\n".join(add) + "\n")
     result = {"finished": int(time.time()), "duration": round(time.time() - t0, 1),
               "checked": {"npm": n_checked, "uv": u_checked}, "uv_no_record": no_record, "uv_envs": envs,
-              "skipped_vanished": SKIPPED["vanished"],
+              "skipped_vanished": SKIPPED["vanished"], "skipped_unreadable": SKIPPED["unreadable"],
               "found": {"npm": len(n_bad), "uv": len({b["key"] for b in u_bad})},
               "inplace": {"npm": 0, "uv": sum(1 for b in u_bad if b["inplace"])},
               "bad": bad[:200]}

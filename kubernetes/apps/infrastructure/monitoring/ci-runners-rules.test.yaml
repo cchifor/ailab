@@ -28,8 +28,8 @@ tests:
             exp_annotations:
               summary: CI runner 192.168.0.15:9100 has corrupt uv cache entries not yet purged
               description: 'The nightly cache verify found uv cache entries on 192.168.0.15:9100 whose content no longer matches their own hash, and they are still in the purge queue, so every job that
-                installs them fails (uv; npm re-fetches). The queue is applied with act_runner down, at its next restart; the cleanup restarts it in an idle gap at most every 6h, so a never-idle runner
-                keeps them. `systemctl restart gitea-act-runner` applies it at once (waits for the running job). Then read /var/lib/gitea-runner-cache/result.json and `journalctl -t gitea-runner-cache-purge`.
+                installs them fails (uv; npm re-fetches). The queue is applied inside act_runner''s next start (its ExecStartPre); the cleanup restarts it in an idle gap at most every 6h, so a never-idle
+                runner keeps them. `systemctl restart gitea-act-runner` applies it at once (waits for the running job). Then read /var/lib/gitea-runner-cache/result.json and `journalctl -t gitea-runner-cache-purge`.
                 Corruption points at the host, not the job: see docs/runbooks/ci-runners.md.'
   - interval: 1m
     name: no verify beacon for 30h on a long-up runner fires; one with the beacon, or just booted, does not

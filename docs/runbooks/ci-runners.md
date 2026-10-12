@@ -234,7 +234,8 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     against their `RECORD`, and queues bad entries in `/var/lib/gitea-runner-cache/purge.queue`. For uv it
     records whether the file changed after unpack (`corrupt_inplace_evidence`: a job wrote through a
     hardlink) and which venvs share the inode.
-  - `apply` (root) purges the queue only with act_runner DOWN (MainPID 0: its ExecStartPre, any stop), and
+  - `apply` (root) purges the queue only as act_runner's ExecStartPre (systemd starts the daemon only after
+    it exits, so no Gitea job runs during the purge; the reclaim timer never purges), and
     not when a co-located GitHub job is running at its start (checked once). The cleanup never purges
     itself: in a confirmed idle gap it restarts act_runner (at most every 6h) so the ExecStartPre does.
     Root only validates the queue (runner-owned regular file, strict lines, fixed roots); the purge and
@@ -251,8 +252,9 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     `…CacheVerifyStale` (>3d, after 4h of uptime), `…CacheVerifyBeaconMissing` (never ran: 30h on the 24/7
     pool, 6h after 4h of uptime on cloud), `…RootFilesystemFailed` (critical: the textfile collector reads
     NO file, the fast signal of a shut-down root, see section 9) and `…TextfileBeaconUnreadable` (warning:
-    one malformed beacon, the others still parse). `corrupt_found` alone pages nobody; corruption on a
-    runner points at its host.
+    one malformed beacon, the others still parse). If the critical fires but SSH works, check for a
+    malformed beacon first: a host whose ONLY .prom is malformed reads the same as a dead root.
+    `corrupt_found` alone pages nobody; corruption on a runner points at its host.
 - **GitHub agent reclaim on Gitea hosts:** the dormant GitHub agent's `runner-reclaim.sh` runs at every
   agent (re)start and used to `docker rm -f` every container and prune volumes, images and buildx builders,
   with no idea whether a Gitea job was mid-flight. From ailab#1284 (once `/usr/local/bin/runner-reclaim.sh`

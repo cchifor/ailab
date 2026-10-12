@@ -388,8 +388,8 @@ spec:
             description: >-
               The nightly cache verify found {{ $labels.cache }} cache entries on {{ $labels.instance }} whose
               content no longer matches their own hash, and they are still in the purge queue, so every job
-              that installs them fails (uv; npm re-fetches). The queue is applied with act_runner down, at
-              its next restart; the cleanup restarts it in an idle gap at most every 6h, so a never-idle
+              that installs them fails (uv; npm re-fetches). The queue is applied inside act_runner's next
+              start (its ExecStartPre); the cleanup restarts it in an idle gap at most every 6h, so a never-idle
               runner keeps them. `systemctl restart gitea-act-runner` applies it at once (waits for the
               running job). Then read
               /var/lib/gitea-runner-cache/result.json and `journalctl -t gitea-runner-cache-purge`. Corruption
