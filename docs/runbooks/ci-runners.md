@@ -152,7 +152,7 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
 `systemctl disable --now gitea-act-runner` or flip `gitea_runner_enabled: false`.
 
 **Maintenance automation (act_runner has NO per-job hook — the `gitea_runner` role ships two idle-guarded timers):**
-- **Workspace reclaim** (`gitea-runner-reclaim.sh`, `.timer` ~30s + a daemon `ExecStartPre`): act_runner
+- **Workspace reclaim** (`gitea-runner-reclaim.sh`, `.timer` every 5s + a daemon `ExecStartPre`): act_runner
   REUSES the per-repo host workspace across jobs; job containers leave root-owned artifact dirs until a new
   job can't `chdir` into its cwd and dies at its first step with the MISLEADING
   `fork/exec /usr/bin/bash: no such file or directory` (bash exists — the cwd is inaccessible). The reclaim
@@ -160,12 +160,28 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
 - **Docker/storage cleanup** (`gitea-runner-cleanup.sh`, `.timer` 15min): CI compose stacks accumulate tens
   of GB on the SHARED Docker daemon — **build cache 10-33 GB/runner + stale images** — until the disk fills
   and CI breaks (**ci-runner-2 hit 100%**). Prunes build cache + unused images + stopped/stale-running
-  containers + orphaned networks, with disk-pressure escalation (retention **48h → 6h at ≥80% → hard 1h +
-  actcache trim at ≥92%**). **Safe-by-construction** (hardened by an adversarial 3-lens review — the daemon
-  is shared with the GitHub agent and act_runner's idle signal is unreliable): window-based prunes
-  (`--filter until=…`, never `-af`) never touch in-use/recent resources; running containers are reaped only
+  containers + orphaned networks, with disk-pressure escalation. Retention starts at **24h**, tightens to
+  **6h at ≥75%** disk, and is **4h at ≥92%** (plus an actcache trim). No window may go below 4h, because the
+  job timeout is 3h. Two prunes run without a window: `builder prune -af` when the build cache is over its
+  20 GB cap at ≥75%, and `image prune -af` at **≥88%**. Both run only inside a CONFIRMED idle gap (3
+  consecutive idle reads, which rules out the false idle between steps). Running containers are reaped only
   past the **4h job timeout** and NEVER the persistent `buildx_buildkit_builder`; NO `docker volume prune`;
-  the idle check spans BOTH the gitea and GitHub runners. Tunables: `defaults/main.yml` `gitea_runner_cleanup_*`.
+  workspaces untouched for 48h are deleted. The idle check covers BOTH the gitea and GitHub runners.
+  Only ≥92% prunes during a live job, and only after the idle wait failed. Tunables:
+  `defaults/main.yml` `gitea_runner_cleanup_*` (the source of truth for every number above).
+- **Bounded /tmp** (since 2026-10-12): all jobs share one `/tmp`, and Ubuntu ages it only after **30 days**
+  (`/usr/lib/tmpfiles.d/tmp.conf`). It reached 9-22 GB per runner (`pytest-of-runner`, `node-compile-cache`).
+  The role overrides that file by name, re-rendered from the vendor file with only the age changed to **2d**.
+  It ages `/tmp/pytest-of-runner` at **6h** and `/tmp/node-compile-cache` at **1d**, and runs
+  `systemd-tmpfiles-clean` hourly. Every age stays above the 3h job timeout, so nothing a live job created
+  or modified can go. Check with `systemd-tmpfiles --cat-config | grep -A1 'tmpfiles.d/tmp.conf'` and
+  `du -sh /tmp`. The cloud runners also lose `/tmp` at every power-off (the `D` boot wipe). Tunables:
+  `gitea_runner_tmp_*`.
+- **GitHub agent reclaim on Gitea hosts:** the dormant GitHub agent's `runner-reclaim.sh` runs at every
+  agent (re)start and used to `docker rm -f` every container and prune volumes, images and buildx builders,
+  with no idea whether a Gitea job was mid-flight. Since 2026-10-12 it skips its whole docker block whenever
+  `gitea-act-runner.service` is enabled on the host (`github_runner_reclaim_gitea_unit`), and logs
+  `skip docker reclaim` under tag `runner-reclaim`. It still repairs workspaces and `~/.docker`.
 - **Beacons → node_exporter textfile** (`gitea_runner_{reclaim,cleanup}_*.prom`, mode **0644** so
   node_exporter can read them): `gitea_runner_cleanup_{disk_used_percent,disk_freed_percent,build_cache_bytes,
   images_bytes,reaped_containers,busy_skip,last_run_seconds}`. Alerts (`monitoring/ci-runners-rules.yaml`):
@@ -364,6 +380,21 @@ not booted with its host; disk and registration kept); and comment its address o
 `ci-runners-cloud.yaml` and its entry out of `inventory/hosts.yml` in one ailab PR, or `CloudCIRunnerDownWhileHostUp`
 fires. Undo all three together after a clean memory test of the host. cloud-ci-6 was quarantined
 this way on 2026-09-24 (#848).
+
+**A runner whose root filesystem has died** (seen on cloud-ci-5 and cloud-ci-7, 2026-10-12).
+- **Symptoms:**
+  - The VM is `running` and pingable, and node_exporter still answers.
+  - SSH resets during key exchange, and anything that runs a program fails with `Input/output error`.
+  - QEMU reports the virtual disk healthy, and `node_filesystem_readonly` stays 0.
+  - `node_textfile_scrape_error` for that instance goes to **1 within about a minute**. That is the fast signal; the beacon-missing alerts take 30 min.
+- **Cause:** an ext4 error (`htree_dirblock_to_tree` on a directory block) shut the filesystem down. The kernel 6.8 shutdown flag is not a read-only remount, so `/proc/mounts` still says `rw`.
+- **Confirm without SSH:** `pvesh get /nodes/<host>/qemu/<vmid>/agent/file-read --file /sys/fs/ext4/sda1/errors_count`. A non-zero count confirms it; `first_error_func` and `first_error_ino` in the same directory name the failing call and inode. This works because the guest agent is still resident.
+- **Recover:**
+  1. First check it is still dead: another session or operator may already have reset it. Re-read `errors_count`, and check the PVE task log `/var/log/pve/tasks/index`.
+  2. Run `qm reset <vmid>`. The boot replays the journal; the on-disk fsck found the directory intact both times.
+  3. A host-side `e2fsck -fy` via `losetup -P` on the stopped VM's LV is needed only if the boot drops into emergency mode.
+- **While it is down,** the act_runner daemon keeps running from memory and can accept a job and fail it. If a reset is not possible right away, disable the runner in Gitea from outside: `PATCH /api/v1/orgs/cchifor/actions/runners/<id> {"disabled": true}`.
+- **Do not walk a whole filesystem** (`find / -xdev …`) on a cloud3 guest while diagnosing. That walk is what tripped both shutdowns on 2026-10-12. Targeted reads of a few thousand files were fine.
 
 **Never delete a `cloud-ci-*` registration while a job of theirs may be within the watchdog's
 2 h lookback** — the API resolves `runner_name`/`runner_id` from the live runner row and the
