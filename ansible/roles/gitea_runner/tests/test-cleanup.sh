@@ -188,6 +188,13 @@ EOF
 
 # logger: keep the script's log lines (the last argument) in $WORK/logger.log, so a case can assert WHICH
 # record a heal acted on, not only that one ran.
+# Shared-cache purge applier: records "cacheverify <args>" into the same call log.
+cat >"$BIN/cacheverify" <<EOF
+#!/usr/bin/env bash
+echo "cacheverify \$*" >> "$CALLS"
+EOF
+chmod +x "$BIN/cacheverify"
+
 cat >"$BIN/logger" <<EOF
 #!/usr/bin/env bash
 for a in "\$@"; do last="\$a"; done
@@ -210,6 +217,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
     MOCK_MAINPID="${MOCK_MAINPID:-4242}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
+    GITEA_CACHE_VERIFY_BIN="$BIN/cacheverify" GITEA_CACHE_PURGE_QUEUE="${QUEUEFILE:-/nonexistent/queue}" \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
     GITEA_CLEANUP_IDLE_WAIT_SEC="${IDLEWAIT:-2}" GITEA_CLEANUP_IDLE_POLL_SEC=1 \
@@ -947,6 +955,18 @@ if [ -n "$role_envfile" ] && [ "$role_envfile" = "$script_envfile" ]; then
 else
   bad "M: env-file path DRIFT — the script reads '$script_envfile' but the role writes '$role_envfile'; every knob would silently fall back to its built-in default"
 fi
+
+echo "[N] the shared-cache purge queue is applied only inside a CONFIRMED idle window"
+QUEUEFILE="$WORK/purge.queue"
+echo "uv AAAAAAAAAAAAAAAAAAAA" > "$QUEUEFILE"
+QUEUEFILE="$QUEUEFILE" run_case 0 50
+assert_has "cacheverify apply" "N1: idle + non-empty queue -> applier runs"
+QUEUEFILE="$QUEUEFILE" run_case 1 50
+if grep -q '^cacheverify' "$CALLS"; then bad "N2: busy must defer the purge"; else ok "N2: busy -> purge deferred, queue kept"; fi
+: > "$QUEUEFILE"
+QUEUEFILE="$QUEUEFILE" run_case 0 50
+if grep -q '^cacheverify' "$CALLS"; then bad "N3: an empty queue must not run the applier"; else ok "N3: empty queue -> no applier"; fi
+unset QUEUEFILE
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

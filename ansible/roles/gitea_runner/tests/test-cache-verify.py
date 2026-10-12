@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Behavioural tests for gitea-runner-cache-verify.py (verify / publish / apply).
+
+Runs on the live runner VMs as `runner` (runner-scripts workflow), so every path is a throwaway fixture:
+fake npm and uv caches with planted corruption, a fake textfile dir, and a fake `runuser` that runs the
+deletion as the current user. Nothing here reads or writes the host's real caches.
+
+Usage: python3 ansible/roles/gitea_runner/tests/test-cache-verify.py   (exit 0 = pass)
+"""
+import base64
+import hashlib
+import importlib.util
+import os
+import stat
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+SCRIPT = Path(__file__).resolve().parent.parent / "files" / "gitea-runner-cache-verify.py"
+
+
+def b64(data):
+    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+
+
+class Fx:
+    def __init__(self, root):
+        self.root = Path(root)
+        self.home = self.root / "home"
+        self.npm = self.home / ".npm/_cacache"
+        self.uv = self.home / ".cache/uv"
+        self.state = self.root / "state"
+        self.textfile = self.root / "textfile"
+        self.pytest = self.root / "tmp/pytest-of-runner"
+        self.work = self.home / "act-runner/work"
+        for d in (self.npm, self.uv, self.state, self.textfile, self.pytest, self.work, self.home / ".local/share/uv"):
+            d.mkdir(parents=True, exist_ok=True)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        # runuser -u <user> -- <cmd...>: run <cmd...> as the current user and record the call.
+        (self.bin / "runuser").write_text('#!/usr/bin/env bash\necho "$*" >> "$FX/runuser.log"\nshift 3\nexec "$@"\n')
+        (self.bin / "runuser").chmod(0o755)
+
+    def npm_put(self, data, corrupt=False, algo="sha512"):
+        h = hashlib.new(algo, data).hexdigest()
+        p = self.npm / "content-v2" / algo / h[:2] / h[2:4] / h[4:]
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data[:-1] + b"X" if corrupt else data)
+        return h, p
+
+    def uv_archive(self, aid, files, corrupt=(), pointer=True):
+        a = self.uv / "archive-v0" / aid
+        di = a / "pkg-1.0.dist-info"
+        di.mkdir(parents=True)
+        rows = []
+        for rel, data in files.items():
+            f = a / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(data)
+            rows.append(f"{rel},sha256={b64(data)},{len(data)}")
+        rows.append("pkg-1.0.dist-info/RECORD,,")
+        rows.append("pkg/__pycache__/x.cpython-312.pyc,,")
+        (di / "RECORD").write_text("\n".join(rows) + "\n")
+        os.utime(a, None)
+        time.sleep(0.01)
+        for rel in corrupt:
+            (a / rel).write_bytes(b"corrupted" + (a / rel).read_bytes())
+        if pointer:
+            w = self.uv / "wheels-v6/pypi/pkg"
+            w.mkdir(parents=True, exist_ok=True)
+            (w / "1.0-py3-none-any.http").write_bytes(b"\x92\xa5blob\xb0" + aid.encode() + b"\x00")
+        return a
+
+    def env(self, **over):
+        e = {"FX": str(self.root), "GITEA_CACHE_VERIFY_ENV_FILE": "/nonexistent",
+             "GITEA_RUNNER_USER": "runner", "GITEA_RUNNER_HOME": str(self.home),
+             "GITEA_CACHE_NPM_DIR": str(self.npm), "GITEA_CACHE_UV_DIR": str(self.uv),
+             "GITEA_CACHE_STATE_DIR": str(self.state), "GITEA_CACHE_TEXTFILE_DIR": str(self.textfile),
+             "GITEA_CACHE_BEACON": "1", "GITEA_CACHE_RUNUSER": str(self.bin / "runuser"),
+             "GITEA_CACHE_LINK_ROOT_UVDATA": str(self.home / ".local/share/uv"),
+             "GITEA_CACHE_LINK_ROOT_PYTEST": str(self.pytest), "GITEA_CACHE_LINK_ROOT_WORK": str(self.work)}
+        e.update(over)
+        return e
+
+    def run(self, cmd, **over):
+        with mock.patch.dict(os.environ, self.env(**over)):
+            spec = importlib.util.spec_from_file_location(f"cv_{id(self)}_{cmd}_{time.time_ns()}", SCRIPT)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod.main(["x", cmd])
+
+    def queue(self):
+        q = self.state / "purge.queue"
+        return q.read_text().split("\n") if q.exists() else []
+
+    def prom(self):
+        p = self.textfile / "gitea_runner_cache_verify.prom"
+        return p.read_text() if p.exists() else ""
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.fx = Fx(self._t.name)
+
+    def tearDown(self):
+        self._t.cleanup()
+
+
+class VerifyTests(Base):
+    def test_clean_caches_queue_nothing_and_publish_zeroes(self):
+        self.fx.npm_put(b"good tarball")
+        self.fx.npm_put(b"sha1 entry", algo="sha1")
+        self.fx.uv_archive("A" * 20, {"pkg/_x.so": b"\x7fELF ok"})
+        self.assertEqual(self.fx.run("verify"), 0)
+        self.fx.run("publish")
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+        prom = self.fx.prom()
+        self.assertIn('gitea_runner_cache_checked{cache="npm"} 2', prom)
+        self.assertIn('gitea_runner_cache_checked{cache="uv"} 1', prom)
+        self.assertIn('gitea_runner_cache_corrupt_found{cache="npm"} 0', prom)
+        self.assertIn('gitea_runner_cache_corrupt_pending{cache="uv"} 0', prom)
+
+    def test_corrupt_npm_and_uv_are_found_queued_and_pending(self):
+        h, _ = self.fx.npm_put(b"tarball bytes", corrupt=True)
+        self.fx.uv_archive("B" * 20, {"pkg/_rust.abi3.so": b"\x7fELF good", "pkg/__init__.py": b"x=1\n"},
+                           corrupt=("pkg/_rust.abi3.so",))
+        self.fx.run("verify")
+        self.fx.run("publish")
+        q = [l for l in self.fx.queue() if l]
+        self.assertIn(f"npm sha512:{h}", q)
+        self.assertIn("uv " + "B" * 20, q)
+        prom = self.fx.prom()
+        self.assertIn('gitea_runner_cache_corrupt_found{cache="npm"} 1', prom)
+        self.assertIn('gitea_runner_cache_corrupt_found{cache="uv"} 1', prom)
+        self.assertIn('gitea_runner_cache_corrupt_pending{cache="npm"} 1', prom)
+        self.assertIn('gitea_runner_cache_corrupt_pending{cache="uv"} 1', prom)
+
+    def test_inplace_write_after_unpack_is_flagged(self):
+        a = self.fx.uv_archive("C" * 20, {"pkg/m.so": b"ok bytes"})
+        time.sleep(1.1)  # ctime granularity: the in-place write lands visibly after the archive dir's ctime
+        with open(a / "pkg/m.so", "r+b") as fh:
+            fh.write(b"XX")
+        self.fx.run("verify")
+        self.fx.run("publish")
+        self.assertIn('gitea_runner_cache_corrupt_inplace_evidence{cache="uv"} 1', self.fx.prom())
+
+    def test_symlink_to_a_fifo_is_skipped_not_hung(self):
+        h = hashlib.sha512(b"real").hexdigest()
+        p = self.fx.npm / "content-v2/sha512" / h[:2] / h[2:4] / h[4:]
+        p.parent.mkdir(parents=True)
+        fifo = self.fx.root / "fifo"
+        os.mkfifo(fifo)
+        p.symlink_to(fifo)
+        a = self.fx.uv_archive("D" * 20, {"pkg/a.py": b"a"})
+        os.unlink(a / "pkg/a.py")
+        os.mkfifo(a / "pkg/a.py")   # a FIFO in place of a RECORD file: O_NONBLOCK open + fstat rejects it
+        t0 = time.time()
+        self.fx.run("verify")
+        self.assertLess(time.time() - t0, 10)
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+
+    def test_record_paths_that_escape_the_archive_are_ignored(self):
+        a = self.fx.uv_archive("E" * 20, {"pkg/a.py": b"a"})
+        secret = self.fx.root / "secret"
+        secret.write_bytes(b"not part of the archive")
+        rec = a / "pkg-1.0.dist-info/RECORD"
+        rec.write_text(rec.read_text() + f"../../../secret,sha256={b64(b'other')},1\n/etc/passwd,sha256=AAAA,1\n")
+        self.fx.run("verify")
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+
+    def test_hardlinked_venv_is_recorded_for_removal(self):
+        a = self.fx.uv_archive("F" * 20, {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",))
+        venv = self.fx.pytest / "pytest-7/test_x0/.venv"
+        (venv / "lib/python3.12/site-packages/pkg").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        os.link(a / "pkg/m.so", venv / "lib/python3.12/site-packages/pkg/m.so")
+        self.fx.run("verify")
+        self.assertIn("venv pytest pytest-7/test_x0/.venv", self.fx.queue())
+
+
+class ApplyTests(Base):
+    def test_apply_purges_npm_uv_pointer_and_linked_venv_as_runner(self):
+        h, npm_file = self.fx.npm_put(b"tarball", corrupt=True)
+        a = self.fx.uv_archive("G" * 20, {"pkg/m.so": b"good"}, corrupt=("pkg/m.so",))
+        venv = self.fx.pytest / "pytest-3/test_y0/.venv"
+        (venv / "lib").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("x\n")
+        os.link(a / "pkg/m.so", venv / "lib/m.so")
+        pointer = self.fx.uv / "wheels-v6/pypi/pkg/1.0-py3-none-any.http"
+        self.fx.run("verify")
+        self.assertEqual(self.fx.run("apply"), 0)
+        self.assertFalse(npm_file.exists())
+        self.assertFalse(a.exists())
+        self.assertFalse(pointer.exists())
+        self.assertFalse(venv.exists())
+        self.assertTrue((self.fx.pytest / "pytest-3").exists(), "only the venv root goes, not its parents")
+        self.assertEqual([l for l in self.fx.queue() if l], [])
+        log = (self.fx.root / "runuser.log").read_text()
+        self.assertTrue(all(l.startswith("-u runner -- rm -rf --one-file-system -- ") for l in log.splitlines()), log)
+        self.assertIn('gitea_runner_cache_corrupt_pending{cache="uv"} 0', self.fx.prom())
+
+    def test_forged_queue_lines_are_rejected_and_nothing_outside_the_roots_is_touched(self):
+        victim = self.fx.root / "victim"
+        victim.mkdir()
+        (victim / "keep").write_text("x")
+        self.fx.state.joinpath("purge.queue").write_text("\n".join([
+            "npm sha512:../../../victim",
+            "uv ../../victim",
+            f"venv pytest ../../{victim.name}",
+            f"venv work {victim}",
+            "venv pytest .",
+            "venv nosuchroot a/b",
+            "rm -rf /",
+            "uv " + "H" * 20 + " extra",
+        ]) + "\n")
+        self.fx.run("apply")
+        self.assertTrue((victim / "keep").exists())
+        self.assertFalse((self.fx.root / "runuser.log").exists(), "no deletion may run for a forged line")
+        self.assertEqual([l for l in self.fx.queue() if l], [], "rejected lines are dropped, not retried")
+
+    def test_venv_entry_must_really_be_a_venv(self):
+        d = self.fx.work / "abc/hostexecutor/src"
+        d.mkdir(parents=True)
+        (d / "code.py").write_text("x")
+        self.fx.state.joinpath("purge.queue").write_text("venv work abc/hostexecutor/src\n")
+        self.fx.run("apply")
+        self.assertTrue((d / "code.py").exists())
+
+    def test_publish_without_a_result_writes_no_beacon(self):
+        self.fx.run("publish")
+        self.assertEqual(self.fx.prom(), "")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)

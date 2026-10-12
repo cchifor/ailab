@@ -36,6 +36,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/logger"
 # The job-boundary reaper: a recording mock. The runner VMs this suite runs on have the REAL reaper at
 # /usr/local/bin/gitea-runner-reap.py, so every run_reclaim must point GITEA_REAP_BIN here.
 printf '#!/usr/bin/env bash\necho "reap $*" >> "%s"\n' "$CALLS" >"$BIN/reap-mock"
+# The cache purge applier: a recording mock (the real one is root-only on the host).
+printf '#!/usr/bin/env bash\necho "cacheverify $*" >> "%s"\n' "$CALLS" >"$BIN/cacheverify-mock"
 chmod +x "$BIN"/*
 
 # ---- fixture: many reused workspaces, like a runner after weeks of agentforge ephemeral repos ----
@@ -51,6 +53,7 @@ done
 run_reclaim() {
   GITEA_RECLAIM_ENV_FILE=/nonexistent \
     GITEA_REAP_BIN="$BIN/reap-mock" GITEA_REAP_MODE="${REAP_MODE_OVERRIDE:-log}" \
+    GITEA_CACHE_VERIFY_BIN="$BIN/cacheverify-mock" GITEA_CACHE_PURGE_QUEUE="${QUEUE_OVERRIDE:-$WORK/no-queue}" \
     GITEA_RUNNER_WORKDIR_PARENT="$WSROOT" \
     GITEA_RUNNER_USER="$(id -un)" GITEA_RUNNER_GROUP="$(id -gn 2>/dev/null || id -g)" \
     GITEA_RUNNER_CONFIG_DIR="$WORK/cfg" \
@@ -99,6 +102,16 @@ grep -q '^reap' "$CALLS" && bad "D: --no-reap must not call the reaper" || ok "D
 : > "$CALLS"; REAP_MODE_OVERRIDE=off run_reclaim
 grep -q '^reap' "$CALLS" && bad "D: mode off must not call the reaper" || ok "D: mode off skips the reaper"
 unset REAP_MODE_OVERRIDE
+
+echo "[E] the cache purge queue is applied under ExecStartPre (--no-reap) only, and only when non-empty"
+echo "npm sha512:$(printf 'a%.0s' $(seq 128))" > "$WORK/queue"
+: > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim --no-reap
+grep -q '^cacheverify apply' "$CALLS" && ok "E: ExecStartPre applies a non-empty queue" || bad "E: ExecStartPre applies a non-empty queue"
+: > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim
+grep -q '^cacheverify' "$CALLS" && bad "E: a timer tick must not apply the queue" || ok "E: a timer tick leaves the queue alone"
+: > "$WORK/queue"; : > "$CALLS"; QUEUE_OVERRIDE="$WORK/queue" run_reclaim --no-reap
+grep -q '^cacheverify' "$CALLS" && bad "E: an empty queue must not run the applier" || ok "E: an empty queue is a no-op"
+unset QUEUE_OVERRIDE
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

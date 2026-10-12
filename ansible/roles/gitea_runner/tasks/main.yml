@@ -252,6 +252,55 @@
   notify: Restart systemd-resolved
   when: gitea_runner_enabled | bool
 
+# ── 4d2. shared-cache integrity check (nightly verify as runner; purge in race-free windows) ─────
+- name: Assert the purge queue lives in the cache-verify state directory
+  ansible.builtin.assert:
+    that:
+      - (gitea_runner_cache_verify_queue | dirname) == gitea_runner_cache_verify_state_dir
+    fail_msg: >-
+      gitea_runner_cache_verify_queue ({{ gitea_runner_cache_verify_queue }}) must be inside
+      gitea_runner_cache_verify_state_dir ({{ gitea_runner_cache_verify_state_dir }}), the runner-owned dir.
+  when: gitea_runner_cache_verify_enabled | bool
+
+- name: Ensure the cache-verify state directory (runner-owned, since the verifier writes its queue there)
+  ansible.builtin.file:
+    path: "{{ gitea_runner_cache_verify_state_dir }}"
+    state: directory
+    owner: "{{ gitea_runner_user }}"
+    group: "{{ gitea_runner_group }}"
+    mode: "0755"
+  when: gitea_runner_cache_verify_enabled | bool
+
+- name: Install the cache-verify config
+  ansible.builtin.template:
+    src: gitea-runner-cache-verify.env.j2
+    dest: "{{ gitea_runner_cache_verify_env }}"
+    mode: "0644"
+  when: gitea_runner_cache_verify_enabled | bool
+
+- name: Install the cache verifier / purge applier
+  ansible.builtin.copy:
+    src: gitea-runner-cache-verify.py
+    dest: "{{ gitea_runner_cache_verify_bin }}"
+    mode: "0755"
+  when: gitea_runner_cache_verify_enabled | bool
+
+- name: Install the cache-verify service
+  ansible.builtin.template:
+    src: gitea-runner-cache-verify.service.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_cache_verify_service }}"
+    mode: "0644"
+  notify: Reload systemd for gitea reclaim
+  when: gitea_runner_cache_verify_enabled | bool
+
+- name: Install the cache-verify timer
+  ansible.builtin.template:
+    src: gitea-runner-cache-verify.timer.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_cache_verify_timer }}"
+    mode: "0644"
+  notify: Restart gitea cache-verify timer
+  when: gitea_runner_cache_verify_enabled | bool
+
 # ── 4e. bounded /tmp (every job shares one /tmp; Ubuntu ages it at 30d) ─────
 # Ages, not a per-job wipe: see gitea_runner_tmp_age in defaults. `validate` runs systemd-tmpfiles under
 # --root=<a path that does not exist>: it parses every field (type, path, mode, user, group, age) and
@@ -348,6 +397,14 @@
     state: started
     daemon_reload: true
   when: gitea_runner_reclaim_enabled | bool
+
+- name: Enable + start the cache-verify timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_cache_verify_timer }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: gitea_runner_cache_verify_enabled | bool
 
 - name: Enable + start the docker/storage cleanup timer
   ansible.builtin.systemd:

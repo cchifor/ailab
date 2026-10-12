@@ -28,6 +28,14 @@
     enabled: true
     daemon_reload: true
 
+# Timer-only; the verify service never touches act_runner or a job.
+- name: Restart gitea cache-verify timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_cache_verify_timer }}"
+    state: restarted
+    enabled: true
+    daemon_reload: true
+
 # Picks up the hourly OnUnitActiveSec drop-in. Safe: the timer only runs systemd-tmpfiles --clean.
 - name: Restart systemd-tmpfiles-clean timer
   ansible.builtin.systemd:

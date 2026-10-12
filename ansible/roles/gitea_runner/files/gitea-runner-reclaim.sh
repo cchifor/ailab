@@ -51,7 +51,9 @@ REAP_BIN="${GITEA_REAP_BIN:-/usr/local/bin/gitea-runner-reap.py}"
 REAP_MODE="${GITEA_REAP_MODE:-log}"
 REAP_TIMEOUT="${GITEA_REAP_TIMEOUT_SEC:-90}"
 NO_REAP=0
-[ "${1:-}" = "--no-reap" ] && NO_REAP=1
+[ "${1:-}" = "--no-reap" ] && NO_REAP=1 # passed only by the unit's ExecStartPre
+CACHE_VERIFY_BIN="${GITEA_CACHE_VERIFY_BIN:-/usr/local/bin/gitea-runner-cache-verify.py}"
+CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
 
 log() { logger -t gitea-runner-reclaim -- "$*" 2>/dev/null || true; }
 
@@ -167,9 +169,19 @@ run_reaper() {
   timeout -k 5 "$REAP_TIMEOUT" "$REAP_BIN" || log "reaper exited rc=$?"
 }
 
+# Shared-cache purge queue: applied here ONLY under ExecStartPre (--no-reap), because the daemon is
+# down, so no job can be installing from an entry while it is removed. The cleanup timer applies it
+# too, inside its confirmed idle window.
+apply_cache_purges() {
+  [ "$NO_REAP" = 1 ] || return 0
+  [ -s "$CACHE_PURGE_QUEUE" ] && [ -x "$CACHE_VERIFY_BIN" ] || return 0
+  timeout -k 5 60 "$CACHE_VERIFY_BIN" apply 2>&1 | logger -t gitea-runner-cache-purge 2>/dev/null || true
+}
+
 main() {
   local status=ok foreign=0 cleaned=0 ws
   run_reaper
+  apply_cache_purges
   if daemon_busy; then
     status=busy
     log "skip: gitea job in flight (daemon has child processes)"

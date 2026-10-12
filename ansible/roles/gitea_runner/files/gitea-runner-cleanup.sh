@@ -119,6 +119,9 @@ HEAL_LOOKBACK_SEC="${GITEA_CLEANUP_HEAL_LOOKBACK_SEC:-604800}"
 # heal is not retried at all: it stays on the alert for a human.
 HEAL_COOLDOWN_SEC="${GITEA_CLEANUP_HEAL_COOLDOWN_SEC:-21600}"
 HEAL_STATE="${GITEA_CLEANUP_HEAL_STATE:-/var/lib/gitea-runner-cleanup/buildkit-heal.state}"
+# Shared-cache purge queue written by gitea-runner-cache-verify.py (nightly, as runner).
+CACHE_VERIFY_BIN="${GITEA_CACHE_VERIFY_BIN:-/usr/local/bin/gitea-runner-cache-verify.py}"
+CACHE_PURGE_QUEUE="${GITEA_CACHE_PURGE_QUEUE:-/var/lib/gitea-runner-cache/purge.queue}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 
@@ -563,6 +566,19 @@ else
     write_beacon "busy_skip 0" "pressure_defer 0" "midjob_prune 0" "last_run_seconds $(date +%s)" \
       "disk_used_percent $(disk_pct)"
     exit 0
+  fi
+fi
+
+# ---- shared-cache purge queue ------------------------------------------------------------------
+# Corrupt npm/uv cache entries found by the nightly verify are removed only inside a CONFIRMED idle
+# gap: a uv install in flight hardlinks from the archive being removed. The confirmation narrows that
+# race, it does not close it, so the reclaim's ExecStartPre (daemon down) applies the queue too. A
+# deferral keeps the queue; gitea_runner_cache_corrupt_pending stays up until it is applied.
+if [ -s "$CACHE_PURGE_QUEUE" ] && [ -x "$CACHE_VERIFY_BIN" ]; then
+  if idle_confirmed; then
+    timeout -k 5 120 "$CACHE_VERIFY_BIN" apply 2>&1 | logger -t gitea-runner-cache-purge 2>/dev/null || true
+  else
+    log "cache purge deferred: a job is running (the queue is kept)"
   fi
 fi
 

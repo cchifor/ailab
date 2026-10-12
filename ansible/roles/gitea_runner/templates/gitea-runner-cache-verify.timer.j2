@@ -1,0 +1,13 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Nightly; Persistent=true catches up a run missed while the host
+# was off, and the random delay spreads the VMs that share a hypervisor.
+[Unit]
+Description=Nightly runner cache integrity check
+
+[Timer]
+OnCalendar={{ gitea_runner_cache_verify_on_calendar }}
+RandomizedDelaySec={{ gitea_runner_cache_verify_random_delay }}
+Persistent=true
+Unit={{ gitea_runner_cache_verify_service }}
+
+[Install]
+WantedBy=timers.target
