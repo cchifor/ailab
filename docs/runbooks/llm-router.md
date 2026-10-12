@@ -117,21 +117,26 @@ drain above 40000 ms (a 57 s watchdog).
 **How to check after a rollout:** read the router journal for the rollout window. There must be no `abandoned`
 entries; only `cancelled` / `SHUTDOWN` for streams the drain cut.
 
-**To restart the router** (for example to verify a drain), scale it to 0 and back:
+**To restart the router** (for example to verify a drain), send its process SIGTERM inside the container:
 
 ```sh
-kubectl --context admin@ai -n llm-router scale deploy/llm-router --replicas=0
-kubectl --context admin@ai -n llm-router wait --for=delete pod -l app=llm-router --timeout=120s
-kubectl --context admin@ai -n llm-router scale deploy/llm-router --replicas=1
+kubectl --context admin@ai -n llm-router logs -f deploy/llm-router -c router &   # to watch the drain
+kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sh -c 'kill -TERM 1'
 ```
 
+- **What happens:** PID 1 is the router (`node dist/apps/router/main.js`), so it drains exactly as on any SIGTERM. Its
+  watchdog bounds that at `ROUTER_DRAIN_MS` + 17 s. Then it exits, and the kubelet restarts the container in the same
+  pod (`restartPolicy: Always`, after a back-off of about 10 s), with the same volume.
+- **What to check:** the pod's RESTARTS count goes up by one, and `kubectl logs --previous` shows the drained process.
+  The Deployment does not change, so Flux has nothing to undo, and no second router can start.
 - **Not `kubectl rollout restart`:** it adds a `restartedAt` annotation to the pod template. Flux removes the
   annotation at its next apply of `apps`, which restarts the router a second time. This was seen on 2026-10-12 at 07:42
   and 08:51, about 10 minutes after each deliberate restart.
 - **Not `kubectl delete pod`:** the ReplicaSet starts a replacement at once, outside the `Recreate` strategy. On the
   same node, that would run two routers on one SQLite volume while the old one drains.
-- **Why scaling is safe:** the old pod still drains on SIGTERM, and Flux setting `replicas: 1` back is the same end
-  state. This procedure had not been exercised yet when it was written (2026-10-12).
+- **Not scaling to 0 and back:** if Flux re-applies `replicas: 1` while the old pod still drains, the same second
+  router starts.
+- This procedure had not been exercised yet when it was written (2026-10-12).
 
 **An edge rollout** lets open streams finish (Caddy `grace_period 90s`, `preStop` sleep 5, `terminationGracePeriodSeconds: 100`);
 new connections go to the other replica (`maxUnavailable: 0`, PDB `minAvailable: 1`). If you change the Caddyfile
@@ -1146,7 +1151,8 @@ overload count starts over).
 **Why.** After the follow-ups release, Codex turns on the dev workers still ended with "Selected model is at
 capacity. Please try a different model." That is the Codex CLI's text for an error code of `server_is_overloaded`, and
 it ends the turn without a retry. Between 08:41 and 09:32 UTC about 23 requests ended this way (about 4% of all
-requests), on all four dev workers and on requests with no route. It happened in two ways:
+requests). It happened on all four dev workers, and on the reviewer bots' model-mode keys, whose journal rows have no
+`route` (reviewer-codex, model `codex`). It happened in two ways:
 - **Before output (about 6):** every attempt met the overload. The router failed over to another account, but the
   backend routes by the conversation's `prompt_cache_key`, so the second account met the same overload. The router's
   final `response.failed` then carried the upstream code.
