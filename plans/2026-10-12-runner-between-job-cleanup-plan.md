@@ -1,6 +1,6 @@
 # Gitea runner: cleanup between jobs, and cache integrity
 
-Round-1 review and per-finding resolutions: `2026-10-12-runner-between-job-cleanup-review-r1.md`. The Codex seat was out of quota (it resets 2026-10-18), so an independent Claude Plan agent reviewed this plan instead.
+Review record: `2026-10-12-runner-between-job-cleanup-review-r1.md` covers round 1 and the per-finding resolutions; round 2 is summarised at the end of that file. The Codex seat was out of quota (it resets 2026-10-18), so an independent Claude Plan agent reviewed this plan instead.
 
 ## Context
 
@@ -39,7 +39,7 @@ Out of scope:
 ### PR 1 (low risk): bounded `/tmp`, GitHub reclaim guard, runbook refresh
 
 **1-B /tmp.**
-- Override the vendor file by name with `/etc/tmpfiles.d/tmp.conf`, containing `D /tmp 1777 root root 2d`. That keeps the boot wipe and changes only the age.
+- Override the vendor file by name with `/etc/tmpfiles.d/tmp.conf`, **rendered from the vendor file** (`slurp` `/usr/lib/tmpfiles.d/tmp.conf`, rewrite only the age field of the single `/tmp` line, and assert that exactly one such line exists). Every other vendor line survives, the boot wipe is kept, and only the age becomes `2d`.
 - `/etc/tmpfiles.d/gitea-runner-tmp.conf` adds `e /tmp/pytest-of-runner - - - 6h` and `e /tmp/node-compile-cache - - - 1d`. These are different paths, so no duplicate-line collision.
 - A `systemd-tmpfiles-clean.timer` drop-in sets `OnUnitActiveSec=1h`.
 - Why this is safe: anything a live job created or modified is under 3 h old (the job timeout), and the smallest age here is 6 h. Under relatime a file a job only *reads* can look older. That only affects caches (node-compile-cache), where losing an entry costs a recompile.
@@ -66,7 +66,7 @@ This is a new phase of `gitea-runner-reclaim.sh`. It runs on the existing 5 s ti
 
 **Boundary `B`.**
 - Read new journal entries since a stored cursor: `journalctl _SYSTEMD_UNIT=<svc> _PID=<MainPID> -o json --after-cursor=…`.
-- Accept only messages from `_COMM=act_runner` whose `MESSAGE` matches the anchored `^time="([^"]+)" level=info msg="task [0-9]+ repo is [A-Za-z0-9._/-]+ `. That ignores `logger` lines from job processes, which journald attributes to the same unit.
+- Accept only messages from `_COMM=act_runner` whose `MESSAGE` matches an anchored regex taken from a **captured real line**. For example, from cloud-ci-9: `time="2026-10-12T13:56:15+03:00" level=info msg="task 434665 repo is cchifor/platform https://github.com https://git.chifor.me"`. The test fixture is that captured line, verbatim. The parser handles the `±hh:mm` offset. Matching this way ignores `logger` lines from job processes, which journald attributes to the same unit.
 - For each accepted line, compute two boot-relative estimates and take the **earlier** one:
   - logrus `time=` (floored to the second, act_runner's own clock at the log call), converted with the current `btime`;
   - `__MONOTONIC_TIMESTAMP` (journald receive time, with the same `_BOOT_ID`).
@@ -105,7 +105,10 @@ c. **Networks and volumes.**
 
 **Modes.**
 - `gitea_runner_reap_mode`: `off | log | enforce`, default **`log`**. Log mode writes `would-reap <kind> <id> age=… reason=…`.
-- **Adoption probe** (log mode): on each later edge, check whether objects reported as would-reap are still in use by the current job. A process still alive and holding a listening port the job connected to is hard to prove, so the probe tracks the evidence that matters: a container, network or volume reported earlier that is now attached to a running container started ≥ B. A non-zero `gitea_runner_reap_adopted_total` blocks the switch to enforce.
+- **Adoption probe** (log mode):
+  - On the periodic pass, run `timeout 15 docker events --since <B> --until <now> --filter` for the would-reap container, network and volume ids. Any `exec_*`, `attach`, `connect`, `start`, `restart`, `stop`, `kill`, `die`, `destroy` or `mount` after B means the current job took the object over (Compose `up` keeping a running container shows as exec/attach/connect, not as a new attach).
+  - For processes, a would-reap PID that the current job's cgroup members connect to cannot be proven cheaply. So process reaping is held to the same gate, and the canary checks for jobs that fail at or after the edge pass.
+  - A non-zero `gitea_runner_reap_adopted_total` blocks enforce.
 - Measure task line → first `docker compose up` per repo from the journal and logs, to size the take-over window.
 
 **Beacon:**
@@ -116,7 +119,11 @@ c. **Networks and volumes.**
 - `gitea_runner_reap_adopted_total`
 - `gitea_runner_reap_refused`
 
-**Switching to enforce** is a one-line role var change in a follow-up PR. It happens after two or more CI days of log data with zero adoption and no would-reap object that later failed a job.
+**Switching to enforce** is a one-line role var change in a follow-up PR. Preconditions:
+- two or more CI days of log data;
+- `adopted_total == 0`;
+- no would-reap object that later failed a job;
+- `boundary_age_seconds ≥ 0` on every runner that ran jobs in that window, which proves the regex parses real lines and the gate is not passing on a missing B.
 
 ### PR 3 (medium): cache integrity verifier, purge queue, alerts
 
@@ -126,14 +133,21 @@ c. **Networks and volumes.**
 - uv: `archive-v0/<id>` is checked against every `*.dist-info/RECORD` sha256 (urlsafe-b64). Archives without a RECORD are counted, not failed.
 - For each bad file it records evidence: `nlink`; `mtime`/`ctime` against the archive dir's ctime (a later write means modified in place); size and path.
 
-**Purge queue.** Bad entries are appended to `/var/lib/gitea-runner-cache/purge.queue` (owned by runner). The queue is applied only inside race-free windows:
-- reclaim ExecStartPre (daemon down; the cloud runners boot daily);
-- `gitea-runner-cleanup.sh`, inside its **existing** `idle_confirmed` window. One call, no new copy of the idle logic.
+**Purge queue.** The verifier runs as runner, so the queue is untrusted input to a root applier. It is hardened:
+- Each entry is `<cache> <id-or-digest>`, accepted only if it matches a strict regex: npm `sha512|sha1` plus a hex digest; uv `[A-Za-z0-9_-]{16,32}` archive ids.
+- The **applier builds every path itself** under the fixed cache roots and never reads a path from the queue.
+- Deletes run via `runuser -u runner --`.
+- The `pyvenv.cfg` walk is bounded to the listed roots and never removes a root itself.
+- Everything sits under a hard `timeout 120`.
+
+The queue is applied only inside these windows:
+- reclaim ExecStartPre (daemon down; the cloud runners boot daily). Bounded work only: deleting the listed entries under the timeout, no hashing, no GC, no broad `find`.
+- `gitea-runner-cleanup.sh`, inside its **existing** `idle_confirmed` window: one call, no new copy of the idle logic, same timeout.
 
 Purge actions:
-- npm: run `npm cache verify` as runner. It rehashes, removes bad content and rewrites index-v5.
+- npm: delete **only the listed content files**. `npm cache verify` is not used here: its GC can drop content that a just-started job wrote but has not indexed yet, and its runtime is unbounded. An index entry left pointing at missing content is read as a cache miss and re-fetched; the canary confirms that.
 - uv: remove the `archive-v0/<id>` dir, plus every non-archive file under the uv cache whose bytes name `<id>`. This does not depend on the uv version: the host's uv 0.5.11 is older than the setup-uv versions that write the cache, so `uv cache clean` could miss newer buckets.
-- If `nlink > 1`, `find` the other links under `~/.local/share/uv`, `/tmp/pytest-of-runner` and `~/act-runner/work` with `-xdev -samefile`, and remove each one's venv root (nearest `pyvenv.cfg`) or pytest session dir.
+- If `nlink > 1`, the **verifier** (not the applier) records the other links, found with `find -xdev -samefile` under `~/.local/share/uv`, `/tmp/pytest-of-runner` and `~/act-runner/work`, as venv-root ids relative to those roots. The applier re-validates each id against its root and removes that venv root (nearest `pyvenv.cfg`) or pytest session dir as runner.
 
 **Schedule and limits.**
 - Timer: `OnCalendar=04:30`, `RandomizedDelaySec=2h`, `Persistent=true`, `OnBootSec=45min`.
@@ -152,8 +166,10 @@ Purge actions:
 | Alert | Condition | Severity |
 |---|---|---|
 | `…CacheCorruptPending` | `corrupt_pending > 0` for 30m | warning |
-| `…CacheCorruptFound` | `corrupt_found > 0` (points at the host) | info |
+| `…CacheVerifyBeaconMissing` | `absent(...cache_verify_last_run_seconds)` and boot > 4h | warning |
 | `…CacheVerifyStale` | last run > 3d and `time() - node_boot_time_seconds > 4h` | warning |
+
+`corrupt_found` gets no alert: Alertmanager has no severity route, so even `info` reaches ntfy every 4 h. It stays a dashboard series, a signal that points at the host.
 | `…RootFilesystemFailed` | `node_textfile_scrape_error == 1` for 3m | **critical**; the runbook says disable the runner in Gitea from outside |
 
 Add `ci-runners-rules.test.yaml` (new; rules-lint auto-discovers siblings) and extend `ci-runners-cloud-rules.test.yaml`.
@@ -212,12 +228,15 @@ Reaper cases:
 - B moving mid-pass triggers a recompute.
 - Env-var drift check (as in test-cleanup.sh [M]).
 - The existing single-pass `/proc` test still holds.
+- The boundary parser is tested on the verbatim captured line (with its `+03:00` offset).
+- The adoption probe flags a would-reap container that shows an `exec_start` event after B.
 
 `test-cache-verify.sh`:
 - A corrupt npm file and a RECORD mismatch are found.
 - In-place evidence is flagged when ctime is newer than the archive.
 - The queue is written; purge happens only through the queue appliers; pointer files are removed; a hardlinked venv root is removed.
 - O_NOFOLLOW: a symlink to a FIFO does not hang.
+- The applier rejects a queue line that carries a path or `..`, and never deletes outside the fixed roots.
 
 `test_dsh_validator_pin.py`: the reclaim env exemption and the GitHub reclaim guard. `promtool test rules` covers all new rules. `shellcheck` on the changed scripts.
 
@@ -247,4 +266,4 @@ Reaper cases:
 7. **tmpfiles removes a cache file mid-job** (low × low). Caches only. Job-created files are under 3 h old against a 6 h minimum.
 8. **The verifier's I/O during the CI day** (medium × low). CPUQuota, IOWeight and bandwidth caps.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
