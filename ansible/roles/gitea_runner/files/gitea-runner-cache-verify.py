@@ -266,7 +266,8 @@ def venv_root_for(path, root, name):
 def verify_uv():
     """Every wheel archive must carry a RECORD that hashes every file it lists. Measured 2026-10-12 on
     cloud-ci-9 (7518 archives) and ci-runner-4 (64954): every non-environment archive had one, the only
-    unhashed row was RECORD itself, and every hash was sha256. So anything else marks the archive corrupt."""
+    unhashed row was RECORD itself, and every hash was sha256 (all urlsafe-base64 but one uv-0.8.2-built
+    wheel's hex rows). So anything else marks the archive corrupt."""
     checked, bad, no_record, envs = 0, [], 0, 0
     linked = {}   # (dev, ino) -> entries whose corrupt inode is shared
 
@@ -331,7 +332,11 @@ def verify_uv():
                     corrupt(aid, row[0], "missing or not a regular file")
                     continue
                 checked += 1
-                if base64.urlsafe_b64encode(h.digest()).rstrip(b"=").decode() == want:
+                # The spec says urlsafe-base64, but uv 0.8.2's build backend wrote HEX digests: the
+                # ag_ui_protocol 0.1.14 wheel on PyPI (on every runner, every hex digest matching its file,
+                # 2026-10-12). A full-length digest in either encoding proves the content; corruption
+                # matches neither.
+                if want in (base64.urlsafe_b64encode(h.digest()).rstrip(b"=").decode(), h.hexdigest()):
                     continue
                 # mtime, not ctime: link()/unlink() of another hardlink also bumps ctime, and every uv
                 # install hardlinks from the archive. Only a content write moves mtime past the unpack.

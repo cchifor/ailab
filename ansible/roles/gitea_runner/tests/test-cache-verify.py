@@ -187,6 +187,23 @@ class VerifyTests(Base):
         self.assertEqual([l for l in self.fx.queue() if l], ["uv " + "E" * 20])
         self.assertFalse([p for p in opened if "secret" in p or "passwd" in p], opened)
 
+    def test_hex_digests_are_accepted_when_they_match_and_corrupt_when_they_do_not(self):
+        # uv 0.8.2's build backend writes hex sha256 into RECORD (ag_ui_protocol 0.1.14, 2026-10-12)
+        for aid, good in (("H" * 20, True), ("I" * 20, False)):
+            a = self.fx.uv / "archive-v0" / aid
+            (a / "pkg").mkdir(parents=True)
+            (a / "pkg-1.0.dist-info").mkdir()
+            (a / "pkg/__init__.py").write_bytes(b"")
+            (a / "pkg/m.py").write_bytes(b"x = 1\n" if good else b"x = 2\n")
+            rows = [f"pkg/__init__.py,sha256={hashlib.sha256(b'').hexdigest()},0",
+                    f"pkg/m.py,sha256={hashlib.sha256(b'x = 1' + bytes([10])).hexdigest()},6",
+                    "pkg-1.0.dist-info/RECORD,,"]
+            (a / "pkg-1.0.dist-info/RECORD").write_text("\n".join(rows) + "\n")
+        self.fx.run("verify")
+        q = [l for l in self.fx.queue() if l]
+        self.assertNotIn("uv " + "H" * 20, q, "a matching hex digest is a valid RECORD")
+        self.assertIn("uv " + "I" * 20, q, "a hex digest that does not match is still corruption")
+
     def test_archives_without_a_usable_record_are_corrupt_but_a_uv_environment_is_not(self):
         nodi = self.fx.uv / "archive-v0" / ("N" * 20)          # no .dist-info at all
         (nodi / "pkg").mkdir(parents=True)
