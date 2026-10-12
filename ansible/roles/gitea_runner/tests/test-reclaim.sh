@@ -33,6 +33,9 @@ printf '#!/usr/bin/env bash\necho 0\n' >"$BIN/systemctl"
 # docker ps -q -> no containers (no bind-mount busy paths).
 printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/docker"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/logger"
+# The job-boundary reaper: a recording mock. The runner VMs this suite runs on have the REAL reaper at
+# /usr/local/bin/gitea-runner-reap.py, so every run_reclaim must point GITEA_REAP_BIN here.
+printf '#!/usr/bin/env bash\necho "reap $*" >> "%s"\n' "$CALLS" >"$BIN/reap-mock"
 chmod +x "$BIN"/*
 
 # ---- fixture: many reused workspaces, like a runner after weeks of agentforge ephemeral repos ----
@@ -47,11 +50,12 @@ done
 
 run_reclaim() {
   GITEA_RECLAIM_ENV_FILE=/nonexistent \
+    GITEA_REAP_BIN="$BIN/reap-mock" GITEA_REAP_MODE="${REAP_MODE_OVERRIDE:-log}" \
     GITEA_RUNNER_WORKDIR_PARENT="$WSROOT" \
     GITEA_RUNNER_USER="$(id -un)" GITEA_RUNNER_GROUP="$(id -gn 2>/dev/null || id -g)" \
     GITEA_RUNNER_CONFIG_DIR="$WORK/cfg" \
     GITEA_RECLAIM_BEACON=0 GITEA_RECLAIM_TEXTFILE_DIR=/nonexistent \
-    PATH="$BIN:$PATH" bash "$SCRIPT" >/dev/null 2>&1
+    PATH="$BIN:$PATH" bash "$SCRIPT" "$@" >/dev/null 2>&1
 }
 
 fails=0
@@ -86,6 +90,15 @@ if [ -e "/proc/$$/cwd" ]; then
 else
   echo "  SKIP: /proc/<pid>/cwd not available on this platform (runs on the Linux runner VMs)"
 fi
+
+echo "[D] the job-boundary reaper runs on a timer tick, and never under ExecStartPre (--no-reap) or mode off"
+: > "$CALLS"; run_reclaim
+[ "$(grep -c '^reap' "$CALLS")" -eq 1 ] && ok "D: tick calls the reaper once" || bad "D: tick calls the reaper once"
+: > "$CALLS"; run_reclaim --no-reap
+grep -q '^reap' "$CALLS" && bad "D: --no-reap must not call the reaper" || ok "D: --no-reap skips the reaper"
+: > "$CALLS"; REAP_MODE_OVERRIDE=off run_reclaim
+grep -q '^reap' "$CALLS" && bad "D: mode off must not call the reaper" || ok "D: mode off skips the reaper"
+unset REAP_MODE_OVERRIDE
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

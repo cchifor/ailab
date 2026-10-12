@@ -150,6 +150,35 @@
     mode: "0755"
   when: gitea_runner_reclaim_enabled | bool
 
+# The reaper's whole safety case rests on capacity 1: with two task slots, "created before the newest
+# task line" would include a concurrent LIVE job. The script also refuses on its own if config.yaml
+# disagrees, so this assert is the early, loud half.
+- name: Assert capacity 1 while the job-boundary reaper is on
+  ansible.builtin.assert:
+    that:
+      - gitea_runner_reap_mode in ['off', 'log', 'enforce']
+      - gitea_runner_reap_mode == 'off' or (gitea_runner_capacity | int) == 1
+    fail_msg: >-
+      gitea_runner_reap_mode={{ gitea_runner_reap_mode }} needs gitea_runner_capacity == 1 (got
+      {{ gitea_runner_capacity }}). Set gitea_runner_reap_mode: off before raising capacity.
+  when: gitea_runner_reclaim_enabled | bool
+
+- name: Ensure the reaper state directory
+  ansible.builtin.file:
+    path: "{{ gitea_runner_reap_state | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: gitea_runner_reclaim_enabled | bool
+
+- name: Install the job-boundary leftover reaper
+  ansible.builtin.copy:
+    src: gitea-runner-reap.py
+    dest: "{{ gitea_runner_reap_bin }}"
+    mode: "0755"
+  when: gitea_runner_reclaim_enabled | bool
+
 - name: Install the workspace-reclaim oneshot service
   ansible.builtin.template:
     src: gitea-runner-reclaim.service.j2
