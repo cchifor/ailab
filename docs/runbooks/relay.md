@@ -583,7 +583,8 @@ Then `migrate` applies 006–049 and re-applies every `relay_app` grant, and onl
 
 - the manual pre-merge backup run (Job created from `relay-postgres-dump`) and its published
   generation;
-- the per-rollout pre-migration generation named in the `backup-database` log;
+- the pre-migration generation named in the `backup-database` log of the **first** init attempt
+  (see the rollback note on retries), plus any later attempts' generations;
 - the `migrate` and `bootstrap` log lines and exit 0, and `SELECT max(version) FROM
   schema_migrations` = 49;
 - Relay 1/1 Ready on the new digest;
@@ -625,9 +626,20 @@ swaps that database and needs no Secret change. Do not start 0.3.5 against schem
    3. In the new `relay` database, replay the per-database statements from
       `postgres-bootstrap.yaml`: the `REVOKE CREATE ON SCHEMA public`, the `GRANT USAGE`, and the
       four `ALTER DEFAULT PRIVILEGES`.
-3. **Restore.** Copy that rollout's pre-migration `relay.dump` into the pod and check it against its
-   generation's `SHA256SUMS`. Then run `pg_restore -U postgres --role=relay_migrator --no-owner
-   --no-acl --exit-on-error -d relay`.
+3. **Restore.** Pick the generation first:
+   - **Use the EARLIEST generation of this rollout**, the one named in the `backup-database` log of
+     the first init attempt. `migrate` commits each migration file in its own transaction. If it
+     fails partway, the init chain retries, and every retry's `backup-database` publishes a new
+     generation of an already **partially migrated** database. Never restore the latest
+     generation by default.
+   - If the first attempt's generation is unknown, use the manual pre-merge generation
+     `20261013T073237Z-8a79e0e2-34ca-4619-90f4-9840ab4a4638`. It is known pure 0.3.5 (schema 5),
+     but it loses writes made between 07:32Z and the rollout.
+   - Either way, confirm on the restored database that `max(version) FROM schema_migrations` = 5.
+
+   Copy that generation's `relay.dump` into the pod and check it against the generation's
+   `SHA256SUMS`. Then run `pg_restore -U postgres --role=relay_migrator --no-owner --no-acl
+   --exit-on-error -d relay`.
 4. **Verify the restored database before anything starts**:
    - table and row counts match the generation;
    - every table is owned by `relay_migrator`;
