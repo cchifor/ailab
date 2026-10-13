@@ -699,6 +699,19 @@ then delete their Relay membership and sessions as `postgres` inside `relay-post
 
 Afterwards, remove the throwaway's Relay membership and delete its Keycloak user.
 
-**Rollback**: one reviewed change setting `RELAY_AUTH_MODE` back to `local` (stage 1, proven by
-that stage's admin-token sign-in). The `OIDC_*` values may stay. The database is unaffected:
-memberships keyed on the Keycloak issuer simply stop matching anything.
+**Rollback**: one reviewed change setting `RELAY_AUTH_MODE` back to `local` (stage 1; its
+admin-token sign-in was verified). Then revoke the sessions OIDC minted. They stay valid for up to
+8 h, and the two modes must not overlap. As `postgres` inside `relay-postgres-0`, against `relay`:
+
+```sql
+DELETE FROM sessions s USING users u
+ WHERE s.user_id = u.id AND u.subject LIKE 'https://id.chifor.me/realms/relay|%';
+```
+
+The `OIDC_*` values may stay. Memberships keyed on the Keycloak issuer simply stop matching
+anything.
+
+**Callback URL**: Relay builds `redirect_uri` from `RELAY_URL` (`https://relay.chifor.me` +
+`/api/auth/callback`), not from request or proxy headers. In OIDC mode Relay refuses to start
+unless `RELAY_URL` is an exact HTTPS origin. Keycloak's `relay` client allows exactly that one
+redirect URI, so changing the public origin means changing both.
