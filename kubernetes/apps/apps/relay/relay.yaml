@@ -132,7 +132,9 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-      - image: registry.chifor.me/relay/control-plane@sha256:3571fb473a1657c6ee85405e08b0505204139449be9dd91da7b6fc717119b6cc
+      # Relay v0.6.0, source be1b72ebb7c19ac312500b9c4df12eea0f971dc2,
+      # release 2125 / run 84499.
+      - image: registry.chifor.me/relay/control-plane@sha256:5e01b323d6e5cacd4980d7bcc14082ec937d1731a69a89af2568f8f322b9f774
         workingDir: /app
         envFrom:
         - secretRef:
@@ -176,7 +178,9 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      - image: registry.chifor.me/relay/control-plane@sha256:3571fb473a1657c6ee85405e08b0505204139449be9dd91da7b6fc717119b6cc
+      # Relay v0.6.0, source be1b72ebb7c19ac312500b9c4df12eea0f971dc2,
+      # release 2125 / run 84499.
+      - image: registry.chifor.me/relay/control-plane@sha256:5e01b323d6e5cacd4980d7bcc14082ec937d1731a69a89af2568f8f322b9f774
         workingDir: /app
         envFrom:
         - secretRef:
