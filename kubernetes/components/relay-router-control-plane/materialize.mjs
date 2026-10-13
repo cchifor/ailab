@@ -68,7 +68,8 @@ try {
     baoMount: metadata.baoMount,
     baoPrefix: metadata.baoPrefix,
   }], null, 2) + '\n');
-} catch {
-  console.error('Relay router private-file setup failed; input values withheld.');
+} catch (error) {
+  const code = /^E[A-Z]{1,20}$/.test(error?.code ?? '') ? error.code : 'INVALID_INPUT';
+  console.error(`Relay router private-file setup failed (${code}); input values withheld.`);
   process.exitCode = 1;
 }
