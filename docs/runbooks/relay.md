@@ -584,8 +584,8 @@ Then `migrate` applies 006–049 and re-applies every `relay_app` grant, and onl
 - the manual pre-merge backup run (Job created from `relay-postgres-dump`) and its published
   generation;
 - the per-rollout pre-migration generation named in the `backup-database` log;
-- the `migrate` and `bootstrap` log lines and exit 0, and `SELECT max(version)` on the migrations
-  table, which must cover 049;
+- the `migrate` and `bootstrap` log lines and exit 0, and `SELECT max(version) FROM
+  schema_migrations` = 49;
 - Relay 1/1 Ready on the new digest;
 - `/health` and `/ready` returning 200, and `/api/auth/config` reporting local;
 - one administrator-token sign-in returning 200.
