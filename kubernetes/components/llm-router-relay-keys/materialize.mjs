@@ -14,7 +14,7 @@ async function read(name, maximum) {
 }
 
 async function write(value) {
-  const path = '/output/trust.json';
+  const path = '/output/private/trust.json';
   await rm(`${path}.new`, { force: true });
   const file = await open(`${path}.new`, 'wx', 0o600);
   try { await file.writeFile(value); await file.sync(); } finally { await file.close(); }
@@ -30,10 +30,13 @@ try {
   // The router performs the authoritative schema, key-type and duplicate check
   // at startup. This init gate ensures the mounted object is bounded JSON and
   // cannot be replaced through a symlink or partial write.
-  await mkdir('/output', { recursive: true, mode: 0o700 });
-  await chmod('/output', 0o700);
+  // emptyDir is group-owned by the pod fsGroup. Create a private child rather
+  // than chmod-ing kubelet's root-owned mount point as UID 1000.
+  await mkdir('/output/private', { recursive: true, mode: 0o700 });
+  await chmod('/output/private', 0o700);
   await write(JSON.stringify(value) + '\n');
-} catch {
-  console.error('llm-router Relay trust setup failed; input values withheld.');
+} catch (error) {
+  const code = /^E[A-Z]{1,20}$/.test(error?.code ?? '') ? error.code : 'INVALID_INPUT';
+  console.error(`llm-router Relay trust setup failed (${code}); input values withheld.`);
   process.exitCode = 1;
 }

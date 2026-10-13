@@ -36,7 +36,7 @@ spec:
           runAsGroup: 1000
         env:
         - name: RELAY_KEYS_TRUST_FILE
-          value: /run/relay-keys/trust.json
+          value: /run/relay-keys/private/trust.json
         volumeMounts:
         - {name: relay-keys-trust-file, mountPath: /run/relay-keys, readOnly: true}
       volumes:
