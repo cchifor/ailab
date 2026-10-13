@@ -1516,12 +1516,14 @@ too").
 - **The slots.** The FIFO wait, the 60 s timeout before 429 `CLAUDE_BUSY` (Retry-After 5 s) and the once-only release
   are unchanged. A wait that times out no longer leaves its abort listener on the request signal.
 - **The pod (`router.yaml`).**
-  - Memory limit 1280Mi → 3584Mi, memory request 384Mi → 1Gi, CPU limit 2 → 4.
+  - Memory limit 1280Mi → 3584Mi, memory request 384Mi → 2560Mi, CPU limit 2 → 4.
   - Measured on the live pod: the router process ~310 MiB, one Claude Code run (2.1.281, `sdk-resume`) ~210 MiB.
   - Worst case at 8 runs: 310 + 512 (Assistant image jobs) + 8 × 210 ≈ 2.5 GiB, about 70 % of the limit.
   - **The old 1280Mi was already too small.** At the old cap of 2, the worst case (310 + 512 + 2 × 210 ≈ 1.2 GiB)
     filled about 97 % of it. Never go back below 2Gi, whatever the cap.
-  - The request is 1Gi, the loaded working set, so the scheduler reserves what the pod uses (one replica, Recreate).
+  - The request is 2560Mi, the 8-run worst case, reserved on the node.
+    - One replica with `Recreate` does not stop other pods from overcommitting the node; a request does.
+    - Keep the request in step with `maxRunning`: `822 + N × 210` MiB.
   - The agent nodes have 16 GiB at about 20 % used.
 
 **After the rollout** (live setting): `maxRunning` 2 → 8.
