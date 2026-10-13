@@ -11,3 +11,5 @@ kind: Kustomization
 resources:
   - router.yaml
   - edge.yaml
+# The Relay trust bridge remains opt-in. The activation gate test requires
+# operator evidence before a follow-up PR may include it here.

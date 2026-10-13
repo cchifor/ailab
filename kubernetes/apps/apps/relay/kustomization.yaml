@@ -12,3 +12,5 @@ resources:
 - network-policy.yaml
 - postgres-bootstrap.yaml
 - backup.yaml
+# The managed control-plane component remains opt-in. The activation gate test
+# requires operator evidence before a follow-up PR may include it here.

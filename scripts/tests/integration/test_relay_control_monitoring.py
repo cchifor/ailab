@@ -29,10 +29,14 @@ class Monitoring(unittest.TestCase):
         wrapper = cls.root / 'render'
         wrapper.mkdir()
         base = ROOT / 'kubernetes/apps/apps/relay'
+        cls.base_docs = list(yaml.safe_load_all(docker(
+            'run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+            'build', str(base.relative_to(ROOT))).stdout))
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump({
             'apiVersion': 'kustomize.config.k8s.io/v1beta1', 'kind': 'Kustomization',
             'resources': [os.path.relpath(base, wrapper)],
             'components': [os.path.relpath(COMPONENT, wrapper),
+                           os.path.relpath(ROOT / 'kubernetes/components/relay-router-control-plane', wrapper),
                            os.path.relpath(ROOT / 'kubernetes/components/relay-notifications/relay', wrapper)],
         }))
         raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
@@ -221,8 +225,7 @@ class Monitoring(unittest.TestCase):
         self.assertEqual(ingress['ingress'][0]['ports'], [{'protocol': 'TCP', 'port': 8788}])
 
     def test_application_only_mounts_verifier_and_preserves_base_workloads(self):
-        base_docs = list(yaml.safe_load_all((ROOT / 'kubernetes/apps/apps/relay/relay.yaml').read_text()))
-        base = named(base_docs, 'Deployment', 'relay')['spec']['template']['spec']
+        base = named(self.base_docs, 'Deployment', 'relay')['spec']['template']['spec']
         # Kubelet uses this fsGroup for 0440 projected Secret readability. The
         # native host-user fixture alone cannot establish cluster file ownership.
         self.assertEqual(base['securityContext']['fsGroup'], 1000)
@@ -230,13 +233,20 @@ class Monitoring(unittest.TestCase):
         initializer = next(c for c in self.spec['initContainers'] if c['name'] == 'metrics-files')
         self.assertEqual(initializer['securityContext']['runAsUser'], 1000)
         self.assertEqual(initializer['securityContext']['runAsGroup'], 1000)
-        self.assertEqual([c for c in self.spec['initContainers'] if c['name'] not in ('metrics-files', 'notification-files')], base['initContainers'])
+        self.assertEqual([c for c in self.spec['initContainers'] if c['name'] not in ('metrics-files', 'notification-files', 'router-files')], base['initContainers'])
         application = next(c for c in self.spec['containers'] if c['name'] == 'relay')
         self.assertEqual(application.get('securityContext', {}).get('runAsUser', self.spec['securityContext'].get('runAsUser')), 1000)
         self.assertEqual(application['image'], next(c for c in base['containers'] if c['name'] == 'relay')['image'])
         env = {e['name']: e.get('value') for e in application['env']}
         self.assertEqual(env['RELAY_CONTROL_METRICS_FILE'], '/run/relay-metrics/private/config.json')
-        self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', env)
+        base_app = next(c for c in base['containers'] if c['name'] == 'relay')
+        # Monitoring preserves the opt-in boundary; the activation overlay is
+        # tested separately once the operator evidence permits it.
+        self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', {e['name'] for e in base_app['env']})
+        self.assertNotIn('RELAY_ROUTER_CONNECTIONS_FILE', {e['name'] for e in base_app['env']})
+        self.assertEqual(next(e['value'] for e in application['env'] if e['name'] == 'RELAY_AGENT_CONTROL_PLANE'), '1')
+        self.assertEqual(next(e['value'] for e in application['env'] if e['name'] == 'RELAY_ROUTER_CONNECTIONS_FILE'), '/run/relay-router/private/connections.json')
+        self.assertIn('relay-router-connection', {v['secret']['secretName'] for v in self.spec['volumes'] if 'secret' in v})
         self.assertNotIn('metrics-input', {v['name'] for v in application['volumeMounts']})
         inputs = next(v['secret'] for v in self.spec['volumes'] if v['name'] == 'metrics-input')
         self.assertEqual(inputs['secretName'], 'relay-control-metrics')
