@@ -1597,6 +1597,50 @@ too").
    - **Keep the resources block.** It does not depend on the image, and the old 1280Mi was undersized even at 2 runs
      (above).
 
+## Activity search release (2026-10-13)
+
+`router-0.1.0-20261013-activity-search` deploys merged llm-router main `2baf22df220a7ce0811e98aeee55b87593528e3d`
+([#103](https://git.chifor.me/cchifor/llm-router/pulls/103)), on the owner's request: the PR reviewer bots did not show
+on the Activity page.
+
+**Why they did not show.** The page lists the newest 100 requests, and "Load more" stops at 500.
+- On 2026-10-13, 100 requests covered only 2.4 minutes, 79 of them from dev-worker-1. The bots make about 20 requests an
+  hour each.
+- The Source and Route filters offered only the loaded rows' values, so the bots were not in the filters either.
+- The search matched only the request id, model, account and agent.
+
+**What changes.**
+- **Filters.** Source also offers every active API key, and Route every configured route (`GET /admin/v1/keys`, the
+  configuration; the same cache entries as the API keys and settings pages). If those calls are refused, the options
+  are the loaded rows' values, as before.
+- **Search.** `GET /admin/v1/trajectories?search=` also matches the entered route (model mode), the principal id and the
+  source's name.
+  - A key's name matches only rows of the key's own namespace, as the displayed source does, so a search never reveals
+    a name the row would not show.
+  - The matching (namespace, principal) pairs reach SQLite as one JSON parameter, so every matching key counts.
+  - **Cost:** the route term reads each row's JSON. A search that matches nothing scans the whole journal: ~0.48 s on
+    41k rows (2026-10-13), once per 10 s refresh while a search is active. That is about what the `route` filter
+    already cost.
+- **So, for the reviewers:** search `reviewer`, `claude-reviewer` or `codex-reviewer`, or pick them under Source or
+  Route.
+
+**Image.**
+- Archive `router-0.1.0-20261013-activity-search.tar.gz`, SHA-256
+  `71e8c095cbbacd03fc20dc0951af5611997dde46458c25bceb075cc1fa59480f`.
+  - Built in the pinned Node 26.10.0 image on dev-worker-1, and the production smoke passed.
+  - Relay v0.2.0 asset 216.
+- Relay branch `release/router-activity-search-image` (`1788f0c6`),
+  [run 85184](https://git.chifor.me/cchifor/relay/actions/runs/85184); receipt `deployment-images-85184.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:62d4885cd0954687ed128bf9e0ac76c0366356991f0cf1f8467839ca6b33ddef`.
+- Before merge: CI on Linux passed, and both reviewer bots approved (after the 500-key cap was removed).
+
+**Rollback.** Revert the image digest and both pod-template annotations together, and keep the resources:
+- `image: registry.chifor.me/llm-router/router@sha256:6cbb671d1e2f773cb8407d58ec99b4cb55741eb1f2c351518bcac88137b8ac91`
+- `chifor.me/source-commit: 6ef7eee235f7e5ea5d0c118249659ed99a63434b`
+- `chifor.me/release: router-0.1.0-20261013-claude-run-cap`
+
+Nothing else is needed: there is no schema change and no new setting, and `maxRunning` stays (that image has it).
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
