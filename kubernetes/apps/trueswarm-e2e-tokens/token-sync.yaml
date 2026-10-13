@@ -57,7 +57,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: sync
-              image: mirror.gcr.io/library/python:3.14-slim
+              image: mirror.gcr.io/library/python:3.15-slim
               command: ["python3", "-u", "/scripts/token_sync.py"]
               env:
                 - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
@@ -126,7 +126,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sync
-          image: mirror.gcr.io/library/python:3.14-slim
+          image: mirror.gcr.io/library/python:3.15-slim
           command: ["python3", "-u", "/scripts/token_sync.py"]
           env:
             - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }

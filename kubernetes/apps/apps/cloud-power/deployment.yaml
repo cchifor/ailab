@@ -53,7 +53,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: cloud-power
-          image: mirror.gcr.io/library/python:3.14-slim
+          image: mirror.gcr.io/library/python:3.15-slim
           command: ["python3", "-u", "/app/app.py"]
           env:
             - { name: MODE, value: "api" }
@@ -157,7 +157,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: cloud-power-wol
-          image: mirror.gcr.io/library/python:3.14-slim
+          image: mirror.gcr.io/library/python:3.15-slim
           command: ["python3", "-u", "/app/app.py"]
           env:
             - { name: MODE, value: "wol" } # exposes ONLY POST /api/wake; no PVE token is mounted
