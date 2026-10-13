@@ -184,10 +184,28 @@ spec:
         env:
         - name: NODE_ENV
           value: production
-        # Pinned, not left to the release's default: stage 2 flips this one line to `oidc`, and its
-        # rollback is this value (docs/runbooks/relay.md, release 0.5.2).
+        # Browser sign-in through the ailab Keycloak (ADR 0038, docs/runbooks/keycloak.md). Rollback =
+        # `local` (the administrator-token sign-in; RELAY_ADMIN_TOKEN stays in relay-secrets).
+        # OIDC_CLIENT_SECRET comes from relay-secrets and MUST equal Keycloak's `relay` client secret.
         - name: RELAY_AUTH_MODE
-          value: local
+          value: oidc
+        - name: OIDC_ISSUER
+          value: https://id.chifor.me/realms/relay
+        - name: OIDC_CLIENT_ID
+          value: relay
+        - name: OIDC_PROVIDER_NAME
+          value: Relay ID
+        # Also delivered by the envFrom relay-secrets above; named explicitly so the dependency is
+        # visible here and the pod refuses to start (CreateContainerConfigError) if the key is missing.
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: relay-secrets
+              key: OIDC_CLIENT_SECRET
+        # Keycloak has no SMTP: an operator marks a member's email verified when binding them
+        # (ADR 0038 decision 4). No OIDC_IDP_HINT until the Google broker exists.
+        - name: OIDC_REQUIRE_EMAIL_VERIFIED
+          value: '1'
         - name: RELAY_HOST
           value: 0.0.0.0
         - name: RELAY_PORT
