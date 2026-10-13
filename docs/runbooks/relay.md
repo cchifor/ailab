@@ -245,6 +245,42 @@ data PVCs, PostgreSQL, backup scheduling, DNS and tunnel routes are unchanged.
 Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/runs/57525):
 `registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31`.
 
+## Managed router control plane (v0.6.0)
+
+The `kubernetes/components/relay-router-control-plane` component is opt-in. It
+is the reviewed deployment boundary for Relay's scoped llm-router token
+lifecycle and managed Codex sessions. Do not add it to the base Relay
+Kustomization until the operator has recorded the router bridge, trust, OpenBao
+and worker evidence in the Relay release handoff.
+
+Before activation, provision the external Secret `relay/relay-router-connection`
+through the normal secret-management route. It must contain only these keys:
+
+| Key | Contents |
+| --- | --- |
+| `metadata.json` | Versioned connection metadata: UUID, name, tenant UUID list, fixed HTTPS router/OpenBao origins, issuer, admin/reconciler key IDs, OpenBao mount and prefix. |
+| `admin-key.pem` | Relay's Ed25519 admin signing key, matching the router trust mapping. |
+| `reconciler-key.pem` | Separate Ed25519 reconciliation key, matching the router trust mapping. |
+| `bao-token` | Relay-only OpenBao writer identity, restricted to the configured tenant prefix and destroy operation. |
+
+The component's init container validates the metadata, key types, origins and
+token shape, then writes a private `connections.json` plus 0600 key/token files
+to an in-memory volume. The application receives only the generated file path
+and `RELAY_AGENT_CONTROL_PLANE=1`; no raw token is mounted into the browser,
+connector or holder. Missing or malformed input prevents the replacement Pod
+from starting. The Secret is not represented in Git and its values must never
+be placed in a PR, issue, log or this runbook.
+
+Activation is a reviewed Flux change that pins the same immutable v0.6.0 image
+digest in both the migration and Relay containers, adds the component, and
+records the release/source annotations. If OpenBao is reachable only through a
+private cluster address, the same change must add a narrowly scoped egress rule
+for its service and TLS CA; do not widen Relay to arbitrary private networks.
+After reconciliation, run the release candidate's create/escrow/install,
+catalog, routed Codex, rotation, revocation, lost-response and rollback checks.
+Keep the v0.5.2 image and its rollback generation available until the complete
+acceptance report is reviewed.
+
 
 ## Terminal geometry release 0.2.1
 
