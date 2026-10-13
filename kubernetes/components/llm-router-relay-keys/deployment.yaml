@@ -6,6 +6,8 @@ metadata:
 spec:
   template:
     spec:
+      # The base router Deployment already uses uid/gid/fsGroup 1000 for the
+      # SQLite data PVC. Keep those exact identities while adding the bridge.
       securityContext:
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch

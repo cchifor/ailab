@@ -1416,6 +1416,9 @@ namespace, route aliases, access kinds, maximum lifetime and key-count ceiling.
 It must not contain private keys or router bearer credentials. The init
 container bounds the JSON, writes it atomically to a 0600 in-memory file, and
 the router validates key types, duplicates and ceilings again at startup.
+The component preserves the base router's existing UID/GID/fsGroup 1000
+identity (the same identity that owns the SQLite data volume); it makes those
+values explicit so the trust file cannot introduce a volume-ownership change.
 
 Activation is a reviewed Flux PR that includes this component and pins the
 router image containing the reviewed bridge. The rollout must prove that the
