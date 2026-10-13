@@ -1426,8 +1426,9 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
 - Revision 1478, between the two, was the router's own cooldown write after that 429.
 
 **How the fallback behaves.** Verified 15:07-15:10 UTC with administrator requests:
-- **claude-5 not eligible** (busy at its concurrency of 1, cooling down, or offline): the same attempt goes to
-  `pool-claude`. Of two simultaneous requests, claude-5 served one on `opus` and `pool-claude` (claude-3) the other.
+- **claude-5 not eligible** (busy at its concurrency, cooling down, or offline): the same attempt goes to
+  `pool-claude`. At concurrency 1, of two simultaneous requests, claude-5 served one on `opus` and `pool-claude`
+  (claude-3) the other. Revision 1480 raised it to 4 (below).
   - reviewer-claude sends one request at a time: 200 requests from 2026-10-12 07:19 to 2026-10-13 14:57 UTC, at most 1
     in flight.
   - So "busy" means another router client (`pool-claude`, `pool-mixed`, the `claude` route) holds claude-5's slot. In
@@ -1449,21 +1450,36 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
     `pool-claude` in its first attempt.
   - Re-enable it once claude-5 serves again.
 
-**How to call them.**
+**Revision 1480: Claude concurrency 1 → 4.** At the owner's request, like the Codex accounts, all five Claude accounts
+(`claude`, `claude-2` … `claude-5`) now have `concurrency: 4`.
+- **Verified:** two simultaneous `claude-reviewer` requests were both served by claude-5 (until then the second went
+  to `pool-claude`).
+- **The pod still runs at most 2 Claude requests at once.** `provider-claude` caps the Claude Code processes per pod
+  (`MAX_RUNNING = 2`, hard-coded: each run is a full runtime in a pod limited to 1280Mi).
+  - A third request waits for a free run for up to 60 s.
+  - It then fails with 429 `CLAUDE_BUSY` (retryable), and the route's next attempt goes elsewhere.
+  - So the concurrency raise stops an account from looking busy, but more Claude work at once needs an llm-router change
+    (a configurable cap) and a higher memory limit.
+- **Rollback:** set the five back to 1, in one full `PUT` with `If-Match` that changes only those fields.
+
+**How the bots call them.** Wired on 2026-10-13 (`ansible/host_vars/reviewer-{1,2}.yml`; dev-workers.md § "Router
+seats").
 - **`claude-reviewer`: route mode**, `model: "claude-reviewer"`.
-  - reviewer-claude's key (`key_f856495c9b0c`) may use every route.
-  - So only the reviewer's router seat changes: map its model to `claude-reviewer` in the seat's `routes`.
+  - reviewer-claude's key (`key_f856495c9b0c`) may use every route, so it did not change.
+  - Its router seat carries `model: claude-reviewer`, so every ladder tier (`fable`, `opus`, `sonnet`) asks for the
+    route.
 - **`codex-reviewer`: model mode only.**
   - `pool-codex`'s targets are `*`, so `model: "codex-reviewer"` gets 400 `MODEL_REQUIRED`.
   - The request names a model of `pool-codex`'s allowlist (`gpt-6-astra`) and selects the route with
     `X-Router-Route: codex-reviewer`, or through a key whose `defaultRoute` it is.
-  - The reviewer's router seat sends no header, and reviewer-codex's key (`key_d7adf31fb93e`) may use only `codex`, with
-    no default route. Keys cannot be edited.
-  - So switching needs a new key `{routes: ["codex-reviewer"], defaultRoute: "codex-reviewer"}` and a seat that sends
-    the model name, with no `routes` mapping.
-  - Keep the old key (`codex` only) until the new route has run for a while: rolling back is then a seat change.
-- **Until then the bots are unchanged.** reviewer-claude asks for `fable` by name, the direct route that tries account
-  `claude` first. reviewer-codex calls the `codex` route.
+  - The reviewbot sends no header, and the old key (`key_d7adf31fb93e`) may use only `codex`, with no default route.
+    Keys cannot be edited.
+  - So reviewer-codex has a new key, `key_4fdbe2b833fe`: `{routes: ["codex-reviewer"], defaultRoute: "codex-reviewer"}`,
+    365 days, escrowed as `reviewbot_codex_router_key`.
+  - Its seat has no `models` map and sends the tier name, `gpt-6-astra`.
+  - Verified with that key before the switch: `gpt-6-astra` gave 200 via `pool-codex`; `codex` gave 400
+    `MODEL_NOT_SUPPORTED`. So the key and the seat change must deploy together, which one `reviewers.yml` run does.
+  - The old key stays valid until the new route has run for a while: rolling back is then a seat change.
 
 **Check** without spending quota: `POST /admin/v1/preview` as the administrator.
 - `{"model": "claude-reviewer", …}` selects `claude-reviewer:claude-5`.
@@ -1471,10 +1487,11 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
 
 **Rollback.** Move every client off the routes first, then delete them. A key whose only route is deleted serves
 nothing.
-1. **reviewer-claude:** map its seat's model back to `fable`. Its key may use every route, so it does not change.
+1. **reviewer-claude:** drop `model` from its router seat, so the ladder's own names go back to the router. Its key may
+   use every route, so it does not change.
 2. **reviewer-codex,** if it was switched:
-   - **While the old key still exists** (`key_d7adf31fb93e`, `codex` only): point the seat back at it and restore the
-     mapping to `codex`.
+   - **While the old key still exists** (`key_d7adf31fb93e`, `codex` only): restore it as `reviewbot_codex_router_key`
+     (revert that SOPS change), restore the seat's `models: { gpt-6-astra: codex }`, and deploy both in one run.
    - **Once it has been revoked:** keys cannot be edited, so first issue a replacement in the old shape:
      `{routes: ["codex"]}`, with no `defaultRoute`. Seed it into the seat and restore the mapping to `codex`. Check that
      reviews are served (journal rows of that key with `model: codex`).
