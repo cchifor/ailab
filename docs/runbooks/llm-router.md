@@ -1397,3 +1397,30 @@ There were two causes:
 - `chifor.me/release: router-0.1.0-20261012-activity-table`
 
 Nothing else changes: no schema change, no new setting. The `codex` concurrency is separate config and stays.
+
+## Relay managed-key bridge (v0.6.0)
+
+The `kubernetes/components/llm-router-relay-keys` component is opt-in and
+supplies the deployment boundary for Relay's scoped client-token lifecycle. The
+`relay-keys` plugin is already part of the router source, but it stays disabled
+unless `RELAY_KEYS_TRUST_FILE` is present. Do not add this component to the base
+router Kustomization until Relay's v0.6.0 operator gate has reviewed the exact
+router image, issuer/tenant mapping, key ceilings, OpenBao policies and holder
+acceptance.
+
+Provision the external Secret `llm-router/llm-router-relay-keys-trust` through
+the approved secret-management route with one key, `trust.json`. It contains
+only the versioned public trust mapping consumed by the plugin: the Relay
+issuer, Ed25519 public key IDs and roles, the approved tenant UUID, router
+namespace, route aliases, access kinds, maximum lifetime and key-count ceiling.
+It must not contain private keys or router bearer credentials. The init
+container bounds the JSON, writes it atomically to a 0600 in-memory file, and
+the router validates key types, duplicates and ceilings again at startup.
+
+Activation is a reviewed Flux PR that includes this component and pins the
+router image containing the reviewed bridge. The rollout must prove that the
+route is unreachable without a valid Relay assertion, tenant and grant ceilings
+are enforced, and disabling the component removes the bridge without revoking
+existing keys. Keep the prior router image and SQLite backup as rollback
+material. A private OpenBao origin or custom CA requires a separate narrow
+network/TLS change; never widen the router policy to arbitrary private egress.
