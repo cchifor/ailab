@@ -247,13 +247,41 @@ Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/ru
 
 ## Managed router control plane (v0.6.0)
 
-The `kubernetes/components/relay-router-control-plane` component is opt-in. It
-is the reviewed deployment boundary for Relay's scoped llm-router token
-lifecycle and managed Codex sessions. Do not add it to the base Relay
-Kustomization until the operator has recorded the router bridge, trust, OpenBao
-and worker evidence in the Relay release handoff.
+The Relay Kustomization includes `kubernetes/components/relay-router-control-plane`
+to enable scoped llm-router token administration and managed Codex sessions.
+This activation change must stay draft until the operator has reviewed the
+preflight below. Missing input prevents Relay from starting; merging before
+provisioning would interrupt the existing authentication and terminal service.
 
-Before activation, provision the external Secret `relay/relay-router-connection`
+### Preflight before merging activation
+
+Record the following nonsecret references in the Relay operator handoff:
+
+- both `relay/relay-router-connection` and
+  `llm-router/llm-router-relay-keys-trust` are provisioned with matching issuer,
+  tenant and separate admin/reconciler Ed25519 public key IDs;
+- the router trust mapping's aliases, access kinds, lifetime and key-count
+  ceilings are reviewed for tenant `00000000-0000-4000-8000-000000000001`;
+- the configured HTTPS router and OpenBao origins are reachable from Relay,
+  their TLS chains are trusted, and restricted writer/worker-reader policies
+  are provisioned; add narrow egress and CA delivery in this PR if required;
+- one approved worker has the pinned connector, holder, renderer and renderer
+  watch services staged with matching identity, private files and linger;
+- the operator names the constrained acceptance target and rollback owner.
+
+The llm-router image is pinned to
+`sha256:f8ddc9ce9353f6e3a5f7bcc75b8ff16d2cfa29cf0a5e801358b57d9dbc4bec54`
+(source `ccfbd1dbe1310ce11b2d9b659ddf6a3d72aba597`) and contains the bridge.
+Relay's application and migration image remain v0.6.0 at
+`sha256:5e01b323d6e5cacd4980d7bcc14082ec937d1731a69a89af2568f8f322b9f774`.
+
+Live token/session acceptance follows this activation. It is not a prerequisite
+for starting the services that acceptance exercises. Keep candidate qualified
+profiles and pools disabled and do not create production admission records until
+the independent acceptance report has been reviewed. This PR supplies no release
+approval file or pin.
+
+Provision the external Secret `relay/relay-router-connection`
 through the normal secret-management route. It must contain only these keys:
 
 | Key | Contents |
@@ -279,7 +307,11 @@ for its service and TLS CA; do not widen Relay to arbitrary private networks.
 After reconciliation, run the release candidate's create/escrow/install,
 catalog, routed Codex, rotation, revocation, lost-response and rollback checks.
 Keep the v0.5.2 image and its rollback generation available until the complete
-acceptance report is reviewed.
+acceptance report is reviewed. To abandon the acceptance rollout before any
+credential is issued, revert both component inclusions through a reviewed PR
+while retaining the healthy v0.6.0 images. If credentials have been issued,
+revoke and verify their rejection before removing the bridge: disabling the
+bridge by itself does not revoke existing keys.
 
 
 ## Terminal geometry release 0.2.1

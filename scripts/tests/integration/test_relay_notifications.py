@@ -64,9 +64,13 @@ class Notifications(unittest.TestCase):
         cls.addClassCleanup(cls.scratch.cleanup)
         cls.root = Path(cls.scratch.name)
         cls.rendered = {}
+        cls.base_rendered = {}
         docker("pull", KUSTOMIZE, timeout=300)
         docker("pull", KUBECONFORM, timeout=300)
         for name, base in [("relay", "apps/relay"), ("ntfy", "infrastructure/monitoring")]:
+            cls.base_rendered[name] = list(yaml.safe_load_all(docker(
+                "run", "--rm", "-v", f"{ROOT}:/work:ro", "-w", "/work", KUSTOMIZE,
+                "build", "kubernetes/apps/" + base).stdout))
             wrapper = cls.root / name
             wrapper.mkdir()
             k = {
@@ -201,10 +205,14 @@ class Notifications(unittest.TestCase):
 
     def test_render_preserves_backup_gates_and_is_opt_in(self):
         deployment = named(self.rendered["relay"], "Deployment", "relay")["spec"]["template"]["spec"]
-        base = named(documents(ROOT / "kubernetes/apps/apps/relay/relay.yaml"), "Deployment", "relay")["spec"]["template"]["spec"]
+        base = named(self.base_rendered["relay"], "Deployment", "relay")["spec"]["template"]["spec"]
         self.assertEqual([c for c in deployment["initContainers"] if c["name"] != "notification-files"], base["initContainers"])
         app = next(c for c in deployment["containers"] if c["name"] == "relay")
-        self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", [e["name"] for e in app["env"]])
+        base_app = next(c for c in base["containers"] if c["name"] == "relay")
+        # Notifications must preserve the separately reviewed control-plane activation.
+        for key in ["RELAY_AGENT_CONTROL_PLANE", "RELAY_ROUTER_CONNECTIONS_FILE"]:
+            self.assertEqual([e for e in app["env"] if e["name"] == key],
+                             [e for e in base_app["env"] if e["name"] == key])
         self.assertEqual(app["image"], next(c for c in base["containers"] if c["name"] == "relay")["image"])
         initializer = next(c for c in deployment["initContainers"] if c["name"] == "notification-files")
         self.assertEqual(deployment["securityContext"]["fsGroup"], initializer["securityContext"]["runAsGroup"])

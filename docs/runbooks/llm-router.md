@@ -1501,13 +1501,13 @@ nothing.
 
 ## Relay managed-key bridge (v0.6.0)
 
-The `kubernetes/components/llm-router-relay-keys` component is opt-in and
-supplies the deployment boundary for Relay's scoped client-token lifecycle. The
-`relay-keys` plugin is already part of the router source, but it stays disabled
-unless `RELAY_KEYS_TRUST_FILE` is present. Do not add this component to the base
-router Kustomization until Relay's v0.6.0 operator gate has reviewed the exact
-router image, issuer/tenant mapping, key ceilings, OpenBao policies and holder
-acceptance.
+The router Kustomization includes `kubernetes/components/llm-router-relay-keys`
+to supply the trust file that enables the `relay-keys` plugin. Keep the activation
+PR draft until the operator reviews the exact router image, issuer/tenant
+mapping, key ceilings, OpenBao policies and staged worker services described in
+[Relay's preflight](relay.md#preflight-before-merging-activation).
+Live token and holder acceptance follows the constrained activation; production
+profile/pool admission remains disabled until that report is reviewed.
 
 Provision the external Secret `llm-router/llm-router-relay-keys-trust` through
 the approved secret-management route with one key, `trust.json`. It contains

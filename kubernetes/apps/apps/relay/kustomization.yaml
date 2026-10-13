@@ -12,3 +12,6 @@ resources:
 - network-policy.yaml
 - postgres-bootstrap.yaml
 - backup.yaml
+# Enable only after the operator preflight in docs/runbooks/relay.md.
+components:
+- ../../../components/relay-router-control-plane
