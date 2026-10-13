@@ -1410,26 +1410,28 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
     `fallbackAliases: ["pool-claude"]`.
   - It has no timeouts of its own, like the direct `fable` route reviewer-claude uses now.
 
-**Revision 1479** changed that target's model from `fable` to `opus`:
-- claude-5 refuses `fable` until 2026-11-01 00:00 UTC (429 `RATE_LIMITED`; the reply named no window).
+**Revision 1479** changed that target's model from `fable` to `opus`, and it stays there.
+- **Opus 5.5.** `opus` is the router's Claude Code alias for `claude-opus-5-5` (2.1.281, `latest_per_family`; `fable`
+  is `claude-fable-5-1`). The owner ruled on 2026-10-13 that the Gitea reviewer need not use `fable`:
+  - claude-5 serves the reviewer on Opus 5.5;
+  - the route falls back only when claude-5 cannot take the request.
+- **Why not `fable`:** claude-5 refuses it until 2026-11-01 00:00 UTC (429 `RATE_LIMITED`; the reply named no
+  window). With `fable`, every request failed over to the pool.
   - **Where the date comes from:** the router's reading of that refusal. `GET /admin/v1/usage` showed claude-5 at
     `limits.status: "limited"`, `source: "reply"`, `limitedUntil: 1793491200000`.
   - That is the `resetsAt` Claude Code reported with its rejection (`mapClaudeLimits` in `provider-claude`). No
     dashboard or support reply confirms it.
-- A `haiku` probe a minute later read 5-hour 0 % and weekly 27 % (`POST /admin/v1/usage/refresh`), so the account
-  itself serves.
-  - The probe always asks for `haiku`, so it cannot tell whether `fable` is back.
-- With `fable`, every request failed over to the pool.
-- **To move back to `fable`** once that date has passed:
-  1. Set the target's model back to `fable`: change only that field, with a full `PUT` and `If-Match`.
-  2. Send one request on `claude-reviewer`.
-  3. If it comes back `x-router-route: pool-claude`, with an `attempt.failed` `RATE_LIMITED` on claude-5 in its
-     trajectory, `fable` is still refused: set `opus` again.
+- **The account itself serves.** A `haiku` probe a minute later read 5-hour 0 % and weekly 27 %
+  (`POST /admin/v1/usage/refresh`; the probe always asks for `haiku`).
 - Revision 1478, between the two, was the router's own cooldown write after that 429.
 
 **How the fallback behaves.** Verified 15:07-15:10 UTC with administrator requests:
 - **claude-5 not eligible** (busy at its concurrency of 1, cooling down, or offline): the same attempt goes to
   `pool-claude`. Of two simultaneous requests, claude-5 served one on `opus` and `pool-claude` (claude-3) the other.
+  - reviewer-claude sends one request at a time: 200 requests from 2026-10-12 07:19 to 2026-10-13 14:57 UTC, at most 1
+    in flight.
+  - So "busy" means another router client (`pool-claude`, `pool-mixed`, the `claude` route) holds claude-5's slot. In
+    the 24 hours before these routes, claude-5 served no router request.
 - **A retryable failure on claude-5:** the next attempt goes to `pool-claude`. With the 429 on `fable`, claude-5
   failed in 0.9 s and cooled down for 60 s, and claude-3 answered.
 - **The model changes on fallback.** `pool-claude` answers on its pool model, `sonnet`, so a review that falls back is a
