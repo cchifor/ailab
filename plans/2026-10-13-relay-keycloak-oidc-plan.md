@@ -1,5 +1,13 @@
 # Relay v0.5.2 sign-in through a new ailab-owned Keycloak
 
+## Codex Review
+
+- The plan correctly follows the repository’s CNPG managed-role plus one-shot database pattern, preserves Relay’s backup gate, pins images, and includes useful edge and acceptance checks.
+- The Keycloak deployment has several integration gaps: client-secret rotation cannot be performed by restarting pods, the realm JSON must encode PKCE as a client attribute, and the new database Secret must be included in the databases Kustomization.
+- The admin hostname, management port, forwarded-header trust, and Cloudflare path rules need explicit live verification.
+- Open registration without email verification is an intentional policy, but the plan needs abuse controls and a precise operator procedure for confirming the correct immutable subject.
+- Rollback is directionally sound, but the plan should gate the Relay PR on a healthy Keycloak and document the actual forward-migration restore procedure.
+
 ## Context
 
 Relay (`relay.chifor.me`, namespace `relay`) is the agent control plane that dev-worker-4's Codex
@@ -65,23 +73,30 @@ Facts checked on 2026-10-13:
    - `keycloak-db-bootstrap.yaml`: a ConfigMap plus Job, deliberately NOT in `kustomization.yaml`
      (same as litellm). Idempotent `\gexec` `CREATE DATABASE keycloak OWNER keycloak`, run once by
      option A (`kubectl exec infra-pg-1 -- psql`).
+<!-- codex: Add `infra-pg-keycloak.sops.yaml` to `kubernetes/apps/databases/kustomization.yaml`; otherwise Flux never creates the Secret consumed by `managed.roles`, and the CNPG role reconciliation cannot complete. -->
+<!-- codex: Follow the repository’s proven `gitea-db-bootstrap.yaml` operator path: execute the SQL with `-c postgres -U postgres` through CNPG peer authentication on the primary. A Job that optionally reads `infra-pg-superuser` can exit successfully without creating anything, as the existing `litellm` pattern documents. -->
 3. **App** (`kubernetes/apps/apps/keycloak/`, added to `apps/kustomization.yaml`):
    - `namespace.yaml`: PSA `restricted` enforce, labels like the other apps.
-   - `keycloak-secrets.sops.yaml`: `KC_BOOTSTRAP_ADMIN_USERNAME`, `KC_BOOTSTRAP_ADMIN_PASSWORD`,
-     `KC_DB_PASSWORD` (byte-identical to `infra-pg-keycloak`), `RELAY_OIDC_CLIENT_SECRET` (random
+   - `keycloak-secrets.sops.yaml`: `KC_BOOTSTRAP_ADMIN_USERNAME`,
+     `KC_BOOTSTRAP_ADMIN_PASSWORD`, `KC_DB_PASSWORD` (byte-identical to
+     `infra-pg-keycloak`), `RELAY_OIDC_CLIENT_SECRET` (random
      48-byte base64url). Generated locally, never printed, SOPS-encrypted with the repo age rule.
    - `realm-relay.json` ConfigMap, mounted at `/opt/keycloak/data/import`, imported with
      `--import-realm`. Import is create-if-absent and never overwrites a live realm. It sets:
-     `registrationAllowed: true`, `registrationEmailAsUsername: true`, `loginWithEmailAllowed: true`,
-     `duplicateEmailsAllowed: false`, `verifyEmail: false` and `resetPasswordAllowed: false` (no
-     SMTP), `rememberMe: false`, `sslRequired: external`, `bruteForceProtected: true`, and
+     `registrationAllowed: true`, `registrationEmailAsUsername: true`,
+     `loginWithEmailAllowed: true`, `duplicateEmailsAllowed: false`, `verifyEmail: false` and
+     `resetPasswordAllowed: false` (no SMTP), `rememberMe: false`, `sslRequired: external`,
+     `bruteForceProtected: true`, and
      `passwordPolicy: length(12) and notUsername and notEmail`.
      The `relay` client: `publicClient: false`, client-secret auth with
      `secret: "${RELAY_OIDC_CLIENT_SECRET}"` (Keycloak's env placeholder substitution at import),
      `standardFlowEnabled: true`, implicit, direct-grant and service-account flows off,
      `redirectUris: ["https://relay.chifor.me/api/auth/callback"]`,
-     `webOrigins: ["https://relay.chifor.me"]`, and `pkce.code.challenge.method: S256`.
+     `webOrigins: ["https://relay.chifor.me"]`, and
+     `pkce.code.challenge.method: S256`.
      No users, no IdPs.
+<!-- codex: Encode PKCE in the Keycloak realm export’s client `attributes` map as `"pkce.code.challenge.method": "S256"` and verify it with `kcadm`; a top-level client property with that name may be ignored during import. -->
+<!-- codex: `--import-realm` skips an already-existing realm, so the placeholder is resolved only on the initial import. The runbook must use the Admin API/kcadm for subsequent client-secret rotation and realm changes; updating both Kubernetes Secrets and restarting does not change the existing Keycloak client. -->
    - `keycloak.yaml` Deployment: 1 replica, `strategy: Recreate` (local cache, one writer), image
      pinned by digest, args `start --import-realm`. Env:
      - `KC_DB=postgres`, `KC_DB_URL_HOST=infra-pg-rw.databases.svc.cluster.local`,
@@ -95,16 +110,21 @@ Facts checked on 2026-10-13:
      false` is a recorded exception: the stock image auto-builds for `KC_DB=postgres` into
      `/opt/keycloak/lib/quarkus` at start, and building a custom optimized image is out of scope.
      Requests 250m/768Mi, limits 2 CPU/1536Mi, no service-account token.
+<!-- codex: Verify that `KC_HOSTNAME_ADMIN=http://localhost:8080` works through the intended browser port-forward and that the console does not redirect API calls to the public edge, where `/admin` is blocked. Also verify Cloudflare overwrites X-Forwarded headers and that direct pod access is not possible outside the allowed edge path. -->
+<!-- codex: Declare a named management container port (or explicitly document the numeric probe contract) and test all three 9000 endpoints. Metrics are enabled but the Service exposes only 8080 and the plan adds no ServiceMonitor or management-port scrape path; either add the required monitoring wiring and NetworkPolicy allowance or remove `KC_METRICS_ENABLED`. -->
    - `service.yaml`: http 8080 only (9000 is not in the Service).
    - `network-policy.yaml`: ingress 8080 from `edge`/cloudflared only. Egress DNS (kube-system 53)
      plus `databases` infra-pg 5432 only.
+<!-- codex: Specify the exact namespace and pod labels in the policy and test a tunneled request plus a denied non-edge request. If management metrics are retained, monitoring also needs an explicit path to port 9000; otherwise the enabled metrics endpoint is unused. -->
 4. **Edge** (`apps/edge/cloudflared.yaml`): `id.chifor.me` rules, with `path: ^/admin(/|$)` and
    `path: ^/realms/master(/|$)` mapped to `http_status:404` BEFORE the catch-all
    `service: http://keycloak.keycloak.svc.cluster.local:8080`. No Cloudflare Access gate, because
    Keycloak is its own login, the same as `relay` and `git`. Bump the tunnel revision annotation the
    way existing hostname additions do.
+<!-- codex: Validate the actual rendered ingress with `cloudflared tunnel ingress validate` and `cloudflared tunnel ingress rule` for `/admin/`, `/admin/realms`, `/realms/master/`, `/realms/relay/`, and an unrelated path. The host-specific 404 rules must precede the host catch-all and the file must retain its final global catch-all. -->
 5. **DNS** (`kubernetes/infra/cloudflare/variables.tf`): add `id` to `tunnel_hostnames`. Operator
    runs `tofu plan`, which must show exactly one CNAME create, then `tofu apply` after merge.
+<!-- codex: Run the plan against the existing Cloudflare state and confirm the `id` record is absent or imported before applying; an empty or stale state can produce duplicate-record or destructive changes despite the expected one-create plan. -->
 6. **Monitoring**: a Gatus endpoint for
    `https://id.chifor.me/realms/relay/.well-known/openid-configuration` (200 plus issuer match), in
    the existing `gatus/configmap.yaml` style.
@@ -113,6 +133,9 @@ Facts checked on 2026-10-13:
    updates; later changes go through kcadm and are written back to `realm-relay.json` in the same PR),
    member provisioning, rotation of the client secret (both Secrets in one PR, then restart both
    pods), backup/restore (infra-pg dumps), and the edge blocks.
+<!-- codex: Clarify that the bootstrap admin variables create a temporary master-realm account only on the initial startup while the master realm is absent; changing those Secret values later does not recover or replace the account. Document the exact port-forward target and the permanent-admin creation/removal command. -->
+<!-- codex: Replace the client-secret rotation instruction with an ordered kcadm/API update of the Keycloak client, verification of the new secret, then Relay Secret update and restart. Include a rollback secret procedure because the realm import will not apply the changed JSON. -->
+<!-- codex: “Written back to realm-relay.json” is source-of-truth bookkeeping, not reconciliation. Add a drift check that compares the live realm/client settings with the reviewed JSON and explicitly excludes live users, password hashes, and generated secrets from the file. -->
 
 ### PR 2 (ailab): Relay cutover to v0.5.2 + OIDC
 
@@ -130,6 +153,9 @@ Opened after run 84067 publishes the image. The digest is taken from the release
 - The existing init chain is the backup gate: `migrate` runs only when
   `/tmp/relay-pre-migration-backup.json` exists. Before merging, also run the nightly dump job once
   by hand and record its result.
+<!-- codex: Make PR 2 merge/reconcile conditional on PR 1 being Ready, the realm import being observed, discovery returning the exact issuer, and the client secret being verified. Otherwise Relay can enter OIDC mode while its issuer or client is unavailable. -->
+<!-- codex: The manually triggered nightly dump is useful evidence but does not replace the deployment’s per-rollout `backup-database` and `backup-artifacts` init chain. Record both the dump result and the generated pre-migration receipt before accepting the cutover. -->
+<!-- codex: Add an explicit no-write/cutover window and a tested procedure for restoring the pre-migration generation if the v0.3.5 image must be restored; the current text assumes a dump exists but does not say how to stop reconciliation, restore it, and prevent Relay from immediately migrating again. -->
 
 ### Email verification policy (no SMTP)
 
@@ -137,6 +163,8 @@ Sign-up stays open, and a new account has `email_verified=false`. Relay keeps
 `OIDC_REQUIRE_EMAIL_VERIFIED=1`. So an account gets into Relay only when an operator has (a) bound
 its `issuer|sub` with `member.js` AND (b) set `emailVerified=true` in Keycloak after confirming the
 person out of band. A stranger's sign-up gets a Keycloak account and nothing in Relay.
+<!-- codex: Open registration with no email verification permits account-spam, username/email impersonation, and brute-force pressure even though Relay membership is gated. Add an explicit rate-limit/abuse-monitoring decision and state that operators must verify the exact Keycloak user ID, email, and immutable subject before binding membership. -->
+<!-- codex: Verify that the Relay authorization request asks for the scopes/claims needed for `email_verified`, and test the token claim after toggling the Keycloak user’s `emailVerified` flag; otherwise the policy may depend on a claim Relay never receives. -->
 
 ### Operator steps (after both PRs merge and reconcile)
 
@@ -161,6 +189,7 @@ person out of band. A stranger's sign-up gets a Keycloak account and nothing in 
    - pod init statuses are recorded;
    - `https://id.chifor.me/admin/` and `/realms/master/` return 404 at the edge.
    Then delete the throwaway account.
+<!-- codex: Add a positive/negative test that the owner’s token contains the expected `sub`, issuer, email, and `email_verified=true`, and that the member command binds that exact subject rather than an email-derived lookup. Also verify the throwaway account is deleted from Keycloak, not merely absent from Relay. -->
 5. Answer questions 1–7 in the dw4 handoff file, noting that Q1/Q2 changed by owner decision (new
    instance, no Google yet). Record request 2 as resolved, and requests 1/6 as described under
    "Older requests".
@@ -194,13 +223,16 @@ person out of band. A stranger's sign-up gets a Keycloak account and nothing in 
   manifest checks; `terraform fmt -check` and `tofu plan` for cloudflare (exactly one create);
   `sops -d` round-trip check on each new Secret (keys present, values non-empty, never printed);
   realm JSON parses; Gatus config validates; repo CI green; both reviewer approvals.
+<!-- codex: Add `kustomize build`/schema checks for the rendered NetworkPolicy and Service ports, validate the exact realm client attribute shape, and run `cloudflared tunnel ingress validate` plus representative `cloudflared tunnel ingress rule` checks. Confirm the database Secret is included in the databases Kustomization and that Flux decryption produces both namespace-local Secrets. -->
 - Live: the steps under "Operator steps". Keycloak pod Ready; the import logs say "Realm 'relay'
   imported"; discovery 200 with the exact issuer and S256 in
   `code_challenge_methods_supported`; the `relay` client read via kcadm matches the JSON (flows,
   redirect, origin, PKCE); edge 404s; Relay 1/1 Ready on the v0.5.2 digest; acceptance list complete.
+<!-- codex: Add management-port probe results, a browser port-forward admin-console test, forwarded-proto/secure-cookie evidence, and an explicit check that Relay can reach discovery/token/JWKS over its allowed egress. If metrics remain enabled, verify the intended scrape path. -->
 - Rollback: an auth-only rollback keeps the v0.5.2 image and sets `RELAY_AUTH_MODE=local`, which
   brings the admin-token login back (that token stays in `relay-secrets`). Going back to the v0.3.5
   image also means restoring the pre-migration dump, because v0.3.5→v0.5.2 migrations are
   forward-only. PR 1 is additive and can stay.
+<!-- codex: Test the auth-only rollback in a disposable or controlled window, including a fresh pod restart and successful admin-token login. For an image rollback, name the exact suspension/restore/reconcile order and verify the restored database is not immediately migrated again. -->
 
-<!-- codex-review-status: pending -->
+<!-- codex-review-status: complete -->
