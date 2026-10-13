@@ -30,6 +30,10 @@ spec:
         - {name: router-files, mountPath: /output}
       containers:
       - name: relay
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
         env:
         - name: RELAY_AGENT_CONTROL_PLANE
           value: '1'
