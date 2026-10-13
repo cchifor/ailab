@@ -810,6 +810,29 @@ merges need BOTH personas clean, and two GPT reviews are not two independent rev
 need not run on `fable`. Rollback: drop `model` from the seat and deploy (`reviewers.yml -l
 reviewer-1 -t reviewbot`).
 
+What one route for every tier means:
+- **A router 429** parks seat `r` at account scope, so for every tier at once. The review moves to
+  seats a-c; it never walks three identical router tiers.
+- **A failure that is not a limit** (5xx, a stream error, an empty answer) descends the ladder on the
+  SAME seat (`ModelError`). On `r` that re-sends the same route, at most twice, while the attempt
+  budget allows (`llm_fallback_min_s`). That amounts to a bounded retry of a route that already fails
+  over internally.
+- **Seat `r` serves whatever tier the ladder is on,** so it stays preferred even after the ladder has
+  descended on seats a-c.
+- **Labels name the tier, not the served model.** The tier appears in reviewbot's metrics and logs
+  (`reviewbot_llm_active_model_info`, `seat 'r' … on 'fable'`); the posted review's marker carries only
+  persona, head and verdict.
+  - The model that ran is in the router's journal: `GET /admin/v1/trajectories?route=claude-reviewer`
+    gives `accountId`, and `attempt.started` gives the model.
+  - The response header `x-router-route` says `claude-reviewer` (claude-5) or `pool-claude`
+    (fallback).
+
+**Deploying a reviewer-2 key and seat change together:** `-t reviewbot` writes the config, then the
+key (read per call), and restarts at the end of the play. A router call that starts between the key
+task and the restart pairs the new key with the old seat. With 2026-10-13's key that is 400
+`MODEL_NOT_SUPPORTED`: an ordinary failure, not a park. So deploy while reviewer-2 is idle
+(`reviewbot_job_running{persona="codex"} == 0`).
+
 ### When a persona is parked on a subscription rate limit
 
 **Do nothing. It self-heals, and the two obvious interventions both make it worse.** This is the
