@@ -813,6 +813,18 @@ reviewer-1 -t reviewbot`).
 What one route for every tier means:
 - **A router 429** parks seat `r` at account scope, so for every tier at once. The review moves to
   seats a-c; it never walks three identical router tiers.
+- **Which 429s park.** reviewbot reads the router's `error.reason`, not only the status
+  (`_router_refusal`):
+  - **`reason: "busy"`** (`CAPACITY_UNAVAILABLE`: every target of the route is in use) is waited out
+    in place, without a park.
+  - **Any other 429** parks seat `r` until the `Retry-After` it sends, else for 15 min.
+  - **`CLAUDE_BUSY`** carries no `reason`, so it parks. The router raises it when the pod's two Claude
+    runs (`MAX_RUNNING`) stayed taken for 60 s, and marks it retryable with `Retry-After: 5`.
+  - **Inside the router** it is a failed attempt: `claude-reviewer` moves on to its next attempt (3 in
+    all, claude-5 and then `pool-claude`). So reviewbot sees it only when all three attempts each waited
+    up to 60 s for a pod run slot, which takes about 3 minutes of a full pod.
+  - **The cost** is then a 5 s park of seat `r`. That review runs on seats a-c, and the next one is back
+    on the router (preferred, never sticky).
 - **A failure that is not a limit** (5xx, a stream error, an empty answer) descends the ladder on the
   SAME seat (`ModelError`). On `r` that re-sends the same route, at most twice, while the attempt
   budget allows (`llm_fallback_min_s`). That amounts to a bounded retry of a route that already fails
