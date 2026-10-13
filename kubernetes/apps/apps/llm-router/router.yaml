@@ -211,13 +211,16 @@ spec:
           # Memory: the router process runs at ~310 MiB (measured 2026-10-13); image jobs in the Assistant add at most
           # 512 MiB at their maximum sizes (llm-router tests/image-memory.test.ts, enforced ceiling; measured 341-419 MiB
           # on Linux), and each Claude Code run adds ~210 MiB (Claude Code 2.1.281, sdk-resume). The pod runs at most
-          # provider-claude `maxRunning` runs at once (a live plugin setting, llm-router #102; default 2, set to 8 here
-          # after this limit rolled out). Worst case at 8: 310 + 512 + 8 x 210 = ~2.5 GiB, ~70% of 3584Mi. Lower the
-          # setting BEFORE lowering this limit. CPU 4: eight Claude Code start-ups at once.
+          # provider-claude `maxRunning` runs at once: llm-router #102, default 2. The value is NOT in this file; it is
+          # a live plugin setting in /data/plugins.yml (admin API), set to 8 once this limit had rolled out, and
+          # reverting this file does not reset it. Worst case at 8: 310 + 512 + 8 x 210 = ~2.5 GiB, ~70% of 3584Mi.
+          # Even at 2 runs the worst case (~1.2 GiB) filled ~97% of the old 1280Mi, so never go back below 2Gi; lower
+          # the setting BEFORE lowering this limit. Request 1Gi: the loaded working set, so the scheduler reserves what
+          # the pod uses (one replica, Recreate). CPU 4: eight Claude Code start-ups at once.
           resources:
             requests:
               cpu: 100m
-              memory: 512Mi
+              memory: 1Gi
             limits:
               cpu: "4"
               memory: 3584Mi

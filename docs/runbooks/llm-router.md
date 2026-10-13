@@ -1516,14 +1516,19 @@ too").
 - **The slots.** The FIFO wait, the 60 s timeout before 429 `CLAUDE_BUSY` (Retry-After 5 s) and the once-only release
   are unchanged. A wait that times out no longer leaves its abort listener on the request signal.
 - **The pod (`router.yaml`).**
-  - Memory limit 1280Mi → 3584Mi, memory request 384Mi → 512Mi, CPU limit 2 → 4.
+  - Memory limit 1280Mi → 3584Mi, memory request 384Mi → 1Gi, CPU limit 2 → 4.
   - Measured on the live pod: the router process ~310 MiB, one Claude Code run (2.1.281, `sdk-resume`) ~210 MiB.
   - Worst case at 8 runs: 310 + 512 (Assistant image jobs) + 8 × 210 ≈ 2.5 GiB, about 70 % of the limit.
+  - **The old 1280Mi was already too small.** At the old cap of 2, the worst case (310 + 512 + 2 × 210 ≈ 1.2 GiB)
+    filled about 97 % of it. Never go back below 2Gi, whatever the cap.
+  - The request is 1Gi, the loaded working set, so the scheduler reserves what the pod uses (one replica, Recreate).
   - The agent nodes have 16 GiB at about 20 % used.
 
 **After the rollout** (live setting): `maxRunning` 2 → 8.
+- The value lives in `/data/plugins.yml` (admin API), not in `router.yaml`, and reverting the manifest does not reset
+  it.
 - Set it only once the pod with the 3584Mi limit is running.
-- Lower it first before ever lowering the limit.
+- Before ever lowering the limit, lower the setting first.
 
 **Image.**
 - Archive `router-0.1.0-20261013-claude-run-cap.tar.gz`, SHA-256
@@ -1542,14 +1547,16 @@ too").
 **Rollback.**
 1. **First remove the setting.** `PATCH /admin/v1/plugins/provider-claude/config` with
    `{"values": {"transport": "sdk-resume"}}` (no `maxRunning`), with `If-Match` set to the view's etag.
-   - The cap returns to the default 2, which is what 1280Mi holds.
+   - The cap returns to the default 2, the old image's hard-coded cap.
    - The save stores exactly the submitted values in `/data/plugins.yml` (`provider-claude` held only
      `{"transport":"sdk-resume"}` before this release), so the file no longer carries `maxRunning`. The old image's
      schema is `.strict()`, so it would refuse the extra key.
-2. **Then revert `router.yaml`:** the image digest, both pod-template annotations and the resources block together.
+2. **Then revert `router.yaml`:** only the image digest and both pod-template annotations, together.
    - `image: registry.chifor.me/llm-router/router@sha256:f8ddc9ce9353f6e3a5f7bcc75b8ff16d2cfa29cf0a5e801358b57d9dbc4bec54`
    - `chifor.me/source-commit: ccfbd1dbe1310ce11b2d9b659ddf6a3d72aba597`
    - `chifor.me/release: router-0.1.0-20261012-sticky-spills`
+   - **Keep the resources block.** It does not depend on the image, and the old 1280Mi was undersized even at 2 runs
+     (above).
 
 ## Relay managed-key bridge (v0.6.0)
 
