@@ -1641,6 +1641,25 @@ on the Activity page.
 
 Nothing else is needed: there is no schema change and no new setting, and `maxRunning` stays (that image has it).
 
+**Rolled out 2026-10-13.** ailab PR #1313 merged as `aea2b77c`.
+- **Rollout:** Flux applied it at 17:38 UTC.
+  - The old pod used its whole drain budget (`drained in 20151 ms`, `runtime closed in 98 ms`). The new pod
+    `llm-router-7c87f55f78-wdtmw` (resources unchanged, 0 restarts) was ready about 20 s after the old one stopped.
+  - In the journal, 17:33-17:39:30: 207 requests, none `abandoned`.
+  - **Six long streams were cut by the restart** (`cancelled`, cause `shutdown`): five from dev-worker-1 and one from
+    `covenant-demo-luna`. Codex clients retry a cut stream (the dev workers allow 8 stream retries).
+  - The other cancels in the window were `superseded`, the normal Codex follow-up pattern.
+  - Router rollout acceptance passed: [run 85227](https://git.chifor.me/cchifor/ailab/actions/runs/85227).
+- **Setting:** `maxRunning` 8 is still active after the restart, read from `/data/plugins.yml`.
+- **Verified on the live router:**
+  - `?search=codex-reviewer` returns reviewer-codex's requests (29 rows; its model is `gpt-6-astra`, so only the entered
+    route finds them).
+  - `?search=claude-reviewer` returns reviewer-claude's (27).
+  - `?search=reviewer` returns both bots' keys, including reviewer-codex's old one.
+  - `REVIEWER-CODEX` matches the name regardless of case.
+  - Each search took 0.09-0.6 s.
+  - The page served at router.chifor.me carries the new search placeholder.
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
