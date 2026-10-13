@@ -57,9 +57,10 @@ spec:
           # Stock python, stdlib only (the cloud-power / ci-rerun-watchdog shape); the extras YAML
           # is read by phase4_probe.parse_yaml_subset, no PyYAML needed. DIGEST-PINNED (the OCI
           # index digest of 3.14-slim on 2026-10-06, the image the tests ran under): the weekly
-          # TTL re-run must not pick up a different interpreter on a fresh node. Re-pin
-          # deliberately: docker buildx imagetools inspect mirror.gcr.io/library/python:3.14-slim
-          image: mirror.gcr.io/library/python:3.15-slim@sha256:ea4f1f290e071bf7d28199cfb3e09f5dbad31b50e9c32fd58f2f2d7be915f3ae
+          # TTL re-run must not pick up a different interpreter on a fresh node. Keep the
+          # qualification image pinned independently from routine application base-image bumps.
+          # Re-pin deliberately: docker buildx imagetools inspect mirror.gcr.io/library/python:3.14-slim
+          image: mirror.gcr.io/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
           imagePullPolicy: IfNotPresent
           command:
             - python3
