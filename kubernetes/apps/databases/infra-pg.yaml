@@ -254,6 +254,19 @@ spec:
         connectionLimit: -1
         passwordSecret:
           name: infra-pg-gitea
+      # ailab Keycloak (id.chifor.me, ADR 0038) - reconciled into existence on the LIVE cluster
+      # (postInitSQL only runs at first bootstrap); password from infra-pg-keycloak, which MUST stay
+      # byte-identical to KC_DB_PASSWORD in apps/keycloak/keycloak-secrets.sops.yaml. managed.roles makes
+      # the ROLE but NEVER a DATABASE: the `keycloak` DB comes from the superuser one-shot
+      # databases/keycloak-db-bootstrap.sql (gitea's peer-auth invocation; see that file's header).
+      - name: keycloak
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: infra-pg-keycloak
       # AgentForge v2 RLS boundary (ADR 0019): two roles, one password secret each. bypassrls is set
       # explicitly on both — afp_admin BYPASSRLS (owner/migrations), afp_app NOBYPASSRLS (request path).
       - name: afp_admin

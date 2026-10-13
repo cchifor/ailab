@@ -415,6 +415,16 @@ data:
         url: http://authelia.auth.svc.cluster.local:9091/api/health
         interval: 60s
         conditions: ["[STATUS] == 200"]
+      - name: Keycloak (id.chifor.me) OIDC discovery
+        group: Infrastructure
+        # The public path Relay itself uses (ADR 0038). The issuer match also catches a hostname or
+        # proxy-header regression (Keycloak advertising an internal or http:// issuer), which would
+        # break every Relay sign-in.
+        url: https://id.chifor.me/realms/relay/.well-known/openid-configuration
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+          - "[BODY].issuer == https://id.chifor.me/realms/relay"
       - name: Registry (Zot)
         group: Infrastructure
         url: https://registry.chifor.me/v2/   # anon-readable OCI API; on the LXC (.36), public LE cert

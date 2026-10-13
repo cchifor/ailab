@@ -48,6 +48,18 @@ data:
       # Relay owns browser and connector authentication; no interactive Access gate.
       - hostname: relay.chifor.me
         service: http://relay.relay.svc.cluster.local:80
+      # ailab Keycloak (ADR 0038): Relay's identity provider, own login, so no Access gate. The admin
+      # console and the master realm are NEVER served publicly: those paths answer 404 here, ahead of
+      # the host's catch-all (rule order is first match). Admin = kubectl port-forward only
+      # (docs/runbooks/keycloak.md).
+      - hostname: id.chifor.me
+        path: ^/admin(/|$)
+        service: http_status:404
+      - hostname: id.chifor.me
+        path: ^/realms/master(/|$)
+        service: http_status:404
+      - hostname: id.chifor.me
+        service: http://keycloak.keycloak.svc.cluster.local:80
       # SearXNG web UI — the estate's own metasearch instance, which exists for dsh (apps/dsh/searxng.yaml)
       # and now also answers a browser. NOT behind Cloudflare Access, and NOT pointed at the searxng
       # Service: it terminates on that namespace's oauth2-proxy, which is an OIDC client of Authelia and
@@ -189,7 +201,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-10-11-llm-router-edge"
+        chifor.me/config-revision: "2026-10-13-keycloak-id"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:
