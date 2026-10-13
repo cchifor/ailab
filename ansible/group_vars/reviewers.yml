@@ -1,0 +1,22 @@
+# Draft rollout for the consolidated Forge bounded-review lane.
+# Merging this reviewed PR records the opt-in; activation is a separate operator step that
+# converges both reviewer hosts after human examination. The no-automerge label protects this PR
+# until that review is complete.
+pr_reviewer_chunk_review_repos:
+  - cchifor/forge
+pr_reviewer_chunk_review_policy_epoch: forge-304-20261011T230723Z
+pr_reviewer_chunk_review_profiles:
+  claude:
+    llm_kind: claude
+    llm_model: fable
+    llm_fallback_model: opus
+    llm_effort: medium
+    llm_models: [fable, opus, sonnet]
+  # Empty llm_models and fallback intentionally select the role's legacy single-pin mode:
+  # llm_model is the primary pin and an empty fallback means no secondary model.
+  codex:
+    llm_kind: codex
+    llm_model: gpt-6-astra
+    llm_fallback_model: ""
+    llm_effort: medium
+    llm_models: []
