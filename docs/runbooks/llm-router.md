@@ -1537,7 +1537,7 @@ too").
     `Recreate` replica.
   - For more runs, raise the limit first, to at least `(822 + N × 210) / 0.7` MiB for N runs, then the setting.
 
-**Rolled out 2026-10-13.** ailab #1311 merged as `2237b6dd`.
+**Rolled out 2026-10-13.** ailab PR #1311 merged as `2237b6dd`.
 - **Rollout:** Flux applied it at 16:35 UTC.
   - The old pod drained in 18.4 s (`runtime closed in 62 ms`). The new pod `llm-router-886d985ff-wxpsv` (talos-agent-node-2,
     limits 4 CPU / 3584Mi, request 2560Mi) was ready about 25 s after the old one stopped being ready.
@@ -1548,11 +1548,26 @@ too").
 - **Setting (about 16:39):** `PATCH /admin/v1/plugins/provider-claude/config` set
   `{"transport": "sdk-resume", "maxRunning": 8}` with `If-Match`. Active at once (`pending: false`); `/data/plugins.yml`
   now holds the same.
-- **Verified (16:40):** four simultaneous `claude-reviewer` requests ran four Claude Code processes at once, where the
-  old cap allowed two.
-  - About 210 MiB each, as measured before.
-  - Pod memory peaked at about 1.2 GiB of 3584Mi.
-  - All four were served by claude-5 (concurrency 4, revision 1480) in 9-12 s.
+- **Verified at 4 (16:40).** Four simultaneous `claude-reviewer` requests ran four Claude Code processes at once, where
+  the old cap allowed two.
+  - About 210 MiB RSS each, as measured before.
+  - Pod memory peaked at about 1.2 GiB of 3584Mi (cgroup `memory.current`).
+  - All four were served by the router account `claude-5` (a Claude subscription; concurrency 4 since revision 1480),
+    on `opus`, in 9-12 s.
+- **Verified at the full cap of 8 (16:43).** Eight simultaneous `claude-reviewer` requests ran eight Claude Code
+  processes at once.
+  - Four were served by `claude-5` (its concurrency of 4) and four by the fallback `pool-claude`, all with 200, in
+    9.5-14.8 s.
+  - The pod cgroup's `memory.peak` was **1719 MiB, 48 % of 3584Mi**: anon about 1070 MiB plus 563 MiB file cache. The
+    Claude processes' summed RSS was about 1.75 GiB (about 218 MiB each) and the router's about 260 MiB.
+  - The cgroup counts the pages the processes share (the Claude Code binary) once, which is why it is lower than the
+    summed RSS.
+- **Reading these numbers against the sizing rule.** `822 + N × 210` MiB is a deliberately conservative upper bound,
+  so the samples do not argue for a lower limit.
+  - It counts the Assistant's 512 MiB of image-job headroom (no image job ran during these tests) and adds RSS without
+    the sharing above.
+  - At 8 runs that bound is ~2.5 GiB, about 70 % of 3584Mi. The 8-run sample plus 512 MiB of image jobs is about
+    2.2 GiB, 62 %.
 
 **Image.**
 - Archive `router-0.1.0-20261013-claude-run-cap.tar.gz`, SHA-256
