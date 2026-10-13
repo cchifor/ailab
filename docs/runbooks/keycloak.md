@@ -9,7 +9,7 @@ There is one realm per application. Today the only one is `relay`, with issuer
 | Deployment, Service, NetworkPolicy, realm JSON | `kubernetes/apps/apps/keycloak/` (Flux, `apps` layer) |
 | Secrets (bootstrap admin, DB password, `relay` client secret) | `keycloak-secrets.sops.yaml` (SOPS is the system of record, not OpenBao) |
 | Database | `keycloak` DB on CNPG `infra-pg`: role in `databases/infra-pg.yaml`, password `databases/infra-pg-keycloak.sops.yaml`, DB from `databases/keycloak-db-bootstrap.sql` |
-| Public route | `apps/edge/cloudflared.yaml` (`/admin` and `/realms/master` answer 404) + `id` in `kubernetes/infra/cloudflare/variables.tf` |
+| Public route | `apps/edge/cloudflared.yaml` (allowlist: `/realms/relay` + `/resources`; `..`/`;` and everything else 404) + `id` in `kubernetes/infra/cloudflare/variables.tf` |
 | Monitoring | Gatus "Keycloak (id.chifor.me) OIDC discovery" |
 | Backups | the nightly `infra-pg-dump` enumerates every database, `keycloak` included |
 
@@ -103,8 +103,16 @@ The console shows a "temporary admin" banner for this account. That is accepted 
    - `curl -s https://id.chifor.me/realms/relay/.well-known/openid-configuration`: `issuer` is
      exactly `https://id.chifor.me/realms/relay`, and `code_challenge_methods_supported` contains
      `S256`.
-   - `curl -o /dev/null -w '%{http_code}' https://id.chifor.me/admin/` returns `404`, and so does
-     `https://id.chifor.me/realms/master/`. `https://id.chifor.me/realms/relay/account` returns 200.
+   - The edge allowlist works. Use `curl --path-as-is -o /dev/null -w '%{http_code}'` so curl does not
+     normalize the paths itself.
+     - Expect `404` for `/`, `/admin/`, `//admin/`, `/admin/realms/relay/users`, `/realms/master/`,
+       `/realms//master/.well-known/openid-configuration`,
+       `/realms/relay/../master/.well-known/openid-configuration`, `/realms/relay/%2e%2e/master/x`,
+       `/realms/relay/x;y` and `/js/keycloak.js`.
+     - Expect `200` for `/realms/relay/account` and for one `/resources/…` asset that the login page
+       references.
+     - Expect the registration form to render at `/realms/relay/login-actions/registration`, reached
+       from the login page.
    - The client matches the JSON: `kc get clients/$RELAY_CLIENT -r relay` (the full object;
      `--fields attributes` prints `{}` because kcadm's field filter drops nested maps). Check
      `attributes."pkce.code.challenge.method"` = `S256`.

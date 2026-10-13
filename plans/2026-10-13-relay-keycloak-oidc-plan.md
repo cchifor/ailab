@@ -355,6 +355,10 @@ ADR, not the Approach text above, for these points:
   the current primary. It is not a ConfigMap plus Job.
 - **DNS** uses `tofu apply -target='cloudflare_dns_record.tunnel["id"]'`. The operator state carries
   unrelated drift, including two destroys of the live `trueswarm-admin-e2e` Access token and policy.
+- **Edge = allowlist, not the plan's two deny rules.** Requested by both reviewers. `id.chifor.me`
+  serves only `^/realms/relay(/|$)` and `^/resources/`, refuses `..` and `;` first, and returns 404
+  for everything else. The login, registration and account pages reference only allowlisted paths
+  (checked against 26.7.5 locally).
 - **Verified rather than assumed:**
   - Keycloak 26.7.5 resolves the bare `${RELAY_OIDC_CLIENT_SECRET}` placeholder at import, and
     imports `attributes.pkce.code.challenge.method=S256`. Checked in a disposable local container

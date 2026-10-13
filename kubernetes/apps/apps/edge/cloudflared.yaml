@@ -48,18 +48,24 @@ data:
       # Relay owns browser and connector authentication; no interactive Access gate.
       - hostname: relay.chifor.me
         service: http://relay.relay.svc.cluster.local:80
-      # ailab Keycloak (ADR 0038): Relay's identity provider, own login, so no Access gate. The admin
-      # console and the master realm are NEVER served publicly: those paths answer 404 here, ahead of
-      # the host's catch-all (rule order is first match). Admin = kubectl port-forward only
-      # (docs/runbooks/keycloak.md).
+      # ailab Keycloak (ADR 0038): Relay's identity provider, own login, so no Access gate. ALLOWLIST,
+      # first match wins: only the `relay` realm and the theme resources reach Keycloak; the admin
+      # console/API, the master realm and every other path answer 404 (admin = kubectl port-forward
+      # only, docs/runbooks/keycloak.md). cloudflared matches the once-decoded path literally while
+      # Keycloak's HTTP layer normalizes, so a deny-list keyed on `/admin` could be dodged by `//admin`
+      # or `/realms/relay/../master`: hence the allowlist, and dot-segment/`;` paths are refused before
+      # it (no legitimate Keycloak URL carries either). A new realm/app on this host = a new allow line.
       - hostname: id.chifor.me
-        path: ^/admin(/|$)
+        path: '\.\.|;'
         service: http_status:404
       - hostname: id.chifor.me
-        path: ^/realms/master(/|$)
-        service: http_status:404
-      - hostname: id.chifor.me
+        path: ^/realms/relay(/|$)
         service: http://keycloak.keycloak.svc.cluster.local:80
+      - hostname: id.chifor.me
+        path: ^/resources/
+        service: http://keycloak.keycloak.svc.cluster.local:80
+      - hostname: id.chifor.me
+        service: http_status:404
       # SearXNG web UI — the estate's own metasearch instance, which exists for dsh (apps/dsh/searxng.yaml)
       # and now also answers a browser. NOT behind Cloudflare Access, and NOT pointed at the searxng
       # Service: it terminates on that namespace's oauth2-proxy, which is an OIDC client of Authelia and

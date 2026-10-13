@@ -66,8 +66,13 @@ Why not the `strive` realm:
    runbook's recent-registrations watch, and Relay's membership gate. There is no captcha and no
    Cloudflare rate limit yet. Revisit when the Google IdP lands, or as soon as sign-up spam is seen.
 6. **Admin surface.**
-   - The admin console and the `master` realm are never served publicly: cloudflared answers 404
-     for `^/admin` and `^/realms/master`.
+   - The admin console and the `master` realm are never served publicly. On `id.chifor.me`,
+     cloudflared publishes an **allowlist**, `^/realms/relay(/|$)` and `^/resources/`, and refuses
+     any path containing `..` or `;` before that. Everything else is 404.
+   - Why an allowlist and not a deny-list on `/admin`: cloudflared matches the decoded path
+     literally, while Keycloak's HTTP layer normalizes it. Keycloak 26.7.5 was observed rejecting
+     `//`, `..` and `%2e%2e` paths with 400, but the boundary must not depend on that.
+   - Each new realm on this host adds its own allow line.
    - The console is reached through `kubectl port-forward` only (`KC_HOSTNAME_ADMIN=
      http://localhost:8080`).
    - The bootstrap admin stays as the break-glass master admin. Its system of record is the SOPS
