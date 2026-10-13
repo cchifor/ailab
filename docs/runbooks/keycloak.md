@@ -19,16 +19,32 @@ a different cluster). **Never print a secret value.** Compare values by sha256 p
 ## kcadm
 
 Run kcadm inside the pod, against the pod's own HTTP port. The bootstrap credentials come from the
-pod env, so they never cross the workstation:
+pod env, so they never cross the workstation. There are two wrappers:
 
 ```bash
-kc() { kubectl --context admin@ai -n keycloak exec deploy/keycloak -c keycloak -- sh -c \
-  'K=/opt/keycloak/bin/kcadm.sh; C=/tmp/kcadm-$$.cfg; trap "rm -f $C" EXIT
-   $K config credentials --config $C --server http://localhost:8080 --realm master \
-     --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" >/dev/null &&
-   $K "$@" --config $C' kc "$@"; }
+# kc   - arguments only. NEVER put a secret in its arguments: kubectl exec sends argv to the API
+#        server as URL query parameters (audit log), and your shell keeps it in history.
+# kcin - the same, plus the request body on STDIN (`-f -`). Every secret goes this way, from a
+#        private file you delete afterwards.
+kc()   { kubectl --context admin@ai -n keycloak exec    deploy/keycloak -c keycloak -- sh -c "$KCADM" kc "$@"; }
+kcin() { kubectl --context admin@ai -n keycloak exec -i deploy/keycloak -c keycloak -- sh -c "$KCADM" kc "$@"; }
+KCADM='K=/opt/keycloak/bin/kcadm.sh; C=/tmp/kcadm-$$.cfg; trap "rm -f $C" EXIT
+  $K config credentials --config $C --server http://localhost:8080 --realm master \
+    --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" >/dev/null &&
+  $K "$@" --config $C'
 kc get realms/relay --fields realm,registrationAllowed,verifyEmail,bruteForceProtected,passwordPolicy
+RELAY_CLIENT=$(kc get clients -r relay -q clientId=relay --fields id --format csv --noquotes | tr -d '\r')
 ```
+
+Read a secret only through a hash, never to the terminal:
+
+```bash
+kc get clients/$RELAY_CLIENT/client-secret -r relay \
+  | python3 -c 'import json,sys,hashlib; print(hashlib.sha256(json.load(sys.stdin)["value"].encode()).hexdigest()[:12])'
+```
+
+`kcin update clients/<id> -f -` and `kcin update users/<id>/reset-password -f -` were checked against
+26.7.5 on 2026-10-13 (disposable local container).
 
 ## Admin console
 
@@ -44,9 +60,11 @@ The public host never serves it.
 `keycloak-secrets.sops.yaml`. Keycloak creates the account **only at the first start, and only while
 the master realm has no admin**. Editing those values later changes nothing live. To rotate:
 
-1. Run `kc set-password -r master --username kc-admin --new-password …` with a value read from a
-   private file, never typed into argv on a shared host.
-2. Update the SOPS file in the same PR.
+1. Write `{"type":"password","value":"<new>","temporary":false}` to a private file. Then run
+   `kcin update users/<kc-admin id>/reset-password -r master -f - < that-file` and delete the
+   file. The id comes from `kc get users -r master -q username=kc-admin -q exact=true --fields id`.
+2. Update `KC_BOOTSTRAP_ADMIN_PASSWORD` in the SOPS file in the same PR. That value is what the
+   `kc` wrappers log in with, so the pod must restart onto the new Secret before they work again.
 
 The console shows a "temporary admin" banner for this account. That is accepted (ADR 0038 decision
 6).
@@ -87,12 +105,19 @@ The console shows a "temporary admin" banner for this account. That is accepted 
      `S256`.
    - `curl -o /dev/null -w '%{http_code}' https://id.chifor.me/admin/` returns `404`, and so does
      `https://id.chifor.me/realms/master/`. `https://id.chifor.me/realms/relay/account` returns 200.
-   - The client matches the JSON:
-     `kc get clients -r relay -q clientId=relay --fields clientId,publicClient,standardFlowEnabled,implicitFlowEnabled,directAccessGrantsEnabled,serviceAccountsEnabled,redirectUris,webOrigins,attributes`.
-   - The client secret was substituted. Compare the sha256 prefix of
-     `kc get clients/<id>/client-secret -r relay` (field `value`) with that of
-     `RELAY_OIDC_CLIENT_SECRET` from `sops -d`. A literal `${RELAY_OIDC_CLIENT_SECRET}` means the
-     placeholder was not resolved.
+   - The client matches the JSON: `kc get clients/$RELAY_CLIENT -r relay` (the full object;
+     `--fields attributes` prints `{}` because kcadm's field filter drops nested maps). Check
+     `attributes."pkce.code.challenge.method"` = `S256`.
+   - The client secret was substituted: its hash (see "kcadm") equals the sha256 prefix of
+     `RELAY_OIDC_CLIENT_SECRET` from `sops -d`. Keycloak 26.7.5 resolves the bare
+     `${RELAY_OIDC_CLIENT_SECRET}` placeholder at import. This was checked on 2026-10-13 in a
+     disposable local container with this exact realm file, and the PKCE attribute and default scopes
+     (`profile`, `email`, `basic`) came through too.
+     - **If it stays literal anyway** (the hash equals the sha256 of the string
+       `${RELAY_OIDC_CLIENT_SECRET}`), the import will not run again. Set the real value through the
+       API: write `{"secret":"<value from sops -d>"}` to a private file, run
+       `kcin update clients/$RELAY_CLIENT -r relay -f - < that-file`, delete the file, and re-check
+       the hash.
 
 ## Realm changes (the import never re-applies)
 
@@ -119,16 +144,16 @@ must equal the live value.
 
 The order matters, and the import does NOT apply a changed Secret.
 
-1. Generate the new value into a private file. Keep the old value until step 5. It is still in git
-   history (SOPS) for rollback.
-2. Set it live: `kc update clients/<id> -r relay -s "secret=<new>"`, from the pod side, passing the
-   value via a file, never via argv on the workstation.
-3. Verify: the sha256 prefix of `kc get clients/<id>/client-secret -r relay` equals the new value's.
-   From this moment Relay sign-ins fail until step 4 lands, so do 2–4 together.
+1. Generate the new value into a private file as `{"secret":"<new>"}`. Keep the old value until
+   step 5. It is still in git history (SOPS) for rollback.
+2. Set it live: `kcin update clients/$RELAY_CLIENT -r relay -f - < that-file`, then delete the
+   file. The value never goes into argv.
+3. Verify that the client-secret hash (see "kcadm") equals the new value's. From this moment Relay
+   sign-ins fail until step 4 lands, so do 2–4 together.
 4. One PR updates both `OIDC_CLIENT_SECRET` in `apps/relay/relay-secrets.sops.yaml` and
    `RELAY_OIDC_CLIENT_SECRET` here. Relay restarts on its Secret change; confirm that it does, and
    restart it otherwise.
-5. Rollback: `kc update` back to the old value, then revert the PR.
+5. Rollback: `kcin update` back to the old value, the same way, then revert the PR.
 
 ## Members (Relay)
 
@@ -152,8 +177,11 @@ To remove someone, delete or disable the Keycloak user AND remove the Relay memb
 session lasts up to 8 h and is not revoked by Keycloak.
 
 **Password reset.** There is no SMTP, so this is operator-only:
-`kc set-password -r relay --userid <id> --new-password <value> --temporary`, with the value given out
-of band. The user must change it at the next sign-in.
+
+1. Write `{"type":"password","value":"<temporary>","temporary":true}` to a private file.
+2. Run `kcin update users/<id>/reset-password -r relay -f - < that-file`, then delete the file.
+3. Give the value to the person out of band. Keycloak adds `UPDATE_PASSWORD`, so they must change it
+   at the next sign-in.
 
 ## Abuse watch
 

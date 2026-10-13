@@ -1,5 +1,8 @@
 # Relay v0.5.2 sign-in through a new ailab-owned Keycloak
 
+> Implemented in ailab #1299 (stage 1) and #1300 (Keycloak). Where they differ from this plan, see
+> "Implementation rulings" at the end.
+
 ## Context
 
 Relay (`relay.chifor.me`, namespace `relay`) is the agent control plane that dev-worker-4's Codex
@@ -334,5 +337,29 @@ and the client secret is verified.
   `keycloak` role reconciled.
 - **Rollback:** the auth rollback is proven by PR 2's local-mode evidence. The image rollback is
   documented but not rehearsed (request 3). PR 1 is additive and can stay.
+
+## Implementation rulings (2026-10-13): where the shipped PRs deviate from this plan
+
+The shipped files are the authority where these differ. Follow `docs/runbooks/keycloak.md` and the
+ADR, not the Approach text above, for these points:
+
+- **No OpenBao escrow, and no permanent-admin swap.** `openbao-estate-credentials.md` keeps values
+  that a SOPS file already holds out of `af/estate`, to avoid two copies drifting apart. The
+  bootstrap admin therefore stays the break-glass master admin (ADR 0038 decision 6), and SOPS is its
+  system of record. Approach item 8 and operator step 2 are superseded.
+- **Client-secret rollback** uses the previous value from SOPS git history, not an OpenBao copy.
+  Every secret write goes through kcadm `-f -` on stdin, never argv (runbook "kcadm").
+- **Resources:** requests 1Gi, limits 2Gi (not 768Mi/1536Mi), because the KC heap defaults to 70% of
+  the limit, plus metaspace.
+- **DB bootstrap** is a plain `keycloak-db-bootstrap.sql`, run with gitea's peer-auth invocation on
+  the current primary. It is not a ConfigMap plus Job.
+- **DNS** uses `tofu apply -target='cloudflare_dns_record.tunnel["id"]'`. The operator state carries
+  unrelated drift, including two destroys of the live `trueswarm-admin-e2e` Access token and policy.
+- **Verified rather than assumed:**
+  - Keycloak 26.7.5 resolves the bare `${RELAY_OIDC_CLIENT_SECRET}` placeholder at import, and
+    imports `attributes.pkce.code.challenge.method=S256`. Checked in a disposable local container
+    with the exact realm file.
+  - The Relay restore rehearsal passed for the DB data (#1299). It found that `--no-acl` drops the
+    `relay_app` grants, which `migrate` re-applies.
 
 <!-- codex-review-status: finalized -->
