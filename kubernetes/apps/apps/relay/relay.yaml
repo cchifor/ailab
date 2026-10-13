@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.5.2-ci-20261013
-        chifor.me/source-commit: 39767c6329524a36fce9875a14f37a0eef942c32
+        chifor.me/release: relay-0.6.0-ci-20261013
+        chifor.me/source-commit: be1b72ebb7c19ac312500b9c4df12eea0f971dc2
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
