@@ -568,21 +568,79 @@ v0.5.x OIDC relying-party code, and it applies migrations `006`–`049` (forward
 table or column). Every new control-plane feature stays disabled by default: no pool, profile,
 approval file, notification, monitoring or Gitea-issuer input is set here.
 
-**Authentication is unchanged in this stage.** `RELAY_AUTH_MODE` is unset and no `OIDC_ISSUER`
-is set, so Relay resolves to local mode and keeps the administrator-token sign-in. Stage 2 enables
-OIDC against the ailab Keycloak (`id.chifor.me`, realm `relay`) in a separate reviewed change.
-Keeping the two apart means that change's rollback (back to local mode on this same image) is the
-state this stage proves.
+**Authentication is unchanged in this stage.** `RELAY_AUTH_MODE=local` is pinned on the `relay`
+container rather than left to the release default, so Relay keeps the administrator-token sign-in.
+Stage 2 flips that one value to `oidc` against the ailab Keycloak (`id.chifor.me`, realm `relay`,
+ADR 0038) in a separate reviewed change. That change's rollback is this state.
 
-The existing coordinated database/artifact backup gate runs before `migrate`: the
-`backup-database` and `backup-artifacts` init containers must publish
-`/tmp/relay-pre-migration-backup.json`, or `migrate` does not start. Record the generated
-receipt name, the init statuses, `/health` and `/ready`, and one administrator-token sign-in.
+**No old pod runs against the new schema.** The Deployment strategy is `Recreate`: the 0.3.5 pod
+is terminated before the new pod's init chain starts. The `backup-database` and `backup-artifacts`
+init containers must publish `/tmp/relay-pre-migration-backup.json`, or `migrate` does not start.
+Then `migrate` applies 006–049 and re-applies every `relay_app` grant, and only then does the
+0.5.2 `relay` container start.
 
-Rollback: auth needs none here. Running the 0.3.5 image against the migrated schema-49 database
-is **untested**. Return to 0.3.5 by restoring the pre-migration dump of this rollout into a fresh
-database (the initial-deployment restore steps above, as `relay_migrator`), with Flux suspended
-and Relay scaled to zero, and only then pin
-`registry.chifor.me/relay/control-plane@sha256:25640aafcdf4484ebe87c47ebfa9be1a3dc69233dca6b9b6a0df5a97416cb82d`,
-release `relay-0.3.5-ci-20261006` and source `a78d6f33dcc14c7ecd34b12b1adca23975dea874` through a
-reviewed change. That restore has not been rehearsed.
+**Evidence to record for this rollout**, nonsecret, with UTC times:
+
+- the manual pre-merge backup run (Job created from `relay-postgres-dump`) and its published
+  generation;
+- the per-rollout pre-migration generation named in the `backup-database` log;
+- the `migrate` and `bootstrap` log lines and exit 0, and `SELECT max(version)` on the migrations
+  table, which must cover 049;
+- Relay 1/1 Ready on the new digest;
+- `/health` and `/ready` returning 200, and `/api/auth/config` reporting local;
+- one administrator-token sign-in returning 200.
+
+### Restore rehearsal (2026-10-13, before the merge)
+
+Generation `20261013T073237Z-8a79e0e2-34ca-4619-90f4-9840ab4a4638` was produced by a manual Job from
+`relay-postgres-dump`.
+
+- **Checks.** Every `SHA256SUMS` entry was OK. The copied `relay.dump` re-hashed to the same sha256
+  (`535c5695…`).
+- **Restore.** It was restored into a **disposable** database on `relay-postgres`, as
+  `relay_migrator` (`pg_restore -U postgres --role=relay_migrator --no-owner --no-acl
+  --exit-on-error`), after replaying the bootstrap's per-database grants. The restore took about
+  2 s.
+- **Result.** 22/22 tables, 167/167 rows, every table owned by `relay_migrator`, and 16/16 tables
+  with forced RLS. The disposable database was dropped.
+- **Finding.** After `--no-acl`, `relay_app` had **no** privilege on its 16 tables. Its grants come
+  from `migrate` (both 0.3.5's and 0.5.2's `scripts/migrate.ts` re-grant `relay_app` on every run),
+  not from the bootstrap's default privileges. A restore is therefore only usable **after** the
+  release's `migrate` has run, which is exactly what the init chain does.
+
+This rehearsed the database restore, not the full rollback below.
+
+### Rollback to 0.3.5
+
+Auth needs no rollback in this stage. Running the 0.3.5 image against the migrated schema-49
+database is **untested**. Every Relay DSN selects its database by the name `relay`, so a rollback
+swaps that database and needs no Secret change. Do not start 0.3.5 against schema 49.
+
+1. **Freeze.** Run `flux suspend kustomization apps -n flux-system`, then
+   `kubectl --context admin@ai -n relay scale deploy/relay --replicas=0`, and wait until no `relay`
+   pod remains.
+2. **Swap the database.** As `postgres`, by local socket inside `relay-postgres-0`:
+   1. `ALTER DATABASE relay RENAME TO relay_failed_v052;`
+   2. `CREATE DATABASE relay OWNER relay_migrator;`
+   3. In the new `relay` database, replay the per-database statements from
+      `postgres-bootstrap.yaml`: the `REVOKE CREATE ON SCHEMA public`, the `GRANT USAGE`, and the
+      four `ALTER DEFAULT PRIVILEGES`.
+3. **Restore.** Copy that rollout's pre-migration `relay.dump` into the pod and check it against its
+   generation's `SHA256SUMS`. Then run `pg_restore -U postgres --role=relay_migrator --no-owner
+   --no-acl --exit-on-error -d relay`.
+4. **Verify the restored database before anything starts**:
+   - table and row counts match the generation;
+   - every table is owned by `relay_migrator`;
+   - 16 tables have forced RLS.
+
+   `relay_app` grants are expected to be missing at this point.
+5. **Restore artifacts if needed.** If plugin artifacts changed during the failed release, restore
+   the generation's `plugins/` tree to `relay-data`.
+6. **Pin 0.3.5.** In a reviewed PR, pin
+   `registry.chifor.me/relay/control-plane@sha256:25640aafcdf4484ebe87c47ebfa9be1a3dc69233dca6b9b6a0df5a97416cb82d`,
+   release `relay-0.3.5-ci-20261006` and source `a78d6f33dcc14c7ecd34b12b1adca23975dea874`, and
+   remove the `RELAY_AUTH_MODE` line. Merge it, then run `flux resume kustomization apps -n
+   flux-system`.
+7. **Check the first start.** 0.3.5's `migrate` finds its schema current and re-grants `relay_app`.
+   Check `/ready`, an administrator-token sign-in, and the counts.
+8. **Clean up.** Drop `relay_failed_v052` only after acceptance.

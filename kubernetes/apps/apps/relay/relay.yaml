@@ -184,6 +184,10 @@ spec:
         env:
         - name: NODE_ENV
           value: production
+        # Pinned, not left to the release's default: stage 2 flips this one line to `oidc`, and its
+        # rollback is this value (docs/runbooks/relay.md, release 0.5.2).
+        - name: RELAY_AUTH_MODE
+          value: local
         - name: RELAY_HOST
           value: 0.0.0.0
         - name: RELAY_PORT
