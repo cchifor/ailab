@@ -1398,6 +1398,58 @@ There were two causes:
 
 Nothing else changes: no schema change, no new setting. The `codex` concurrency is separate config and stays.
 
+## Reviewer routes (2026-10-13)
+
+**Why.** At the owner's request, the PR reviewer bots get routes of their own: `codex-reviewer` on the Codex smart
+pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool when claude-5 fails.
+
+**Revision 1477** added two routes:
+- `codex-reviewer`: a pointer to `pool-codex`, like `dw-1` … `dw-4`.
+- `claude-reviewer`: one target, `claude-reviewer:claude-5`.
+  - Strategy `priority`, affinity `none`, `access: ["subscription"]`, `maxAttempts: 3`,
+    `fallbackAliases: ["pool-claude"]`.
+  - It has no timeouts of its own, like the direct `fable` route reviewer-claude uses now.
+
+**Revision 1479** changed that target's model from `fable` to `opus`:
+- claude-5 refuses `fable` until 2026-11-01 00:00 UTC (429 `RATE_LIMITED`; the reply named no window).
+- A `haiku` probe a minute later read 5-hour 0 % and weekly 27 % (`POST /admin/v1/usage/refresh`), so the account
+  itself serves.
+- With `fable`, every request failed over to the pool.
+- Once claude-5 serves `fable` again, set it back: change only that field, with a full `PUT` and `If-Match`.
+- Revision 1478, between the two, was the router's own cooldown write after that 429.
+
+**How the fallback behaves.** Verified 15:07-15:10 UTC with administrator requests:
+- **claude-5 not eligible** (busy at its concurrency of 1, cooling down, or offline): the same attempt goes to
+  `pool-claude`. Of two simultaneous requests, claude-5 served one on `opus` and `pool-claude` (claude-3) the other.
+- **A retryable failure on claude-5:** the next attempt goes to `pool-claude`. With the 429 on `fable`, claude-5
+  failed in 0.9 s and cooled down for 60 s, and claude-3 answered.
+- **The model changes on fallback.** `pool-claude` answers on its pool model, `sonnet`, so a review that falls back is a
+  `sonnet` review.
+- **Quota readings are ignored.** A `priority` route ignores them: while claude-5 is limited, every request after its
+  60 s cooldown tries it first.
+
+**How to call them.**
+- **`claude-reviewer`: route mode**, `model: "claude-reviewer"`.
+  - reviewer-claude's key (`key_f856495c9b0c`) may use every route.
+  - So only the reviewer's router seat changes: map its model to `claude-reviewer` in the seat's `routes`.
+- **`codex-reviewer`: model mode only.**
+  - `pool-codex`'s targets are `*`, so `model: "codex-reviewer"` gets 400 `MODEL_REQUIRED`.
+  - The request names a model of `pool-codex`'s allowlist (`gpt-6-astra`) and selects the route with
+    `X-Router-Route: codex-reviewer`, or through a key whose `defaultRoute` it is.
+  - The reviewer's router seat sends no header, and reviewer-codex's key (`key_d7adf31fb93e`) may use only `codex`, with
+    no default route. Keys cannot be edited.
+  - So switching needs a new key `{routes: ["codex-reviewer"], defaultRoute: "codex-reviewer"}` and a seat that sends
+    the model name, with no `routes` mapping. Revoke the old key afterwards.
+- **Until then the bots are unchanged.** reviewer-claude asks for `fable` by name, the direct route that tries account
+  `claude` first. reviewer-codex calls the `codex` route.
+
+**Check** without spending quota: `POST /admin/v1/preview` as the administrator.
+- `{"model": "claude-reviewer", …}` selects `claude-reviewer:claude-5`.
+- `{"model": "gpt-6-astra", …}` with `X-Router-Route: codex-reviewer` selects a `pool-codex` target.
+
+**Rollback.** First move any key or seat that uses the routes back. Then delete both routes in one
+`PUT /admin/v1/config`. Nothing else references them.
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component is opt-in and
