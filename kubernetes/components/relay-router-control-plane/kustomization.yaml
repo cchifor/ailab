@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Opt-in only. The component is included by the Relay release rollout after
+# the operator has provisioned the reviewed router/OpenBao Secret.
+configMapGenerator:
+- name: relay-router-setup
+  namespace: relay
+  files:
+  - materialize.mjs
+patches:
+- path: deployment.yaml
