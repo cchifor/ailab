@@ -202,9 +202,9 @@ class Notifications(unittest.TestCase):
     def test_render_preserves_backup_gates_and_is_opt_in(self):
         deployment = named(self.rendered["relay"], "Deployment", "relay")["spec"]["template"]["spec"]
         base = named(documents(ROOT / "kubernetes/apps/apps/relay/relay.yaml"), "Deployment", "relay")["spec"]["template"]["spec"]
-        self.assertEqual([c for c in deployment["initContainers"] if c["name"] not in ("notification-files", "router-files")], base["initContainers"])
+        self.assertEqual([c for c in deployment["initContainers"] if c["name"] != "notification-files"], base["initContainers"])
         app = next(c for c in deployment["containers"] if c["name"] == "relay")
-        self.assertEqual(next(e.get("value") for e in app["env"] if e["name"] == "RELAY_AGENT_CONTROL_PLANE"), "1")
+        self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", [e["name"] for e in app["env"]])
         self.assertEqual(app["image"], next(c for c in base["containers"] if c["name"] == "relay")["image"])
         initializer = next(c for c in deployment["initContainers"] if c["name"] == "notification-files")
         self.assertEqual(deployment["securityContext"]["fsGroup"], initializer["securityContext"]["runAsGroup"])
@@ -219,10 +219,7 @@ class Notifications(unittest.TestCase):
             base = ROOT / "kubernetes/apps" / directory
             k = yaml.safe_load((base / "kustomization.yaml").read_text())
             for component in k.get("components", []):
-                resolved = (base / component).resolve()
-                if resolved == (COMPONENTS / "relay-router-control-plane").resolve():
-                    continue
-                self.assertFalse(resolved.is_relative_to(COMPONENTS),
+                self.assertFalse((base / component).resolve().is_relative_to(COMPONENTS),
                                  "notification opt-in requires a separate rollout PR")
         mount = next(m for m in self.native["volumeMounts"] if m["mountPath"] == "/etc/ntfy/server.yml")
         self.assertEqual(mount["name"], "notification-config")

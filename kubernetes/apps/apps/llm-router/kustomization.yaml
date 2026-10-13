@@ -11,7 +11,3 @@ kind: Kustomization
 resources:
   - router.yaml
   - edge.yaml
-# v0.6.0 activation: the bridge remains fail-closed until the operator
-# provisions llm-router/llm-router-relay-keys-trust with the reviewed mapping.
-components:
-  - ../../../components/llm-router-relay-keys

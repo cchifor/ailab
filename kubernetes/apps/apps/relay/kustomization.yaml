@@ -12,8 +12,3 @@ resources:
 - network-policy.yaml
 - postgres-bootstrap.yaml
 - backup.yaml
-# v0.6.0 activation: this opt-in component fails closed unless the operator
-# provisions relay/relay-router-connection with the reviewed router/OpenBao
-# material described in docs/runbooks/relay.md.
-components:
-- ../../../components/relay-router-control-plane
