@@ -214,6 +214,8 @@ spec:
           # provider-claude `maxRunning` runs at once: llm-router #102, default 2. The value is NOT in this file; it is
           # a live plugin setting in /data/plugins.yml (admin API), set to 8 once this limit had rolled out, and
           # reverting this file does not reset it. Worst case at 8: 310 + 512 + 8 x 210 = ~2.5 GiB, ~70% of 3584Mi.
+          # The setting accepts up to 32, but this limit holds 8 at ~70% and ~13 at 100%: keep maxRunning <= 8 here, and
+          # raise the limit first for more (limit >= (822 + N x 210) / 0.7 MiB).
           # Even at 2 runs the worst case (~1.2 GiB) filled ~97% of the old 1280Mi, so never go back below 2Gi; lower
           # the setting BEFORE lowering this limit. Request 1Gi: the loaded working set, so the scheduler reserves what
           # the pod uses (one replica, Recreate). CPU 4: eight Claude Code start-ups at once.

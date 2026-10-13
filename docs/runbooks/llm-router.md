@@ -1529,6 +1529,11 @@ too").
   it.
 - Set it only once the pod with the 3584Mi limit is running.
 - Before ever lowering the limit, lower the setting first.
+- **The ceiling is the memory, not the schema.** The setting accepts 1-32, but 3584Mi holds 8 runs at about 70 % and
+  about 13 at 100 % ((3584 − 310 − 512) / 210).
+  - Keep `maxRunning` at 8 or below with this limit. An OOM kill drops every request in flight on the single
+    `Recreate` replica.
+  - For more runs, raise the limit first, to at least `(822 + N × 210) / 0.7` MiB for N runs, then the setting.
 
 **Image.**
 - Archive `router-0.1.0-20261013-claude-run-cap.tar.gz`, SHA-256
