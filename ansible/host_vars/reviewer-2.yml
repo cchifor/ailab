@@ -31,13 +31,19 @@ journal_ship_enabled: true
 # and the systemd NoNewPrivileges condition covers both variables.
 #
 # SEAT `r` IS THE LLM ROUTER (2026-10-07; reviewbot.py § router seats, runbook dev-workers.md §
-# "Router seats"): API key key_d7adf31fb93e on router.chifor.me, granted the `codex` route
-# (round-robin over the router's own Codex seats). Preferred over a-d within the tier and never
-# sticky; a-d stay as the fallback AND must stay configured: the hourly usage probe is what
-# refreshes the seat logins that dsh and LiteLLM read (dsh.md § Codex subscriptions).
+# "Router seats"). Preferred over a-d within the tier and never sticky; a-d stay as the fallback
+# AND must stay configured: the hourly usage probe is what refreshes the seat logins that dsh and
+# LiteLLM read (dsh.md § Codex subscriptions).
+# Since 2026-10-13 (owner request) the key is key_4fdbe2b833fe: routes [codex-reviewer], default
+# route codex-reviewer, a pointer to the router's Codex smart pool `pool-codex`. The seat sends the
+# tier name (`gpt-6-astra`, no `models` map), which the key routes in model mode through its
+# default route; naming the route itself would get 400 MODEL_REQUIRED (the pool's targets are
+# any-model). Runbook llm-router.md § "Reviewer routes (2026-10-13)". The previous key,
+# key_d7adf31fb93e (`codex` route only, model `codex` via `models: { gpt-6-astra: codex }`), stays
+# valid on the router for rollback until the owner retires it.
 pr_reviewer_llm_seats:
   - { name: r, sudo_user: "", router_url: "https://router.chifor.me",
-      key_file: "{{ pr_reviewer_router_key_file }}", models: { gpt-6-astra: codex } }
+      key_file: "{{ pr_reviewer_router_key_file }}" }
   - { name: a, sudo_user: codexrun }
   - { name: b, sudo_user: codexrun2 }
   - { name: c, sudo_user: codexrun3 }

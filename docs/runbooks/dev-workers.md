@@ -758,8 +758,13 @@ cchifor/llm-router) instead of a CLI login: an entry in `pr_reviewer_llm_seats` 
 
 | persona | seat | key | route | state |
 |---|---|---|---|---|
-| codex (reviewer-2) | `r` | `key_d7adf31fb93e` | `codex` (round-robin gpt-6-luna + 3x gpt-6-astra) | **serving** |
-| claude (reviewer-1) | `r` | `key_f856495c9b0c` | the ladder's own names: `fable`, `opus`, `sonnet` (router Claude models; a `claude` route = 4x sonnet also exists) | **serving** since 2026-10-07 |
+| codex (reviewer-2) | `r` | `key_4fdbe2b833fe` | `codex-reviewer` (pointer to the smart pool `pool-codex`), reached as the key's default route: the seat sends the tier name `gpt-6-astra` | **serving** since 2026-10-13 |
+| claude (reviewer-1) | `r` | `key_f856495c9b0c` | `claude-reviewer` for every tier (seat `model`): claude-5 on `opus` (Opus 5.5), falling back to `pool-claude` (`sonnet`) | **serving** since 2026-10-13 |
+
+Both routes: llm-router.md § "Reviewer routes (2026-10-13)". Until 2026-10-13 reviewer-2 used
+`key_d7adf31fb93e` on the `codex` route (round-robin gpt-6-luna + 3x gpt-6-astra, seat
+`models: { gpt-6-astra: codex }`); that key stays valid for rollback. reviewer-1 asked for the
+ladder's own names (`fable`, `opus`, `sonnet`) with no `model`.
 
 How it behaves - the existing park machinery, unchanged:
 
@@ -799,6 +804,46 @@ key_file: "{{ pr_reviewer_router_key_file }}" }`. It has no `models` map, so eve
 model. Each tier was probed with a real review first (a 429 there means the router has no eligible
 Claude account). Re-probe after any router change. Never point the claude persona at a Codex route:
 merges need BOTH personas clean, and two GPT reviews are not two independent reviews.
+
+**Since 2026-10-13** the seat carries `model: claude-reviewer`, so every tier asks for that route
+(Claude accounts only: claude-5 on `opus`, then `pool-claude`). The owner ruled that this persona
+need not run on `fable`. Rollback: drop `model` from the seat and deploy (`reviewers.yml -l
+reviewer-1 -t reviewbot`).
+
+What one route for every tier means:
+- **A router 429** parks seat `r` at account scope, so for every tier at once. The review moves to
+  seats a-c; it never walks three identical router tiers.
+- **Which 429s park.** reviewbot reads the router's `error.reason`, not only the status
+  (`_router_refusal`):
+  - **`reason: "busy"`** (`CAPACITY_UNAVAILABLE`: every target of the route is in use) is waited out
+    in place, without a park.
+  - **Any other 429** parks seat `r` until the `Retry-After` it sends, else for 15 min.
+  - **`CLAUDE_BUSY`** carries no `reason`, so it parks. The router raises it when the pod's two Claude
+    runs (`MAX_RUNNING`) stayed taken for 60 s, and marks it retryable with `Retry-After: 5`.
+  - **Inside the router** it is a failed attempt: `claude-reviewer` moves on to its next attempt (3 in
+    all, claude-5 and then `pool-claude`). So reviewbot sees it only when all three attempts each waited
+    up to 60 s for a pod run slot, which takes about 3 minutes of a full pod.
+  - **The cost** is then a 5 s park of seat `r`. That review runs on seats a-c, and the next one is back
+    on the router (preferred, never sticky).
+- **A failure that is not a limit** (5xx, a stream error, an empty answer) descends the ladder on the
+  SAME seat (`ModelError`). On `r` that re-sends the same route, at most twice, while the attempt
+  budget allows (`llm_fallback_min_s`). That amounts to a bounded retry of a route that already fails
+  over internally.
+- **Seat `r` serves whatever tier the ladder is on,** so it stays preferred even after the ladder has
+  descended on seats a-c.
+- **Labels name the tier, not the served model.** The tier appears in reviewbot's metrics and logs
+  (`reviewbot_llm_active_model_info`, `seat 'r' … on 'fable'`); the posted review's marker carries only
+  persona, head and verdict.
+  - The model that ran is in the router's journal: `GET /admin/v1/trajectories?route=claude-reviewer`
+    gives `accountId`, and `attempt.started` gives the model.
+  - The response header `x-router-route` says `claude-reviewer` (claude-5) or `pool-claude`
+    (fallback).
+
+**Deploying a reviewer-2 key and seat change together:** `-t reviewbot` writes the config, then the
+key (read per call), and restarts at the end of the play. A router call that starts between the key
+task and the restart pairs the new key with the old seat. With 2026-10-13's key that is 400
+`MODEL_NOT_SUPPORTED`: an ordinary failure, not a park. So deploy while reviewer-2 is idle
+(`reviewbot_job_running{persona="codex"} == 0`).
 
 ### When a persona is parked on a subscription rate limit
 
