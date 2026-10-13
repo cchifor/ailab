@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: ccfbd1dbe1310ce11b2d9b659ddf6a3d72aba597
-        chifor.me/release: router-0.1.0-20261012-sticky-spills
+        chifor.me/source-commit: 6ef7eee235f7e5ea5d0c118249659ed99a63434b
+        chifor.me/release: router-0.1.0-20261013-claude-run-cap
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,9 +121,9 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Bridge source ccfbd1dbe1310ce11b2d9b659ddf6a3d72aba597;
-          # parity-c12bc466c8dd-83008 image, digest verified in the registry.
-          image: registry.chifor.me/llm-router/router@sha256:f8ddc9ce9353f6e3a5f7bcc75b8ff16d2cfa29cf0a5e801358b57d9dbc4bec54
+          # Bridge source 6ef7eee235f7e5ea5d0c118249659ed99a63434b;
+          # parity-e7f7539488eb-85014 image, digest verified in the registry.
+          image: registry.chifor.me/llm-router/router@sha256:6cbb671d1e2f773cb8407d58ec99b4cb55741eb1f2c351518bcac88137b8ac91
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -208,16 +208,19 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
-          # Memory: the process idles at ~185 MiB; image jobs in the Assistant add at most 512 MiB at their maximum
-          # sizes (llm-router tests/image-memory.test.ts, enforced ceiling; measured 341-419 MiB on Linux), and a
-          # Claude Code run adds ~190 MiB. 1280Mi keeps that worst case (~890 MiB) under ~70% of the limit.
+          # Memory: the router process runs at ~310 MiB (measured 2026-10-13); image jobs in the Assistant add at most
+          # 512 MiB at their maximum sizes (llm-router tests/image-memory.test.ts, enforced ceiling; measured 341-419 MiB
+          # on Linux), and each Claude Code run adds ~210 MiB (Claude Code 2.1.281, sdk-resume). The pod runs at most
+          # provider-claude `maxRunning` runs at once (a live plugin setting, llm-router #102; default 2, set to 8 here
+          # after this limit rolled out). Worst case at 8: 310 + 512 + 8 x 210 = ~2.5 GiB, ~70% of 3584Mi. Lower the
+          # setting BEFORE lowering this limit. CPU 4: eight Claude Code start-ups at once.
           resources:
             requests:
               cpu: 100m
-              memory: 384Mi
+              memory: 512Mi
             limits:
-              cpu: "2"
-              memory: 1280Mi
+              cpu: "4"
+              memory: 3584Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

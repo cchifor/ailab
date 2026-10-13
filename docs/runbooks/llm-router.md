@@ -1459,7 +1459,8 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
   - A third request waits for a free run for up to 60 s.
   - It then fails with 429 `CLAUDE_BUSY` (retryable), and the route's next attempt goes elsewhere.
   - So the concurrency raise stops an account from looking busy, but more Claude work at once needs an llm-router change
-    (a configurable cap) and a higher memory limit.
+    (a configurable cap) and a higher memory limit. That followed the same day: see "Claude run cap release
+    (2026-10-13)" below.
 - **Rollback:** set the five back to 1, in one full `PUT` with `If-Match` that changes only those fields.
 
 **How the bots call them.** Wired on 2026-10-13 (`ansible/host_vars/reviewer-{1,2}.yml`; dev-workers.md § "Router
@@ -1498,6 +1499,57 @@ nothing.
    - Then revoke the `codex-reviewer` key.
 3. Delete both routes in one `PUT /admin/v1/config` with `If-Match`. No other route, pointer or fallback references
    them.
+
+## Claude run cap release (2026-10-13)
+
+`router-0.1.0-20261013-claude-run-cap` deploys merged llm-router main `6ef7eee235f7e5ea5d0c118249659ed99a63434b`
+([#102](https://git.chifor.me/cchifor/llm-router/pulls/102)), on the owner's request ("raise the pod MAX_RUNNING cap
+too").
+
+**What changes.**
+- **The cap is a setting.** `provider-claude` capped the pod at 2 Claude Code runs at once (`MAX_RUNNING`,
+  hard-coded). It is now the plugin setting `maxRunning`, "Parallel runs", 1-32.
+  - Edit it under Settings → Plugins → provider-claude-subscription, or with
+    `PATCH /admin/v1/plugins/provider-claude/config`.
+  - A change applies at once: a raise starts waiting requests, a cut lets running ones finish.
+  - The code default stays 2, so the image alone changes nothing.
+- **The slots.** The FIFO wait, the 60 s timeout before 429 `CLAUDE_BUSY` (Retry-After 5 s) and the once-only release
+  are unchanged. A wait that times out no longer leaves its abort listener on the request signal.
+- **The pod (`router.yaml`).**
+  - Memory limit 1280Mi → 3584Mi, memory request 384Mi → 512Mi, CPU limit 2 → 4.
+  - Measured on the live pod: the router process ~310 MiB, one Claude Code run (2.1.281, `sdk-resume`) ~210 MiB.
+  - Worst case at 8 runs: 310 + 512 (Assistant image jobs) + 8 × 210 ≈ 2.5 GiB, about 70 % of the limit.
+  - The agent nodes have 16 GiB at about 20 % used.
+
+**After the rollout** (live setting): `maxRunning` 2 → 8.
+- Set it only once the pod with the 3584Mi limit is running.
+- Lower it first before ever lowering the limit.
+
+**Image.**
+- Archive `router-0.1.0-20261013-claude-run-cap.tar.gz`, SHA-256
+  `ae35f96c3a205d3ce4ce90086ae9941b710179481cf089a3af5f826d8cdcfd26`.
+  - Built in the pinned Node 26.10.0 image on dev-worker-1, and the production smoke passed.
+  - Relay v0.2.0 asset 214.
+- Relay branch `release/router-claude-run-cap-image` (`e7f75394`),
+  [run 85014](https://git.chifor.me/cchifor/relay/actions/runs/85014); receipt `deployment-images-85014.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:6cbb671d1e2f773cb8407d58ec99b4cb55741eb1f2c351518bcac88137b8ac91`.
+- Before merge: CI on Linux passed after one rerun.
+  - The first run failed on an unhandled rejection from `subscription-login/emails.ts`: a log call after a test
+    runtime closed, while `tests/smoke-pool.test.ts` ran. That is a teardown race this change does not touch; all 1784
+    tests had passed.
+  - Both reviewer bots approved.
+
+**Rollback.**
+1. **First remove the setting.** `PATCH /admin/v1/plugins/provider-claude/config` with
+   `{"values": {"transport": "sdk-resume"}}` (no `maxRunning`), with `If-Match` set to the view's etag.
+   - The cap returns to the default 2, which is what 1280Mi holds.
+   - The save stores exactly the submitted values in `/data/plugins.yml` (`provider-claude` held only
+     `{"transport":"sdk-resume"}` before this release), so the file no longer carries `maxRunning`. The old image's
+     schema is `.strict()`, so it would refuse the extra key.
+2. **Then revert `router.yaml`:** the image digest, both pod-template annotations and the resources block together.
+   - `image: registry.chifor.me/llm-router/router@sha256:f8ddc9ce9353f6e3a5f7bcc75b8ff16d2cfa29cf0a5e801358b57d9dbc4bec54`
+   - `chifor.me/source-commit: ccfbd1dbe1310ce11b2d9b659ddf6a3d72aba597`
+   - `chifor.me/release: router-0.1.0-20261012-sticky-spills`
 
 ## Relay managed-key bridge (v0.6.0)
 
