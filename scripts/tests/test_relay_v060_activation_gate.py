@@ -16,15 +16,20 @@ ROUTER_COMPONENT = "../../../components/llm-router-relay-keys"
 
 
 class ActivationGate(unittest.TestCase):
-    def test_pending_evidence_keeps_both_components_opt_in(self):
+    def test_evidence_status_matches_activation_shape(self):
         evidence = yaml.safe_load(EVIDENCE.read_text())
         relay = yaml.safe_load(RELAY.read_text())
         router = yaml.safe_load(ROUTER.read_text())
         relay_active = RELAY_COMPONENT in relay.get("components", [])
         router_active = ROUTER_COMPONENT in router.get("components", [])
-        self.assertEqual(evidence["status"], "pending")
-        self.assertFalse(relay_active, "Relay activation requires approved evidence")
-        self.assertFalse(router_active, "router bridge activation requires approved evidence")
+        self.assertIn(evidence["status"], {"pending", "approved"})
+        self.assertEqual(relay_active, router_active, "Relay and router activation must move together")
+        if evidence["status"] == "pending":
+            self.assertFalse(relay_active, "Relay activation requires approved evidence")
+            self.assertFalse(router_active, "router bridge activation requires approved evidence")
+        else:
+            self.assertTrue(relay_active, "approved evidence must be accompanied by activation")
+            self.assertTrue(router_active, "approved evidence must be accompanied by router activation")
 
     def test_activation_requires_exact_release_and_complete_nonsecret_evidence(self):
         evidence = yaml.safe_load(EVIDENCE.read_text())
