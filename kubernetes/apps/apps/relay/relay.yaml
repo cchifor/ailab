@@ -195,6 +195,13 @@ spec:
           value: relay
         - name: OIDC_PROVIDER_NAME
           value: Relay ID
+        # Also delivered by the envFrom relay-secrets above; named explicitly so the dependency is
+        # visible here and the pod refuses to start (CreateContainerConfigError) if the key is missing.
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: relay-secrets
+              key: OIDC_CLIENT_SECRET
         # Keycloak has no SMTP: an operator marks a member's email verified when binding them
         # (ADR 0038 decision 4). No OIDC_IDP_HINT until the Google broker exists.
         - name: OIDC_REQUIRE_EMAIL_VERIFIED
