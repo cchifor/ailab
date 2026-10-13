@@ -247,11 +247,12 @@ Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/ru
 
 ## Managed router control plane (v0.6.0)
 
-The Relay Kustomization includes `kubernetes/components/relay-router-control-plane`
-to enable scoped llm-router token administration and managed Codex sessions.
-This activation change must stay draft until the operator has reviewed the
-preflight below. Missing input prevents Relay from starting; merging before
-provisioning would interrupt the existing authentication and terminal service.
+The Relay Kustomization in the activation PR includes
+`kubernetes/components/relay-router-control-plane` to enable scoped llm-router
+token administration and managed Codex sessions. This activation change must
+remain unmerged until the operator has reviewed the preflight below. Missing
+input prevents Relay from starting; merging before provisioning would interrupt
+the existing authentication and terminal service.
 
 ### Preflight before merging activation
 
@@ -264,7 +265,9 @@ Record the following nonsecret references in the Relay operator handoff:
   ceilings are reviewed for tenant `00000000-0000-4000-8000-000000000001`;
 - the configured HTTPS router and OpenBao origins are reachable from Relay,
   their TLS chains are trusted, and restricted writer/worker-reader policies
-  are provisioned; add narrow egress and CA delivery in this PR if required;
+  are provisioned. The existing Relay policy permits TCP/443 to public origins;
+  if the approved OpenBao origin is private or uses a separate CA, this PR must
+  remain unmerged until a separate narrow egress/CA change is reviewed;
 - one approved worker has the pinned connector, holder, renderer and renderer
   watch services staged with matching identity, private files and linger;
 - the operator names the constrained acceptance target and rollback owner.

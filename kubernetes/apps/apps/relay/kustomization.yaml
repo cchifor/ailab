@@ -12,6 +12,7 @@ resources:
 - network-policy.yaml
 - postgres-bootstrap.yaml
 - backup.yaml
-# Enable only after the operator preflight in docs/runbooks/relay.md.
+# This activation is reviewed with the preflight in docs/runbooks/relay.md.
+# Do not merge or reconcile before the external Secret and handoff evidence exist.
 components:
 - ../../../components/relay-router-control-plane

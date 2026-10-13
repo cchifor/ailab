@@ -11,6 +11,7 @@ kind: Kustomization
 resources:
   - router.yaml
   - edge.yaml
-# Enable only after the operator preflight in docs/runbooks/relay.md.
+# This activation is reviewed with the preflight in docs/runbooks/relay.md.
+# Do not merge or reconcile before the external Secret and handoff evidence exist.
 components:
 - ../../../components/llm-router-relay-keys

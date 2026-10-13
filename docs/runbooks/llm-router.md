@@ -1501,9 +1501,9 @@ nothing.
 
 ## Relay managed-key bridge (v0.6.0)
 
-The router Kustomization includes `kubernetes/components/llm-router-relay-keys`
-to supply the trust file that enables the `relay-keys` plugin. Keep the activation
-PR draft until the operator reviews the exact router image, issuer/tenant
+The router Kustomization in the activation PR includes
+`kubernetes/components/llm-router-relay-keys` to supply the trust file that
+enables the `relay-keys` plugin. Keep the activation PR unmerged until the operator reviews the exact router image, issuer/tenant
 mapping, key ceilings, OpenBao policies and staged worker services described in
 [Relay's preflight](relay.md#preflight-before-merging-activation).
 Live token and holder acceptance follows the constrained activation; production

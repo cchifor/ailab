@@ -210,9 +210,12 @@ class Notifications(unittest.TestCase):
         app = next(c for c in deployment["containers"] if c["name"] == "relay")
         base_app = next(c for c in base["containers"] if c["name"] == "relay")
         # Notifications must preserve the separately reviewed control-plane activation.
+        self.assertEqual(next(e["value"] for e in app["env"] if e["name"] == "RELAY_AGENT_CONTROL_PLANE"), "1")
+        self.assertEqual(next(e["value"] for e in app["env"] if e["name"] == "RELAY_ROUTER_CONNECTIONS_FILE"), "/run/relay-router/private/connections.json")
         for key in ["RELAY_AGENT_CONTROL_PLANE", "RELAY_ROUTER_CONNECTIONS_FILE"]:
             self.assertEqual([e for e in app["env"] if e["name"] == key],
                              [e for e in base_app["env"] if e["name"] == key])
+        self.assertIn("relay-router-connection", {v["secret"]["secretName"] for v in deployment["volumes"] if "secret" in v})
         self.assertEqual(app["image"], next(c for c in base["containers"] if c["name"] == "relay")["image"])
         initializer = next(c for c in deployment["initContainers"] if c["name"] == "notification-files")
         self.assertEqual(deployment["securityContext"]["fsGroup"], initializer["securityContext"]["runAsGroup"])

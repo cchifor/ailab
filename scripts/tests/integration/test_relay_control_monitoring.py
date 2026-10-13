@@ -240,9 +240,12 @@ class Monitoring(unittest.TestCase):
         self.assertEqual(env['RELAY_CONTROL_METRICS_FILE'], '/run/relay-metrics/private/config.json')
         base_app = next(c for c in base['containers'] if c['name'] == 'relay')
         # Monitoring must preserve the independently activated router control plane.
+        self.assertEqual(next(e['value'] for e in application['env'] if e['name'] == 'RELAY_AGENT_CONTROL_PLANE'), '1')
+        self.assertEqual(next(e['value'] for e in application['env'] if e['name'] == 'RELAY_ROUTER_CONNECTIONS_FILE'), '/run/relay-router/private/connections.json')
         for key in ['RELAY_AGENT_CONTROL_PLANE', 'RELAY_ROUTER_CONNECTIONS_FILE']:
             self.assertEqual([e for e in application['env'] if e['name'] == key],
                              [e for e in base_app['env'] if e['name'] == key])
+        self.assertIn('relay-router-connection', {v['secret']['secretName'] for v in self.spec['volumes'] if 'secret' in v})
         self.assertNotIn('metrics-input', {v['name'] for v in application['volumeMounts']})
         inputs = next(v['secret'] for v in self.spec['volumes'] if v['name'] == 'metrics-input')
         self.assertEqual(inputs['secretName'], 'relay-control-metrics')
