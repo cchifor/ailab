@@ -247,12 +247,11 @@ Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/ru
 
 ## Managed router control plane (v0.6.0)
 
-The Relay Kustomization in the activation PR includes
-`kubernetes/components/relay-router-control-plane` to enable scoped llm-router
-token administration and managed Codex sessions. This activation change must
-remain unmerged until the operator has reviewed the preflight below. Missing
-input prevents Relay from starting; merging before provisioning would interrupt
-the existing authentication and terminal service.
+The `kubernetes/components/relay-router-control-plane` component remains
+opt-in. A follow-up activation PR may include it only after the operator has
+reviewed the preflight below. Missing input prevents Relay from starting;
+including it before provisioning would interrupt the existing authentication
+and terminal service. The activation gate test enforces this boundary in CI.
 
 ### Preflight before merging activation
 

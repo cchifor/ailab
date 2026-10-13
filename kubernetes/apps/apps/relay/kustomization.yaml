@@ -12,7 +12,5 @@ resources:
 - network-policy.yaml
 - postgres-bootstrap.yaml
 - backup.yaml
-# This activation is reviewed with the preflight in docs/runbooks/relay.md.
-# Do not merge or reconcile before the external Secret and handoff evidence exist.
-components:
-- ../../../components/relay-router-control-plane
+# The managed control-plane component remains opt-in. The activation gate test
+# requires operator evidence before a follow-up PR may include it here.

@@ -59,6 +59,9 @@ jobs:
           set -euo pipefail
           bash scripts/manifest-lint.sh
 
+      - name: v0.6.0 activation requires reviewed nonsecret evidence
+        run: python3 scripts/tests/test_relay_v060_activation_gate.py
+
       - name: Inline content-hash drift (checksum/capability-kids, NFS provisioner Job suffix)
         shell: bash
         run: |

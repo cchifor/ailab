@@ -1501,11 +1501,12 @@ nothing.
 
 ## Relay managed-key bridge (v0.6.0)
 
-The router Kustomization in the activation PR includes
-`kubernetes/components/llm-router-relay-keys` to supply the trust file that
-enables the `relay-keys` plugin. Keep the activation PR unmerged until the operator reviews the exact router image, issuer/tenant
-mapping, key ceilings, OpenBao policies and staged worker services described in
-[Relay's preflight](relay.md#preflight-before-merging-activation).
+The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
+supplies the trust file that enables the `relay-keys` plugin. A follow-up
+activation PR may include it only after the operator reviews the exact router
+image, issuer/tenant mapping, key ceilings, OpenBao policies and staged worker
+services described in [Relay's preflight](relay.md#preflight-before-merging-activation).
+The activation gate test enforces this boundary in CI.
 Live token and holder acceptance follows the constrained activation; production
 profile/pool admission remains disabled until that report is reviewed.
 
