@@ -656,3 +656,49 @@ swaps that database and needs no Secret change. Do not start 0.3.5 against schem
 7. **Check the first start.** 0.3.5's `migrate` finds its schema current and re-grants `relay_app`.
    Check `/ready`, an administrator-token sign-in, and the counts.
 8. **Clean up.** Drop `relay_failed_v052` only after acceptance.
+
+## Authentication release 0.5.2 — stage 2, sign-in through the ailab Keycloak
+
+Same image as stage 1 (`sha256:3571fb47…`). This stage only switches the browser sign-in:
+
+- `RELAY_AUTH_MODE=oidc`;
+- `OIDC_ISSUER=https://id.chifor.me/realms/relay`, `OIDC_CLIENT_ID=relay`;
+- `OIDC_PROVIDER_NAME=Relay ID`, `OIDC_REQUIRE_EMAIL_VERIFIED=1`;
+- `OIDC_CLIENT_SECRET` in `relay-secrets`, which must equal Keycloak's `relay` client secret
+  (compare sha256 prefixes, never values).
+
+The identity provider is ADR 0038, with its runbook in `docs/runbooks/keycloak.md`. There is no
+`OIDC_IDP_HINT` until the Google broker exists.
+
+**Merge only after** Keycloak is Ready, the realm import is logged, discovery returns exactly
+`https://id.chifor.me/realms/relay`, the client checks pass, and the client secret's hash equals
+this Secret's (keycloak runbook, "First deployment").
+
+**Who gets in.** Signing up at `id.chifor.me` grants nothing. A person reaches Relay only after an
+operator has done both of these (keycloak runbook, "Members"):
+
+- confirmed them out of band and set `emailVerified=true` on their exact Keycloak user ID;
+- bound `https://id.chifor.me/realms/relay|<that id>` with `node dist/scripts/member.js`.
+
+`POST /api/auth/login` (the administrator token) answers 404 while this mode is on. A Relay session
+lasts up to 8 h, and disabling the Keycloak user does not end it. `member.js` only upserts a role,
+and revokes that user's sessions whenever it runs. To remove someone, disable their Keycloak user,
+then delete their Relay membership and sessions as `postgres` inside `relay-postgres-0`
+(`DELETE FROM sessions …; DELETE FROM memberships …` for that `user_id` and tenant).
+
+**Acceptance**, recorded with UTC times and nonsecret evidence:
+
+- `/api/auth/config` reports OIDC.
+- The first member signs in. The `users.subject` row equals the recorded `issuer|id` exactly, and
+  the ID token carries `email_verified=true`.
+- A throwaway sign-up is denied with no session.
+- The same throwaway, bound while `emailVerified=false`, is rejected.
+- Logout removes the Relay session.
+- A tampered `state` creates no session.
+- The admin-token login returns 404.
+
+Afterwards, remove the throwaway's Relay membership and delete its Keycloak user.
+
+**Rollback**: one reviewed change setting `RELAY_AUTH_MODE` back to `local` (stage 1, proven by
+that stage's admin-token sign-in). The `OIDC_*` values may stay. The database is unaffected:
+memberships keyed on the Keycloak issuer simply stop matching anything.
