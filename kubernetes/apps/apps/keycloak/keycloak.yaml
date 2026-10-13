@@ -1,0 +1,104 @@
+# ailab Keycloak (ADR 0038). One replica with a local cache: Recreate, never two writers.
+# Public origin https://id.chifor.me via the Cloudflare tunnel (apps/edge/cloudflared.yaml), which
+# answers 404 for /admin and /realms/master. The admin console is reachable ONLY through
+#   kubectl --context admin@ai -n keycloak port-forward deploy/keycloak 8080:8080
+# then http://localhost:8080/admin/ (KC_HOSTNAME_ADMIN below). Runbook: docs/runbooks/keycloak.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # the image's `keycloak` user; its files are 1000:0, so the group stays the image default
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.7.5@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85
+          # The stock image is not pre-built for postgres, so `start` runs Keycloak's auto-build into
+          # /opt/keycloak/lib/quarkus first (adds ~30 s). That is why readOnlyRootFilesystem is false
+          # below - a recorded exception (ADR 0038), not an oversight.
+          args: ["start", "--import-realm"]
+          envFrom:
+            - secretRef:
+                name: keycloak-secrets # KC_BOOTSTRAP_ADMIN_*, KC_DB_PASSWORD, RELAY_OIDC_CLIENT_SECRET
+          env:
+            - { name: KC_DB, value: postgres }
+            - { name: KC_DB_URL_HOST, value: infra-pg-rw.databases.svc.cluster.local }
+            - { name: KC_DB_URL_DATABASE, value: keycloak }
+            - { name: KC_DB_USERNAME, value: keycloak }
+            # Hostname v2: every public URL (issuer, login pages, redirects) is this origin, whatever
+            # Host header arrives. The admin console is served for localhost only (port-forward).
+            - { name: KC_HOSTNAME, value: "https://id.chifor.me" }
+            - { name: KC_HOSTNAME_ADMIN, value: "http://localhost:8080" }
+            # TLS ends at Cloudflare; cloudflared speaks plain HTTP to the Service. The NetworkPolicy
+            # admits only the cloudflared pods, so the X-Forwarded-* headers Keycloak trusts come
+            # from the tunnel.
+            - { name: KC_HTTP_ENABLED, value: "true" }
+            - { name: KC_PROXY_HEADERS, value: xforwarded }
+            - { name: KC_CACHE, value: local }
+            - { name: KC_HEALTH_ENABLED, value: "true" } # /health/* on the management port 9000
+            - { name: KC_LOG_CONSOLE_OUTPUT, value: default }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: management, containerPort: 9000 }
+          startupProbe: # first start = auto-build + Liquibase schema + realm import
+            httpGet: { path: /health/started, port: management }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /health/ready, port: management }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: management }
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { cpu: "2", memory: 2Gi } # KC heap defaults to 70% of the limit, plus metaspace
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # see the image comment above
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: realm-import
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: realm-import
+          configMap:
+            name: keycloak-realm-relay
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+spec:
+  selector:
+    app.kubernetes.io/name: keycloak
+  ports:
+    - name: http
+      port: 80
+      targetPort: http # the management port 9000 is deliberately not published

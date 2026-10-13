@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# ailab Keycloak at id.chifor.me (ADR 0038): one realm per application; today only `relay`.
+# Runbook: docs/runbooks/keycloak.md. Its database is the `keycloak` DB on infra-pg (databases layer).
+resources:
+  - namespace.yaml
+  - keycloak-secrets.sops.yaml # SOPS: bootstrap admin, DB password, relay client secret
+  - keycloak.yaml # Deployment + Service
+  - network-policy.yaml # ingress only from the tunnel; egress only DNS + infra-pg
+
+configMapGenerator:
+  # Imported by `start --import-realm` ONLY while the realm does not exist. Editing this file later
+  # renames the ConfigMap and restarts the pod, but changes NOTHING in the live realm: apply the same
+  # change with kcadm first (docs/runbooks/keycloak.md "Realm changes").
+  - name: keycloak-realm-relay
+    namespace: keycloak # the generator does not inherit one; without it Flux rejects the ConfigMap
+    files:
+      - realm-relay.json

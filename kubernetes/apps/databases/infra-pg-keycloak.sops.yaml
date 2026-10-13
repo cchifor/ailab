@@ -1,0 +1,32 @@
+# basic-auth creds for the `keycloak` managed role/DB (infra-pg) behind the ailab Keycloak at
+# id.chifor.me (kubernetes/apps/apps/keycloak, ADR 0038). The password MUST stay byte-identical to
+# KC_DB_PASSWORD in apps/keycloak/keycloak-secrets.sops.yaml.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-keycloak
+    namespace: databases
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:JqbEfaj/sBE=,iv:5Fyyg964QuTGoAYQLjB5tQ879RkVtIh26RaPRbsplkY=,tag:q7ZQyPtWN9jVfcH5MOvo4g==,type:str]
+    password: ENC[AES256_GCM,data:9QcUmGoC7ZUJ9EfobvWJ15ozAZ/zpYwcVDqvKRs6YKhumIyX7IKSd/WHYNPnnJ1C/dnzvkqvE88ytLVJr1u+tA==,iv:WJMNsD/6BcIJvFk6vLSOa84CYMXqRSu7Kk5k5iNTOL8=,tag:7rO3qVEuTHBU4JSTnMONUQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBsSEViS2p4cXZyc0NwTGVO
+            Vm1zYTJpWWkwUnJidEk1c3pDUVliWFg1Q3g0CkVmVFJXbC9jQ3VPcEhZOTB4VWUx
+            aURRYnRMTFc2MjVRcjMvN3hJRHQzSVEKLS0tIERxTWlyenhwZGNHVElDL1dYNENr
+            NFJQK3RZbzd4dzlsOVVLd29KTVIxa3MK8s72RjHDriA6VHngJ56K5OBDJ+ZvrWdz
+            Nevdx2TbeXodJfsLSWB60StgqJ8+/cnL3KWSxSL56cM87M1z4hLkgw==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-10-13T07:33:53Z"
+    mac: ENC[AES256_GCM,data:q7Rt1mJSABA13ymmzirZRw6oW/ZIrvKX3whtxALUrj8ikOgmyoepaNy7aFM/qjQmorq5ypcauuEDMsJRKE3uANz0a33bcNLwNwYlsnW9yoOuwUTN4lHwv21JewMlfGraPkABXZTpliu6o4bStjlMvLuYiLDv7y43sg/M4qlFYB0=,iv:z0zVEq2jx3btj8a7Ydwjki45l4GZuyS9cXcW2+Ig7QQ=,tag:Ham8ponJxGHm+FRomiGfCw==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4
