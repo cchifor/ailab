@@ -1723,6 +1723,29 @@ Nothing else is needed: there is no schema change and no new setting, and `maxRu
 Nothing else is needed: there is no schema change and no new setting. The old page reads a remembered multi-value
 query as nothing (it never read `router.activity.query`), and a repeated filter parameter is refused again (400).
 
+**Rolled out 2026-10-13.** ailab PR #1315 merged as `8c7b7763` at 18:51 UTC.
+- **Flux:** the GitHub mirror had the commit at once. A `requestedAt` nudge on `gitrepository/flux-system`, then on
+  `kustomization/apps` once `infrastructure` had applied, rolled it out at 18:52.
+- **Drain:** the old pod used its whole drain budget (`drained in 20199 ms`, `runtime closed in 129 ms`).
+  - **Two requests were cut** (`cancelled`, cause `shutdown`).
+    - **dev-worker-1:** a Codex stream. Its conversation went on afterwards, with 5 later turns (4 complete, 1 running
+      when checked).
+    - **reviewer-claude:** a `claude-reviewer` request. It carries no conversation id, so a retry cannot be shown in the
+      journal; that key's next request was running when checked.
+  - In the journal, 18:50-18:55: 120 requests, of which 2 `shutdown`, 1 `superseded`, and none `abandoned` (none in the
+    last 500 either).
+- **New pod:** `llm-router-6b949b9f67-d2htb`, running the r2 digest with resources unchanged. It started at 18:52:05 and was
+  ready at 18:52:24.
+- **Acceptance:** router rollout acceptance passed, [run 85386](https://git.chifor.me/cchifor/ailab/actions/runs/85386).
+- **Verified on the live router** (admin API through a port-forward):
+  - **Several sources at once:** the three active reviewer keys in one request (`?principal=…` ×3) return rows from all
+    three (200 rows at `limit=200`, 0.03 s).
+  - **Several routes at once:** `?route=codex-reviewer&route=claude-reviewer` returns 115 rows, 50 and 65 (0.42 s).
+  - **Refused with 400:** 51 principals, 51 statuses in one comma list, and a repeated `namespace`.
+  - **Unchanged:** a single `?principal=` behaves as before (200).
+  - **The page:** router.chifor.me serves the new bundle (`index-Dh9PoQfc.js`, which carries the checklist and stored-query
+    code).
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
