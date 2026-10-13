@@ -758,8 +758,13 @@ cchifor/llm-router) instead of a CLI login: an entry in `pr_reviewer_llm_seats` 
 
 | persona | seat | key | route | state |
 |---|---|---|---|---|
-| codex (reviewer-2) | `r` | `key_d7adf31fb93e` | `codex` (round-robin gpt-6-luna + 3x gpt-6-astra) | **serving** |
-| claude (reviewer-1) | `r` | `key_f856495c9b0c` | the ladder's own names: `fable`, `opus`, `sonnet` (router Claude models; a `claude` route = 4x sonnet also exists) | **serving** since 2026-10-07 |
+| codex (reviewer-2) | `r` | `key_4fdbe2b833fe` | `codex-reviewer` (pointer to the smart pool `pool-codex`), reached as the key's default route: the seat sends the tier name `gpt-6-astra` | **serving** since 2026-10-13 |
+| claude (reviewer-1) | `r` | `key_f856495c9b0c` | `claude-reviewer` for every tier (seat `model`): claude-5 on `opus` (Opus 5.5), falling back to `pool-claude` (`sonnet`) | **serving** since 2026-10-13 |
+
+Both routes: llm-router.md § "Reviewer routes (2026-10-13)". Until 2026-10-13 reviewer-2 used
+`key_d7adf31fb93e` on the `codex` route (round-robin gpt-6-luna + 3x gpt-6-astra, seat
+`models: { gpt-6-astra: codex }`); that key stays valid for rollback. reviewer-1 asked for the
+ladder's own names (`fable`, `opus`, `sonnet`) with no `model`.
 
 How it behaves - the existing park machinery, unchanged:
 
@@ -799,6 +804,11 @@ key_file: "{{ pr_reviewer_router_key_file }}" }`. It has no `models` map, so eve
 model. Each tier was probed with a real review first (a 429 there means the router has no eligible
 Claude account). Re-probe after any router change. Never point the claude persona at a Codex route:
 merges need BOTH personas clean, and two GPT reviews are not two independent reviews.
+
+**Since 2026-10-13** the seat carries `model: claude-reviewer`, so every tier asks for that route
+(Claude accounts only: claude-5 on `opus`, then `pool-claude`). The owner ruled that this persona
+need not run on `fable`. Rollback: drop `model` from the seat and deploy (`reviewers.yml -l
+reviewer-1 -t reviewbot`).
 
 ### When a persona is parked on a subscription rate limit
 
