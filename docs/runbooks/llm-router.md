@@ -1537,6 +1537,23 @@ too").
     `Recreate` replica.
   - For more runs, raise the limit first, to at least `(822 + N × 210) / 0.7` MiB for N runs, then the setting.
 
+**Rolled out 2026-10-13.** ailab #1311 merged as `2237b6dd`.
+- **Rollout:** Flux applied it at 16:35 UTC.
+  - The old pod drained in 18.4 s (`runtime closed in 62 ms`). The new pod `llm-router-886d985ff-wxpsv` (talos-agent-node-2,
+    limits 4 CPU / 3584Mi, request 2560Mi) was ready about 25 s after the old one stopped being ready.
+  - In the journal, 16:24:30-16:37: 142 requests, 140 complete, none `abandoned` and none `SHUTDOWN`. The one failure
+    (16:32) and the one cancel (16:24) came before the rollout.
+  - Router rollout acceptance passed:
+    [run 85092](https://git.chifor.me/cchifor/ailab/actions/runs/85092).
+- **Setting (about 16:39):** `PATCH /admin/v1/plugins/provider-claude/config` set
+  `{"transport": "sdk-resume", "maxRunning": 8}` with `If-Match`. Active at once (`pending: false`); `/data/plugins.yml`
+  now holds the same.
+- **Verified (16:40):** four simultaneous `claude-reviewer` requests ran four Claude Code processes at once, where the
+  old cap allowed two.
+  - About 210 MiB each, as measured before.
+  - Pod memory peaked at about 1.2 GiB of 3584Mi.
+  - All four were served by claude-5 (concurrency 4, revision 1480) in 9-12 s.
+
 **Image.**
 - Archive `router-0.1.0-20261013-claude-run-cap.tar.gz`, SHA-256
   `ae35f96c3a205d3ce4ce90086ae9941b710179481cf089a3af5f826d8cdcfd26`.
