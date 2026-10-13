@@ -28,7 +28,9 @@ spec:
         - {name: notification-config, mountPath: /output}
       containers:
       - name: ntfy
-        image: binwiederhier/ntfy:v2.29.0@sha256:4c599cf0818965782f93f652bd843e92714992e84d6b88ad17713dc0951cda1f
+        # Docker Hub's amd64 child is not mirrored by the Forge registry. The
+        # public GCR mirror serves the same immutable v2.29.0 manifest digest.
+        image: mirror.gcr.io/binwiederhier/ntfy:v2.29.0@sha256:4c599cf0818965782f93f652bd843e92714992e84d6b88ad17713dc0951cda1f
         volumeMounts:
         - name: notification-config
           mountPath: /etc/ntfy/server.yml

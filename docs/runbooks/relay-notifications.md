@@ -7,7 +7,7 @@ worker; including a component is not a release upgrade or production acceptance.
 
 ## Authority and configuration
 
-The ntfy component keeps the pinned 2.29.0 server and its existing `ailab` and
+The ntfy component keeps the pinned 2.29.0 server from the public GCR mirror and its existing `ailab` and
 `qnap` postStart reconciliation. Native declarative provisioning adds two regular
 accounts, never administrators:
 
