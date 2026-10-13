@@ -553,3 +553,36 @@ Rollback restores `registry.chifor.me/relay/control-plane@sha256:6469aa151ecc13e
 in both containers, release `relay-0.3.4-ci-20261004` and source
 `2e02ba4c281de754065a77ac221b3352474b2536` through a reviewed GitOps change.
 No database restore or worker downgrade is needed for this UI-only rollback.
+
+
+## Control-plane and authentication release 0.5.2 — stage 1, local sign-in
+
+Source: `39767c6329524a36fce9875a14f37a0eef942c32` (Relay main after [PR #140](https://git.chifor.me/cchifor/relay/pulls/140); tag `v0.5.2`, release 2124).
+Image: `registry.chifor.me/relay/control-plane@sha256:3571fb473a1657c6ee85405e08b0505204139449be9dd91da7b6fc717119b6cc` in both the application and migration containers.
+Provenance: `deployment-images-84067.json` on the [v0.5.2 release](https://git.chifor.me/cchifor/relay/releases/tag/v0.5.2),
+from the successful [release CI 84067](https://git.chifor.me/cchifor/relay/actions/runs/84067). The
+registry index for that digest was re-read and hashes to the same value.
+
+This is the first deployment since 0.3.5. It carries the v0.4.0 control-plane milestones and the
+v0.5.x OIDC relying-party code, and it applies migrations `006`–`049` (forward-only, none drops a
+table or column). Every new control-plane feature stays disabled by default: no pool, profile,
+approval file, notification, monitoring or Gitea-issuer input is set here.
+
+**Authentication is unchanged in this stage.** `RELAY_AUTH_MODE` is unset and no `OIDC_ISSUER`
+is set, so Relay resolves to local mode and keeps the administrator-token sign-in. Stage 2 enables
+OIDC against the ailab Keycloak (`id.chifor.me`, realm `relay`) in a separate reviewed change.
+Keeping the two apart means that change's rollback (back to local mode on this same image) is the
+state this stage proves.
+
+The existing coordinated database/artifact backup gate runs before `migrate`: the
+`backup-database` and `backup-artifacts` init containers must publish
+`/tmp/relay-pre-migration-backup.json`, or `migrate` does not start. Record the generated
+receipt name, the init statuses, `/health` and `/ready`, and one administrator-token sign-in.
+
+Rollback: auth needs none here. Running the 0.3.5 image against the migrated schema-49 database
+is **untested**. Return to 0.3.5 by restoring the pre-migration dump of this rollout into a fresh
+database (the initial-deployment restore steps above, as `relay_migrator`), with Flux suspended
+and Relay scaled to zero, and only then pin
+`registry.chifor.me/relay/control-plane@sha256:25640aafcdf4484ebe87c47ebfa9be1a3dc69233dca6b9b6a0df5a97416cb82d`,
+release `relay-0.3.5-ci-20261006` and source `a78d6f33dcc14c7ecd34b12b1adca23975dea874` through a
+reviewed change. That restore has not been rehearsed.
