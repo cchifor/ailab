@@ -335,4 +335,4 @@ and the client secret is verified.
 - **Rollback:** the auth rollback is proven by PR 2's local-mode evidence. The image rollback is
   documented but not rehearsed (request 3). PR 1 is additive and can stay.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
