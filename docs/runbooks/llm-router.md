@@ -1412,10 +1412,19 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
 
 **Revision 1479** changed that target's model from `fable` to `opus`:
 - claude-5 refuses `fable` until 2026-11-01 00:00 UTC (429 `RATE_LIMITED`; the reply named no window).
+  - **Where the date comes from:** the router's reading of that refusal. `GET /admin/v1/usage` showed claude-5 at
+    `limits.status: "limited"`, `source: "reply"`, `limitedUntil: 1793491200000`.
+  - That is the `resetsAt` Claude Code reported with its rejection (`mapClaudeLimits` in `provider-claude`). No
+    dashboard or support reply confirms it.
 - A `haiku` probe a minute later read 5-hour 0 % and weekly 27 % (`POST /admin/v1/usage/refresh`), so the account
   itself serves.
+  - The probe always asks for `haiku`, so it cannot tell whether `fable` is back.
 - With `fable`, every request failed over to the pool.
-- Once claude-5 serves `fable` again, set it back: change only that field, with a full `PUT` and `If-Match`.
+- **To move back to `fable`** once that date has passed:
+  1. Set the target's model back to `fable`: change only that field, with a full `PUT` and `If-Match`.
+  2. Send one request on `claude-reviewer`.
+  3. If it comes back `x-router-route: pool-claude`, with an `attempt.failed` `RATE_LIMITED` on claude-5 in its
+     trajectory, `fable` is still refused: set `opus` again.
 - Revision 1478, between the two, was the router's own cooldown write after that 429.
 
 **How the fallback behaves.** Verified 15:07-15:10 UTC with administrator requests:
@@ -1425,8 +1434,18 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
   failed in 0.9 s and cooled down for 60 s, and claude-3 answered.
 - **The model changes on fallback.** `pool-claude` answers on its pool model, `sonnet`, so a review that falls back is a
   `sonnet` review.
+- **Telling which target served a review:**
+  - **Response header:** `x-router-route: claude-reviewer` means claude-5 served it; `pool-claude` means the
+    fallback did.
+  - **Journal:** `GET /admin/v1/trajectories?route=claude-reviewer` gives each request's `accountId`. Its detail
+    (`/admin/v1/trajectories/:id`) has `attempt.started` events with the `deploymentId` and `model` of each attempt.
 - **Quota readings are ignored.** A `priority` route ignores them: while claude-5 is limited, every request after its
-  60 s cooldown tries it first.
+  60 s cooldown tries it first. Each such try costs about 1 s and one of the 3 attempts.
+- **If claude-5 becomes limited on `opus` too:** stop that waste with a full `PUT` and `If-Match`.
+  - Set the target's model to one that claude-5 still serves.
+  - Or set its `enabled` to `false`. A disabled target is not eligible (`disabled`), so each request goes straight to
+    `pool-claude` in its first attempt.
+  - Re-enable it once claude-5 serves again.
 
 **How to call them.**
 - **`claude-reviewer`: route mode**, `model: "claude-reviewer"`.
@@ -1439,7 +1458,8 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
   - The reviewer's router seat sends no header, and reviewer-codex's key (`key_d7adf31fb93e`) may use only `codex`, with
     no default route. Keys cannot be edited.
   - So switching needs a new key `{routes: ["codex-reviewer"], defaultRoute: "codex-reviewer"}` and a seat that sends
-    the model name, with no `routes` mapping. Revoke the old key afterwards.
+    the model name, with no `routes` mapping.
+  - Keep the old key (`codex` only) until the new route has run for a while: rolling back is then a seat change.
 - **Until then the bots are unchanged.** reviewer-claude asks for `fable` by name, the direct route that tries account
   `claude` first. reviewer-codex calls the `codex` route.
 
@@ -1447,8 +1467,18 @@ pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool w
 - `{"model": "claude-reviewer", …}` selects `claude-reviewer:claude-5`.
 - `{"model": "gpt-6-astra", …}` with `X-Router-Route: codex-reviewer` selects a `pool-codex` target.
 
-**Rollback.** First move any key or seat that uses the routes back. Then delete both routes in one
-`PUT /admin/v1/config`. Nothing else references them.
+**Rollback.** Move every client off the routes first, then delete them. A key whose only route is deleted serves
+nothing.
+1. **reviewer-claude:** map its seat's model back to `fable`. Its key may use every route, so it does not change.
+2. **reviewer-codex,** if it was switched:
+   - **While the old key still exists** (`key_d7adf31fb93e`, `codex` only): point the seat back at it and restore the
+     mapping to `codex`.
+   - **Once it has been revoked:** keys cannot be edited, so first issue a replacement in the old shape:
+     `{routes: ["codex"]}`, with no `defaultRoute`. Seed it into the seat and restore the mapping to `codex`. Check that
+     reviews are served (journal rows of that key with `model: codex`).
+   - Then revoke the `codex-reviewer` key.
+3. Delete both routes in one `PUT /admin/v1/config` with `If-Match`. No other route, pointer or fallback references
+   them.
 
 ## Relay managed-key bridge (v0.6.0)
 
