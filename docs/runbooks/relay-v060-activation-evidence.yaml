@@ -1,6 +1,8 @@
 # Nonsecret activation record. Update this file in the reviewed activation PR
 # only after the operator has recorded the corresponding evidence in the Relay
-# handoff. Never add Secret values, private keys, bearer tokens or kubeconfigs.
+# handoff. Preflight is recorded before activation; the constrained acceptance
+# receipt is recorded after the activated services are exercised. Never add
+# Secret values, private keys, bearer tokens or kubeconfigs.
 version: 1
 status: pending
 tenantId: 00000000-0000-4000-8000-000000000001
