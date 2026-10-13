@@ -1667,6 +1667,58 @@ Nothing else is needed: there is no schema change and no new setting, and `maxRu
   - Each search took 0.09-0.6 s.
   - The page served at router.chifor.me carries the new search placeholder.
 
+## Activity multi-value filters release (2026-10-13)
+
+`router-0.1.0-20261013-activity-multi-filters` deploys merged llm-router main `449bb83838d9bafb72587e279fb80e0c9c8ff940`
+([#104](https://git.chifor.me/cchifor/llm-router/pulls/104)), on the owner's request. Two changes:
+- a filter can take more than one value, so both reviewer bots show at once;
+- the table's filters survive a reload and a sign-out.
+
+**What changes.**
+- **Several values per filter.** Every + Filter field (Result, Source, Route, Served by, Model) is a checklist.
+  - A click ticks or unticks a value, and the menu stays open for more.
+  - Values of one field are alternatives; different fields all apply.
+  - The chip names the first two values and then `+N`; its title lists all of them.
+  - For the reviewers: Source → tick `reviewer-codex …` and `reviewer-claude …`, or Route → `codex-reviewer` and
+    `claude-reviewer`.
+- **Remembered.** The search, sort, filters, density and hidden columns are kept in the browser's localStorage
+  (`router.activity.query`, `.hidden`, `.density`).
+  - A reload, or signing out and in, finds the table as it was left. Sign-out does not clear storage.
+  - It is per browser, not per user: another admin on the same browser profile sees the same filters.
+  - A remembered Source on a key revoked since keeps its name (`… (revoked)`) and can be unticked.
+- **API (additive).** `GET /admin/v1/trajectories` accepts a repeated `status`, `model`, `accountId`, `agentId`,
+  `principal` or `route` (`?principal=key:a&principal=key:b`), any of the values matching.
+  - At most 50 values per filter, each at most 512 characters.
+  - Any other parameter stays single; a repeat gets 400 `INVALID_QUERY`.
+  - Single-value calls behave as before.
+  - The namespace stays one exact `namespace=?` in the store and never takes a list.
+- **Reusable.** The table code is generic (`apps/web/table/`: `toggleFilter`, `useTableState`), so the next page that
+  uses the table gets both features. The trueswarm-admin directory table gets the same change in its own PR.
+
+**Image.**
+- Archive `router-0.1.0-20261013-activity-multi-filters.tar.gz`, SHA-256
+  `b0528f9cfaffe21887b03902c46122a402379e6e6f6aef988647a2ec57bb11e9`.
+  - Built in the pinned Node 26.10.0 image on dev-worker-1, and the production smoke passed.
+  - Relay v0.2.0 asset 218.
+- Relay branch `release/router-activity-multi-filters-image` (`6a140655`),
+  [run 85343](https://git.chifor.me/cchifor/relay/actions/runs/85343); receipt `deployment-images-85343.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:f21a42a1aaba084efe31361b1cbfaeb6222b3b333751886f50983bb077ff9dd2`
+  (tag `parity-6a14065519cd-85343`; the digest was checked in the registry).
+- **Before merge:**
+  - CI on Linux passed, browser suite included.
+  - Both reviewer bots approved. reviewer-codex's namespace finding was answered with evidence and hardened (`f79ac17`).
+  - reviewer-claude's status-cap nit is fixed in [#105](https://git.chifor.me/cchifor/llm-router/pulls/105), which is
+    not in this image: it refuses more than 50 distinct statuses rather than dropping them, and only matters for
+    malformed requests.
+
+**Rollback.** Revert the image digest and both pod-template annotations together, and keep the resources:
+- `image: registry.chifor.me/llm-router/router@sha256:62d4885cd0954687ed128bf9e0ac76c0366356991f0cf1f8467839ca6b33ddef`
+- `chifor.me/source-commit: 2baf22df220a7ce0811e98aeee55b87593528e3d`
+- `chifor.me/release: router-0.1.0-20261013-activity-search`
+
+Nothing else is needed: there is no schema change and no new setting. The old page reads a remembered multi-value
+query as nothing (it never read `router.activity.query`), and a repeated filter parameter is refused again (400).
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
