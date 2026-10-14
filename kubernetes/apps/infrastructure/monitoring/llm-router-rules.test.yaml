@@ -138,6 +138,30 @@ tests:
         exp_alerts: []
 
   - interval: 1m
+    name: two of three accounts limited is capacity, not a provider outage
+    input_series:
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-3",provider="codex",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-3",provider="codex",status="ok"}'
+        values: "0x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-4",provider="codex",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-4",provider="codex",status="ok"}'
+        values: "0x20"
+      # codex-5 has a reading and is not limited: its `limited` series exists with value 0.
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-5",provider="codex",status="limited"}'
+        values: "0x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-5",provider="codex",status="warning"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+
+  - interval: 1m
     name: one limited account warns; every account of a provider limited is critical
     input_series:
       # codex: both accounts limited -> provider exhausted. claude: one of two -> account alert only.
