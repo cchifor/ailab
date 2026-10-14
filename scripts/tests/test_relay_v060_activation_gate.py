@@ -10,7 +10,6 @@ ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE = ROOT / "docs/runbooks/relay-v060-activation-evidence.yaml"
 RELAY = ROOT / "kubernetes/apps/apps/relay/kustomization.yaml"
 ROUTER = ROOT / "kubernetes/apps/apps/llm-router/kustomization.yaml"
-RELAY_MANIFEST = ROOT / "kubernetes/apps/apps/relay/relay.yaml"
 
 
 class ActivationGate(unittest.TestCase):
@@ -27,7 +26,14 @@ class ActivationGate(unittest.TestCase):
             ROOT / "kubernetes/apps/apps/relay",
             ROOT / "kubernetes/apps/apps/llm-router",
         ]
-        forbidden = ("RELAY_AGENT_CONTROL_PLANE", "RELAY_ROUTER_CONNECTIONS_FILE", "relay-router-control-plane", "llm-router-relay-keys")
+        forbidden = (
+            "RELAY_AGENT_CONTROL_PLANE",
+            "RELAY_ROUTER_CONNECTIONS_FILE",
+            "relay-router-control-plane",
+            "llm-router-relay-keys",
+            "llm-router-relay-keys-trust",
+            "relay-router-connection",
+        )
         for root in active_roots:
             for path in root.rglob("*"):
                 if path.suffix not in {".yaml", ".yml"} or not path.is_file():
