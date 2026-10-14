@@ -102,9 +102,11 @@ spec:
               a limit window: the router skips it (quota_exhausted) until the reset the Status page
               shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
         # Every account of a provider limited: the pools of that provider serve nothing but credits.
-        # count(status=limited == 1) against count(status=limited series): the exporter writes all
-        # three `status` series (0 or 1) for every account that has a limits READING, so the
-        # right-hand side is the accounts with a reading, not the accounts configured. Readings
+        # Left: the `status="limited"` series whose VALUE is 1 (the limited accounts). Right: the
+        # `status="limited"` series whatever their value (a label selector matches the series, not
+        # the value) - the exporter writes all three `status` series (0 or 1) for every account
+        # that has a limits READING, so the right-hand side is the accounts with a reading, not the
+        # accounts configured. Two of three limited: 2 == 3 is false, no page (tested). Readings
         # persist in the router's store and come back after a restart, so a Codex or Claude account
         # that has ever served has one; an account that never reported (brand new, or a provider
         # without limit headers) has no series and is invisible here. The `>= 2` floor keeps that
