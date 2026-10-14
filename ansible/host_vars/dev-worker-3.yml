@@ -5,3 +5,17 @@
 # dev-worker-bot. Rollback = set false and converge (docs/runbooks/openbao-dev-workers.md,
 # "Gitea identity cut-over (per slot)").
 dev_worker_gitea_identity_cutover: true
+
+# Relay connector (ansible/relay-connectors.yml; docs/runbooks/relay-connectors.md). Adopts this
+# slot's existing approved account-scope identity; never enrolls. The values below are the identity's
+# nonsecret settings and must match it exactly.
+# Migrated 2026-10-14 from the v0.2.2 pane-scoped `join` runner, which lived in a detached tmux
+# session `relay-chifor` (removed), with `service install --state` on its existing identity.
+relay_connector_enabled: true
+relay_connector_manage_service: true
+relay_connector_user: c4
+relay_connector_arch: amd64
+relay_connector_host_id: 47405392-9848-4bb8-bc4d-974a589fd2d9
+relay_connector_state_file: /home/c4/.local/state/relay/relay.chifor.me/connector.json
+relay_connector_name: dev-worker-3
+relay_connector_sockets: ['']

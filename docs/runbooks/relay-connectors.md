@@ -1,8 +1,8 @@
 # Pinned Relay connector service adoption
 
 `ansible/relay-connectors.yml` reconciles an **already-enrolled** worker's existing
-tmux connector identity and user service. It is opt-in, is not included by the
-worker/site playbooks, and has no enabled inventory. It does not enroll a host,
+tmux connector identity and user service. It is opt-in and is not included by the
+worker/site playbooks or the daily fleet converge. It does not enroll a host,
 rewrite its identity/token/service settings, approve access, enable ACP launches
 or start an agent. Relay's R0 rollout remains incomplete until the actual worker
 inventory, logout/reboot and fresh hub heartbeat checks pass.
@@ -62,6 +62,44 @@ enrollment flow separately for a new installation. Phase-less legacy state is
 unsupported by this role; establish approval through the existing connector/hub
 workflow before adoption rather than inferring it from a missing field. Do not copy a worker token
 into Ansible variables, logs or operator handoff files.
+
+## Current inventory (2026-10-14)
+
+Each dev-worker has its pin in `ansible/host_vars/dev-worker-N.yml`. The pins record each
+identity's `service` block as read back on the host. The owner approved all four account-scope
+identities in Relay on 2026-10-14 at 13:33 UTC, before the pins merged. Each identity's local
+`phase` was `approved` when the pin was written, so the role's phase check passes. The installed
+version is whatever the role last applied (`/opt/relay/connector/applied-<UUID>.json`), not this table.
+
+| Worker | Installation UUID | State file | Sockets | Origin of the installation |
+|---|---|---|---|---|
+| dev-worker-1 | `b3b1be1a-…` | `~/.config/relay-connector/connector.json` | `['']` (default) | migrated from the v0.1.0 pane runner `relay-connector.service`; that unit file was removed |
+| dev-worker-2 | `14123362-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | `['']` (default) | new 2026-10-14 |
+| dev-worker-3 | `47405392-…` | `~/.local/state/relay/relay.chifor.me/connector.json` | `['']` (default) | migrated from the v0.2.2 `join` runner in tmux session `relay-chifor` (removed) |
+| dev-worker-4 | `a7366b7a-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | `['/tmp/tmux-1000/default']` | service mode since 2026-10-04. Its install recorded the default socket's explicit path |
+
+dev-worker-1 and dev-worker-3 kept their original state paths: `service install --state` on the
+existing identity keeps the UUID and credential, and only the scope change needed a fresh approval.
+A migration is finished only when no legacy runner is running and nothing can start one on that
+state file again. For a legacy unit, run these as the execution user, in order:
+
+1. `systemctl --user disable --now <legacy>.service`;
+2. confirm that `systemctl --user is-active <legacy>.service` prints `inactive` and that
+   `pgrep -af relay-connector` lists only the new `serve` process. Deleting or disabling a unit
+   does not stop a runner that is already running;
+3. delete the unit file and run `systemctl --user daemon-reload`. A disabled unit can still be
+   started.
+
+Then restart the new `relay-connector-<UUID>.service`, so it is the one holding the state lock.
+For a detached tmux session that runs the connector (the pre-v0.3.0 workflow), stop the connector
+process inside it, check the pane is an idle shell, and kill the session. tmux-continuum restores
+a leftover session after every reboot as an empty shell, so also check that the next resurrect save
+no longer lists it.
+
+The controller binary lives in the WSL converge clone's sibling directory,
+`~/.ailab-converge/artifacts/relay-connector/v<version>/relay-connector-linux-amd64`, fetched on
+Windows (WSL has no internet) and checked against the pinned SHA-256. Pass it with
+`-e relay_connector_source=…`; it is not committed.
 
 ## Converge one worker
 
