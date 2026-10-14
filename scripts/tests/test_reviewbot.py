@@ -161,6 +161,24 @@ class FailurePolicyTest(unittest.TestCase):
         self.assertEqual(["retry"] * 4 + ["quarantined"], states)
         self.assertEqual(0, timeouts)
 
+    def test_upstream_busy_waits_longer_each_time_and_never_burns_an_attempt(self):
+        """A backend overload (UpstreamBusy) is charged to its own counter: the ordinary and
+        deadline budgets stay intact, the wait grows (2, 4, 8, 16, 32, then 60 min), and only
+        max_busy_retries (10: about six hours) in a row quarantine."""
+        e = self.m.UpstreamBusy("router stream error upstream: codex: upstream reported a "
+                                "failed response (server_is_overloaded) [route gpt-6-astra]")
+        states, waits, busy = [], [], 0
+        for _ in range(10):
+            state, busy, wait, note = self.m.next_busy_state(e, busy)
+            states.append(state)
+            waits.append(wait)
+        self.assertEqual(["retry"] * 10, states)
+        self.assertEqual([120, 240, 480, 960, 1920, 3600, 3600, 3600, 3600, 3600], waits)
+        self.assertTrue(note.startswith("upstream busy, retrying in 60 min (no attempt consumed)"), note)
+        state, busy, wait, note = self.m.next_busy_state(e, busy)
+        self.assertEqual(("quarantined", 11, 0.0), (state, busy, wait))
+        self.assertTrue(note.startswith("upstream busy for 11 retries"), note)
+
     def test_timeout_note_is_readable(self):
         """A TimeoutExpired stringifies to the whole argv list; the journal was full of them."""
         self.assertEqual("llm deadline exceeded after 900s", self.m.fail_note(self.timeout))
@@ -514,6 +532,46 @@ class WorkerIterationTest(unittest.TestCase):
         state, _attempts, timeouts, _note = self._job()
         self.assertEqual("done", state)
         self.assertEqual(1, timeouts, "the counter must not be silently reset by a success")
+
+    def test_an_upstream_overload_waits_without_spending_an_attempt(self):
+        """The round trip of UpstreamBusy through the database: no ordinary or deadline attempt
+        moves, the busy counter does, and next_at waits its own growing interval."""
+        self.m.enqueue("o/r", 1, self.A, "webhook")
+        self.m.review_job = lambda *a: (_ for _ in ()).throw(
+            self.m.UpstreamBusy("router stream error upstream: codex: upstream reported a "
+                                "failed response (server_is_overloaded) [route gpt-6-astra]"))
+        before = real_time.time()
+        self.assertIsNotNone(self.m.worker_once())
+        state, attempts, timeouts, note = self._job()
+        self.assertEqual(("retry", 0, 0), (state, attempts, timeouts))
+        self.assertTrue(note.startswith("upstream busy, retrying in 2 min (no attempt consumed)"), note)
+        c = self.m.db()
+        busy, next_at = c.execute("SELECT busy_attempts, next_at FROM jobs").fetchone()
+        c.execute("UPDATE jobs SET next_at=0")
+        c.commit()
+        c.close()
+        self.assertEqual(1, busy)
+        self.assertGreaterEqual(next_at, before + 119)
+        self.m.worker_once()
+        c = self.m.db()
+        busy, next_at = c.execute("SELECT busy_attempts, next_at FROM jobs").fetchone()
+        c.close()
+        self.assertEqual(2, busy, "the second refusal in a row is counted")
+        self.assertGreaterEqual(next_at, before + 239, "and waited twice as long")
+        state, attempts, timeouts, _ = self._job()
+        self.assertEqual(("retry", 0, 0), (state, attempts, timeouts))
+        # "In a row" is literal: an ordinary failure resets the busy counter (and bills itself).
+        c = self.m.db()
+        c.execute("UPDATE jobs SET next_at=0")
+        c.commit()
+        c.close()
+        self.m.review_job = lambda *a: (_ for _ in ()).throw(RuntimeError("llm exit 1: transient"))
+        self.m.worker_once()
+        c = self.m.db()
+        busy = c.execute("SELECT busy_attempts FROM jobs").fetchone()[0]
+        c.close()
+        state, attempts, timeouts, _ = self._job()
+        self.assertEqual((0, "retry", 1, 0), (busy, state, attempts, timeouts))
 
     def test_a_completed_head_retires_a_quarantine_left_on_an_older_head(self):
         """The enqueue race: head B is queued while head A is still RUNNING, so A is not

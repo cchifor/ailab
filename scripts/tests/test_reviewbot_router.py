@@ -253,6 +253,48 @@ class RouterSeatTest(unittest.TestCase):
             m.run_llm("t", "d", "diff")
         self.assertFalse(m.seat_parked("r"))
 
+    def test_a_backend_overload_is_upstream_busy_not_a_failed_attempt(self):
+        """2026-10-14: OpenAI's "Degraded performance in Codex" refused 20-30 % of requests for
+        3+ hours. The router reports it under its upstream codes with the backend's own code in
+        the message; nobody here is at fault, so it must neither park the seat nor burn one of
+        the 5 attempts (next_busy_state) - whether it came before output (a 503 refusal, an
+        `unavailable` chunk) or after (an `upstream` chunk mid-stream)."""
+        m = self.load([self.router_seat(model="x")])
+        early = {"error": {"code": "unavailable",
+                           "message": "codex: upstream reported server_is_overloaded before any output"}}
+        late = lambda code: {"error": {"code": "upstream", "message":
+                                       f"codex: upstream reported a failed response ({code})"}}
+        # The backend's code as the error's own code (the native protocol's shape), with the
+        # CLI-facing message, and the stream the backend closed before any output, count too.
+        own = {"error": {"code": "server_is_overloaded",
+                         "message": "Selected model is at capacity. Please try a different model."}}
+        cut = {"error": {"code": "unavailable",
+                         "message": "codex: upstream closed the stream before any output"}}
+        for reply in ((503, {"x-request-id": "req-1"}, early),
+                      (200, {}, sse_answer("")[:1] + [early]),
+                      (200, {}, sse_answer("")[:1] + [own]),
+                      (200, {}, sse_answer("")[:1] + [cut]),
+                      (200, {}, sse_answer('{"summary": "par')[:-1] + [late("server_is_overloaded")]),
+                      (200, {}, sse_answer('{"summary": "par')[:-1] + [late("server_error")])):
+            Router.script = [reply]
+            with self.assertRaises(m.UpstreamBusy) as cm:
+                m.run_llm("t", "d", "diff")
+            self.assertFalse(m.seat_parked("r"))
+            state, busy, wait, note = m.next_busy_state(cm.exception, 0)
+            self.assertEqual(("retry", 1, 120), (state, busy, wait))
+            self.assertIn("no attempt consumed", note)
+        # The marker is required: a bare 502, a refusal without it, or an upstream code that
+        # names a real problem with the request stays an ordinary failure that burns attempts.
+        for reply in (refusal(502, "UPSTREAM_FAILED"), refusal(503, "unavailable"),
+                      (200, {}, sse_answer('{"summary": "par')[:-1] + [late("context_length_exceeded")]),
+                      (200, {}, sse_answer("")[:1] + [{"error": {"code": "upstream", "message":
+                                                       "stream closed before any output: malformed"}}])):
+            Router.script = [reply]
+            with self.assertRaises(RuntimeError) as cm:
+                m.run_llm("t", "d", "diff")
+            self.assertNotIsInstance(cm.exception, m.UpstreamBusy)
+            self.assertFalse(m.seat_parked("r"))
+
     # ── rotation with subscription seats behind the router ───────────────────────────
     def _cli_ok(self, m):
         calls = []

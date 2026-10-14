@@ -957,6 +957,17 @@ others are non-merging by construction. Tune with `pr_reviewer_exclude_globs` /
 `pr_reviewer_doc_globs` in the role — never from the repo under review, or a PR could exclude
 its own payload.
 
+**A backend overload is not an attempt.** Since 2026-10-14 a refusal the router reports as the
+model's backend being overloaded (`server_is_overloaded`, `server_error`, or a stream cut before
+any output; the router has already failed it over to its other accounts) is `UpstreamBusy`: it
+parks nothing, descends no tier, and costs no ordinary or deadline attempt. The job waits on its
+own counter (`jobs.busy_attempts`: 2, 4, 8, 16, 32, then 60 minutes between tries) and quarantines
+only after `pr_reviewer_max_busy_retries` (10, about six hours) in a row, with the note `upstream
+busy for N retries`. `journalctl -u reviewbot | grep 'upstream busy'` shows the waits;
+`reviewbot_llm_upstream_busy_total` counts them. Before this, the 2026-10-14 OpenAI incident
+("Degraded performance in Codex", 20-30 % refused for 3+ hours) walked every job through its 5
+attempts in half an hour and quarantined it.
+
 **Quarantine is now sticky by design.** `enqueue()` dedupes against `quarantined`, which is what
 stops the reconciler re-queueing a hopeless job every 300 s forever (each round costs
 `max_timeout_attempts` x `llm_timeout_s` of a single-threaded worker). A quarantined head is
