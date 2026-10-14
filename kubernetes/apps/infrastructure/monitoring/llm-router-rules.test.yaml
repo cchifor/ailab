@@ -155,6 +155,10 @@ tests:
         values: "0x20"
       - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="ok"}'
         values: "1x20"
+      # A provider whose only account WITH A READING is limited (the others never reported): the
+      # counts are equal, but one account must not page as a whole provider.
+      - series: 'llm_router_account_limit_status{job="llm-router",account="local-x",provider="local",status="limited"}'
+        values: "1x20"
     alert_rule_test:
       - eval_time: 11m
         alertname: LlmRouterAccountLimited
@@ -183,6 +187,18 @@ tests:
                 The provider reports account claude (claude) at 100 % of
                 a limit window: the router skips it (quota_exhausted) until the reset the Status page
                 shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              account: local-x
+              provider: local
+              status: limited
+            exp_annotations:
+              summary: "llm-router account local-x is limited (refused until its reset)"
+              description: >-
+                The provider reports account local-x (local) at 100 % of
+                a limit window: the router skips it (quota_exhausted) until the reset the Status page
+                shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
       # codex-4 only became limited at 5m: at 11m its own alert has not held for 10m yet.
       - eval_time: 16m
         alertname: LlmRouterAccountLimited
@@ -208,7 +224,15 @@ tests:
                 The provider reports account claude (claude) at 100 % of
                 a limit window: the router skips it (quota_exhausted) until the reset the Status page
                 shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
-      # Both codex accounts limited from 5m: critical from 10m. claude never, one of two is free.
+          - exp_labels: { severity: warning, job: llm-router, account: local-x, provider: local, status: limited }
+            exp_annotations:
+              summary: "llm-router account local-x is limited (refused until its reset)"
+              description: >-
+                The provider reports account local-x (local) at 100 % of
+                a limit window: the router skips it (quota_exhausted) until the reset the Status page
+                shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+      # Both codex accounts limited from 5m: critical from 10m. claude never (one of two is free);
+      # local never (its one limited account is under the >= 2 floor).
       - eval_time: 11m
         alertname: LlmRouterProviderExhausted
         exp_alerts:

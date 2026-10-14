@@ -2,8 +2,9 @@
 # job=llm-router; series from the router's `metrics` plugin, llm-router README § Metrics).
 #
 # WHY THIS EXISTS: on 2026-10-14 OpenAI's "Degraded performance in Codex" refused 20-30 % of the
-# router's requests from 06:00 to past 09:00 UTC (419 of 2,277 requests in three hours; the 24 h
-# baseline was 0-3 % per hour), two of the five Codex accounts had been at 100 % of their weekly
+# router's requests from 06:00 to past 09:00 UTC (487 of 2,277 requests failed in three hours, 419
+# of them `server_is_overloaded`; 18-30 % per hour against a 24 h baseline of 0-3 %), two of the
+# five Codex accounts had been at 100 % of their weekly
 # window since the previous evening, and the other three were burning toward it at about 1 % every
 # 9 minutes - and nothing fired, because the router exported nothing. The dev workers, the reviewer
 # bots and the platform's production key all route through it.
@@ -83,9 +84,9 @@ spec:
           for: 30m
           labels: { severity: warning }
           annotations:
-            summary: "llm-router account {{ $labels.account }} at {{ $value }}% of its {{ $labels.window }} window"
+            summary: "llm-router account {{ $labels.account }} at {{ $value | printf \"%.0f\" }}% of its {{ $labels.window }} window"
             description: >-
-              Account {{ $labels.account }} ({{ $labels.provider }}) has used {{ $value }}% of its
+              Account {{ $labels.account }} ({{ $labels.provider }}) has used {{ $value | printf "%.0f" }}% of its
               {{ $labels.window }} limit window for 30m. At 100 % the provider refuses it until the
               reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
               Decide now whether to throttle its callers, let it run on credits, or add capacity:
@@ -101,13 +102,23 @@ spec:
               a limit window: the router skips it (quota_exhausted) until the reset the Status page
               shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
         # Every account of a provider limited: the pools of that provider serve nothing but credits.
-        # count(status=limited == 1) against count(status=limited series): each account carries
-        # exactly one `limited` series (0 or 1), so the right-hand side is the account count.
+        # count(status=limited == 1) against count(status=limited series): the exporter writes all
+        # three `status` series (0 or 1) for every account that has a limits READING, so the
+        # right-hand side is the accounts with a reading, not the accounts configured. Readings
+        # persist in the router's store and come back after a restart, so a Codex or Claude account
+        # that has ever served has one; an account that never reported (brand new, or a provider
+        # without limit headers) has no series and is invisible here. The `>= 2` floor keeps that
+        # from turning one limited account into a critical page; an always-present per-account
+        # series from the exporter would be the complete fix.
         - alert: LlmRouterProviderExhausted
           expr: |
-            count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"} == 1)
-              ==
-            count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"})
+            (
+              count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"} == 1)
+                ==
+              count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"})
+            )
+            and
+            count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"} == 1) >= 2
           for: 5m
           labels: { severity: critical }
           annotations:

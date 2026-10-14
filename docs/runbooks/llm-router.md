@@ -1932,8 +1932,11 @@ incident, so a third attempt mostly adds load and quota burn. Revisit once the f
   `codex-reviewer` and look at a failed row's events).
 - `conversation.rekey_skipped` appears only while the provider-wide share is high.
 - Rollback: the previous digest and annotations (`e86536b0…` / `599ad796…` /
-  `router-0.1.0-20261014-activity-datetime`); the metrics port and the PodMonitor then scrape nothing,
-  which is `LlmRouterScrapeDown`, not a fault.
+  `router-0.1.0-20261014-activity-datetime`) AND drop `ROUTER_METRICS_PORT` with the `metrics`
+  containerPort in the same revert: the old image opens no listener there, and a pod that still declares
+  the port keeps a PodMonitor target that refuses connections, so `LlmRouterScrapeDown` fires (warning)
+  for as long as the old image runs. If the port must stay for some reason, silence that alert for the
+  duration instead. The PodMonitor and the rules can stay either way.
 
 ## Relay managed-key bridge (v0.6.0)
 
