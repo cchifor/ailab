@@ -1,8 +1,8 @@
 # Pinned Relay connector service adoption
 
 `ansible/relay-connectors.yml` reconciles an **already-enrolled** worker's existing
-tmux connector identity and user service. It is opt-in, is not included by the
-worker/site playbooks, and has no enabled inventory. It does not enroll a host,
+tmux connector identity and user service. It is opt-in and is not included by the
+worker/site playbooks or the daily fleet converge. It does not enroll a host,
 rewrite its identity/token/service settings, approve access, enable ACP launches
 or start an agent. Relay's R0 rollout remains incomplete until the actual worker
 inventory, logout/reboot and fresh hub heartbeat checks pass.
@@ -62,6 +62,28 @@ enrollment flow separately for a new installation. Phase-less legacy state is
 unsupported by this role; establish approval through the existing connector/hub
 workflow before adoption rather than inferring it from a missing field. Do not copy a worker token
 into Ansible variables, logs or operator handoff files.
+
+## Current inventory (2026-10-14)
+
+All four dev-workers run the account-scope service on the default tmux socket, and each
+has its pin in `ansible/host_vars/dev-worker-N.yml`:
+
+| Worker | Installation UUID | State file | Origin of the installation |
+|---|---|---|---|
+| dev-worker-1 | `b3b1be1a-…` | `~/.config/relay-connector/connector.json` | migrated from the v0.1.0 pane runner `relay-connector.service` (disabled) |
+| dev-worker-2 | `14123362-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | new 2026-10-14 |
+| dev-worker-3 | `47405392-…` | `~/.local/state/relay/relay.chifor.me/connector.json` | migrated from the v0.2.2 `join` runner in tmux session `relay-chifor` (removed) |
+| dev-worker-4 | `a7366b7a-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | service mode since 2026-10-04 |
+
+dev-worker-1 and dev-worker-3 kept their original state paths: `service install --state` on the
+existing identity keeps the UUID and credential, and only the scope change needed a fresh approval.
+A detached tmux session that runs the connector belongs to the pre-v0.3.0 workflow. tmux-continuum
+restores such a session after every reboot as an empty shell, so remove it after a migration.
+
+The controller binary lives in the WSL converge clone's sibling directory,
+`~/.ailab-converge/artifacts/relay-connector/v<version>/relay-connector-linux-amd64`, fetched on
+Windows (WSL has no internet) and checked against the pinned SHA-256. Pass it with
+`-e relay_connector_source=…`; it is not committed.
 
 ## Converge one worker
 

@@ -6,3 +6,16 @@
 # each opened by that slot's own bot. Rollback = set false and converge (docs/runbooks/openbao-dev-workers.md,
 # "Gitea identity cut-over (per slot)").
 dev_worker_gitea_identity_cutover: true
+
+# Relay connector (ansible/relay-connectors.yml; docs/runbooks/relay-connectors.md). Adopts this
+# slot's existing approved account-scope identity; never enrolls. The values below are the identity's
+# nonsecret settings and must match it exactly.
+# New installation 2026-10-14 (`service install`); the state is at the connector's default path.
+relay_connector_enabled: true
+relay_connector_manage_service: true
+relay_connector_user: c4
+relay_connector_arch: amd64
+relay_connector_host_id: 14123362-bf10-4193-b38a-23bfb8d7ba27
+relay_connector_state_file: /home/c4/.local/state/relay/f765a05a957da5b4/connector.json
+relay_connector_name: dev-worker-2
+relay_connector_sockets: ['']
