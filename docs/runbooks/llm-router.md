@@ -1981,6 +1981,16 @@ for a good part of the admin API. Chat and tools only: no schema change, no new 
     longer lists.
   - `route_stats` (trajectory-recorder): requests, errors and p95 per route and tokens per account over 30m to 24h.
   - `ignore_network_server` (discovery-network): remove or restore a scanned server, with an undo each way.
+- **Approval gate (the same for every change tool, the new ones included).** A change tool never changes anything
+  itself: it returns a proposal, shown as a card with a diff, and the change happens only when an administrator presses
+  Apply (`packages/plugins/agent-core`, README "Changes are proposals"; operators and viewers see the card but cannot
+  apply). A session an administrator has set to "apply automatically" applies ordinary proposals without the click;
+  proposals marked `explicit` are never applied that way and always wait for the click. Of the new tools,
+  `remove_secret` is `explicit` (irreversible: the value cannot be recovered); `configure_plugin`, `release_binding`,
+  `refresh_models` and `ignore_network_server` are ordinary proposals (undoable, except `release_binding`, whose card
+  says "Undo: none"). The audit entries (`secret.deleted`, `placement.deleted`, `plugin.settings_changed`, ...) are
+  written by the apply, after the human decision, never instead of it. The model-backed Assistant cannot change its own
+  approval mode (that is a UI setting, `PUT /admin/v1/chat/settings`, administrators only).
 - **Kept out of the chat on purpose:** plugin install and the chat's approval mode (the UI), join tokens for
   self-registering servers and a subscription's label (the console, so the assistant can never invent one).
   `reject_registration` and `revoke_registration` already existed.
@@ -1992,16 +2002,26 @@ for a good part of the admin API. Chat and tools only: no schema change, no new 
 - Relay branch `release/router-0.1.0-20261014-agent-control-image` (`92e4222a`),
   [run 87097](https://git.chifor.me/cchifor/relay/actions/runs/87097); receipt `deployment-images-87097.json`.
 - Image `registry.chifor.me/llm-router/router@sha256:3e0f67b5937ace37a8339710d4f6347eefa031214f4b2c096d3bc79380ac2928` (tag `parity-92e4222a13fe-87097`; the digest was checked in the registry).
-- **Before merge:** CI on Linux passed on both PRs; both reviewer bots approved. reviewer-codex's one finding on #108
-  (pointer routes missing from an account's route list) was fixed in `cdaca9d`; reviewer-claude's two nits were
-  answered (the `support()` default mirrors the agent-route rule) and fixed (`c892c83`, in #109).
-  Locally: `tsc --noEmit` clean, `vitest run` 1853 passed, `check:architecture` only the known #79 line.
+- **Before merge:** CI on Linux passed on all three PRs; both reviewer bots approved each.
+  - #108: reviewer-codex's finding (pointer routes missing from an account's route list) was fixed in
+    [`cdaca9d`](https://git.chifor.me/cchifor/llm-router/commit/cdaca9d71a087ab1f280509ca712ebe25f5745b6); reviewer-claude's
+    two nits were answered on the PR (the `support()` default mirrors the agent-route rule) and fixed in
+    [`c892c83`](https://git.chifor.me/cchifor/llm-router/commit/c892c839ee103cfb831f100fb536187f07507a1e) (in #109).
+  - #109, two rounds: [`8ee2670`](https://git.chifor.me/cchifor/llm-router/commit/8ee2670b6c760b71603e925c13f154dea9c4f303)
+    (route_stats totals the selected route, refresh_models reports what fit the 100-model catalog, audit_log says when a
+    filtered search stopped at the 500 most recent entries, a test pins that remove_secret is refused at approval time
+    once an account took the key) and [`8e7a011`](https://git.chifor.me/cchifor/llm-router/commit/8e7a01105443509ac16429f9f79591a059e49494)
+    (`Store.listBindings(limit?)`, the limit applied in the SQLite query). The findings and the answers are on the PR.
+  - #110: the `list_bindings` description (agent bindings by key, placements most recently used first).
+  - Locally: `tsc --noEmit` clean, `vitest run` 1857 passed, `check:architecture` only the known #79 line.
 
 **How to check after the rollout.**
 - In the Assistant: "inspect codex-2" answers a Setting/Value table whose Concurrency row reads `N in flight of 12`;
   "show the upstream-health settings" lists intervalSeconds 30; "what is in the audit journal" lists recent entries.
 - `router_status` (or `/status` in the guide) shows the "In flight / limit" column.
-- The system prompt's "what you can do" line names the new tools (`GET /admin/v1/chat` after one model turn).
+- With the model-backed Assistant (not the guide), ask "what can you do?": the answer names the new tools, because the
+  system prompt's "what you can do" line lists them. The prompt itself is not exposed over HTTP; this question is the
+  way to see it from outside.
 
 **Rollback.** Revert the image digest and both pod-template annotations together, and keep the resources:
 - `image: registry.chifor.me/llm-router/router@sha256:43a6fc179dbfda924be213794755f2e1a46de7ad83f63bacbe589f8f41c243df`
