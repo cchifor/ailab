@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE = ROOT / "docs/runbooks/relay-v060-activation-evidence.yaml"
 RELAY = ROOT / "kubernetes/apps/apps/relay/kustomization.yaml"
 ROUTER = ROOT / "kubernetes/apps/apps/llm-router/kustomization.yaml"
+COMMUNICATION_COMPONENT = (
+    ROOT / "kubernetes/components/relay-default-communication"
+)
 
 
 class ActivationGate(unittest.TestCase):
@@ -49,6 +52,46 @@ class ActivationGate(unittest.TestCase):
         text = EVIDENCE.read_text()
         for forbidden in ("admin-key.pem", "reconciler-key.pem", "trust.json", "relay-keys"):
             self.assertNotIn(forbidden, text)
+
+    def test_default_communication_component_is_a_narrow_relay_patch(self):
+        component_path = COMMUNICATION_COMPONENT / "kustomization.yaml"
+        component = yaml.safe_load(component_path.read_text())
+        self.assertEqual(component["kind"], "Component")
+        self.assertEqual(component.get("resources", []), [])
+        self.assertEqual(component.get("patches"), [{"path": "deployment.yaml"}])
+
+        relay_manifest = next(
+            document
+            for document in yaml.safe_load_all(
+                (ROOT / "kubernetes/apps/apps/relay/relay.yaml").read_text()
+            )
+            if document and document.get("kind") == "Deployment"
+        )
+        relay_containers = relay_manifest["spec"]["template"]["spec"]["containers"]
+        self.assertEqual(
+            [container.get("name") for container in relay_containers].count("relay"),
+            1,
+        )
+
+        patch = yaml.safe_load(
+            (COMMUNICATION_COMPONENT / "deployment.yaml").read_text()
+        )
+        patch_containers = patch["spec"]["template"]["spec"]["containers"]
+        self.assertEqual([container.get("name") for container in patch_containers], ["relay"])
+        self.assertEqual(
+            patch_containers[0]["env"],
+            [{"name": "RELAY_AGENT_COMMUNICATION", "value": "1"}],
+        )
+
+        # The component may only patch the existing Deployment. Any future
+        # Secret, router, or other standalone resource must be reviewed as a
+        # separate deployment change rather than silently widening this toggle.
+        for path in COMMUNICATION_COMPONENT.rglob("*"):
+            if path.suffix not in {".yaml", ".yml"} or not path.is_file():
+                continue
+            document = yaml.safe_load(path.read_text())
+            self.assertIn(document.get("kind"), {"Component", "Deployment"}, path)
+            self.assertNotIn(document.get("kind"), {"Secret", "ConfigMap"}, path)
 
 
 if __name__ == "__main__":
