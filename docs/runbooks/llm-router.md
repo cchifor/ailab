@@ -1951,6 +1951,66 @@ incident, so a third attempt mostly adds load and quota burn. Revisit once the f
   for as long as the old image runs. If the port must stay for some reason, silence that alert for the
   duration instead. The PodMonitor and the rules can stay either way.
 
+## Assistant full control release: account read-back and the rest of the admin API (2026-10-14)
+
+`router-0.1.0-20261014-agent-control` deploys merged llm-router main `ac0d33db47f354dcf374d9d79b92624293872c83`
+([#108](https://git.chifor.me/cchifor/llm-router/pulls/108), [#109](https://git.chifor.me/cchifor/llm-router/pulls/109)
+and the wording follow-up [#110](https://git.chifor.me/cchifor/llm-router/pulls/110)), on the owner's "implement and deploy all the
+aboves". The Assistant (the router's own agent) could set an account's concurrency but never read it, and had no tool
+for a good part of the admin API. Chat and tools only: no schema change, no new setting, no new endpoint.
+
+**What changes.**
+- **Account read-back (#108).** `inspect_account` shows every setting `update_account` and `configure_models` take
+  (concurrency among them), what is happening now (requests in flight against the concurrency, health, a running
+  cooldown, the plan limits the usage plugin has read) and the routes using the account, pointers included
+  (`front → default · gpt-a`). `list_routes` carries `concurrency` and `inFlight` per account; `router_status` gains an
+  "In flight / limit" column. `update_account` takes `tools` (refused where the provider plugin cannot run them, e.g.
+  Claude in single-turn mode), `vision` and `clearCooldown: true`. The model's configuration summary names each
+  account's concurrency. Secret values never appear, only references.
+- **The rest of the admin API (#109).** Eleven tools, each registered by the plugin that owns the domain:
+  - `plugin_settings` / `configure_plugin` (api-admin): a plugin's fields with value, default and description; whether a
+    change applies at once or after a restart; a proposal per changed field, If-Match on the settings revision, Undo as
+    a compensating `configure_plugin`. Refused for deployment-set settings and for `smart-pools` (its own tools).
+    This is how the chat now changes provider-claude's parallel runs or upstream-health's interval.
+  - `audit_log` (api-admin): newest first, by action prefix or actor, up to 200.
+  - `list_bindings` / `release_binding` (api-admin): agent bindings and conversation placements with the key the admin
+    API takes; releasing is a proposal with no undo, audited `placement.deleted` / `binding.deleted` with `via: chat`.
+  - `list_secrets` / `check_secret` / `remove_secret` (secret-store): references, labels, when stored and last used, the
+    accounts using each; deleting is an explicit approval with no undo and is refused while an account references the key.
+  - `refresh_models` (provider-registry): adds the models the provider lists now, removes nothing, names what it no
+    longer lists.
+  - `route_stats` (trajectory-recorder): requests, errors and p95 per route and tokens per account over 30m to 24h.
+  - `ignore_network_server` (discovery-network): remove or restore a scanned server, with an undo each way.
+- **Kept out of the chat on purpose:** plugin install and the chat's approval mode (the UI), join tokens for
+  self-registering servers and a subscription's label (the console, so the assistant can never invent one).
+  `reject_registration` and `revoke_registration` already existed.
+
+**Image.**
+- Archive `router-0.1.0-20261014-agent-control.tar.gz`, SHA-256 `fe66fd6a7f695c567a0ce40ca6496d0d0ac4f7bfbe4dcdf399a7c0ec9a011d1b`.
+  - Built in the pinned Node 26.10.0 image on dev-worker-1, and the production smoke passed.
+  - Relay v0.2.0 asset 252.
+- Relay branch `release/router-0.1.0-20261014-agent-control-image` (`92e4222a`),
+  [run 87097](https://git.chifor.me/cchifor/relay/actions/runs/87097); receipt `deployment-images-87097.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:3e0f67b5937ace37a8339710d4f6347eefa031214f4b2c096d3bc79380ac2928` (tag `parity-92e4222a13fe-87097`; the digest was checked in the registry).
+- **Before merge:** CI on Linux passed on both PRs; both reviewer bots approved. reviewer-codex's one finding on #108
+  (pointer routes missing from an account's route list) was fixed in `cdaca9d`; reviewer-claude's two nits were
+  answered (the `support()` default mirrors the agent-route rule) and fixed (`c892c83`, in #109).
+  Locally: `tsc --noEmit` clean, `vitest run` 1853 passed, `check:architecture` only the known #79 line.
+
+**How to check after the rollout.**
+- In the Assistant: "inspect codex-2" answers a Setting/Value table whose Concurrency row reads `N in flight of 12`;
+  "show the upstream-health settings" lists intervalSeconds 30; "what is in the audit journal" lists recent entries.
+- `router_status` (or `/status` in the guide) shows the "In flight / limit" column.
+- The system prompt's "what you can do" line names the new tools (`GET /admin/v1/chat` after one model turn).
+
+**Rollback.** Revert the image digest and both pod-template annotations together, and keep the resources:
+- `image: registry.chifor.me/llm-router/router@sha256:43a6fc179dbfda924be213794755f2e1a46de7ad83f63bacbe589f8f41c243df`
+- `chifor.me/source-commit: ae0f061623720ac164a45ea6631da2ee3b1b46c1`
+- `chifor.me/release: router-0.1.0-20261014-overload-metrics`
+
+Nothing else is needed: no schema change, no new setting, no new endpoint. A conversation in which the model called one
+of the new tools keeps its transcript; the old image simply no longer offers them.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
