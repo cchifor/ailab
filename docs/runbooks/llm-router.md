@@ -1986,9 +1986,12 @@ for a good part of the admin API. Chat and tools only: no schema change, no new 
   Apply (`packages/plugins/agent-core`, README "Changes are proposals"; operators and viewers see the card but cannot
   apply). A session an administrator has set to "apply automatically" applies ordinary proposals without the click;
   proposals marked `explicit` are never applied that way and always wait for the click. Of the new tools,
-  `remove_secret` is `explicit` (irreversible: the value cannot be recovered); `configure_plugin`, `release_binding`,
-  `refresh_models` and `ignore_network_server` are ordinary proposals (undoable, except `release_binding`, whose card
-  says "Undo: none"). The audit entries (`secret.deleted`, `placement.deleted`, `plugin.settings_changed`, ...) are
+  `remove_secret` is `explicit` (irreversible: the value cannot be recovered); `configure_plugin`, `refresh_models` and
+  `ignore_network_server` are ordinary, undoable proposals. `release_binding` is an ordinary proposal as well, and its
+  card says "Undo: none" because nothing is lost that an undo would bring back: a released conversation placement is
+  re-created on the conversation's next turn (possibly on another subscription, at the cost of its prompt cache), and
+  a released agent binding is re-created by route affinity on the agent's next request. It touches no account, no
+  configuration and no stored data, so in an "apply automatically" session it runs without the click. The audit entries (`secret.deleted`, `placement.deleted`, `plugin.settings_changed`, ...) are
   written by the apply, after the human decision, never instead of it. The model-backed Assistant cannot change its own
   approval mode (that is a UI setting, `PUT /admin/v1/chat/settings`, administrators only).
 - **Kept out of the chat on purpose:** plugin install and the chat's approval mode (the UI), join tokens for
