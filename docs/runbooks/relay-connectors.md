@@ -9,15 +9,22 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
-The default release is the public v0.3.5 connector manifest observed on
-2026-10-10 at
-`https://relay.chifor.me/downloads/connector/v0.3.5/manifest.json`:
+The default release is the public v0.6.2 connector manifest observed on
+2026-10-14 at
+`https://relay.chifor.me/downloads/connector/v0.6.2/manifest.json`:
 
 | Field | Pin |
 |---|---|
-| Source | `a78d6f33dcc14c7ecd34b12b1adca23975dea874` |
-| Linux amd64 SHA-256 | `a79a35bee2615a28ce2fe1e01da9784ec7e832c28d493d7865d78a7ede03179e` |
-| Linux arm64 SHA-256 | `e89518ffeaa8ff7dbef0cc67de753fd6b614f2de29e47e83557fd8af3012afa0` |
+| Source | `f52693cef05985e7ba8164b26362ac40c8aa39e4` |
+| Linux amd64 SHA-256 | `8cf35551be1390d8ec1c834f36166d5ace623bb7bc83cbd1530b570581ebea81` |
+| Linux arm64 SHA-256 | `3a43de6b91a536e179bb40ec0227bb5cdd1f6560a786be89b136d4d1488e5d51` |
+
+The pins above were checked against the published manifest at
+`https://relay.chifor.me/downloads/connector/v0.6.2/manifest.json` on
+2026-10-14. The manifest reports source commit `f52693cef05985e7ba8164b26362ac40c8aa39e4`
+and the same architecture-specific digests. The connector role only changes the
+content-addressed binary pin; its service unit, identity checks and activation
+gates are unchanged.
 
 Obtain the versioned binary on the controller from that reviewed release and
 compare the manifest/source/digest. Pass its local absolute path; workers never
