@@ -36,7 +36,6 @@ class Monitoring(unittest.TestCase):
             'apiVersion': 'kustomize.config.k8s.io/v1beta1', 'kind': 'Kustomization',
             'resources': [os.path.relpath(base, wrapper)],
             'components': [os.path.relpath(COMPONENT, wrapper),
-                           os.path.relpath(ROOT / 'kubernetes/components/relay-router-control-plane', wrapper),
                            os.path.relpath(ROOT / 'kubernetes/components/relay-notifications/relay', wrapper)],
         }))
         raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
@@ -233,7 +232,7 @@ class Monitoring(unittest.TestCase):
         initializer = next(c for c in self.spec['initContainers'] if c['name'] == 'metrics-files')
         self.assertEqual(initializer['securityContext']['runAsUser'], 1000)
         self.assertEqual(initializer['securityContext']['runAsGroup'], 1000)
-        self.assertEqual([c for c in self.spec['initContainers'] if c['name'] not in ('metrics-files', 'notification-files', 'router-files')], base['initContainers'])
+        self.assertEqual([c for c in self.spec['initContainers'] if c['name'] not in ('metrics-files', 'notification-files')], base['initContainers'])
         application = next(c for c in self.spec['containers'] if c['name'] == 'relay')
         self.assertEqual(application.get('securityContext', {}).get('runAsUser', self.spec['securityContext'].get('runAsUser')), 1000)
         self.assertEqual(application['image'], next(c for c in base['containers'] if c['name'] == 'relay')['image'])
@@ -244,9 +243,9 @@ class Monitoring(unittest.TestCase):
         # tested separately once the operator evidence permits it.
         self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', {e['name'] for e in base_app['env']})
         self.assertNotIn('RELAY_ROUTER_CONNECTIONS_FILE', {e['name'] for e in base_app['env']})
-        self.assertEqual(next(e['value'] for e in application['env'] if e['name'] == 'RELAY_AGENT_CONTROL_PLANE'), '1')
-        self.assertEqual(next(e['value'] for e in application['env'] if e['name'] == 'RELAY_ROUTER_CONNECTIONS_FILE'), '/run/relay-router/private/connections.json')
-        self.assertIn('relay-router-connection', {v['secret']['secretName'] for v in self.spec['volumes'] if 'secret' in v})
+        self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', env)
+        self.assertNotIn('RELAY_ROUTER_CONNECTIONS_FILE', env)
+        self.assertNotIn('relay-router-connection', {v['secret']['secretName'] for v in self.spec['volumes'] if 'secret' in v})
         self.assertNotIn('metrics-input', {v['name'] for v in application['volumeMounts']})
         inputs = next(v['secret'] for v in self.spec['volumes'] if v['name'] == 'metrics-input')
         self.assertEqual(inputs['secretName'], 'relay-control-metrics')

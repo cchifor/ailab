@@ -1,18 +1,15 @@
-# Nonsecret activation record. Update this file in the reviewed activation PR
-# only after the operator has recorded the corresponding evidence in the Relay
-# handoff. Preflight is recorded before activation; the constrained acceptance
-# receipt is recorded after the activated services are exercised. Never add
-# Secret values, private keys, bearer tokens or kubeconfigs.
-version: 1
+# Nonsecret record for the public llm-router access-request integration.
+# The Relay-specific trust bridge was withdrawn and is kept only on the
+# todo/relay-router-trust-bridge branches. Never add credentials, private keys,
+# bearer tokens or kubeconfigs here.
+version: 2
 status: pending
-tenantId: 00000000-0000-4000-8000-000000000001
-release:
-  sourceCommit: be1b72ebb7c19ac312500b9c4df12eea0f971dc2
-  relayImageDigest: sha256:5e01b323d6e5cacd4980d7bcc14082ec937d1731a69a89af2568f8f322b9f774
-  routerImageDigest: sha256:f8ddc9ce9353f6e3a5f7bcc75b8ff16d2cfa29cf0a5e801358b57d9dbc4bec54
+accessFlow:
+  status: pending
+  reference: ''
+  requestApprovalRedeemRouteRotateRevoke: pending
+  restartRecovery: pending
 preflight:
-  relayConnection: {status: pending, reference: ''}
-  routerTrust: {status: pending, reference: ''}
   openBaoPolicies: {status: pending, reference: ''}
   workerConvergence: {status: pending, reference: ''}
   acceptanceTarget: {status: pending, reference: ''}
