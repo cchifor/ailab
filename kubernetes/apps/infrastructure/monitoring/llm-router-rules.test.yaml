@@ -1,0 +1,228 @@
+# `promtool test rules` fixtures for llm-router-rules.yaml. Run by scripts/rules-lint.sh on every
+# PR, after `promtool check rules`. Every rule is asserted both ways: it fires on the shape of the
+# 2026-10-14 incident, and it stays silent on the healthy shape it must not page for.
+#
+# `rule_files` is the extracted spec name (rules-lint.sh hands promtool the `spec:` body under the
+# manifest's own basename).
+rule_files:
+  - llm-router-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------ scrape target
+  - interval: 1m
+    name: a pod not answering on 9464 pages after 10m; an answering one does not
+    input_series:
+      - series: 'up{job="llm-router",namespace="llm-router",pod="llm-router-a"}'
+        values: "0x30"
+      - series: 'up{job="llm-router",namespace="llm-router",pod="llm-router-b"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: LlmRouterScrapeDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              namespace: llm-router
+              pod: llm-router-a
+            exp_annotations:
+              summary: "llm-router metrics port not answering (llm-router-a)"
+              description: >-
+                The router pod llm-router-a has not answered on its metrics port (9464) for 10m.
+                A rollout gap is under a minute; this is the port not opened (ROUTER_METRICS_PORT,
+                the metrics plugin disabled) or NetworkPolicy llm-router no longer admitting
+                Prometheus. The LlmRouter* alerts below cannot fire while this one is active.
+      - eval_time: 5m
+        alertname: LlmRouterScrapeDown
+        exp_alerts: []
+      # A target exists, so the absent-target rule stays quiet.
+      - eval_time: 20m
+        alertname: LlmRouterMetricsAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    name: no llm-router target at all pages after 15m
+    input_series:
+      - series: 'up{job="something-else",namespace="x",pod="y"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: LlmRouterMetricsAbsent
+        exp_alerts:
+          # absent() carries the selector's equality labels, so job= is on the alert.
+          - exp_labels:
+              severity: warning
+              job: llm-router
+            exp_annotations:
+              summary: "No llm-router scrape target (PodMonitor selects nothing)"
+              description: >-
+                Prometheus has had no up{job="llm-router"} series for 15m: the PodMonitor
+                apps/llm-router/podmonitor.yaml selects no pod (label change, namespace, or the
+                monitor is gone). Every other LlmRouter* alert is blind while this one is active.
+      - eval_time: 10m
+        alertname: LlmRouterMetricsAbsent
+        exp_alerts: []
+
+  # ------------------------------------------------------------ failure ratio
+  - interval: 1m
+    name: a route failing half its requests pages; a healthy route and a quiet one do not
+    input_series:
+      # dw-1: 2 requests a minute, 1 of them failed (50 %). Two accounts, as the real series are.
+      - series: 'llm_router_requests_total{job="llm-router",route="dw-1",status="complete",error_code="",upstream_code="",account="codex",provider="codex"}'
+        values: "0+1x40"
+      - series: 'llm_router_requests_total{job="llm-router",route="dw-1",status="failed",error_code="upstream",upstream_code="server_is_overloaded",account="codex-2",provider="codex"}'
+        values: "0+1x40"
+      # dw-3: 3 a minute, 1 in 30 failed (about 3 %): the healthy day.
+      - series: 'llm_router_requests_total{job="llm-router",route="dw-3",status="complete",error_code="",upstream_code="",account="codex-5",provider="codex"}'
+        values: "0+3x40"
+      - series: 'llm_router_requests_total{job="llm-router",route="dw-3",status="failed",error_code="upstream",upstream_code="server_error",account="codex-5",provider="codex"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2"
+      # codex-reviewer: every request failed, but 3 requests in 15 minutes is under the 10-request gate.
+      - series: 'llm_router_requests_total{job="llm-router",route="codex-reviewer",status="failed",error_code="upstream",upstream_code="server_is_overloaded",account="codex",provider="codex"}'
+        values: "0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6 6 6 6 6 7 7 7 7 7 8"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              route: dw-1
+            exp_annotations:
+              summary: "llm-router route dw-1: 50% of requests failing"
+              description: >-
+                Over the last 15 minutes 50% of the requests that entered
+                route dw-1 ended failed (at least 10 requests in the window). The
+                healthy baseline is under 3 %. Read the codes on the Activity page or
+                GET /admin/v1/stats?window=1h: upstream_code server_is_overloaded on every account is
+                the provider (check status.openai.com); one account is that account; a 4xx code is
+                the clients. Runbook: docs/runbooks/llm-router.md § Overload handling.
+      # Not yet at the 15m hold.
+      - eval_time: 10m
+        alertname: LlmRouterFailureRatioHigh
+        exp_alerts: []
+
+  # ------------------------------------------------------------ limits
+  - interval: 1m
+    name: a weekly window at 95% pages after 30m; the 5-hour Claude window at 95% does not
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-5",provider="codex",window="primary"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "81x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-5",provider="claude",window="5-hour"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-5",provider="claude",window="weekly"}'
+        values: "39x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterAccountNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              account: codex-5
+              provider: codex
+              window: primary
+            exp_annotations:
+              summary: "llm-router account codex-5 at 95% of its primary window"
+              description: >-
+                Account codex-5 (codex) has used 95% of its
+                primary limit window for 30m. At 100 % the provider refuses it until the
+                reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+                Decide now whether to throttle its callers, let it run on credits, or add capacity:
+                the pool keeps serving on the other accounts until they reach the same wall.
+      - eval_time: 20m
+        alertname: LlmRouterAccountNearLimit
+        exp_alerts: []
+
+  - interval: 1m
+    name: one limited account warns; every account of a provider limited is critical
+    input_series:
+      # codex: both accounts limited -> provider exhausted. claude: one of two -> account alert only.
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-3",provider="codex",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-3",provider="codex",status="ok"}'
+        values: "0x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-4",provider="codex",status="limited"}'
+        values: "0x5 1x15"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="codex-4",provider="codex",status="warning"}'
+        values: "1x5 0x15"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude",provider="claude",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="limited"}'
+        values: "0x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="ok"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: LlmRouterAccountLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              account: codex-3
+              provider: codex
+              status: limited
+            exp_annotations:
+              summary: "llm-router account codex-3 is limited (refused until its reset)"
+              description: >-
+                The provider reports account codex-3 (codex) at 100 % of
+                a limit window: the router skips it (quota_exhausted) until the reset the Status page
+                shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              account: claude
+              provider: claude
+              status: limited
+            exp_annotations:
+              summary: "llm-router account claude is limited (refused until its reset)"
+              description: >-
+                The provider reports account claude (claude) at 100 % of
+                a limit window: the router skips it (quota_exhausted) until the reset the Status page
+                shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+      # codex-4 only became limited at 5m: at 11m its own alert has not held for 10m yet.
+      - eval_time: 16m
+        alertname: LlmRouterAccountLimited
+        exp_alerts:
+          - exp_labels: { severity: warning, job: llm-router, account: codex-3, provider: codex, status: limited }
+            exp_annotations:
+              summary: "llm-router account codex-3 is limited (refused until its reset)"
+              description: >-
+                The provider reports account codex-3 (codex) at 100 % of
+                a limit window: the router skips it (quota_exhausted) until the reset the Status page
+                shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+          - exp_labels: { severity: warning, job: llm-router, account: codex-4, provider: codex, status: limited }
+            exp_annotations:
+              summary: "llm-router account codex-4 is limited (refused until its reset)"
+              description: >-
+                The provider reports account codex-4 (codex) at 100 % of
+                a limit window: the router skips it (quota_exhausted) until the reset the Status page
+                shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+          - exp_labels: { severity: warning, job: llm-router, account: claude, provider: claude, status: limited }
+            exp_annotations:
+              summary: "llm-router account claude is limited (refused until its reset)"
+              description: >-
+                The provider reports account claude (claude) at 100 % of
+                a limit window: the router skips it (quota_exhausted) until the reset the Status page
+                shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+      # Both codex accounts limited from 5m: critical from 10m. claude never, one of two is free.
+      - eval_time: 11m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: codex
+            exp_annotations:
+              summary: "llm-router: every codex account is limited"
+              description: >-
+                All 2 codex accounts the router holds are at 100 % of a limit
+                window. Requests on that provider's routes now fail (or run on credits where an
+                account has them) until the earliest reset. The dev workers' Codex CLI cannot fall
+                back to another provider through the router. Runbook: docs/runbooks/llm-router.md
+                § Overload handling.
+      - eval_time: 4m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
