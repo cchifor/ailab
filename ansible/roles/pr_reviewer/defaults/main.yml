@@ -226,6 +226,13 @@ pr_reviewer_max_attempts: 5
 # lower cap on the shared one — otherwise one fast transient error plus one real timeout
 # quarantines a job that deserved another try.
 pr_reviewer_max_timeout_attempts: 2
+# Backend refusals the router reports (`server_is_overloaded` / `server_error`, before or after
+# output) are the model's backend being overloaded, not this PR's fault and not a seat's: they are
+# waited out on their OWN counter (jobs.busy_attempts) - 2, 4, 8, 16, 32, then 60 minutes between
+# tries - and never cost an ordinary or a deadline attempt. This many in a row (about six hours)
+# quarantine the job. WHY: 2026-10-14, OpenAI's "Degraded performance in Codex" refused 20-30 % of
+# requests for 3+ hours; every job walked its 5 ordinary attempts in half an hour and quarantined.
+pr_reviewer_max_busy_retries: 10
 pr_reviewer_reconcile_s: 300
 # codex-only: reasoning effort for reviews (the seeded account default is xhigh - 5-10min
 # per review; medium is the right latency/quality point for a review bot).

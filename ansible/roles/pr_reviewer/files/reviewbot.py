@@ -107,7 +107,7 @@ def db():
         id INTEGER PRIMARY KEY, repo TEXT, pr INTEGER, head_sha TEXT,
         state TEXT, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0,
         created REAL, updated REAL, review_id INTEGER, note TEXT,
-        timeout_attempts INTEGER DEFAULT 0)""")
+        timeout_attempts INTEGER DEFAULT 0, busy_attempts INTEGER DEFAULT 0)""")
     c.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
     # Deadline failures are capped separately from fast ones (see worker()), which needs a
     # counter the CREATE above only supplies on a fresh database. Migrate existing ones in
@@ -150,6 +150,15 @@ def db():
         except sqlite3.OperationalError as e:
             # db_lock only serializes THIS process's threads; `--requeue` runs as a second
             # process against the same file and can win the race to add the column.
+            if "duplicate column" not in str(e).lower():
+                raise
+    if "busy_attempts" not in cols:
+        # Backend refusals (UpstreamBusy) have their own counter: they cost no ordinary attempt
+        # and no deadline attempt, and their ceiling is counted apart from both.
+        try:
+            c.execute("ALTER TABLE jobs ADD COLUMN busy_attempts INTEGER DEFAULT 0")
+            c.commit()
+        except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
     return c
@@ -982,6 +991,57 @@ class ModelError(RuntimeError):
     """One tier failed for a reason that says nothing about the account (a 5xx, an empty
     answer, a CLI crash). Nothing parks; run_llm descends a tier on the SAME seat if the budget
     allows, else it becomes an ordinary failure that bills the attempt."""
+
+
+# A transient refusal by the model's BACKEND, reported through the router: `server_is_overloaded`
+# ("Selected model is at capacity"), a `server_error`, or a stream the backend closed before any
+# output. The router has already failed the attempt over to its other accounts (or had none left),
+# so the PR did nothing wrong and no seat is at fault: nothing parks, no tier descends, and no
+# ordinary attempt is consumed. The job waits a growing interval instead (busy_backoff_s) and
+# retries, up to `max_busy_retries` times (default 10: about six hours). WHY: on 2026-10-14 OpenAI's
+# "Degraded performance in Codex" refused 20-30 % of requests for over three hours; every job
+# walked its 5 ordinary attempts about 2, 4, 8 and 16 minutes apart and quarantined within half an
+# hour - sticky, each needing --requeue by hand - against a condition that outlasted the budget by
+# hours and that no retry could influence. The marker in the MESSAGE is required (upstream_busy):
+# a bare 502 for a malformed stream or a rejected request is a real failure and keeps burning
+# attempts.
+UPSTREAM_BUSY_CODES = frozenset({"unavailable", "upstream", "UPSTREAM_FAILURE"})
+UPSTREAM_BUSY_RE = re.compile(r"server_is_overloaded|server_error|at capacity|before any output"
+                              r"|overload", re.I)
+BUSY_BACKOFF_BASE_S = 120
+BUSY_BACKOFF_MAX_S = 3600
+
+
+class UpstreamBusy(ModelError):
+    """The model's backend refused transiently (see above). Passes through run_llm
+    unreclassified, like RateLimited: no park, no fallback tier, no attempt consumed."""
+
+
+def upstream_busy(code, message, status=None):
+    """Whether a router refusal (HTTP `status`) or stream error is the backend's transient
+    refusal: an overload marker in the message AND one of the router's upstream codes or a
+    502/503."""
+    if not UPSTREAM_BUSY_RE.search(str(message or "")):
+        return False
+    return str(code or "") in UPSTREAM_BUSY_CODES or status in (502, 503)
+
+
+def busy_backoff_s(busy_attempts):
+    """Seconds to wait after the N-th busy retry: 2, 4, 8, 16, 32, then 60 minutes."""
+    return min(BUSY_BACKOFF_MAX_S, BUSY_BACKOFF_BASE_S * 2 ** max(0, int(busy_attempts) - 1))
+
+
+def next_busy_state(e, busy_attempts):
+    """Retry-or-quarantine after an UpstreamBusy: (state, busy_attempts, wait_s, note). Pure,
+    like next_failure_state; the ordinary attempt counters are the caller's and stay untouched.
+    The note never starts with `ambiguous POST` (three queries match that prefix)."""
+    busy_attempts += 1
+    if busy_attempts > CFG.get("max_busy_retries", 10):
+        return ("quarantined", busy_attempts, 0.0,
+                f"upstream busy for {busy_attempts} retries: {str(e)[:150]}")
+    wait = busy_backoff_s(busy_attempts)
+    return ("retry", busy_attempts, wait,
+            f"upstream busy, retrying in {wait // 60:.0f} min (no attempt consumed): {str(e)[:150]}")
 
 
 # A model name the CLI cannot serve at all - a floating alias that stopped resolving, or a
@@ -1998,6 +2058,11 @@ def run_llm(title, desc, diff_text, rubric=""):
                     f"seat '{nxt[0]}' model '{nxt[1] or '(account default)'}' with {left:.0f}s "
                     f"of the shared budget left")
                 continue
+            except UpstreamBusy:
+                # The backend, not this seat or tier: no park, no descent, and the worker charges
+                # no attempt (next_busy_state). Rotating to another Codex seat would meet the
+                # same backend; descending a tier would spend the budget on a second refusal.
+                raise
             except ModelError as e:
                 # Not evidence about the account: nothing parks. Today's fallback, generalised
                 # down the ladder on the SAME seat - a transient 5xx on the top tier costs one
@@ -2028,7 +2093,7 @@ def run_llm(title, desc, diff_text, rubric=""):
     # job is billed to the DEADLINE cap - quarantine after 2, against a wall it will keep
     # hitting. The window can close mid-stream (codex streams for minutes before it is cut
     # off), so a refusal past a third of the budget is a normal event, not a corner.
-    except (subprocess.TimeoutExpired, ExpensiveFailure, RateLimited):
+    except (subprocess.TimeoutExpired, ExpensiveFailure, RateLimited, UpstreamBusy):
         raise
     except Exception as e:
         spent = time.monotonic() - started
@@ -2155,6 +2220,8 @@ def _router_refusal(status, raw, headers, route, tier):
         ra = _retry_after(headers)
         busy = err.get("reason") == "busy"
         return RateLimited(detail, (now + ra) if ra else None, scope="account", model=tier), busy
+    if upstream_busy(code, err.get("message"), status):
+        return UpstreamBusy(detail), False
     return ModelError(detail), False
 
 
@@ -2257,8 +2324,9 @@ def _run_router(seat, tier, prompt, remaining):
             if isinstance(obj.get("error"), dict):
                 # A stream that already started ends with an error chunk (skill.md § Errors).
                 er = obj["error"]
-                raise ModelError(f"router stream error {er.get('code') or er.get('type') or '-'}: "
-                                 f"{str(er.get('message') or '')[:300]} [route {route}]")
+                kind = UpstreamBusy if upstream_busy(er.get("code"), er.get("message")) else ModelError
+                raise kind(f"router stream error {er.get('code') or er.get('type') or '-'}: "
+                           f"{str(er.get('message') or '')[:300]} [route {route}]")
             for ch in obj.get("choices") or []:
                 if not isinstance(ch, dict):
                     continue
@@ -3165,7 +3233,7 @@ def write_metrics():
                 "'merge_blocked_seconds','merge_blocked_dependency_seconds',"
                 "'llm_primary_failed_total','llm_fallback_used_total',"
                 "'llm_seat_switches_total','llm_credscan_skipped_total',"
-                "'llm_model_switches_total')")}
+                "'llm_model_switches_total','llm_upstream_busy_total')")}
             # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
             # metric added only to the (key, metric) render list below would export 0 forever.
             # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
@@ -3306,6 +3374,8 @@ def write_metrics():
                             ("findings_dropped_total", "reviewbot_findings_dropped_total"),
                             ("llm_timeouts_total", "reviewbot_llm_timeouts_total"),
                             ("llm_failures_total", "reviewbot_llm_failures_total"),
+                            # Backend refusals (UpstreamBusy): waited out, never an attempt.
+                            ("llm_upstream_busy_total", "reviewbot_llm_upstream_busy_total"),
                             ("llm_seconds", "reviewbot_llm_seconds_last"),
                             ("llm_seconds_max", "reviewbot_llm_seconds_max"),
                             ("llm_output_tokens", "reviewbot_llm_output_tokens_last"),
@@ -3473,8 +3543,8 @@ def worker_once():
         return None
     with db_lock:
         c = db()
-        row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts,created "
-                        "FROM jobs WHERE state IN ('queued','retry') AND next_at<=? "
+        row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts,created,"
+                        "busy_attempts FROM jobs WHERE state IN ('queued','retry') AND next_at<=? "
                         "ORDER BY created LIMIT 1", (time.time(),)).fetchone()
         if row:
             c.execute("UPDATE jobs SET state='running', updated=? WHERE id=?",
@@ -3483,9 +3553,11 @@ def worker_once():
         c.close()
     if not row:
         return None
-    jid, repo, pr, head_sha, attempts, timeouts, created = row
+    jid, repo, pr, head_sha, attempts, timeouts, created, busy = row
     timeouts = timeouts or 0
+    busy = busy or 0
     limited_until = 0.0
+    busy_wait = 0.0
     try:
         state, rid, note = review_job(jid, repo, pr, head_sha)
     except RateLimited as e:
@@ -3503,6 +3575,13 @@ def worker_once():
         state, attempts, timeouts, note = next_failure_state(e, attempts, timeouts)
         rid = None
         log(f"job {jid} {repo}#{pr} deferred: {fail_note(e)}")
+    except UpstreamBusy as e:
+        # The backend refused (overload): no attempt consumed, a growing wait instead. Counted
+        # apart from llm_failures_total, which by design means "this PR's attempt failed".
+        bump_meta("llm_upstream_busy_total")
+        state, busy, busy_wait, note = next_busy_state(e, busy)
+        rid = None
+        log(f"job {jid} {repo}#{pr} upstream busy ({busy}): {fail_note(e)}")
     except Exception as e:
         bump_meta("llm_timeouts_total" if is_budget_failure(e) else "llm_failures_total")
         state, attempts, timeouts, note = next_failure_state(e, attempts, timeouts)
@@ -3533,11 +3612,15 @@ def worker_once():
             next_at = time.time() + 60
         elif limited_until and usage_poller_enabled():
             next_at = min(limited_until, time.time() + DEFAULT_PARK_S)
+        elif busy_wait:
+            # A backend refusal waits its own, growing interval (next_busy_state), not the
+            # attempt backoff: `attempts` did not move.
+            next_at = time.time() + busy_wait
         else:
             next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
-        c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, next_at=?, "
-                  "updated=?, review_id=?, note=? WHERE id=?",
-                  (persisted_state, attempts, timeouts, next_at, time.time(), rid, note, jid))
+        c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, busy_attempts=?, "
+                  "next_at=?, updated=?, review_id=?, note=? WHERE id=?",
+                  (persisted_state, attempts, timeouts, busy, next_at, time.time(), rid, note, jid))
         if persisted_state == "done":
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
                       (str(time.time()),))
@@ -3783,7 +3866,7 @@ def requeue(repo, pr, force=False):
             return 2
         ids = [r[0] for r in rows]
         n = c.execute(
-            "UPDATE jobs SET state='queued', attempts=0, timeout_attempts=0, next_at=0, "
+            "UPDATE jobs SET state='queued', attempts=0, timeout_attempts=0, busy_attempts=0, next_at=0, "
             "updated=? WHERE state='quarantined' AND id IN (%s)" % ",".join("?" * len(ids)),
             [time.time()] + ids).rowcount
         c.commit()
