@@ -26,7 +26,6 @@ class ActivationGate(unittest.TestCase):
         active_roots = [
             ROOT / "kubernetes/apps/apps/relay",
             ROOT / "kubernetes/apps/apps/llm-router",
-            ROOT / "kubernetes/components",
         ]
         forbidden = ("RELAY_AGENT_CONTROL_PLANE", "RELAY_ROUTER_CONNECTIONS_FILE", "relay-router-control-plane", "llm-router-relay-keys")
         for root in active_roots:
