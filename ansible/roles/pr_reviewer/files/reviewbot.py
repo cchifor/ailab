@@ -1002,12 +1002,16 @@ class ModelError(RuntimeError):
 # "Degraded performance in Codex" refused 20-30 % of requests for over three hours; every job
 # walked its 5 ordinary attempts about 2, 4, 8 and 16 minutes apart and quarantined within half an
 # hour - sticky, each needing --requeue by hand - against a condition that outlasted the budget by
-# hours and that no retry could influence. The marker in the MESSAGE is required (upstream_busy):
-# a bare 502 for a malformed stream or a rejected request is a real failure and keeps burning
-# attempts.
+# hours and that no retry could influence. The BACKEND'S code decides (upstream_busy): either as
+# the error's own code, or named in the message under one of the router's upstream codes (the
+# chat protocol wraps it: `upstream: ... (server_is_overloaded)`). A bare 502 for a malformed
+# stream or a rejected request is a real failure and keeps burning attempts; so is a backend code
+# that names the request (`context_length_exceeded`). "In a row" is literal: any other outcome
+# (a success, an ordinary failure, a park) resets the counter.
+BACKEND_BUSY_CODES = frozenset({"server_is_overloaded", "server_error"})
 UPSTREAM_BUSY_CODES = frozenset({"unavailable", "upstream", "UPSTREAM_FAILURE"})
-UPSTREAM_BUSY_RE = re.compile(r"server_is_overloaded|server_error|at capacity|before any output"
-                              r"|overload", re.I)
+UPSTREAM_BUSY_RE = re.compile(r"server_is_overloaded|server_error|at capacity"
+                              r"|closed the stream before any output", re.I)
 BUSY_BACKOFF_BASE_S = 120
 BUSY_BACKOFF_MAX_S = 3600
 
@@ -1019,11 +1023,14 @@ class UpstreamBusy(ModelError):
 
 def upstream_busy(code, message, status=None):
     """Whether a router refusal (HTTP `status`) or stream error is the backend's transient
-    refusal: an overload marker in the message AND one of the router's upstream codes or a
-    502/503."""
+    refusal: the backend's own busy code, or its marker in the message under one of the
+    router's upstream codes (or a 502/503)."""
+    code = str(code or "")
+    if code in BACKEND_BUSY_CODES:
+        return True
     if not UPSTREAM_BUSY_RE.search(str(message or "")):
         return False
-    return str(code or "") in UPSTREAM_BUSY_CODES or status in (502, 503)
+    return code in UPSTREAM_BUSY_CODES or status in (502, 503)
 
 
 def busy_backoff_s(busy_attempts):
@@ -2062,6 +2069,9 @@ def run_llm(title, desc, diff_text, rubric=""):
                 # The backend, not this seat or tier: no park, no descent, and the worker charges
                 # no attempt (next_busy_state). Rotating to another Codex seat would meet the
                 # same backend; descending a tier would spend the budget on a second refusal.
+                # ASSUMES every tier of a seat shares that backend, which is what the ladders
+                # are (Claude tiers on a Claude seat; one Codex tier): a mixed-provider ladder
+                # would need a descent here when the next tier's provider differs.
                 raise
             except ModelError as e:
                 # Not evidence about the account: nothing parks. Today's fallback, generalised
@@ -3557,7 +3567,9 @@ def worker_once():
     timeouts = timeouts or 0
     busy = busy or 0
     limited_until = 0.0
-    busy_wait = 0.0
+    # Busy refusals count IN A ROW: the counter persists only through the UpstreamBusy branch
+    # below; every other outcome (success, ordinary failure, park) writes 0 back.
+    busy_next, busy_wait = 0, 0.0
     try:
         state, rid, note = review_job(jid, repo, pr, head_sha)
     except RateLimited as e:
@@ -3579,9 +3591,9 @@ def worker_once():
         # The backend refused (overload): no attempt consumed, a growing wait instead. Counted
         # apart from llm_failures_total, which by design means "this PR's attempt failed".
         bump_meta("llm_upstream_busy_total")
-        state, busy, busy_wait, note = next_busy_state(e, busy)
+        state, busy_next, busy_wait, note = next_busy_state(e, busy)
         rid = None
-        log(f"job {jid} {repo}#{pr} upstream busy ({busy}): {fail_note(e)}")
+        log(f"job {jid} {repo}#{pr} upstream busy ({busy_next}): {fail_note(e)}")
     except Exception as e:
         bump_meta("llm_timeouts_total" if is_budget_failure(e) else "llm_failures_total")
         state, attempts, timeouts, note = next_failure_state(e, attempts, timeouts)
@@ -3620,7 +3632,8 @@ def worker_once():
             next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
         c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, busy_attempts=?, "
                   "next_at=?, updated=?, review_id=?, note=? WHERE id=?",
-                  (persisted_state, attempts, timeouts, busy, next_at, time.time(), rid, note, jid))
+                  (persisted_state, attempts, timeouts, busy_next, next_at, time.time(), rid, note,
+                   jid))
         if persisted_state == "done":
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
                       (str(time.time()),))

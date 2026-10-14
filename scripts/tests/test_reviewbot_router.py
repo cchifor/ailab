@@ -264,8 +264,16 @@ class RouterSeatTest(unittest.TestCase):
                            "message": "codex: upstream reported server_is_overloaded before any output"}}
         late = lambda code: {"error": {"code": "upstream", "message":
                                        f"codex: upstream reported a failed response ({code})"}}
+        # The backend's code as the error's own code (the native protocol's shape), with the
+        # CLI-facing message, and the stream the backend closed before any output, count too.
+        own = {"error": {"code": "server_is_overloaded",
+                         "message": "Selected model is at capacity. Please try a different model."}}
+        cut = {"error": {"code": "unavailable",
+                         "message": "codex: upstream closed the stream before any output"}}
         for reply in ((503, {"x-request-id": "req-1"}, early),
                       (200, {}, sse_answer("")[:1] + [early]),
+                      (200, {}, sse_answer("")[:1] + [own]),
+                      (200, {}, sse_answer("")[:1] + [cut]),
                       (200, {}, sse_answer('{"summary": "par')[:-1] + [late("server_is_overloaded")]),
                       (200, {}, sse_answer('{"summary": "par')[:-1] + [late("server_error")])):
             Router.script = [reply]
@@ -278,7 +286,9 @@ class RouterSeatTest(unittest.TestCase):
         # The marker is required: a bare 502, a refusal without it, or an upstream code that
         # names a real problem with the request stays an ordinary failure that burns attempts.
         for reply in (refusal(502, "UPSTREAM_FAILED"), refusal(503, "unavailable"),
-                      (200, {}, sse_answer('{"summary": "par')[:-1] + [late("context_length_exceeded")])):
+                      (200, {}, sse_answer('{"summary": "par')[:-1] + [late("context_length_exceeded")]),
+                      (200, {}, sse_answer("")[:1] + [{"error": {"code": "upstream", "message":
+                                                       "stream closed before any output: malformed"}}])):
             Router.script = [reply]
             with self.assertRaises(RuntimeError) as cm:
                 m.run_llm("t", "d", "diff")

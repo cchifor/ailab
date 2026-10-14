@@ -560,6 +560,18 @@ class WorkerIterationTest(unittest.TestCase):
         self.assertGreaterEqual(next_at, before + 239, "and waited twice as long")
         state, attempts, timeouts, _ = self._job()
         self.assertEqual(("retry", 0, 0), (state, attempts, timeouts))
+        # "In a row" is literal: an ordinary failure resets the busy counter (and bills itself).
+        c = self.m.db()
+        c.execute("UPDATE jobs SET next_at=0")
+        c.commit()
+        c.close()
+        self.m.review_job = lambda *a: (_ for _ in ()).throw(RuntimeError("llm exit 1: transient"))
+        self.m.worker_once()
+        c = self.m.db()
+        busy = c.execute("SELECT busy_attempts FROM jobs").fetchone()[0]
+        c.close()
+        state, attempts, timeouts, _ = self._job()
+        self.assertEqual((0, "retry", 1, 0), (busy, state, attempts, timeouts))
 
     def test_a_completed_head_retires_a_quarantine_left_on_an_older_head(self):
         """The enqueue race: head B is queued while head A is still RUNNING, so A is not
