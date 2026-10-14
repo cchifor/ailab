@@ -1808,6 +1808,44 @@ Nothing else is needed: there is no schema change and no new setting. The old im
 removed network servers come back at the next scan. The old page shows the old Time and Latency columns again, with the
 same stored sort.
 
+**Rolling forward again after a rollback** hides the servers removed before the rollback once more: the old image
+leaves the `discovery-network/ignored` KV key in place. To bring them back, Restore each one after rolling forward, on
+the new image (the old one has no Restore control): Status > Network servers > Removed from scans, or
+`POST /admin/v1/discover/network/ignored {"server": ..., "restore": true}`.
+
+**Rolled out 2026-10-14.** ailab [#1320](https://git.chifor.me/cchifor/ailab/pulls/1320) merged as `73ca3262` at
+08:44 UTC.
+- **Flux:** the GitHub mirror had the commit at 08:44:20. As in every router release, a manual `requestedAt` nudge on
+  `gitrepository/flux-system`, then on `kustomization/apps` once `infrastructure` had applied (08:44:30), rolled it out
+  at once. Without the nudges, `apps` waits for its next interval.
+- **Drain:** the old pod used its whole drain budget (`drained in 20169 ms`, `runtime closed in 120 ms`).
+  - **Six requests were cut** (`cancelled`, cause `shutdown`): five Codex streams from dev-worker-1 (2), dev-worker-3 (2)
+    and dev-worker-4 (1), and one `gpt-6-luna` chat request from the `covenant-demo-luna` key. Every one of those keys
+    sent more requests afterwards, and each dev-worker conversation went on with later turns.
+  - In the journal: none of the newest 500 requests is `abandoned` (`GET /admin/v1/trajectories?limit=500`, counting
+    `status: abandoned`, at 08:49 UTC).
+  - The edge held the gap: a `/health` call through router.chifor.me during the restart answered 200 after 40 s.
+- **New pod:** `llm-router-67f76d8bd7-qz49c`, running the new digest with resources unchanged. It started at 08:44:53
+  and was ready by 08:45:16.
+- **Acceptance:** router rollout acceptance passed, [run 85909](https://git.chifor.me/cchifor/ailab/actions/runs/85909)
+  (finished 08:45:28, after the new pod was ready).
+- **Verified on the live router** (admin API through a port-forward):
+  - router.chifor.me serves the new bundle (`index-ryUUYTDx.js`, which carries "Date / time", "Removed from scans" and
+    "first token after").
+  - `GET /admin/v1/discover/network` returns `ignored: []`, with the two Restricted servers (192.168.0.88:8080,
+    192.168.0.189:8080) still listed, ready to be removed.
+  - A request's detail carries `stream.first_content` (e.g. took 17.7 s, first content after 16.5 s).
+- **Not this release:** Codex was at capacity all morning.
+  - In the 37 minutes before the restart, 127 of 478 requests through the router failed upstream (27 %:
+    `server_is_overloaded` 115, `server_error` 11, other 1). reviewer-codex's review of llm-router #106 was quarantined
+    after 5 such failures and had to be requeued.
+  - In equal 4.7-minute windows around the restart (journal pages from
+    `GET /admin/v1/trajectories?limit=500&before=...`): before, 63 requests, 10 failed (16 % of those finished); after,
+    76 requests, 10 failed (15 % of the 67 finished), all upstream overloads but one.
+  - The 6 `deferred` requests at 08:48 (`CAPACITY_UNAVAILABLE`) were the whole Codex pool busy: `codex` and `codex-2`
+    at their concurrency, `codex-3` and `codex-4` out of primary-window quota, `codex-5` cooling down after an overload.
+    The same happened at 06:12 and 06:52, before the release.
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
