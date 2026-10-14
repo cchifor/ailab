@@ -1746,6 +1746,68 @@ query as nothing (it never read `router.activity.query`), and a repeated filter 
   - **The page:** router.chifor.me serves the new bundle (`index-Dh9PoQfc.js`, which carries the checklist and stored-query
     code).
 
+## Activity date/time and duration, usage cards, removable network servers release (2026-10-14)
+
+`router-0.1.0-20261014-activity-datetime` deploys merged llm-router main `599ad79698420551747f78eb046b401190acf9ca`
+([#106](https://git.chifor.me/cchifor/llm-router/pulls/106)), on the owner's request. Four UI fixes:
+
+**What changes.**
+- **Activity: Date / time** replaces **Time**.
+  - The time is on top and the day under it: Today, Yesterday, or "Sun, Oct 11", with the year when it is not this
+    year's. The full timestamp shows on hover.
+  - With the time alone, rows of different days looked out of order once sorted. Sorting still orders the loaded rows
+    by the full timestamp.
+- **Activity: Duration** replaces **Latency**.
+  - It always was `endedAt - startedAt`: the whole request, queueing, retries and the full stream included. Only the
+    name changes.
+  - A running request shows its time so far (`42s…`), ticking every second, and sorts by it.
+  - The detail pane reads `took 18.4s · first token after 2.3s`, and its timeline has a "First token after …" line,
+    from the journal's `stream.first_content` event. The list endpoint strips events, so the table does not show it.
+  - Both columns keep their ids (`latency`, `time`), so a sort or hidden column a browser saved still applies.
+- **Status: usage cards** lay out like provider cards.
+  - The name has its own full-width line, the account line sits under it, and the running pill is on the right.
+  - The 7-day footer is one figure per row: Requests, Tokens in, Tokens out, Errors.
+- **Status: network servers can be removed.**
+  - Found and Restricted rows are scan records, not configuration or accounts, so Settings > Servers never listed them
+    and every scan added them back.
+  - Each row that is not declared has a Remove button with an inline confirmation. "Removed from scans (N)" lists the
+    removed addresses, each with Restore.
+  - A removed address loses its record at once, and sweeps no longer connect to it, until it is restored.
+  - A declared server (the `discovery-network` plugin's `servers` setting) is removed in the settings instead; its row
+    links there. Declaring a removed address takes it off the list at the next start.
+- **API (additive).** `POST /admin/v1/discover/network/ignored {server, restore?}`, administrators only, audited as
+  `discovery.server_ignored` / `discovery.server_restored`. `GET /admin/v1/discover/network` gains `ignored`.
+  - The list lives in the plugin's KV store (`discovery-network/ignored`), at most 256 addresses.
+
+**Image.**
+- Archive `router-0.1.0-20261014-activity-datetime.tar.gz`, SHA-256
+  `d63299c8c9cf43175c829ca8c2f931cda07d89f6529b8ac339e966026c4ea069`.
+  - Built in the pinned Node 26.10.0 image on dev-worker-1, and the production smoke passed.
+  - Relay v0.2.0 asset 235.
+- Relay branch `release/router-activity-datetime-image` (`a1a73e1c`),
+  [run 85871](https://git.chifor.me/cchifor/relay/actions/runs/85871); receipt `deployment-images-85871.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:e86536b0436414bbe8f8c4c4e2ec4fce70569cb519247ee3a0203a28f8e39750`
+  (tag `parity-a1a73e1c5862-85871`; the digest was checked in the registry).
+- **Before merge:**
+  - CI on Linux passed, browser suite included.
+  - Both reviewer bots approved #106 after three rounds.
+    - reviewer-claude: a removed-then-declared address could not be restored (409), and a scan could start before the
+      saved list loaded. Both were fixed (`673f229`).
+    - reviewer-codex: a running row's duration only moved when something else re-rendered the page. It now ticks on a
+      shared 1 s clock (`e06d5cd`).
+  - reviewer-codex's review of the last head was quarantined after 5 `server_is_overloaded` failures (Codex
+    `gpt-6-astra` at capacity, about 20 % of Codex requests at the time). It was requeued on reviewer-2 with
+    `reviewbot.py /etc/reviewbot/config.json --requeue cchifor/llm-router 106`, and then approved.
+
+**Rollback.** Revert the image digest and both pod-template annotations together, and keep the resources:
+- `image: registry.chifor.me/llm-router/router@sha256:c3460ff20f0cedafe802438dd5ef1542e7faad839aafcc9fa1834a27da106b4e`
+- `chifor.me/source-commit: 684ccfe27fbb3aded796066136a564050a98d5b1`
+- `chifor.me/release: router-0.1.0-20261013-activity-multi-filters-r2`
+
+Nothing else is needed: there is no schema change and no new setting. The old image ignores the `ignored` KV key, so
+removed network servers come back at the next scan. The old page shows the old Time and Latency columns again, with the
+same stored sort.
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
