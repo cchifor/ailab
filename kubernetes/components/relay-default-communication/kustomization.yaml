@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Enables Relay's authenticated session and agent-messaging transport without
+# enabling managed router/OpenBao activation or the broader control-plane
+# administration surface.
+patches:
+- path: deployment.yaml

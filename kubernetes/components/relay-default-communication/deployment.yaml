@@ -1,0 +1,13 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      containers:
+      - name: relay
+        env:
+        - name: RELAY_AGENT_COMMUNICATION
+          value: '1'
