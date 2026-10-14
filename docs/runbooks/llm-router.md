@@ -1846,6 +1846,98 @@ the new image (the old one has no Restore control): Status > Network servers > R
     at their concurrency, `codex-3` and `codex-4` out of primary-window quota, `codex-5` cooling down after an overload.
     The same happened at 06:12 and 06:52, before the release.
 
+## Overload handling, metrics and alerts (2026-10-14)
+
+**The incident.** From 06:00 UTC OpenAI's "Degraded performance in Codex and ChatGPT Work" refused
+20-30 % of the router's Codex requests for over three hours (journal 05:58-08:46: 487 of 2,277
+requests failed, 419 of them `server_is_overloaded`, 51 `server_error`; the 24 h baseline was 0-3 %
+per hour, even at 2,575 requests/hour). The edge and the router added no errors of their own.
+Turn-level impact was small (278 failure chains, 270 recovered on the Codex CLI's retries, 8 turns
+lost), the cost was latency and quota. The analysis also found four router-side gaps, each closed
+below. The owner's instruction was to leave the weekly-cap question (codex-3/codex-4 at 100 %, the
+Pro accounts burning toward it) alone.
+
+**Live configuration (admin API, `PUT /admin/v1/config` with `If-Match`):**
+- **Revision 1541** (09:51 UTC) is the intended state:
+  - `gpt-6-luna` gained `codex-5` as a fifth deployment (`codex-5-gpt-6-luna`, round-robin,
+    `maxAttempts 2` unchanged). With codex-3 and codex-4 capped and `codex` often at its concurrency
+    limit, the route had been one account for the covenant demo and `strive-platform-production`.
+    `codex-5` got `visionModels: [gpt-6-luna]` like the other Codex accounts (image input is
+    refused on an account whose `visionModels` lacks the model).
+  - New route **`qwen3.8-27b`**: one deployment on `lan-192.168.0.28-18020` (cloud2 vLLM, which
+    serves exactly that model name), `access: [local]`, `priority`, `maxAttempts 1`, `compat lenient`.
+    Until then nobody could reach the model through the router: the platform's catalog routes its
+    `local` group (including `openai:qwen3.8-27b`) here, and the covenant demo key sent it 11 times
+    in the window for `ROUTE_NOT_ALLOWED`. Smoke: `POST /v1/chat/completions` 200 on both routes.
+  - **Still open:** the covenant demo key `key_3f7b1a2160da` allows `[gpt-6-luna]` only, and a key's
+    routes cannot be changed after creation (no update endpoint). Its qwen requests keep failing
+    until it is re-issued with `[gpt-6-luna, qwen3.8-27b]` and handed to whoever runs the demo (the
+    key is in no cluster Secret; `strive-platform-production`, routes `all`, is the one in
+    `strive-ailab/llm-router`).
+- **Revision 1540 was a mistake, live for two minutes** (09:49-09:51): `gpt-6-luna` as a *pointer*
+  to `pool-codex` (and `default` repointed to the pool, which the config store requires). A pointer
+  serves route mode only: a chat client that sends the alias as `model` gets 400 `MODEL_REQUIRED`.
+  Only the administrator's own smoke request hit it (journal checked). Do not repeat it for a
+  model-mode route; the pointer form is for the Codex CLI's native routes (`dw-N`).
+- Rollback to the previous luna route: `GET /admin/v1/config/revisions/1539`, then
+  `POST /admin/v1/config/revert` (or the Assistant's `revert_config`).
+
+**llm-router #107** (merged main `ae0f061623720ac164a45ea6631da2ee3b1b46c1`, release `router-0.1.0-20261014-overload-metrics`, archive sha256
+`cd7584a111e3d4ece345f1765c48ca6c32a8d792f1b64292b2bdfa3760d941d2`, relay asset 237 on v0.2.0, relay run 86088, image
+`sha256:43a6fc179dbfda924be213794755f2e1a46de7ad83f63bacbe589f8f41c243df`, rolled out by the ailab PR `feat/llm-router-metrics-alerts` of 2026-10-14):
+1. **The translated path fails over on an early overload.** `runSse` (chat completions and
+   Responses translated to the subscription API) had classified every `response.failed`/`error`
+   as `upstream`, 502, not retryable, so model-mode routes (`gpt-6-luna`, `codex-reviewer`) never
+   failed over while the native path (#98) did: 48 of the 487 failures, 11 of the 15 reviewer
+   overloads and all 32 luna overloads. Now an overload (`server_is_overloaded`, `server_error`)
+   before anything was yielded is `unavailable`, 503, retryable, with the upstream code, and so is
+   a stream that ends before any output without a terminal event. In the journal: a model-mode
+   request now shows `attempt.failed {code: unavailable, retryable: true}` then `retry.scheduled`.
+2. **The re-key stays off while the provider is overloaded for everyone.** 53 conversations were
+   re-keyed in the window and 52 of those attempts failed too; a new key costs the prompt cache
+   (98 % cached on the same key, about 50 % after a new placement). The engine keeps the last
+   5 minutes of attempt outcomes per provider and, at the decision, re-keys only when other
+   requests' overload share is under 0.2 (or under 10 samples); otherwise the count resets and the
+   journal says `conversation.rekey_skipped {afterOverloads, overloadShare, samples}`.
+3. **A `metrics` plugin.** `GET /admin/v1/metrics` (administrator token) and, with
+   `ROUTER_METRICS_PORT=9464` (router.yaml), unauthenticated `GET /metrics` on 9464. Counters from
+   the journal (`llm_router_requests_total`, `llm_router_attempts_total`, `llm_router_tokens_total`),
+   gauges from the usage plugin's readings (`llm_router_account_limit_used_percent`,
+   `..._resets_at_seconds`, `..._status`, `llm_router_account_credits_balance`) and
+   `llm_router_inflight_requests`. Scraped by `apps/llm-router/podmonitor.yaml` (job `llm-router`,
+   30 s); the NetworkPolicy admits the kube-prometheus-stack Prometheus pods on 9464 and the Service
+   deliberately does not carry the port.
+
+**Alerts** (`infrastructure/monitoring/llm-router-rules.yaml`, unit tests beside it): `LlmRouterMetricsAbsent`
+(no target 15 m), `LlmRouterScrapeDown` (10 m), `LlmRouterFailureRatioHigh` (a route over 10 % failed for
+15 m with at least 10 requests per 15 m), `LlmRouterAccountNearLimit` (weekly/primary window at 90 % for
+30 m), `LlmRouterAccountLimited` (10 m), `LlmRouterProviderExhausted` (every account of a provider
+limited, critical). Thresholds come from the incident's and the healthy day's numbers (file header).
+
+**Reviewer bot (ailab #1322).** A backend overload the router reports is `UpstreamBusy` on
+reviewer-1/2: no park, no tier descent, no ordinary or deadline attempt; its own counter
+(`jobs.busy_attempts`, 2/4/8/16/32/60-minute waits, `pr_reviewer_max_busy_retries` 10). See
+dev-workers.md § reviewers. Before this, reviewer-2 walked `platform#2275` to attempt 4 of 5 in half
+an hour of the incident.
+
+**Deliberately not done:** `pool-codex` `maxAttempts` stays at 2. 146 of the window's 168 two-attempt
+failures had an untried eligible account, but second attempts failed 62 % of the time during the
+incident, so a third attempt mostly adds load and quota burn. Revisit once the failover rescue rate
+(journal: `retry.scheduled` followed by `request.complete`) is back near 75 %.
+
+**How to check after the rollout.**
+- `GET /admin/v1/metrics` answers text with `llm_router_requests_total`; after a minute Prometheus has
+  `up{job="llm-router"} == 1` (port-forward `svc/kube-prometheus-stack-prometheus 9090` and query).
+- A model-mode overload before output now journals `retry.scheduled` (filter Activity by
+  `codex-reviewer` and look at a failed row's events).
+- `conversation.rekey_skipped` appears only while the provider-wide share is high.
+- Rollback: the previous digest and annotations (`e86536b0…` / `599ad796…` /
+  `router-0.1.0-20261014-activity-datetime`) AND drop `ROUTER_METRICS_PORT` with the `metrics`
+  containerPort in the same revert: the old image opens no listener there, and a pod that still declares
+  the port keeps a PodMonitor target that refuses connections, so `LlmRouterScrapeDown` fires (warning)
+  for as long as the old image runs. If the port must stay for some reason, silence that alert for the
+  duration instead. The PodMonitor and the rules can stay either way.
+
 ## Relay managed-key bridge (v0.6.0)
 
 The `kubernetes/components/llm-router-relay-keys` component remains opt-in and

@@ -1,0 +1,133 @@
+# Alerts for the LLM router (namespace llm-router; metrics via apps/llm-router/podmonitor.yaml,
+# job=llm-router; series from the router's `metrics` plugin, llm-router README § Metrics).
+#
+# WHY THIS EXISTS: on 2026-10-14 OpenAI's "Degraded performance in Codex" refused 20-30 % of the
+# router's requests from 06:00 to past 09:00 UTC (487 of 2,277 requests failed in three hours, 419
+# of them `server_is_overloaded`; 18-30 % per hour against a 24 h baseline of 0-3 %), two of the
+# five Codex accounts had been at 100 % of their weekly
+# window since the previous evening, and the other three were burning toward it at about 1 % every
+# 9 minutes - and nothing fired, because the router exported nothing. The dev workers, the reviewer
+# bots and the platform's production key all route through it.
+#
+# THRESHOLDS: the failure ratio is per ROUTE, because the routes differ by an order of magnitude in
+# traffic (dw-1 at ~450/h, codex-reviewer at ~9/h), and it is gated on at least 10 requests per 15
+# minutes (the ratio over three requests is noise). 10 % for 15 minutes: the incident ran at 18-30 %
+# per hour for three hours, while the healthy day never passed 3 % in any hour (3 h journal export
+# 2026-10-14 05:58-08:46 UTC, and the 24 h export before it). The limit rules read the gauges the
+# usage plugin keeps from every reply, so they fire on the provider's own numbers.
+#
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+# llm-router-rules.test.yaml pins that every rule fires on the incident's shape and stays silent on
+# the healthy one; scripts/rules-lint.sh runs it on every PR.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: llm-router
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: llm-router
+      rules:
+        # FIRST, because it keeps the rest honest: every rule below reads a series from this one
+        # target, and a rule over an absent series never fires. `absent()` catches the monitor
+        # selecting nothing at all (a label rename, a chart upgrade); `up == 0` a pod that is there
+        # but not answering on 9464.
+        - alert: LlmRouterMetricsAbsent
+          expr: absent(up{job="llm-router"})
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "No llm-router scrape target (PodMonitor selects nothing)"
+            description: >-
+              Prometheus has had no up{job="llm-router"} series for 15m: the PodMonitor
+              apps/llm-router/podmonitor.yaml selects no pod (label change, namespace, or the
+              monitor is gone). Every other LlmRouter* alert is blind while this one is active.
+        - alert: LlmRouterScrapeDown
+          expr: up{job="llm-router"} == 0
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router metrics port not answering ({{ $labels.pod }})"
+            description: >-
+              The router pod {{ $labels.pod }} has not answered on its metrics port (9464) for 10m.
+              A rollout gap is under a minute; this is the port not opened (ROUTER_METRICS_PORT,
+              the metrics plugin disabled) or NetworkPolicy llm-router no longer admitting
+              Prometheus. The LlmRouter* alerts below cannot fire while this one is active.
+        # Failed requests (status="failed": not cancelled, not deferred) as a share of all requests
+        # ended on the route, over 15 minutes, on routes with at least 10 requests in that window.
+        - alert: LlmRouterFailureRatioHigh
+          expr: |
+            (
+              sum by (route) (rate(llm_router_requests_total{job="llm-router",status="failed"}[15m]))
+                /
+              sum by (route) (rate(llm_router_requests_total{job="llm-router"}[15m]))
+            ) > 0.10
+            and
+            sum by (route) (rate(llm_router_requests_total{job="llm-router"}[15m])) > (10 / 900)
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router route {{ $labels.route }}: {{ $value | humanizePercentage }} of requests failing"
+            description: >-
+              Over the last 15 minutes {{ $value | humanizePercentage }} of the requests that entered
+              route {{ $labels.route }} ended failed (at least 10 requests in the window). The
+              healthy baseline is under 3 %. Read the codes on the Activity page or
+              GET /admin/v1/stats?window=1h: upstream_code server_is_overloaded on every account is
+              the provider (check status.openai.com); one account is that account; a 4xx code is
+              the clients. Runbook: docs/runbooks/llm-router.md § Overload handling.
+        # A subscription near the end of its long window (Codex: primary = weekly; Claude: weekly).
+        # The 5-hour Claude window is left out: it fills and empties several times a day by design.
+        - alert: LlmRouterAccountNearLimit
+          expr: llm_router_account_limit_used_percent{job="llm-router",window=~"primary|weekly"} >= 90
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router account {{ $labels.account }} at {{ $value | printf \"%.0f\" }}% of its {{ $labels.window }} window"
+            description: >-
+              Account {{ $labels.account }} ({{ $labels.provider }}) has used {{ $value | printf "%.0f" }}% of its
+              {{ $labels.window }} limit window for 30m. At 100 % the provider refuses it until the
+              reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+              Decide now whether to throttle its callers, let it run on credits, or add capacity:
+              the pool keeps serving on the other accounts until they reach the same wall.
+        - alert: LlmRouterAccountLimited
+          expr: llm_router_account_limit_status{job="llm-router",status="limited"} == 1
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router account {{ $labels.account }} is limited (refused until its reset)"
+            description: >-
+              The provider reports account {{ $labels.account }} ({{ $labels.provider }}) at 100 % of
+              a limit window: the router skips it (quota_exhausted) until the reset the Status page
+              shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+        # Every account of a provider limited: the pools of that provider serve nothing but credits.
+        # Left: the `status="limited"` series whose VALUE is 1 (the limited accounts). Right: the
+        # `status="limited"` series whatever their value (a label selector matches the series, not
+        # the value) - the exporter writes all three `status` series (0 or 1) for every account
+        # that has a limits READING, so the right-hand side is the accounts with a reading, not the
+        # accounts configured. Two of three limited: 2 == 3 is false, no page (tested). Readings
+        # persist in the router's store and come back after a restart, so a Codex or Claude account
+        # that has ever served has one; an account that never reported (brand new, or a provider
+        # without limit headers) has no series and is invisible here. The `>= 2` floor keeps that
+        # from turning one limited account into a critical page; an always-present per-account
+        # series from the exporter would be the complete fix.
+        - alert: LlmRouterProviderExhausted
+          expr: |
+            (
+              count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"} == 1)
+                ==
+              count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"})
+            )
+            and
+            count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"} == 1) >= 2
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "llm-router: every {{ $labels.provider }} account is limited"
+            description: >-
+              All {{ $value }} {{ $labels.provider }} accounts the router holds are at 100 % of a limit
+              window. Requests on that provider's routes now fail (or run on credits where an
+              account has them) until the earliest reset. The dev workers' Codex CLI cannot fall
+              back to another provider through the router. Runbook: docs/runbooks/llm-router.md
+              § Overload handling.

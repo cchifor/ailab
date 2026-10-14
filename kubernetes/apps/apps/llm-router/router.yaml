@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 599ad79698420551747f78eb046b401190acf9ca
-        chifor.me/release: router-0.1.0-20261014-activity-datetime
+        chifor.me/source-commit: ae0f061623720ac164a45ea6631da2ee3b1b46c1
+        chifor.me/release: router-0.1.0-20261014-overload-metrics
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,9 +121,9 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Bridge source 599ad79698420551747f78eb046b401190acf9ca;
-          # parity-a1a73e1c5862-85871 image, digest verified in the registry.
-          image: registry.chifor.me/llm-router/router@sha256:e86536b0436414bbe8f8c4c4e2ec4fce70569cb519247ee3a0203a28f8e39750
+          # Bridge source ae0f061623720ac164a45ea6631da2ee3b1b46c1;
+          # parity-e0078c860b5e-86088 image, digest verified in the registry.
+          image: registry.chifor.me/llm-router/router@sha256:43a6fc179dbfda924be213794755f2e1a46de7ad83f63bacbe589f8f41c243df
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -131,11 +131,20 @@ spec:
             - name: http
               containerPort: 8787
               protocol: TCP
+            # Prometheus scrape port (the router's `metrics` plugin, GET /metrics only, no
+            # authentication): scraped by podmonitor.yaml, admitted from Prometheus only by the
+            # NetworkPolicy below, and deliberately absent from the Service so it never reaches
+            # the edge or the tunnel.
+            - name: metrics
+              containerPort: 9464
+              protocol: TCP
           env:
             - name: ROUTER_HOST
               value: "0.0.0.0" # default is 127.0.0.1; containers must be reachable
             - name: ROUTER_PORT
               value: "8787"
+            - name: ROUTER_METRICS_PORT
+              value: "9464"
             - name: ROUTER_DATABASE
               value: /data/router.sqlite
             - name: ROUTER_WEB_ROOT
@@ -275,6 +284,20 @@ spec:
       ports:
         - protocol: TCP
           port: 8787
+    # Prometheus, for podmonitor.yaml, on the metrics port only. Both selectors in ONE `from`
+    # item (AND): as two items they would be OR'ed and admit the whole monitoring namespace. The
+    # label pair is the one ci-rerun-watchdog/networkpolicy.yaml and agentforge/networkpolicy.yaml
+    # record from the live cluster; a chart upgrade that changes it makes LlmRouterScrapeDown fire,
+    # which is the intended signal.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/instance: kube-prometheus-stack-prometheus
+      ports:
+        - protocol: TCP
+          port: 9464
   egress:
     # Cluster DNS (kube-dns runs in kube-system).
     - to:

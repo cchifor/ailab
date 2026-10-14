@@ -1,0 +1,32 @@
+# PodMonitor for the router's Prometheus metrics: the llm-router `metrics` plugin serves `GET /metrics`
+# on its own port (ROUTER_METRICS_PORT 9464 in router.yaml, unauthenticated) beside the API port.
+#
+# A PodMonitor, NOT a ServiceMonitor, on purpose: the Service in router.yaml fronts the API port
+# only, so the unauthenticated scrape port never acquires a Service, an edge route or a tunnel
+# hostname. NetworkPolicy llm-router (router.yaml) admits the kube-prometheus-stack Prometheus
+# pods on 9464 and nothing else. Same namespace as the pod; `release: kube-prometheus-stack` is the
+# label the operator selects monitors by (podMonitorNamespaceSelector is {}, so the namespace is
+# free); the NAMED port; job pinned to `llm-router` so infrastructure/monitoring/llm-router-rules.yaml
+# can name it (the default would be `llm-router/llm-router`).
+#
+# WHY: 2026-10-14, three hours at 20-30 % failed requests (an OpenAI incident) and two Codex
+# accounts at 100 % of their weekly window fired nothing - the router had no scrape target and no
+# rule. Its journal held every number; Prometheus held none.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: llm-router
+  namespace: llm-router
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: llm-router
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - targetLabel: job
+          replacement: llm-router
