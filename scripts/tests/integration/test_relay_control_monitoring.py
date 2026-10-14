@@ -239,8 +239,8 @@ class Monitoring(unittest.TestCase):
         env = {e['name']: e.get('value') for e in application['env']}
         self.assertEqual(env['RELAY_CONTROL_METRICS_FILE'], '/run/relay-metrics/private/config.json')
         base_app = next(c for c in base['containers'] if c['name'] == 'relay')
-        # Monitoring preserves the opt-in boundary; the activation overlay is
-        # tested separately once the operator evidence permits it.
+        # Monitoring preserves the opt-in boundary; this rendered overlay must
+        # not carry the managed flag or a router connection Secret.
         self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', {e['name'] for e in base_app['env']})
         self.assertNotIn('RELAY_ROUTER_CONNECTIONS_FILE', {e['name'] for e in base_app['env']})
         self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', env)

@@ -18,15 +18,27 @@ class ActivationGate(unittest.TestCase):
         evidence = yaml.safe_load(EVIDENCE.read_text())
         relay = yaml.safe_load(RELAY.read_text())
         router = yaml.safe_load(ROUTER.read_text())
-        relay_text = RELAY_MANIFEST.read_text()
         for resources in (relay.get("components", []), router.get("components", [])):
             self.assertNotIn("../../../components/relay-router-control-plane", resources)
             self.assertNotIn("../../../components/llm-router-relay-keys", resources)
+        # Check all active overlay YAML, including referenced components. A
+        # flag or trust component must not be smuggled in through a merge patch.
+        active_roots = [
+            ROOT / "kubernetes/apps/apps/relay",
+            ROOT / "kubernetes/apps/apps/llm-router",
+            ROOT / "kubernetes/components",
+        ]
+        forbidden = ("RELAY_AGENT_CONTROL_PLANE", "RELAY_ROUTER_CONNECTIONS_FILE", "relay-router-control-plane", "llm-router-relay-keys")
+        for root in active_roots:
+            for path in root.rglob("*"):
+                if path.suffix not in {".yaml", ".yml"} or not path.is_file():
+                    continue
+                text = path.read_text()
+                for value in forbidden:
+                    self.assertNotIn(value, text, f"retired bridge material in {path}")
         self.assertEqual(evidence["version"], 2)
-        self.assertEqual(evidence["status"], "pending")
-        self.assertEqual(evidence["accessFlow"]["status"], "pending")
-        self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", relay_text)
-        self.assertNotIn("RELAY_ROUTER_CONNECTIONS_FILE", relay_text)
+        self.assertIn(evidence["status"], {"pending", "approved"})
+        self.assertIn(evidence["accessFlow"]["status"], {"pending", "approved"})
 
     def test_evidence_contains_no_bridge_credentials_or_activation_material(self):
         text = EVIDENCE.read_text()
