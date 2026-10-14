@@ -1869,17 +1869,24 @@ Pro accounts burning toward it) alone.
     Until then nobody could reach the model through the router: the platform's catalog routes its
     `local` group (including `openai:qwen3.8-27b`) here, and the covenant demo key sent it 11 times
     in the window for `ROUTE_NOT_ALLOWED`. Smoke: `POST /v1/chat/completions` 200 on both routes.
-  - **The covenant demo key was re-issued** (a key's routes cannot be changed after creation): the old
-    `key_3f7b1a2160da` (`covenant-demo-luna-20260928-1738`, routes `[gpt-6-luna]`) is replaced by
-    `key_0fbd06bbff5c` (`covenant-demo-luna-qwen-20261014-1110`, prefix `lrk_ilQl`, routes
-    `[gpt-6-luna, qwen3.8-27b]`, expires 2027-01-12), created 11:10 UTC with `POST /admin/v1/keys` and
-    revealed once with `POST /admin/v1/keys/reveal/<revealId>` (the reveal expires 10 minutes after
-    creation). `GET /v1/models` with it lists both routes; a qwen request through it answered 200.
-    The token is in the operator checkout's gitignored `kubernetes/infra/_out/` as
-    `llm-router-key-covenant-demo-luna-qwen-20261014-1110.txt`; the demo's deployment is not in this
-    estate (the key is in no cluster Secret; `strive-platform-production`, routes `all`, is the one in
-    `strive-ailab/llm-router`). The old key stays active until the demo uses the new token; then
-    `DELETE /admin/v1/keys/key_3f7b1a2160da`.
+  - **The covenant app's key was re-issued** (a key's routes cannot be changed after creation). The
+    app is a workbricks (platform) app, so the key follows the `workbricks-app-<app>` naming:
+    `key_b62258d8a42c` (`workbricks-app-covenant`, routes `[gpt-6-luna, qwen3.8-27b]`, expires
+    2027-01-12), created 11:58 UTC with `POST /admin/v1/keys` and revealed once with
+    `POST /admin/v1/keys/reveal/<revealId>` (the reveal expires 10 minutes after creation; the token
+    cannot be shown again). `GET /v1/models` with it lists both routes; a qwen request through it
+    answered 200. An interim key created at 11:10 under the wrong name
+    (`covenant-demo-luna-qwen-20261014-1110`, `key_0fbd06bbff5c`) was never handed out and was revoked
+    at 11:58.
+  - **Still open (owner: chifor, target 2026-10-21):** the token is held only in the owner's
+    workstation ops checkout (`work\homeilab`, gitignored `kubernetes/infra/_out/`,
+    `llm-router-key-workbricks-app-covenant.txt`); the app's deployment is not in this estate (the
+    key is in no cluster Secret; `strive-platform-production`, routes `all`, is the one in
+    `strive-ailab/llm-router`). Put the token into the app's configuration, delete the local file,
+    then `DELETE /admin/v1/keys/key_3f7b1a2160da` (the old luna-only key
+    `covenant-demo-luna-20260928-1738`, left active so the app keeps working until then). If the
+    checkout is lost before the handoff, re-issue (one `POST` + one reveal) rather than search for a
+    copy.
 - **Revision 1540 was a mistake, live for two minutes** (09:49-09:51): `gpt-6-luna` as a *pointer*
   to `pool-codex` (and `default` repointed to the pool, which the config store requires). A pointer
   serves route mode only: a chat client that sends the alias as `model` gets 400 `MODEL_REQUIRED`.
