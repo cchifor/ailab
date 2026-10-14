@@ -80,11 +80,21 @@ version is whatever the role last applied (`/opt/relay/connector/applied-<UUID>.
 
 dev-worker-1 and dev-worker-3 kept their original state paths: `service install --state` on the
 existing identity keeps the UUID and credential, and only the scope change needed a fresh approval.
-A migration is finished only when nothing else can start a runner on that state file. Remove the
-legacy autostart: for a unit, delete its file and `daemon-reload` (disabling alone leaves it
-startable). For a detached tmux session that runs the connector (the pre-v0.3.0 workflow), kill the
-session. tmux-continuum restores a leftover session after every reboot as an empty shell, so also
-check that the next resurrect save no longer lists it.
+A migration is finished only when no legacy runner is running and nothing can start one on that
+state file again. For a legacy unit, run these as the execution user, in order:
+
+1. `systemctl --user disable --now <legacy>.service`;
+2. confirm that `systemctl --user is-active <legacy>.service` prints `inactive` and that
+   `pgrep -af relay-connector` lists only the new `serve` process. Deleting or disabling a unit
+   does not stop a runner that is already running;
+3. delete the unit file and run `systemctl --user daemon-reload`. A disabled unit can still be
+   started.
+
+Then restart the new `relay-connector-<UUID>.service`, so it is the one holding the state lock.
+For a detached tmux session that runs the connector (the pre-v0.3.0 workflow), stop the connector
+process inside it, check the pane is an idle shell, and kill the session. tmux-continuum restores
+a leftover session after every reboot as an empty shell, so also check that the next resurrect save
+no longer lists it.
 
 The controller binary lives in the WSL converge clone's sibling directory,
 `~/.ailab-converge/artifacts/relay-connector/v<version>/relay-connector-linux-amd64`, fetched on
