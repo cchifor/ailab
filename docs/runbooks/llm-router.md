@@ -1879,7 +1879,7 @@ Pro accounts burning toward it) alone.
     (`covenant-demo-luna-qwen-20261014-1110`, `key_0fbd06bbff5c`) was never handed out and was revoked
     at 11:58.
   - **Still open (owner: chifor, target 2026-10-21):** the token is held only in the owner's
-    workstation ops checkout (`work\homeilab`, gitignored `kubernetes/infra/_out/`,
+    workstation ops checkout (`work/home/ailab`, gitignored `kubernetes/infra/_out/`,
     `llm-router-key-workbricks-app-covenant.txt`); the app's deployment is not in this estate (the
     key is in no cluster Secret; `strive-platform-production`, routes `all`, is the one in
     `strive-ailab/llm-router`). Put the token into the app's configuration, delete the local file,
