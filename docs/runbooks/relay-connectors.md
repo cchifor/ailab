@@ -65,20 +65,26 @@ into Ansible variables, logs or operator handoff files.
 
 ## Current inventory (2026-10-14)
 
-All four dev-workers run the account-scope service on the default tmux socket, and each
-has its pin in `ansible/host_vars/dev-worker-N.yml`:
+Each dev-worker has its pin in `ansible/host_vars/dev-worker-N.yml`. The pins record each
+identity's `service` block as read back on the host. The owner approved all four account-scope
+identities in Relay on 2026-10-14 at 13:33 UTC, before the pins merged. Each identity's local
+`phase` was `approved` when the pin was written, so the role's phase check passes. The installed
+version is whatever the role last applied (`/opt/relay/connector/applied-<UUID>.json`), not this table.
 
-| Worker | Installation UUID | State file | Origin of the installation |
-|---|---|---|---|
-| dev-worker-1 | `b3b1be1a-…` | `~/.config/relay-connector/connector.json` | migrated from the v0.1.0 pane runner `relay-connector.service` (disabled) |
-| dev-worker-2 | `14123362-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | new 2026-10-14 |
-| dev-worker-3 | `47405392-…` | `~/.local/state/relay/relay.chifor.me/connector.json` | migrated from the v0.2.2 `join` runner in tmux session `relay-chifor` (removed) |
-| dev-worker-4 | `a7366b7a-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | service mode since 2026-10-04 |
+| Worker | Installation UUID | State file | Sockets | Origin of the installation |
+|---|---|---|---|---|
+| dev-worker-1 | `b3b1be1a-…` | `~/.config/relay-connector/connector.json` | `['']` (default) | migrated from the v0.1.0 pane runner `relay-connector.service`; that unit file was removed |
+| dev-worker-2 | `14123362-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | `['']` (default) | new 2026-10-14 |
+| dev-worker-3 | `47405392-…` | `~/.local/state/relay/relay.chifor.me/connector.json` | `['']` (default) | migrated from the v0.2.2 `join` runner in tmux session `relay-chifor` (removed) |
+| dev-worker-4 | `a7366b7a-…` | `~/.local/state/relay/f765a05a957da5b4/connector.json` | `['/tmp/tmux-1000/default']` | service mode since 2026-10-04. Its install recorded the default socket's explicit path |
 
 dev-worker-1 and dev-worker-3 kept their original state paths: `service install --state` on the
 existing identity keeps the UUID and credential, and only the scope change needed a fresh approval.
-A detached tmux session that runs the connector belongs to the pre-v0.3.0 workflow. tmux-continuum
-restores such a session after every reboot as an empty shell, so remove it after a migration.
+A migration is finished only when nothing else can start a runner on that state file. Remove the
+legacy autostart: for a unit, delete its file and `daemon-reload` (disabling alone leaves it
+startable). For a detached tmux session that runs the connector (the pre-v0.3.0 workflow), kill the
+session. tmux-continuum restores a leftover session after every reboot as an empty shell, so also
+check that the next resurrect save no longer lists it.
 
 The controller binary lives in the WSL converge clone's sibling directory,
 `~/.ailab-converge/artifacts/relay-connector/v<version>/relay-connector-linux-amd64`, fetched on

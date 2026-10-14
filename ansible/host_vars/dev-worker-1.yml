@@ -25,7 +25,7 @@ dev_worker_gitea_identity_cutover: true
 # Relay connector (ansible/relay-connectors.yml; docs/runbooks/relay-connectors.md). Adopts this
 # slot's existing approved account-scope identity; never enrolls. The values below are the identity's
 # nonsecret settings and must match it exactly.
-# Migrated 2026-10-14 from the v0.1.0 pane-scoped `relay-connector.service` (now disabled) with
+# Migrated 2026-10-14 from the v0.1.0 pane-scoped `relay-connector.service` (unit file removed) with
 # `service install --state` on its existing identity, so the state keeps its original path.
 relay_connector_enabled: true
 relay_connector_manage_service: true
