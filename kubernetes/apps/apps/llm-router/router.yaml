@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: ae0f061623720ac164a45ea6631da2ee3b1b46c1
-        chifor.me/release: router-0.1.0-20261014-overload-metrics
+        chifor.me/source-commit: ac0d33db47f354dcf374d9d79b92624293872c83
+        chifor.me/release: router-0.1.0-20261014-agent-control
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,9 +121,9 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Bridge source ae0f061623720ac164a45ea6631da2ee3b1b46c1;
-          # parity-e0078c860b5e-86088 image, digest verified in the registry.
-          image: registry.chifor.me/llm-router/router@sha256:43a6fc179dbfda924be213794755f2e1a46de7ad83f63bacbe589f8f41c243df
+          # Bridge source ac0d33db47f354dcf374d9d79b92624293872c83;
+          # parity-92e4222a13fe-87097 image, digest verified in the registry.
+          image: registry.chifor.me/llm-router/router@sha256:3e0f67b5937ace37a8339710d4f6347eefa031214f4b2c096d3bc79380ac2928
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
