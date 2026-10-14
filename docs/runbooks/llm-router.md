@@ -1951,33 +1951,16 @@ incident, so a third attempt mostly adds load and quota burn. Revisit once the f
   for as long as the old image runs. If the port must stay for some reason, silence that alert for the
   duration instead. The PodMonitor and the rules can stay either way.
 
-## Relay managed-key bridge (v0.6.0)
+## Relay access requests
 
-The `kubernetes/components/llm-router-relay-keys` component remains opt-in and
-supplies the trust file that enables the `relay-keys` plugin. A follow-up
-activation PR may include it only after the operator reviews the exact router
-image, issuer/tenant mapping, key ceilings, OpenBao policies and staged worker
-services described in [Relay's preflight](relay.md#preflight-before-merging-activation).
-The activation gate test enforces this boundary in CI.
-Live token and holder acceptance follows the constrained activation; production
-profile/pool admission remains disabled until that report is reviewed.
+Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
+flow described in `/agent/skill.md`. Router administrators approve routes and
+lifetime in Settings → API keys; rotation is a new request and revocation stays
+on the router. No Relay-specific live router change is required.
 
-Provision the external Secret `llm-router/llm-router-relay-keys-trust` through
-the approved secret-management route with one key, `trust.json`. It contains
-only the versioned public trust mapping consumed by the plugin: the Relay
-issuer, Ed25519 public key IDs and roles, the approved tenant UUID, router
-namespace, route aliases, access kinds, maximum lifetime and key-count ceiling.
-It must not contain private keys or router bearer credentials. The init
-container bounds the JSON, writes it atomically to a 0600 in-memory file, and
-the router validates key types, duplicates and ceilings again at startup.
-The component preserves the base router's existing UID/GID/fsGroup 1000
-identity (the same identity that owns the SQLite data volume); it makes those
-values explicit so the trust file cannot introduce a volume-ownership change.
-
-Activation is a reviewed Flux PR that includes this component and pins the
-router image containing the reviewed bridge. The rollout must prove that the
-route is unreachable without a valid Relay assertion, tenant and grant ceilings
-are enforced, and disabling the component removes the bridge without revoking
-existing keys. Keep the prior router image and SQLite backup as rollback
-material. A private OpenBao origin or custom CA requires a separate narrow
-network/TLS change; never widen the router policy to arbitrary private egress.
+The old managed-key trust bridge is deferred. Its opt-in component and setup
+script are preserved on AILab's `todo/relay-router-trust-bridge` branch and
+removed from the current deployment tree. No trust Secret or signing keys
+should be provisioned. Any future implementation needs a new design review and
+explicit owner authorization before touching the shared live router. See
+[Relay's integration gate](relay.md#managed-router-access--pending-public-approval-integration).

@@ -76,9 +76,7 @@ class Notifications(unittest.TestCase):
             k = {
                 "apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
                 "resources": [os.path.relpath(ROOT / "kubernetes/apps" / base, wrapper)],
-                "components": [os.path.relpath(COMPONENTS / name, wrapper)] + (
-                    [os.path.relpath(ROOT / "kubernetes/components/relay-router-control-plane", wrapper)]
-                    if name == "relay" else []),
+                "components": [os.path.relpath(COMPONENTS / name, wrapper)],
             }
             (wrapper / "kustomization.yaml").write_text(yaml.safe_dump(k))
             raw = docker("run", "--rm", "-v", f"{ROOT}:/work:ro", "-w", "/work", KUSTOMIZE,
@@ -208,16 +206,16 @@ class Notifications(unittest.TestCase):
     def test_render_preserves_backup_gates_and_is_opt_in(self):
         deployment = named(self.rendered["relay"], "Deployment", "relay")["spec"]["template"]["spec"]
         base = named(self.base_rendered["relay"], "Deployment", "relay")["spec"]["template"]["spec"]
-        self.assertEqual([c for c in deployment["initContainers"] if c["name"] not in ("notification-files", "router-files")], base["initContainers"])
+        self.assertEqual([c for c in deployment["initContainers"] if c["name"] not in ("notification-files",)], base["initContainers"])
         app = next(c for c in deployment["containers"] if c["name"] == "relay")
         base_app = next(c for c in base["containers"] if c["name"] == "relay")
         # The base remains intentionally inactive until the operator evidence
         # gate permits a separate activation PR.
         self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", {e["name"] for e in base_app["env"]})
         self.assertNotIn("RELAY_ROUTER_CONNECTIONS_FILE", {e["name"] for e in base_app["env"]})
-        self.assertEqual(next(e["value"] for e in app["env"] if e["name"] == "RELAY_AGENT_CONTROL_PLANE"), "1")
-        self.assertEqual(next(e["value"] for e in app["env"] if e["name"] == "RELAY_ROUTER_CONNECTIONS_FILE"), "/run/relay-router/private/connections.json")
-        self.assertIn("relay-router-connection", {v["secret"]["secretName"] for v in deployment["volumes"] if "secret" in v})
+        self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", {e["name"] for e in app["env"]})
+        self.assertNotIn("RELAY_ROUTER_CONNECTIONS_FILE", {e["name"] for e in app["env"]})
+        self.assertNotIn("relay-router-connection", {v["secret"]["secretName"] for v in deployment["volumes"] if "secret" in v})
         self.assertEqual(app["image"], next(c for c in base["containers"] if c["name"] == "relay")["image"])
         initializer = next(c for c in deployment["initContainers"] if c["name"] == "notification-files")
         self.assertEqual(deployment["securityContext"]["fsGroup"], initializer["securityContext"]["runAsGroup"])

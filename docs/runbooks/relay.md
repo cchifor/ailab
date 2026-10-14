@@ -245,76 +245,56 @@ data PVCs, PostgreSQL, backup scheduling, DNS and tunnel routes are unchanged.
 Published by [Gitea CI run 57525](https://git.chifor.me/cchifor/relay/actions/runs/57525):
 `registry.chifor.me/relay/control-plane@sha256:48b408402873b38c74665121e98739fccf7f6d6aa5e4443957fe051661ecad31`.
 
-## Managed router control plane (v0.6.0)
+## Managed router access — pending public approval integration
 
-The `kubernetes/components/relay-router-control-plane` component remains
-opt-in. A follow-up activation PR may include it only after the operator has
-reviewed the preflight below. Missing input prevents Relay from starting;
-including it before provisioning would interrupt the existing authentication
-and terminal service. The activation gate test enforces this boundary in CI.
+Relay requests keys through [llm-router's public agent contract](https://router.chifor.me/agent/skill.md):
+request, router-administrator approval, and one-time redeem into the credential
+store. Rotation requires a new approval; revocation occurs in Router Settings.
+Relay shows a persistent pending notification with the human code and approval
+link. Poll tokens and issued keys must never appear in browser responses, logs,
+plaintext database columns, or this runbook.
 
-### Preflight before merging activation
+The dedicated trust bridge is deferred. Its implementation and deployment
+material are preserved on the `todo/relay-router-trust-bridge` branches in
+[Relay](https://git.chifor.me/cchifor/relay/src/branch/todo/relay-router-trust-bridge)
+and [AILab](https://git.chifor.me/cchifor/ailab/src/branch/todo/relay-router-trust-bridge).
+These branches are TODO references, not activation candidates. The old
+`relay-router-control-plane` and `llm-router-relay-keys` components have been
+removed from the deployment tree. Do not provision signing keys, a router trust
+Secret, or a Relay trust mapping. This retirement changes no live llm-router
+image, configuration, or deployment.
 
-Record the following nonsecret references in the Relay operator handoff:
+`RELAY_AGENT_CONTROL_PLANE`, qualified profiles, and pools stay disabled until
+the public approval integration and its constrained acceptance are reviewed.
+The nonsecret record remains at `relay-v060-activation-evidence.yaml` for
+continuity; it now describes the public contract rather than the retired bridge.
+The activation gate prevents enabling the retired components or the managed flag
+while that record is pending. Default communication may be deployed independently
+using `RELAY_AGENT_COMMUNICATION`; it does not authorize managed activation.
 
-- both `relay/relay-router-connection` and
-  `llm-router/llm-router-relay-keys-trust` are provisioned with matching issuer,
-  tenant and separate admin/reconciler Ed25519 public key IDs;
-- the router trust mapping's aliases, access kinds, lifetime and key-count
-  ceilings are reviewed for tenant `00000000-0000-4000-8000-000000000001`;
-- the configured HTTPS router and OpenBao origins are reachable from Relay,
-  their TLS chains are trusted, and restricted writer/worker-reader policies
-  are provisioned. The existing Relay policy permits TCP/443 to public origins;
-  if the approved OpenBao origin is private or uses a separate CA, this PR must
-  remain unmerged until a separate narrow egress/CA change is reviewed;
-- one approved worker has the pinned connector, holder, renderer and renderer
-  watch services staged with matching identity, private files and linger;
-- the operator names the constrained acceptance target and rollback owner.
+### Required integration and acceptance evidence
 
-The llm-router image is pinned to
-`sha256:f8ddc9ce9353f6e3a5f7bcc75b8ff16d2cfa29cf0a5e801358b57d9dbc4bec54`
-(source `ccfbd1dbe1310ce11b2d9b659ddf6a3d72aba597`) and contains the bridge.
-Relay's application and migration image remain v0.6.0 at
-`sha256:5e01b323d6e5cacd4980d7bcc14082ec937d1731a69a89af2568f8f322b9f774`.
+- A reviewed Relay release persists pending request state and notifications,
+  enforces at most one pending request per profile, and handles denial, expiry,
+  delivery loss, revocation, rate limits, and restart recovery.
+- Router approval determines routes and lifetime. Keys are redeemed exactly
+  once into a confirmed secret-store write. No Relay-specific router changes
+  are required.
+- OpenBao escrow and worker delivery remain separate requirements. Use the
+  provisioned `af` mount and `relay/router` prefix. A private origin or estate CA
+  needs a reviewed narrow egress/CA change before activation.
+- One named acceptance worker has the matching connector, holder, renderer,
+  private-file permissions, and approved profile. Record exact source, image,
+  artifact, and deployment identities with a rollback target.
+- Record request → approve → redeem → route → rotate → revoke against the
+  supported runtime, plus loss/restart handling and secret confinement. Codex
+  live acceptance awaits provider capacity; fixture tests are not live evidence.
 
-Live token/session acceptance follows this activation. It is not a prerequisite
-for starting the services that acceptance exercises. Keep candidate qualified
-profiles and pools disabled and do not create production admission records until
-the independent acceptance report has been reviewed. This PR supplies no release
-approval file or pin.
-
-Provision the external Secret `relay/relay-router-connection`
-through the normal secret-management route. It must contain only these keys:
-
-| Key | Contents |
-| --- | --- |
-| `metadata.json` | Versioned connection metadata: UUID, name, tenant UUID list, fixed HTTPS router/OpenBao origins, issuer, admin/reconciler key IDs, OpenBao mount and prefix. |
-| `admin-key.pem` | Relay's Ed25519 admin signing key, matching the router trust mapping. |
-| `reconciler-key.pem` | Separate Ed25519 reconciliation key, matching the router trust mapping. |
-| `bao-token` | Relay-only OpenBao writer identity, restricted to the configured tenant prefix and destroy operation. |
-
-The component's init container validates the metadata, key types, origins and
-token shape, then writes a private `connections.json` plus 0600 key/token files
-to an in-memory volume. The application receives only the generated file path
-and `RELAY_AGENT_CONTROL_PLANE=1`; no raw token is mounted into the browser,
-connector or holder. Missing or malformed input prevents the replacement Pod
-from starting. The Secret is not represented in Git and its values must never
-be placed in a PR, issue, log or this runbook.
-
-Activation is a reviewed Flux change that pins the same immutable v0.6.0 image
-digest in both the migration and Relay containers, adds the component, and
-records the release/source annotations. If OpenBao is reachable only through a
-private cluster address, the same change must add a narrowly scoped egress rule
-for its service and TLS CA; do not widen Relay to arbitrary private networks.
-After reconciliation, run the release candidate's create/escrow/install,
-catalog, routed Codex, rotation, revocation, lost-response and rollback checks.
-Keep the v0.5.2 image and its rollback generation available until the complete
-acceptance report is reviewed. To abandon the acceptance rollout before any
-credential is issued, revert both component inclusions through a reviewed PR
-while retaining the healthy v0.6.0 images. If credentials have been issued,
-revoke and verify their rejection before removing the bridge: disabling the
-bridge by itself does not revoke existing keys.
-
+Ship activation only through a reviewed AILab PR and Flux, pinning the same
+immutable image in Relay and its migration container. Remove any obsolete
+`admin-key.pem` and `reconciler-key.pem` inputs through the normal secret-management
+route if a previously staged connection Secret contains them; this repository
+contains no such live Secret and this change does not mutate one.
 
 ## Terminal geometry release 0.2.1
 
