@@ -9,40 +9,44 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
-The default release is the v0.7.2 connector manifest from Relay release
-[v0.7.2](https://git.chifor.me/cchifor/relay/releases/tag/v0.7.2) (release
-workflow run 87536, 2026-10-15). The upgraded hub serves the same manifest at
-`https://relay.chifor.me/downloads/connector/v0.7.2/manifest.json`:
+The default release is the v0.7.3 connector manifest from Relay release
+[v0.7.3](https://git.chifor.me/cchifor/relay/releases/tag/v0.7.3) (release
+workflow run 87699, 2026-10-15). The upgraded hub serves the same manifest at
+`https://relay.chifor.me/downloads/connector/v0.7.3/manifest.json`:
 
 | Field | Pin |
 |---|---|
-| Source | `af901bb8621970b20cb77b83365241ea1b22b17c` |
-| Linux amd64 SHA-256 | `d75e9439cec0a31bb6c84c9cca204a7121b93131c0e22d685c6b4c7c41677dcc` |
-| Linux arm64 SHA-256 | `3472334e1d141b7afb442f3061db0f5a70a289f1ce1f2b796b3740b6279d2ea2` |
+| Source | `0684b75f2ae662711a2497ec155bc06400348fc5` |
+| Linux amd64 SHA-256 | `bb10c127235ca453dd74fdbdbb5f6381cb71ced5d4ba8c96d1ea0fbc11a8df61` |
+| Linux arm64 SHA-256 | `1b66b3ffa00223884f0df1352ade8f13d10d9e84d45196604cf9294dbdd9df27` |
 
 The pins were checked on 2026-10-15 against the release's `manifest.json` and
 `SHA256SUMS` and the downloaded binaries; all three agree on these digests.
-`manifest.json` and `deployment-images-87536.json` both name source commit
-`af901bb8621970b20cb77b83365241ea1b22b17c`, and the latter records the hub image digest.
+`manifest.json` and `deployment-images-87699.json` both name source commit
+`0684b75f2ae662711a2497ec155bc06400348fc5`, and the latter records the hub image digest.
 
-[Relay #159](https://git.chifor.me/cchifor/relay/pulls/159) describes what v0.7.2
-carries. In summary:
+[Relay #161](https://git.chifor.me/cchifor/relay/pulls/161) describes what v0.7.3 adds;
+[Relay #159](https://git.chifor.me/cchifor/relay/pulls/159) describes v0.7.2, which it
+builds on. In summary:
 
-- **Identity across tmux server restarts.** A reboot reattaches each restored
-  pane to its existing agent instead of creating a duplicate. Agents whose panes
-  are gone are removed.
-- **Server-scoped tombstones (schema 51).** A deleted agent's tombstone matches
-  only its own tmux server instance and is pruned once that server ends. After
-  a 0.7.2 connector's first scan, `agent_tombstones` holds only deletions in
-  servers that still run.
-- **Pane observer restart.** An ended observer is restarted on the next scan
-  instead of leaving the agent Offline until the host connection drops.
-- **Byte-exact pane stream (from v0.7.1).** Non-UTF-8 output no longer ends an
-  observer.
+- **Identity across tmux server restarts (v0.7.2).** A reboot reattaches each
+  restored pane to its existing agent. Agents whose panes are gone are removed.
+- **Server-scoped tombstones (v0.7.2, schema 51).** A deleted agent's tombstone
+  matches only its own tmux server instance and is pruned once that server ends.
+- **Pane observer restart (v0.7.2)** and **byte-exact pane stream (v0.7.1).**
+- **Missed scans and per-socket scan states (v0.7.3).** An online agent whose pane
+  the server still lists survives 20 s of missed scans. A socket whose tmux listing
+  failed leaves its agents as they were; four failures in a row report it absent.
+- **Explicit panes, client address, dead hosts and "Last seen" (v0.7.3).**
+  - Explicitly registered panes stay observed.
+  - Rate limits key on the hub's `RELAY_CLIENT_ADDRESS_HEADER` (`cf-connecting-ip`).
+  - A silent host is terminated after 40 s.
+  - A reconnect leaves offline agents' last-seen times alone.
 
-Rolling the hub back to v0.7.1 is only an image revert, with no database restore and no
-connector downgrade. Each of these was checked on 2026-10-15 against an isolated
-database:
+Rolling the hub back is only an image revert, with no database restore and no connector
+downgrade. v0.7.3 adds no schema change, and a v0.7.2 hub drops the connector's new `scans`
+field like any other unknown discovery field. For a rollback to v0.7.1 (schema 51 stays),
+each of these was checked on 2026-10-15 against an isolated database:
 
 - v0.7.1's migrator, which knows migrations up to 050, exits cleanly against a
   schema-51 database.

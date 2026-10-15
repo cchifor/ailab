@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.7.2-release-87536
-        chifor.me/source-commit: af901bb8621970b20cb77b83365241ea1b22b17c
+        chifor.me/release: relay-0.7.3-release-87699
+        chifor.me/source-commit: 0684b75f2ae662711a2497ec155bc06400348fc5
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -132,9 +132,9 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-      # Relay v0.7.2, source af901bb8621970b20cb77b83365241ea1b22b17c,
-      # release v0.7.2 / run 87536.
-      - image: registry.chifor.me/relay/control-plane@sha256:c7f5ee2b4f378ac0a2941778feb181a51c9c4292cfefa9876f2d0622d7dd2679
+      # Relay v0.7.3, source 0684b75f2ae662711a2497ec155bc06400348fc5,
+      # release v0.7.3 / run 87699.
+      - image: registry.chifor.me/relay/control-plane@sha256:26f1a195eaebdfe1cad94ef248d09e5484f6f1f496c9f6f72a84e8a0a391a688
         workingDir: /app
         envFrom:
         - secretRef:
@@ -178,9 +178,9 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.7.2, source af901bb8621970b20cb77b83365241ea1b22b17c,
-      # release v0.7.2 / run 87536.
-      - image: registry.chifor.me/relay/control-plane@sha256:c7f5ee2b4f378ac0a2941778feb181a51c9c4292cfefa9876f2d0622d7dd2679
+      # Relay v0.7.3, source 0684b75f2ae662711a2497ec155bc06400348fc5,
+      # release v0.7.3 / run 87699.
+      - image: registry.chifor.me/relay/control-plane@sha256:26f1a195eaebdfe1cad94ef248d09e5484f6f1f496c9f6f72a84e8a0a391a688
         workingDir: /app
         envFrom:
         - secretRef:
@@ -216,6 +216,13 @@ spec:
           value: '8788'
         - name: RELAY_URL
           value: https://relay.chifor.me
+        # Every request arrives from cloudflared, so without this all clients share one source
+        # address for rate limits and the pending access-request cap. Cloudflare's edge overwrites
+        # CF-Connecting-IP on every request. The header is trustworthy ONLY because
+        # network-policy.yaml admits ingress to 8788 from edge/cloudflared alone; remove this
+        # setting before adding any other ingress path to the relay pod.
+        - name: RELAY_CLIENT_ADDRESS_HEADER
+          value: cf-connecting-ip
         - name: RELAY_DATA_DIR
           value: /data
         - name: RELAY_LLM_URL
