@@ -9,22 +9,30 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
-The default release is the public v0.6.2 connector manifest observed on
-2026-10-14 at
-`https://relay.chifor.me/downloads/connector/v0.6.2/manifest.json`:
+The default release is the v0.7.2 connector manifest from Relay release
+[v0.7.2](https://git.chifor.me/cchifor/relay/releases/tag/v0.7.2) (release
+workflow run 87536, 2026-10-15). The upgraded hub serves the same manifest at
+`https://relay.chifor.me/downloads/connector/v0.7.2/manifest.json`:
 
 | Field | Pin |
 |---|---|
-| Source | `f52693cef05985e7ba8164b26362ac40c8aa39e4` |
-| Linux amd64 SHA-256 | `8cf35551be1390d8ec1c834f36166d5ace623bb7bc83cbd1530b570581ebea81` |
-| Linux arm64 SHA-256 | `3a43de6b91a536e179bb40ec0227bb5cdd1f6560a786be89b136d4d1488e5d51` |
+| Source | `af901bb8621970b20cb77b83365241ea1b22b17c` |
+| Linux amd64 SHA-256 | `d75e9439cec0a31bb6c84c9cca204a7121b93131c0e22d685c6b4c7c41677dcc` |
+| Linux arm64 SHA-256 | `3472334e1d141b7afb442f3061db0f5a70a289f1ce1f2b796b3740b6279d2ea2` |
 
-The pins above were checked against the published manifest at
-`https://relay.chifor.me/downloads/connector/v0.6.2/manifest.json` on
-2026-10-14. The manifest reports source commit `f52693cef05985e7ba8164b26362ac40c8aa39e4`
-and the same architecture-specific digests. The connector role only changes the
-content-addressed binary pin; its service unit, identity checks and activation
-gates are unchanged.
+The pins were checked on 2026-10-15 against the release's `manifest.json`,
+`SHA256SUMS`, `deployment-images-87536.json`, and the downloaded binaries. All of
+them report source commit `af901bb8621970b20cb77b83365241ea1b22b17c` and these
+digests. v0.7.2 carries two fixes:
+
+- v0.7.1's byte-exact pane stream. Non-UTF-8 pane output no longer takes an
+  agent offline.
+- Agent identity across tmux server restarts. A reboot reattaches each
+  restored pane to its existing agent instead of creating a duplicate, and
+  agents whose panes are gone are removed.
+
+The connector role only changes the content-addressed binary pin. Its service
+unit, identity checks and activation gates are unchanged.
 
 Obtain the versioned binary on the controller from that reviewed release and
 compare the manifest/source/digest. Pass its local absolute path; workers never
