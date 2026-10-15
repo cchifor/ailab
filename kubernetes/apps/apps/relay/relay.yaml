@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.7.3-release-87699
-        chifor.me/source-commit: 0684b75f2ae662711a2497ec155bc06400348fc5
+        chifor.me/release: relay-0.7.5-release-88376
+        chifor.me/source-commit: 2bcb24003f93783d3e97a2caca09cb15cc3d3bfd
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -132,9 +132,9 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-      # Relay v0.7.3, source 0684b75f2ae662711a2497ec155bc06400348fc5
-      # release v0.7.3 / run 87699.
-      - image: registry.chifor.me/relay/control-plane@sha256:26f1a195eaebdfe1cad94ef248d09e5484f6f1f496c9f6f72a84e8a0a391a688
+      # Relay v0.7.5, source 2bcb24003f93783d3e97a2caca09cb15cc3d3bfd
+      # release v0.7.5 / run 88376.
+      - image: registry.chifor.me/relay/control-plane@sha256:61ddeafec5c4b3f585b71043740da855d55afff107e31513778cd74e7128be17
         workingDir: /app
         envFrom:
         - secretRef:
@@ -178,9 +178,9 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.7.3, source 0684b75f2ae662711a2497ec155bc06400348fc5
-      # release v0.7.3 / run 87699.
-      - image: registry.chifor.me/relay/control-plane@sha256:26f1a195eaebdfe1cad94ef248d09e5484f6f1f496c9f6f72a84e8a0a391a688
+      # Relay v0.7.5, source 2bcb24003f93783d3e97a2caca09cb15cc3d3bfd
+      # release v0.7.5 / run 88376.
+      - image: registry.chifor.me/relay/control-plane@sha256:61ddeafec5c4b3f585b71043740da855d55afff107e31513778cd74e7128be17
         workingDir: /app
         envFrom:
         - secretRef:
