@@ -14,11 +14,15 @@ and re-encrypt it with the ailab age key. Never commit a plaintext Secret.
 Validate the encrypted field without printing its value:
 
 ```bash
+set -euo pipefail
 export SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey
 known_hosts="$(sops decrypt kubernetes/apps/platform-bootstrap/deploy-key.sops.yaml \
   | yq -r '.stringData.known_hosts')"
-printf '%s\n' "$known_hosts" \
-  | grep -Eq '(^|[[:space:],])\[?git\.chifor\.me\]?(:[0-9]+)?[[:space:]]+(ssh-|ecdsa-)'
+if ! printf '%s\n' "$known_hosts" \
+  | grep -Eq '(^|[[:space:],])\[?git\.chifor\.me\]?(:[0-9]+)?[[:space:]]+(ssh-|ecdsa-)'; then
+  printf '%s\n' 'known_hosts has no git.chifor.me SSH host key entry' >&2
+  exit 1
+fi
 if printf '%s\n' "$known_hosts" \
   | grep -Eq '(^|[[:space:],])github\.com([[:space:],]|$)'; then
   printf '%s\n' 'known_hosts still contains a github.com entry' >&2
