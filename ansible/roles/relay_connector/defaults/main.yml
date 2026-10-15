@@ -18,10 +18,10 @@ relay_connector_state_file: ""
 # Exact existing service settings, reviewed per worker; never written to identity.
 relay_connector_name: ""
 relay_connector_sockets: []
-# v0.7.2 release manifest observed 2026-10-15; change through release review.
+# v0.7.3 release manifest observed 2026-10-15; change through release review.
 relay_connector_release:
-  version: 0.7.2
-  sourceCommit: af901bb8621970b20cb77b83365241ea1b22b17c
+  version: 0.7.3
+  sourceCommit: 0684b75f2ae662711a2497ec155bc06400348fc5
   sha256:
-    amd64: d75e9439cec0a31bb6c84c9cca204a7121b93131c0e22d685c6b4c7c41677dcc
-    arm64: 3472334e1d141b7afb442f3061db0f5a70a289f1ce1f2b796b3740b6279d2ea2
+    amd64: bb10c127235ca453dd74fdbdbb5f6381cb71ced5d4ba8c96d1ea0fbc11a8df61
+    arm64: 1b66b3ffa00223884f0df1352ade8f13d10d9e84d45196604cf9294dbdd9df27
