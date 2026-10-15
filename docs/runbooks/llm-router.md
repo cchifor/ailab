@@ -2034,6 +2034,92 @@ for a good part of the admin API. Chat and tools only: no schema change, no new 
 Nothing else is needed: no schema change, no new setting, no new endpoint. A conversation in which the model called one
 of the new tools keeps its transcript; the old image simply no longer offers them.
 
+## Overload attribution release: time to first content, provider overload share, an evidence-based re-key gate (2026-10-15)
+
+`router-0.1.0-20261015-overload-attribution` deploys merged llm-router main `48c4a7f09b4c037950d1f80dee259d25a4e3c6a6`
+([#111](https://git.chifor.me/cchifor/llm-router/pulls/111)), with two new alert rules beside the six of 2026-10-14, on the
+owner's "implement and deploy 2 and 3" of the analysis below.
+
+**The second window.** From 06:00 to past 09:35 UTC on 2026-10-15 the Codex backend queued every request for a steady
+31 s before its first content and shed a quarter of the streams after they had started (journal 2026-10-14 17:45 to
+2026-10-15 09:35: 0 overloads in about 2,550 requests until 06:00, then 92 in 451). It hit every Codex account and
+every dev-worker conversation; a conversation that failed over to a cache-cold sibling was shed there at the same
+rate. The CLI's own retry (the `server_error` rewrite of 2026-10-12) recovered 37 of 39 failure chains; the two that
+did not were client cancels. The cost was latency and quota, not lost turns. The owner's pasted analysis had read it
+as the `dw-3` conversation's binding sending it back to one overloaded account, and asked for a retry after the first
+content; that retry is not buildable (the client already holds the response id and output of the first attempt, and
+the sibling sheds at the same rate), and the binding was not the cause. What was missing was attribution: the route
+rule fired for `dw-3` at 27 % and read as a route problem, and the earliest sign of the window, the time to first
+content, had no series at all. The 10 re-keys of the window (`conversation.rekeyed`) rescued nothing, as the 53 of
+2026-10-14 had not: the provider-wide gate of 2026-10-14 (`REKEY_BROAD_SHARE` 0.2) did not trip because the other
+requests' overload share sat at 16-18 %.
+
+**What changes.**
+- **`llm_router_first_content_seconds{account,provider}`** (llm-router #111): a cumulative histogram (buckets 0.5 s to
+  300 s, `_sum`, `_count`) of the time from an attempt's start to its first content (text, tool call, image or native
+  output), from the journal's `stream.first_content`, by the account that produced it. The event now carries
+  `attemptElapsedMs` beside `elapsedMs` (since the request started): the histogram reads the attempt's own time, so a
+  failover's earlier attempt is not charged to the account that then served (reviewer-claude's finding on #111). The
+  healthy day sits at 1-5 s whatever the context size (dev-worker turns of 100-180k input tokens at 2.7-3.7 s); the
+  queue sat at 22-32 s on every account.
+- **The re-key's provider-wide gate needs evidence that the provider serves others** (llm-router #111,
+  `REKEY_WINDOW_MS` 15 min, `REKEY_BROAD_SHARE` 0.1, `REKEY_BROAD_OVERLOADS` 2). The streak itself is unchanged: three
+  overloads in a row, before or after output, re-key a conversation, because the mechanism's own incident (2026-10-12,
+  one conversation failing 83 % while others on the same accounts were fine) was mostly mid-stream (17 of that
+  morning's 23 overloads came after output). What failed on 2026-10-15 was the gate of 2026-10-14, and not at its 0.2
+  threshold: replayed from the journal, at the ten re-key decisions the other requests of the previous 5 minutes
+  numbered 0 to 9 (the conversation was most of the provider's traffic), so the gate's 10-sample floor was never
+  reached and every decision re-keyed by default. Now too few samples keep the key instead of re-keying blind
+  (`conversation.rekey_skipped` with `samples` under 10), the window is 15 minutes (the alert's), the share 0.1 (the
+  alert's threshold; the healthy baseline is 0-3 %), and one stray overload among the samples does not pass for the
+  provider. Replayed, that holds all ten decisions of 2026-10-15 (7 for lack of evidence, 3 by a 22-27 % share) and
+  keeps the designed case: a conversation failing while ten or more others are served re-keys. The first version of
+  #111 had instead dropped mid-stream overloads from the streak; reviewer-claude pointed out that this gives up
+  re-keying for exactly the conversation the mechanism exists for, and that the gate was the lever that failed; the
+  replay then showed which part of the gate. Agreed and changed, twice.
+- **Two alert rules** (`infrastructure/monitoring/llm-router-rules.yaml`, unit tests beside it):
+  - `LlmRouterProviderOverloadShareHigh`: attempts that ended on an upstream overload as a share of all attempts on
+    the provider, over 15 minutes, above 10 % for 15 minutes, on at least 10 attempts in the window. Per provider,
+    from the existing `llm_router_attempts_total`: the route rule says a route fails, this one says whose fault it is.
+    Its description says what not to do (release bindings, re-key, repoint routes, raise concurrency).
+  - `LlmRouterFirstContentSlow`: the provider's median time from an attempt's start to its first content over 15
+    minutes above 20 s for 10 minutes, on at least 10 attempts with content. Fires about an hour before the share rule
+    did on this window's shape. The quantile reads the new histogram, so the rule is silent until this image is live,
+    and silent again (never wrong) if the image is rolled back.
+- Nothing else: no schema change, no new setting, no new endpoint, no live-config change. `pool-codex` keeps
+  `maxAttempts 2`; the binding of the analysed conversation was not released.
+
+**Image.**
+- Archive `router-0.1.0-20261015-overload-attribution.tar.gz`, SHA-256 `8bca1cb13f7c984702e1cf1ec87053e8e1da3ffc2dd621e9ed7c2b22fa966e01`.
+  - Built in the pinned Node 26.10.0 image on dev-worker-1, and the production smoke passed.
+  - Relay v0.2.0 asset 280.
+- Relay branch `release/router-0.1.0-20261015-overload-attribution-image` (`cc95c46a6d20`),
+  [run 87633](https://git.chifor.me/cchifor/relay/actions/runs/87633); receipt `deployment-images-87633.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:1e185f187fc143c011408e3c8c6377a8fd4f8f34fbacbeac1df9529255da6aff` (tag `parity-cc95c46a6d20-87633`; the digest was checked in the registry).
+- **Before merge:** CI on Linux passed; both reviewer bots approved. reviewer-claude's round-1 findings (the histogram charged a failover's earlier queue to the serving account; mid-stream overloads dropped from the streak) were fixed in [`6a5dd26`](https://git.chifor.me/cchifor/llm-router/commit/6a5dd264a26b6e80a50298d6b33920b7e8f49857), its round-2 findings (one stray overload tripping a 0.1 gate; a stale description) in [`6041c57`](https://git.chifor.me/cchifor/llm-router/commit/6041c577892f); the answers and the replay numbers are on the PR.
+  Locally: `tsc --noEmit` clean, `vitest run` green, `check:architecture` only the known #79 line;
+  `promtool check rules` 8 rules and `promtool test rules` green on the new fixtures (a fifth of a provider's attempts
+  overloaded fires at 20 %, timeouts and a quiet provider do not, the healthy 3 % stays quiet; a 31 s queue fires at a
+  38 s interpolated median, 2.5 s and a quiet provider do not).
+
+**How to check after the rollout.**
+- `GET /admin/v1/metrics` (or `:9464/metrics`) lists `llm_router_first_content_seconds_bucket{...,le="+Inf"}` after
+  the first served request; in Prometheus,
+  `histogram_quantile(0.5, sum by (provider, le) (rate(llm_router_first_content_seconds_bucket[15m])))` reads a few
+  seconds per provider on a healthy day.
+- Both new rules show in Prometheus (Alerts page, group `llm-router`, 8 rules) as inactive.
+- In the journal, `stream.first_content` events carry `attemptElapsedMs`; during a provider-wide window
+  `conversation.rekey_skipped` rows show an `overloadShare` of 0.1 or more, or `samples` under 10 when the
+  conversation is most of the provider's traffic.
+
+**Rollback.** Revert the image digest and both pod-template annotations together, and keep the rules:
+- `image: registry.chifor.me/llm-router/router@sha256:3e0f67b5937ace37a8339710d4f6347eefa031214f4b2c096d3bc79380ac2928`
+- `chifor.me/source-commit: ac0d33db47f354dcf374d9d79b92624293872c83`
+- `chifor.me/release: router-0.1.0-20261014-agent-control`
+
+With the old image `LlmRouterFirstContentSlow` reads an absent series and stays silent; `LlmRouterProviderOverloadShareHigh`
+keeps working on the counter the old image already exports.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
