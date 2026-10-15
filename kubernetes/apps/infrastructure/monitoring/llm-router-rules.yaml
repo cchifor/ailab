@@ -120,7 +120,7 @@ spec:
               with sum by (account) of the same ratio, check status.openai.com, and see
               LlmRouterFirstContentSlow for the queue ahead of it. Runbook: docs/runbooks/llm-router.md
               § Overload attribution.
-        # The provider's median time from a request's start to its first content, over 15 minutes, on
+        # The provider's median time from an attempt's start to its first content, over 15 minutes, on
         # providers with at least 10 attempts that reached content in that window. The earliest sign of an
         # upstream admission queue: a provider shedding load queues every request first (31 s on every
         # Codex account on 2026-10-15, before the overloads, cached and cold prompts alike), while a
@@ -136,7 +136,7 @@ spec:
           annotations:
             summary: 'llm-router: {{ $labels.provider }} median time to first content is {{ $value | printf "%.0f" }} s'
             description: >-
-              Over the last 15 minutes the median time from a request's start to its first content on
+              Over the last 15 minutes the median time from an attempt's start to its first content on
               provider {{ $labels.provider }} was {{ $value | printf "%.0f" }} s (at least 10 attempts with
               content in the window). A healthy provider answers in a few seconds whatever the context size;
               a steady 20-45 s on every account is the provider's admission queue, and mid-stream overloads

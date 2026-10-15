@@ -228,7 +228,7 @@ tests:
             exp_annotations:
               summary: "llm-router: codex median time to first content is 38 s"
               description: >-
-                Over the last 15 minutes the median time from a request's start to its first content on
+                Over the last 15 minutes the median time from an attempt's start to its first content on
                 provider codex was 38 s (at least 10 attempts with
                 content in the window). A healthy provider answers in a few seconds whatever the context size;
                 a steady 20-45 s on every account is the provider's admission queue, and mid-stream overloads
