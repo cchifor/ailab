@@ -60,7 +60,7 @@ The `config.json` + `docker-compose.yml` below remain the **QNAP Container Stati
 
 - **CI (platform repo):** set repo secrets `REGISTRY_USERNAME=ci` +
   `REGISTRY_PASSWORD=<pass>`. `.github/workflows/build.yml` logs in to
-  `registry.chifor.me` and `docker-bake.hcl` pushes `registry.chifor.me/strive/*`.
+  `registry.chifor.me` and `docker-bake.hcl` pushes `registry.chifor.me/workbricks/*`.
 - **Cluster:** nothing — the ailab overlay already points
   `global.imageRegistry=registry.chifor.me`; nodes pull anonymously over TLS.
 - **First images:** trigger the platform `build.yml` (push to main) or, from a
