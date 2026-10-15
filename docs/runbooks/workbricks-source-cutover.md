@@ -19,8 +19,11 @@ known_hosts="$(sops decrypt kubernetes/apps/platform-bootstrap/deploy-key.sops.y
   | yq -r '.stringData.known_hosts')"
 printf '%s\n' "$known_hosts" \
   | grep -Eq '(^|[[:space:],])\[?git\.chifor\.me\]?(:[0-9]+)?[[:space:]]+(ssh-|ecdsa-)'
-printf '%s\n' "$known_hosts" \
-  | ! grep -Eq '(^|[[:space:],])github\.com([[:space:],]|$)'
+if printf '%s\n' "$known_hosts" \
+  | grep -Eq '(^|[[:space:],])github\.com([[:space:],]|$)'; then
+  printf '%s\n' 'known_hosts still contains a github.com entry' >&2
+  exit 1
+fi
 ```
 
 After the Workbricks deploy key has read access and the PR is merged, verify
