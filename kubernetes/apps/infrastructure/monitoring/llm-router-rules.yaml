@@ -16,6 +16,19 @@
 # 2026-10-14 05:58-08:46 UTC, and the 24 h export before it). The limit rules read the gauges the
 # usage plugin keeps from every reply, so they fire on the provider's own numbers.
 #
+# ATTRIBUTION (2026-10-15): the second overload window, 06:00-09:35 UTC the next day, fired the route
+# rule for dw-3 at 27 % and was read as a route, conversation-binding and retry problem; it was the
+# provider's capacity, on every Codex account (15-31 % of every account's attempts per hour, every
+# dev-worker conversation, siblings shedding the same conversation at the same rate), and its
+# earliest sign was the time to first content: a steady 31 s on every account from 06:00, cached and
+# cold prompts alike, against about 3 s the evening before with the same 100-180k-token contexts,
+# an hour before the first failure ratio crossed a threshold. Two rules carry that reading:
+# LlmRouterProviderOverloadShareHigh (the overload share per PROVIDER, from the attempts counter
+# that already existed) and LlmRouterFirstContentSlow (the provider's median time to first content,
+# from the `llm_router_first_content_seconds` histogram the router exports since
+# router-0.1.0-20261015-overload-attribution). Their descriptions say what NOT to do: a provider-wide
+# overload is not fixed by releasing bindings, re-keying or repointing routes.
+#
 # `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
 # llm-router-rules.test.yaml pins that every rule fires on the incident's shape and stays silent on
 # the healthy one; scripts/rules-lint.sh runs it on every PR.
@@ -77,6 +90,59 @@ spec:
               GET /admin/v1/stats?window=1h: upstream_code server_is_overloaded on every account is
               the provider (check status.openai.com); one account is that account; a 4xx code is
               the clients. Runbook: docs/runbooks/llm-router.md § Overload handling.
+        # Attempts that ended on an upstream overload (upstream_code server_is_overloaded or server_error,
+        # before or after output) as a share of ALL attempts on the provider, over 15 minutes, on providers
+        # with at least 10 attempts in that window. Per provider, not per route or account: the route rule
+        # above says that a route fails, this one says whose fault it is. Attempts count the failovers a
+        # request survived, so the share runs a little above the route's request failure ratio in the
+        # same window; the healthy day's share was 0-3 % per hour, both incidents' 15-31 %. 10 %, like the
+        # route rule, so the two fire together and the reading is one glance.
+        - alert: LlmRouterProviderOverloadShareHigh
+          expr: |
+            (
+              sum by (provider) (rate(llm_router_attempts_total{job="llm-router",outcome="failed",upstream_code=~"server_is_overloaded|server_error"}[15m]))
+                /
+              sum by (provider) (rate(llm_router_attempts_total{job="llm-router"}[15m]))
+            ) > 0.10
+            and
+            sum by (provider) (rate(llm_router_attempts_total{job="llm-router"}[15m])) > (10 / 900)
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router: {{ $value | humanizePercentage }} of {{ $labels.provider }} attempts overloaded upstream"
+            description: >-
+              Over the last 15 minutes {{ $value | humanizePercentage }} of the router's upstream attempts on
+              provider {{ $labels.provider }} ended on an overload (server_is_overloaded or server_error; at
+              least 10 attempts in the window). The healthy baseline is under 3 %. This is the provider's
+              capacity, not a route, a key or a conversation binding: do not release bindings, re-key or
+              repoint routes for it, and do not raise concurrency. Clients that retry (the Codex CLI on
+              server_error) recover their turns; the cost is latency and quota. Confirm it is every account
+              with sum by (account) of the same ratio, check status.openai.com, and see
+              LlmRouterFirstContentSlow for the queue ahead of it. Runbook: docs/runbooks/llm-router.md
+              § Overload attribution.
+        # The provider's median time from a request's start to its first content, over 15 minutes, on
+        # providers with at least 10 attempts that reached content in that window. The earliest sign of an
+        # upstream admission queue: a provider shedding load queues every request first (31 s on every
+        # Codex account on 2026-10-15, before the overloads, cached and cold prompts alike), while a
+        # healthy provider answers 100-180k-token turns in 1-5 s. 20 s sits between the two, and the
+        # histogram's buckets straddle it (12, 20, 30, 45 s).
+        - alert: LlmRouterFirstContentSlow
+          expr: |
+            histogram_quantile(0.5, sum by (provider, le) (rate(llm_router_first_content_seconds_bucket{job="llm-router"}[15m]))) > 20
+            and
+            sum by (provider) (rate(llm_router_first_content_seconds_count{job="llm-router"}[15m])) > (10 / 900)
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: 'llm-router: {{ $labels.provider }} median time to first content is {{ $value | printf "%.0f" }} s'
+            description: >-
+              Over the last 15 minutes the median time from a request's start to its first content on
+              provider {{ $labels.provider }} was {{ $value | printf "%.0f" }} s (at least 10 attempts with
+              content in the window). A healthy provider answers in a few seconds whatever the context size;
+              a steady 20-45 s on every account is the provider's admission queue, and mid-stream overloads
+              (LlmRouterProviderOverloadShareHigh) usually follow. Nothing in the router changes this: do not
+              release bindings, re-key or repoint routes. Per account: the same quantile by (account, le).
+              Runbook: docs/runbooks/llm-router.md § Overload attribution.
         # A subscription near the end of its long window (Codex: primary = weekly; Claude: weekly).
         # The 5-hour Claude window is left out: it fills and empties several times a day by design.
         - alert: LlmRouterAccountNearLimit
