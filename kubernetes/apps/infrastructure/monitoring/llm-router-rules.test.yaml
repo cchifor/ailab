@@ -151,12 +151,12 @@ tests:
         exp_alerts: []
 
   - interval: 1m
-    name: a provider at the healthy 3% stays quiet
+    name: a provider at a steady healthy 3% (1 overload in 33 attempts, every minute) stays quiet
     input_series:
       - series: 'llm_router_attempts_total{job="llm-router",account="codex-5",provider="codex",outcome="complete",code="",upstream_code=""}'
-        values: "0+3x40"
+        values: "0+32x40"
       - series: 'llm_router_attempts_total{job="llm-router",account="codex-5",provider="codex",outcome="failed",code="upstream",upstream_code="server_is_overloaded"}'
-        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2"
+        values: "0+1x40"
     alert_rule_test:
       - eval_time: 31m
         alertname: LlmRouterProviderOverloadShareHigh
@@ -226,11 +226,12 @@ tests:
               severity: warning
               provider: codex
             exp_annotations:
-              summary: "llm-router: codex median time to first content is 38 s"
+              summary: "llm-router: codex median time to first content is about 38 s"
               description: >-
                 Over the last 15 minutes the median time from an attempt's start to its first content on
-                provider codex was 38 s (at least 10 attempts with
-                content in the window). A healthy provider answers in a few seconds whatever the context size;
+                provider codex was about 38 s (interpolated within a
+                histogram bucket, so read it as a range; at least 10 attempts with content in the window). A
+                healthy provider answers in a few seconds whatever the context size;
                 a steady 20-45 s on every account is the provider's admission queue, and mid-stream overloads
                 (LlmRouterProviderOverloadShareHigh) usually follow. Nothing in the router changes this: do not
                 release bindings, re-key or repoint routes. Per account: the same quantile by (account, le).

@@ -134,11 +134,12 @@ spec:
           for: 10m
           labels: { severity: warning }
           annotations:
-            summary: 'llm-router: {{ $labels.provider }} median time to first content is {{ $value | printf "%.0f" }} s'
+            summary: 'llm-router: {{ $labels.provider }} median time to first content is about {{ $value | printf "%.0f" }} s'
             description: >-
               Over the last 15 minutes the median time from an attempt's start to its first content on
-              provider {{ $labels.provider }} was {{ $value | printf "%.0f" }} s (at least 10 attempts with
-              content in the window). A healthy provider answers in a few seconds whatever the context size;
+              provider {{ $labels.provider }} was about {{ $value | printf "%.0f" }} s (interpolated within a
+              histogram bucket, so read it as a range; at least 10 attempts with content in the window). A
+              healthy provider answers in a few seconds whatever the context size;
               a steady 20-45 s on every account is the provider's admission queue, and mid-stream overloads
               (LlmRouterProviderOverloadShareHigh) usually follow. Nothing in the router changes this: do not
               release bindings, re-key or repoint routes. Per account: the same quantile by (account, le).
