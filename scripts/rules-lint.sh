@@ -120,15 +120,12 @@ fi
 
 # `promtool test rules` resolves each fixture's `rule_files:` RELATIVE TO THE FIXTURE, so the
 # tests are copied in beside the extracted specs they name.
-# Fixtures are siblings <rule-file-basename>.test.yaml or
-# <rule-file-basename>.<scenario>.test.yaml. Companions allow a different global
-# evaluation interval (e.g. a 90-day renewal simulation) without silently leaving
-# that scenario out of CI. Discovery still follows the actual rule manifests.
+# A fixture is the sibling <rule-file-basename>.test.yaml, so discovery follows the rules rather
+# than a second glob that could drift away from them.
 TEST_FILES=()
 for rf in "${RULE_FILES[@]}"; do
-  for cand in "${rf%.*}".test.yaml "${rf%.*}".*.test.yaml; do
-    [ -f "$cand" ] && TEST_FILES+=("$cand")
-  done
+  cand="${rf%.*}.test.yaml"
+  [ -f "$cand" ] && TEST_FILES+=("$cand")
 done
 if [ "${#TEST_FILES[@]}" -gt 0 ]; then
   CONTAINER_TESTS=()

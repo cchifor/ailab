@@ -54,16 +54,11 @@ denied.
 | Project | Slots | Namespaces | Flux (`flux-system`, get by name) | Defined in |
 |---|---|---|---|---|
 | Trueswarm | `platform-dw2`, `platform-dw4` | `trueswarm`, `trueswarm-admin`, `trueswarm-recovery`, plus `get` on the 5 `trueswarm-executor-*` ValidatingAdmissionPolicies | Kustomizations `trueswarm`, `trueswarm-git-auth`, `trueswarm-admin*`, `trueswarm-platform-*`; GitRepositories `trueswarm`, `trueswarm-admin`; Jobs `trueswarm{,-admin}-git-bootstrap`, `trueswarm-admin-executor-bootstrap` | ailab `kubernetes/apps/clusters/ai/trueswarm{,-admin}-observer.yaml` **and** `cchifor/trueswarm-admin` `deploy/{platform,foundation,recovery-foundation,security}/observer.yaml` (+ `deploy/platform/backup-observer.yaml`) |
-| Forge object-store certificate bootstrap ([platform#2221](https://git.chifor.me/cchifor/platform/pulls/2221); **temporary, remove by 2026-10-24**, [#1225](https://git.chifor.me/cchifor/ailab/issues/1225); ADR 0028 amendment 2026-10-10) | all live slots (`platform-dw1`..`platform-dw4`) | `strive-ailab`: `get` Certificate `objectstore-forge-tls`; cluster: `get` ClusterIssuer `ailab-ca` | Kustomizations `platform`, `platform-objectstore`, `platform-objectstore-certificate`; GitRepository `platform` | ailab `kubernetes/apps/infrastructure/platform-access/rbac.yaml` (`forge-objectstore-cert-observer`) |
 
 ```sh
 platform kubectl -n trueswarm-admin get deploy,jobs,clusters.postgresql.cnpg.io,backups.postgresql.cnpg.io
 platform kubectl -n trueswarm logs job/<migration-job>
 platform kubectl -n flux-system get kustomization trueswarm-admin-migration -o wide   # by name; a bare `get kustomizations` is denied
-# forge object-store certificate bootstrap (every slot, until 2026-10-24)
-platform kubectl get clusterissuer ailab-ca -o jsonpath='{.status.conditions}'
-platform kubectl -n flux-system get kustomization platform-objectstore -o jsonpath='{.spec.dependsOn}'
-platform kubectl -n strive-ailab get certificate objectstore-forge-tls -o jsonpath='{.metadata.generation} {.status.conditions}'
 ```
 
 The worker needs nothing new for this. It is the same ServiceAccount and the same
@@ -256,7 +251,7 @@ the same live set, and retired slots must appear in both `RETIRED_SLOTS` lists:
 | 7 | `kubernetes/infra/dev-workers/variables.tf` | the map key |
 | 8 | `inventory/hosts.yml` | the host |
 | 9 | `kubernetes/apps/trueswarm-e2e-tokens/token-sync.yaml` (ADR 0035) | `LIVE_SLOTS` — **in both the CronJob and the bootstrap Job**; the next run drops the slot from both app Secrets |
-| 10 | project-scoped grants: `kubernetes/apps/clusters/ai/*-observer.yaml` and the purpose-named grants in `platform-access/rbac.yaml` (`relay-r0-observer-dw4`, `forge-objectstore-cert-observer` until 2026-10-24) (CI-checked), and the **`cchifor/trueswarm-admin`** repo's `deploy/*/observer.yaml` + `deploy/*/backup-observer.yaml` (NOT CI-checked from here) | drop the slot's subject; re-home the grant if the project's agent moves |
+| 10 | project-scoped grants: `kubernetes/apps/clusters/ai/*-observer.yaml` and the purpose-named grants in `platform-access/rbac.yaml` (`relay-r0-observer-dw4`) (CI-checked), and the **`cchifor/trueswarm-admin`** repo's `deploy/*/observer.yaml` + `deploy/*/backup-observer.yaml` (NOT CI-checked from here) | drop the slot's subject; re-home the grant if the project's agent moves |
 
 ```bash
 python3 scripts/check-slot-enumerations.py   # prints every enumeration and its set; exits 1 on a DIFF
@@ -277,80 +272,6 @@ in a namespace whose workloads hold credentials the worker must not reach by por
 ClusterRole is bound to every worker at once, and the ansible health check asserts those exact
 denials on every playbook run (it would go red, which is the point).
 
-## Temporary objectstore recovery observer (remove by 2026-10-18)
-
-`objectstore-backup-observer-dw2` lets only `platform-dw2` read/list Velero
-`backups`, `podvolumebackups`, `restores` and `podvolumerestores` in `velero`.
-The storage rollout in platform #2219 needs volume-specific recovery evidence;
-configured Kopia schedules alone do not prove a usable copy. Backup names are
-timestamped, so discovery needs `list`; the grant consequently exposes these
-four CR kinds across that namespace. This reveals the backed-up pod/PVC/node
-inventory across protected namespaces, uploader types, repository URLs/paths
-and snapshot IDs, as well as spec/status. It does not expose backup contents or
-credentials and grants no restore creation, workload access or other writes.
-Restore-side reads check whether an earlier recovery operation already supplies
-the missing evidence; the existence or absence of that evidence is still unknown.
-
-After reconciliation, inspect `spec.pod.namespace` and the pod/PVC identity on
-the PodVolumeBackup records for `strive-ailab/objectstore-data`, then read their
-own phases, timestamps and related Backup results. A successful copy is still
-not a demonstrated restore. Restore qualification must use an isolated volume
-through a separately reviewed operation, never the production PVC.
-
-Remove both purpose-named RBAC documents, this paragraph and
-`scripts/tests/test_objectstore_backup_observer.py` after the investigation or
-by **2026-10-18**, whichever comes first. Track removal in
-[ailab #1242](https://git.chifor.me/cchifor/ailab/issues/1242); RBAC has no automatic
-expiry. The permission contract makes subsequent CI runs fail after that date
-while the grant remains; it does not revoke live permissions itself. The generic
-observer and every other slot remain unchanged.
-
-## Temporary objectstore monitoring observer (remove by 2026-10-18)
-
-`objectstore-monitor-observer-dw2` lets only `platform-dw2` read the named
-objectstore probe Deployment, Service, NetworkPolicy, Probe and PrometheusRule,
-and the named Prometheus Service and Prometheus custom resource in `monitoring`.
-It also permits **GET-only** service proxy requests to
-`http:kube-prometheus-stack-prometheus:9090`. This allows live scrape discovery,
-metric and rule checks for [ailab #1245](https://git.chifor.me/cchifor/ailab/pulls/1245)
-before the separate shared-storage rollout in platform #2219.
-
-The proxy exposes Prometheus's entire GET API, including stored metrics, targets,
-labels and rendered configuration. Kubernetes RBAC cannot restrict its query
-strings or URL suffixes to the objectstore job. Use only the observations below;
-never print unrelated telemetry or retrieve configuration. Prometheus enables its
-remote-write receiver, but writes use POST, which this grant does not permit.
-There is no pod forwarding, workload mutation, Secret access, exec, credential
-minting, list or watch grant. Other slots and the generic observer are unchanged.
-
-After reviewer merge and reconciliation:
-
-The Probe in #1245 explicitly sets `spec.jobName: objectstore-tls`, so the query
-below uses its stable `job` label rather than the operator-generated scrape-pool
-name. Recheck that field if the probe is changed.
-
-```bash
-platform kubectl -n monitoring get deployment objectstore-tls-probe
-platform kubectl -n monitoring get probe objectstore-tls
-platform kubectl -n monitoring get prometheusrule objectstore-tls
-platform kubectl get --raw '/api/v1/namespaces/monitoring/services/http:kube-prometheus-stack-prometheus:9090/proxy/api/v1/query?query=up%7Bjob%3D%22objectstore-tls%22%7D'
-```
-
-Observe the exact job's target health and rule evaluation, `probe_success`,
-`probe_ssl_earliest_cert_expiry`, the Certificate expiry metric and the Service
-inventory gate. Before the HTTPS Service exists, a failed handshake is expected
-and all five gated alerts should be inactive; exporter readiness and scrape
-success can still be proven. Scrape discovery does not prove tailnet access,
-network-policy denial cases or actual notification delivery. Do not send a test
-notification as part of this read-only qualification.
-
-Remove both RBAC documents, this section and
-`scripts/tests/test_objectstore_monitor_observer.py` after qualification or by
-**2026-10-18**, whichever comes first. Track removal in
-[ailab #1247](https://git.chifor.me/cchifor/ailab/issues/1247). RBAC has no runtime
-expiry; the contract test fails subsequent CI after the deadline but does not
-revoke the live grant.
-
 ## Failure modes
 
 | Symptom | Cause | Fix |
@@ -363,35 +284,3 @@ revoke the live grant.
 | `platform psql`: "FATAL: too many connections for role" | more than 10 concurrent sessions for this slot | close sessions; `pg_stat_activity` (readable via `pg_monitor`) shows them. The sync also refuses to rotate while a slot is at its limit (it would commit a password it could not then prove), so a run may exit with "capacity or transport" until the sessions drain — that is the safe outcome, not a fault |
 | A query on a replica is cancelled mid-scan | `max_standby_streaming_delay` | re-run with `--rw` |
 | `KubeJobFailed` on `openbao-platform-pg-sync` | see the Job's log — OpenBao login (role missing / sealed), Postgres unreachable, or a proof failure | nothing expires for 14 days; fix and let the next run converge |
-
-## Temporary objectstore restore planning observer (remove by 2026-10-18)
-
-`objectstore-restore-observer-dw2` permits only `platform-dw2` to read four
-named objects: the Velero Deployment and node-agent DaemonSet in `velero`,
-StorageClass `nfs-csi`, and production PV
-`pvc-73726d9c-d190-4de9-8057-f17bc8996a3b`. Its ADR 0028 amendment explains
-the cluster-scoped exception. Existing Backup/PVB/Restore/PVR observation is
-unchanged. This grant does not create a restore, touch storage, or add Secret,
-backup-download, exec, port-forward, log or write access.
-
-Read only the required fields, preserving the full image digest when available:
-
-```sh
-platform kubectl -n velero get deployment velero -o jsonpath='{.spec.template.spec.containers[*].image}'
-platform kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.containers[*].image}'
-platform kubectl get storageclass nfs-csi -o jsonpath='{.provisioner} {.reclaimPolicy} {.volumeBindingMode}'
-platform kubectl get pv pvc-73726d9c-d190-4de9-8057-f17bc8996a3b -o jsonpath='{.metadata.uid} {.spec.claimRef.uid} {.spec.csi.driver} {.spec.csi.volumeHandle} {.spec.persistentVolumeReclaimPolicy}'
-```
-
-The PV includes internal storage topology and may name credential references;
-the workloads include full pod templates. Keep evidence to image identities,
-volume identity and provisioning behavior; do not print environment values or
-fetch secret-bearing backup archives. See the staged
-[isolated restore plan](objectstore-isolated-restore.md) before preparing any
-activating change.
-
-Remove all four same-named RBAC objects and
-`scripts/tests/test_objectstore_restore_observer.py` after planning or by
-**2026-10-18**, whichever comes first. Removal is tracked by
-[ailab #1242](https://git.chifor.me/cchifor/ailab/issues/1242); the annotation
-has no automatic enforcement.
