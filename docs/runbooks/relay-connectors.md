@@ -20,16 +20,28 @@ workflow run 87536, 2026-10-15). The upgraded hub serves the same manifest at
 | Linux amd64 SHA-256 | `d75e9439cec0a31bb6c84c9cca204a7121b93131c0e22d685c6b4c7c41677dcc` |
 | Linux arm64 SHA-256 | `3472334e1d141b7afb442f3061db0f5a70a289f1ce1f2b796b3740b6279d2ea2` |
 
-The pins were checked on 2026-10-15 against the release's `manifest.json`,
-`SHA256SUMS`, `deployment-images-87536.json`, and the downloaded binaries. All of
-them report source commit `af901bb8621970b20cb77b83365241ea1b22b17c` and these
-digests. v0.7.2 carries two fixes:
+The pins were checked on 2026-10-15 against the release's `manifest.json` and
+`SHA256SUMS` and the downloaded binaries; all three agree on these digests.
+`manifest.json` and `deployment-images-87536.json` both name source commit
+`af901bb8621970b20cb77b83365241ea1b22b17c`, and the latter records the hub image digest.
 
-- v0.7.1's byte-exact pane stream. Non-UTF-8 pane output no longer takes an
-  agent offline.
-- Agent identity across tmux server restarts. A reboot reattaches each
-  restored pane to its existing agent instead of creating a duplicate, and
-  agents whose panes are gone are removed.
+[Relay #159](https://git.chifor.me/cchifor/relay/pulls/159) describes what v0.7.2
+carries. In summary:
+
+- **Identity across tmux server restarts.** A reboot reattaches each restored
+  pane to its existing agent instead of creating a duplicate. Agents whose panes
+  are gone are removed.
+- **Server-scoped tombstones (schema 51).** A deleted agent's tombstone matches
+  only its own tmux server instance and is pruned once that server ends. After
+  a 0.7.2 connector's first scan, `agent_tombstones` holds only deletions in
+  servers that still run.
+- **Pane observer restart.** An ended observer is restarted on the next scan
+  instead of leaving the agent Offline until the host connection drops.
+- **Byte-exact pane stream (from v0.7.1).** Non-UTF-8 output no longer ends an
+  observer.
+
+Rolling the hub back to v0.7.1 needs only the image revert. v0.7.1's tombstone,
+deletion and broker tests pass against a schema-51 database.
 
 The connector role only changes the content-addressed binary pin. Its service
 unit, identity checks and activation gates are unchanged.
