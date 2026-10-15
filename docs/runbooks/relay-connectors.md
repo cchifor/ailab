@@ -39,13 +39,19 @@ builds on. In summary:
   failed leaves its agents as they were; four failures in a row report it absent.
 - **Explicit panes, client address, dead hosts and "Last seen" (v0.7.3).**
   - Explicitly registered panes stay observed.
-  - Rate limits key on the hub's `RELAY_CLIENT_ADDRESS_HEADER` (`cf-connecting-ip`).
+  - Rate limits key on the hub's `RELAY_CLIENT_ADDRESS_HEADER` (`cf-connecting-ip`). The
+    pending access-request cap is then 20 per client address. The global ceiling of 500
+    pending requests across all addresses still applies, and IPv6 addresses are not grouped
+    by prefix.
   - A silent host is terminated after 40 s.
   - A reconnect leaves offline agents' last-seen times alone.
 
 Rolling the hub back is only an image revert, with no database restore and no connector
 downgrade. v0.7.3 adds no schema change, and a v0.7.2 hub drops the connector's new `scans`
-field like any other unknown discovery field. For a rollback to v0.7.1 (schema 51 stays),
+field like any other unknown discovery field. An earlier hub also ignores
+`RELAY_CLIENT_ADDRESS_HEADER`, so after a revert Relay's request logs again show
+cloudflared's pod address as `remoteAddress`, and rate limits are shared again. For a rollback
+to v0.7.1 (schema 51 stays),
 each of these was checked on 2026-10-15 against an isolated database:
 
 - v0.7.1's migrator, which knows migrations up to 050, exits cleanly against a

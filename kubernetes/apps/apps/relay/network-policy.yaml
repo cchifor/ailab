@@ -12,6 +12,9 @@ spec:
   policyTypes:
   - Ingress
   - Egress
+  # Only cloudflared may reach Relay. relay.yaml sets RELAY_CLIENT_ADDRESS_HEADER=cf-connecting-ip,
+  # which is trustworthy only while this is the sole ingress: adding another source here would let
+  # it choose its own client address. Remove that setting first.
   ingress:
   - from:
     - namespaceSelector:
