@@ -78,7 +78,7 @@ spec:
               sum by (route) (rate(llm_router_requests_total{job="llm-router"}[15m]))
             ) > 0.10
             and
-            sum by (route) (rate(llm_router_requests_total{job="llm-router"}[15m])) > (10 / 900)
+            sum by (route) (rate(llm_router_requests_total{job="llm-router"}[15m])) >= (10 / 900)
           for: 15m
           labels: { severity: warning }
           annotations:
@@ -105,7 +105,7 @@ spec:
               sum by (provider) (rate(llm_router_attempts_total{job="llm-router"}[15m]))
             ) > 0.10
             and
-            sum by (provider) (rate(llm_router_attempts_total{job="llm-router"}[15m])) > (10 / 900)
+            sum by (provider) (rate(llm_router_attempts_total{job="llm-router"}[15m])) >= (10 / 900)
           for: 15m
           labels: { severity: warning }
           annotations:
@@ -130,7 +130,7 @@ spec:
           expr: |
             histogram_quantile(0.5, sum by (provider, le) (rate(llm_router_first_content_seconds_bucket{job="llm-router"}[15m]))) > 20
             and
-            sum by (provider) (rate(llm_router_first_content_seconds_count{job="llm-router"}[15m])) > (10 / 900)
+            sum by (provider) (rate(llm_router_first_content_seconds_count{job="llm-router"}[15m])) >= (10 / 900)
           for: 10m
           labels: { severity: warning }
           annotations:
