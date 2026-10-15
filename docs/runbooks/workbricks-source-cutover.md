@@ -15,8 +15,12 @@ Validate the encrypted field without printing its value:
 
 ```bash
 export SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey
-sops decrypt kubernetes/apps/platform-bootstrap/deploy-key.sops.yaml \
-  | yq -e '.stringData.known_hosts | length > 0' >/dev/null
+known_hosts="$(sops decrypt kubernetes/apps/platform-bootstrap/deploy-key.sops.yaml \
+  | yq -r '.stringData.known_hosts')"
+printf '%s\n' "$known_hosts" \
+  | grep -Eq '(^|[[:space:],])\[?git\.chifor\.me\]?(:[0-9]+)?[[:space:]]+(ssh-|ecdsa-)'
+printf '%s\n' "$known_hosts" \
+  | ! grep -Eq '(^|[[:space:],])github\.com([[:space:],]|$)'
 ```
 
 After the Workbricks deploy key has read access and the PR is merged, verify
