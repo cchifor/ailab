@@ -4,6 +4,8 @@
 #
 # cchifor/workbricks is PRIVATE, so this clones over SSH with a read-only deploy
 # key. The key Secret (platform-deploy-key, flux-system) is SOPS-encrypted under
+# Before merging, refresh its encrypted `known_hosts` entry with the verified
+# SSH host key for git.chifor.me; a GitHub host key does not authenticate Gitea.
 # kubernetes/apps/platform-bootstrap and applied by the platform-git-auth
 # Kustomization. Pin ref.branch to a tag/sha for immutable deploys once stabilized.
 apiVersion: source.toolkit.fluxcd.io/v1
