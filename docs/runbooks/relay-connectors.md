@@ -40,8 +40,15 @@ carries. In summary:
 - **Byte-exact pane stream (from v0.7.1).** Non-UTF-8 output no longer ends an
   observer.
 
-Rolling the hub back to v0.7.1 needs only the image revert. v0.7.1's tombstone,
-deletion and broker tests pass against a schema-51 database.
+Rolling the hub back to v0.7.1 is only an image revert, with no database restore and no
+connector downgrade. Each of these was checked on 2026-10-15 against an isolated
+database:
+
+- v0.7.1's migrator, which knows migrations up to 050, exits cleanly against a
+  schema-51 database.
+- v0.7.1's tombstone, deletion and broker tests pass on schema 51.
+- v0.7.1's real-tmux end-to-end suite passes with the 0.7.2 connector. The v0.7.1
+  hub ignores the new start-time, position and server-report fields.
 
 The connector role only changes the content-addressed binary pin. Its service
 unit, identity checks and activation gates are unchanged.
