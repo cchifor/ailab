@@ -1,6 +1,8 @@
 # `promtool test rules` fixtures for llm-router-rules.yaml. Run by scripts/rules-lint.sh on every
 # PR, after `promtool check rules`. Every rule is asserted both ways: it fires on the shape of the
-# 2026-10-14 incident, and it stays silent on the healthy shape it must not page for.
+# 2026-10-14 incident (the attribution rules on the 2026-10-15 window: a fifth of a provider's
+# attempts overloaded, a 31 s queue ahead of every first content), and it stays silent on the
+# healthy shape it must not page for.
 #
 # `rule_files` is the extracted spec name (rules-lint.sh hands promtool the `spec:` body under the
 # manifest's own basename).
@@ -101,6 +103,142 @@ tests:
       # Not yet at the 15m hold.
       - eval_time: 10m
         alertname: LlmRouterFailureRatioHigh
+        exp_alerts: []
+
+  # ------------------------------------------------------------ provider overload share
+  - interval: 1m
+    name: a provider overloaded on a fifth of its attempts pages; failures of other kinds and a quiet provider do not
+    input_series:
+      # codex: 8 completions and 2 overloads a minute (20 %), across two accounts, as the 2026-10-15 window was.
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex",provider="codex",outcome="complete",code="",upstream_code=""}'
+        values: "0+5x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex-2",provider="codex",outcome="complete",code="",upstream_code=""}'
+        values: "0+3x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex",provider="codex",outcome="failed",code="upstream",upstream_code="server_is_overloaded"}'
+        values: "0+1x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex-2",provider="codex",outcome="failed",code="unavailable",upstream_code="server_error"}'
+        values: "0+1x40"
+      # claude: 2 of 7 attempts a minute fail, but on timeouts, not overloads.
+      - series: 'llm_router_attempts_total{job="llm-router",account="claude",provider="claude",outcome="complete",code="",upstream_code=""}'
+        values: "0+5x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="claude",provider="claude",outcome="failed",code="TIMEOUT",upstream_code=""}'
+        values: "0+2x40"
+      # local: every attempt overloaded, but 4 attempts in 15 minutes is under the 10-attempt gate.
+      - series: 'llm_router_attempts_total{job="llm-router",account="lan-1",provider="local",outcome="failed",code="upstream",upstream_code="server_error"}'
+        values: "0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 9 9 9 9 10"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterProviderOverloadShareHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: codex
+            exp_annotations:
+              summary: "llm-router: 20% of codex attempts overloaded upstream"
+              description: >-
+                Over the last 15 minutes 20% of the router's upstream attempts on
+                provider codex ended on an overload (server_is_overloaded or server_error; at
+                least 10 attempts in the window). The healthy baseline is under 3 %. This is the provider's
+                capacity, not a route, a key or a conversation binding: do not release bindings, re-key or
+                repoint routes for it, and do not raise concurrency. Clients that retry (the Codex CLI on
+                server_error) recover their turns; the cost is latency and quota. Confirm it is every account
+                with sum by (account) of the same ratio, check status.openai.com, and see
+                LlmRouterFirstContentSlow for the queue ahead of it. Runbook: docs/runbooks/llm-router.md
+                § Overload attribution.
+      # Not yet at the 15m hold.
+      - eval_time: 10m
+        alertname: LlmRouterProviderOverloadShareHigh
+        exp_alerts: []
+
+  - interval: 1m
+    name: a provider at a steady healthy 3% (1 overload in 33 attempts, every minute) stays quiet
+    input_series:
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex-5",provider="codex",outcome="complete",code="",upstream_code=""}'
+        values: "0+32x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex-5",provider="codex",outcome="failed",code="upstream",upstream_code="server_is_overloaded"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterProviderOverloadShareHigh
+        exp_alerts: []
+
+  # ------------------------------------------------------------ time to first content
+  - interval: 1m
+    name: a provider queueing every request for 31s pages after 10m; one answering in 2.5s and a quiet one do not
+    input_series:
+      # codex: 2 attempts a minute, every first content at 31 s (the buckets up to 30 s stay empty).
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="0.5"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="1"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="2"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="3"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="5"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="8"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="12"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="20"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="30"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="45"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="60"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="120"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="300"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="codex",provider="codex",le="+Inf"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_count{job="llm-router",account="codex",provider="codex"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_sum{job="llm-router",account="codex",provider="codex"}'
+        values: "0+62x40"
+      # claude: 2 attempts a minute, first content at 2.5 s (a reduced bucket set; the quantile needs +Inf).
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="claude",provider="claude",le="2"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="claude",provider="claude",le="3"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="claude",provider="claude",le="30"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="claude",provider="claude",le="+Inf"}'
+        values: "0+2x40"
+      - series: 'llm_router_first_content_seconds_count{job="llm-router",account="claude",provider="claude"}'
+        values: "0+2x40"
+      # local: every first content past a minute, but 4 attempts in 15 minutes is under the gate.
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="lan-1",provider="local",le="60"}'
+        values: "0x40"
+      - series: 'llm_router_first_content_seconds_bucket{job="llm-router",account="lan-1",provider="local",le="+Inf"}'
+        values: "0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 9 9 9 9 10"
+      - series: 'llm_router_first_content_seconds_count{job="llm-router",account="lan-1",provider="local"}'
+        values: "0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 9 9 9 9 10"
+    alert_rule_test:
+      # Every observation in the (30, 45] bucket: the median interpolates to 38 s.
+      - eval_time: 26m
+        alertname: LlmRouterFirstContentSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: codex
+            exp_annotations:
+              summary: "llm-router: codex median time to first content is about 38 s"
+              description: >-
+                Over the last 15 minutes the median time from an attempt's start to its first content on
+                provider codex was about 38 s (interpolated within a
+                histogram bucket, so read it as a range; at least 10 attempts with content in the window). A
+                healthy provider answers in a few seconds whatever the context size;
+                a steady 20-45 s on every account is the provider's admission queue, and mid-stream overloads
+                (LlmRouterProviderOverloadShareHigh) usually follow. Nothing in the router changes this: do not
+                release bindings, re-key or repoint routes. Per account: the same quantile by (account, le).
+                Runbook: docs/runbooks/llm-router.md § Overload attribution.
+      # Not yet at the 10m hold.
+      - eval_time: 8m
+        alertname: LlmRouterFirstContentSlow
         exp_alerts: []
 
   # ------------------------------------------------------------ limits
