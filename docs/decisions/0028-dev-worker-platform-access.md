@@ -333,6 +333,12 @@ apply every minute instead.
 annotation records the date. Kubernetes does not enforce it. The grant lets the workers observe and
 record. Merging #2221 and activating the later TLS stage stay owner decisions.
 
+**Closed 2026-10-15.** The owner closed platform #2221 and #2219 without merging (no consumer
+of the private Forge endpoint exists yet, and the eventual design is a dedicated Forge store, not a
+sidecar on the shared provider). All six `forge-objectstore-cert-observer` objects were removed
+from `platform-access/rbac.yaml` ahead of the 2026-10-24 deadline; [ailab#1225](https://git.chifor.me/cchifor/ailab/issues/1225)
+is closed by that removal.
+
 ## Amendment 2026-10-11 — temporary restore planning observer (dw2)
 
 **Trigger.** Platform [#2219](https://git.chifor.me/cchifor/platform/pulls/2219)
@@ -363,6 +369,13 @@ planning or by **2026-10-18**, whichever comes first, tracked by
 [ailab #1242](https://git.chifor.me/cchifor/ailab/issues/1242). The date is an
 explicit cleanup obligation; RBAC has no automatic expiry. Future scratch
 namespace observation requires a separately reviewed grant.
+
+**Closed 2026-10-15.** Platform #2219 was closed without merging, so the restore drill it needed
+is no longer owed. The four `objectstore-restore-observer-dw2` objects, the `objectstore-backup-observer-dw2`
+and `objectstore-monitor-observer-dw2` grants that served the same investigation, their contract
+tests and runbook sections were removed ahead of the 2026-10-18 deadline;
+[ailab#1242](https://git.chifor.me/cchifor/ailab/issues/1242) and
+[ailab#1247](https://git.chifor.me/cchifor/ailab/issues/1247) are closed by that removal.
 
 ## Follow-ups
 
