@@ -17,7 +17,7 @@ Validate the encrypted field without printing its value:
 set -euo pipefail
 export SOPS_AGE_KEY_FILE=kubernetes/infra/_out/age.agekey
 known_hosts="$(sops decrypt kubernetes/apps/platform-bootstrap/deploy-key.sops.yaml \
-  | yq -r '.stringData.known_hosts')"
+  | yq -r '.data.known_hosts' | base64 --decode)"
 if ! printf '%s\n' "$known_hosts" \
   | grep -Eq '(^|[[:space:],])\[?git\.chifor\.me\]?(:[0-9]+)?[[:space:]]+(ssh-|ecdsa-)'; then
   printf '%s\n' 'known_hosts has no git.chifor.me SSH host key entry' >&2
