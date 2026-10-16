@@ -55,7 +55,7 @@ log = logging.getLogger("ci-rerun-watchdog")
 
 # ansible/roles/pr_reviewer/defaults/main.yml pr_reviewer_repos - the repos the reviewbots watch.
 DEFAULT_REPOS = (
-    "cchifor/ailab,cchifor/agentforge,cchifor/workbricks,cchifor/platform,"
+    "cchifor/ailab,cchifor/agentforge,cchifor/workbricks,"
     "cchifor/agentforge-platform,cchifor/dsh-team-conductor"
 )
 SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"

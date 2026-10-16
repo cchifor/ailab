@@ -279,7 +279,7 @@ class GiteaApiShTest(unittest.TestCase):
         for text in ("approve-pin 0123abc", "approve-pin " + "f" * 40, "approve-pin 0123ABC\n"):
             with self.subTest(text=text):
                 raw = json.dumps({"body": text}).encode()
-                r, sent = self.send("POST", "/repos/cchifor/platform/issues/7/comments", raw,
+                r, sent = self.send("POST", "/repos/cchifor/workbricks/issues/7/comments", raw,
                                     AILAB_RUN_ID=self.RUN)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertEqual(sent, raw)

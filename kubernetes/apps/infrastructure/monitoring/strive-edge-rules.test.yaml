@@ -42,12 +42,12 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              namespace: platform-edge
+              namespace: workbricks-edge
               service: traefik-metrics
             exp_annotations:
-              summary: "Traefik metrics are not being scraped (platform-edge/traefik-metrics)"
+              summary: "Traefik metrics are not being scraped (workbricks-edge/traefik-metrics)"
               description: >-
-                There is no `up` series for service traefik-metrics in namespace platform-edge, or a
+                There is no `up` series for service traefik-metrics in namespace workbricks-edge, or a
                 Traefik target reports 0, and it has been so for 15m. Until it is back the StriveEdge*
                 rules cannot fire. Check the ServiceMonitor `traefik` carries
                 `release: kube-prometheus-stack`, that Service `traefik-metrics` exists with port
@@ -56,11 +56,11 @@ tests:
   - interval: 1m
     name: one unscrapeable Traefik pod pages, the healthy two do not
     input_series:
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-a"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-a"}'
         values: "0x40"
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-b"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-b"}'
         values: "1x40"
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-c"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-c"}'
         values: "1x40"
     alert_rule_test:
       - eval_time: 10m
@@ -71,13 +71,13 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              namespace: platform-edge
+              namespace: workbricks-edge
               service: traefik-metrics
               pod: traefik-a
             exp_annotations:
-              summary: "Traefik metrics are not being scraped (platform-edge/traefik-metrics)"
+              summary: "Traefik metrics are not being scraped (workbricks-edge/traefik-metrics)"
               description: >-
-                There is no `up` series for service traefik-metrics in namespace platform-edge, or a
+                There is no `up` series for service traefik-metrics in namespace workbricks-edge, or a
                 Traefik target reports 0, and it has been so for 15m. Until it is back the StriveEdge*
                 rules cannot fire. Check the ServiceMonitor `traefik` carries
                 `release: kube-prometheus-stack`, that Service `traefik-metrics` exists with port
@@ -88,11 +88,11 @@ tests:
     input_series:
       # A rollout: traefik-a leaves, traefik-d arrives, traefik-b is up throughout. Series are keyed
       # by pod, so the replacement is a new series and absent() never sees an empty set.
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-a"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-a"}'
         values: "1x15 _x25"
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-d"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-d"}'
         values: "_x15 1x25"
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-b"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-b"}'
         values: "1x40"
     alert_rule_test:
       - eval_time: 10m
@@ -110,9 +110,9 @@ tests:
     input_series:
       # All targets vanish for 10 samples, then return. absent() is true for part of the gap, the
       # `for: 15m` hold is what keeps this from paging.
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-a"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-a"}'
         values: "1x10 _x10 1x20"
-      - series: 'up{namespace="platform-edge",service="traefik-metrics",pod="traefik-b"}'
+      - series: 'up{namespace="workbricks-edge",service="traefik-metrics",pod="traefik-b"}'
         values: "1x10 _x10 1x20"
       - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
         values: "1x40"
@@ -130,17 +130,17 @@ tests:
     input_series:
       # Three Traefik pods, 2 req/s in total, 15% of it 5xx (+3 of every +20 per pod per 30s).
       # The series pre-exist (non-zero start), so rate() sees every event.
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "1000+17x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="502",pod="traefik-a"}'
         values: "10+3x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-b"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-b"}'
         values: "1000+17x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-b"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="500",pod="traefik-b"}'
         values: "10+3x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-c"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-c"}'
         values: "1000+17x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="503",pod="traefik-c"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="503",pod="traefik-c"}'
         values: "10+3x120"
     alert_rule_test:
       # The 10m `for:` has not elapsed yet.
@@ -163,9 +163,9 @@ tests:
   - interval: 30s
     name: the ratio alert resolves once the 5xx stop
     input_series:
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "1000+17x60 2020+20x100"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="502",pod="traefik-a"}'
         values: "10+3x60 190+0x100"
     alert_rule_test:
       - eval_time: 16m
@@ -189,9 +189,9 @@ tests:
     name: a ratio below 5% (1%) stays silent on the ratio rule and the burst rule
     input_series:
       # 1 req/s, 1% 5xx: ratio 0.01. 5xx per 10m ~ 6, below the burst's 10 as well.
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "1000+30x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="502",pod="traefik-a"}'
         values: "10+0x2 11+0x2 12+0x2 13+0x2 14+0x2 15+0x2 16+0x2 17+0x2 18+0x2 19+0x2 20+0x2 21+0x2 22+0x2 23+0x2 24+0x2 25+0x2 26+0x2 27+0x2 28+0x2 29+0x2 30+0x2 31+0x2 32+0x2 33+0x2 34+0x2 35+0x2 36+0x2 37+0x2 38+0x2 39+0x2 40+0x2 41+0x2 42+0x2 43+0x2 44+0x2 45+0x2 46+0x2 47+0x2 48+0x2 49+0x2"
     alert_rule_test:
       - eval_time: 20m
@@ -204,10 +204,10 @@ tests:
   - interval: 30s
     name: ONE isolated 5xx at moderate traffic pages nothing
     input_series:
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "1000+10x120"
       # A single 502 at about 10 minutes, then flat. A 1-in-300 blip: ratio ~0.3% at the peak.
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="502",pod="traefik-a"}'
         values: "5x20 6x100"
     alert_rule_test:
       - eval_time: 12m
@@ -228,7 +228,7 @@ tests:
     input_series:
       # 100% 5xx, but one response per two minutes (0.0083 req/s, below the 0.01 req/s guard) and
       # 5 per 10m (below the burst's 10). Only the traffic guard keeps the ratio rule quiet here.
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="502",pod="traefik-a"}'
         values: "100+1x40"
     alert_rule_test:
       - eval_time: 40m
@@ -241,9 +241,9 @@ tests:
   - interval: 30s
     name: no traffic at all (flat counters, 0/0) pages nothing
     input_series:
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "1000+0x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="502",pod="traefik-a"}'
         values: "5+0x120"
     alert_rule_test:
       - eval_time: 30m
@@ -261,7 +261,7 @@ tests:
       - series: 'up{job="kubelet",namespace="kube-system",service="kubelet"}'
         values: "1x120"
       # A different pod set with ONLY 200s: the 5xx series does not exist yet.
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "1000+10x120"
     alert_rule_test:
       - eval_time: 30m
@@ -274,12 +274,12 @@ tests:
   - interval: 30s
     name: 5xx on the metrics and websecure entrypoints and in other namespaces do not count
     input_series:
-      # Only entrypoint="web" in namespace platform-edge is the public edge.
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="metrics",code="500",pod="traefik-a"}'
+      # Only entrypoint="web" in namespace workbricks-edge is the public edge.
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="metrics",code="500",pod="traefik-a"}'
         values: "100+20x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="websecure",code="500",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="websecure",code="500",pod="traefik-a"}'
         values: "100+20x120"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "1000+30x120"
       - series: 'traefik_entrypoint_requests_total{namespace="other",entrypoint="web",code="500",pod="traefik-x"}'
         values: "100+20x120"
@@ -298,9 +298,9 @@ tests:
       # 20 req/s of healthy traffic keeps the ratio far below 5% (< 0.2%), so ONLY the burst rule can
       # fire. 18 5xx between 10:00 and 14:00 (+3 per tick, six ticks), then nothing - like the
       # incident, the burst stops by itself.
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "100000+600x200"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="500",pod="traefik-a"}'
         values: "5x20 8 11 14 17 20 23 23x174"
     alert_rule_test:
       - eval_time: 9m
@@ -330,11 +330,11 @@ tests:
   - interval: 30s
     name: the burst is summed across pods, no single pod needs to reach 10
     input_series:
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="500",pod="traefik-a"}'
         values: "5+1x40 45x100"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="502",pod="traefik-b"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="502",pod="traefik-b"}'
         values: "5+1x40 45x100"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "100000+600x140"
     alert_rule_test:
       # 20 minutes of one 5xx per 30 s on each pod: 40 per pod per 20 min, 20 in any 10m window.
@@ -354,9 +354,9 @@ tests:
   - interval: 30s
     name: fewer than 10 5xx in the window (6) stays silent
     input_series:
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="200",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="200",pod="traefik-a"}'
         values: "100000+600x200"
-      - series: 'traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code="500",pod="traefik-a"}'
+      - series: 'traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code="500",pod="traefik-a"}'
         values: "5x20 6 7 8 9 10 11 11x174"
     alert_rule_test:
       - eval_time: 14m
@@ -373,11 +373,11 @@ tests:
     input_series:
       # The E4 shape: a router 500 that the service handler never produced, so no service 500 series
       # exists. +1 per 30 s for 20 m (about 20 per 10m), then flat.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 45x80"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
         values: "1000+10x120"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
         values: "1000+10x120"
     alert_rule_test:
       - eval_time: 15m
@@ -407,14 +407,14 @@ tests:
     name: origin 5xx and an unreachable origin (500 and 502 in BOTH families) stay silent
     input_series:
       # Router and service count the same requests, so the difference is 0 however many there are.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 45x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 45x80"
       # Traefik's own 502 against an origin that refuses the connection is counted by the service handler too.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
         values: "9+2x40 89x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
         values: "9+2x40 89x80"
     alert_rule_test:
       - eval_time: 15m
@@ -429,9 +429,9 @@ tests:
     input_series:
       # Router counts 2 per tick (1 edge-generated + 1 origin), service counts the 1 origin per tick:
       # the difference is the edge-generated 1 per tick (E4 measured 14 router, 6 service, 8 edge).
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+2x40 85x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 45x80"
     alert_rule_test:
       - eval_time: 15m
@@ -456,14 +456,14 @@ tests:
   - interval: 30s
     name: it is per service - edge-generated 5xx on gatekeeper page that service alone, origin 5xx on web do not
     input_series:
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="503",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="503",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 45x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
         values: "1000+10x120"
       # A louder origin problem on another service: 3 per tick in BOTH families.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+3x40 125x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+3x40 125x80"
     alert_rule_test:
       - eval_time: 15m
@@ -489,12 +489,12 @@ tests:
     name: it sums over Traefik pods - two pods that are each below the threshold page together, one alone does not
     input_series:
       # Each pod: +1 every 5 ticks, exactly 2 in any 10m window (below 3). Two pods: 4, above it.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
         values: "5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4"
       # Control: another service with ONE slow pod series; alone it stays below the threshold and must not page.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5x4 6x4 7x4 8x4 9x4 10x4 11x4 12x4"
     alert_rule_test:
       - eval_time: 30m
@@ -521,17 +521,17 @@ tests:
     input_series:
       # pod-a ends at minute 20, pod-b starts a minute later with a fresh counter at 1. Same 1-per-tick cadence.
       # W: edge-generated only (router, no service 5xx). G: origin 5xx (router and service, equal).
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 _x80"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
         values: "_x41 1+1x78"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 _x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 _x80"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
         values: "_x41 1+1x78"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-b"}'
         values: "_x41 1+1x78"
     alert_rule_test:
       - eval_time: 25m
@@ -558,11 +558,11 @@ tests:
     input_series:
       # Router and service reset to 0 together at minute 10.5 and keep counting. G: origin 5xx. W: the router
       # alone resets and keeps counting edge-generated 5xx, which increase() still sees across the reset.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x20 0+1x60"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x20 0+1x60"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x20 0+1x60"
     alert_rule_test:
       - eval_time: 15m
@@ -589,9 +589,9 @@ tests:
     input_series:
       # Both series are created at minute 20 with value 1 (no earlier sample). W reaches 12 events and
       # keeps going; G stops at 3. increase() cannot see the first event of a series (see the header).
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x40 1+1x11 12x70"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x40 1 2 3 3x77"
     alert_rule_test:
       - eval_time: 25m
@@ -621,15 +621,15 @@ tests:
       # at 100. increase() of the new service series is 0 (its burst is before its first sample) while the
       # router's increase() sees the jump, extrapolated to 105.3. Without the born-series term this pages for
       # 105; with it at 1.0x it still pages for 5.3 (extrapolation), so the 1.1 factor is pinned here too.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "20x40 120x79"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x41 100x78"
       # gatekeeper, the control: the same shape with 10 origin 500s, then 8 edge-generated 500s (ForwardAuth)
       # one per tick. The edge share still pages: router 18 * 1.053 - service 10 * 1.1 = 7.9 at minute 25.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "20x40 30+1x8 38x71"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x41 10x78"
     alert_rule_test:
       - eval_time: 21m
@@ -680,17 +680,17 @@ tests:
       # 500s arrive inside one scrape: router 101, the service 500 series is created at 100. The router has no
       # sample in the hour before a window that starts after minute 10, so "older" must mean "first sample
       # before the service's first sample", not "seen before the window".
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x40 1x3 101x76"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x44 100x76"
       # gatekeeper, the control: the same staggered births (router at 20 with 1, service at 22 with 10 origin
       # 500s), then 8 ForwardAuth 500s one per tick: it pages, web beside it does not. Minute 25: router
       # 16 * 1.05 - service 10 * 1.1 = 5.8; minute 31 (the router's first sample, 21.5 m, is the window's
       # first): 18 * 1.053 - 11 = 7.9.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x40 1x3 11+1x8 19x68"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x44 10x76"
     alert_rule_test:
       - eval_time: 25m
@@ -737,16 +737,16 @@ tests:
       # series are both created at 12 inside one scrape. Both new series lose the same first scrape, so the
       # 502s net to 0 and the 8 edge-generated 500s page. Counting the new service series at full value here
       # (without its router being older) would subtract 12 and hide the 8.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "20x40 21+1x7 28x72"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x41 12x78"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x41 12x78"
       # gatekeeper: a pure origin burst on a brand-new code, both families created together at 50: silent.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x41 50x78"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
         values: "_x41 50x78"
     alert_rule_test:
       - eval_time: 25m
@@ -775,11 +775,11 @@ tests:
       # TraefikService, the service series carry the two children's names, so nothing joins, the zero-fill
       # applies and 1 origin 500 per tick pages as "edge-generated". No route uses a TraefikService today;
       # this pins the shape the alert description warns about (see the rule's header).
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-weighted@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-weighted@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+2x40 85x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-v1-80@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-v1-80@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 45x80"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-v2-80@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-v2-80@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+1x40 45x80"
     alert_rule_test:
       - eval_time: 15m
@@ -805,17 +805,17 @@ tests:
     name: two stray edge-generated 5xx, ForwardAuth 401s (router-only 4xx) and flat counters page nothing
     input_series:
       # Two stray router 500s with no service series: increase 2, below 3.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-a"}'
         values: "5x20 6 7 7x98"
       # The normal live shape: ForwardAuth refusals are router-only 401s, rising fast. Not a 5xx.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="401",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="401",method="GET",protocol="http",pod="traefik-a"}'
         values: "5+2x120"
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
         values: "1000+10x120"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
         values: "1000+10x120"
       # Flat counters: nothing happened in the window.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-keycloak-79d615decd89bc3a7b40@kubernetescrd",router="strive-ailab-keycloak-79d615decd89bc3a7b40@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-keycloak-79d615decd89bc3a7b40@kubernetescrd",router="strive-ailab-keycloak-79d615decd89bc3a7b40@kubernetescrd",code="502",method="GET",protocol="http",pod="traefik-a"}'
         values: "40x120"
     alert_rule_test:
       - eval_time: 12m
@@ -833,9 +833,9 @@ tests:
         values: "1x120"
       # A never-hit service has no series in either family (Traefik creates them on the first request);
       # what exists here is a busy neighbour with 200s only.
-      - series: 'traefik_router_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_router_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",router="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
         values: "1000+10x120"
-      - series: 'traefik_service_requests_total{namespace="platform-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
+      - series: 'traefik_service_requests_total{namespace="workbricks-edge",exported_service="strive-ailab-gatekeeper-122ddbcb16c62338409a@kubernetescrd",code="200",method="GET",protocol="http",pod="traefik-a"}'
         values: "1000+10x120"
       # A router 500 flood in a namespace that is not the public edge (a copy of the scrape elsewhere).
       - series: 'traefik_router_requests_total{namespace="other",exported_service="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",router="strive-ailab-web-e1fade25a5de4567b1ba@kubernetescrd",code="500",method="GET",protocol="http",pod="traefik-x"}'

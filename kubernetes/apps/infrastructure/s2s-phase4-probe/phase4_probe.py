@@ -26,7 +26,7 @@ failed, 2 = bad invocation. It never prints a token: the input tokens are never 
 access_token is decoded only for the claims asserted, and anything JWT-shaped in a printed
 refusal is redacted.
 
-Expected values come from gatekeeper at platform main ac123f047 (cited per check as
+Expected values come from gatekeeper at Workbricks main ac123f047 (cited per check as
 `infra/gatekeeper/src/app/gatekeeper/<file>:<line>`) and from the harness's request shape
 (`services/harness/src/plugins/identity-gatekeeper/s2s.ts`, cited as `s2s.ts:<line>`).
 

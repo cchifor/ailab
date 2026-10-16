@@ -32,11 +32,11 @@ SERVICE = "gitea-act-runner.service"
 WORKDIR = "/home/runner/act-runner/work"
 TZ = datetime.timezone(datetime.timedelta(hours=3))
 # Verbatim from cloud-ci-9's journal on 2026-10-12: the format fixture.
-CAPTURED = ('time="2026-10-12T13:56:15+03:00" level=info msg="task 434665 repo is cchifor/platform '
+CAPTURED = ('time="2026-10-12T13:56:15+03:00" level=info msg="task 434665 repo is cchifor/workbricks '
             'https://github.com https://git.chifor.me"')
 
 
-def task_msg(boot_s, task=4242, repo="cchifor/platform"):
+def task_msg(boot_s, task=4242, repo="cchifor/workbricks"):
     t = datetime.datetime.fromtimestamp(BTIME + boot_s, TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
     return f'time="{t[:-2]}:{t[-2:]}" level=info msg="task {task} repo is {repo} https://github.com https://git.chifor.me"'
 
@@ -200,7 +200,7 @@ class BoundaryTests(Base):
         self.fx.journal([[entry]])
         self.fx.run()
         st = self.fx.state()
-        self.assertEqual((st["b_task"], st["b_repo"]), ("434665", "cchifor/platform"))
+        self.assertEqual((st["b_task"], st["b_repo"]), ("434665", "cchifor/workbricks"))
         self.assertAlmostEqual(st["b_boot"], logged - BTIME - 5, places=3)
 
     def test_receive_lag_never_pushes_the_boundary_later(self):
@@ -380,7 +380,7 @@ class DockerTests(Base):
                      {"Name": "ghproj_data", "CreatedAt": iso(100), "Labels": {"com.docker.compose.project": "ghproj"}},
                      {"Name": "b" * 64, "CreatedAt": iso(100), "Labels": {"com.docker.volume.anonymous": ""}}],
             networks=[{"Id": "n1", "Name": "ghproj_default", "Created": iso(100), "Labels": {"com.docker.compose.project": "ghproj"}, "Containers": {}}])
-        self.fx.run(GITEA_CLEANUP_PEER_SERVICES="actions.runner.cchifor-platform.service")
+        self.fx.run(GITEA_CLEANUP_PEER_SERVICES="actions.runner.cchifor-workbricks.service")
         w = "\n".join(self.fx.would())
         self.assertIn("gitea-old", w)
         self.assertIn("gproj_data", w)

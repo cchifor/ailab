@@ -51,7 +51,7 @@ At the end, state which phases ran and what was skipped, and why.
   in a checkout with unrelated uncommitted work.
 - Read the repo's `AGENTS.md`, `CLAUDE.md`, `TESTING.md` — including nested ones covering
   the paths you will change — and `plans/` for prior art.
-- Reuse first: check https://git.chifor.me/cchifor/platform for existing components.
+- Reuse first: check https://git.chifor.me/cchifor/workbricks for existing components.
   Presume AGAINST new abstraction: generalize when a second consumer exists or is named,
   or when a genuine boundary (security wrapper, mandated extension point, testing seam)
   justifies it — never for speculative reuse.

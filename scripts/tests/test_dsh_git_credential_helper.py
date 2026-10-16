@@ -259,7 +259,7 @@ class HelperBehaviour(unittest.TestCase):
     def test_extra_request_keys_do_not_matter(self):
         # git also sends path=, username= (when the URL carries one), wwwauth[]=
         # and more. None of it changes the answer for the right authority.
-        desc = "capability[]=authtype\nprotocol=https\nhost=git.chifor.me\npath=cchifor/platform.git\nusername=whoever\n\n"
+        desc = "capability[]=authtype\nprotocol=https\nhost=git.chifor.me\npath=cchifor/workbricks.git\nusername=whoever\n\n"
         proc = _run("get", self.mount, stdin=desc)
         self.assertEqual(proc.stdout, f"username=dsh\npassword={PAT}\n")
 

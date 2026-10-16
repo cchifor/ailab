@@ -102,7 +102,7 @@
 
 - name: Install the runner systemd unit
   ansible.builtin.template:
-    src: actions.runner.cchifor-platform.service.j2
+    src: actions.runner.cchifor-workbricks.service.j2
     dest: "/etc/systemd/system/{{ github_runner_service }}"
     mode: "0644"
   notify: Restart github-runner

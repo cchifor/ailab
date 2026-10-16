@@ -8,7 +8,7 @@ from, not a manifest under test here). Every `kind: Kustomization` document
 in that directory names a `spec.path` this repo's own tooling can attempt to
 `kustomize build`.
 
-NOT EVERY ONE OF THOSE PATHS IS LOCAL. The agentforge-tenants, platform,
+NOT EVERY ONE OF THOSE PATHS IS LOCAL. The agentforge-tenants, workbricks,
 muse-stream, Trueswarm and cloudlab (monitoring) stages reference other repositories.
 Trueswarm's runtime and administrative stages are now sourced from the private
 cchifor/trueswarm-admin repository. Their paths are built and validated by that
@@ -34,7 +34,7 @@ then classifies each Kustomization by looking its reference UP in that table:
   * EXTERNAL — the resolved object's url is a different repo AND the object
                is a reviewed entry in `EXPECTED_EXTERNAL_SOURCES`, the closed
                allowlist of externally-sourced objects this step is ALLOWED
-               to skip (currently exactly `agentforge-tenants`, `platform` and
+               to skip (currently exactly `agentforge-tenants`, `workbricks` and
                `muse-stream`, `trueswarm`, `trueswarm-admin` and `cloudlab`). The path is excluded and the exclusion is printed
                to stderr so a CI log makes the gate's real coverage visible.
   * ANYTHING ELSE is a `DiscoveryError` — fail closed. That covers: no
@@ -125,7 +125,7 @@ LOCAL_REPO_HOSTS = frozenset(
 EXPECTED_EXTERNAL_SOURCES = frozenset(
     {
         ("flux-system", "agentforge-tenants"),
-        ("flux-system", "platform"),
+        ("flux-system", "workbricks"),
         ("flux-system", "muse-stream"),
         ("flux-system", "trueswarm"),
         ("flux-system", "trueswarm-admin"),

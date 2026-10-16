@@ -1,5 +1,5 @@
 ---
-# Guest swapfile (cchifor/platform#620) — an OOM reclaim valve so a heavy docker-compose e2e /
+# Guest swapfile (cchifor/workbricks#620) — an OOM reclaim valve so a heavy docker-compose e2e /
 # Playwright peak spills to the VM's own disk instead of tripping the kernel OOM-killer (exit 137,
 # "self-hosted runner lost communication"). The minimal cloud image ships no swap. Disk-backed (no
 # host-RAM cost); swappiness=10 keeps it a safety valve, not a first resort. Idempotent: the swapfile

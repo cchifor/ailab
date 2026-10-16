@@ -41,7 +41,7 @@ REQUIRED_PLATFORM = [
 ]
 ACK = "CI / owner-ack (pull_request)"
 GATE = "CI / ci-gate (pull_request)"
-RUN_URL = "/cchifor/platform/actions/runs/71276/jobs/471671"
+RUN_URL = "/cchifor/workbricks/actions/runs/71276/jobs/471671"
 
 FAKE_GIT = textwrap.dedent(f"""\
     #!/usr/bin/env bash
@@ -217,7 +217,7 @@ KUBE_PY = STATE_HELPERS + textwrap.dedent("""\
 
 def status(context, state, sid, url=None):
     return {"id": sid, "context": context, "status": state,
-            "target_url": url or "/cchifor/platform/actions/runs/71276/jobs/471600"}
+            "target_url": url or "/cchifor/workbricks/actions/runs/71276/jobs/471600"}
 
 
 def green(**overrides):
@@ -437,7 +437,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
         r = self.run_script("platform", "7", HEAD, polls="5", execute=False)
         self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
         self.assertIn("would wait", r.stdout)
-        pr_reads = [e for e in self.events() if e == "CALL ws GET /repos/cchifor/platform/pulls/7"]
+        pr_reads = [e for e in self.events() if e == "CALL ws GET /repos/cchifor/workbricks/pulls/7"]
         self.assertEqual(len(pr_reads), 1, "one gate pass, no polling")
         self.assert_nothing_but_reads()
 
@@ -708,9 +708,9 @@ class GiteaOwnerMergeTest(unittest.TestCase):
         r = self.run_script("platform", "7", HEAD, "--approve-pin", polls="6")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         owner = self.owner_calls()
-        self.assertIn(f'CALL owner POST /repos/cchifor/platform/issues/7/comments {{"body":"approve-pin {HEAD}"}}',
+        self.assertIn(f'CALL owner POST /repos/cchifor/workbricks/issues/7/comments {{"body":"approve-pin {HEAD}"}}',
                       owner)
-        self.assertIn("CALL owner POST /repos/cchifor/platform/actions/runs/71276/rerun-failed-jobs", owner)
+        self.assertIn("CALL owner POST /repos/cchifor/workbricks/actions/runs/71276/rerun-failed-jobs", owner)
         self.assertEqual(len(self.mints()), 2)
         self.assertEqual(len(self.deletes()), 2)
         # never hold a token across the wait: the first token is deleted before the post-pin status polls,

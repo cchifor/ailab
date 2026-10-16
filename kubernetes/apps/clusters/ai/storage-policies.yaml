@@ -8,12 +8,12 @@ spec:
   retryInterval: 1m
   timeout: 5m
   # Kyverno policies that shape the storage layer. They cannot live in `infrastructure` (where the
-  # trident HelmRelease is): Kyverno itself is delivered by `platform-kyverno`, which dependsOn
+  # trident HelmRelease is): Kyverno itself is delivered by `workbricks-kyverno`, which dependsOn
   # `infrastructure`, so a ClusterPolicy there would make the base layer wait on a CRD that is only
-  # installed after it — a cycle Flux never resolves. This Kustomization sits after platform-kyverno
+  # installed after it — a cycle Flux never resolves. This Kustomization sits after workbricks-kyverno
   # instead. It is admission-only mutation, so it needs nothing else to be Ready first.
   dependsOn:
-    - name: platform-kyverno
+    - name: workbricks-kyverno
   sourceRef:
     kind: GitRepository
     name: flux-system

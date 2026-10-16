@@ -5,7 +5,7 @@
 # staged through Postgres (dbfs), sustaining ~2.3MiB/s of WAL under CI load. Sizing below reflects that,
 # not the original MB-scale grafana/authelia footprint.
 #
-# Operator: cnpg-system (v1.24.x), installed by the external cchifor/platform repo — consumed
+# Operator: cnpg-system (v1.24.x), installed by the external cchifor/workbricks repo — consumed
 # dependency, documented in ADR 0016. Notes pinned to operator 1.24:
 #   - No `Database` CRD yet (CNPG >=1.25), so the second database is created via initdb postInitSQL
 #     (runs ONCE at first bootstrap, as superuser). On an already-bootstrapped cluster, create the
@@ -42,7 +42,7 @@ spec:
     # 40Gi -> 60Gi (2026-10-06, CNPGVolumeNearlyFull: 87% on both instances). The growth was NOT data:
     # action_task was 20 GB on disk for 1.7 GB of live rows, 19 GB of it TOAST. Gitea rewrites a
     # running task's whole log_indexes value (~4 bytes per log line, so up to 4.6 MB) on every runner
-    # log flush (~1/s), and cchifor/platform's e2e/load jobs logged 0.3-1.2M lines each — ~98% of them
+    # log flush (~1/s), and cchifor/workbricks's e2e/load jobs logged 0.3-1.2M lines each — ~98% of them
     # docker compose TTY progress redraws (fixed at the source: COMPOSE_ANSI=never, platform#2118). Autovacuum
     # could not recycle the dead TOAST as fast as 4-6 such jobs produced it, so the file kept extending
     # (11 GB used on 09-22 -> 37 GB on 10-06; +9.5 GB overnight 10-03/04). The 09-29 "gitea is 12 GB"

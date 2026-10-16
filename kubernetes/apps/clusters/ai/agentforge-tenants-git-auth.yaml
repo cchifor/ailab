@@ -2,7 +2,7 @@
 # clusters/ai sweep: the read-only SSH deploy-key Secret (agentforge-tenants-deploy-key) the
 # agentforge-tenants GitRepository clones with, AND the minimal-RBAC reconciler SA + ClusterRole/
 # -Binding it impersonates. Dedicated path kubernetes/apps/agentforge-tenants-bootstrap, same split
-# as platform-git-auth -> platform-bootstrap.
+# as workbricks-git-auth -> workbricks-bootstrap.
 #
 # No explicit dependsOn: the GitRepository simply retries each interval and clones successfully once
 # this Kustomization has applied the Secret; the tenant Kustomization's impersonation works once the

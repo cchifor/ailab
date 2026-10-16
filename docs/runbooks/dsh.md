@@ -256,7 +256,7 @@ contents**; the fields are operator-owned by design.
    done; [ -n "$ok" ] || { echo "kubelet did not project both files within ~3.5 min" >&2; exit 1; }
    # c. git, in a dsh session (the Landlock-confined shell is the thing under test, not kubectl
    #    exec). No pipe after git: a pipe would replace git's exit status with the reader's.
-   git ls-remote https://git.chifor.me/cchifor/platform.git > /dev/null && echo "forge auth OK"
+   git ls-remote https://git.chifor.me/cchifor/workbricks.git > /dev/null && echo "forge auth OK"
    ```
 
    `both` matches the key names in both shapes (`"GITEA_USER":"..."` in the Secret's `.data`, a bare

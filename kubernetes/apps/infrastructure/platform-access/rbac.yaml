@@ -164,7 +164,7 @@ automountServiceAccountToken: false
 ---
 # One RoleBinding per platform namespace. The ClusterRole is never ClusterRoleBound: a worker sees
 # these three namespaces and nothing else. strive-ailab = the services, the CNPG cluster, Valkey,
-# Hatchet, Keycloak; strive-sandboxes-ailab = the App sandboxes airlock runs; platform-edge = the
+# Hatchet, Keycloak; strive-sandboxes-ailab = the App sandboxes airlock runs; workbricks-edge = the
 # platform's own Traefik (routing questions). The subject list is the live slot list (header comment).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -200,7 +200,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: dev-worker-platform-observer
-  namespace: platform-edge
+  namespace: workbricks-edge
 subjects:
   - { kind: ServiceAccount, name: platform-dw1, namespace: platform-access }
   - { kind: ServiceAccount, name: platform-dw2, namespace: platform-access }

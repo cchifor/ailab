@@ -312,7 +312,7 @@ retired slot left in them, so a retirement must remove it here as well.
 | Where | Object | Grants |
 |---|---|---|
 | cluster | ClusterRole + ClusterRoleBinding | `get` ClusterIssuer `ailab-ca` |
-| `flux-system` | Role + RoleBinding | `get` Kustomizations `platform`, `platform-objectstore`, `platform-objectstore-certificate`; GitRepository `platform` |
+| `flux-system` | Role + RoleBinding | `get` Kustomizations `workbricks`, `platform-objectstore`, `platform-objectstore-certificate`; GitRepository `workbricks` |
 | `strive-ailab` | Role + RoleBinding | `get` Certificate `objectstore-forge-tls` |
 
 **The second cluster-scoped grant.** This is the exception the 2026-09-29 amendment requires its own
@@ -321,7 +321,7 @@ named object, and that object holds no secret material: its spec names the CA Se
 (`ailab-root-ca`, which stays denied) and its status is the `Ready` condition the runbook asks for.
 The Certificate exposes its Secret's name, DNS names and status. The private key stays in the
 denied Secret. Like the Trueswarm Flux grants, the Kustomization and GitRepository `get` exposes
-`secretRef` names (`sops-age`, `platform-deploy-key`) and the source URL, not a credential.
+`secretRef` names (`sops-age`, `workbricks-deploy-key`) and the source URL, not a credential.
 
 **Why `platform-access`, not `clusters/ai/`.** The `strive-ailab` Role needs a namespace that the
 `platform` Kustomization creates. The root `flux-system` Kustomization would fail its whole apply on

@@ -149,12 +149,12 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "min(up{namespace=\"platform-edge\",service=\"traefik-metrics\"})",
+              "expr": "min(up{namespace=\"workbricks-edge\",service=\"traefik-metrics\"})",
               "instant": true,
               "range": false
             }
           ],
-          "description": "up for service traefik-metrics in platform-edge (the platform E1a scrape, live since 2026-10-07). NOT SCRAPED means the target is gone; TraefikScrapeMissing fires after 15 minutes of it."
+          "description": "up for service traefik-metrics in workbricks-edge (the platform E1a scrape, live since 2026-10-07). NOT SCRAPED means the target is gone; TraefikScrapeMissing fires after 15 minutes of it."
         },
         {
           "id": 3,
@@ -207,7 +207,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))",
+              "expr": "sum(rate(traefik_entrypoint_requests_total{namespace=\"workbricks-edge\",entrypoint=\"web\"}[$__rate_interval]))",
               "instant": true,
               "range": false
             }
@@ -272,7 +272,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "100 * sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[$__rate_interval])) / sum(rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\"}[$__rate_interval]))",
+              "expr": "100 * sum(rate(traefik_entrypoint_requests_total{namespace=\"workbricks-edge\",entrypoint=\"web\",code=~\"5..\"}[$__rate_interval])) / sum(rate(traefik_entrypoint_requests_total{namespace=\"workbricks-edge\",entrypoint=\"web\"}[$__rate_interval]))",
               "instant": true,
               "range": false
             }
@@ -338,7 +338,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum(increase(traefik_entrypoint_requests_total{namespace=\"platform-edge\",entrypoint=\"web\",code=~\"5..\"}[10m]))",
+              "expr": "sum(increase(traefik_entrypoint_requests_total{namespace=\"workbricks-edge\",entrypoint=\"web\",code=~\"5..\"}[10m]))",
               "instant": true,
               "range": false
             }
@@ -461,7 +461,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum by (entrypoint) (rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\"}[$__rate_interval]))",
+              "expr": "sum by (entrypoint) (rate(traefik_entrypoint_requests_total{namespace=\"workbricks-edge\"}[$__rate_interval]))",
               "legendFormat": "{{entrypoint}}"
             }
           ],
@@ -508,7 +508,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum by (entrypoint, code) (rate(traefik_entrypoint_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval]))",
+              "expr": "sum by (entrypoint, code) (rate(traefik_entrypoint_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"}[$__rate_interval]))",
               "legendFormat": "{{entrypoint}} {{code}}"
             }
           ],
@@ -555,7 +555,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "topk(10, sum by (exported_service) (rate(traefik_service_requests_total{namespace=\"platform-edge\"}[$__rate_interval])))",
+              "expr": "topk(10, sum by (exported_service) (rate(traefik_service_requests_total{namespace=\"workbricks-edge\"}[$__rate_interval])))",
               "legendFormat": "{{exported_service}}"
             }
           ]
@@ -601,7 +601,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum by (exported_service, code) (rate(traefik_service_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval]))",
+              "expr": "sum by (exported_service, code) (rate(traefik_service_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"}[$__rate_interval]))",
               "legendFormat": "{{exported_service}} {{code}}"
             }
           ],
@@ -650,7 +650,7 @@ data:
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum by (exported_service) (increase(traefik_router_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval])) - (sum by (exported_service) (((sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval])) unless sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[1h] offset $__rate_interval))) and (min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_router_requests_total{namespace=\"platform-edge\",code=~\"5..\"})[$__rate_interval:30s])) < min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_service_requests_total{namespace=\"platform-edge\",code=~\"5..\"})[$__rate_interval:30s])))) * 1.1 or sum by (exported_service, code, method, protocol, pod) (increase(traefik_service_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval]))) or sum by (exported_service) (increase(traefik_router_requests_total{namespace=\"platform-edge\",code=~\"5..\"}[$__rate_interval])) * 0)",
+              "expr": "sum by (exported_service) (increase(traefik_router_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"}[$__rate_interval])) - (sum by (exported_service) (((sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"}[$__rate_interval])) unless sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"}[1h] offset $__rate_interval))) and (min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_router_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"})[$__rate_interval:30s])) < min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_service_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"})[$__rate_interval:30s])))) * 1.1 or sum by (exported_service, code, method, protocol, pod) (increase(traefik_service_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"}[$__rate_interval]))) or sum by (exported_service) (increase(traefik_router_requests_total{namespace=\"workbricks-edge\",code=~\"5..\"}[$__rate_interval])) * 0)",
               "legendFormat": "{{exported_service}}"
             }
           ],
@@ -699,7 +699,7 @@ data:
                 "type": "loki",
                 "uid": "${DS_LOKI}"
               },
-              "expr": "sum by (DownstreamStatus, OriginStatus) (count_over_time({namespace=\"platform-edge\",container=\"traefik\"} | json | DownstreamStatus >= 500 [$__auto]))",
+              "expr": "sum by (DownstreamStatus, OriginStatus) (count_over_time({namespace=\"workbricks-edge\",container=\"traefik\"} | json | DownstreamStatus >= 500 [$__auto]))",
               "legendFormat": "down {{DownstreamStatus}} / origin {{OriginStatus}}",
               "queryType": "range"
             }
@@ -735,7 +735,7 @@ data:
                 "uid": "${DS_LOKI}"
               },
               "queryType": "range",
-              "expr": "{namespace=\"platform-edge\",container=\"traefik\"} | json | DownstreamStatus >= 500"
+              "expr": "{namespace=\"workbricks-edge\",container=\"traefik\"} | json | DownstreamStatus >= 500"
             }
           ],
           "description": "Access log is JSON with every request header dropped (V54). Fields: RouterName, ServiceName, DownstreamStatus, OriginStatus, Duration, RequestPath. Client addresses are present in the raw log lines; do not paste them into tickets."
