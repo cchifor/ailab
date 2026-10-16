@@ -135,7 +135,7 @@ gitea_runner_reclaim_interval: 5s # OnUnitInactiveSec between idle-guarded sweep
 #   the inter-job window ~6x more often. Cheap while busy (daemon_busy short-circuits before the scan).
 gitea_runner_reclaim_boot_delay: 90s # OnBootSec — let the daemon settle before the first sweep
 # Artifact subdirs job containers write as root/foreign uid into the reused workspace. KEEP IN SYNC
-# with cchifor/platform:.github/runner-hooks/job-started.sh AND the github_runner role's job-started.sh.
+# with cchifor/workbricks:.github/runner-hooks/job-started.sh AND the github_runner role's job-started.sh.
 gitea_runner_reclaim_dirs:
   - .hatchet-config
   - coverage-data

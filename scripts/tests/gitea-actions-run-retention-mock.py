@@ -199,9 +199,9 @@ def summary(out):
 def two_repos(st, n_old=120, n_recent=60):
     # platform: 120 old (ids 1..120) then 60 recent (121..180)  -> 4 pages, eligible at the tail
     for i in range(1, n_old + 1):
-        st.add("cchifor/platform", i, completed=OLD)
+        st.add("cchifor/workbricks", i, completed=OLD)
     for i in range(n_old + 1, n_old + n_recent + 1):
-        st.add("cchifor/platform", i, completed=RECENT)
+        st.add("cchifor/workbricks", i, completed=RECENT)
     for i in range(1, 6):
         st.add("cchifor/ailab", i, completed=OLD)
     st.add("cchifor/ailab", 6, completed=RECENT)
@@ -231,7 +231,7 @@ def main():
     st, rc, out = scenario("drain", two_repos, {"MAX_DELETES_PER_RUN": "500"})
     check("drain exit 0", rc == 0, out[-500:])
     check("drain deleted all 125 old", len(st.deleted) == 125, str(len(st.deleted)))
-    check("drain recent untouched", len(st.completed_desc("cchifor/platform")) == 60 and len(st.completed_desc("cchifor/ailab")) == 1)
+    check("drain recent untouched", len(st.completed_desc("cchifor/workbricks")) == 60 and len(st.completed_desc("cchifor/ailab")) == 1)
 
     # 3. completions arrive between page reads: no crash, nothing ineligible deleted, progress made
     st, rc, out = scenario("shift", two_repos, {"MAX_DELETES_PER_RUN": "500"})
@@ -242,32 +242,32 @@ def main():
     # 4. ineligible tail page (reruns) followed by eligible pages: NO early stop
     def tail_rerun(st):
         for i in range(1, 51):            # ids 1..50 = last page, all rerun recently
-            st.add("cchifor/platform", i, completed=RECENT)
+            st.add("cchifor/workbricks", i, completed=RECENT)
         for i in range(51, 101):          # ids 51..100 = eligible
-            st.add("cchifor/platform", i, completed=OLD)
+            st.add("cchifor/workbricks", i, completed=OLD)
         for i in range(101, 111):
-            st.add("cchifor/platform", i, completed=RECENT)
+            st.add("cchifor/workbricks", i, completed=RECENT)
     st, rc, out = scenario("tail-ineligible", tail_rerun, {"MAX_DELETES_PER_RUN": "500"})
     check("tail-ineligible exit 0", rc == 0, out[-500:])
     check("tail-ineligible deleted the 50 eligible", sorted(rid for _, rid in st.deleted) == list(range(51, 101)), str(len(st.deleted)))
 
     # 5. null completed_at, the exact cutoff (not eligible: strictly older), and one second older (eligible)
     def edge(st):
-        st.add("cchifor/platform", 1, completed=None)
-        st.add("cchifor/platform", 2, completed=CUTOFF)
-        st.add("cchifor/platform", 3, completed=CUTOFF - 1)
-        st.add("cchifor/platform", 4, completed=CUTOFF + 1)
+        st.add("cchifor/workbricks", 1, completed=None)
+        st.add("cchifor/workbricks", 2, completed=CUTOFF)
+        st.add("cchifor/workbricks", 3, completed=CUTOFF - 1)
+        st.add("cchifor/workbricks", 4, completed=CUTOFF + 1)
     st, rc, out = scenario("edge", edge)
     check("edge exit 0", rc == 0, out[-400:])
-    check("edge only the strictly-older run deleted", st.deleted == [("cchifor/platform", 3)], str(st.deleted))
+    check("edge only the strictly-older run deleted", st.deleted == [("cchifor/workbricks", 3)], str(st.deleted))
 
     # 6. rerun between listing and delete: revalidation skips it, once
     def rerun(st):
-        st.add("cchifor/platform", 3, completed=OLD)
-        st.add("cchifor/platform", 4, completed=OLD)
+        st.add("cchifor/workbricks", 3, completed=OLD)
+        st.add("cchifor/workbricks", 4, completed=OLD)
     st, rc, out = scenario("rerun-before-delete", rerun)
     s = summary(out)
-    check("rerun exit 0 and skipped once", rc == 0 and s["skipped_revalidation"] == "1" and st.deleted == [("cchifor/platform", 4)], str(st.deleted) + out[-300:])
+    check("rerun exit 0 and skipped once", rc == 0 and s["skipped_revalidation"] == "1" and st.deleted == [("cchifor/workbricks", 4)], str(st.deleted) + out[-300:])
 
     # 7. 403 and 401 => exit 1 with a summary, no deletes
     st, rc, out = scenario("forbidden", two_repos)

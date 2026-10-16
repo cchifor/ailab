@@ -1,8 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# SOPS-encrypted read-only SSH deploy key for the `platform` GitRepository
-# (cchifor/platform is private). Applied to flux-system by the platform-git-auth
-# Flux Kustomization (../clusters/ai/platform-git-auth.yaml), which carries the
+# SOPS-encrypted read-only SSH deploy key for the stable `workbricks` GitRepository
+# (sourced from private cchifor/workbricks). Applied to flux-system by the workbricks-git-auth
+# Flux Kustomization (../clusters/ai/workbricks-git-auth.yaml), which carries the
 # sops-age decryption config. Kept OUTSIDE clusters/ai so the decryption-less
 # flux-system Kustomization that recursively sweeps clusters/ai never tries to
 # apply the still-encrypted Secret.

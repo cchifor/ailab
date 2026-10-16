@@ -90,7 +90,7 @@ see `docs/runbooks/openbao-estate-credentials.md`) and platform's `age1wuvg...` 
    ls -la ~/.config/sops/age/ ~/work/keys/ 2>/dev/null; env | cut -d= -f1 | grep -i '^SOPS_AGE'
    ```
 
-   On 2026-10-07 the first command lists Kustomizations on the sources `flux-system` (this repo), `platform`, `cloudlab`,
+   On 2026-10-07 the first command lists Kustomizations on the sources `flux-system` (this repo), `workbricks`, `cloudlab`,
    `muse-stream`, `agentforge-tenants` and `trueswarm-admin`, and the second lists only `flux-system/sops-age`. For every
    other repository in the first list, open its `.sops.yaml` and its encrypted files: the ones that name the old recipient
    need steps 3 and 5 too, or step 4's check fails for their Kustomizations (and removing the old identity there would break

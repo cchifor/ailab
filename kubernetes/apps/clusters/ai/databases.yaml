@@ -10,7 +10,7 @@ spec:
   # Only `infrastructure` (priority classes, PodMonitor CRD). Deliberately NOT `platform`, even though
   # the CNPG operator + its CRDs come from there (ADR 0016 consequences): platform runs wait:false, so
   # depending on it wouldn't guarantee the operator anyway. On a fresh bootstrap this Kustomization
-  # fails-and-retries until the platform repo has installed the postgresql.cnpg.io CRDs — expected,
+  # fails-and-retries until the Workbricks repository has installed the postgresql.cnpg.io CRDs — expected,
   # converges via retryInterval (same pattern as qnap-storage.yaml's CRD ordering).
   # ⚠ FRESH-BOOTSTRAP (DR rebuild) CYCLE — needs one manual unblock: grafana (a kps chart resource
   # inside `infrastructure`, wait:true) needs infra-pg; infra-pg needs the CNPG operator; the operator

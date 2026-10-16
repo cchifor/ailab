@@ -1,4 +1,4 @@
-# Alerts over the strive platform's WEEKLY read-mostly soak (cchifor/platform
+# Alerts over the strive platform's WEEKLY read-mostly soak (cchifor/workbricks
 # deploy/components/load — k6-weekly-soak CronJob, Sunday 02:00, 90 min @
 # <=10 RPS vs the live edge). The soak streams k6 metrics into this
 # Prometheus tagged env=weekly-soak; the k6-load-rules.yaml recording rules
@@ -22,7 +22,7 @@
 #                        ago — no false positives from deploys/restarts at
 #                        idle). 75m < the 90m soak so it can fire before
 #                        the run ends; the Monday soak-report workflow
-#                        (cchifor/platform load-weekly-report.yml) computes
+#                        (cchifor/workbricks load-weekly-report.yml) computes
 #                        the same delta over the exact window as the
 #                        offline backstop. The k6 runner pod excludes
 #                        itself — its trend buffers legitimately grow all
@@ -92,5 +92,5 @@ spec:
               (and >25%) over 75 minutes of steady read-mostly load — flat traffic
               should mean flat memory. Compare Sunday's soak window in the k6-nightly
               dashboard, and expect the same container flagged in Monday's 'Weekly
-              soak report' issue (cchifor/platform). If it OOM-kills first, the stock
+              soak report' issue (cchifor/workbricks). If it OOM-kills first, the stock
               KubeContainerOOMKilledCount/KubePodCrashLooping alerts fire too.

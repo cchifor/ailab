@@ -422,7 +422,7 @@ its login leaves `dev_worker_gitea_users` (`ansible/group_vars/dev_workers.yml`;
 
 ### Record
 
-Installed on `cchifor/platform` `main` on 2026-10-06 (Gitea 1.26.1), after the authority guard PR
+Installed on `cchifor/workbricks` `main` on 2026-10-06 (Gitea 1.26.1), after the authority guard PR
 (`.github/workflows/s2s-authority-guard.yml` plus `scripts/ci/check-s2s-authority.py`) merged.
 
 - **Protected patterns: 26.** The 23 patterns of the plan (brace-expanded) plus
@@ -476,13 +476,13 @@ Expect about 19 owner reviews a month.
 ### Re-apply procedure
 
 Use it to restore or extend the rule. If its first lines print `not an ailab checkout` or `STOP`,
-nothing after them may run: `cd` into an ailab checkout and start again. It needs a **repo-admin** token for `cchifor/platform` (the
+nothing after them may run: `cd` into an ailab checkout and start again. It needs a **repo-admin** token for `cchifor/workbricks` (the
 owner's, held outside the workers). Gitea applies only the FIRST matching rule, so patch the
 effective one. The PATCH MERGES with the live rule: it unions the live `protected_file_patterns` and
 `status_check_contexts` with the documented ones and never replaces them.
 
 ```sh
-G=https://git.chifor.me/api/v1/repos/cchifor/platform
+G=https://git.chifor.me/api/v1/repos/cchifor/workbricks
 # Snapshots and the pattern list live in the MAIN checkout's gitignored kubernetes/infra/_out/ (a git
 # worktree has no _out/), never in the current directory. Run this from inside any AILAB checkout:
 # from a platform checkout the same path would not be gitignored, so refuse anything else.
@@ -782,13 +782,13 @@ When the extras gain a second k8s entry, `refuse-second-k8s` runs as well, autom
   `uv run --quiet python3 scripts/ci/report-ailab-pin-drift.py --count-app-templates --fail-on-torn --fail-on-incoherent`.
 
 **On any failure, darken the harness.** The script prints `DARKEN THE HARNESS` and these commands.
-First the freeze, top-down: the root Kustomization, then `platform`, then `platform-app`, then the
+First the freeze, top-down: the root Kustomization, then `platform`, then `workbricks-app`, then the
 HelmRelease, then the scale:
 
 ```sh
 kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks-app --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=0
 ```
@@ -805,35 +805,35 @@ scripts/s2s/flux-resume.sh --after-revert   # optional: --sha <the revert's merg
 
 - **Freeze top-down, the Kustomizations before the HelmRelease.** Each parent re-applies its
   children from git and drops a `kubectl patch` suspend: the root `flux-system/flux-system`
-  applies `platform`, and `platform` applies `platform-app` (and `platform-secrets`). A freeze of
-  `platform-app` and the HelmRelease alone was undone twice within minutes on 2026-10-08 (incident
-  AG2-1). The Flux Kustomization `flux-system/platform-app` (path
+  applies `workbricks`, and `workbricks` applies `workbricks-app` (and `workbricks-secrets`). A freeze of
+  `workbricks-app` and the HelmRelease alone was undone twice within minutes on 2026-10-08 (incident
+  AG2-1). The Flux Kustomization `flux-system/workbricks-app` (path
   `deploy/gitops/flux/clusters/ailab/app`) re-applies the HelmRelease from git. It clears a
   hand-set HelmRelease suspend within one reconcile: observed 2026-10-06, suspended at 17:21Z and
   cleared at 17:22:39Z. The HelmRelease suspend is still needed: the HelmRelease uses
   `reconcileStrategy: Revision`, so every platform commit upgrades the release, and Helm's
   three-way merge puts `replicas: 1` back.
 - **What freezing costs.** With the root suspended, every ailab GitOps change waits, as do every
-  strive-ailab deploy and everything else that `platform` and `platform-app` apply, until
+  strive-ailab deploy and everything else that `platform` and `workbricks-app` apply, until
   `flux-resume.sh` resumes them.
 - **Resuming the release** is `scripts/s2s/flux-resume.sh`, never a hand-typed un-suspend. Waiting
   on the Kustomization's `observedGeneration` proves nothing: it also moves when suspend is toggled.
   If the source still serves the pre-merge artifact, an un-suspended Kustomization re-applies the old
   HelmRelease and clears its suspend. The script stops (exit 1) at the first gate that does not pass
   within `PHASE4_RESUME_TIMEOUT_SECONDS` (default 600), and touches nothing after it. Its gates:
-  1. **The target.** `--sha`, else platform main now
-     (`git ls-remote https://git.chifor.me/cchifor/platform.git refs/heads/main`).
-  2. **The source.** It requests a reconcile of GitRepository `flux-system/platform`
+  1. **The target.** `--sha`, else Workbricks main now
+     (`git ls-remote https://git.chifor.me/cchifor/workbricks.git refs/heads/main`).
+  2. **The source.** It requests a reconcile of GitRepository `flux-system/workbricks`
      (`reconcile.fluxcd.io/requestedAt`), then waits until `.status.artifact.revision` is
      `main@sha1:<target>`. Without `--sha` a later main also counts: main is append-only, so it
      descends from the target. Nothing is resumed before this.
-  3. **The Secrets.** If Kustomization `platform-secrets` is suspended (drill 2 freezes it), it
+  3. **The Secrets.** If Kustomization `workbricks-secrets` is suspended (drill 2 freezes it), it
      un-suspends it first. It then waits until the Kustomization has processed the new generation,
      `.status.lastAppliedRevision` is `main@sha1:<target>` and Ready is True. With `--after-config`
-     it requires this even when `platform-secrets` was not suspended, because values that land
+     it requires this even when `workbricks-secrets` was not suspended, because values that land
      before the Secret would point the ten services at preshared secrets the registry does not hold
-     yet. Otherwise an unsuspended `platform-secrets` is not a gate: a darken must not depend on it.
-  4. **The Kustomization.** It un-suspends `platform-app`, then waits until
+     yet. Otherwise an unsuspended `workbricks-secrets` is not a gate: a darken must not depend on it.
+  4. **The Kustomization.** It un-suspends `workbricks-app`, then waits until
      `.status.lastAppliedRevision` is `main@sha1:<target>` and Ready is True.
   5. **The HelmRelease.** It un-suspends it only if `.spec.suspend` still reads true (the
      Kustomization's re-apply normally clears it). Then it waits until Ready is True and
@@ -1007,12 +1007,12 @@ G="kubectl --context admin@ai -n strive-gatekeeper"
 # Kustomization re-applies the HelmRelease and clears its suspend). This also keeps Helm off the
 # ConfigMap mid-drill.
 kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
 # Freeze the gatekeeper release too, the same way: it owns the ConfigMap, so this keeps Helm off it mid-drill.
-kubectl --context admin@ai -n flux-system patch kustomization platform-gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks-gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
 $G patch helmrelease gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
 scripts/s2s/phase4-probes.sh --gatekeeper-only                            # baseline: PASS on both replicas
 A=$($G get pod -l app.kubernetes.io/name=gatekeeper -o jsonpath='{.items[0].metadata.name}')
@@ -1041,10 +1041,10 @@ scripts/s2s/phase4-probes.sh --gatekeeper-only                            # PASS
 ```
 
 The resume is the script, as everywhere in this runbook: `flux-resume.sh --after-drill` (above) resumes
-the gatekeeper release too, as its step 1c: Kustomization `flux-system/platform-gatekeeper` first, then
+the gatekeeper release too, as its step 1c: Kustomization `flux-system/workbricks-gatekeeper` first, then
 HelmRelease `strive-gatekeeper/gatekeeper` only if its `.spec.suspend` still reads true (the
 Kustomization's re-apply normally clears it), and it waits for Ready at the landed commit before
-`platform-app` moves. The drill merged nothing, so the commit it lands is platform main now.
+`workbricks-app` moves. The drill merged nothing, so the commit it lands is Workbricks main now.
 
 **2. Rollback after #2125 (config only; the harness stays up).** The rollback operators would actually
 use. It moves the ten Python services and the four workers back to preshared client secrets and
@@ -1087,8 +1087,8 @@ Drill 2 used #2198 as the worked example:
 - Before the window, hold every open platform PR with `no-automerge`, and open a window issue
   labelled `rollout-freeze`.
 
-Freeze top-down. `platform-secrets` is frozen too, because the PR edits a Secret, and it is resumed
-first. The gatekeeper release (`platform-gatekeeper`, a sibling of `platform-app` since the A.2
+Freeze top-down. `workbricks-secrets` is frozen too, because the PR edits a Secret, and it is resumed
+first. The gatekeeper release (`workbricks-gatekeeper`, a sibling of `workbricks-app` since the A.2
 cutover) is frozen too: the PR changes the registry and its checksum, and a sibling is not held by its
 suspended parent. The harness is not scaled:
 
@@ -1096,28 +1096,28 @@ suspended parent. The harness is not scaled:
 K="kubectl --context admin@ai -n strive-ailab"
 G="kubectl --context admin@ai -n strive-gatekeeper"
 kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform-secrets --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks-secrets --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform-gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks-gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
 $G patch helmrelease gatekeeper --type=merge -p '{"spec":{"suspend":true}}'
 ```
 
 **Only after the PR has merged**, resume with `flux-resume.sh --after-config`. It runs gates 1-7
 under "Resuming the release":
 
-1. It resumes `platform-secrets` first and requires it to have applied the merge (gate 3) before
+1. It resumes `workbricks-secrets` first and requires it to have applied the merge (gate 3) before
    anything else moves.
-2. It resumes `platform-gatekeeper` and the `gatekeeper` HelmRelease (step 1c) and requires the
+2. It resumes `workbricks-gatekeeper` and the `gatekeeper` HelmRelease (step 1c) and requires the
    gatekeeper upgrade to the merge: the new registry checksum rolls gatekeeper here, so the services
    come back to a gatekeeper that already serves the registry they expect. The block below reads
    that roll (`rollout status`), the probes and the mint counts.
-3. It lands `platform-app` and the HelmRelease.
+3. It lands `workbricks-app` and the HelmRelease.
 4. It requires the harness rollout.
 5. It resumes `platform`, then the root.
 
-A cluster without Kustomization `platform-gatekeeper` (before the A.2 cutover, or after a platform
+A cluster without Kustomization `workbricks-gatekeeper` (before the A.2 cutover, or after a platform
 revert of it) stops the script at step 1c by design: that world's resume is the runbook revision that
 shipped with it, not this one.
 
@@ -1176,7 +1176,7 @@ back in quiet hours. The harness was up throughout; it never went dark.
 | Freeze (top-down) | 20:10:22Z | 20:47:19Z |
 | PR merged | 20:14:21Z | 21:00:19Z |
 | Source at the merge | 20:14:56Z | 21:01:00Z |
-| `platform-secrets` applied, registry checked | 20:15:07Z, `77b3ada0` (10 entries) | 21:01:09Z, `a163d50c` (0 entries) |
+| `workbricks-secrets` applied, registry checked | 20:15:07Z, `77b3ada0` (10 entries) | 21:01:09Z, `a163d50c` (0 entries) |
 | Gatekeeper rolls | 1 (pods 20:16:13Z, 20:16:23Z) | 1 (pods 21:04:52Z, 21:05:06Z) |
 | Gatekeeper registry | `clients=10`, `merged=1 refused=10` | `clients=0`, `merged=11 refused=0` |
 | First mint per client after the roll | 20-54 s (profile 8 min, a rare minter; deepagent and sentinel minted nothing in the window) | 22-94 s (21:05:14Z-21:06:26Z) |
@@ -1239,8 +1239,8 @@ scripts/s2s/phase4-probes.sh --revocation-drill
 # terminal 2, when terminal 1 prints "Revoke now" (top-down: the parents, then the Kustomization,
 # then the HelmRelease):
 kubectl --context admin@ai -n flux-system patch kustomization flux-system --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform --type=merge -p '{"spec":{"suspend":true}}'
-kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks --type=merge -p '{"spec":{"suspend":true}}'
+kubectl --context admin@ai -n flux-system patch kustomization workbricks-app --type=merge -p '{"spec":{"suspend":true}}'
 $K patch helmrelease strive --type=merge -p '{"spec":{"suspend":true}}'
 $K scale deployment/harness --replicas=0
 ```

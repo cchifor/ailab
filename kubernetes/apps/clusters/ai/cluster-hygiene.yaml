@@ -8,10 +8,10 @@ spec:
   retryInterval: 1m
   timeout: 5m
   # Kyverno CLEANUP policies (garbage the control plane never collects). Same placement reason as
-  # storage-policies: the kyverno.io CRDs arrive with platform-kyverno, which dependsOn
+  # storage-policies: the kyverno.io CRDs arrive with workbricks-kyverno, which dependsOn
   # infrastructure, so these cannot live in any layer below it.
   dependsOn:
-    - name: platform-kyverno
+    - name: workbricks-kyverno
   sourceRef:
     kind: GitRepository
     name: flux-system

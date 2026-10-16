@@ -687,7 +687,7 @@ class TestGithubReclaimKeepList(unittest.TestCase):
 
     IDS = ['aaa111', 'bbb222', 'ccc333']
     META = {
-        'aaa111': 'node:24 /platform-e2e-web-1',
+        'aaa111': 'node:24 /workbricks-e2e-web-1',
         'bbb222': image_pin.IMAGE + ' /' + image_pin.NAME,
         'ccc333': 'moby/buildkit:buildx-stable-1 /buildx_buildkit_builder0',
     }

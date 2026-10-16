@@ -416,7 +416,7 @@ to save the publication record). Retries re-queue sweeps until the controller is
 publish was observed to take 5 min; two detaches of a dead pod's volumes sat 3 h.
 
 **The fix is GitOps state, not a hand patch.** `kubernetes/apps/storage-policies/trident-attacher-timeout.yaml`
-is a Kyverno mutate policy (Flux Kustomization `storage-policies`, after `platform-kyverno`) that
+is a Kyverno mutate policy (Flux Kustomization `storage-policies`, after `workbricks-kyverno`) that
 rewrites the attacher's `--timeout=*` to `--timeout=600s` at admission on `trident/trident-controller`.
 It is needed because the Deployment is rendered by `qnap-csi-operator` from a template inside its
 image (`TridentOrchestrator` exposes only `debug/namespace/tridentImage`) and the operator reverts a

@@ -25,16 +25,16 @@
 #    EXIT/INT/TERM/HUP deletes it by name; the script then proves it dead (gone from the database, and its next
 #    use answers 401) and lists the owner's remaining tokens by name.
 #    - plain merge first; force_merge ONLY after Gitea's "Changed protected files" refusal;
-#    - --approve-pin (platform's owner-ack gate): when CI / owner-ack failed and nothing else did, token 1
+#    - --approve-pin (Workbricks' owner-ack gate): when CI / owner-ack failed and nothing else did, token 1
 #      posts `approve-pin FULL_HEAD_SHA`, re-runs the failed jobs of the owner-ack run and is deleted; the
 #      script waits WITHOUT a token until every context passes, then token 2 merges. If owner-ack is already
 #      green, no pin is posted. A token is never held across a wait.
 # Exit: 0 merged (dry run: the gate passes now); 2 bad input (or no contexts file for REPO); 3 refused by the
 # gate, nothing more minted; 4 the owner operation failed (its token deleted); 5 a deletion was NOT confirmed:
 # delete that token now; 6 dry run only: checks are still pending or missing (an --execute run would wait).
-#   scripts/gitea-owner-merge.sh platform 2138 8f9c07439418a66197025f5685a51b948ef191af             # dry run
-#   scripts/gitea-owner-merge.sh platform 2138 8f9c07439418a66197025f5685a51b948ef191af --execute
-#   scripts/gitea-owner-merge.sh platform 2149 8a8daed88aa05197de65bfd2d97af00aa740f250 --approve-pin --execute
+#   scripts/gitea-owner-merge.sh workbricks 2138 8f9c07439418a66197025f5685a51b948ef191af             # dry run
+#   scripts/gitea-owner-merge.sh workbricks 2138 8f9c07439418a66197025f5685a51b948ef191af --execute
+#   scripts/gitea-owner-merge.sh workbricks 2149 8a8daed88aa05197de65bfd2d97af00aa740f250 --approve-pin --execute
 set -uo pipefail
 set +x # never trace: a traced assignment would print the token
 

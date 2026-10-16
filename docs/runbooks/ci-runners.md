@@ -1,6 +1,6 @@
 # Runbook — self-hosted GitHub Actions runners (Proxmox)
 
-5 ephemeral runner VMs (2 on node1/node2, 1 on node3) joining the `cchifor/platform` **`self-hosted-hv`** pool.
+5 ephemeral runner VMs (2 on node1/node2, 1 on node3) joining the `cchifor/workbricks` **`self-hosted-hv`** pool.
 See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_runner/` (config).
 
 | | |
@@ -18,7 +18,7 @@ See ADR 0013. IaC: `kubernetes/infra/runners/` (VMs) + `ansible/roles/github_run
    **Administration: Read & write** (to mint runner registration tokens) + **Metadata: Read-only**.
    No other permissions, no org/account perms.
 2. Create the App. Note the **App ID**. Generate a **private key** → downloads a `.pem`.
-3. **Install** the App on **only** `cchifor/platform` (Install App → Only select repositories). Open
+3. **Install** the App on **only** `cchifor/workbricks` (Install App → Only select repositories). Open
    the installation; its URL ends in `/installations/<INSTALLATION_ID>` — note the installation ID.
 
 ## 2. Provide the credentials
@@ -65,12 +65,12 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
 ```
 
 ## 5. Verify
-- **Registered:** GitHub → `cchifor/platform` → Settings → Actions → Runners → `self-hosted-hv` shows
+- **Registered:** GitHub → `cchifor/workbricks` → Settings → Actions → Runners → `self-hosted-hv` shows
   `ephem-ci-runner-{1..5}-…` **Idle** (Proxmox-only pool; the legacy Hyper-V runners are retired — §6).
 - **Canary:** Actions → **Runner pool health** → Run workflow. Re-run until it lands on a `ci-runner-N`
   host (check the "Runner identity" step); it asserts the `ephem-*` name, `memory.max == 10G`, the
   wrapper, the hook env, **and (2026-07-01) that `~/.docker` is runner-owned + `docker buildx build`
-  works** — the buildx self-heal regression gate (cchifor/platform#682).
+  works** — the buildx self-heal regression gate (cchifor/workbricks#682).
 - **On a VM:**
   ```bash
   ssh ubuntu@192.168.0.14 'systemctl status actions.runner.cchifor-platform.service --no-pager; \
@@ -79,7 +79,7 @@ just runners        # installs Docker/toolchain + the ported runner contract, re
   ```
   Expect the service active, Compose **v2.31.0**, the `ACTIONS_RUNNER_HOOK_JOB_STARTED` env + the
   `runner-reclaim.sh` `ExecStartPre`.
-- **Real job:** open a PR on `cchifor/platform`; confirm `e2e`/`build` land on a Proxmox runner with no
+- **Real job:** open a PR on `cchifor/workbricks`; confirm `e2e`/`build` land on a Proxmox runner with no
   `EACCES … .hatchet-config` checkout flake.
 - **Metrics:** the VMs appear as `job=ci-runner-node` scrape targets in Prometheus (CI load on the
   dashboards).
@@ -280,7 +280,7 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
 - **The GitHub agents are RETIRED (2026-10-12).** `github_runner_agent_enabled: false`
   (group_vars/github_runners.yml), and `tasks/retire.yml` removed the unit, scripts, App key and
   `~/actions-runner` from ci-runner-1..6/9/10.
-  - Why: ADR 0017 disabled Actions on the GitHub mirror, so they never got a job, while the App key
+  - Why: ADR 0017 disabled Actions on the Workbricks Gitea source, so they never got a job, while the App key
     (Administration: read/write) sat in a runner-owned file every Gitea CI job could read.
   - The key was revoked on GitHub.
   - The `~/.docker` self-heal and `runner_docker_config_root_owned` moved to `gitea-runner-reclaim.sh`.
@@ -653,7 +653,7 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
 - **Canary fails `memory.max`:** the `20-reclaim`/unit drop-ins didn't apply — `systemctl daemon-reload`
   + re-run `just runners`. `MemoryMax` must be `10G` (10737418240 bytes). NB: `MemoryMax=10G` is the
   service **cgroup** cap, unrelated to the balloon floor below — don't conflate them.
-- **Jobs OOM / "self-hosted runner lost communication" / exit 137 (cchifor/platform#620):** the
+- **Jobs OOM / "self-hosted runner lost communication" / exit 137 (cchifor/workbricks#620):** the
   Proxmox host is under RAM pressure and `pvestatd` ballooned the guest down toward its floor, starving
   the running job. The VM resource (`kubernetes/infra/runners`) pins the **balloon floor to 12 GiB**
   (`runner_memory_floating_mib = 12288`, was the bpg default 1 GiB) so a running guest can't drop below

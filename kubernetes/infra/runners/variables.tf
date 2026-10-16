@@ -101,7 +101,7 @@ variable "runner_memory_floating_mib" {
     cap, set in the ansible role) — the canary checks that, not the balloon. Set equal to
     runner_memory_mib to disable ballooning.
 
-    Was 12 GiB (fixing cchifor/platform#620: at ~80% host RAM, pvestatd ballooned idle runners to
+    Was 12 GiB (fixing cchifor/workbricks#620: at ~80% host RAM, pvestatd ballooned idle runners to
     1-2 GiB and CI jobs OOM-killed at exit 137). Now 10 GiB — the runner-service systemd cgroup cap
     (MemoryMax=10G): the observed CI-job working set peaks ~7 GiB (idle ~1-2 GiB, busy ~10% of the
     time), so 10 GiB still covers the peak while the balloon inflates to 24 GiB under load, and it
@@ -111,7 +111,7 @@ variable "runner_memory_floating_mib" {
     #620. Validate under a two-heavy-jobs-on-one-host CI run before relying on the freed RAM.
   EOT
   type        = number
-  default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/platform#620
+  default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/workbricks#620
 }
 variable "runner_rootfs_gb" {
   description = <<-EOT

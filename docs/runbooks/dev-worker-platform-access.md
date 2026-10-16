@@ -36,7 +36,7 @@ platform env                                 # slot, postgres role, file paths (
 
 ### What is reachable
 
-- **Namespaces `strive-ailab`, `strive-sandboxes-ailab`, `platform-edge`**: workloads, `pods/log`,
+- **Namespaces `strive-ailab`, `strive-sandboxes-ailab`, `workbricks-edge`**: workloads, `pods/log`,
   services, endpoints, configmaps, events, PVCs, PDBs, HPAs, NetworkPolicies, Ingresses, the
   CNPG / Traefik / Cilium / Flux HelmRelease / ExternalSecret / Prometheus / KEDA / Kyverno /
   agent-sandbox objects, `kubectl top pods`, and `port-forward`.

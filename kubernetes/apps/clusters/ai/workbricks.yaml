@@ -1,11 +1,11 @@
-# Strive platform — root entrypoint. Points the ailab cluster's Flux at the
-# platform repo's per-cluster DAG, which fans out the component + app
+# Workbricks deployment — root entrypoint. Points the ailab cluster's Flux at the
+# Workbricks repository's per-cluster DAG, which fans out the component + app
 # Kustomizations/HelmReleases (sources → secrets/edge/data → app →
 # identity/workers). SOPS decryption (sops-age) covers deploy/secrets/ailab.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: platform
+  name: workbricks
   namespace: flux-system
 spec:
   interval: 10m
@@ -15,7 +15,7 @@ spec:
     - name: infrastructure
   sourceRef:
     kind: GitRepository
-    name: platform
+    name: workbricks
   path: ./deploy/gitops/flux/clusters/ailab
   prune: true
   wait: false

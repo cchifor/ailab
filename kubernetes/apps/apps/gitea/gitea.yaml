@@ -177,7 +177,7 @@ spec:
         # Periodic `git gc` on every repository. OFF by default in Gitea, and the cost of leaving it
         # off is paid on every clone: CI fetches this forge constantly (5 runners, many jobs each), and
         # each fetch runs git-upload-pack, which must search every pack and loose object in the repo.
-        # Measured 2026-08-09, cchifor/platform: 47 packs + 7,639 loose objects in 98 MB, and every
+        # Measured 2026-08-09, cchifor/workbricks: 47 packs + 7,639 loose objects in 98 MB, and every
         # upload-pack slow-logged at ~3.5s (15 of them inside 10 minutes). A single `git gc` took 5s
         # and left 2 packs + 1 loose object at 38 MB. The other active repos were the same shape
         # (agentforge-platform 43M->6M, ailab 22M->5M, agentforge 28M->4M).
@@ -201,7 +201,7 @@ spec:
           ARTIFACT_RETENTION_DAYS: 14 # retention applies to the S3 backend too
           # 14d (was 30) — aligns with ARTIFACT_RETENTION_DAYS. cron.cleanup_actions (enabled, @midnight)
           # deletes each task's log + nulls its log_indexes once it passes this age. Most logs offload to
-          # versitygw S3 fine, but large cchifor/platform CI logs (100s of MB compressed) FAIL the DBFS→S3
+          # versitygw S3 fine, but large cchifor/workbricks CI logs (100s of MB compressed) FAIL the DBFS→S3
           # transfer and pile up in-DB as dbfs_data (2.6k stuck tasks = 3.7 GiB on 2026-07-20). 14d bounds
           # the .db to ~5-6 GiB so ext4 stays under the ~9 GiB zvol high-water → no LUN re-alert (the thin
           # QuTS LUN can't UNMAP-reclaim, so bounding growth is what matters). Fixing the S3 transfer of

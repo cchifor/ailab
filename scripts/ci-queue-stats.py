@@ -25,7 +25,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 GITEA_URL = os.environ.get("GITEA_URL", "https://git.chifor.me")
-DEFAULT_REPOS = "cchifor/ailab,cchifor/agentforge,cchifor/platform,cchifor/agentforge-platform,cchifor/dsh-team-conductor"
+DEFAULT_REPOS = "cchifor/ailab,cchifor/agentforge,cchifor/workbricks,cchifor/agentforge-platform,cchifor/dsh-team-conductor"
 EPOCH_UNSET = 1e9  # Gitea sends 0001-01-01T00:00:00Z / 1970-01-01 for unset timestamps
 
 

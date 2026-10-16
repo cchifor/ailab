@@ -2,16 +2,16 @@
 """Offline tests for scripts/s2s/flux-resume.sh: resuming the frozen strive release.
 
 A stateful fake Flux stands in for the cluster:
-- The GitRepository `flux-system/platform` fetches platform main some polls after the reconcile
+- The GitRepository `flux-system/workbricks` fetches Workbricks main some polls after the reconcile
   request.
-- The Kustomization `platform-app` applies the fetched revision some polls after it is resumed,
+- The Kustomization `workbricks-app` applies the fetched revision some polls after it is resumed,
   and that re-apply clears the HelmRelease's hand-set suspend (as observed live on 2026-10-06 at
   17:22:39Z).
 - The HelmRelease upgrades its chart to the applied revision.
-- The Kustomization `platform-secrets` (not suspended by default) applies the fetched revision some
+- The Kustomization `workbricks-secrets` (not suspended by default) applies the fetched revision some
   polls after it is resumed or nudged.
 
-A fake `git` answers `ls-remote` for platform main. Faults model what the gates must catch:
+A fake `git` answers `ls-remote` for Workbricks main. Faults model what the gates must catch:
 - a source stuck on the old commit;
 - a Kustomization that never applies;
 - a HelmRelease left suspended;
@@ -41,14 +41,14 @@ OLD = "1" * 40
 TARGET = "a" * 40
 LATER = "b" * 40
 WRITES = {"annotate", "patch", "scale", "rollout", "delete", "apply", "edit", "label", "replace"}
-#: The Kustomizations that apply platform-app (R19: a freeze suspends them top-down).
-PARENTS = ("platform", "flux-system")
+#: The Kustomizations that apply workbricks-app (R19: a freeze suspends them top-down).
+PARENTS = ("workbricks", "flux-system")
 #: The Kustomization that applies the release's Secrets (deploy/secrets/ailab). Drill 2's config change edits
-#: one, so it is frozen with the release and must land before platform-app (#1162 review).
-SECRETS = "platform-secrets"
-# The gatekeeper release (platform A.2): its Kustomization, its HelmRelease (in strive-gatekeeper) and the
+#: one, so it is frozen with the release and must land before workbricks-app (#1162 review).
+SECRETS = "workbricks-secrets"
+# The gatekeeper release (Workbricks A.2): its Kustomization, its HelmRelease (in strive-gatekeeper) and the
 # HelmChart source-controller builds for it (flux-system/<hr namespace>-<hr name>).
-GK = "platform-gatekeeper"
+GK = "workbricks-gatekeeper"
 GK_HR = "gatekeeper"
 GK_CHART = "strive-gatekeeper-gatekeeper"
 #: ailab main as the root's source serves it, before and after the freeze.
@@ -129,7 +129,7 @@ def fake_kubectl(argv):
     try:
         if args[0] == "annotate" and kind == "gitrepository":
             st["annotated"] = True
-            return _out("gitrepository.source.toolkit.fluxcd.io/platform annotated\n")
+            return _out("gitrepository.source.toolkit.fluxcd.io/workbricks annotated\n")
         if args[0] == "get" and kind == "gitrepository" and len(args) > 2 and args[2] == "flux-system":
             st["source_lookups"] = st.get("source_lookups", 0) + 1
             return _out(st.get("ailab_source", rev(AILAB)))
@@ -199,7 +199,7 @@ def fake_kubectl(argv):
                         st["gkhr_chart"] = "0.2.0" if st.get("gkhr_chart_plain") else "0.2.0+%s.1" % applied[:12]
                 return _out("%s|%s|True" % ("true" if st.get("gkhr_suspended", False) else "", st.get("gkhr_chart", "0.2.0+%s.1" % OLD[:12])))
         if args[0] == "get" and kind == "helmchart" and name == GK_CHART:
-            # observedSourceArtifactRevision|artifact.revision: built from what platform-gatekeeper applied; the
+            # observedSourceArtifactRevision|artifact.revision: built from what workbricks-gatekeeper applied; the
             # artifact's revision equals the deployed chart unless the test says the release lags the build.
             built = st.get("gk", {}).get("applied", rev(OLD))
             if st.get("gkhr_chart_plain"):
@@ -223,9 +223,9 @@ def fake_kubectl(argv):
             suspended = st.get("parents", {}).get(name, False)
             gen = st.setdefault("parent_gen", {}).get(name, 7)
             observed = st.setdefault("parent_observed", {}).get(name, 7)
-            src_name = "platform" if name == "platform" else "flux-system"
-            src = st["source"] if src_name == "platform" else st.get("ailab_source", rev(AILAB))
-            applied = st.setdefault("parent_applied", {}).get(name, rev(OLD) if src_name == "platform" else rev(AILAB_OLD))
+            src_name = "workbricks" if name == "workbricks" else "flux-system"
+            src = st["source"] if src_name == "workbricks" else st.get("ailab_source", rev(AILAB))
+            applied = st.setdefault("parent_applied", {}).get(name, rev(OLD) if src_name == "workbricks" else rev(AILAB_OLD))
             if name in st.get("parent_transient_once", []) and not suspended:
                 st["parent_transient_once"].remove(name)
                 sys.stderr.write("error: etcdserver: request timed out\n")
@@ -239,10 +239,10 @@ def fake_kubectl(argv):
             return _out("%s|%d|%d|%s|True|GitRepository|flux-system|%s" % ("true" if suspended else "false", gen, observed, applied, src_name))
         if args[0] == "patch" and kind == "kustomization":
             assert '"suspend":false' in args[-1]
-            # What platform-secrets had applied when platform-app was resumed (#1162 review).
+            # What workbricks-secrets had applied when workbricks-app was resumed (#1162 review).
             st["secrets_at_app_patch"] = st.get("secrets", {}).get("applied", rev(OLD))
             st["ks_suspended"] = False
-            return _out("kustomization.kustomize.toolkit.fluxcd.io/platform-app patched\n")
+            return _out("kustomization.kustomize.toolkit.fluxcd.io/workbricks-app patched\n")
         if args[0] == "get" and kind == "kustomization":
             if not st["ks_suspended"] and st.get("ks_applies", True):
                 st["ks_polls"] = st.get("ks_polls", 0) + 1
@@ -425,7 +425,7 @@ class FluxResume(_Resume):
         rc, text = self.run_script("--after-revert")
         self.assertEqual(rc, 1, text)
         self.assertIn("STOP", text)
-        self.assertIn("GitRepository flux-system/platform", text)
+        self.assertIn("GitRepository flux-system/workbricks", text)
         self.assertNotIn(("patch", "kustomization"), self.verbs())
         self.assertNotIn(("patch", "helmrelease"), self.verbs())
         self.assertTrue(self.final()["ks_suspended"])
@@ -451,7 +451,7 @@ class FluxResume(_Resume):
         self.state(ks_applies=False)
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 1, text)
-        self.assertIn("Kustomization flux-system/platform-app", text)
+        self.assertIn("Kustomization flux-system/workbricks-app", text)
         self.assertNotIn(("get", "helmrelease"), self.verbs())
         self.assertNotIn(("scale", "deployment/harness"), self.verbs())
 
@@ -489,46 +489,46 @@ class FluxResume(_Resume):
         self.assertEqual(self.calls(), [])
 
     def test_suspended_parents_are_resumed_last_platform_then_flux_system(self):
-        # R19: a freeze suspends flux-system, platform, platform-app and the HelmRelease top-down,
+        # R19: a freeze suspends flux-system, workbricks, workbricks-app and the HelmRelease top-down,
         # because a parent re-applies its children and drops a kubectl-patch suspend. They are
         # resumed only after the release landed, the inner parent first.
-        self.state(parents={"platform": True, "flux-system": True})
+        self.state(parents={"workbricks": True, "flux-system": True})
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 0, text)
         last_hr_get = max(i for i, v in enumerate(self.verbs()) if v == ("get", "helmrelease"))
-        platform = self.index("patch", "kustomization/platform")
+        workbricks = self.index("patch", "kustomization/workbricks")
         flux_system = self.index("patch", "kustomization/flux-system")
-        self.assertLess(last_hr_get, platform)
-        self.assertLess(platform, flux_system)
-        self.assertEqual(self.final()["parents"], {"platform": False, "flux-system": False})
+        self.assertLess(last_hr_get, workbricks)
+        self.assertLess(workbricks, flux_system)
+        self.assertEqual(self.final()["parents"], {"workbricks": False, "flux-system": False})
         self.assertIn("RESUMED", text)
 
     def test_a_gate_stop_leaves_the_parents_suspended(self):
-        self.state(parents={"platform": True, "flux-system": True}, source_fetches=False)
+        self.state(parents={"workbricks": True, "flux-system": True}, source_fetches=False)
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 1, text)
-        self.assertNotIn(("patch", "kustomization/platform"), self.verbs())
+        self.assertNotIn(("patch", "kustomization/workbricks"), self.verbs())
         self.assertNotIn(("patch", "kustomization/flux-system"), self.verbs())
-        self.assertEqual(self.final()["parents"], {"platform": True, "flux-system": True})
+        self.assertEqual(self.final()["parents"], {"workbricks": True, "flux-system": True})
 
     def test_parents_that_are_not_suspended_are_warned_about_and_left_alone(self):
-        self.state(parents={"platform": False, "flux-system": False})
+        self.state(parents={"workbricks": False, "flux-system": False})
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 0, text)
         self.assertIn("WARNING", text)
         self.assertIn("top-down", text)
-        self.assertNotIn(("patch", "kustomization/platform"), self.verbs())
+        self.assertNotIn(("patch", "kustomization/workbricks"), self.verbs())
         self.assertNotIn(("patch", "kustomization/flux-system"), self.verbs())
 
     def test_after_config_keeps_the_harness(self):
         # R22: drill 2 keeps the assistant up; a config-only rollback/re-forward must leave the
         # harness deployed (no scale, no removal).
-        self.state(parents={"platform": True, "flux-system": True})
+        self.state(parents={"workbricks": True, "flux-system": True})
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 0, text)
         self.assertNotIn(("scale", "deployment/harness"), self.verbs())
         self.assertIn("deployment/harness is up", text)
-        self.assertEqual(self.final()["parents"], {"platform": False, "flux-system": False})
+        self.assertEqual(self.final()["parents"], {"workbricks": False, "flux-system": False})
 
     def test_after_config_stops_when_the_harness_is_gone(self):
         self.state(harness=False)
@@ -542,7 +542,7 @@ class FluxResume(_Resume):
         rc, text = self.run_script("--after-config", "--dry-run")
         self.assertEqual(rc, 0, text)
         self.assertEqual(self.calls(), [])
-        self.assertIn("kustomization platform", text)
+        self.assertIn("kustomization workbricks", text)
         self.assertIn("kustomization flux-system", text)
         self.assertIn("deployment/harness", text)
         rc, _ = self.run_script("--after-config", "--after-drill")
@@ -552,20 +552,20 @@ class FluxResume(_Resume):
         # Review of #1159 (reviewer-codex): Ready=True right after the unsuspend can be the condition
         # from before the freeze. The gate requires observedGeneration to reach the generation the
         # unsuspend created and lastAppliedRevision to equal the parent's source artifact.
-        self.state(parents={"platform": True, "flux-system": True}, parent_never_reconciles=["platform"])
+        self.state(parents={"workbricks": True, "flux-system": True}, parent_never_reconciles=["workbricks"])
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 1, text)
         self.assertIn("STOP", text)
-        self.assertIn("Kustomization flux-system/platform", text)
+        self.assertIn("Kustomization flux-system/workbricks", text)
         self.assertNotIn(("patch", "kustomization/flux-system"), self.verbs())
         self.assertTrue(self.final()["parents"]["flux-system"])
 
     def test_an_unreadable_parent_at_step_0_changes_nothing(self):
         # Review of #1159 (reviewer-claude): a failed read is not "not suspended".
-        self.state(parents={"platform": True, "flux-system": True}, parent_get_fails=["platform"])
+        self.state(parents={"workbricks": True, "flux-system": True}, parent_get_fails=["workbricks"])
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 1, text)
-        self.assertIn("cannot read Kustomization flux-system/platform", text)
+        self.assertIn("cannot read Kustomization flux-system/workbricks", text)
         self.assertFalse(WRITES & {v for v, _ in self.verbs()})
 
     def test_after_config_refuses_a_harness_scaled_to_zero(self):
@@ -580,17 +580,17 @@ class FluxResume(_Resume):
     def test_after_config_stops_on_a_failed_harness_rollout(self):
         # Review of #1159 (reviewer-codex): old replicas can stay available while the new rollout fails;
         # a failed `rollout status` must stop the run before the parents are resumed.
-        self.state(parents={"platform": True, "flux-system": True}, harness_rollout_fails=True)
+        self.state(parents={"workbricks": True, "flux-system": True}, harness_rollout_fails=True)
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 1, text)
         self.assertIn("did not finish rolling out", text)
-        self.assertNotIn(("patch", "kustomization/platform"), self.verbs())
+        self.assertNotIn(("patch", "kustomization/workbricks"), self.verbs())
 
     def test_the_self_applied_root_passes_without_a_handled_request(self):
         # Drill 2 (2026-10-08): flux-system/flux-system applies its own object from git, which drops the
         # requestedAt annotation, so lastHandledReconcileAt never moved and the old gate gave a false STOP
         # after the release had landed. Generation + revision are the proof that works for the root.
-        self.state(parents={"platform": True, "flux-system": True}, ailab_source=rev(AILAB))
+        self.state(parents={"workbricks": True, "flux-system": True}, ailab_source=rev(AILAB))
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 0, text)
         self.assertEqual(self.final()["parent_applied"]["flux-system"], rev(AILAB))
@@ -599,7 +599,7 @@ class FluxResume(_Resume):
     def test_a_fresh_generation_with_a_stale_revision_stops(self):
         # Review of #1161 (reviewer-claude): the revision half of the gate on its own: the controller has
         # processed the new generation but still reports the pre-freeze lastAppliedRevision.
-        self.state(parents={"platform": True, "flux-system": True}, ailab_source=rev(AILAB),
+        self.state(parents={"workbricks": True, "flux-system": True}, ailab_source=rev(AILAB),
                    parent_stale_revision=["flux-system"])
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 1, text)
@@ -608,16 +608,16 @@ class FluxResume(_Resume):
 
     def test_a_transient_read_right_after_the_unsuspend_is_retried(self):
         # Review of #1161 (reviewer-claude): the post-unsuspend generation read is retried, not a false STOP.
-        self.state(parents={"platform": True, "flux-system": True}, parent_transient_once=["platform"])
+        self.state(parents={"workbricks": True, "flux-system": True}, parent_transient_once=["workbricks"])
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 0, text)
         self.assertIn("RESUMED", text)
 
     def test_suspended_secrets_land_before_platform_app(self):
-        # Review of #1162 (reviewer-claude): drill 2 freezes platform-secrets with the release. If the
+        # Review of #1162 (reviewer-claude): drill 2 freezes workbricks-secrets with the release. If the
         # values landed first, the ten services would present preshared secrets to a registry that still
-        # has no entry for them. The script resumes platform-secrets first and requires it to apply the
-        # target before platform-app moves.
+        # has no entry for them. The script resumes workbricks-secrets first and requires it to apply the
+        # target before workbricks-app moves.
         self.state(secrets={"suspended": True, "after": 3})
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 0, text)
@@ -634,7 +634,7 @@ class FluxResume(_Resume):
     def test_suspended_secrets_are_landed_first_in_every_mode(self):
         # Review of #1162 round 2 (both reviewers): the wait must not depend on re-reading the suspend
         # field after the un-suspend. The secrets apply only on the third poll here, so a skipped wait
-        # resumes platform-app before they land.
+        # resumes workbricks-app before they land.
         self.state(secrets={"suspended": True, "after": 3})
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 0, text)
@@ -651,7 +651,7 @@ class FluxResume(_Resume):
         self.assertTrue(self.final()["ks_suspended"])
 
     def test_after_config_requires_unsuspended_secrets_at_the_target(self):
-        # A config change lands its Secrets first even when platform-secrets was not frozen.
+        # A config change lands its Secrets first even when workbricks-secrets was not frozen.
         self.state(secrets={"suspended": False, "applies": False})
         rc, text = self.run_script("--after-config")
         self.assertEqual(rc, 1, text)
@@ -660,7 +660,7 @@ class FluxResume(_Resume):
         self.assertNotIn(("patch", "kustomization/" + SECRETS), self.verbs())
 
     def test_the_darken_and_drill_paths_do_not_wait_on_unsuspended_secrets(self):
-        # Outside --after-config an unsuspended platform-secrets is not a gate: a darken revert must not
+        # Outside --after-config an unsuspended workbricks-secrets is not a gate: a darken revert must not
         # depend on an unrelated Kustomization being healthy.
         self.state(secrets={"suspended": False, "applies": False})
         rc, text = self.run_script("--after-drill")
@@ -675,9 +675,9 @@ class FluxResume(_Resume):
 
 
 class GatekeeperRelease(_Resume):
-    """Step 1c (platform A.2): the gatekeeper release is its own HelmRelease under Kustomization
-    platform-gatekeeper, a sibling of platform-app. The script resumes and gates it after the Secrets and
-    before platform-app, so the services never come back to a gatekeeper that does not serve their
+    """Step 1c (Workbricks A.2): the gatekeeper release is its own HelmRelease under Kustomization
+    workbricks-gatekeeper, a sibling of workbricks-app. The script resumes and gates it after the Secrets and
+    before workbricks-app, so the services never come back to a gatekeeper that does not serve their
     registry yet."""
 
     def test_a_suspended_gatekeeper_release_is_resumed_and_gated_before_platform_app(self):
@@ -685,7 +685,7 @@ class GatekeeperRelease(_Resume):
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 0, text)
         gk = self.index("patch", "kustomization/" + GK)
-        self.assertLess(gk, self.index("patch", "kustomization"))  # platform-app comes after
+        self.assertLess(gk, self.index("patch", "kustomization"))  # workbricks-app comes after
         self.assertLess(self.last("get", "helmrelease/" + GK_HR), self.index("patch", "kustomization"))
         # The Kustomization's re-apply cleared the HelmRelease suspend: no hand patch needed.
         self.assertNotIn(("patch", "helmrelease/" + GK_HR), self.verbs())
@@ -705,7 +705,7 @@ class GatekeeperRelease(_Resume):
         self.assertEqual(rc, 1, text)
         self.assertIn("STOP", text)
         self.assertIn("Kustomization flux-system/" + GK, text)
-        self.assertNotIn(("patch", "kustomization"), self.verbs())  # platform-app untouched
+        self.assertNotIn(("patch", "kustomization"), self.verbs())  # workbricks-app untouched
         self.assertNotIn(("patch", "helmrelease"), self.verbs())
 
     def test_a_gatekeeper_upgrade_that_never_lands_stops_before_platform_app(self):
@@ -723,7 +723,7 @@ class GatekeeperRelease(_Resume):
         self.assertNotIn(("get", "helmrelease/" + GK_HR), self.verbs())
 
     def test_a_missing_gatekeeper_kustomization_stops_at_1c(self):
-        # Before the cutover, or after a platform revert of it: this script is for the post-cutover world.
+        # Before the cutover, or after a Workbricks revert of it: this script is for the post-cutover world.
         self.state(gk_missing=True)
         rc, text = self.run_script("--after-drill")
         self.assertEqual(rc, 1, text)

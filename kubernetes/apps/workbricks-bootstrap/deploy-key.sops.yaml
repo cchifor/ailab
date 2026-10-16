@@ -6,7 +6,7 @@ data:
 kind: Secret
 metadata:
     creationTimestamp: null
-    name: platform-deploy-key
+    name: workbricks-deploy-key
     namespace: flux-system
 sops:
     age:

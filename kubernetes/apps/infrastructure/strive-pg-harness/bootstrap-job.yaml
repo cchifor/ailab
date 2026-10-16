@@ -10,7 +10,7 @@
 # deletes and recreates THIS Job instead of failing the whole Kustomization.
 #
 # CREDENTIALS: the CNPG-generated strive-pg-superuser Secret (the platform Cluster sets
-# enableSuperuserAccess: true), mounted the same way the platform repo's strive-pg-init-databases
+# enableSuperuserAccess: true), mounted the same way the Workbricks repository's strive-pg-init-databases
 # Job and ailab's openbao-platform-pg-sync mount it; and the ESO-rendered strive-pg-harness Secret,
 # `optional: true` so the pod starts (and does nothing) before ESO has rendered it.
 apiVersion: batch/v1

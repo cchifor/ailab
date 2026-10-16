@@ -6,7 +6,7 @@ No cluster and no network beyond 127.0.0.1.
 Part 1 tests the in-pod verdict logic (phase4_probe.py) with fabricated JWTs and canned gatekeeper
 answers. Part 2 runs the bash orchestrator end to end: stub `kubectl` and `curl` on PATH, and a
 small gatekeeper emulator (one HTTP server per fake replica) that answers /auth/token and /metrics
-the way gatekeeper does at platform main ac123f047, with switchable faults. The stub `kubectl`
+the way gatekeeper does at Workbricks main ac123f047, with switchable faults. The stub `kubectl`
 runs the in-pod program locally (same bootstrap, same stdin) against that replica's emulator.
 
     python3 -m unittest scripts.s2s.test_phase4_probes
@@ -666,18 +666,18 @@ class InProcess(unittest.TestCase):
 # ── Part 2: the bash orchestrator end to end ───────────────────────────────
 
 
-KS_SUSPEND = """kubectl --context admin@ai -n flux-system patch kustomization platform-app --type=merge -p '{"spec":{"suspend":%s}}'"""
+KS_SUSPEND = """kubectl --context admin@ai -n flux-system patch kustomization workbricks-app --type=merge -p '{"spec":{"suspend":%s}}'"""
 HR_SUSPEND = """kubectl --context admin@ai -n strive-ailab patch helmrelease strive --type=merge -p '{"spec":{"suspend":%s}}'"""
 SCALE = "kubectl --context admin@ai -n strive-ailab scale deployment/harness --replicas=%d"
 #: The freeze is top-down (incident AG2-1, 2026-10-08): a parent Kustomization re-applies its children
-#: and drops a `kubectl patch` suspend, so a freeze of platform-app and the HelmRelease alone was undone
-#: twice within minutes. The root and `platform` are suspended before `platform-app`.
+#: and drops a `kubectl patch` suspend, so a freeze of workbricks-app and the HelmRelease alone was undone
+#: twice within minutes. The root and `workbricks` are suspended before `workbricks-app`.
 PARENT_SUSPEND = """kubectl --context admin@ai -n flux-system patch kustomization %s --type=merge -p '{"spec":{"suspend":true}}'"""
-FREEZE_PARENTS = ("flux-system", "platform")
-# The leaves a drill may freeze after the parents: platform-app (the strive release) and, since
-# gatekeeper runs in its own namespace (platform A.2), platform-gatekeeper (the gatekeeper release and
-# its registry-extras ConfigMap). Siblings under `platform`, frozen in either order.
-FREEZE_LEAVES = ("platform-app", "platform-gatekeeper")
+FREEZE_PARENTS = ("flux-system", "workbricks")
+# The leaves a drill may freeze after the parents: workbricks-app (the strive release) and, since
+# gatekeeper runs in its own namespace (Workbricks A.2), workbricks-gatekeeper (the gatekeeper release and
+# its registry-extras ConfigMap). Siblings under `workbricks`, frozen in either order.
+FREEZE_LEAVES = ("workbricks-app", "workbricks-gatekeeper")
 
 
 def _ordered(case, text, needles):
@@ -689,7 +689,7 @@ def _ordered(case, text, needles):
 
 
 def assert_freeze(case, text, scale_to):
-    """Freeze = the parents (the root, then `platform`), then the Flux Kustomization `platform-app`
+    """Freeze = the parents (the root, then `workbricks`), then the Flux Kustomization `workbricks-app`
     (it re-applies the HelmRelease from git and clears a hand-set suspend), then the HelmRelease
     (helm-controller upgrades), then the scale."""
     _ordered(case, text, [PARENT_SUSPEND % p for p in FREEZE_PARENTS]
@@ -703,7 +703,7 @@ RESUME_CONFIG = "scripts/s2s/flux-resume.sh --after-config"
 
 def assert_resume(case, text, mode):
     """A resume is scripts/s2s/flux-resume.sh, never a hand-typed un-suspend. That script gates each
-    step on the platform commit Flux actually fetched and applied (test_flux_resume.py)."""
+    step on the Workbricks commit Flux actually fetched and applied (test_flux_resume.py)."""
     case.assertIn(RESUME_REVERT if mode == "revert" else RESUME_DRILL, text)
     case.assertNotIn('"suspend":false', text, "a hand-typed resume")
 
@@ -714,10 +714,10 @@ def assert_freeze_then_resume(case, text, scale_to):
 
 
 class RunbookFreezeOrder(unittest.TestCase):
-    """The runbook's freezes are top-down: the root, then `platform`, then `platform-app` (incident
+    """The runbook's freezes are top-down: the root, then `workbricks`, then `workbricks-app` (incident
     AG2-1, 2026-10-08: a parent re-applies its children and drops a hand-set suspend), and the
     Kustomization before the HelmRelease (observed 2026-10-06 17:22Z: a HelmRelease-only suspend was
-    cleared by the next platform-app reconcile). Every resume is scripts/s2s/flux-resume.sh: no command
+    cleared by the next workbricks-app reconcile). Every resume is scripts/s2s/flux-resume.sh: no command
     block un-suspends by hand. A freeze and a resume never share a code fence, so pasting a freeze
     never un-freezes."""
 
@@ -753,44 +753,44 @@ class RunbookFreezeOrder(unittest.TestCase):
             resumes += block.count("flux-resume.sh --after-")
             names = self.suspended_kustomizations(lines)
             if names:
-                # Top-down: the root, then `platform`, then (only in drill 2, whose PR edits a Secret)
-                # platform-secrets, then the leaves (FREEZE_LEAVES): platform-app always, and
-                # platform-gatekeeper where the drill touches the gatekeeper release's ConfigMap.
+                # Top-down: the root, then `workbricks`, then (only in drill 2, whose PR edits a Secret)
+                # workbricks-secrets, then the leaves (FREEZE_LEAVES): workbricks-app always, and
+                # workbricks-gatekeeper where the drill touches the gatekeeper release's ConfigMap.
                 self.assertEqual(names[:2], list(FREEZE_PARENTS), "not top-down:\n" + block)
-                self.assertIn("platform-app", names[2:], block)
-                self.assertLessEqual(set(names[2:]) - set(FREEZE_LEAVES), {"platform-secrets"}, block)
+                self.assertIn("workbricks-app", names[2:], block)
+                self.assertLessEqual(set(names[2:]) - set(FREEZE_LEAVES), {"workbricks-secrets"}, block)
                 first_leaf = min(i for i, n in enumerate(names) if n in FREEZE_LEAVES)
                 self.assertTrue(all(n in FREEZE_LEAVES for n in names[first_leaf:]), "a parent after a leaf:\n" + block)
             for i, line in enumerate(lines):
                 if "patch helmrelease strive" in line:
                     freezes += 1
                     before = self.neighbour(lines, i, -1, block)
-                    self.assertTrue("patch kustomization platform-app" in before and '"suspend":true' in before, block)
-                if "patch kustomization platform-app" in line:
+                    self.assertTrue("patch kustomization workbricks-app" in before and '"suspend":true' in before, block)
+                if "patch kustomization workbricks-app" in line:
                     after = self.neighbour(lines, i, +1, block)
                     self.assertTrue("patch helmrelease strive" in after and '"suspend":true' in after, block)
                 # The gatekeeper release pairs with ITS Kustomization the same way.
                 if "patch helmrelease gatekeeper" in line:
                     before = self.neighbour(lines, i, -1, block)
-                    self.assertTrue("patch kustomization platform-gatekeeper" in before and '"suspend":true' in before, block)
-                if "patch kustomization platform-gatekeeper" in line:
+                    self.assertTrue("patch kustomization workbricks-gatekeeper" in before and '"suspend":true' in before, block)
+                if "patch kustomization workbricks-gatekeeper" in line:
                     after = self.neighbour(lines, i, +1, block)
                     self.assertTrue("patch helmrelease gatekeeper" in after and '"suspend":true' in after, block)
         self.assertGreaterEqual(freezes, 4, "the darken block and drills 1, 2 and 4 freeze")
         self.assertGreaterEqual(resumes, 3, "the darken resume, drill 2 and the drills' restore resume")
 
     def test_the_script_resumes_the_gatekeeper_release_before_platform_app(self):
-        # Step 1c: the gatekeeper release (platform A.2) is resumed and gated before platform-app, in every
+        # Step 1c: the gatekeeper release (Workbricks A.2) is resumed and gated before workbricks-app, in every
         # mode, so the services never come back to a gatekeeper that does not serve their registry yet.
         for mode in ("--after-drill", "--after-config", "--after-revert"):
             out = subprocess.run(
                 ["bash", str(HERE / "flux-resume.sh"), mode, "--dry-run"],
                 capture_output=True, text=True, check=True,
             ).stdout
-            gk = out.index("kustomization platform-gatekeeper")
-            self.assertLess(gk, out.index("patch kustomization platform-app"), mode)
+            gk = out.index("kustomization workbricks-gatekeeper")
+            self.assertLess(gk, out.index("patch kustomization workbricks-app"), mode)
             self.assertIn("helmrelease gatekeeper", out[gk:], mode)
-            self.assertLess(out.index("kustomization platform-secrets"), gk, mode)
+            self.assertLess(out.index("kustomization workbricks-secrets"), gk, mode)
 
     def test_each_resume_uses_the_right_mode(self):
         text = RUNBOOK.read_text(encoding="utf-8")
@@ -805,8 +805,8 @@ class RunbookFreezeOrder(unittest.TestCase):
 
     def test_drill_2_freezes_the_secrets_and_keeps_the_harness(self):
         # Drill 2 as run on 2026-10-08 (R22): its PR edits gatekeeper-secrets.enc.yaml, so
-        # platform-secrets is frozen too and resumed first; the harness stays up throughout. Since the
-        # A.2 cutover the gatekeeper release is a sibling of platform-app (platform-gatekeeper), so the
+        # workbricks-secrets is frozen too and resumed first; the harness stays up throughout. Since the
+        # A.2 cutover the gatekeeper release is a sibling of workbricks-app (workbricks-gatekeeper), so the
         # drill freezes it too: the registry change must not land on it mid-window.
         text = RUNBOOK.read_text(encoding="utf-8")
         drill2 = text[text.index("**2. Rollback after #2125 (config only") : text.index("**3. Token rotation.**")]
@@ -814,7 +814,7 @@ class RunbookFreezeOrder(unittest.TestCase):
         freeze = [f for f in fences if '"suspend":true' in f]
         self.assertEqual(len(freeze), 1, "drill 2 has one freeze block")
         self.assertEqual(self.suspended_kustomizations(freeze[0].splitlines()),
-                         ["flux-system", "platform", "platform-secrets", "platform-app", "platform-gatekeeper"])
+                         ["flux-system", "workbricks", "workbricks-secrets", "workbricks-app", "workbricks-gatekeeper"])
         self.assertNotIn("scale deployment/harness", drill2)
 
 

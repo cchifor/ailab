@@ -7,7 +7,7 @@ Provisioned with **OpenTofu** (bpg/proxmox) + Python/paramiko scripts. This file
 gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 >  **Forge = Gitea (`git.chifor.me`), NOT GitHub.** As of 2026-07-09 (ADR 0017) Gitea is the
-> **master** forge for this repo and `cchifor/platform`. Push, open PRs, and run CI on
+> **master** forge for this repo and `cchifor/workbricks`. Push, open PRs, and run CI on
 > **Gitea** (`git.chifor.me/cchifor/ailab`, org `cchifor`). `github.com/cchifor/*` is a
 > **read-only push-mirror backup** (GitHub Actions dormant). Use the Gitea API / `tea`, **NOT `gh`**:
 > `scripts/gitea-api.sh` for routine calls (the workstation's non-admin `workstation-bot`), and

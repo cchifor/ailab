@@ -1,8 +1,8 @@
 ---
-# Self-hosted GitHub Actions runner host config. Replicates the cchifor/platform "self-hosted-hv"
+# Self-hosted GitHub Actions runner host config. Replicates the cchifor/workbricks "self-hosted-hv"
 # ephemeral pool (previously Multipass/Hyper-V Ubuntu VMs) on the codified Proxmox lab. The contract
 # (ephemeral wrapper, systemd unit + drop-ins, job-started hook, between-jobs reclaim, daemon.json)
-# is PORTED from cchifor/platform:infra/runner/ + .github/runner-hooks/ and is asserted nightly by
+# is PORTED from cchifor/workbricks:infra/runner/ + .github/runner-hooks/ and is asserted nightly by
 # that repo's runner-health.yml canary — keep these in sync with it. The only intentional change vs
 # the live pool is registration auth: a GitHub App (here) instead of a static PAT.
 github_runner_enabled: false # opt-in, like storage_router (flip in group_vars/github_runners.yml)
@@ -13,13 +13,13 @@ github_runner_enabled: false # opt-in, like storage_router (flip in group_vars/g
 github_runner_agent_enabled: true
 
 # ---- pool identity (must match the live self-hosted-hv pool so jobs route to both) ----
-github_runner_repo: cchifor/platform
+github_runner_repo: cchifor/workbricks
 github_runner_label: self-hosted-hv
 
 # ---- GitHub App auth ----
 # App ID + installation ID are NOT secret (set in group_vars/github_runners.yml). The App private
 # key IS secret: provided as the var `github_app_private_key`, decrypted from SOPS by site.yml's
-# pre_task (community.sops.load_vars) and written 0400 to the path below. App needs, on cchifor/platform:
+# pre_task (community.sops.load_vars) and written 0400 to the path below. App needs, on cchifor/workbricks:
 # Administration: read/write (to mint runner registration tokens) + Metadata: read.
 github_runner_app_id: ""
 github_runner_app_installation_id: ""
@@ -47,9 +47,9 @@ github_runner_reclaim_keep_re: ""
 # its beacon (without the build-cache size, which comes from the skipped docker block).
 # Empty = no Gitea runner here; the ephemeral contract is unchanged.
 github_runner_reclaim_gitea_unit: gitea-act-runner.service
-github_runner_service: actions.runner.cchifor-platform.service
+github_runner_service: actions.runner.cchifor-workbricks.service
 
-# ---- guest swap (cchifor/platform#620: heavy e2e peaks spill to the VM's own disk, not OOM) ----
+# ---- guest swap (cchifor/workbricks#620: heavy e2e peaks spill to the VM's own disk, not OOM) ----
 # None existed on the cloud image. With the balloon floor pinned to 12 GiB (tofu), swap is the
 # second line of defence: a heavy compose/Playwright peak spills to the VM's disk instead of getting
 # OOM-killed (exit 137). swappiness=10 keeps it cold — used only under genuine pressure, not eagerly.
