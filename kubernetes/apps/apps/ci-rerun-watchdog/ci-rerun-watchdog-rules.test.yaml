@@ -75,8 +75,6 @@ tests:
       - series: 'ci_rerun_watchdog_reruns_total{job="ci-rerun-watchdog", repo="cchifor/ailab", mode="live"}'
         values: "0 1 2 3+0x60"
       - series: 'ci_rerun_watchdog_reruns_total{job="ci-rerun-watchdog", repo="cchifor/workbricks", mode="dry_run"}'
-        values: "0+1x60"        # the shadow week is expected to be busy
-      - series: 'ci_rerun_watchdog_reruns_total{job="ci-rerun-watchdog", repo="cchifor/workbricks", mode="dry_run"}'
         values: "0+1x60"        # the Workbricks cutover is expected to be busy
     alert_rule_test:
       - eval_time: 30m
