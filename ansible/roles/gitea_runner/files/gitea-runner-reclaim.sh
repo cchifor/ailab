@@ -26,7 +26,7 @@
 # fixed allow-list of ARTIFACT subdirs (never the checkout, never .git) and chowns foreign-owned
 # leftovers back to the runner; it never deletes the workspace itself.
 #
-# Keep GITEA_RECLAIM_DIRS in sync with cchifor/workbricks:.github/runner-hooks/job-started.sh and the
+# Keep GITEA_RECLAIM_DIRS in sync with cchifor/platform:.github/runner-hooks/job-started.sh and the
 # github_runner role's job-started.sh (the GitHub pool's equivalent hook).
 set -uo pipefail
 

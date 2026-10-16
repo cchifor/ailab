@@ -217,7 +217,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_PEER_PROBE_RC="${MOCK_PEER_PROBE_RC:-}" MOCK_SYSTEMCTL_FAIL="${MOCK_SYSTEMCTL_FAIL:-0}" \
     MOCK_MAINPID="${MOCK_MAINPID:-4242}" \
     GITEA_CLEANUP_ENV_FILE=/nonexistent \
-    GITEA_CLEANUP_PEER_SERVICES="${PEER_SERVICES_OVERRIDE:-actions.runner.cchifor-workbricks.service}" \
+    GITEA_CLEANUP_PEER_SERVICES="${PEER_SERVICES_OVERRIDE:-actions.runner.cchifor-platform.service}" \
     GITEA_CACHE_PURGE_QUEUE="${QUEUEFILE:-/nonexistent/queue}" GITEA_CLEANUP_CACHE_PURGE_STAMP="$WORK/purge.stamp" \
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \

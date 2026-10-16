@@ -230,7 +230,7 @@ dev_worker_tmux_continuum_save_interval: "15"
 
 # ---- gh-actions-fleet (repos shown in the dashboard 'github' window) ----
 dev_worker_gh_fleet_repos:
-  - cchifor/workbricks
+  - cchifor/platform
 
 # ---- web terminal authentication gate (tasks/web_gate.yml, tag web-gate) ----
 # Every path to ttyd is authenticated. Tunnel path: Cloudflare Access's JWT, validated on the worker

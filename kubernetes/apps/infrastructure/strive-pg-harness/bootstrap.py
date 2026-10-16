@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ensure the harness service's login role and database exist on the platform's strive-pg cluster.
 
-Owner runbook step 12 (cchifor/workbricks plans/2026-10-05-platform-modularization-owner-runbook.md):
+Owner runbook step 12 (cchifor/platform plans/2026-10-05-platform-modularization-owner-runbook.md):
 role `harness` LOGIN NOSUPERUSER NOBYPASSRLS, database `harness` OWNED by it. The chart's own
 migration init container then applies services/harness/migrations as `harness`.
 

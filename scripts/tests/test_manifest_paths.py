@@ -47,7 +47,7 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: The full set of Flux Kustomization paths in kubernetes/apps/clusters/ai that this checkout can
 #: actually `kustomize build` — i.e. sourceRef resolves to THIS repo's own flux-system source, per
 #: kubernetes/apps/clusters/ai/flux-system/gotk-sync.yaml (GitRepository flux-system's url IS
-#: cchifor/ailab.git). External stages name paths in agentforge-tenants, workbricks,
+#: cchifor/ailab.git). External stages name paths in agentforge-tenants, platform,
 #: muse-stream and the private trueswarm-admin repo. Their source objects form a closed,
 #: reviewed allowlist; a new external source without an entry fails discovery.
 #: The local paths below are checked against actual kustomization.yaml files.
@@ -84,7 +84,7 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/strive-pg-harness",
         # 2026-10-06 — the S2S Phase 4 probe Job (TokenRequest RBAC + an additive gatekeeper netpol).
         "./kubernetes/apps/infrastructure/s2s-phase4-probe",
-        "./kubernetes/apps/workbricks-bootstrap",
+        "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",
         "./kubernetes/apps/trueswarm-bootstrap",
@@ -94,7 +94,7 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/trueswarm-e2e-tokens",
         "./kubernetes/apps/qnap-storage",
         "./kubernetes/apps/storage-policies",
-        # 2026-09-29 — Kyverno cleanup policies (terminated ReplicaSet pods), after workbricks-kyverno
+        # 2026-09-29 — Kyverno cleanup policies (terminated ReplicaSet pods), after platform-kyverno
         # for the same CRD-ordering reason as storage-policies. Added deliberately.
         "./kubernetes/apps/cluster-hygiene",
     }
@@ -261,11 +261,11 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "workbricks"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab")},
+            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))
-        self.assertFalse(mp.is_this_repo(sources[("flux-system", "workbricks")]))
+        self.assertFalse(mp.is_this_repo(sources[("flux-system", "platform")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "muse-stream")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "trueswarm")]))
         # cloudlab shares a PATH with a directory in this repo (./kubernetes/apps/infrastructure/
@@ -659,11 +659,11 @@ class SourceRefResolution(_FixtureRepo):
         self._assert_raises_both_modes("flux-system/agentforge-tenants")
 
     def test_allowlisted_name_whose_declared_url_is_this_repo_is_local(self):
-        # The allowlist never overrides resolution: if the object named `workbricks` actually points
+        # The allowlist never overrides resolution: if the object named `platform` actually points
         # at THIS repo, its path is local and buildable, so it must be built, not excluded.
-        (self.cluster_ai / "workbricks-source.yaml").write_text(_git_repository_doc("workbricks", LOCAL_URL))
+        (self.cluster_ai / "platform-source.yaml").write_text(_git_repository_doc("platform", LOCAL_URL))
         self._mk_target("kubernetes/apps/x")
-        (self.cluster_ai / "x.yaml").write_text(_kustomization_doc("x", "./kubernetes/apps/x", source_name="workbricks"))
+        (self.cluster_ai / "x.yaml").write_text(_kustomization_doc("x", "./kubernetes/apps/x", source_name="platform"))
         self.assertEqual(self._discover_both_modes(), ["./kubernetes/apps/x"])
 
     def test_duplicate_git_repository_declaration_fails_closed(self):

@@ -68,7 +68,7 @@ variable "lxc_rootfs_gb" {
 # (grow-only; the pool must have free space).
 # Bumped 64 -> 192 GiB: at 64 GiB the store filled (no retention pre-fix), 100% full → blob writes
 # failed (`blob upload unknown` / `provided digest did not match`) while reads still served, which
-# reds cchifor/workbricks CI builds. 192 GiB gives headroom alongside the new storage.retention
+# reds cchifor/platform CI builds. 192 GiB gives headroom alongside the new storage.retention
 # policy (config.json.j2). Applied live via `pct resize 5004 mp0 192G`; this keeps tofu in sync.
 variable "data_datastore" {
   type    = string

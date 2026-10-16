@@ -11,15 +11,15 @@
 #
 # strive-realm is a deliberate, documented EXCEPTION to that last sentence, and only in part.
 # Its e2e/load persona passwords were hand-created Secrets in ns strive-ailab with no git home
-# at all (the Workbricks repository's deploy/components/e2e/kustomization.yaml offers SOPS "or seed it
+# at all (the platform repo's deploy/components/e2e/kustomization.yaml offers SOPS "or seed it
 # directly", and directly is what happened), so they are squarely in scope. Its
-# keycloak_admin_password is NOT: that one also lives in the Workbricks repository's
+# keycloak_admin_password is NOT: that one also lives in the platform repo's
 # deploy/secrets/ailab/keycloak-secrets.enc.yaml, and escrowing it was an explicit operator
-# decision (break-glass reach into the realm without the Workbricks repository's age key) that buys a
+# decision (break-glass reach into the realm without the platform repo's age key) that buys a
 # SECOND home. Rotating it must touch the platform SOPS file AND this seed in the same change.
 # ops_admin_username/ops_admin_password (2026-09-22) are the same shape: the dedicated App-upgrade
-# administrator persona's password is Flux+SOPS in the Workbricks repository (deploy/secrets/ailab/
-# ops-admin-secrets.enc.yaml) AND a Gitea Actions secret on cchifor/workbricks; escrowed here so
+# administrator persona's password is Flux+SOPS in the platform repo (deploy/secrets/ailab/
+# ops-admin-secrets.enc.yaml) AND a Gitea Actions secret on cchifor/platform; escrowed here so
 # the realm's persona set stays complete in one place. Rotate all three in the same change.
 # Be precise about WHY, because the obvious guess is wrong: seed-wins cannot revert the live
 # credential -- nothing reads af/estate/* back into Keycloak or into the platform Secret (see

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Resume the frozen strive release in the only safe order, proving at each step that Flux landed the
-# intended Workbricks commit before anything further is un-frozen.
+# intended platform commit before anything further is un-frozen.
 #
 # The S2S darken and drills (docs/runbooks/s2s-identity.md, "Phase 4") freeze the release: the Flux
-# Kustomization flux-system/workbricks-app first, then the HelmRelease strive-ailab/strive. Resuming
+# Kustomization flux-system/platform-app first, then the HelmRelease strive-ailab/strive. Resuming
 # by hand is unsafe in two ways:
 #   - Un-suspending the HelmRelease first lets helm-controller upgrade a stale spec. Mid-rollback,
 #     that brings the harness back before the reverted helmrelease.yaml is applied.
@@ -13,27 +13,27 @@
 #
 # The script does this, and stops (exit 1) at the first gate that does not pass. Nothing after a
 # failed gate is touched.
-#   0. Target: --sha, else Workbricks main now (git ls-remote).
-#   1. Source: request a reconcile of GitRepository flux-system/workbricks, then wait until
+#   0. Target: --sha, else platform main now (git ls-remote).
+#   1. Source: request a reconcile of GitRepository flux-system/platform, then wait until
 #      .status.artifact.revision is main@sha1:<target>. Without --sha it may instead be
-#      main@sha1:<Workbricks main now>: main is protected and append-only, so a later main descends
+#      main@sha1:<platform main now>: main is protected and append-only, so a later main descends
 #      from the target, and it then becomes the target. With --sha it must be exactly that commit.
 #      Nothing is resumed before this.
-#   1b. Secrets: Kustomization workbricks-secrets (deploy/secrets/ailab). If it is suspended (drill 2 freezes it,
+#   1b. Secrets: Kustomization platform-secrets (deploy/secrets/ailab). If it is suspended (drill 2 freezes it,
 #      because its config change edits gatekeeper-secrets.enc.yaml), un-suspend it; with --after-config, require
 #      it even when it was not suspended. Either way, wait until it has processed the generation the un-suspend
-#      created, .status.lastAppliedRevision is main@sha1:<target> and Ready is True, BEFORE workbricks-app moves:
+#      created, .status.lastAppliedRevision is main@sha1:<target> and Ready is True, BEFORE platform-app moves:
 #      values that land first would point the ten services at preshared secrets the registry does not hold yet.
-#      Outside --after-config an unsuspended workbricks-secrets is not a gate (a darken must not depend on it).
+#      Outside --after-config an unsuspended platform-secrets is not a gate (a darken must not depend on it).
 #   1c. Gatekeeper (platform A.2: the trust root is its own release, HelmRelease strive-gatekeeper/gatekeeper
-#      under Kustomization flux-system/workbricks-gatekeeper, a sibling of workbricks-app). If the Kustomization is
+#      under Kustomization flux-system/platform-gatekeeper, a sibling of platform-app). If the Kustomization is
 #      suspended (drill 1 freezes it: it owns the registry-extras ConfigMap; drill 2 freezes it: the rollback
 #      PR changes the registry and its checksum, which must roll gatekeeper BEFORE the services come back),
 #      un-suspend it and require it applied main@sha1:<target> and Ready; with --after-config, require that
 #      even when it was not suspended. Then the HelmRelease: un-suspend it ONLY if .spec.suspend still reads
 #      true, and require Ready with .status.history[0].chartVersion carrying the target's first 12 hex.
-#      Outside --after-config an unsuspended workbricks-gatekeeper is not a gate.
-#   2. Kustomization: un-suspend workbricks-app, then wait until .status.lastAppliedRevision is
+#      Outside --after-config an unsuspended platform-gatekeeper is not a gate.
+#   2. Kustomization: un-suspend platform-app, then wait until .status.lastAppliedRevision is
 #      main@sha1:<target> and Ready is True.
 #   3. HelmRelease: un-suspend it ONLY if .spec.suspend still reads true (the Kustomization's
 #      re-apply normally clears it, as observed on 2026-10-06 at 17:22:39Z). Then wait until Ready
@@ -43,16 +43,16 @@
 #      the rollout; then run scripts/s2s/phase4-probes.sh. --after-config (a config-only rollback or
 #      re-forward that keeps the harness, drill 2 as redesigned on 2026-10-08): deployment/harness must
 #      still exist and its rollout must be complete.
-#   5. The parents: Kustomizations flux-system/workbricks (it applies workbricks-app) and then
+#   5. The parents: Kustomizations flux-system/platform (it applies platform-app) and then
 #      flux-system/flux-system (the root), each resumed only if it is suspended, then Ready required.
 #
 # THE FREEZE IS TOP-DOWN (incident AG2-1, 2026-10-08): a parent Kustomization re-applies its children
-# and drops a `kubectl patch` suspend, so a freeze of workbricks-app and the HelmRelease alone was undone
-# twice within minutes. Freeze flux-system, then workbricks, then the children; this script resumes the
+# and drops a `kubectl patch` suspend, so a freeze of platform-app and the HelmRelease alone was undone
+# twice within minutes. Freeze flux-system, then platform, then the children; this script resumes the
 # children first and the parents last. Parents that are not suspended get a WARNING at step 0.
 #
 # OWNER-RUN, from a machine that is not a dev worker, with the `admin@ai` context and git access to
-# cchifor/workbricks. Git Bash on Windows or bash on Linux.
+# cchifor/platform. Git Bash on Windows or bash on Linux.
 #
 # Exit 0: landed. Exit 1: STOP at a gate (what is resumed and what is not is printed). Exit 2: bad
 # invocation.
@@ -62,16 +62,16 @@ export MSYS_NO_PATHCONV=1
 
 CONTEXT=admin@ai
 FLUX_NS=flux-system
-SOURCE=workbricks
-SECRETS=workbricks-secrets
-GK_KUSTOMIZATION=workbricks-gatekeeper
+SOURCE=platform
+SECRETS=platform-secrets
+GK_KUSTOMIZATION=platform-gatekeeper
 GK_NS=strive-gatekeeper
 GK_HELMRELEASE=gatekeeper
-KUSTOMIZATION=workbricks-app
+KUSTOMIZATION=platform-app
 NS=strive-ailab
 HELMRELEASE=strive
 HARNESS=harness
-WORKBRICKS_REMOTE=https://git.chifor.me/cchifor/workbricks.git
+PLATFORM_REMOTE=https://git.chifor.me/cchifor/platform.git
 TIMEOUT=${PHASE4_RESUME_TIMEOUT_SECONDS:-600}
 POLL=${PHASE4_RESUME_POLL_SECONDS:-10}
 
@@ -79,13 +79,13 @@ usage() {
   cat <<'EOF'
 usage: scripts/s2s/flux-resume.sh (--after-revert | --after-drill | --after-config) [--sha SHA] [--dry-run]
 
-  --after-revert  after the durable revert (harness.enabled: false) has MERGED on Workbricks main:
+  --after-revert  after the durable revert (harness.enabled: false) has MERGED on platform main:
                   lands it, then requires deployment/harness to be gone
-  --after-drill   once a drill is over: lands Workbricks main, then scales the harness back to 1
+  --after-drill   once a drill is over: lands platform main, then scales the harness back to 1
   --after-config  a config-only rollback or re-forward that keeps the harness: lands it, then requires
                   deployment/harness to exist and be rolled out
-  --sha SHA       the Workbricks commit to land (40 hex), e.g. the revert's merge commit. The source
-                  must then carry exactly that commit. Default: Workbricks main now, or any later
+  --sha SHA       the platform commit to land (40 hex), e.g. the revert's merge commit. The source
+                  must then carry exactly that commit. Default: platform main now, or any later
                   main (main is append-only, so it descends from the target)
   --dry-run       print the steps; no cluster or git call
 
@@ -125,10 +125,10 @@ stop() {
   exit 1
 }
 
-# main_sha: Workbricks main now, or nothing (never a partial or malformed value).
+# main_sha: platform main now, or nothing (never a partial or malformed value).
 main_sha() {
   local s
-  s=$(git ls-remote "$WORKBRICKS_REMOTE" refs/heads/main 2>/dev/null | cut -f1 | head -n 1) || true
+  s=$(git ls-remote "$PLATFORM_REMOTE" refs/heads/main 2>/dev/null | cut -f1 | head -n 1) || true
   s=${s//$'\r'/}
   if [[ $s =~ ^[0-9a-f]{40}$ ]]; then printf '%s' "$s"; fi
   return 0
@@ -154,7 +154,7 @@ source_at_target() {
   ((PINNED)) && return 1
   cur=$(main_sha)
   if [[ -n $cur && $cur != "$SHA" && $ART == *"@sha1:$cur" ]]; then
-    printf 'Workbricks main moved on to %s (a descendant: main is append-only); landing that\n' "$cur"
+    printf 'platform main moved on to %s (a descendant: main is append-only); landing that\n' "$cur"
     SHA=$cur
     return 0
   fi
@@ -162,7 +162,7 @@ source_at_target() {
 }
 
 # secrets_read: SECRETS_STATE = suspend|generation|observedGeneration|lastAppliedRevision|Ready of
-# workbricks-secrets. A failed read is an error, never "not suspended".
+# platform-secrets. A failed read is an error, never "not suspended".
 SECRETS_STATE='' SECRETS_GEN=0
 secrets_read() {
   SECRETS_STATE=$(f get kustomization "$SECRETS" -o jsonpath='{.spec.suspend}{"|"}{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.lastAppliedRevision}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
@@ -184,7 +184,7 @@ secrets_applied() {
   [[ $susp != true && ${observed:-0} -ge $SECRETS_GEN && $applied == *"@sha1:$SHA" && $ready == True ]]
 }
 
-# The gatekeeper Kustomization, read and gated exactly like workbricks-secrets.
+# The gatekeeper Kustomization, read and gated exactly like platform-secrets.
 GK_STATE='' GK_GEN=0
 gk_read() {
   GK_STATE=$(f get kustomization "$GK_KUSTOMIZATION" -o jsonpath='{.spec.suspend}{"|"}{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.lastAppliedRevision}{"|"}{.status.conditions[?(@.type=="Ready")].status}') || return 1
@@ -208,7 +208,7 @@ gkhr_read() {
   GKHR=${GKHR//$'\r'/}
 }
 # gkhr_upgraded: not suspended, Ready, and built from the target commit. The gatekeeper release renders
-# ./deploy/helm from the SAME GitRepository as strive with reconcileStrategy Revision (Workbricks
+# ./deploy/helm from the SAME GitRepository as strive with reconcileStrategy Revision (platform
 # deploy/gitops/flux/clusters/ailab/gatekeeper/helmrelease.yaml), so its chartVersion carries the commit
 # like strive's. Should that ever change, the HelmChart's observedSourceArtifactRevision (flux-system/
 # <hr namespace>-<hr name>) is the strategy-independent proof: the chart artifact was built from the
@@ -247,9 +247,9 @@ hr_upgraded() {
   [[ $susp != true && $chart == *"${SHA:0:12}"* && $ready == True ]]
 }
 
-# The parents of workbricks-app, innermost first: flux-system/workbricks applies it, flux-system/flux-system
-# (the root) applies workbricks.
-PARENTS=(workbricks flux-system)
+# The parents of platform-app, innermost first: flux-system/platform applies it, flux-system/flux-system
+# (the root) applies platform.
+PARENTS=(platform flux-system)
 PARENT='' PARENT_STATE='' GEN_AFTER=0 PARENT_SRC=''
 # parent_read NAME: PARENT_STATE = suspend|generation|observedGeneration|lastAppliedRevision|Ready|
 # sourceRef.kind|sourceRef.namespace|sourceRef.name.
@@ -305,10 +305,10 @@ harness_gone() {
 if ((DRY_RUN)); then
   cat <<EOF
 flux-resume ($MODE), dry run: no cluster or git call. The steps, each gated (at most ${TIMEOUT}s):
-  0. target = ${SHA:-Workbricks main now: git ls-remote $WORKBRICKS_REMOTE refs/heads/main}
+  0. target = ${SHA:-platform main now: git ls-remote $PLATFORM_REMOTE refs/heads/main}
   1. kubectl --context $CONTEXT -n $FLUX_NS annotate gitrepository $SOURCE --overwrite reconcile.fluxcd.io/requestedAt=<now>
      wait: kubectl --context $CONTEXT -n $FLUX_NS get gitrepository $SOURCE -o jsonpath='{.status.artifact.revision}'
-           is main@sha1:<target> (or a later Workbricks main); NOTHING is resumed before this
+           is main@sha1:<target> (or a later platform main); NOTHING is resumed before this
   1b. only if kubectl --context $CONTEXT -n $FLUX_NS get kustomization $SECRETS -o jsonpath='{.spec.suspend}' is true:
        kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $SECRETS --type=merge -p '{"spec":{"suspend":false}}'
      wait (when it was suspended, and always with --after-config): observedGeneration >= the new generation,
@@ -323,7 +323,7 @@ flux-resume ($MODE), dry run: no cluster or git call. The steps, each gated (at 
            ./deploy/helm from the same GitRepository, reconcileStrategy Revision), else HelmChart
            $FLUX_NS/$GK_NS-$GK_HELMRELEASE .status.observedSourceArtifactRevision is main@sha1:<target> AND the
            release's history head equals that HelmChart's .status.artifact.revision; BEFORE step 2.
-     A cluster without Kustomization $GK_KUSTOMIZATION (before the A.2 cutover, or after a Workbricks revert of
+     A cluster without Kustomization $GK_KUSTOMIZATION (before the A.2 cutover, or after a platform revert of
            it) stops here by design: use the runbook revision of that world.
   2. kubectl --context $CONTEXT -n $FLUX_NS patch kustomization $KUSTOMIZATION --type=merge -p '{"spec":{"suspend":false}}'
      wait: .status.lastAppliedRevision is main@sha1:<target> and Ready is True
@@ -349,9 +349,9 @@ command -v git >/dev/null || { echo "flux-resume: git not found" >&2; exit 2; }
 
 step "0. Target commit"
 [[ -n $SHA ]] || SHA=$(main_sha)
-[[ $SHA =~ ^[0-9a-f]{40}$ ]] || stop "cannot read Workbricks main (git ls-remote $WORKBRICKS_REMOTE refs/heads/main)" \
+[[ $SHA =~ ^[0-9a-f]{40}$ ]] || stop "cannot read platform main (git ls-remote $PLATFORM_REMOTE refs/heads/main)" \
   "Nothing was changed: the Kustomization and the HelmRelease stay suspended."
-echo "landing Workbricks $SHA ($MODE)"
+echo "landing platform $SHA ($MODE)"
 SUSPENDED_PARENTS=()
 for p in "${PARENTS[@]}"; do
   parent_read "$p" || stop "cannot read Kustomization $FLUX_NS/$p" \
@@ -379,41 +379,41 @@ if ((SECRETS_WAS_SUSPENDED)); then
   step "1b. Kustomization $FLUX_NS/$SECRETS (frozen with the release): resume it first, then require it applied $SHA"
   f patch kustomization "$SECRETS" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
   wait_until secrets_generation || stop "cannot read Kustomization $FLUX_NS/$SECRETS after its resume (${TIMEOUT}s)" \
-    "Only $SECRETS is resumed; workbricks-app and the HelmRelease stay suspended."
+    "Only $SECRETS is resumed; platform-app and the HelmRelease stay suspended."
 elif [[ $MODE == config ]]; then
   step "1b. Kustomization $FLUX_NS/$SECRETS: a config change lands its Secrets first; require it applied $SHA"
 fi
 if ((SECRETS_WAS_SUSPENDED)) || [[ $MODE == config ]]; then
   f annotate kustomization "$SECRETS" --overwrite "reconcile.fluxcd.io/requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
   wait_until secrets_applied || stop "Kustomization $FLUX_NS/$SECRETS reads '${SECRETS_STATE:-?}' (suspend|generation|observedGeneration|lastAppliedRevision|Ready), not applied main@sha1:$SHA past generation $SECRETS_GEN, after ${TIMEOUT}s" \
-    "workbricks-app and the HelmRelease stay suspended: values must not land before the Secrets they rely on. Investigate $SECRETS."
+    "platform-app and the HelmRelease stay suspended: values must not land before the Secrets they rely on. Investigate $SECRETS."
   echo "Kustomization $FLUX_NS/$SECRETS applied ${SHA:0:12} and Ready"
 fi
 
 wait_until gk_read || stop "cannot read Kustomization $FLUX_NS/$GK_KUSTOMIZATION (${TIMEOUT}s)" \
-  "workbricks-app and the HelmRelease stay suspended. Re-run once the API answers."
+  "platform-app and the HelmRelease stay suspended. Re-run once the API answers."
 GK_WAS_SUSPENDED=0
 [[ ${GK_STATE%%|*} == true ]] && GK_WAS_SUSPENDED=1
 if ((GK_WAS_SUSPENDED)); then
   step "1c. Kustomization $FLUX_NS/$GK_KUSTOMIZATION (frozen with the release): resume it, then require it applied $SHA"
   f patch kustomization "$GK_KUSTOMIZATION" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
   wait_until gk_generation || stop "cannot read Kustomization $FLUX_NS/$GK_KUSTOMIZATION after its resume (${TIMEOUT}s)" \
-    "Only $SECRETS and $GK_KUSTOMIZATION are resumed; workbricks-app and the HelmRelease stay suspended."
+    "Only $SECRETS and $GK_KUSTOMIZATION are resumed; platform-app and the HelmRelease stay suspended."
 elif [[ $MODE == config ]]; then
   step "1c. Kustomization $FLUX_NS/$GK_KUSTOMIZATION: a config change rolls gatekeeper before the services; require it applied $SHA"
 fi
 if ((GK_WAS_SUSPENDED)) || [[ $MODE == config ]]; then
   f annotate kustomization "$GK_KUSTOMIZATION" --overwrite "reconcile.fluxcd.io/requestedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
   wait_until gk_applied || stop "Kustomization $FLUX_NS/$GK_KUSTOMIZATION reads '${GK_STATE:-?}' (suspend|generation|observedGeneration|lastAppliedRevision|Ready), not applied main@sha1:$SHA past generation $GK_GEN and Ready, after ${TIMEOUT}s" \
-    "workbricks-app and the HelmRelease stay suspended: the services must not come back before gatekeeper serves the registry they need. Investigate $GK_KUSTOMIZATION."
+    "platform-app and the HelmRelease stay suspended: the services must not come back before gatekeeper serves the registry they need. Investigate $GK_KUSTOMIZATION."
   echo "Kustomization $FLUX_NS/$GK_KUSTOMIZATION applied ${SHA:0:12} and Ready"
-  gkhr_read || stop "cannot read HelmRelease $GK_NS/$GK_HELMRELEASE" "workbricks-app and the HelmRelease stay suspended."
+  gkhr_read || stop "cannot read HelmRelease $GK_NS/$GK_HELMRELEASE" "platform-app and the HelmRelease stay suspended."
   if [[ ${GKHR%%|*} == true ]]; then
     echo "HelmRelease $GK_NS/$GK_HELMRELEASE still suspended after its Kustomization applied $SHA: resuming it"
     g patch helmrelease "$GK_HELMRELEASE" --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
   fi
   wait_until gkhr_upgraded || stop "HelmRelease $GK_NS/$GK_HELMRELEASE reads '${GKHR:-?}' (suspend|chartVersion|Ready), not upgraded to ${SHA:0:12}, after ${TIMEOUT}s" \
-    "workbricks-app and the HelmRelease stay suspended. Investigate the gatekeeper release, or freeze again (Kustomization first)."
+    "platform-app and the HelmRelease stay suspended. Investigate the gatekeeper release, or freeze again (Kustomization first)."
   echo "HelmRelease $GK_NS/$GK_HELMRELEASE upgraded: chart ${GKHR#*|}"
 fi
 
@@ -466,4 +466,4 @@ if [[ ${#SUSPENDED_PARENTS[@]} -gt 0 ]]; then
     echo "Kustomization $FLUX_NS/$PARENT resumed, reconciled (generation $GEN_AFTER, ${PARENT_SRC}) and Ready"
   done
 fi
-printf '\nRESUMED: Workbricks %s applied by the Kustomization and the HelmRelease\n' "$SHA"
+printf '\nRESUMED: platform %s applied by the Kustomization and the HelmRelease\n' "$SHA"

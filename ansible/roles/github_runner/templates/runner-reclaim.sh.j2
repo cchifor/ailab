@@ -3,7 +3,7 @@
 # logs never fill the disk and no leftover containers hold CPU/RAM while idle. Best-effort: ALWAYS
 # exits 0 (never blocks the runner from starting). Runs as ROOT (20-reclaim.conf ExecStartPre=+).
 #
-# MANAGED BY ANSIBLE (role: github_runner). Ported from cchifor/workbricks:infra/runner/provision.sh.
+# MANAGED BY ANSIBLE (role: github_runner). Ported from cchifor/platform:infra/runner/provision.sh.
 set -uo pipefail
 RUNNER_DIR="{{ github_runner_dir }}"
 DOCKER_CFG="{{ github_runner_home }}/.docker"

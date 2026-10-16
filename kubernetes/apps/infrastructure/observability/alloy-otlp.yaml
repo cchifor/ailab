@@ -5,7 +5,7 @@
 # Deployment in its own `observability` namespace because the platform helm
 # charts HARDCODE the exporter endpoint
 #   http://alloy.observability.svc.cluster.local:4318
-# (cchifor/workbricks deploy/helm/templates/_helpers.tpl) and their
+# (cchifor/platform deploy/helm/templates/_helpers.tpl) and their
 # NetworkPolicies' standardEgress admits exactly ns=observability +
 # app.kubernetes.io/name=alloy on 4317/4318. The HelmRelease is named
 # alloy-otlp so it can't collide with monitoring/alloy tooling-wise;
@@ -24,7 +24,7 @@
 #           → otelcol.processor.batch
 #           → otelcol.exporter.otlphttp → Tempo (observability/tempo.yaml).
 # Services send both signals to the same endpoint; the platform gates span
-# emission with OTEL_TRACES_ENABLED (cchifor/workbricks
+# emission with OTEL_TRACES_ENABLED (cchifor/platform
 # deploy/helm/values/providers/ailab.yaml global.observability.traces).
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease

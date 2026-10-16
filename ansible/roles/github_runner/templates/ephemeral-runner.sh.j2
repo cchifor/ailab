@@ -2,7 +2,7 @@
 # ephemeral-runner.sh — single-job ephemeral runner cycle (GitHub App auth).
 #
 # MANAGED BY ANSIBLE (role: github_runner). Ported from
-# cchifor/workbricks:infra/runner/reference/ephemeral-runner.sh; the ONLY change is registration
+# cchifor/platform:infra/runner/reference/ephemeral-runner.sh; the ONLY change is registration
 # auth — a GitHub App (JWT -> installation token -> registration token) instead of a static PAT.
 # This is the ExecStart of {{ github_runner_service }}: each invocation registers a fresh ephemeral
 # runner named ephem-<host>-<epoch>-<8hex> (matches platform's runner-health canary regex),

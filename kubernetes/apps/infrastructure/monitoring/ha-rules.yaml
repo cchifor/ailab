@@ -204,7 +204,7 @@ spec:
       rules:
         # Inventory of single-replica workloads NOT on the ADR 0016 Tier-B accepted list. The two
         # curated negative regexes ARE the accept-list encoding (git-reviewed, one place, no extra
-        # infra): namespace!~ excludes system/platform namespaces wholesale (charts / the Workbricks repository
+        # infra): namespace!~ excludes system/platform namespaces wholesale (charts / the platform repo
         # own them); the name!~ lists are the intentional singletons — keep them in sync with the
         # ADR 0016 Tier-B table. New app namespaces are auto-included: an unlisted singleton shows up
         # here until it is either replicated or explicitly accepted. Value 1 per offending workload;

@@ -91,8 +91,8 @@ restore ansible/group_vars/dev_workers.yml
 
 echo "[C] a removed or reformatted source fails instead of dropping out"
 edit kubernetes/apps/infrastructure/platform-access/rbac.yaml \
-  's[:s.index("kind: RoleBinding\nmetadata:\n  name: dev-worker-platform-observer\n  namespace: workbricks-edge") - 4]'
-expect_fail "a whole RoleBinding deleted" "no dev-worker-platform-observer RoleBinding for namespace workbricks-edge"
+  's[:s.index("kind: RoleBinding\nmetadata:\n  name: dev-worker-platform-observer\n  namespace: platform-edge") - 4]'
+expect_fail "a whole RoleBinding deleted" "no dev-worker-platform-observer RoleBinding for namespace platform-edge"
 restore kubernetes/apps/infrastructure/platform-access/rbac.yaml
 
 edit kubernetes/apps/infrastructure/platform-access/pg-sync.yaml \

@@ -2,7 +2,7 @@
 # checks for the strive platform's nightly k6 lane, plus 30-day trend panels
 # over the k6:* recording rules (k6-load-rules.yaml). Data arrives via k6's
 # experimental-prometheus-rw output from the CI runner VMs through the
-# prometheus-lan NodePort (cchifor/workbricks load-nightly.yml; adapted from
+# prometheus-lan NodePort (cchifor/platform load-nightly.yml; adapted from
 # that repo's LOCAL-grafana deploy/observability/dashboards/k6-load.json).
 # Templated on scenario + testid (one per run: <scenario>-<gh run_id>) + env
 # (nightly vs ad-hoc). NOTE: k6's rw output stores durations in SECONDS —

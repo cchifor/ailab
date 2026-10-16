@@ -187,7 +187,7 @@ and `cnpg_gitea_site_admins_total`. Counts and ages only, never a token hash, na
 ## strive-pg (the PLATFORM's cluster, not this one): the harness role and database
 
 `strive-pg` in ns `strive-ailab` is the Strive platform's CNPG cluster. Its Cluster CR belongs to the
-platform repo (`deploy/components/cnpg-cluster/`, Flux Kustomization `workbricks-cnpg`); ailab never
+platform repo (`deploy/components/cnpg-cluster/`, Flux Kustomization `platform-cnpg`); ailab never
 patches it. The one database object ailab does keep there is the harness service's login role and
 database (owner runbook step 12 of the platform's 2026-10 modularization program):
 

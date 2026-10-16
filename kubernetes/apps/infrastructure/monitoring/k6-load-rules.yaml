@@ -1,5 +1,5 @@
 # Recording rules over the k6 remote-write series the strive platform's
-# nightly load lane streams in (cchifor/workbricks load-nightly.yml → the
+# nightly load lane streams in (cchifor/platform load-nightly.yml → the
 # prometheus-lan NodePort → /api/v1/write). k6's experimental-prometheus-rw
 # output emits one gauge per trend stat — k6_http_req_duration_p95 in
 # SECONDS (rw native unit; the platform's summary exports are ms) — and a
