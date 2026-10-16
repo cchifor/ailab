@@ -661,7 +661,7 @@ class WorktreesTest(unittest.TestCase):
         self.repo = os.path.join(self.user, "platform")
         os.makedirs(self.user)
         git(self.user, "clone", "-q", self.bare, self.repo)
-        git(self.repo, "config", "remote.origin.url", "https://forge.invalid/cchifor/workbricks.git")
+        git(self.repo, "config", "remote.origin.url", "https://forge.invalid/cchifor/platform.git")
         git(self.repo, "config", "remote.origin.pushurl", self.bare)
         write(os.path.join(self.repo, "app.py"), "a\n")
         write(os.path.join(self.repo, ".gitignore"), "node_modules/\n.env\n*.log\n")

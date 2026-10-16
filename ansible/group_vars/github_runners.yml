@@ -1,5 +1,5 @@
 ---
-# Self-hosted GitHub Actions runner pool (cchifor/workbricks, label self-hosted-hv).
+# Self-hosted GitHub Actions runner pool (cchifor/platform, label self-hosted-hv).
 # The runner role is opt-in; this enables it for the github_runners group. App ID + installation ID
 # are NOT secret (they identify, they don't authorize). The App PRIVATE KEY is the secret — it lives
 # in ansible/secrets/github-runner.sops.yaml (SOPS) and is loaded by site.yml's pre_task.

@@ -28,7 +28,7 @@ pr_reviewer_required_hook_events:
 pr_reviewer_repos:
   - cchifor/ailab
   - cchifor/agentforge
-  - cchifor/workbricks
+  - cchifor/platform
   - cchifor/agentforge-platform
   # dsh-team-conductor joined 2026-09-18 (operator-directed): the DSH agent team's own repo,
   # transferred from the restricted `dsh` user into this org so the org webhooks, the hook

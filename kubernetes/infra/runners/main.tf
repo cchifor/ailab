@@ -1,6 +1,6 @@
 ###############################################################################
 # Self-hosted GitHub Actions runner VMs — 5 active: 2 on node1/node2, 1 on node3 (6th reserved; see variables.tf).
-# Replicates the existing cchifor/workbricks "self-hosted-hv" ephemeral pool
+# Replicates the existing cchifor/platform "self-hosted-hv" ephemeral pool
 # (Multipass/Hyper-V Ubuntu 24.04) onto the codified lab as Proxmox QEMU VMs.
 # Docker-heavy CI (compose v2.31.0 + buildx + Playwright-in-container + k6).
 # Host/runner config is applied by the ansible role `github_runner` (just runners).
@@ -47,7 +47,7 @@ resource "proxmox_virtual_environment_vm" "runner" {
   # Ballooning: VM floats between floating (idle floor, 12 GiB) and dedicated (load ceiling, 24 GiB),
   # so idle runners return RAM to the host. Independent of the runner service's systemd MemoryMax cap.
   # The floor is held at 12 GiB (not the bpg default 1 GiB) because host RAM pressure was ballooning
-  # the guests down to 1-2 GiB and OOM-killing CI jobs — see cchifor/workbricks#620 + variables.tf.
+  # the guests down to 1-2 GiB and OOM-killing CI jobs — see cchifor/platform#620 + variables.tf.
   memory {
     dedicated = var.runner_memory_mib
     floating  = var.runner_memory_floating_mib

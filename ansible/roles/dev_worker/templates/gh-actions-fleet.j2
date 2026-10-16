@@ -2,7 +2,7 @@
 # {{ ansible_managed }} (role: dev_worker)
 # Compact GitHub Actions view: status icon + workflow name only.
 REPOS=(
-{% for r in dev_worker_gh_fleet_repos | default(['cchifor/workbricks']) %}
+{% for r in dev_worker_gh_fleet_repos | default(['cchifor/platform']) %}
   {{ r }}
 {% endfor %}
 )

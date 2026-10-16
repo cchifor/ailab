@@ -45,7 +45,7 @@ APPS = ROOT / "kubernetes/apps"
 
 # One RoleBinding of the observer ClusterRole per platform namespace (platform-access/rbac.yaml),
 # and one env block per workload in pg-sync.yaml (the CronJob and the bootstrap Job).
-EXPECTED_ROLEBINDING_NAMESPACES = ("strive-ailab", "strive-sandboxes-ailab", "workbricks-edge")
+EXPECTED_ROLEBINDING_NAMESPACES = ("strive-ailab", "strive-sandboxes-ailab", "platform-edge")
 EXPECTED_PGSYNC_ENVS = 2
 
 

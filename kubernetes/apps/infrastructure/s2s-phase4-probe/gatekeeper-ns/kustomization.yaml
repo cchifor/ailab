@@ -12,7 +12,7 @@ kind: Kustomization
 # MERGE ONLY AFTER the platform cutover is live: strive-gatekeeper exists, endpoints/gatekeeper there
 # is 2/2 ready, and the old gatekeeper is gone from strive-ailab. Earlier, this Kustomization fails
 # to apply or the Job records a false FAIL. On a platform cutover rollback, revert this PR (back to
-# strive-ailab here and in GK_NS) TOGETHER WITH the Workbricks revert, not after it.
+# strive-ailab here and in GK_NS) TOGETHER WITH the platform revert, not after it.
 namespace: strive-gatekeeper
 resources:
   - rbac.yaml

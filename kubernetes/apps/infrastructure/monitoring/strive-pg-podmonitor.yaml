@@ -13,8 +13,8 @@
 # 2026-09-16 while draining talos-cp3; see cnpg-replication-rules.yaml for the full incident.
 #
 # WHY A SECOND PodMonitor RATHER THAN RELABELLING CNPG'S. Two reasons, and both matter:
-#   1. OWNERSHIP. strive-pg's Cluster CR is reconciled by the `workbricks-cnpg` Flux Kustomization out
-#      of the EXTERNAL cchifor/workbricks repo — ailab manages nothing else in strive-ailab. A label
+#   1. OWNERSHIP. strive-pg's Cluster CR is reconciled by the `platform-cnpg` Flux Kustomization out
+#      of the EXTERNAL cchifor/platform repo — ailab manages nothing else in strive-ailab. A label
 #      patched onto CNPG's managed object from here would be reverted by whichever controller wins,
 #      silently and on an unpredictable schedule.
 #   2. CNPG DELETES PodMonitors NAMED AFTER THE CLUSTER. apps/databases/infra-pg.yaml records this
@@ -29,7 +29,7 @@
 # NOTE this object lives in strive-ailab, a namespace ailab does not otherwise own. It is additive
 # and self-contained (a PodMonitor creates nothing and mutates nothing), which is what makes it a
 # safe exception rather than a precedent for managing that namespace from here. The durable fix is
-# for the Workbricks repository to add the release label to its Cluster's monitoring stanza; when it does,
+# for the platform repo to add the release label to its Cluster's monitoring stanza; when it does,
 # delete this file.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor

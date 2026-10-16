@@ -16,7 +16,7 @@
 #         "units_map":{"repo.actions":"write"},"includes_all_repositories":true,"can_create_org_repo":false}
 #      PUT  /api/v1/teams/<team id>/members/actions-retention
 #    Proof of scope with the resulting token: GET /orgs/cchifor/repos 200, GET runs 200, DELETE of a
-#    bogus run id 404 (permission passed), GET /repos/cchifor/workbricks/contents/README.md 403.
+#    bogus run id 404 (permission passed), GET /repos/cchifor/platform/contents/README.md 403.
 #
 # 3. the token (PAT scopes are immutable; a wrong set means a new token). Never to the terminal:
 #      kubectl --context admin@ai -n gitea exec deploy/gitea -c gitea -- gitea admin user generate-access-token -u actions-retention -t actions-run-retention --scopes read:organization,write:repository --raw > /some/mode-600/file

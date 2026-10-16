@@ -347,7 +347,7 @@ spec:
           url: http://loki.monitoring.svc.cluster.local:3100
         # Tempo (ns observability, tempo.yaml there) — strive platform traces,
         # head-sampled via the alloy-otlp collector. Field shapes follow the
-        # platform's local-compose precedent (cchifor/workbricks
+        # platform's local-compose precedent (cchifor/platform
         # deploy/observability/grafana-datasources.yaml). `prometheus` is the
         # chart's default-datasource uid (grafana.sidecar.datasources.uid).
         # Tempo's NetworkPolicy admits exactly these Grafana pods on 3200.

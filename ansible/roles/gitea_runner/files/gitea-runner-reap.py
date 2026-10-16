@@ -102,7 +102,7 @@ ADOPT_WINDOW_SEC = 48 * 3600
 WOULD_TTL_SEC = 24 * 3600
 
 # act_runner's own line, verbatim from cloud-ci-9's journal (2026-10-12):
-#   time="2026-10-12T13:56:15+03:00" level=info msg="task 434665 repo is cchifor/workbricks https://github.com https://git.chifor.me"
+#   time="2026-10-12T13:56:15+03:00" level=info msg="task 434665 repo is cchifor/platform https://github.com https://git.chifor.me"
 TASK_RE = re.compile(
     r'^time="(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(Z|[+-]\d\d:\d\d)" level=info '
     r'msg="task (\d+) repo is ([A-Za-z0-9._-]+/[A-Za-z0-9._-]+) ')

@@ -3,7 +3,7 @@
 #
 # Why: ADR 0017 disabled Actions on the GitHub mirror, so the agent never got a job (0 since
 # 09-30/10-02 on all 8 hosts). Meanwhile:
-# - it kept the GitHub App private key (Administration: read/write on cchifor/workbricks) in a
+# - it kept the GitHub App private key (Administration: read/write on cchifor/platform) in a
 #   runner-owned file that every Gitea CI job could read (host mode, same user);
 # - its ExecStartPre reclaim could force-remove Docker state under a running Gitea job (guarded only
 #   since #1284).

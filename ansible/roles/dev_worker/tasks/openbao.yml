@@ -427,7 +427,7 @@
           platform pf valkey-master 16379:6379       # any ClusterIP, foreground
           platform env                               # slot, postgres role, file paths
 
-      What it can reach: the `strive-ailab`, `strive-sandboxes-ailab` and `workbricks-edge` namespaces
+      What it can reach: the `strive-ailab`, `strive-sandboxes-ailab` and `platform-edge` namespaces
       (workloads, pods/logs, services, configmaps, events, PVCs, CNPG/Traefik/Flux/ESO objects,
       `kubectl top`, port-forward) and every platform database EXCEPT `keycloak`.
 
@@ -449,7 +449,7 @@
          usually a missing tenant, not missing data.
       5. `--rw` uses the primary (still read-only). Prefer it for a long scan: a replica can cancel a
          query that conflicts with recovery (`max_standby_streaming_delay`).
-      6. Fixes ship as PRs to the Workbricks repository and through Flux. This credential is for *seeing*.
+      6. Fixes ship as PRs to the platform repo and through Flux. This credential is for *seeing*.
 
       Runbook: `docs/runbooks/dev-worker-platform-access.md` in the ailab repo.
       {% endif %}

@@ -53,7 +53,7 @@
     state: directory
     mode: "0755"
 
-# ── 1b. guest swap (cchifor/workbricks#620) ────────────────────────────────────
+# ── 1b. guest swap (cchifor/platform#620) ────────────────────────────────────
 # OOM reclaim valve so a heavy compose/Playwright peak spills to the VM disk instead of exit-137.
 # Pairs with the 12 GiB balloon floor in tofu (kubernetes/infra/runners). See swap.yml + the runbook.
 - name: Configure guest swap

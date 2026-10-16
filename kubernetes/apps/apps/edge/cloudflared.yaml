@@ -182,9 +182,9 @@ data:
       # /agent, /auth + the gatekeeper ForwardAuth chain). id.strive.place -> Keycloak.
       # Requires the strive.place zone + these CNAMEs on the tunnel (see RUNBOOK).
       - hostname: strive.place
-        service: http://traefik.workbricks-edge.svc.cluster.local:80
+        service: http://traefik.platform-edge.svc.cluster.local:80
       - hostname: id.strive.place
-        service: http://traefik.workbricks-edge.svc.cluster.local:80
+        service: http://traefik.platform-edge.svc.cluster.local:80
       - service: http_status:404
 ---
 apiVersion: apps/v1

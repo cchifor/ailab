@@ -42,7 +42,7 @@ perf:
 ping:
     cd {{ansible_dir}} && ansible pve_nodes -m ping
 
-# Ansible: provision/refresh the self-hosted GitHub Actions runner VMs (cchifor/workbricks pool).
+# Ansible: provision/refresh the self-hosted GitHub Actions runner VMs (cchifor/platform pool).
 # Create the VMs first (tofu -chdir=kubernetes/infra/runners apply) + the github-runner SOPS secret.
 # Dedicated playbook (not site.yml), so a full `just net` never touches the runner VMs.
 # See docs/runbooks/ci-runners.md.

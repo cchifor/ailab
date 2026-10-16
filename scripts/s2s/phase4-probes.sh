@@ -4,7 +4,7 @@
 # Plan: plans/2026-10-06-s2s-identity-openbao-plan.md, "Phase 4" and "Verification and drills".
 # Runbook: docs/runbooks/s2s-identity.md, "Phase 4: activation checks" (when to run what).
 #
-# OWNER-RUN, after Workbricks #2092 (`harness.enabled: true`) has rolled out, from a machine that is
+# OWNER-RUN, after platform #2092 (`harness.enabled: true`) has rolled out, from a machine that is
 # NOT a dev worker, with the `admin@ai` kube context. Git Bash on Windows or bash on Linux; needs
 # kubectl, curl, base64 and sha256sum (no local python).
 #
@@ -34,7 +34,7 @@ CONTEXT=admin@ai
 # The harness, its ServiceAccount, the `default` SA and HelmRelease `strive` live in NS.
 NS=strive-ailab
 # Gatekeeper's namespace: its pods, Service/Endpoints and ConfigMap gatekeeper-registry-extras.
-# strive-gatekeeper since the A.2 cutover (Workbricks: gatekeeper in its own namespace, step 3).
+# strive-gatekeeper since the A.2 cutover (platform: gatekeeper in its own namespace, step 3).
 # It is the shared source: scripts/s2s/test_phase4_job.py fails unless the in-cluster probe Job
 # (kubernetes/apps/infrastructure/s2s-phase4-probe/gatekeeper-ns/kustomization.yaml) says the same.
 GK_NS=strive-gatekeeper
@@ -52,10 +52,10 @@ EXTRAS_CM=gatekeeper-registry-extras
 HELMRELEASE=strive
 # The Flux Kustomization that applies the HelmRelease manifest (deploy/gitops/flux/clusters/ailab/app).
 FLUX_NS=flux-system
-FLUX_KUSTOMIZATION=workbricks-app
-# Its parents, outermost first: the root (applies `workbricks`) and `workbricks` (applies workbricks-app).
+FLUX_KUSTOMIZATION=platform-app
+# Its parents, outermost first: the root (applies `platform`) and `platform` (applies platform-app).
 # Each re-applies its children and drops a hand-set suspend (incident AG2-1, 2026-10-08).
-FLUX_PARENTS=(flux-system workbricks)
+FLUX_PARENTS=(flux-system platform)
 # A real route of the harness IngressRoute (PathPrefix(/api/harness), gatekeeper-auth BEFORE the
 # rewrite; the harness serves /admin/v1/chat*): unauthenticated it must be 401, never a login 302.
 EDGE_URL=https://strive.place/api/harness/admin/v1/chat
@@ -164,21 +164,21 @@ redact() { sed -E 's/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/<redac
 k() { kubectl --context "$CONTEXT" -n "$NS" "$@"; }
 kg() { kubectl --context "$CONTEXT" -n "$GK_NS" "$@"; }
 
-# Freeze = top-down: the parent Kustomizations (the root, then `workbricks`), then the Flux
+# Freeze = top-down: the parent Kustomizations (the root, then `platform`), then the Flux
 # Kustomization that applies the HelmRelease, then the HelmRelease, then the scale. Every suspend is
 # needed: a parent re-applies its children from git and drops a hand-set suspend (incident AG2-1,
-# 2026-10-08: a freeze of workbricks-app and the HelmRelease alone was undone twice within minutes);
+# 2026-10-08: a freeze of platform-app and the HelmRelease alone was undone twice within minutes);
 # the Kustomization re-applies the HelmRelease manifest and so clears a hand-set HelmRelease suspend
 # within one reconcile (observed 2026-10-06 17:22Z); the HelmRelease suspend stops helm-controller
 # upgrades, which would put the replica count back. flux-resume.sh resumes the parents last.
 freeze_commands() {
   local parent
   cat <<EOF
-  1. Freeze the release top-down: the root Kustomization, then \`workbricks\` (each re-applies its
+  1. Freeze the release top-down: the root Kustomization, then \`platform\` (each re-applies its
      children from git and drops a hand-set suspend; incident AG2-1, 2026-10-08), then the
      Kustomization $FLUX_KUSTOMIZATION (it re-applies the HelmRelease from git and clears a hand-set
      HelmRelease suspend; observed 2026-10-06 17:22Z), then the HelmRelease (Helm re-applies the
-     replica count on every Workbricks commit, so a bare scale is undone). Suspending the root holds
+     replica count on every platform commit, so a bare scale is undone). Suspending the root holds
      every ailab GitOps change until the resume:
 EOF
   for parent in "${FLUX_PARENTS[@]}"; do
@@ -194,7 +194,7 @@ EOF
 EOF
 }
 
-# Resume = scripts/s2s/flux-resume.sh, never by hand. It lands the Workbricks commit through Flux,
+# Resume = scripts/s2s/flux-resume.sh, never by hand. It lands the platform commit through Flux,
 # with a gate at each step: the GitRepository fetched it; the Kustomization applied it; the
 # HelmRelease (un-suspended only if still suspended) upgraded to it. Un-suspending by hand can
 # re-apply a stale HelmRelease and, mid-rollback, bring the harness back before the revert lands.
@@ -210,7 +210,7 @@ EOF
 darken_commands() {
   freeze_commands
   cat <<EOF
-  3. Make it durable: a Workbricks PR setting \`harness.enabled: false\` in
+  3. Make it durable: a platform PR setting \`harness.enabled: false\` in
      deploy/helm/values/providers/ailab.yaml (revert #2092), merged. Only AFTER it has merged, resume:
 $(resume_commands revert)
 EOF
@@ -488,7 +488,7 @@ reminders() {
   - The @api assistant journeys (tests/e2e/journeys/assistant/api-*.spec.ts, flows
     tests/e2e/flows/assistant/api-*.md) pass live against https://strive.place with the persona,
     one worker.
-  - report-ailab-pin-drift shows 0 torn: from a Workbricks checkout at main, as
+  - report-ailab-pin-drift shows 0 torn: from a platform checkout at main, as
     .github/workflows/ailab-pin-guard.yml runs it:
       uv run --quiet python3 scripts/ci/report-ailab-pin-drift.py --count-app-templates --fail-on-torn --fail-on-incoherent
   Both are part of the activation: a failure there darkens the harness too.
@@ -664,7 +664,7 @@ revocation_drill() {
       bad "revocation: only $streak consecutive refused rounds at the end of the observation (2 needed): the end state was not observed"
     fi
   fi
-  section "Restore, once the drill is over (it lands Workbricks main, then scales the harness to 1)"
+  section "Restore, once the drill is over (it lands platform main, then scales the harness to 1)"
   resume_commands drill
   cat <<EOF
   then: scripts/s2s/phase4-probes.sh   (the full post-flip check again)

@@ -59,10 +59,10 @@ registry_zot_manage_ufw: true
 
 # ---- Pull-through cache (sync extension) ----
 # Zot's `sync` runs registry.chifor.me as an on-demand pull-through MIRROR of upstream base images
-# (docker.io/quay.io/mcr) so the cchifor/workbricks CI runners stop hitting Docker Hub's anonymous 429.
+# (docker.io/quay.io/mcr) so the cchifor/platform CI runners stop hitting Docker Hub's anonymous 429.
 # Images are served at the TRANSPARENT upstream path (registry.chifor.me/v2/library/python/... etc),
 # which is what a Docker daemon `registry-mirrors` and a BuildKit `[registry."docker.io"] mirrors`
-# require — proven end-to-end by cchifor/workbricks's scripts/ci/verify-registry-mirror.sh.
+# require — proven end-to-end by cchifor/platform's scripts/ci/verify-registry-mirror.sh.
 # Prefix layering (config.json.j2): quay.io (keycloak/**) and mcr (playwright*) keep SPECIFIC
 # prefixes and are listed FIRST; docker.io is listed LAST with the explicit allowlist below.
 # See docs/decisions/0014-registry-pull-through-cache.md.
@@ -72,7 +72,7 @@ registry_zot_manage_ufw: true
 # then starts an on-demand upstream sync for something that cannot exist upstream (9,036
 # `failed to sync image` in one day), and one that never settles wedges every later read of that
 # reference ("image already demanded, waiting on channel") — tag-manifest reads hang while `/v2/`
-# stays green (cchifor/workbricks#788). Zot content filters have no negation, so an explicit list is
+# stays green (cchifor/platform#788). Zot content filters have no negation, so an explicit list is
 # the only way to say "never proxy our own namespaces". The fix was first applied by hand on
 # 2026-08-26 and silently lost when this role re-rendered the config on 2026-09-25 — hence here,
 # pinned by scripts/tests/test_registry_zot_sync_allowlist.py and asserted at apply time.
@@ -144,7 +144,7 @@ registry_zot_sync_dockerhub_user: ""
 registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credentials.json"
 
 # ---- Retention (storage.retention in config.json.j2) ----
-# Without retention the store grows unbounded (~one sha-<commit> tag per repo per Workbricks main
+# Without retention the store grows unbounded (~one sha-<commit> tag per repo per platform main
 # build) and eventually fills the data disk → 100%-full blob-write failures. The strive/** policy
 # keeps `latest` + the N most-recently-pushed sha tags per repo (GC reclaims the rest). The mirror
 # repos (everything else) are a CACHE: they are explicitly PROTECTED (deleteUntagged:false, keep

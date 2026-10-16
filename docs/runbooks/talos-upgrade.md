@@ -182,10 +182,10 @@ needs a separate owner decision. It restores control-plane metadata only.
     INHERIT; GRANT pg_monitor TO cnpg_metrics_exporter;`.
   - After every CNPG hop, gate on `cnpg_collector_last_collection_error == 0` for every instance.
   - Custom queries must be readable by `pg_monitor`. infra-pg's Gitea credential views already were.
-- **The Flux `workbricks` GitRepository pulls the Workbricks Gitea source** (`ssh://git@git.chifor.me/cchifor/workbricks`,
-  10 min interval), which lags the Gitea merge. After a Workbricks merge, re-annotate
+- **The Flux `platform` GitRepository pulls the GitHub mirror** (`ssh://git@github.com/cchifor/platform`,
+  10 min interval), which lags the Gitea merge. After a platform merge, re-annotate
   `reconcile.fluxcd.io/requestedAt` on the GitRepository until its artifact revision moves, and only then
-  nudge the Kustomization (`workbricks-cnpg-operator`, ...). One hop sat on the pre-merge revision for ~5 min.
+  nudge the Kustomization (`platform-cnpg-operator`, ...). One hop sat on the pre-merge revision for ~5 min.
 - **Toggling a label on a platform PR re-triggers `Preview Environment / preview`** and cancels the run in
   flight, which then shows as a failure. Re-run it with `POST .../actions/runs/<run>/jobs/<job>/rerun`,
   which goes to the back of the queue; it cost ~25 min once. To hold a pipelined PR, set

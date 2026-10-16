@@ -5,7 +5,7 @@
 #
 # WHY HERE (ns strive-ailab) AND NOT NEXT TO THE OTHER SYNC: it needs the CNPG superuser to create
 # roles and grant, and a Secret can only be mounted by a pod in its own namespace. This is the SAME
-# Secret, mounted the SAME way, as the Workbricks repository's own strive-pg-init-databases Job — an
+# Secret, mounted the SAME way, as the platform repo's own strive-pg-init-databases Job — an
 # in-cluster, Flux-owned, reviewed workload. What ADR 0028 bounds is what a WORKER can read; this Job
 # is on the cluster side of that line (plan §Decision 2).
 #
@@ -700,7 +700,7 @@ spec:
           containers:
             - name: sync
               # The CNPG operand image LINE the platform's strive-pg Cluster runs (python3 + psycopg2
-              # bundled with barman-cloud). The Cluster is on 16.9 and is managed by the Workbricks repository;
+              # bundled with barman-cloud). The Cluster is on 16.9 and is managed by the platform repo;
               # renovate.json holds this image to 16.x, the same major, so a client minor may lead the
               # server but the libpq protocol cannot drift. Every 16.x bump must pass
               # scripts/tests/test-platform-pg-sync.sh (manifests CI) under this exact image; 16.15 did

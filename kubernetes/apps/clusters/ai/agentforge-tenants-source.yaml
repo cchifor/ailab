@@ -7,7 +7,7 @@
 # (agentforge-tenants-deploy-key, flux-system) is SOPS-encrypted under
 # kubernetes/apps/agentforge-tenants-bootstrap and applied by the agentforge-tenants-git-auth
 # Kustomization (the bootstrap-generated flux-system sweep of clusters/ai has NO decryption, so the
-# ciphertext Secret can't live here — same split as workbricks-source/workbricks-git-auth).
+# ciphertext Secret can't live here — same split as platform-source/platform-git-auth).
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:

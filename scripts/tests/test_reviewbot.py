@@ -2673,7 +2673,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
     The behavioural enqueue tests use repos=["o/kept"], so restoring cchifor/review-bot-fixture to
     the role defaults would leave them green. This is the test that would actually go red."""
 
-    EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/workbricks",
+    EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
                 "cchifor/agentforge-platform", "cchifor/dsh-team-conductor",
                 "cchifor/forge", "cchifor/relay", "cchifor/llm-router", "cchifor/dsh-acp-plus"]
 
@@ -2774,8 +2774,8 @@ class AllowlistDefaultsTest(unittest.TestCase):
 
     def test_the_parser_is_not_confused_by_quoting_or_trailing_keys(self):
         text = ('pr_reviewer_repos:\n  - "cchifor/ailab"\n'
-                "  - 'cchifor/workbricks'  # inline\n\nnext_key: 1\n  - not-a-repo\n")
-        self.assertEqual(self._parse_repos(text), ["cchifor/ailab", "cchifor/workbricks"])
+                "  - 'cchifor/platform'  # inline\n\nnext_key: 1\n  - not-a-repo\n")
+        self.assertEqual(self._parse_repos(text), ["cchifor/ailab", "cchifor/platform"])
 
     def test_the_parser_fails_closed_on_a_shape_it_cannot_read(self):
         with self.assertRaises(AssertionError):

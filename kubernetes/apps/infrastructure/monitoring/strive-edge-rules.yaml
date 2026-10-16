@@ -7,7 +7,7 @@
 # application 5xx), twelve carried an upstream status, gatekeeper logged no errors, and Traefik had
 # NO scrape at all (its ServiceMonitor lacks the `release` label Prometheus selects on, and the
 # `traefik` Service exposes no metrics port), so the only record was 7 days of access log lines. The
-# plan's E1a fixes the scrape in the Workbricks repository; this file is what reads it. E5's dashboard
+# plan's E1a fixes the scrape in the platform repo; this file is what reads it. E5's dashboard
 # (strive-edge-dashboard.yaml) is the matching view; E2 (Gatus, apps/gatus/configmap.yaml) probes
 # the public path from outside.
 #
@@ -117,7 +117,7 @@
 # {method="api_key",status="disabled"}. Checked against live Prometheus on 2026-10-07, BEFORE AG1a:
 # job="gatekeeper" (namespace strive-ailab then, strive-gatekeeper since the A.2 cutover; pod,
 # instance ip:5000, service, container, endpoint) is the real scrape label set. No expression in this
-# file matches the gatekeeper series by namespace (the only namespace matchers are workbricks-edge's
+# file matches the gatekeeper series by namespace (the only namespace matchers are platform-edge's
 # Traefik series), so the move is invisible to the rules; checked at the cutover on 2026-10-09, when
 # up{job="gatekeeper"} showed both strive-gatekeeper pods;
 # gatekeeper_auth_requests_total additionally carries tenant_id, method, status;
@@ -173,16 +173,16 @@ spec:
         # this does not fire today; a 7-day backtest is true only up to that moment).
         - alert: TraefikScrapeMissing
           expr: |
-            absent(up{namespace="workbricks-edge",service="traefik-metrics"})
+            absent(up{namespace="platform-edge",service="traefik-metrics"})
             or
-            up{namespace="workbricks-edge",service="traefik-metrics"} == 0
+            up{namespace="platform-edge",service="traefik-metrics"} == 0
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: "Traefik metrics are not being scraped (workbricks-edge/traefik-metrics)"
+            summary: "Traefik metrics are not being scraped (platform-edge/traefik-metrics)"
             description: >-
-              There is no `up` series for service traefik-metrics in namespace workbricks-edge, or a
+              There is no `up` series for service traefik-metrics in namespace platform-edge, or a
               Traefik target reports 0, and it has been so for 15m. Until it is back the StriveEdge*
               rules cannot fire. Check the ServiceMonitor `traefik` carries
               `release: kube-prometheus-stack`, that Service `traefik-metrics` exists with port
@@ -195,13 +195,13 @@ spec:
         - alert: StriveEdge5xxRatioHigh
           expr: |
             (
-              sum(rate(traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code=~"5.."}[5m]))
+              sum(rate(traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code=~"5.."}[5m]))
               /
-              sum(rate(traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web"}[5m]))
+              sum(rate(traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web"}[5m]))
               > 0.05
             )
             and
-            sum(rate(traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web"}[5m])) > 0.01
+            sum(rate(traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web"}[5m])) > 0.01
           for: 10m
           labels:
             severity: critical
@@ -219,7 +219,7 @@ spec:
         # is "about 10"; the fixtures use clear margins on both sides.
         - alert: StriveEdge5xxBurst
           expr: |
-            sum(increase(traefik_entrypoint_requests_total{namespace="workbricks-edge",entrypoint="web",code=~"5.."}[10m])) >= 10
+            sum(increase(traefik_entrypoint_requests_total{namespace="platform-edge",entrypoint="web",code=~"5.."}[10m])) >= 10
           labels:
             severity: warning
           annotations:
@@ -244,28 +244,28 @@ spec:
         - alert: StriveEdgeGenerated5xx
           expr: |
             (
-              sum by (exported_service) (increase(traefik_router_requests_total{namespace="workbricks-edge",code=~"5.."}[10m]))
+              sum by (exported_service) (increase(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
               -
               (
                 sum by (exported_service) (
                   (
                     (
-                      sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace="workbricks-edge",code=~"5.."}[10m]))
+                      sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
                       unless
-                      sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace="workbricks-edge",code=~"5.."}[1h] offset 10m))
+                      sum by (exported_service, code, method, protocol, pod) (last_over_time(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[1h] offset 10m))
                     )
                     and
                     (
-                      min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_router_requests_total{namespace="workbricks-edge",code=~"5.."})[10m:30s]))
+                      min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_router_requests_total{namespace="platform-edge",code=~"5.."})[10m:30s]))
                       <
-                      min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_service_requests_total{namespace="workbricks-edge",code=~"5.."})[10m:30s]))
+                      min by (exported_service, code, method, protocol, pod) (min_over_time(timestamp(traefik_service_requests_total{namespace="platform-edge",code=~"5.."})[10m:30s]))
                     )
                   ) * 1.1
                   or
-                  sum by (exported_service, code, method, protocol, pod) (increase(traefik_service_requests_total{namespace="workbricks-edge",code=~"5.."}[10m]))
+                  sum by (exported_service, code, method, protocol, pod) (increase(traefik_service_requests_total{namespace="platform-edge",code=~"5.."}[10m]))
                 )
                 or
-                sum by (exported_service) (increase(traefik_router_requests_total{namespace="workbricks-edge",code=~"5.."}[10m])) * 0
+                sum by (exported_service) (increase(traefik_router_requests_total{namespace="platform-edge",code=~"5.."}[10m])) * 0
               )
             ) > 3
           labels:

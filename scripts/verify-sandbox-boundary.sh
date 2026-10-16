@@ -17,7 +17,7 @@
 #              /proc/1/environ carries no orchestrator credential (separate PID namespace).
 #
 # DISPOSABLE + SAFE: runs ONLY against the throwaway tenant-zero/playground workspace with a fresh random
-# job-id subPath, and HARD-REFUSES platform-dev (which drives the real cchifor/ailab + cchifor/workbricks
+# job-id subPath, and HARD-REFUSES platform-dev (which drives the real cchifor/ailab + cchifor/platform
 # repos). Both canary Jobs are TORN DOWN afterwards. A green run is the standing proof v1.1 is safe; ANY
 # breach is a P0 — STOP and escalate with the reproduction.
 #

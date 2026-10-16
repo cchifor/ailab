@@ -32,7 +32,7 @@ WS_TOKEN = "f00dfeed" * 5  # the routine workstation-bot credential
 HEAD = "8a8daed88aa05197de65bfd2d97af00aa740f250"
 OLD = "1111111111111111111111111111111111111111"
 MERGE_SHA = "9999999999999999999999999999999999999999"
-REQUIRED_WORKBRICKS = [
+REQUIRED_PLATFORM = [
     "CI / ci-gate*",
     "E2E Preflight / preflight*",
     "E2E Tests / smoke*",
@@ -41,7 +41,7 @@ REQUIRED_WORKBRICKS = [
 ]
 ACK = "CI / owner-ack (pull_request)"
 GATE = "CI / ci-gate (pull_request)"
-RUN_URL = "/cchifor/workbricks/actions/runs/71276/jobs/471671"
+RUN_URL = "/cchifor/platform/actions/runs/71276/jobs/471671"
 
 FAKE_GIT = textwrap.dedent(f"""\
     #!/usr/bin/env bash
@@ -217,11 +217,11 @@ KUBE_PY = STATE_HELPERS + textwrap.dedent("""\
 
 def status(context, state, sid, url=None):
     return {"id": sid, "context": context, "status": state,
-            "target_url": url or "/cchifor/workbricks/actions/runs/71276/jobs/471600"}
+            "target_url": url or "/cchifor/platform/actions/runs/71276/jobs/471600"}
 
 
 def green(**overrides):
-    """A fully green workbricks head: the five required contexts, owner-ack, and a skipped job."""
+    """A fully green platform head: the five required contexts, owner-ack, and a skipped job."""
     ctx = {
         GATE: "success",
         "E2E Preflight / preflight (pull_request)": "success",
@@ -278,7 +278,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
     def scenario(self, **kw):
         sc = {
             "ws_token": WS_TOKEN,
-            "repo": "workbricks",
+            "repo": "platform",
             "merge_sha": MERGE_SHA,
             "pr": {"number": 7, "state": "open", "merged": False, "draft": False, "title": "feat: x",
                    "head": {"sha": HEAD}, "base": {"ref": "main"}, "mergeable": True},
@@ -286,7 +286,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
             "statuses": [green()],
             "after_rerun": [green()],
             "branch": {"name": "main", "protected": True, "enable_status_check": True,
-                       "status_check_contexts": list(REQUIRED_WORKBRICKS)},
+                       "status_check_contexts": list(REQUIRED_PLATFORM)},
             "merge_responses": [[200, ""]],
         }
         sc.update(kw)
@@ -405,7 +405,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_without_execute_it_is_a_dry_run(self):
         self.scenario(merge_responses=[[405, {"message": "Changed protected files"}], [200, ""]])
-        r = self.run_script("workbricks", "7", HEAD, execute=False)
+        r = self.run_script("platform", "7", HEAD, execute=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DRY RUN", r.stdout)
         self.assertIn("would merge", r.stdout)
@@ -413,14 +413,14 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_explicit_dry_run_flag_is_the_same(self):
         self.scenario()
-        r = self.run_script("workbricks", "7", HEAD, "--dry-run", execute=False)
+        r = self.run_script("platform", "7", HEAD, "--dry-run", execute=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DRY RUN", r.stdout)
         self.assert_nothing_but_reads()
 
     def test_dry_run_with_approve_pin_names_the_pin_and_the_run(self):
         self.scenario(statuses=[green(**{ACK: "failure", GATE: "failure"})])
-        r = self.run_script("workbricks", "7", HEAD, "--approve-pin", execute=False)
+        r = self.run_script("platform", "7", HEAD, "--approve-pin", execute=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn(f"approve-pin {HEAD}", r.stdout)
         self.assertIn("run 71276", r.stdout)
@@ -428,25 +428,25 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_dry_run_refuses_like_the_real_run(self):
         self.scenario(statuses=[green(**{"E2E Tests / smoke (pull_request)": "failure"})])
-        r = self.run_script("workbricks", "7", HEAD, execute=False)
+        r = self.run_script("platform", "7", HEAD, execute=False)
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assert_nothing_but_reads()
 
     def test_dry_run_does_not_wait_for_pending_checks(self):
         self.scenario(statuses=[green(**{GATE: "pending"})])
-        r = self.run_script("workbricks", "7", HEAD, polls="5", execute=False)
+        r = self.run_script("platform", "7", HEAD, polls="5", execute=False)
         self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
         self.assertIn("would wait", r.stdout)
-        pr_reads = [e for e in self.events() if e == "CALL ws GET /repos/cchifor/workbricks/pulls/7"]
+        pr_reads = [e for e in self.events() if e == "CALL ws GET /repos/cchifor/platform/pulls/7"]
         self.assertEqual(len(pr_reads), 1, "one gate pass, no polling")
         self.assert_nothing_but_reads()
 
     # -- argument and file checks ----------------------------------------------------------------------------
     def test_bad_arguments_exit_2_without_any_call(self):
         self.scenario()
-        for args in (("workbricks", "7", HEAD[:12]), ("workbricks", "x7", HEAD), ("workbricks", "7", HEAD.upper()),
-                     ("../workbricks", "7", HEAD), ("workbricks", "7", HEAD, "--force"), ("workbricks", "7"),
-                     ("workbricks", "7", HEAD, "--dry-run"), ("workbricks", "7", HEAD, "extra")):
+        for args in (("platform", "7", HEAD[:12]), ("platform", "x7", HEAD), ("platform", "7", HEAD.upper()),
+                     ("../platform", "7", HEAD), ("platform", "7", HEAD, "--force"), ("platform", "7"),
+                     ("platform", "7", HEAD, "--dry-run"), ("platform", "7", HEAD, "extra")):
             r = self.run_script(*args)  # each with --execute appended: --dry-run plus --execute is refused
             self.assertEqual(r.returncode, 2, args)
         self.assertEqual(self.read("argv.curl"), [])
@@ -462,18 +462,18 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_shipped_context_files_are_lf_and_match_the_live_lists(self):
         d = os.path.join(REPO, "scripts", "owner-ops")
-        for repo in ("workbricks", "ailab"):
+        for repo in ("platform", "ailab"):
             with open(os.path.join(d, f"required-contexts-{repo}.txt"), "rb") as f:
                 raw = f.read()
             self.assertNotIn(b"\r", raw, repo)
             patterns = [l for l in raw.decode("utf-8").splitlines() if l.strip() and not l.startswith("#")]
-            self.assertEqual(patterns, REQUIRED_WORKBRICKS if repo == "workbricks" else [], repo)
+            self.assertEqual(patterns, REQUIRED_PLATFORM if repo == "platform" else [], repo)
 
     # -- the gate refuses before minting ---------------------------------------------------------------------
     def test_refuses_when_the_head_moved(self):
         self.scenario(pr={"number": 7, "state": "open", "merged": False, "draft": False, "title": "feat: x",
                           "head": {"sha": OLD}, "base": {"ref": "main"}})
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assert_refused_without_minting(r)
         self.assertIn("head moved", r.stdout + r.stderr)
 
@@ -483,7 +483,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
             base = {"number": 7, "draft": False, "title": "feat: x", "head": {"sha": HEAD}, "base": {"ref": "main"}}
             base.update(pr)
             self.scenario(pr=base)
-            r = self.run_script("workbricks", "7", HEAD)
+            r = self.run_script("platform", "7", HEAD)
             self.assert_refused_without_minting(r)
 
     def test_refuses_a_wip_or_draft_pr(self):
@@ -496,14 +496,14 @@ class GiteaOwnerMergeTest(unittest.TestCase):
                   "head": {"sha": HEAD}, "base": {"ref": "main"}}
             pr.update(extra)
             self.scenario(pr=pr)
-            r = self.run_script("workbricks", "7", HEAD)
+            r = self.run_script("platform", "7", HEAD)
             self.assert_refused_without_minting(r)
 
     def test_a_title_that_only_starts_with_wip_letters_is_not_wip(self):
         pr = {"number": 7, "state": "open", "merged": False, "draft": False, "title": "Wipe stale tokens",
               "head": {"sha": HEAD}, "base": {"ref": "main"}}
         self.scenario(pr=pr)
-        r = self.run_script("workbricks", "7", HEAD, execute=False)
+        r = self.run_script("platform", "7", HEAD, execute=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_refuses_when_a_bot_did_not_approve_the_head(self):
@@ -518,49 +518,49 @@ class GiteaOwnerMergeTest(unittest.TestCase):
         for reviews in cases:
             self.fresh()
             self.scenario(reviews=reviews)
-            r = self.run_script("workbricks", "7", HEAD)
+            r = self.run_script("platform", "7", HEAD)
             self.assert_refused_without_minting(r)
 
     def test_reads_every_page_of_reviews(self):
         # 60 unrelated reviews first: an approval on page 2 must be found (and the gate must pass).
         noise = [approved("someone-else", rid=i, state="COMMENT") for i in range(1, 61)]
         self.scenario(reviews=noise + [approved("reviewer-claude", rid=61), approved("reviewer-codex", rid=62)])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_refuses_when_a_required_context_failed(self):
         self.scenario(statuses=[green(**{"E2E Tests / smoke (pull_request)": "failure"})])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assert_refused_without_minting(r)
         self.assertIn("E2E Tests / smoke", r.stdout + r.stderr)
 
     def test_refuses_when_a_required_context_stays_pending(self):
         self.scenario(statuses=[green(**{"S2S Authority Guard / guard (pull_request)": "pending"})])
-        r = self.run_script("workbricks", "7", HEAD, polls="3")
+        r = self.run_script("platform", "7", HEAD, polls="3")
         self.assert_refused_without_minting(r)
 
     def test_refuses_when_a_required_context_is_missing(self):
         self.scenario(statuses=[green(**{"E2E Preflight / preflight (pull_request)": None})])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assert_refused_without_minting(r)
         self.assertIn("E2E Preflight / preflight*", r.stdout + r.stderr)
 
     def test_refuses_when_any_reported_context_failed(self):
         # force_merge bypasses every check, so a failed context that is not required still refuses.
         self.scenario(statuses=[green(**{"CI / frontend (pull_request)": "failure"})])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assert_refused_without_minting(r)
 
     def test_refuses_when_owner_ack_failed_without_approve_pin(self):
         self.scenario(statuses=[green(**{ACK: "failure", GATE: "failure"})])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assert_refused_without_minting(r)
         self.assertIn("--approve-pin", r.stdout + r.stderr)
 
     def test_refuses_when_live_protection_requires_a_context_the_file_lacks(self):
         self.scenario(branch={"name": "main", "enable_status_check": True,
-                              "status_check_contexts": REQUIRED_WORKBRICKS + ["New Gate / new*"]})
-        r = self.run_script("workbricks", "7", HEAD)
+                              "status_check_contexts": REQUIRED_PLATFORM + ["New Gate / new*"]})
+        r = self.run_script("platform", "7", HEAD)
         self.assert_refused_without_minting(r)
         self.assertIn("New Gate / new*", r.stdout + r.stderr)
 
@@ -568,13 +568,13 @@ class GiteaOwnerMergeTest(unittest.TestCase):
         # 120 skipped contexts first: the required ones sit on page 3 and must still be found.
         filler = [status(f"CI / job{i} (pull_request)", "skipped", 1000 + i) for i in range(120)]
         self.scenario(statuses=[filler + green()])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_waits_without_a_credential_then_mints_once_green(self):
         pending = green(**{GATE: "pending", "E2E Tests / smoke (pull_request)": "pending"})
         self.scenario(statuses=[pending, pending, green()])
-        r = self.run_script("workbricks", "7", HEAD, polls="5")
+        r = self.run_script("platform", "7", HEAD, polls="5")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         ev = self.events()
         first_mint = next(i for i, e in enumerate(ev) if e.startswith("MINT "))
@@ -586,7 +586,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
     # -- the owner operation --------------------------------------------------------------------------------
     def test_happy_path_mints_once_merges_and_deletes_once(self):
         self.scenario()
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.mints()), 1)
         self.assertEqual(len(self.deletes()), 1)
@@ -599,7 +599,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_token_is_used_only_between_mint_and_delete(self):
         self.scenario()
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         ev = self.events()
         i_mint = next(i for i, e in enumerate(ev) if e.startswith("MINT "))
@@ -613,7 +613,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_curl_reads_no_config_and_follows_no_redirects(self):
         self.scenario()
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for argv in self.read("argv.curl"):
             self.assertTrue(argv.startswith("-q "), argv)
@@ -623,7 +623,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_force_merge_only_after_changed_protected_files(self):
         self.scenario(merge_responses=[[405, {"message": "Changed protected files", "url": "x"}], [200, ""]])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.merge_bodies(), [{"Do": "merge", "head_commit_id": HEAD},
                                                {"Do": "merge", "head_commit_id": HEAD, "force_merge": True}])
@@ -633,7 +633,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_no_force_merge_after_any_other_refusal_and_the_token_is_deleted(self):
         self.scenario(merge_responses=[[405, {"message": "Not all required status checks successful"}]])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
         self.assertEqual(self.merge_bodies(), [{"Do": "merge", "head_commit_id": HEAD}])
         self.assertEqual(len(self.deletes()), 1)
@@ -641,7 +641,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_delete_runs_when_the_merge_call_fails_in_transport(self):
         self.scenario(merge_responses=[["EXIT7", ""]])
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
         self.assertEqual(len(self.mints()), 1)
         self.assertEqual(len(self.deletes()), 1)
@@ -649,7 +649,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_delete_runs_when_the_mint_returns_garbage(self):
         self.scenario(mint_fail=True)
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
         self.assertEqual(len(self.mints()), 1)
         self.assertEqual(len(self.deletes()), 1, "a half-made token is deleted by name")
@@ -662,7 +662,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
         self.scenario(term_on_delete=True,
                       pr={"number": 424242, "state": "open", "merged": False, "draft": False, "title": "feat: x",
                           "head": {"sha": HEAD}, "base": {"ref": "main"}})
-        r = self.run_script("workbricks", "424242", HEAD)
+        r = self.run_script("platform", "424242", HEAD)
         ev = self.events()
         self.assertGreaterEqual(len(self.deletes()), 1)
         last_delete = max(i for i, e in enumerate(ev) if e.startswith("DELETE "))
@@ -672,19 +672,19 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_a_transient_read_failure_while_waiting_is_retried(self):
         self.scenario(status_fail_reads=1)
-        r = self.run_script("workbricks", "7", HEAD, polls="3")
+        r = self.run_script("platform", "7", HEAD, polls="3")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.mints()), 1)
 
     def test_persistent_read_failures_refuse_without_minting(self):
         self.scenario(status_fail_reads=99)
-        r = self.run_script("workbricks", "7", HEAD, polls="10")
+        r = self.run_script("platform", "7", HEAD, polls="10")
         self.assert_refused_without_minting(r)
         self.assertIn("read", r.stdout + r.stderr)
 
     def test_unconfirmed_revocation_is_loud(self):
         self.scenario(revocation_ineffective=True)
-        r = self.run_script("workbricks", "7", HEAD)
+        r = self.run_script("platform", "7", HEAD)
         self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
         self.assertIn("NOT CONFIRMED", r.stdout + r.stderr)
         self.assert_no_secret_in_argv_or_output(r)
@@ -705,12 +705,12 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_approve_pin_posts_the_full_head_reruns_and_merges_with_two_short_tokens(self):
         self.pin_scenario()
-        r = self.run_script("workbricks", "7", HEAD, "--approve-pin", polls="6")
+        r = self.run_script("platform", "7", HEAD, "--approve-pin", polls="6")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         owner = self.owner_calls()
-        self.assertIn(f'CALL owner POST /repos/cchifor/workbricks/issues/7/comments {{"body":"approve-pin {HEAD}"}}',
+        self.assertIn(f'CALL owner POST /repos/cchifor/platform/issues/7/comments {{"body":"approve-pin {HEAD}"}}',
                       owner)
-        self.assertIn("CALL owner POST /repos/cchifor/workbricks/actions/runs/71276/rerun-failed-jobs", owner)
+        self.assertIn("CALL owner POST /repos/cchifor/platform/actions/runs/71276/rerun-failed-jobs", owner)
         self.assertEqual(len(self.mints()), 2)
         self.assertEqual(len(self.deletes()), 2)
         # never hold a token across the wait: the first token is deleted before the post-pin status polls,
@@ -727,7 +727,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
     def test_approve_pin_refuses_when_another_context_failed(self):
         self.scenario(statuses=[green(**{ACK: "failure", GATE: "failure",
                                          "Contract Tests / contract-gate (pull_request)": "failure"})])
-        r = self.run_script("workbricks", "7", HEAD, "--approve-pin")
+        r = self.run_script("platform", "7", HEAD, "--approve-pin")
         self.assert_refused_without_minting(r)
 
     def test_approve_pin_stops_when_owner_ack_fails_again_after_the_rerun(self):
@@ -736,7 +736,7 @@ class GiteaOwnerMergeTest(unittest.TestCase):
             if s["context"] in (ACK, GATE):
                 s["id"] += 700  # a NEW failure, not the one the pin was posted for
         self.pin_scenario(after=[again])
-        r = self.run_script("workbricks", "7", HEAD, "--approve-pin", polls="4")
+        r = self.run_script("platform", "7", HEAD, "--approve-pin", polls="4")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertEqual(len(self.mints()), 1, "no merge token after a failed acknowledgement")
         self.assertEqual(len(self.deletes()), 1)
@@ -744,14 +744,14 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_approve_pin_skips_the_pin_when_owner_ack_is_already_green(self):
         self.scenario()
-        r = self.run_script("workbricks", "7", HEAD, "--approve-pin")
+        r = self.run_script("platform", "7", HEAD, "--approve-pin")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.mints()), 1)
         self.assertFalse([e for e in self.owner_calls() if "/comments" in e or "rerun" in e])
 
     def test_approve_pin_refuses_a_head_without_owner_ack(self):
         self.scenario(statuses=[green(**{ACK: None})])
-        r = self.run_script("workbricks", "7", HEAD, "--approve-pin")
+        r = self.run_script("platform", "7", HEAD, "--approve-pin")
         self.assert_refused_without_minting(r)
 
 
