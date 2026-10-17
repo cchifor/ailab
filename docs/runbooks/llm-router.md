@@ -2147,6 +2147,30 @@ unchanged; catalog failures return a safe 5xx so Codex keeps its bundled fallbac
 - `chifor.me/source-commit: 48c4a7f09b4c037950d1f80dee259d25a4e3c6a6`
 - `chifor.me/release: router-0.1.0-20261015-overload-attribution`
 
+### Native catalog review follow-up (r2)
+
+The first image passed the deployment checks, then the implementation review found three correctness limits: the
+client-version cache needed bounded LRU eviction, an `ANY_MODEL` route needed to honor the selected account's
+`allowedModels`, and provider body-read failures needed a safe mapped error. These are fixed in llm-router commit
+`100a3f570d519ed4eb12bee58001a989229129f4` ([PR #113](https://git.chifor.me/cchifor/llm-router/pulls/113)). The API-owned
+12-second deadline is now the only native catalog timeout. The focused Node 24 suite has 155 passing tests, including
+an expired-cache refresh failure assertion.
+
+**Image.**
+- Archive `router-0.1.0-20261017-native-catalog-r2.tar.gz`, SHA-256
+  `8637ce1887503d3a72f22c483b40d685a2073f7cb2662e79051eeb80fb8f94e7`, Relay v0.2.0 asset 323.
+- Relay branch `codex/relay-images` (`d072c15d9ce29ffe66af9cf808f1a8e1d302a917`), [run 90362](https://git.chifor.me/cchifor/relay/actions/runs/90362),
+  receipt `deployment-images-90362.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:2beb3aeda431e625c583d18c08f9d08501b0ee486a11291b5bb2b7bcee93aae6`
+  (tag `parity-d072c15d9ce2-90362`; digest checked by CI).
+- The production smoke, Node 24 typecheck, build, and focused native catalog tests passed. The architecture check
+  retains the known pre-existing `packages/modules/inference/index.ts` side-effect finding.
+
+**Rollback.** Revert the image digest and both pod-template annotations together to the first native catalog image:
+- `image: registry.chifor.me/llm-router/router@sha256:94fbba9602e99187e08ca168b5d77ad731bf63d1e0a08330209d5bfae4626092`
+- `chifor.me/source-commit: 2bea41bf238ccb3f2610a8346281b2efbb3bf6ce`
+- `chifor.me/release: router-0.1.0-20261017-native-catalog`
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
