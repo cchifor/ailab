@@ -2120,6 +2120,33 @@ requests' overload share sat at 16-18 %.
 With the old image `LlmRouterFirstContentSlow` reads an absent series and stays silent; `LlmRouterProviderOverloadShareHigh`
 keeps working on the counter the old image already exports.
 
+## Native Codex model catalog release (2026-10-17)
+
+`router-0.1.0-20261017-native-catalog` deploys merged llm-router main
+`2bea41bf238ccb3f2610a8346281b2efbb3bf6ce` ([#113](https://git.chifor.me/cchifor/llm-router/pulls/113)) for issue #112.
+The native Codex pass-through now answers `GET /v1/models?client_version=...` with the complete Codex catalog when
+the selected header/default route is native. It selects the first ready accessible Codex deployment on the effective
+route, filters entries to that route's models, preserves provider metadata and order, and performs bounded per-account
+and client-version caching with upstream and client ETag revalidation. Ordinary OpenAI model requests remain
+unchanged; catalog failures return a safe 5xx so Codex keeps its bundled fallback. The shipped Codex pool also includes
+`gpt-6.1-sol`.
+
+**Image.**
+- Archive `router-0.1.0-20261017-native-catalog.tar.gz`, SHA-256
+  `d7eaf822aa52f3bf5c77d6cbd83c24b1f8092a2509f35a191201f973d22426dc`, Relay v0.2.0 asset 321.
+- Relay branch `codex/relay-images` (`ec91bb8`), [run 90344](https://git.chifor.me/cchifor/relay/actions/runs/90344),
+  receipt `deployment-images-90344.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:94fbba9602e99187e08ca168b5d77ad731bf63d1e0a08330209d5bfae4626092`
+  (tag `parity-ec91bb80482d-90344`; digest checked by CI).
+- Production smoke, focused native catalog tests, typecheck and build passed. The full Node 24 suite had 1,866
+  passing tests; three existing Claude process-group tests remain environment failures. The architecture check still
+  reports the known `packages/modules/inference/index.ts` side-effect line.
+
+**Rollback.** Revert the image digest and both pod-template annotations together to the overload-attribution release:
+- `image: registry.chifor.me/llm-router/router@sha256:1e185f187fc143c011408e3c8c6377a8fd4f8f34fbacbeac1df9529255da6aff`
+- `chifor.me/source-commit: 48c4a7f09b4c037950d1f80dee259d25a4e3c6a6`
+- `chifor.me/release: router-0.1.0-20261015-overload-attribution`
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
