@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: f00576fe112a58a342cfbfc050bd822117acbfa8
-        chifor.me/release: router-0.1.0-20261017-native-catalog-r3
+        chifor.me/source-commit: 46b4e40bd015e5219a5bd22c9c9b860e6acabd5
+        chifor.me/release: router-0.1.0-20261017-body-limits
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,9 +121,9 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Bridge source f00576fe112a58a342cfbfc050bd822117acbfa8;
-          # parity-82da4c81a474-90380 image, digest verified in the registry.
-          image: registry.chifor.me/llm-router/router@sha256:59a94f2836b69b357e33cc54bd7e6f1f844d01d5f39018a170358c3fd5d000c6
+          # Bridge source 46b4e40bd015e5219a5bd22c9c9b860e6acabd5;
+          # parity-db05ba025851-90442 image, digest verified in the registry.
+          image: registry.chifor.me/llm-router/router@sha256:63c05de632d29fc5241b171a20e5c78c0e32eae6979bb218b4d64daeff6f3ed9
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -143,6 +143,13 @@ spec:
               value: "0.0.0.0" # default is 127.0.0.1; containers must be reachable
             - name: ROUTER_PORT
               value: "8787"
+            # Phase 1 keeps the 16 MiB cap. Raise it only after the bounded upstream and memory measurements from issue #114.
+            - name: ROUTER_CODEX_NATIVE_MAX_BODY_MIB
+              value: "16"
+            - name: ROUTER_CODEX_NATIVE_BODY_BUDGET_MIB
+              value: "128"
+            - name: ROUTER_CODEX_NATIVE_BODY_READ_SECONDS
+              value: "120"
             - name: ROUTER_METRICS_PORT
               value: "9464"
             - name: ROUTER_DATABASE
