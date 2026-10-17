@@ -2171,6 +2171,26 @@ an expired-cache refresh failure assertion.
 - `chifor.me/source-commit: 2bea41bf238ccb3f2610a8346281b2efbb3bf6ce`
 - `chifor.me/release: router-0.1.0-20261017-native-catalog`
 
+### Native catalog refresh-cap follow-up (r3)
+
+The r2 review then identified an unbounded in-flight refresh map and a disabled-model gap for accounts whose
+`allowedModels` list is empty. llm-router commit `f00576fe112a58a342cfbfc050bd822117acbfa8` ([PR #113](https://git.chifor.me/cchifor/llm-router/pulls/113)) caps concurrent native catalog refreshes at 16, filters disabled models in both entitlement modes, and adds a mid-stream body-read failure test. The focused HTTP suite has 39 passing tests and the repository CI verification passed.
+
+**Image.**
+- Archive `router-0.1.0-20261017-native-catalog-r3.tar.gz`, SHA-256
+  `1bb980c3b8aef6dab211a48a49386d5eaee0c58f87306a4ab4a4369bc49a4ccd`, Relay v0.2.0 asset 326.
+- Relay branch `codex/relay-images` (`82da4c81a4740d1b51267ef6723c60bce73f56b9`), [run 90380](https://git.chifor.me/cchifor/relay/actions/runs/90380),
+  receipt `deployment-images-90380.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:59a94f2836b69b357e33cc54bd7e6f1f844d01d5f39018a170358c3fd5d000c6`
+  (tag `parity-82da4c81a474-90380`; digest checked by CI).
+- Production smoke, Node 24 typecheck, build, focused tests, and architecture checks followed the repository CI
+  verification; the architecture check retains the known pre-existing inference side-effect finding.
+
+**Rollback.** Revert the image digest and both pod-template annotations together to r2:
+- `image: registry.chifor.me/llm-router/router@sha256:2beb3aeda431e625c583d18c08f9d08501b0ee486a11291b5bb2b7bcee93aae6`
+- `chifor.me/source-commit: 100a3f570d519ed4eb12bee58001a989229129f4`
+- `chifor.me/release: router-0.1.0-20261017-native-catalog-r2`
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
