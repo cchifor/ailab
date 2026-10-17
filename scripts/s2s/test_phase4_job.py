@@ -820,6 +820,34 @@ class Manifests(unittest.TestCase):
         self.assertEqual(mounts["work"]["mountPath"], job.parse_args(["--gatekeeper-namespace", "x"]).work_dir)
         self.assertIn("emptyDir", volumes["work"])
 
+    def test_renovate_never_repins_the_image(self):
+        # The digest pin is deliberate (job.yaml's comment), so Renovate proposes no update of it,
+        # tag or digest: #1176, #1298 and #1354 each tried. One rule disables it for this file alone,
+        # narrowed by nothing else, and no later rule (later packageRules win) re-enables it.
+        [container] = self.pod["spec"]["containers"]
+        package = container["image"].split("@", 1)[0].rsplit(":", 1)[0]
+        path = (TREE / "job.yaml").relative_to(REPO).as_posix()
+        rules = json.loads((REPO / "renovate.json").read_text(encoding="utf-8"))["packageRules"]
+        holds = [i for i, r in enumerate(rules) if path in r.get("matchFileNames", []) and package in r.get("matchPackageNames", [])]
+        self.assertEqual(len(holds), 1, "renovate.json needs one rule disabling %s in %s" % (package, path))
+        rule = rules[holds[0]]
+        self.assertIs(rule.get("enabled"), False)
+        self.assertEqual(sorted(k for k in rule if k.startswith("match")), ["matchFileNames", "matchPackageNames"])
+        self.assertEqual(rule["matchFileNames"], [path])
+
+        def literal(values):
+            return bool(values) and not any(v.startswith(("/", "!")) or any(c in v for c in "*?[]{}") for v in values)
+
+        for later in rules[holds[0] + 1:]:
+            if later.get("enabled") is not True:
+                continue
+            # A later rule that literally names other packages or other files cannot match this
+            # reference; any pattern (regex, glob, negation) or an unscoped rule might, so it fails.
+            names, files = later.get("matchPackageNames"), later.get("matchFileNames")
+            if (literal(names) and package not in names) or (literal(files) and path not in files):
+                continue
+            self.fail("a later packageRule may re-enable %s in %s (later rules win): %s" % (package, path, later.get("description")))
+
     def test_netpol_admits_exactly_the_probe_pod_to_gatekeeper(self):
         spec = self.netpol["spec"]
         self.assertEqual(spec["policyTypes"], ["Ingress"])

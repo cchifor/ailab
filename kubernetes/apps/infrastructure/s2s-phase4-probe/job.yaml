@@ -55,10 +55,15 @@ spec:
       containers:
         - name: probe
           # Stock python, stdlib only (the cloud-power / ci-rerun-watchdog shape); the extras YAML
-          # is read by phase4_probe.parse_yaml_subset, no PyYAML needed. DIGEST-PINNED (the OCI
-          # index digest of 3.14-slim on 2026-10-06, the image the tests ran under): the weekly
-          # TTL re-run must not pick up a different interpreter on a fresh node. Re-pin
-          # deliberately: docker buildx imagetools inspect mirror.gcr.io/library/python:3.14-slim
+          # is read by phase4_probe.parse_yaml_subset, no PyYAML needed. DIGEST-PINNED to one OCI
+          # index digest of 3.14-slim: the weekly TTL re-run must not pick up a different
+          # interpreter on a fresh node. (The tests first ran under the 2026-10-06 digest; a2b82f3
+          # came with Renovate's digest refresh #1176, merged 2026-10-10, and the Job has passed under
+          # it since, last on 2026-10-16.) Renovate is DISABLED for this reference (renovate.json),
+          # so the routine python bumps of the other workloads (#1298, #1354) never move it. Re-pin
+          # by hand and deliberately: re-run scripts/s2s's tests under the new image, update this
+          # comment and, for a new minor, the tag regex in test_phase4_job.py's test_job_shape.
+          #   docker buildx imagetools inspect mirror.gcr.io/library/python:3.14-slim
           image: mirror.gcr.io/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
           imagePullPolicy: IfNotPresent
           command:
