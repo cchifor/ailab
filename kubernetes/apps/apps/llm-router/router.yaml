@@ -122,7 +122,8 @@ spec:
       containers:
         - name: router
           # Bridge source 2aa139d7439a380c1bdced3c1f53ea10cb7f5236;
-          # parity-f0a773adc1c5-90464 image, digest verified in the registry.
+          # parity-f0a773adc1c5-90464 image, digest verified in the registry;
+          # Relay run 90464, archive sha256:5d6f9f020e14131374dedce70fab0b0dcbe7545ec9de3b9c0775fa116913506c.
           image: registry.chifor.me/llm-router/router@sha256:fdbd5738d19bb10dcd4c3aa11b02d4efd6493db7b59289dc3814018806d3bc0f
           imagePullPolicy: IfNotPresent
           workingDir: /app
