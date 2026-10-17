@@ -106,6 +106,12 @@
       "description": "Hold the OpenBao provision-Job CLI images (quay.io/openbao/openbao) at the SERVER's minor, 2.6.x -- each Job's comment pins the CLI to the server's version. The server is the `openbao` Flux HelmRelease chart (0.29.4 = 2.6.2), and Renovate does NOT track it: the flux manager is not configured beyond its gotk-components default, so no chart PR has ever been opened. A group would therefore still produce a CLI-only bump (#938: 2.7.0 against a 2.6.2 server). Lift this bound in the same PR that bumps the chart (a human-scheduled restart of the single-replica secrets store).",
       "matchPackageNames": ["quay.io/openbao/openbao"],
       "allowedVersions": "/^2\\.6\\./"
+    },
+    {
+      "description": "Never update the S2S Phase 4 probe Job's python image (kubernetes/apps/infrastructure/s2s-phase4-probe/job.yaml), neither its tag nor its digest. It is a qualification probe, digest-pinned so that its weekly TTL re-run keeps the interpreter it was validated under, and its comment says every re-pin is deliberate. Without this rule each routine python bump for the other workloads reached it: the 3.14-slim digest refresh #1176 (2026-10-09, flagged by reviewer-claude and merged), the 3.15 bump #1298 (2026-10-13, probe hunk reverted by hand before merge) and #1354 (2026-10-17, the probe alone: manifests CI red and both reviewers blocking). Scoped to this one file, so every other mirror.gcr.io/library/python reference keeps its normal updates. scripts/s2s/test_phase4_job.py pins this rule (test_renovate_never_repins_the_image) next to the 3.14-slim tag (test_job_shape). A re-pin is a hand edit that re-runs those tests under the new image in the same PR.",
+      "matchFileNames": ["kubernetes/apps/infrastructure/s2s-phase4-probe/job.yaml"],
+      "matchPackageNames": ["mirror.gcr.io/library/python"],
+      "enabled": false
     }
   ]
 }

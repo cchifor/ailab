@@ -820,6 +820,23 @@ class Manifests(unittest.TestCase):
         self.assertEqual(mounts["work"]["mountPath"], job.parse_args(["--gatekeeper-namespace", "x"]).work_dir)
         self.assertIn("emptyDir", volumes["work"])
 
+    def test_renovate_never_repins_the_image(self):
+        # The digest pin is deliberate (job.yaml's comment), so Renovate proposes no update of it,
+        # tag or digest: #1176, #1298 and #1354 each tried. One rule disables it for this file alone,
+        # narrowed by nothing else, and no later rule (later packageRules win) re-enables it.
+        [container] = self.pod["spec"]["containers"]
+        package = container["image"].split("@", 1)[0].rsplit(":", 1)[0]
+        path = (TREE / "job.yaml").relative_to(REPO).as_posix()
+        rules = json.loads((REPO / "renovate.json").read_text(encoding="utf-8"))["packageRules"]
+        holds = [i for i, r in enumerate(rules) if path in r.get("matchFileNames", []) and package in r.get("matchPackageNames", [])]
+        self.assertEqual(len(holds), 1, "renovate.json needs one rule disabling %s in %s" % (package, path))
+        rule = rules[holds[0]]
+        self.assertIs(rule.get("enabled"), False)
+        self.assertEqual(sorted(k for k in rule if k.startswith("match")), ["matchFileNames", "matchPackageNames"])
+        self.assertEqual(rule["matchFileNames"], [path])
+        for later in rules[holds[0] + 1:]:
+            self.assertIsNot(later.get("enabled"), True, later.get("description"))
+
     def test_netpol_admits_exactly_the_probe_pod_to_gatekeeper(self):
         spec = self.netpol["spec"]
         self.assertEqual(spec["policyTypes"], ["Ingress"])
