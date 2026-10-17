@@ -834,8 +834,19 @@ class Manifests(unittest.TestCase):
         self.assertIs(rule.get("enabled"), False)
         self.assertEqual(sorted(k for k in rule if k.startswith("match")), ["matchFileNames", "matchPackageNames"])
         self.assertEqual(rule["matchFileNames"], [path])
+
+        def literal(values):
+            return bool(values) and not any(v.startswith(("/", "!")) or any(c in v for c in "*?[]{}") for v in values)
+
         for later in rules[holds[0] + 1:]:
-            self.assertIsNot(later.get("enabled"), True, later.get("description"))
+            if later.get("enabled") is not True:
+                continue
+            # A later rule that literally names other packages or other files cannot match this
+            # reference; any pattern (regex, glob, negation) or an unscoped rule might, so it fails.
+            names, files = later.get("matchPackageNames"), later.get("matchFileNames")
+            if (literal(names) and package not in names) or (literal(files) and path not in files):
+                continue
+            self.fail("a later packageRule may re-enable %s in %s (later rules win): %s" % (package, path, later.get("description")))
 
     def test_netpol_admits_exactly_the_probe_pod_to_gatekeeper(self):
         spec = self.netpol["spec"]

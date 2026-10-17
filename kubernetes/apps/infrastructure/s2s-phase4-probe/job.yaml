@@ -58,7 +58,7 @@ spec:
           # is read by phase4_probe.parse_yaml_subset, no PyYAML needed. DIGEST-PINNED to one OCI
           # index digest of 3.14-slim: the weekly TTL re-run must not pick up a different
           # interpreter on a fresh node. (The tests first ran under the 2026-10-06 digest; a2b82f3
-          # came with Renovate's digest refresh #1176 on 2026-10-10, and the Job has passed under
+          # came with Renovate's digest refresh #1176, merged 2026-10-10, and the Job has passed under
           # it since, last on 2026-10-16.) Renovate is DISABLED for this reference (renovate.json),
           # so the routine python bumps of the other workloads (#1298, #1354) never move it. Re-pin
           # by hand and deliberately: re-run scripts/s2s's tests under the new image, update this
