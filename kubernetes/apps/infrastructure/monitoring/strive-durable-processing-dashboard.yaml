@@ -20,8 +20,8 @@ data:
       "panels": [
         {
           "id": 1,
-          "title": "Task queue wait p95",
-          "description": "READY to committed claim. Retry backoff and dependency wait are excluded.",
+          "title": "Task queue wait",
+          "description": "READY to committed claim p95 and oldest current READY wait, including stalled queues. Retry backoff and dependency wait are excluded.",
           "type": "timeseries",
           "gridPos": {
             "h": 8,
@@ -38,6 +38,11 @@ data:
               "refId": "A",
               "expr": "histogram_quantile(0.95, sum(rate(workflow_task_map_queue_wait_seconds_bucket[$__rate_interval])) by (le))",
               "legendFormat": "p95"
+            },
+            {
+              "refId": "B",
+              "expr": "max(workflow_task_map_oldest_queue_wait_seconds)",
+              "legendFormat": "oldest waiting"
             }
           ],
           "fieldConfig": {

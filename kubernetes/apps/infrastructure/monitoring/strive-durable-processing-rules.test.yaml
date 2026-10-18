@@ -1,4 +1,3 @@
-# promtool fixtures; scripts/rules-lint.sh discovers these, never a Kustomize resource.
 rule_files:
   - strive-durable-processing-rules.yaml
 evaluation_interval: 1m
@@ -199,8 +198,8 @@ tests:
               severity: warning
             exp_annotations:
               summary: durable processing queue wait exceeds 5 minutes
-              description: The p95 ready-task queue wait exceeds five minutes. Check worker capacity and fairness
-                limits.
+              description: The p95 or oldest current ready-task queue wait exceeds five minutes. Check worker capacity
+                and fairness limits.
   - name: healthy workflow_task_map_queue_wait_seconds
     interval: 1m
     input_series:
@@ -277,4 +276,25 @@ tests:
     alert_rule_test:
       - eval_time: 15m
         alertname: DurableProcessingPublicationLag
+        exp_alerts: []
+  - name: stalled ready queue alerts without any claims and recovers
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_oldest_queue_wait_seconds
+        values: 0+60x20 0x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingQueueWaitHigh
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: DurableProcessingQueueWaitHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable processing queue wait exceeds 5 minutes
+              description: The p95 or oldest current ready-task queue wait exceeds five minutes. Check worker capacity
+                and fairness limits.
+      - eval_time: 22m
+        alertname: DurableProcessingQueueWaitHigh
         exp_alerts: []

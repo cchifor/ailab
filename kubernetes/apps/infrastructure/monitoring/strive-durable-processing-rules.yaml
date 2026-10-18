@@ -16,15 +16,16 @@ spec:
       interval: 30s
       rules:
         - alert: DurableProcessingQueueWaitHigh
-          expr: histogram_quantile(0.95, sum(rate(workflow_task_map_queue_wait_seconds_bucket[10m])) by (le)) >
-            300
+          expr: |
+            histogram_quantile(0.95, sum(rate(workflow_task_map_queue_wait_seconds_bucket[10m])) by (le)) > 300
+            or max(workflow_task_map_oldest_queue_wait_seconds) > 300
           for: 10m
           labels:
             severity: warning
           annotations:
             summary: durable processing queue wait exceeds 5 minutes
-            description: The p95 ready-task queue wait exceeds five minutes. Check worker capacity and fairness
-              limits.
+            description: The p95 or oldest current ready-task queue wait exceeds five minutes. Check worker capacity
+              and fairness limits.
         - alert: DurableProcessingProviderLatencyHigh
           expr: histogram_quantile(0.95, sum(rate(workflow_model_provider_duration_seconds_bucket[10m])) by (le))
             > 60
