@@ -355,7 +355,7 @@ data:
           "id": 10,
           "title": "Provider usage in selected window",
           "description": "Usage is recorded after task settlement commits. For costs by release, open the run inspector; release identities remain in durable read models, not Prometheus labels.",
-          "type": "timeseries",
+          "type": "stat",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -370,7 +370,8 @@ data:
             {
               "refId": "A",
               "expr": "sum(increase(workflow_task_map_provider_usage_total{unit=~\"tokens|requests\"}[$__range])) by (unit)",
-              "legendFormat": "{{unit}}"
+              "legendFormat": "{{unit}}",
+              "instant": true
             }
           ],
           "fieldConfig": {
@@ -379,20 +380,25 @@ data:
             }
           },
           "options": {
-            "legend": {
-              "displayMode": "list",
-              "placement": "bottom"
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
             },
-            "tooltip": {
-              "mode": "multi"
-            }
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto"
           }
         },
         {
           "id": 11,
           "title": "Provider spend in selected window",
           "description": "Provider-neutral micro-cost units; not assumed to be USD. Plan/release-specific cost and reservations are available in the run inspector.",
-          "type": "timeseries",
+          "type": "stat",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -407,7 +413,8 @@ data:
             {
               "refId": "A",
               "expr": "sum(increase(workflow_task_map_provider_usage_total{unit=\"spend_micros\"}[$__range]))",
-              "legendFormat": "micro-cost units"
+              "legendFormat": "micro-cost units",
+              "instant": true
             }
           ],
           "fieldConfig": {
@@ -416,13 +423,18 @@ data:
             }
           },
           "options": {
-            "legend": {
-              "displayMode": "list",
-              "placement": "bottom"
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
             },
-            "tooltip": {
-              "mode": "multi"
-            }
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto"
           }
         },
         {

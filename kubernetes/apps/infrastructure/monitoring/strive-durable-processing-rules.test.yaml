@@ -77,8 +77,8 @@ tests:
   - name: one lease expiry fires within the event window
     interval: 1m
     input_series:
-      - series: workflow_task_map_lease_expired_total
-        values: 0x2 1x20
+      - series: workflow_task_map_last_lease_expiry_timestamp_seconds
+        values: _ _ _ 180x30
     alert_rule_test:
       - eval_time: 4m
         alertname: DurableProcessingLeaseExpiry
@@ -92,8 +92,8 @@ tests:
   - name: an old lease expiry stops alerting
     interval: 1m
     input_series:
-      - series: workflow_task_map_lease_expired_total
-        values: 0x2 1x30
+      - series: workflow_task_map_last_lease_expiry_timestamp_seconds
+        values: _ _ _ 180x30
     alert_rule_test:
       - eval_time: 20m
         alertname: DurableProcessingLeaseExpiry
@@ -110,8 +110,8 @@ tests:
   - name: one provider budget refusal fires
     interval: 1m
     input_series:
-      - series: workflow_task_map_provider_budget_exhausted_total
-        values: 0x2 1x20
+      - series: workflow_task_map_last_budget_refusal_timestamp_seconds
+        values: _ _ _ 180x30
     alert_rule_test:
       - eval_time: 4m
         alertname: DurableProcessingProviderBudgetExhausted
