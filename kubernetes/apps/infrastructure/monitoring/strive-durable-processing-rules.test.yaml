@@ -1,0 +1,280 @@
+# promtool fixtures; scripts/rules-lint.sh discovers these, never a Kustomize resource.
+rule_files:
+  - strive-durable-processing-rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: an unresolved ambiguous plan persists past the alert hold
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_plans{status="ambiguous",instance="one"}
+        values: 1x30
+      - series: workflow_task_map_plans{status="ambiguous",instance="two"}
+        values: 1x30
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: DurableProcessingAmbiguousOutcomes
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: durable processing has unresolved outcomes
+              description: Ambiguous or partial plans remain unresolved. Inspect durable tasks and resolve provider
+                calls before publication.
+    promql_expr_test:
+      - expr: sum(max by (status) (workflow_task_map_plans{status=~"ambiguous|partial"}))
+        eval_time: 12m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  - name: an unresolved partial plan is also actionable
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_plans{status="partial"}
+        values: 1x30
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: DurableProcessingAmbiguousOutcomes
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: durable processing has unresolved outcomes
+              description: Ambiguous or partial plans remain unresolved. Inspect durable tasks and resolve provider
+                calls before publication.
+  - name: resolution clears the ambiguous inventory
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_plans{status="ambiguous"}
+        values: 1x10 0x20
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DurableProcessingAmbiguousOutcomes
+        exp_alerts: []
+  - name: young task is below the age threshold
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_oldest_task_age_seconds{state="ready"}
+        values: 60x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DurableProcessingTaskAgeHigh
+        exp_alerts: []
+  - name: an old retrying task is visible without further attempts
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_oldest_task_age_seconds{state="retry_wait"}
+        values: 4000x30
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: DurableProcessingTaskAgeHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable tasks are older than one hour
+              description: Unresolved task age exceeds one hour. Inspect paused plans, blocked dependencies and
+                worker capacity.
+  - name: one lease expiry fires within the event window
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_lease_expired_total
+        values: 0x2 1x20
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DurableProcessingLeaseExpiry
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable task leases are expiring
+              description: At least one durable task lease expired in the last ten minutes. Check worker heartbeats
+                and task deadlines.
+  - name: an old lease expiry stops alerting
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_lease_expired_total
+        values: 0x2 1x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DurableProcessingLeaseExpiry
+        exp_alerts: []
+  - name: a counter reset is not a lease expiry
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_lease_expired_total
+        values: 5x5 0x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DurableProcessingLeaseExpiry
+        exp_alerts: []
+  - name: one provider budget refusal fires
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_provider_budget_exhausted_total
+        values: 0x2 1x20
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DurableProcessingProviderBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: durable processing provider budget is exhausted
+              description: A durable provider-budget admission or settlement was refused in the last ten minutes.
+                Inspect reservations and reconciled usage.
+  - name: a stale DB observation warns
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_observation_timestamp_seconds
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DurableProcessingObservationStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable processing inventory is not being observed
+              description: The Workflow API has not reported a fresh task-map database sample. Check the API sampler,
+                database and telemetry delivery.
+  - name: a missing DB observation warns
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DurableProcessingObservationStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable processing inventory is not being observed
+              description: The Workflow API has not reported a fresh task-map database sample. Check the API sampler,
+                database and telemetry delivery.
+  - name: a fresh DB observation remains healthy
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_observation_timestamp_seconds
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DurableProcessingObservationStale
+        exp_alerts: []
+  - name: sustained durable task retry pressure warns
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_retries_total{reason="retryable"}
+        values: 0+120x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DurableProcessingRetriesHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable processing retry rate is elevated
+              description: Durable task retries exceed one per second. Inspect provider health and attempt diagnostics.
+  - name: isolated retry pressure stays quiet
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_retries_total{reason="retryable"}
+        values: 0+1x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingRetriesHigh
+        exp_alerts: []
+  - name: slow workflow_task_map_queue_wait_seconds
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_queue_wait_seconds_bucket{le="100"}
+        values: '0x30'
+      - series: workflow_task_map_queue_wait_seconds_bucket{le="1000"}
+        values: 0+60x30
+      - series: workflow_task_map_queue_wait_seconds_bucket{le="+Inf"}
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingQueueWaitHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable processing queue wait exceeds 5 minutes
+              description: The p95 ready-task queue wait exceeds five minutes. Check worker capacity and fairness
+                limits.
+  - name: healthy workflow_task_map_queue_wait_seconds
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_queue_wait_seconds_bucket{le="100"}
+        values: 0+60x30
+      - series: workflow_task_map_queue_wait_seconds_bucket{le="1000"}
+        values: 0+60x30
+      - series: workflow_task_map_queue_wait_seconds_bucket{le="+Inf"}
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingQueueWaitHigh
+        exp_alerts: []
+  - name: slow workflow_model_provider_duration_seconds
+    interval: 1m
+    input_series:
+      - series: workflow_model_provider_duration_seconds_bucket{le="10"}
+        values: '0x30'
+      - series: workflow_model_provider_duration_seconds_bucket{le="120"}
+        values: 0+60x30
+      - series: workflow_model_provider_duration_seconds_bucket{le="+Inf"}
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingProviderLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable processing provider latency exceeds 1 minute
+              description: The p95 model-provider operation latency exceeds one minute. Inspect provider health
+                and task deadlines.
+  - name: healthy workflow_model_provider_duration_seconds
+    interval: 1m
+    input_series:
+      - series: workflow_model_provider_duration_seconds_bucket{le="10"}
+        values: 0+60x30
+      - series: workflow_model_provider_duration_seconds_bucket{le="120"}
+        values: 0+60x30
+      - series: workflow_model_provider_duration_seconds_bucket{le="+Inf"}
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingProviderLatencyHigh
+        exp_alerts: []
+  - name: slow workflow_publication_lag_seconds
+    interval: 1m
+    input_series:
+      - series: workflow_publication_lag_seconds_bucket{le="100"}
+        values: '0x30'
+      - series: workflow_publication_lag_seconds_bucket{le="1000"}
+        values: 0+60x30
+      - series: workflow_publication_lag_seconds_bucket{le="+Inf"}
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingPublicationLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable publication lag exceeds 5 minutes
+              description: The p95 publication intent-to-commit latency exceeds five minutes. Inspect publication
+                receipts and outbox drain.
+  - name: healthy workflow_publication_lag_seconds
+    interval: 1m
+    input_series:
+      - series: workflow_publication_lag_seconds_bucket{le="100"}
+        values: 0+60x30
+      - series: workflow_publication_lag_seconds_bucket{le="1000"}
+        values: 0+60x30
+      - series: workflow_publication_lag_seconds_bucket{le="+Inf"}
+        values: 0+60x30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DurableProcessingPublicationLag
+        exp_alerts: []

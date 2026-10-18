@@ -1,0 +1,96 @@
+# Durable App processing: the task instruments from cchifor/platform.
+# Keep queries aligned with platform deploy/observability; bounded labels only.
+# Each API replica samples the same DB inventory, so gauges use max across replicas.
+# Event counters describe independently committed work and sum across workers.
+# OTLP arrives through Alloy; no new scrape or privileged DB credential is needed.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: strive-durable-processing
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: strive.workflow-durable-processing
+    interval: 30s
+    rules:
+    - alert: DurableProcessingQueueWaitHigh
+      expr: histogram_quantile(0.95, sum(rate(workflow_task_map_queue_wait_seconds_bucket[10m])) by (le)) > 300
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: durable processing queue wait exceeds 5 minutes
+        description: The p95 ready-task queue wait exceeds five minutes. Check worker capacity and fairness limits.
+    - alert: DurableProcessingProviderLatencyHigh
+      expr: histogram_quantile(0.95, sum(rate(workflow_model_provider_duration_seconds_bucket[10m])) by (le)) >
+        60
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: durable processing provider latency exceeds 1 minute
+        description: The p95 model-provider operation latency exceeds one minute. Inspect provider health and task
+          deadlines.
+    - alert: DurableProcessingRetriesHigh
+      expr: sum(rate(workflow_task_map_retries_total[10m])) > 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: durable processing retry rate is elevated
+        description: Durable task retries exceed one per second. Inspect provider health and attempt diagnostics.
+    - alert: DurableProcessingAmbiguousOutcomes
+      expr: sum(max by (status) (workflow_task_map_plans{status=~"ambiguous|partial"})) > 0
+      for: 10m
+      labels:
+        severity: critical
+      annotations:
+        summary: durable processing has unresolved outcomes
+        description: Ambiguous or partial plans remain unresolved. Inspect durable tasks and resolve provider calls
+          before publication.
+    - alert: DurableProcessingLeaseExpiry
+      expr: sum(increase(workflow_task_map_lease_expired_total[10m])) > 0
+      labels:
+        severity: warning
+      annotations:
+        summary: durable task leases are expiring
+        description: At least one durable task lease expired in the last ten minutes. Check worker heartbeats and
+          task deadlines.
+    - alert: DurableProcessingTaskAgeHigh
+      expr: max(workflow_task_map_oldest_task_age_seconds{state=~"pending|ready|claimed|retry_wait|blocked"}) >
+        3600
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: durable tasks are older than one hour
+        description: Unresolved task age exceeds one hour. Inspect paused plans, blocked dependencies and worker
+          capacity.
+    - alert: DurableProcessingPublicationLag
+      expr: histogram_quantile(0.95, sum(rate(workflow_publication_lag_seconds_bucket[10m])) by (le)) > 300
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: durable publication lag exceeds 5 minutes
+        description: The p95 publication intent-to-commit latency exceeds five minutes. Inspect publication receipts
+          and outbox drain.
+    - alert: DurableProcessingProviderBudgetExhausted
+      expr: sum(increase(workflow_task_map_provider_budget_exhausted_total[10m])) > 0
+      labels:
+        severity: critical
+      annotations:
+        summary: durable processing provider budget is exhausted
+        description: A durable provider-budget admission or settlement was refused in the last ten minutes. Inspect
+          reservations and reconciled usage.
+    - alert: DurableProcessingObservationStale
+      expr: (time() - max(workflow_task_map_observation_timestamp_seconds) > 120) or absent(workflow_task_map_observation_timestamp_seconds)
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: durable processing inventory is not being observed
+        description: The Workflow API has not reported a fresh task-map database sample. Check the API sampler,
+          database and telemetry delivery.
