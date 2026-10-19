@@ -54,10 +54,36 @@ function findBlock(lines) {
   return { start, end };
 }
 
-// The provider a block names: block form (`  provider: x`) or flow form (`{ provider: x, ... }`).
+// The provider a block names, read from the ACTIVE mapping only -- never from a comment. A
+// whole-block text search would take `# previous provider: litellm` above the real key as the
+// setting, and then overwrite a valid default the user picked (or skip a retired one). Two shapes:
+//   block form  `agent-default-model:` then a DIRECT child `provider: x` (comments skipped; the
+//               child indent is the first real line's, so deeper keys never match)
+//   flow form   `agent-default-model: { provider: x, model: y }` on the header line itself
+// Anything else (a scalar value, an anchor, a multi-line flow mapping) is null: unreadable, and
+// the caller then leaves the file alone.
+const PROVIDER_VALUE = `(['"]?)([A-Za-z0-9._-]+)\\1`;
 function providerOf(blockLines) {
-  const m = blockLines.join('\n').match(/(?:^|[\s{,])provider[ \t]*:[ \t]*['"]?([A-Za-z0-9._-]+)['"]?/);
-  return m ? m[1] : null;
+  const header = blockLines[0].replace(HEADER, '').trim();
+  if (header !== '' && !header.startsWith('#')) {
+    const flow = header.match(/^\{([^{}#]*)\}[ \t]*(#.*)?$/);
+    if (!flow) return null;
+    for (const pair of flow[1].split(',')) {
+      const m = pair.trim().match(new RegExp(`^(?:provider|"provider"|'provider')[ \\t]*:[ \\t]*${PROVIDER_VALUE}$`));
+      if (m) return m[2];
+    }
+    return null;
+  }
+  const children = blockLines.slice(1).filter((l) => !isBlank(l) && !isComment(l));
+  if (!children.length) return null;
+  const depth = indentOf(children[0]);
+  const key = new RegExp(`^ {${depth}}(?:provider|"provider"|'provider')[ \\t]*:[ \\t]*${PROVIDER_VALUE}[ \\t]*(#.*)?$`);
+  for (const l of children) {
+    if (indentOf(l) !== depth) continue;
+    const m = l.match(key);
+    if (m) return m[2];
+  }
+  return null;
 }
 
 // Split on LF and keep each line's own CR off the matching; rejoin with the file's own ending.

@@ -221,8 +221,29 @@ class ReconcileDefaultModel(unittest.TestCase):
         self.assertNotIn("\n", out.replace("\r\n", ""), "the file's CRLF endings must be kept")
         self.assertEqual(yaml.safe_load(out)["agent-default-model"], _seed()["agent-default-model"])
 
+    def test_a_comment_is_never_read_as_the_active_provider(self):
+        # A comment naming a retired provider above a valid key must not trigger a rewrite...
+        live = ("agent-default-model:\n  # previous provider: litellm\n  # provider: litellm\n"
+                "  provider: llm-router-codex\n  model: gpt-6-sol\n")
+        proc, out = self._run(live)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out, live)
+        # ...and a comment naming a current provider must not mask a retired active key.
+        live = "agent-default-model:\n  # provider: llm-router-codex\n  provider: litellm\n  model: x\n"
+        proc, out = self._run(live)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(yaml.safe_load(out)["agent-default-model"], _seed()["agent-default-model"])
+
+    def test_only_a_direct_child_provider_key_counts(self):
+        live = ("agent-default-model:\n  meta:\n    provider: litellm\n"
+                "  provider: llm-router-local\n  model: qwen3.8-27b\n")
+        proc, out = self._run(live)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out, live)
+
     def test_absent_default_and_unreadable_shapes_never_fail_the_boot(self):
-        for live in ("ui: 1\n", "agent-default-model: litellm/x\nagent-default-model: y\n"):
+        for live in ("ui: 1\n", "agent-default-model: litellm/x\nagent-default-model: y\n",
+                     "agent-default-model: litellm\n", "agent-default-model: &d { provider: litellm }\n"):
             with self.subTest(live=live):
                 proc, out = self._run(live)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
