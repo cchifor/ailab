@@ -406,8 +406,12 @@ renders ONE key, `auth.json`, with `default "unconfigured"` on the token and acc
 and `expires_at: 4102444800`: measured in the pinned image (2026-09-19), a missing, empty,
 unparseable or file-expired token sends LiteLLM into the OAuth device flow (a synchronous poll of
 `auth.openai.com` for up to 15 min, at Router construction), while the placeholder and the
-far-future sentinel built the Router in 0.07 s with no network and failed FAST upstream. Never
-remove any of the three from that template. The real expiry is `CHATGPT_EXPIRES_AT` in the vault
+far-future sentinel built the Router in 0.07 s with no network and failed FAST upstream. Since
+LiteLLM v1.106.0 (upstream #39585) the authenticator refuses that device flow inside the proxy's
+event loop instead: a missing, empty or unparseable file fails Router construction at once with no
+network, and a proxy over a missing file came up serving every other route while this one answered
+400 "no healthy deployments" (measured 2026-10-19). Never remove any of the three from that
+template. The real expiry is `CHATGPT_EXPIRES_AT` in the vault
 and `dsh_codex_projection_token_expires_at_seconds` on the textfile below.
 
 > **Do not put a ChatGPT OAuth token in LiteLLM's `OPENAI_API_KEY` or send it to `api.openai.com`.**

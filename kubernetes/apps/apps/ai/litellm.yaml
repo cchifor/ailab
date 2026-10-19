@@ -1210,7 +1210,12 @@ spec:
           # other Renovate PR (operator-directed; the `no-automerge` rule left renovate.json): both
           # personas clean, CI green, and that CI includes litellm-route-contract, triggered by this
           # file. Bump the three refs together (litellm-local.yaml, litellm-vkeys.yaml).
-          image: ghcr.io/berriai/litellm:v1.105.1@sha256:b7b9e2c306343721802253d0dd9436b9634a2eb4e14da7c7cf06c5c7b7530802
+          # v1.106.0 (2026-10-19) moved two behaviours the route contracts pin, both upstream fixes:
+          # the chatgpt/ authenticator REFUSES the device-code login inside an event loop (#39585; see
+          # the chatgpt-auth volume below), and a NON-streaming caller of a provider that forces SSE
+          # now gets the aggregated response instead of the events (dsh streams, so it is unaffected).
+          # Both contracts were re-measured in the same pull request.
+          image: ghcr.io/berriai/litellm:v1.106.0@sha256:2e4c0371f3a8c28e4da131d77abaa8341cd3b0c2fcc4d34d7c5900431af7b9d0
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
@@ -1277,15 +1282,19 @@ spec:
         # litellm-chatgpt-auth is rendered by the ExternalSecret in litellm-chatgpt-eso.yaml: ONE key,
         # auth.json, always valid JSON with a NON-EMPTY token and a far-future expires_at (the header
         # there explains why that exact shape is load-bearing).
-        # `optional: false` IS THE GUARD, not a default left alone. A pod WITHOUT this file is LiteLLM's
-        # device-flow path: Router construction calls the chatgpt/ authenticator, finds no token, and
-        # reaches for auth.openai.com in a synchronous poll of up to 15 minutes (measured 2026-09-19 in
-        # this image with sockets denied: a missing file made Router(...) attempt auth.openai.com
-        # immediately). With `optional: true` kubelet would start the container over an EMPTY
-        # directory and the process would hang in that flow behind a readiness probe that never
-        # passes; with `optional: false` the pod stays ContainerCreating on a visible MountVolume
-        # "secret not found" event and, under maxUnavailable: 0, the old replicas keep serving. A pod
-        # must not start without the file. The Secret exists BEFORE this Deployment change lands:
+        # `optional: false` IS THE GUARD, not a default left alone. A pod WITHOUT this file cannot
+        # build this route: Router construction calls the chatgpt/ authenticator and finds no token.
+        # Up to v1.105.1 that reached for auth.openai.com in a synchronous poll of up to 15 minutes
+        # (measured 2026-09-19 with sockets denied: a missing file made Router(...) attempt
+        # auth.openai.com immediately). Since v1.106.0 the authenticator refuses the device-code login
+        # inside the proxy's event loop (upstream #39585) and LiteLLM drops the deployment instead:
+        # measured 2026-10-19, a proxy over an empty directory went live and served every OTHER route
+        # while gpt-6-astra-realjaynesage answered 400 "no healthy deployments". With
+        # `optional: true` kubelet would start the container over an EMPTY directory, and that pod
+        # would hang (up to v1.105.1) or pass readiness WITHOUT the route (since v1.106.0); with
+        # `optional: false` the pod stays ContainerCreating on a visible MountVolume "secret not
+        # found" event and, under maxUnavailable: 0, the old replicas keep serving. A pod must not
+        # start without the file. The Secret exists BEFORE this Deployment change lands:
         # the ESO chain (SA -> SecretStore -> ExternalSecret) is applied by hand from the branch and
         # verified Ready first (plan § Verification), so the merge that rolls this Deployment finds
         # it already present. Both replicas mount the same Secret, so a rotation reaches both within
