@@ -284,8 +284,8 @@ data:
         },
         {
           "id": 8,
-          "title": "Expired leases in 10 minutes",
-          "description": "",
+          "title": "Estimated expired leases in 10 minutes",
+          "description": "Rolling estimate from exported counter increments. The first event after a worker starts can be missed here; the lease-expiry alert uses the last-event timestamp to detect that event.",
           "type": "timeseries",
           "gridPos": {
             "h": 8,

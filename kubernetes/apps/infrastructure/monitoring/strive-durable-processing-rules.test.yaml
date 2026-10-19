@@ -97,15 +97,27 @@ tests:
       - eval_time: 20m
         alertname: DurableProcessingLeaseExpiry
         exp_alerts: []
-  - name: a counter reset is not a lease expiry
+  - name: a restarted process does not re-alert on an old lease expiry
     interval: 1m
     input_series:
-      - series: workflow_task_map_lease_expired_total
-        values: 5x5 0x20
+      - series: workflow_task_map_last_lease_expiry_timestamp_seconds
+        values: _ _ _ 180x12 stale _ _ _ _ 180x9
     alert_rule_test:
-      - eval_time: 10m
+      - eval_time: 16m
         alertname: DurableProcessingLeaseExpiry
         exp_alerts: []
+      - eval_time: 21m
+        alertname: DurableProcessingLeaseExpiry
+        exp_alerts: []
+    promql_expr_test:
+      - expr: max(workflow_task_map_last_lease_expiry_timestamp_seconds)
+        eval_time: 16m
+        exp_samples: []
+      - expr: max(workflow_task_map_last_lease_expiry_timestamp_seconds)
+        eval_time: 21m
+        exp_samples:
+          - labels: '{}'
+            value: 180
   - name: one provider budget refusal fires
     interval: 1m
     input_series:
