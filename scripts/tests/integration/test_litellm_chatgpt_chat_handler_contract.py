@@ -36,8 +36,10 @@ What this proves, in the order the cases run:
       whose parser admits such a block would reach; the input/output counts the
       upstream reported pass through exactly (zero included), with total = input + output;
   (f) the placeholder auth.json builds the Router with no socket attempt, and a
-      MISSING file still sends the first call to the device flow (the existing
-      guard is unchanged by the handler);
+      MISSING file fails the first call with LiteLLM's device-code REFUSAL and no
+      socket attempt (1.106.0, upstream #39585: no device flow inside an event
+      loop; up to 1.105.1 that call reached for auth.openai.com) -- the existing
+      guard is unchanged by the handler;
   (g) one outer request produces exactly one success-callback record, under the
       outer provider, and the inner `no-log` call produces none;
   (h) a cost-map entry for the inner id that says supports_native_streaming false is
@@ -143,7 +145,8 @@ CONTAINER_ENV = {item["name"]: item.get("value") for item in CONTAINER["env"]}
 HANDLER_PATH = AI_DIR / "chatgpt_chat.py"
 HANDLER_BYTES = HANDLER_PATH.read_bytes()
 UPSTREAM_URL = "https://chatgpt.com/backend-api/codex/responses"
-DEVICE_FLOW_HOST = "auth.openai.com"
+# The authenticator's refusal of the device-code login inside an event loop (1.106.0, #39585).
+DEVICE_CODE_REFUSAL = "device-code login needs a human"
 # The auth.json shape litellm-chatgpt-eso.yaml renders before a seat logs in (the device-flow guard).
 PLACEHOLDER_AUTH = {"access_token": "unconfigured", "account_id": "unconfigured", "expires_at": 4102444800}
 
@@ -791,8 +794,8 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, "success", closed)):
             # Only the custom route: a chatgpt-chat/ deployment does not run the authenticator at
             # construction (a chatgpt/ deployment does -- test_litellm_chatgpt_route_contract.py
-            # case c covers that), so construction must succeed and the FIRST CALL must be the
-            # device-flow attempt.
+            # case c covers that), so construction must succeed and the FIRST CALL must be where
+            # the device flow is refused.
             router = Router(model_list=[copy.deepcopy(ROUTES["gpt-5.6-sol"])],
                             **copy.deepcopy(CONFIG["router_settings"]))
             self.assertEqual(NETWORK_ATTEMPTS, [], "f: construction must not reach for the network")
@@ -801,13 +804,17 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
             finally:
                 await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
                 router.reset()
+        # Taken and cleared BEFORE any assertion: a failure here must not fail a later case's
+        # no-socket check too.
+        attempts = list(NETWORK_ATTEMPTS)
+        NETWORK_ATTEMPTS.clear()
         self.assertIsNotNone(error, "f: the first call must fail without a token")
-        self.assertTrue(NETWORK_ATTEMPTS and all(DEVICE_FLOW_HOST in a for a in NETWORK_ATTEMPTS),
-                        f"f: the device flow is still the failure mode of a missing file: {NETWORK_ATTEMPTS}")
+        self.assertIn(DEVICE_CODE_REFUSAL, str(error),
+                      f"f: the device-code refusal is the failure mode of a missing file: {str(error)[:300]}")
+        self.assertEqual(attempts, [], "f: the refused device flow makes no socket attempt")
         self.assertEqual(sent, [], "f: nothing reaches the upstream without a token")
         self.assertLess(time.monotonic() - started, 20)
-        print(json.dumps({"case": "f-missing", "error": type(error).__name__, "network_attempts": NETWORK_ATTEMPTS}))
-        NETWORK_ATTEMPTS.clear()
+        print(json.dumps({"case": "f-missing", "error": type(error).__name__, "network_attempts": attempts}))
 
     def test_chatgpt_chat_handler_contract(self):
         async def run_cases():

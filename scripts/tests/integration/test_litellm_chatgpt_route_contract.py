@@ -14,12 +14,20 @@ What this proves, in the order the cases run:
       include -- and the transform drops max_output_tokens (accepted loss) while the
       caller's `text` IS forwarded: the proxy loads chatgpt_chat.py through
       custom_provider_map before it builds its Router, and that module re-adds
-      `text` on every chatgpt/ call (ADR 0027, 2026-09-20), so this test loads it too;
+      `text` on every chatgpt/ call (ADR 0027, 2026-09-20), so this test loads it too.
+      The upstream call always streams; what the CALLER gets follows its own stream
+      flag (since 1.106.0, upstream "honor caller stream flag when provider forces
+      SSE"): a streaming caller -- dsh, `transport: sse` -- gets the
+      response.completed frame, a non-streaming one the aggregated response;
   (b) a JWT whose exp is in the PAST behaves identically under the sentinel: the
       file's expires_at is what keeps LiteLLM out of the device flow;
-  (c) a MISSING file, an EMPTY token and a MALFORMED file each send LiteLLM into
-      the OAuth device flow (auth.openai.com) at Router construction -- the
-      executable record of why the ESO template must ALWAYS render (a);
+  (c) a MISSING file, an EMPTY token and a MALFORMED file each fail Router
+      construction with LiteLLM's device-code REFUSAL and no socket attempt: since
+      1.106.0 (upstream #39585) the authenticator refuses the OAuth device flow
+      inside a running event loop, which is where the proxy builds its Router.
+      Up to 1.105.1 the same three reached for auth.openai.com there. Either way
+      the route cannot be built without (a) -- the executable record of why the
+      ESO template must ALWAYS render it;
   (d) upstream 401 / 429 map to AuthenticationError / RateLimitError in seconds;
   (e) ONE Router, three calls, the file rewritten atomically between them: each
       call carries the token and account id of the file current at call time,
@@ -57,7 +65,8 @@ def _deny_connect(_socket, address):
 def _deny_resolve(host, port, *_args, **_kwargs):
     # Recorded at the resolver, not only at connect(): CI runs this under
     # `docker run --network none`, where getaddrinfo fails before any connect()
-    # is reached, and case (c) must still observe the device-flow attempt there.
+    # is reached, and case (c) must still observe a device-flow attempt there if
+    # a pin ever makes one again.
     NETWORK_ATTEMPTS.append(f"resolve:{host}:{port}")
     raise AssertionError("Unexpected name resolution in offline route contract")
 
@@ -86,6 +95,7 @@ import yaml
 from litellm import Router
 from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+from litellm.types.llms.openai import ResponsesAPIResponse
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -116,7 +126,8 @@ CONTAINER = next(item for item in DEPLOYMENT["spec"]["template"]["spec"]["contai
                  if item["name"] == "litellm")
 CONTAINER_ENV = {item["name"]: item.get("value") for item in CONTAINER["env"]}
 UPSTREAM_URL = "https://chatgpt.com/backend-api/codex/responses"
-DEVICE_FLOW_HOST = "auth.openai.com"
+# The authenticator's refusal of the device-code login inside an event loop (1.106.0, #39585).
+DEVICE_CODE_REFUSAL = "device-code login needs a human"
 # The sentinel litellm-chatgpt-eso.yaml renders (2100-01-01T00:00:00Z). The provider
 # trusts a numeric expires_at over the token's own exp claim, so this is what keeps
 # a stale or placeholder token on the fail-fast (401 upstream) path (plan finding 2).
@@ -268,13 +279,13 @@ class ChatGPTRouteContract(unittest.TestCase):
         # what the deployed proxy does with this route, retries and all.
         return Router(model_list=[copy.deepcopy(ROUTE)], **copy.deepcopy(CONFIG["router_settings"]))
 
-    async def _call(self, router):
-        """One Responses call; drains the stream the provider forces (stream:true)
-        and returns (events, error_name)."""
+    async def _call(self, router, request=REQUEST):
+        """One Responses call; drains the response when it is a stream and returns
+        (events, error_name). A non-streamed response is the single event."""
         events = []
         error = None
         try:
-            response = await asyncio.wait_for(router.aresponses(**copy.deepcopy(REQUEST)), timeout=25)
+            response = await asyncio.wait_for(router.aresponses(**copy.deepcopy(request)), timeout=25)
 
             async def drain():
                 if hasattr(response, "__aiter__"):
@@ -290,7 +301,7 @@ class ChatGPTRouteContract(unittest.TestCase):
             await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
         return events, error
 
-    async def _exercise(self, label, outcome, files):
+    async def _exercise(self, label, outcome, files, request=REQUEST):
         """Write the first auth.json, build ONE Router on it, then one call per
         entry of `files` (each rewritten atomically before its call). Returns the
         recorded wire requests and the per-call (events, error) pairs; asserts
@@ -306,7 +317,7 @@ class ChatGPTRouteContract(unittest.TestCase):
                 for index, (directory, auth) in enumerate(files):
                     if index:
                         _write_auth(directory, auth)
-                    results.append(await self._call(router))
+                    results.append(await self._call(router, request))
             finally:
                 router.reset()
         elapsed = time.monotonic() - started
@@ -336,16 +347,25 @@ class ChatGPTRouteContract(unittest.TestCase):
         self.assertNotIn("max_output_tokens", body, f"{label}: accepted loss, ADR 0026")
         self.assertEqual(body.get("text"), REQUEST["text"], f"{label}: text is forwarded (chatgpt_chat.py, ADR 0027)")
 
-    async def _case_a_placeholder_file(self):
-        directory = _use_token_dir("a-placeholder")
-        sent, results = await self._exercise("a", "success", [(directory, PLACEHOLDER_AUTH)])
-        self.assertEqual(len(sent), 1, "exactly one upstream attempt")
-        self._assert_wire_request("a", sent[0], "unconfigured", "unconfigured")
+    async def _case_a_placeholder_file(self, label, stream):
+        directory = _use_token_dir(f"{label}-placeholder")
+        request = {**REQUEST, "stream": True} if stream else REQUEST
+        sent, results = await self._exercise(label, "success", [(directory, PLACEHOLDER_AUTH)], request)
+        self.assertEqual(len(sent), 1, f"{label}: exactly one upstream attempt")
+        # The same streamed wire request whatever the caller asked for.
+        self._assert_wire_request(label, sent[0], "unconfigured", "unconfigured")
         events, error = results[0]
-        self.assertIsNone(error)
-        completed = [event for event in events if getattr(event, "type", None) == "response.completed"]
-        self.assertEqual(len(completed), 1, "the stream must surface the response.completed frame")
-        self.assertEqual(completed[0].response.output[0].content[0].text, "OK")
+        self.assertIsNone(error, label)
+        if stream:
+            completed = [event.response for event in events
+                         if getattr(event, "type", None) == "response.completed"]
+            self.assertEqual(len(completed), 1, f"{label}: the stream must surface the response.completed frame")
+        else:
+            completed = [event for event in events if isinstance(event, ResponsesAPIResponse)]
+            self.assertEqual(len(events), 1, f"{label}: a non-streaming caller gets ONE response, not the events")
+            self.assertEqual(len(completed), 1, f"{label}: that response is the aggregated ResponsesAPIResponse")
+        self.assertEqual(completed[0].status, "completed", label)
+        self.assertEqual(completed[0].output[0].content[0].text, "OK", label)
 
     async def _case_b_past_jwt_exp_under_sentinel(self):
         directory = _use_token_dir("b-expired-jwt")
@@ -364,29 +384,35 @@ class ChatGPTRouteContract(unittest.TestCase):
         sent = []
         started = time.monotonic()
         error = None
+        detail = ""
         router = None
         with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, "success")):
             try:
-                # Construction is where the 2026-09-19 probe measured the attempt
-                # (get_llm_provider runs the authenticator); the first call is the
-                # fallback should a future pin move it.
+                # Construction is where both the 2026-09-19 probe (1.105.1: the
+                # device-flow attempt) and the 2026-10-19 one (1.106.0: the refusal)
+                # measured it -- get_llm_provider runs the authenticator. A pin that
+                # moves it to the first call fails the refusal assertion below and
+                # gets re-measured.
                 router = self._router()
                 _, error = await self._call(router)
             except Exception as exc:
-                error = type(exc).__name__
+                error, detail = type(exc).__name__, str(exc)
             finally:
                 if router is not None:
                     router.reset()
         elapsed = time.monotonic() - started
-        self.assertIsNotNone(error, f"{name}: Router construction or the first call must raise")
-        self.assertTrue(NETWORK_ATTEMPTS, f"{name}: the device flow must have reached for the network")
-        self.assertTrue(all(DEVICE_FLOW_HOST in attempt for attempt in NETWORK_ATTEMPTS),
-                        f"{name}: every attempt is the OAuth device flow: {NETWORK_ATTEMPTS}")
-        self.assertEqual(sent, [], f"{name}: nothing may reach the upstream without a token")
-        self.assertLess(elapsed, 10, f"{name}: the denied attempt fails fast")
-        print(json.dumps({"case": f"c-{name}", "error": error,
-                          "network_attempts": NETWORK_ATTEMPTS, "elapsed_s": round(elapsed, 2)}))
+        # Taken and cleared BEFORE any assertion: a failure here must not fail the later cases'
+        # no-socket checks too.
+        attempts = list(NETWORK_ATTEMPTS)
         NETWORK_ATTEMPTS.clear()
+        self.assertIsNotNone(error, f"{name}: Router construction or the first call must raise")
+        self.assertIn(DEVICE_CODE_REFUSAL, detail,
+                      f"{name}: Router construction refuses the device-code login: {error}: {detail[:300]}")
+        self.assertEqual(attempts, [], f"{name}: the refused device flow makes no socket attempt")
+        self.assertEqual(sent, [], f"{name}: nothing may reach the upstream without a token")
+        self.assertLess(elapsed, 10, f"{name}: the refusal fails fast")
+        print(json.dumps({"case": f"c-{name}", "error": error,
+                          "network_attempts": attempts, "elapsed_s": round(elapsed, 2)}))
 
     async def _case_d_upstream_rejection(self, status, error_name, attempts):
         directory = _use_token_dir(f"d-{status}")
@@ -418,8 +444,9 @@ class ChatGPTRouteContract(unittest.TestCase):
     def test_chatgpt_route_contract(self):
         async def run_cases():
             try:
-                with self.subTest(case="a"):
-                    await self._case_a_placeholder_file()
+                for label, stream in (("a", False), ("a-stream", True)):
+                    with self.subTest(case=label):
+                        await self._case_a_placeholder_file(label, stream)
                 with self.subTest(case="b"):
                     await self._case_b_past_jwt_exp_under_sentinel()
                 for name, content in (("missing", None),

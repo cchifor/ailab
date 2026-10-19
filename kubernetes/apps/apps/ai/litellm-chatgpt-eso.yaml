@@ -24,7 +24,11 @@
 # that at Router construction, so it would freeze a request AND a pod start. Router(...) over a
 # missing file or a real past expiry reached for auth.openai.com immediately. The same file with a
 # NON-EMPTY placeholder token and a FAR-FUTURE `expires_at` built the Router in 0.07 s with no
-# network and sent the request upstream, where a bad token fails FAST (401). So:
+# network and sent the request upstream, where a bad token fails FAST (401). Since LiteLLM v1.106.0
+# (upstream #39585) the authenticator REFUSES that device flow inside an event loop, which is where
+# the proxy runs it: no hang any more, but no route either -- a missing, empty or unparseable file
+# fails Router construction at once, and the proxy comes up without gpt-6-astra-realjaynesage
+# (measured 2026-10-19). The guards below keep the route constructible on every version. So:
 #   * `default "unconfigured"`: the token field is never empty. Before the login, and if the
 #     publisher ever stops, LiteLLM sends a placeholder and gets an honest upstream refusal.
 #   * `expires_at: 4102444800` (2100-01-01): LiteLLM never judges the token expired from this file.
