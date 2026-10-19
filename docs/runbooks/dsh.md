@@ -22,13 +22,17 @@ browser ──▶ Cloudflare Access ──▶ cloudflared ──▶ dsh Service 
                                                       │
                              ┌────────────────────────┼────────────────────┐
                              ▼                        ▼                    ▼
-      router.chifor.me (models)      searxng.dsh.svc:8080      CoreDNS
-       via Cloudflare → llm-router edge                │
-                                                 the internet
+                     router.chifor.me       searxng.dsh.svc:8080        CoreDNS
+                         (models)                     │
+                             │                  the internet
+                     Cloudflare tunnel
+                             │
+               llm-router edge → llm-router
 ```
 
 `dsh` can reach CoreDNS, SearXNG, the Kubernetes API, and public IPv4 HTTP(S) destinations — the
-last is also its only model path (llm-router's public hostname; see "Models: llm-router"). Private ranges remain excluded from *direct* web egress. A separate
+last is also its only model path (llm-router's public hostname; see "Models: llm-router").
+Private ranges remain excluded from *direct* web egress. A separate
 `dsh-operator-ssh` NetworkPolicy allows TCP 22 to the explicitly approved operator hosts listed
 below. Since 2026-09-18 those exclusions bound only the pod's direct connections, not what the
 agent can reach: see the next section.
