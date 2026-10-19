@@ -7,14 +7,13 @@
 # children. The conductor keeps dsh's tools, session lifecycle and delegation machinery, because
 # it IS a dsh agent -- only its model route is Codex.
 #
-# THE ROUTE IS `gpt-6-astra` ON THE `litellm` PROVIDER (2026-09-12). Not a `codex` provider: one
-# was seeded with `api: openai-codex-responses`, which is not a schema value, and because
-# validation covers the WHOLE providers dict it took litellm down with it -- the init container
-# still unwrites that block on every boot (dsh/deployment.yaml). The Codex model is served instead
-# as an ordinary LiteLLM route on the key that already serves gpt-5.4, which needs no dsh provider,
-# no OpenBao path and no CODEX_API_KEY. A `-codex` id could not have been used from here anyway:
-# that family is Responses-API only (404 on /v1/chat/completions, measured 2026-09-12), and this
-# provider speaks openai-completions.
+# THE ROUTE IS `gpt-6-astra` ON THE `llm-router-codex` PROVIDER (since 2026-10-19, ADR 0039; it
+# was a LiteLLM route, then the native `openai-codex` subscription provider, before that). Every
+# dsh model is served by llm-router now: llm-router-codex is a Responses route into the router's
+# `pool-codex` smart pool (settings.seed.yaml says why), and the workers below are on
+# llm-router-local. The old `codex` provider -- seeded with `api: openai-codex-responses`, not a
+# schema value, which took every provider down -- is still unwritten on every boot
+# (dsh/deployment.yaml).
 #
 # WHAT THIS IS NOT: the Codex CLI. That is `dsh-subagent-codex` (architecture A, team-review
 # below), and it CANNOT conduct anything -- the provider rejects agentOptions, personas, tool
@@ -27,11 +26,11 @@
 # Pinning a route inside a preset is not something dsh-agent-presets does.
 #
 # SO SELECTING THIS TEAM IS HALF THE JOB: also select `gpt-6-astra` for the session. The
-# deployment default is `agent-default-model: litellm/qwen3.8-27b-vllm-cloud` and is deliberately
-# left there (gpt-6-astra is paid, and it would otherwise become the default for every session),
-# so a Conductor session left on the default is qwen conducting qwen -- the team's topology
-# without its point. That is not a hypothetical: it is how this team behaved from the day it
-# shipped until the route existed.
+# deployment default is `agent-default-model: llm-router-local/qwen3.8-flash-next` and is
+# deliberately left there (gpt-6-astra spends the Codex subscriptions' weekly windows, and it would
+# otherwise become the default for every session), so a Conductor session left on the default is
+# qwen conducting qwen -- the team's topology without its point. That is not a hypothetical: it is
+# how this team behaved from the day it shipped until the route existed.
 #
 # THE INHERITANCE TRAP, and what this file does about it. Spawn children INHERIT the parent's
 # provider/model when nothing overrides it, so on a Codex-routed conductor an unconfigured child
@@ -266,8 +265,8 @@
         modelSelectionSettings: true
         backgroundMode: continuable
         agentOptions:
-          provider: litellm
-          model: qwen3.8-27b-vllm-cloud
+          provider: llm-router-local
+          model: qwen3.8-27b
         maxDepth: 2
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this

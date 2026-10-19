@@ -1,25 +1,24 @@
-# Runbook: registering a model across the estate (LiteLLM → dsh, Open WebUI)
+# Runbook: registering a model across the estate (LiteLLM → Open WebUI)
 
 The serving side of a model lives where the model runs (ailab's LXCs: `ai-model-swap.md`; the
 cloudlab GPU cluster: `git.chifor.me/cchifor/cloudlab`, `host/llama-swap.yaml` and runbook §11/§13).
 This runbook is the **registration** side: how a model that is already answering on some `/v1`
-endpoint becomes a route in LiteLLM and, from that one edit, a choice in dsh and in Open WebUI.
-Decision record: ADR 0022.
+endpoint becomes a route in LiteLLM and, from that one edit, a choice in Open WebUI.
+Decision record: ADR 0022. dsh is not a LiteLLM consumer: since 2026-10-19 it takes every model
+from llm-router (ADR 0039, `dsh.md`), so a route registered here does not reach dsh's picker.
 
 ## The shape
 
 ```
 serving host (/v1)  ->  litellm.yaml model_list (the ONE edit)
                             |-> just af-gen-litellm  ->  open-webui.yaml  "0".model_ids   (Local group)
-                            |                        ->  dsh settings.seed.yaml  models:  (picker)
                             |                        ->  litellm.yaml checksum/config     (rollout)
                             '-> CI: just af-verify-litellm fails closed on drift
 ```
 
 Open WebUI's second connection discovers **everything** LiteLLM serves; ids claimed by the generated
 allowlist on the first connection show under **Local**, every other id shows under **External**
-(by the merge rule in Open WebUI's code — first connection to claim an id wins). dsh shows exactly
-what its seed names.
+(by the merge rule in Open WebUI's code — first connection to claim an id wins).
 
 ## 1. Before touching the repo
 
@@ -75,10 +74,10 @@ Conventions the comments around the existing entries enforce, and the generator 
   will be rejected** — llama-swap loads before it proxies. Measure it and put the number in the
   route comment, as the cloud pair does.
 - **A dated comment block above the entry** with the measured numbers and the context arithmetic.
-- **Visibility is derived, not declared.** The route is listed in dsh and in Open WebUI's Local
-  group when `api_base` is a private IPv4 or a `.svc.cluster.local` host, `model_info.mode` is
-  unset or `chat`, and `model_info.hidden` is not `true`. To keep a route reachable by name but out
-  of dsh and of Open WebUI's Local group (a fallback-only route, a route under test) set
+- **Visibility is derived, not declared.** The route is listed in Open WebUI's Local group when
+  `api_base` is a private IPv4 or a `.svc.cluster.local` host, `model_info.mode` is unset or
+  `chat`, and `model_info.hidden` is not `true`. To keep a route reachable by name but out of
+  Open WebUI's Local group (a fallback-only route, a route under test) set
   `model_info: { hidden: true }` — a YAML boolean, not a string. It still appears under Open WebUI's
   External group via discovery.
 - **Fallbacks** are a separate `router_settings.fallbacks` line and resolve only against this
@@ -97,12 +96,11 @@ python3 -m unittest discover -s scripts/tests -p "test_*.py"
 git status --porcelain      # then git add the exact paths — never git add -A
 ```
 
-`--write` reports each span it changed. Expect three: `open-webui.yaml` (`"0".model_ids`),
-`settings.seed.yaml` (the `models:` rows) and `litellm.yaml` (`checksum/config`). If it refuses,
-read the message: an empty selection, a non-boolean `hidden`, a `model_name` that does not
-round-trip as a plain YAML string, a hand-edited line inside a generated span, or a non-canonical
+`--write` reports each span it changed. Expect two: `open-webui.yaml` (`"0".model_ids`) and
+`litellm.yaml` (`checksum/config`). If it refuses, read the message: an empty selection, a
+non-boolean `hidden`, a `model_name` carrying a single quote, or a non-canonical
 `OPENAI_API_CONFIGS` value are all errors rather than silent rewrites. Review the diff, commit the
-`litellm.yaml` entry and the three generated spans together, open the PR on Gitea.
+`litellm.yaml` entry and the two generated spans together, open the PR on Gitea.
 
 ## 4. After the merge
 
@@ -113,7 +111,6 @@ interval; each consumer then rolls on its own trigger:
 |---|---|---|
 | LiteLLM | `checksum/config` changed → new pod template, rolling update (the Deployment in `litellm.yaml`: 2 replicas, `maxUnavailable: 0`) | `kubectl --context admin@ai -n ai get pods -l app.kubernetes.io/name=litellm` — both pods on the new template; then, in-cluster, `GET http://litellm.ai.svc:4000/v1/models` with the master key lists the name |
 | Open WebUI | the env value changed → rollout | the picker shows the route under **Local**; `ENABLE_PERSISTENT_CONFIG=false`, so env is authoritative on every boot |
-| dsh | the `dsh-relay` ConfigMap hash changed → the 1-replica `Recreate` Deployment rolls; the `seed-settings` init container splices the block | `kubectl --context admin@ai -n dsh logs deploy/dsh -c seed-settings` prints `was:` / `now:` id lists |
 
 Then prove the route **through the proxy**, not only direct-to-backend: a greedy fixed prompt
 (`Reply with exactly: OK`), a request in thinking mode that terminates (`finish_reason: stop`),
@@ -123,19 +120,19 @@ not from a dev-worker.
 
 ## 5. Removing, hiding, renaming
 
-- **Hide** (keep the name resolvable, drop it from dsh and from Open WebUI's Local group):
+- **Hide** (keep the name resolvable, drop it from Open WebUI's Local group):
   `model_info: { hidden: true }`, then `just af-gen-litellm`. Open WebUI's External group still
   shows it.
 - **Remove**: first check `router_settings.fallbacks` and known callers for the name; then delete
-  the entry, regenerate, commit, merge, and confirm Flux has rolled the proxy and both consumers
+  the entry, regenerate, commit, merge, and confirm Flux has rolled the proxy and Open WebUI
   (step 4); only then stop the backend. Routing is restored before a backend is disabled, never
   the reverse — a local regeneration changes nothing live.
 - **Rename**: don't, if chats reference it. Open WebUI stores the model id per chat and there is no
   prefix or alias layer by design; a renamed route strands every existing chat on that id.
 - **Rename without stranding anyone -- two names, one backend**: keep the old entry and mark it
   `model_info: { hidden: true }`, add a second entry under the new `model_name` with **identical**
-  `litellm_params` and `model_info.alias_of: <old name>`, then `just af-gen-litellm`. dsh and Open
-  WebUI's Local group show only the new name (the hide is partial: the old id still surfaces under
+  `litellm_params` and `model_info.alias_of: <old name>`, then `just af-gen-litellm`. Open WebUI's
+  Local group shows only the new name (the hide is partial: the old id still surfaces under
   Open WebUI's External group, see above); the old one keeps answering for every chat and session
   pinned to it. Done for `qwen3.8-27b-fp8-cloud` → `qwen3.8-27b-fp8-unc-cloud` on 2026-09-11 (the
   comment on those entries says why). The two `litellm_params` blocks must stay identical: they
@@ -150,11 +147,11 @@ not from a dev-worker.
 - **A non-empty `model_ids` disables discovery for that Open WebUI connection**, and there is no
   wildcard. That is why the Local group is generated rather than discovered, and why the second
   connection exists.
-- **dsh lists whatever the seed names and only fails when a user picks a dead id.** The generator
-  cannot produce a name that is not in `model_list`; a route that is in `model_list` but not
-  actually served still fails at selection time — a 404 for a served name the backend does not
-  know, a connection error or timeout for a backend that is down, or a silent fallback if one is
-  configured. The probe in step 4 is what catches that before a user does.
+- **A listed route only fails when a user picks it.** The generator cannot produce a name that is
+  not in `model_list`; a route that is in `model_list` but not actually served still fails at
+  selection time — a 404 for a served name the backend does not know, a connection error or
+  timeout for a backend that is down, or a silent fallback if one is configured. The probe in
+  step 4 is what catches that before a user does.
 - **cloud3 holds one model at a time.** Every cloud3 route (`qwen3-coder-30b-a3b-cloud`,
   `qwen3.5-122b-cloud`, `qwen3.8-flash-next-cloud`, `qwen3.8-flash-next-q6-cloud`,
   `qwen3.8-27b-fp8-cloud`) shares one llama-swap; a request for a different one swaps the whole
@@ -172,8 +169,8 @@ not from a dev-worker.
 The same one edit registers an image model; the differences are what the generator and the
 consumers do with it (first case: Qwen-Image-2.1 on cloud2, ADR 0033, 2026-09-29).
 
-- **Set `model_info.mode: image_generation`.** The generator then leaves the route out of dsh and
-  the Local group. It still shows in Open WebUI's *External* group, because that connection
+- **Set `model_info.mode: image_generation`.** The generator then leaves the route out of the
+  Local group. It still shows in Open WebUI's *External* group, because that connection
   discovers LiteLLM's whole `/v1/models`, which lists every route regardless of mode (the
   embedding routes already show there), and LiteLLM forwards `/chat/completions` to it regardless of
   mode too. **So a route in `mode: image_generation` WILL be picked as a chat model** — its backend

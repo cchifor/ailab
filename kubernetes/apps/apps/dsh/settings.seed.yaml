@@ -1,137 +1,161 @@
 # Seed for $DSH_HOME/settings.yaml — copied in ONCE, on first boot, only if the file is absent.
 # dsh owns this file afterwards (the Settings UI writes it, and adapters re-read it per request),
-# so this must never overwrite a live one.
+# so this must never overwrite a live one. The PROVIDER blocks below are the exception: they are
+# infrastructure this repo owns, and seed-settings in deployment.yaml re-splices each of them into
+# the live file on every boot (reconcile-provider.js), so an edit here reaches the running pod.
 #
-# Registers the estate's LiteLLM proxy as a CUSTOM provider. It must be custom, not built-in: a
-# built-in provider id is always answered from the installed catalog even when its baseURL points at
-# a gateway, so only a custom provider surfaces what LiteLLM actually serves.
+# EVERY MODEL dsh OFFERS COMES FROM llm-router (router.chifor.me) since 2026-10-19 (ADR 0039).
+# The LiteLLM provider, both Codex subscription providers and the shipped DeepSeek adapter are
+# gone; deployment.yaml unwrites the PVC copies of the old blocks and cordis.patch.yml disables
+# the DeepSeek row. One router key serves all three providers below:
 #
-# api MUST be openai-completions — LiteLLM speaks OpenAI Chat Completions. A provider speaks exactly
-# one protocol, so a second one would be needed for anything Anthropic-shaped.
+#   key_353539972cec  "dsh all routes (ailab dsh.chifor.me, ns dsh)"  routes: all, 365 days
 #
-# CREDENTIAL: deliberately not set here. dsh keeps keys in $DSH_HOME/.credentials.yaml (write-only
-# through the UI, and the file is rejected if it carries any group/other permission bit), and this
-# repo cannot mint one — the SOPS age key is not available to CI. Enter the LiteLLM key once under
-# Settings → Models → the litellm provider; it persists on the dsh-home PVC across restarts.
+# escrowed as the field LLM_ROUTER_API_KEY of af/dsh/credentials in OpenBao. ESO projects that
+# document into /dsh-credentials (openbao-eso.yaml) and openbao-credentials.mjs resolves
+# `apiKeyEnv: LLM_ROUTER_API_KEY` from the projected file per request -- no env var, no
+# Deployment change on rotation.
+#
+# WHY THREE PROVIDERS AND NOT ONE. A provider speaks exactly one protocol, and the router does not
+# serve every model on both. Measured from this pod on 2026-10-19 with the key above:
+#   /v1/chat/completions  200 with a tool call for Codex, Claude and the local Qwen models
+#   /v1/responses         200 for Codex; `response.failed` for Claude and for Qwen
+# Codex stays on the Responses protocol (reasoning items survive across turns there, which chat
+# completions drops); Claude and Qwen use Chat Completions. The split also gives the model picker
+# one heading per family.
+#
+# WHY https://router.chifor.me AND NOT A CLUSTER ADDRESS. The router's NetworkPolicy admits only
+# its edge (the Caddy hold proxy that drains requests during router upgrades), and the edge admits
+# only cloudflared. The public hostname is the router's documented client path, dsh already has
+# general 443 egress (networkpolicy.yaml), and a request through it is held -- not dropped --
+# across a router rollout. Measured from this pod: /v1/models 200, first token in 1-4 s.
+#
+# THE MODEL LISTS ARE HAND-WRITTEN from GET /v1/models with that key (2026-10-19). A model added
+# on the router does not appear here by itself: add a row, and the next pod start reconciles it.
+# The two image models (qwen-image-2.1, qwen-image-2.1-fast) are deliberately absent -- they are
+# image-generation endpoints, not chat models, and dsh would fail every turn sent to them.
+#
+# IMAGE INPUT follows the router, not the model card: the router refuses an image on an account
+# whose visionModels lacks the model, and today only gpt-6-luna is listed there (every local
+# account reports vision: false). So `input: [text, image]` appears on exactly that one row; a
+# hand-entered model is text-only until it says otherwise.
 llm-pi-ai:
   providers:
-    litellm:
-      # Reads the key from the environment; the Deployment populates it from the
-      # External-Secrets-synced `dsh-litellm` Secret (ultimately af/estate/litellm in OpenBao).
-      # LiteLLM REQUIRES a real key -- an absent header is 401 and a wrong one is 400
-      # "No connected db", verified from this pod 2026-09-07. Without it the provider is
-      # registered but every model call fails, which is exactly how it behaved before.
-      apiKeyEnv: LITELLM_API_KEY
-      # Bounds the BYTES of images carried in one request, not the count -- say that plainly,
-      # because it is the difference between this helping and this being theatre. dsh re-sends
-      # every image in the conversation on every turn, and when this budget is exceeded
-      # offloadRequestImagesWithPolicy (dsh-llm) replaces the OLDEST images with placeholders,
-      # front-only and in fixed quanta so the pruned prefix stays byte-stable and vLLM's prefix
-      # cache survives. Pruning from the tail instead would invalidate the cache every turn.
-      #
-      # WHAT IT DOES NOT DO: bound the COUNT. Attachments measured on this deployment run
-      # 2 KB-100 KB with a 40 KB median, so 64 images is ~2.6 MB and this budget never binds
-      # first at those sizes. The count is bounded by the server instead (MM_IMAGES=64 on cloud2,
-      # which is max_model_len/2048 and therefore the ceiling). This value exists for the other
-      # shape of the problem: a handful of large screenshots, where 8 x 1 MiB would otherwise eat
-      # the context before the image cap noticed.
-      #
-      # 8 MiB, down from the 20 MiB default. The adapter also caps each image at 1 MiB inside the
-      # request (requestImagePolicy.maxBytes), so this is ~8 worst-case images and ~200 typical.
-      maxRequestImageBytes: 8388608
-      api: openai-completions
-      baseURL: http://litellm.ai.svc.cluster.local:4000/v1
-      models:
-        # A hand-entered model is text-only until it says otherwise, so `input: [text, image]` is
-        # what makes image attachment work at all. It is emitted for exactly the routes whose
-        # LiteLLM entry declares model_info.supports_vision: true (cloud2 serves Qwen3.8-27B with
-        # the tower loaded, VISION=1, probe-verified) — claim vision THERE, not here.
-        # generated by scripts/gen-litellm-consumers.py from litellm.yaml — do not hand-edit; run --write
-        - id: qwen3.5-122b-cloud
-        - id: qwen3.8-27b-vllm-cloud
-          input: [text, image]
-        - id: qwen3.8-27b-vllm-fast-cloud
-        - id: qwen3.8-27b-fp8-unc-cloud
-        - id: qwen3-coder-30b-a3b-cloud
-        - id: qwen3.8-flash-next-cloud
-          input: [text, image]
-        - id: qwen3.8-27b-ailab
-          input: [text, image]
-    # Subscription credential projected from reviewer-2 seat B through OpenBao/ESO.
-    # Omit api: the catalog supplies openai-codex-responses; that internal protocol
-    # name is not an accepted explicit profile api value.
-    openai-codex:
-      displayName: OpenAI Codex (realjaysage)
-      apiKeyEnv: DSH_CODEX_ACCESS_TOKEN
-      transport: sse
-      models:
-        - id: gpt-6-astra
-          input: [text, image]
-    # A SECOND Codex subscription -- reviewer-2 seat d (codexrun4, realjaynesage@gmail.com) -- served
-    # THROUGH LiteLLM's chatgpt/ provider as the route gpt-6-astra-realjaynesage (ADR 0026). Added
-    # 2026-09-19, when seat b's weekly window read 100 % (reviewbot_llm_usage_percent{persona="codex",
-    # seat="b"}) and dsh had no usable Astra route.
+    # Codex (ChatGPT subscriptions codex .. codex-5), through the router's `pool-codex` smart pool.
     #
-    # NOT a second native openai-codex provider, because the installed adapter cannot host one: in
-    # @deepseek-ai/dsh-llm-pi-ai 0.1.5-alpha.2 the Codex subscription protocol (openai-codex-responses)
-    # is reachable only by reusing the CATALOG route id `openai-codex`, and a hand-declared route must
-    # name `api` in openai-completions | openai-responses | anthropic-messages -- any other value fails
-    # the adapter's Config schema for the WHOLE providers dict (that is what took every provider down
-    # once; see the DSH_PROVIDER_REMOVE line in deployment.yaml). This exact block passes that schema,
-    # verified in the pod 2026-09-19.
+    # X-Router-Route: pool-codex puts each request in the pool's MODEL MODE: the pool's `*` targets
+    # serve the requested model on whichever subscription the smart strategy picks -- quota-aware,
+    # and a conversation stays on one account (thread placement by prompt_cache_key). Without the
+    # header a model name resolves to the router's DIRECT policy instead: plain priority over the
+    # accounts in configuration order, which keeps hitting `codex` first even when its weekly window
+    # is spent. Dev workers and the codex reviewer use the same pool.
     #
-    # api: openai-responses -- LiteLLM's chatgpt/ provider is Responses-native (it talks to
-    # chatgpt.com/backend-api/codex/responses), and this model's reasoning + function tools need the
-    # Responses protocol, as the paid gpt-6-astra route in litellm.yaml (openai/responses/...) already
-    # established. Not openai-completions: chat-completions through this provider is unverified.
-    #
-    # apiKeyEnv: LITELLM_API_KEY -- the same env the litellm provider above reads (the ESO-synced
-    # `dsh-litellm` Secret). The subscription token itself lives in the ai namespace (Secret
-    # litellm-chatgpt-auth, mounted in the litellm pod at /chatgpt-auth) and NEVER in this pod: dsh
-    # authenticates to the gateway, the gateway authenticates to OpenAI.
-    #
-    # A NON-CATALOG route inherits nothing, so every model field is spelled out. 272000 / 128000 are
-    # the catalog's own gpt-6-astra values; input: [text, image] is what makes attachments work at all
-    # (a hand-entered model is text-only until it says otherwise -- see the litellm block above).
-    # reasoningEfforts mirrors the catalog's thinkingLevelMap for gpt-6-astra MINUS its "off" row,
-    # and `reasoning: medium` is the route default. Both are load-bearing, measured 2026-09-19 in a
-    # live session on this provider: a declared `"off": null` leaves the adapter's thinkingLevelMap
-    # entry UNDEFINED (dsh-llm-pi-ai resolveModelReasoning keeps only non-null wire values), and with
-    # no effort selected pi-ai's openai-responses then sends `reasoning.effort: "none"`, which the
-    # ChatGPT backend refuses for this model -- every turn 400'd ("Unsupported value: 'none' ...
-    # Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'") until the user picked an
-    # effort. With the row absent the map's `off` is an explicit null and pi-ai omits `reasoning`;
-    # the route default makes a fresh session usable at once. The native openai-codex provider above
-    # never had this problem because its catalog entry carries the same map with the wire semantics
-    # built in.
-    #
-    # compat.supportsStrictMode: true is the OTHER measured defect. The generic openai-responses
-    # adapter defaults it to false and OMITS `strict` on function tools; the Responses backend then
-    # defaults strict to true and constrained decoding fills EVERY optional property on every call --
-    # 12 of 12 bash calls in the probe carried `sandbox_permissions: "workspace-write"`, which dsh
-    # refuses as a non-widening escalation ("not strictly wider than this call's current mode"), so
-    # no tool call ever ran. The native codex adapter defaults the switch to true; proven live by a
-    # 40 s settings/update patch (reverted) after which the very next call emitted only
-    # {command, description} and succeeded. Offered on this protocol by RESPONSES_COMPAT_GATE.
-    #
-    # ACCEPTED PARAMETER LOSS on this path (recorded in ADR 0026; measured in the pinned LiteLLM
-    # 1.101.0 image 2026-09-19): max_output_tokens is never sent -- maxTokens here sizes the model
-    # and is not a per-request cap, so the model's own 128k ceiling applies; text.verbosity,
-    # prompt_cache_key and parallel_tool_calls are dropped by LiteLLM's chatgpt Responses transform
-    # (default verbosity; backend default for parallel tool calls; prefix caching rides on the
-    # session_id header LiteLLM sets per call). None of these changes an answer's correctness.
-    openai-codex-realjaynesage:
-      displayName: OpenAI Codex (realjaynesage)
-      apiKeyEnv: LITELLM_API_KEY
+    # The next three settings are the ones the old LiteLLM Codex route needed, and both defects
+    # reproduce through the router (measured from this pod 2026-10-19 on gpt-6-astra):
+    #   * compat.supportsStrictMode: true. Without it the generic openai-responses adapter OMITS
+    #     `strict` on function tools, the backend defaults it to true, and constrained decoding fills
+    #     every optional property -- a bash call came back with sandbox_permissions:
+    #     "workspace-write", which dsh refuses as a non-widening escalation. strict:false returned
+    #     only {command}.
+    #   * reasoningEfforts WITHOUT an `off` row, and `reasoning: medium`. With no effort selected
+    #     pi-ai would send reasoning.effort "none", which the backend answers with HTTP 400
+    #     unsupported_value (measured again through the router). The absent row makes `off` an
+    #     explicit null so pi-ai omits `reasoning`, and the route default makes a fresh session
+    #     usable at once.
+    # contextWindow/maxTokens are the installed pi-ai catalog's openai-codex values (272000 /
+    # 128000); gpt-6-sol and gpt-6-luna are not in that catalog and are given the family's values.
+    llm-router-codex:
+      displayName: LLM Router (Codex)
+      apiKeyEnv: LLM_ROUTER_API_KEY
       api: openai-responses
-      baseURL: http://litellm.ai.svc.cluster.local:4000/v1
+      baseURL: https://router.chifor.me/v1
+      headers: { X-Router-Route: pool-codex }
       transport: sse
       reasoning: medium
       compat: { supportsStrictMode: true }
       models:
-        - id: gpt-6-astra-realjaynesage
+        - id: gpt-6-astra
           name: GPT-6 Astra
+          contextWindow: 272000
+          maxTokens: 128000
+          reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+        - id: gpt-6-sol
+          name: GPT-6 Sol
+          contextWindow: 272000
+          maxTokens: 128000
+          reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+        - id: gpt-6-luna
+          name: GPT-6 Luna
           contextWindow: 272000
           maxTokens: 128000
           input: [text, image]
           reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+        - id: gpt-5.6-sol
+          name: GPT-5.6 Sol
+          contextWindow: 272000
+          maxTokens: 128000
+          reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+        - id: gpt-5.6-terra
+          name: GPT-5.6 Terra
+          contextWindow: 272000
+          maxTokens: 128000
+          reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+        - id: gpt-5.6-luna
+          name: GPT-5.6 Luna
+          contextWindow: 272000
+          maxTokens: 128000
+          reasoningEfforts: { minimal: low, low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+    # Claude (subscriptions claude .. claude-5), by model name: the router's direct policy tries the
+    # accounts that list the model, up to three. Not through `pool-claude`: that pool's targets are
+    # pinned to `sonnet`, so in model mode it would serve sonnet and refuse the other three.
+    # 200000 is the conservative window (the router does not publish one); dsh compacts against it.
+    llm-router-claude:
+      displayName: LLM Router (Claude)
+      apiKeyEnv: LLM_ROUTER_API_KEY
+      api: openai-completions
+      baseURL: https://router.chifor.me/v1
+      models:
+        - id: opus
+          name: Claude Opus
+          contextWindow: 200000
+          maxTokens: 64000
+        - id: sonnet
+          name: Claude Sonnet
+          contextWindow: 200000
+          maxTokens: 64000
+        - id: haiku
+          name: Claude Haiku
+          contextWindow: 200000
+          maxTokens: 64000
+        - id: fable
+          name: Claude Fable
+          contextWindow: 200000
+          maxTokens: 64000
+    # The estate's self-hosted Qwen servers, as the router names them. Where the old LiteLLM ids went:
+    #   qwen3.8-27b-vllm-cloud / -vllm-fast-cloud  -> qwen3.8-27b  (a router ROUTE: cloud2 vLLM
+    #                                                 192.168.0.28:18020, which serves that name)
+    #   qwen3.8-flash-next-cloud                   -> qwen3.8-flash-next
+    #   qwen3.8-27b-fp8-unc-cloud                  -> qwen3.8-27b-fp8
+    #   qwen3.5-122b-cloud, qwen3-coder-30b-a3b-cloud, qwen3.8-27b-ailab  -> the same names, no suffix
+    # qwen3.8-27b-w4a16 is new to dsh (it was the second LiteLLM deployment behind -vllm-cloud).
+    # No contextWindow, as before: the route's defaultContextWindow (262144) applies.
+    llm-router-local:
+      displayName: LLM Router (Local)
+      apiKeyEnv: LLM_ROUTER_API_KEY
+      api: openai-completions
+      baseURL: https://router.chifor.me/v1
+      models:
+        - id: qwen3.8-flash-next
+        - id: qwen3.8-27b
+        - id: qwen3.8-27b-ailab
+        - id: qwen3.8-27b-fp8
+        - id: qwen3.8-27b-w4a16
+        - id: qwen3.5-122b
+        - id: qwen3-coder-30b-a3b
+# The default route for a NEW session. On a fresh volume this is simply seeded. On an existing one
+# reconcile-default-model.js copies this block over the live one ONLY when the live block still
+# names a retired provider (litellm, openai-codex, openai-codex-realjaynesage, deepseek-official),
+# so a default the user picked later from the router's models is never overwritten.
+agent-default-model:
+  provider: llm-router-local
+  model: qwen3.8-flash-next

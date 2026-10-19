@@ -224,8 +224,8 @@ def check_litellm_config_checksum() -> Site:
     923cdbdd5584 while the recipe produced 2b2e9034fa3d. Two independent
     instances of the same defect in one file pair is why BOTH are gated here
     rather than just the one that happened to be noticed first. This proxy is
-    the higher-traffic of the two — Open WebUI, the cloudflared tunnel, dsh and
-    gatus all route through it — so a silently-unrolled config here is the more
+    the higher-traffic of the two — Open WebUI, the cloudflared tunnel and gatus
+    all route through it — so a silently-unrolled config here is the more
     consequential of the two.
 
     Recipe: the YAML-parsed (dedented) `config.yaml` string value, UTF-8,

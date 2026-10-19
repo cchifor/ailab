@@ -4,7 +4,7 @@ kind: Kustomization
 namespace: dsh
 resources:
   - namespace.yaml
-  - openbao-eso.yaml   # SA + CA + SecretStore + ExternalSecret: the LiteLLM key from OpenBao
+  - openbao-eso.yaml   # SA + CA + SecretStore + ExternalSecret: af/dsh/credentials (incl. the llm-router key)
   - k8s-admin.yaml     # ServiceAccount + ClusterRoleBinding to cluster-admin (ADR 0025)
   - pvc.yaml
   - install-job.yaml   # one-shot: npm-installs dsh into the app PVC (see the file for why not an image)
@@ -13,7 +13,7 @@ resources:
   - oauth2-proxy-searxng-secret.sops.yaml # SOPS: oauth2-proxy client + cookie secrets
   - searxng-auth.yaml # Authelia SSO gate publishing the SearXNG web UI at search.chifor.me
   - service.yaml
-  - networkpolicy.yaml # default-deny both ways; only cloudflared in; DNS + LiteLLM + SearXNG + 443 out
+  - networkpolicy.yaml # default-deny both ways; only cloudflared in; DNS + SearXNG + 443 out (models: router.chifor.me)
   - api-egress-cilium.yaml # Cilium service translation for kubernetes.default.svc:443
   - operator-ssh-networkpolicy.yaml # dedicated SSH account on explicitly approved hosts
 
@@ -44,6 +44,7 @@ configMapGenerator:
       - settings.seed.yaml
       - fix-profile.js
       - reconcile-provider.js
+      - reconcile-default-model.js
       # Sets dsh.profile.bundles from the closure actually projected. NOT a merge: a bundle
       # named there but absent throws at profile load and crash-loops the pod.
       - reconcile-bundles.js

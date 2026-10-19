@@ -16,9 +16,9 @@
     "requiredContexts": ["test / test (pull_request)"]
   },
   "models": {
-    "conductor": {"provider":"openai-codex","model":"gpt-6-astra"},
-    "worker": {"provider":"litellm","model":"qwen3.8-27b-vllm-cloud"},
-    "reviewer": {"provider":"litellm","model":"qwen3.8-flash-next-cloud"}
+    "conductor": {"provider":"llm-router-codex","model":"gpt-6-astra"},
+    "worker": {"provider":"llm-router-local","model":"qwen3.8-27b"},
+    "reviewer": {"provider":"llm-router-local","model":"qwen3.8-flash-next"}
   },
   "author": {"name":"DSH Conductor","email":"dsh-team@users.noreply.git.chifor.me"},
   "validationCommands": [{"executable":"npm","args":["test"]}],
@@ -36,9 +36,9 @@
     "maxCalls":40,
     "maxReservedTokens":40000000,
     "routes": {
-      "openai-codex/gpt-6-astra":{"maxTokensPerCall":1000000},
-      "litellm/qwen3.8-27b-vllm-cloud":{"maxTokensPerCall":212992},
-      "litellm/qwen3.8-flash-next-cloud":{"maxTokensPerCall":229376}
+      "llm-router-codex/gpt-6-astra":{"maxTokensPerCall":1000000},
+      "llm-router-local/qwen3.8-27b":{"maxTokensPerCall":212992},
+      "llm-router-local/qwen3.8-flash-next":{"maxTokensPerCall":229376}
     }
   }
 }

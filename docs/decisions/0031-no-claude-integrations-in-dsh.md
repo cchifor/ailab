@@ -1,6 +1,7 @@
 # ADR 0031 — No Claude integrations in dsh: the Fable route and the Claude Code CLI provider are withdrawn
 
-**Status:** ACCEPTED (2026-09-22), operator-directed: *"Review the dsh ailab implementation. Remove all
+**Status:** SUPERSEDED by ADR 0039 (2026-10-19: dsh offers Claude through llm-router, holding no Claude
+credential). Was ACCEPTED (2026-09-22), operator-directed: *"Review the dsh ailab implementation. Remove all
 existing claude integrations."* **Supersedes ADR 0029** (Claude Fable 5.1 on the metered key) **and
 ADR 0030** (Claude on the Max subscription through the Claude Code CLI). Both ADRs stay in the tree
 as the record of what was built and why; their designs are no longer deployed.

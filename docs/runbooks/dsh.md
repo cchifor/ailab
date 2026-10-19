@@ -1,7 +1,9 @@
 # Runbook: dsh (DeepSeek Harness)
 
-An agentic coding UI at **<https://dsh.chifor.me>**, served from the `dsh` namespace and using the
-estate's own models through LiteLLM. Manifests: `kubernetes/apps/apps/dsh/`.
+An agentic coding UI at **<https://dsh.chifor.me>**, served from the `dsh` namespace. Every model it
+offers comes from **llm-router** (`router.chifor.me`) since 2026-10-19 (ADR 0039; LiteLLM, the
+native Codex providers and the shipped DeepSeek adapter before that). Manifests:
+`kubernetes/apps/apps/dsh/`.
 
 **The defining constraint: this pod executes model-authored code.** The agent runs shell commands
 and writes files, and a `danger-full-access` permission preset is selectable in its UI. Nearly every
@@ -20,13 +22,13 @@ browser ──▶ Cloudflare Access ──▶ cloudflared ──▶ dsh Service 
                                                       │
                              ┌────────────────────────┼────────────────────┐
                              ▼                        ▼                    ▼
-                    LiteLLM (models)         searxng.dsh.svc:8080      CoreDNS
-                                                      │
+      router.chifor.me (models)      searxng.dsh.svc:8080      CoreDNS
+       via Cloudflare → llm-router edge                │
                                                  the internet
 ```
 
-`dsh` can reach CoreDNS, LiteLLM, SearXNG, the Kubernetes API, and public IPv4 HTTP(S)
-destinations. Private ranges remain excluded from *direct* web egress. A separate
+`dsh` can reach CoreDNS, SearXNG, the Kubernetes API, and public IPv4 HTTP(S) destinations — the
+last is also its only model path (llm-router's public hostname; see "Models: llm-router"). Private ranges remain excluded from *direct* web egress. A separate
 `dsh-operator-ssh` NetworkPolicy allows TCP 22 to the explicitly approved operator hosts listed
 below. Since 2026-09-18 those exclusions bound only the pod's direct connections, not what the
 agent can reach: see the next section.
@@ -92,6 +94,60 @@ Cloudflare Access is the real per-person gate; this cookie is a second layer. Re
 > `cloudflared` deliberately sets **no `httpHostHeader` override** for this hostname. dsh's `/api`
 > trust fence refuses any request whose Host is not a declared authority, and the pod declares
 > `--trusted-host dsh.chifor.me`. Rewriting Host would 403 every request.
+
+---
+
+## Models: llm-router
+
+Since 2026-10-19 (ADR 0039) dsh has exactly three model providers, all on llm-router, all
+authenticated by ONE router key:
+
+| Provider (picker heading) | Protocol | Models | Notes |
+|---|---|---|---|
+| `llm-router-codex` — LLM Router (Codex) | `openai-responses` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` (image input), `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | header `X-Router-Route: pool-codex`: the smart pool over the Codex subscriptions |
+| `llm-router-claude` — LLM Router (Claude) | `openai-completions` | `opus`, `sonnet`, `haiku`, `fable` | the Claude subscriptions, by model name (direct policy) |
+| `llm-router-local` — LLM Router (Local) | `openai-completions` | `qwen3.8-flash-next` (default), `qwen3.8-27b`, `qwen3.8-27b-ailab`, `qwen3.8-27b-fp8`, `qwen3.8-27b-w4a16`, `qwen3.5-122b`, `qwen3-coder-30b-a3b` | the self-hosted servers |
+
+The blocks live in `settings.seed.yaml` (its header records why three providers, why the public
+hostname, and the two Responses-path defects the Codex block works around) and are reconciled
+into the PVC's `settings.yaml` on every boot. The model lists are **hand-written** from
+`GET /v1/models` with the key: a model added on the router appears in dsh only when a row is added
+to the seed. The router's two image-generation models are deliberately not offered.
+
+**The key.** `key_353539972cec`, named `dsh all routes (ailab dsh.chifor.me, ns dsh)`,
+`routes: all` (`null` in `GET /admin/v1/keys`), created 2026-10-19 with a 365-day expiry
+(2027-10-19). Its only copy is the field `LLM_ROUTER_API_KEY` of `af/dsh/credentials` (OpenBao
+version 12 of that document); ESO projects it to `/dsh-credentials/LLM_ROUTER_API_KEY` and
+`openbao-credentials.mjs` reads it per request, so a rotation needs no restart. The pod holds no
+other model key — `LITELLM_API_KEY` and its `dsh-litellm` ExternalSecret are gone.
+
+**Rotation / re-issue** (a router key cannot be edited, only replaced):
+
+```bash
+# 1. Issue: POST /admin/v1/keys with the admin token from llm-router/llm-router-auth. An admin
+#    BEARER gets the token in the response ("token"); the console gets a 10-minute reveal instead.
+#    Body: {"name":"dsh all routes (ailab dsh.chifor.me, ns dsh)","routes":"all","expiresInDays":365}
+# 2. Escrow: CAS-guarded KV-v2 PATCH of af/dsh/credentials, field LLM_ROUTER_API_KEY only
+#    (`bao kv patch -cas=<version> -mount=af dsh/credentials LLM_ROUTER_API_KEY=@file`, or the HTTP
+#    API with Content-Type application/merge-patch+json) -- `patch`, never `put`.
+# 3. kubectl --context admin@ai -n dsh annotate externalsecret dsh-credentials force-sync="$(date +%s)" --overwrite
+# 4. Verify from the pod (prints a count, never the key):
+kubectl --context admin@ai -n dsh exec deploy/dsh -c dsh -- node -e '
+  const k=require("fs").readFileSync("/dsh-credentials/LLM_ROUTER_API_KEY","utf8").trim();
+  fetch("https://router.chifor.me/v1/models",{headers:{authorization:"Bearer "+k}})
+    .then(r=>r.json()).then(j=>console.log(j.data.length,"models"))'
+# 5. Only then revoke the old one: DELETE /admin/v1/keys/<old id>.
+```
+
+**Measured on 2026-10-19**, from the pod, through pi-ai with each block resolved by the adapter's
+own `resolveProfiles` (strict): a tool-calling turn succeeded on every listed model.
+`qwen3.5-122b` was the exception — it timed out on the router's 300 s
+pre-output wait. The other models on the cloudlab server at 192.168.0.26 took 45–200 s. They are
+loaded on demand there, so a cold model is slow on its first turn (an upstream property; LiteLLM
+had the same servers). The cloud2 vLLM route `qwen3.8-27b` answered in under 1 s.
+
+**Rollback** is ADR 0039's: revert the PR. The old reconcile lines re-insert the LiteLLM and Codex
+blocks; the DeepSeek row comes back with the patch row gone.
 
 ---
 
@@ -301,6 +357,14 @@ with git itself, isolated from the host's configuration.
 
 ## Codex subscriptions: the reviewer seats behind dsh and LiteLLM
 
+> **dsh consumes neither seat since 2026-10-19** (ADR 0039). Its Codex models come from
+> llm-router's `pool-codex` (see "Models: llm-router"), and the `openai-codex` and
+> `openai-codex-realjaynesage` provider blocks are unwritten on every boot. Everything below still
+> RUNS: the publisher still patches both documents every minute, the `CodexProjection*` alerts
+> still watch it, and LiteLLM's `gpt-6-astra-realjaynesage` route still exists. Retiring seat b's
+> projection (`af/dsh/credentials` `DSH_CODEX_*`) is a reviewer-2 change, recorded as a follow-up in
+> ADR 0039. The section is kept as the description of that still-running machinery.
+
 Two ChatGPT subscriptions serve `gpt-6-astra` to dsh, and both are reviewer-2 seats whose OAuth
 refresh happens ONLY on that host (ADR 0024 for the seats, ADR 0026 for the second route). Local
 Qwen routes keep using LiteLLM's ordinary routes and are not part of this.
@@ -457,15 +521,22 @@ curl -s 'http://127.0.0.1:9090/api/v1/query?query=dsh_codex_projection_token_exp
 
 ---
 
-## Claude: none, by decision
+## Claude: through llm-router since 2026-10-19
 
-dsh has **no Claude route** since 2026-09-22 (ADR 0031). Two were built and withdrawn the day
+**ADR 0039 supersedes ADR 0031's decision.** The operator asked for every model llm-router serves,
+which includes the router's Claude subscriptions, and they are offered as the `llm-router-claude`
+provider (`opus`, `sonnet`, `haiku`, `fable`). dsh holds no Claude credential: the subscription
+tokens are the router's, and the pod authenticates to the router with its router key. The rest of
+this section is the record of the two earlier attempts and stays accurate as history.
+
+dsh had **no Claude route** from 2026-09-22 (ADR 0031) until then. Two were built and withdrawn the day
 after each shipped: `anthropic-fable` on LiteLLM's metered key (ADR 0029, never answered — the
 key is rejected by Anthropic) and `claude-cli`, the Claude Code CLI as a child process on the Max
 subscription (ADR 0030, never authenticated). The deployment still runs
 `DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1` each boot to unwrite the PVC copy of the
-provider block; that line is safe to keep. "LiteLLM is the ONLY model path" holds again. Adding
-Claude back is a new ADR, and both old ones still describe the constraints accurately.
+provider block; that line is safe to keep. Both old ADRs still describe the constraints of
+those two designs accurately; neither applies to the router route, where dsh holds no Claude
+credential at all.
 
 ---
 
@@ -821,22 +892,23 @@ four missing means the wrong image.
 ### Models disappeared from the picker
 
 `settings.yaml` lives on the PVC and is **owned by dsh** (the Settings UI writes it). The
-`reconcile-provider.js` init script rewrites only the `litellm` provider block from the seed on every
-boot, preserving everything else. The `models:` rows of that seed block are not hand-written:
-`scripts/gen-litellm-consumers.py` derives them (together with Open WebUI's `model_ids` and
-litellm.yaml's `checksum/config`) from litellm.yaml's `model_list`, listing every route whose
-`api_base` is a private IPv4 or a `.svc.cluster.local` name and whose `model_info.mode` is unset
-or `chat`, unless the entry sets `model_info.hidden: true` (which drops it from dsh and from Open
-WebUI's Local group only; Open WebUI's second connection still shows it under External), with
-`input: [text, image]` on the routes that declare `supports_vision: true`. After editing
-`model_list`, run `just af-gen-litellm` (`python3 scripts/gen-litellm-consumers.py --write` where
-just is not installed) and commit the three files together — CI runs `just af-verify-litellm`'s
-check and fails on drift. If model ids were renamed in LiteLLM and dsh still lists the old ones,
-check that script's output:
+seed-settings init container rewrites only the provider blocks this repo owns —
+`llm-router-codex`, `llm-router-claude`, `llm-router-local` — from the seed on every boot
+(`reconcile-provider.js`, one invocation per provider), unwrites the retired ones (`litellm`,
+`openai-codex`, `openai-codex-realjaynesage`, and the older `codex` / `anthropic-fable`), and
+repoints a saved `agent-default-model` that still names a retired provider
+(`reconcile-default-model.js`). Everything else in the file is preserved. The model rows are
+hand-written from the router's `GET /v1/models` (ADR 0039; until 2026-10-19 they were generated
+from LiteLLM's `model_list`, which no longer feeds dsh). Its log says what each step did:
 
 ```bash
 kubectl -n dsh logs deploy/dsh -c seed-settings
 ```
+
+A model the picker lists but every turn fails on is a router-side question: check the key still
+lists it (the `/v1/models` one-liner under "Models: llm-router") and the router's Activity page for
+the request. `MISSING_CREDENTIAL` means `/dsh-credentials/LLM_ROUTER_API_KEY` is absent — the
+`dsh-credentials` ExternalSecret is not synced.
 
 ### The "Internal Testing Notice" modal comes back on every reload
 
