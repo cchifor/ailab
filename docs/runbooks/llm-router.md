@@ -2191,6 +2191,21 @@ The r2 review then identified an unbounded in-flight refresh map and a disabled-
 - `chifor.me/source-commit: 100a3f570d519ed4eb12bee58001a989229129f4`
 - `chifor.me/release: router-0.1.0-20261017-native-catalog-r2`
 
+## dsh key (2026-10-19)
+
+dsh (`dsh.chifor.me`) takes every model from the router since 2026-10-19 (ailab ADR 0039;
+`docs/runbooks/dsh.md`, "Models: llm-router"). No live configuration changed: one key was added.
+
+- `key_353539972cec`, `dsh all routes (ailab dsh.chifor.me, ns dsh)`, `routes: all`, created with
+  `POST /admin/v1/keys` under the admin bearer (`{"routes":"all","expiresInDays":365}`; expires
+  2027-10-19). The token is escrowed ONLY as `LLM_ROUTER_API_KEY` in OpenBao `af/dsh/credentials`.
+- dsh sends Codex models with `X-Router-Route: pool-codex` (model mode on the smart pool) on
+  `/v1/responses`. It sends Claude (`opus`, `sonnet`, `haiku`, `fable`) and the local Qwen models by
+  name on `/v1/chat/completions`. Through `/v1/responses` both of those answer `response.failed`.
+- The journal shows its requests under that key's name. Revoke with
+  `DELETE /admin/v1/keys/key_353539972cec`, after re-issuing per the dsh runbook if dsh should keep
+  working.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem

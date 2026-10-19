@@ -10,8 +10,8 @@ two honest:
   * litellm-vkeys.yaml is deliberately NOT Flux-applied (it is operator-run; a
     tenant-provisioning Job under the wait:true `apps` Kustomization would wedge the
     whole apps layer), so no reconcile ever revisits it after a model is renamed.
-  * gen-litellm-consumers.py does not cover it. That generator derives Open WebUI and
-    the dsh seed from litellm.yaml — the MAIN proxy. Tenants live on the separate
+  * gen-litellm-consumers.py does not cover it. That generator derives Open WebUI's
+    Local group from litellm.yaml — the MAIN proxy. Tenants live on the separate
     local-only gateway, whose model_list it never reads.
   * A dangling whitelist entry does not fail loudly at seed time. The key is created
     with whatever names it was given; the breakage surfaces later, per request, as a

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/gen-litellm-consumers.py.
 
-The subject is the derivation of the three consumer spans from litellm.yaml's model_list: the
-Open WebUI `model_ids` allowlist, the dsh seed's `models:` rows, and the `checksum/config`
-rollout annotation. Run:
+The subject is the derivation of the two consumer spans from litellm.yaml's model_list: the
+Open WebUI `model_ids` allowlist and the `checksum/config` rollout annotation. Run:
 
     python -m unittest discover -s scripts/tests -p "test_*.py"
 
@@ -16,7 +15,6 @@ The module filename is hyphenated (repo convention), so it is loaded by path.
 """
 import importlib.util
 import json
-import os
 import pathlib
 import shutil
 import subprocess
@@ -30,7 +28,6 @@ _SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
 _MOD_PATH = _SCRIPTS / "gen-litellm-consumers.py"
 _CIH_PATH = _SCRIPTS / "check-inline-hashes.py"
 _FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "gen-litellm-consumers"
-_RECONCILE_JS = _SCRIPTS.parent / "kubernetes/apps/apps/dsh/reconcile-provider.js"
 
 
 def _load(name, path):
@@ -46,12 +43,10 @@ cih = _load("check_inline_hashes", _CIH_PATH)
 
 LITELLM_REL = "kubernetes/apps/apps/ai/litellm.yaml"
 OPEN_WEBUI_REL = "kubernetes/apps/apps/ai/open-webui.yaml"
-SEED_REL = "kubernetes/apps/apps/dsh/settings.seed.yaml"
-ALL_REL = (LITELLM_REL, OPEN_WEBUI_REL, SEED_REL)
+ALL_REL = (LITELLM_REL, OPEN_WEBUI_REL)
 
-#: What the fixture model_list must select, in model_list order, with the vision flag.
-EXPECTED = [("alpha-cloud", True), ("delta-172", False), ("epsilon-local", False)]
-EXPECTED_IDS = [name for name, _ in EXPECTED]
+#: What the fixture model_list must select, in model_list order.
+EXPECTED_IDS = ["alpha-cloud", "delta-172", "epsilon-local"]
 
 EXPECTED_WEBUI_LINE = (
     "            - { name: OPENAI_API_CONFIGS, value: '"
@@ -61,22 +56,14 @@ EXPECTED_WEBUI_LINE = (
     "' }"
 )
 
-EXPECTED_SEED_ROWS = [
-    "        - id: alpha-cloud",
-    "          input: [text, image]",
-    "        - id: delta-172",
-    "        - id: epsilon-local",
-]
-
 
 class Sandbox:
-    """A throwaway repo root holding copies of the three fixtures at their real relative paths."""
+    """A throwaway repo root holding copies of the two fixtures at their real relative paths."""
 
     def __enter__(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self._tmp.name)
-        for rel, fixture in ((LITELLM_REL, "litellm.yaml"), (OPEN_WEBUI_REL, "open-webui.yaml"),
-                             (SEED_REL, "settings.seed.yaml")):
+        for rel, fixture in ((LITELLM_REL, "litellm.yaml"), (OPEN_WEBUI_REL, "open-webui.yaml")):
             dst = self.root / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_FIXTURES / fixture, dst)
@@ -111,8 +98,7 @@ def _lines(text):
 class SelectionRule(unittest.TestCase):
     def test_fixture_selection_and_order(self):
         with Sandbox() as sb:
-            models = glc.load_models(sb.root)
-        self.assertEqual([(m.name, m.vision) for m in models], EXPECTED)
+            self.assertEqual(glc.load_models(sb.root), EXPECTED_IDS)
 
     def _visible(self, api_base=None, **model_info):
         entry = {"model_name": "x", "litellm_params": {"model": "openai/x", "api_key": "k"}}
@@ -209,7 +195,7 @@ class SelectionRule(unittest.TestCase):
         # The fixture carries zeta-embed-local: a PRIVATE api_base with model_info.mode: embedding.
         with Sandbox() as sb:
             self.assertIn("zeta-embed-local", sb.read(LITELLM_REL))
-            names = [m.name for m in glc.load_models(sb.root)]
+            names = glc.load_models(sb.root)
         self.assertNotIn("zeta-embed-local", names)
         self.assertEqual(names, EXPECTED_IDS)
 
@@ -228,178 +214,89 @@ class SelectionRule(unittest.TestCase):
                 proc = sb.run(mode)
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertIn("ERROR", proc.stdout)
-                self.assertIn("no consumer-visible route in model_list; refusing to render empty consumer lists",
-                              proc.stdout)
+                self.assertIn("no consumer-visible route in model_list; refusing to render an empty "
+                              "Open WebUI Local group", proc.stdout)
                 self.assertNotIn("Traceback", proc.stderr)
                 self.assertNotIn("wrote", proc.stdout)
                 for rel in ALL_REL:
                     self.assertEqual(sb.read(rel), before[rel], f"{rel} must not be touched")
 
-    def test_vision_only_from_supports_vision_true(self):
-        with Sandbox() as sb:
-            by_name = {m.name: m for m in glc.load_models(sb.root)}
-        self.assertTrue(by_name["alpha-cloud"].vision)
-        self.assertFalse(by_name["delta-172"].vision)      # no supports_vision at all
-        self.assertFalse(by_name["epsilon-local"].vision)  # supports_vision: false
 
+class DshOnlyIsInert(unittest.TestCase):
+    """`model_info.dsh_only` was dsh's opt-in while dsh was a consumer (until 2026-10-19, ADR 0039).
 
-class DshOptIn(unittest.TestCase):
-    """`model_info.dsh_only` — the one documented exemption from the private-api_base rule.
-
-    It exists so ONE paid route can reach dsh's picker without loosening the rule for gpt-5.4,
-    claude-sonnet-5 and the embedding model along with it, and it must never widen Open WebUI's
-    Local group, which is what the private-api_base rule protects.
+    litellm.yaml still carries one `dsh_only: false`, and editing config.yaml rolls the shared
+    LiteLLM pod, so the key stays and the generator ignores it: never an error, never a reason to
+    list or withhold a route.
     """
 
-    def _entry(self, api_base=None, **model_info):
-        entry = {"model_name": "x", "litellm_params": {"model": "openai/x", "api_key": "k"}}
-        if api_base is not None:
-            entry["litellm_params"]["api_base"] = api_base
-        if model_info:
-            entry["model_info"] = model_info
-        return entry
-
-    def test_paid_route_reaches_dsh_and_not_the_local_group(self):
-        entry = self._entry(dsh_only=True)  # no api_base at all — the shape of every paid route
-        self.assertTrue(glc.dsh_visible(entry))
+    def test_any_value_selects_exactly_what_the_entry_would_without_it(self):
+        for api_base, listed in (("http://10.0.0.5:8080/v1", True), (None, False)):
+            for value in (True, False, "true", 1):
+                with self.subTest(api_base=api_base, dsh_only=value):
+                    entry = {"model_name": "x", "litellm_params": {"model": "openai/x", "api_key": "k"},
+                             "model_info": {"dsh_only": value}}
+                    if api_base:
+                        entry["litellm_params"]["api_base"] = api_base
+                    self.assertIs(glc.consumer_visible(entry), listed)
+        # Nor does it contradict `hidden` any more: hidden alone decides.
+        entry = {"model_name": "x", "litellm_params": {"model": "openai/x", "api_base": "http://10.0.0.5:8080/v1"},
+                 "model_info": {"hidden": True, "dsh_only": True}}
         self.assertFalse(glc.consumer_visible(entry))
 
-    def test_the_same_route_without_the_key_reaches_neither(self):
-        entry = self._entry()
-        self.assertFalse(glc.dsh_visible(entry))
-        self.assertFalse(glc.consumer_visible(entry))
-
-    def test_self_hosted_route_can_be_held_back_from_the_local_group(self):
-        entry = self._entry("http://10.0.0.5:8080/v1", dsh_only=True)
-        self.assertTrue(glc.dsh_visible(entry))
-        self.assertFalse(glc.consumer_visible(entry))
-
-    def test_boolean_false_is_not_an_opt_in(self):
-        self.assertFalse(glc.dsh_visible(self._entry(dsh_only=False)))
-        # ...and it does not withdraw a route that qualifies on its own.
-        entry = self._entry("http://10.0.0.5:8080/v1", dsh_only=False)
-        self.assertTrue(glc.dsh_visible(entry))
-        self.assertTrue(glc.consumer_visible(entry))
-
-    def test_mode_still_applies_through_the_opt_in(self):
-        # A PAID embedding route must not reach a chat picker by opting in.
-        self.assertFalse(glc.dsh_visible(self._entry(dsh_only=True, mode="embedding")))
-
-    def test_non_boolean_is_an_error_naming_the_entry_and_the_key(self):
-        for bad in ("true", "false", "yes", 1, 0, None, [True]):
-            with self.subTest(dsh_only=bad):
-                with self.assertRaises(glc.SourceError) as cm:
-                    glc.dsh_visible(self._entry(dsh_only=bad))
-                self.assertIn("'x'", str(cm.exception))
-                self.assertIn("model_info.dsh_only", str(cm.exception))
-
-    def test_non_boolean_is_checked_before_any_filter_could_exclude_the_entry(self):
-        # Same discipline as `hidden`: an entry with no api_base is excluded anyway, but a typo in
-        # the opt-in must still be a FAILURE rather than a silent "well, it was excluded regardless".
-        for probe in (glc.dsh_visible, glc.consumer_visible):
-            with self.subTest(probe=probe.__name__):
-                with self.assertRaises(glc.SourceError):
-                    probe(self._entry(dsh_only="true"))
-
-    def test_hidden_and_dsh_only_together_are_a_contradiction(self):
-        for probe in (glc.dsh_visible, glc.consumer_visible):
-            with self.subTest(probe=probe.__name__):
-                with self.assertRaises(glc.SourceError) as cm:
-                    probe(self._entry("http://10.0.0.5:8080/v1", hidden=True, dsh_only=True))
-                self.assertIn("'x'", str(cm.exception))
-                self.assertIn("contradictory", str(cm.exception))
-
-    @staticmethod
-    def _opt_in_paid_route(sb):
-        """Give the fixture's paid gpt-4.1 entry the opt-in key."""
-        text = sb.read(LITELLM_REL)
-        old = "          model: openai/gpt-4.1\n          api_key: os.environ/OPENAI_API_KEY\n"
-        assert old in text, "fixture shape changed"
-        sb.write(LITELLM_REL, text.replace(old, old + "        model_info: { dsh_only: true }\n", 1))
-
-    def test_cli_write_adds_it_to_dsh_and_leaves_open_webui_untouched(self):
+    def test_a_dsh_only_true_self_hosted_route_is_listed_like_any_other(self):
         with Sandbox() as sb:
-            self._opt_in_paid_route(sb)
+            text = sb.read(LITELLM_REL)
+            # delta-172 is self-hosted; this key used to hold it OUT of the Local group.
+            text = text.replace("{ max_input_tokens: 81920 }", "{ max_input_tokens: 81920, dsh_only: true }", 1)
+            # gpt-4.1 is paid (no api_base); this key used to offer it to dsh. It must not leak in.
+            paid = "          model: openai/gpt-4.1\n          api_key: os.environ/OPENAI_API_KEY\n"
+            self.assertIn(paid, text, "fixture shape changed")
+            text = text.replace(paid, paid + "        model_info: { dsh_only: true }\n", 1)
+            self.assertEqual(text.count("dsh_only: true"), 2)
+            sb.write(LITELLM_REL, text)
+            self.assertEqual(glc.load_models(sb.root), EXPECTED_IDS)
             proc = sb.run("--write")
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            # The fixture's Local group is deliberately stale, so --write DOES rewrite this line;
-            # what matters is that it normalises to the self-hosted routes and no more. Asserting
-            # the exact expected line (not "unchanged") is what catches a paid route leaking in.
-            self.assertIn(EXPECTED_WEBUI_LINE, sb.read(OPEN_WEBUI_REL))
-            self.assertNotIn("gpt-4.1", sb.read(OPEN_WEBUI_REL),
-                             "a paid route must never widen Open WebUI's Local group")
-            providers = yaml.safe_load(sb.read(SEED_REL))["llm-pi-ai"]["providers"]
-            self.assertEqual([r["id"] for r in providers["litellm"]["models"]],
-                             ["alpha-cloud", "gpt-4.1", "delta-172", "epsilon-local"],
-                             "model_list order, with the opted-in route in its own position")
-            self.assertEqual([r["id"] for r in providers["other-provider"]["models"]],
-                             ["untouched-model"], "a sibling provider's rows are not the owned span")
-            self.assertEqual(sb.run("--check").returncode, 0, "the written state must be clean")
-
-    def test_cli_check_reports_the_drift_before_it_is_written(self):
-        with Sandbox() as sb:
-            self._opt_in_paid_route(sb)
-            proc = sb.run("--check")
-            self.assertNotEqual(proc.returncode, 0)
-            self.assertIn("gpt-4.1", proc.stdout)
-            self.assertIn(SEED_REL, proc.stdout)
-
-    def test_an_all_dsh_only_config_is_refused_rather_than_emptying_the_local_group(self):
-        for mode in ("--check", "--write"):
-            with self.subTest(mode=mode), Sandbox() as sb:
-                text = sb.read(LITELLM_REL)
-                text = text.replace("{ supports_vision: true, max_input_tokens: 81920 }",
-                                    "{ supports_vision: true, max_input_tokens: 81920, dsh_only: true }")
-                text = text.replace("{ max_input_tokens: 81920 }", "{ max_input_tokens: 81920, dsh_only: true }")
-                text = text.replace("{ supports_vision: false, max_input_tokens: 114688 }",
-                                    "{ supports_vision: false, max_input_tokens: 114688, dsh_only: true }")
-                self.assertEqual(text.count("dsh_only: true"), 3, "every selectable fixture route is now dsh_only")
-                sb.write(LITELLM_REL, text)
-                before = {rel: sb.read(rel) for rel in ALL_REL}
-                proc = sb.run(mode)
-                self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-                self.assertIn("refusing to render an empty Open WebUI Local group", proc.stdout)
-                self.assertNotIn("Traceback", proc.stderr)
-                for rel in ALL_REL:
-                    self.assertEqual(sb.read(rel), before[rel], f"{rel} must not be touched")
+            self.assertIn(EXPECTED_WEBUI_LINE, _lines(sb.read(OPEN_WEBUI_REL)))
+            self.assertEqual(sb.run("--check").returncode, 0)
 
 
 class ModelNames(unittest.TestCase):
-    """A model_name is written verbatim into a dsh `- id: <name>` row and into the JSON inside Open
-    WebUI's single-quoted YAML scalar, so it must survive both: yaml.safe_load(name) must be the
-    same str, the rendered row must parse back to it, and it must not carry a single quote."""
+    """A model_name is written into the JSON inside Open WebUI's single-quoted YAML scalar. json.dumps
+    escapes everything JSON needs, so the one name the rewrite cannot carry is one with a single
+    quote. (The plain-YAML-scalar rule that also applied until 2026-10-19 existed for dsh's unquoted
+    `- id: <name>` seed rows, which this script no longer writes.)"""
 
     @staticmethod
     def _config(name):
-        # The name is JSON-quoted so it always reaches the parser as a STRING model_name: the
-        # subject here is the round-trip rule, not "model_name must be a string".
+        # The name is JSON-quoted so it always reaches the parser as a STRING model_name.
         return (
             "model_list:\n"
             f"  - model_name: {json.dumps(name)}\n"
             "    litellm_params: { model: openai/x, api_base: http://10.0.0.5:8080/v1, api_key: k }\n"
         )
 
-    def test_names_that_do_not_round_trip_are_an_error_naming_the_entry(self):
-        # Decided by the rule, not a list: an int, a null, a bool, a mapping key, a comment start,
-        # an empty scalar, a reserved indicator.
-        for bad in ("123", "null", "true", "foo:", "x #y", "", "@x", "0x1f", "1.5", "[a]", "a\tb"):
-            with self.subTest(name=bad):
-                with self.assertRaises(glc.SourceError) as cm:
-                    glc.models_from_config(self._config(bad))
-                self.assertIn(repr(bad), str(cm.exception))
-                self.assertIn("model_name", str(cm.exception))
+    def test_names_survive_the_open_webui_rewrite_verbatim(self):
+        # Including shapes an unquoted YAML scalar could not carry: the name sits inside JSON.
+        names = ["qwen3.5-122b-cloud", "a b", "123", "null", "true", "foo:", "x #y", "@x", "[a]",
+                 'a"b', "a\\b", "a\tb", "café"]
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(glc.models_from_config(self._config(name)), [name])
+        with Sandbox() as sb:
+            span = glc.render_open_webui(sb.read(OPEN_WEBUI_REL), names)
+        doc = yaml.safe_load(span.rendered)
+        env = {e["name"]: e["value"] for e in doc["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(json.loads(env["OPENAI_API_CONFIGS"])["0"]["model_ids"], names)
 
-    def test_names_that_round_trip_are_accepted_as_they_are(self):
-        # A space is fine when the scalar comes back unchanged: the rule, not a character list.
-        # (`1e3` is a STRING to PyYAML's YAML 1.1 resolver -- a float needs a dot -- so it passes.)
-        for good in ("a b", "foo#bar", "-x", "qwen3.5-122b-cloud", "a/b:c.d_e", "1e3"):
-            with self.subTest(name=good):
-                models = glc.models_from_config(self._config(good))
-                self.assertEqual([m.name for m in models], [good])
-                self.assertEqual(yaml.safe_load(f"- id: {good}"), [{"id": good}])
+    def test_an_empty_name_is_an_error(self):
+        with self.assertRaises(glc.SourceError) as cm:
+            glc.models_from_config(self._config(""))
+        self.assertIn("model_name", str(cm.exception))
 
     def test_a_single_quote_cannot_sit_inside_the_open_webui_scalar(self):
-        # "it's" round-trips in YAML, but the OPENAI_API_CONFIGS value is a single-quoted YAML
+        # "it's" is a fine YAML string, but the OPENAI_API_CONFIGS value is a single-quoted YAML
         # scalar and json.dumps does not escape a quote, so the name would end the scalar early.
         with self.assertRaises(glc.SourceError) as cm:
             glc.models_from_config(self._config("it's"))
@@ -409,15 +306,51 @@ class ModelNames(unittest.TestCase):
     def test_the_cli_names_the_entry_without_a_traceback(self):
         for mode in ("--check", "--write"):
             with self.subTest(mode=mode), Sandbox() as sb:
-                sb.write(LITELLM_REL, sb.read(LITELLM_REL).replace("- model_name: alpha-cloud", '- model_name: "123"'))
+                sb.write(LITELLM_REL, sb.read(LITELLM_REL).replace("- model_name: alpha-cloud", '- model_name: "it\'s"'))
                 before = {rel: sb.read(rel) for rel in ALL_REL}
                 proc = sb.run(mode)
                 self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
                 self.assertIn("ERROR", proc.stdout)
-                self.assertIn("'123'", proc.stdout)
+                self.assertIn("it's", proc.stdout)
                 self.assertNotIn("Traceback", proc.stderr)
                 for rel in ALL_REL:
                     self.assertEqual(sb.read(rel), before[rel], f"{rel} must not be touched")
+
+
+class DuplicateModelNames(unittest.TestCase):
+    """Several DEPLOYMENTS of one model_name -> exactly ONE Local-group id.
+
+    This is how LiteLLM expresses a router-balanced pool (qwen3.8-27b-ailab runs on ai-node2 and
+    ai-node3). A Local-group id is only the name, so the fold has nothing to choose between; the
+    supports_vision agreement check that guarded dsh's `input: [text, image]` rows left with dsh.
+    """
+
+    DUP = ("      - model_name: alpha-cloud\n        litellm_params:\n          model: openai/alpha\n"
+           "          api_base: http://10.0.0.99:8080/v1\n        model_info: { supports_vision: false }\n")
+
+    def _with_dup(self, sb):
+        text = sb.read(LITELLM_REL)
+        anchor = "    litellm_settings:"
+        self.assertIn(anchor, text, "fixture layout changed")
+        sb.write(LITELLM_REL, text.replace(anchor, self.DUP + anchor, 1))
+
+    def test_a_second_deployment_emits_one_id_not_two(self):
+        with Sandbox() as sb:
+            self._with_dup(sb)
+            self.assertEqual(glc.load_models(sb.root), EXPECTED_IDS)
+            proc = sb.run("--write")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(sb.read(OPEN_WEBUI_REL).count('"alpha-cloud"'), 1)
+
+    def test_a_second_deployment_leaves_open_webui_byte_identical(self):
+        # Adding a deployment is a ROUTING change: the Local group must not move at all.
+        with Sandbox() as sb:
+            sb.run("--write")
+            before = sb.read(OPEN_WEBUI_REL)
+            self._with_dup(sb)
+            proc = sb.run("--write")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(sb.read(OPEN_WEBUI_REL), before)
 
 
 # ---------------------------------------------------------------------------
@@ -542,151 +475,6 @@ class OpenWebUIRewrite(unittest.TestCase):
         self.assertIn("# a comment that mentions OPENAI_API_CONFIGS must not be mistaken", text)
 
 
-class SeedRewrite(unittest.TestCase):
-    def test_surrounding_lines_and_comments_are_byte_identical(self):
-        with Sandbox() as sb:
-            before = _lines(sb.read(SEED_REL))
-            self.assertEqual(sb.run("--write").returncode, 0)
-            after = _lines(sb.read(SEED_REL))
-        first = before.index("        - id: stale-a")
-        last = before.index("        - id: stale-b")
-        self.assertEqual(after[:first], before[:first], "everything before the first row is untouched")
-        self.assertEqual(after[first:first + len(EXPECTED_SEED_ROWS)], EXPECTED_SEED_ROWS)
-        self.assertEqual(after[first + len(EXPECTED_SEED_ROWS):], before[last + 1:],
-                         "everything after the models list is untouched")
-        # The explanatory comment lines directly above the first row are part of the untouched prefix.
-        self.assertEqual(after[first - 2], "        # explanatory comment BEFORE the first row: preserved byte for byte")
-        self.assertEqual(after[first - 1], "        # (two lines of it, to prove the whole run survives)")
-
-    def test_parsed_shape_is_what_reconcile_provider_needs(self):
-        with Sandbox() as sb:
-            sb.run("--write")
-            text = sb.read(SEED_REL)
-        doc = yaml.safe_load(text)
-        litellm = doc["llm-pi-ai"]["providers"]["litellm"]
-        self.assertEqual(litellm["models"], [
-            {"id": "alpha-cloud", "input": ["text", "image"]},
-            {"id": "delta-172"},
-            {"id": "epsilon-local"},
-        ])
-        self.assertEqual(doc["llm-pi-ai"]["providers"]["other-provider"]["models"], [{"id": "untouched-model"}])
-        lines = _lines(text)
-        # Plain block headers at direct-child depth: the exact walk reconcile-provider.js performs.
-        self.assertIn("llm-pi-ai:", lines)
-        self.assertIn("  providers:", lines)
-        self.assertIn("    litellm:", lines)
-        self.assertIn("      models:", lines)
-
-    @unittest.skipUnless(shutil.which("node"), "node is not installed here")
-    def test_reconcile_provider_js_splices_the_generated_rows(self):
-        with Sandbox() as sb:
-            sb.run("--write")
-            live = sb.root / "settings.yaml"
-            live.write_text(
-                "llm-pi-ai:\n"
-                "  providers:\n"
-                "    litellm:\n"
-                "      api: openai-completions\n"
-                "      models:\n"
-                "        - id: gone-a\n"
-                "    other-provider:\n"
-                "      api: openai-responses\n"
-                "      models:\n"
-                "        - id: untouched-model\n"
-                "ui:\n"
-                "  theme: light\n",
-                encoding="utf-8",
-                # newline="": without it write_text translates every \n to \r\n on Windows, and
-                # reconcile-provider.js walks this file line by line -- it then matches nothing,
-                # warns "settings.yaml has no llm-pi-ai" on STDERR and leaves the file untouched,
-                # which read as an empty-stdout failure here. The pod's real settings.yaml is LF.
-                newline="",
-            )
-            env = dict(os.environ, DSH_SETTINGS=str(live), DSH_SEED=str(sb.root / SEED_REL))
-            proc = subprocess.run(["node", str(_RECONCILE_JS)], env=env, capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            self.assertIn("now: alpha-cloud, delta-172, epsilon-local", proc.stdout)
-            spliced = yaml.safe_load(live.read_text(encoding="utf-8"))
-        self.assertEqual(spliced["llm-pi-ai"]["providers"]["litellm"]["models"], [
-            {"id": "alpha-cloud", "input": ["text", "image"]},
-            {"id": "delta-172"},
-            {"id": "epsilon-local"},
-        ])
-        self.assertEqual(spliced["ui"], {"theme": "light"})
-
-
-class SeedSpanGuards(unittest.TestCase):
-    """Between `models:` and the first generated row only comments and blank lines may appear, and
-    the WHOLE parsed list (not just the anchored rows) must equal the derived one for OK."""
-
-    ROGUE_FORMS = ("        - { id: rogue-model }", "        - name: rogue", "        rogue-model")
-
-    def test_rogue_row_before_the_anchor_is_an_error_naming_the_line(self):
-        for rogue in self.ROGUE_FORMS:
-            for where in ("right after the header", "between the comments and the first row"):
-                for mode in ("--check", "--write"):
-                    with self.subTest(rogue=rogue.strip(), where=where, mode=mode), Sandbox() as sb:
-                        lines = _lines(sb.read(SEED_REL))
-                        at = lines.index("      models:") + 1 if where == "right after the header" \
-                            else lines.index("        - id: stale-a")
-                        lines.insert(at, rogue)
-                        sb.write(SEED_REL, "\n".join(lines))
-                        before = {rel: sb.read(rel) for rel in ALL_REL}
-                        proc = sb.run(mode)
-                        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-                        self.assertIn("ERROR", proc.stdout)
-                        self.assertNotIn("DRIFT", proc.stdout)
-                        self.assertIn(f"{SEED_REL}:{at + 1}:", proc.stdout, "the offending line is named")
-                        self.assertIn(rogue.strip(), proc.stdout)
-                        self.assertNotIn("Traceback", proc.stderr)
-                        self.assertNotIn("wrote", proc.stdout)
-                        for rel in ALL_REL:
-                            self.assertEqual(sb.read(rel), before[rel], f"{rel} must not be touched")
-
-    def test_rogue_row_after_the_last_generated_row_is_drift(self):
-        with Sandbox() as sb:
-            self.assertEqual(sb.run("--write").returncode, 0)
-            clean = sb.read(SEED_REL)
-            lines = _lines(clean)
-            lines.insert(lines.index("        - id: epsilon-local") + 1, "        - { id: rogue-model }")
-            sb.write(SEED_REL, "\n".join(lines))
-            proc = sb.run("--check")
-            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-            self.assertNotIn("ERROR", proc.stdout)
-            drift = [l for l in proc.stdout.splitlines() if l.startswith("DRIFT ")]
-            self.assertEqual(len(drift), 1, proc.stdout)
-            self.assertIn(SEED_REL, drift[0])
-            # The committed side is the PARSED list, so the rogue id is named in the message.
-            self.assertIn("rogue-model", drift[0])
-            self.assertIn("->", drift[0])
-            self.assertEqual(sb.run("--write").returncode, 0)
-            self.assertEqual(sb.read(SEED_REL), clean, "--write normalises the rogue away")
-            self.assertEqual(sb.run("--check").returncode, 0)
-
-    def test_committed_side_is_the_parsed_list(self):
-        # The description of what is committed comes from yaml.safe_load of the whole file, the
-        # way dsh will read it, including a name that carries a space.
-        with Sandbox() as sb:
-            self.assertEqual(sb.run("--write").returncode, 0)
-            text = sb.read(SEED_REL).replace("        - id: delta-172\n", "        - id: delta 172\n          input: [text, image]\n")
-            sb.write(SEED_REL, text)
-            span = glc.render_seed(text, glc.load_models(sb.root))
-        self.assertEqual(span.committed, "[alpha-cloud (vision), delta 172 (vision), epsilon-local]")
-        self.assertEqual(span.derived, "[alpha-cloud (vision), delta-172, epsilon-local]")
-        self.assertFalse(span.clean)
-
-    def test_a_models_value_that_is_not_a_row_list_is_an_error(self):
-        with Sandbox() as sb:
-            self.assertEqual(sb.run("--write").returncode, 0)
-            text = sb.read(SEED_REL).replace("        - id: delta-172\n", "        - delta-172\n")
-            sb.write(SEED_REL, text)
-            proc = sb.run("--check")
-        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("ERROR", proc.stdout)
-        self.assertIn("models", proc.stdout)
-        self.assertNotIn("Traceback", proc.stderr)
-
-
 class Checksum(unittest.TestCase):
     def test_annotation_matches_check_inline_hashes_derivation(self):
         with Sandbox() as sb:
@@ -761,9 +549,8 @@ class CheckMode(unittest.TestCase):
             proc = sb.run("--check")
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         drift = [l for l in proc.stdout.splitlines() if l.startswith("DRIFT ")]
-        self.assertEqual(len(drift), 3, proc.stdout)
+        self.assertEqual(len(drift), 2, proc.stdout)
         self.assertTrue(any(OPEN_WEBUI_REL in l and "model_ids" in l for l in drift), proc.stdout)
-        self.assertTrue(any(SEED_REL in l and "models" in l for l in drift), proc.stdout)
         self.assertTrue(any(LITELLM_REL in l and "checksum/config" in l for l in drift), proc.stdout)
         self.assertIn("--write", proc.stdout)
 
@@ -785,45 +572,10 @@ class CheckMode(unittest.TestCase):
         self.assertIn(OPEN_WEBUI_REL, drift[0])
         self.assertIn("alpha-cloud", drift[0])
 
-    def _formatting_drift(self, rel, before, after):
-        with Sandbox() as sb:
-            sb.run("--write")
-            text = sb.read(rel)
-            self.assertIn(before, text)
-            sb.write(rel, text.replace(before, after, 1))
-            proc = sb.run("--check")
-            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-            drift = [l for l in proc.stdout.splitlines() if l.startswith("DRIFT ")]
-            self.assertEqual(len(drift), 1, proc.stdout)
-            self.assertIn(rel, drift[0])
-            self.assertIn("ids match", drift[0])
-            self.assertIn("formatting", drift[0])
-            self.assertIn("extra lines", drift[0])
-            self.assertIn("--write", drift[0])
-            self.assertNotIn("->", drift[0], "no committed -> derived pair: the ids are the same")
-            # --write normalises it back to the canonical rendering.
-            self.assertEqual(sb.run("--write").returncode, 0)
-            self.assertEqual(sb.read(rel), text)
-            self.assertEqual(sb.run("--check").returncode, 0)
-
-    def test_seed_hand_added_comment_is_formatting_drift(self):
-        self._formatting_drift(
-            SEED_REL,
-            "        - id: delta-172\n",
-            "        - id: delta-172\n        # a hand-added comment inside the generated span\n",
-        )
-
-    def test_seed_extra_key_on_a_row_is_formatting_drift(self):
-        self._formatting_drift(
-            SEED_REL,
-            "        - id: delta-172\n",
-            "        - id: delta-172\n          temperature: 0.2\n",
-        )
-
     def test_webui_spacing_is_a_source_error_not_drift(self):
         # The OPENAI_API_CONFIGS value must be canonical compact JSON, model_ids array included:
         # spacing there is refused with an instruction (see OpenWebUIRewrite), not reported as
-        # formatting drift for --write to normalise.
+        # drift for --write to normalise.
         with Sandbox() as sb:
             sb.run("--write")
             text = sb.read(OPEN_WEBUI_REL)
@@ -838,16 +590,16 @@ class CheckMode(unittest.TestCase):
     def test_clean_tree_passes_and_check_does_not_write(self):
         with Sandbox() as sb:
             sb.run("--write")
-            snapshot = {rel: sb.read(rel) for rel in (LITELLM_REL, OPEN_WEBUI_REL, SEED_REL)}
+            snapshot = {rel: sb.read(rel) for rel in ALL_REL}
             proc = sb.run("--check")
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            self.assertEqual(proc.stdout.count("OK "), 3, proc.stdout)
-            # A stale tree is not touched by --check either.
-            sb2_before = snapshot
+            self.assertEqual(proc.stdout.count("OK "), 2, proc.stdout)
+            self.assertIn("both spans match", proc.stdout)
             for rel in snapshot:
-                self.assertEqual(sb.read(rel), sb2_before[rel])
+                self.assertEqual(sb.read(rel), snapshot[rel])
+        # A stale tree is not touched by --check either.
         with Sandbox() as sb:
-            before = {rel: sb.read(rel) for rel in (LITELLM_REL, OPEN_WEBUI_REL, SEED_REL)}
+            before = {rel: sb.read(rel) for rel in ALL_REL}
             sb.run("--check")
             for rel in before:
                 self.assertEqual(sb.read(rel), before[rel])
@@ -865,28 +617,28 @@ class WriteMode(unittest.TestCase):
         with Sandbox() as sb:
             first = sb.run("--write")
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-            after_first = {rel: sb.read(rel) for rel in (LITELLM_REL, OPEN_WEBUI_REL, SEED_REL)}
+            after_first = {rel: sb.read(rel) for rel in ALL_REL}
             second = sb.run("--write")
             self.assertEqual(second.returncode, 0)
-            after_second = {rel: sb.read(rel) for rel in (LITELLM_REL, OPEN_WEBUI_REL, SEED_REL)}
+            after_second = {rel: sb.read(rel) for rel in ALL_REL}
         self.assertEqual(after_first, after_second)
-        self.assertEqual(first.stdout.count("wrote"), 3, first.stdout)
+        self.assertEqual(first.stdout.count("wrote"), 2, first.stdout)
         self.assertNotIn("wrote", second.stdout)
-        self.assertEqual(second.stdout.count("unchanged"), 3, second.stdout)
+        self.assertEqual(second.stdout.count("unchanged"), 2, second.stdout)
 
     def test_write_does_not_add_or_drop_lines(self):
         with Sandbox() as sb:
-            before = {rel: sb.read(rel) for rel in (LITELLM_REL, OPEN_WEBUI_REL)}
+            before = {rel: sb.read(rel) for rel in ALL_REL}
             sb.run("--write")
             for rel, text in before.items():
                 self.assertEqual(len(_lines(sb.read(rel))), len(_lines(text)), rel)
-            # The seed grows by exactly (new rows) - (old rows): 4 lines replace 3.
-            seed_before = _lines(_FIXTURES.joinpath("settings.seed.yaml").read_text(encoding="utf-8"))
-            self.assertEqual(len(_lines(sb.read(SEED_REL))), len(seed_before) + 1)
 
 
 class LineEndings(unittest.TestCase):
     """A CRLF checkout must be rewritten only in the owned spans and compared byte for byte."""
+
+    #: The start of each span's anchor line, after its indentation.
+    ANCHORS = {OPEN_WEBUI_REL: b"- { name: OPENAI_API_CONFIGS", LITELLM_REL: b'checksum/config: "'}
 
     @staticmethod
     def _to_crlf(sb):
@@ -904,7 +656,7 @@ class LineEndings(unittest.TestCase):
             self._to_crlf(sb)
             proc = sb.run("--write")
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            self.assertEqual(proc.stdout.count("wrote"), 3, proc.stdout)
+            self.assertEqual(proc.stdout.count("wrote"), 2, proc.stdout)
             for rel in ALL_REL:
                 got = (sb.root / rel).read_bytes()
                 self.assertEqual(got.count(b"\n"), got.count(b"\r\n"), f"{rel}: every line break stays CRLF")
@@ -923,91 +675,32 @@ class LineEndings(unittest.TestCase):
         self.assertIn("\r\n", crlf_text)
         self.assertEqual(glc.config_checksum(crlf_text), lf)
 
-    def test_check_compares_real_bytes(self):
+    def test_each_anchor_line_keeps_its_own_line_ending(self):
+        # A rewrite replaces the VALUE on its anchor line and keeps that line's own terminator, so
+        # one LF line in a CRLF checkout is rewritten as an LF line and nothing else moves.
+        def lf_at(data, i):
+            lines = data.split(b"\r\n")
+            return b"\r\n".join(lines[:i + 1]) + b"\n" + b"\r\n".join(lines[i + 1:])
+
+        with Sandbox() as lf:
+            self.assertEqual(lf.run("--write").returncode, 0)
+            rendered = {rel: (lf.root / rel).read_bytes().replace(b"\n", b"\r\n") for rel in ALL_REL}
         with Sandbox() as sb:
             self._to_crlf(sb)
-            sb.run("--write")
-            p = sb.root / SEED_REL
-            data = p.read_bytes()
-            row = b"        - id: delta-172\r\n"
-            self.assertIn(row, data)
-            p.write_bytes(data.replace(row, b"        - id: delta-172\n", 1))
-            proc = sb.run("--check")
-        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        drift = [l for l in proc.stdout.splitlines() if l.startswith("DRIFT ")]
-        self.assertEqual(len(drift), 1, proc.stdout)
-        self.assertIn(SEED_REL, drift[0])
-
-
-class DuplicateModelNameTests(unittest.TestCase):
-    """Several DEPLOYMENTS of one model_name -> exactly ONE consumer row, and a LOUD failure if the
-    deployments disagree about capability.
-
-    This is how LiteLLM expresses a router-balanced pool (qwen3.8-27b-ailab runs on ai-node2 and
-    ai-node3). Before these tests the generator folded duplicates FIRST-WINS and silently: the
-    consumer-visible vision flag came from whichever entry happened to be first, so dropping
-    supports_vision from the first of two identical deployments removed dsh's image-input row with
-    nothing failing and no diff in either consumer file.
-    """
-
-    DUP = '      - model_name: {name}\n        litellm_params:\n          model: openai/{name}\n          api_base: {api_base}\n        model_info: {{ supports_vision: {vision} }}\n'
-
-    def _dup_block(self, name, api_base, vision):
-        return self.DUP.format(name=name, api_base=api_base, vision=str(vision).lower())
-
-    def _with_dup(self, sb, name, vision):
-        text = sb.read(LITELLM_REL)
-        anchor = "    litellm_settings:"
-        self.assertIn(anchor, text, "fixture layout changed")
-        block = self._dup_block(name, "http://10.0.0.99:8080/v1", vision)
-        return text.replace(anchor, block + anchor, 1)
-
-    def test_matching_duplicate_emits_one_row_not_two(self):
-        with Sandbox() as sb:
-            sb.write(LITELLM_REL, self._with_dup(sb, "alpha-cloud", True))
+            at = {}
+            for rel, anchor in self.ANCHORS.items():
+                p = sb.root / rel
+                data = p.read_bytes()
+                [at[rel]] = [k for k, l in enumerate(data.split(b"\r\n")) if l.lstrip().startswith(anchor)]
+                p.write_bytes(lf_at(data, at[rel]))
             proc = sb.run("--write")
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            seed, webui = sb.read(SEED_REL), sb.read(OPEN_WEBUI_REL)
-        self.assertEqual(seed.count("- id: alpha-cloud"), 1, "duplicate deployment emitted twice")
-        self.assertEqual(webui.count('"alpha-cloud"'), 1)
-        self.assertIn("          input: [text, image]", seed)
-
-    def test_matching_duplicate_leaves_consumers_byte_identical(self):
-        # Adding a second deployment is a ROUTING change, not a capability change: the consumers
-        # must not move at all, or every such change would churn two generated files.
-        with Sandbox() as sb:
-            sb.run("--write")
-            before_seed, before_webui = sb.read(SEED_REL), sb.read(OPEN_WEBUI_REL)
-            sb.write(LITELLM_REL, self._with_dup(sb, "alpha-cloud", True))
-            proc = sb.run("--write")
+            self.assertEqual(proc.stdout.count("wrote"), 2, proc.stdout)
+            for rel in ALL_REL:
+                self.assertEqual((sb.root / rel).read_bytes(), lf_at(rendered[rel], at[rel]), rel)
+            proc = sb.run("--check")
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            self.assertEqual(sb.read(SEED_REL), before_seed)
-            self.assertEqual(sb.read(OPEN_WEBUI_REL), before_webui)
 
-    def test_mismatched_vision_across_deployments_is_a_loud_error(self):
-        # alpha-cloud is vision:true in the fixture; a second deployment saying false must NOT be
-        # silently dropped in favour of the first.
-        with Sandbox() as sb:
-            sb.write(LITELLM_REL, self._with_dup(sb, "alpha-cloud", False))
-            proc = sb.run("--check")
-        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("alpha-cloud", proc.stdout)
-        self.assertIn("supports_vision", proc.stdout)
-        self.assertNotIn("Traceback", proc.stderr)
-
-    def test_mismatch_is_caught_regardless_of_which_entry_is_first(self):
-        # The error must not depend on ordering -- that would reintroduce the first-wins bug in the
-        # validation itself.
-        with Sandbox() as sb:
-            text = sb.read(LITELLM_REL)
-            head = "      - model_name: alpha-cloud"
-            self.assertIn(head, text, "fixture layout changed")
-            dup = self._dup_block("alpha-cloud", "http://10.0.0.99:8080/v1", False)
-            sb.write(LITELLM_REL, text.replace(head, dup + head, 1))
-            proc = sb.run("--check")
-        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("alpha-cloud", proc.stdout)
-        self.assertNotIn("Traceback", proc.stderr)
 
 if __name__ == "__main__":
     unittest.main()

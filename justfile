@@ -216,13 +216,14 @@ af-verify-brokers:
 af-gen-brokers:
     python scripts/gen-broker-inventory.py --write
 
-# Verify the three LiteLLM consumer spans (Open WebUI's Local-group model_ids, the dsh seed's
-# provider models rows, litellm.yaml's checksum/config annotation) still agree with litellm.yaml's
-# model_list that derives them. Static-only; this is what .gitea/workflows/manifests.yaml runs.
+# Verify the two LiteLLM consumer spans (Open WebUI's Local-group model_ids, litellm.yaml's
+# checksum/config annotation) still agree with litellm.yaml's model_list that derives them. dsh is
+# not one: it takes its models from llm-router (ADR 0039). Static-only; this is what
+# .gitea/workflows/manifests.yaml runs.
 af-verify-litellm:
     python scripts/gen-litellm-consumers.py --check
 
-# Regenerate those three spans from model_list after adding/removing/hiding a route.
+# Regenerate those two spans from model_list after adding/removing/hiding a route.
 af-gen-litellm:
     python scripts/gen-litellm-consumers.py --write
 

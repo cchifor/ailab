@@ -1,17 +1,26 @@
-# dsh reads the LiteLLM key from OpenBao, not from a SOPS Secret.
+# dsh reads its credentials from OpenBao, not from a SOPS Secret.
 #
-# WHY: the credential has to reach a namespace that is deliberately isolated, and this repo
+# WHY: the credentials have to reach a namespace that is deliberately isolated, and this repo
 # cannot mint a SOPS Secret (the age key is not available here). More to the point, the estate
-# rule is that tokens live in OpenBao — so the key is stored at af/estate/litellm and pulled in
-# by External Secrets, the same way agentforge-broker and the tenants do it.
+# rule is that tokens live in OpenBao, pulled in by External Secrets, the same way
+# agentforge-broker and the tenants do it.
 #
-# The OpenBao side (created 2026-09-07, breakglass ceremony per
-# docs/runbooks/openbao-estate-credentials.md):
-#   af/estate/litellm            field `master_key`  (the value; nothing here ever prints it)
-#   policy af-app-dsh            read on af/data/estate/litellm ONLY — one path, read-only
+# The OpenBao side:
+#   af/dsh/credentials           every dsh credential, one field each (discovery ExternalSecret at
+#                                the bottom of this file). Since 2026-10-19 that includes
+#                                LLM_ROUTER_API_KEY, the llm-router key every model is served on
+#                                (ADR 0039).
+#   policy af-app-dsh            owned by security/openbao/dsh-provision-job.yaml
 #   auth/kubernetes/role/af-app-dsh   bound_service_account_names=dsh-eso, namespaces=dsh
 # Named af-app-dsh rather than af-operator-dsh: the af-operator-* family is AgentForge's, and
 # this is an ordinary app, not part of that control plane.
+#
+# THE dsh-litellm ExternalSecret IS GONE (2026-10-19, ADR 0039). It projected the LiteLLM MASTER
+# key (af/estate/litellm `master_key`) into the pod as LITELLM_API_KEY for the `litellm` provider;
+# that provider, and with it the last consumer, moved to llm-router. Flux prunes the object and
+# ESO's ownerReference takes the Secret with it. af-app-dsh still grants read on af/estate/litellm:
+# the provision Job's drift guard owns that policy and only accepts its reviewed forms, so the
+# narrowing is a change THERE (follow-up recorded in ADR 0039) -- the grant is now unused.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -51,21 +60,8 @@ spec:
           serviceAccountRef: { name: dsh-eso }
       caProvider: { type: Secret, name: openbao-tls, key: ca.crt }
 ---
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: dsh-litellm
-spec:
-  refreshInterval: 1h
-  secretStoreRef: { name: dsh-store, kind: SecretStore }
-  target:
-    name: dsh-litellm
-    creationPolicy: Owner
-  data:
-    - secretKey: api_key
-      remoteRef: { key: estate/litellm, property: master_key }
----
-# The Codex credential, same store and same pattern as the LiteLLM key above.
+# The Codex credential, parked (see below) -- once the same one-path pattern as the removed
+# dsh-litellm ExternalSecret.
 #
 # WHY NOT AN OPENBAO AGENT IN THE POD. The dev-workers run a bao agent plus the `cred` helper,
 # and the obvious move is to do the same here. It would be a serious regression: an agent writes
@@ -131,7 +127,7 @@ spec:
 #
 # EVERY OTHER dsh CREDENTIAL, discovered rather than enumerated.
 #
-# THE PROBLEM THIS SOLVES. The dsh-litellm ExternalSecret above (and the parked dsh-codex one) each
+# THE PROBLEM THIS SOLVES. The dsh-litellm ExternalSecret (removed 2026-10-19) and the parked dsh-codex one each
 # name ONE OpenBao path and project it into ONE env var declared in the Deployment. That means adding a credential to OpenBao is not
 # enough for dsh to see it: it needs a new ExternalSecret, a new env var, a commit, a review and a
 # Flux reconcile. OpenBao is meant to be the one place a credential is managed, so that rotating or
@@ -163,8 +159,9 @@ spec:
 #                               an operator write (docs/runbooks/dsh.md, "Git access to the forge").
 #   policy af-app-dsh           read on af/data/dsh/credentials, written by that Job.
 # Until the Job has run, this ExternalSecret reports NotReady, the Secret is absent, and the
-# Deployment mounts it `optional: true` -- so the harness runs exactly as before, resolving
-# LITELLM_API_KEY from its env var. The plugin treats an absent mount as "OpenBao has nothing".
+# Deployment mounts it `optional: true` -- so the pod still boots, but since 2026-10-19 it then
+# has NO model key at all (LLM_ROUTER_API_KEY lives only here). The plugin treats an absent mount
+# as "OpenBao has nothing", and every turn fails with MISSING_CREDENTIAL until the Secret syncs.
 #
 # FIELDS IN USE, and who reads them -- because "discovered, not enumerated" is about the
 # transport, not about documentation:
@@ -174,12 +171,15 @@ spec:
 #   DSH_OPERATOR_SSH_KEY, DSH_OPERATOR_SSH_USER, DSH_OPERATOR_SSH_KNOWN_HOSTS
 #                             dedicated operator SSH identity; read from the mounted files.
 #                             Host authorization and sudo scope: docs/runbooks/dsh.md.
-#   DSH_CODEX_ACCESS_TOKEN    native openai-codex provider; access-only projection of reviewer-2
-#                             seat B. The reviewer owns refresh; its publisher patches this field.
-#   DSH_CODEX_ACCOUNT_ID, DSH_CODEX_ACCOUNT_EMAIL, DSH_CODEX_EXPIRES_AT
-#                             projection identity (the ChatGPT account id, a JWT claim -- added
-#                             2026-09-19 so every projection carries one field set, ADR 0026) and
-#                             expiry metadata, never refresh credentials. Nothing in dsh reads the id.
+#   LLM_ROUTER_API_KEY        the llm-router key (key_353539972cec, routes: all, expires
+#                             2027-10-19) behind all three llm-router-* providers in
+#                             settings.seed.yaml, resolved per request by openbao-credentials.mjs.
+#                             An operator write (docs/runbooks/dsh.md, "Models: llm-router").
+#   DSH_CODEX_ACCESS_TOKEN, DSH_CODEX_ACCOUNT_ID, DSH_CODEX_ACCOUNT_EMAIL, DSH_CODEX_EXPIRES_AT
+#                             reviewer-2 seat B's access-only projection, still PATCHED by its
+#                             publisher every minute but READ BY NOTHING in dsh since 2026-10-19:
+#                             the native openai-codex provider it fed is retired (ADR 0039).
+#                             Retiring the projection is a reviewer-2 change, recorded there.
 # Whatever else lands here is readable by the agent, which is why the document must hold only
 # credentials dsh is meant to have (see the volume comment in deployment.yaml).
 apiVersion: external-secrets.io/v1

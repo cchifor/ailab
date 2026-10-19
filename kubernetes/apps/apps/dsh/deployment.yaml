@@ -148,12 +148,40 @@ spec:
               set -eu
               if [ -s /dsh-home/settings.yaml ]; then
                 # dsh owns this file once written (the Settings UI writes it), so it is NOT
-                # overwritten -- but the litellm PROVIDER block inside it is infrastructure this
-                # repo owns, and leaving that stale broke every model in dsh when #547 renamed the
-                # local routes to their -cloud names. reconcile-provider.js rewrites only that
-                # block and preserves the rest byte-for-byte. See the header there.
+                # overwritten -- but the PROVIDER blocks inside it are infrastructure this repo
+                # owns, and leaving one stale broke every model in dsh when #547 renamed the
+                # local routes to their -cloud names. reconcile-provider.js rewrites only the
+                # block it is named and preserves the rest byte-for-byte. See the header there.
                 echo "settings.yaml exists -- reconciling the provider blocks this repo owns"
-                node /seed/reconcile-provider.js
+                # EVERY MODEL COMES FROM llm-router since 2026-10-19 (ADR 0039). The four retired
+                # model sources are UNWRITTEN below, before the new blocks go in: dropping a
+                # block from the seed leaves the PVC copy serving it (settings.yaml is seeded
+                # once), and a removed provider is a model the picker still offers and every
+                # turn on it fails. Each removal is SAFE TO KEEP INDEFINITELY: once the block is
+                # gone it prints "not present; nothing to remove" and exits 0. Rollback is in
+                # ADR 0039: revert the PR, and the old reconcile lines re-insert the old blocks.
+                #   litellm                     the LiteLLM proxy's Qwen routes (#547 onwards)
+                #   openai-codex                reviewer-2 seat b, native Codex subscription
+                #   openai-codex-realjaynesage  reviewer-2 seat d through LiteLLM (ADR 0026)
+                # The fourth source, the shipped DeepSeek adapter, is a composition row and is
+                # disabled in cordis.patch.yml rather than here.
+                DSH_PROVIDER=litellm DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
+                DSH_PROVIDER=openai-codex DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
+                DSH_PROVIDER=openai-codex-realjaynesage DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
+                # The router providers, reconciled per boot like every provider block. ORDER IS
+                # DELIBERATE: a provider missing from the live file is inserted directly under
+                # `providers:`, so each insertion lands ABOVE the previous one, and the picker
+                # lists providers in file order. Local, then Claude, then Codex therefore reads
+                # Codex, Claude, Local on a first reconcile. Once present they are rewritten in
+                # place and the order stays whatever it is.
+                DSH_PROVIDER=llm-router-local node /seed/reconcile-provider.js
+                DSH_PROVIDER=llm-router-claude node /seed/reconcile-provider.js
+                DSH_PROVIDER=llm-router-codex node /seed/reconcile-provider.js
+                # A saved default that names a retired provider would start every NEW session on
+                # a route that no longer exists. Repointed to the seed's default only in that
+                # case; a default picked from the router's models is never touched.
+                DSH_RETIRED_PROVIDERS=litellm,openai-codex,openai-codex-realjaynesage,deepseek-official \
+                  node /seed/reconcile-default-model.js
                 # REMOVE the broken `codex` provider, do not reconcile it. It was seeded with
                 # `api: openai-codex-responses`, which the profile schema does not accept, and
                 # schema validation covers the WHOLE providers dict -- so that one value failed
@@ -163,28 +191,21 @@ spec:
                 # already-written block survives every boot. This actively unwrites it.
                 #
                 # SAFE TO KEEP INDEFINITELY: with the provider absent it prints "not present;
-                # nothing to remove" and exits 0. Remove this line only when the codex route is
-                # re-added in its correct form (see settings.seed.yaml), and in that case it must
-                # be replaced by a reconcile of the new provider name, not simply deleted.
+                # nothing to remove" and exits 0. The Codex models are served by the
+                # llm-router-codex provider above; this line stays as the unwrite of the old
+                # `codex` block only.
                 DSH_PROVIDER=codex DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
-                DSH_PROVIDER=openai-codex node /seed/reconcile-provider.js
-                # openai-codex-realjaynesage: the SECOND Codex subscription (reviewer-2 seat d),
-                # served through LiteLLM -- the seed says why it is a Responses route and not a
-                # second native provider. Reconciled per boot like openai-codex, for the same
-                # reason: settings.yaml lives on the PVC, so a provider added to the seed never
-                # reaches it otherwise. Rollback = DSH_PROVIDER=openai-codex-realjaynesage
-                # DSH_PROVIDER_REMOVE=1 here for ONE boot (dropping the seed block alone leaves
-                # the PVC copy in place), then delete this line. ADR 0026.
-                DSH_PROVIDER=openai-codex-realjaynesage node /seed/reconcile-provider.js
                 # anthropic-fable: REMOVED (ADR 0031 -- no Claude integrations in dsh). The
                 # provider block was reconciled onto the PVC copy of settings.yaml from
                 # 2026-09-21 until 2026-09-22, and dropping the seed block alone leaves that
                 # copy serving a model_list entry LiteLLM no longer has. Same shape as the
                 # `codex` removal above, and SAFE TO KEEP INDEFINITELY for the same reason:
                 # once the block is gone it prints "not present; nothing to remove" and exits 0.
+                # (Claude is offered again since ADR 0039, through llm-router-claude -- a
+                # different provider name, so this unwrite of the old block is unaffected.)
                 DSH_PROVIDER=anthropic-fable DSH_PROVIDER_REMOVE=1 node /seed/reconcile-provider.js
               else
-                echo "seeding settings.yaml with the LiteLLM provider"
+                echo "seeding settings.yaml with the llm-router providers"
                 # install -m 0644, NOT cp: the seed ConfigMap is mounted defaultMode 0444, and cp
                 # preserves that, leaving a READ-ONLY settings.yaml. dsh owns this file after the
                 # first boot -- the Settings UI writes it -- so a 0444 copy silently breaks every
@@ -581,11 +602,11 @@ spec:
             - { name: GIT_AUTHOR_EMAIL, value: dsh@noreply.git.chifor.me }
             - { name: GIT_COMMITTER_NAME, value: dsh }
             - { name: GIT_COMMITTER_EMAIL, value: dsh@noreply.git.chifor.me }
-            # The LiteLLM credential, synced from OpenBao by External Secrets (openbao-eso.yaml).
-            # settings.yaml references it as `apiKeyEnv: LITELLM_API_KEY` rather than embedding a
-            # value, so the secret never lands in git and never lands in the seed ConfigMap either.
-            - name: LITELLM_API_KEY
-              valueFrom: { secretKeyRef: { name: dsh-litellm, key: api_key } }
+            # NO MODEL KEY IN THE ENVIRONMENT. Until 2026-10-19 LITELLM_API_KEY sat here -- the
+            # LiteLLM MASTER key, from the dsh-litellm ExternalSecret. Every model now comes from
+            # llm-router (ADR 0039), whose key is the LLM_ROUTER_API_KEY field of af/dsh/credentials,
+            # read from the /dsh-credentials mount below by openbao-credentials.mjs at request time.
+            # The env var and its ExternalSecret are gone with the LiteLLM provider.
             # The Codex credential for the `codex` PROVIDER ROUTE -- dsh's own agent loop on
             # the Codex model, read via settings.yaml's `apiKeyEnv` (architecture B).
             #
@@ -651,8 +672,8 @@ spec:
             # descriptor.
             #
             # Not readable by the dsh USER only -- the agent runs in THIS container and can read
-            # this directory. That is the same exposure LITELLM_API_KEY already has as an env var,
-            # and it is why the OpenBao document behind it must hold ONLY credentials dsh is meant
+            # this directory, including LLM_ROUTER_API_KEY (an all-routes router key, ADR 0039).
+            # That is why the OpenBao document behind it must hold ONLY credentials dsh is meant
             # to have. Containment here is the OpenBao ACL, not the filesystem.
             - { name: credentials, mountPath: /dsh-credentials, readOnly: true }
           # Probes are exec, not httpGet: unauthenticated / returns 401 once routes mount, which a

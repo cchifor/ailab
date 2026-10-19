@@ -75,7 +75,7 @@ class AliasPairs(unittest.TestCase):
                 )
                 self.assertIsNot(info.get("hidden"), True, "the alias is the advertised name; it must not be hidden")
                 # Everything in model_info except the two alias-mechanics keys must agree too:
-                # max_input_tokens and supports_vision shape requests and the consumers' rows.
+                # max_input_tokens and supports_vision describe the one deployment both names reach.
                 strip = lambda d: {k: v for k, v in (d or {}).items() if k not in ("hidden", "alias_of")}
                 self.assertEqual(strip(info), strip(original.get("model_info")), "model_info must agree apart from hidden/alias_of")
 

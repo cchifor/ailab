@@ -197,20 +197,21 @@ jobs:
           set -euo pipefail
           cmp ansible/roles/openbao_agent/files/ailab-root-ca.crt kubernetes/apps/infrastructure/platform-access/ailab-root-ca.crt
 
-      # The three spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids,
-      # the dsh seed's provider models rows, and litellm.yaml's own checksum/config — must match what
-      # the generator renders. Same fail-closed shape as the step above: a drifted span, a missing
-      # interpreter or an unparseable source is a non-zero exit, never a skip. PyYAML is the runner's
-      # system package (the same assumption broker-inventory.yaml's unit-test step already makes).
-      - name: LiteLLM consumer drift (Open WebUI model_ids, dsh seed models, checksum/config)
+      # The two spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids and
+      # litellm.yaml's own checksum/config — must match what the generator renders (dsh stopped being
+      # a consumer on 2026-10-19; it takes its models from llm-router, ADR 0039). Same fail-closed
+      # shape as the step above: a drifted span, a missing interpreter or an unparseable source is a
+      # non-zero exit, never a skip. PyYAML is the runner's system package (the same assumption
+      # broker-inventory.yaml's unit-test step already makes).
+      - name: LiteLLM consumer drift (Open WebUI model_ids, checksum/config)
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/gen-litellm-consumers.py --check
 
-      # The FOURTH cross-reference out of litellm's model lists, and the only one the generator above
+      # The THIRD cross-reference out of litellm's model lists, and the only one the generator above
       # cannot see: per-tenant virtual keys whitelist model_names from litellm-LOCAL, which that
-      # generator never reads (it derives its three spans from the MAIN proxy). litellm-vkeys.yaml is
+      # generator never reads (it derives its two spans from the MAIN proxy). litellm-vkeys.yaml is
       # also deliberately not Flux-applied, so no reconcile revisits it after a model is renamed, and a
       # dangling entry does not fail at seed time -- the key is created fine and then fails every
       # request. Removing qwen3.6-35b-a3b on 2026-09-16 left exactly that dangling entry and nothing
