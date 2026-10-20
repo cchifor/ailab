@@ -128,7 +128,7 @@ tests:
         exp_samples:
           - labels: '{}'
             value: 180
-  - name: a counter reset does not replay an old lease expiry
+  - name: the lease alert ignores a counter reset counted by increase
     interval: 1m
     input_series:
       - series: workflow_task_map_last_lease_expiry_timestamp_seconds
