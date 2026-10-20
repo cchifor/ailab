@@ -1,3 +1,4 @@
+# Durable task alerts: incident, healthy, resolution, missing-data and restart cases.
 rule_files:
   - strive-durable-processing-rules.yaml
 evaluation_interval: 1m
@@ -103,6 +104,15 @@ tests:
       - series: workflow_task_map_last_lease_expiry_timestamp_seconds
         values: _ _ _ 180x12 stale _ _ _ _ 180x9
     alert_rule_test:
+      - eval_time: 5m
+        alertname: DurableProcessingLeaseExpiry
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: durable task leases are expiring
+              description: At least one durable task lease expired in the last ten minutes. Check worker heartbeats
+                and task deadlines.
       - eval_time: 16m
         alertname: DurableProcessingLeaseExpiry
         exp_alerts: []
@@ -118,6 +128,23 @@ tests:
         exp_samples:
           - labels: '{}'
             value: 180
+  - name: a counter reset does not replay an old lease expiry
+    interval: 1m
+    input_series:
+      - series: workflow_task_map_last_lease_expiry_timestamp_seconds
+        values: _ _ _ 180x30
+      - series: workflow_task_map_lease_expired_total
+        values: 5x15 1x20
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DurableProcessingLeaseExpiry
+        exp_alerts: []
+    promql_expr_test:
+      - expr: increase(workflow_task_map_lease_expired_total[10m]) > bool 0
+        eval_time: 20m
+        exp_samples:
+          - labels: '{}'
+            value: 1
   - name: one provider budget refusal fires
     interval: 1m
     input_series:
