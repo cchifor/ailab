@@ -99,7 +99,7 @@ spec:
         - name: tmp
           mountPath: /tmp
       - name: backup-artifacts
-        image: docker.io/library/node:22.23.3-bookworm-slim@sha256:3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9
+        image: docker.io/library/node:22.23.4-bookworm-slim@sha256:5991875dfb80938dd8a6ba3fe3e96fd04929e70792762b3319d8caadbbe229bc
         command:
         - node
         - /scripts/rollout-publish.mjs
@@ -271,7 +271,7 @@ spec:
             port: http
           periodSeconds: 10
       - name: backup-holder
-        image: docker.io/library/node:22.23.3-bookworm-slim@sha256:3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9
+        image: docker.io/library/node:22.23.4-bookworm-slim@sha256:5991875dfb80938dd8a6ba3fe3e96fd04929e70792762b3319d8caadbbe229bc
         command:
         - node
         - -e
