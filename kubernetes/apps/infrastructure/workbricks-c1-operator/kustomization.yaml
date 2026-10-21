@@ -8,3 +8,28 @@ resources:
   - resource-quotas.yaml # OR-5 compute quotas + the OR-6 priority guard
   - priority-class.yaml # OR-6: workbricks-low (500, never preempts)
   - gatekeeper-auth-delegator.yaml # OR-4: TokenReview for the cell's token issuer
+# OR-10 delivery: the CA the cell's namespaced External Secrets SecretStores pin to reach OpenBao
+# (caProvider: {type: ConfigMap, name: openbao-ca, key: ca.crt}). This is the PUBLIC ailab-root-ca
+# certificate, the same bytes as ../platform-access/ailab-root-ca.crt and the workers' copy (the
+# manifests workflow `cmp`s all three). A ConfigMap the operator owns, rather than a cert-manager
+# Certificate from the ailab-ca ClusterIssuer in the cell's namespaces: that would let the cell's
+# deployer mint certificates from the estate's internal CA. Only the two namespaces with a vault
+# role get it; workbricks-c1-sandbox has no vault access. Fixed names (no hash suffix): SecretStores
+# reference them by name.
+configMapGenerator:
+  - name: openbao-ca
+    namespace: workbricks-c1
+    files:
+      - ca.crt=ailab-root-ca.crt
+    options:
+      disableNameSuffixHash: true
+      labels:
+        workbricks/cell: c1
+  - name: openbao-ca
+    namespace: workbricks-c1-data
+    files:
+      - ca.crt=ailab-root-ca.crt
+    options:
+      disableNameSuffixHash: true
+      labels:
+        workbricks/cell: c1

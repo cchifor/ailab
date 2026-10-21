@@ -206,6 +206,7 @@ jobs:
         run: |
           set -euo pipefail
           cmp ansible/roles/openbao_agent/files/ailab-root-ca.crt kubernetes/apps/infrastructure/platform-access/ailab-root-ca.crt
+          cmp ansible/roles/openbao_agent/files/ailab-root-ca.crt kubernetes/apps/infrastructure/workbricks-c1-operator/ailab-root-ca.crt
 
       # The two spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids and
       # litellm.yaml's own checksum/config — must match what the generator renders (dsh stopped being
