@@ -31,8 +31,8 @@
 #
 # THE OWNERSHIP CONTRACT:
 #   * GIT OWNS THE THREE POLICIES AND THE THREE ROLES WHOLE. `bao policy write` replaces the
-#     policy; each role write spells out every login-deciding field, empty ones included (a role
-#     write is an update that keeps omitted fields). A change made by hand is reverted on the next
+#     policy; each role write spells out every field, empty and default ones included (a role
+#     write is an update that keeps omitted fields), and reads each one back. A change made by hand is reverted on the next
 #     run; an emergency change must suspend this Job (or the `openbao` Kustomization) AND land in
 #     git before reconciliation resumes.
 #   * THE KEYS ARE CREATED, NEVER CHANGED. Their key material exists only in the vault (and its
@@ -210,9 +210,12 @@ data:
 
     # ---- 5. The auth roles, WRITTEN and OWNED WHOLE -----------------------------------------------
     # The shape af-app-strive-pg-harness has live: the ServiceAccount's uid as the entity alias, a
-    # 1h token, the policy attached through token_policies. Every field that decides WHO may log in
-    # is written explicitly, the empty ones included (a role write keeps omitted fields), above all
-    # bound_service_account_namespace_selector. Then read back with EXACT list-element matches.
+    # 1h token, the policy attached through token_policies. A role write is an UPDATE that keeps
+    # every omitted field, so EVERY field is written explicitly, the empty and default ones included:
+    # the login-deciding ones (above all bound_service_account_namespace_selector) and the token
+    # ones (max/explicit-max TTL, period, use count, type, default policy), pinned to OpenBao's
+    # defaults. Then everything is read back: list fields with EXACT element matches, scalar fields
+    # against the value OpenBao prints for what was written.
     role_field_has() {
       bao read -field="$2" "auth/kubernetes/role/$1" | tr -d '[]' | tr ' ' '\n' | grep -qx "$3"
     }
@@ -226,7 +229,25 @@ data:
         token_bound_cidrs="" \
         token_policies="$policy" \
         token_ttl=1h \
+        token_max_ttl=0 \
+        token_explicit_max_ttl=0 \
+        token_period=0 \
+        token_num_uses=0 \
+        token_type=default \
+        token_no_default_policy=false \
         alias_name_source=serviceaccount_uid
+      for want in token_ttl=3600 token_max_ttl=0 token_explicit_max_ttl=0 token_period=0 \
+        token_num_uses=0 token_type=default token_no_default_policy=false \
+        alias_name_source=serviceaccount_uid; do
+        got="$(bao read -field="${want%%=*}" "auth/kubernetes/role/$role")" || {
+          echo "cannot read back role $role field ${want%%=*}; aborting" >&2
+          exit 1
+        }
+        [ "$got" = "${want#*=}" ] || {
+          echo "role $role has ${want%%=*}=$got after writing, expected ${want#*=}; aborting" >&2
+          exit 1
+        }
+      done
       role_field_has "$role" token_policies "$policy" || {
         echo "role $role does not carry policy $policy after writing; aborting" >&2
         exit 1

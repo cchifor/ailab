@@ -7,7 +7,8 @@
 #      deletion not allowed; three policies equal to their pinned forms; three roles bound to the
 #      right ServiceAccounts and namespaces (the sandbox namespace in none).
 #   2. second run: everything re-asserted, the keys unchanged (still version 1).
-#   3. role drift (namespace selector, audience, CIDRs) added by hand is cleared by the next run.
+#   3. role drift added by hand (namespace selector, audience, CIDRs, token TTLs/period/uses/type)
+#      is cleared by the next run.
 #   4. least privilege: each policy signs with its own keys only, reads public keys only, cannot
 #      export, back up or rotate; the secrets policy reads af/workbricks/c1/* and nothing else.
 #   5. a policy changed by hand: REFUSED before anything is rewritten.
@@ -94,14 +95,20 @@ expect $N "policy workbricks-c1-signing matches a reviewed form"
 for k in $KEYS; do keyj "$k" | grep -q '"latest_version": 1' || fail "a re-run changed key $k"; done
 echo "2: re-run -> everything re-asserted, keys unchanged"
 
-# 3. login-widening drift on a ROLE is cleared
-bao write auth/kubernetes/role/workbricks-c1-secrets bound_service_account_namespace_selector='{"matchLabels":{"any":"ns"}}' audience=other token_bound_cidrs=10.0.0.0/8 >/dev/null
+# 3. drift on a ROLE (a role write keeps omitted fields) is cleared: the login-widening fields and
+# the token fields alike.
+bao write auth/kubernetes/role/workbricks-c1-secrets bound_service_account_namespace_selector='{"matchLabels":{"any":"ns"}}' audience=other token_bound_cidrs=10.0.0.0/8 \
+  token_max_ttl=48h token_explicit_max_ttl=72h token_period=10m token_num_uses=3 token_type=service token_no_default_policy=true >/dev/null
 [ -n "$(field workbricks-c1-secrets bound_service_account_namespace_selector)" ] || fail "test setup: selector not set"
+[ "$(field workbricks-c1-secrets token_num_uses)" = 3 ] || fail "test setup: token_num_uses not set"
 run || { cat /tmp/run.$N >&2; fail "run after role drift"; }
 [ -z "$(field workbricks-c1-secrets bound_service_account_namespace_selector)" ] || fail "the namespace selector survived a run"
 [ -z "$(field workbricks-c1-secrets audience 2>/dev/null)" ] || fail "the audience survived a run"
 [ "$(field workbricks-c1-secrets token_bound_cidrs)" = "[]" ] || fail "token_bound_cidrs survived a run"
-echo "3: role drift (namespace selector, audience, CIDRs) -> cleared"
+for want in token_ttl=3600 token_max_ttl=0 token_explicit_max_ttl=0 token_period=0 token_num_uses=0 token_type=default token_no_default_policy=false; do
+  [ "$(field workbricks-c1-secrets "${want%%=*}")" = "${want#*=}" ] || fail "${want%%=*} drift survived a run"
+done
+echo "3: role drift (namespace selector, audience, CIDRs, token TTLs/period/uses/type/default policy) -> cleared"
 
 # 4. least privilege. allow/deny run a command as a given token; deny fails the test if it works.
 IN=aGVsbG8= # "hello"
