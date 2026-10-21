@@ -1,0 +1,22 @@
+# Workbricks OR-7: the cell's GatewayClass. The cell runs its own Envoy Gateway controller in
+# workbricks-c1 (decision 15: Traefik's controller name is fixed, so a second Traefik would contend
+# with the platform's for Gateway API objects). That controller claims ONLY this controllerName;
+# the platform's Traefik claims only traefik.io/gateway-controller, so neither sees the other's
+# class. Until the cell's controller runs, the class stays Accepted=Unknown ("Waiting for
+# controller"), which is expected.
+#
+# The Gateway API CRDs themselves (v1.2.1, standard channel) are installed by the platform's
+# Traefik HelmRelease (platform-edge/traefik), not here: a Traefik chart bump moves them.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: workbricks-c1
+  labels:
+    workbricks/cell: c1
+spec:
+  controllerName: gateway.envoyproxy.io/workbricks-c1
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: workbricks-c1
+    namespace: workbricks-c1

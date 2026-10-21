@@ -1,0 +1,108 @@
+# Workbricks OR-5 quotas. Operator-owned: the cell's own Flux unit cannot edit or delete
+# ResourceQuotas (OR-11), so these are the cell's real ceiling.
+#
+# `compute`: the cell's idle design is about 5.5 GiB / 1.97 vCPU requested inside a 6 GiB / 2 vCPU
+# budget. Stage 2 gets about 9 GiB / 3 vCPU of requests across the three namespaces, with limits at
+# twice that. The split is the operator's first guess (services and workers beside the data stores,
+# a small sandbox); ask for a rebalance in operator-requests.md, the total is what was agreed.
+#   workbricks-c1          requests 1500m / 4Gi   limits 3 / 8Gi
+#   workbricks-c1-data     requests 1    / 4Gi    limits 2 / 8Gi
+#   workbricks-c1-sandbox  requests 500m / 1Gi    limits 1 / 2Gi
+# Consequences for the cell: every container must declare cpu+memory requests AND limits (a quota
+# on a resource makes the API server refuse pods that omit it), and RuntimeClass overhead counts
+# against the quota (gvisor adds 80m / 24Mi per pod, kata 250m / 160Mi).
+#
+# `priority-guard`: zero pods of any PriorityClass other than workbricks-low. The Priority admission
+# plugin writes the global default (platform-normal) into a pod that names no class BEFORE quota is
+# evaluated, so a pod without priorityClassName is refused here too, rather than landing at a
+# priority that preempts platform workloads (OR-6). That includes pods an operator creates on the
+# cell's behalf (e.g. CloudNativePG instances: set spec.priorityClassName on the Cluster).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute
+  namespace: workbricks-c1
+  labels:
+    workbricks/cell: c1
+spec:
+  hard:
+    requests.cpu: "1500m"
+    requests.memory: 4Gi
+    limits.cpu: "3"
+    limits.memory: 8Gi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: priority-guard
+  namespace: workbricks-c1
+  labels:
+    workbricks/cell: c1
+spec:
+  hard:
+    pods: "0"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: NotIn
+        values: [workbricks-low]
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute
+  namespace: workbricks-c1-data
+  labels:
+    workbricks/cell: c1
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 4Gi
+    limits.cpu: "2"
+    limits.memory: 8Gi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: priority-guard
+  namespace: workbricks-c1-data
+  labels:
+    workbricks/cell: c1
+spec:
+  hard:
+    pods: "0"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: NotIn
+        values: [workbricks-low]
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute
+  namespace: workbricks-c1-sandbox
+  labels:
+    workbricks/cell: c1
+spec:
+  hard:
+    requests.cpu: "500m"
+    requests.memory: 1Gi
+    limits.cpu: "1"
+    limits.memory: 2Gi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: priority-guard
+  namespace: workbricks-c1-sandbox
+  labels:
+    workbricks/cell: c1
+spec:
+  hard:
+    pods: "0"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: NotIn
+        values: [workbricks-low]

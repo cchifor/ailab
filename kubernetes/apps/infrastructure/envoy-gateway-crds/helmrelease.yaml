@@ -1,0 +1,56 @@
+# Envoy Gateway's own CRDs (gateway.envoyproxy.io, 8 kinds, all v1alpha1), for the Workbricks cell's
+# Envoy Gateway controller (Workbricks OR-7). CRDs are cluster-scoped, so the operator installs them
+# and the cell's chart runs with crds.enabled=false.
+#
+# The CRDs-only chart, with the Gateway API half switched OFF: the Gateway API CRDs (v1.2.1,
+# standard) belong to the platform's Traefik HelmRelease (platform-edge/traefik) and must not get a
+# second owner. Rendered output = the release asset envoy-gateway-crds.yaml of v1.9.2, byte for
+# byte (sha256 b339119f8f3a4046688fc96837b4129553f42c9998976913ef9dff25694d85cc, checked
+# 2026-10-21). The chart keeps them in templates/, so an upgrade updates them; the envoyproxies CRD
+# alone is about 1.4 MB.
+#
+# VERSION = the cell's controller minor. Envoy Gateway supports a minor for 6 months (v1.9: until
+# 2027-02-14), so expect a bump request about twice a year; bump this pin and the cell's controller
+# together, not by Renovate alone.
+#
+# helm.sh/resource-policy: keep on every CRD (post-render): deleting this HelmRelease, or this
+# directory, must not delete the CRDs, which would cascade-delete every EnvoyProxy and policy object
+# in the cell. Removing them is an explicit `kubectl delete crd`.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: envoy-gateway-crds
+  namespace: flux-system
+spec:
+  interval: 1h
+  timeout: 10m
+  chart:
+    spec:
+      chart: gateway-crds-helm
+      version: "v1.9.2"
+      interval: 24h
+      sourceRef:
+        kind: HelmRepository
+        name: envoyproxy
+        namespace: flux-system
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+  values:
+    crds:
+      gatewayAPI:
+        enabled: false
+      envoyGateway:
+        enabled: true
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              kind: CustomResourceDefinition
+            patch: |
+              - op: add
+                path: /metadata/annotations/helm.sh~1resource-policy
+                value: keep

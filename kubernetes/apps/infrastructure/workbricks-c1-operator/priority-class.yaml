@@ -1,0 +1,14 @@
+# The Workbricks cell's PriorityClass (Workbricks OR-6). Below every existing class (platform-low is
+# 1000) and never preempts, so the cell can only use spare capacity and is the first thing the
+# scheduler evicts for the platform. A separate class, rather than platform-low, keeps the two
+# products apart in quotas and alerts. The cell's namespaces refuse pods of any other class
+# (resource-quotas.yaml, `priority-guard`), because a pod naming no class would get the global
+# default platform-normal (100000, PreemptLowerPriority).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: workbricks-low
+value: 500
+preemptionPolicy: Never
+globalDefault: false
+description: "Workbricks cell workloads. Below every platform class; never preempts."

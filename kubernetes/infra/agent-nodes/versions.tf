@@ -12,5 +12,11 @@ terraform {
       source  = "siderolabs/talos"
       version = "~> 0.12"
     }
+    # node-labels.tf (the pool label + taint, applied cluster-side). The live state was written by
+    # 3.2.1.
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 3.2"
+    }
   }
 }

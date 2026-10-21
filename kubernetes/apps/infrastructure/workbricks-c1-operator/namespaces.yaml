@@ -1,0 +1,45 @@
+# The Workbricks cell c1's three namespaces (Workbricks OR-5). Namespaces are cluster-scoped, so the
+# operator creates them; the cell's own Flux unit (OR-11) deploys INTO them and may not create,
+# label or delete them.
+#
+# prune: disabled on purpose. Removing this file (or this whole directory) from git must not
+# cascade-delete the cell's database, object store and broker with their namespaces. Retiring the
+# cell is an explicit `kubectl delete ns`, after its data is exported.
+#
+# Pod Security `restricted` on all three, unpinned (follows the cluster's version). The sandbox
+# namespace runs gVisor/Kata pods, which `restricted` admits: runtimeClassName is not a PSA field.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workbricks-c1
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    workbricks/cell: c1
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workbricks-c1-data
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    workbricks/cell: c1
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workbricks-c1-sandbox
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    workbricks/cell: c1
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

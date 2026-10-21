@@ -44,6 +44,31 @@ locals {
       install_image      = "factory.talos.dev/nocloud-installer/${lookup(local.install_schematics, k, data.terraform_remote_state.infra.outputs.schematic_id)}:${var.talos_version}"
     })
   }
+  # The nodes whose schematic carries the sandbox runtimes (kata-containers + gvisor), derived from
+  # install_schematics so a node gains this patch in the same change that gives it the extensions.
+  #   * nodeLabels: the kata/gvisor RuntimeClasses select these (infrastructure/agentforge-
+  #     runtimeclasses), so a sandbox pod can only land on a node that has the handler. Without
+  #     them it could be placed on agent-node-1/2 and fail FailedCreatePodSandBox (Workbricks OR-1).
+  #     The extensions' own labels (extensions.talos.dev/<name>=<version>) cannot be used: a
+  #     RuntimeClass nodeSelector matches values exactly, and those values change on every upgrade.
+  #   * user.max_user_namespaces: Talos defaults it to 0, and runsc's gofer then fails with
+  #     "fork/exec /proc/self/exe: no space left on device", so no gvisor pod ever started (OR-2).
+  #     Scoped to these nodes only. Kata does not need it (its guest has its own kernel). The
+  #     kubelet runs with seccompDefault: true, so RuntimeDefault still refuses unshare(CLONE_NEWUSER)
+  #     to ordinary containers. 11255 is the value Talos' user-namespaces guide uses.
+  # Both settings apply without a reboot (Talos applies nodeLabels and sysctls live).
+  sandbox_runtime_nodes = toset([for k, s in local.install_schematics : k if s == local.schematics.kata_gvisor])
+  sandbox_runtime_patch = yamlencode({
+    machine = {
+      nodeLabels = {
+        "ailab.io/runtime-gvisor" = "true"
+        "ailab.io/runtime-kata"   = "true"
+      }
+      sysctls = {
+        "user.max_user_namespaces" = "11255"
+      }
+    }
+  })
 }
 
 # Apply the worker config to each node. No talos_machine_bootstrap / talos_cluster_kubeconfig — the
@@ -55,7 +80,10 @@ resource "talos_machine_configuration_apply" "worker" {
   client_configuration        = data.terraform_remote_state.infra.outputs.client_configuration
   machine_configuration_input = data.talos_machine_configuration.worker.machine_configuration
   node                        = each.value.ip
-  config_patches              = [local.worker_patches[each.key]]
+  config_patches = concat(
+    [local.worker_patches[each.key]],
+    contains(local.sandbox_runtime_nodes, each.key) ? [local.sandbox_runtime_patch] : [],
+  )
 
   lifecycle {
     precondition {

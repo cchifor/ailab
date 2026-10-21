@@ -1,0 +1,27 @@
+# Operator-owned prerequisites of the Workbricks cell c1 (requests OR-4..OR-7 in the cell's
+# operator-requests.md): its namespaces, quotas, PriorityClass, the TokenReview binding, Envoy
+# Gateway's cluster-scoped RBAC and the cell's GatewayClass. Everything cluster-scoped the cell
+# needs lives HERE, in this CP-unwritable repo; the cell's own charts contain no cluster-scoped
+# objects, and its own Flux unit (OR-11, not yet created) may write only inside its namespaces.
+#
+# No dependsOn on another product's unit. The GatewayClass needs the Gateway API CRDs, which the
+# platform's Traefik HelmRelease installs: on a fresh rebuild this unit fails its dry-run until
+# they exist, then converges on the next retry. The Envoy Gateway CRDs are a separate unit
+# (envoy-gateway-crds.yaml): nothing here needs them to exist.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: workbricks-c1-operator
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/workbricks-c1-operator
+  # prune:true for the quotas, bindings and class; the namespaces opt out
+  # (kustomize.toolkit.fluxcd.io/prune: disabled), see namespaces.yaml.
+  prune: true
+  wait: true

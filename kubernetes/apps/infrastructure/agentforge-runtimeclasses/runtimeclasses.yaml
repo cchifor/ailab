@@ -17,8 +17,13 @@ metadata:
 # kernel modules (worker.yaml.tftpl).
 handler: kata
 scheduling:
+  # ailab.io/runtime-kata: only the pool nodes whose Talos schematic carries the kata-containers
+  # extension (agent-node-3 today). Talos sets the label from kubernetes/infra/agent-nodes/talos.tf
+  # (sandbox_runtime_patch), derived from the same install_schematics entry that installs the
+  # extension. Without it a kata pod could land on agent-node-1/2 and fail FailedCreatePodSandBox.
   nodeSelector:
     ailab.io/agent-pool: "true"
+    ailab.io/runtime-kata: "true"
   tolerations:
     - key: dedicated
       operator: Equal
@@ -37,10 +42,14 @@ metadata:
   name: gvisor
 # gVisor / runsc — user-space kernel, no KVM required. The compute-only fallback for roles that do
 # NOT need privileged DinD (which gVisor cannot host). Registered by the siderolabs/gvisor extension.
+# Also the Workbricks cell's snippet-runner class (its sandbox namespace, workbricks-c1-sandbox).
 handler: runsc
 scheduling:
+  # ailab.io/runtime-gvisor: only the pool nodes with the gvisor extension AND user namespaces
+  # enabled (runsc's gofer needs them), both from the same talos.tf patch as the kata label.
   nodeSelector:
     ailab.io/agent-pool: "true"
+    ailab.io/runtime-gvisor: "true"
   tolerations:
     - key: dedicated
       operator: Equal
