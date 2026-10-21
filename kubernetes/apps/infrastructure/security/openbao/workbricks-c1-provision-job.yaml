@@ -266,6 +266,21 @@ data:
           exit 1
         }
       done
+      # audience and token_bound_cidrs are checked in the role's JSON: an EMPTY audience is absent
+      # from `bao read -field=audience` (exit 1, "not present"), which must not read as a failure,
+      # while a role that cannot be read at all still must.
+      rj="$(bao read -format=json "auth/kubernetes/role/$role")" || {
+        echo "cannot read back role $role; aborting" >&2
+        exit 1
+      }
+      if echo "$rj" | grep -q '"audience": "[^"]'; then
+        echo "role $role still carries an audience after writing; aborting" >&2
+        exit 1
+      fi
+      echo "$rj" | grep -q '"token_bound_cidrs": \[\]' || {
+        echo "role $role still carries token_bound_cidrs after writing; aborting" >&2
+        exit 1
+      }
       sel="$(bao read -field=bound_service_account_namespace_selector "auth/kubernetes/role/$role")" || {
         echo "cannot read back role $role's namespace selector; aborting" >&2
         exit 1
