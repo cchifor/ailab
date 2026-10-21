@@ -20,7 +20,18 @@
 #
 # PRUNE IS DISABLED ON THE CRDs (patch below): deleting this unit, or a CRD vanishing from a future
 # tag, must not delete a CRD, which would cascade-delete every EnvoyProxy and policy object in the
-# cell. Removing one is an explicit `kubectl delete crd`.
+# cell. Removing one is an explicit `kubectl delete crd`. A strategic-merge patch, so a future CRD
+# without an annotations map still gets it.
+#
+# TRUST BOUNDARY: this applies whatever upstream's directory holds at a tag, and a tag can be moved.
+# So the unit does NOT run as kustomize-controller's own (cluster-admin) identity: it impersonates
+# envoy-gateway-crds-applier, which may only get/list/watch/create/patch/update
+# CustomResourceDefinitions. Anything else a re-pointed tag or a compromised upstream added
+# (Deployments, RBAC, webhooks) fails closed with Forbidden (measured 2026-10-21 with a probe of this
+# exact ClusterRole: the 8 CRDs applied, a Deployment and a ClusterRoleBinding were refused). The
+# expected revision is v1.9.2@sha1:f9f92a112a4033abed5c8d43a5f7e37da257403c; Flux records the
+# resolved one in the GitRepository's status.artifact.revision. Residual: a moved tag can still
+# change the CRDs themselves (schema, conversion settings).
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -34,10 +45,43 @@ spec:
   sparseCheckout:
     - charts/gateway-helm/charts/crds/crds/generated
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: envoy-gateway-crds-applier
+  namespace: flux-system
+automountServiceAccountToken: false # only kustomize-controller impersonates it, via TokenRequest
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: envoy-gateway-crds-applier
+rules:
+  # No delete: the CRDs are prune-disabled, so the unit never needs it.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, list, watch, create, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: envoy-gateway-crds-applier
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: envoy-gateway-crds-applier
+subjects:
+  - kind: ServiceAccount
+    name: envoy-gateway-crds-applier
+    namespace: flux-system
+---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: envoy-gateway-crds
+  # NOT the old name `envoy-gateway-crds`: that unit's inventory holds the failed HelmRelease, and
+  # this unit's CRD-only identity could not prune it. Removing the old Kustomization from git lets
+  # Flux delete it, and its own garbage collection (no impersonation) removes the HelmRelease.
+  name: envoy-gateway-crds-upstream
   namespace: flux-system
 spec:
   interval: 1h
@@ -49,10 +93,14 @@ spec:
   path: ./charts/gateway-helm/charts/crds/crds/generated
   prune: true
   wait: true
+  serviceAccountName: envoy-gateway-crds-applier
   patches:
     - target:
         kind: CustomResourceDefinition
       patch: |
-        - op: add
-          path: /metadata/annotations/kustomize.toolkit.fluxcd.io~1prune
-          value: disabled
+        apiVersion: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        metadata:
+          name: any # replaced by each target's name
+          annotations:
+            kustomize.toolkit.fluxcd.io/prune: disabled

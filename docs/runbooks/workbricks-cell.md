@@ -18,7 +18,7 @@ DNS and GitOps change, is requested by the Workbricks team in their `operator-re
 
 Paths under `infrastructure/` and `clusters/` are relative to `kubernetes/apps/`. The CRDs cannot be a
 HelmRelease: Helm's release Secret would exceed the 1 MiB object limit (about 2.5 MB of CRDs). Flux units:
-`workbricks-c1-operator`, `workbricks-c1-gateway` and `envoy-gateway-crds` (`kubernetes/apps/clusters/ai/`).
+`workbricks-c1-operator`, `workbricks-c1-gateway` and `envoy-gateway-crds-upstream` (`kubernetes/apps/clusters/ai/`).
 
 ## Verify
 
@@ -51,4 +51,5 @@ $K auth can-i update gatewayclasses/traefik --as=system:serviceaccount:workbrick
 - **Retiring the cell** is explicit: delete its Flux unit, export its data, then
   `kubectl delete ns workbricks-c1 workbricks-c1-data workbricks-c1-sandbox`. Removing
   `workbricks-c1-operator` from git leaves the namespaces (prune disabled) and removing
-  `envoy-gateway-crds` leaves the CRDs (`kustomize.toolkit.fluxcd.io/prune: disabled`).
+  `envoy-gateway-crds-upstream` leaves the CRDs (`kustomize.toolkit.fluxcd.io/prune: disabled`). That unit
+  runs as `envoy-gateway-crds-applier`, which may only write CustomResourceDefinitions.
