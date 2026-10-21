@@ -35,7 +35,7 @@ then classifies each Kustomization by looking its reference UP in that table:
                is a reviewed entry in `EXPECTED_EXTERNAL_SOURCES`, the closed
                allowlist of externally-sourced objects this step is ALLOWED
                to skip (currently exactly `agentforge-tenants`, `platform` and
-               `muse-stream`, `trueswarm`, `trueswarm-admin` and `cloudlab`). The path is excluded and the exclusion is printed
+               `muse-stream`, `trueswarm`, `trueswarm-admin`, `cloudlab` and `envoy-gateway`). The path is excluded and the exclusion is printed
                to stderr so a CI log makes the gate's real coverage visible.
   * ANYTHING ELSE is a `DiscoveryError` — fail closed. That covers: no
                `sourceRef` at all; a `sourceRef` that is not a mapping or
@@ -134,6 +134,10 @@ EXPECTED_EXTERNAL_SOURCES = frozenset(
         # ./kubernetes/apps/infrastructure/monitoring, also exists in this repo -- which is exactly
         # why the sourceRef is resolved rather than the path string-matched.
         ("flux-system", "cloudlab"),
+        # envoyproxy/gateway on GitHub at a release tag, sparse-checked-out to its generated
+        # Envoy Gateway CRDs (clusters/ai/envoy-gateway-crds.yaml, for the Workbricks cell).
+        # Upstream plain CRD YAML, so there is nothing of ours to build there.
+        ("flux-system", "envoy-gateway"),
     }
 )
 

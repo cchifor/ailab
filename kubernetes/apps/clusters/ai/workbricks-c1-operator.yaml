@@ -5,7 +5,7 @@
 # namespaces.
 #
 # The edge pieces are separate units: workbricks-c1-gateway (GatewayClass + Envoy Gateway's cluster
-# RBAC, which need the platform's Gateway API CRDs) and envoy-gateway-crds. Nothing here needs any
+# RBAC, which need the platform's Gateway API CRDs) and envoy-gateway-crds-upstream. Nothing here needs any
 # CRD, so a fresh rebuild applies these prerequisites at once, whatever state the edge is in.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
