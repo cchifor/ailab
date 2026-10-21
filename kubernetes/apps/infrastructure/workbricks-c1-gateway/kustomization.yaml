@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The Workbricks cell c1's edge prerequisites (clusters/ai/workbricks-c1-gateway.yaml), Workbricks OR-7.
+resources:
+  - gatewayclass.yaml # the cell's GatewayClass (needs the Gateway API CRDs from the platform's Traefik)
+  - envoy-gateway-rbac.yaml # the controller's cluster-scoped RBAC, narrowed to the cell's class

@@ -1,0 +1,21 @@
+# Envoy Gateway CRDs (gateway.envoyproxy.io) for the Workbricks cell's own Envoy Gateway controller
+# (Workbricks OR-7). A dedicated unit so a CRD upgrade can never wedge the shared `infrastructure`
+# layer, and separate from workbricks-c1-operator, which needs none of these kinds to exist.
+# dependsOn infrastructure for the `envoyproxy` OCI HelmRepository (sources/).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-gateway-crds
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 2m
+  timeout: 10m
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/envoy-gateway-crds
+  prune: true
+  wait: true

@@ -1,0 +1,57 @@
+# Workbricks OR-7: the cluster-scoped half of the cell's Envoy Gateway controller RBAC (chart
+# gateway-helm v1.9.2, provider.kubernetes.watch.type: Namespaces). The chart ALWAYS renders its own
+# ClusterRole + ClusterRoleBinding (no value turns them off), so the cell's render must drop them and
+# use this pair instead; the namespaced Roles in the three cell namespaces stay in the cell's chart.
+#
+# Rules = the chart's cluster rules (templates/envoy-gateway-rbac.yaml at v1.9.2), narrowed:
+#   * nodes, namespaces get/list/watch: the controller always watches both (NodePort addresses,
+#     namespace selection). Read-only.
+#   * gatewayclasses list/watch on ALL classes (an informer cannot be name-scoped; the controller
+#     filters by controllerName), but get/patch/update and status update ONLY on the cell's own class
+#     `workbricks-c1`. The chart grants writes on every GatewayClass, which would let the cell's
+#     controller rewrite a platform class.
+#   * dropped: multicluster.x-k8s.io serviceimports (that CRD does not exist here, and the controller
+#     only watches it when it does) and certificates.k8s.io ClusterTrustBundle (not served here).
+#     If either appears, the cell asks again.
+# NOT granted, deliberately: the topology injector (a MutatingWebhookConfiguration plus a certgen
+# ClusterRole that patches it). The cell runs with topologyInjector.enabled=false AND
+# config.envoyGateway.provider.kubernetes.proxyTopologyInjector.disabled=true (the chart writes the
+# first flag where the controller does not read it). The nodes carry no zone labels, so it would do
+# nothing anyway.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workbricks-c1-envoy-gateway
+  labels:
+    workbricks/cell: c1
+rules:
+  - apiGroups: [""]
+    resources: [nodes, namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gatewayclasses]
+    verbs: [list, watch]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gatewayclasses]
+    resourceNames: [workbricks-c1]
+    verbs: [get, patch, update]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gatewayclasses/status]
+    resourceNames: [workbricks-c1]
+    verbs: [update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workbricks-c1-envoy-gateway
+  labels:
+    workbricks/cell: c1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workbricks-c1-envoy-gateway
+subjects:
+  # The chart's controller ServiceAccount name is fixed (`envoy-gateway`), whatever the release name.
+  - kind: ServiceAccount
+    name: envoy-gateway
+    namespace: workbricks-c1

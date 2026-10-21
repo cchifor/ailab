@@ -19,6 +19,14 @@
 ipam:
   mode: kubernetes
 kubeProxyReplacement: true
+# Socket load balancing stays OFF (Workbricks OR-13). This is the chart default through 1.19.8,
+# which renders it explicitly as bpf-lb-sock: "false"; pinned here so a default change in a later
+# chart cannot flip it during a hop. With it on, gVisor and Kata pods cannot reach ClusterIP
+# Services: their sockets live in the sandbox's own kernel, which Cilium's cgroup hooks never see
+# (Workbricks spike 5, 2026-10-21). If it is ever needed, also set hostNamespaceOnly: true, which
+# keeps socket LB to the host namespace and leaves pods on the per-packet datapath.
+socketLB:
+  enabled: false
 k8sServiceHost: localhost
 k8sServicePort: 7445
 securityContext:

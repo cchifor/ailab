@@ -49,6 +49,29 @@ kubectl --context admin@ai get node agent-node-1 -o jsonpath='{.spec.taints}'  #
 Ready follows once Cilium schedules its agent DaemonSet onto the new nodes (it tolerates the taint
 via its cluster-wide toleration — verify).
 
+## Sandbox runtime nodes (kata + gVisor)
+
+Only the nodes whose `install_schematics` entry in `talos.tf` is `kata_gvisor` (today
+**agent-node-3**) carry the runtimes. `talos.tf` gives exactly those nodes a second config patch
+(`sandbox_runtime_patch`, applied live, no reboot):
+
+- the labels `ailab.io/runtime-kata=true` and `ailab.io/runtime-gvisor=true`, which the `kata` and
+  `gvisor` RuntimeClasses select (`kubernetes/apps/infrastructure/agentforge-runtimeclasses/`), so
+  a sandbox pod can never be placed on a node without the handler;
+- `user.max_user_namespaces=11255`. Talos defaults it to 0, and gVisor's gofer then fails with
+  `fork/exec /proc/self/exe: no space left on device`. Kata does not need it.
+
+Giving another node the runtimes = its `install_schematics` entry + a `scripts/talos-upgrade-node.sh`
+upgrade to that schematic + `tofu apply`, in that order: the labels must not appear before the
+extensions do. Smoke test, in a throwaway Pod Security `restricted` namespace: a busybox pod with
+`runtimeClassName: gvisor` reaches Running and its `dmesg` starts with `Starting gVisor...`
+(verified 2026-10-21, Workbricks OR-1/OR-2).
+
+```bash
+kubectl --context admin@ai get nodes -L ailab.io/runtime-kata,ailab.io/runtime-gvisor
+talosctl -n 192.168.0.49 read /proc/sys/user/max_user_namespaces   # 11255 (agent-node-1/2: 0)
+```
+
 ## Nested virtualization prerequisite (P2 gate for Kata — DO NOT auto-apply here)
 
 Kata's QEMU microVM needs `/dev/kvm` inside the Talos worker, which requires **`kvm_amd nested=1`

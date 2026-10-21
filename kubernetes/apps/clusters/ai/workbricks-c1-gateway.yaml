@@ -1,0 +1,24 @@
+# The Workbricks cell c1's edge prerequisites (Workbricks OR-7): its GatewayClass and the
+# cluster-scoped RBAC of its own Envoy Gateway controller. A unit of its own because the GatewayClass
+# needs the Gateway API CRDs, which the platform's Traefik HelmRelease installs: on a fresh rebuild
+# this unit fails its dry-run until they exist, then converges on the next retry, without holding
+# back the cell's namespaces and quotas (workbricks-c1-operator).
+#
+# Deliberately NO dependsOn on the platform's unit (platform-edge): that name belongs to another
+# repo, and a rename there (as in ailab #1346) would leave this unit waiting forever on a
+# dependency that no longer exists. Retrying the dry-run is self-healing; a stale dependsOn is not.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: workbricks-c1-gateway
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/workbricks-c1-gateway
+  prune: true
+  wait: true

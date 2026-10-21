@@ -1,0 +1,18 @@
+# Workbricks OR-4: the cell's token issuer (`gatekeeper`) verifies each job worker's projected
+# ServiceAccount token with the TokenReview API at every capability exchange. system:auth-delegator
+# grants exactly tokenreviews + subjectaccessreviews `create`, nothing else. The ServiceAccount
+# itself is the cell's (its chart creates it); the binding is inert until it exists.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workbricks-c1-gatekeeper-auth-delegator
+  labels:
+    workbricks/cell: c1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: gatekeeper
+    namespace: workbricks-c1
