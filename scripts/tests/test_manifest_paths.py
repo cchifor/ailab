@@ -85,11 +85,11 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # 2026-10-06 — the S2S Phase 4 probe Job (TokenRequest RBAC + an additive gatekeeper netpol).
         "./kubernetes/apps/infrastructure/s2s-phase4-probe",
         # 2026-10-21 — the Workbricks cell c1's operator-owned prerequisites (namespaces, quotas,
-        # PriorityClass, TokenReview binding), its edge pieces (GatewayClass + Envoy Gateway's cluster
-        # RBAC) and the Envoy Gateway CRDs (docs/runbooks/workbricks-cell.md). Added deliberately.
+        # PriorityClass, TokenReview binding) and its edge pieces (GatewayClass + Envoy Gateway's cluster
+        # RBAC) (docs/runbooks/workbricks-cell.md). Added deliberately. (The Envoy Gateway CRDs come
+        # from upstream's tagged source: the external `envoy-gateway` entry, not a local path.)
         "./kubernetes/apps/infrastructure/workbricks-c1-operator",
         "./kubernetes/apps/infrastructure/workbricks-c1-gateway",
-        "./kubernetes/apps/infrastructure/envoy-gateway-crds",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",
@@ -267,7 +267,7 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab")},
+            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab"), ("flux-system", "envoy-gateway")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))

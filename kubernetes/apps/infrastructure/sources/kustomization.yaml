@@ -13,4 +13,3 @@ resources:
   - external-secrets.yaml # External Secrets Operator (AgentForge v2 P2)
   - keda.yaml # KEDA event-driven autoscaling (AgentForge v2 P2)
   - kro.yaml # kro / kube-resource-orchestrator, OCI chart (AgentForge v2 P2)
-  - envoyproxy.yaml # Envoy Gateway CRDs, OCI chart (Workbricks cell c1, OR-7)
