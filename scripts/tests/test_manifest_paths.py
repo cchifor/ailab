@@ -84,6 +84,12 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/strive-pg-harness",
         # 2026-10-06 — the S2S Phase 4 probe Job (TokenRequest RBAC + an additive gatekeeper netpol).
         "./kubernetes/apps/infrastructure/s2s-phase4-probe",
+        # 2026-10-21 — the Workbricks cell c1's operator-owned prerequisites (namespaces, quotas,
+        # PriorityClass, TokenReview binding), its edge pieces (GatewayClass + Envoy Gateway's cluster
+        # RBAC) and the Envoy Gateway CRDs (docs/runbooks/workbricks-cell.md). Added deliberately.
+        "./kubernetes/apps/infrastructure/workbricks-c1-operator",
+        "./kubernetes/apps/infrastructure/workbricks-c1-gateway",
+        "./kubernetes/apps/infrastructure/envoy-gateway-crds",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",
