@@ -329,6 +329,18 @@ for field in gitea_pat gitea_repo_pat gitea_package_pat; do
   fi
 done
 
+# Cloudflare answers a `Python-urllib/*` User-Agent with `403 error code: 1010` on git.chifor.me. On
+# 2026-10-21 a Codex agent read that as an access denial, ruled the API off-limits ("requires owner
+# restoration") and stalled platform #2408, although the same calls returned 200 with any explicit
+# User-Agent. The guide must say what 1010 means and what to send instead.
+for phrase in 'error code: 1010' 'Python-urllib' 'User-Agent'; do
+  if printf '%s\n' "$guide_block" | grep -qF -- "$phrase"; then
+    ok "D9: the credentials guide explains Cloudflare 1010 ($phrase)"
+  else
+    bad "D9: the credentials guide does not mention '$phrase' (Cloudflare 1010 is a client User-Agent block)"
+  fi
+done
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "ALL PASS"
