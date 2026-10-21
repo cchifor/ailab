@@ -118,7 +118,7 @@ spec:
         # Rebuild one version-pinned client artifact; NEVER write the shared install.
         # A future DSH upgrade must remove/rebase this hotfix before it can roll.
         - name: build-command-ui-fix
-          image: mirror.gcr.io/library/node@sha256:1b84b89ada025e3b14543cbb837ffaa1c1b5273b841c5b94dd1a8f9c1d8cf7fe
+          image: mirror.gcr.io/library/node@sha256:45a2bf9d9300e9cf47ecb375e38447c140c45ef5fbae869c430475b05b98d86e
           command: [node, /ui-fix-source/build-command-ui-fix.mjs, /app, /ui-client-fix/client.js]
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
