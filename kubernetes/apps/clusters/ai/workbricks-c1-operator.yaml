@@ -1,13 +1,12 @@
-# Operator-owned prerequisites of the Workbricks cell c1 (requests OR-4..OR-7 in the cell's
-# operator-requests.md): its namespaces, quotas, PriorityClass, the TokenReview binding, Envoy
-# Gateway's cluster-scoped RBAC and the cell's GatewayClass. Everything cluster-scoped the cell
-# needs lives HERE, in this CP-unwritable repo; the cell's own charts contain no cluster-scoped
-# objects, and its own Flux unit (OR-11, not yet created) may write only inside its namespaces.
+# Operator-owned prerequisites of the Workbricks cell c1 (requests OR-4..OR-6 in the cell's
+# operator-requests.md): its namespaces, quotas, PriorityClass and the TokenReview binding. Everything
+# cluster-scoped the cell needs lives in this CP-unwritable repo; the cell's own charts contain no
+# cluster-scoped objects, and its own Flux unit (OR-11, not yet created) may write only inside its
+# namespaces.
 #
-# No dependsOn on another product's unit. The GatewayClass needs the Gateway API CRDs, which the
-# platform's Traefik HelmRelease installs: on a fresh rebuild this unit fails its dry-run until
-# they exist, then converges on the next retry. The Envoy Gateway CRDs are a separate unit
-# (envoy-gateway-crds.yaml): nothing here needs them to exist.
+# The edge pieces are separate units: workbricks-c1-gateway (GatewayClass + Envoy Gateway's cluster
+# RBAC, which need the platform's Gateway API CRDs) and envoy-gateway-crds. Nothing here needs any
+# CRD, so a fresh rebuild applies these prerequisites at once, whatever state the edge is in.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:

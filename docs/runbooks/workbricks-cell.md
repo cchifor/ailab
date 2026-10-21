@@ -13,11 +13,11 @@ DNS and GitOps change, is requested by the Workbricks team in their `operator-re
 | OR-5 | Namespaces `workbricks-c1`, `-data`, `-sandbox` (PSA `restricted`, prune disabled) + `compute` quotas | `infrastructure/workbricks-c1-operator/` |
 | OR-6 | PriorityClass `workbricks-low` (500, `Never`) + a `priority-guard` quota refusing any other class | same |
 | OR-7 | Envoy Gateway CRDs v1.9.2 (CRDs-only chart, `keep` policy) | `infrastructure/envoy-gateway-crds/` |
-| OR-7 | The controller's cluster RBAC, GatewayClass `workbricks-c1` | `infrastructure/workbricks-c1-operator/` |
+| OR-7 | The controller's cluster RBAC, GatewayClass `workbricks-c1` | `infrastructure/workbricks-c1-gateway/` |
 | OR-13 | Cilium socket LB pinned off | `kubernetes/infra/bootstrap/cilium-values.yaml` |
 
 Paths under `infrastructure/` are relative to `kubernetes/apps/`. Flux units:
-`workbricks-c1-operator` and `envoy-gateway-crds` (`kubernetes/apps/clusters/ai/`).
+`workbricks-c1-operator`, `workbricks-c1-gateway` and `envoy-gateway-crds` (`kubernetes/apps/clusters/ai/`).
 
 ## Verify
 
