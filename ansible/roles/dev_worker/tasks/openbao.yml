@@ -365,6 +365,16 @@
         `cred exec {{ dev_worker_gitea_cred_name }} gitea_package_pat FORGE_RELEASE_TOKEN -- <cmd>` with
         `FORGE_RELEASE_USERNAME={{ dev_worker_gitea_user }}`; the same field serves `FORGE_CATALOG_TOKEN`.
 
+      ## A 403 whose body is `error code: 1010` is Cloudflare, not Gitea
+
+      git.chifor.me sits behind Cloudflare, which rejects every request whose User-Agent starts with
+      `Python-urllib` (what Python's `urllib` sends by default): HTTP 403 with the 17-byte body
+      `error code: 1010`. Gitea never saw that request, so it says nothing about your access and is
+      nothing to escalate. Send an explicit `User-Agent` naming your tool and this worker, e.g.
+      `<tool>/1.0 ({{ inventory_hostname }})`, on every API call whatever the client, then retry the
+      same call. A real Gitea refusal is different: its body is JSON with a `message` (for example
+      `branch_protections`, which needs an admin). Do not work around that one.
+
       ## Attribution: say which worker and which run wrote it
 
       This is worker `{{ inventory_hostname }}`, and git already commits as `{{ dev_worker_git_user_name }}`:

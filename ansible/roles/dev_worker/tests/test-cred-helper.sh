@@ -329,6 +329,29 @@ for field in gitea_pat gitea_repo_pat gitea_package_pat; do
   fi
 done
 
+# Cloudflare answers a `Python-urllib/*` User-Agent with `403 error code: 1010` on git.chifor.me. On
+# 2026-10-21 a Codex agent read that as an access denial, ruled the API off-limits ("requires owner
+# restoration") and stalled platform #2408, although the same calls returned 200 with any explicit
+# User-Agent. The section must say what 1010 means, what to send and to retry, AND how a real Gitea
+# refusal differs: without that half, "add a User-Agent and retry" reads as a way around every 403.
+section_1010="$(printf '%s\n' "$guide_block" | awk '
+  /## A 403 whose body is `error code: 1010`/ { f = 1; print; next }
+  f && /^ *## / { exit }
+  f
+')"
+if [ -n "$section_1010" ]; then
+  ok "D9: the credentials guide has a Cloudflare 1010 section"
+else
+  bad "D9: the credentials guide has no '## A 403 whose body is \`error code: 1010\`' section"
+fi
+for phrase in 'Python-urllib' 'User-Agent' 'retry the' 'JSON with a `message`' 'Do not work around'; do
+  if printf '%s\n' "$section_1010" | grep -qF -- "$phrase"; then
+    ok "D9: the 1010 section says '$phrase'"
+  else
+    bad "D9: the 1010 section does not say '$phrase'"
+  fi
+done
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "ALL PASS"
