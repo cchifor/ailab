@@ -368,13 +368,12 @@
       ## A 403 whose body is `error code: 1010` is Cloudflare, not Gitea
 
       git.chifor.me sits behind Cloudflare, which rejects every request whose User-Agent starts with
-      `Python-urllib` (what Python's `urllib` sends by default) or `libwww-perl`: HTTP 403 with the
-      17-byte body `error code: 1010`. Gitea never saw that request, so it says nothing about your
-      access and is nothing to escalate. Send an explicit `User-Agent` naming your tool and this
-      worker, e.g. `<tool>/1.0 ({{ inventory_hostname }})`, on every API call, then retry the same
-      call; `curl`, `git`, `requests` and `httpx` already pass. A real Gitea refusal has a JSON body
-      with a `message` (for example `branch_protections`, which needs an admin): do not work around
-      that one.
+      `Python-urllib` (what Python's `urllib` sends by default): HTTP 403 with the 17-byte body
+      `error code: 1010`. Gitea never saw that request, so it says nothing about your access and is
+      nothing to escalate. Send an explicit `User-Agent` naming your tool and this worker, e.g.
+      `<tool>/1.0 ({{ inventory_hostname }})`, on every API call whatever the client, then retry the
+      same call. A real Gitea refusal is different: its body is JSON with a `message` (for example
+      `branch_protections`, which needs an admin). Do not work around that one.
 
       ## Attribution: say which worker and which run wrote it
 
