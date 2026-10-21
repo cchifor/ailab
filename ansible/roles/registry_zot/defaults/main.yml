@@ -34,6 +34,8 @@ registry_zot_pull_user: "pull"
 registry_zot_scoped_push_users:
   - user: "trueswarm-ci"
     repositories: "trueswarm/**"   # cchifor/trueswarm .gitea/workflows/publish.yml
+  - user: "workbricks-ci"
+    repositories: "workbricks/**"  # cchifor/workbricks image-publish CI (Workbricks OR-12)
 
 # Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
 # UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
