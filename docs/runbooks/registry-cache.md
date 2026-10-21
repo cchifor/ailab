@@ -79,6 +79,7 @@ prefix (`read`/`create`/`update`, no `delete`), listed in `registry_zot_scoped_p
 | user | repositories | consumer |
 |---|---|---|
 | `trueswarm-ci` | `trueswarm/**` | `cchifor/trueswarm` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`) |
+| `workbricks-ci` | `workbricks/**` | `cchifor/workbricks` image-publish CI (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`; Workbricks OR-12). The cell pulls anonymously, like every other image; the registry is LAN-only. |
 
 zot authorizes a repo by its **longest matching pattern only** — policies are not merged — so each
 scoped entry repeats the `**` grants (anonymous read, `ci`, `pull`, admins) via the template macro.
