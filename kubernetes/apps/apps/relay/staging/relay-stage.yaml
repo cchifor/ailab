@@ -23,7 +23,7 @@ spec:
     seccompProfile:
       type: RuntimeDefault
   containers:
-  - image: docker.io/library/node:22.23.3-bookworm-slim@sha256:3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9
+  - image: docker.io/library/node:22.23.4-bookworm-slim@sha256:5991875dfb80938dd8a6ba3fe3e96fd04929e70792762b3319d8caadbbe229bc
     workingDir: /tmp
     envFrom:
     - secretRef:
