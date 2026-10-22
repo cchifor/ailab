@@ -11,11 +11,17 @@
 #     existing key is a no-op in OpenBao (measured on 2.6.4: a second create with another type
 #     exits 0 and changes nothing), so the Job always creates, then READS BACK and refuses unless
 #     the key has exactly those settings.
-#   * three policies + three k8s-auth roles, OWNED WHOLE:
-#       workbricks-c1-gatekeeper  SA gatekeeper@workbricks-c1        sign/verify + read pubkeys, jwks-root
-#       workbricks-c1-signing     SA signing@workbricks-c1           sign/verify + read pubkeys, release + audit
-#       workbricks-c1-secrets     SA secret-delivery@workbricks-c1   read af/data/workbricks/c1/*
-#                                 and secret-delivery@workbricks-c1-data
+#   * four policies + four k8s-auth roles, OWNED WHOLE (each role carries the same-named policy):
+#       workbricks-c1-gatekeeper   SA gatekeeper@workbricks-c1        sign/verify + read pubkeys, jwks-root
+#       workbricks-c1-app-control  SA app-control@workbricks-c1       sign/verify + read pubkeys, release
+#       workbricks-c1-audit        SA audit@workbricks-c1             sign/verify + read pubkeys, audit
+#       workbricks-c1-secrets      SA secret-delivery@workbricks-c1   read af/data/workbricks/c1/*
+#                                  and secret-delivery@workbricks-c1-data
+#   * RETIRED 2026-10-22: policy + role workbricks-c1-signing (SA signing@workbricks-c1, release AND
+#     audit). Workbricks: `signing` is a library, not a service, and each caller signs with its own
+#     key, so the one role became app-control (release) and audit (audit). Section 6 deletes the old
+#     role, then the old policy -- the policy ONLY while it still equals its last reviewed form
+#     (RETIRED_SIGN_FORM); a drifted one means a human changed it, and the Job refuses before any write.
 #     The sandbox namespace (workbricks-c1-sandbox) gets NO vault access: its runners are
 #     credential-free by design (Workbricks decision 9).
 #   * KV: nothing is created. af/workbricks/c1/ is the prefix the secrets role may read; documents
@@ -30,11 +36,11 @@
 # absent Secret turns this Job red rather than skipping silently.
 #
 # THE OWNERSHIP CONTRACT:
-#   * GIT OWNS THE THREE POLICIES AND THE THREE ROLES WHOLE. `bao policy write` replaces the
+#   * GIT OWNS THE FOUR POLICIES AND THE FOUR ROLES WHOLE. `bao policy write` replaces the
 #     policy; each role write spells out every field, empty and default ones included (a role
-#     write is an update that keeps omitted fields), and reads each one back. A change made by hand is reverted on the next
-#     run; an emergency change must suspend this Job (or the `openbao` Kustomization) AND land in
-#     git before reconciliation resumes.
+#     write is an update that keeps omitted fields), and reads each one back. A change made by hand
+#     is reverted on the next run; an emergency change must suspend this Job (or the `openbao`
+#     Kustomization) AND land in git before reconciliation resumes.
 #   * THE KEYS ARE CREATED, NEVER CHANGED. Their key material exists only in the vault (and its
 #     raft snapshots): a vault rebuilt from git alone gets NEW keys, so every signature and
 #     attestation made before is unverifiable with the new public keys. docs/runbooks/
@@ -61,17 +67,22 @@ data:
     TRANSIT=transit
     KEYS="workbricks-c1-jwks-root workbricks-c1-release workbricks-c1-audit"
     GK_POLICY=workbricks-c1-gatekeeper
-    SIGN_POLICY=workbricks-c1-signing
+    APPCTL_POLICY=workbricks-c1-app-control
+    AUDIT_POLICY=workbricks-c1-audit
     SECRETS_POLICY=workbricks-c1-secrets
+    # Retired policy + role (see the header). RETIRED_SIGN_FORM is the normalised document the
+    # previous version of this Job wrote (its SIGN_DESIRED): the only form section 6 may delete.
+    RETIRED_SIGN=workbricks-c1-signing
+    RETIRED_SIGN_FORM='path"transit/sign/workbricks-c1-release"{capabilities=["update"]}path"transit/sign/workbricks-c1-release/sha2-256"{capabilities=["update"]}path"transit/verify/workbricks-c1-release"{capabilities=["update"]}path"transit/verify/workbricks-c1-release/sha2-256"{capabilities=["update"]}path"transit/keys/workbricks-c1-release"{capabilities=["read"]}path"transit/sign/workbricks-c1-audit"{capabilities=["update"]}path"transit/sign/workbricks-c1-audit/sha2-256"{capabilities=["update"]}path"transit/verify/workbricks-c1-audit"{capabilities=["update"]}path"transit/verify/workbricks-c1-audit/sha2-256"{capabilities=["update"]}path"transit/keys/workbricks-c1-audit"{capabilities=["read"]}'
 
     bao token lookup >/dev/null || {
       echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
       exit 1
     }
 
-    # ---- 1. Drift guards on all three policies, BEFORE anything is written --------------------
+    # ---- 1. Drift guards on all four policies and the retired one, BEFORE anything is written --
     # Whole-document comparison after stripping full-line comments, then every whitespace
-    # character (chatgpt-provision-job.yaml has the reasoning). None of the three has a
+    # character (chatgpt-provision-job.yaml has the reasoning). None of the four has a
     # pre-ownership form: nothing created them before this Job, so the only document each may find
     # is its own output.
     #
@@ -86,8 +97,10 @@ data:
     }
     GK_BASELINE='path"transit/sign/workbricks-c1-jwks-root"{capabilities=["update"]}path"transit/sign/workbricks-c1-jwks-root/sha2-256"{capabilities=["update"]}path"transit/verify/workbricks-c1-jwks-root"{capabilities=["update"]}path"transit/verify/workbricks-c1-jwks-root/sha2-256"{capabilities=["update"]}path"transit/keys/workbricks-c1-jwks-root"{capabilities=["read"]}'
     GK_DESIRED="$GK_BASELINE"
-    SIGN_BASELINE='path"transit/sign/workbricks-c1-release"{capabilities=["update"]}path"transit/sign/workbricks-c1-release/sha2-256"{capabilities=["update"]}path"transit/verify/workbricks-c1-release"{capabilities=["update"]}path"transit/verify/workbricks-c1-release/sha2-256"{capabilities=["update"]}path"transit/keys/workbricks-c1-release"{capabilities=["read"]}path"transit/sign/workbricks-c1-audit"{capabilities=["update"]}path"transit/sign/workbricks-c1-audit/sha2-256"{capabilities=["update"]}path"transit/verify/workbricks-c1-audit"{capabilities=["update"]}path"transit/verify/workbricks-c1-audit/sha2-256"{capabilities=["update"]}path"transit/keys/workbricks-c1-audit"{capabilities=["read"]}'
-    SIGN_DESIRED="$SIGN_BASELINE"
+    APPCTL_BASELINE='path"transit/sign/workbricks-c1-release"{capabilities=["update"]}path"transit/sign/workbricks-c1-release/sha2-256"{capabilities=["update"]}path"transit/verify/workbricks-c1-release"{capabilities=["update"]}path"transit/verify/workbricks-c1-release/sha2-256"{capabilities=["update"]}path"transit/keys/workbricks-c1-release"{capabilities=["read"]}'
+    APPCTL_DESIRED="$APPCTL_BASELINE"
+    AUDIT_BASELINE='path"transit/sign/workbricks-c1-audit"{capabilities=["update"]}path"transit/sign/workbricks-c1-audit/sha2-256"{capabilities=["update"]}path"transit/verify/workbricks-c1-audit"{capabilities=["update"]}path"transit/verify/workbricks-c1-audit/sha2-256"{capabilities=["update"]}path"transit/keys/workbricks-c1-audit"{capabilities=["read"]}'
+    AUDIT_DESIRED="$AUDIT_BASELINE"
     SECRETS_BASELINE='path"af/data/workbricks/c1/*"{capabilities=["read"]}'
     SECRETS_DESIRED="$SECRETS_BASELINE"
 
@@ -120,8 +133,31 @@ data:
       fi
     }
     guard_policy "$GK_POLICY" "$GK_BASELINE" "$GK_DESIRED"
-    guard_policy "$SIGN_POLICY" "$SIGN_BASELINE" "$SIGN_DESIRED"
+    guard_policy "$APPCTL_POLICY" "$APPCTL_BASELINE" "$APPCTL_DESIRED"
+    guard_policy "$AUDIT_POLICY" "$AUDIT_BASELINE" "$AUDIT_DESIRED"
     guard_policy "$SECRETS_POLICY" "$SECRETS_BASELINE" "$SECRETS_DESIRED"
+    # The retired policy: absent is fine (fresh vault, or already retired); present, it must still be
+    # its last reviewed form, or the Job refuses here, before ANY write, and section 6 never deletes
+    # a document somebody changed by hand.
+    RETIRE_SIGN_POLICY=no
+    if echo "$POLICY_LIST" | grep -q "\"${RETIRED_SIGN}\""; then
+      prev="$(bao policy read "$RETIRED_SIGN")" || {
+        echo "retired policy $RETIRED_SIGN exists but could not be read; aborting" >&2
+        exit 1
+      }
+      echo "--- retired policy $RETIRED_SIGN (deleted in section 6; kept here as the audit trail) ---"
+      echo "$prev"
+      echo "--- end retired policy ---"
+      if [ "$(printf '%s\n' "$prev" | normalise)" != "$RETIRED_SIGN_FORM" ]; then
+        echo "REFUSING: retired policy $RETIRED_SIGN does not match its last reviewed form. Something" >&2
+        echo "changed it outside git, and this Job deletes only the reviewed form. To unblock, review the" >&2
+        echo "policy printed above, then EITHER delete it by hand (bao policy delete $RETIRED_SIGN; the" >&2
+        echo "role goes on the next run) OR restore RETIRED_SIGN_FORM (bao policy write) and re-run." >&2
+        exit 1
+      fi
+      echo "retired policy $RETIRED_SIGN matches its last reviewed form; will be deleted"
+      RETIRE_SIGN_POLICY=yes
+    fi
 
     # ---- 2. The transit engine ------------------------------------------------------------------
     # Presence from the mount LIST, then the TYPE from the mount itself: a kv (or any other) engine
@@ -178,12 +214,14 @@ data:
     path "transit/verify/workbricks-c1-jwks-root/sha2-256" { capabilities = ["update"] }
     path "transit/keys/workbricks-c1-jwks-root" { capabilities = ["read"] }
     EOF
-    bao policy write "$SIGN_POLICY" - <<'EOF'
+    bao policy write "$APPCTL_POLICY" - <<'EOF'
     path "transit/sign/workbricks-c1-release" { capabilities = ["update"] }
     path "transit/sign/workbricks-c1-release/sha2-256" { capabilities = ["update"] }
     path "transit/verify/workbricks-c1-release" { capabilities = ["update"] }
     path "transit/verify/workbricks-c1-release/sha2-256" { capabilities = ["update"] }
     path "transit/keys/workbricks-c1-release" { capabilities = ["read"] }
+    EOF
+    bao policy write "$AUDIT_POLICY" - <<'EOF'
     path "transit/sign/workbricks-c1-audit" { capabilities = ["update"] }
     path "transit/sign/workbricks-c1-audit/sha2-256" { capabilities = ["update"] }
     path "transit/verify/workbricks-c1-audit" { capabilities = ["update"] }
@@ -195,7 +233,8 @@ data:
     bao policy write "$SECRETS_POLICY" - <<'EOF'
     path "af/data/workbricks/c1/*" { capabilities = ["read"] }
     EOF
-    for pair in "$GK_POLICY:$GK_DESIRED" "$SIGN_POLICY:$SIGN_DESIRED" "$SECRETS_POLICY:$SECRETS_DESIRED"; do
+    for pair in "$GK_POLICY:$GK_DESIRED" "$APPCTL_POLICY:$APPCTL_DESIRED" "$AUDIT_POLICY:$AUDIT_DESIRED" \
+      "$SECRETS_POLICY:$SECRETS_DESIRED"; do
       policy="${pair%%:*}"; desired="${pair#*:}"
       raw="$(bao policy read "$policy")" || {
         echo "policy $policy could not be read back; aborting" >&2
@@ -206,7 +245,7 @@ data:
         exit 1
       }
     done
-    echo "policies $GK_POLICY, $SIGN_POLICY, $SECRETS_POLICY written and verified"
+    echo "policies $GK_POLICY, $APPCTL_POLICY, $AUDIT_POLICY, $SECRETS_POLICY written and verified"
 
     # ---- 5. The auth roles, WRITTEN and OWNED WHOLE -----------------------------------------------
     # The shape af-app-strive-pg-harness has live: the ServiceAccount's uid as the entity alias, a
@@ -292,8 +331,47 @@ data:
       echo "role $role written: $sa@{$namespaces} carries $policy"
     }
     write_role workbricks-c1-gatekeeper gatekeeper workbricks-c1 "$GK_POLICY"
-    write_role workbricks-c1-signing signing workbricks-c1 "$SIGN_POLICY"
+    write_role workbricks-c1-app-control app-control workbricks-c1 "$APPCTL_POLICY"
+    write_role workbricks-c1-audit audit workbricks-c1 "$AUDIT_POLICY"
     write_role workbricks-c1-secrets secret-delivery workbricks-c1,workbricks-c1-data "$SECRETS_POLICY"
+
+    # ---- 6. Retire workbricks-c1-signing: the role first, then the policy -------------------------
+    # After the replacements exist. The ROLE goes whatever it holds: deleting a login path only
+    # narrows access. The POLICY goes only when section 1 found it in its last reviewed form. Both
+    # absences are established from LISTS and checked again after the delete; absent = nothing to do.
+    # (Section 5 just wrote four roles, so the role list cannot legitimately come back empty.)
+    ROLE_LIST="$(bao list -format=json auth/kubernetes/role)" || {
+      echo "cannot list k8s-auth roles; aborting" >&2
+      exit 1
+    }
+    if echo "$ROLE_LIST" | grep -q "\"${RETIRED_SIGN}\""; then
+      bao delete "auth/kubernetes/role/$RETIRED_SIGN" >/dev/null
+      after="$(bao list -format=json auth/kubernetes/role)" || {
+        echo "cannot list k8s-auth roles after deleting $RETIRED_SIGN; aborting" >&2
+        exit 1
+      }
+      if echo "$after" | grep -q "\"${RETIRED_SIGN}\""; then
+        echo "retired role $RETIRED_SIGN is still listed after deleting it; aborting" >&2
+        exit 1
+      fi
+      echo "retired role $RETIRED_SIGN deleted"
+    else
+      echo "retired role $RETIRED_SIGN absent; nothing to delete"
+    fi
+    if [ "$RETIRE_SIGN_POLICY" = yes ]; then
+      bao policy delete "$RETIRED_SIGN" >/dev/null
+      left="$(bao policy list -format=json)" || {
+        echo "cannot list policies after deleting $RETIRED_SIGN; aborting" >&2
+        exit 1
+      }
+      if echo "$left" | grep -q "\"${RETIRED_SIGN}\""; then
+        echo "retired policy $RETIRED_SIGN is still listed after deleting it; aborting" >&2
+        exit 1
+      fi
+      echo "retired policy $RETIRED_SIGN deleted"
+    else
+      echo "retired policy $RETIRED_SIGN absent; nothing to delete"
+    fi
     echo "workbricks-c1 provisioning complete"
 ---
 apiVersion: batch/v1

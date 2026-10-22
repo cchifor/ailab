@@ -44,8 +44,8 @@ resources:
   # never writes it again (the harness service's strive-pg role; infrastructure/strive-pg-harness/).
   - strive-pg-harness-provision-job.yaml # policy + role + af/strive/pg-harness bootstrap (breakglass-auth)
   # An EIGHTH, and the first that is not KV at all: owns the `transit/` engine's three
-  # workbricks-c1-* signing keys (created once, never changed, non-exportable) plus three policies and
-  # three k8s-auth roles OUTRIGHT, and creates no KV document (Workbricks OR-10). A wipe REPLACES the
+  # workbricks-c1-* signing keys (created once, never changed, non-exportable) plus four policies and
+  # four k8s-auth roles OUTRIGHT (and retires the old workbricks-c1-signing pair), and creates no KV document (Workbricks OR-10). A wipe REPLACES the
   # keys: openbao-recovery.md, the TRANSIT row.
   - workbricks-c1-provision-job.yaml # transit + keys + policies + roles for the Workbricks cell (breakglass-auth)
   # NB: the Stage-1 k8s-auth canary (SecretStore/ExternalSecret) lives in ../openbao-canary/ — a SEPARATE

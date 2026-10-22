@@ -12,6 +12,15 @@
 # on a resource makes the API server refuse pods that omit it), and RuntimeClass overhead counts
 # against the quota (gvisor adds 80m / 24Mi per pod, kata 250m / 160Mi).
 #
+# Storage (Workbricks answer, 2026-10-22): everything persistent lives in workbricks-c1-data: the
+# database cluster (2 x 20Gi), the broker (10Gi) and the object store (50Gi), 90Gi steady state.
+# Workbricks asked for 100Gi / 6 PVCs; the quota is 120Gi / 8 so that one extra database volume fits
+# (a replica rebuild or a PVC expansion claims the new size before the old one is released, and a
+# quota refusal mid-operation would leave the database degraded). Growing beyond that is a request.
+# The other two namespaces may claim no storage at all (requests.storage 0, persistentvolumeclaims
+# 0), so nothing there can grow onto the NAS. That also refuses generic ephemeral volumes
+# (volumes[].ephemeral: they are materialised as PVCs): scratch space there is emptyDir only.
+#
 # `priority-guard`: zero pods of any PriorityClass other than workbricks-low. The Priority admission
 # plugin writes the global default (platform-normal) into a pod that names no class BEFORE quota is
 # evaluated, so a pod without priorityClassName is refused here too, rather than landing at a
@@ -30,6 +39,8 @@ spec:
     requests.memory: 4Gi
     limits.cpu: "3"
     limits.memory: 8Gi
+    requests.storage: "0"
+    persistentvolumeclaims: "0"
 ---
 apiVersion: v1
 kind: ResourceQuota
@@ -60,6 +71,8 @@ spec:
     requests.memory: 4Gi
     limits.cpu: "2"
     limits.memory: 8Gi
+    requests.storage: 120Gi
+    persistentvolumeclaims: "8"
 ---
 apiVersion: v1
 kind: ResourceQuota
@@ -90,6 +103,8 @@ spec:
     requests.memory: 1Gi
     limits.cpu: "1"
     limits.memory: 2Gi
+    requests.storage: "0"
+    persistentvolumeclaims: "0"
 ---
 apiVersion: v1
 kind: ResourceQuota
