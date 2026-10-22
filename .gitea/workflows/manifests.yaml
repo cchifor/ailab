@@ -172,7 +172,7 @@ jobs:
           bash scripts/tests/test-strive-pg-harness-provision.sh
 
       # The Workbricks cell c1's OpenBao provision script (transit engine, three non-exportable
-      # ecdsa-p256 keys, three policies, three k8s-auth roles) under its Job image against a real
+      # ecdsa-p256 keys, four policies, four k8s-auth roles, the signing-role retirement) under its Job image against a real
       # `bao server -dev`: create, keep, role drift, least privilege (no export/backup/rotate, KV read
       # on af/workbricks/c1/* only), policy drift, a foreign engine at transit/, an exportable key.
       - name: Workbricks c1 OpenBao provision under its Job image
