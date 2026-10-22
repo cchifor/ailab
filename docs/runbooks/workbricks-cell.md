@@ -19,6 +19,7 @@ DNS and GitOps change, is requested by the Workbricks team in their `operator-re
 | OR-11 | The cell's own Flux unit `workbricks-c1` (cchifor/workbricks, `deploy/cells/c1`, `main`), **suspended** until that path exists; read-only deploy key (Gitea key id 72) | `clusters/ai/workbricks-c1.yaml`, `clusters/ai/workbricks-c1-git-auth.yaml`, `workbricks-c1-bootstrap/` |
 | OR-11 | Its identity `flux-system/workbricks-c1-reconciler`: ClusterRole `workbricks-c1-deployer` bound by RoleBindings in the 3 namespaces only (no `escalate`/`bind`) | `infrastructure/workbricks-c1-operator/reconciler-rbac.yaml` |
 | OR-8/11 | VAP `workbricks-c1-certificate-issuer`: Certificates/CertificateRequests in the cell only from ClusterIssuer `letsencrypt-workbricks-c1` (not created yet, so none at all today) | `infrastructure/workbricks-c1-operator/certificate-issuer-guard.yaml` |
+| OR-11 | VAPs `workbricks-c1-{gateway-attachment,service-exposure,no-sa-token-secrets,scrape-scope,operator-owned}`: the paths other controllers would carry outside the cell | `infrastructure/workbricks-c1-operator/cell-admission-guards.yaml` |
 | OR-12 | zot push user `workbricks-ci` (`workbricks/**`, no delete); Actions secrets on `cchifor/workbricks` | `ansible/roles/registry_zot/defaults/main.yml`, `docs/runbooks/registry-cache.md` |
 | OR-13 | Cilium socket LB pinned off | `kubernetes/infra/bootstrap/cilium-values.yaml` |
 
@@ -69,6 +70,17 @@ $K auth can-i escalate roles -n workbricks-c1 --as=$R                 # no
   Deployment in `default` were refused. A kind the cell needs later is requested in its
   `operator-requests.md` and added here. Resuming the unit (dropping `suspend: true`) is a reviewed
   change, made once `deploy/cells/c1` exists in cchifor/workbricks.
+- **What RBAC does not bound.** The unit can run pods as any ServiceAccount in the cell, so its
+  reach includes those accounts' bindings (gatekeeper's `system:auth-delegator`,
+  `workbricks-c1-envoy-gateway`, the cell's OpenBao roles). Kept minimal by design. Writes that make
+  ANOTHER controller act outside the cell are refused by `cell-admission-guards.yaml`, for every creator
+  in a `workbricks/cell=c1` namespace: a Gateway must use class `workbricks-c1` and routes may attach
+  only to cell Gateways; Services are ClusterIP only with no `externalIPs` (so the cell's Envoy proxy
+  Service must be ClusterIP: public traffic arrives through the tunnel); no legacy ServiceAccount-token
+  Secrets; ServiceMonitors/PodMonitors may select only cell namespaces (the platform Prometheus does
+  not ignore namespace selectors); and the cell's unit may not change or delete anything labelled
+  `workbricks/operator-owned=true` (the `openbao-ca` ConfigMaps, its own RoleBindings). Measured
+  2026-10-22 with probe copies: 19 admit/deny cases as intended.
 - **Certificates.** `workbricks-c1-certificate-issuer` refuses any Certificate or CertificateRequest
   in a namespace labelled `workbricks/cell=c1` unless it names ClusterIssuer
   `letsencrypt-workbricks-c1` (any creator, cert-manager's shims included). That issuer does not

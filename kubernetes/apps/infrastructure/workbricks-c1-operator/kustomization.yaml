@@ -10,6 +10,7 @@ resources:
   - gatekeeper-auth-delegator.yaml # OR-4: TokenReview for the cell's token issuer
   - reconciler-rbac.yaml # OR-11: the identity the cell's own Flux unit impersonates (3 namespaces only)
   - certificate-issuer-guard.yaml # OR-8/OR-11: Certificates in the cell only from its own issuer
+  - cell-admission-guards.yaml # OR-11: gateway attachment, Service exposure, SA-token Secrets, scrape scope, operator-owned objects
 # OR-10 delivery: the CA the cell's namespaced External Secrets SecretStores pin to reach OpenBao
 # (caProvider: {type: ConfigMap, name: openbao-ca, key: ca.crt}). This is the PUBLIC ailab-root-ca
 # certificate, the same bytes as ../platform-access/ailab-root-ca.crt and the workers' copy (the
@@ -27,6 +28,7 @@ configMapGenerator:
       disableNameSuffixHash: true
       labels:
         workbricks/cell: c1
+        workbricks/operator-owned: "true" # the cell's unit may not change it (cell-admission-guards.yaml)
   - name: openbao-ca
     namespace: workbricks-c1-data
     files:
@@ -35,3 +37,4 @@ configMapGenerator:
       disableNameSuffixHash: true
       labels:
         workbricks/cell: c1
+        workbricks/operator-owned: "true" # the cell's unit may not change it (cell-admission-guards.yaml)

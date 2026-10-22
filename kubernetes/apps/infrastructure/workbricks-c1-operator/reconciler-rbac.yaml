@@ -13,8 +13,16 @@
 #     listed here, and no Role can grant ResourceQuota, LimitRange, Namespace, PriorityClass or
 #     RuntimeClass writes. Those stay the operator's (workbricks-c1-operator). `bind` is unnecessary
 #     because the reconciler holds every permission of the Roles it binds.
-#   * Never: Secrets beyond what the chart's Roles need, pods writes, serviceaccounts/token, nodes,
-#     anything in another namespace.
+#   * Not held: pods writes, serviceaccounts/token, nodes, anything in another namespace.
+#
+# WHAT RBAC DOES NOT BOUND, stated plainly (reviewer-claude, #1397): the unit can run pods as ANY
+# ServiceAccount in the cell's namespaces (a Deployment's serviceAccountName), so its effective reach
+# includes those ServiceAccounts' own bindings: system:auth-delegator for workbricks-c1/gatekeeper
+# (TokenReview/SubjectAccessReview create), workbricks-c1-envoy-gateway (node/namespace read, writes to
+# the cell's own GatewayClass), and the cell's OpenBao roles. Those are the cell's by design and kept
+# minimal. And some objects it may write make OTHER controllers act (gateway attachment, Service
+# exposure, legacy SA-token Secrets, monitor namespace selectors); cell-admission-guards.yaml closes
+# those paths, and certificate-issuer-guard.yaml the certificate one.
 # Additions are requested in the cell's operator-requests.md and reviewed here (stage 5 will ask for
 # the sandbox runtime's agents.x-k8s.io kinds).
 apiVersion: v1
@@ -142,6 +150,7 @@ metadata:
   namespace: workbricks-c1
   labels:
     workbricks/cell: c1
+    workbricks/operator-owned: "true" # the unit cannot edit or delete its own binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -158,6 +167,7 @@ metadata:
   namespace: workbricks-c1-data
   labels:
     workbricks/cell: c1
+    workbricks/operator-owned: "true" # the unit cannot edit or delete its own binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -174,6 +184,7 @@ metadata:
   namespace: workbricks-c1-sandbox
   labels:
     workbricks/cell: c1
+    workbricks/operator-owned: "true" # the unit cannot edit or delete its own binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
