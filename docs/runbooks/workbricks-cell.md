@@ -16,12 +16,17 @@ DNS and GitOps change, is requested by the Workbricks team in their `operator-re
 | OR-7 | The controller's cluster RBAC, GatewayClass `workbricks-c1` | `infrastructure/workbricks-c1-gateway/` |
 | OR-10 | OpenBao: `transit/` + keys `workbricks-c1-{jwks-root,release,audit}`, policies and k8s-auth roles `workbricks-c1-{gatekeeper,signing,secrets}`, KV prefix `af/workbricks/c1/*` | `infrastructure/security/openbao/workbricks-c1-provision-job.yaml` |
 | OR-10 | ConfigMap `openbao-ca` (the public ailab root CA) in `workbricks-c1` and `-data`, for the cell's SecretStores | `infrastructure/workbricks-c1-operator/` |
+| OR-11 | The cell's own Flux unit `workbricks-c1` (cchifor/workbricks, `deploy/cells/c1`, `main`), **suspended** until that path exists; read-only deploy key (Gitea key id 72) | `clusters/ai/workbricks-c1.yaml`, `clusters/ai/workbricks-c1-git-auth.yaml`, `workbricks-c1-bootstrap/` |
+| OR-11 | Its identity `flux-system/workbricks-c1-reconciler`: ClusterRole `workbricks-c1-deployer` bound by RoleBindings in the 3 namespaces only (no `escalate`/`bind`) | `infrastructure/workbricks-c1-operator/reconciler-rbac.yaml` |
+| OR-8/11 | VAP `workbricks-c1-certificate-issuer`: Certificates/CertificateRequests in the cell only from ClusterIssuer `letsencrypt-workbricks-c1` (not created yet, so none at all today) | `infrastructure/workbricks-c1-operator/certificate-issuer-guard.yaml` |
+| OR-11 | VAPs `workbricks-c1-{gateway-attachment,service-exposure,no-sa-token-secrets,scrape-scope,secret-store-scope,operator-owned}`: the paths other controllers would carry outside the cell | `infrastructure/workbricks-c1-operator/cell-admission-guards.yaml` |
 | OR-12 | zot push user `workbricks-ci` (`workbricks/**`, no delete); Actions secrets on `cchifor/workbricks` | `ansible/roles/registry_zot/defaults/main.yml`, `docs/runbooks/registry-cache.md` |
 | OR-13 | Cilium socket LB pinned off | `kubernetes/infra/bootstrap/cilium-values.yaml` |
 
 Paths under `infrastructure/` and `clusters/` are relative to `kubernetes/apps/`. The CRDs cannot be a
 HelmRelease: Helm's release Secret would exceed the 1 MiB object limit (about 2.5 MB of CRDs). Flux units:
-`workbricks-c1-operator`, `workbricks-c1-gateway` and `envoy-gateway-crds-upstream` (`kubernetes/apps/clusters/ai/`).
+`workbricks-c1-operator`, `workbricks-c1-gateway`, `envoy-gateway-crds-upstream`, `workbricks-c1-git-auth` and
+the cell's own `workbricks-c1` (`kubernetes/apps/clusters/ai/`).
 
 ## Verify
 
@@ -34,6 +39,12 @@ $K get crd | grep gateway.envoyproxy.io                       # 8 CRDs
 $K get gatewayclass workbricks-c1                             # Accepted once the cell's controller runs
 $K auth can-i create tokenreviews --as=system:serviceaccount:workbricks-c1:gatekeeper   # yes
 $K auth can-i update gatewayclasses/traefik --as=system:serviceaccount:workbricks-c1:envoy-gateway  # no
+$K -n flux-system get kustomization workbricks-c1                   # suspended until deploy/cells/c1 exists
+R=system:serviceaccount:flux-system:workbricks-c1-reconciler
+$K auth can-i create deployments -n workbricks-c1 --as=$R             # yes
+$K auth can-i create deployments -n default --as=$R                   # no
+$K auth can-i update resourcequotas -n workbricks-c1 --as=$R          # no
+$K auth can-i escalate roles -n workbricks-c1 --as=$R                 # no
 ```
 
 ## Rules that protect the platform
@@ -51,7 +62,35 @@ $K auth can-i update gatewayclasses/traefik --as=system:serviceaccount:workbrick
   `config.envoyGateway.provider.kubernetes.proxyTopologyInjector.disabled=true`); its chart's
   ClusterRole/ClusterRoleBinding are dropped from the cell's render in favour of
   `workbricks-c1-envoy-gateway`, which can write only the `workbricks-c1` GatewayClass.
-- **Retiring the cell** is explicit: delete its Flux unit, export its data, then
+- **The cell's own unit** (`workbricks-c1`) impersonates `workbricks-c1-reconciler`. Its ClusterRole
+  is the cell's declared kinds plus exactly what Envoy Gateway's chart writes into its namespaced
+  Roles, so those Roles can be created without `escalate`; nothing it creates can grant ResourceQuota,
+  LimitRange or Namespace writes. Measured 2026-10-22 with a probe of this ClusterRole: the chart's
+  4 Roles and 4 RoleBindings were admitted; a ResourceQuota Role, a RoleBinding to `admin` and a
+  Deployment in `default` were refused. A kind the cell needs later is requested in its
+  `operator-requests.md` and added here. Resuming the unit (dropping `suspend: true`) is a reviewed
+  change, made once `deploy/cells/c1` exists in cchifor/workbricks.
+- **What RBAC does not bound.** The unit can run pods as any ServiceAccount in the cell, so its
+  reach includes those accounts' bindings (gatekeeper's `system:auth-delegator`,
+  `workbricks-c1-envoy-gateway`, the cell's OpenBao roles). Kept minimal by design. Pod specs are
+  bounded by Pod Security `restricted`, enforced on the three Namespaces, which the unit cannot write
+  (a privileged hostNetwork pod is refused). Writes that make
+  ANOTHER controller act outside the cell are refused by `cell-admission-guards.yaml`, for every creator
+  in a `workbricks/cell=c1` namespace: a Gateway must use class `workbricks-c1` and its listeners may
+  admit routes only from cell namespaces, routes may attach only to cell Gateways, and ReferenceGrants
+  may grant only the cell's own namespaces; Services are ClusterIP only with no `externalIPs` (so the cell's Envoy proxy
+  Service must be ClusterIP: public traffic arrives through the tunnel); no legacy ServiceAccount-token
+  Secrets; ServiceMonitors/PodMonitors may select only cell namespaces (the platform Prometheus does
+  not ignore namespace selectors); ExternalSecrets may read only through a namespaced SecretStore
+  (no ClusterSecretStore, no ClusterGenerator); and the cell's unit may not change or delete anything labelled
+  `workbricks/operator-owned=true` (the `openbao-ca` ConfigMaps, its own RoleBindings). Measured
+  2026-10-22 with probe copies: every admit/deny case as intended.
+- **Certificates.** `workbricks-c1-certificate-issuer` refuses any Certificate or CertificateRequest
+  in a namespace labelled `workbricks/cell=c1` unless it names ClusterIssuer
+  `letsencrypt-workbricks-c1` (any creator, cert-manager's shims included). That issuer does not
+  exist yet; public TLS for the cell is planned at Cloudflare's edge, like strive.place.
+- **Retiring the cell** is explicit: delete its Flux unit, remove its deploy key from
+  cchifor/workbricks, export its data, then
   `kubectl delete ns workbricks-c1 workbricks-c1-data workbricks-c1-sandbox`. Removing
   `workbricks-c1-operator` from git leaves the namespaces (prune disabled) and removing
   `envoy-gateway-crds-upstream` leaves the CRDs (`kustomize.toolkit.fluxcd.io/prune: disabled`). That unit

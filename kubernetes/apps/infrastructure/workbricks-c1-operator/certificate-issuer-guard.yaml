@@ -1,0 +1,55 @@
+# Workbricks OR-8 / OR-11: certificates in the cell's namespaces may come ONLY from the cell's own
+# issuer. cert-manager does not restrict which names a namespace may request from a ClusterIssuer:
+# without this, a Certificate in a cell namespace could use `letsencrypt-cloudflare` (the
+# estate-wide Cloudflare token, so any chifor.me / trueswarm name) or `ailab-ca` (the estate's
+# internal CA, so e.g. openbao.openbao.svc). The cell's reconciler may create Certificates
+# (reconciler-rbac.yaml); this is what bounds them.
+#
+# The allowed issuer, ClusterIssuer `letsencrypt-workbricks-c1`, does NOT exist yet: OR-8 is open,
+# and with the owner's direction (TLS at Cloudflare's edge, like strive.place) the cell may never
+# need one. Until it exists, no Certificate can be created in the cell's namespaces at all, which is
+# the intended default. Its names (dnsNames under the cell's domains) get a second clause in the same
+# change that creates the issuer.
+#
+# Applies to EVERY creator, not just the reconciler: cert-manager's own shims (ingress-shim,
+# gateway-shim) create Certificates from annotations, and CertificateRequests are matched too, so
+# nothing reaches an issuer around the Certificate check. Status writes are a subresource and do not
+# match. `issuerRef.kind` defaults to Issuer and `group` to cert-manager.io when omitted, so kind must
+# be explicit and group either absent or cert-manager.io.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workbricks-c1-certificate-issuer
+  labels:
+    workbricks/cell: c1
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        workbricks/cell: c1
+    resourceRules:
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["certificates", "certificaterequests"]
+  validations:
+    - expression: >-
+        has(object.spec.issuerRef) &&
+        object.spec.issuerRef.name == 'letsencrypt-workbricks-c1' &&
+        has(object.spec.issuerRef.kind) && object.spec.issuerRef.kind == 'ClusterIssuer' &&
+        (!has(object.spec.issuerRef.group) || object.spec.issuerRef.group == '' ||
+         object.spec.issuerRef.group == 'cert-manager.io')
+      message: >-
+        Certificates and CertificateRequests in the Workbricks cell's namespaces must use issuerRef
+        {kind: ClusterIssuer, name: letsencrypt-workbricks-c1} (docs/runbooks/workbricks-cell.md).
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workbricks-c1-certificate-issuer
+  labels:
+    workbricks/cell: c1
+spec:
+  policyName: workbricks-c1-certificate-issuer
+  validationActions: ["Deny"]

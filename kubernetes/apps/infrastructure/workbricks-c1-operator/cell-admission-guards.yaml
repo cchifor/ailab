@@ -1,0 +1,277 @@
+# Workbricks OR-11: admission guards for the paths RBAC cannot see. RBAC confines what the cell's
+# reconciler may WRITE (reconciler-rbac.yaml), but some objects it may write make ANOTHER controller
+# act outside the cell. These policies close those paths. Each applies to every creator in a namespace
+# labelled workbricks/cell=c1 (the reconciler, the cell's own controllers, a human), except the last,
+# which is about the reconciler only. Found in review (reviewer-claude, ailab #1397).
+#
+#   gateway-attachment  a Gateway must use the cell's GatewayClass; routes may attach only to Gateways
+#                       in the cell's namespaces. Otherwise a platform gateway controller could provision
+#                       listeners, or serve routes, on the cell's behalf. A cell Gateway's listeners
+#                       may admit routes only from cell namespaces, and ReferenceGrants may grant only
+#                       the cell's own namespaces.
+#   service-exposure    Services are ClusterIP only (headless included), with no spec.externalIPs:
+#                       Cilium's kube-proxy replacement honours externalIPs (the CVE-2020-8554 class:
+#                       capture traffic to any IP), and DenyServiceExternalIPs is not enabled on this
+#                       apiserver. LoadBalancer/NodePort would expose the cell past the edge (public
+#                       traffic arrives via the Cloudflare tunnel); ExternalName could point a cell
+#                       client anywhere. So the cell's Envoy proxy Service must be ClusterIP
+#                       (EnvoyProxy spec.provider.kubernetes.envoyService.type).
+#   no-sa-token-secrets no legacy kubernetes.io/service-account-token Secrets: they would mint a
+#                       non-expiring token for any cell ServiceAccount and put it in a readable Secret.
+#                       Pods use projected tokens.
+#   scrape-scope        ServiceMonitors/PodMonitors may select only the cell's namespaces. The platform
+#                       Prometheus does not set ignoreNamespaceSelectors, so `any: true` would scrape
+#                       every namespace.
+#   secret-store-scope  an ExternalSecret may read only through a namespaced SecretStore (and no
+#                       ClusterGenerator): a ClusterSecretStore would read with platform credentials,
+#                       and one without spec.conditions serves every namespace. None exists today.
+#   operator-owned      the reconciler may not change or delete an object labelled
+#                       workbricks/operator-owned=true (the openbao-ca ConfigMaps, its own
+#                       RoleBindings). Both units apply as field manager kustomize-controller, so a cell
+#                       manifest naming one of them would otherwise fight workbricks-c1-operator silently
+#                       instead of failing.
+# NOT here because it is already enforced: Pod Security `restricted` (enforce/warn/audit) on the three
+# Namespaces (namespaces.yaml). The reconciler cannot write Namespaces, so no workload it creates, nor
+# any pod the cell's Envoy Gateway renders, can be privileged or use host namespaces or hostPath:
+# measured 2026-10-22, a privileged hostNetwork pod in workbricks-c1 is refused by PodSecurity.
+# Measured with probe copies before merge (see the PR). A guard that has to loosen is requested in the
+# cell's operator-requests.md.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workbricks-c1-gateway-attachment
+  labels:
+    workbricks/cell: c1
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        workbricks/cell: c1
+    resourceRules:
+      - apiGroups: ["gateway.networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["gateways", "httproutes", "grpcroutes", "tcproutes", "tlsroutes", "udproutes", "referencegrants"]
+  validations:
+    - expression: "request.kind.kind != 'Gateway' || object.spec.gatewayClassName == 'workbricks-c1'"
+      message: "A Gateway in the Workbricks cell must use gatewayClassName workbricks-c1."
+    # reviewer-codex, #1397: a cell Gateway could itself admit routes from other namespaces
+    # (allowedRoutes from: All, or a broad selector). A listener may admit routes only from its own
+    # namespace (Same, the default) or through a Selector pinned to cell namespaces by the
+    # apiserver-managed kubernetes.io/metadata.name label (which no one can set on another namespace).
+    # Selector terms are ANDed, so one such term is enough to confine it.
+    - expression: >-
+        request.kind.kind != 'Gateway' || object.spec.listeners.all(l,
+          !has(l.allowedRoutes) || !has(l.allowedRoutes.namespaces) ||
+          !has(l.allowedRoutes.namespaces.from) || l.allowedRoutes.namespaces.from == 'Same' ||
+          (l.allowedRoutes.namespaces.from == 'Selector' && has(l.allowedRoutes.namespaces.selector) &&
+            ((has(l.allowedRoutes.namespaces.selector.matchLabels) &&
+              'kubernetes.io/metadata.name' in l.allowedRoutes.namespaces.selector.matchLabels &&
+              l.allowedRoutes.namespaces.selector.matchLabels['kubernetes.io/metadata.name'] in
+                ['workbricks-c1', 'workbricks-c1-data', 'workbricks-c1-sandbox']) ||
+             (has(l.allowedRoutes.namespaces.selector.matchExpressions) &&
+              l.allowedRoutes.namespaces.selector.matchExpressions.exists(e,
+                e.key == 'kubernetes.io/metadata.name' && e.operator == 'In' && has(e.values) &&
+                e.values.all(v, v in ['workbricks-c1', 'workbricks-c1-data', 'workbricks-c1-sandbox']))))))
+      message: "A Gateway listener in the Workbricks cell may admit routes only from the cell's namespaces (Same, or a Selector on kubernetes.io/metadata.name In the cell's namespaces)."
+    - expression: >-
+        request.kind.kind == 'Gateway' || !has(object.spec.parentRefs) ||
+        object.spec.parentRefs.all(p,
+          (!has(p.kind) || p.kind == 'Gateway') &&
+          (!has(p.group) || p.group == 'gateway.networking.k8s.io') &&
+          (!has(p.namespace) || p.namespace in ['workbricks-c1', 'workbricks-c1-data', 'workbricks-c1-sandbox']))
+      message: "A route in the Workbricks cell may attach only to a Gateway in the cell's namespaces."
+    # reviewer-codex, #1397: a ReferenceGrant in a cell namespace authorizes objects in its `from`
+    # namespaces to reference cell objects, so another namespace's routes could be made to expose or
+    # consume cell Services. Grants may name only the cell's own namespaces.
+    - expression: >-
+        request.kind.kind != 'ReferenceGrant' ||
+        object.spec.from.all(f, f.namespace in ['workbricks-c1', 'workbricks-c1-data', 'workbricks-c1-sandbox'])
+      message: "A ReferenceGrant in the Workbricks cell may grant only the cell's own namespaces."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workbricks-c1-gateway-attachment
+  labels:
+    workbricks/cell: c1
+spec:
+  policyName: workbricks-c1-gateway-attachment
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workbricks-c1-service-exposure
+  labels:
+    workbricks/cell: c1
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        workbricks/cell: c1
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  validations:
+    - expression: "!has(object.spec.type) || object.spec.type == 'ClusterIP'"
+      message: "Services in the Workbricks cell must be type ClusterIP (public traffic arrives through the edge tunnel)."
+    - expression: "!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0"
+      message: "Services in the Workbricks cell may not set spec.externalIPs."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workbricks-c1-service-exposure
+  labels:
+    workbricks/cell: c1
+spec:
+  policyName: workbricks-c1-service-exposure
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workbricks-c1-no-sa-token-secrets
+  labels:
+    workbricks/cell: c1
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        workbricks/cell: c1
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+  validations:
+    - expression: "!has(object.type) || object.type != 'kubernetes.io/service-account-token'"
+      message: "Legacy ServiceAccount token Secrets are not allowed in the Workbricks cell; use projected tokens."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workbricks-c1-no-sa-token-secrets
+  labels:
+    workbricks/cell: c1
+spec:
+  policyName: workbricks-c1-no-sa-token-secrets
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workbricks-c1-scrape-scope
+  labels:
+    workbricks/cell: c1
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        workbricks/cell: c1
+    resourceRules:
+      - apiGroups: ["monitoring.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["servicemonitors", "podmonitors"]
+  validations:
+    - expression: >-
+        !has(object.spec.namespaceSelector) ||
+        ((!has(object.spec.namespaceSelector.any) || !object.spec.namespaceSelector.any) &&
+         (!has(object.spec.namespaceSelector.matchNames) ||
+          object.spec.namespaceSelector.matchNames.all(n, n in ['workbricks-c1', 'workbricks-c1-data', 'workbricks-c1-sandbox'])))
+      message: "Monitors in the Workbricks cell may select only the cell's namespaces (no any: true)."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workbricks-c1-scrape-scope
+  labels:
+    workbricks/cell: c1
+spec:
+  policyName: workbricks-c1-scrape-scope
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workbricks-c1-operator-owned
+  labels:
+    workbricks/cell: c1
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        workbricks/cell: c1
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["*"]
+  matchConditions:
+    - name: only-the-cell-reconciler
+      expression: "request.userInfo.username == 'system:serviceaccount:flux-system:workbricks-c1-reconciler'"
+  validations:
+    - expression: >-
+        !(has(oldObject.metadata.labels) && 'workbricks/operator-owned' in oldObject.metadata.labels &&
+          oldObject.metadata.labels['workbricks/operator-owned'] == 'true')
+      message: "This object is owned by the cluster operator (workbricks/operator-owned=true); the cell's unit may not change or delete it."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workbricks-c1-operator-owned
+  labels:
+    workbricks/cell: c1
+spec:
+  policyName: workbricks-c1-operator-owned
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workbricks-c1-secret-store-scope
+  labels:
+    workbricks/cell: c1
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        workbricks/cell: c1
+    resourceRules:
+      - apiGroups: ["external-secrets.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["externalsecrets"]
+  validations:
+    - expression: >-
+        !has(object.spec.secretStoreRef) || !has(object.spec.secretStoreRef.kind) ||
+        object.spec.secretStoreRef.kind == 'SecretStore'
+      message: "An ExternalSecret in the Workbricks cell must use a namespaced SecretStore, not a ClusterSecretStore."
+    - expression: >-
+        (!has(object.spec.data) || object.spec.data.all(d, !has(d.sourceRef) ||
+          ((!has(d.sourceRef.storeRef) || !has(d.sourceRef.storeRef.kind) || d.sourceRef.storeRef.kind == 'SecretStore') &&
+           (!has(d.sourceRef.generatorRef) || d.sourceRef.generatorRef.kind != 'ClusterGenerator')))) &&
+        (!has(object.spec.dataFrom) || object.spec.dataFrom.all(d, !has(d.sourceRef) ||
+          ((!has(d.sourceRef.storeRef) || !has(d.sourceRef.storeRef.kind) || d.sourceRef.storeRef.kind == 'SecretStore') &&
+           (!has(d.sourceRef.generatorRef) || d.sourceRef.generatorRef.kind != 'ClusterGenerator'))))
+      message: "ExternalSecret sourceRefs in the Workbricks cell may use only a namespaced SecretStore, and no ClusterGenerator."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workbricks-c1-secret-store-scope
+  labels:
+    workbricks/cell: c1
+spec:
+  policyName: workbricks-c1-secret-store-scope
+  validationActions: ["Deny"]
