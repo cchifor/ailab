@@ -150,7 +150,9 @@ data:
       echo "--- end retired policy ---"
       if [ "$(printf '%s\n' "$prev" | normalise)" != "$RETIRED_SIGN_FORM" ]; then
         echo "REFUSING: retired policy $RETIRED_SIGN does not match its last reviewed form. Something" >&2
-        echo "changed it outside git; an operator must decide before this Job deletes it." >&2
+        echo "changed it outside git, and this Job deletes only the reviewed form. To unblock, review the" >&2
+        echo "policy printed above, then EITHER delete it by hand (bao policy delete $RETIRED_SIGN; the" >&2
+        echo "role goes on the next run) OR restore RETIRED_SIGN_FORM (bao policy write) and re-run." >&2
         exit 1
       fi
       echo "retired policy $RETIRED_SIGN matches its last reviewed form; will be deleted"
