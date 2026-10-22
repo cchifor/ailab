@@ -1,0 +1,184 @@
+# Workbricks OR-11: the identity the cell's own Flux unit (clusters/ai/workbricks-c1.yaml)
+# impersonates. It is the cell's whole write boundary on this cluster:
+#   * a ClusterRole used ONLY through RoleBindings in the three cell namespaces. There is no
+#     ClusterRoleBinding, so it grants nothing outside workbricks-c1, workbricks-c1-data and
+#     workbricks-c1-sandbox, and nothing cluster-scoped;
+#   * the kinds the cell declared (dev-worker-2's operator-requests.md, "OR-11: kinds") with full
+#     CRUD, so prune and garbage collection work;
+#   * PLUS exactly the permissions Envoy Gateway v1.9.2's chart writes into its NAMESPACED Roles in
+#     the watched namespaces (provider.kubernetes.watch.type=Namespaces): the reconciler creates those
+#     Roles, and Kubernetes RBAC lets a subject create a Role only if it already holds every rule in
+#     it, unless it has `escalate`. Holding them is what makes `escalate` unnecessary.
+#   * NO `escalate`, `bind` or `impersonate`. So every Role the unit creates can hold only what is
+#     listed here, and no Role can grant ResourceQuota, LimitRange, Namespace, PriorityClass or
+#     RuntimeClass writes. Those stay the operator's (workbricks-c1-operator). `bind` is unnecessary
+#     because the reconciler holds every permission of the Roles it binds.
+#   * Never: Secrets beyond what the chart's Roles need, pods writes, serviceaccounts/token, nodes,
+#     anything in another namespace.
+# Additions are requested in the cell's operator-requests.md and reviewed here (stage 5 will ask for
+# the sandbox runtime's agents.x-k8s.io kinds).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workbricks-c1-reconciler
+  namespace: flux-system
+  labels:
+    workbricks/cell: c1
+automountServiceAccountToken: false # only kustomize-controller impersonates it, via TokenRequest
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workbricks-c1-deployer
+  labels:
+    workbricks/cell: c1
+rules:
+  # ---- the cell's declared kinds, full CRUD -------------------------------------------------
+  # deletecollection on configmaps/services/serviceaccounts: Envoy Gateway's infra-manager Role has it.
+  - apiGroups: [""]
+    resources: [configmaps, services, serviceaccounts]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # daemonsets: not one of the cell's kinds, but the infra-manager Role grants it (Envoy proxies as a
+  # DaemonSet). The quotas and the priority guard still bound anything it would create.
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [postgresql.cnpg.io]
+    resources: [clusters, poolers, scheduledbackups]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gateways, httproutes, grpcroutes, referencegrants]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [gateway.envoyproxy.io]
+    resources: [envoyproxies, securitypolicies, clienttrafficpolicies, backendtrafficpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [external-secrets.io]
+    resources: [secretstores, externalsecrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Certificates are additionally limited to the cell's own issuer by admission
+  # (certificate-issuer-guard.yaml).
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [monitoring.coreos.com]
+    resources: [servicemonitors, podmonitors, prometheusrules]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # ---- held only so Envoy Gateway's namespaced Roles can be created without `escalate` ---------
+  # envoy-gateway-role reads Secrets (listener TLS); the certgen Role gets/creates/updates the
+  # controller's own certificate Secret. The cell applies no Secret itself (ExternalSecret does).
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update]
+  # Read-only. The chart's pods/pods/binding WRITE rule exists only with the topology injector, which
+  # the cell runs disabled (OR-7), so it is deliberately not held: a render that still carries it fails.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [coordination.k8s.io] # leader election
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [listenersets, tcproutes, tlsroutes, udproutes, backendtlspolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources:
+      - gateways/status
+      - listenersets/status
+      - grpcroutes/status
+      - httproutes/status
+      - tcproutes/status
+      - tlsroutes/status
+      - udproutes/status
+      - backendtlspolicies/status
+    verbs: [update]
+  - apiGroups: [gateway.envoyproxy.io]
+    resources: [envoypatchpolicies, envoyextensionpolicies, backends, httproutefilters]
+    verbs: [get, list, watch]
+  - apiGroups: [gateway.envoyproxy.io]
+    resources:
+      - envoyproxies/status
+      - envoypatchpolicies/status
+      - clienttrafficpolicies/status
+      - backendtrafficpolicies/status
+      - securitypolicies/status
+      - envoyextensionpolicies/status
+      - backends/status
+    verbs: [update]
+  # Inert under a RoleBinding: ClusterTrustBundle is cluster-scoped, and a namespaced binding cannot
+  # authorize a cluster-scoped request (the API is not even served here). Present only because the
+  # chart's infra-manager Role lists it, and that Role could not be created without it.
+  - apiGroups: [certificates.k8s.io]
+    resources: [clustertrustbundles]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workbricks-c1-reconciler
+  namespace: workbricks-c1
+  labels:
+    workbricks/cell: c1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workbricks-c1-deployer
+subjects:
+  - kind: ServiceAccount
+    name: workbricks-c1-reconciler
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workbricks-c1-reconciler
+  namespace: workbricks-c1-data
+  labels:
+    workbricks/cell: c1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workbricks-c1-deployer
+subjects:
+  - kind: ServiceAccount
+    name: workbricks-c1-reconciler
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workbricks-c1-reconciler
+  namespace: workbricks-c1-sandbox
+  labels:
+    workbricks/cell: c1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workbricks-c1-deployer
+subjects:
+  - kind: ServiceAccount
+    name: workbricks-c1-reconciler
+    namespace: flux-system

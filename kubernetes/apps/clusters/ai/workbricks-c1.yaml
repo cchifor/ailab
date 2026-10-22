@@ -1,0 +1,46 @@
+# The Workbricks cell c1's OWN Flux unit (Workbricks OR-11): the cell's release records in
+# cchifor/workbricks, path deploy/cells/c1, branch main (every change reaches main only through
+# reviewed, bot-merged PRs there). The cell deploys additively beside the platform.
+#
+# SUSPENDED until deploy/cells/c1 exists: the first stage 2 deployment PR in cchifor/workbricks
+# creates it, and dev-worker-2 says so in its operator-requests.md. Resuming = drop `suspend: true`
+# here, in a reviewed PR, after checking that the path builds.
+#
+# THE BOUNDARY IS RBAC, not review alone. The unit impersonates flux-system/workbricks-c1-reconciler
+# (infrastructure/workbricks-c1-operator/reconciler-rbac.yaml), which is bound ONLY in the three cell
+# namespaces and ONLY to the kinds the cell declared: it cannot create, change or prune anything
+# outside them, nor anything cluster-scoped, nor its own Namespaces, ResourceQuotas, LimitRanges or
+# PriorityClass. "Prune only inside the cell" is therefore a property of the identity, and the cell's
+# inventory diff before and after each deployment is a second check, not the only one. No
+# targetNamespace (the cell's manifests name their own namespaces), no dependsOn on another product's
+# unit, no SOPS decryption (the cell's secrets come from OpenBao through External Secrets).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: workbricks-c1
+  namespace: flux-system
+spec:
+  interval: 5m
+  url: ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/workbricks.git
+  ref:
+    branch: main
+  secretRef:
+    name: workbricks-c1-deploy-key
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: workbricks-c1
+  namespace: flux-system
+spec:
+  suspend: true # resume when deploy/cells/c1 exists (see the header)
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  sourceRef:
+    kind: GitRepository
+    name: workbricks-c1
+  path: ./deploy/cells/c1
+  prune: true
+  wait: true
+  serviceAccountName: workbricks-c1-reconciler

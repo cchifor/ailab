@@ -90,6 +90,8 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # from upstream's tagged source: the external `envoy-gateway` entry, not a local path.)
         "./kubernetes/apps/infrastructure/workbricks-c1-operator",
         "./kubernetes/apps/infrastructure/workbricks-c1-gateway",
+        # 2026-10-22 — the read-only deploy key for the cell's own Flux unit (workbricks-c1-git-auth).
+        "./kubernetes/apps/workbricks-c1-bootstrap",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",
@@ -267,7 +269,7 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab"), ("flux-system", "envoy-gateway")},
+            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab"), ("flux-system", "envoy-gateway"), ("flux-system", "workbricks-c1")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))

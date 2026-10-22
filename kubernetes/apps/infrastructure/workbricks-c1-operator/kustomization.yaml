@@ -8,6 +8,8 @@ resources:
   - resource-quotas.yaml # OR-5 compute quotas + the OR-6 priority guard
   - priority-class.yaml # OR-6: workbricks-low (500, never preempts)
   - gatekeeper-auth-delegator.yaml # OR-4: TokenReview for the cell's token issuer
+  - reconciler-rbac.yaml # OR-11: the identity the cell's own Flux unit impersonates (3 namespaces only)
+  - certificate-issuer-guard.yaml # OR-8/OR-11: Certificates in the cell only from its own issuer
 # OR-10 delivery: the CA the cell's namespaced External Secrets SecretStores pin to reach OpenBao
 # (caProvider: {type: ConfigMap, name: openbao-ca, key: ca.crt}). This is the PUBLIC ailab-root-ca
 # certificate, the same bytes as ../platform-access/ailab-root-ca.crt and the workers' copy (the
