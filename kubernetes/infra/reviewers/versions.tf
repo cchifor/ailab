@@ -3,7 +3,7 @@ terraform {
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
-      version = "~> 0.117" # same pin as the Talos (infra/), ai-lxc, and runners modules
+      version = "~> 0.118" # same pin as the Talos (infra/), ai-lxc, and runners modules
     }
   }
 }
