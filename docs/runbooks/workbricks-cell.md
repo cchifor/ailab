@@ -76,8 +76,9 @@ $K auth can-i escalate roles -n workbricks-c1 --as=$R                 # no
   bounded by Pod Security `restricted`, enforced on the three Namespaces, which the unit cannot write
   (a privileged hostNetwork pod is refused). Writes that make
   ANOTHER controller act outside the cell are refused by `cell-admission-guards.yaml`, for every creator
-  in a `workbricks/cell=c1` namespace: a Gateway must use class `workbricks-c1`, routes may attach
-  only to cell Gateways, and ReferenceGrants may grant only the cell's own namespaces; Services are ClusterIP only with no `externalIPs` (so the cell's Envoy proxy
+  in a `workbricks/cell=c1` namespace: a Gateway must use class `workbricks-c1` and its listeners may
+  admit routes only from cell namespaces, routes may attach only to cell Gateways, and ReferenceGrants
+  may grant only the cell's own namespaces; Services are ClusterIP only with no `externalIPs` (so the cell's Envoy proxy
   Service must be ClusterIP: public traffic arrives through the tunnel); no legacy ServiceAccount-token
   Secrets; ServiceMonitors/PodMonitors may select only cell namespaces (the platform Prometheus does
   not ignore namespace selectors); ExternalSecrets may read only through a namespaced SecretStore

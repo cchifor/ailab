@@ -6,8 +6,9 @@
 #
 #   gateway-attachment  a Gateway must use the cell's GatewayClass; routes may attach only to Gateways
 #                       in the cell's namespaces. Otherwise a platform gateway controller could provision
-#                       listeners, or serve routes, on the cell's behalf. ReferenceGrants may grant
-#                       only the cell's own namespaces.
+#                       listeners, or serve routes, on the cell's behalf. A cell Gateway's listeners
+#                       may admit routes only from cell namespaces, and ReferenceGrants may grant only
+#                       the cell's own namespaces.
 #   service-exposure    Services are ClusterIP only (headless included), with no spec.externalIPs:
 #                       Cilium's kube-proxy replacement honours externalIPs (the CVE-2020-8554 class:
 #                       capture traffic to any IP), and DenyServiceExternalIPs is not enabled on this
@@ -55,6 +56,25 @@ spec:
   validations:
     - expression: "request.kind.kind != 'Gateway' || object.spec.gatewayClassName == 'workbricks-c1'"
       message: "A Gateway in the Workbricks cell must use gatewayClassName workbricks-c1."
+    # reviewer-codex, #1397: a cell Gateway could itself admit routes from other namespaces
+    # (allowedRoutes from: All, or a broad selector). A listener may admit routes only from its own
+    # namespace (Same, the default) or through a Selector pinned to cell namespaces by the
+    # apiserver-managed kubernetes.io/metadata.name label (which no one can set on another namespace).
+    # Selector terms are ANDed, so one such term is enough to confine it.
+    - expression: >-
+        request.kind.kind != 'Gateway' || object.spec.listeners.all(l,
+          !has(l.allowedRoutes) || !has(l.allowedRoutes.namespaces) ||
+          !has(l.allowedRoutes.namespaces.from) || l.allowedRoutes.namespaces.from == 'Same' ||
+          (l.allowedRoutes.namespaces.from == 'Selector' && has(l.allowedRoutes.namespaces.selector) &&
+            ((has(l.allowedRoutes.namespaces.selector.matchLabels) &&
+              'kubernetes.io/metadata.name' in l.allowedRoutes.namespaces.selector.matchLabels &&
+              l.allowedRoutes.namespaces.selector.matchLabels['kubernetes.io/metadata.name'] in
+                ['workbricks-c1', 'workbricks-c1-data', 'workbricks-c1-sandbox']) ||
+             (has(l.allowedRoutes.namespaces.selector.matchExpressions) &&
+              l.allowedRoutes.namespaces.selector.matchExpressions.exists(e,
+                e.key == 'kubernetes.io/metadata.name' && e.operator == 'In' && has(e.values) &&
+                e.values.all(v, v in ['workbricks-c1', 'workbricks-c1-data', 'workbricks-c1-sandbox']))))))
+      message: "A Gateway listener in the Workbricks cell may admit routes only from the cell's namespaces (Same, or a Selector on kubernetes.io/metadata.name In the cell's namespaces)."
     - expression: >-
         request.kind.kind == 'Gateway' || !has(object.spec.parentRefs) ||
         object.spec.parentRefs.all(p,
