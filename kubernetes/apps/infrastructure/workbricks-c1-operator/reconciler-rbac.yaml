@@ -20,8 +20,10 @@
 # includes those ServiceAccounts' own bindings: system:auth-delegator for workbricks-c1/gatekeeper
 # (TokenReview/SubjectAccessReview create), workbricks-c1-envoy-gateway (node/namespace read, writes to
 # the cell's own GatewayClass), and the cell's OpenBao roles. Those are the cell's by design and kept
-# minimal. And some objects it may write make OTHER controllers act (gateway attachment, Service
-# exposure, legacy SA-token Secrets, monitor namespace selectors); cell-admission-guards.yaml closes
+# minimal. Pod specs are bounded by Pod Security `restricted`, enforced on the three Namespaces, which
+# this identity cannot write (no privileged pods, host namespaces or hostPath). And some objects it
+# may write make OTHER controllers act (gateway attachment, Service exposure, legacy SA-token
+# Secrets, monitor namespace selectors, ClusterSecretStore reads); cell-admission-guards.yaml closes
 # those paths, and certificate-issuer-guard.yaml the certificate one.
 # Additions are requested in the cell's operator-requests.md and reviewed here (stage 5 will ask for
 # the sandbox runtime's agents.x-k8s.io kinds).
