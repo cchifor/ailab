@@ -70,7 +70,7 @@ Secret.
   are `dev-worker-bot` tokens (non-admin, org team `automation`), no longer `chifor`'s — the owner
   identity must never be seeded here (s2s plan D1). Fields: `gitea_pat`, `gitea_repo_pat`,
   `gitea_package_pat`, `strive_test_user`, `strive_test_password`, `proxmox_ssh_key`, `litellm_diag_key`,
-  `litellm_diag_base`, `litellm_diag_models`.
+  `litellm_diag_base`, `litellm_diag_models`, `llm_router_eval_key`.
 
   **Gitea tokens: shared now, per slot next** (`plans/2026-10-11-worker-identities-plan.md`). Since
   2026-10-11 every slot also has its own non-admin Gitea account `dev-worker-N-bot` (team
@@ -168,6 +168,16 @@ Secret.
   `VKEY_DEV_WORKERS_DIAG` in `litellm-vkeys-secret.sops.yaml` (what LiteLLM stores) and `common.json`
   here (what `cred` serves) — so rotation = new value in both files, re-run the vkeys seeding Job, let
   the provision Job converge (or force it, *Rotation* step 4).
+
+  `llm_router_eval_key` (added 2026-10-23) is the **one generic router key for platform App evals**:
+  `key_1cb2bb744e27` `strive-platform-eval` on `https://router.chifor.me/v1`, routes `gpt-6-luna`
+  and `qwen3.8-27b` only, expiring 2027-01-20. Reach it with
+  `cred exec common llm_router_eval_key LLM_ROUTER_API_KEY -- <cmd>`. It sits in `common` because
+  evals are not pinned to one worker, and the route list and the key's capacity bound what a
+  compromised worker could spend. **It is not `strive-platform-production`**, which shares
+  production's quota and is never projected to a worker. Like `litellm_diag_key` it has a second
+  home: the `cchifor/platform` Actions secret `LLM_ROUTER_API_KEY`, which the eval workflows read. A
+  rotation changes both, and `llm-router.md` § "Platform eval key (2026-10-23)" has the order.
 
   `registry_{host,pull_user,pull_password}` (added 2026-09-25) is the **read-only zot pull
   identity** for `registry.chifor.me` (user `pull`, zot policy `read` on `**`, nothing else).
