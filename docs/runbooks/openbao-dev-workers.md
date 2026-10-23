@@ -173,11 +173,18 @@ Secret.
   `key_1cb2bb744e27` `strive-platform-eval` on `https://router.chifor.me/v1`, routes `gpt-6-luna`
   and `qwen3.8-27b` only, expiring 2027-01-20. Reach it with
   `cred exec common llm_router_eval_key LLM_ROUTER_API_KEY -- <cmd>`. It sits in `common` because
-  evals are not pinned to one worker, and the route list and the key's capacity bound what a
-  compromised worker could spend. **It is not `strive-platform-production`**, which shares
-  production's quota and is never projected to a worker. Like `litellm_diag_key` it has a second
-  home: the `cchifor/platform` Actions secret `LLM_ROUTER_API_KEY`, which the eval workflows read. A
-  rotation changes both, and `llm-router.md` § "Platform eval key (2026-10-23)" has the order.
+  evals are not pinned to one worker. The route list and the key's capacity bound what a compromised
+  worker could spend. **It is not `strive-platform-production`**, which shares production's quota and
+  is never projected to a worker. Like `litellm_diag_key` it has a second home: the
+  `cchifor/platform` Actions secret `LLM_ROUTER_API_KEY`, which the eval workflows read. A rotation
+  changes both, and `llm-router.md` § "Platform eval key (2026-10-23)" has the order.
+
+  **The trade-off of ONE key, recorded on purpose:** the same value serves all four workers AND
+  platform CI. So a misbehaving or compromised worker can use up the key's capacity, and CI evals
+  start failing with it. And revoking a leaked worker copy revokes CI's copy too, so CI breaks until
+  the platform secret is rotated as well. The owner asked for one generic key (2026-10-22/23), and
+  that cost is accepted. If it bites, issue a separate CI-only key and leave this field to the
+  workers. That means a second router key, a platform secret swap, and no change here.
 
   `registry_{host,pull_user,pull_password}` (added 2026-09-25) is the **read-only zot pull
   identity** for `registry.chifor.me` (user `pull`, zot policy `read` on `**`, nothing else).

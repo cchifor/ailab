@@ -2210,8 +2210,8 @@ dsh (`dsh.chifor.me`) takes every model from the router since 2026-10-19 (ailab 
 ## Platform eval key (2026-10-23)
 
 The owner asked on 2026-10-22/23 for ONE generic key for every platform App eval, replacing
-`covenant-demo-luna-20260928-1738`, with OpenBao as its home. No live configuration changed: one key
-was added and one revoked.
+`covenant-demo-luna-20260928-1738`, with OpenBao as its home. No router config revision changed: one
+key was added and one revoked. Outside the router, a vault field and a CI secret were written.
 
 - **`key_1cb2bb744e27` `strive-platform-eval`**, routes `[gpt-6-luna, qwen3.8-27b]`, expires
   2027-01-20. dev-worker-1 requested it through the agent-skill access-request flow, and the
@@ -2250,9 +2250,33 @@ was added and one revoked.
     affected. It had no requests in the same window.
 - **Rotation:**
   1. Issue a new key, by access request or `POST /admin/v1/keys` plus the one-time reveal.
-  2. Put it into `common.json` with `sops set --value-stdin` (value never in argv), merge, and force
-     the provision Job if needed (`openbao-dev-workers.md` *Rotation*). Write the live field with
-     `bao kv patch` at the same time.
+  2. Put it into the seed. **`common.json` is ONE encrypted string holding a JSON object of every
+     shared field.** `sops set` on `["stringData"]["common.json"]` replaces that whole string, so
+     piping in only the new key would wipe `proxmox_ssh_key` and the rest of the shared fields. The
+     seed wins, so the provision Job would then push that loss into the vault. Read, modify and write
+     back the whole object, with the new value arriving on stdin (never argv, never the terminal):
+
+     ```sh
+     export SOPS_AGE_KEY_FILE=<main checkout>/kubernetes/infra/_out/age.agekey
+     F=kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml
+     <command that prints only the new key> | python3 -c '
+     import json, subprocess, sys
+     f, path = sys.argv[1], "[\"stringData\"][\"common.json\"]"
+     obj = json.loads(subprocess.run(["sops", "-d", "--extract", path, f],
+                                     capture_output=True, text=True, check=True).stdout)
+     before = set(obj)
+     obj["llm_router_eval_key"] = sys.stdin.read().strip()
+     assert set(obj) == before | {"llm_router_eval_key"}
+     subprocess.run(["sops", "set", "--value-stdin", f, path], check=True, text=True,
+                    input=json.dumps(json.dumps(obj, separators=(", ", ": "))))' "$F"
+     sops -d --extract '["stringData"]["common.json"]' "$F" \
+       | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)))'   # field NAMES only
+     ```
+
+     The outer `json.dumps` is there because `sops set` takes a JSON-encoded value, and this value
+     is a string. `git diff` must show only the `common.json` ciphertext and the sops MAC/timestamp.
+     Merge, and force the provision Job if needed (`openbao-dev-workers.md` *Rotation*). Write the
+     live field with `bao kv patch` at the same time.
   3. PUT the platform secret.
   4. Check in the journal (`GET /admin/v1/trajectories?principal=key:<id>`) that CI moved to the new
      key, then revoke the old one.
