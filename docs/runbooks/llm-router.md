@@ -1886,7 +1886,8 @@ Pro accounts burning toward it) alone.
     then `DELETE /admin/v1/keys/key_3f7b1a2160da` (the old luna-only key
     `covenant-demo-luna-20260928-1738`, left active so the app keeps working until then). If the
     checkout is lost before the handoff, re-issue (one `POST` + one reveal) rather than search for a
-    copy.
+    copy. **2026-10-23:** by then only platform CI used `key_3f7b1a2160da`, so it was replaced and
+    revoked (see "Platform eval key (2026-10-23)").
 - **Revision 1540 was a mistake, live for two minutes** (09:49-09:51): `gpt-6-luna` as a *pointer*
   to `pool-codex` (and `default` repointed to the pool, which the config store requires). A pointer
   serves route mode only: a chat client that sends the alias as `model` gets 400 `MODEL_REQUIRED`.
@@ -2205,6 +2206,82 @@ dsh (`dsh.chifor.me`) takes every model from the router since 2026-10-19 (ailab 
 - The journal shows its requests under that key's name. Revoke with
   `DELETE /admin/v1/keys/key_353539972cec`, after re-issuing per the dsh runbook if dsh should keep
   working.
+
+## Platform eval key (2026-10-23)
+
+The owner asked on 2026-10-22/23 for ONE generic key for every platform App eval, replacing
+`covenant-demo-luna-20260928-1738`, with OpenBao as its home. No router config revision changed: one
+key was added and one revoked. Outside the router, a vault field and a CI secret were written.
+
+- **`key_1cb2bb744e27` `strive-platform-eval`**, routes `[gpt-6-luna, qwen3.8-27b]`, expires
+  2027-01-20. dev-worker-1 requested it through the agent-skill access-request flow, and the
+  administrator approved it on 2026-10-22. Do not run evals on `strive-platform-production`: that key
+  shares production's quota and rate limits.
+- **Two homes, one value. Rotate both:**
+  - OpenBao `af/dev-workers/common`, field `llm_router_eval_key`, SEEDED from `common.json` in
+    `devworker-seeds.sops.yaml` (seed-wins, `openbao-dev-workers.md`). Every dev worker reaches it
+    with `cred exec common llm_router_eval_key LLM_ROUTER_API_KEY -- <cmd>`.
+  - `cchifor/platform` Actions secret `LLM_ROUTER_API_KEY`, set at 2026-10-23 07:07:42Z
+    (`PUT /repos/cchifor/platform/actions/secrets/LLM_ROUTER_API_KEY`, HTTP 204). The call used a
+    `chifor` token minted for that one call and deleted right after (its next use answered 401).
+    The value went from the vault to the request without being printed. Eight workflows read the
+    secret: `eval-smoke`, `eval-nightly`, `eval-autonomy`, `eval-routing`, `eval-promotion-gate`,
+    `agentic-ui`, `load-nightly` and `preview-env`. All of them set
+    `LLM_ROUTER_BASE_URL=https://router.chifor.me/v1`. The org secret `OPENAI_API_KEY` dates from
+    2026-07-09, before the router existed, so it is not a router key and was left alone.
+- **Validation:** `eval-smoke` was dispatched on platform `main` (run 103421, 07:08Z). Its
+  `model smoke (critical set)` job made 31 router calls as `key_1cb2bb744e27` and got no 401. The
+  tests ended 12 passed and 2 failed, both failures a 503 `server_is_overloaded` from the upstream:
+  the known flake, which failed this job 17 times on each of 10-21 and 10-22 with the old key. After
+  the swap, the old key had no requests.
+- **Revoked** `key_3f7b1a2160da` with `DELETE /admin/v1/keys/key_3f7b1a2160da` at 07:15:28Z. At that
+  point no job of the eight workflows was queued or running, so no job still held the old value.
+- **The replaced key, `key_3f7b1a2160da` `covenant-demo-luna-20260928-1738`** (routes
+  `[gpt-6-luna]`), had a single consumer: platform CI.
+  - The journal holds it from 2026-10-19 21:16Z (its oldest kept row) to 2026-10-23 06:16Z, 5,631
+    requests in all. 5,630 of them started while a job of one of those eight workflows was running,
+    counting re-run attempts (the Gitea DB's `action_task` joined on `job_id`). The remaining one was
+    a cancelled request at a job boundary.
+  - No cluster Secret, OpenBao document (57 under `af/`) or SOPS file held its value. This was
+    checked by the key prefix the router lists, without reading any value out.
+  - Its 33 `qwen3.8-27b` requests, from the nightly's qwen lane, were `ROUTE_NOT_ALLOWED`. The new
+    key allows that route.
+  - The covenant app's own key, `workbricks-app-covenant` (`key_b62258d8a42c`, 2026-10-14), is not
+    affected. It had no requests in the same window.
+- **Rotation:**
+  1. Issue a new key, by access request or `POST /admin/v1/keys` plus the one-time reveal.
+  2. Put it into the seed. **`common.json` is ONE encrypted string holding a JSON object of every
+     shared field.** `sops set` on `["stringData"]["common.json"]` replaces that whole string, so
+     piping in only the new key would wipe `proxmox_ssh_key` and the rest of the shared fields. The
+     seed wins, so the provision Job would then push that loss into the vault. Read, modify and write
+     back the whole object, with the new value arriving on stdin (never argv, never the terminal):
+
+     ```sh
+     export SOPS_AGE_KEY_FILE=<main checkout>/kubernetes/infra/_out/age.agekey
+     F=kubernetes/apps/infrastructure/security/openbao/devworker-seeds.sops.yaml
+     <command that prints only the new key> | python3 -c '
+     import json, subprocess, sys
+     f, path = sys.argv[1], "[\"stringData\"][\"common.json\"]"
+     obj = json.loads(subprocess.run(["sops", "-d", "--extract", path, f],
+                                     capture_output=True, text=True, check=True).stdout)
+     before = set(obj)
+     obj["llm_router_eval_key"] = sys.stdin.read().strip()
+     assert set(obj) == before | {"llm_router_eval_key"}
+     subprocess.run(["sops", "set", "--value-stdin", f, path], check=True, text=True,
+                    input=json.dumps(json.dumps(obj, separators=(", ", ": "))))' "$F"
+     sops -d --extract '["stringData"]["common.json"]' "$F" \
+       | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)))'   # field NAMES only
+     ```
+
+     The outer `json.dumps` is there because `sops set` takes a JSON-encoded value, and this value
+     is a string. `git diff` must show only the `common.json` ciphertext and the sops MAC/timestamp.
+     Merge, and force the provision Job if needed (`openbao-dev-workers.md` *Rotation*). Write the
+     live field with `bao kv patch` at the same time.
+  3. PUT the platform secret.
+  4. Check in the journal (`GET /admin/v1/trajectories?principal=key:<id>`) that CI moved to the new
+     key, then revoke the old one.
+- `gpt-6-luna` refuses `response_format: json_object` unless a USER message contains the word
+  "JSON" (cchifor/llm-router#116). Anyone smoke-testing the key in JSON mode will hit this.
 
 ## Relay access requests
 
