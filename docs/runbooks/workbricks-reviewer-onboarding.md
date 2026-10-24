@@ -18,9 +18,12 @@ History:
   hosts logged `HTTP Error 404` on its reconcile and on workbricks#1's review jobs until access
   was restored (§ Activation record). `cchifor/workbricks-apps` was created the same day.
 
-Both repositories follow the `cchifor/docs` repository template. Its CI workflow is
+`cchifor/workbricks` follows the `cchifor/docs` repository template. Its CI workflow is
 `.gitea/workflows/ci.yml` (workflow `CI`, job `verify`, context `CI / verify (pull_request)`)
-and runs on the organization's `self-hosted-hv` runners.
+and runs on the organization's `self-hosted-hv` runners; it arrives with workbricks#1.
+`cchifor/workbricks-apps` has **no CI yet** (its `main` is an empty root commit): its first pull
+request must add the same template workflow, because the `main` rule below already requires
+`CI / verify (pull_request)` and nothing produces that context there until then.
 
 ## Activation
 
@@ -65,26 +68,38 @@ and the token answered 401 after deletion.
 - `cchifor/workbricks-apps` was empty. `main` was seeded with an empty root commit (`6624cd7`, as
   `workstation-bot`) before the rule was applied, the same way `cchifor/workbricks`'s `main` was
   seeded by dev-worker-2.
-- **Negative test:** `workstation-bot` is in team `automation` with the same grants as the
-  dev-worker bots. It reads `protected=true`, `user_can_push=false` and `user_can_merge=false` on
-  `main` in both repositories. Its direct push of an empty commit to `workbricks-apps` `main` was
-  refused (`pre-receive hook declined`). Dev workers therefore change `main` only through pull
-  requests that the reviewers merge.
-- `cchifor/workbricks-apps` has no CI yet. Its first pull request has to add the template
-  workflow: the rule requires `CI / verify (pull_request)`, and reviewbot merges only when the
-  combined status is `success`.
+- **Negative test:** run as `workstation-bot`. It reads `protected=true`, `user_can_push=false`
+  and `user_can_merge=false` on `main` in both repositories. Its direct push of an empty commit to
+  `workbricks-apps` `main` was refused (`pre-receive hook declined`). The test stands for the
+  dev-worker bots because their grants were checked to be the same, in the Gitea database
+  (`team_user`, `collaboration`, `user.is_admin`, read-only):
+  - `dev-worker-bot` and `dev-worker-1-bot` … `dev-worker-4-bot` are non-admin and members of team
+    `automation` only (id 37, `repo.code`/`repo.pulls` write), the same team as `workstation-bot`.
+    None of them is in `Owners`.
+  - Neither repository has a collaborator except `reviewer-claude` and `reviewer-codex` (mode 2,
+    write).
+
+  The rule also disables push for everyone, whatever the grant. Dev workers therefore change `main`
+  only through pull requests that the reviewers merge.
+- `cchifor/workbricks-apps` has no CI yet (see above). Reviewbot also merges only when the
+  combined status is `success`, so nothing merges there before that workflow exists.
 
 ## Not carried over from the old repository
 
 These belong to the Workbricks cell (`workbricks-cell.md`), not to review. The recreate broke
-them, and they are recorded here because they were found during the reviewer re-activation:
+them, and they were found during the reviewer re-activation. Tracked with the fix steps in
+[ailab#1415](https://git.chifor.me/cchifor/ailab/issues/1415); do both before the first stage-2
+deployment PR unsuspends `workbricks-c1`:
 
 - **Deploy key id 72** (read-only, used by Flux `GitRepository` `workbricks-c1`) is on
   `workbricks-old`. Since the recreate, `workbricks-c1` has been `Ready=False`
   (`GitOperationFailed ... invalid pkt-len found`; the key is not on the new repository). Its
-  Kustomization is suspended, so nothing deploys from it.
+  Kustomization is suspended, so nothing deploys from it. Fix: register the SOPS-held public key
+  (`workbricks-c1-bootstrap/`) as a read-only deploy key on the new repository, or rotate the pair,
+  then record the new key id.
 - **Actions secrets `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`** (zot user `workbricks-ci`) are on
-  `workbricks-old`.
+  `workbricks-old`. Fix: set both on the new repository from `registry.sops.yaml` (also in
+  OpenBao `af/estate/registry` `workbricks_ci_password`).
 
 Validation: `python3 -m unittest discover -s scripts/tests -p test_reviewbot.py`.
 

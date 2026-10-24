@@ -23,6 +23,10 @@ DNS and GitOps change, is requested by the Workbricks team in their `operator-re
 | OR-12 | zot push user `workbricks-ci` (`workbricks/**`, no delete); Actions secrets on `cchifor/workbricks` | `ansible/roles/registry_zot/defaults/main.yml`, `docs/runbooks/registry-cache.md` |
 | OR-13 | Cilium socket LB pinned off | `kubernetes/infra/bootstrap/cilium-values.yaml` |
 
+**Broken since 2026-10-24 (OR-11 deploy key, OR-12 Actions secrets):** `cchifor/workbricks` was recreated, and
+both stayed on the renamed `cchifor/workbricks-old`, so `GitRepository` `workbricks-c1` is `Ready=False`. Fix steps:
+[ailab#1415](https://git.chifor.me/cchifor/ailab/issues/1415). Do both before `workbricks-c1` is unsuspended.
+
 Paths under `infrastructure/` and `clusters/` are relative to `kubernetes/apps/`. The CRDs cannot be a
 HelmRelease: Helm's release Secret would exceed the 1 MiB object limit (about 2.5 MB of CRDs). Flux units:
 `workbricks-c1-operator`, `workbricks-c1-gateway`, `envoy-gateway-crds-upstream`, `workbricks-c1-git-auth` and
