@@ -62,7 +62,7 @@
       "enabled": false
     },
     {
-      "description": "Do NOT track the TAGLESS digest pins in the self-hosted registry: llm-router/router and relay/control-plane (their release flows build, verify and pin each digest, and an llm-router digest change ships only on the owner's go), and headlamp-k8s/headlamp-plugin-flux (a hand-mirrored copy of ghcr.io/headlamp-k8s/headlamp-plugin-flux v0.6.0, so a newer plugin needs a new mirror before anything can pin it). A tagless pin gives Renovate no tag to follow, so every run logged 'Could not determine new digest for update' for all three, and the 'Some dependencies could not be looked up' banner on every PR it opened (#1402, #1403) was partly these. Scoped by name, like the agentforge rule above: the TAGGED mirrors in this registry (library/python, verdaccio, nginx-unprivileged) still update normally.",
+      "description": "Do NOT track the TAGLESS digest pins in the self-hosted registry. A tagless pin gives Renovate no tag to follow (every run logged 'Could not determine new digest'), and these digests are moved elsewhere: llm-router/router and relay/control-plane by their release flows (an llm-router digest ships only on the owner's go), headlamp-k8s/headlamp-plugin-flux by re-mirroring ghcr.io/headlamp-k8s/headlamp-plugin-flux. Scoped by name like the agentforge rule above, so the TAGGED mirrors in this registry keep updating. Pinned by scripts/tests/test_renovate_config.py.",
       "matchPackageNames": [
         "registry.chifor.me/llm-router/router",
         "registry.chifor.me/relay/control-plane",
