@@ -75,6 +75,10 @@ pr_reviewer_repos:
   # pull requests need the same two-persona review and reviewer-owned merges. Activation
   # prerequisites and verification: docs/runbooks/workbricks-reviewer-onboarding.md.
   - cchifor/workbricks
+  # Workbricks business apps (owner request, 2026-10-24): the separate repository the owner chose
+  # for apps ("Where business Apps live: Separate repo"). Same two-persona review, same bots-only
+  # main protection as cchifor/workbricks; same runbook.
+  - cchifor/workbricks-apps
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 # The agentforge pin bot is deliberately NOT ignored (operator-directed CD, 2026-09-02):
 # its PRs get the pin rubric below and automerge when digest-only + clean + CI green.
