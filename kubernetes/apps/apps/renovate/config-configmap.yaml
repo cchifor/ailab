@@ -26,6 +26,18 @@ data:
       // *-bot user per automation rather than sharing an existing bot's identity.
       gitAuthor: 'Renovate Bot <renovate-bot@chifor.me>',
       binarySource: 'install',  // install tool versions on demand (the full image)
+      // registry.chifor.me resolves to the registry LXC (192.168.0.36, a private address), and
+      // Renovate 44.x warns on every run that `internalHostAccess=block` -- its next-major
+      // default -- would refuse it. That would silently stop updates for the TAGGED mirrors it
+      // hosts (library/python, verdaccio, nginx-unprivileged). Grant it HERE: Renovate honours
+      // an internal-host grant only from this self-hosted global config (an `allowInternal` in
+      // renovate.json is stripped). Scoped by hostType so only registry lookups are covered.
+      // The ONLY hostRules key in this object: add future host rules to this array. A JS object
+      // literal keeps just the last of two equal keys, so a second `hostRules:` would silently drop
+      // this one (scripts/tests/test_renovate_config.py fails on that).
+      hostRules: [
+        { matchHost: 'registry.chifor.me', hostType: 'docker', allowInternal: true },
+      ],
       // RENOVATE_TOKEN is now the GITEA PAT (write:repository, write:issue, read:user).
       // RENOVATE_GITHUB_COM_TOKEN stays a github.com token ON PURPOSE: Renovate still queries
       // github.com for release notes/changelogs regardless of the platform it runs against, and

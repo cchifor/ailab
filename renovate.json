@@ -62,6 +62,15 @@
       "enabled": false
     },
     {
+      "description": "Do NOT track the TAGLESS digest pins in the self-hosted registry. A tagless pin gives Renovate no tag to follow (every run logged 'Could not determine new digest'), and these digests are moved elsewhere: llm-router/router and relay/control-plane by their release flows (an llm-router digest ships only on the owner's go), headlamp-k8s/headlamp-plugin-flux by re-mirroring ghcr.io/headlamp-k8s/headlamp-plugin-flux. Scoped by name like the agentforge rule above, so the TAGGED mirrors in this registry keep updating. Pinned by scripts/tests/test_renovate_config.py.",
+      "matchPackageNames": [
+        "registry.chifor.me/llm-router/router",
+        "registry.chifor.me/relay/control-plane",
+        "registry.chifor.me/headlamp-k8s/headlamp-plugin-flux"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Group kube-prometheus-stack + its CRDs",
       "matchPackageNames": ["/kube-prometheus-stack/"],
       "groupName": "kube-prometheus-stack"

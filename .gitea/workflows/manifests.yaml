@@ -87,6 +87,11 @@ jobs:
       - name: Router CI rollout acceptance fails on missing or failed evidence
         run: python3 -m unittest scripts.tests.test_router_rollout
 
+      # Renovate never fails a run on these: a duplicate config key drops rules, and a bad name
+      # only logs a lookup failure. The validator accepts both.
+      - name: Renovate config keeps its lookup fixes (single hostRules key, tagless pins off)
+        run: python3 -m unittest scripts.tests.test_renovate_config
+
       # The S2S Phase 4 probes (scripts/s2s/, docs/runbooks/s2s-identity.md): the in-pod verdict
       # logic against fabricated JWTs and canned gatekeeper answers, then phase4-probes.sh end to end
       # against stub kubectl/curl and a gatekeeper emulator per replica: every mandatory refusal, the
