@@ -194,7 +194,7 @@ spec:
           # Verdaccio 6, pinned by digest and pulled anonymously through registry.chifor.me
           # (the cluster's Zot; VAP forbids imagePullSecrets). Bump the digest via the standard
           # pin scripts.
-          image: registry.chifor.me/verdaccio/verdaccio:6@sha256:d394c36d62a62d264cf5566eabe323050f3e0a3f6455ccff9c355fcbfcb28073
+          image: registry.chifor.me/verdaccio/verdaccio:6@sha256:82f4decaf1c9eff885bf7a1227335f78581ff715288d5f38898e67e28b3bfbdd
           env:
             # The image bakes VERDACCIO_PORT=4873, which OVERRIDES the config's `listen:` — so
             # without this verdaccio binds 4873 and collides with the sidecar (EADDRINUSE,
