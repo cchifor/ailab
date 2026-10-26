@@ -2518,7 +2518,7 @@ during a PG outage, operate with the bearer admin token instead. Sign out afterw
 **After the switch** (ailab #1443, merge `0efc27a5`, about 21:16 UTC on 2026-10-26):
 - The new pod logged no `auth.*` warning: the store initialised and the administrator was seeded. `router_auth` holds
   that subject as `admin`, plus the `local:admin` record behind break-glass.
-- **Public checks, 18 of 19 as designed:**
+- **Public checks:** 18 of 19 passed as written; the 19th was blocked earlier than it tested (below).
   - `/health`, `/ready` and the SPA answer 200. `/auth/config` shows `oidc:true`, `local:false`, `available:true`.
   - `/auth/oidc` sends a 302 to the realm, with the exact callback, client `llm-router`, S256, state and nonce. The
     `lr_oidc` cookie is HttpOnly, Secure, SameSite=Lax, Path=/auth.
@@ -2528,9 +2528,13 @@ during a PG outage, operate with the bearer admin token instead. Sign out afterw
     - it issues an admin session;
     - signing out answers `revoked:true`;
     - the old cookie then gets 401.
-  - **The 19th** sent a forged `cf-connecting-ip: 127.0.0.1` through the public host. It got 403 from **Cloudflare**
-    itself (`error code: 1000`, no `x-request-id`): Cloudflare refuses a client-supplied CF header before it reaches
-    the tunnel. That is stronger than the router's own 404 the check expected.
+  - **The 19th** sent the break-glass token with a forged `cf-connecting-ip: 127.0.0.1` through the public host. It
+    was blocked at Cloudflare's edge: a 403 served by Cloudflare (`Server: cloudflare`, `error code: 1000`), with no
+    `x-request-id` from the router. That is all it shows: this one request did not get a session. It is not a test of
+    the router, which by design trusts the header whenever it is present. That control is the ingress boundary
+    (`router.yaml`, at `ROUTER_AUTH_CLIENT_ADDRESS_HEADER`): only the edge path, behind Cloudflare, and a cluster-admin
+    port-forward reach `:8787`. The router's per-header behaviour is covered by llm-router's integration suite, where
+    a non-loopback header gets 404 and loopback gets a session.
 - `validate-live` matched the baseline: the three known `MODEL_REQUIRED` failures, and the image check skipped
   because cloud2 is powered off at night.
 - **Still owed:** the owner's first browser sign-in. It uses the one-time password and sets their own password.
