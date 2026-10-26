@@ -17,6 +17,9 @@ resources:
   # ailab Keycloak (ADR 0038). Password MUST stay in sync with KC_DB_PASSWORD in apps/keycloak/keycloak-secrets.sops.yaml.
   # The DATABASE comes from the keycloak-db-bootstrap.sql one-shot (a plain SQL file, not a resource).
   - infra-pg-keycloak.sops.yaml # basic-auth creds for the keycloak DB (managed role)
+  # llm-router browser-auth store (llm-router#121). Password MUST stay in sync with auth-database-url in
+  # apps/llm-router/llm-router-oidc.sops.yaml. The DATABASE comes from the router-auth-db-bootstrap.sql one-shot.
+  - infra-pg-router-auth.sops.yaml # basic-auth creds for the router_auth DB (managed role)
   # AgentForge v2 RLS boundary (ADR 0019): two managed roles, one basic-auth secret each. Each password
   # MUST stay in sync with the matching DSN in apps/agentforge/agentforge-db.sops.yaml (see those headers).
   - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)

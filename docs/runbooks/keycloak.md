@@ -1,16 +1,22 @@
 # Keycloak (`id.chifor.me`)
 
 The ailab identity provider, decided in [ADR 0038](../decisions/0038-ailab-keycloak-for-relay.md).
-There is one realm per application. Today the only one is `relay`, with issuer
-`https://id.chifor.me/realms/relay`, used by Relay (`relay.chifor.me`).
+There is one realm per application:
+
+| Realm | Issuer | Used by |
+|---|---|---|
+| `relay` | `https://id.chifor.me/realms/relay` | Relay (`relay.chifor.me`) |
+| `llm-router` | `https://id.chifor.me/realms/llm-router` | llm-router's console (`router.chifor.me`), from 2026-10-26 (llm-router#121) |
+
+Most commands below name `relay`; for the router's realm use `-r llm-router` and client `llm-router`.
 
 | Piece | Where |
 |---|---|
-| Deployment, Service, NetworkPolicy, realm JSON | `kubernetes/apps/apps/keycloak/` (Flux, `apps` layer) |
-| Secrets (bootstrap admin, DB password, `relay` client secret) | `keycloak-secrets.sops.yaml` (SOPS is the system of record, not OpenBao) |
+| Deployment, Service, NetworkPolicy, realm JSON (`realm-relay.json`, `realm-llm-router.json`, both in ConfigMap `keycloak-realms`) | `kubernetes/apps/apps/keycloak/` (Flux, `apps` layer) |
+| Secrets (bootstrap admin, DB password, the `relay` and `llm-router` client secrets) | `keycloak-secrets.sops.yaml` (SOPS is the system of record, not OpenBao) |
 | Database | `keycloak` DB on CNPG `infra-pg`: role in `databases/infra-pg.yaml`, password `databases/infra-pg-keycloak.sops.yaml`, DB from `databases/keycloak-db-bootstrap.sql` |
-| Public route | `apps/edge/cloudflared.yaml` (allowlist: `/realms/relay` + `/resources`; `..`/`;` and everything else 404) + `id` in `kubernetes/infra/cloudflare/variables.tf` |
-| Monitoring | Gatus "Keycloak (id.chifor.me) OIDC discovery" |
+| Public route | `apps/edge/cloudflared.yaml` (allowlist: `/realms/relay`, `/realms/llm-router` + `/resources`; `..`/`;` and everything else 404) + `id` in `kubernetes/infra/cloudflare/variables.tf` |
+| Monitoring | Gatus "Keycloak (id.chifor.me) OIDC discovery" (relay) and "Keycloak (id.chifor.me) llm-router realm discovery" |
 | Backups | the nightly `infra-pg-dump` enumerates every database, `keycloak` included |
 
 Everything below runs from the workstation with `kubectl --context admin@ai` (the default context is
@@ -129,12 +135,13 @@ The console shows a "temporary admin" banner for this account. That is accepted 
 
 ## Realm changes (the import never re-applies)
 
-`--import-realm` imports `realm-relay.json` **only while the realm does not exist**. Editing the file
+`--import-realm` imports each realm file **only while that realm does not exist** (strategy
+`IGNORE_EXISTING`; the log says `Realm 'relay' already exists. Import skipped`). Editing the file
 renames its ConfigMap and restarts the pod, and the live realm stays exactly as it was. So every
 change follows these steps:
 
 1. Make the change live with `kc update …`, and read it back.
-2. In the same PR, write the setting back into `realm-relay.json`. The JSON holds realm and client
+2. In the same PR, write the setting back into the realm's JSON (`realm-relay.json` or `realm-llm-router.json`). The JSON holds realm and client
    **settings only**: never users, password hashes, or a real secret. The client secret stays the
    `${RELAY_OIDC_CLIENT_SECRET}` placeholder.
 
@@ -147,6 +154,57 @@ kc get clients -r relay -q clientId=relay > /tmp/live-client.json
 
 Each top-level key of `realm-relay.json`, and each field of its `relay` client except `secret`,
 must equal the live value.
+
+## Adding a realm (done for `llm-router`, 2026-10-26)
+
+One realm per application (ADR 0038). A new realm is one PR plus checks:
+
+1. **The PR** adds `realm-<app>.json` to the `keycloak-realms` generator in `kustomization.yaml`,
+   with the client secret as a `${<APP>_OIDC_CLIENT_SECRET}` placeholder. The value goes into
+   `keycloak-secrets.sops.yaml` and the app's own SOPS Secret: generate it once, so both copies
+   are byte-identical. The PR also adds an allow line `^/realms/<app>(/|$)` to the `id.chifor.me`
+   rules in `edge/cloudflared.yaml` (bump `chifor.me/config-revision`) and a Gatus discovery check.
+2. **Rehearse first.** Merging renames the ConfigMap, which restarts the Keycloak singleton
+   (Recreate): new Relay sign-ins wait about a minute, and existing sessions are unaffected. For
+   `llm-router` this ran on the pinned 26.8.1 image in a throwaway pod (`start-dev`, dev-file
+   DB). It started with `relay` only and live-edited `relay`'s displayName, then started again with
+   both files, then a third time. `relay` was skipped both times and kept the edit. `llm-router` was
+   imported with its secret substituted (hash of the value, not of the literal placeholder), PKCE
+   S256 and default scopes `profile`, `email`, `basic`. The image has no `curl`, `python3` or `tar`:
+   feed files with `kubectl exec -i … -- bash -c 'cat > /tmp/f' < f` and use kcadm.
+3. **Before merging:** run `infra-pg-dump` once, so a fresh `keycloak` dump exists
+   (`kubectl --context admin@ai -n databases create job --from=cronjob/infra-pg-dump infra-pg-dump-pre-<app>`),
+   and save `kc get realms/relay` and the `relay` client (`kc get clients/$RELAY_CLIENT -r relay`) for comparison.
+4. **After the restart:**
+   - the log shows `Realm '<app>' imported` and `Realm 'relay' already exists. Import skipped`;
+   - `relay` and its client equal the saved copies;
+   - the new realm's discovery answers on the public host, `issuer` is exact, and S256 is offered;
+   - the client JSON matches, and its secret hash equals the SOPS value's (see "kcadm");
+   - the edge matrix of "First deployment" step 4 passes for the new realm as well;
+   - a Relay sign-in still works.
+5. **If the pod does not come back** (for example the new JSON fails to import), revert the PR. The
+   old ConfigMap name comes back with `realm-relay.json` alone, and `relay` is never re-imported,
+   because it exists. Never delete a realm to "re-run" an import: users and secrets live in the
+   database, not the JSON.
+
+## Members (llm-router)
+
+The router admits a Keycloak identity only with a membership in its own auth store, the
+`router_auth` database on infra-pg, keyed by the exact `https://id.chifor.me/realms/llm-router|<id>`.
+`ROUTER_OIDC_REQUIRE_EMAIL_VERIFIED=1`, so the user's `emailVerified` must be true, as for Relay.
+
+- **The first administrator** is the `ROUTER_AUTH_ADMIN_SUBJECT` value in
+  `apps/llm-router/router.yaml`. The router creates that user and membership at every start and
+  re-sets its role to `admin`. Removing that person therefore means removing the env value too:
+  deleting the row alone is undone at the next start.
+- **Anyone else** has no CLI or API yet. Insert the user and membership with SQL on the primary
+  (`\c router_auth`), in one transaction, with the exact subject and the tenant
+  `00000000-0000-4000-8000-000000000001` (the router's default; check `router_auth_tenants`).
+- **Removal:** delete the membership, then the user's sessions:
+  `DELETE FROM router_auth_sessions WHERE user_id = <id>`. A router session lasts up to 8 h and is
+  NOT ended by a Keycloak logout, password reset or user disable. Disable the Keycloak user AND
+  remove the membership.
+- **Password reset** works as for Relay (`-r llm-router`).
 
 ## Client-secret rotation
 

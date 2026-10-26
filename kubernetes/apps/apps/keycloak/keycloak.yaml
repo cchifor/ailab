@@ -39,7 +39,7 @@ spec:
           args: ["start", "--import-realm"]
           envFrom:
             - secretRef:
-                name: keycloak-secrets # KC_BOOTSTRAP_ADMIN_*, KC_DB_PASSWORD, RELAY_OIDC_CLIENT_SECRET
+                name: keycloak-secrets # KC_BOOTSTRAP_ADMIN_*, KC_DB_PASSWORD, RELAY_OIDC_CLIENT_SECRET, LLM_ROUTER_OIDC_CLIENT_SECRET
           env:
             - { name: KC_DB, value: postgres }
             - { name: KC_DB_URL_HOST, value: infra-pg-rw.databases.svc.cluster.local }
@@ -86,7 +86,7 @@ spec:
       volumes:
         - name: realm-import
           configMap:
-            name: keycloak-realm-relay
+            name: keycloak-realms
 ---
 apiVersion: v1
 kind: Service

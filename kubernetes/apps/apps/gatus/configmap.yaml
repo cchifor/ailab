@@ -425,6 +425,15 @@ data:
         conditions:
           - "[STATUS] == 200"
           - "[BODY].issuer == https://id.chifor.me/realms/relay"
+      - name: Keycloak (id.chifor.me) llm-router realm discovery
+        group: Infrastructure
+        # The router's browser sign-in (llm-router#121). The router fetches this discovery lazily, so an
+        # outage here blocks only new console sign-ins, never API traffic.
+        url: https://id.chifor.me/realms/llm-router/.well-known/openid-configuration
+        interval: 60s
+        conditions:
+          - "[STATUS] == 200"
+          - "[BODY].issuer == https://id.chifor.me/realms/llm-router"
       - name: Registry (Zot)
         group: Infrastructure
         url: https://registry.chifor.me/v2/   # anon-readable OCI API; on the LXC (.36), public LE cert

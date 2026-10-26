@@ -1,0 +1,38 @@
+{
+  "realm": "llm-router",
+  "enabled": true,
+  "displayName": "LLM Router ID",
+  "sslRequired": "external",
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "passwordPolicy": "length(12) and notUsername and notEmail",
+  "clients": [
+    {
+      "clientId": "llm-router",
+      "name": "LLM Router",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${LLM_ROUTER_OIDC_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "rootUrl": "https://router.chifor.me",
+      "redirectUris": ["https://router.chifor.me/auth/callback"],
+      "webOrigins": ["https://router.chifor.me"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ]
+}
