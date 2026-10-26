@@ -1413,7 +1413,22 @@ Nothing else changes: no schema change, no new setting. The `codex` concurrency 
 >   request names, and a request naming the route `claude-reviewer` names none, so the fallback had nothing to
 >   serve (`model_unspecified`). It went unnoticed until claude-5 reached its weekly wall (2026-10-26 04:56Z,
 >   resets 10-28 10:00Z); from then on every review was refused in 3 ms with attempts 0.
-> - `claude-reviewer` is left in place, unused, as the rollback target.
+> - **`claude-reviewer` is RETIRED (config revision 1780, 2026-10-26, owner's go).** Nothing referenced it (no route
+>   fallback, pointer or key), its last request was 07:26Z that day, and its fallback could not work while
+>   `pool-claude` is `*`, so it was no rollback at all. Removed with one full `PUT /admin/v1/config` (`If-Match: 1779`)
+>   that changed nothing else (verified by diffing every route and account before and after). The rest of this
+>   section is its record.
+> - **To restore it** (never a partial update - `PUT /admin/v1/config` replaces the WHOLE config):
+>   1. `GET /admin/v1/config/revisions/1779` and take only its `claude-reviewer` entry from `policies`.
+>      **Do not restore it verbatim**: its `fallbackAliases: ["pool-claude"]` is the fallback that cannot serve while
+>      `pool-claude` is `*` (`model_unspecified`) - the outage this section records. Set `fallbackAliases: []`
+>      (claude-5 only: the route then refuses while claude-5 is at its wall, which reviewbot parks losslessly), or
+>      add explicit targets on other Claude accounts with a concrete model (e.g. `claude-3:opus`) instead.
+>   2. `GET /admin/v1/config` for the CURRENT config and note its `revision` (N).
+>   3. Append that entry to the current `policies` (change nothing else) and `PUT /admin/v1/config` with the
+>      whole document and `If-Match: N`. A 409 means someone wrote in between: start again from step 2.
+>   4. `GET /admin/v1/config` again: revision N+1, `claude-reviewer` present, every other route and account
+>      identical to step 2.
 
 **Why.** At the owner's request, the PR reviewer bots get routes of their own: `codex-reviewer` on the Codex smart
 pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool when claude-5 fails.
