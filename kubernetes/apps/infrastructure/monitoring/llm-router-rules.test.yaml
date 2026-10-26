@@ -298,7 +298,7 @@ tests:
         alertname: LlmRouterAccountNearLimit
         exp_alerts:
           - exp_labels:
-              severity: warning
+              severity: info
               job: llm-router
               account: claude-5
               provider: claude
@@ -322,6 +322,224 @@ tests:
               description: >-
                 Account codex-2 (codex) has used 92% of its
                 primary limit window for 30m. At 100 % the provider refuses it until the
+                reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+                Decide now whether to throttle its callers, let it run on credits, or add capacity:
+                the pool keeps serving on the other accounts until they reach the same wall.
+
+  - interval: 1m
+    name: the Claude pool with one account below 90% warns at 31m, not at 25m
+    input_series:
+      # 2026-10-26 shape after another week of Fable/Opus reviews: claude, claude-2/4/5 spent, claude-3 left.
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "93x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "91x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "40x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-4",provider="claude",window="weekly"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-5",provider="claude",window="weekly"}'
+        values: "100x40"
+      # The 5-hour window and a Codex weekly reading are not the Claude pool's weekly headroom.
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-3",provider="claude",window="5-hour"}'
+        values: "99x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "10x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "llm-router: only 1 Claude account(s) below 90% of their weekly window"
+              description: >-
+                pool-claude has 1 account(s) with weekly headroom (below 90 %), held for 30m. The
+                Claude reviewer (Fable, then Opus) and every other pool-claude caller now depend on that
+                many accounts; when they reach their walls the reviews wait (lossless, ReviewbotStalled
+                after 1 h) until the earliest reset. Each account's reading and reset:
+                llm_router_account_limit_used_percent / llm_router_account_limit_resets_at_seconds
+                {provider="claude",window="weekly"}, or the router's Status page. Options: add or
+                re-enable a Claude account, slow non-review pool-claude callers, or accept the pause.
+                Runbook: docs/runbooks/llm-router.md § Reviewer routes.
+      - eval_time: 25m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts: []
+
+  - interval: 1m
+    name: no Claude account below 90% still warns (an empty count is 0, not silence)
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "100x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "llm-router: only 0 Claude account(s) below 90% of their weekly window"
+              description: >-
+                pool-claude has 0 account(s) with weekly headroom (below 90 %), held for 30m. The
+                Claude reviewer (Fable, then Opus) and every other pool-claude caller now depend on that
+                many accounts; when they reach their walls the reviews wait (lossless, ReviewbotStalled
+                after 1 h) until the earliest reset. Each account's reading and reset:
+                llm_router_account_limit_used_percent / llm_router_account_limit_resets_at_seconds
+                {provider="claude",window="weekly"}, or the router's Status page. Options: add or
+                re-enable a Claude account, slow non-review pool-claude callers, or accept the pause.
+                Runbook: docs/runbooks/llm-router.md § Reviewer routes.
+
+  - interval: 1m
+    name: the live 2026-10-26 pool (three accounts below 90%) stays quiet
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "2x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "82x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "5x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-4",provider="claude",window="weekly"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-5",provider="claude",window="weekly"}'
+        values: "100x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts: []
+
+  - interval: 1m
+    name: exactly two Claude accounts below 90% stay quiet
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "60x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "70x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts: []
+
+  - interval: 1m
+    name: a stale low reading (reset already past) is no headroom, so the pool still warns
+    input_series:
+      # claude-2: a disabled/reauth_required account's last reading, 40 %, its reset passes at 10m (600 s), so it is stale from then: pending at 10m, firing from 40m.
+      # claude-3: live at 50 %, reset tomorrow. claude-4: spent.
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "100x60"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "40x60"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "600x60"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "50x60"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "86400x60"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-4",provider="claude",window="weekly"}'
+        values: "95x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "llm-router: only 1 Claude account(s) below 90% of their weekly window"
+              description: >-
+                pool-claude has 1 account(s) with weekly headroom (below 90 %), held for 30m. The
+                Claude reviewer (Fable, then Opus) and every other pool-claude caller now depend on that
+                many accounts; when they reach their walls the reviews wait (lossless, ReviewbotStalled
+                after 1 h) until the earliest reset. Each account's reading and reset:
+                llm_router_account_limit_used_percent / llm_router_account_limit_resets_at_seconds
+                {provider="claude",window="weekly"}, or the router's Status page. Options: add or
+                re-enable a Claude account, slow non-review pool-claude callers, or accept the pause.
+                Runbook: docs/runbooks/llm-router.md § Reviewer routes.
+
+  - interval: 1m
+    name: no Claude readings at all stay quiet (LlmRouterMetricsAbsent owns an absent target)
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-2",provider="codex",window="primary"}'
+        values: "97x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts: []
+
+  - interval: 1m
+    name: a Claude primary window at its wall is info too (the provider split keeps both windows)
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-x",provider="claude",window="primary"}'
+        values: "96x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterAccountNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              job: llm-router
+              account: claude-x
+              provider: claude
+              window: primary
+            exp_annotations:
+              summary: "llm-router account claude-x at 96% of its primary window"
+              description: >-
+                Account claude-x (claude) has used 96% of its
+                primary limit window for 30m. At 100 % the provider refuses it until the
+                reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+                Decide now whether to throttle its callers, let it run on credits, or add capacity:
+                the pool keeps serving on the other accounts until they reach the same wall.
+
+  - interval: 1m
+    name: a one-account Claude pool is left to the per-account rules
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "97x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: LlmRouterClaudePoolHeadroomLow
+        exp_alerts: []
+
+  - interval: 1m
+    name: a Claude account at its weekly wall is info; a Codex one at its primary wall is warning
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-4",provider="claude",window="weekly"}'
+        values: "95x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-5",provider="codex",window="primary"}'
+        values: "95x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterAccountNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              account: codex-5
+              provider: codex
+              window: primary
+            exp_annotations:
+              summary: "llm-router account codex-5 at 95% of its primary window"
+              description: >-
+                Account codex-5 (codex) has used 95% of its
+                primary limit window for 30m. At 100 % the provider refuses it until the
+                reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+                Decide now whether to throttle its callers, let it run on credits, or add capacity:
+                the pool keeps serving on the other accounts until they reach the same wall.
+          - exp_labels:
+              severity: info
+              job: llm-router
+              account: claude-4
+              provider: claude
+              window: weekly
+            exp_annotations:
+              summary: "llm-router account claude-4 at 95% of its weekly window"
+              description: >-
+                Account claude-4 (claude) has used 95% of its
+                weekly limit window for 30m. At 100 % the provider refuses it until the
                 reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
                 Decide now whether to throttle its callers, let it run on credits, or add capacity:
                 the pool keeps serving on the other accounts until they reach the same wall.
@@ -389,7 +607,7 @@ tests:
                 a limit window: the router skips it (quota_exhausted) until the reset the Status page
                 shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
           - exp_labels:
-              severity: warning
+              severity: info
               job: llm-router
               account: claude
               provider: claude
@@ -430,7 +648,7 @@ tests:
                 The provider reports account codex-4 (codex) at 100 % of
                 a limit window: the router skips it (quota_exhausted) until the reset the Status page
                 shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
-          - exp_labels: { severity: warning, job: llm-router, account: claude, provider: claude, status: limited }
+          - exp_labels: { severity: info, job: llm-router, account: claude, provider: claude, status: limited }
             exp_annotations:
               summary: "llm-router account claude is limited (refused until its reset)"
               description: >-

@@ -1942,6 +1942,12 @@ Pro accounts burning toward it) alone.
 15 m with at least 10 requests per 15 m), `LlmRouterAccountNearLimit` (weekly/primary window at 90 % for
 30 m), `LlmRouterAccountLimited` (10 m), `LlmRouterProviderExhausted` (every account of a provider
 limited, critical). Thresholds come from the incident's and the healthy day's numbers (file header).
+Since 2026-10-26 the two per-account rules are `warning` for Codex (and every non-Claude provider) and
+`info` for Claude: `pool-claude` routes around one spent Claude account by itself, so the Claude
+warning is the pool's, `LlmRouterClaudePoolHeadroomLow` (fewer than two Claude accounts below 90 % of
+their weekly window for 30 m). `info` alerts reach ntfy only while something in the `llm-router`
+namespace is warning or worse (InfoInhibitor, kube-prometheus-stack.yaml); otherwise they are
+dashboard context.
 
 **Reviewer bot (ailab #1322).** A backend overload the router reports is `UpstreamBusy` on
 reviewer-1/2: no park, no tier descent, no ordinary or deadline attempt; its own counter
