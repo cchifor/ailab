@@ -2319,6 +2319,75 @@ key was added and one revoked. Outside the router, a vault field and a CI secret
 - `gpt-6-luna` refuses `response_format: json_object` unless a USER message contains the word
   "JSON" (cchifor/llm-router#116). Anyone smoke-testing the key in JSON mode will hit this.
 
+## Keycloak-ready authentication release, deployed in local mode (2026-10-26)
+
+`router-0.1.0-20261026-auth` deploys merged llm-router main `2d50a7061ea64bbfebfb99b9e74d4055bc076445`
+([#117](https://git.chifor.me/cchifor/llm-router/pulls/117)), on dev-worker-4's request in
+[llm-router#118](https://git.chifor.me/cchifor/llm-router/issues/118). It adds the code for Keycloak OIDC browser
+sign-in (authorization code + PKCE, identities keyed `issuer|sub`) backed by a separate PostgreSQL auth store, an
+account menu, and a first-paint appearance script (`/appearance-bootstrap.js`, allowed by the router's
+`script-src 'self'`).
+
+**Nothing about sign-in changes in this deployment.** `ROUTER_AUTH_MODE` and `ROUTER_AUTH_DATABASE_URL` are unset,
+so the router stays in local mode: the admin token signs in and becomes an HttpOnly `lr_session` cookie, sessions
+stay in SQLite (KV `auth.sessions`, so existing browser sessions remain valid), and bearer API keys are untouched.
+`GET /auth/config` answers `{"oidc":false,"local":true}`, so the SPA keeps showing the token form. The release adds
+`GET /auth/config` and `GET /auth/me`. `POST /auth/logout` without a valid session now answers 401 (it used to
+answer 200). There is no SQLite schema change, no new setting and no live-config change.
+
+**Enabling Keycloak needs its own reviewed change**, which this release does not make:
+- A realm. ADR 0038 gives each application its own realm on `id.chifor.me` and no client in `relay`. The router's
+  `.env.example` names `realms/relay`; do not follow that. The edge publishes only an allowlist
+  (`^/realms/relay(/|$)`, `^/resources/` in `edge/cloudflared.yaml`), so a new realm also needs its own allow line.
+- A confidential `llm-router` client with the exact redirect `https://router.chifor.me/auth/callback`, and its secret
+  in a Secret (`ROUTER_OIDC_SECRET`).
+- A PostgreSQL database and role for the auth store (the infra-pg pattern of ADR 0016), as `ROUTER_AUTH_DATABASE_URL`
+  in a Secret, plus egress to it in the router's NetworkPolicy. The router runs the migrations at start.
+- At least one administrator, as `ROUTER_AUTH_ADMIN_SUBJECT=<issuer>|<sub>`. In OIDC mode the router refuses to start
+  without one unless a break-glass token is set.
+- `ROUTER_AUTH_MODE=oidc`, `ROUTER_OIDC_ISSUER`, `ROUTER_OIDC_CLIENT`, `ROUTER_AUTH_PUBLIC_URL=https://router.chifor.me`
+  and `ROUTER_AUTH_CLIENT_ADDRESS_HEADER=cf-connecting-ip`. That header is trustworthy here for the reasons given at
+  `ROUTER_PLUGIN_CONFIG` in `router.yaml`.
+- After the switch, the token form disappears. Local sign-in then works only with the break-glass token, and only
+  from loopback. Bearer API keys keep working. When PostgreSQL is down, browser sessions fail closed and API keys
+  keep serving.
+
+**Image.**
+- Archive `router-0.1.0-20261026-auth.tar.gz`, SHA-256
+  `12228f11e962a0eb212c60bb6068c8340e46a8c0fc97e204aaf0b2c558ea3a37`, Relay v0.2.0 asset 393 (with its `.sha256`, 394).
+  - It was built in a volume-free pod (emptyDir only) in the Relay runtime image, Node 26.10.0
+    (`node@sha256:a723b54c…`).
+  - Steps: `pnpm install --frozen-lockfile`, a clean `pnpm build`, then `pnpm install --prod --frozen-lockfile
+    --ignore-scripts` in the release directory. No pnpm store is inside the archive.
+  - `scripts/smoke-production.mjs` passed.
+  - A local-mode check also passed 18/18. It started `dist/apps/router/main.js` with `ROUTER_ADMIN_TOKEN` set and
+    checked `/health`, `/ready`, the SPA and bootstrap script, `/auth/config`, `/auth/state`, the unauthenticated 401s,
+    a token sign-in to a cookie, `/auth/me`, cookie and bearer admin calls, a bearer Responses call, and sign-out.
+- Relay branch `release/router-0.1.0-20261026-auth-image` (`77ab8ad14110`), router entry of `releases.json` only.
+  It was built by [run 109405](https://git.chifor.me/cchifor/relay/actions/runs/109405), receipt
+  `deployment-images-109405.json` (asset 395).
+- Image `registry.chifor.me/llm-router/router@sha256:5e3b7677a66b7e406057194c353254879a2a98a3c69f0e96d557116557c14271`
+  (tag `parity-77ab8ad14110-109405`).
+  - Pulled anonymously, verifying the index, the amd64 manifest and every blob (450 MiB).
+- llm-router CI was green for both the merge commit (run 109224) and the PR head (run 109220).
+
+**Before the roll.**
+- A verified backup was taken in the live pod: `/data/backups/pre-auth-20261026`. It holds a `VACUUM INTO` copy of
+  `router.sqlite` (integrity ok) plus `router.secrets.key` and `plugins.yml`, with SHA-256s in `COMPLETE`. It was made
+  with Relay's `backup-router.mjs` under that label.
+- `validate-live` on the live release gave 6/9. The three failures are `codex text`, `codex stream` and
+  `codex tool call`: each answered 400 `MODEL_REQUIRED` in about 4 ms, because the live config no longer serves the
+  bare model `codex` that the script sends. That is not caused by this release. The Codex vision check (account
+  `codex`, `gpt-6-luna`), the non-vision refusal, Claude streaming, image generation and the Assistant image checks
+  passed.
+
+**Rollback.** Revert the image digest and both pod-template annotations together to the body-limits release:
+- `image: registry.chifor.me/llm-router/router@sha256:fdbd5738d19bb10dcd4c3aa11b02d4efd6493db7b59289dc3814018806d3bc0f`
+- `chifor.me/source-commit: 2aa139d7439a380c1bdced3c1f53ea10cb7f5236`
+- `chifor.me/release: router-0.1.0-20261017-body-limits-r3`
+
+In local mode this release writes nothing the previous one cannot read, so a rollback needs no data step.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
