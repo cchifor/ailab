@@ -1416,9 +1416,15 @@ Nothing else changes: no schema change, no new setting. The `codex` concurrency 
 > - **`claude-reviewer` is RETIRED (config revision 1780, 2026-10-26, owner's go).** Nothing referenced it (no route
 >   fallback, pointer or key), its last request was 07:26Z that day, and its fallback could not work while
 >   `pool-claude` is `*`, so it was no rollback at all. Removed with one full `PUT /admin/v1/config` (`If-Match: 1779`)
->   that changed nothing else (verified by diffing every route and account before and after). To restore it: PUT
->   revision 1779's `claude-reviewer` policy back (`GET /admin/v1/config/revisions/1779`). The rest of this section is
->   its record.
+>   that changed nothing else (verified by diffing every route and account before and after). The rest of this
+>   section is its record.
+> - **To restore it** (never a partial update - `PUT /admin/v1/config` replaces the WHOLE config):
+>   1. `GET /admin/v1/config/revisions/1779` and take only its `claude-reviewer` entry from `policies`.
+>   2. `GET /admin/v1/config` for the CURRENT config and note its `revision` (N).
+>   3. Append that entry to the current `policies` (change nothing else) and `PUT /admin/v1/config` with the
+>      whole document and `If-Match: N`. A 409 means someone wrote in between: start again from step 2.
+>   4. `GET /admin/v1/config` again: revision N+1, `claude-reviewer` present, every other route and account
+>      identical to step 2.
 
 **Why.** At the owner's request, the PR reviewer bots get routes of their own: `codex-reviewer` on the Codex smart
 pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool when claude-5 fails.
