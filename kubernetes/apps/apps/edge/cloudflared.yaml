@@ -249,23 +249,27 @@ spec:
           # of waiting before the next attempt). That stretched short blips past Gitea's 10-min
           # zombie-task timeout and failed in-flight CI jobs, because the runners reach git.chifor.me
           # through this tunnel.
-          # Readiness: ~30 s without an edge connection -> NotReady (KubeDeploymentReplicasMismatch
-          # fires if it lasts 15 min). A rollout waits for the new connector to register before an old
-          # one goes, so a rollout started during a WAN outage holds the old pods until the WAN is back.
-          # No Service selects these pods, so readiness gates no traffic.
+          # Liveness is therefore only "the process answers" (/healthcheck is a static OK), never edge
+          # connectivity. A RUNNING connector rides out any outage on its own: in 2026.10.4 every tunnel
+          # backoff is built with retryForever=true and capped at 32 s (supervisor/supervisor.go,
+          # retry/backoffhandler.go). A COLD start is weaker: it must first resolve the edge over DNS
+          # (edgediscovery.ResolveEdge in NewSupervisor) and exits if that fails, which during an outage
+          # means CrashLoopBackOff. So killing a disconnected connector, after any threshold, can only
+          # make an outage longer.
+          livenessProbe:
+            httpGet: { path: /healthcheck, port: metrics }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          # Readiness: ~30 s without an edge connection -> NotReady. A connector that stays NotReady for
+          # 15 min, whether from a long outage or one wedged and no longer reconnecting, fires the stock
+          # KubeDeploymentReplicasMismatch; delete that pod if the WAN is up. A rollout waits for the
+          # new connector to register before an old one goes, so a rollout started during a WAN outage
+          # holds the old pods until the WAN is back. No Service selects these pods, so readiness gates
+          # no traffic.
           readinessProbe:
             httpGet: { path: /ready, port: metrics }
             periodSeconds: 10
             failureThreshold: 3
-          # Liveness: the same /ready, but only after ~15 min without an edge connection, longer than a
-          # blip, so it recycles a connector that is alive but wedged and has stopped reconnecting. With
-          # the cached image that restart needs no network, and it does not stack CrashLoopBackOff: the
-          # kubelet resets a container's restart backoff once it has run for 10 min.
-          livenessProbe:
-            httpGet: { path: /ready, port: metrics }
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 90
           volumeMounts:
             - { name: config, mountPath: /etc/cloudflared/config, readOnly: true }
             - { name: creds, mountPath: /etc/cloudflared/creds, readOnly: true }
