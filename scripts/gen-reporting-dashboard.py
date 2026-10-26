@@ -288,191 +288,104 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
     }
 
 
-# ── seat blocks, one per persona ──────────────────────────────────────────────────────────
-# The seat table: one instant series per seat per window, aggregated so the scrape labels
-# (endpoint/instance/job/namespace/service) never become columns.
-def _seat_pct(persona, limit):
-    return f'max by (seat) (reviewbot_llm_usage_percent{{persona="{persona}",limit="{limit}"}})'
+# ── routing, one block for both personas (router-only since 2026-10-26) ───────────────────
+# Both reviewers review through ONE seat each, `r`, an API key on llm-router (ailab #1421 and
+# the router-only seat PRs): reviewer-1 asks the smart pool `pool-claude` for fable, then opus
+# (never sonnet); reviewer-2 asks `codex-reviewer` -> `pool-codex` for gpt-6-astra. The router
+# owns the accounts, so the per-subscription-seat blocks this row carried until then (account
+# email, usage windows, login expiry, best tier per account, seats usable) described logins
+# reviewbot no longer has - they were dead weight, and with seats a-c logged out for 10+ days
+# they had become a wall of red that hid the one stall that mattered (2026-10-26 03:55-07:37Z:
+# heartbeat green, queue 2, no review). Account usage lives on the router's own dashboard.
+SERVING_MAP = [{"type": "value", "options": {
+    "0": {"text": "OK", "color": "green", "index": 0},
+    "1": {"text": "STALLED", "color": "red", "index": 1}}}]
+ROUTER_SEAT_MAP = [{"type": "value", "options": {
+    "0": {"text": "serving", "color": "green", "index": 0},
+    "1": {"text": "parked", "color": "red", "index": 1}}}]
+OK_STEPS = [{"color": "red", "value": None}, {"color": "green", "value": 1}]
 
 
-def _seat_reset(persona, limit):
-    # Only a reset still ahead is a countdown. resets_at is 0 for a window with no open period,
-    # and it is refreshed HOURLY, so once the reset moment passes the stale stamp sits in the
-    # past until the next probe - a `> 0` filter alone rendered that as "-42 min"
-    # (reviewer-claude on ailab#784). Either case -> no series -> a blank cell.
-    return (f'max by (seat) (reviewbot_llm_usage_resets_at_seconds{{persona="{persona}",limit="{limit}"}}'
-            ' > time()) - time()')
+def _rng(metric):
+    return f'round(sum(increase({metric}[$__range]))) or vector(0)'
 
 
-USAGE_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 80},
-               {"color": "red", "value": 100}]
-
-
-def _usable(persona, model):
-    return (f'((1 - reviewbot_llm_model_parked{{persona="{persona}",model="{model}"}}) * on(seat) group_left() '
-            f'(1 - reviewbot_llm_seat_parked{{persona="{persona}"}}))')
-
-
-def best_tier(persona, tiers):
-    """WHAT EACH ACCOUNT CAN SERVE, as a weight. A tier is usable on a seat only when the seat is
-    not parked as an account (weekly_all/session wall) AND that tier is not parked on it; the
-    first cut plotted the per-model flags alone, so an account-parked seat showed opus and
-    sonnet "free" (screenshot review, 2026-09-19). Anchored on reviewbot_llm_seat_parked, which
-    write_metrics emits for EVERY seat, zero included: `(1 - x)` yields no series when x is
-    absent, so a seat with a missing flag series would silently rank one tier down, or vanish
-    (reviewer-claude on ailab#788) - with the anchor it reads `parked`, wrong on the safe side
-    and visible."""
-    return ("max by (seat) (" + " or ".join(f"({_usable(persona, m)} * {w})" for m, w in tiers)
-            + f' or (max by (seat) (reviewbot_llm_seat_parked{{persona="{persona}"}}) * 0))')
-
-
-def seat_email(persona):
-    """The info series, ONE per seat: during an account swap the old and new seat_info can
-    overlap a scrape, and a many-to-one join on `seat` then errors ("multiple matches") and
-    blanks the panel at the very moment it should explain the swap (reviewer-claude on
-    ailab#788)."""
-    return f'topk by (seat) (1, max by (seat, email) (reviewbot_llm_seat_info{{persona="{persona}"}}))'
-
-
-def _gauge_col(name, width=None):
-    return _ov(name, ([{"id": "custom.width", "value": width}] if width else [])
-               + [{"id": "unit", "value": "percent"}, {"id": "min", "value": 0},
-                      {"id": "max", "value": 100}, {"id": "decimals", "value": 0},
-                      {"id": "thresholds", "value": {"mode": "absolute", "steps": USAGE_STEPS}},
-                      {"id": "custom.cellOptions",
-                       "value": {"type": "gauge", "mode": "gradient", "valueDisplayMode": "color"}}])
-
-
-def _reset_col(name, width=None):
-    return _ov(name, ([{"id": "custom.width", "value": width}] if width else [])
-               + [{"id": "unit", "value": "dtdurations"}, {"id": "decimals", "value": 0}])
-
-
-# The claude ladder on reviewer-1, pr_reviewer_llm_models: [fable, opus, sonnet]; 0 = parked.
-CLAUDE_TIERS = (("fable", 3), ("opus", 2), ("sonnet", 1))
-CLAUDE_TIER_MAP = [{"type": "value", "options": {
-    "3": {"text": "fable", "color": "green", "index": 0},
-    "2": {"text": "opus", "color": "yellow", "index": 1},
-    "1": {"text": "sonnet", "color": "orange", "index": 2},
-    "0": {"text": "parked", "color": "red", "index": 3}}}]
-# The windows the usage API reports, in table order: (limit label, column title).
-CLAUDE_WINDOWS = (("session", "Session"), ("weekly_all", "Weekly"), ("weekly_fable", "Fable"))
-# reviewer-2 runs ONE model (pr_reviewer_llm_model: gpt-6-astra), so capacity is serving or
-# parked, and the app server reports one weekly window on these plans (secondary: null,
-# 2026-09-19) - a Session column would be a blank one until a plan grows a 5h window.
-CODEX_TIERS = (("gpt-6-astra", 1),)
-CODEX_TIER_MAP = [{"type": "value", "options": {
-    "1": {"text": "serving", "color": "green", "index": 0},
-    "0": {"text": "parked", "color": "red", "index": 1}}}]
-CODEX_WINDOWS = (("weekly_all", "Weekly"),)
-
-
-# The seats, in row order, like the tier names above. reviewer-1 runs a, b, c
-# (pr_reviewer_llm_seats); reviewer-2 runs a, b, c and, since ADR 0026 (2026-09-19), provisions
-# seat d (codexrun4, realjaynesage — the second ChatGPT subscription LiteLLM serves) STAGED:
-# not in reviewbot's config until its login lands, so it exports no reviewbot_* series and its
-# timeline row is ABSENT — not `parked`, absent — until the plan's PR 3 activates it. A seat
-# only one persona has costs the other nothing: every per-seat target is anchored on
-# reviewbot_llm_seat_parked{seat=...}, and a target with no series draws no row. A fifth seat
-# is a one-line change here.
-SEAT_NAMES = ("a", "b", "c", "d")
-
-
-def seat_block(persona, name, y, tiers, tier_map, windows, serves=True, capacity_title=None):
-    """One persona's seats: four stats (4 units), the seats table (6), the capacity timeline
-    (5) - 15 units from y. Which account and model the persona is on RIGHT NOW, every
-    account's windows from the usage API (read hourly by reviewbot as each seat), and what
-    each account can serve.
-
-    LAYOUT RULES, learned from screenshot reviews (2026-09-18/19): every stat >= 4 wide, the
-    account stat half the row with the font PINNED (auto-sizing wraps an email on a narrow
-    window); the table with short headers, no filter funnels, fixed widths so it fits a 1500px
-    window without a scrollbar, sm cells, 6 units; the timeline ONE row per account. The
-    email lives on ONE info series, reviewbot_llm_seat_info, joined here; the numeric series
-    are aggregated max by (seat) so scrape labels never reach the table. `serves` adds the
-    best-tier column, pointless for a single-model persona where State already says it."""
-    P = f'persona="{persona}"'
-    bt, se = best_tier(persona, tiers), seat_email(persona)
-    targets = [("H", se)]
-    order = ["seat", "email", "Value #G"] + (["Value #J"] if serves else [])
-    rename = {"seat": "Seat", "email": "Account", "Value #G": "State", "Value #J": "Serves",
-              "Value #I": "Login expires"}
-    gauges, resets = [], []
-    for i, (limit, label) in enumerate(windows):
-        pr, rr = f"P{i}", f"R{i}"
-        targets += [(pr, _seat_pct(persona, limit)), (rr, _seat_reset(persona, limit))]
-        order += [f"Value #{pr}", f"Value #{rr}"]
-        rename[f"Value #{pr}"], rename[f"Value #{rr}"] = label, f"{label} reset"
-        gauges.append(label)
-        resets.append(f"{label} reset")
-    # State: 2 = the active seat, 1 = parked, 0 = free. "Parked" is NOTHING USABLE - the
-    # account wall OR every tier parked - the same verdict the capacity timeline draws, so a
-    # seat whose only model is parked can never read `free` here while the timeline says
-    # parked (reviewer-codex on ailab#790). And "active" needs something usable: reviewbot's
-    # active-seat marker falls back to the current seat when EVERY seat is parked, and `or`
-    # keeps its left side, so a parked seat read `● active` (codex cross-review of #790) - the
-    # `and` drops the marker for a seat with nothing usable. best_tier is anchored per seat,
-    # so the last term fills every seat the first lacks. Login expires: the login's
-    # access-token expiry, relative ("in 5 hours"); a stamp that stays in the past is a login
-    # the keepalive could not renew (0 = setup-token, dropped).
-    targets += [("G", f'((max by (seat) (reviewbot_llm_active_seat_info{{{P}}}) * 2) '
-                      f'and on(seat) ({bt} > 0)) or ({bt} == bool 0)'),
-                ("I", f'max by (seat) (reviewbot_llm_seat_credential_expires_at_seconds{{{P}}} > 0) * 1000')]
-    if serves:
-        targets.append(("J", bt))
-    order.append("Value #I")
-    overrides = [
-        _ov("Seat", [{"id": "custom.width", "value": 52}]),
-        _ov("Account", [{"id": "custom.minWidth", "value": 170}]),
-        _ov("State", [{"id": "custom.width", "value": 82},
-                      {"id": "custom.cellOptions", "value": {"type": "color-text"}},
-                      {"id": "mappings", "value": [{"type": "value", "options": {
-                          "2": {"text": "● active", "color": "green", "index": 0},
-                          "1": {"text": "parked", "color": "red", "index": 1},
-                          "0": {"text": "free", "color": "text", "index": 2}}}]}]),
-        _ov("Login expires", [{"id": "custom.width", "value": 130},
-                              {"id": "unit", "value": "dateTimeFromNow"}]),
-    ] + ([_ov("Serves", [{"id": "custom.width", "value": 72},
-                         {"id": "custom.cellOptions", "value": {"type": "color-text"}},
-                         {"id": "mappings", "value": tier_map}])] if serves else []) \
-      + [_gauge_col(c, 110) for c in gauges] + [_reset_col(c, 120) for c in resets]
-    return [
-        stat_name(f"{name} · Active Account", 0, y, 12, 4,
-                  f'reviewbot_llm_active_seat_info{{{P}}} * on(persona,seat) '
-                  f'group_left(email,plan) reviewbot_llm_seat_info{{{P}}}',
-                  "{{email}} · seat {{seat}}", value_size=26),
-        stat_name(f"{name} · Active Model", 12, y, 4, 4,
-                  f'reviewbot_llm_active_model_info{{{P}}}', "{{model}}", value_size=26),
-        # 0 = a seat's probe failed on the last poll (ReviewbotUsageProbeFailing after 3h).
-        stat(f"{name} · Usage Probe", 16, y, 4, 4,
-             f'min(reviewbot_llm_usage_probe_ok{{{P}}}) or vector(0)',
-             steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
+def router_block(y):
+    """Both personas' routing in 14 units from y: is each persona SERVING (not just alive), on
+    which model, through a router seat that is serving or parked; then the range's outcomes."""
+    out = []
+    for i, (persona, name) in enumerate((("claude", "Claude"), ("codex", "Codex"))):
+        P, x = f'persona="{persona}"', 12 * i
+        out += [
+            # STALLED = queued work and no successful review for an hour - ReviewbotStalled's
+            # condition. The heartbeat alone stays green through exactly that (2026-10-26).
+            stat(f"{name} · Serving", x, y, 4, 4,
+                 f'(max(reviewbot_queue_depth{{{P}}}) > bool 0) * '
+                 f'(time() - max(reviewbot_last_success_timestamp_seconds{{{P}}}) > bool 3600)',
+                 steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}],
+                 mappings=SERVING_MAP, value_size=26,
+                 description="STALLED: queued work and no successful review for over an hour."),
+            stat_name(f"{name} · Active Model", x + 4, y, 4, 4,
+                      f'reviewbot_llm_active_model_info{{{P}}}', "{{model}}", value_size=26),
+            stat(f"{name} · Router Seat", x + 8, y, 4, 4,
+                 f'max(reviewbot_llm_seat_parked{{{P},seat="r"}})',
+                 steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}],
+                 mappings=ROUTER_SEAT_MAP, value_size=26,
+                 description="Seat r is the persona's llm-router key; parked = the router refused "
+                             "(429) and the queue waits, lossless, until Retry-After."),
+        ]
+    claude_rev = 'sum(increase(reviewbot_llm_seat_reviews_total{persona="claude",seat="r"}[$__range]))'
+    out += [
+        # Reviews served on the top tier (fable) in the range; the rest ran on opus. -1 = no
+        # claude review in the range (a 0/0 would render NaN).
+        stat("Claude · Fable Share", 0, y + 4, 4, 4,
+             f'clamp_min(1 - sum(increase(reviewbot_llm_fallback_used_total{{persona="claude"}}[$__range])) '
+             f'/ ({claude_rev} > 0), 0) or on() vector(-1)',
+             unit="percentunit", mappings=[{"type": "value", "options": {
+                 "-1": {"text": "no reviews", "color": "text", "index": 0}}}],
+             description="Share of claude reviews in the range served on fable; the rest on opus "
+                         "(never sonnet)."),
+        stat("Router Refusals (429)", 4, y + 4, 4, 4,
+             _rng("reviewbot_llm_rate_limited_total"),
+             steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
+                    {"color": "red", "value": 10}], description="Both personas, in the selected range."),
+        stat("Backend Busy", 8, y + 4, 4, 4,
+             _rng("reviewbot_llm_upstream_busy_total"),
+             steps=[{"color": "green", "value": None}, {"color": "orange", "value": 10},
+                    {"color": "red", "value": 50}],
+             description="Upstream overloads the router reported (no attempt consumed), both "
+                         "personas, in the selected range."),
+        stat("Merge-Blocked PRs", 12, y + 4, 4, 4,
+             'max(reviewbot_merge_blocked_prs) or vector(0)',
+             steps=[{"color": "green", "value": None}, {"color": "orange", "value": 1}],
+             description="PRs both personas cleared that the merge gate still holds."),
+        # The one seat credential left on the reviewers: reviewer-2's seat d login, projected
+        # into af/litellm/chatgpt for LiteLLM's chatgpt/ provider by dsh-codex-publisher.
+        stat("LiteLLM Codex Token", 16, y + 4, 4, 4,
+             'min(dsh_codex_projection_ok{document="litellm/chatgpt"}) or vector(0)',
+             steps=OK_STEPS, value_size=26,
              mappings=[{"type": "value", "options": {"1": {"text": "OK", "index": 0},
                                                      "0": {"text": "FAILING", "index": 1}}}],
-             value_size=26),
-        # Seats that can serve SOMETHING. Aggregated before `or vector(0)`: a labelled series
-        # OR'd with the label-less vector(0) keeps BOTH, and the stat showed a phantom red
-        # zero beside the real value (codex review of PR 2). min() drops the labels.
-        stat(f"{name} · Seats Usable", 20, y, 4, 4,
-             f'min(reviewbot_llm_seats_available{{{P}}}) or vector(0)',
-             steps=[{"color": "red", "value": None}, {"color": "orange", "value": 1},
-                    {"color": "green", "value": 2}], value_size=26),
-        # Orange at 80, red at 100: 100 IS the parked state. The email rides on its OWN
-        # target (H): a seat whose probe is failing still gets its account named.
-        table(f"{name} seats", 0, y + 4, 24, 6, targets=targets, by="seat", order=order, rename=rename,
-              exclude=["Time", "Value #H"] + [f"Time {i}" for i in range(1, len(targets) + 1)],
-              overrides=overrides, cell_height="sm", filterable=False, sort="Seat"),
-        # ONE ROW PER ACCOUNT, over time: what it could serve, or parked. ONE TARGET PER SEAT:
-        # a state timeline draws frames in query-result order, and a range query's series come
-        # back in hash order (the codex rows read a, c, b - screenshot, 2026-09-19); Prometheus's
-        # sort_by_label sits behind an experimental-functions flag this cluster does not carry,
-        # so the order is fixed by targets instead.
-        state_timeline(capacity_title or f"{name} seat capacity — best tier each account can serve",
-                       0, y + 10, 24, 5,
-                       [f'({bt} * on(seat) group_left(email) {se}) and on(seat) '
-                        f'reviewbot_llm_seat_parked{{{P},seat="{sn}"}}' for sn in SEAT_NAMES],
-                       ["{{seat}} · {{email}}"] * len(SEAT_NAMES), tier_map),
+             description="dsh-codex-publisher's projection of reviewer-2 seat d into "
+                         "af/litellm/chatgpt."),
+        stat("LiteLLM Token Expires", 20, y + 4, 4, 4,
+             'max(dsh_codex_projection_token_expires_at_seconds{document="litellm/chatgpt"}) * 1000',
+             unit="dateTimeFromNow", value_size=22,
+             description="The projected access token's expiry. It renews only AFTER it expires "
+                         "(codex-cli); CodexProjectionStale fires 10 min past it without renewal."),
+        state_timeline("Router seat r — serving or parked, per persona", 0, y + 8, 12, 6,
+                       [f'max(reviewbot_llm_seat_parked{{persona="{p}",seat="r"}})'
+                        for p in ("claude", "codex")],
+                       ["claude", "codex"], ROUTER_SEAT_MAP),
+        ts("Router outcomes (1h) — reviews, below top tier, refused, backend busy", 12, y + 8, 12, 6,
+           ['sum by (persona) (increase(reviewbot_llm_seat_reviews_total{seat="r"}[1h]))',
+            'sum by (persona) (increase(reviewbot_llm_fallback_used_total[1h]))',
+            'sum by (persona) (increase(reviewbot_llm_rate_limited_total[1h]))',
+            'sum by (persona) (increase(reviewbot_llm_upstream_busy_total[1h]))'],
+           "short", legends=["{{persona}} reviews", "{{persona}} below top tier",
+                             "{{persona}} refused (429)", "{{persona}} backend busy"], decimals=0),
     ]
+    return out
 
 
 # group_left(name) join so per-instance panels show the friendly guest name instead of qemu/4001
@@ -785,18 +698,14 @@ panels += [
     ts("Queue Depth / Oldest Age", 12, 152, 12, 7,
        ['reviewbot_queue_depth', 'reviewbot_oldest_job_age_seconds'],
        "short", legends=["{{persona}} depth", "{{persona}} oldest s"]),
-    # ── seats, ladder and usage, one block per persona (seat_block above) ─────────────────
-    *seat_block("claude", "Claude", 159, CLAUDE_TIERS, CLAUDE_TIER_MAP, CLAUDE_WINDOWS),
-    # The codex persona (reviewer-2): the same watchdog since ailab#789, through the CLI's
-    # app server; one model, one weekly window.
-    *seat_block("codex", "Codex", 174, CODEX_TIERS, CODEX_TIER_MAP, CODEX_WINDOWS, serves=False,
-                capacity_title="Codex seat capacity — serving or parked, per account"),
+    # ── routing: router seat r per persona, the tier served, the range's outcomes ────────
+    *router_block(159),
     # THE REASON, not just the rate. Everything above is numeric and can only say THAT a review
     # failed; this says which PR and why. Shipped by roles/journal_ship (Alloy -> loki-lan).
     # The filter is deliberately broad — `failed`, `error`, `skipped` — because the 2026-09-06
     # failure text ("'utf-8' codec can't decode byte 0xf6") matched no term anyone would have
     # thought to search for in advance.
-    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 189, 24, 9,
+    logs("Reviewer Errors — reviewbot journal (failures, errors, skips)", 0, 173, 24, 9,
          '{job="host-journal", unit="reviewbot.service"} '
          '|~ "(?i)(failed|error|quarantin|skipped|exhausted)"'),
 ]
