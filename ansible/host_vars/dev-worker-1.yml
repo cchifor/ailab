@@ -16,6 +16,15 @@
 # agent from being the largest task when the slice does fill.
 dev_worker_tmux_memory_max: "9G"
 
+# A second 8 GiB swapfile (2026-10-26). DevWorkerThrashing pended here with the 4 GiB base file full
+# (3.9 of 4.0 GiB) and ~389 swap-ins/s, from processes OUTSIDE the tmux slice: an acceptance stack's
+# redis (2.6 GiB, no maxmemory, default snapshots - each BGSAVE fork briefly doubles it) plus vitest
+# runs. More RAM is not on offer: ai-node1 hosts cp1, three runners, two dev-workers and an agent node
+# (~152 GB committed on 124 GB). Root has 32 GB free. Disk-backed, swappiness 10: a cushion for those
+# bursts, not a fix for the redis - capping that is the acceptance stack owner's call.
+dev_worker_extra_swapfiles:
+  - { path: /swapfile2, size: "8G" }
+
 # Per-slot Gitea identity (plan 2026-10-11 worker identities, Phase 4 canary, 2026-10-11): this slot
 # authenticates as its own `dev-worker-1-bot` with the tokens in af/dev-workers/dev-worker-1, not the
 # shared dev-worker-bot. Rollback = set false and converge (docs/runbooks/openbao-dev-workers.md,

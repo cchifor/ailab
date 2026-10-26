@@ -76,6 +76,7 @@
 
 - name: Guest swapfile (OOM cushion)
   ansible.builtin.import_tasks: swap.yml
+  tags: [swap]
 # After docker.yml: the tool drives the docker CLI. Own tag: --tags cleanup.
 - name: cleanup tool (stale stacks, unused images/volumes, old build cache)
   ansible.builtin.import_tasks: cleanup.yml
