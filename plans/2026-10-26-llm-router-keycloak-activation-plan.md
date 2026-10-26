@@ -1,4 +1,4 @@
-<!-- status: in progress -->
+<!-- status: done 2026-10-26 (pending the owner's first browser sign-in) -->
 # llm-router: Keycloak browser sign-in in production (llm-router#121)
 
 Date: 2026-10-26. A dated record: do not rewrite it later. The current procedure lives in
@@ -108,3 +108,18 @@ Partly accepted:
 Rejected:
 - **A separate migration identity.** One owner role, as for Keycloak. The runtime needs DML on every
   table anyway, the schema file is idempotent, and a second URL would still sit in the same pod.
+
+## Outcome (2026-10-26)
+
+| Phase | Result |
+|---|---|
+| 1. Prerequisites | ailab #1441, merged 19:56 UTC. The import was rehearsed first. `relay` stayed byte-identical. |
+| 2. Live steps | The DB was bootstrapped, with router login over TLS 1.3. The realm, client and secret hash were verified, and the 19-path edge matrix passed. The administrator was created: `83354ded-97b6-417f-8267-566ab816c4fd`. |
+| 3. Hardening | llm-router #123, merged after three review rounds: reviewer-codex, reviewer-claude and a separate codex implementation review. It also closes #120. The integration suite runs in CI against a real PostgreSQL. Against the #117 code the suite fails: the process exits on dropped connections, and the router never becomes ready with the issuer down. |
+| 4. Isolated end-to-end run | 11/11 against the real realm, twice: on the branch and on the released image `sha256:2e4211a3…`. |
+| Hardened image roll (local mode) | ailab #1442, merged 20:58 UTC. Image `registry.chifor.me/llm-router/router@sha256:2e4211a3549b9c98f8896d1e06105c62ed22c7c6803c005acfcead4ba32df6b5` (llm-router `171ff37b`). Public checks 17/17. `validate-live` matched the baseline, with images skipped (cloud2 off at night). |
+| 5. Switch | ailab #1443, merged 21:15 UTC; the pod was ready at about 21:16. Post-switch checks and `validate-live` as recorded in the runbook. |
+
+Follow-ups:
+- the owner's first sign-in;
+- a membership API or UI in llm-router (members other than `ROUTER_AUTH_ADMIN_SUBJECT` need SQL today).

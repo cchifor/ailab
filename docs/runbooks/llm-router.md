@@ -2515,6 +2515,30 @@ ADR 0038. Settings are in `router.yaml`, next to `ROUTER_AUTH_MODE`.
 The token never goes into a URL. The same request through the public host answers 404. Break-glass needs PostgreSQL;
 during a PG outage, operate with the bearer admin token instead. Sign out afterwards.
 
+**After the switch** (ailab #1443, merge `0efc27a5` at 21:15 UTC on 2026-10-26; the new pod was ready at about 21:16):
+- The new pod logged no `auth.*` warning: the store initialised and the administrator was seeded. `router_auth` holds
+  that subject as `admin`, plus the `local:admin` record behind break-glass.
+- **Public checks:** 18 of 19 passed as written; the 19th was blocked earlier than it tested (below).
+  - `/health`, `/ready` and the SPA answer 200. `/auth/config` shows `oidc:true`, `local:false`, `available:true`.
+  - `/auth/oidc` sends a 302 to the realm, with the exact callback, client `llm-router`, S256, state and nonce. The
+    `lr_oidc` cookie is HttpOnly, Secure, SameSite=Lax, Path=/auth.
+  - Token sign-in with the admin token answers 404. The break-glass token through the public host answers 404.
+  - The unauthenticated 401s hold. Bearer `/admin/v1/config`, `/v1/models` and `/v1/routes` answer 200.
+  - Break-glass through a port-forward:
+    - it issues an admin session;
+    - signing out answers `revoked:true`;
+    - the old cookie then gets 401.
+  - **The 19th** sent the break-glass token with a forged `cf-connecting-ip: 127.0.0.1` through the public host. It
+    was blocked at Cloudflare's edge: a 403 served by Cloudflare (`Server: cloudflare`, `error code: 1000`), with no
+    `x-request-id` from the router. That is all it shows: this one request did not get a session. It is not a test of
+    the router, which by design trusts the header whenever it is present. That control is the ingress boundary
+    (`router.yaml`, at `ROUTER_AUTH_CLIENT_ADDRESS_HEADER`): only the edge path, behind Cloudflare, and a cluster-admin
+    port-forward reach `:8787`. The router's per-header behaviour is covered by llm-router's integration suite, where
+    a non-loopback header gets 404 and loopback gets a session.
+- `validate-live` matched the baseline: the three known `MODEL_REQUIRED` failures, and the image check skipped
+  because cloud2 is powered off at night.
+- **Still owed:** the owner's first browser sign-in. It uses the one-time password and sets their own password.
+
 **Rollback.** Revert this PR, removing every `ROUTER_AUTH_*` and `ROUTER_OIDC_*` variable together: the router goes
 back to local token sign-in. Sessions issued in Keycloak mode live in PostgreSQL and stop working. Local sessions issued
 before the switch are still in SQLite (KV `auth.sessions`, up to 30 days) and work again: they belong to the
