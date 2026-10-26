@@ -1,0 +1,43 @@
+# llm-router browser sign-in through Keycloak (llm-router#121; docs/runbooks/llm-router.md). System of record =
+# this SOPS file.
+# - oidc-client-secret: the `llm-router` client secret in realm llm-router at id.chifor.me; byte-identical to
+#   LLM_ROUTER_OIDC_CLIENT_SECRET in apps/keycloak/keycloak-secrets.sops.yaml. Rotation is a kcadm change first
+#   (docs/runbooks/keycloak.md), never just an edit here.
+# - auth-database-url: the router_auth role on infra-pg; its password is byte-identical to
+#   databases/infra-pg-router-auth.sops.yaml. sslmode=no-verify: TLS on the wire without CA pinning (CNPG's own CA
+#   rotates; a static copy here would go stale).
+# - break-glass-token: loopback-only browser sign-in for a Keycloak outage (kubectl port-forward to the pod). It needs
+#   the PG store; during a PG outage operate with the bearer admin token (llm-router-auth) instead.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: llm-router-oidc
+    namespace: llm-router
+    labels:
+        app.kubernetes.io/name: llm-router
+        app.kubernetes.io/part-of: llm-router
+type: Opaque
+stringData:
+    oidc-client-secret: ENC[AES256_GCM,data:5FHMmco2O2UIqHYL/CthnI7IyGPrrptZ0TVBOC+qbcNhQTJBRtUNbUkY0fWtFiy89Z5TBmWITWtWSna5eURJqw==,iv:NomrSCLGeCwxVu1W0Dpy41/MDdjoSt0Sm5iI/8S95vk=,tag:Br5OAcDhEwWp2cx/cv84Yw==,type:str]
+    auth-database-url: ENC[AES256_GCM,data:wcsV1OtATe+U41yP0UpbDMiuUGicrXQRPkxCt9+w3MYj+B2hVPGAFRLZ2roD8wo/YMzTZBwlsFAFHq6RHpwDEW+a9DvUzsfhmKjmJzw+WTAkCMaWscpkoTOcouFwcusgx+Da9mpj3f0go7UkxVc/CcB34eB8SyOxt1TlmAnVbeHJMWD2+kJGDVK0f9mTQkLJAYU=,iv:kpFdxYXo/4GIthBOne+MNG0sgEuT+NL1JeYgS9xr0Mc=,tag:ytVMT7GLHGH4wEYRI2gnvA==,type:str]
+    break-glass-token: ENC[AES256_GCM,data:eg5aRpbgR/1c1qwqlRvsAQG0jrttrXvRdC9Qt7zayzGTtDVGOtEA9nNLhs0knSoNnEG/V9s1OvZYc053e5OdJA==,iv:BMhZHFRCUkw35srEUBhdIh7NR+Hyt7CQc1jQswlkzsY=,tag:TEVvWpo+nzHbeS/O6mEszg==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB0VndzODh1Q1gyUUFSR3c4
+            U1RwZS9HWnVqWWdEYjV1WFpWazNWV1RuZW1nCmhzM29LclhMY3cwZkgyVkhqUUFX
+            Q2dJekg2Q3RScVVaYkpHMU5jRmcxbkUKLS0tIENEeXBkQ3JTMVZHUGRaa1Y5Vmpx
+            UHlxeXF1VWFRelZPa3Z6S0xnM1JlUE0Kxm0/CqRUTePhoeCtIYh6dyPNNgZCg0gi
+            rKC64lfKa47oyYNfat33lujw/zvWXfiQD/BV2CsYEmXer639hRMtTg==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-10-26T19:33:43Z"
+    mac: ENC[AES256_GCM,data:O/7cGJMjRAmSKgzeh3c5zdHDRhoYC5uMob9muprJwblP/wlGRt33FsTtM46fy5Svb5q26FH+qNgpqbROjLiwKdrBL4Rbd/WTMScp7TbzjYcvPC0bPNwreAkslyQCepJPi7jQkWLcUkWz4INGoUXfquSRI7AT3JAkg6LMZ3iVGK4=,iv:BsP3djnJBSzxK0VKg16fG8U/vDycvFsRazczOf0tvXM=,tag:zxzdBEzayIWNq1fAvmAwfA==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

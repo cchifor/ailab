@@ -368,3 +368,15 @@ spec:
             cidr: 192.168.0.28/32
       ports:
         - {protocol: TCP, port: 8190}
+    # The browser-auth store (llm-router#121): the `router_auth` database on CNPG infra-pg. Only the
+    # Keycloak (OIDC) mode uses it; bearer API keys never touch it. Keycloak itself is reached over the
+    # public HTTPS rule above (https://id.chifor.me, through Cloudflare), not in-cluster.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: infra-pg
+      ports:
+        - {protocol: TCP, port: 5432}

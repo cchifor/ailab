@@ -1,0 +1,32 @@
+# basic-auth creds for the `router_auth` managed role/DB (infra-pg) behind llm-router's browser sign-in
+# (llm-router#121: Keycloak sessions and memberships). The password MUST stay byte-identical to the password
+# inside auth-database-url in apps/llm-router/llm-router-oidc.sops.yaml.
+apiVersion: v1
+kind: Secret
+metadata:
+    name: infra-pg-router-auth
+    namespace: databases
+type: kubernetes.io/basic-auth
+stringData:
+    username: ENC[AES256_GCM,data:F+dZZ9EtVK01EBg=,iv:m/M9FS6oOm+YMM2p2CPOMm8x9fjMQ4XOfH1vpeyzL2M=,tag:j0R19qocc/E4rg7An4/M0A==,type:str]
+    password: ENC[AES256_GCM,data:XyLyh1Pv5hxJk89QLVnev20RBgWBLx1A90KFMIIGW/iiuQC3kn3yEI9uS+sk6TXD,iv:56HOhKRSSe7nFnNzgiLw3jb47q44YGdksNxaePM8fBs=,tag:I4J5QKtt9Z2CRYixm7hx0A==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBKUVFVNzVobXNIdkczQmdm
+            a1UweUVYdk5DdVpwYktVY0ZNVHBOOTFWQ1hnCmxhV012UWc4Z0FNK000YTVHdnoy
+            b09XR0tMTGlDejl6V0RmMXYwdXZCUDQKLS0tIGxFQU1kS1c1eDJPNzZoN2NjOUdM
+            b2pSVUxKK1VJYko2UzNudlNXUGF5ckEKfPTjxJee2UU1eGp0zEvUp1Ho1NmFPxyQ
+            aGLCBIck1XMnfNZIG5IS3o8/q7KufJGQDNrFvXX0QxS84nTSAoKoFQ==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-10-26T19:33:43Z"
+    mac: ENC[AES256_GCM,data:FIvFv29Z6ZeL0IQCDnNTDD+VzMqf57TRLa9bRV2+T/fNRP7jwsBkLBTK7oYnPCChSXbYR8pFi9e20lT4oVVsUETn2DW6XdMfsZ/rQOjahrPP8X04RCvpS6lYESo+yQofKMsY0ixLW4msM1Zzr6TEiNzO+q82q0uFjmrBm5ZZ5k0=,iv:BR4ioKbZKH6IBUfOyWaOvVpBJ3jEdLPl7mbUYsJ9S3E=,tag:tQpislxz8I0bS9pZOwll5A==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

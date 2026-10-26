@@ -2405,6 +2405,32 @@ answer 200). There is no SQLite schema change, no new setting and no live-config
 
 In local mode this release writes nothing the previous one cannot read, so a rollback needs no data step.
 
+## Keycloak sign-in: prerequisites (2026-10-26, llm-router#121)
+
+The owner decided on 2026-10-26 to switch the console to Keycloak sign-in. The plan, the owner's
+decisions and the codex review are in `plans/2026-10-26-llm-router-keycloak-activation-plan.md`.
+This first step provisions the pieces and changes **no router behaviour**: the Deployment does not
+reference any of them yet.
+
+| Piece | Where |
+|---|---|
+| Realm `llm-router`, confidential client `llm-router` (PKCE S256, redirect exactly `https://router.chifor.me/auth/callback`) | `apps/keycloak/realm-llm-router.json` (ConfigMap `keycloak-realms`), runbook `keycloak.md` "Adding a realm" |
+| Edge | `edge/cloudflared.yaml`: `^/realms/llm-router(/|$)` on `id.chifor.me` |
+| Auth store | role `router_auth` (`databases/infra-pg.yaml`, password `databases/infra-pg-router-auth.sops.yaml`); DB from the one-shot `databases/router-auth-db-bootstrap.sql`; the router owns the schema and applies it at start |
+| Router secrets | `apps/llm-router/llm-router-oidc.sops.yaml`, Secret `llm-router-oidc`: `oidc-client-secret`, `auth-database-url` (`sslmode=no-verify`: TLS without CA pinning), `break-glass-token` |
+| Egress | router NetworkPolicy: infra-pg :5432. Keycloak is reached on the existing public-443 rule, through Cloudflare |
+| Monitoring | Gatus "Keycloak (id.chifor.me) llm-router realm discovery" |
+
+**Byte-identical pairs** (compare by sha256 prefix, never print):
+- `oidc-client-secret` = `LLM_ROUTER_OIDC_CLIENT_SECRET` in `keycloak-secrets.sops.yaml`.
+- The password in `auth-database-url` = `password` in `infra-pg-router-auth.sops.yaml`.
+
+**Not yet:** `ROUTER_AUTH_MODE=oidc`. It waits for:
+- an llm-router hardening release (the #117 code crashes on an idle PG connection error and still
+  blocks start-up on PG and on Keycloak discovery);
+- an isolated end-to-end run against the real realm;
+- the administrator's `sub`.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem

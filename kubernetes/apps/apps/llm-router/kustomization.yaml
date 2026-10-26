@@ -12,5 +12,6 @@ resources:
   - router.yaml
   - edge.yaml
   - podmonitor.yaml # Prometheus scrape of the router's metrics port (rules: infrastructure/monitoring/llm-router-rules.yaml)
+  - llm-router-oidc.sops.yaml # SOPS: Keycloak client secret, router_auth DB URL, break-glass token (llm-router#121)
 # The Relay trust bridge remains opt-in. The activation gate test requires
 # operator evidence before a follow-up PR may include it here.

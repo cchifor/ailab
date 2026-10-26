@@ -267,6 +267,18 @@ spec:
         createrole: false
         passwordSecret:
           name: infra-pg-keycloak
+      # llm-router browser-auth store (llm-router#121: Keycloak sign-in, sessions, memberships). Password from
+      # infra-pg-router-auth, which MUST stay byte-identical to the password inside auth-database-url in
+      # apps/llm-router/llm-router-oidc.sops.yaml. managed.roles makes the ROLE but NEVER a DATABASE: the
+      # `router_auth` DB comes from the superuser one-shot databases/router-auth-db-bootstrap.sql.
+      - name: router_auth
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: infra-pg-router-auth
       # AgentForge v2 RLS boundary (ADR 0019): two roles, one password secret each. bypassrls is set
       # explicitly on both — afp_admin BYPASSRLS (owner/migrations), afp_app NOBYPASSRLS (request path).
       - name: afp_admin
