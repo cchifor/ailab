@@ -526,6 +526,15 @@ the session scratchpad clone — hand the tfstate to the main checkout and verif
 
 ### Seats: the codex persona holds several subscriptions
 
+> **RETIRED 2026-10-26: both personas review through llm-router only** (§ "Router seats" below).
+> The subscription seats are gone from `pr_reviewer_llm_seats` and their users were removed
+> (`pr_reviewer_retired_seat_users`), so reviewbot runs no CLI, no sudo and no usage watchdog, and
+> reviewbot.service has NoNewPrivileges again. This section is kept as the record of how the seats
+> worked and as the rollback procedure (restore the seat list from git, then log each seat in).
+> On reviewer-2 one login survives: seat d (`codexrun4`), the LiteLLM `chatgpt/` subscription, now
+> owned by the `dsh_codex_publisher` role and renewed by `codex-seat-renew@codexrun4.timer`
+> (dsh.md § "Codex subscriptions").
+
 reviewer-2 runs `pr_reviewer_llm_seats` — a list of `{name, sudo_user, home?}`, one ChatGPT
 subscription each, one OS user each — plus `pr_reviewer_llm_seats_staged`, the same shape for a
 seat that is provisioned but not yet served. Live since 2026-09-16 (a, b, c) and 2026-09-19 (d,
@@ -636,6 +645,13 @@ probes, and the manual check is `sudo -n -u <seat user> HOME=/home/<seat user>
 /usr/local/lib/reviewbot/codex-usage.py`. Re-login a seat with `codex login` as its user.
 
 ### Seats on reviewer-1: the claude persona holds three subscriptions
+
+> **RETIRED 2026-10-26: both personas review through llm-router only** (§ "Router seats" below).
+> The subscription seats are gone from `pr_reviewer_llm_seats` and their users were removed
+> (`pr_reviewer_retired_seat_users`), so reviewbot runs no CLI, no sudo and no usage watchdog, and
+> reviewbot.service has NoNewPrivileges again. This section is kept as the record of how the seats
+> worked and as the rollback procedure (restore the seat list from git, then log each seat in).
+> All three logins had been logged out by the CLI (tokens blanked) since 2026-10-04/16.
 
 Since 2026-09-18 (`plans/2026-09-18-claude-seat-rotation-plan.md`, ADR 0025) reviewer-1 runs the
 same `pr_reviewer_llm_seats` rotation as reviewer-2 — sticky selection, lossless park, duplicate
@@ -758,8 +774,15 @@ cchifor/llm-router) instead of a CLI login: an entry in `pr_reviewer_llm_seats` 
 
 | persona | seat | key | route | state |
 |---|---|---|---|---|
-| codex (reviewer-2) | `r` | `key_4fdbe2b833fe` | `codex-reviewer` (pointer to the smart pool `pool-codex`), reached as the key's default route: the seat sends the tier name `gpt-6-astra` | **serving** since 2026-10-13 |
-| claude (reviewer-1) | `r` | `key_f856495c9b0c` | the smart pool `pool-claude` in `X-Router-Route` (seat `route`), the tier's model in `model` (seat `models`): `fable`, then `opus`; never `sonnet` | **serving** since 2026-10-26 (`claude-reviewer` 2026-10-13..26) |
+| codex (reviewer-2) | `r` | `key_4fdbe2b833fe` | `codex-reviewer` (pointer to the smart pool `pool-codex`), reached as the key's default route: the seat sends the tier name `gpt-6-astra` | **serving** since 2026-10-13; the ONLY seat since 2026-10-26 |
+| claude (reviewer-1) | `r` | `key_f856495c9b0c` (expires 2027-01-05) | the smart pool `pool-claude` in `X-Router-Route` (seat `route`), the tier's model in `model` (seat `models`): `fable`, then `opus`; never `sonnet` | **serving** since 2026-10-26 (`claude-reviewer` 2026-10-13..26); the ONLY seat since 2026-10-26 |
+
+**Router only since 2026-10-26 (owner request).** Each persona has seat `r` and nothing else, so a
+router outage pauses reviews - losslessly: the queue is kept and `ReviewbotStalled` fires after
+1 h - and, since merges need both personas, merges with them. There is no subscription fallback.
+The router balances more accounts than the seats ever did (`pool-claude`: five Claude accounts;
+`pool-codex`: every Codex account). **Renew the keys before they expire** (`key_f856495c9b0c`
+2027-01-05): a 401 parks seat `r` for 6 h and the persona stops.
 
 Both routes: llm-router.md § "Reviewer routes (2026-10-13)". Until 2026-10-13 reviewer-2 used
 `key_d7adf31fb93e` on the `codex` route (round-robin gpt-6-luna + 3x gpt-6-astra, seat

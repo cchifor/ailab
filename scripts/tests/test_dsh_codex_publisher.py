@@ -317,6 +317,56 @@ class Publishing(unittest.TestCase):
         self.assertIn('dsh_codex_projection_optional{document="litellm/chatgpt"} 1', text)
         self.assertNotIn('dsh_codex_projection_last_success_timestamp_seconds{document="litellm/chatgpt"}', text)
 
+    # ── a RETIRED projection: its fields leave the document once, nothing else is touched ─────
+    # 2026-10-26: seat b's projection into af/dsh/credentials lost its last reader on 10-19 (ADR
+    # 0039), but its access token - renewed that day, ten days of life - sat in a document dsh's
+    # agent can read. Retiring it removes the four fields with a JSON merge patch (null deletes a
+    # key), CAS-guarded like a publish, and records that it did so.
+    def _retiring(self):
+        return {'address': 'https://vault.example',
+                'projections': [config()['projections'][1] | {'optional': False}],
+                'retired': [{'kv_path': 'dsh/credentials', 'prefix': 'DSH_CODEX'}]}
+
+    def test_a_retired_projection_nulls_its_four_fields_once(self):
+        cfg = self._retiring()
+        rc, out = self._run(cfg, both_seats)
+        self.assertEqual(rc, 0)
+        retired = self.vault.patches('dsh/credentials')
+        self.assertEqual(len(retired), 1)
+        self.assertEqual(retired[0][2]['data'], {'DSH_CODEX' + f: None for f in FIELDS})
+        self.assertEqual(retired[0][2]['options'], {'cas': 8})
+        self.assertIn('retired', out)
+        logins = self.vault.logins()
+        rc, out = self._run(cfg, both_seats)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.vault.patches('dsh/credentials')), 1, 'removed once, never again')
+        self.assertEqual(self.vault.logins() - logins, 1, 'a finished retirement does not even log in')
+        self.assertEqual(len(self.vault.patches('litellm/chatgpt')), 1, 'the live projection is untouched')
+
+    def test_a_retired_document_has_no_series_in_the_textfile(self):
+        self._run(config(optional_d=False), both_seats)            # dsh/credentials was projected
+        self._run(self._retiring(), both_seats)
+        text = self.textfile.read_text()
+        self.assertNotIn('document="dsh/credentials"', text)
+        self.assertIn('dsh_codex_projection_ok{document="litellm/chatgpt",email="realjaynesage@gmail.com"} 1', text)
+
+    def test_a_retirement_that_names_a_live_projection_is_refused(self):
+        cfg = self._retiring() | {'retired': [{'kv_path': 'litellm/chatgpt', 'prefix': 'CHATGPT'}]}
+        rc, out = self._run(cfg, both_seats)
+        self.assertEqual(rc, 1)
+        self.assertFalse(any(all(v is None for v in c[2]['data'].values()) for c in self.vault.patches()),
+                         'a live projection must never be nulled')
+        self.assertIn('still projected', out)
+
+    def test_a_vault_error_retiring_is_a_failure_without_the_body(self):
+        self.vault.fail_path = 'dsh/credentials'
+        rc, out = self._run(self._retiring(), both_seats)
+        self.assertEqual(rc, 1)
+        self.assertIn('HTTP 403', out)
+        self.assertNotIn('secret body', out)
+        rc, _ = self._run(self._retiring() , both_seats)
+        self.assertEqual(rc, 1, 'not recorded as done, so the next run tries again')
+
 
 if __name__ == '__main__':
     unittest.main()

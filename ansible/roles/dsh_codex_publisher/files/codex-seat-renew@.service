@@ -1,0 +1,24 @@
+[Unit]
+Description=Renew the Codex login of projection seat %i (its app server renews an expired token)
+# WHY THIS EXISTS (2026-10-26). A projected seat's access token is renewed only by something run AS
+# that seat, and codex-cli 0.153.4 renews only an EXPIRED token. The reviewer used to do it with its
+# hourly usage poll; since both personas review through llm-router only, nothing else runs as the
+# seat. This runs the same probe the reviewer ran (codex-usage.py: `codex app-server`,
+# account/rateLimits/read - no model call, no quota), which renews the token once it has expired, so
+# the publisher has a fresh one to project within a tick. Nothing else runs as the seat now, so there
+# is never a second refresher racing this one for the refresh token.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+WorkingDirectory=~
+ExecStart=/usr/bin/python3 /usr/local/lib/dsh-codex-publisher/codex-usage.py
+# The probe prints the account's usage windows and the credential's expiry, never a token.
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# The app server rewrites the seat's own ~/.codex (auth.json, logs, state) and nothing else.
+ReadWritePaths=/home/%i

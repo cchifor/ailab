@@ -363,11 +363,22 @@ with git itself, isolated from the host's configuration.
 
 > **dsh consumes neither seat since 2026-10-19** (ADR 0039). Its Codex models come from
 > llm-router's `pool-codex` (see "Models: llm-router"), and the `openai-codex` and
-> `openai-codex-realjaynesage` provider blocks are unwritten on every boot. Everything below still
-> RUNS: the publisher still patches both documents every minute, the `CodexProjection*` alerts
-> still watch it, and LiteLLM's `gpt-6-astra-realjaynesage` route still exists. Retiring seat b's
-> projection (`af/dsh/credentials` `DSH_CODEX_*`) is a reviewer-2 change, recorded as a follow-up in
-> ADR 0039. The section is kept as the description of that still-running machinery.
+> `openai-codex-realjaynesage` provider blocks are unwritten on every boot.
+>
+> **2026-10-26: seat b's projection is RETIRED and seat d is the only one left.** reviewer-2 reviews
+> through llm-router only, so it no longer runs as any seat; seats a-c and their users are gone.
+> - Seat b's `retired` entry in `host_vars/reviewer-2.yml` made the publisher remove the four
+>   `DSH_CODEX_*` fields from `af/dsh/credentials` once (a CAS JSON merge patch with nulls), so no
+>   live token sits in a document dsh's agent can read.
+> - Seat d (`codexrun4`, `af/litellm/chatgpt`) stays: LiteLLM's `gpt-5.6-sol` is served from this
+>   subscription for the platform's Workflow drafts (ADR 0027), beside the `gpt-6-astra-realjaynesage`
+>   route. The `dsh_codex_publisher` role now owns its user and runs
+>   `codex-seat-renew@codexrun4.timer`: every 5 min the seat's probe (`codex-usage.py`, the Codex
+>   app server, no quota) renews the token once it has expired - codex-cli 0.153.4 renews nothing
+>   earlier - and the publisher projects it within a minute. `CodexProjectionStale` fires only when
+>   that has not happened 10 min after expiry.
+> - The table and procedures below are the pre-2026-10-26 record; read "the reviewer refreshes"
+>   as "the renewal timer refreshes" for seat d.
 
 Two ChatGPT subscriptions serve `gpt-6-astra` to dsh, and both are reviewer-2 seats whose OAuth
 refresh happens ONLY on that host (ADR 0024 for the seats, ADR 0026 for the second route). Local

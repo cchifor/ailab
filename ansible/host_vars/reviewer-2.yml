@@ -7,74 +7,49 @@ pr_reviewer_llm_model: gpt-6-astra
 pr_reviewer_llm_cmd:
   - "/usr/bin/codex"
 pr_reviewer_llm_timeout_s: 600
-pr_reviewer_llm_sudo_user: codexrun
+pr_reviewer_llm_sudo_user: ""
 # Ship journald to Loki (roles/journal_ship) — the reviewer failure REASON was
 # previously visible only by SSHing to this host.
 journal_ship_enabled: true
-# ---- seat rotation (ADR 0024, plans/2026-09-16-codex-seat-rotation-plan.md) ----
-# FOUR seats, one per distinct ChatGPT account, each verified by tokens.account_id at the time
-# it was added — cfdea639… (seat a, shared with the six dev agents), 9c8a8cfb… (seat b),
-# 11c52fea… (seat c) and 841dae14… (seat d, 2026-09-19). All four were provisioned with
-# `codex login --device-auth`, which is the headless flow and is absent from `codex login --help`
-# at 0.153.4.
-# Distinctness is not a convention here, it is enforced: resolve_seats() reads each seat's
-# account_id at startup and COLLAPSES duplicates, because rotating inside one account is the
-# doomed-retry loop the park exists to prevent. A fourth seat sharing an existing account would
-# reduce reviewbot_llm_seats_distinct and fire ReviewbotSeatsDegraded rather than pretend the
-# capacity exists.
+# ---- ROUTER ONLY since 2026-10-26 (owner request; dev-workers.md § "Router seats") ----
+# The persona reviews through llm-router alone: seat `r`, key key_4fdbe2b833fe (routes
+# [codex-reviewer], default route codex-reviewer, a pointer to the Codex smart pool `pool-codex`).
+# The seat sends the tier name (`gpt-6-astra`, no `models` map), which the key routes in model mode
+# through its default route; naming the route itself would get 400 MODEL_REQUIRED (the pool's
+# targets are any-model). Runbook llm-router.md § "Reviewer routes (2026-10-13)".
 #
-# Sticky, in this order: seat `a` carries the load until it refuses, then `b`. That is deliberate
-# and not round-robin — spreading evenly drives both accounts to their walls at the same time and
-# turns two staggered recoveries into one synchronised outage.
-#
-# pr_reviewer_llm_sudo_user stays set below: it is what the dormant OpenBao import still gates on,
-# and the systemd NoNewPrivileges condition covers both variables.
-#
-# SEAT `r` IS THE LLM ROUTER (2026-10-07; reviewbot.py § router seats, runbook dev-workers.md §
-# "Router seats"). Preferred over a-d within the tier and never sticky; a-d stay as the fallback
-# AND must stay configured: the hourly usage probe is what refreshes the seat logins that dsh and
-# LiteLLM read (dsh.md § Codex subscriptions).
-# Since 2026-10-13 (owner request) the key is key_4fdbe2b833fe: routes [codex-reviewer], default
-# route codex-reviewer, a pointer to the router's Codex smart pool `pool-codex`. The seat sends the
-# tier name (`gpt-6-astra`, no `models` map), which the key routes in model mode through its
-# default route; naming the route itself would get 400 MODEL_REQUIRED (the pool's targets are
-# any-model). Runbook llm-router.md § "Reviewer routes (2026-10-13)". The previous key,
-# key_d7adf31fb93e (`codex` route only, model `codex` via `models: { gpt-6-astra: codex }`), stays
-# valid on the router for rollback until the owner retires it.
+# RETIRED: the subscription-seat rotation (ADR 0024, seats a-d = codexrun..codexrun4, sticky, with
+# an hourly usage watchdog). The router balances the same accounts and more, and a router outage
+# now pauses the persona losslessly (queue intact, ReviewbotStalled after 1 h) instead of falling
+# back. With no seat run as another user, sudoers is removed and reviewbot.service runs with
+# NoNewPrivileges. Seat d's user (codexrun4) is NOT retired: it is the LiteLLM chatgpt/ login, now
+# owned and renewed by the dsh_codex_publisher role below. Rollback: restore the seat list from git
+# (the a-c logins are gone with their users, so each would need a new `codex login --device-auth`).
 pr_reviewer_llm_seats:
   - { name: r, sudo_user: "", router_url: "https://router.chifor.me",
       key_file: "{{ pr_reviewer_router_key_file }}" }
-  - { name: a, sudo_user: codexrun }
-  - { name: b, sudo_user: codexrun2 }
-  - { name: c, sudo_user: codexrun3 }
-  # Seat d (realjaynesage@gmail.com, ADR 0026): staged on 2026-09-19, activated once its device-auth
-  # login was installed as codexrun4 -- the hourly usage probe now renews its token, which is what
-  # keeps the LiteLLM chatgpt/ projection fresh. Last in the sticky order, so reviews reach it only
-  # when a, b and c are all spent.
-  - { name: d, sudo_user: codexrun4 }
-pr_reviewer_llm_seats_staged: []
-# The usage watchdog, hourly, as on reviewer-1: reviewbot runs codex-usage.py AS each seat, which
-# asks the CLI's own app server (`codex app-server`, account/rateLimits/read - no model call, no
-# quota) for the account's windows, parks and unparks seats from the API's percent/resets_at,
-# and exports per-account usage with the email from the seat's token claims. 2026-09-19: the
-# three seats read 97 %, 72 % and 100 % (rate_limit_reached) of their weekly windows, invisible
-# until now.
-pr_reviewer_usage_poll_s: 3600
+pr_reviewer_retired_seat_users: [codexrun, codexrun2, codexrun3]
+# No subscription seat left to read, so no usage watchdog.
+pr_reviewer_usage_poll_s: 0
 
-# The reviewer remains the sole OAuth refresher; its consumers receive access tokens only. One
+# The seat login is the sole OAuth refresher; its consumers receive access tokens only. One
 # projection per seat that feeds something (ansible/roles/dsh_codex_publisher/files/publish.py):
-#   seat b -> af/dsh/credentials DSH_CODEX_*   dsh's native openai-codex provider
-#   seat d -> af/litellm/chatgpt CHATGPT_*     LiteLLM's chatgpt/ provider, via ESO (ADR 0026)
-# Both projections are REQUIRED: an absent auth file on either is a failure the alerts see.
+#   seat d (codexrun4) -> af/litellm/chatgpt CHATGPT_*   LiteLLM's chatgpt/ provider, via ESO (ADR 0026)
+# It is REQUIRED: an absent auth file is a failure the alerts see. `seat_user` makes the role own the
+# user and run codex-seat-renew@codexrun4.timer, which renews the token once it expires (the
+# reviewer used to, by running as the seat; it no longer does).
+# RETIRED 2026-10-26: seat b -> af/dsh/credentials DSH_CODEX_*. Its reader, dsh's native
+# openai-codex provider, went with ADR 0039 (2026-10-19); the `retired` entry removes the four
+# fields from the document once, so no live token sits where dsh's agent can read it.
 dsh_codex_publisher:
   address: https://openbao.lan.chifor.me:30820
   textfile: /var/lib/prometheus/node-exporter/dsh-codex-publisher.prom
   projections:
-    - auth_path: /home/codexrun2/.codex/auth.json
-      email: realjaysage@gmail.com
-      kv_path: dsh/credentials
-      prefix: DSH_CODEX
     - auth_path: /home/codexrun4/.codex/auth.json
       email: realjaynesage@gmail.com
       kv_path: litellm/chatgpt
       prefix: CHATGPT
+      seat_user: codexrun4
+  retired:
+    - kv_path: dsh/credentials
+      prefix: DSH_CODEX

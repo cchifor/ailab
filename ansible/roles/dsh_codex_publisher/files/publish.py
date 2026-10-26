@@ -4,10 +4,16 @@
 One PROJECTION per reviewer seat: the seat's `~/.codex/auth.json` (the OAuth owner -- the Codex CLI
 running as that seat is the only thing that ever refreshes it) is read, its access token and the
 identity claims in that token are PATCHed into one KV-v2 document under a field prefix, and the
-refresh token, the id token and the auth document itself never leave the host. Two projections
-exist today (host_vars/reviewer-2.yml): seat b -> af/dsh/credentials as DSH_CODEX_*, read by dsh's
-native openai-codex provider; seat d -> af/litellm/chatgpt as CHATGPT_*, rendered by ESO into the
-auth file LiteLLM's `chatgpt/` provider reads (ADR 0026).
+refresh token, the id token and the auth document itself never leave the host. One projection
+exists today (host_vars/reviewer-2.yml): seat d -> af/litellm/chatgpt as CHATGPT_*, rendered by ESO
+into the auth file LiteLLM's `chatgpt/` provider reads (ADR 0026). Seat b -> af/dsh/credentials as
+DSH_CODEX_* is RETIRED (its reader, dsh's native openai-codex provider, went with ADR 0039): a
+`retired` entry removes its fields from the document once (retire()).
+
+Since 2026-10-26 the reviewer no longer runs as these seats (it reviews through llm-router only), so
+the seat's token is renewed by codex-seat-renew@<seat user>.timer - the Codex app server, run as the
+seat every 5 minutes, renews an EXPIRED token (codex-cli 0.153.4 renews nothing earlier) - and this
+publisher still only reads the file.
 
 Projections are independent, and each one logs in on its own: the AppRole token lives 60 s, so a
 token is never carried from one projection into the next. A seat whose auth file does not exist yet
@@ -160,6 +166,42 @@ def publish(config, session, fields, kv_path='dsh/credentials', state_path=STATE
     print('projection af/' + kv_path + ' updated; unrelated fields preserved')
 
 
+FIELD_SUFFIXES = ('_ACCESS_TOKEN', '_ACCOUNT_ID', '_ACCOUNT_EMAIL', '_EXPIRES_AT')   # what project() writes
+
+
+def _retired_key(kv_path, prefix):
+    return 'retired:' + kv_path + ':' + prefix
+
+
+def retired_done(kv_path, prefix, state_path=STATE):
+    try:
+        return bool((_read_state(state_path).get(_retired_key(kv_path, prefix)) or {}).get('done'))
+    except (OSError, ValueError):
+        return False
+
+
+def retire(config, session, kv_path, prefix, state_path=STATE):
+    """Remove a RETIRED projection's fields from af/<kv_path>, once.
+
+    A projection whose consumer is gone still leaves its last access token in the document - for
+    up to ten days of its life, readable by whatever the document is rendered into. A JSON merge
+    patch with null deletes a key and leaves every other field alone; the patch is CAS-guarded like
+    a publish. The state file records that it was done, so the publisher never writes the document
+    again for it (a lost state file costs one more, harmless, patch)."""
+    tls, token = session
+    state = _read_state(state_path)
+    metadata = _request(config, tls, 'af/metadata/' + kv_path, token=token)['data']
+    version = metadata['current_version']
+    current = metadata['versions'][str(version)]
+    if current['destroyed'] or current['deletion_time']:
+        raise ValueError('credential document af/' + kv_path + ' is deleted; operator recovery required')
+    result = _request(config, tls, 'af/data/' + kv_path, 'PATCH',
+                      {'options': {'cas': version}, 'data': {prefix + s: None for s in FIELD_SUFFIXES}}, token)
+    state[_retired_key(kv_path, prefix)] = {'done': True, 'version': result['data']['version']}
+    _write_atomic(state_path, json.dumps(state))
+    print('retired projection ' + prefix + '_* removed from af/' + kv_path + '; unrelated fields preserved')
+
+
 def _label(text):
     # The exposition format escapes backslash, double quote AND newline in label values; an
     # unescaped newline (a folded-scalar typo in host_vars) would make node_exporter reject the
@@ -228,6 +270,23 @@ def run(config, approle, now, state_path=STATE, read_auth=None, textfile=None):
             print('projection ' + label + ' failed: ' + type(error).__name__ + detail, flush=True)
             failures += 1
         results.append(result)
+    live = {(p['kv_path'], p.get('prefix', 'DSH_CODEX')) for p in config['projections']}
+    for retired in config.get('retired', []):
+        document, prefix = retired['kv_path'], retired['prefix']
+        label = prefix + '_* in af/' + document
+        if (document, prefix) in live:
+            # A host_vars slip must never null the token a consumer is reading right now.
+            print('retired projection ' + label + ' refused: it is still projected', flush=True)
+            failures += 1
+            continue
+        if retired_done(document, prefix, state_path):
+            continue                    # done once; no login, no read, no write
+        try:
+            retire(config, login(config, approle), document, prefix, state_path)
+        except Exception as error:
+            detail = (' HTTP ' + str(error.code)) if isinstance(error, urllib.error.HTTPError) else ''
+            print('retired projection ' + label + ' failed: ' + type(error).__name__ + detail, flush=True)
+            failures += 1
     _carry_last_success(results, state_path)
     if textfile:
         _write_atomic(Path(textfile), render_metrics(results, now), 0o644)

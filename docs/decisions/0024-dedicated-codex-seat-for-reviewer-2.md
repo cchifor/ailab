@@ -1,5 +1,9 @@
 # ADR 0024 — reviewer-2 gets more Codex capacity; review volume is not cut to fit one seat
 
+> **SUPERSEDED FOR REVIEWS 2026-10-26.** reviewer-2 reviews through llm-router only (seat `r`,
+> `pool-codex`); seats a-c and their users are removed. Seat d survives only as the LiteLLM `chatgpt/`
+> login, owned and renewed by the `dsh_codex_publisher` role (ADR 0026 amendment, dsh.md).
+
 > **AMENDED 2026-09-16, same day, before any seat was bought.** This ADR originally decided on a
 > *dedicated* seat, reasoning that the reviewer was starved by sharing one with the AgentForge
 > dev agents. **That premise was wrong and the measurement is below.** The dev agents make 41

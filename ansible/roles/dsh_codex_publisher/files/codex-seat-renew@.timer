@@ -1,0 +1,12 @@
+[Unit]
+Description=Renew the Codex login of projection seat %i every 5 minutes
+
+[Timer]
+# 5 min bounds the time a projection can carry an expired token well inside the 10 min
+# CodexProjectionStale threshold, for one app-server start per tick.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
