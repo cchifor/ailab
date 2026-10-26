@@ -13,7 +13,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=%i
-WorkingDirectory=~
+# systemd 255 derives HOME from passwd for User= (measured on reviewer-2: /home/codexrun4); pinned
+# anyway, because the probe and the app server find the login through $HOME and ReadWritePaths
+# below already assumes this path.
+Environment=HOME=/home/%i
+WorkingDirectory=/home/%i
 ExecStart=/usr/bin/python3 /usr/local/lib/dsh-codex-publisher/codex-usage.py
 # The probe prints the account's usage windows and the credential's expiry, never a token.
 TimeoutStartSec=120
