@@ -316,9 +316,11 @@ class ExecuteRound2Test(ExecuteTest):
 class FakeDocker:
     """`sh` stand-in for the loaders and execute(): answers by the docker subcommand."""
 
-    def __init__(self, containers=(), images=(), rmi=None, present=()):
+    def __init__(self, containers=(), images=(), rmi=None, present=(),
+                 inspect_err="Error: No such image: sha256:gone"):
         self.containers, self.images = list(containers), list(images)
         self.rmi, self.present, self.calls = rmi, set(present), []
+        self.inspect_err = inspect_err
 
     def __call__(self, args, check=True):
         args = list(args)
@@ -337,7 +339,7 @@ class FakeDocker:
             if args[3:] and args[3] in self.present:
                 r.stdout = "[{}]"
             elif len(args) == 4 and not self.images:
-                r.returncode = 1
+                r.returncode, r.stderr = 1, self.inspect_err
             else:
                 r.stdout = json.dumps(self.images)
         elif args[:3] == ["docker", "system", "df"]:
@@ -378,6 +380,17 @@ class OddInspectEntryTest(unittest.TestCase):
                           now=datetime.now(timezone.utc), dir_exists=lambda p: False)
         self.assertFalse([a for a in p if a.kind == "image"])
 
+    def test_zero_last_tag_time_is_unknown_and_kept(self):
+        # reviewer-claude (#1422): docker writes 0001-01-01 for a never-tagged image; that must
+        # read as unknown (kept), not as year 1 (ancient, removable).
+        fake = FakeDocker(images=[{"Id": "sha256:art", "RepoTags": [],
+                                   "Metadata": {"LastTagTime": "0001-01-01T00:00:00Z"}}])
+        ims = self.load(cl.load_images, fake)
+        self.assertGreater(ims[0].created, NOW)
+        p = cl.build_plan([], ims, [], build_cache_bytes=0, tool_caches=[], opts=OPTS,
+                          now=datetime.now(timezone.utc), dir_exists=lambda p: False)
+        self.assertFalse([a for a in p if a.kind == "image"])
+
     def test_unparseable_image_entry_is_left_out_and_the_rest_load(self):
         fake = FakeDocker(images=[{"RepoTags": ["no-id:1"]},
                                   {"Id": "sha256:ok", "Created": "2026-09-01T00:00:00Z"}])
@@ -409,6 +422,15 @@ class OddInspectEntryTest(unittest.TestCase):
                 mock.patch("sys.stdout"):
             failures, _ = cl.execute(plan, fresh_plan=plan)
         self.assertEqual(failures, 0)
+
+    def test_rmi_no_such_image_with_a_failing_inspect_stays_a_failure(self):
+        # reviewer-codex + reviewer-claude (#1422): a non-zero inspect is not proof of absence.
+        plan = [cl.Action("image", "w:1", "x", "9d", 1, ["sha256:gone"], ["docker", "rmi", "w:1"])]
+        fake = FakeDocker(rmi="Error response from daemon: No such image: w@sha256:2bd8",
+                          inspect_err="Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+        with mock.patch.object(cl, "sh", fake),                 mock.patch.object(cl, "tag_image_id", return_value="sha256:gone"),                 mock.patch("sys.stdout"):
+            failures, _ = cl.execute(plan, fresh_plan=plan)
+        self.assertEqual(failures, 1)
 
     def test_rmi_no_such_image_while_the_image_is_still_there_fails(self):
         plan = [cl.Action("image", "w:1", "x", "9d", 1, ["sha256:still"], ["docker", "rmi", "w:1"])]

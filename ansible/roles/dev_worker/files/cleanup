@@ -1440,11 +1440,14 @@ def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=No
                 # store, removing one image can take another planned entry's content with it,
                 # and the later `rmi` answers "No such image" - which made the whole docker
                 # step exit 1 and kept DevWorkerDiskGuardFailing up after a run that freed
-                # 9.7 GB. Only when the planned image ID is really absent, not on the message.
-                if (a.kind == "image" and "No such image" in (r.stderr or r.stdout)
-                        and sh(["docker", "image", "inspect", a.ids[0]], check=False).returncode):
-                    gone = True
-                    break
+                # 9.7 GB. Only when an inspect of the planned ID itself answers "No such image":
+                # a bare non-zero inspect is also a daemon restart, a timeout or a permission
+                # error, and must stay a failure (reviewer-codex + reviewer-claude, #1422).
+                if a.kind == "image" and "No such image" in (r.stderr or r.stdout):
+                    chk = sh(["docker", "image", "inspect", a.ids[0]], check=False)
+                    if chk.returncode and "No such image" in ((chk.stderr or "") + (chk.stdout or "")):
+                        gone = True
+                        break
                 ok = False
                 print(f"  ✗ {i:>3} {CATEGORY[a.kind]}: {a.label} — {err[-1] if err else 'failed'}")
                 break
