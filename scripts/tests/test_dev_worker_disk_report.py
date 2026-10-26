@@ -302,7 +302,9 @@ class OwnerFileTest(unittest.TestCase):
         os.symlink(outside, os.path.join(self.root, "wt", "link"))
         text = self.render({"wt": 30 * GB, "wt/one": 2 * GB, "wt/link": 25 * GB})
         self.assertNotIn("root-only-value", text)
-        self.assertNotIn('dir="wt/link",owner=', text)
+        self.assertNotIn('dev_worker_dir_kept_until_seconds{user="c4",root="workspace",dir="wt/link"', text)
+        self.assertNotIn('dev_worker_dir_owner_file_invalid{user="c4",root="workspace",dir="wt/link"}', text,
+                         "not read at all - neither kept nor reported invalid (reviewer-codex on #1434)")
 
     def test_files_beside_checkouts_export_no_owner_series(self):
         """2026-10-26, live on dev-worker-3: the files beside forge-work's checkouts (CURRENT_STATE.md,
