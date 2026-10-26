@@ -150,9 +150,18 @@ spec:
         # for accounts it can use, so a disabled or reauth_required account keeps exporting its last
         # reading (codex-4: 100 % with a reset of 2026-10-24 21:08Z, still firing on 10-26). A known,
         # past reset suppresses it; an account that reports no reset time (or 0) keeps alerting.
+        # SEVERITY BY PROVIDER (2026-10-26). Claude is served through the smart pool `pool-claude`
+        # (both reviewer personas' Claude reviews, Fable/Opus since ailab #1421/#1429), which routes
+        # around a spent account by itself, so ONE Claude account at its wall is context, not an action:
+        # its per-account rules are `info` (inhibited by InfoInhibitor unless something in the
+        # llm-router namespace is warning or worse) and the pool-level LlmRouterClaudePoolHeadroomLow
+        # below is the Claude warning. Codex stays `warning` per account: it has no pool-level early
+        # warning (LlmRouterProviderExhausted fires only once EVERY account is limited), and its
+        # per-account walls are what the 2026-10-14 incident needed to see. Same alert names either
+        # way, so silences and dashboards keep matching; the provider label picks the rule.
         - alert: LlmRouterAccountNearLimit
           expr: >-
-            llm_router_account_limit_used_percent{job="llm-router",window=~"primary|weekly"} >= 90
+            llm_router_account_limit_used_percent{job="llm-router",provider!="claude",window=~"primary|weekly"} >= 90
             unless on (job, account, provider, window)
             ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
           for: 30m
@@ -165,8 +174,23 @@ spec:
               reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
               Decide now whether to throttle its callers, let it run on credits, or add capacity:
               the pool keeps serving on the other accounts until they reach the same wall.
+        - alert: LlmRouterAccountNearLimit
+          expr: >-
+            llm_router_account_limit_used_percent{job="llm-router",provider="claude",window="weekly"} >= 90
+            unless on (job, account, provider, window)
+            ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
+          for: 30m
+          labels: { severity: info }
+          annotations:
+            summary: "llm-router account {{ $labels.account }} at {{ $value | printf \"%.0f\" }}% of its {{ $labels.window }} window"
+            description: >-
+              Account {{ $labels.account }} ({{ $labels.provider }}) has used {{ $value | printf "%.0f" }}% of its
+              {{ $labels.window }} limit window for 30m. At 100 % the provider refuses it until the
+              reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+              Decide now whether to throttle its callers, let it run on credits, or add capacity:
+              the pool keeps serving on the other accounts until they reach the same wall.
         - alert: LlmRouterAccountLimited
-          expr: llm_router_account_limit_status{job="llm-router",status="limited"} == 1
+          expr: llm_router_account_limit_status{job="llm-router",provider!="claude",status="limited"} == 1
           for: 10m
           labels: { severity: warning }
           annotations:
@@ -175,6 +199,46 @@ spec:
               The provider reports account {{ $labels.account }} ({{ $labels.provider }}) at 100 % of
               a limit window: the router skips it (quota_exhausted) until the reset the Status page
               shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+        - alert: LlmRouterAccountLimited
+          expr: llm_router_account_limit_status{job="llm-router",provider="claude",status="limited"} == 1
+          for: 10m
+          labels: { severity: info }
+          annotations:
+            summary: "llm-router account {{ $labels.account }} is limited (refused until its reset)"
+            description: >-
+              The provider reports account {{ $labels.account }} ({{ $labels.provider }}) at 100 % of
+              a limit window: the router skips it (quota_exhausted) until the reset the Status page
+              shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+        # The Claude POOL running out of room: fewer than two Claude accounts below 90 % of their weekly
+        # window, so the next wall leaves pool-claude on one account or none - every Fable/Opus review
+        # and every other pool-claude caller then queues on it. `or vector(0)`: no account below 90 %
+        # makes the inner count EMPTY, not 0, and an empty vector never compares; the `and on()` gate
+        # keeps "no Claude readings at all" silent (LlmRouterMetricsAbsent owns an absent target) and
+        # needs at least two accounts with a reading, so a one-account pool is left to the per-account
+        # rules. A stale reading (reset already past) counts as no headroom here, on purpose: it is an
+        # account the router could not refresh, which is not capacity either. 30m rides out a reading
+        # that dips under 90 % only between two usage refreshes.
+        - alert: LlmRouterClaudePoolHeadroomLow
+          expr: |
+            (
+              (count(llm_router_account_limit_used_percent{job="llm-router",provider="claude",window="weekly"} < 90) or vector(0))
+                < 2
+            )
+            and on ()
+            (count(llm_router_account_limit_used_percent{job="llm-router",provider="claude",window="weekly"}) >= 2)
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router: only {{ $value }} Claude account(s) below 90% of their weekly window"
+            description: >-
+              pool-claude has {{ $value }} account(s) with weekly headroom (below 90 %), held for 30m. The
+              Claude reviewer (Fable, then Opus) and every other pool-claude caller now depend on that
+              many accounts; when they reach their walls the reviews wait (lossless, ReviewbotStalled
+              after 1 h) until the earliest reset. Each account's reading and reset:
+              llm_router_account_limit_used_percent / llm_router_account_limit_resets_at_seconds
+              {provider="claude",window="weekly"}, or the router's Status page. Options: add or
+              re-enable a Claude account, slow non-review pool-claude callers, or accept the pause.
+              Runbook: docs/runbooks/llm-router.md § Reviewer routes.
         # Every account of a provider limited: the pools of that provider serve nothing but credits.
         # Left: the `status="limited"` series whose VALUE is 1 (the limited accounts). Right: the
         # `status="limited"` series whatever their value (a label selector matches the series, not
