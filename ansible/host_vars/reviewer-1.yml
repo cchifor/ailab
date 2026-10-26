@@ -41,24 +41,32 @@ pr_reviewer_llm_cmd:
 # SEAT `r` IS THE LLM ROUTER (2026-10-07; reviewbot.py § router seats, runbook dev-workers.md §
 # "Router seats"): API key key_f856495c9b0c on router.chifor.me (it may use every route).
 # Preferred over a-c within every tier and never sticky; a-c stay as the fallback.
-# Since 2026-10-13 (owner request) every tier asks for the route `claude-reviewer` (`model`, no
-# `models` map): claude-5 on `opus` (Claude Code's alias for Opus 5.5), falling back inside the
-# router to `pool-claude` (`sonnet`) when claude-5 fails or is busy. The owner ruled that this
-# persona need not run on `fable`; claude-5 refuses `fable` until 2026-11-01. So a review the
-# ladder labels `fable` is served on Opus 5.5 (or `sonnet` on fallback); the ladder still governs
-# seats a-c. Runbook llm-router.md § "Reviewer routes (2026-10-13)". Rollback: drop `model`.
+# Since 2026-10-26 (owner request) the seat asks the Claude smart pool for the TIER'S model:
+# `route: pool-claude` goes out as the X-Router-Route header and `models` puts fable / opus in
+# the body - the router's model mode, in which the pool's `*` targets serve the model a request
+# names and the pool picks the account with the most headroom. Reviews run on Fable or Opus
+# only, never `sonnet` or lower (owner, 2026-10-26). A 429 on one tier parks that tier on this
+# seat and the ladder asks opus next (reviewbot.py § router seats).
+# REPLACED 2026-10-13..26: every tier asked the route `claude-reviewer` (claude-5 on `opus`,
+# falling back to `pool-claude`). That fallback died silently once pool-claude's targets became
+# `*`: a request naming a route carries no model for a `*` target (`model_unspecified`), and the
+# day claude-5 hit its weekly wall (2026-10-26 04:56Z) every review was refused with attempts 0.
+# Runbook llm-router.md § "Reviewer routes". Rollback: `model: claude-reviewer` instead of
+# `route` + `models`.
 pr_reviewer_llm_seats:
   - { name: r, sudo_user: "", router_url: "https://router.chifor.me",
-      key_file: "{{ pr_reviewer_router_key_file }}", model: claude-reviewer }
+      key_file: "{{ pr_reviewer_router_key_file }}", route: pool-claude,
+      models: { fable: fable, opus: opus } }
   - { name: a, sudo_user: clauderun }
   - { name: b, sudo_user: clauderun2 }
   - { name: c, sudo_user: clauderun3 }
 # ---- model ladder + usage watchdog (plan PR 2) ----
-# fable first on ANY seat, then opus, then sonnet - tier-major, sticky within a tier. A
-# MODEL-scoped refusal (Fable spent) parks that (seat, model) pair and the same tier is tried on
-# the next seat; a tier is left only when every seat is parked for it. Sonnet stays because the
-# usage API exposes an opus-scoped weekly cap: a seat can be out of opus while its account
-# window is fine. All FLOATING aliases on purpose: this host wants always-latest, and an alias
+# fable first on ANY seat, then opus - tier-major, sticky within a tier. A MODEL-scoped refusal
+# (Fable spent) parks that (seat, model) pair and the same tier is tried on the next seat; a tier
+# is left only when every seat is parked for it. NO SONNET RUNG (owner, 2026-10-26: reviews run
+# on Fable or Opus only). With both tiers parked on every seat the job waits, lossless - the
+# queue is left intact and nothing is billed - rather than being reviewed on a smaller model.
+# All FLOATING aliases on purpose: this host wants always-latest, and an alias
 # cannot go stale the way a version ID left in a file does (`claude-fable-5-1` would be the
 # pinned form and needs CLI >= 2.1.251; `fable` resolves on the installed 2.1.197).
 #
@@ -72,7 +80,7 @@ pr_reviewer_llm_seats:
 # ACCOUNT-scoped limit (weekly_all, session) parks the whole seat; only the rotation answers
 # that. The watchdog parks and unparks from these numbers and climbs back to fable when the API
 # shows it reopened - the only place an upward move happens, hourly, never per review.
-pr_reviewer_llm_models: [fable, opus, sonnet]
+pr_reviewer_llm_models: [fable, opus]
 pr_reviewer_usage_poll_s: 3600
 # The pin pair is what reviewbot_llm_primary_model_info reports and what a host without a
 # ladder would run; here the ladder above is authoritative and these are its first two rungs.
