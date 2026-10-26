@@ -1759,13 +1759,45 @@ def _poll_seat(s, now):
             park_dead_login(s["name"], "401 after the keepalive")
 
 
+# A seat's access token is renewed only after it EXPIRES, and only by something run as that
+# seat: the codex probe's app server (codex-cli 0.153.4 does not renew early - a full `codex exec`
+# as seat b four hours before expiry, last_refresh ten days old, renewed nothing, 2026-10-26), or
+# the claude keepalive after a 401. On the hourly cadence alone a token that expires just after a
+# poll stays expired for up to an hour, and the projections that publish it (af/dsh/credentials,
+# af/litellm/chatgpt) hand their consumers a dead token for as long. So the ticker also wakes
+# RENEW_GRACE_S after the earliest expiry it knows of - past the expiry, so the probe meets an
+# expired token and renews it - but never sooner than MIN_POLL_GAP_S after the last poll.
+RENEW_GRACE_S = 60
+MIN_POLL_GAP_S = 30
+
+
+def next_poll_delay(now=None):
+    """Seconds until the next usage poll: usage_poll_s, or sooner for a token that expires first.
+    Expiries already more than RENEW_GRACE_S in the past are ignored - a login no poll renewed is
+    parked or alerting already, and must not turn the ticker into a tight loop."""
+    now = time.time() if now is None else now
+    due = now + int(CFG.get("usage_poll_s") or 0)
+    for snap in list(USAGE_SNAPSHOT.values()):
+        cred = (snap or {}).get("credential") if isinstance(snap, dict) else None
+        exp = cred.get("expires_at") if isinstance(cred, dict) else None
+        if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+            at = exp + RENEW_GRACE_S
+            if now < at < due:
+                due = at
+    return max(float(MIN_POLL_GAP_S), due - now)
+
+
 def usage_ticker():
-    """The hourly poll. Returns at once when usage_poll_s is 0 (the codex host), so a disabled
-    watchdog starts no thread body and touches nothing."""
+    """The hourly poll - sooner when a seat's token expires first (next_poll_delay). Returns at
+    once when usage_poll_s is 0, so a disabled watchdog starts no thread body and touches
+    nothing."""
     if not usage_poller_enabled():
         return
+    # The first sleep already knows every seat's expiry: main() polls once BEFORE this thread
+    # starts. Each sleep is fixed when it begins, which is enough: USAGE_SNAPSHOT changes only
+    # in a poll, so nothing learned mid-sleep could move an expiry earlier.
     while True:
-        time.sleep(int(CFG.get("usage_poll_s") or 0))
+        time.sleep(next_poll_delay())
         try:
             poll_usage()
         except Exception as e:
@@ -4012,7 +4044,7 @@ def main():
     if usage_poller_enabled():
         poll_usage()
         log(f"usage: polled {len(SEATS)} seat(s); active seat '{CURRENT_SEAT}' model "
-            f"'{CURRENT_MODEL or '(account default)'}'; next poll in {CFG['usage_poll_s']}s")
+            f"'{CURRENT_MODEL or '(account default)'}'; next poll in {next_poll_delay():.0f}s")
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=usage_ticker, daemon=True).start()
     threading.Thread(target=reconciler, daemon=True).start()

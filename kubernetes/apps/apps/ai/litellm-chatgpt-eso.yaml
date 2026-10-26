@@ -34,7 +34,8 @@
 #   * `expires_at: 4102444800` (2100-01-01): LiteLLM never judges the token expired from this file.
 #     A genuinely expired JWT is refused UPSTREAM in seconds instead of parking the worker in a
 #     device flow. The REAL expiry is what the publisher exports
-#     (dsh_codex_projection_token_expires_at_seconds; CodexProjectionStale fires at <24 h left).
+#     (dsh_codex_projection_token_expires_at_seconds; CodexProjectionStale fires 10 min past expiry
+#     with no renewal; reviewbot polls the seat a minute after expiry, which renews it).
 #   * `toJson`: whatever the vault holds, the string fields are JSON-encoded, so the file LiteLLM
 #     parses is valid JSON by construction (an unparseable file is the device-flow path too).
 #   * `account_id` is published beside the token; without it LiteLLM derives it from the JWT and

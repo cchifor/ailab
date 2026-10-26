@@ -459,7 +459,8 @@ published), `dsh_codex_projection_last_success_timestamp_seconds{document}` (car
 failing runs from its state file) and `dsh_codex_publisher_last_run_timestamp_seconds`.
 Five rules watch the chain. In `kubernetes/apps/infrastructure/monitoring/reviewbot-rules.yaml`:
 `CodexProjectionFailing` (a required projection with `ok == 0` for 30 m), `CodexProjectionStale`
-(a published token with under 24 h left), `CodexPublisherDown` (the heartbeat
+(a published token expired over 10 min and not renewed; reviewbot polls each seat a minute after
+its token expires, and codex-cli renews only an expired token, so there is no earlier warning to act on), `CodexPublisherDown` (the heartbeat
 `dsh_codex_publisher_last_run_timestamp_seconds` 15 min old — a stopped timer leaves the previous
 textfile scrapeable with `ok == 1`) and `CodexPublisherMetricsMissing` (no heartbeat series at
 all). In `ha-rules.yaml`: `LiteLLMChatGPTAuthNotReady`, on ESO's own status of

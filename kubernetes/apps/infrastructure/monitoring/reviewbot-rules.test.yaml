@@ -1092,20 +1092,19 @@ tests:
         exp_alerts: []
 
   - interval: 1m
-    name: a projected token inside its last day pages, a staged seat's does not
+    name: a projected token expired and not renewed pages, a staged seat's does not
     input_series:
       # The JWT exp is a CONSTANT between publishes (it steps only when a newer token lands), so
-      # the fixture holds it flat and lets time() close the gap: 44400 is 12h past the 20m
-      # evaluation, and inside the 24h threshold from the very first sample, so the 15m hold is
-      # the only thing the 10m assertion exercises.
+      # the fixture holds it flat at 0 and lets time() walk past it: more than 600 s past from
+      # the 11m sample, plus the 5m hold => fires from 16m.
       - series: 'dsh_codex_projection_token_expires_at_seconds{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
-        values: "44400x60"
+        values: "0x60"
       - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
         values: "0x60"
-      # seat d, logged in but still STAGED: the same 12h-left token, silent by the gate (the
+      # seat d, logged in but still STAGED: the same dead token, silent by the gate (the
       # documented seam in the rule's comment).
       - series: 'dsh_codex_projection_token_expires_at_seconds{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt"}'
-        values: "44400x60"
+        values: "0x60"
       - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="litellm/chatgpt"}'
         values: "1x60"
     alert_rule_test:
@@ -1118,19 +1117,47 @@ tests:
               instance: 192.168.0.25:9100
               document: dsh/credentials
             exp_annotations:
-              summary: "Codex token projected for dsh/credentials expires in under 24h"
+              summary: "Codex token projected for dsh/credentials expired and was not renewed"
               description: >-
-                The access token the publisher last projected into af/dsh/credentials has
-                under a day left and no newer one has been published. The reviewer's own login
-                renews a seat's token only when the CLI runs as that seat (a review, or the
-                hourly usage probe), so a seat that is never chosen and not in the hourly poll
-                ages out. The consumers (dsh's openai-codex provider, LiteLLM's chatgpt/ route)
-                fail fast upstream once it expires (401). Check the seat with codex-usage.py as
-                its user (`sudo -n -u <seat user> HOME=/home/<seat user>
-                /usr/local/lib/reviewbot/codex-usage.py` on 192.168.0.25) and the publisher
-                journal, `journalctl -u dsh-codex-publisher.service`.
-      # Inside the 15m hold.
-      - eval_time: 10m
+                The access token the publisher last projected into af/dsh/credentials
+                expired over 10 minutes ago and no newer one has been published, so its consumers
+                (dsh's openai-codex provider, LiteLLM's chatgpt/ route) are answering 401. reviewbot
+                polls each seat a minute after its token expires and the probe renews it, so this
+                is a renewal that failed. Run the probe as the seat's user (`sudo -n -u <seat user>
+                HOME=/home/<seat user> /usr/local/lib/reviewbot/codex-usage.py` on 192.168.0.25):
+                ok with a fresh expiry means the publisher has yet to pick it up (`journalctl -u
+                dsh-codex-publisher.service`); a 401 means the seat's login is dead - log the seat
+                in again.
+      # Past the 600 s threshold (from 11m) but inside the 5m hold.
+      - eval_time: 14m
+        alertname: CodexProjectionStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: a token inside its last day no longer pages (nothing can renew it early)
+    input_series:
+      # 44400 s = 12 h left at the start, the shape that kept the old 24 h rule firing on
+      # 2026-10-25/26 for a day with nothing to act on.
+      - series: 'dsh_codex_projection_token_expires_at_seconds{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "44400x60"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CodexProjectionStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: a token renewed a minute after it expired does not page
+    input_series:
+      # Expired at 0; the post-expiry poll renews it and the publisher projects the new token
+      # (exp 10 days out) by the 3m sample - well inside the 600 s threshold.
+      - series: 'dsh_codex_projection_token_expires_at_seconds{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "0x2 864000x57"
+      - series: 'dsh_codex_projection_optional{job="reviewer-node",instance="192.168.0.25:9100",document="dsh/credentials"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 30m
         alertname: CodexProjectionStale
         exp_alerts: []
 
