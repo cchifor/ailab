@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 2aa139d7439a380c1bdced3c1f53ea10cb7f5236
-        chifor.me/release: router-0.1.0-20261017-body-limits-r3
+        chifor.me/source-commit: 2d50a7061ea64bbfebfb99b9e74d4055bc076445
+        chifor.me/release: router-0.1.0-20261026-auth
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Bridge source 2aa139d7439a380c1bdced3c1f53ea10cb7f5236;
-          # parity-f0a773adc1c5-90464 image, digest verified in the registry;
-          # Relay run 90464, archive sha256:5d6f9f020e14131374dedce70fab0b0dcbe7545ec9de3b9c0775fa116913506c.
-          image: registry.chifor.me/llm-router/router@sha256:fdbd5738d19bb10dcd4c3aa11b02d4efd6493db7b59289dc3814018806d3bc0f
+          # Source 2d50a7061ea64bbfebfb99b9e74d4055bc076445 (llm-router #117);
+          # parity-77ab8ad14110-109405 image, all blobs pulled anonymously and verified;
+          # Relay run 109405, archive sha256:12228f11e962a0eb212c60bb6068c8340e46a8c0fc97e204aaf0b2c558ea3a37.
+          image: registry.chifor.me/llm-router/router@sha256:5e3b7677a66b7e406057194c353254879a2a98a3c69f0e96d557116557c14271
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -162,6 +162,10 @@ spec:
             # watchdog fires at 57 s, 3 s before the grace ends, so raise the grace before going near it.
             - name: ROUTER_DRAIN_MS
               value: "20000"
+            # Browser sign-in stays in local mode: this token, exchanged for an HttpOnly session cookie. The
+            # Keycloak OIDC mode of llm-router #117 is NOT enabled here: it needs ROUTER_AUTH_MODE=oidc, a
+            # PostgreSQL auth store (ROUTER_AUTH_DATABASE_URL), a confidential Keycloak client and a provisioned
+            # administrator, and a reviewed change of its own (docs/runbooks/llm-router.md, 2026-10-26 release).
             - name: ROUTER_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
