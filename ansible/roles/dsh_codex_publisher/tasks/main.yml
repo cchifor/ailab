@@ -155,3 +155,5 @@
   loop: "{{ dsh_codex_publisher.projections | selectattr('seat_user', 'defined') | list }}"
   loop_control:
     label: "{{ item.seat_user }}"
+  # A --check run of the FIRST install has no unit file on disk to enable yet.
+  when: not (ansible_check_mode and dsh_codex_publisher_renew_units.changed)
