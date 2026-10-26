@@ -358,6 +358,18 @@ class Publishing(unittest.TestCase):
                          'a live projection must never be nulled')
         self.assertIn('still projected', out)
 
+    def test_a_retired_document_that_no_longer_exists_is_done_not_a_failure_every_minute(self):
+        """404 on the metadata read: there is nothing left to remove (reviewer-claude on #1429)."""
+        self.vault.fail_path, self.vault.fail_status = 'dsh/credentials', 404
+        rc, out = self._run(self._retiring(), both_seats)
+        self.assertEqual(rc, 0)
+        self.assertIn('nothing to remove', out)
+        calls = len(self.vault.calls)
+        logins = self.vault.logins()
+        self._run(self._retiring(), both_seats)
+        self.assertEqual(self.vault.logins() - logins, 1, 'recorded as done: only the live projection logs in')
+        self.assertFalse(any('/af/metadata/dsh/credentials' in c[1] for c in self.vault.calls[calls:]))
+
     def test_a_vault_error_retiring_is_a_failure_without_the_body(self):
         self.vault.fail_path = 'dsh/credentials'
         rc, out = self._run(self._retiring(), both_seats)

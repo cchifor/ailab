@@ -158,13 +158,22 @@
 
 # RETIRED SEAT USERS (2026-10-26: both personas review through llm-router only). Removed with
 # their homes, which hold nothing but that seat's own login - never a copy anything else reads.
-# A user still provisioned as a seat (served or staged) is refused, so a list that drifted from
-# pr_reviewer_llm_seats cannot delete a live login.
-- name: Refuse to retire a seat user that is still provisioned
+# A user that still holds a live login is refused - served or staged here, or a projection seat the
+# dsh_codex_publisher role owns on the same host (codexrun4, the LiteLLM chatgpt/ login since
+# 2026-10-26) - so a list that drifted (a copy-paste during a rollback) cannot delete it: only a new
+# device-auth ceremony would bring it back (reviewer-claude on #1429).
+- name: Refuse to retire a seat user that still holds a live login
   ansible.builtin.assert:
     that:
-      - pr_reviewer_retired_seat_users | intersect(pr_reviewer_seats_effective | map(attribute='sudo_user') | list) | length == 0
-    fail_msg: "pr_reviewer_retired_seat_users names a user that pr_reviewer_llm_seats(_staged) still provisions"
+      - pr_reviewer_retired_seat_users | intersect(pr_reviewer_seat_users_protected) | length == 0
+    fail_msg: >-
+      pr_reviewer_retired_seat_users names {{ pr_reviewer_retired_seat_users | intersect(pr_reviewer_seat_users_protected) }},
+      still provisioned as a served or staged seat or owned by dsh_codex_publisher
+  vars:
+    pr_reviewer_seat_users_protected: >-
+      {{ (pr_reviewer_seats_effective + pr_reviewer_llm_seats_staged) | map(attribute='sudo_user') | select() | list
+         + ((dsh_codex_publisher | default({})).projections | default([]) | selectattr('seat_user', 'defined')
+            | map(attribute='seat_user') | list) }}
   tags: [seats]
 
 - name: Remove retired seat users and their homes

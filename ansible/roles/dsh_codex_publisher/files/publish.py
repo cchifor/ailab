@@ -190,7 +190,17 @@ def retire(config, session, kv_path, prefix, state_path=STATE):
     again for it (a lost state file costs one more, harmless, patch)."""
     tls, token = session
     state = _read_state(state_path)
-    metadata = _request(config, tls, 'af/metadata/' + kv_path, token=token)['data']
+    try:
+        metadata = _request(config, tls, 'af/metadata/' + kv_path, token=token)['data']
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise               # a 403 is an access problem an operator must see, every run
+        # The document is gone: nothing is left to remove, so this is done - not a failure every
+        # minute for as long as the entry stays in host_vars (reviewer-claude on #1429).
+        state[_retired_key(kv_path, prefix)] = {'done': True, 'version': None}
+        _write_atomic(state_path, json.dumps(state))
+        print('retired projection ' + prefix + '_*: af/' + kv_path + ' does not exist; nothing to remove')
+        return
     version = metadata['current_version']
     current = metadata['versions'][str(version)]
     if current['destroyed'] or current['deletion_time']:

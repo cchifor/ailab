@@ -9,6 +9,9 @@ Description=Renew the Codex login of projection seat %i (its app server renews a
 # is never a second refresher racing this one for the refresh token.
 After=network-online.target
 Wants=network-online.target
+# A no-op, not a failure every 5 min, between the user's creation and its device-auth login
+# ceremony (reviewer-claude on #1429).
+ConditionPathExists=/home/%i/.codex/auth.json
 
 [Service]
 Type=oneshot
