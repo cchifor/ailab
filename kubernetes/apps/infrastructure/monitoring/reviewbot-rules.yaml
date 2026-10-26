@@ -627,8 +627,11 @@ spec:
         # expiry (next_poll_delay), the probe's app server renews the token, and the publisher
         # projects it within a minute. 600 s past expiry is therefore a renewal that failed - a
         # dead refresh token, a seat outside pr_reviewer_llm_seats, a stopped reviewbot - and
-        # the consumers are already answering 401. for: 5m rides out a scrape gap. Same
-        # optional gate as above. DOCUMENTED SEAM: a staged seat that has never
+        # the consumers are already answering 401. for: 5m rides out a scrape gap. Severity stays
+        # warning ON PURPOSE: it is the same consumer outage CodexProjectionFailing reports by
+        # another path (warning), and every rule of this family is warning - dsh's codex provider
+        # and LiteLLM's chatgpt/ route are developer tooling, not a merge or estate gate. Raising
+        # one would rank one outage two ways. Same optional gate as above. DOCUMENTED SEAM: a staged seat that has never
         # published has no expires_at series at all (publish.py omits the line), so the gate is
         # moot there — but seat d between its login ceremony and PR 3 (logged in, projecting,
         # still optional) ages out WITHOUT a page; only PR 3 flipping the projection to required

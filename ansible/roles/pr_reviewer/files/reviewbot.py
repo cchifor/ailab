@@ -1793,6 +1793,9 @@ def usage_ticker():
     nothing."""
     if not usage_poller_enabled():
         return
+    # The first sleep already knows every seat's expiry: main() polls once BEFORE this thread
+    # starts. Each sleep is fixed when it begins, which is enough: USAGE_SNAPSHOT changes only
+    # in a poll, so nothing learned mid-sleep could move an expiry earlier.
     while True:
         time.sleep(next_poll_delay())
         try:
@@ -4041,7 +4044,7 @@ def main():
     if usage_poller_enabled():
         poll_usage()
         log(f"usage: polled {len(SEATS)} seat(s); active seat '{CURRENT_SEAT}' model "
-            f"'{CURRENT_MODEL or '(account default)'}'; next poll in {CFG['usage_poll_s']}s")
+            f"'{CURRENT_MODEL or '(account default)'}'; next poll in {next_poll_delay():.0f}s")
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=usage_ticker, daemon=True).start()
     threading.Thread(target=reconciler, daemon=True).start()
