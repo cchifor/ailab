@@ -2425,11 +2425,55 @@ reference any of them yet.
 - `oidc-client-secret` = `LLM_ROUTER_OIDC_CLIENT_SECRET` in `keycloak-secrets.sops.yaml`.
 - The password in `auth-database-url` = `password` in `infra-pg-router-auth.sops.yaml`.
 
-**Not yet:** `ROUTER_AUTH_MODE=oidc`. It waits for:
-- an llm-router hardening release (the #117 code crashes on an idle PG connection error and still
-  blocks start-up on PG and on Keycloak discovery);
-- an isolated end-to-end run against the real realm;
-- the administrator's `sub`.
+### Auth hardening release, still local mode (2026-10-26, llm-router #123)
+
+`router-0.1.0-20261026-auth-hardening` deploys llm-router main `171ff37b67fc246dabb4b11fd19f3aa9badcf470`
+([#123](https://git.chifor.me/cchifor/llm-router/pulls/123)): the fixes Keycloak mode needs before production uses it.
+- The auth-store pools handle errors from idle connections. Without that, a failover's dropped connections exited the
+  process (reproduced: exit code 1).
+- Neither PostgreSQL nor the issuer is needed to start: store initialisation and OIDC discovery run in the background,
+  retried, single-flight.
+- Store health is live, and the sign-in page recovers by polling `/auth/config`.
+- Logout during a store outage is answered as `revoked:false`; the revocation is queued, and the session is refused
+  until it is applied.
+- #120 is fixed.
+
+Each fix is covered by `tests/auth-oidc-integration.test.ts` (real PostgreSQL behind a cuttable proxy, an HTTPS mock
+issuer), which also runs in llm-router CI.
+
+Its only local-mode effects:
+- `/auth/config` gains `available`;
+- logout without a session clears the cookie (#120);
+- a client key's browser sign-in answers 403 again.
+
+**Image.**
+- Archive `router-0.1.0-20261026-auth-hardening.tar.gz`, SHA-256
+  `819b0eed2559f3bed857db0d015aacf7ef17f6035d0d651ce9964862ef85122f`, Relay v0.2.0 assets 396/397.
+- Relay branch `release/router-0.1.0-20261026-auth-hardening-image`,
+  [run 109682](https://git.chifor.me/cchifor/relay/actions/runs/109682).
+- Image `registry.chifor.me/llm-router/router@sha256:2e4211a3549b9c98f8896d1e06105c62ed22c7c6803c005acfcead4ba32df6b5`
+  (tag `parity-875d99035086-109682`). Every blob was pulled anonymously and verified.
+
+**Isolated end-to-end run on this exact image against the real realm.** The pod `router-e2e` ran in Keycloak mode
+with its own throwaway PostgreSQL and `ROUTER_AUTH_PUBLIC_URL=https://router.chifor.me`. Keycloak's redirect was
+replayed to the pod, never to production, and the disposable users were deleted afterwards. 11/11 passed:
+- `/auth/config` shows `oidc:true`, `local:false`, `available:true`;
+- an admin signs in through the real login form, getting a Secure, HttpOnly, SameSite=Lax session;
+- `/auth/me` reports the admin, and an admin route works;
+- a replayed callback gets `expired`;
+- logout answers `revoked:true`, and the old cookie then gets 401;
+- an unverified email gets `email_unverified`;
+- a verified non-member gets `not_member`, and has no session.
+
+**Rollback.** Revert the digest and both annotations to `sha256:5e3b7677a66b7e406057194c353254879a2a98a3c69f0e96d557116557c14271` /
+`2d50a7061ea64bbfebfb99b9e74d4055bc076445` / `router-0.1.0-20261026-auth`. No data step is needed.
+
+**Not yet:** `ROUTER_AUTH_MODE=oidc`. Its prerequisites are now met:
+- the hardening release (this section);
+- the isolated end-to-end run against the real realm;
+- the administrator's `sub` (`83354ded-97b6-417f-8267-566ab816c4fd` in realm `llm-router`).
+
+The switch itself is a separate PR, after this image has rolled.
 
 ## Relay access requests
 
