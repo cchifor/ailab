@@ -134,6 +134,11 @@ TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 # only systemctl: a heal that left the runner stopped must still be recovered without docker.)
 log() { logger -t gitea-runner-cleanup -- "$*" 2>/dev/null || true; }
 disk_pct() { df --output=pcent "$DISK_PATH" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+# Build-cache size in bytes (docker's HumanSize is base-1000, hence --from=si); empty when unreadable.
+build_cache_bytes() {
+  timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null \
+    | awk -F'|' '$1=="Build Cache"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null
+}
 is_num() { case "${1:-}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
 # Clamp a `--filter until=` window UP to MIN_UNTIL_SEC and emit it in seconds (docker accepts a bare
@@ -580,7 +585,23 @@ else
   if [ "$healed" -eq 0 ] && is_num "$HEAL_STUCK_TICKS" && [ "$HEAL_STUCK_TICKS" -gt 0 ]; then
     stuck="$(state_get cap_stuck)"; is_num "$stuck" || stuck=0
     if [ "$stuck" -ge "$HEAL_STUCK_TICKS" ]; then
-      if [ $(( $(date +%s) - last_heal )) -lt "$HEAL_COOLDOWN_SEC" ]; then
+      # RE-VALIDATED NOW, not taken from the count alone (review of #1426): the count is history, and
+      # its resets live behind 3b's pressure gate, so pressure cleared by other means (a hand repair,
+      # image rotation) or a cap raised or disabled since would otherwise still buy a docker restart.
+      # Heal only while the disk is at/over PRESSURE_PCT AND the cache is over an enabled cap right
+      # now. An unreadable size heals nothing and keeps the count; a cache now under the cap resets it.
+      pct_s="$(disk_pct)"; is_num "$pct_s" || pct_s=0
+      bc_s=""
+      if ! is_num "${CACHE_MAX_BYTES:-0}" || [ "${CACHE_MAX_BYTES:-0}" -le 0 ]; then
+        log "build cache pinned count ${stuck}, but the cache cap is disabled -> no pinned-cache heal"
+      elif [ "$pct_s" -lt "$PRESSURE_PCT" ]; then
+        log "build cache pinned count ${stuck}, but disk ${pct_s}% < ${PRESSURE_PCT}% -> no pinned-cache heal"
+      elif bc_s="$(build_cache_bytes)"; ! is_num "$bc_s"; then
+        log "build cache pinned count ${stuck}, but its size is unreadable -> not healing this tick"
+      elif [ "$bc_s" -le "$CACHE_MAX_BYTES" ]; then
+        state_set cap_stuck 0 || true
+        log "build cache ${bc_s}B is under the cap now -> pinned count reset, no heal"
+      elif [ $(( $(date +%s) - last_heal )) -lt "$HEAL_COOLDOWN_SEC" ]; then
         log "build cache pinned over cap (${stuck} cap prunes): heal cooldown since @${last_heal} -> not healing again yet"
       elif ! wait_for_gap; then
         log "build cache pinned over cap (${stuck} cap prunes): no job gap in ${IDLE_WAIT_SEC}s -> next tick retries"
@@ -809,12 +830,15 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
       # NO PROGRESS = records pinned "in use" (2026-10-26: 1336 of 1336 on ci-runner-3, 63.6 GB, and
       # 436 cap prunes in 7 days that freed 0 B). Count the prunes that leave the cache over the cap;
       # section 0 heals after HEAL_STUCK_TICKS of them in a row. An unreadable size counts nothing.
-      bc_after="$(timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null \
-        | awk -F'|' '$1=="Build Cache"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
+      bc_after="$(build_cache_bytes)"
       if is_num "$bc_after" && [ "$bc_after" -gt "$CACHE_MAX_BYTES" ]; then
         stuck="$(state_get cap_stuck)"; is_num "$stuck" || stuck=0
         state_set cap_stuck "$(( stuck + 1 ))" || true
-        log "build cache still ${bc_after}B after the full prune (over cap $(( stuck + 1 )) prune(s) in a row) -> pinned records; section 0 heals at ${HEAL_STUCK_TICKS}"
+        if [ "$HEAL_DANGLING" = 1 ] && is_num "$HEAL_STUCK_TICKS" && [ "$HEAL_STUCK_TICKS" -gt 0 ]; then
+          log "build cache still ${bc_after}B after the full prune (over cap $(( stuck + 1 )) prune(s) in a row) -> pinned records; section 0 heals at ${HEAL_STUCK_TICKS}"
+        else
+          log "build cache still ${bc_after}B after the full prune (over cap $(( stuck + 1 )) prune(s) in a row) -> pinned records; the pinned-cache heal is DISABLED (HEAL_DANGLING=${HEAL_DANGLING}, HEAL_STUCK_TICKS=${HEAL_STUCK_TICKS})"
+        fi
       elif is_num "$bc_after"; then
         state_set cap_stuck 0 || true
       fi

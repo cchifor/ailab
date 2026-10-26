@@ -841,7 +841,8 @@ check "S3: ...the sweep waits for the next tick and the runner runs again" \
 check "S3: ...and no record was marked failed (a pinned-cache heal has no record)" '! grep -q "^failed_" "$WORK/heal.state"'
 
 pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=26 MOCK_CACHE_AFTER=5 run_beacon 0 85
-check "S4: a cap prune that gets the cache under cap resets the count" '[ "$(state_val cap_stuck)" = 0 ] && ! heal_ran'
+check "S4: a cap prune that gets the cache under cap resets the count (the after-prune path)" \
+  'calls_has "docker builder prune -af" && [ "$(state_val cap_stuck)" = 0 ] && ! heal_ran'
 pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
 check "S5: a cache already under cap resets the count, with no prune" \
   '[ "$(state_val cap_stuck)" = 0 ] && ! calls_has "docker builder prune -af"'
@@ -856,6 +857,19 @@ pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; STUCKTICKS=0 MOCK_CACHE=26 
 check "S9: HEAL_STUCK_TICKS=0 disables it" '! heal_ran && swept'
 pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; HEALON=0 MOCK_CACHE=26 run_beacon 0 85
 check "S10: HEAL_DANGLING=0 disables it too (it is the same heal)" '! heal_ran && swept'
+# A count at the threshold is HISTORY: the heal re-reads disk and cache first (review of #1426), since
+# the count's resets only run behind 3b's pressure gate.
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
+check "S11: count at threshold but the cache is under the cap now -> no heal, count reset" \
+  '! heal_ran && [ "$(state_val cap_stuck)" = 0 ] && swept'
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 50
+check "S12: count at threshold but the disk is below pressure -> no heal, count kept" \
+  '! heal_ran && [ "$(state_val cap_stuck)" = 3 ] && swept'
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; CACHECAP=0 MOCK_CACHE=26 run_beacon 0 85
+check "S13: count at threshold but the cap is disabled -> no heal" '! heal_ran && swept'
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=0 run_beacon 0 85
+check "S14: count at threshold but the size is unreadable -> no heal, count kept" \
+  '! heal_ran && [ "$(state_val cap_stuck)" = 3 ] && swept'
 pinned
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
