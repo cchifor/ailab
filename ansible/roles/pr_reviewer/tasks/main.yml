@@ -146,6 +146,44 @@
     validate: visudo -cf %s
   when: pr_reviewer_seats_effective | map(attribute='sudo_user') | select() | list | length > 0
 
+# A host that runs no seat as another user (router seats only, since 2026-10-26) keeps no grant:
+# the file would otherwise outlive the seats it named, and reviewbot.service only gets
+# NoNewPrivileges once nothing needs sudo (templates/reviewbot.service.j2).
+- name: Remove the seat sudoers grant once no seat needs one
+  ansible.builtin.file:
+    path: /etc/sudoers.d/reviewbot-llm
+    state: absent
+  when: pr_reviewer_seats_effective | map(attribute='sudo_user') | select() | list | length == 0
+  tags: [seats]
+
+# RETIRED SEAT USERS (2026-10-26: both personas review through llm-router only). Removed with
+# their homes, which hold nothing but that seat's own login - never a copy anything else reads.
+# A user that still holds a live login is refused - served or staged here, or a projection seat the
+# dsh_codex_publisher role owns on the same host (codexrun4, the LiteLLM chatgpt/ login since
+# 2026-10-26) - so a list that drifted (a copy-paste during a rollback) cannot delete it: only a new
+# device-auth ceremony would bring it back (reviewer-claude on #1429).
+- name: Refuse to retire a seat user that still holds a live login
+  ansible.builtin.assert:
+    that:
+      - pr_reviewer_retired_seat_users | intersect(pr_reviewer_seat_users_protected) | length == 0
+    fail_msg: >-
+      pr_reviewer_retired_seat_users names {{ pr_reviewer_retired_seat_users | intersect(pr_reviewer_seat_users_protected) }},
+      still provisioned as a served or staged seat or owned by dsh_codex_publisher
+  vars:
+    pr_reviewer_seat_users_protected: >-
+      {{ (pr_reviewer_seats_effective + pr_reviewer_llm_seats_staged) | map(attribute='sudo_user') | select() | list
+         + ((dsh_codex_publisher | default({})).projections | default([]) | selectattr('seat_user', 'defined')
+            | map(attribute='seat_user') | list) }}
+  tags: [seats]
+
+- name: Remove retired seat users and their homes
+  ansible.builtin.user:
+    name: "{{ item }}"
+    state: absent
+    remove: true
+  loop: "{{ pr_reviewer_retired_seat_users }}"
+  tags: [seats]
+
 # The shared codex login, rendered by the bao agent (tasks/openbao.yml). Sits AFTER the isolated
 # user + its ~/.codex exist and BEFORE reviewbot starts, so the first review after a rollout runs
 # on the rendered token. import_tasks so the `when` here gates every task inside, tag `openbao` so

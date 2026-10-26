@@ -1120,14 +1120,13 @@ tests:
               summary: "Codex token projected for dsh/credentials expired and was not renewed"
               description: >-
                 The access token the publisher last projected into af/dsh/credentials
-                expired over 10 minutes ago and no newer one has been published, so its consumers
-                (dsh's openai-codex provider, LiteLLM's chatgpt/ route) are answering 401. reviewbot
-                polls each seat a minute after its token expires and the probe renews it, so this
-                is a renewal that failed. Run the probe as the seat's user (`sudo -n -u <seat user>
-                HOME=/home/<seat user> /usr/local/lib/reviewbot/codex-usage.py` on 192.168.0.25):
-                ok with a fresh expiry means the publisher has yet to pick it up (`journalctl -u
-                dsh-codex-publisher.service`); a 401 means the seat's login is dead - log the seat
-                in again.
+                expired over 10 minutes ago and no newer one has been published, so its consumer
+                (LiteLLM's chatgpt/ route for litellm/chatgpt) is answering 401. The seat's renewal timer
+                runs the seat's probe every 5 min, which renews an expired token, so this is a renewal
+                that failed. `systemctl status codex-seat-renew@<seat user>.timer` and `journalctl -u
+                codex-seat-renew@<seat user>` on 192.168.0.25: a fresh expiry there means the publisher
+                has yet to pick it up (`journalctl -u dsh-codex-publisher.service`); a 401 means the
+                seat's login is dead - log the seat in again (docs/runbooks/dsh.md).
       # Past the 600 s threshold (from 11m) but inside the 5m hold.
       - eval_time: 14m
         alertname: CodexProjectionStale

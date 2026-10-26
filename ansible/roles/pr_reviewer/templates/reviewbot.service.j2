@@ -16,14 +16,16 @@ ExecStart=/usr/bin/python3 /usr/local/lib/reviewbot/reviewbot.py /etc/reviewbot/
 Restart=always
 RestartSec=10
 MemoryMax=2G
-{% if not pr_reviewer_llm_sudo_user and not pr_reviewer_llm_seats %}
+{% if not pr_reviewer_llm_sudo_user and (pr_reviewer_llm_seats | map(attribute='sudo_user') | select() | list | length == 0) %}
 # NoNewPrivileges is incompatible with the sudo-based LLM isolation (it blocked every
 # codex run on reviewer-2, caught live 2026-09-02); it stays on where sudo is unused.
-# pr_reviewer_llm_seats is in the condition for the same reason: a seat list is ALSO a
-# sudo user, and once Phase 2 moves the users there and clears pr_reviewer_llm_sudo_user,
+# The SERVED seats' users are in the condition for the same reason: a seat list is ALSO a
+# sudo user, and once Phase 2 moved the users there and cleared pr_reviewer_llm_sudo_user,
 # a sudo_user-only test would render NoNewPrivileges=true and break every seat at once -
-# the isolated mktemp fails first, so every job dies burning attempts. Renders identically
-# while the list is empty.
+# the isolated mktemp fails first, so every job dies burning attempts. A seat with an empty
+# sudo_user (a router seat: one HTTPS call as the service user) needs no sudo, so a host
+# that serves router seats only gets NoNewPrivileges back (2026-10-26). Staged seats are
+# never run by reviewbot and do not count.
 NoNewPrivileges=true
 {% endif %}
 

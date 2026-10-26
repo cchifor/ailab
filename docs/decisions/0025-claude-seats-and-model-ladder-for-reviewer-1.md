@@ -1,5 +1,9 @@
 # ADR 0025 — reviewer-1 rotates across three Claude accounts and a model ladder
 
+> **SUPERSEDED 2026-10-26.** reviewer-1 reviews through llm-router only (seat `r`: `pool-claude` with
+> `fable` then `opus`, never `sonnet`). Seats a-c had been logged out since 2026-10-04/16; their users
+> are removed and the usage watchdog is off (dev-workers.md § "Router seats").
+
 **Status:** ACCEPTED (2026-09-18). **IMPLEMENTED** — Phase 1 (seats, ailab#777) and Phase 2
 (ladder, watchdog, dashboard) of `plans/2026-09-18-claude-seat-rotation-plan.md`.
 

@@ -27,6 +27,52 @@
     group: root
     mode: "0644"
 
+# THE PROJECTED SEATS ARE THIS ROLE'S (2026-10-26). Both reviewer personas review through llm-router
+# only, so the pr_reviewer role no longer provisions or runs as these users; a projection that names
+# `seat_user` gets the user (same shape pr_reviewer created it with), its 0700 ~/.codex for the
+# device-auth login ceremony (docs/runbooks/dsh.md), and codex-seat-renew@<user>.timer, which renews
+# the login's token once it expires. The probe is the reviewer's own codex-usage.py, installed from
+# the pr_reviewer role's files so the two never drift.
+- name: Own each projected seat's user
+  ansible.builtin.user:
+    name: "{{ item.seat_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: true
+    home: "/home/{{ item.seat_user }}"
+  loop: "{{ dsh_codex_publisher.projections | selectattr('seat_user', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.seat_user }}"
+
+- name: Ensure each projected seat's ~/.codex exists
+  ansible.builtin.file:
+    path: "/home/{{ item.seat_user }}/.codex"
+    state: directory
+    owner: "{{ item.seat_user }}"
+    group: "{{ item.seat_user }}"
+    mode: "0700"
+  loop: "{{ dsh_codex_publisher.projections | selectattr('seat_user', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.seat_user }}"
+
+- name: Install the seat probe that renews an expired login
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../pr_reviewer/files/codex-usage.py"
+    dest: /usr/local/lib/dsh-codex-publisher/codex-usage.py
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the seat renewal units
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [codex-seat-renew@.service, codex-seat-renew@.timer]
+  register: dsh_codex_publisher_renew_units
+
 - name: Install OpenBao's trusted CA
   ansible.builtin.copy:
     src: "{{ role_path }}/../openbao_agent/files/ailab-root-ca.crt"
@@ -93,9 +139,21 @@
   ansible.builtin.systemd_service:
     daemon_reload: true
   when: dsh_codex_publisher_service_unit.changed or dsh_codex_publisher_timer_unit.changed
+        or dsh_codex_publisher_renew_units.changed
 
 - name: Enable token projection
   ansible.builtin.systemd_service:
     name: dsh-codex-publisher.timer
     enabled: true
     state: started
+
+- name: Enable each projected seat's renewal
+  ansible.builtin.systemd_service:
+    name: "codex-seat-renew@{{ item.seat_user }}.timer"
+    enabled: true
+    state: started
+  loop: "{{ dsh_codex_publisher.projections | selectattr('seat_user', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.seat_user }}"
+  # A --check run of the FIRST install has no unit file on disk to enable yet.
+  when: not (ansible_check_mode and dsh_codex_publisher_renew_units.changed)

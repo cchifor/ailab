@@ -1,5 +1,10 @@
 # ADR 0026 — A second ChatGPT subscription (realjaynesage) for GPT-6 Astra, served through LiteLLM
 
+> **AMENDED 2026-10-26.** The reviewer no longer runs as seat d, so it no longer renews its token.
+> The `dsh_codex_publisher` role owns `codexrun4` and renews the login with
+> `codex-seat-renew@codexrun4.timer` (every 5 min, the seat's probe; renews an expired token).
+> dsh stopped consuming the route on 2026-10-19 (ADR 0039); `gpt-5.6-sol` still uses it (ADR 0027).
+
 **Status:** ACCEPTED (2026-09-19), operator-directed: *"add a second subscription ... a new openai
 subscription in litellm and a new OpenAI Codex (realjaynesage)"*. Design and measurements in
 `plans/2026-09-19-second-codex-subscription-plan.md`. Implementation lands in three PRs, in order:

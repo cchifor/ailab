@@ -173,6 +173,10 @@ pr_reviewer_usage_keepalive_timeout_s: 60
 # So a new seat lands here first, the login happens as its user, and only then does it move to
 # pr_reviewer_llm_seats (a one-line change + `-t reviewbot`). Same {name, sudo_user, home?} shape.
 pr_reviewer_llm_seats_staged: []
+# Seat users to REMOVE (with their homes): seats that left the rotation for good. The role refuses a
+# name it still provisions. Both personas review through llm-router only since 2026-10-26, so their
+# host_vars list the subscription seats' users here (dev-workers.md § "Router seats").
+pr_reviewer_retired_seat_users: []
 pr_reviewer_seats_effective: >-
   {{ (pr_reviewer_llm_seats if (pr_reviewer_llm_seats | length > 0)
       else ([{'name': 'default', 'sudo_user': pr_reviewer_llm_sudo_user}]
