@@ -299,7 +299,8 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
 # heartbeat green, queue 2, no review). Account usage lives on the router's own dashboard.
 SERVING_MAP = [{"type": "value", "options": {
     "0": {"text": "OK", "color": "green", "index": 0},
-    "1": {"text": "STALLED", "color": "red", "index": 1}}}]
+    "1": {"text": "STALLED", "color": "red", "index": 1},
+    "-1": {"text": "DOWN", "color": "red", "index": 2}}}]
 ROUTER_SEAT_MAP = [{"type": "value", "options": {
     "0": {"text": "serving", "color": "green", "index": 0},
     "1": {"text": "parked", "color": "red", "index": 1}}}]
@@ -319,42 +320,57 @@ def router_block(y):
         out += [
             # STALLED = queued work and no successful review for an hour - ReviewbotStalled's
             # condition. The heartbeat alone stays green through exactly that (2026-10-26).
+            # Every absence is decided (reviewer-claude on #1430): last_success exists only once
+            # a job has ever succeeded (read from the jobs DB, never reset to 0 on restart), so
+            # queued work with NO success yet is STALLED too; no queue series at all is the
+            # exporter gone -> DOWN (-1), never a grey "No data".
             stat(f"{name} · Serving", x, y, 4, 4,
-                 f'(max(reviewbot_queue_depth{{{P}}}) > bool 0) * '
-                 f'(time() - max(reviewbot_last_success_timestamp_seconds{{{P}}}) > bool 3600)',
+                 f'((max(reviewbot_queue_depth{{{P}}}) > bool 0) * '
+                 f'((time() - max(reviewbot_last_success_timestamp_seconds{{{P}}}) > bool 3600) '
+                 f'or on() vector(1))) or on() vector(-1)',
                  steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}],
                  mappings=SERVING_MAP, value_size=26,
-                 description="STALLED: queued work and no successful review for over an hour."),
+                 description="STALLED: queued work and no successful review for over an hour "
+                             "(ReviewbotStalled pages after 30 min more). DOWN: no metrics."),
             stat_name(f"{name} · Active Model", x + 4, y, 4, 4,
                       f'reviewbot_llm_active_model_info{{{P}}}', "{{model}}", value_size=26),
+            # An absent seat series reads parked: wrong on the safe side, and visible.
             stat(f"{name} · Router Seat", x + 8, y, 4, 4,
-                 f'max(reviewbot_llm_seat_parked{{{P},seat="r"}})',
+                 f'max(reviewbot_llm_seat_parked{{{P},seat="r"}}) or on() vector(1)',
                  steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}],
                  mappings=ROUTER_SEAT_MAP, value_size=26,
                  description="Seat r is the persona's llm-router key; parked = the router refused "
                              "(429) and the queue waits, lossless, until Retry-After."),
         ]
-    claude_rev = 'sum(increase(reviewbot_llm_seat_reviews_total{persona="claude",seat="r"}[$__range]))'
+    # Numerator and denominator over the SAME population, every seat: llm_fallback_used_total
+    # carries no seat label, so filtering only the reviews to seat="r" would skew any range
+    # that reaches back before the router-only switch (reviewer-claude on #1430).
+    claude_rev = 'sum(increase(reviewbot_llm_seat_reviews_total{persona="claude"}[$__range]))'
     out += [
         # Reviews served on the top tier (fable) in the range; the rest ran on opus. -1 = no
         # claude review in the range (a 0/0 would render NaN).
         stat("Claude · Fable Share", 0, y + 4, 4, 4,
-             f'clamp_min(1 - sum(increase(reviewbot_llm_fallback_used_total{{persona="claude"}}[$__range])) '
-             f'/ ({claude_rev} > 0), 0) or on() vector(-1)',
+             f'clamp_min(1 - (sum(increase(reviewbot_llm_fallback_used_total{{persona="claude"}}[$__range])) '
+             f'or vector(0)) / ({claude_rev} > 0), 0) or on() vector(-1)',
              unit="percentunit", mappings=[{"type": "value", "options": {
                  "-1": {"text": "no reviews", "color": "text", "index": 0}}}],
              description="Share of claude reviews in the range served on fable; the rest on opus "
                          "(never sonnet)."),
+        # COUNTS over the picker's range, like Review Failures / Deadline Timeouts above (the
+        # row's convention since 2026-10-10), so the colours are sized for the default 6 h and
+        # read hotter on a longer range - said in each description (reviewer-claude on #1430).
         stat("Router Refusals (429)", 4, y + 4, 4, 4,
              _rng("reviewbot_llm_rate_limited_total"),
              steps=[{"color": "green", "value": None}, {"color": "orange", "value": 3},
-                    {"color": "red", "value": 10}], description="Both personas, in the selected range."),
+                    {"color": "red", "value": 10}],
+             description="Both personas, in the selected range. Colours sized for the default "
+                         "6 h range."),
         stat("Backend Busy", 8, y + 4, 4, 4,
              _rng("reviewbot_llm_upstream_busy_total"),
              steps=[{"color": "green", "value": None}, {"color": "orange", "value": 10},
                     {"color": "red", "value": 50}],
              description="Upstream overloads the router reported (no attempt consumed), both "
-                         "personas, in the selected range."),
+                         "personas, in the selected range. Colours sized for the default 6 h range."),
         stat("Merge-Blocked PRs", 12, y + 4, 4, 4,
              'max(reviewbot_merge_blocked_prs) or vector(0)',
              steps=[{"color": "green", "value": None}, {"color": "orange", "value": 1}],
