@@ -584,6 +584,17 @@ else
   # dockerd, builder prune -af). Section 3b counts the cap prunes that left the cache over the cap
   # (cap_stuck); HEAL_STUCK_TICKS in a row run the heal here, under the same cooldown, confirmed gap and
   # runner-stop sequence as a dangling record. A record heal this tick comes first.
+  # stuck_failed tracks the CURRENT cache, not history (review of #1426, round 3): the other clears run
+  # only under pressure or at the threshold, so a hand repair that empties the cache and drops the disk
+  # below PRESSURE_PCT would leave the mark (and the beacon) up and decline the heal for a brand-new
+  # pinning later. Read only in that state: one `docker system df` per tick while a heal has failed.
+  if [ "$(state_get stuck_failed)" = 1 ]; then
+    bc_c="$(build_cache_bytes)"
+    if is_num "$bc_c" && is_num "${CACHE_MAX_BYTES:-0}" && [ "$bc_c" -le "${CACHE_MAX_BYTES:-0}" ]; then
+      state_set cap_stuck 0 stuck_failed 0 || true
+      log "build cache ${bc_c}B is under the cap -> the failed pinned-cache heal mark is cleared"
+    fi
+  fi
   if [ "$healed" -eq 0 ] && is_num "$HEAL_STUCK_TICKS" && [ "$HEAL_STUCK_TICKS" -gt 0 ]; then
     stuck="$(state_get cap_stuck)"; is_num "$stuck" || stuck=0
     if [ "$stuck" -ge "$HEAL_STUCK_TICKS" ]; then

@@ -884,6 +884,14 @@ check "S15b: ...and is not healed again after the cooldown, while it stays on th
 pinned; printf 'cap_stuck=2\nstuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
 check "S16: a cache seen under the cap clears stuck_failed (and the count)" \
   '[ "$(state_val stuck_failed)" = 0 ] && [ "$(state_val cap_stuck)" = 0 ]'
+# ...also BELOW pressure (round 3): a hand repair empties the cache and drops the disk, and neither 3b
+# nor the threshold path runs then.
+pinned; printf 'stuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 50
+check "S17: below pressure, a cache under the cap still clears stuck_failed, on the same tick's beacon" \
+  '[ "$(state_val stuck_failed)" = 0 ] && [ "$(heal_field pinned_cache_failed)" = 0 ] && ! heal_ran'
+pinned; printf 'stuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 50
+check "S17b: below pressure, a cache still over the cap keeps it" \
+  '[ "$(state_val stuck_failed)" = 1 ] && [ "$(heal_field pinned_cache_failed)" = 1 ] && ! heal_ran'
 pinned
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
