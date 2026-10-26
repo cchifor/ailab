@@ -3,6 +3,9 @@
 # of tripping the kernel OOM-killer and wedging the VM. Disk-backed (no host-RAM cost); swappiness=10
 # keeps it a safety valve, not a first resort.
 
+# OUTPUT CONTRACT: one bare path per line (`--show=NAME --noheadings`, measured on dev-worker-1..4:
+# ['/swapfile']). Both `not in stdout_lines` checks below depend on it - with /proc/swaps or the default
+# columns every line would carry type/size/used and mkswap would run against a live file.
 - name: Check for active swap
   ansible.builtin.command: swapon --show=NAME --noheadings
   register: dev_worker_active_swap
