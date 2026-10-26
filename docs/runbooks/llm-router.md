@@ -2468,12 +2468,59 @@ replayed to the pod, never to production, and the disposable users were deleted 
 **Rollback.** Revert the digest and both annotations to `sha256:5e3b7677a66b7e406057194c353254879a2a98a3c69f0e96d557116557c14271` /
 `2d50a7061ea64bbfebfb99b9e74d4055bc076445` / `router-0.1.0-20261026-auth`. No data step is needed.
 
-**Not yet:** `ROUTER_AUTH_MODE=oidc`. Its prerequisites are now met:
-- the hardening release (this section);
-- the isolated end-to-end run against the real realm;
-- the administrator's `sub` (`83354ded-97b6-417f-8267-566ab816c4fd` in realm `llm-router`).
+Rolled by ailab #1442 on 2026-10-26 (~21:00 UTC). After the rollout:
+- the public checks passed 17/17;
+- `validate-live` matched the baseline, the same three `MODEL_REQUIRED` failures, with the image check skipped:
+  cloud2 is powered off at night (ADR 0033), and `192.168.0.28` does not answer.
 
-The switch itself is a separate PR, after this image has rolled.
+### Keycloak sign-in switched on (2026-10-26, llm-router#121)
+
+`router.chifor.me`'s console signs in through Keycloak: realm `llm-router` at `id.chifor.me`, its own realm per
+ADR 0038. Settings are in `router.yaml`, next to `ROUTER_AUTH_MODE`.
+- **Browser sign-in** is "Continue with Keycloak" (authorization code with PKCE S256, state and nonce). Pasting a token
+  is no longer accepted: `/auth/login` answers 404, except for break-glass.
+- **Sessions** are rows in `router_auth` on infra-pg, and last 8 hours. They are not ended by a Keycloak logout,
+  password reset or user disable (`keycloak.md`, "Members (llm-router)").
+- **To end someone's sessions now** (a compromised account, for example), disable the Keycloak user, then delete their
+  rows on the infra-pg primary. Their next request is signed out.
+
+  ```sh
+  P=$(kubectl --context admin@ai -n databases get cluster infra-pg -o jsonpath='{.status.currentPrimary}')
+  printf '%s\n' "DELETE FROM router_auth_sessions WHERE user_id IN (SELECT id FROM router_auth_users WHERE subject = :'s');" \
+    | kubectl --context admin@ai -n databases exec -i "$P" -c postgres -- psql -U postgres -d router_auth -v ON_ERROR_STOP=1 \
+        -v s='https://id.chifor.me/realms/llm-router|<keycloak user id>'
+  ```
+
+  The SQL goes in on stdin because psql does not substitute `:'s'` inside a `-c` string (checked 2026-10-26: a syntax
+  error).
+
+  Also remove the membership (`DELETE FROM router_auth_memberships WHERE user_id IN (...)`), or the person signs in
+  again once Keycloak lets them. For the administrator named by `ROUTER_AUTH_ADMIN_SUBJECT`, remove the variable too.
+- **Bearer API keys are unchanged**, including `ROUTER_ADMIN_TOKEN`: `validate-live`, operators, every client.
+  Neither PostgreSQL nor Keycloak is on their path, or on the router's start-up path (#123).
+- **Who gets in:** a Keycloak identity with `email_verified` AND a membership in `router_auth`, matched by its exact
+  `issuer|sub`. Self-registration is open (owner decision) but grants nothing without a membership.
+  - The first administrator is `ROUTER_AUTH_ADMIN_SUBJECT`: `chifor@gmail.com`, user id
+    `83354ded-97b6-417f-8267-566ab816c4fd`, email verified by the operator, with a one-time password delivered to the
+    owner out of band.
+  - Anyone else needs SQL for now (`keycloak.md`); a membership API or UI is a follow-up.
+
+**Break-glass (Keycloak down).** The token is `break-glass-token` in Secret `llm-router-oidc`.
+1. `kubectl --context admin@ai -n llm-router port-forward deploy/llm-router 8787:8787`.
+2. Open `http://127.0.0.1:8787`. Browsers send Secure cookies to localhost.
+3. In the devtools console run
+   `await fetch('/auth/login', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({token: '<break-glass token>'})})`,
+   then reload.
+
+The token never goes into a URL. The same request through the public host answers 404. Break-glass needs PostgreSQL;
+during a PG outage, operate with the bearer admin token instead. Sign out afterwards.
+
+**Rollback.** Revert this PR, removing every `ROUTER_AUTH_*` and `ROUTER_OIDC_*` variable together: the router goes
+back to local token sign-in. Sessions issued in Keycloak mode live in PostgreSQL and stop working. Local sessions issued
+before the switch are still in SQLite (KV `auth.sessions`, up to 30 days) and work again: they belong to the
+administrator's own browsers. Keep the realm, the client and the `router_auth` database: they are harmless when unused.
+The revert also removes `ROUTER_AUTH_CLIENT_ADDRESS_HEADER`, so the sign-in throttle keys on the edge proxy's address
+again and becomes one budget for every visitor, as it was before the switch.
 
 ## Relay access requests
 

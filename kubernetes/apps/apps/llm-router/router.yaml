@@ -162,15 +162,59 @@ spec:
             # watchdog fires at 57 s, 3 s before the grace ends, so raise the grace before going near it.
             - name: ROUTER_DRAIN_MS
               value: "20000"
-            # Browser sign-in stays in local mode: this token, exchanged for an HttpOnly session cookie. The
-            # Keycloak OIDC mode of llm-router #117 is NOT enabled here: it needs ROUTER_AUTH_MODE=oidc, a
-            # PostgreSQL auth store (ROUTER_AUTH_DATABASE_URL), a confidential Keycloak client and a provisioned
-            # administrator, and a reviewed change of its own (docs/runbooks/llm-router.md, 2026-10-26 release).
+            # The bearer administrator key: API clients, validate-live and operators. In Keycloak mode it no longer
+            # signs a browser in (local sign-in is off); it stays the way to operate during a PostgreSQL outage.
             - name: ROUTER_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: llm-router-auth
                   key: admin-token
+            # Browser sign-in through Keycloak (llm-router#121; runbook "Keycloak sign-in"). Realm llm-router at
+            # id.chifor.me (its own realm, ADR 0038); sessions and memberships in the router_auth DB on infra-pg.
+            # Neither PostgreSQL nor the issuer is needed for the router to start or for bearer traffic (llm-router
+            # #123): an outage of either blocks new browser sign-ins only.
+            - name: ROUTER_AUTH_MODE
+              value: oidc
+            - name: ROUTER_OIDC_ISSUER
+              value: https://id.chifor.me/realms/llm-router
+            - name: ROUTER_OIDC_CLIENT
+              value: llm-router
+            - name: ROUTER_OIDC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: llm-router-oidc
+                  key: oidc-client-secret
+            - name: ROUTER_AUTH_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: llm-router-oidc
+                  key: auth-database-url
+            - name: ROUTER_AUTH_PUBLIC_URL
+              value: https://router.chifor.me
+            - name: ROUTER_OIDC_REQUIRE_EMAIL_VERIFIED
+              value: "1"
+            # The first administrator: chifor@gmail.com in realm llm-router (created 2026-10-26, email verified by
+            # the operator). An identifier, not a secret. Re-asserted as admin at every start: removing that person
+            # means removing this variable too.
+            - name: ROUTER_AUTH_ADMIN_SUBJECT
+              value: https://id.chifor.me/realms/llm-router|83354ded-97b6-417f-8267-566ab816c4fd
+            - name: ROUTER_AUTH_ADMIN_NAME
+              value: Constantin Chifor
+            # Per-client sign-in throttling and the break-glass loopback check read this header when it is present,
+            # else the TCP peer. Only two paths reach :8787: the edge (NetworkPolicy below: llm-router-edge pods only,
+            # which take traffic only from cloudflared, where Cloudflare overwrites cf-connecting-ip on every request,
+            # so a client cannot forge it), and a kubectl port-forward. A port-forward bypasses NetworkPolicy, but
+            # opening one needs cluster-admin, which can read the break-glass token anyway. No other in-cluster client
+            # can reach the pod to send its own header.
+            - name: ROUTER_AUTH_CLIENT_ADDRESS_HEADER
+              value: cf-connecting-ip
+            # Break-glass for a Keycloak outage: a browser session from loopback only (kubectl port-forward to the
+            # pod). It needs PostgreSQL; during a PG outage operate with ROUTER_ADMIN_TOKEN instead.
+            - name: ROUTER_BREAK_GLASS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-router-oidc
+                  key: break-glass-token
             # Model servers on the LAN (cchifor/llm-router discovery-network): the only network the router may
             # scan is the mgmt LAN, on the model-server ports below (the same list as the egress rule), and
             # these known servers are checked on every full scan: cloudlab vLLM (.28:18020) and llama-swap
