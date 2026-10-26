@@ -830,7 +830,7 @@ check "S1: a cap prune that leaves the cache over cap counts one (cap_stuck=1)" 
 check "S1: ...and does not heal yet" '! heal_ran'
 MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85; MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85
 check "S2: three pinned cap prunes in a row -> cap_stuck=3, still no heal" '[ "$(state_val cap_stuck)" = 3 ] && ! heal_ran'
-MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85
+MOCK_CACHE=26 MOCK_CACHE_AFTER=1 KEEP_RUNNER_STATE=1 run_beacon 0 85
 in_order "S3: the next tick heals in the record heal's order" \
   "systemctl stop gitea-act-runner.service" "docker image prune -af" "systemctl restart docker.service" \
   "docker builder prune -af" "systemctl start --no-block gitea-act-runner.service"
@@ -839,6 +839,8 @@ check "S3: ...counts from zero again, records the attempt, releases the runner" 
 check "S3: ...the sweep waits for the next tick and the runner runs again" \
   '! swept && [ "$(cat "$WORK/runner.state")" = active ]'
 check "S3: ...and no record was marked failed (a pinned-cache heal has no record)" '! grep -q "^failed_" "$WORK/heal.state"'
+check "S3: ...a heal that got the cache under the cap is not a failed one (beacon pinned_cache_failed=0)" \
+  '[ "$(state_val stuck_failed)" = 0 ] && [ "$(heal_field pinned_cache_failed)" = 0 ]'
 
 pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=26 MOCK_CACHE_AFTER=5 run_beacon 0 85
 check "S4: a cap prune that gets the cache under cap resets the count (the after-prune path)" \
@@ -870,6 +872,18 @@ check "S13: count at threshold but the cap is disabled -> no heal" '! heal_ran &
 pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=0 run_beacon 0 85
 check "S14: count at threshold but the size is unreadable -> no heal, count kept" \
   '! heal_ran && [ "$(state_val cap_stuck)" = 3 ] && swept'
+# A heal that leaves the cache over the cap is TERMINAL, as failed_<Y> is for a record (review of
+# #1426, round 2): otherwise 3b counts back up and dockerd restarts every cooldown, forever.
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 85
+check "S15: a full heal that leaves the cache over the cap marks stuck_failed=1 (beacon pinned_cache_failed=1)" \
+  'heal_ran && [ "$(state_val stuck_failed)" = 1 ] && [ "$(state_val cap_stuck)" = 0 ] && [ "$(heal_field pinned_cache_failed)" = 1 ]'
+printf 'cap_stuck=3\nstuck_failed=1\nlast_heal=%s\nheals_total=1\n' "$(( $(date +%s) - 99999 ))" > "$WORK/heal.state"
+MOCK_CACHE=26 run_beacon 0 85
+check "S15b: ...and is not healed again after the cooldown, while it stays on the beacon; the sweep runs" \
+  '! heal_ran && [ "$(heal_field pinned_cache_failed)" = 1 ] && swept'
+pinned; printf 'cap_stuck=2\nstuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
+check "S16: a cache seen under the cap clears stuck_failed (and the count)" \
+  '[ "$(state_val stuck_failed)" = 0 ] && [ "$(state_val cap_stuck)" = 0 ]'
 pinned
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"

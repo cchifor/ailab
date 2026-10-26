@@ -320,13 +320,15 @@ state_set() {
 # unchanged. runner_held 1 = a heal stopped the runner and has not seen it active since.
 write_heal_beacon() { # <dangling_record 0|1>
   [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
-  local tmp held lh ht
+  local tmp held lh ht pf
   held="$(state_get runner_held)"; is_num "$held" || held=0
   lh="$(state_get last_heal)"; is_num "$lh" || lh=0
   ht="$(state_get heals_total)"; is_num "$ht" || ht=0
+  # 1 = a full pinned-cache heal left the build cache over its cap; not retried until seen under it.
+  pf="$(state_get stuck_failed)"; is_num "$pf" || pf=0
   tmp="$(mktemp "$HEAL_BEACON_FILE.XXXX" 2>/dev/null)" || return 0
   printf 'gitea_runner_buildkit_%s %s\n' dangling_record "$1" runner_held "$held" \
-    heal_last_seconds "$lh" heals_total "$ht" > "$tmp"
+    heal_last_seconds "$lh" heals_total "$ht" pinned_cache_failed "$pf" > "$tmp"
   chmod 0644 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$HEAL_BEACON_FILE" 2>/dev/null || rm -f "$tmp"
 }
@@ -599,8 +601,14 @@ else
       elif bc_s="$(build_cache_bytes)"; ! is_num "$bc_s"; then
         log "build cache pinned count ${stuck}, but its size is unreadable -> not healing this tick"
       elif [ "$bc_s" -le "$CACHE_MAX_BYTES" ]; then
-        state_set cap_stuck 0 || true
+        state_set cap_stuck 0 stuck_failed 0 || true
         log "build cache ${bc_s}B is under the cap now -> pinned count reset, no heal"
+      elif [ "$(state_get stuck_failed)" = 1 ]; then
+        # The terminal state, as failed_<Y> is for a record: a full heal already left the cache over the
+        # cap, and the same steps would fail the same way at the cost of a docker restart every cooldown.
+        # It stays on the beacon (pinned_cache_failed) and the disk alert until the cache is seen under
+        # the cap, which clears it.
+        log "build cache ${bc_s}B pinned over cap, but a full heal already left it there -> alerting, not retrying until it is seen under the cap"
       elif [ $(( $(date +%s) - last_heal )) -lt "$HEAL_COOLDOWN_SEC" ]; then
         log "build cache pinned over cap (${stuck} cap prunes): heal cooldown since @${last_heal} -> not healing again yet"
       elif ! wait_for_gap; then
@@ -609,9 +617,18 @@ else
         pct_h="$(disk_pct)"
         heal_dangling_record "" ""
         case $? in
-          # Counted from zero again: if the cache is still pinned, 3b sees it within HEAL_STUCK_TICKS
-          # ticks and the cooldown spaces the retry.
-          0) healed=1; state_set cap_stuck 0 || true; log "heal: pinned-cache heal done, disk ${pct_h}% -> $(disk_pct)%" ;;
+          # Judged by the cache size, the way a record heal is judged by the record: still over the cap
+          # after the full heal -> the terminal stuck_failed state (no retry until it is seen under the
+          # cap). Under the cap, or unreadable, -> counted from zero again.
+          0)
+            healed=1; bc_h="$(build_cache_bytes)"
+            if is_num "$bc_h" && [ "$bc_h" -gt "$CACHE_MAX_BYTES" ]; then
+              state_set cap_stuck 0 stuck_failed 1 || true
+              log "heal: build cache STILL ${bc_h}B after a full pinned-cache heal (disk ${pct_h}% -> $(disk_pct)%) -> it will not be retried until the cache is seen under the cap"
+            else
+              state_set cap_stuck 0 stuck_failed 0 || true
+              log "heal: pinned-cache heal done, build cache ${bc_h:-unreadable}B, disk ${pct_h}% -> $(disk_pct)%"
+            fi ;;
           1 | 2) healed=1 ;;
           *) : ;; # did not start; the sweep below runs as usual
         esac
@@ -818,8 +835,11 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
   bc_now="$(timeout 60 docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null \
     | awk -F'|' '$1=="Build Cache"{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null)"
   if is_num "$bc_now" && [ "$bc_now" -le "$CACHE_MAX_BYTES" ]; then
-    # Under the cap: whatever pinned it before is gone, so a later overshoot counts from zero.
-    [ "$(state_get cap_stuck)" = 0 ] || state_set cap_stuck 0 || true
+    # Under the cap: whatever pinned it before is gone, so a later overshoot counts from zero, and a
+    # failed pinned-cache heal (stuck_failed) is cleared.
+    if [ "$(state_get cap_stuck)" != 0 ] || [ "$(state_get stuck_failed)" = 1 ]; then
+      state_set cap_stuck 0 stuck_failed 0 || true
+    fi
   fi
   if is_num "$bc_now" && [ "$bc_now" -gt "$CACHE_MAX_BYTES" ]; then
     if ! idle_confirmed; then
@@ -840,7 +860,7 @@ if [ "$midjob" -eq 0 ] && [ "${CACHE_MAX_BYTES:-0}" -gt 0 ] && [ "$pct_cap" -ge 
           log "build cache still ${bc_after}B after the full prune (over cap $(( stuck + 1 )) prune(s) in a row) -> pinned records; the pinned-cache heal is DISABLED (HEAL_DANGLING=${HEAL_DANGLING}, HEAL_STUCK_TICKS=${HEAL_STUCK_TICKS})"
         fi
       elif is_num "$bc_after"; then
-        state_set cap_stuck 0 || true
+        state_set cap_stuck 0 stuck_failed 0 || true
       fi
       # Collect first, then iterate: a `grep` matching nothing exits 1, which would poison a piped
       # `while` if this script ever gained `set -e`. (`set -o pipefail` is already on at the top and
