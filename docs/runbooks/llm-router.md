@@ -2481,6 +2481,21 @@ ADR 0038. Settings are in `router.yaml`, next to `ROUTER_AUTH_MODE`.
   is no longer accepted: `/auth/login` answers 404, except for break-glass.
 - **Sessions** are rows in `router_auth` on infra-pg, and last 8 hours. They are not ended by a Keycloak logout,
   password reset or user disable (`keycloak.md`, "Members (llm-router)").
+- **To end someone's sessions now** (a compromised account, for example), disable the Keycloak user, then delete their
+  rows on the infra-pg primary. Their next request is signed out.
+
+  ```sh
+  P=$(kubectl --context admin@ai -n databases get cluster infra-pg -o jsonpath='{.status.currentPrimary}')
+  printf '%s\n' "DELETE FROM router_auth_sessions WHERE user_id IN (SELECT id FROM router_auth_users WHERE subject = :'s');" \
+    | kubectl --context admin@ai -n databases exec -i "$P" -c postgres -- psql -U postgres -d router_auth -v ON_ERROR_STOP=1 \
+        -v s='https://id.chifor.me/realms/llm-router|<keycloak user id>'
+  ```
+
+  The SQL goes in on stdin because psql does not substitute `:'s'` inside a `-c` string (checked 2026-10-26: a syntax
+  error).
+
+  Also remove the membership (`DELETE FROM router_auth_memberships WHERE user_id IN (...)`), or the person signs in
+  again once Keycloak lets them. For the administrator named by `ROUTER_AUTH_ADMIN_SUBJECT`, remove the variable too.
 - **Bearer API keys are unchanged**, including `ROUTER_ADMIN_TOKEN`: `validate-live`, operators, every client.
   Neither PostgreSQL nor Keycloak is on their path, or on the router's start-up path (#123).
 - **Who gets in:** a Keycloak identity with `email_verified` AND a membership in `router_auth`, matched by its exact
@@ -2504,6 +2519,8 @@ during a PG outage, operate with the bearer admin token instead. Sign out afterw
 back to local token sign-in. Sessions issued in Keycloak mode live in PostgreSQL and stop working. Local sessions issued
 before the switch are still in SQLite (KV `auth.sessions`, up to 30 days) and work again: they belong to the
 administrator's own browsers. Keep the realm, the client and the `router_auth` database: they are harmless when unused.
+The revert also removes `ROUTER_AUTH_CLIENT_ADDRESS_HEADER`, so the sign-in throttle keys on the edge proxy's address
+again and becomes one budget for every visitor, as it was before the switch.
 
 ## Relay access requests
 
