@@ -267,6 +267,17 @@ spec:
         createrole: false
         passwordSecret:
           name: infra-pg-keycloak
+      # Router browser auth only; SQLite router state remains on llm-router-data.
+      # Secret is an operator prerequisite; DB creation is llm-router-auth-db-bootstrap.sql.
+      - name: llm_router_auth
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        bypassrls: false
+        passwordSecret:
+          name: infra-pg-llm-router-auth
       # AgentForge v2 RLS boundary (ADR 0019): two roles, one password secret each. bypassrls is set
       # explicitly on both — afp_admin BYPASSRLS (owner/migrations), afp_app NOBYPASSRLS (request path).
       - name: afp_admin

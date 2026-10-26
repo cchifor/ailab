@@ -4,6 +4,10 @@ The ailab identity provider, decided in [ADR 0038](../decisions/0038-ailab-keycl
 There is one realm per application. Today the only one is `relay`, with issuer
 `https://id.chifor.me/realms/relay`, used by Relay (`relay.chifor.me`).
 
+The pending `llm-router` realm has a separate [two-phase activation runbook](llm-router-keycloak.md).
+Provision its required Secrets before merging the prerequisite rollout; verify the new issuer and
+administrator before enabling OIDC on the router. The router does not become a client in `relay`.
+
 | Piece | Where |
 |---|---|
 | Deployment, Service, NetworkPolicy, realm JSON | `kubernetes/apps/apps/keycloak/` (Flux, `apps` layer) |

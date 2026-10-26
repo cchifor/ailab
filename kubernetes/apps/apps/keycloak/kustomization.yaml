@@ -1,6 +1,6 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# ailab Keycloak at id.chifor.me (ADR 0038): one realm per application; today only `relay`.
+# ailab Keycloak at id.chifor.me (ADR 0038): separate `relay` and `llm-router` realms.
 # Runbook: docs/runbooks/keycloak.md. Its database is the `keycloak` DB on infra-pg (databases layer).
 resources:
   - namespace.yaml
@@ -16,3 +16,7 @@ configMapGenerator:
     namespace: keycloak # the generator does not inherit one; without it Flux rejects the ConfigMap
     files:
       - realm-relay.json
+  - name: keycloak-realm-llm-router
+    namespace: keycloak
+    files:
+      - realm-llm-router.json

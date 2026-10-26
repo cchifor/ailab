@@ -7,6 +7,8 @@ kind: Kustomization
 # NOT created here (operator/vault prerequisites):
 #   * Secret llm-router-auth (key admin-token, >= 24 chars) — the pod fails
 #     its startup gate until it exists (fail closed, no default credentials).
+#   * Before OIDC activation: llm-router-oidc (client-secret, admin-subject) and llm-router-auth-db (database-url).
+#     Provision before activation; docs/runbooks/llm-router-keycloak.md records the operator gate.
 #   * The "edge" namespace label and the Cloudflare tunnel in edge-connector.
 resources:
   - router.yaml

@@ -162,10 +162,8 @@ spec:
             # watchdog fires at 57 s, 3 s before the grace ends, so raise the grace before going near it.
             - name: ROUTER_DRAIN_MS
               value: "20000"
-            # Browser sign-in stays in local mode: this token, exchanged for an HttpOnly session cookie. The
-            # Keycloak OIDC mode of llm-router #117 is NOT enabled here: it needs ROUTER_AUTH_MODE=oidc, a
-            # PostgreSQL auth store (ROUTER_AUTH_DATABASE_URL), a confidential Keycloak client and a provisioned
-            # administrator, and a reviewed change of its own (docs/runbooks/llm-router.md, 2026-10-26 release).
+            # Local browser sign-in remains enabled until the separate OIDC activation PR.
+            # Provisioning gate: docs/runbooks/llm-router-keycloak.md.
             - name: ROUTER_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -321,6 +319,17 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Auth store: infra-pg pods in the databases namespace, TCP 5432 only.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: infra-pg
+      ports:
+        - protocol: TCP
+          port: 5432
     # Public upstream provider endpoints (HTTPS only), RFC1918 excluded.
     # Also covers the chat's subscription sign-in (subscription-login plugin):
     # the on-demand CLI install from registry.npmjs.org and the Codex device

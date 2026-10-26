@@ -49,7 +49,7 @@ data:
       - hostname: relay.chifor.me
         service: http://relay.relay.svc.cluster.local:80
       # ailab Keycloak (ADR 0038): Relay's identity provider, own login, so no Access gate. ALLOWLIST,
-      # first match wins: only the `relay` realm and the theme resources reach Keycloak; the admin
+      # first match wins: only the `relay` and `llm-router` realms and theme resources reach Keycloak; the admin
       # console/API, the master realm and every other path answer 404 (admin = kubectl port-forward
       # only, docs/runbooks/keycloak.md). cloudflared matches the once-decoded path literally while
       # Keycloak's HTTP layer normalizes, so a deny-list keyed on `/admin` could be dodged by `//admin`
@@ -60,6 +60,9 @@ data:
         service: http_status:404
       - hostname: id.chifor.me
         path: ^/realms/relay(/|$)
+        service: http://keycloak.keycloak.svc.cluster.local:80
+      - hostname: id.chifor.me
+        path: ^/realms/llm-router(/|$)
         service: http://keycloak.keycloak.svc.cluster.local:80
       - hostname: id.chifor.me
         path: ^/resources/
@@ -207,7 +210,7 @@ spec:
         # routes until something restarts them. A new hostname then looks deployed but 404s at the
         # edge. Bump this whenever the ingress list changes -- it is the rollout trigger. (Same trap
         # cloud-power's kustomization documents for app code.)
-        chifor.me/config-revision: "2026-10-13-keycloak-id"
+        chifor.me/config-revision: "2026-10-26-router-keycloak"
       labels:
         app.kubernetes.io/name: cloudflared
     spec:

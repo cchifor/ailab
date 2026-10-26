@@ -41,6 +41,13 @@ spec:
             - secretRef:
                 name: keycloak-secrets # KC_BOOTSTRAP_ADMIN_*, KC_DB_PASSWORD, RELAY_OIDC_CLIENT_SECRET
           env:
+            # Required before this change rolls: mirrored with llm-router/llm-router-oidc.
+            # The realm import reads this only when llm-router does not already exist.
+            - name: LLM_ROUTER_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: llm-router-oidc
+                  key: client-secret
             - { name: KC_DB, value: postgres }
             - { name: KC_DB_URL_HOST, value: infra-pg-rw.databases.svc.cluster.local }
             - { name: KC_DB_URL_DATABASE, value: keycloak }
@@ -85,8 +92,12 @@ spec:
               readOnly: true
       volumes:
         - name: realm-import
-          configMap:
-            name: keycloak-realm-relay
+          projected:
+            sources:
+              - configMap:
+                  name: keycloak-realm-relay
+              - configMap:
+                  name: keycloak-realm-llm-router
 ---
 apiVersion: v1
 kind: Service

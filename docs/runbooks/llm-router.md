@@ -5,6 +5,9 @@ kubeconfig is required or issued. The source is merged in Gitea, mirrored to
 GitHub, then reconciled by Flux. The initial manual deployment notes below are
 historical. See the provider-naming release section for the current release and CI acceptance.
 
+Pending browser sign-in activation: [LLM Router Keycloak](llm-router-keycloak.md) separates realm/database
+provisioning from the router's OIDC mode switch. The 2026-10-26 application image alone keeps local login.
+
 ## Topology and authentication
 
 Cloudflare proxied CNAME → existing locally managed `ailab` tunnel → `llm-router.llm-router.svc.cluster.local:80` → Node :8787.
