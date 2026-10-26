@@ -25,16 +25,21 @@ from its systemd unit, within --budget seconds in total. Results:
                                                           before truncating, so a new dir shows)
 `kind` is a hint, never a deletion criterion: git (has .git: a clone or linked worktree), worktrees (a
 plain directory holding git worktrees, like wt/), cache (.cache*, .npm), tmp (.tmp), file, other.
-Alerts: DevWorkerDirGrowing, DevWorkerUnownedDataLarge, DevWorkerDiskReportStale.
+    dev_worker_dir_kept_until_seconds{user,root,dir,owner} an OWNER.json keeps the entry knowingly until then
+    dev_worker_dir_owner_file_invalid{user,root,dir}      an OWNER.json is there but unusable (never honoured)
+Alerts: DevWorkerDirGrowing, DevWorkerUnownedDataLarge (kept entries exempt), DevWorkerKeptDataExpired,
+DevWorkerDiskReportStale.
 
 Installed by ansible (roles/dev_worker, tasks/disk_report.yml); tested by
 scripts/tests/test_dev_worker_disk_report.py.
 """
 import argparse
+import datetime
 import glob
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -44,6 +49,14 @@ TEXTFILE_DIR = "/var/lib/prometheus/node-exporter"
 PROM = "dev_worker_disk_report.prom"
 CACHE_NAMES = (".npm",)              # plus anything starting with ".cache"
 LABEL_MAX = 120
+# OWNER.json at the top of an unowned directory keeps it KNOWINGLY: {"owner", "keep_until"
+# (YYYY-MM-DD, kept through that whole day UTC, or an ISO datetime), "reason"}. Only owner and
+# keep_until leave the file. This runs as root over agent-writable trees, so the file must be a
+# regular file (no symlink, no FIFO), at most OWNER_MAX_BYTES, with keep_until at most
+# OWNER_MAX_DAYS ahead - anything else is reported invalid and never honoured.
+OWNER_FILE = "OWNER.json"
+OWNER_MAX_BYTES = 4096
+OWNER_MAX_DAYS = 366
 
 
 def du(root, timeout, run=subprocess.run):
@@ -114,6 +127,69 @@ def nested_unowned(root, sizes, kinds):
     return out
 
 
+def parse_until(value):
+    """keep_until as unix time, or None. A bare date keeps through its whole day (UTC); a datetime
+    without a zone is UTC."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    try:
+        if len(v) == 10:
+            day = datetime.date.fromisoformat(v)
+            start = datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc)
+            return (start + datetime.timedelta(days=1)).timestamp()
+        at = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=datetime.timezone.utc)
+    return at.timestamp()
+
+
+def read_owner(path, now):
+    """{"owner", "until"} from path/OWNER.json, {"invalid": True} when one is there but unusable,
+    None when there is none. Never follows a symlink and never blocks on a FIFO."""
+    p = os.path.join(path, OWNER_FILE)
+    if not os.path.lexists(p):
+        return None
+    if os.path.islink(p):
+        return {"invalid": True}
+    try:
+        fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return {"invalid": True}
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > OWNER_MAX_BYTES:
+            return {"invalid": True}
+        raw = os.read(fd, OWNER_MAX_BYTES + 1)
+    except OSError:
+        return {"invalid": True}
+    finally:
+        os.close(fd)
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {"invalid": True}
+    owner = doc.get("owner") if isinstance(doc, dict) else None
+    until = parse_until(doc.get("keep_until")) if isinstance(doc, dict) else None
+    if not isinstance(owner, str) or not owner.strip() or until is None \
+            or until > now + OWNER_MAX_DAYS * 86400:
+        return {"invalid": True}
+    return {"owner": owner.strip(), "until": int(until)}
+
+
+def owners(root, kinds, nested, now):
+    """{entry: read_owner(...)} for every entry an unowned-data alert can name: top-level `other`
+    directories and the unowned children of grouping directories. Git checkouts are never read."""
+    out = {}
+    for name in [n for n, k in kinds.items() if k == "other"] + list(nested):
+        found = read_owner(os.path.join(root, name), now)
+        if found is not None:
+            out[name] = found
+    return out
+
+
 def growth(now_top, then_top):
     """{name: bytes grown} for every entry, new ones counting from 0."""
     return {name: b - then_top.get(name, 0) for name, b in now_top.items()}
@@ -169,9 +245,11 @@ def build(users, now, scan, state_dir, top, big, growth_hours):
         top_now = top_level(sizes)
         kinds = {name: kind_of(root, name) for name in top_now}
         grown = growth(top_now, base[key]) if key in base else {}
+        nested = nested_unowned(root, sizes, kinds)
         out["roots"][key] = {"user": user, "root": root_name, "path": root, "total": sizes.get(".", 0),
                              "top": top_now, "kinds": kinds, "growth": grown, "depth2": sizes,
-                             "nested": nested_unowned(root, sizes, kinds), "scanned_at": int(now)}
+                             "nested": nested, "owners": owners(root, kinds, nested, now),
+                             "scanned_at": int(now)}
     return out
 
 
@@ -202,6 +280,11 @@ def render(model, now, scan_seconds, top, big):
         "# TYPE dev_worker_dir_bytes gauge",
         "# HELP dev_worker_dir_growth_bytes Growth of a top-level entry over the growth window (fastest).",
         "# TYPE dev_worker_dir_growth_bytes gauge",
+        "# HELP dev_worker_dir_kept_until_seconds Until when the entry's OWNER.json keeps it knowingly.",
+        "# TYPE dev_worker_dir_kept_until_seconds gauge",
+        "# HELP dev_worker_dir_owner_file_invalid 1 when the entry's OWNER.json is there but unusable"
+        " (not a regular file, too big, not JSON, no owner or keep_until, or keep_until too far out).",
+        "# TYPE dev_worker_dir_owner_file_invalid gauge",
     ]
     data = []
     for key in sorted(model["roots"]):
@@ -221,6 +304,12 @@ def render(model, now, scan_seconds, top, big):
         for n, g in sorted(r["growth"].items(), key=lambda kv: -kv[1])[:top]:
             if g > 0:
                 data.append(f'dev_worker_dir_growth_bytes{{{base},dir="{esc(n)}",kind="{r["kinds"].get(n, "other")}"}} {g}')
+        for n, o in sorted(r.get("owners", {}).items()):
+            if o.get("invalid"):
+                data.append(f'dev_worker_dir_owner_file_invalid{{{base},dir="{esc(n)}"}} 1')
+            else:
+                data.append(f'dev_worker_dir_kept_until_seconds{{{base},dir="{esc(n)}",'
+                            f'owner="{esc(o["owner"])}"}} {o["until"]}')
     return "\n".join(lines + data) + "\n"
 
 
