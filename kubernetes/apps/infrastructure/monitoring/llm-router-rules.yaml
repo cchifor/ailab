@@ -146,8 +146,15 @@ spec:
               Runbook: docs/runbooks/llm-router.md § Overload attribution.
         # A subscription near the end of its long window (Codex: primary = weekly; Claude: weekly).
         # The 5-hour Claude window is left out: it fills and empties several times a day by design.
+        # A reading whose OWN reset time has passed is stale, not a wall: the router refreshes usage only
+        # for accounts it can use, so a disabled or reauth_required account keeps exporting its last
+        # reading (codex-4: 100 % with a reset of 2026-10-24 21:08Z, still firing on 10-26). A known,
+        # past reset suppresses it; an account that reports no reset time (or 0) keeps alerting.
         - alert: LlmRouterAccountNearLimit
-          expr: llm_router_account_limit_used_percent{job="llm-router",window=~"primary|weekly"} >= 90
+          expr: >-
+            llm_router_account_limit_used_percent{job="llm-router",window=~"primary|weekly"} >= 90
+            unless on (job, account, provider, window)
+            ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
           for: 30m
           labels: { severity: warning }
           annotations:

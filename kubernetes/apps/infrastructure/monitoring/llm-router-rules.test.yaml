@@ -276,6 +276,57 @@ tests:
         exp_alerts: []
 
   - interval: 1m
+    name: a reading past its own reset is stale (disabled account) and stays silent; a future reset still pages
+    input_series:
+      # codex-4 shape on 2026-10-26: disabled + reauth_required, last reading 100 %, reset 2026-10-24 21:08Z.
+      # At eval time 31m (1860 s) a reset of 600 s is in the past; 86400 s is tomorrow.
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-4",provider="codex",window="primary"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="codex-4",provider="codex",window="primary"}'
+        values: "600x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-5",provider="claude",window="weekly"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude-5",provider="claude",window="weekly"}'
+        values: "86400x40"
+      # No usable reset time (0): not provably stale, so it keeps paging.
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-2",provider="codex",window="primary"}'
+        values: "92x40"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="codex-2",provider="codex",window="primary"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterAccountNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              account: claude-5
+              provider: claude
+              window: weekly
+            exp_annotations:
+              summary: "llm-router account claude-5 at 100% of its weekly window"
+              description: >-
+                Account claude-5 (claude) has used 100% of its
+                weekly limit window for 30m. At 100 % the provider refuses it until the
+                reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+                Decide now whether to throttle its callers, let it run on credits, or add capacity:
+                the pool keeps serving on the other accounts until they reach the same wall.
+          - exp_labels:
+              severity: warning
+              job: llm-router
+              account: codex-2
+              provider: codex
+              window: primary
+            exp_annotations:
+              summary: "llm-router account codex-2 at 92% of its primary window"
+              description: >-
+                Account codex-2 (codex) has used 92% of its
+                primary limit window for 30m. At 100 % the provider refuses it until the
+                reset (llm_router_account_limit_resets_at_seconds; the Status page shows the time).
+                Decide now whether to throttle its callers, let it run on credits, or add capacity:
+                the pool keeps serving on the other accounts until they reach the same wall.
+
+  - interval: 1m
     name: two of three accounts limited is capacity, not a provider outage
     input_series:
       - series: 'llm_router_account_limit_status{job="llm-router",account="codex-3",provider="codex",status="limited"}'
