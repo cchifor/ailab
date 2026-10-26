@@ -21,13 +21,18 @@ land these secret-only additions in a preparatory PR. Do not widen the worker's 
 |---|---|---|---|
 | `keycloak` | `llm-router-oidc` | `client-secret` | New confidential client's secret, identical to the router copy |
 | `databases` | `infra-pg-llm-router-auth` | `username`, `password` | `kubernetes.io/basic-auth`, username `llm_router_auth`, CNPG-managed role |
-| `llm-router` | `llm-router-auth-db` | `database-url` | DSN for `llm_router_auth` at `infra-pg-rw.databases.svc.cluster.local:5432/llm_router_auth` |
+| `llm-router` | `llm-router-auth-db` | `database-url`, `ca.crt` | DSN for `llm_router_auth` at `infra-pg-rw.databases.svc.cluster.local:5432/llm_router_auth`, plus the infra-pg server CA certificate (never its private key) |
 | `llm-router` | `llm-router-oidc` | `client-secret`, later `admin-subject` | Matching client secret; exact verified administrator identity added after realm provisioning |
 
 Generate independent client and database credentials; never post values to issues, logs, or shell
-arguments. Match the database password with the DSN using the existing secret-management mechanism.
-Verify the DSN's TLS settings using the deployed Node/pg driver; if a CA is needed, provide its trust
-configuration before activation. The single auth role owns only this auth database, because the
+arguments. Match the database password with the DSN using the existing secret-management mechanism;
+URL-encode the username/password components. Phase 2 mounts only `ca.crt` read-only at
+`/etc/router-auth-db/ca.crt`. The DSN must use
+`sslmode=verify-full&sslrootcert=/etc/router-auth-db/ca.crt`; verify both the certificate chain and
+the service hostname with the deployed Node/pg driver before activation. Do not disable TLS or
+certificate/hostname verification to pass this check. Maintain the namespace-local CA copy when
+infra-pg rotates its CA, and roll the router after changing the DSN or trust bundle.
+The single auth role owns only this auth database, because the
 current application performs idempotent DDL at startup. It is not a superuser, role creator, database
 creator, or RLS bypass role. SQLite data, provider credentials, and API keys remain in their existing store.
 
@@ -57,12 +62,20 @@ After the prerequisite merge, verify:
 4. Public `/admin`, `/realms/master`, unknown realms, dot-segment paths and semicolon paths still
    return 404. Exercise raw and encoded traversal cases with `curl --path-as-is` as in the Keycloak runbook.
 5. The router still advertises `oidc:false, local:true`; existing API-key traffic remains healthy.
+6. From the router's network context, discovery, JWKS and token endpoint requests are not blocked
+   by Cloudflare bot/WAF policies. Verify database connectivity against live ingress policies too;
+   the repository's databases Kustomization currently declares no ingress NetworkPolicy.
 
 Provision the intended first administrator in this realm. Follow ADR 0038's out-of-band identity
 verification and mark `emailVerified=true` on the exact user ID. Store
 `https://id.chifor.me/realms/llm-router|<that-id>` as `admin-subject` in the router's OIDC Secret.
 Do not copy a subject from Relay or resolve membership by email. No SMTP or Google broker is added
-by this change; self-registration alone confers no router membership.
+by this change; self-registration alone confers no router membership. Open registration and manual
+email verification follow ADR 0038's explicit launch policy. An existing account with the intended
+email is not proof of ownership: verify the person controls that exact account before marking its
+email verified or binding its subject. Resolve a squatted address through the operator procedure,
+never by granting membership to the account that happens to claim it. Apply the Keycloak runbook's
+recent-registrations watch and password-recovery procedure to this realm too.
 
 Record the prerequisite PR, issuer checks, secret reference names, and confirmation of administrator
 provisioning in #121. Never include passwords, tokens, or client secrets.
@@ -79,7 +92,7 @@ Only after those checks, merge the separate router Deployment change setting:
 | `ROUTER_OIDC_CLIENT` | `llm-router` |
 | `ROUTER_OIDC_REQUIRE_EMAIL_VERIFIED` | `1` |
 | `ROUTER_AUTH_CLIENT_ADDRESS_HEADER` | `cf-connecting-ip`, overwritten by the existing trusted edge |
-| `ROUTER_AUTH_DATABASE_URL` | `llm-router-auth-db/database-url` |
+| `ROUTER_AUTH_DATABASE_URL` | `llm-router-auth-db/database-url`, with verified TLS using the mounted `ca.crt` |
 | `ROUTER_OIDC_SECRET` | `llm-router-oidc/client-secret` |
 | `ROUTER_AUTH_ADMIN_SUBJECT` | `llm-router-oidc/admin-subject` |
 
@@ -90,7 +103,9 @@ path through an operator-reviewed change. The rollback below provides the existi
 
 Verify `/auth/config` reports `oidc:true, local:false`, and `/auth/oidc` redirects to the expected realm
 with the exact callback, state, nonce, and PKCE S256. The provisioned administrator must complete login,
-see account/settings/theme controls, and sign out successfully. Verify unverified/non-member identities
+see account/settings/theme controls, and sign out successfully. Sign-out revokes the router session
+and cookie; it does not end the Keycloak SSO session or call its RP-initiated logout endpoint.
+Verify unverified/non-member identities
 are refused, callbacks cannot be replayed, cookies are Secure/HttpOnly, and API-key traffic continues.
 The change switches browser sessions from SQLite to PostgreSQL, so existing browser sessions require
 sign-in again. Their old private conversations belong to the old principal; they are not reassigned.
@@ -98,8 +113,12 @@ sign-in again. Their old private conversations belong to the old principal; they
 Healthy `/health` and `/ready` alone do not prove OIDC works. The deployed auth plugin keeps bearer
 traffic available when PostgreSQL fails during initialization, but disables browser auth until restart.
 It does not automatically retry initialization; restore the database and perform a reviewed restart.
-If Keycloak discovery fails while the database is healthy, startup fails. Exercise these failure modes
-in an isolated environment, not by interrupting production dependencies.
+If Keycloak discovery fails while the database is healthy, startup fails. With one Recreate replica,
+this also stops bearer API traffic during a restart until Keycloak/public edge connectivity recovers
+or phase 2 is rolled back. Record this availability dependency and the working rollback path in the
+activation receipt; bearer-only recovery from discovery failure would require a separately tested
+application change. Exercise these failure modes in an isolated environment, not by interrupting
+production dependencies.
 
 ## Rollback
 
