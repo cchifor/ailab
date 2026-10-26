@@ -91,12 +91,12 @@ them, and they were found during the reviewer re-activation. Tracked with the fi
 [ailab#1415](https://git.chifor.me/cchifor/ailab/issues/1415); do both before the first stage-2
 deployment PR unsuspends `workbricks-c1`:
 
-- **Deploy key id 72** (read-only, used by Flux `GitRepository` `workbricks-c1`) is on
-  `workbricks-old`. Since the recreate, `workbricks-c1` has been `Ready=False`
-  (`GitOperationFailed ... invalid pkt-len found`; the key is not on the new repository). Its
-  Kustomization is suspended, so nothing deploys from it. Fix: register the SOPS-held public key
-  (`workbricks-c1-bootstrap/`) as a read-only deploy key on the new repository, or rotate the pair,
-  then record the new key id.
+- **Deploy key: fixed 2026-10-26.** Id 72 (read-only, used by Flux `GitRepository`
+  `workbricks-c1`) stayed on `workbricks-old`. From the recreate until the fix, `workbricks-c1`
+  was `Ready=False` (`GitOperationFailed ... invalid pkt-len found`). Its Kustomization is
+  suspended, so nothing deployed from it. The SOPS-held public key (fingerprint
+  `SHA256:vVx9amr3…`, unchanged) is now read-only deploy key **id 73** on the new repository.
+  `workbricks-c1` is `Ready=True`, and id 72 has been removed from `workbricks-old`.
 - **Actions secrets `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`** (zot user `workbricks-ci`) are on
   `workbricks-old`. Fix: set both on the new repository from `registry.sops.yaml` (also in
   OpenBao `af/estate/registry` `workbricks_ci_password`).

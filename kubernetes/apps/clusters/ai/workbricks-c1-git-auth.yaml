@@ -1,9 +1,13 @@
 # Decrypts + applies the read-only SSH deploy key Secret (workbricks-c1-deploy-key in flux-system)
 # that the `workbricks-c1` GitRepository uses to clone the PRIVATE cchifor/workbricks repo over
 # in-cluster Gitea SSH. Same shape as platform-git-auth.yaml / cloudlab-git-auth.yaml.
-# The key is a Gitea DEPLOY key on cchifor/workbricks, read-only (id 72, registered 2026-10-22,
+# The key is a Gitea DEPLOY key on cchifor/workbricks, read-only (id 73, registered 2026-10-26,
 # title "ailab-flux-workbricks-c1 (read-only)", SHA256:vVx9amr3Oqg0i+x+emIhrieOhahlycjHXuiLWwCs1N8);
 # rotating it = a new deploy key there + re-encrypt the Secret here + delete the old key there.
+# A deploy key belongs to ONE repository: recreating the repository drops it. Id 72 (same key,
+# 2026-10-22) stayed on workbricks-old when the repository was recreated on 2026-10-24, and the
+# GitRepository failed with "invalid pkt-len found" until the same public key was registered again
+# (ailab#1415).
 # No explicit dependsOn: the GitRepository retries each interval and clones once the Secret exists.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
