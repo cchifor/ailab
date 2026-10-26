@@ -291,9 +291,10 @@ class OwnerFileTest(unittest.TestCase):
         self.assertIn('dir=".private"} 1', text)
 
     @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX symlinks")
-    def test_an_owner_file_reached_through_a_symlinked_directory_is_invalid(self):
+    def test_an_owner_file_behind_a_symlinked_directory_is_never_read(self):
         """O_NOFOLLOW guards only the last component: wt/link -> an outside tree holding a
-        well-formed OWNER.json must not be followed as root (reviewer-claude on #1433)."""
+        well-formed OWNER.json must not be followed as root (reviewer-claude on #1433). A symlinked
+        entry, like a file, cannot carry an OWNER.json: it is not read and exports nothing."""
         outside = pathlib.Path(self.tmp.name, "outside")
         outside.mkdir()
         (outside / "OWNER.json").write_text(json.dumps({"owner": "root-only-value",
@@ -301,7 +302,20 @@ class OwnerFileTest(unittest.TestCase):
         os.symlink(outside, os.path.join(self.root, "wt", "link"))
         text = self.render({"wt": 30 * GB, "wt/one": 2 * GB, "wt/link": 25 * GB})
         self.assertNotIn("root-only-value", text)
-        self.assertIn('dev_worker_dir_owner_file_invalid{user="c4",root="workspace",dir="wt/link"} 1', text)
+        self.assertNotIn('dev_worker_dir_kept_until_seconds{user="c4",root="workspace",dir="wt/link"', text)
+        self.assertNotIn('dev_worker_dir_owner_file_invalid{user="c4",root="workspace",dir="wt/link"}', text,
+                         "not read at all - neither kept nor reported invalid (reviewer-codex on #1434)")
+
+    def test_files_beside_checkouts_export_no_owner_series(self):
+        """2026-10-26, live on dev-worker-3: the files beside forge-work's checkouts (CURRENT_STATE.md,
+        *.log, LIFETIME.json ...) are unowned children too, and opening each as a directory failed
+        with ENOTDIR - 1062 `owner_file_invalid` series for files that cannot carry an OWNER.json."""
+        for name in ("CURRENT_STATE.md", "access.log"):
+            pathlib.Path(self.root, "wt", name).write_text("x")
+        text = self.render({"wt": 30 * GB, "wt/one": 2 * GB, "wt/CURRENT_STATE.md": 1,
+                            "wt/access.log": 1, "wt/dump": 25 * GB})
+        self.assertNotIn("dev_worker_dir_owner_file_invalid{", text)
+        self.assertNotIn("dev_worker_dir_kept_until_seconds{", text)
 
     def test_unowned_data_beside_checkouts_can_be_kept_too(self):
         self.owner("wt/dump", {"owner": "forge", "keep_until": "2033-06-30"})
