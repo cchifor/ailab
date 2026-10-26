@@ -759,7 +759,7 @@ cchifor/llm-router) instead of a CLI login: an entry in `pr_reviewer_llm_seats` 
 | persona | seat | key | route | state |
 |---|---|---|---|---|
 | codex (reviewer-2) | `r` | `key_4fdbe2b833fe` | `codex-reviewer` (pointer to the smart pool `pool-codex`), reached as the key's default route: the seat sends the tier name `gpt-6-astra` | **serving** since 2026-10-13 |
-| claude (reviewer-1) | `r` | `key_f856495c9b0c` | `claude-reviewer` for every tier (seat `model`): claude-5 on `opus` (Opus 5.5), falling back to `pool-claude` (`sonnet`) | **serving** since 2026-10-13 |
+| claude (reviewer-1) | `r` | `key_f856495c9b0c` | the smart pool `pool-claude` in `X-Router-Route` (seat `route`), the tier's model in `model` (seat `models`): `fable`, then `opus`; never `sonnet` | **serving** since 2026-10-26 (`claude-reviewer` 2026-10-13..26) |
 
 Both routes: llm-router.md § "Reviewer routes (2026-10-13)". Until 2026-10-13 reviewer-2 used
 `key_d7adf31fb93e` on the `codex` route (round-robin gpt-6-luna + 3x gpt-6-astra, seat
@@ -805,12 +805,36 @@ model. Each tier was probed with a real review first (a 429 there means the rout
 Claude account). Re-probe after any router change. Never point the claude persona at a Codex route:
 merges need BOTH personas clean, and two GPT reviews are not two independent reviews.
 
-**Since 2026-10-13** the seat carries `model: claude-reviewer`, so every tier asks for that route
-(Claude accounts only: claude-5 on `opus`, then `pool-claude`). The owner ruled that this persona
-need not run on `fable`. Rollback: drop `model` from the seat and deploy (`reviewers.yml -l
-reviewer-1 -t reviewbot`).
+**Since 2026-10-26** the seat carries `route: pool-claude` and `models: { fable: fable, opus: opus }`,
+and the ladder is `[fable, opus]` (owner: reviews on Fable or Opus only, never `sonnet` or lower).
+- **The request.** `model` is the tier's model and `X-Router-Route: pool-claude` names the pool: the
+  router's model mode, in which the pool's `*` targets serve the model a request names and the smart
+  pool picks the account with the most headroom. The response header `x-router-route` says
+  `pool-claude`; the journal (`GET /admin/v1/trajectories?principal=key:key_f856495c9b0c`) has the
+  account and the model.
+- **A non-busy 429 parks the tier, not the seat** (`router_tiers_distinct`): no pool account can
+  serve `fable` right now, so `(r, fable)` parks until `Retry-After` and the same review asks `opus`.
+  Both tiers parked on `r` and a-c → the job waits, lossless, with the queue intact; it is never
+  reviewed on a smaller model. `active_choice` is tier-major, so `fable` is asked again the moment its
+  park lapses.
+- **Why the change.** The 2026-10-13 route below died silently: once `pool-claude`'s targets became
+  `*` (between config revisions 1765 and 1778), a request that names a route carries no model for a
+  `*` target (`model_unspecified`). claude-5 reached its weekly wall at 2026-10-26 04:56Z and every
+  review was refused in 3 ms with attempts 0 (`429 CAPACITY_UNAVAILABLE: No eligible account`).
+- **Probe after any router change**, from reviewer-1 with the seat's key (never printed):
+  `curl -s -A reviewbot/1 https://router.chifor.me/v1/chat/completions -H "Authorization: Bearer
+  $(cat /etc/reviewbot/router-key)" -H "X-Router-Route: pool-claude" -H "Content-Type:
+  application/json" -d '{"model":"fable","messages":[{"role":"user","content":"Reply OK."}]}'`,
+  then the same with `opus`.
+- **Rollback:** `model: claude-reviewer` instead of `route` + `models`, and deploy
+  (`reviewers.yml -l reviewer-1,reviewer-2 -t reviewbot` - both hosts, since the forge chunk lane
+  hashes reviewbot.py into its shared policy).
 
-What one route for every tier means:
+**2026-10-13 to 2026-10-26** the seat carried `model: claude-reviewer`, so every tier asked for that
+route (Claude accounts only: claude-5 on `opus`, then `pool-claude`). The owner ruled then that this
+persona need not run on `fable`.
+
+What one route for every tier meant (still true of any seat with a single `model`):
 - **A router 429** parks seat `r` at account scope, so for every tier at once. The review moves to
   seats a-c; it never walks three identical router tiers.
 - **Which 429s park.** reviewbot reads the router's `error.reason`, not only the status

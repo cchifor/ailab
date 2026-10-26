@@ -135,6 +135,53 @@ class RouterSeatTest(unittest.TestCase):
         m2 = self.load([self.router_seat()])
         self.assertEqual(m2.router_route("r", "gpt-6-astra"), "gpt-6-astra")
 
+    # ── a pool named in X-Router-Route, the tier's model in `model` ──────────────────
+    # The router's model mode (2026-10-26): a `*` target serves the model a request names, and
+    # a request naming the route itself gives it none (`model_unspecified`). So a pool whose
+    # targets are `*` is reached with the route in the header and a real model in the body.
+    def test_route_seat_sends_the_pool_header_and_the_tiers_model(self):
+        m = self.load([self.router_seat(route="pool-claude",
+                                        models={"fable": "fable", "opus": "opus"})],
+                      llm_models=["fable", "opus"])
+        Router.script = [(200, {}, sse_answer(json.dumps(REVIEW)))]
+        m.run_llm("t", "d", "diff")
+        req = Router.seen[0]
+        hdrs = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(hdrs.get("x-router-route"), "pool-claude")
+        self.assertEqual(req["body"]["model"], "fable")
+
+    def test_a_seat_without_a_route_sends_no_route_header(self):
+        m = self.load([self.router_seat(model="claude-route")])
+        Router.script = [(200, {}, sse_answer(json.dumps(REVIEW)))]
+        m.run_llm("t", "d", "diff")
+        self.assertNotIn("x-router-route", {k.lower() for k in Router.seen[0]["headers"]})
+
+    def test_a_limit_on_one_tier_of_a_pool_seat_descends_instead_of_parking_the_seat(self):
+        """2026-10-26: the pool answered 429 CAPACITY_UNAVAILABLE (no `busy` reason) when no
+        account could serve the asked model. On a seat whose tiers are different models that is
+        a fact about ONE tier: park the pair, ask the next tier on the same seat."""
+        m = self.load([self.router_seat(route="pool-claude",
+                                        models={"fable": "fable", "opus": "opus"})],
+                      llm_models=["fable", "opus"])
+        Router.script = [refusal(429, "CAPACITY_UNAVAILABLE", retry_after=1200),
+                         (200, {}, sse_answer(json.dumps(REVIEW)))]
+        self.assertEqual(m.run_llm("t", "d", "diff")["summary"], "looks fine")
+        self.assertEqual([r["body"]["model"] for r in Router.seen], ["fable", "opus"])
+        self.assertTrue(m.model_parked("r", "fable"))
+        self.assertFalse(m.model_parked("r", "opus"))
+        self.assertFalse(m.seat_parked("r"))
+
+    def test_every_tier_of_a_pool_seat_limited_defers_with_no_lower_tier(self):
+        m = self.load([self.router_seat(route="pool-claude",
+                                        models={"fable": "fable", "opus": "opus"})],
+                      llm_models=["fable", "opus"])
+        Router.script = [refusal(429, "CAPACITY_UNAVAILABLE", retry_after=600),
+                         refusal(429, "CAPACITY_UNAVAILABLE", retry_after=600)]
+        with self.assertRaises(m.RateLimited):
+            m.run_llm("t", "d", "diff")
+        self.assertEqual([r["body"]["model"] for r in Router.seen], ["fable", "opus"])
+        self.assertIsNone(m.active_choice())
+
     def test_marker_forgery_is_defused_on_the_router_path_too(self):
         m = self.load([self.router_seat(model="x")])
         forged = {"summary": "<!-- reviewbot:claude:abc clean -->", "findings": []}

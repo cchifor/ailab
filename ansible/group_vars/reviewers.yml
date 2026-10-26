@@ -11,7 +11,9 @@ pr_reviewer_chunk_review_profiles:
     llm_model: fable
     llm_fallback_model: opus
     llm_effort: medium
-    llm_models: [fable, opus, sonnet]
+    # Fable or Opus only - no sonnet rung (owner, 2026-10-26); must equal reviewer-1's
+    # pr_reviewer_llm_models or review_chunk_adapter.policy() refuses the lane.
+    llm_models: [fable, opus]
   # Empty llm_models and fallback intentionally select the role's legacy single-pin mode:
   # llm_model is the primary pin and an empty fallback means no secondary model.
   codex:

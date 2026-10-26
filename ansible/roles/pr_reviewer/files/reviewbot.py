@@ -1257,10 +1257,23 @@ def tier_index(model):
 # the model has no tools, never sees the PAT, and never sees the key (it lives in a 0600 file
 # the service user reads per call - `key_file`, default ROUTER_KEY_FILE).
 #
-# Shape: {name, sudo_user: "", router_url, key_file?, model?, models?: {tier: route}}. A tier's
-# router model is models[tier], else `model`, else - with neither configured - the tier name
-# itself. A tier with no route is one this seat does not serve (model_parked says so), which is
-# how a router seat can carry the top tiers while a subscription seat keeps the rest.
+# Shape: {name, sudo_user: "", router_url, key_file?, route?, model?, models?: {tier: route}}. A
+# tier's router model is models[tier], else `model`, else - with neither configured - the tier
+# name itself. A tier with no route is one this seat does not serve (model_parked says so), which
+# is how a router seat can carry the top tiers while a subscription seat keeps the rest.
+#
+# `route` IS THE ROUTER'S MODEL MODE (2026-10-26): sent as the X-Router-Route header, with the
+# tier's model in `model`. A pool whose targets are `*` serves the model a request names, and a
+# request that names the pool itself in `model` gives it none - every target is then
+# `model_unspecified` and the call is refused with attempts 0 (reviewer-1, 2026-10-26 04:56Z:
+# the `claude-reviewer` route's fallback to `pool-claude` after pool-claude went to `*`). So
+# reviewer-1 names the pool in the header and fable / opus in the body: the pool picks the
+# account, the ladder picks the model.
+#
+# A seat whose tiers are DIFFERENT router models treats a non-busy 429 as a fact about the tier
+# it asked for (no account can serve that model now): the pair parks and the next tier is asked
+# on the same seat. A seat that sends one route for every tier keeps the account-scoped park -
+# a second tier would meet the same refusal.
 #
 # ROUTER SEATS ARE PREFERRED, NOT STICKY: within a tier active_choice always tries them first.
 # The router balances its own upstream seats, so the stickiness that protects a subscription
@@ -1296,6 +1309,18 @@ def router_route(seat, tier):
     if not isinstance(m, dict) and isinstance(tier, str) and tier.strip():
         return tier.strip()
     return None
+
+
+def router_header_route(seat):
+    """The route a router seat names in X-Router-Route (model mode), or None."""
+    r = _seat_cfg(seat).get("route")
+    return r.strip() if isinstance(r, str) and r.strip() else None
+
+
+def router_tiers_distinct(seat):
+    """Whether this router seat asks different router models for different tiers - the case
+    where a usage refusal is about the tier, not the seat."""
+    return len({r for r in (router_route(seat, m) for m in MODELS) if r}) > 1
 
 
 def seat_serves(seat, tier):
@@ -2202,13 +2227,14 @@ def _retry_after(headers):
     return v if v > 0 else None
 
 
-def _router_refusal(status, raw, headers, route, tier):
+def _router_refusal(status, raw, headers, route, tier, per_tier=False):
     """Classify one refused router call into the exception the rotation already understands.
     Returns (exception, busy): `busy` is the shared-capacity 429, worth waiting out in place.
 
     Only the router's OWN error codes park anything: a 403 or 404 without one is something
     in front of the router (Cloudflare's 1010 block is a 403 HTML page) and parking the route
-    for six hours on it would be wrong."""
+    for six hours on it would be wrong. `per_tier` (router_tiers_distinct) makes a 429 park the
+    tier rather than the seat."""
     try:
         doc = json.loads(raw or b"{}")
     except ValueError:
@@ -2229,7 +2255,8 @@ def _router_refusal(status, raw, headers, route, tier):
     if status == 429:
         ra = _retry_after(headers)
         busy = err.get("reason") == "busy"
-        return RateLimited(detail, (now + ra) if ra else None, scope="account", model=tier), busy
+        return RateLimited(detail, (now + ra) if ra else None,
+                           scope="model" if per_tier else "account", model=tier), busy
     if upstream_busy(code, err.get("message"), status):
         return UpstreamBusy(detail), False
     return ModelError(detail), False
@@ -2266,15 +2293,20 @@ def _run_router(seat, tier, prompt, remaining):
     url = str(s["router_url"]).rstrip("/") + "/v1/chat/completions"
     body = json.dumps({"model": route, "stream": True,
                        "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
+               "Accept": "text/event-stream", "User-Agent": ROUTER_UA}
+    pool = router_header_route(seat)
+    if pool:
+        headers["X-Router-Route"] = pool
+        route = f"{pool} model {route}"         # what every error below names
+    per_tier = router_tiers_distinct(seat)
     try:
         idle = float(s.get("idle_timeout_s") or ROUTER_IDLE_TIMEOUT_S)
     except (TypeError, ValueError):
         idle = float(ROUTER_IDLE_TIMEOUT_S)
     busy_waits = 0
     while True:
-        req = urllib.request.Request(url, data=body, method="POST", headers={
-            "Authorization": "Bearer " + key, "Content-Type": "application/json",
-            "Accept": "text/event-stream", "User-Agent": ROUTER_UA})
+        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
             resp = urllib.request.urlopen(req, timeout=min(remaining(), idle))
         except urllib.error.HTTPError as e:
@@ -2283,7 +2315,7 @@ def _run_router(seat, tier, prompt, remaining):
             except Exception:
                 raw = b""
             hdrs = {k.lower(): v for k, v in (e.headers or {}).items()}
-            exc, busy = _router_refusal(e.code, raw, hdrs, route, tier)
+            exc, busy = _router_refusal(e.code, raw, hdrs, route, tier, per_tier)
             if busy and busy_waits < ROUTER_BUSY_RETRIES:
                 # Every target of the route is serving someone. Seconds, not a park: moving to
                 # a subscription seat over a five-second queue would be the expensive answer.

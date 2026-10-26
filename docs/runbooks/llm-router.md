@@ -1400,6 +1400,21 @@ Nothing else changes: no schema change, no new setting. The `codex` concurrency 
 
 ## Reviewer routes (2026-10-13)
 
+> **reviewer-claude left `claude-reviewer` on 2026-10-26.** It now sends `X-Router-Route: pool-claude` with the
+> tier's model in `model` (`fable`, then `opus`; owner: never `sonnet` or lower for reviews). See dev-workers.md
+> § "Router seats". What that makes load-bearing here:
+> - **`pool-claude` must keep `models: { claude: "*" }`** in the smart-pools settings. With a fixed model the pool's
+>   targets serve only that model (`modelPolicy`), so `fable` / `opus` requests find no target and every review is
+>   refused. That fails safe (a review is never served on the pool's fixed model), but it stops the persona.
+> - **No account may substitute `fable` or `opus`** with a smaller model (`substitute()` serves an account's
+>   replacement for a model it turned off). Check `GET /admin/v1/config` before turning a Claude model off.
+> - **The outage that prompted it.** `pool-claude` went from `sonnet` to `*` between config revisions 1765
+>   (2026-10-23, the fallback served claude-4 on `sonnet`) and 1778, out of band. A `*` target serves the model a
+>   request names, and a request naming the route `claude-reviewer` names none, so the fallback had nothing to
+>   serve (`model_unspecified`). It went unnoticed until claude-5 reached its weekly wall (2026-10-26 04:56Z,
+>   resets 10-28 10:00Z); from then on every review was refused in 3 ms with attempts 0.
+> - `claude-reviewer` is left in place, unused, as the rollback target.
+
 **Why.** At the owner's request, the PR reviewer bots get routes of their own: `codex-reviewer` on the Codex smart
 pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool when claude-5 fails.
 
