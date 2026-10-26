@@ -1273,7 +1273,7 @@ the alert names (a top-level entry of a user's root, or an unowned child of a gr
 - **Seen, not prevented.** The agent that made the data can write the file too (c4 has sudo), so every new
   or changed keep raises `DevWorkerDataKept` once (it fires for 3h and clears itself). If nobody agreed to
   keep it, delete the `OWNER.json`.
-- A single large FILE cannot carry an `OWNER.json`: move it into a directory that has one.
+- A single large FILE (or a symlinked entry) cannot carry an `OWNER.json`: move it into a directory that has one.
 - disk-report (hourly) then exports `dev_worker_dir_kept_until_seconds{dir,owner}`, `DevWorkerUnownedDataLarge`
   stops naming it, and `DevWorkerKeptDataExpired` names the owner once `keep_until` passes.
 - Only `owner` and `keep_until` leave the file. disk-report runs as root over agent-writable trees, so a symlink,

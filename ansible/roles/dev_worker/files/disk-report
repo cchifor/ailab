@@ -202,11 +202,23 @@ def read_owner(root, rel, now):
     return {"owner": owner.strip(), "until": int(until)}
 
 
+def _is_real_dir(path):
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)       # lstat: a symlink is not a directory here
+    except OSError:
+        return False
+
+
 def owners(root, kinds, nested, now):
-    """{entry: read_owner(...)} for every entry an unowned-data alert can name: top-level `other`
-    directories and the unowned children of grouping directories. Git checkouts are never read."""
+    """{entry: read_owner(...)} for every entry an unowned-data alert can name that can CARRY an
+    OWNER.json: top-level `other` directories and the unowned child DIRECTORIES of grouping dirs.
+    Files and symlinked entries cannot, and are never looked at - the unowned children include
+    every file beside the checkouts (forge-work/*.log, ...), and treating each as a directory made
+    1062 bogus `owner_file_invalid` series on dev-worker-3 (2026-10-26). Git checkouts are never read."""
     out = {}
     for name in [n for n, k in kinds.items() if k == "other"] + list(nested):
+        if not _is_real_dir(os.path.join(root, name)):
+            continue
         found = read_owner(root, name, now)
         if found is not None:
             out[name] = found
