@@ -404,7 +404,139 @@ tests:
                 .private under c4's workspace root on 192.168.0.11:9100
                 is not a git checkout, cache or tmp dir and holds 21.42GiB. disk-guard
                 will never reclaim it. Ask the agent's owner for its owner and lifetime: delete it, move
-                it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly.
+                it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly:
+                an OWNER.json at its top, {"owner", "keep_until" (at most 183 days
+                ahead), "reason"}.
+
+  # OWNER.json (2026-10-26): kept data leaves UnownedDataLarge for good; once its keep_until passes,
+  # KeptDataExpired names the owner instead. Neither alert fires on a kept dir before keep_until.
+  - interval: 1m
+    name: data kept knowingly by OWNER.json is silent until keep_until, then KeptDataExpired names the owner
+    input_series:
+      # Kept far ahead: silent on both rules.
+      - series: 'dev_worker_dir_bytes{job="dev-worker-node", instance="192.168.0.11:9100", user="c4", root="workspace", dir=".private", kind="other"}'
+        values: "23000000000x100"
+      - series: 'dev_worker_dir_kept_until_seconds{job="dev-worker-node", instance="192.168.0.11:9100", user="c4", root="workspace", dir=".private", owner="trueswarm"}'
+        values: "9999999999x100"
+      # Kept until t=10m: past it from 11m, plus the 1h hold => KeptDataExpired from 71m.
+      - series: 'dev_worker_dir_bytes{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="artifacts", kind="other"}'
+        values: "23000000000x100"
+      - series: 'dev_worker_dir_kept_until_seconds{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="artifacts", owner="forge"}'
+        values: "600x100"
+      # Kept, expired, but small (5 GB): not large unowned data, so no page either way.
+      - series: 'dev_worker_dir_bytes{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="small", kind="other"}'
+        values: "5000000000x100"
+      - series: 'dev_worker_dir_kept_until_seconds{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="small", owner="forge"}'
+        values: "600x100"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: DevWorkerUnownedDataLarge
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: DevWorkerKeptDataExpired
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: DevWorkerKeptDataExpired
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+              user: c4
+              root: workspace
+              dir: artifacts
+              owner: forge
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: workspace/artifacts was kept for forge past its keep_until"
+              description: >-
+                artifacts under c4's workspace root on 192.168.0.10:9100
+                holds over 20 GB of unowned data that its OWNER.json kept for forge until
+                1970-01-01 00:10:00 +0000 UTC. Ask forge: delete it, move it to
+                /workspace/archive or the NAS (runbook § Disk full), or extend keep_until (at most 183
+                days ahead).
+
+  - interval: 1m
+    name: a large FILE is told it cannot carry an OWNER.json
+    input_series:
+      - series: 'dev_worker_dir_bytes{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="dump.tar", kind="file"}'
+        values: "25000000000x80"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: DevWorkerUnownedDataLarge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+              user: c4
+              root: workspace
+              dir: dump.tar
+              kind: file
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: workspace/dump.tar holds 23.28GiB of unowned data"
+              description: >-
+                dump.tar under c4's workspace root on 192.168.0.10:9100
+                is not a git checkout, cache or tmp dir and holds 23.28GiB. disk-guard
+                will never reclaim it. Ask the agent's owner for its owner and lifetime: delete it, move
+                it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly:
+                a file cannot carry an OWNER.json, so move it into a directory
+                that has one.
+
+  # A new keep notifies once (3h, then clears); an extension of keep_until notifies again.
+  - interval: 1m
+    name: a new or changed OWNER.json keep fires DataKept for 3h, then clears
+    input_series:
+      # Kept from t=240m (after the test's first 3h, so `offset 3h` has history); extended at t=480m.
+      - series: 'dev_worker_dir_kept_until_seconds{job="dev-worker-node", instance="192.168.0.11:9100", user="c4", root="workspace", dir=".private", owner="trueswarm"}'
+        values: "_x239 2000000000x239 1999999000x100"
+      # Kept since before the window: no notice.
+      - series: 'dev_worker_dir_kept_until_seconds{job="dev-worker-node", instance="192.168.0.10:9100", user="c4", root="workspace", dir="old", owner="forge"}'
+        values: "2000000000x600"
+    alert_rule_test:
+      - eval_time: 242m
+        alertname: DevWorkerDataKept
+        exp_alerts: []
+      - eval_time: 250m
+        alertname: DevWorkerDataKept
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.11:9100"
+              user: c4
+              root: workspace
+              dir: .private
+              owner: trueswarm
+            exp_annotations:
+              summary: "Dev worker 192.168.0.11:9100: workspace/.private is now kept knowingly for trueswarm"
+              description: >-
+                An OWNER.json under c4's workspace root on 192.168.0.11:9100
+                now keeps .private for trueswarm until 2033-05-18 03:33:20 +0000 UTC,
+                which takes it off DevWorkerUnownedDataLarge (created or changed in the last 3h). This is
+                the one notice a new or extended keep gets; it clears by itself. If nobody agreed to
+                keep it, delete the OWNER.json (runbook § Keeping unowned data knowingly).
+      - eval_time: 430m
+        alertname: DevWorkerDataKept
+        exp_alerts: []
+      - eval_time: 490m
+        alertname: DevWorkerDataKept
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.11:9100"
+              user: c4
+              root: workspace
+              dir: .private
+              owner: trueswarm
+            exp_annotations:
+              summary: "Dev worker 192.168.0.11:9100: workspace/.private is now kept knowingly for trueswarm"
+              description: >-
+                An OWNER.json under c4's workspace root on 192.168.0.11:9100
+                now keeps .private for trueswarm until 2033-05-18 03:16:40 +0000 UTC,
+                which takes it off DevWorkerUnownedDataLarge (created or changed in the last 3h). This is
+                the one notice a new or extended keep gets; it clears by itself. If nobody agreed to
+                keep it, delete the OWNER.json (runbook § Keeping unowned data knowingly).
 
   # The last complete scan was at t=0: silent before 3h, paging a few minutes after (not ~6h).
   - interval: 1m

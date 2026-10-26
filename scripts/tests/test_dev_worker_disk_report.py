@@ -219,6 +219,110 @@ class ImplReviewTest(unittest.TestCase):
             self.assertIn("dev_worker_disk_report_history_write_failed 1", text)
 
 
+class OwnerFileTest(unittest.TestCase):
+    """OWNER.json: an owner keeps an unowned directory KNOWINGLY, until a date (2026-10-26).
+
+    DevWorkerUnownedDataLarge told its reader to "keep it knowingly" with no way to say so, so it fired
+    for as long as the data lived (dev-worker-4's .private from 2026-10-09). disk-report runs as root and
+    the file is agent-writable: a symlink, a FIFO, an oversized or malformed file, and a keep_until more
+    than 183 days out are all INVALID (reported, never honoured), and only owner/keep_until leave it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self.tmp.name, "state")
+        self.root = os.path.join(self.tmp.name, "ws", "c4")
+        for name in (".private", "artifacts", "repo/.git", "wt/one/.git", "wt/dump"):
+            os.makedirs(os.path.join(self.root, name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def owner(self, rel, doc):
+        pathlib.Path(self.root, rel, "OWNER.json").write_text(
+            doc if isinstance(doc, str) else json.dumps(doc))
+
+    def render(self, sizes):
+        model = dr.build(["c4"], NOW, {("c4", "workspace"): (self.root, {".": sum(
+            v for k, v in sizes.items() if os.sep not in k), **sizes})}, self.state, 10, 5 * GB, 24)
+        return dr.render(model, NOW, 1.0, 10, 5 * GB)
+
+    def test_a_valid_owner_file_exports_keep_until_and_leaves_the_bytes_series_alone(self):
+        self.owner(".private", {"owner": "trueswarm ownership-validation", "keep_until": "2033-06-30",
+                                "reason": "S6 evidence until the paper"})
+        text = self.render({".private": 22 * GB, "artifacts": 23 * GB})
+        until = 2_003_788_800            # 2033-07-01T00:00:00Z: a DATE keeps through its whole day
+        self.assertIn('dev_worker_dir_kept_until_seconds{user="c4",root="workspace",dir=".private",'
+                      f'owner="trueswarm ownership-validation"}} {until}', text)
+        self.assertIn(f'dir=".private",kind="other"}} {22 * GB}', text)
+        self.assertNotIn('dir="artifacts",owner=', text)
+        self.assertNotIn("S6 evidence", text, "only owner and keep_until leave the file")
+
+    def test_a_datetime_keep_until_is_honoured_as_given(self):
+        self.owner("artifacts", {"owner": "forge", "keep_until": "2033-05-20T12:00:00Z"})
+        self.assertIn('dir="artifacts",owner="forge"} 2000203200', self.render({"artifacts": 23 * GB}))
+
+    def test_unusable_owner_files_are_reported_invalid_and_never_honoured(self):
+        cases = {
+            "not JSON": "{owner: forge",
+            "no keep_until": {"owner": "forge"},
+            "no owner": {"keep_until": "2033-06-30"},
+            "bad date": {"owner": "forge", "keep_until": "soon"},
+            "too far ahead": {"owner": "forge", "keep_until": "2034-12-31"},
+            "past half a year": {"owner": "forge", "keep_until": "2033-12-31"},
+            "oversized": {"owner": "forge", "keep_until": "2033-06-30", "reason": "x" * 5000},
+        }
+        for why, doc in cases.items():
+            with self.subTest(why):
+                self.owner("artifacts", doc)
+                text = self.render({"artifacts": 23 * GB})
+                self.assertIn('dev_worker_dir_owner_file_invalid{user="c4",root="workspace",'
+                              'dir="artifacts"} 1', text)
+                self.assertNotIn("dev_worker_dir_kept_until_seconds{", text)
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX symlinks/FIFOs")
+    def test_a_symlink_or_fifo_owner_file_is_invalid_and_never_read(self):
+        secret = pathlib.Path(self.tmp.name, "secret.json")
+        secret.write_text(json.dumps({"owner": "root-only-value", "keep_until": "2033-06-30"}))
+        os.symlink(secret, os.path.join(self.root, "artifacts", "OWNER.json"))
+        os.mkfifo(os.path.join(self.root, ".private", "OWNER.json"))
+        text = self.render({"artifacts": 23 * GB, ".private": 22 * GB})   # must not block on the FIFO
+        self.assertNotIn("root-only-value", text)
+        self.assertIn('dir="artifacts"} 1', text)
+        self.assertIn('dir=".private"} 1', text)
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX symlinks")
+    def test_an_owner_file_reached_through_a_symlinked_directory_is_invalid(self):
+        """O_NOFOLLOW guards only the last component: wt/link -> an outside tree holding a
+        well-formed OWNER.json must not be followed as root (reviewer-claude on #1433)."""
+        outside = pathlib.Path(self.tmp.name, "outside")
+        outside.mkdir()
+        (outside / "OWNER.json").write_text(json.dumps({"owner": "root-only-value",
+                                                         "keep_until": "2033-06-30"}))
+        os.symlink(outside, os.path.join(self.root, "wt", "link"))
+        text = self.render({"wt": 30 * GB, "wt/one": 2 * GB, "wt/link": 25 * GB})
+        self.assertNotIn("root-only-value", text)
+        self.assertIn('dev_worker_dir_owner_file_invalid{user="c4",root="workspace",dir="wt/link"} 1', text)
+
+    def test_unowned_data_beside_checkouts_can_be_kept_too(self):
+        self.owner("wt/dump", {"owner": "forge", "keep_until": "2033-06-30"})
+        text = self.render({"wt": 30 * GB, "wt/one": 2 * GB, "wt/dump": 25 * GB})
+        self.assertIn('dev_worker_dir_kept_until_seconds{user="c4",root="workspace",dir="wt/dump",'
+                      'owner="forge"}', text)
+
+    def test_a_git_checkout_is_never_read_for_an_owner_file(self):
+        pathlib.Path(self.root, "repo", "OWNER.json").write_text("not json")
+        text = self.render({"repo": 30 * GB})
+        self.assertNotIn('dir="repo"} 1', text)
+        self.assertNotIn('dir="repo",owner', text)
+
+    def test_the_owner_label_is_escaped_and_capped(self):
+        self.owner("artifacts", {"owner": 'a "quoted"\nname ' + "x" * 300, "keep_until": "2033-06-30"})
+        line = next(l for l in self.render({"artifacts": 23 * GB}).splitlines()
+                    if l.startswith("dev_worker_dir_kept_until_seconds{"))
+        self.assertIn(r'owner="a \"quoted\"\nname ', line)      # escaped, one line
+        self.assertLess(len(line), 400)                         # capped (LABEL_MAX)
+
+
 class DuTest(unittest.TestCase):
     class R:
         def __init__(self, out, rc, err=""):

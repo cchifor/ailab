@@ -313,8 +313,17 @@ spec:
         # A top-level directory that is not a git checkout, a cache, the agent tmp dir or the archive,
         # holding over 20 GB: data nothing owns and nothing reclaims (dev-worker-4 had 23 GB in .private,
         # dev-worker-2 17.8 GB in forge-maintenance on 2026-10-09).
+        # KEPT KNOWINGLY (2026-10-26): an OWNER.json at the top of the directory (disk-report:
+        # dev_worker_dir_kept_until_seconds{dir,owner}) takes it off this alert for good - until its
+        # keep_until passes, DevWorkerKeptDataExpired below speaks for it instead. Before, "keep it
+        # knowingly" had no way to be said and the alert fired for as long as the data lived
+        # (.private on dev-worker-4 from 2026-10-09). An unusable OWNER.json exports no kept series
+        # (dev_worker_dir_owner_file_invalid instead), so this keeps firing.
         - alert: DevWorkerUnownedDataLarge
-          expr: dev_worker_dir_bytes{job="dev-worker-node",kind=~"other|file"} > 20e9
+          expr: >-
+            dev_worker_dir_bytes{job="dev-worker-node",kind=~"other|file"} > 20e9
+            unless on (job, instance, user, root, dir)
+            dev_worker_dir_kept_until_seconds{job="dev-worker-node"}
           for: 1h
           labels: { severity: warning }
           annotations:
@@ -323,7 +332,54 @@ spec:
               {{ $labels.dir }} under {{ $labels.user }}'s {{ $labels.root }} root on {{ $labels.instance }}
               is not a git checkout, cache or tmp dir and holds {{ $value | humanize1024 }}B. disk-guard
               will never reclaim it. Ask the agent's owner for its owner and lifetime: delete it, move
-              it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly.
+              it to /workspace/archive (capped) or to the NAS (runbook § Disk full), or keep it knowingly:
+              {{ if eq $labels.kind "file" }}a file cannot carry an OWNER.json, so move it into a directory
+              that has one{{ else }}an OWNER.json at its top, {"owner", "keep_until" (at most 183 days
+              ahead), "reason"}{{ end }}.
+        # A directory someone kept knowingly is still there, still large, and its keep_until has passed:
+        # the promise lapsed. Names the owner it was kept for. 1h like the alert it stands in for.
+        - alert: DevWorkerKeptDataExpired
+          expr: >-
+            (dev_worker_dir_kept_until_seconds{job="dev-worker-node"} < time())
+            and on (job, instance, user, root, dir)
+            (dev_worker_dir_bytes{job="dev-worker-node",kind=~"other|file"} > 20e9)
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: {{ $labels.root }}/{{ $labels.dir }} was kept for {{ $labels.owner }} past its keep_until"
+            description: >-
+              {{ $labels.dir }} under {{ $labels.user }}'s {{ $labels.root }} root on {{ $labels.instance }}
+              holds over 20 GB of unowned data that its OWNER.json kept for {{ $labels.owner }} until
+              {{ $value | humanizeTimestamp }}. Ask {{ $labels.owner }}: delete it, move it to
+              /workspace/archive or the NAS (runbook § Disk full), or extend keep_until (at most 183
+              days ahead).
+        # A NEW OR CHANGED KEEP, seen once (reviewer-claude on #1433). The agent that made the data can
+        # write its OWNER.json (c4 has sudo on the workers), so the exemption cannot be prevented - it is
+        # made VISIBLE: a kept series that did not exist 3h ago, or whose keep_until changed in the last
+        # 3h, fires for those 3h (repeat_interval is 4h: one push) and clears itself. If no human agreed,
+        # delete the OWNER.json. A scrape gap that spans the 3h-ago sample can repeat the notice.
+        - alert: DevWorkerDataKept
+          expr: |
+            (
+              dev_worker_dir_kept_until_seconds{job="dev-worker-node"}
+                unless dev_worker_dir_kept_until_seconds{job="dev-worker-node"} offset 3h
+            )
+            or
+            (
+              dev_worker_dir_kept_until_seconds{job="dev-worker-node"}
+                and on (job, instance, user, root, dir, owner)
+              (changes(dev_worker_dir_kept_until_seconds{job="dev-worker-node"}[3h]) > 0)
+            )
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: {{ $labels.root }}/{{ $labels.dir }} is now kept knowingly for {{ $labels.owner }}"
+            description: >-
+              An OWNER.json under {{ $labels.user }}'s {{ $labels.root }} root on {{ $labels.instance }}
+              now keeps {{ $labels.dir }} for {{ $labels.owner }} until {{ $value | humanizeTimestamp }},
+              which takes it off DevWorkerUnownedDataLarge (created or changed in the last 3h). This is
+              the one notice a new or extended keep gets; it clears by itself. If nobody agreed to
+              keep it, delete the OWNER.json (runbook § Keeping unowned data knowingly).
         # The attribution is out of date: no run in which every root scanned for 3h — the timer stopped,
         # or a root's du keeps timing out or failing (its values are then its own last successful
         # scan's, see data_timestamp_seconds). The threshold carries the delay; `for` only debounces.
