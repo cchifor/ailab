@@ -222,9 +222,14 @@ spec:
         # Reclaim is being attempted and is not working: a step exits non-zero (docker daemon down,
         # cleanup crashing, a step timing out) on consecutive runs. Separate from Exhausted on purpose —
         # a failed step says nothing about whether what is left is live work.
+        # keep_firing_for: a run that is NOT triggered (the disk drifted just above --low) runs no step
+        # and exports failed_steps 0. On dev-worker-3 one such sample (2026-10-26 02:00Z) reset an
+        # alert that had held since 10-22 11:35Z, and the dashboard then dated a four-day failure to
+        # "since 02:04". The cleanup KeyError behind it never stopped; 30m rides over that one quiet run.
         - alert: DevWorkerDiskGuardFailing
           expr: dev_worker_disk_guard_failed_steps{job="dev-worker-node"} > 0
           for: 15m
+          keep_firing_for: 30m
           labels: { severity: warning }
           annotations:
             summary: "Dev worker {{ $labels.instance }}: disk-guard reclaim steps are failing"

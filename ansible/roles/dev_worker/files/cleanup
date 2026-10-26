@@ -314,21 +314,52 @@ def sh(args, check=True):
     return r
 
 
+# ONE ODD INSPECT ENTRY MUST NOT ABORT THE STEP (dev-worker-3, 2026-10-22..26): docker 29 leaves
+# `Created` out for an image with no config (a 2 KB OCI artifact such as strive/pin-manifest),
+# and `d["Created"]` raised KeyError on every disk-guard run for four days - nothing reclaimed
+# while /workspace filled to 92%. An unknown age reads as "just now", so the age rules KEEP the
+# entry; an entry that does not parse at all is kept too (an image by leaving it out of the
+# plan, a container as a pinned stand-in, so its image and its stack still count as in use).
+
+def _created(d):
+    """Creation time from inspect JSON; for an image without one, when it was last tagged here
+    (its pull). Unknown -> now, which every age rule reads as too young to remove."""
+    return (parse_time(d.get("Created"))
+            or parse_time((d.get("Metadata") or {}).get("LastTagTime"))
+            or datetime.now(timezone.utc))
+
+
+def _warn_unparsed(kind, d, e):
+    ident = d.get("Id", "?") if isinstance(d, dict) else "?"
+    print(f"cleanup: kept {kind} {str(ident)[:19]}: inspect entry not understood "
+          f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
 def load_containers():
     ids = sh(["docker", "ps", "-aq", "--no-trunc"]).stdout.split()
     if not ids:
         return []
     out = []
     for d in json.loads(sh(["docker", "inspect", *ids]).stdout):
-        st = d.get("State", {})
-        out.append(Container(
-            id=d["Id"], name=d["Name"].lstrip("/"), image_id=d.get("Image", ""),
-            labels=(d.get("Config") or {}).get("Labels") or {}, running=bool(st.get("Running")),
-            created=parse_time(d["Created"]), started=parse_time(st.get("StartedAt")),
-            finished=parse_time(st.get("FinishedAt")),
-            mounts=tuple(m["Name"] for m in d.get("Mounts") or [] if m.get("Type") == "volume"),
-            restart_count=int(d.get("RestartCount") or 0),
-        ))
+        try:
+            st = d.get("State") or {}
+            out.append(Container(
+                id=d["Id"], name=(d.get("Name") or d["Id"][:12]).lstrip("/"),
+                image_id=d.get("Image", ""),
+                labels=(d.get("Config") or {}).get("Labels") or {}, running=bool(st.get("Running")),
+                created=_created(d), started=parse_time(st.get("StartedAt")),
+                finished=parse_time(st.get("FinishedAt")),
+                mounts=tuple(m["Name"] for m in d.get("Mounts") or [] if m.get("Type") == "volume"),
+                restart_count=int(d.get("RestartCount") or 0),
+            ))
+        except Exception as e:
+            _warn_unparsed("container", d, e)
+            if isinstance(d, dict) and d.get("Id"):
+                # Pinned: "running" is never removed and keeps its image in use.
+                out.append(Container(id=d["Id"], name=str(d["Id"])[:12],
+                                     image_id=str(d.get("Image") or ""), labels={}, running=True,
+                                     created=datetime.now(timezone.utc), started=None,
+                                     finished=None))
     return out
 
 
@@ -343,12 +374,15 @@ def load_images():
             sizes[im.get("ID", "")] = parse_size(im.get("UniqueSize") or im.get("Size"))
     out = []
     for d in json.loads(sh(["docker", "image", "inspect", *ids]).stdout):
-        iid = d["Id"]
-        short = iid.replace("sha256:", "")
-        size = next((v for k, v in sizes.items() if k and short.startswith(k.replace("sha256:", ""))),
-                    d.get("Size", 0))
-        out.append(Image(id=iid, tags=tuple(d.get("RepoTags") or []),
-                         created=parse_time(d["Created"]), size=size))
+        try:
+            iid = d["Id"]
+            short = iid.replace("sha256:", "")
+            size = next((v for k, v in sizes.items()
+                         if k and short.startswith(k.replace("sha256:", ""))), d.get("Size", 0))
+            out.append(Image(id=iid, tags=tuple(d.get("RepoTags") or []),
+                             created=_created(d), size=size))
+        except Exception as e:
+            _warn_unparsed("image", d, e)
     return out
 
 
@@ -1397,15 +1431,29 @@ def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=No
             cmds = [["docker", "volume", "rm", *a.ids]]
         elif a.command:
             cmds = [a.command]
-        ok = True
+        ok, gone = True, False
         for cmd in cmds:
             r = sh(cmd, check=False)
             if r.returncode != 0:
-                ok = False
                 err = (r.stderr or r.stdout).strip().splitlines()
+                # ALREADY GONE IS DONE (dev-worker-3, 2026-10-26): with the containerd image
+                # store, removing one image can take another planned entry's content with it,
+                # and the later `rmi` answers "No such image" - which made the whole docker
+                # step exit 1 and kept DevWorkerDiskGuardFailing up after a run that freed
+                # 9.7 GB. Only when an inspect of the planned ID itself answers "No such image":
+                # a bare non-zero inspect is also a daemon restart, a timeout or a permission
+                # error, and must stay a failure (reviewer-codex + reviewer-claude, #1422).
+                if a.kind == "image" and "No such image" in (r.stderr or r.stdout):
+                    chk = sh(["docker", "image", "inspect", a.ids[0]], check=False)
+                    if chk.returncode and "No such image" in ((chk.stderr or "") + (chk.stdout or "")):
+                        gone = True
+                        break
+                ok = False
                 print(f"  ✗ {i:>3} {CATEGORY[a.kind]}: {a.label} — {err[-1] if err else 'failed'}")
                 break
-        if ok:
+        if ok and gone:
+            print(f"  ✓ {i:>3} {CATEGORY[a.kind]}: {a.label} (already gone)")
+        elif ok:
             print(f"  ✓ {i:>3} {CATEGORY[a.kind]}: {a.label}")
         else:
             failures += 1

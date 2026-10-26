@@ -313,6 +313,135 @@ class ExecuteRound2Test(ExecuteTest):
         self.assertFalse(any("app:1" in c or "app:latest" in c for c in calls))
 
 
+class FakeDocker:
+    """`sh` stand-in for the loaders and execute(): answers by the docker subcommand."""
+
+    def __init__(self, containers=(), images=(), rmi=None, present=(),
+                 inspect_err="Error: No such image: sha256:gone"):
+        self.containers, self.images = list(containers), list(images)
+        self.rmi, self.present, self.calls = rmi, set(present), []
+        self.inspect_err = inspect_err
+
+    def __call__(self, args, check=True):
+        args = list(args)
+        self.calls.append(args)
+
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+        r = R()
+        if args[:3] == ["docker", "ps", "-aq"]:
+            r.stdout = "\n".join(str(d.get("Id")) for d in self.containers)
+        elif args[:2] == ["docker", "inspect"]:
+            r.stdout = json.dumps(self.containers)
+        elif args[:4] == ["docker", "image", "ls", "-aq"]:
+            r.stdout = "\n".join(str(d.get("Id")) for d in self.images)
+        elif args[:3] == ["docker", "image", "inspect"]:
+            if args[3:] and args[3] in self.present:
+                r.stdout = "[{}]"
+            elif len(args) == 4 and not self.images:
+                r.returncode, r.stderr = 1, self.inspect_err
+            else:
+                r.stdout = json.dumps(self.images)
+        elif args[:3] == ["docker", "system", "df"]:
+            r.returncode = 1
+        elif args[:2] == ["docker", "rmi"] and self.rmi:
+            r.returncode, r.stderr = 1, self.rmi
+        return r
+
+
+OPTS = cl.Options(stale_days=14, stopped_hours=24, image_days=7, cache_keep_gb=10,
+                  keep_stacks=False, volumes=False, caches=False)
+
+
+class OddInspectEntryTest(unittest.TestCase):
+    """dev-worker-3, 2026-10-22..26: docker 29 leaves `Created` out for an image with no config
+    (strive/pin-manifest, 2 KB), and the KeyError aborted every disk-guard docker step for four
+    days while /workspace filled to 92%. One odd entry must never stop the step."""
+
+    def load(self, fn, fake):
+        with mock.patch.object(cl, "sh", fake):
+            return fn()
+
+    def test_image_without_created_uses_its_last_tag_time(self):
+        fake = FakeDocker(images=[
+            {"Id": "sha256:art", "RepoTags": ["reg/pin-manifest:sha-1"], "Size": 2364,
+             "Metadata": {"LastTagTime": "2026-10-22T11:01:00.123456789Z"}},
+            {"Id": "sha256:ok", "RepoTags": ["app:1"], "Created": "2026-09-01T00:00:00Z", "Size": 5}])
+        ims = {i.id: i for i in self.load(cl.load_images, fake)}
+        self.assertEqual(ims["sha256:art"].created, datetime(2026, 10, 22, 11, 1, 0, 123456,
+                                                             tzinfo=timezone.utc))
+        self.assertEqual(ims["sha256:ok"].created, datetime(2026, 9, 1, tzinfo=timezone.utc))
+
+    def test_image_of_unknown_age_is_kept_by_the_age_rule(self):
+        fake = FakeDocker(images=[{"Id": "sha256:art", "RepoTags": ["reg/pin-manifest:sha-1"]}])
+        ims = self.load(cl.load_images, fake)
+        self.assertEqual([i.id for i in ims], ["sha256:art"])
+        p = cl.build_plan([], ims, [], build_cache_bytes=0, tool_caches=[], opts=OPTS,
+                          now=datetime.now(timezone.utc), dir_exists=lambda p: False)
+        self.assertFalse([a for a in p if a.kind == "image"])
+
+    def test_zero_last_tag_time_is_unknown_and_kept(self):
+        # reviewer-claude (#1422): docker writes 0001-01-01 for a never-tagged image; that must
+        # read as unknown (kept), not as year 1 (ancient, removable).
+        fake = FakeDocker(images=[{"Id": "sha256:art", "RepoTags": [],
+                                   "Metadata": {"LastTagTime": "0001-01-01T00:00:00Z"}}])
+        ims = self.load(cl.load_images, fake)
+        self.assertGreater(ims[0].created, NOW)
+        p = cl.build_plan([], ims, [], build_cache_bytes=0, tool_caches=[], opts=OPTS,
+                          now=datetime.now(timezone.utc), dir_exists=lambda p: False)
+        self.assertFalse([a for a in p if a.kind == "image"])
+
+    def test_unparseable_image_entry_is_left_out_and_the_rest_load(self):
+        fake = FakeDocker(images=[{"RepoTags": ["no-id:1"]},
+                                  {"Id": "sha256:ok", "Created": "2026-09-01T00:00:00Z"}])
+        with mock.patch("sys.stderr"):
+            ims = self.load(cl.load_images, fake)
+        self.assertEqual([i.id for i in ims], ["sha256:ok"])
+
+    def test_container_without_created_loads_and_a_broken_one_is_pinned(self):
+        fake = FakeDocker(containers=[
+            {"Id": "c-nocreated", "Name": "/a", "Image": "sha256:i1",
+             "State": {"Running": False, "FinishedAt": "2026-09-01T00:00:00Z"}},
+            {"Id": "c-broken", "Image": "sha256:i2", "Mounts": [{"Type": "volume"}]}])
+        with mock.patch("sys.stderr"):
+            cs = {c.id: c for c in self.load(cl.load_containers, fake)}
+        self.assertFalse(cs["c-nocreated"].running)
+        self.assertIsNotNone(cs["c-nocreated"].created)
+        # The stand-in counts as running: never removed, and its image stays in use.
+        self.assertTrue(cs["c-broken"].running)
+        p = cl.build_plan(list(cs.values()), [cl.Image("sha256:i2", ("x:1",), ago(days=90), 1)], [],
+                          build_cache_bytes=0, tool_caches=[], opts=OPTS, now=NOW,
+                          dir_exists=lambda p: False)
+        self.assertFalse([a for a in p if a.ids and a.ids[0] in ("c-broken", "sha256:i2")])
+
+    def test_rmi_of_an_image_already_gone_is_not_a_failure(self):
+        plan = [cl.Action("image", "w:1", "x", "9d", 1, ["sha256:gone"], ["docker", "rmi", "w:1"])]
+        fake = FakeDocker(rmi="Error response from daemon: No such image: w@sha256:2bd8")
+        with mock.patch.object(cl, "sh", fake), \
+                mock.patch.object(cl, "tag_image_id", return_value="sha256:gone"), \
+                mock.patch("sys.stdout"):
+            failures, _ = cl.execute(plan, fresh_plan=plan)
+        self.assertEqual(failures, 0)
+
+    def test_rmi_no_such_image_with_a_failing_inspect_stays_a_failure(self):
+        # reviewer-codex + reviewer-claude (#1422): a non-zero inspect is not proof of absence.
+        plan = [cl.Action("image", "w:1", "x", "9d", 1, ["sha256:gone"], ["docker", "rmi", "w:1"])]
+        fake = FakeDocker(rmi="Error response from daemon: No such image: w@sha256:2bd8",
+                          inspect_err="Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+        with mock.patch.object(cl, "sh", fake),                 mock.patch.object(cl, "tag_image_id", return_value="sha256:gone"),                 mock.patch("sys.stdout"):
+            failures, _ = cl.execute(plan, fresh_plan=plan)
+        self.assertEqual(failures, 1)
+
+    def test_rmi_no_such_image_while_the_image_is_still_there_fails(self):
+        plan = [cl.Action("image", "w:1", "x", "9d", 1, ["sha256:still"], ["docker", "rmi", "w:1"])]
+        fake = FakeDocker(rmi="Error response from daemon: No such image: w:1", present={"sha256:still"})
+        with mock.patch.object(cl, "sh", fake), \
+                mock.patch.object(cl, "tag_image_id", return_value="sha256:still"), \
+                mock.patch("sys.stdout"):
+            failures, _ = cl.execute(plan, fresh_plan=plan)
+        self.assertEqual(failures, 1)
+
+
 class HelpersTest(unittest.TestCase):
     def test_parse_size(self):
         self.assertEqual(cl.parse_size("97B"), 97)

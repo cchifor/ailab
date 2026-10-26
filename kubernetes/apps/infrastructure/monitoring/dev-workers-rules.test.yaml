@@ -141,6 +141,47 @@ tests:
                 `docker system df -v`; ask the agent owner what can go (bulk agent data belongs in the capped
                 /workspace/archive, or on the NAS via the runbook), or grow the disk (kubernetes/infra/dev-workers).
 
+  # One untriggered run (failed_steps 0 for a single sample) must not reset a long failure: on
+  # dev-worker-3 a 02:00Z quiet run restarted a four-day DevWorkerDiskGuardFailing (2026-10-26).
+  # Failing 0-60m, one 0 at 61m, failing 62-70m, then healthy: held at 61m, resolved 30m after 70m.
+  - interval: 1m
+    name: one quiet guard run does not reset a failing guard
+    input_series:
+      - series: 'dev_worker_disk_guard_failed_steps{job="dev-worker-node", instance="192.168.0.10:9100"}'
+        values: "1x60 0 1x8 0x40"
+    alert_rule_test:
+      - eval_time: 61m
+        alertname: DevWorkerDiskGuardFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: disk-guard reclaim steps are failing"
+              description: >-
+                disk-guard on 192.168.0.10:9100 triggered (a disk is under its threshold) and
+                1 reclaim step(s) exited non-zero on its runs for 15m+, so the disk is not being
+                relieved. `journalctl -u dev-worker-disk-guard -n 120` shows each step's exit code and
+                output; `docker info` and `sudo cleanup --dry-run` reproduce the usual causes.
+      - eval_time: 95m
+        alertname: DevWorkerDiskGuardFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: disk-guard reclaim steps are failing"
+              description: >-
+                disk-guard on 192.168.0.10:9100 triggered (a disk is under its threshold) and
+                1 reclaim step(s) exited non-zero on its runs for 15m+, so the disk is not being
+                relieved. `journalctl -u dev-worker-disk-guard -n 120` shows each step's exit code and
+                output; `docker info` and `sudo cleanup --dry-run` reproduce the usual causes.
+      - eval_time: 105m
+        alertname: DevWorkerDiskGuardFailing
+        exp_alerts: []
+
   # 100 GB, 24 GB free and losing 50 MB/min (3 GB/h): empty in 8h, inside the 12h horizon. A disk
   # that sits at 20 GB free without moving must not warn.
   - interval: 1m
