@@ -229,30 +229,43 @@ spec:
         - { key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 60 }
       containers:
         - name: cloudflared
-          # Pinned by tag AND digest, so imagePullPolicy is IfNotPresent and a restart starts from the
-          # node's cached image. With `:latest` (implicitly Always) every restart re-pulled from Docker
-          # Hub, the cluster has no mirror for it, and the restarts happen exactly when the WAN is down:
-          # on 2026-10-26 the connectors sat in ErrImagePull/ImagePullBackOff for minutes after each blip.
+          # Pinned by tag AND digest, with IfNotPresent, so a restart starts from the node's cached image.
+          # With `:latest` (implicitly Always) every restart re-pulled from Docker Hub, the cluster has
+          # no mirror for it, and the restarts happen exactly when the WAN is down: on 2026-10-26 the
+          # connectors sat in ErrImagePull/ImagePullBackOff for minutes after each blip.
+          # imagePullPolicy is EXPLICIT on purpose: the API defaulted it to Always when this Deployment
+          # was created with `:latest`, and an apply that omits the field keeps that value (verified
+          # with a server-side dry run as kustomize-controller). Only nodes that already ran a connector
+          # hold the image; a replica rescheduled elsewhere still pulls once, since there is no
+          # node-level registry mirror.
           image: cloudflare/cloudflared:2026.10.4@sha256:c6c7ae1d5dfdcb094ad344ed68ccffc26635c9c6be80965664c33baf064b0515
+          imagePullPolicy: IfNotPresent
           args: ["tunnel", "--config", "/etc/cloudflared/config/config.yaml", "run"]
           ports:
             - { name: metrics, containerPort: 2000 }
-          # Liveness = the process answers (/healthcheck is a static OK). It used to be /ready, which is
-          # 503 whenever no edge connection is up, i.e. during any WAN outage: the kubelet then killed a
-          # connector that reconnects on its own, reset its retry backoff, and stacked CrashLoopBackOff
-          # (10-11 kills per pod on 2026-10-26, up to 5 min of waiting before the next attempt). That
-          # stretched short blips past Gitea's 10-min zombie-task timeout and failed in-flight CI jobs,
-          # because the runners reach git.chifor.me through this tunnel.
-          livenessProbe:
-            httpGet: { path: /healthcheck, port: metrics }
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          # Readiness keeps /ready: a connector with no edge connection shows NotReady instead of being
-          # restarted, and a rollout waits for the new connector to register before retiring an old one.
+          # /ready is 503 whenever no edge connection is up, i.e. during any WAN outage. As liveness with
+          # the default 30 s threshold it killed connectors that reconnect on their own, reset their
+          # retry backoff and stacked CrashLoopBackOff (10-11 kills per pod on 2026-10-26, up to 5 min
+          # of waiting before the next attempt). That stretched short blips past Gitea's 10-min
+          # zombie-task timeout and failed in-flight CI jobs, because the runners reach git.chifor.me
+          # through this tunnel.
+          # Readiness: ~30 s without an edge connection -> NotReady (KubeDeploymentReplicasMismatch
+          # fires if it lasts 15 min). A rollout waits for the new connector to register before an old
+          # one goes, so a rollout started during a WAN outage holds the old pods until the WAN is back.
           # No Service selects these pods, so readiness gates no traffic.
           readinessProbe:
             httpGet: { path: /ready, port: metrics }
             periodSeconds: 10
+            failureThreshold: 3
+          # Liveness: the same /ready, but only after ~15 min without an edge connection, longer than a
+          # blip, so it recycles a connector that is alive but wedged and has stopped reconnecting. With
+          # the cached image that restart needs no network, and it does not stack CrashLoopBackOff: the
+          # kubelet resets a container's restart backoff once it has run for 10 min.
+          livenessProbe:
+            httpGet: { path: /ready, port: metrics }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 90
           volumeMounts:
             - { name: config, mountPath: /etc/cloudflared/config, readOnly: true }
             - { name: creds, mountPath: /etc/cloudflared/creds, readOnly: true }
