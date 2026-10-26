@@ -1420,6 +1420,10 @@ Nothing else changes: no schema change, no new setting. The `codex` concurrency 
 >   section is its record.
 > - **To restore it** (never a partial update - `PUT /admin/v1/config` replaces the WHOLE config):
 >   1. `GET /admin/v1/config/revisions/1779` and take only its `claude-reviewer` entry from `policies`.
+>      **Do not restore it verbatim**: its `fallbackAliases: ["pool-claude"]` is the fallback that cannot serve while
+>      `pool-claude` is `*` (`model_unspecified`) - the outage this section records. Set `fallbackAliases: []`
+>      (claude-5 only: the route then refuses while claude-5 is at its wall, which reviewbot parks losslessly), or
+>      add explicit targets on other Claude accounts with a concrete model (e.g. `claude-3:opus`) instead.
 >   2. `GET /admin/v1/config` for the CURRENT config and note its `revision` (N).
 >   3. Append that entry to the current `policies` (change nothing else) and `PUT /admin/v1/config` with the
 >      whole document and `If-Match: N`. A 409 means someone wrote in between: start again from step 2.

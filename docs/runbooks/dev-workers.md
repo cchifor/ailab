@@ -853,7 +853,8 @@ and the ladder is `[fable, opus]` (owner: reviews on Fable or Opus only, never `
 - **Rollback:** there is no route rollback any more - `claude-reviewer` was retired on 2026-10-26 (router config
   revision 1780; llm-router.md § "Reviewer routes"). To use a different model, change the seat's `models`; to
   restore the old route first re-add its policy (llm-router.md § "Reviewer routes", "To restore it": merge
-  it into the current config, full PUT with the current revision), then set `model: claude-reviewer` instead of
+  it into the current config, full PUT with the current revision, and WITHOUT its dead `pool-claude` fallback -
+  see the warning there), then set `model: claude-reviewer` instead of
   `route` + `models`, and deploy
   (`reviewers.yml -l reviewer-1,reviewer-2 -t reviewbot` - both hosts, since the forge chunk lane
   hashes reviewbot.py into its shared policy).
