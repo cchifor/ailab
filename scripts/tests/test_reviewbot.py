@@ -5843,6 +5843,45 @@ class CredentialKeepaliveTest(unittest.TestCase):
         self.assertFalse(self.m.credential_expired({"credential": {"source": "chatgpt", "expires_at": 1}}, self.now))
         self.assertFalse(self.m.credential_expired({"credential": {"source": "apikey", "expires_at": 1}}, self.now))
 
+    # ── the poll lands just after a token expires, not up to an hour later ───────────
+    # 2026-10-26: seat b's ChatGPT token (projected into af/dsh/credentials) expired at 11:25:47Z
+    # and the hourly poll was due at 11:36Z. codex-cli 0.153.4 renews only an EXPIRED token - a
+    # full `codex exec` as the seat four hours earlier, last_refresh ten days old, renewed nothing
+    # - so the only cure is a probe after expiry, and every minute until it ran was a 401 for dsh.
+    def test_the_next_poll_lands_just_after_the_earliest_token_expiry(self):
+        self.m.USAGE_SNAPSHOT["a"] = self._doc(expires_at=self.now + 600)
+        self.m.USAGE_SNAPSHOT["b"] = self._doc(source="chatgpt", expires_at=self.now + 1800)
+        self.assertAlmostEqual(600 + self.m.RENEW_GRACE_S, self.m.next_poll_delay(self.now), delta=1)
+        self.m.USAGE_SNAPSHOT["a"] = None
+        self.assertAlmostEqual(1800 + self.m.RENEW_GRACE_S, self.m.next_poll_delay(self.now), delta=1,
+                               msg="a codex (chatgpt) token counts: its app server renews it on the probe")
+
+    def test_an_expiry_beyond_the_interval_or_long_past_keeps_the_interval(self):
+        self.m.USAGE_SNAPSHOT["a"] = self._doc(expires_at=self.now + 7200)
+        self.m.USAGE_SNAPSHOT["b"] = self._doc(ok=False, expires_at=self.now - 5000)   # dead login
+        self.m.USAGE_SNAPSHOT["c"] = None
+        self.assertEqual(3600, self.m.next_poll_delay(self.now),
+                         "a login no poll can renew must not turn the ticker into a tight loop")
+
+    def test_a_token_that_just_expired_is_polled_soon_but_never_in_a_tight_loop(self):
+        self.m.USAGE_SNAPSHOT["a"] = self._doc(expires_at=self.now - self.m.RENEW_GRACE_S + 1)
+        self.assertEqual(self.m.MIN_POLL_GAP_S, self.m.next_poll_delay(self.now))
+
+    def test_the_ticker_sleeps_the_computed_delay(self):
+        seen = []
+
+        class Stop(Exception):
+            pass
+
+        def sleep(n):
+            seen.append(n)
+            raise Stop
+        with mock.patch.object(self.m.time, "sleep", sleep), \
+                mock.patch.object(self.m, "next_poll_delay", lambda now=None: 123.0):
+            with self.assertRaises(Stop):
+                self.m.usage_ticker()
+        self.assertEqual([123.0], seen)
+
     def test_run_llm_holds_the_seat_lock_while_its_cli_runs(self):
         seen = []
         self.m.subprocess.run = self._review_cli(seen)

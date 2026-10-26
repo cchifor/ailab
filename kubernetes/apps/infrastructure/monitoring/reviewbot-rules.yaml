@@ -614,14 +614,21 @@ spec:
         # pr_reviewer_llm_seats only. A seat the sticky rotation never reaches and the poll does
         # not cover keeps one token until it expires, ~7 days after the login, and the publisher
         # correctly has nothing newer to publish: ok stays 1 all the way down, which is why the
-        # rule above is blind to this shape. 86400 = one day of a ~7-day token: the publisher
-        # refuses a token with <=5 min left and the consumers fail fast once it expires (dsh's
+        # rule above is blind to this shape. The consumers fail fast once it expires (dsh's
         # provider and LiteLLM's chatgpt/ route both answer 401 — the far-future sentinel in
         # LiteLLM's rendered auth.json keeps it out of the OAuth device flow, so stale is a
-        # 401, never a hang), so a day is the window in which running the CLI as the seat still
-        # AVERTS an outage rather than ending one. for: 15m — the value only ever steps when a
-        # newer token lands, so the hold rides out a scrape gap and costs nothing against a day
-        # of slack. Same optional gate as above. DOCUMENTED SEAM: a staged seat that has never
+        # 401, never a hang).
+        # FIRES ON A RENEWAL THAT DID NOT HAPPEN, not on a token nearing expiry (2026-10-26).
+        # This rule used to page a day ahead, as the window in which running the CLI as the
+        # seat would avert the outage. No such window exists: codex-cli 0.153.4 renews only an
+        # EXPIRED token (a full `codex exec` as seat b four hours before expiry, last_refresh ten
+        # days old, renewed nothing), so the warning sat firing for 24 h of every token's life
+        # with nothing to do. reviewbot now polls RENEW_GRACE_S (60 s) after the earliest seat
+        # expiry (next_poll_delay), the probe's app server renews the token, and the publisher
+        # projects it within a minute. 600 s past expiry is therefore a renewal that failed - a
+        # dead refresh token, a seat outside pr_reviewer_llm_seats, a stopped reviewbot - and
+        # the consumers are already answering 401. for: 5m rides out a scrape gap. Same
+        # optional gate as above. DOCUMENTED SEAM: a staged seat that has never
         # published has no expires_at series at all (publish.py omits the line), so the gate is
         # moot there — but seat d between its login ceremony and PR 3 (logged in, projecting,
         # still optional) ages out WITHOUT a page; only PR 3 flipping the projection to required
@@ -629,23 +636,23 @@ spec:
         # must page; the fixture pins the current choice either way.
         - alert: CodexProjectionStale
           expr: >-
-            (dsh_codex_projection_token_expires_at_seconds - time() < 86400)
+            (time() - dsh_codex_projection_token_expires_at_seconds > 600)
             and on (instance, document)
             dsh_codex_projection_optional == 0
-          for: 15m
+          for: 5m
           labels: { severity: warning }
           annotations:
-            summary: "Codex token projected for {{ $labels.document }} expires in under 24h"
+            summary: "Codex token projected for {{ $labels.document }} expired and was not renewed"
             description: >-
-              The access token the publisher last projected into af/{{ $labels.document }} has
-              under a day left and no newer one has been published. The reviewer's own login
-              renews a seat's token only when the CLI runs as that seat (a review, or the
-              hourly usage probe), so a seat that is never chosen and not in the hourly poll
-              ages out. The consumers (dsh's openai-codex provider, LiteLLM's chatgpt/ route)
-              fail fast upstream once it expires (401). Check the seat with codex-usage.py as
-              its user (`sudo -n -u <seat user> HOME=/home/<seat user>
-              /usr/local/lib/reviewbot/codex-usage.py` on 192.168.0.25) and the publisher
-              journal, `journalctl -u dsh-codex-publisher.service`.
+              The access token the publisher last projected into af/{{ $labels.document }}
+              expired over 10 minutes ago and no newer one has been published, so its consumers
+              (dsh's openai-codex provider, LiteLLM's chatgpt/ route) are answering 401. reviewbot
+              polls each seat a minute after its token expires and the probe renews it, so this
+              is a renewal that failed. Run the probe as the seat's user (`sudo -n -u <seat user>
+              HOME=/home/<seat user> /usr/local/lib/reviewbot/codex-usage.py` on 192.168.0.25):
+              ok with a fresh expiry means the publisher has yet to pick it up (`journalctl -u
+              dsh-codex-publisher.service`); a 401 means the seat's login is dead - log the seat
+              in again.
         # THE PUBLISHER HAS STOPPED, and neither rule above can see it (codex, plan round 2): a
         # stopped timer, a unit that no longer starts, or a process killed before it writes leaves
         # the PREVIOUS textfile on disk, scrapeable, with ok=1 and a token expiry days out. Every
