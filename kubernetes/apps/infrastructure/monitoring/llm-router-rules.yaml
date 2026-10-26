@@ -176,7 +176,7 @@ spec:
               the pool keeps serving on the other accounts until they reach the same wall.
         - alert: LlmRouterAccountNearLimit
           expr: >-
-            llm_router_account_limit_used_percent{job="llm-router",provider="claude",window="weekly"} >= 90
+            llm_router_account_limit_used_percent{job="llm-router",provider="claude",window=~"primary|weekly"} >= 90
             unless on (job, account, provider, window)
             ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
           for: 30m
@@ -215,13 +215,22 @@ spec:
         # makes the inner count EMPTY, not 0, and an empty vector never compares; the `and on()` gate
         # keeps "no Claude readings at all" silent (LlmRouterMetricsAbsent owns an absent target) and
         # needs at least two accounts with a reading, so a one-account pool is left to the per-account
-        # rules. A stale reading (reset already past) counts as no headroom here, on purpose: it is an
-        # account the router could not refresh, which is not capacity either. 30m rides out a reading
+        # rules. A stale reading (its own reset already past, the NearLimit rules' `unless`) counts as
+        # no headroom here, on purpose, whatever its percentage: it is an account the router could not
+        # refresh - disabled, reauth_required - which is not capacity either (reviewers on #1432). A
+        # reading with no reset time (0) is not provably stale and counts as it reads. 30m rides out a reading
         # that dips under 90 % only between two usage refreshes.
         - alert: LlmRouterClaudePoolHeadroomLow
           expr: |
             (
-              (count(llm_router_account_limit_used_percent{job="llm-router",provider="claude",window="weekly"} < 90) or vector(0))
+              (
+                count(
+                  (llm_router_account_limit_used_percent{job="llm-router",provider="claude",window="weekly"} < 90)
+                  unless on (job, account, provider, window)
+                  ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
+                )
+                or vector(0)
+              )
                 < 2
             )
             and on ()
