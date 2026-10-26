@@ -1413,7 +1413,12 @@ Nothing else changes: no schema change, no new setting. The `codex` concurrency 
 >   request names, and a request naming the route `claude-reviewer` names none, so the fallback had nothing to
 >   serve (`model_unspecified`). It went unnoticed until claude-5 reached its weekly wall (2026-10-26 04:56Z,
 >   resets 10-28 10:00Z); from then on every review was refused in 3 ms with attempts 0.
-> - `claude-reviewer` is left in place, unused, as the rollback target.
+> - **`claude-reviewer` is RETIRED (config revision 1780, 2026-10-26, owner's go).** Nothing referenced it (no route
+>   fallback, pointer or key), its last request was 07:26Z that day, and its fallback could not work while
+>   `pool-claude` is `*`, so it was no rollback at all. Removed with one full `PUT /admin/v1/config` (`If-Match: 1779`)
+>   that changed nothing else (verified by diffing every route and account before and after). To restore it: PUT
+>   revision 1779's `claude-reviewer` policy back (`GET /admin/v1/config/revisions/1779`). The rest of this section is
+>   its record.
 
 **Why.** At the owner's request, the PR reviewer bots get routes of their own: `codex-reviewer` on the Codex smart
 pool, and `claude-reviewer` on claude-5, falling back to the Claude smart pool when claude-5 fails.
