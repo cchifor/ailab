@@ -160,6 +160,9 @@ dev_worker_dockerd_memory_max: "2000M"
 dev_worker_dockerd_memory_high: "1700M"
 dev_worker_swapfile_path: /swapfile
 dev_worker_swapfile_size: "4G"
+# Additional swapfiles for a host that needs more cushion than the base file (tasks/swap.yml says
+# why a second file, not a resize). [{path, size}]; none by default.
+dev_worker_extra_swapfiles: []
 dev_worker_swappiness: 10
 # Seconds the kernel waits after a panic before rebooting itself; 0 = wait forever. The stock default
 # is 0, and on 2026-08-11 22:32 that meant dev-worker-1's kernel panicked ("Attempted to kill the idle

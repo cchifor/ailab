@@ -3,6 +3,9 @@
 # of tripping the kernel OOM-killer and wedging the VM. Disk-backed (no host-RAM cost); swappiness=10
 # keeps it a safety valve, not a first resort.
 
+# OUTPUT CONTRACT: one bare path per line (`--show=NAME --noheadings`, measured on dev-worker-1..4:
+# ['/swapfile']). Both `not in stdout_lines` checks below depend on it - with /proc/swaps or the default
+# columns every line would carry type/size/used and mkswap would run against a live file.
 - name: Check for active swap
   ansible.builtin.command: swapon --show=NAME --noheadings
   register: dev_worker_active_swap
@@ -22,7 +25,9 @@
 
 - name: Initialize + enable swap
   ansible.builtin.shell: "mkswap {{ dev_worker_swapfile_path }} && swapon {{ dev_worker_swapfile_path }}"
-  when: dev_worker_swapfile_path not in dev_worker_active_swap.stdout
+  # Exact line match, not a substring of stdout: with /swapfile2 active, `/swapfile in stdout` would
+  # be true even with /swapfile off (reviewer-codex on #1431).
+  when: dev_worker_swapfile_path not in (dev_worker_active_swap.stdout_lines | map('trim') | list)
   changed_when: true
 
 - name: Persist swap in fstab
@@ -40,3 +45,48 @@
     sysctl_file: /etc/sysctl.d/99-swappiness.conf
     state: present
     reload: true
+
+# EXTRA swapfiles: a host that needs more cushion gets a SECOND file instead of a resized one. The
+# base file above is created once (`creates:`), and growing it in place would mean swapoff of a file
+# that is in use - on dev-worker-1 (2026-10-26) 3.8 of its 4 GiB, which swapoff would have to pull
+# back into RAM under the very pressure the cushion exists for. A new file is added live, with no
+# swapoff and no reboot. Entry shape: {path, size}. Same permissions, init and fstab handling.
+- name: Allocate each extra swapfile
+  ansible.builtin.command: "fallocate -l {{ item.size }} {{ item.path }}"
+  args:
+    creates: "{{ item.path }}"
+  loop: "{{ dev_worker_extra_swapfiles }}"
+  loop_control:
+    label: "{{ item.path }} ({{ item.size }})"
+  register: dev_worker_extra_swap_alloc
+
+- name: Secure each extra swapfile's permissions
+  ansible.builtin.file:
+    path: "{{ item.item.path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ dev_worker_extra_swap_alloc.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  # A --check run that would CREATE the file has nothing on disk to chmod yet.
+  when: not (ansible_check_mode and item.changed)
+
+- name: Initialize + enable each extra swapfile
+  ansible.builtin.shell: "mkswap {{ item.path }} && swapon {{ item.path }}"
+  when: item.path not in (dev_worker_active_swap.stdout_lines | map('trim') | list)
+  changed_when: true
+  loop: "{{ dev_worker_extra_swapfiles }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Persist each extra swapfile in fstab
+  ansible.posix.mount:
+    path: none
+    src: "{{ item.path }}"
+    fstype: swap
+    opts: sw
+    state: present
+  loop: "{{ dev_worker_extra_swapfiles }}"
+  loop_control:
+    label: "{{ item.path }}"
