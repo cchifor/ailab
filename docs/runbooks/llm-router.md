@@ -2381,6 +2381,23 @@ answer 200). There is no SQLite schema change, no new setting and no live-config
   `codex`, `gpt-6-luna`), the non-vision refusal, Claude streaming, image generation and the Assistant image checks
   passed.
 
+**After the roll** (ailab #1437, merge `c5ffddfe6d2c`, new pod ready at about 17:56 UTC on 2026-10-26):
+- The pod runs the pinned digest. `/app/SOURCE_COMMIT` reads `2d50a706…`, and PID 1 is `node dist/apps/router/main.js`.
+  The startup log has no errors.
+- `validate-live` matched the baseline exactly: 6/9, with the same three `MODEL_REQUIRED` failures. The Codex vision
+  call, Claude streaming, image generation and the Assistant image checks all served.
+- The public checks on `router.chifor.me` passed 17/17:
+  - `/health` and `/ready` answer 200. The SPA and `/appearance-bootstrap.js` load.
+  - `/auth/config` answers `{"oidc":false,"local":true}`.
+  - Without credentials, `/admin/v1/config`, `/v1/models` and `/auth/me` answer 401. A wrong token also gets 401.
+  - With the bearer token, `/admin/v1/config`, `/v1/models` and `/v1/routes` answer 200.
+  - A token sign-in returns a Secure, HttpOnly `lr_session` cookie. `/auth/me` answers 200 with it. After a logout
+    the session is gone.
+- Real API-key traffic completed on the new pod (Responses `gpt-6-astra` on `codex-2`). The main-only Router rollout
+  acceptance run on the merge commit passed.
+- llm-router follow-ups: #119 corrects `deploy/README.md` (it described the PVC flow as current), and #120 records
+  codex's two minor local-mode findings.
+
 **Rollback.** Revert the image digest and both pod-template annotations together to the body-limits release:
 - `image: registry.chifor.me/llm-router/router@sha256:fdbd5738d19bb10dcd4c3aa11b02d4efd6493db7b59289dc3814018806d3bc0f`
 - `chifor.me/source-commit: 2aa139d7439a380c1bdced3c1f53ea10cb7f5236`
