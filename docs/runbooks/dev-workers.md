@@ -812,7 +812,8 @@ and the ladder is `[fable, opus]` (owner: reviews on Fable or Opus only, never `
   pool picks the account with the most headroom. The response header `x-router-route` says
   `pool-claude`; the journal (`GET /admin/v1/trajectories?principal=key:key_f856495c9b0c`) has the
   account and the model.
-- **A non-busy 429 parks the tier, not the seat** (`router_tiers_distinct`): no pool account can
+- **A non-busy 429 parks the tier, not the seat** (`router_tiers_distinct`, opt-in: only a seat with
+  `route` or a `models` map whose tiers differ): no pool account can
   serve `fable` right now, so `(r, fable)` parks until `Retry-After` and the same review asks `opus`.
   Both tiers parked on `r` and a-c → the job waits, lossless, with the queue intact; it is never
   reviewed on a smaller model. `active_choice` is tier-major, so `fable` is asked again the moment its

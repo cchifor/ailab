@@ -171,6 +171,30 @@ class RouterSeatTest(unittest.TestCase):
         self.assertFalse(m.model_parked("r", "opus"))
         self.assertFalse(m.seat_parked("r"))
 
+    def test_a_seat_that_never_opted_in_keeps_the_account_scoped_park(self):
+        """No `route` and no `models`: every tier goes out under its own name (the 2026-10-07
+        shape). Tier-scoped parks are opt-in, so a 429 there still parks the whole seat
+        (reviewer-claude on ailab#1421)."""
+        m = self.load([self.router_seat()], llm_models=["top", "low"])
+        Router.script = [refusal(429, "RATE_LIMITED", retry_after=600)]
+        with self.assertRaises(m.RateLimited):
+            m.run_llm("t", "d", "diff")
+        self.assertEqual(["top"], [r["body"]["model"] for r in Router.seen])
+        self.assertTrue(m.seat_parked("r"))
+
+    def test_an_unserveable_tier_on_a_pool_seat_parks_that_tier_and_descends(self):
+        """The park is keyed by (seat, tier), never by the text the errors print."""
+        m = self.load([self.router_seat(route="pool-claude",
+                                        models={"fable": "fable", "opus": "opus"})],
+                      llm_models=["fable", "opus"])
+        Router.script = [refusal(404, "MODEL_NOT_FOUND"),
+                         (200, {}, sse_answer(json.dumps(REVIEW)))]
+        self.assertEqual(m.run_llm("t", "d", "diff")["summary"], "looks fine")
+        self.assertEqual([r["body"]["model"] for r in Router.seen], ["fable", "opus"])
+        self.assertTrue(m.model_parked("r", "fable"))
+        self.assertFalse(m.model_parked("r", "opus"))
+        self.assertEqual(m.active_choice(), ("r", "opus"))
+
     def test_every_tier_of_a_pool_seat_limited_defers_with_no_lower_tier(self):
         m = self.load([self.router_seat(route="pool-claude",
                                         models={"fable": "fable", "opus": "opus"})],

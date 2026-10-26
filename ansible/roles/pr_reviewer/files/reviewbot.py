@@ -1270,10 +1270,11 @@ def tier_index(model):
 # reviewer-1 names the pool in the header and fable / opus in the body: the pool picks the
 # account, the ladder picks the model.
 #
-# A seat whose tiers are DIFFERENT router models treats a non-busy 429 as a fact about the tier
-# it asked for (no account can serve that model now): the pair parks and the next tier is asked
-# on the same seat. A seat that sends one route for every tier keeps the account-scoped park -
-# a second tier would meet the same refusal.
+# A seat that OPTED INTO per-tier models (`route` or a `models` map) and whose tiers are DIFFERENT
+# router models treats a non-busy 429 as a fact about the tier it asked for (no account can serve
+# that model now): the pair parks and the next tier is asked on the same seat. Every other router
+# seat keeps the account-scoped park - one route for every tier, where a second tier would meet
+# the same refusal, and the tier-name default, whose old behaviour stays as it was.
 #
 # ROUTER SEATS ARE PREFERRED, NOT STICKY: within a tier active_choice always tries them first.
 # The router balances its own upstream seats, so the stickiness that protects a subscription
@@ -1318,8 +1319,13 @@ def router_header_route(seat):
 
 
 def router_tiers_distinct(seat):
-    """Whether this router seat asks different router models for different tiers - the case
-    where a usage refusal is about the tier, not the seat."""
+    """Whether this router seat OPTED INTO per-tier models (a `route` header or a `models` map)
+    and asks different router models for different tiers - the case where a usage refusal is
+    about the tier, not the seat. Opt-in, so a seat that sends each tier under its own name by
+    default keeps the account-scoped park it always had (reviewer-claude on ailab#1421)."""
+    s = _seat_cfg(seat)
+    if router_header_route(seat) is None and not isinstance(s.get("models"), dict):
+        return False
     return len({r for r in (router_route(seat, m) for m in MODELS) if r}) > 1
 
 
@@ -2298,7 +2304,9 @@ def _run_router(seat, tier, prompt, remaining):
     pool = router_header_route(seat)
     if pool:
         headers["X-Router-Route"] = pool
-        route = f"{pool} model {route}"         # what every error below names
+    # What the errors below print. Display only: `route` stays the model sent, and parks are
+    # keyed by (seat, tier), never by this text.
+    label = f"{pool} model {route}" if pool else route
     per_tier = router_tiers_distinct(seat)
     try:
         idle = float(s.get("idle_timeout_s") or ROUTER_IDLE_TIMEOUT_S)
@@ -2315,7 +2323,7 @@ def _run_router(seat, tier, prompt, remaining):
             except Exception:
                 raw = b""
             hdrs = {k.lower(): v for k, v in (e.headers or {}).items()}
-            exc, busy = _router_refusal(e.code, raw, hdrs, route, tier, per_tier)
+            exc, busy = _router_refusal(e.code, raw, hdrs, label, tier, per_tier)
             if busy and busy_waits < ROUTER_BUSY_RETRIES:
                 # Every target of the route is serving someone. Seconds, not a park: moving to
                 # a subscription seat over a five-second queue would be the expensive answer.
@@ -2327,7 +2335,7 @@ def _run_router(seat, tier, prompt, remaining):
             raise exc from None
         except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
             remaining()                 # past the deadline this raises TimeoutExpired instead
-            raise ModelError(f"router unreachable: {type(e).__name__}: {e} [route {route}]") from None
+            raise ModelError(f"router unreachable: {type(e).__name__}: {e} [route {label}]") from None
         break
     # `done` is the stream's own end - `[DONE]` or a finish_reason. EOF without either is a
     # connection cut short (Cloudflare, the router restarting), and the text so far may still
@@ -2347,7 +2355,7 @@ def _run_router(seat, tier, prompt, remaining):
             except (OSError, http.client.HTTPException) as e:
                 remaining()
                 raise ModelError(f"router stream failed: {type(e).__name__}: {e} "
-                                 f"[route {route}]") from None
+                                 f"[route {label}]") from None
             if not line:
                 break
             line = line.strip()
@@ -2368,7 +2376,7 @@ def _run_router(seat, tier, prompt, remaining):
                 er = obj["error"]
                 kind = UpstreamBusy if upstream_busy(er.get("code"), er.get("message")) else ModelError
                 raise kind(f"router stream error {er.get('code') or er.get('type') or '-'}: "
-                           f"{str(er.get('message') or '')[:300]} [route {route}]")
+                           f"{str(er.get('message') or '')[:300]} [route {label}]")
             for ch in obj.get("choices") or []:
                 if not isinstance(ch, dict):
                     continue
@@ -2387,11 +2395,11 @@ def _run_router(seat, tier, prompt, remaining):
     text = "".join(parts)
     if not done:
         raise ModelError(f"router stream ended before completion ({len(text)} chars, no "
-                         f"finish_reason or [DONE]) [route {route}]")
+                         f"finish_reason or [DONE]) [route {label}]")
     if finish == "length":
-        raise ModelError(f"router answer truncated (finish_reason=length) [route {route}]")
+        raise ModelError(f"router answer truncated (finish_reason=length) [route {label}]")
     if not text.strip():
-        raise ModelError(f"router returned an empty answer (finish_reason={finish}) [route {route}]")
+        raise ModelError(f"router returned an empty answer (finish_reason={finish}) [route {label}]")
     return text
 
 
