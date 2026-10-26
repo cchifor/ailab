@@ -2515,7 +2515,7 @@ ADR 0038. Settings are in `router.yaml`, next to `ROUTER_AUTH_MODE`.
 The token never goes into a URL. The same request through the public host answers 404. Break-glass needs PostgreSQL;
 during a PG outage, operate with the bearer admin token instead. Sign out afterwards.
 
-**After the switch** (ailab #1443, merge `0efc27a5`, about 21:16 UTC on 2026-10-26):
+**After the switch** (ailab #1443, merge `0efc27a5` at 21:15 UTC on 2026-10-26; the new pod was ready at about 21:16):
 - The new pod logged no `auth.*` warning: the store initialised and the administrator was seeded. `router_auth` holds
   that subject as `admin`, plus the `local:admin` record behind break-glass.
 - **Public checks:** 18 of 19 passed as written; the 19th was blocked earlier than it tested (below).
