@@ -22,7 +22,9 @@
 
 - name: Initialize + enable swap
   ansible.builtin.shell: "mkswap {{ dev_worker_swapfile_path }} && swapon {{ dev_worker_swapfile_path }}"
-  when: dev_worker_swapfile_path not in dev_worker_active_swap.stdout
+  # Exact line match, not a substring of stdout: with /swapfile2 active, `/swapfile in stdout` would
+  # be true even with /swapfile off (reviewer-codex on #1431).
+  when: dev_worker_swapfile_path not in (dev_worker_active_swap.stdout_lines | map('trim') | list)
   changed_when: true
 
 - name: Persist swap in fstab
@@ -69,7 +71,7 @@
 
 - name: Initialize + enable each extra swapfile
   ansible.builtin.shell: "mkswap {{ item.path }} && swapon {{ item.path }}"
-  when: item.path not in dev_worker_active_swap.stdout
+  when: item.path not in (dev_worker_active_swap.stdout_lines | map('trim') | list)
   changed_when: true
   loop: "{{ dev_worker_extra_swapfiles }}"
   loop_control:
