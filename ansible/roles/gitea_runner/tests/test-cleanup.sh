@@ -57,7 +57,11 @@ case "\$1 \$2" in
   "system df")
     # MOCK_CACHE / MOCK_IMAGES = size in GB for that row; 0 (default) prints nothing for it, which is
     # also the "docker wedged / unparseable" case each cap must fail CLOSED on.
-    if [ "\${MOCK_CACHE:-0}" != 0 ]; then printf 'Build Cache|%sGB\n' "\$MOCK_CACHE"; fi
+    # MOCK_CACHE_AFTER: the size once a full (-af) builder prune has run — unset = the prune freed nothing
+    # (records pinned "in use"), 0 = the size is unreadable afterwards (section [S]).
+    if [ -n "\${MOCK_CACHE_AFTER:-}" ] && [ -f "$WORK/phase.afprune" ]; then
+      [ "\$MOCK_CACHE_AFTER" != 0 ] && printf 'Build Cache|%sGB\n' "\$MOCK_CACHE_AFTER"
+    elif [ "\${MOCK_CACHE:-0}" != 0 ]; then printf 'Build Cache|%sGB\n' "\$MOCK_CACHE"; fi
     if [ "\${MOCK_IMAGES:-0}" != 0 ]; then printf 'Images|%sGB\n' "\$MOCK_IMAGES"; fi ;;
   "ps") : ;;          # 'docker ps -q' -> no containers
   *) : ;;
@@ -232,7 +236,8 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_STOP_FAIL="${MOCK_STOP_FAIL:-0}" MOCK_START_FAIL="${MOCK_START_FAIL:-0}" \
     MOCK_DOCKER_RESTART_RC="${MOCK_DOCKER_RESTART_RC:-0}" MOCK_HANG_HEAL="${MOCK_HANG_HEAL:-0}" \
     MOCK_PEER_BUSY_FROM="${MOCK_PEER_BUSY_FROM:-}" MOCK_MV_FAIL="${MOCK_MV_FAIL:-0}" \
-    MOCK_SORT_FAIL="${MOCK_SORT_FAIL:-0}" \
+    MOCK_SORT_FAIL="${MOCK_SORT_FAIL:-0}" MOCK_CACHE_AFTER="${MOCK_CACHE_AFTER:-}" \
+    GITEA_CLEANUP_HEAL_STUCK_TICKS="${STUCKTICKS:-3}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
   # TERM_AT_HANG: SIGTERM the script once the mock reports it is inside the heal (case N10) — what
@@ -811,6 +816,47 @@ MOCK_BUSY_DROP_AFTER=1 IDLEWAIT=0 run_beacon 1 85
 check "Q3: budget spent (IDLE_WAIT_SEC=0) -> no read after the deadline, the busy gate defers" \
   '! swept && [ "$(beacon_field pressure_defer)" = 1 ]'
 unset MOCK_BUSY_DROP_AFTER
+
+echo "[S] pinned build cache: cap prunes that free nothing count up, and HEAL_STUCK_TICKS of them heal"
+# 2026-10-26: ci-runner-3/-4/-10 held 63.6/46/29 GB of build cache with EVERY record "in use" (0 B
+# reclaimable), so the 3b cap prune ran 436 times in 7 days on ci-runner-3 and freed nothing, and with no
+# journal signature the section 0 heal never fired. The hand repair (image prune -af, restart dockerd,
+# builder prune -af) cleared it. Here MOCK_CACHE stays the size after the prune unless MOCK_CACHE_AFTER
+# says otherwise, which is exactly the pinned case.
+pinned() { rm -f "$WORK/heal.state" "$BEACONDIR/gitea_runner_buildkit_heal.prom"; }
+pinned; MOCK_CACHE=26 run_beacon 0 85
+check "S1: a cap prune that leaves the cache over cap counts one (cap_stuck=1)" \
+  'calls_has "docker builder prune -af" && [ "$(state_val cap_stuck)" = 1 ]'
+check "S1: ...and does not heal yet" '! heal_ran'
+MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85; MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85
+check "S2: three pinned cap prunes in a row -> cap_stuck=3, still no heal" '[ "$(state_val cap_stuck)" = 3 ] && ! heal_ran'
+MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85
+in_order "S3: the next tick heals in the record heal's order" \
+  "systemctl stop gitea-act-runner.service" "docker image prune -af" "systemctl restart docker.service" \
+  "docker builder prune -af" "systemctl start --no-block gitea-act-runner.service"
+check "S3: ...counts from zero again, records the attempt, releases the runner" \
+  '[ "$(state_val cap_stuck)" = 0 ] && [ "$(state_val heals_total)" = 1 ] && [ "$(state_val runner_held)" = 0 ]'
+check "S3: ...the sweep waits for the next tick and the runner runs again" \
+  '! swept && [ "$(cat "$WORK/runner.state")" = active ]'
+check "S3: ...and no record was marked failed (a pinned-cache heal has no record)" '! grep -q "^failed_" "$WORK/heal.state"'
+
+pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=26 MOCK_CACHE_AFTER=5 run_beacon 0 85
+check "S4: a cap prune that gets the cache under cap resets the count" '[ "$(state_val cap_stuck)" = 0 ] && ! heal_ran'
+pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
+check "S5: a cache already under cap resets the count, with no prune" \
+  '[ "$(state_val cap_stuck)" = 0 ] && ! calls_has "docker builder prune -af"'
+pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=26 MOCK_CACHE_AFTER=0 run_beacon 0 85
+check "S6: a size unreadable after the prune counts nothing either way" '[ "$(state_val cap_stuck)" = 2 ]'
+
+pinned; printf 'cap_stuck=3\nlast_heal=%s\nheals_total=1\n' "$(( $(date +%s) - 60 ))" > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 85
+check "S7: the heal cooldown holds for the pinned cache too -> no heal, the sweep runs" '! heal_ran && swept'
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; IDLEWAIT=2 MOCK_CACHE=26 run_beacon 1 85
+check "S8: no job gap -> no heal and no runner stop" '! heal_ran && ! calls_has "systemctl stop"'
+pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; STUCKTICKS=0 MOCK_CACHE=26 run_beacon 0 85
+check "S9: HEAL_STUCK_TICKS=0 disables it" '! heal_ran && swept'
+pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; HEALON=0 MOCK_CACHE=26 run_beacon 0 85
+check "S10: HEAL_DANGLING=0 disables it too (it is the same heal)" '! heal_ran && swept'
+pinned
 
 echo "[M] the script's built-in defaults must equal the role defaults that actually ship"
 # Every case above runs with GITEA_CLEANUP_ENV_FILE=/nonexistent, so the ${VAR:-default} fallbacks in

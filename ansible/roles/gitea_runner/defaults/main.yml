@@ -343,4 +343,9 @@ gitea_runner_cleanup_beacon: true # node_exporter textfile beacon (gitea_runner_
 gitea_runner_cleanup_heal_dangling: true
 gitea_runner_cleanup_heal_lookback_sec: 604800 # 7d of docker journal searched for the signature
 gitea_runner_cleanup_heal_cooldown_sec: 21600 # at most one heal per 6h; a record that survives one alerts
+# Pinned-cache heal: the same heal, run without a journal signature after this many CONSECUTIVE cap
+# prunes left the build cache still over gitea_runner_cleanup_cache_max_bytes (records pinned "in use" by
+# dockerd's BuildKit until it restarts: ci-runner-3/-4/-10, 2026-10-26, 63.6/46/29 GB, 0 B reclaimable).
+# 0 disables. Needs heal_dangling true; shares its cooldown.
+gitea_runner_cleanup_heal_stuck_ticks: 3
 gitea_runner_cleanup_heal_state: /var/lib/gitea-runner-cleanup/buildkit-heal.state
