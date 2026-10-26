@@ -280,12 +280,23 @@ spec:
               mountPath: /data # SQLite file + WAL/SHM sidecars
             - name: tmp
               mountPath: /tmp
+            - name: auth-db-ca
+              mountPath: /etc/router-auth-db
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: llm-router-data
         - name: tmp
           emptyDir: {}
+        # Namespace-local copy of infra-pg's server CA; never mount its private key.
+        # The database-url Secret uses sslmode=verify-full and this sslrootcert path.
+        - name: auth-db-ca
+          secret:
+            secretName: llm-router-auth-db
+            items:
+              - key: ca.crt
+                path: ca.crt
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
