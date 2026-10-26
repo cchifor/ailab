@@ -1258,6 +1258,7 @@ hardening plan behind them: `plans/2026-10-09-dev-worker-disk-hardening-plan.md`
 | `DevWorkerDirGrowing{dir}` (warning) | a top-level directory of a user's `/workspace` or `/home` root grew > 15 GB in 24h (hourly `disk-report`; no growth series in a worker's first ~19h) | ask the agent's owner; `sudo jq . /var/lib/dev-worker-disk-report/latest.json` has the depth-2 listing |
 | `DevWorkerUnownedDataLarge{dir}` (warning) | a top-level directory that is not a git checkout, cache or tmp dir holds > 20 GB for 1h — nothing reclaims it; a directory kept knowingly by an `OWNER.json` (below) is exempt | ask for its owner and lifetime: delete, `/workspace/archive`, the NAS (below), or keep it knowingly with an `OWNER.json` |
 | `DevWorkerKeptDataExpired{dir,owner}` (warning) | a directory kept by its `OWNER.json` still holds > 20 GB 1h after its `keep_until` | ask the named owner: delete, archive, or extend `keep_until` |
+| `DevWorkerDataKept{dir,owner}` (warning, 3h) | a new or changed `OWNER.json` keep - the one notice an exemption gets | confirm a human agreed; if not, delete the `OWNER.json` |
 | `DevWorkerDiskReportStale` / `Missing` | no run in which every root scanned for 3h (a du over its 10 min budget, or one that fails, marks a scan incomplete; each root keeps its own last good values) / a worker that never completed one | `journalctl -u dev-worker-disk-report -n 30` |
 | `DevWorkerDiskGuardFailing` / `Stale` / `StateUnknown` | the guard itself is broken: a step exits non-zero, no heartbeat 30m / no completed run 3h, or no readable `/var/lib/dev-worker-disk-guard/state.json` | `systemctl status dev-worker-disk-guard.service`, then the journal |
 
@@ -1268,7 +1269,11 @@ the alert names (a top-level entry of a user's root, or an unowned child of a gr
 {"owner": "trueswarm ownership-validation", "keep_until": "2027-01-31", "reason": "S6 evidence until the write-up"}
 ```
 - `keep_until`: `YYYY-MM-DD` keeps through that whole day (UTC); an ISO datetime is taken as given. At most
-  366 days ahead - a longer promise is a decision to archive it.
+  183 days ahead - a longer promise is a decision to archive it.
+- **Seen, not prevented.** The agent that made the data can write the file too (c4 has sudo), so every new
+  or changed keep raises `DevWorkerDataKept` once (it fires for 3h and clears itself). If nobody agreed to
+  keep it, delete the `OWNER.json`.
+- A single large FILE cannot carry an `OWNER.json`: move it into a directory that has one.
 - disk-report (hourly) then exports `dev_worker_dir_kept_until_seconds{dir,owner}`, `DevWorkerUnownedDataLarge`
   stops naming it, and `DevWorkerKeptDataExpired` names the owner once `keep_until` passes.
 - Only `owner` and `keep_until` leave the file. disk-report runs as root over agent-writable trees, so a symlink,

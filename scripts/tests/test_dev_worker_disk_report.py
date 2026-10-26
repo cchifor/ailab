@@ -225,7 +225,7 @@ class OwnerFileTest(unittest.TestCase):
     DevWorkerUnownedDataLarge told its reader to "keep it knowingly" with no way to say so, so it fired
     for as long as the data lived (dev-worker-4's .private from 2026-10-09). disk-report runs as root and
     the file is agent-writable: a symlink, a FIFO, an oversized or malformed file, and a keep_until more
-    than 366 days out are all INVALID (reported, never honoured), and only owner/keep_until leave it."""
+    than 183 days out are all INVALID (reported, never honoured), and only owner/keep_until leave it."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -268,6 +268,7 @@ class OwnerFileTest(unittest.TestCase):
             "no owner": {"keep_until": "2033-06-30"},
             "bad date": {"owner": "forge", "keep_until": "soon"},
             "too far ahead": {"owner": "forge", "keep_until": "2034-12-31"},
+            "past half a year": {"owner": "forge", "keep_until": "2033-12-31"},
             "oversized": {"owner": "forge", "keep_until": "2033-06-30", "reason": "x" * 5000},
         }
         for why, doc in cases.items():
@@ -288,6 +289,19 @@ class OwnerFileTest(unittest.TestCase):
         self.assertNotIn("root-only-value", text)
         self.assertIn('dir="artifacts"} 1', text)
         self.assertIn('dir=".private"} 1', text)
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX symlinks")
+    def test_an_owner_file_reached_through_a_symlinked_directory_is_invalid(self):
+        """O_NOFOLLOW guards only the last component: wt/link -> an outside tree holding a
+        well-formed OWNER.json must not be followed as root (reviewer-claude on #1433)."""
+        outside = pathlib.Path(self.tmp.name, "outside")
+        outside.mkdir()
+        (outside / "OWNER.json").write_text(json.dumps({"owner": "root-only-value",
+                                                         "keep_until": "2033-06-30"}))
+        os.symlink(outside, os.path.join(self.root, "wt", "link"))
+        text = self.render({"wt": 30 * GB, "wt/one": 2 * GB, "wt/link": 25 * GB})
+        self.assertNotIn("root-only-value", text)
+        self.assertIn('dev_worker_dir_owner_file_invalid{user="c4",root="workspace",dir="wt/link"} 1', text)
 
     def test_unowned_data_beside_checkouts_can_be_kept_too(self):
         self.owner("wt/dump", {"owner": "forge", "keep_until": "2033-06-30"})

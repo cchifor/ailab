@@ -53,10 +53,12 @@ LABEL_MAX = 120
 # (YYYY-MM-DD, kept through that whole day UTC, or an ISO datetime), "reason"}. Only owner and
 # keep_until leave the file. This runs as root over agent-writable trees, so the file must be a
 # regular file (no symlink, no FIFO), at most OWNER_MAX_BYTES, with keep_until at most
-# OWNER_MAX_DAYS ahead - anything else is reported invalid and never honoured.
+# OWNER_MAX_DAYS ahead - anything else is reported invalid and never honoured. The agent that made
+# the data can write the file (c4 has sudo), so a keep is SEEN, not prevented: DevWorkerDataKept
+# notifies once per new or changed keep, and half a year is the longest a keep lasts unrenewed.
 OWNER_FILE = "OWNER.json"
 OWNER_MAX_BYTES = 4096
-OWNER_MAX_DAYS = 366
+OWNER_MAX_DAYS = 183
 
 
 def du(root, timeout, run=subprocess.run):
@@ -146,16 +148,37 @@ def parse_until(value):
     return at.timestamp()
 
 
-def read_owner(path, now):
-    """{"owner", "until"} from path/OWNER.json, {"invalid": True} when one is there but unusable,
-    None when there is none. Never follows a symlink and never blocks on a FIFO."""
-    p = os.path.join(path, OWNER_FILE)
-    if not os.path.lexists(p):
-        return None
-    if os.path.islink(p):
-        return {"invalid": True}
+def _open_owner_file(root, rel):
+    """A read fd for root/rel/OWNER.json, opened WITHOUT following a symlink anywhere below root -
+    not in rel's components, not in the file itself - and without blocking on a FIFO. POSIX walks
+    with dir_fd (O_DIRECTORY|O_NOFOLLOW per component: a symlink is ELOOP/ENOTDIR, and nothing can
+    be swapped in between a check and the open); elsewhere every component is lstat-checked."""
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    if hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in rel.split(os.sep):
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+            return os.open(OWNER_FILE, os.O_RDONLY | os.O_NOFOLLOW | nonblock, dir_fd=fd)
+        finally:
+            os.close(fd)
+    p = root
+    for part in rel.split(os.sep) + [OWNER_FILE]:
+        p = os.path.join(p, part)
+        if os.path.islink(p):
+            raise OSError(40, "symbolic link below the root", p)
+    return os.open(p, os.O_RDONLY | nonblock)
+
+
+def read_owner(root, rel, now):
+    """{"owner", "until"} from root/rel/OWNER.json, {"invalid": True} when one is there but
+    unusable (or reachable only through a symlink), None when there is none."""
     try:
-        fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = _open_owner_file(root, rel)
+    except FileNotFoundError:
+        return None
     except OSError:
         return {"invalid": True}
     try:
@@ -184,7 +207,7 @@ def owners(root, kinds, nested, now):
     directories and the unowned children of grouping directories. Git checkouts are never read."""
     out = {}
     for name in [n for n, k in kinds.items() if k == "other"] + list(nested):
-        found = read_owner(os.path.join(root, name), now)
+        found = read_owner(root, name, now)
         if found is not None:
             out[name] = found
     return out
