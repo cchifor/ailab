@@ -2,7 +2,8 @@
 # edge/edge-proxy that fronts every *.chifor.me hostname, directly and behind the tunnel.
 # Metrics via apps/edge/proxy/podmonitor.yaml (job=edge-proxy; source=caddy for Caddy's per-host
 # histogram, source=reloader for the cert-reloader sidecar's counters), DaemonSet readiness from
-# kube-state-metrics, and the issued certificate's expiry from cert-manager.
+# kube-state-metrics, and the issued certificate's expiry from cert-manager (its series carry the
+# Certificate's namespace as exported_namespace; `namespace` is cert-manager's own).
 #
 # THE CERTIFICATE RULES: the cert-probe sidecar reads the certificate each pod's Caddy SERVES (TLS
 # to localhost), so EdgeCertServedExpiringSoon is the direct answer, and EdgeCertProbeFailing says
@@ -146,7 +147,7 @@ spec:
               EdgeCertServedExpiringSoon is blind there.
         - alert: EdgeCertExpiringSoon
           expr: >-
-            certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}
+            certmanager_certificate_expiration_timestamp_seconds{exported_namespace="edge",name="edge-wildcard"}
             - time() < 14 * 86400
           for: 1h
           labels:
