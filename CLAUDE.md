@@ -65,7 +65,7 @@ Free static space: **none**. `.37`/`.39` went to the cloud1 CI runners cloud-ci-
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs (node2/node3; ai-llm-1 .44/5001 destroyed 2026-10-02) | .45 / .46 | 5002–5003 |
 | registry LXC (node1) | .36 | 5004 |
-| Edge ingress VIP (MetalLB pool `edge`, Caddy `edge-proxy`; WAN 443 forwards here; ADR 0040, `docs/standards/edge-ingress.md`) | .51 | — |
+| Edge ingress VIP (MetalLB pool `edge`, Caddy `edge-proxy`; reserved 2026-10-27, deployed from ADR 0040's P2, WAN 443 forwarded here from P3; `docs/standards/edge-ingress.md`) | .51 | — |
 | Cloud CI runner VMs (`cloud-ci-1..13` on **cloudlab** cloud1 ×3 / cloud2 ×3 / cloud3 ×7; opportunistic, offline at night by design; cloud-ci-6 quarantined; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .29 (cloud1) · .13 / .44 / .50 (cloud2) · .34 / .35 / .30 / .5 / .6 / .7 / .12 (cloud3) | 6101–6113 |
 | Cloud Windows 11 Pro VM `constantin-win-01` (**cloudlab** cloud3; RDP as `c4` with the `af/estate/cloudlab-win11` password, key-only SSH `ssh c4@192.168.0.38`; `../cloudlab/kubernetes/infra/windows-vm`) | .38 | 6201 |
 

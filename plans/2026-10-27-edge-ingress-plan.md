@@ -508,7 +508,7 @@ follows `wan` only, and the documented response is `force_tunnel`.
   `scripts/tests/fixtures/edge/`; a runtime fixture harness `scripts/tests/edge_runtime.sh` (pinned
   Caddy + echo and a fake auth upstream in docker).
 - `kubernetes/apps/infrastructure/sources/metallb.yaml`, `kubernetes/apps/infrastructure/metallb/`
-  (HelmRelease), `kubernetes/apps/metallb-config/` (pool, L2Advertisement) and its Flux
+  (HelmRelease), `kubernetes/apps/infrastructure/metallb-config/` (pool, L2Advertisement) and its Flux
   Kustomization in `kubernetes/apps/clusters/ai/`.
 - `kubernetes/apps/apps/edge/proxy/` (DaemonSet, Services, generator, Certificate, NetworkPolicy,
   PodMonitor, PrometheusRule), wired into `edge/kustomization.yaml`.

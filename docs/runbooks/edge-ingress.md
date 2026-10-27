@@ -13,7 +13,7 @@ delivers; until then the step does not exist yet.
 | Host list, modes, auth, backends | `kubernetes/edge/hostnames.yaml` |
 | Generated proxy config | `kubernetes/apps/apps/edge/proxy/Caddyfile` (never edit by hand: `just edge-render`) |
 | Proxy workload | `kubernetes/apps/apps/edge/proxy/` (namespace `edge`, DaemonSet `edge-proxy`) |
-| VIP | 192.168.0.51 (MetalLB pool `edge`, `kubernetes/apps/metallb-config/`) |
+| VIP | 192.168.0.51 (MetalLB pool `edge`, `kubernetes/apps/infrastructure/metallb-config/`) |
 | Gateway desired state / owned IDs | `kubernetes/edge/gateway.yaml` / `kubernetes/edge/gateway-state.yaml` |
 | Cloudflare DNS | `kubernetes/infra/cloudflare` (local state in the operator's checkout) |
 | Tunnel connector | `kubernetes/apps/apps/edge/cloudflared.yaml` |
@@ -42,12 +42,13 @@ the MAC to a control-plane VM, or read the speaker logs in `metallb-system`.
 
 1. Add the entry to `hostnames.yaml`, with every security field and a `smoke` outcome, and start it
    at `edge: tunnel` and `lan_dns: false`.
-2. `just edge-render`, commit, open the PR. CI validates the schema and parity, and runs the runtime
-   fixture.
-3. After merge: `just edge-smoke`. Then set `lan_dns: true` and run `just edge-gateway-plan` and
-   `just edge-gateway-apply --plan-hash <hash>`. Then `tofu apply` for its DNS record.
-4. Add the NetworkPolicy peer for `edge-proxy` (namespace `edge`, `app.kubernetes.io/name: edge-proxy`)
-   if the backend has an ingress policy.
+2. In the SAME PR, if the backend has an ingress NetworkPolicy, admit the `edge-proxy` pods (namespace
+   `edge`, `app.kubernetes.io/name: edge-proxy`), or the proxy cannot reach it and step 4 fails.
+3. `just edge-render`, commit, open the PR. CI validates the schema and parity, and runs the runtime
+   fixture. Merge, and wait for Flux to reconcile the policy and the proxy.
+4. `just edge-smoke --host <name>` from the LAN. Only when it passes: set `lan_dns: true`, run
+   `just edge-gateway-plan`, then `just edge-gateway-apply --plan-hash <hash>`, then `tofu apply` for
+   its DNS record.
 
 ## Switch a host between tunnel and direct (from P4)
 
@@ -68,7 +69,8 @@ for clients holding the old answer.
 ```bash
 just edge-gateway-plan                         # prints the diff and a plan hash; never mutates
 just edge-gateway-apply --plan-hash <hash>     # aborts if anything changed since the plan
-just edge-gateway-apply --only dhcp            # first step on a rebuild
+just edge-gateway-plan --only dhcp             # first step on a rebuild ...
+just edge-gateway-apply --only dhcp --plan-hash <hash>
 ```
 
 - **Owned objects**: listed in `gateway-state.yaml` (commit it after every apply). The reconciler
@@ -86,8 +88,11 @@ just edge-gateway-apply --only dhcp            # first step on a rebuild
 |---|---|
 | One host misbehaves direct | Switch it to tunnel (above) |
 | All direct hosts | `force_tunnel: true` + `tofu apply` + merge |
-| The proxy or MetalLB is broken (after P5) | (1) `force_tunnel` + `tofu apply`; (2) `git revert` of the P5 commit, which takes cloudflared back to per-host backends (app policies still admit cloudflared until P9); (3) set `lan_dns: false` for the affected hosts + `just edge-gateway-apply`; (4) wait out the caches (300 s public, 60 s local) |
-| Stop serving the WAN at once | `port_forward.enabled: false` in `gateway.yaml` + `just edge-gateway-apply` |
+| The proxy or MetalLB is broken (after P5) | (1) `force_tunnel` + `tofu apply`; (2) `git revert` of the P5 commit, which takes cloudflared back to per-host backends (app policies still admit cloudflared until P9); (3) set `lan_dns: false` for the affected hosts, then `just edge-gateway-plan` and `just edge-gateway-apply --plan-hash <hash>`; (4) wait out the caches (300 s public, 60 s local) |
+| Stop serving the WAN at once | `port_forward.enabled: false` in `gateway.yaml`, then `just edge-gateway-plan` and `just edge-gateway-apply --plan-hash <hash>` |
+
+Every apply, emergency or not, takes the hash of the plan it carries out; `--only` narrows both the plan
+and the apply to one object type and is part of the hash.
 
 **When git.chifor.me is behind the broken proxy**: push through a port-forward. It reaches the
 cluster API through the Talos VIP, not the proxy:

@@ -52,7 +52,11 @@ Validation MUST reject:
 - unknown keys and duplicate names;
 - a missing security field (`exposure`, `auth`);
 - a private host in tunnel mode;
-- an `access_gated` host whose effective mode is `direct`, unless it is `auth: authelia` or private.
+- an `access_gated` host whose effective mode is `direct`, unless it is `auth: authelia` or private;
+- an `access_gated` host with `auth: none`. In tunnel mode such a host is served to every trusted
+  source on the direct listener with no Access in front, so it needs `authelia` or `native` auth
+  whatever its mode;
+- `auth: none` on a private host.
 
 A parity test MUST hold every backend equal to the routing it replaced (the frozen 2026-10-27
 cloudflared ingress), except for differences listed in the test with a reason.
@@ -152,13 +156,13 @@ Another vendor needs another reconciler with the same plan/apply guarantees.
 
 Order matters. Each step is idempotent:
 
-1. **Gateway DHCP**: `just edge-gateway-apply --only dhcp`. Then confirm the VIP has no lease and
-   answers no ARP.
+1. **Gateway DHCP**: `just edge-gateway-plan --only dhcp`, then `just edge-gateway-apply --only dhcp
+   --plan-hash <hash>`. Then confirm the VIP has no lease and answers no ARP.
 2. **Flux**: the infrastructure layer installs MetalLB; `metallb-config` then creates the pool and
    advertisement; `apps` deploys the proxy. Assert the Service's assigned address equals the VIP.
 3. **Smoke**: `just edge-smoke` passes on the LAN through the VIP.
 4. **Gateway, the rest**: local DNS records (hosts with `lan_dns`), then the 443 forward:
-   `just edge-gateway-apply`.
+   `just edge-gateway-plan`, then `just edge-gateway-apply --plan-hash <hash>`.
 5. **Cloudflare DNS**: `tofu apply` in `kubernetes/infra/cloudflare`.
 6. **cloudflared**: catch-all to the tunnel listener.
 

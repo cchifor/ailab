@@ -1,9 +1,10 @@
 # Runbook — internet exposure (Cloudflare Tunnel + Tailscale)
 
-> **Superseded for web hostnames by ADR 0040 (2026-10-27).** `*.chifor.me` now goes through the in-cluster
-> edge proxy, either direct (the gateway forwards 443) or through this tunnel, chosen per host in
-> `kubernetes/edge/hostnames.yaml`. Operations: `docs/runbooks/edge-ingress.md`. The Tailscale part below
-> is unchanged.
+> **Target architecture: ADR 0040 (accepted 2026-10-27).** The web hostnames are moving to an in-cluster
+> edge proxy, reached directly (the gateway forwards 443) or through this tunnel, chosen per host in
+> `kubernetes/edge/hostnames.yaml`. **Until its phase P5 lands, the tunnel routing below is still the live
+> path** and this runbook stays the operational procedure; `docs/runbooks/edge-ingress.md` marks which
+> steps each phase delivers. The Tailscale part below is unchanged.
 
 Hybrid model (chosen 2026-06-14; admin UIs moved public 2026-06-18, PR #24 — see ADR 0007):
 - **Public** (via Cloudflare Tunnel + Cloudflare Access — no open ports, no port-forwarding). Access
