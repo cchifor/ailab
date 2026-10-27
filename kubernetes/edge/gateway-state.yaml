@@ -8,7 +8,9 @@ dhcp_network:
   id: 6584469af81ca8458f9a6af1
   name: Home
 intents: []
-port_forward: null
+port_forward:
+  id: 6ae0e947ca11f9b8900a2901
+  name: ailab-edge-https
 static_dns:
   agentforge.chifor.me: 6ae0e56aca11f9b8900a24fd
   api.chifor.me: 6ae0e56bca11f9b8900a2500
