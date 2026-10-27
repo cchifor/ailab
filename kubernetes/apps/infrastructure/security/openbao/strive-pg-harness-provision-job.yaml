@@ -235,7 +235,7 @@ spec:
         - name: provision
           # Official OpenBao image (bao CLI + busybox sh), the same pin as the sibling provision
           # Jobs: the server's MINOR (renovate.json holds the CLI to 2.6.x).
-          image: quay.io/openbao/openbao:2.6.4
+          image: quay.io/openbao/openbao:2.6.5
           command: ["/bin/sh", "/scripts/provision.sh"]
           env:
             # The headless per-pod name, not the `openbao` Service: a pod that is up but sealed
