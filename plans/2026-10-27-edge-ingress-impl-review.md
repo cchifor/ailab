@@ -1,6 +1,6 @@
 # Implementation review — edge-ingress P2 — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Round-1 verification
 
