@@ -68,8 +68,9 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
    now serves the host.
 2. `tofu apply` from a checkout at that merge: the DNS record becomes a DNS-only CNAME to the apex.
 3. Check from outside: an external HTTP check of `https://<host>.chifor.me`. The proxy's access log
-   shows the probe's public address. Cloudflare flattens the CNAME, so resolvers answer with the
-   apex's A record, not a CNAME: that is expected.
+   shows the probe's public address. Resolvers answer with the CNAME and the apex's A record
+   (Cloudflare flattens only the apex by default): that is expected. The apex A record must stay
+   DNS-only (grey cloud); proxied, every direct host would resolve to Cloudflare and fail there.
 
 **Before the first host goes direct (P6)**: Caddy labels its per-host metrics with whatever `Host`
 arrives over TLS (`per_host` on a TLS server observes every host; only plain-HTTP servers fall back
@@ -93,8 +94,10 @@ that commit, merge.
 ## DNS records and their state (from P4)
 
 `kubernetes/infra/cloudflare/dns.tf` creates exactly the records in `kubernetes/edge/dns-records.json`,
-which `just edge-render` generates from the validated registry. Its plan FAILS (preconditions on the
-output `edge_dns_artifact`, evaluated on every plan, and on each record) when the file was not rendered
+which `just edge-render` generates from the validated registry. Plan and apply with `just edge-dns-plan`
+and `just edge-dns-apply` (arguments pass through): they run `render.py --check` first, so the file is
+the renderer's own output, not just self-consistent. Its plan FAILS (preconditions on the
+output `edge_dns_artifact` for an untargeted plan, and on each record, which a `-target` plan keeps) when the file was not rendered
 from the committed registry (a hash of it), when its records are not the ones rendered for that registry
 (a hash over both: a record edited, added or dropped by hand), when its hostnames are not exactly the
 registry's hosts, when it names another zone or tunnel, or when a record has no valid shape. Fix the
@@ -108,6 +111,9 @@ and `TF_VAR_trueswarm_admin_access_client_secret` (the trueswarm-admin checkout'
 `deploy/foundation/admin-access-identity.sops.yaml`, `stringData.OIDC_CLIENT_SECRET`; or the value the
 operator state already holds for the identity provider; never print it). The plan must then touch only
 `cloudflare_dns_record.edge[...]`.
+
+**Before P4's first apply** a single-record `-target` is refused (the moves are pending; tofu asks to target
+`cloudflare_dns_record.edge` and `cloudflare_dns_record.tunnel` whole), so the first apply is untargeted.
 
 **P4's first apply** moves the 27 records (`moved.tf`: `tunnel["x"]` becomes `edge["x"]`), imports
 `relay` and creates `edge-canary`: 0 to change, 0 to destroy. Anything else: stop. Then delete
@@ -158,12 +164,16 @@ tofu plan  '-target=cloudflare_dns_record.edge["edge-canary"]'
 tofu apply '-target=cloudflare_dns_record.edge["edge-canary"]'
 ```
 
-1. tunnel to direct (`edge: direct`): an in-place update, proxied CNAME to a DNS-only CNAME (answered
-   flattened, as the apex's A record).
-2. direct to private (`exposure: private`, drop `edge`): a replacement, CNAME to A. Measure the NXDOMAIN
-   window on both resolvers.
+1. tunnel to direct (`edge: direct`): expected an in-place update, proxied CNAME to a DNS-only CNAME
+   (answered as the CNAME plus the apex's A record).
+2. direct to private (`exposure: private`, drop `edge`): expected a replacement, CNAME to A (provider
+   5.24.0 planned the type change as `must be replaced` on 2026-10-27). Measure the NXDOMAIN window on
+   both resolvers. Record what each plan actually says (`update in-place` or `must be replaced`).
 3. private to tunnel: a replacement, A to CNAME.
-4. Interrupt a replacement once (Ctrl-C after the delete) and recover as in "An interrupted replacement".
+4. Interrupt a replacement. One Ctrl-C lets tofu finish its in-flight call and save state, so it can only
+   leave the first case of "An interrupted replacement" (the record deleted, the create never sent);
+   rehearse that. The second case (created remotely, not saved) needs a hard stop during the create (a
+   second Ctrl-C, or killing tofu); rehearse it too if you can time it, and record which case you got.
 
 Record the provider and tofu versions, each plan's summary, each window and what each resolver answered.
 A resolver that kept serving its cached answer through the replacement hides the gap: record that as

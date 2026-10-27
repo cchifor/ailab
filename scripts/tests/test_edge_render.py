@@ -275,7 +275,11 @@ class DnsRecords(unittest.TestCase):
         self.assertIn("setsubtract(keys(local.edge_dns.records), local.edge_registry_hosts)", guard)
         self.assertIn("setsubtract(local.edge_registry_hosts, keys(local.edge_dns.records))", guard)
         self.assertEqual(guard.count("precondition {"), 4)
-        self.assertEqual(tf.count("precondition {"), 5)
+        # the same four on every record too: a `-target` plan prunes an output with no resource ancestors
+        resource = tf[tf.index('resource "cloudflare_dns_record" "edge"'):]
+        for line in [ln.strip() for ln in guard.splitlines() if ln.strip().startswith(("condition", "&& length"))]:
+            self.assertIn(line, resource)
+        self.assertEqual(resource.count("precondition {"), 5)
         # no second implementation of the mode rule, and no warn-only check block
         for word in ("edge_default", "force_tunnel", "check \""):
             self.assertNotIn(word, tf)

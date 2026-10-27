@@ -6,23 +6,30 @@
 #
 #   tunnel   proxied CNAME -> <tunnel>.cfargotunnel.com   (Cloudflare's edge, then cloudflared)
 #   direct   DNS-only CNAME -> the apex chifor.me, whose A record the home gateway's DDNS keeps on
-#            the WAN address (Cloudflare flattens it, so resolvers see A answers). The gateway
-#            forwards 443 to the edge proxy's VIP.
+#            the WAN address (that A record must stay DNS-only). Resolvers see the CNAME and the
+#            apex's A record (Cloudflare flattens only the apex by default). The gateway forwards 443
+#            to the edge proxy's VIP.
 #   private  DNS-only A -> the VIP 192.168.0.51 (resolves anywhere, reachable only on the LAN/VPN)
 #
 # BLOCKING GUARDS: preconditions, which fail the plan (a `check` block would only warn). The artifact
-# guards sit on the output edge_dns_artifact below, which is evaluated on every plan: a precondition on
-# the records resource runs once per record, so an emptied or shortened records map would skip it.
+# guards run in two places: on the output edge_dns_artifact, which every UNtargeted plan evaluates
+# however many records there are (an emptied map has no record to carry them), and on every record,
+# which is what a `-target` plan keeps (it prunes an output with no resource ancestors).
 #   1. the file carries the sha256 of the registry as committed (a registry change without
 #      `just edge-render`, which refuses an invalid registry, never reaches Cloudflare);
 #   2. it carries a sha256 over that registry AND its records, recomputed here, so a record edited,
 #      added or dropped by hand fails even with the registry hash intact;
 #   3. its hostnames are exactly the registry's hosts;
 #   4. its zone and tunnel are this module's;
-#   5. (per record, on the resource) every record has exactly one of the three shapes above.
+#   5. (per record only) every record has exactly one of the three shapes above.
+# The hashes are self-reported by the file. They catch a stale render and an edit made by hand; they
+# are not a signature. Parity with the renderer itself is enforced by CI's `render.py --check` on every
+# push (it regenerates the file and refuses any difference) and by `just edge-dns-plan/-apply`, which
+# run the same check before tofu; the runbook applies from merged commits.
 #
-# A mode change between a CNAME and an A record REPLACES the record (the two types cannot coexist
-# on one name, so create_before_destroy would collide): a few seconds of NXDOMAIN. Rehearse it on
+# A mode change between a CNAME and an A record REPLACES the record: provider 5.24.0 plans the type
+# change as delete-then-create (seen 2026-10-27, `replace_paths: [["type"]]`), and the two types cannot
+# coexist on one name, so create_before_destroy would collide: a few seconds of NXDOMAIN. Rehearse it on
 # edge-canary before any real host moves (docs/runbooks/edge-ingress.md, "Rehearse a mode change").
 #
 # SECURITY (Access-gated hosts): while such a host is in tunnel mode its record must not resolve
@@ -74,6 +81,23 @@ resource "cloudflare_dns_record" "edge" {
   comment = lookup(var.tunnel_record_comments, each.key, null)
 
   lifecycle {
+    precondition {
+      condition     = local.edge_dns.registry_sha256 == sha256(local.edge_registry)
+      error_message = "kubernetes/edge/dns-records.json was not rendered from the committed kubernetes/edge/hostnames.yaml: run `just edge-render` (it validates the registry first) and commit both."
+    }
+    precondition {
+      condition     = local.edge_dns.binding_sha256 == sha256("${local.edge_registry}\n${jsonencode(local.edge_dns.records)}")
+      error_message = "The records in kubernetes/edge/dns-records.json are not the ones render.py wrote for this registry (edited, added or removed by hand): run `just edge-render`."
+    }
+    precondition {
+      condition = (length(setsubtract(keys(local.edge_dns.records), local.edge_registry_hosts)) == 0
+      && length(setsubtract(local.edge_registry_hosts, keys(local.edge_dns.records))) == 0)
+      error_message = "kubernetes/edge/dns-records.json does not hold exactly one record per registry host: run `just edge-render`."
+    }
+    precondition {
+      condition     = local.edge_dns.zone == "chifor.me" && local.edge_dns.tunnel_id == var.tunnel_id
+      error_message = "kubernetes/edge/dns-records.json names another zone or tunnel than this module (chifor.me, var.tunnel_id)."
+    }
     precondition {
       condition = (
         (each.value.mode == "tunnel" && each.value.type == "CNAME" && each.value.proxied && each.value.content == local.tunnel_target && each.value.ttl == 1)
