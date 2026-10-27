@@ -1,149 +1,60 @@
-# Implementation review — edge-ingress P2 — round 1
+# Implementation review — edge-ingress P2 — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: pending -->
+
+## Summary
+
+- Sixteen round-1 findings are resolved; three remain incomplete. Two additional deployment issues are raised below.
+- Accepted the author’s 91 runtime checks, mutation result, 34 unit tests, promtool results and kustomize builds without rerunning them.
+- The supplied spec branch now requires a separate admin source tier (`b0f16048`, newer than the reviewed implementation); that boundary is missing.
+- Deployment must ensure every Authelia replica enforces the new rules before the proxy accepts traffic.
+- P2 completion still requires recorded live evidence: VIP allocation and address availability, certificates from every proxy pod, real admin/non-admin authorization, NetworkPolicy enforcement including Vaultwarden’s existing tunnel path, source attribution, and the planned failover and stream-renewal drills.
+
+## Round-1 verification
+
+- Error logs bypass credential and query redaction — resolved: default and access loggers both apply the filter.
+- Homepage bypasses Vaultwarden’s proxy trust boundary — resolved: the exception is removed and Homepage checks the public URL.
+- Certificate fixture files are inaccessible to the Linux CI user — resolved: certificate generation and Caddy use the invoking UID/GID on POSIX.
+- Liveness restarts leave the replacement container permanently drained — resolved: startup removes the shutdown marker while preserving the operator’s drain marker.
+- The reloader’s first pass can acknowledge a certificate never loaded — resolved: an empty initial loaded hash requires successful validation and forced reload, with startup retries.
+- Certificate expiry monitoring checks the Secret instead of each served certificate — incomplete: fresh issuance plus a healthy reloader cannot detect an old Secret projection.
+- The two scrape endpoints have indistinguishable target labels — resolved: `source=caddy|reloader` separates them.
+- HTTPS upstreams do not preserve the required Host — resolved: explicit Host preservation leaves configured TLS server names intact.
+- Forward-auth omits the canonical CF-Connecting-IP — resolved: the forward-auth block explicitly overwrites it.
+- The tunnel IP regex accepts invalid addresses and rejects valid ones — incomplete: address equality is not strict header validation; peer-equal addresses fail and port/zone forms pass.
+- Duplicate YAML keys silently replace security declarations — resolved: the SafeLoader subclass rejects repeated mapping keys.
+- A quoted false value disables upstream TLS verification — resolved: the option requires a boolean.
+- Parity checks allow additional sensitive routes — resolved: ordered route/target lists must match exactly.
+- The tunnel NetworkPolicy boundary is never exercised — incomplete: the new checker can report probe failures as successful policy denials.
+- Required private-path and failure cases are absent — resolved: private Vaultwarden paths, explicit auth denial and malformed-certificate recovery are covered.
+- Connection refusal aborts the fixture’s startup retry loop — resolved: connection establishment is caught and startup retries.
+- Cancellation leaves running Docker fixtures behind — resolved: signal handling, run-scoped cleanup and age-scoped stale cleanup cover the persistent fixture resources.
+- Smoke testing can crash on a connection-closing response — resolved: certificate capture happens during connection establishment.
+- Unknown hosts do not consistently return 404 — resolved: unknown-host handling precedes tunnel validation and HTTP redirects.
 
 ## Findings
 
-### Error logs bypass credential and query redaction
-**Location:** scripts/edge/render.py:411; scripts/tests/edge_runtime.py:315
+### The required admin source tier is missing
+**Location:** scripts/edge/render.py:339; kubernetes/edge/hostnames.yaml:36
 **Severity:** blocker
-**Resolution (accepted):** 87683835: `log default` carries the same filter; the fixture forces auth and upstream 502s with sentinels and checks the whole log (a mutation without the filter leaks four of five sentinels).
+<!-- codex: round-2: The supplied spec branch’s adopted standard §5.3, updated by b0f16048 after this implementation, excludes the lab statics block from admin access, but this renderer applies the broad LAN allowlist to private hosts, Access-gated tunnel-mode hosts and restricted paths, admitting dev-workers and CI runners to those surfaces. Implement and validate the separate admin_sources tier, preserve the named owner exception, and add fixture/smoke coverage proving a lab source can reach ordinary LAN services but receives 403 for admin surfaces. -->
 
-### Homepage bypasses Vaultwarden’s proxy trust boundary
-**Location:** kubernetes/apps/apps/vaultwarden/networkpolicy.yaml:34
-**Severity:** blocker
-**Resolution (accepted):** 0f51d791: the Homepage exception is gone; its tile checks the public URL.
-
-### Certificate fixture files are inaccessible to the Linux CI user
-**Location:** scripts/tests/edge_runtime.py:128; scripts/tests/edge_runtime.py:131
-**Severity:** blocker
-**Resolution (accepted):** c4fe1c8b: openssl and the proxy run with --user uid:gid on POSIX hosts.
-
-### Liveness restarts leave the replacement container permanently drained
-**Location:** kubernetes/apps/apps/edge/proxy/daemonset.yaml:90
+### Proxy activation races the Authelia policy rollout
+**Location:** kubernetes/apps/apps/edge/kustomization.yaml:18; kubernetes/apps/apps/edge/proxy/daemonset.yaml:78
 **Severity:** important
-**Resolution (accepted):** a7302b4e: preStop writes /config/shutdown, removed by the container command before Caddy starts; /config/drain is the operator's alone.
+<!-- codex: round-2: Authelia and the new proxy deploy in the same apps Flux reconciliation, while proxy readiness checks only Caddy’s health endpoint; an old Authelia replica still applying default_policy: one_factor can therefore authorize a non-admin for dsh or the monitoring UIs if its rollout lags or stalls. Stage and verify the complete Authelia policy rollout before enabling proxy traffic, using an enforced deployment dependency or a documented staged activation with real admin/non-admin checks. -->
 
-### The reloader’s first pass can acknowledge a certificate never loaded
-**Location:** kubernetes/apps/apps/edge/proxy/cert-reloader.sh:49
+### Client/peer equality does not validate the tunnel header
+**Location:** scripts/edge/render.py:534
 **Severity:** important
-**Resolution (accepted):** a7302b4e: the first pass validates and reloads whatever is mounted, retrying every 10 s until it succeeds; a fixture case covers a renewal that lands before the reloader starts.
+<!-- codex: round-2: A valid CF-Connecting-IP equal to the cloudflared peer is rejected, while malformed values such as 203.0.113.9:443 or 203.0.113.9%junk pass because Caddy’s parser strips ports and zone suffixes before returning client_ip; see the pinned version’s trustedRealClientIP implementation (https://github.com/caddyserver/caddy/blob/v2.11.7/modules/caddyhttp/server.go). Validate exactly one raw IP independently of peer trust and parser fallback, retaining IPv6/mapped-address coverage and adding peer-equal, port-bearing and zone-bearing cases. -->
 
-### Certificate expiry monitoring checks the Secret instead of each served certificate
-**Location:** kubernetes/apps/infrastructure/monitoring/edge-proxy-rules.yaml:86; docs/runbooks/edge-ingress.md:129
+### Certificate alerts still cannot detect stale served certificates
+**Location:** kubernetes/apps/infrastructure/monitoring/edge-proxy-rules.yaml:124; kubernetes/apps/apps/edge/proxy/cert-reloader.sh:63
 **Severity:** important
-**Resolution (accepted):** a7302b4e: heartbeat and files-not-loaded gauges, with EdgeCertNotLoaded, EdgeCertReloaderStale and EdgeCertReloaderNotScraped; with EdgeCertExpiringSoon they compose the served-certificate claim (stated in the rules file).
+<!-- codex: round-2: If a node’s Secret projection remains old after cert-manager renews, Caddy and the reloader agree on the old files, the heartbeat and scrapes remain healthy, and the expiry rule sees only the fresh certificate, so every added certificate alert can remain silent while that pod’s served certificate expires. Implement the planned per-pod TLS certificate expiry probe, including failed/missing-probe alerts, and cover a fresh issued certificate alongside an old served certificate. -->
 
-### The two scrape endpoints have indistinguishable target labels
-**Location:** kubernetes/apps/apps/edge/proxy/podmonitor.yaml:19
+### NetworkPolicy failures can produce a false pass
+**Location:** scripts/edge/netpol-check.sh:31
 **Severity:** important
-**Resolution (accepted):** a7302b4e: source=caddy|reloader; EdgeProxyNotScraped reads source=caddy, EdgeCertReloaderNotScraped the reloader.
-
-### HTTPS upstreams do not preserve the required Host
-**Location:** scripts/edge/render.py:263; kubernetes/edge/hostnames.yaml:287
-**Severity:** important
-**Resolution (accepted):** 87683835: `header_up Host {host}` on every HTTPS upstream without host_header; the fixture's TLS echo asserts Host and SNI for dw1, proxmox and openbao.
-
-### Forward-auth omits the canonical CF-Connecting-IP
-**Location:** scripts/edge/render.py:434
-**Severity:** important
-**Resolution (accepted):** 87683835: set in edge_authelia; the auth stand-in echoes what it received through Remote-Name and the fixture asserts it on both listeners.
-
-### The tunnel IP regex accepts invalid addresses and rejects valid ones
-**Location:** scripts/edge/render.py:57
-**Severity:** important
-**Resolution (accepted):** 87683835: refused when {client_ip} == {remote_host} (Caddy's own parser fell back to the peer) or the joined header has a comma; cases for 999.999.999.999, 1:2:3 and ::ffff:192.0.2.1.
-
-### Duplicate YAML keys silently replace security declarations
-**Location:** scripts/edge/render.py:232
-**Severity:** important
-**Resolution (accepted):** 87683835: a SafeLoader subclass raises on any repeated key; tests load files with a duplicated host and a duplicated field.
-
-### A quoted false value disables upstream TLS verification
-**Location:** scripts/edge/render.py:162; scripts/edge/render.py:268
-**Severity:** important
-**Resolution (accepted):** 87683835: tls_insecure_skip_verify must be a bool; tls_ca, tls_server_name and host_header plain tokens; respond restricted; smoke statuses integers.
-
-### Parity checks allow additional sensitive routes
-**Location:** scripts/tests/test_edge_render.py:171
-**Severity:** important
-**Resolution (accepted):** 87683835: the ordered (path, target) lists must be equal, and Host/SNI overrides absent unless cloudflared had them or the difference is listed.
-
-### The tunnel NetworkPolicy boundary is never exercised
-**Location:** scripts/tests/edge_runtime.py:305; kubernetes/apps/apps/edge/proxy/networkpolicy.yaml:26
-**Severity:** important
-**Resolution (accepted):** c4fe1c8b: scripts/edge/netpol-check.sh runs the four peers against the Service and a pod IP in the cluster, after merge (P2 verification). Docker cannot apply NetworkPolicy, as the fixture's docstring now states; its tun-forged case now expects 400 (client equals peer).
-
-### Required private-path and failure cases are absent
-**Location:** scripts/tests/edge_runtime.py:327; scripts/tests/edge_runtime/servers.py:40; scripts/tests/edge_runtime.py:405
-**Severity:** important
-**Resolution (accepted):** c4fe1c8b: vault /admin private on both listeners, an explicit auth denial that never reaches the backend, and a malformed certificate followed by recovery.
-
-### Connection refusal aborts the fixture’s startup retry loop
-**Location:** scripts/tests/edge_runtime/client.py:16; scripts/tests/edge_runtime.py:154
-**Severity:** important
-**Resolution (accepted):** c4fe1c8b: create_connection is inside the handler; the harness retries to a 30 s deadline.
-
-### Cancellation leaves running Docker fixtures behind
-**Location:** scripts/tests/edge_runtime.py:52; scripts/tests/edge_runtime.py:459; .gitea/workflows/manifests.yaml:42
-**Severity:** important
-**Resolution (accepted):** c4fe1c8b: random run id, labels with a start time, SIGTERM/SIGHUP raise SystemExit so `finally` runs, label-and-age-scoped stale cleanup.
-
-### Smoke testing can crash on a connection-closing response
-**Location:** scripts/edge/smoke.py:53
-**Severity:** nit
-**Resolution (accepted):** c4fe1c8b: the certificate is read in connect().
-
-### Unknown hosts do not consistently return 404
-**Location:** scripts/edge/render.py:474; scripts/edge/render.py:495
-**Severity:** nit
-**Resolution (accepted):** 87683835: `respond @unknown_host 404` first on :8080 and :8081; cases cover a bad header and an http visitor for an unknown host.
-
-## Diff stat
-
-```text
- .gitea/workflows/manifests.yaml                    |  15 +
- justfile                                           |  16 +
- kubernetes/apps/apps/agentforge/networkpolicy.yaml |   7 +
- kubernetes/apps/apps/auth/configuration.yml        |  20 +
- kubernetes/apps/apps/dsh/networkpolicy.yaml        |   3 +
- kubernetes/apps/apps/dsh/searxng-auth.yaml         |   3 +
- kubernetes/apps/apps/edge/kustomization.yaml       |   3 +
- kubernetes/apps/apps/edge/proxy/Caddyfile          | 823 +++++++++++++++++++++
- kubernetes/apps/apps/edge/proxy/cert-reloader.sh   |  68 ++
- kubernetes/apps/apps/edge/proxy/certificate.yaml   |  24 +
- kubernetes/apps/apps/edge/proxy/daemonset.yaml     | 147 ++++
- kubernetes/apps/apps/edge/proxy/kustomization.yaml |  18 +
- kubernetes/apps/apps/edge/proxy/networkpolicy.yaml |  40 +
- kubernetes/apps/apps/edge/proxy/podmonitor.yaml    |  25 +
- kubernetes/apps/apps/edge/proxy/services.yaml      |  45 ++
- kubernetes/apps/apps/headlamp/networkpolicy.yaml   |   7 +
- kubernetes/apps/apps/keycloak/network-policy.yaml  |   7 +
- kubernetes/apps/apps/llm-router/edge.yaml          |  10 +-
- kubernetes/apps/apps/llm-router/router.yaml        |   5 +-
- kubernetes/apps/apps/relay/network-policy.yaml     |  14 +-
- .../apps/apps/vaultwarden/kustomization.yaml       |   1 +
- .../apps/apps/vaultwarden/networkpolicy.yaml       |  38 +
- kubernetes/apps/apps/vaultwarden/vaultwarden.yaml  |   6 +-
- kubernetes/apps/clusters/ai/metallb.yaml           |  39 +
- .../cert-manager-config/clusterissuers.yaml        |   4 +-
- .../metallb-config/kustomization.yaml              |   4 +
- .../apps/infrastructure/metallb-config/pool.yaml   |  28 +
- .../apps/infrastructure/metallb/helmrelease.yaml   |  53 ++
- .../apps/infrastructure/metallb/kustomization.yaml |   5 +
- .../apps/infrastructure/metallb/namespace.yaml     |  10 +
- .../monitoring/edge-proxy-rules.test.yaml          | 166 +++++
- .../monitoring/edge-proxy-rules.yaml               |  95 +++
- .../infrastructure/monitoring/kustomization.yaml   |   1 +
- .../apps/infrastructure/sources/kustomization.yaml |   1 +
- .../apps/infrastructure/sources/metallb.yaml       |   9 +
- kubernetes/edge/hostnames.yaml                     | 322 ++++++++
- scripts/edge/render.py                             | 559 ++++++++++++++
- scripts/edge/smoke.py                              | 109 +++
- scripts/tests/edge_runtime.py                      | 469 ++++++++++++
- scripts/tests/edge_runtime/client.py               |  63 ++
- scripts/tests/edge_runtime/servers.py              |  70 ++
- .../edge/cloudflared-ingress-2026-10-27.yaml       | 100 +++
- scripts/tests/test_edge_render.py                  | 276 +++++++
- 43 files changed, 3718 insertions(+), 10 deletions(-)
-```
+<!-- codex: round-2: Discarding kubectl’s exit status and stderr and classifying every non-HTTP result as refused makes admission, scheduling, image-pull, DNS and attach failures indistinguishable from policy enforcement; the final direct-listener check uses another pod and does not validate the denied sources. Run a successful direct-listener control from each same probe pod, verify pod execution and curl outcomes explicitly, fail on infrastructure errors, and clean up the probes with an exit trap before treating a tunnel timeout as evidence of denial. -->
