@@ -1,51 +1,82 @@
 # Implementation review — edge-ingress P4 — round 1
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- The forward migration covers all 28 legacy default keys. The supplied result—27 no-op moves, the no-op relay import, one canary create, zero changes and destroys—is consistent with the diff. Retargeted imports retain their IDs; no import conditions changed.
-- For valid inputs, effective-mode precedence matches `render.py`, including private overriding `force_tunnel`. Record types, targets, proxy flags and TTLs match the plan. Cloudflare automatically [flattens same-zone CNAMEs](https://developers.cloudflare.com/dns/cname-flattening/set-up-cname-flattening/), so direct-mode verification must allow flattened A answers.
-- Access applications remain unchanged during DNS-only mode flips. CNAME/A replacement therefore does not itself remove a gate, and `create_before_destroy` would encounter Cloudflare’s record-name collision restriction. Future gate removal/replacement still needs separate sequencing; direct publication depends on Authelia already being deployed for Access-gated hosts.
-- Important gaps remain in blocking validation, interrupted replacement recovery, downgrade guidance, and P4 verification. The current tunnel-only plan does not exercise these cases.
-- All 24 selected renderer/schema/parity tests passed, as did `git diff --check`. No executable consumers of the removed variable or output were found; operational documentation still references the old interface.
+<!-- codex-impl-review-status: complete -->
 
 ## Findings
+
+All seven findings were accepted; none is contested. Fixes: 371d9b24 (generated records behind
+blocking preconditions) and 2a9bb1f3 (import blocks, migration and recovery docs, stale references).
 
 ### Registry identity mismatches do not stop apply
 **Location:** kubernetes/infra/cloudflare/dns.tf:70
 **Severity:** important
-<!-- codex: OpenTofu check assertions produce warnings rather than blocking execution, so a mismatched registry tunnel_id can still retarget every tunnel record despite this purported guard (https://opentofu.org/docs/language/checks/). Replace this with a blocking resource precondition and add negative tests proving zone/tunnel mismatches prevent DNS changes. -->
+**Resolution (accepted):** the `check` block is gone. Three `lifecycle` preconditions on
+`cloudflare_dns_record.edge` fail the plan: registry hash, zone and tunnel identity, record shape.
+Exercised with tofu against a copy of the operator state: pointing `tunnel_id` elsewhere fails the
+plan with "names another zone or tunnel".
 
 ### Invalid registry values silently become public DNS
 **Location:** kubernetes/infra/cloudflare/dns.tf:35
 **Severity:** important
-<!-- codex: An unknown mode such as edge: tunnnel falls through to a DNS-only CNAME to the apex, while the normal renderer load rejects it; Terraform also never checks the access_gated/direct/Authelia invariant or validates exposure before treating everything except literal private as public. Make registry validation a blocking prerequisite of DNS planning, covering unknown values and security combinations, so a local tofu apply cannot publish a registry that the proxy refuses to load. -->
+**Resolution (accepted):** dns.tf no longer interprets the registry. It creates the records in
+`kubernetes/edge/dns-records.json`, which `render.py` writes only from a registry that passed
+`validate()` (unknown modes, exposure values and the access_gated/direct/Authelia rule included). The
+file carries the sha256 of the registry it came from (CRs removed); a registry edit without
+`just edge-render`, or a hand edit of the file, fails the plan (both exercised). The shape
+precondition also refuses a record that is not exactly a tunnel, direct or private shape, so a
+private record cannot point anywhere but the VIP.
 
 ### Retained import IDs obstruct interrupted replacement recovery
-**Location:** kubernetes/infra/cloudflare/imports.tf:5; kubernetes/infra/cloudflare/router-import.tf:3; kubernetes/infra/cloudflare/relay-import.tf:2; kubernetes/infra/cloudflare/muse-import.tf:2
+**Location:** kubernetes/infra/cloudflare/imports.tf:5; router-import.tf:3; relay-import.tf:2; muse-import.tf:2
 **Severity:** important
-<!-- codex: If a CNAME-to-A replacement deletes an imported record and creation fails or is interrupted, its destination can be absent from state and the next plan reactivates the import against the now-deleted historical ID, preventing ordinary recovery; import blocks are inert only while their destination remains tracked (https://opentofu.org/docs/language/import/). Separate completed adoption from ongoing mode management without dropping the pending relay adoption, and test/document recovery both when no replacement exists and when creation succeeded remotely but its new ID was not saved. -->
+**Resolution (accepted):** imports.tf, router-import.tf and muse-import.tf are deleted (their records
+were adopted long ago). relay-import.tf, the one pending adoption, stays for P4's first apply; its
+comment and the runbook say to delete it in the next PR. The runbook documents recovery from an
+interrupted replacement: absent everywhere (plan shows a create), or created remotely but unsaved
+(import by the new id).
 
 ### Older checkouts cannot safely consume migrated state
 **Location:** kubernetes/infra/cloudflare/moved.tf:3
 **Severity:** important
-<!-- codex: These moves work only forward: applying pre-P4 configuration against migrated state plans destruction of edge instances while creating or importing tunnel instances, and retained imports do not reverse that migration; a state serial greater than 48 also does not prove a particular checkout has migrated. Document the minimum compatible checkout and authoritative-state handoff, retain the moves, and provide an explicit reverse-address migration procedure before any rollback to pre-P4 code. -->
+**Resolution (accepted):** the "state serial > 48" claim is removed. moved.tf and the runbook state that
+the moves are forward only, with a check (`tofu state list | grep -c 'dns_record.tunnel\['` is 0 on
+migrated state) and a reverse `tofu state mv` loop, after a state backup, for any rollback to pre-P4
+code. The moves stay at least until P9.
 
 ### The claimed Terraform/Python parity test does not exist
 **Location:** kubernetes/infra/cloudflare/dns.tf:10
 **Severity:** important
-<!-- codex: test_edge_render.py tests Python effective_mode() and proxy/backend parity, but never reads or evaluates dns.tf, and the CI workflow adds no Terraform comparison, so changing Terraform precedence or DNS tuples would leave those tests green. Add a CI test that evaluates the actual HCL across defaults, pins, force_tunnel, private hosts and rejected inputs, compares it with the renderer, and asserts type/content/proxied/TTL for every valid mode. -->
+**Resolution (accepted):** removed the need for one rather than adding an HCL evaluator to CI: the mode
+rule now has a single implementation (`render.effective_mode()`), and DNS consumes its output.
+`test_edge_render.DnsRecords` asserts type/content/proxied/TTL per mode, every host once, mode
+agreement with the proxy across edge_default and force_tunnel, force_tunnel never publishing a private
+host, the CR-insensitive digest, the committed file being current, and that dns.tf reads the file
+behind three preconditions with no `edge_default`/`force_tunnel` logic or `check` block of its own.
+That the HCL hash equals Python's is proven by the passing plan plus the failing tamper cases.
 
 ### P4 replacement rehearsal is neither documented nor currently schema-valid
 **Location:** kubernetes/infra/cloudflare/dns.tf:13; docs/runbooks/edge-ingress.md:53
 **Severity:** important
-<!-- codex: The comment says replacement was rehearsed, but the supplied verification covers only tunnel records and the runbook contains no tunnel→direct→private→tunnel or interrupted-apply evidence; the existing fixed-response canary also cannot validate as private because render.py requires auth:none for respond backends and forbids auth:none on private hosts. Provide a valid harmless rehearsal fixture, perform and record the required transitions and interruption recovery with the provider version, observed DNS/cache behavior and authentication checks, and remove the completed-rehearsal claim until that evidence exists. -->
+**Resolution (accepted):** dns.tf no longer claims a rehearsal. `validate()` now admits `auth: none`
+on a private host only when its backend is a fixed `respond`, so edge-canary is valid in every mode
+(tested: it renders the admin-tier 403 before its answer; a private upstream with auth none is still
+refused). The runbook's "Rehearse a mode change on edge-canary" lists the transitions
+(tunnel to direct, direct to private, private to tunnel, one interrupted replacement), the resolver
+sampling and the evidence to record. The rehearsal itself runs after P4's first apply and its
+evidence goes on the P4 PR (see "Deferred to live verification").
 
 ### Operational instructions still target the removed resource
 **Location:** docs/runbooks/keycloak.md:96; kubernetes/infra/cloudflare/README.md:42
 **Severity:** nit
-<!-- codex: The Keycloak publication commands still target cloudflare_dns_record.tunnel["id"], and the module README directs operators to the removed tunnel_hostnames variable, so those instructions no longer describe the supported configuration. Update active commands to edge["id"], explain registry ownership and the renamed output, and include the migration prerequisites for targeted operations. -->
+**Resolution (accepted):** the Keycloak commands target `cloudflare_dns_record.edge["id"]`, the
+README's DNS section describes the registry, the generated file, `edge_records`, the forward-only
+moves and the remaining import, and the trueswarm e2e note names `edge["relay"]`.
+
+## Deferred to live verification
+
+P4's first apply (expected: 27 moves, the relay import, the edge-canary create, 0 changes, 0 destroys,
+with the inputs in the runbook's "Applying"), the deletion of relay-import.tf after it, and the
+edge-canary rehearsal with its recorded evidence.
 
 ## Diff stat
 
