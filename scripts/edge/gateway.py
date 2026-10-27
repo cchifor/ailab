@@ -551,6 +551,11 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
                                         "before": digest(cur), "fields": fields})
                     else:
                         ops.append({"kind": "forward", "action": "create", "key": pf["name"], "fields": fields})
+            elif any(f.get("name") == pf["name"] and f["_id"] != own_id for f in inv["portforward"]):
+                # disabled, nothing but ours may carry the name either: a stray one is ambiguous the
+                # moment the forward is enabled again (and may itself be exposing something)
+                errors.append(f"a forward named {pf['name']} exists and is not ours while the edge forward is "
+                              f"disabled: inspect it, then delete or rename it in the UI, or --adopt {pf['name']}")
             elif own_id:
                 ops.append({"kind": "forward", "action": "delete", "key": pf["name"], "id": own_id,
                             "before": digest(by_id[own_id])})

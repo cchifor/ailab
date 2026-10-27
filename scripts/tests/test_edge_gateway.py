@@ -313,6 +313,23 @@ class Forward(Base):
                                             "fwd_port": "1", "proto": "tcp"})
         self.assertTrue(any("not ours" in e for e in self.plan()["errors"]))
 
+    def test_a_stray_forward_with_our_name_aborts_while_disabled(self):
+        stray = {"_id": "pf-stray", "name": "ailab-edge-https", "enabled": True, "pfwd_interface": "wan",
+                 "dst_port": "443", "fwd": "192.168.0.77", "fwd_port": "443", "proto": "tcp"}
+        self.api.inv["portforward"].append(dict(stray))
+        plan = self.plan()  # the edge forward is disabled in Base
+        self.assertTrue(any("not ours while the edge forward is disabled" in e for e in plan["errors"]), plan["errors"])
+        self.assertEqual(plan["ops"], [])
+        # and next to an owned one, a disable does not quietly delete ours and leave the stray
+        self.api.inv["portforward"] = [r for r in self.api.inv["portforward"] if r["_id"] != "pf-stray"]
+        self.g["port_forward"]["enabled"] = True
+        self.apply(self.plan())
+        self.g["port_forward"]["enabled"] = False
+        self.api.inv["portforward"].append(dict(stray, enabled=False))
+        plan = self.plan()
+        self.assertTrue(any("not ours while the edge forward is disabled" in e for e in plan["errors"]), plan["errors"])
+        self.assertEqual(plan["ops"], [])
+
     def test_disable_deletes_first(self):
         self.g["port_forward"]["enabled"] = True
         self.lan_dns("router")
