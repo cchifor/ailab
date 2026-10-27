@@ -2559,6 +2559,53 @@ The archive passed the production smoke check, Node 24 typecheck/build, focused 
 
 **Rollback.** Revert the image digest and both pod-template annotations together to `sha256:2e4211a3549b9c98f8896d1e06105c62ed22c7c6803c005acfcead4ba32df6b5` / `171ff37b67fc246dabb4b11fd19f3aa9badcf470` / `router-0.1.0-20261026-auth-hardening`.
 
+## Claude output limit, effort and early stops release (2026-10-27, llm-router#125)
+
+`router-0.1.0-20261027-claude-output-limit` deploys llm-router main `f5c0c412b1a4f23248013dafa62ac25a7308a64f`
+([#125](https://git.chifor.me/cchifor/llm-router/pulls/125)), on the owner's go.
+
+**Why.** reviewer-1's fable reviews of workbricks docs PRs failed three times with
+`SEAT_PROTOCOL_ERROR: SDK transport exceeded one model turn` (10-26 08:59Z and 11:04Z, 10-27 08:39Z), each after
+~530 s of streaming. The fable runs reached Claude Code's default output limit (64000 tokens). Claude Code then asked
+the model again in the same run ("Output token limit hit. Resume directly..."), past `--max-turns 1`, and the router's
+one-turn guard failed the whole request. The opus fallback reviewed those PRs.
+
+**What changes** (Multi-turn, `sdk-resume`, only; Single-turn is unchanged).
+- **Early stops end the answer instead of failing it.** A first response that stops at the output limit
+  (`max_tokens`, `model_context_window_exceeded`) finishes with `length` (Responses: `incomplete`,
+  `max_output_tokens`); a refusal finishes with `content_filter`. The run is stopped at the first response's end, so
+  the answer never waits on, or fails with, the request Claude Code makes next; the caller decides what comes next.
+  Any other extra model turn is still `SEAT_PROTOCOL_ERROR`, and the message now names how the first response ended.
+- **The caller's output limit** (`max_tokens`, `max_completion_tokens`, `max_output_tokens`) is passed to Claude Code
+  as `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, but only for accounts with `capabilities.maxOutputTokens: true`. Elsewhere it is
+  dropped and listed in `x-router-ignored-params` on a lenient route (`pool-claude`), or skips the target on a strict one.
+- **Reasoning effort** (`reasoning_effort`, `reasoning.effort`): `low`, `medium`, `high`, `xhigh` or `max` are passed as
+  `CLAUDE_CODE_EFFORT_LEVEL`. Before this release any effort was refused with a 400. Other values, and any effort for
+  haiku, are refused with a 400, because Claude Code would drop them silently.
+
+**Image.**
+- Archive `router-0.1.0-20261027-claude-output-limit.tar.gz`, SHA-256
+  `49f1f71b854be9540a5277b3452b6e7ac6e1755357bbc868cb01a9a6b16a7294`, Relay v0.2.0 asset 402. It was built on
+  dev-worker-1 in the pinned Node 26.10.0 image; the production smoke check passed.
+- Relay branch `release/router-0.1.0-20261027-claude-output-limit-image`,
+  [run 110442](https://git.chifor.me/cchifor/relay/actions/runs/110442), receipt `deployment-images-110442.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:6c9db895a9a3ee0dd7f4551d87f9b381d1874e91f83105be5cc64509f51ad013`
+  (tag `parity-68b1ebbe28b0-110442`). The registry's digest for the tag matches, and the image's `SOURCE_COMMIT` is
+  `f5c0c412`.
+- No database migration or secret change.
+
+**After the rollout** (live config, admin API): set `capabilities.maxOutputTokens: true` on `claude`, `claude-2`,
+`claude-3`, `claude-4` and `claude-5` (all `false` at config rev 1791). Only then does a caller's limit reach Claude
+Code. reviewer-1 already sends `max_tokens: { fable: 40000 }` (ailab #1449, deployed 2026-10-27 12:36Z); until the
+flag is on, the router drops it and says so.
+
+**Rollback.**
+1. First set `capabilities.maxOutputTokens` back to `false` on the Claude accounts. The old image accepts a config
+   that has it on at startup, but its Claude provider refuses every config write while any Claude account has it on.
+2. Then revert the image digest and both pod-template annotations together to
+   `sha256:731d43fa2f3bf9a7a48cd0d724eeee47e4677ca2c01d025a83ca68572f2d8b73` /
+   `1f92b9d1e920a110808378472ebf83670c282b6b` / `router-0.1.0-20261027-account-menu`.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
