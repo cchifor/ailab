@@ -4,7 +4,9 @@ controller:
   cert_sha256: 55ef62f960610952c987555690ac1c5493ae57c8a87911c6ec7130863e4c4b0b
   site: default
   url: https://192.168.1.152
-dhcp_network: null
+dhcp_network:
+  id: 6584469af81ca8458f9a6af1
+  name: Home
 intents: []
 port_forward: null
 static_dns: {}

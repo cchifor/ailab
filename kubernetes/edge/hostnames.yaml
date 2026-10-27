@@ -330,6 +330,6 @@ hosts:
     edge: default
     auth: none # a fixed answer that names the peer; nothing behind it
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { respond: "edge-canary ok peer={remote_host}" }
     smoke: { status: 200 }
