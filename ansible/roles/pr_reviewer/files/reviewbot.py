@@ -1340,18 +1340,23 @@ def router_output_cap(seat, tier):
 
 
 def router_cap_problem(seat):
-    """Why a router seat's `max_tokens` leaves a tier it meant to cap uncapped, or None. Said
-    once at seat resolution: an unsent cap is a runaway guard that silently is not there."""
+    """Why part (or all) of a router seat's `max_tokens` is not sent, and what still is, or
+    None. Said once at seat resolution: an unsent cap is a runaway guard that silently is not
+    there - and a map that still caps some tier must say so, not claim the guard is gone."""
     cap = _seat_cfg(seat).get("max_tokens")
     if cap is None:
         return None
-    if isinstance(cap, dict):
-        bad = {k: v for k, v in cap.items() if not _positive_int(v)}
-        if bad:
-            return f"max_tokens {bad!r} is not a positive int"
-        stray = sorted(str(k) for k in cap if k not in MODELS)
-        return f"max_tokens names {stray}, which are not tiers of {MODELS}" if stray else None
-    return None if _positive_int(cap) else f"max_tokens {cap!r} is not a positive int"
+    if not isinstance(cap, dict):
+        return None if _positive_int(cap) else \
+            f"max_tokens {cap!r} is not a positive int - no output cap is sent"
+    unusable = sorted(str(k) for k, v in cap.items() if not _positive_int(v))
+    stray = sorted(str(k) for k in cap if k not in MODELS)
+    if not unusable and not stray:
+        return None
+    kept = [t for t in MODELS if router_output_cap(seat, t) is not None]
+    said = ([f"max_tokens for {unusable} is not a positive int"] if unusable else []) + \
+        ([f"max_tokens names {stray}, which are not tiers of {MODELS}"] if stray else [])
+    return "; ".join(said) + (f" - still capped: {kept}" if kept else " - no output cap is sent")
 
 
 def router_tiers_distinct(seat):
@@ -1930,7 +1935,7 @@ def resolve_seats():
     for s in SEATS:
         why = is_router_seat(s) and router_cap_problem(s)
         if why:
-            log(f"seat '{s['name']}': {why} - no output cap is sent for it (host_vars typo?)")
+            log(f"seat '{s['name']}': {why} (host_vars typo?)")
     if idle and len(idle) < len(SEATS):
         _apply_seats([s for s in SEATS if s["name"] not in idle])
     # Nothing to deduplicate with one seat. (This used to return for every kind but codex; the

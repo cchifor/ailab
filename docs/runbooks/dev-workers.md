@@ -807,7 +807,8 @@ How it behaves - the existing park machinery, unchanged:
   fable runaways on workbricks docs PRs streamed ~530 s into Claude Code's 64000 default and failed as
   `SEAT_PROTOCOL_ERROR: SDK transport exceeded one model turn`. Opus stays uncapped: its longest review on record
   (36312) is too close to 40000. A cap reviewbot cannot send (not a positive int, or a tier name that is not on
-  the ladder) is logged at startup: `seat 'r': max_tokens ... - no output cap is sent`.
+  the ladder) is logged at startup, with what is still sent: `seat 'r': max_tokens for ['opus'] is not a positive
+  int - still capped: ['fable']`, or `... - no output cap is sent` when nothing is.
   The router honours it only after llm-router #125 is released **and** the Claude accounts allow output caps
   (`capabilities.maxOutputTokens: true`). Until then it drops the cap and lists it in `x-router-ignored-params`,
   so the setting is harmless before that.

@@ -187,19 +187,29 @@ class RouterSeatTest(unittest.TestCase):
     def test_an_unusable_cap_is_logged_at_seat_resolution_not_dropped_silently(self):
         """reviewer-claude on #1449: a cap that is not sent removes the runaway guard, so the
         operator must be told - once, when the seats are resolved."""
-        for cap, words in ((40000, None), ({"fable": 40000}, None), ("40000", "not a positive int"),
-                           ({"fable": 0}, "not a positive int"), ({"fabel": 40000}, "fabel")):
+        # (cap, words the log line must carry, words it must not). Round 2: a map that still caps
+        # some tier must say so, never "no output cap is sent".
+        cases = ((40000, None, None), ({"fable": 40000}, None, None),
+                 ("40000", ["not a positive int", "no output cap is sent"], None),
+                 ({"fable": 0}, ["['fable'] is not a positive int", "no output cap is sent"], None),
+                 ({"fabel": 40000}, ["['fabel']", "no output cap is sent"], None),
+                 ({"fable": 40000, "opus": "x"}, ["['opus'] is not a positive int", "still capped: ['fable']"],
+                  "no output cap"),
+                 ({"fable": 40000, "fabel": 40000}, ["['fabel']", "still capped: ['fable']"], "no output cap"))
+        for cap, words, never in cases:
             with self.subTest(cap=cap):
-                m = self.load([self.router_seat(models={"fable": "fable"}, max_tokens=cap)],
-                              llm_models=["fable"])
+                m = self.load([self.router_seat(models={"fable": "fable", "opus": "opus"}, max_tokens=cap)],
+                              llm_models=["fable", "opus"])
                 with mock.patch.object(m, "log") as log:
                     m.resolve_seats()
                 said = " ".join(str(c.args[0]) for c in log.call_args_list if "max_tokens" in str(c.args[0]))
                 if words is None:
                     self.assertEqual(said, "")
-                else:
-                    self.assertIn(words, said)
-                    self.assertIn("no output cap", said)
+                    continue
+                for w in words:
+                    self.assertIn(w, said)
+                if never:
+                    self.assertNotIn(never, said)
 
     def test_a_seat_without_a_route_sends_no_route_header(self):
         m = self.load([self.router_seat(model="claude-route")])
