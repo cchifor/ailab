@@ -101,7 +101,11 @@ _UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
 
 def load_yaml(path):
     with open(path, encoding="utf-8") as f:
-        return yaml.load(f, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
+        return load_yaml_text(f.read())
+
+
+def load_yaml_text(text: str):
+    return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
 
 
 # --------------------------------------------------------------------------------------------
@@ -319,8 +323,9 @@ def effective_mode(reg: dict, name: str) -> str:
     return reg["edge_default"] if h.get("edge", "default") == "default" else h["edge"]
 
 
-def load(path: pathlib.Path = REGISTRY) -> dict:
-    reg = load_yaml(path)
+def load(path: pathlib.Path = REGISTRY, text: str | None = None) -> dict:
+    """The validated registry. With `text`, that exact text (main() hashes the same snapshot)."""
+    reg = load_yaml_text(text) if text is not None else load_yaml(path)
     errors = validate(reg)
     if errors:
         raise RegistryError("\n".join(errors))
@@ -695,17 +700,25 @@ def main(argv=None) -> int:
     ap.add_argument("--test-profile", type=pathlib.Path, help="docker fixture overrides (JSON)")
     args = ap.parse_args(argv)
     try:
-        reg = load(args.registry)
+        # ONE read: dns-records.json carries the hash of exactly the text that was validated and
+        # rendered, so an editor saving the file mid-render cannot pair old records with a new hash.
+        registry_text = args.registry.read_bytes().decode("utf-8")
+        reg = load(args.registry, registry_text)
     except RegistryError as e:
         print(f"edge registry invalid:\n{e}", file=sys.stderr)
         return 1
     if args.validate:
         print(f"edge registry ok: {len(reg['hosts'])} hosts")
         return 0
-    profile = json.loads(args.test_profile.read_text()) if args.test_profile else None
+    profile = None
+    if args.test_profile is not None:
+        profile = json.loads(args.test_profile.read_text())
+        if not isinstance(profile, dict) or not profile:
+            print(f"{args.test_profile}: a test profile must be a non-empty JSON object", file=sys.stderr)
+            return 1
     outputs = [(args.out, render(reg, profile))]
-    if not profile:  # the docker fixture renders a Caddyfile only
-        outputs.append((args.dns_out, render_dns(reg, args.registry.read_bytes().decode("utf-8"))))
+    if args.test_profile is None:  # a fixture render never touches the production DNS file
+        outputs.append((args.dns_out, render_dns(reg, registry_text)))
     if args.check:
         stale = [p for p, text in outputs if (p.read_text(encoding="utf-8") if p.exists() else "") != text]
         for p in stale:

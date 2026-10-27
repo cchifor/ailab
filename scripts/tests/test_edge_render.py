@@ -204,6 +204,47 @@ class DnsRecords(unittest.TestCase):
         self.assertEqual(render.registry_digest(text), render.registry_digest(text.replace("\n", "\r\n")))
         self.assertNotEqual(render.registry_digest(text), render.registry_digest(text + "#\n"))
 
+    def test_main_hashes_the_text_it_validated(self):
+        # an editor saving the registry between validation and hashing must not pair the records
+        # rendered from the old text with the new text's hash (codex impl-review P4 round 2)
+        import json
+        import tempfile
+        from unittest import mock
+        text = render.REGISTRY.read_bytes().decode("utf-8")
+        real_validate = render.validate
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            reg = d / "hostnames.yaml"
+            reg.write_text(text, encoding="utf-8", newline="")
+
+            def validate_then_save(r):
+                errors = real_validate(r)
+                reg.write_text(text + "# saved by an editor mid-render\n", encoding="utf-8", newline="")
+                return errors
+            with mock.patch.object(render, "validate", validate_then_save):
+                rc = render.main(["--registry", str(reg), "--out", str(d / "Caddyfile"), "--dns-out", str(d / "dns.json")])
+            self.assertEqual(rc, 0)
+            doc = json.loads((d / "dns.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["registry_sha256"], render.registry_digest(text))
+
+    def test_a_test_profile_never_writes_dns(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            for bad in ("{}", "null", "[]"):
+                (d / "p.json").write_text(bad, encoding="utf-8")
+                rc = render.main(["--test-profile", str(d / "p.json"), "--out", str(d / "Caddyfile"),
+                                  "--dns-out", str(d / "dns.json")])
+                self.assertEqual(rc, 1, bad)
+            (d / "p.json").write_text('{"allow": []}', encoding="utf-8")
+            with mock.patch.object(render, "render", lambda reg, profile: "# fixture\n"):
+                rc = render.main(["--test-profile", str(d / "p.json"), "--out", str(d / "Caddyfile"),
+                                  "--dns-out", str(d / "dns.json")])
+            self.assertEqual(rc, 0)
+            self.assertTrue((d / "Caddyfile").exists())
+            self.assertFalse((d / "dns.json").exists())
+
     def test_committed_file_is_current(self):
         text = render.render_dns(committed(), render.REGISTRY.read_bytes().decode("utf-8"))
         self.assertEqual(render.DNS_OUTPUT.read_text(encoding="utf-8"), text,
