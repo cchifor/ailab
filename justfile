@@ -309,6 +309,16 @@ pin-verify image tag digest="":
 edge-render:
     python scripts/edge/render.py
 
+# The Cloudflare module's edge records (ADR 0040 P4). render.py --check first: the generated
+# kubernetes/edge/dns-records.json must be exactly the renderer's output for the committed registry
+# (the plan's own hashes are self-reported). Inputs: docs/runbooks/edge-ingress.md, "Applying".
+edge-dns-plan *args:
+    python scripts/edge/render.py --check
+    tofu -chdir=kubernetes/infra/cloudflare plan {{args}}
+edge-dns-apply *args:
+    python scripts/edge/render.py --check
+    tofu -chdir=kubernetes/infra/cloudflare apply {{args}}
+
 # Smoke every registry host through the VIP 192.168.0.51 with SNI/Host set, from a LAN host.
 # `just edge-smoke --as untrusted` from a pod or other non-trusted source expects 403 for every
 # host that is not direct.

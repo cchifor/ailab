@@ -1,6 +1,6 @@
-output "tunnel_cname_records" {
-  description = "Managed proxied CNAMEs (hostname -> record name)."
-  value       = { for k, r in cloudflare_dns_record.tunnel : k => r.name }
+output "edge_records" {
+  description = "Registry-driven edge records (hostname -> type and target), kubernetes/edge/hostnames.yaml."
+  value       = { for k, r in cloudflare_dns_record.edge : k => "${r.type} ${r.content}${r.proxied ? " (proxied)" : ""}" }
 }
 
 # api.chifor.me service-token credentials — set as CF-Access-Client-Id / CF-Access-Client-Secret

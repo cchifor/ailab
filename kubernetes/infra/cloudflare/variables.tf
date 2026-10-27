@@ -9,15 +9,9 @@ variable "zone_id" {
 }
 
 variable "tunnel_id" {
-  description = "The locally-managed cloudflared tunnel UUID. Owned by kubernetes/apps/apps/edge/cloudflared.yaml (git+Flux) — NOT created here; used only to build the CNAME targets."
+  description = "The locally-managed cloudflared tunnel UUID. Owned by kubernetes/apps/apps/edge/cloudflared.yaml (git+Flux) — NOT created here. The edge registry (kubernetes/edge/hostnames.yaml tunnel_id) must name the same tunnel: dns.tf checks it."
   type        = string
   default     = "f93d9a6a-5172-43d3-8bef-13460ea7607b"
-}
-
-variable "tunnel_hostnames" {
-  description = "Subdomains under chifor.me published by the tunnel; each gets a proxied CNAME -> <tunnel>.cfargotunnel.com. Existing records are adopted via imports.tf; NEW ones (status, dw1-dw4 — dw5 retired 2026-09-23, dw6 2026-09-21; agentforge, openbao, search) are created. The dw* hosts are the dev-worker ttyd terminals (2 per node) and are gated by access.tf. agentforge is Access-FREE (own Authelia OIDC, ADR 0019). openbao is the secret-store UI and IS Access-gated (access.tf `openbao`) despite having its own token login — see that resource for why. dsh is the DeepSeek Harness agent UI and IS Access-gated (access.tf `dsh`): it executes model-generated tool calls, and its own session cookie carries no SSO identity, so Access is the only per-person gate. id is the ailab Keycloak (ADR 0038) and is Access-FREE: it is its own login, and cloudflared publishes only its /realms/relay and /resources paths (everything else 404). search is the SearXNG web UI and is Access-FREE, gated instead by its own oauth2-proxy -> Authelia (kubernetes/apps/apps/dsh/searxng-auth.yaml), the same shape as home.chifor.me."
-  type        = list(string)
-  default     = ["home", "sso", "status", "chat", "grafana", "api", "dw1", "dw2", "dw3", "dw4", "k8s", "hubble", "proxmox", "qnap", "prometheus", "alertmanager", "ntfy", "git", "vault", "agentforge", "openbao", "dsh", "search", "router", "relay", "muse", "trueswarm", "id"]
 }
 
 variable "registry_ip" {
