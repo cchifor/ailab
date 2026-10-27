@@ -18,9 +18,7 @@
 	}
 	auto_https off
 	grace_period 90s
-	metrics {
-		per_host
-	}
+	metrics
 	servers :8443 {
 		name direct
 		protocols h1 h2

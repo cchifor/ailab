@@ -72,17 +72,16 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
    (Cloudflare flattens only the apex by default): that is expected. The apex A record must stay
    DNS-only (grey cloud); proxied, every direct host would resolve to Cloudflare and fail there.
 
-**Before the first host goes direct (P6)**: Caddy labels its per-host metrics with whatever `Host`
-arrives over TLS (`per_host` on a TLS server observes every host; only plain-HTTP servers fall back
-to `_other`), so on the WAN a scanner could grow Caddy's in-memory series, and Prometheus, without
-bound. Caddy 2.11.7 has no producer-side bound for TLS hosts short of dropping `per_host`, so choose
-one first: drop `per_host` (EdgeUpstreamErrors then reads the whole proxy, not one host), or keep it
-and drop unknown-host samples at scrape time with a `metricRelabelings` `action: keep` on
-`source_labels: [host]`, on the Caddy endpoint (`source=caddy`) only. Its regex must also match the
-EMPTY value, because a series without a `host` label (Caddy's process and Go metrics) reads as "" and
-would otherwise be dropped too: `^(|router\.chifor\.me|git\.chifor\.me|...)$`, every registry host. The
-second protects Prometheus only, and Caddy still holds every series (restarts reset it). Do not relabel unknown hosts to `_other`: relabeling does not aggregate, it makes
-duplicate series within one scrape.
+**Per-host metrics are off** (since 2026-10-27, before WAN 443 opened): on a TLS server Caddy labels
+its per-host metrics with whatever `Host` arrives, so from the WAN a scanner could grow Caddy's memory and
+Prometheus without bound, and Caddy 2.11.7 has no producer-side bound short of dropping `per_host`.
+EdgeUpstreamErrors reads per listener (`server`: direct, tunnel, redirect); the access log names the hosts
+(`kubectl -n edge logs -l app.kubernetes.io/name=edge-proxy -c caddy`). The cost: one low-traffic host failing
+100 % pages only if it carries over a fifth of its listener's requests (Gatus probes only a few edge URLs:
+agentforge, Keycloak's realms, the registry). Follow-up: a bounded per-host availability signal, probes of the
+registry's hosts through the VIP. Do not bring `per_host` back without
+a bound; a scrape-time relabel would protect Prometheus only (and must not map unknown hosts to `_other`:
+relabeling does not aggregate, it makes duplicate series within one scrape).
 
 **To tunnel** (planned): on a branch, set the host to `tunnel` and `just edge-render`; run `tofu apply`
 from that branch first, wait 300 s (the apex TTL), then merge (the proxy change). In an emergency do
