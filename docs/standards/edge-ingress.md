@@ -168,9 +168,16 @@ Order matters. Each step is idempotent:
 
 1. **Gateway DHCP**: `just edge-gateway-plan --only dhcp`, then `just edge-gateway-apply --only dhcp
    --plan-hash <hash>`. Then confirm the VIP has no lease and answers no ARP.
-2. **Flux**: `metallb` installs MetalLB and `metallb-config` then creates the pool and
-   advertisement; `edge-proxy`, its own Kustomization, deploys the proxy only after `apps` is healthy,
-   so Authelia's admins-only rules are live before the proxy can forward to their hosts. Assert the
+2. **Flux**: three standalone Kustomizations (`flux get ks` lists each). `metallb` (after
+   `infrastructure`) installs MetalLB, and `metallb-config` (after `metallb`) creates the pool and
+   advertisement. `edge-proxy` deploys the proxy after `apps` only. That order carries the Authelia
+   guarantee because of two preconditions, both of which must hold: `apps` has `wait: true`, so it
+   is Ready only once its Deployments have rolled out; and Authelia's configuration is a hash-named
+   generated ConfigMap that Authelia reads only at startup, so a rule change renames it and rolls
+   every replica. Together they put the admins-only rules on every replica before the proxy can
+   forward to those hosts. `edge-proxy` deliberately does not depend on `metallb-config`: a
+   Service created before the pool exists stays pending until MetalLB assigns the VIP, and the
+   proxy's updates (from P5, the tunnel path's) do not wait on MetalLB's health. Assert the
    Service's assigned address equals the VIP.
 3. **Smoke**: `just edge-smoke` passes on the LAN through the VIP.
 4. **Gateway, the rest**: local DNS records (hosts with `lan_dns`), then the 443 forward:
