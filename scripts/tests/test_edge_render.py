@@ -104,6 +104,34 @@ class RegistrySchema(unittest.TestCase):
     def test_routes_default_required(self):
         self.assert_rejected(lambda r: r["hosts"]["id"].pop("routes_default"), "routes_default: backend or 404")
 
+    def test_access_gated_needs_real_auth(self):
+        self.assert_rejected(lambda r: r["hosts"]["proxmox"].update(auth="none"), "access_gated host needs authelia or native")
+
+    def test_security_options_are_typed(self):
+        self.assert_rejected(lambda r: r["hosts"]["proxmox"]["backend"].update(tls_insecure_skip_verify="false"),
+                             "must be a bool")
+        self.assert_rejected(lambda r: r["hosts"]["dw1"]["backend"].update(tls_server_name="dw1.chifor.me }"),
+                             "is not a plain token")
+        self.assert_rejected(lambda r: r["hosts"]["edge-canary"]["backend"].update(respond='ok" 200\n}'),
+                             "words, '=' and {remote_host} only")
+        self.assert_rejected(lambda r: r["hosts"]["router"]["smoke"].update(status="200"), "statuses must be integers")
+
+    def test_duplicate_keys_are_refused_by_load(self):
+        text = render.REGISTRY.read_text(encoding="utf-8")
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            dup_host = pathlib.Path(d) / "dup-host.yaml"
+            i = text.index("  router:\n")
+            j = text.index("\n  relay:\n")
+            dup_host.write_text(text + "\n" + text[i:j].replace("edge: default", "edge: direct") + "\n", encoding="utf-8")
+            with self.assertRaises(render.RegistryError):
+                render.load(dup_host)
+            dup_field = pathlib.Path(d) / "dup-field.yaml"
+            dup_field.write_text(text.replace("  router:\n    exposure: public\n",
+                                              "  router:\n    exposure: private\n    exposure: public\n"), encoding="utf-8")
+            with self.assertRaises(render.RegistryError):
+                render.load(dup_field)
+
     def test_invalid_host_label(self):
         self.assert_rejected(lambda r: r["hosts"].update({"Bad_Name": copy.deepcopy(r["hosts"]["router"])}), "invalid DNS label")
 
@@ -168,6 +196,7 @@ class Parity(unittest.TestCase):
                 self.assertTrue(h["backend"].get("tls_ca"), f"{host}: CA pinning kept")
             if "httpHostHeader" in origin:
                 self.assertEqual(INTENDED.get(name), "host-sni", f"{host}: Host header change not listed")
+            frozen_routes = []
             for r in rules:
                 if "path" not in r:
                     continue
@@ -175,10 +204,15 @@ class Parity(unittest.TestCase):
                     # cloudflared refused these paths outright; the raw-URI guard does that here
                     self.assertTrue(h.get("uri_guard"), f"{host}: deny rule {r['path']} needs uri_guard")
                     continue
-                matching = [rt for rt in h.get("routes") or [] if rt["match"]["path_regexp"] == r["path"]]
-                self.assertEqual(len(matching), 1, f"{host}: path rule {r['path']} carried over")
-                to = matching[0]["to"]
-                self.assertEqual(h["backend"]["url"] if to == "default" else to, r["service"], f"{host} {r['path']}")
+                frozen_routes.append((r["path"], r["service"]))
+            ours = [(rt["match"]["path_regexp"], h["backend"]["url"] if rt["to"] == "default" else rt["to"])
+                    for rt in h.get("routes") or []]
+            # the SAME routes in the SAME order: an extra route (say ^/admin/ on id) is a failure
+            self.assertEqual(ours, frozen_routes, f"{host}: path routes differ from cloudflared's")
+            if not origin.get("httpHostHeader") and "originServerName" not in origin:
+                self.assertNotIn("host_header", h["backend"], f"{host}: Host override not in cloudflared")
+                if INTENDED.get(name) != "host-sni":
+                    self.assertNotIn("tls_server_name", h["backend"], f"{host}: SNI override not in cloudflared")
 
     def test_access_gated_set(self):
         """The hosts Cloudflare Access gates today (access.tf) are exactly the access_gated ones."""
@@ -254,9 +288,9 @@ class Rendering(unittest.TestCase):
     def test_tunnel_client_address_checks_come_first(self):
         tunnel = self.site("http://:8080 {")
         route = tunnel[tunnel.index("\troute {"):]
-        first = [ln.strip() for ln in route.splitlines()[1:4]]
-        self.assertEqual(first, ["respond @cf_client_bad 400", "respond @cf_visitor_missing 400",
-                                 "redir @cf_visitor_http https://{host}{uri} 308"])
+        first = [ln.strip() for ln in route.splitlines()[1:6]]
+        self.assertEqual(first, ["respond @unknown_host 404", "respond @cf_client_bad 400", "respond @cf_client_multi 400",
+                                 "respond @cf_visitor_missing 400", "redir @cf_visitor_http https://{host}{uri} 308"])
 
     def test_authelia_runs_before_the_proxy(self):
         direct = self.site("https://:8443 {")
@@ -268,8 +302,22 @@ class Rendering(unittest.TestCase):
         self.assertNotIn("client_ip ", self.text.replace("{client_ip}", ""))
 
     def test_log_redaction(self):
+        # twice each: the site access logs AND the default logger, which carries http.log.error
         for h in render.LOG_REDACT:
-            self.assertIn(f"request>headers>{h} delete", self.text)
+            self.assertGreaterEqual(self.text.count(f"request>headers>{h} delete"), 2, h)
+        self.assertIn("\tlog default {", self.text)
+
+    def test_https_upstreams_send_the_public_host(self):
+        direct = self.site("https://:8443 {")
+        for name in ("dw1", "proxmox", "qnap", "openbao"):
+            block = direct[direct.index(f"handle @h_{name} {{"):]
+            block = block[:block.index("\n\t\t}\n")]
+            self.assertIn("header_up Host {host}", block, name)
+
+    def test_forward_auth_gets_the_canonical_client(self):
+        snippet = self.text[self.text.index("(edge_authelia) {"):]
+        snippet = snippet[:snippet.index("\n}\n")]
+        self.assertIn("header_up CF-Connecting-IP {client_ip}", snippet)
 
 
 if __name__ == "__main__":

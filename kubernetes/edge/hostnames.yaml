@@ -159,7 +159,6 @@ hosts:
     routes:
       - match: { path_regexp: "^/(media/[^/]+|art/[^/]+|api/v1/uploads/[^/]+/content)$" }
         to: "http://trueswarm-muse.trueswarm.svc.cluster.local:80"
-      - { match: { path_regexp: "^/" }, to: default }
     routes_default: backend
     smoke: { status: 200 }
   muse:

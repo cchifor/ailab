@@ -46,15 +46,20 @@ REQUIRED_HOST_KEYS = {"exposure", "auth", "access_gated", "lan_dns", "backend", 
 BACKEND_KEYS = {"url", "respond", "tls_insecure_skip_verify", "tls_ca", "tls_server_name", "host_header"}
 SMOKE_KEYS = {"status", "status_any", "location_contains"}
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+# Values interpolated into the Caddyfile: no whitespace, quotes, braces or backticks.
+SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._:/-]+$")
+# A fixed response body: words, '=', and the {remote_host} placeholder only.
+SAFE_RESPOND = re.compile(r"^[A-Za-z0-9 =._:-]*(\{remote_host\}[A-Za-z0-9 =._:-]*)?$")
 
 # Refused on hosts with uri_guard, matched on the RAW request target before the query string:
 # dot segments, ';' and percent-encoded dots, slashes, backslashes, semicolons and percents (double
 # encoding), any case. Caddy matches paths after decoding, the backends may normalise differently;
 # refusing the ambiguous forms outright removes the question (id: Keycloak realms, vault: /admin).
 URI_GUARD = r"(?i)^[^?]*(\.\.|/\./|/\.$|;|%2e|%2f|%5c|%25|%3b|\\)"
-# One IPv4 or IPv6 address and nothing else. Multiple header lines are joined with "," by the
-# placeholder, so they fail this too.
-SINGLE_IP = r"^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7})$"
+# The tunnel listener's client address comes from CF-Connecting-IP. Caddy parses that header itself
+# (client_ip_headers) and falls back to the TCP peer when it is missing or not a valid address, so
+# "the client IP equals the peer" is exactly "no valid CF-Connecting-IP". A comma anywhere in the
+# joined header value (several values, or several header lines) is refused separately.
 
 # Removed from every request before routing, on both listeners: identity and forwarding headers
 # only this proxy may set. The direct listener also drops every Cf-* header (no Cloudflare there).
@@ -67,6 +72,29 @@ LOG_REDACT = ["Cf-Access-Jwt-Assertion", "Cf-Access-Client-Id", "Cf-Access-Clien
 
 class RegistryError(Exception):
     pass
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """safe_load, except a key repeated in one mapping is an error instead of last-one-wins: a
+    second `router:` entry or a second `exposure:` must never silently replace the first."""
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise RegistryError(f"duplicate key {key!r} (line {key_node.start_mark.line + 1})")
+        seen.add(key)
+    return loader.construct_mapping(node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+def load_yaml(path):
+    with open(path, encoding="utf-8") as f:
+        return yaml.load(f, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
 
 
 # --------------------------------------------------------------------------------------------
@@ -167,10 +195,20 @@ def validate(reg: dict) -> list[str]:
                 errors.append(f"{where}.backend.url: scheme://host[:port] only, got {b['url']!r}")
             if "respond" in b and h["auth"] != "none":
                 errors.append(f"{where}: a fixed respond backend must be auth none")
+            if "respond" in b and not SAFE_RESPOND.match(str(b["respond"])):
+                errors.append(f"{where}.backend.respond: words, '=' and {{remote_host}} only")
+            if "tls_insecure_skip_verify" in b and not isinstance(b["tls_insecure_skip_verify"], bool):
+                errors.append(f"{where}.backend.tls_insecure_skip_verify: must be a bool, not {b['tls_insecure_skip_verify']!r}")
+            for k in ("tls_ca", "tls_server_name", "host_header"):
+                if k in b and not (isinstance(b[k], str) and SAFE_TOKEN.match(b[k])):
+                    errors.append(f"{where}.backend.{k}: {b[k]!r} is not a plain token")
             if any(k.startswith("tls_") for k in b) and not str(b.get("url", "")).startswith("https://"):
                 errors.append(f"{where}.backend: tls_* options need an https url")
         if h["auth"] == "none" and h["exposure"] == "private":
             errors.append(f"{where}: auth none is for public content only")
+        if h["auth"] == "none" and h["access_gated"]:
+            errors.append(f"{where}: an access_gated host needs authelia or native auth: in tunnel mode the "
+                          "direct listener serves it to every trusted source with no Access in front")
         routes = h.get("routes")
         if routes is not None:
             if not isinstance(routes, list) or not routes:
@@ -197,6 +235,8 @@ def validate(reg: dict) -> list[str]:
         s = h["smoke"]
         if not isinstance(s, dict) or set(s) - SMOKE_KEYS or ("status" in s) == ("status_any" in s):
             errors.append(f"{where}.smoke: status or status_any, optional location_contains")
+        elif "status" in s and not isinstance(s["status"], int) or                 "status_any" in s and not all(isinstance(x, int) for x in s["status_any"]):
+            errors.append(f"{where}.smoke: statuses must be integers")
     return errors
 
 
@@ -228,8 +268,7 @@ def effective_mode(reg: dict, name: str) -> str:
 
 
 def load(path: pathlib.Path = REGISTRY) -> dict:
-    with open(path, encoding="utf-8") as f:
-        reg = yaml.safe_load(f)
+    reg = load_yaml(path)
     errors = validate(reg)
     if errors:
         raise RegistryError("\n".join(errors))
@@ -262,8 +301,20 @@ def _proxy(url, backend, profile, indent):
         lines.append(f"{pad}\theader_up X-Test-Backend {url}")
     if backend.get("host_header"):
         lines.append(f"{pad}\theader_up Host {backend['host_header']}")
+    elif url.startswith("https://"):
+        # Caddy rewrites Host to the upstream's address for HTTPS upstreams unless told otherwise; the
+        # backends expect the public name, as cloudflared sent it (and the dw gate requires it).
+        lines.append(f"{pad}\theader_up Host {{host}}")
     tls = [k for k in ("tls_insecure_skip_verify", "tls_ca", "tls_server_name") if backend.get(k)]
-    if tls and not profile and url == backend.get("url"):
+    if profile and url.startswith("https://"):
+        # the fixture's HTTPS echo: the same Host/SNI semantics, only the address and trust swapped
+        lines[0] = f"{pad}reverse_proxy {profile['echo_tls']} {{"
+        lines.append(f"{pad}\ttransport http {{")
+        lines.append(f"{pad}\t\ttls_insecure_skip_verify")
+        if backend.get("tls_server_name"):
+            lines.append(f"{pad}\t\ttls_server_name {backend['tls_server_name']}")
+        lines.append(f"{pad}\t}}")
+    elif tls and not profile and url == backend.get("url"):
         lines.append(f"{pad}\ttransport http {{")
         if backend.get("tls_insecure_skip_verify"):
             lines.append(f"{pad}\t\ttls_insecure_skip_verify")
@@ -372,6 +423,17 @@ def render(reg: dict, profile: dict | None = None) -> str:
         w("# TEST PROFILE: backends, auth and source ranges replaced for the docker fixture.")
     w("{")
     w("\tadmin localhost:2019")
+    w("\tlog default {")
+    w("\t\toutput stdout")
+    w("\t\tformat filter {")
+    w("\t\t\twrap json")
+    w("\t\t\tfields {")
+    w("\t\t\t\trequest>uri regexp `\\?.*$` `?REDACTED`")
+    for hname in LOG_REDACT:
+        w(f"\t\t\t\trequest>headers>{hname} delete")
+    w("\t\t\t}")
+    w("\t\t}")
+    w("\t}")
     w("\tauto_https off")
     w("\tgrace_period 90s")
     w("\tmetrics {")
@@ -435,6 +497,7 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w(f"\tforward_auth {authelia} {{")
     w("\t\turi /api/authz/forward-auth")
     w("\t\tcopy_headers Remote-User Remote-Groups Remote-Email Remote-Name")
+    w("\t\theader_up CF-Connecting-IP {client_ip}")
     w("\t\theader_up X-Forwarded-Proto https")
     w("\t\theader_up X-Forwarded-Host {host}")
     w("\t\theader_up X-Forwarded-For {client_ip}")
@@ -467,11 +530,15 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w("http://:8080 {")
     w("\timport edge_log")
     o.extend(_site_matchers(reg, public, allow, exclude))
-    w(f"\t@cf_client_bad not vars_regexp {{http.request.header.CF-Connecting-IP}} `{SINGLE_IP}`")
+    w("\t@unknown_host not host " + " ".join(_fqdn(reg, n) for n in public))
+    w("\t@cf_client_bad expression `{client_ip} == {remote_host}`")
+    w("\t@cf_client_multi vars_regexp {http.request.header.CF-Connecting-IP} `,`")
     w("\t@cf_visitor_missing not header Cf-Visitor *")
     w("\t@cf_visitor_http header_regexp Cf-Visitor `\"scheme\"\\s*:\\s*\"http\"`")
     w("\troute {")
+    w("\t\trespond @unknown_host 404")
     w("\t\trespond @cf_client_bad 400")
+    w("\t\trespond @cf_client_multi 400")
     w("\t\trespond @cf_visitor_missing 400")
     w("\t\tredir @cf_visitor_http https://{host}{uri} 308")
     for hdr in STRIP_ALWAYS:
@@ -492,7 +559,9 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w("http://:8081 {")
     w("\timport edge_log")
     o.extend(_peer_matchers(allow, exclude))
+    w("\t@unknown_host not host " + " ".join(_fqdn(reg, n) for n in names))
     w("\troute {")
+    w("\t\trespond @unknown_host 404")
     w("\t\trespond @untrusted_peer 403")
     w("\t\trespond @excluded_peer 403")
     w("\t\tredir https://{host}{uri} 308")
@@ -502,7 +571,7 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w("http://:8082 {")
     w("\t@draining file {")
     w("\t\troot /config")
-    w("\t\ttry_files drain")
+    w("\t\ttry_files drain shutdown")
     w("\t}")
     w("\troute {")
     w("\t\trespond @draining \"draining\" 503")
