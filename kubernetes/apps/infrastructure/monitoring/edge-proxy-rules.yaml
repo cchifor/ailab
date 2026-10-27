@@ -2,8 +2,11 @@
 # edge/edge-proxy that fronts every *.chifor.me hostname, directly and behind the tunnel.
 # Metrics via apps/edge/proxy/podmonitor.yaml (job=edge-proxy; source=caddy for Caddy's per-host
 # histogram, source=reloader for the cert-reloader sidecar's counters), DaemonSet readiness from
-# kube-state-metrics, and the issued certificate's expiry from cert-manager (its series carry the
-# Certificate's namespace as exported_namespace; `namespace` is cert-manager's own).
+# kube-state-metrics, and the issued certificate's expiry from cert-manager. That one is scraped by
+# the chart's ServiceMonitor cert-manager/cert-manager (infrastructure/cert-manager/helmrelease.yaml)
+# with honorLabels false, so its series carry the Certificate's namespace as exported_namespace and
+# `namespace` is cert-manager's own; EdgeCertExpiringSoon selects on exported_namespace and sets
+# `namespace: edge` on the alert. If that monitor ever honors labels, the selector must follow.
 #
 # THE CERTIFICATE RULES: the cert-probe sidecar reads the certificate each pod's Caddy SERVES (TLS
 # to localhost), so EdgeCertServedExpiringSoon is the direct answer, and EdgeCertProbeFailing says
@@ -152,6 +155,7 @@ spec:
           for: 1h
           labels:
             severity: warning
+            namespace: edge # the series' own namespace is cert-manager's; route this as an edge alert
           annotations:
             summary: "edge-wildcard certificate expires in under 14 days"
             description: >-

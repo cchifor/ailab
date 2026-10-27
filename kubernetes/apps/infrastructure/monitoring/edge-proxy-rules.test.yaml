@@ -150,7 +150,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              namespace: cert-manager
+              namespace: edge
               exported_namespace: edge
               name: edge-wildcard
             exp_annotations:

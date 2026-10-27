@@ -531,10 +531,10 @@ def scrape(fx, path, metric):
     r = fx.request("trusted", [{"id": "scrape", "port": 9180, "host": "x", "target": path}])
     if not r:
         return False, "no response"
-    ctype = ";".join(r[0].get("headers", {}).get("content-type", []))
-    ok = (r[0].get("status") == 200 and ctype.startswith("text/plain") and "version=0.0.4" in ctype
+    ctypes = r[0].get("headers", {}).get("content-type", [])
+    ok = (r[0].get("status") == 200 and ctypes == [render.PROM_TEXT]
           and metric in (r[0].get("body") or ""))
-    return ok, f"status {r[0].get('status')}, content-type {ctype!r}"
+    return ok, f"status {r[0].get('status')}, content-type {ctypes!r}"
 
 
 def wait_for(pred, seconds=20):

@@ -65,9 +65,13 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
 
 **Before the first host goes direct (P6)**: Caddy labels its per-host metrics with whatever `Host`
 arrives over TLS (`per_host` on a TLS server observes every host; only plain-HTTP servers fall back
-to `_other`). On the WAN a scanner could then grow Prometheus without bound. Bound the `host` label
-first, for example a PodMonitor metric relabeling that keeps registry hostnames and maps the rest to
-`_other`.
+to `_other`), so on the WAN a scanner could grow Caddy's in-memory series, and Prometheus, without
+bound. Caddy 2.11.7 has no producer-side bound for TLS hosts short of dropping `per_host`, so choose
+one first: drop `per_host` (EdgeUpstreamErrors then reads the whole proxy, not one host), or keep it
+and drop unknown-host samples at scrape time with a PodMonitor `metricRelabelings` `action: keep` on
+the registry's hostnames. The second protects Prometheus only, and Caddy still holds every series
+(restarts reset it). Do not relabel unknown hosts to `_other`: relabeling does not aggregate, it makes
+duplicate series within one scrape.
 
 **To tunnel** (planned): run `tofu apply` first with the host set to `tunnel`, wait 300 s (the apex
 TTL), then merge the proxy change. In an emergency do both at once and accept up to 300 s of 403

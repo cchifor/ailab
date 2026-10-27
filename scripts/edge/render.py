@@ -36,8 +36,8 @@ OUTPUT = ROOT / "kubernetes/apps/apps/edge/proxy/Caddyfile"
 
 AUTHELIA = "authelia.auth.svc.cluster.local:9091"
 CERT = "/certs/tls.crt"
-PROM_TEXT = "text/plain; version=0.0.4; charset=utf-8"  # Prometheus text exposition format
 KEY = "/certs/tls.key"
+PROM_TEXT = "text/plain; version=0.0.4; charset=utf-8"  # Prometheus text exposition format
 
 TOP_KEYS = {"version", "zone", "edge_default", "force_tunnel", "vip", "tunnel_id", "trusted_sources", "admin_sources",
             "tunnel_trusted_proxies", "hosts"}
