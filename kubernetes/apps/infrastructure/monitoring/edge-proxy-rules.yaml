@@ -66,6 +66,9 @@ spec:
         # Per LISTENER (server: direct, tunnel, redirect), not per host: Caddy's per-host labels are
         # off because on a TLS server they would record any Host a WAN client sends (unbounded). The
         # failing host is in the access log: kubectl -n edge logs -l app.kubernetes.io/name=edge-proxy -c caddy.
+        # Known gap: per listener, one low-traffic host failing 100 % pages only if it carries over a fifth
+        # of its listener's requests; a bounded per-host signal (probes of the registry's hosts) is a
+        # follow-up (docs/runbooks/edge-ingress.md).
         - alert: EdgeUpstreamErrors
           expr: >-
             (

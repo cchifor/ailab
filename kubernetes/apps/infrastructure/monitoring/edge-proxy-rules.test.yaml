@@ -86,11 +86,11 @@ tests:
         values: "0+40x40"
       - series: 'caddy_http_request_duration_seconds_count{job="edge-proxy",code="502",server="direct"}'
         values: "0+20x40"
-      # redirect: 100 % failing but 1 request per 10 minutes: below the volume gate
-      - series: 'caddy_http_request_duration_seconds_count{job="edge-proxy",code="502",server="redirect"}'
+      # tunnel: 100 % failing but 1 request per 10 minutes: below the volume gate
+      - series: 'caddy_http_request_duration_seconds_count{job="edge-proxy",code="502",server="tunnel"}'
         values: "0+0.1x40"
-      # tunnel: healthy
-      - series: 'caddy_http_request_duration_seconds_count{job="edge-proxy",code="200",server="tunnel"}'
+      # redirect: it never proxies, only 308s
+      - series: 'caddy_http_request_duration_seconds_count{job="edge-proxy",code="308",server="redirect"}'
         values: "0+50x40"
     alert_rule_test:
       - eval_time: 30m

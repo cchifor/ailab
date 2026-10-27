@@ -76,7 +76,10 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
 its per-host metrics with whatever `Host` arrives, so from the WAN a scanner could grow Caddy's memory and
 Prometheus without bound, and Caddy 2.11.7 has no producer-side bound short of dropping `per_host`.
 EdgeUpstreamErrors reads per listener (`server`: direct, tunnel, redirect); the access log names the hosts
-(`kubectl -n edge logs -l app.kubernetes.io/name=edge-proxy -c caddy`). Do not bring `per_host` back without
+(`kubectl -n edge logs -l app.kubernetes.io/name=edge-proxy -c caddy`). The cost: one low-traffic host failing
+100 % pages only if it carries over a fifth of its listener's requests (Gatus probes only a few edge URLs:
+agentforge, Keycloak's realms, the registry). Follow-up: a bounded per-host availability signal, probes of the
+registry's hosts through the VIP. Do not bring `per_host` back without
 a bound; a scrape-time relabel would protect Prometheus only (and must not map unknown hosts to `_other`:
 relabeling does not aggregate, it makes duplicate series within one scrape).
 
