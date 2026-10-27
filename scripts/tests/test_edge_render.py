@@ -250,12 +250,32 @@ class DnsRecords(unittest.TestCase):
         self.assertEqual(render.DNS_OUTPUT.read_text(encoding="utf-8"), text,
                          "run `just edge-render` and commit kubernetes/edge/dns-records.json")
 
+    def test_binding_covers_every_record_and_the_registry(self):
+        import json
+        text = render.REGISTRY.read_bytes().decode("utf-8")
+        doc = json.loads(render.render_dns(committed(), text))
+        recs = doc["records"]
+        self.assertEqual(doc["binding_sha256"], render.records_binding(text, recs))
+        # a valid-shape substitution, a dropped record, an emptied map, another registry: all differ
+        sub = json.loads(json.dumps(recs))
+        sub["router"] = {"mode": "direct", "type": "CNAME", "content": "chifor.me", "proxied": False, "ttl": 60}
+        dropped = {k: v for k, v in recs.items() if k != "router"}
+        for other in (render.records_binding(text, sub), render.records_binding(text, dropped),
+                      render.records_binding(text, {}), render.records_binding(text + "#\n", recs)):
+            self.assertNotEqual(doc["binding_sha256"], other)
+
     def test_dns_tf_consumes_the_file_behind_blocking_guards(self):
         tf = (ROOT / "kubernetes/infra/cloudflare/dns.tf").read_text(encoding="utf-8")
         self.assertIn("dns-records.json", tf)
-        self.assertIn("local.edge_dns.registry_sha256 == sha256(local.edge_registry)", tf)
         self.assertIn('replace(file("${path.module}/../../edge/hostnames.yaml"), "\\r", "")', tf)
-        self.assertEqual(tf.count("precondition {"), 3)
+        # the artifact guards sit on an output, which every plan evaluates however many records exist
+        guard = tf[tf.index('output "edge_dns_artifact"'):tf.index('resource "cloudflare_dns_record" "edge"')]
+        self.assertIn("local.edge_dns.registry_sha256 == sha256(local.edge_registry)", guard)
+        self.assertIn('local.edge_dns.binding_sha256 == sha256("${local.edge_registry}\\n${jsonencode(local.edge_dns.records)}")', guard)
+        self.assertIn("setsubtract(keys(local.edge_dns.records), local.edge_registry_hosts)", guard)
+        self.assertIn("setsubtract(local.edge_registry_hosts, keys(local.edge_dns.records))", guard)
+        self.assertEqual(guard.count("precondition {"), 4)
+        self.assertEqual(tf.count("precondition {"), 5)
         # no second implementation of the mode rule, and no warn-only check block
         for word in ("edge_default", "force_tunnel", "check \""):
             self.assertNotIn(word, tf)

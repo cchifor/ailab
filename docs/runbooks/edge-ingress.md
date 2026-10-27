@@ -93,9 +93,12 @@ that commit, merge.
 ## DNS records and their state (from P4)
 
 `kubernetes/infra/cloudflare/dns.tf` creates exactly the records in `kubernetes/edge/dns-records.json`,
-which `just edge-render` generates from the validated registry. Its plan FAILS (lifecycle preconditions)
-when the file was not rendered from the committed registry (a hash of it), names another zone or tunnel,
-or holds a record of no valid shape. Fix the registry and re-render; never edit the JSON.
+which `just edge-render` generates from the validated registry. Its plan FAILS (preconditions on the
+output `edge_dns_artifact`, evaluated on every plan, and on each record) when the file was not rendered
+from the committed registry (a hash of it), when its records are not the ones rendered for that registry
+(a hash over both: a record edited, added or dropped by hand), when its hostnames are not exactly the
+registry's hosts, when it names another zone or tunnel, or when a record has no valid shape. Fix the
+registry and re-render; never edit the JSON.
 
 **Applying.** A plain `tofu plan` of this module is not clean: the live Trueswarm admin gate was applied by
 `scripts/trueswarm-admin-access.sh` with inputs `terraform.tfvars` does not hold. Export them first:

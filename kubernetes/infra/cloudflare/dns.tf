@@ -10,11 +10,16 @@
 #            forwards 443 to the edge proxy's VIP.
 #   private  DNS-only A -> the VIP 192.168.0.51 (resolves anywhere, reachable only on the LAN/VPN)
 #
-# BLOCKING GUARDS: lifecycle preconditions, which fail the plan (a `check` block would only warn).
-#   1. the file carries the sha256 of the registry as committed, so a hand edit, or a registry change
-#      without `just edge-render` (which refuses an invalid registry), never reaches Cloudflare;
-#   2. its zone and tunnel are this module's;
-#   3. every record has exactly one of the three shapes above.
+# BLOCKING GUARDS: preconditions, which fail the plan (a `check` block would only warn). The artifact
+# guards sit on the output edge_dns_artifact below, which is evaluated on every plan: a precondition on
+# the records resource runs once per record, so an emptied or shortened records map would skip it.
+#   1. the file carries the sha256 of the registry as committed (a registry change without
+#      `just edge-render`, which refuses an invalid registry, never reaches Cloudflare);
+#   2. it carries a sha256 over that registry AND its records, recomputed here, so a record edited,
+#      added or dropped by hand fails even with the registry hash intact;
+#   3. its hostnames are exactly the registry's hosts;
+#   4. its zone and tunnel are this module's;
+#   5. (per record, on the resource) every record has exactly one of the three shapes above.
 #
 # A mode change between a CNAME and an A record REPLACES the record (the two types cannot coexist
 # on one name, so create_before_destroy would collide): a few seconds of NXDOMAIN. Rehearse it on
@@ -25,9 +30,33 @@
 # failed apply leaves a NEW record absent (fail-safe). The registry refuses to put an Access-gated
 # host in direct mode without Authelia in front (render.py validate()).
 locals {
-  edge_registry = replace(file("${path.module}/../../edge/hostnames.yaml"), "\r", "")
-  edge_dns      = jsondecode(file("${path.module}/../../edge/dns-records.json"))
-  tunnel_target = "${var.tunnel_id}.cfargotunnel.com"
+  edge_registry       = replace(file("${path.module}/../../edge/hostnames.yaml"), "\r", "")
+  edge_registry_hosts = keys(yamldecode(local.edge_registry).hosts)
+  edge_dns            = jsondecode(file("${path.module}/../../edge/dns-records.json"))
+  tunnel_target       = "${var.tunnel_id}.cfargotunnel.com"
+}
+
+output "edge_dns_artifact" {
+  description = "The sha256 binding kubernetes/edge/dns-records.json to the registry it was rendered from."
+  value       = local.edge_dns.binding_sha256
+
+  precondition {
+    condition     = local.edge_dns.registry_sha256 == sha256(local.edge_registry)
+    error_message = "kubernetes/edge/dns-records.json was not rendered from the committed kubernetes/edge/hostnames.yaml: run `just edge-render` (it validates the registry first) and commit both."
+  }
+  precondition {
+    condition     = local.edge_dns.binding_sha256 == sha256("${local.edge_registry}\n${jsonencode(local.edge_dns.records)}")
+    error_message = "The records in kubernetes/edge/dns-records.json are not the ones render.py wrote for this registry (edited, added or removed by hand): run `just edge-render`."
+  }
+  precondition {
+    condition = (length(setsubtract(keys(local.edge_dns.records), local.edge_registry_hosts)) == 0
+    && length(setsubtract(local.edge_registry_hosts, keys(local.edge_dns.records))) == 0)
+    error_message = "kubernetes/edge/dns-records.json does not hold exactly one record per registry host: run `just edge-render`."
+  }
+  precondition {
+    condition     = local.edge_dns.zone == "chifor.me" && local.edge_dns.tunnel_id == var.tunnel_id
+    error_message = "kubernetes/edge/dns-records.json names another zone or tunnel than this module (chifor.me, var.tunnel_id)."
+  }
 }
 
 resource "cloudflare_dns_record" "edge" {
@@ -45,14 +74,6 @@ resource "cloudflare_dns_record" "edge" {
   comment = lookup(var.tunnel_record_comments, each.key, null)
 
   lifecycle {
-    precondition {
-      condition     = local.edge_dns.registry_sha256 == sha256(local.edge_registry)
-      error_message = "kubernetes/edge/dns-records.json was not rendered from the committed kubernetes/edge/hostnames.yaml: run `just edge-render` (it validates the registry first) and commit both."
-    }
-    precondition {
-      condition     = local.edge_dns.zone == "chifor.me" && local.edge_dns.tunnel_id == var.tunnel_id
-      error_message = "kubernetes/edge/dns-records.json names another zone or tunnel than this module (chifor.me, var.tunnel_id)."
-    }
     precondition {
       condition = (
         (each.value.mode == "tunnel" && each.value.type == "CNAME" && each.value.proxied && each.value.content == local.tunnel_target && each.value.ttl == 1)

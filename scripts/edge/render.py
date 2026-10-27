@@ -355,14 +355,27 @@ def dns_records(reg: dict) -> dict:
     return out
 
 
+def records_binding(registry_text: str, records: dict) -> str:
+    """sha256 over the registry (CRs removed) and the records, which dns.tf recomputes as
+    sha256("${registry}\n${jsonencode(records)}"): a record edited, added or dropped by hand, with the
+    registry hash left intact, no longer matches. jsonencode writes compact JSON with sorted keys and
+    escapes <, > and & (Go's encoder); these values never carry those, which is asserted."""
+    canon = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    if any(c in canon for c in "<>&"):
+        raise RegistryError("dns records contain <, > or &, which jsonencode would escape differently")
+    return hashlib.sha256((registry_text.replace("\r", "") + "\n" + canon).encode("utf-8")).hexdigest()
+
+
 def render_dns(reg: dict, registry_text: str) -> str:
+    records = dns_records(reg)
     doc = {
         "_generated": "by scripts/edge/render.py from kubernetes/edge/hostnames.yaml; do not edit, run `just edge-render`",
         "registry_sha256": registry_digest(registry_text),
+        "binding_sha256": records_binding(registry_text, records),
         "zone": reg["zone"],
         "tunnel_id": reg["tunnel_id"],
         "vip": reg["vip"],
-        "records": dns_records(reg),
+        "records": records,
     }
     return json.dumps(doc, indent=2) + "\n"
 
