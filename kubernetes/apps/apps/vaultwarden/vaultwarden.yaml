@@ -63,8 +63,10 @@ spec:
             - { name: SIGNUPS_ALLOWED, value: "false" } # invite-only
             - { name: INVITATIONS_ALLOWED, value: "true" } # /admin can whitelist an email to register
             - { name: SIGNUPS_VERIFY, value: "false" } # no SMTP wired -> don't require email verification
-            # Per-IP LOGIN_RATELIMIT needs the real client IP. Use Cf-Connecting-IP: a single, edge-set,
-            # un-spoofable value cloudflared forwards. (X-Forwarded-For is client-appended — CF puts the
+            # Per-IP LOGIN_RATELIMIT needs the real client IP. Use Cf-Connecting-IP: a single value set by
+            # whatever reaches the pod - Cloudflare's edge through cloudflared, or the in-cluster edge proxy,
+            # which overwrites it on every request (ADR 0040) - and networkpolicy.yaml admits only those (plus
+            # Homepage's /alive probe). (X-Forwarded-For is client-appended — CF puts the
             # real IP LAST but Vaultwarden reads the FIRST entry, so it is trivially spoofable here.)
             - { name: IP_HEADER, value: "CF-Connecting-IP" }
             - { name: DISABLE_ICON_DOWNLOAD, value: "true" } # removes the SSRF surface (pod can reach the LAN)

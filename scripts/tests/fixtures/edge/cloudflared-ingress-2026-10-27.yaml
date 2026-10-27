@@ -1,0 +1,100 @@
+# FROZEN copy of the cloudflared ingress as it stood on 2026-10-27 (gitea main 43022401), before
+# the edge proxy took over routing (ADR 0040). scripts/tests/test_edge_render.py holds every
+# registry backend equal to it, except for differences that test lists with a reason. Never
+# update this file to make the test pass: change the registry or record the difference.
+ingress:
+- hostname: home.chifor.me
+  service: http://oauth2-proxy.homepage.svc.cluster.local:4180
+- hostname: sso.chifor.me
+  service: http://authelia.auth.svc.cluster.local:9091
+- hostname: status.chifor.me
+  service: http://gatus.gatus.svc.cluster.local:8080
+- hostname: chat.chifor.me
+  service: http://open-webui.ai.svc.cluster.local:80
+- hostname: grafana.chifor.me
+  service: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
+- hostname: dsh.chifor.me
+  service: http://dsh.dsh.svc.cluster.local:80
+- hostname: api.chifor.me
+  service: http://litellm.ai.svc.cluster.local:4000
+- hostname: router.chifor.me
+  service: http://llm-router-edge.llm-router.svc.cluster.local:80
+- hostname: relay.chifor.me
+  service: http://relay.relay.svc.cluster.local:80
+- hostname: id.chifor.me
+  path: \.\.|;
+  service: http_status:404
+- hostname: id.chifor.me
+  path: ^/realms/relay(/|$)
+  service: http://keycloak.keycloak.svc.cluster.local:80
+- hostname: id.chifor.me
+  path: ^/realms/llm-router(/|$)
+  service: http://keycloak.keycloak.svc.cluster.local:80
+- hostname: id.chifor.me
+  path: ^/resources/
+  service: http://keycloak.keycloak.svc.cluster.local:80
+- hostname: id.chifor.me
+  service: http_status:404
+- hostname: search.chifor.me
+  service: http://oauth2-proxy-searxng.dsh.svc.cluster.local:4180
+- hostname: dw1.chifor.me
+  service: https://192.168.0.8
+  originRequest:
+    noTLSVerify: true
+    httpHostHeader: 192.168.0.8
+- hostname: dw2.chifor.me
+  service: https://192.168.0.9
+  originRequest:
+    noTLSVerify: true
+    httpHostHeader: 192.168.0.9
+- hostname: dw3.chifor.me
+  service: https://192.168.0.10
+  originRequest:
+    noTLSVerify: true
+    httpHostHeader: 192.168.0.10
+- hostname: dw4.chifor.me
+  service: https://192.168.0.11
+  originRequest:
+    noTLSVerify: true
+    httpHostHeader: 192.168.0.11
+- hostname: k8s.chifor.me
+  service: http://headlamp.headlamp.svc.cluster.local:80
+- hostname: hubble.chifor.me
+  service: http://hubble-ui.kube-system.svc.cluster.local:80
+- hostname: proxmox.chifor.me
+  service: https://192.168.0.2:8006
+  originRequest:
+    noTLSVerify: true
+- hostname: qnap.chifor.me
+  service: https://192.168.1.225
+  originRequest:
+    noTLSVerify: true
+- hostname: prometheus.chifor.me
+  service: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+- hostname: alertmanager.chifor.me
+  service: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093
+- hostname: ntfy.chifor.me
+  service: http://ntfy.monitoring.svc.cluster.local:80
+- hostname: trueswarm.chifor.me
+  path: ^/(media/[^/]+|art/[^/]+|api/v1/uploads/[^/]+/content)$
+  service: http://trueswarm-muse.trueswarm.svc.cluster.local:80
+- hostname: trueswarm.chifor.me
+  service: http://trueswarm.trueswarm.svc.cluster.local:80
+- hostname: muse.chifor.me
+  service: http://muse-stream.muse-stream.svc.cluster.local:80
+- hostname: git.chifor.me
+  service: http://gitea-http.gitea.svc.cluster.local:3000
+- hostname: agentforge.chifor.me
+  service: http://agentforge-platform.agentforge.svc.cluster.local:8080
+- hostname: vault.chifor.me
+  service: http://vaultwarden.vaultwarden.svc.cluster.local:80
+- hostname: openbao.chifor.me
+  service: https://openbao-ui.openbao.svc.cluster.local:8200
+  originRequest:
+    caPool: /etc/cloudflared/openbao-ca/ca.crt
+    originServerName: openbao.openbao.svc.cluster.local
+- hostname: strive.place
+  service: http://traefik.platform-edge.svc.cluster.local:80
+- hostname: id.strive.place
+  service: http://traefik.platform-edge.svc.cluster.local:80
+- service: http_status:404

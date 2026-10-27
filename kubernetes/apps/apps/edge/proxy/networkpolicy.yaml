@@ -1,0 +1,40 @@
+# Who may connect to the edge proxy, per listener.
+#   8443 direct, 8081 redirect: anyone. The LAN, the gateway's WAN forward and in-cluster pods;
+#                               the proxy itself decides per host from the TCP peer.
+#   8080 tunnel: ONLY the cloudflared pods. Namespace AND pod label, so cloudflared-strive
+#                (label cloudflared-strive) and every other pod are refused. The tunnel listener
+#                trusts CF-Connecting-IP from the pod CIDR, so this rule is that trust's boundary.
+#   9180 metrics: the monitoring namespace (Prometheus).
+# 8082 (health) is reached by the kubelet only, which Cilium admits from the host.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge-proxy
+  namespace: edge
+  labels:
+    app.kubernetes.io/name: edge-proxy
+    app.kubernetes.io/part-of: edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: edge-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8443 }
+        - { protocol: TCP, port: 8081 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - { protocol: TCP, port: 9180 }

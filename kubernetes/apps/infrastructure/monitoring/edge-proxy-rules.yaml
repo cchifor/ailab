@@ -1,0 +1,95 @@
+# Alerts for the edge proxy (ADR 0040, docs/standards/edge-ingress.md): the Caddy DaemonSet
+# edge/edge-proxy that fronts every *.chifor.me hostname, directly and behind the tunnel.
+# Metrics via apps/edge/proxy/podmonitor.yaml (job=edge-proxy): Caddy's per-host request histogram
+# and the cert-reloader sidecar's counters; DaemonSet readiness from kube-state-metrics; the
+# certificate's expiry from cert-manager.
+#
+# WHY: from P5 the tunnel and the direct path both go through this proxy, so a proxy that is down,
+# failing upstream or serving a stale certificate takes every public hostname with it.
+# `release: kube-prometheus-stack` so the operator's ruleSelector picks it up.
+# edge-proxy-rules.test.yaml asserts each rule both ways; scripts/rules-lint.sh runs it on every PR.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: edge-proxy
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: edge-proxy
+      rules:
+        - alert: EdgeProxyDown
+          expr: kube_daemonset_status_number_ready{namespace="edge",daemonset="edge-proxy"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "edge-proxy has no ready pod"
+            description: >-
+              No edge-proxy pod is ready, so the VIP 192.168.0.51 answers nothing and, from P5,
+              the tunnel has no backend either. Runbook: docs/runbooks/edge-ingress.md, Rollback.
+        - alert: EdgeProxyDegraded
+          expr: >-
+            kube_daemonset_status_number_ready{namespace="edge",daemonset="edge-proxy"}
+            < kube_daemonset_status_desired_number_scheduled{namespace="edge",daemonset="edge-proxy"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "edge-proxy has fewer ready pods than nodes"
+            description: >-
+              Some control-plane node has no ready edge-proxy pod for 15m (a drain file left in
+              /config/drain, a failed rollout, or a missing certificate Secret). MetalLB announces
+              only from nodes with a ready pod, so the VIP still works, with less headroom.
+        - alert: EdgeProxyNotScraped
+          expr: absent(up{job="edge-proxy"} == 1)
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "no edge-proxy metrics target is up"
+            description: >-
+              Prometheus has no answering edge-proxy target for 15m: the PodMonitor, the metrics
+              port 9180 or the NetworkPolicy edge-proxy. The other edge alerts are blind meanwhile.
+        - alert: EdgeUpstreamErrors
+          expr: >-
+            (
+              sum by (host) (rate(caddy_http_request_duration_seconds_count{job="edge-proxy",code=~"5.."}[10m]))
+              / sum by (host) (rate(caddy_http_request_duration_seconds_count{job="edge-proxy"}[10m]))
+            ) > 0.2
+            and sum by (host) (increase(caddy_http_request_duration_seconds_count{job="edge-proxy"}[10m])) >= 20
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.host }}: over 20 % of requests fail with 5xx at the edge"
+            description: >-
+              More than a fifth of the requests to {{ $labels.host }} through the edge proxy have
+              answered 5xx for 15m (502 = backend unreachable or Authelia down). Gated on at least
+              20 requests per 10m.
+        - alert: EdgeCertReloadFailing
+          expr: >-
+            increase(edge_cert_reload_failures_total{job="edge-proxy"}[30m]) > 0
+            or increase(edge_cert_invalid_total{job="edge-proxy"}[30m]) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "edge-proxy cannot load a renewed certificate"
+            description: >-
+              The cert-reloader sidecar on {{ $labels.pod }} keeps failing to reload Caddy, or the
+              renewed pair does not validate, so Caddy is still serving the previous certificate.
+              Check `kubectl -n edge logs {{ $labels.pod }} -c cert-reloader`.
+        - alert: EdgeCertExpiringSoon
+          expr: >-
+            certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}
+            - time() < 14 * 86400
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "edge-wildcard certificate expires in under 14 days"
+            description: >-
+              cert-manager has not renewed *.chifor.me (Certificate edge/edge-wildcard; it renews at
+              30 days left). Check the Certificate's events and the Cloudflare DNS-01 solver.

@@ -1,0 +1,45 @@
+# The VIP (192.168.0.51) for the LAN and the gateway's WAN 443 forward. MetalLB assigns and
+# announces it (infrastructure/metallb + metallb-config); Cilium's LB-IPAM ignores the Service
+# because of its loadBalancerClass. externalTrafficPolicy: Local keeps the client address and makes
+# MetalLB announce only from a node with a ready edge-proxy pod. No NodePorts: nothing needs them,
+# and they would open the proxy on every node's address.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-proxy
+  namespace: edge
+  labels:
+    app.kubernetes.io/name: edge-proxy
+    app.kubernetes.io/part-of: edge
+  annotations:
+    # autoAssign is off on the pool, so the Service names both the pool and the address.
+    metallb.io/address-pool: edge
+    metallb.io/loadBalancerIPs: 192.168.0.51
+spec:
+  type: LoadBalancer
+  loadBalancerClass: metallb.io/metallb
+  externalTrafficPolicy: Local
+  allocateLoadBalancerNodePorts: false
+  selector:
+    app.kubernetes.io/name: edge-proxy
+  ports:
+    - { name: https, port: 443, targetPort: direct, protocol: TCP }
+    - { name: http, port: 80, targetPort: redirect, protocol: TCP }
+---
+# The tunnel listener: cloudflared's only target (apps/edge/cloudflared.yaml, from P5). ClusterIP
+# only; the NetworkPolicy admits nothing but the cloudflared pods on this port, which is what makes
+# trusting CF-Connecting-IP here safe.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-proxy-tunnel
+  namespace: edge
+  labels:
+    app.kubernetes.io/name: edge-proxy
+    app.kubernetes.io/part-of: edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: edge-proxy
+  ports:
+    - { name: tunnel, port: 8080, targetPort: tunnel, protocol: TCP }

@@ -1,0 +1,28 @@
+# The edge VIP, and only it (ADR 0040). The address sits OUTSIDE the gateway's DHCP pool
+# (kubernetes/edge/gateway.yaml; the pool starts at 192.168.0.52), and on a rebuild that must be
+# true BEFORE this file is applied: docs/standards/edge-ingress.md, "Installing on new
+# infrastructure". autoAssign off: a Service gets it only by naming pool and address
+# (apps/edge/proxy/services.yaml), so no other LoadBalancer Service can take it.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: edge
+  namespace: metallb-system
+spec:
+  addresses:
+    - 192.168.0.51/32
+  autoAssign: false
+---
+# Announce the pool from the control-plane nodes only: the nodes that run the edge proxy. With
+# externalTrafficPolicy: Local MetalLB picks one of them that has a ready proxy pod.
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: edge
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - edge
+  nodeSelectors:
+    - matchLabels:
+        node-role.kubernetes.io/control-plane: ""

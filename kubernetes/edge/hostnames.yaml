@@ -1,0 +1,322 @@
+# Edge ingress registry: the single source of truth for every *.chifor.me web hostname the edge
+# serves (docs/standards/edge-ingress.md, ADR 0040). Edit THIS file, then `just edge-render`.
+#
+# Consumers:
+#   - scripts/edge/render.py   -> kubernetes/apps/apps/edge/proxy/Caddyfile (CI fails on drift)
+#   - kubernetes/infra/cloudflare (DNS records per effective mode, yamldecode)
+#   - scripts/edge/gateway.py  -> UniFi local DNS records for hosts with lan_dns: true
+#
+# Per host (no defaults for the security fields; render.py rejects anything missing or unknown):
+#   exposure      public | private
+#   edge          default | direct | tunnel        (public only; default -> edge_default)
+#   auth          native | authelia | none          (none = public content only)
+#   authelia_group                                   (auth: authelia only)
+#   access_gated  true when the host relies on Cloudflare Access while it is in tunnel mode
+#   lan_dns       the gateway serves a local A record -> vip (set once the LAN smoke passed)
+#   backend       url, or respond for a fixed answer; tls_insecure_skip_verify, tls_ca,
+#                 tls_server_name, host_header
+#   uri_guard     refuse dot segments, ';' and encoded dots/slashes/backslashes/percents in the raw path
+#   routes        ordered path rules; the first match wins: {match: {path_regexp|paths}, to: default|<url>}
+#   routes_default  backend | 404 (what happens when routes are defined and none matched)
+#   restricted_paths  [{paths: [...], path_regexp: ..., exposure: access_gated | private}]
+#   smoke         the expected anonymous outcome through the VIP from the LAN (scripts/edge/smoke.py)
+#
+# Out of scope (unchanged): registry.chifor.me (DNS-only A to the zot LXC), the *-lan NodePorts,
+# trueswarm-admin (its own tunnel), strive.place (another Cloudflare account).
+version: 1
+zone: chifor.me
+# Every host starts in the tunnel; hosts move to direct one at a time after verification (P6).
+edge_default: tunnel
+# Emergency switch: true sends every public host back to the tunnel, whatever its own pin.
+force_tunnel: false
+vip: 192.168.0.51
+tunnel_id: f93d9a6a-5172-43d3-8bef-13460ea7607b
+# Private hosts, restricted paths and tunnel-mode hosts on the direct listener are served only to
+# these TCP peers. Never a forwarded header.
+trusted_sources:
+  allow:
+    - 192.168.0.0/23   # UniFi network Home (lab LAN, workstation, QNAP)
+    - 192.168.50.0/24  # UniFi VLAN Trusted
+    - 192.168.99.0/24  # UniFi VLAN Mgmt
+  exclude:
+    - 192.168.0.1/32   # the UXG: source address of NAT-loopback traffic
+    - 192.168.0.41/32  # talos-cp1
+    - 192.168.0.42/32  # talos-cp2
+    - 192.168.0.43/32  # talos-cp3
+    - 192.168.0.47/32  # talos-agent-node-1
+    - 192.168.0.48/32  # talos-agent-node-2
+    - 192.168.0.49/32  # talos-agent-node-3
+# The tunnel listener trusts CF-Connecting-IP only from these peers; its NetworkPolicy admits only
+# the cloudflared pods.
+tunnel_trusted_proxies:
+  - 10.244.0.0/16
+
+hosts:
+  # ---- public, the application's own login ------------------------------------------------
+  home:
+    exposure: public
+    edge: default
+    auth: native # oauth2-proxy -> Authelia, admins_only
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://oauth2-proxy.homepage.svc.cluster.local:4180" }
+    smoke: { status: 302, location_contains: "sso.chifor.me" }
+  sso:
+    exposure: public
+    edge: default
+    auth: native # Authelia itself
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://authelia.auth.svc.cluster.local:9091" }
+    smoke: { status: 200 }
+  status:
+    exposure: public
+    edge: default
+    auth: none # Gatus: a public status page
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://gatus.gatus.svc.cluster.local:8080" }
+    smoke: { status: 200 }
+  chat:
+    exposure: public
+    edge: default
+    auth: native # Open WebUI
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://open-webui.ai.svc.cluster.local:80" }
+    smoke: { status: 200 }
+  grafana:
+    exposure: public
+    edge: default
+    auth: native # Grafana login (Authelia OIDC)
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80" }
+    smoke: { status: 302, location_contains: "/login" }
+  api:
+    exposure: public
+    edge: default
+    auth: native # LiteLLM master/virtual keys
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://litellm.ai.svc.cluster.local:4000" }
+    smoke: { status: 200 }
+  router:
+    exposure: public
+    edge: default
+    auth: native # llm-router bearer keys + Keycloak sign-in
+    access_gated: false
+    lan_dns: false
+    # llm-router-edge holds requests while the single router pod restarts (llm-router/edge.yaml).
+    backend: { url: "http://llm-router-edge.llm-router.svc.cluster.local:80" }
+    smoke: { status: 200 }
+  relay:
+    exposure: public
+    edge: default
+    auth: native # Relay owns browser and connector authentication
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://relay.relay.svc.cluster.local:80" }
+    smoke: { status: 200 }
+  id:
+    exposure: public
+    edge: default
+    auth: native # Keycloak; only the relay and llm-router realms and the static resources
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://keycloak.keycloak.svc.cluster.local:80" }
+    uri_guard: true
+    routes:
+      - { match: { path_regexp: "^/realms/relay(/|$)" }, to: default }
+      - { match: { path_regexp: "^/realms/llm-router(/|$)" }, to: default }
+      - { match: { path_regexp: "^/resources/" }, to: default }
+    routes_default: "404"
+    smoke: { status: 404 }
+  search:
+    exposure: public
+    edge: default
+    auth: native # its own oauth2-proxy -> Authelia (apps/dsh/searxng-auth.yaml)
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://oauth2-proxy-searxng.dsh.svc.cluster.local:4180" }
+    smoke: { status: 302, location_contains: "sso.chifor.me" }
+  ntfy:
+    exposure: public
+    edge: default
+    auth: native # ntfy deny-all default + token users
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://ntfy.monitoring.svc.cluster.local:80" }
+    smoke: { status: 200 }
+  trueswarm:
+    exposure: public
+    edge: default
+    auth: native # Trueswarm owns authentication
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://trueswarm.trueswarm.svc.cluster.local:80" }
+    # Only native media and ticket-bound upload paths reach the isolated Muse instance.
+    routes:
+      - match: { path_regexp: "^/(media/[^/]+|art/[^/]+|api/v1/uploads/[^/]+/content)$" }
+        to: "http://trueswarm-muse.trueswarm.svc.cluster.local:80"
+      - { match: { path_regexp: "^/" }, to: default }
+    routes_default: backend
+    smoke: { status: 200 }
+  muse:
+    exposure: public
+    edge: default
+    auth: native # Muse native user/agent/mobile auth; published songs are public
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://muse-stream.muse-stream.svc.cluster.local:80" }
+    smoke: { status: 200 }
+  git:
+    exposure: public
+    edge: default
+    auth: native # Gitea (Authelia OIDC for the UI, tokens for git)
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://gitea-http.gitea.svc.cluster.local:3000" }
+    smoke: { status: 200 }
+  agentforge:
+    exposure: public
+    edge: default
+    auth: native # the CP's own Authelia OIDC + org membership (ADR 0019)
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://agentforge-platform.agentforge.svc.cluster.local:8080" }
+    smoke: { status: 200 }
+  vault:
+    exposure: public
+    edge: default
+    auth: native # Vaultwarden master password + 2FA; native clients cannot do Access
+    access_gated: false
+    lan_dns: false
+    backend: { url: "http://vaultwarden.vaultwarden.svc.cluster.local:80" }
+    uri_guard: true
+    # /admin is Access-gated at Cloudflare today (access.tf vault_admin); private once WireGuard works (P7).
+    restricted_paths:
+      - { path_regexp: "^/+admin(/|$)", exposure: access_gated }
+    smoke: { status: 200 }
+
+  # ---- Access-gated today: tunnel + Access from outside, LAN-only on the direct listener --------
+  dsh:
+    exposure: public
+    edge: tunnel
+    auth: authelia # its session cookie carries no SSO identity; Access was the only per-person gate
+    authelia_group: admins
+    access_gated: true
+    lan_dns: false
+    # No Host override: dsh's /api trust fence refuses any Host but dsh.chifor.me.
+    backend: { url: "http://dsh.dsh.svc.cluster.local:80" }
+    smoke: { status: 302, location_contains: "sso.chifor.me" }
+  k8s:
+    exposure: public
+    edge: tunnel
+    auth: authelia # Headlamp, read-only cluster explorer
+    authelia_group: admins
+    access_gated: true
+    lan_dns: false
+    backend: { url: "http://headlamp.headlamp.svc.cluster.local:80" }
+    smoke: { status: 302, location_contains: "sso.chifor.me" }
+  hubble:
+    exposure: public
+    edge: tunnel
+    auth: authelia # Hubble UI has no auth of its own
+    authelia_group: admins
+    access_gated: true
+    lan_dns: false
+    backend: { url: "http://hubble-ui.kube-system.svc.cluster.local:80" }
+    smoke: { status: 302, location_contains: "sso.chifor.me" }
+  prometheus:
+    exposure: public
+    edge: tunnel
+    auth: authelia # no native auth
+    authelia_group: admins
+    access_gated: true
+    lan_dns: false
+    backend: { url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090" }
+    smoke: { status: 302, location_contains: "sso.chifor.me" }
+  alertmanager:
+    exposure: public
+    edge: tunnel
+    auth: authelia # no native auth; can silence every alert
+    authelia_group: admins
+    access_gated: true
+    lan_dns: false
+    backend: { url: "http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093" }
+    smoke: { status: 302, location_contains: "sso.chifor.me" }
+  proxmox:
+    exposure: public
+    edge: tunnel
+    auth: native # Proxmox login; recovery surface, kept off Authelia (also https://192.168.0.2:8006)
+    access_gated: true
+    lan_dns: false
+    # Self-signed origin; the ADR 0007 CA-pinning item is still open.
+    backend: { url: "https://192.168.0.2:8006", tls_insecure_skip_verify: true }
+    smoke: { status: 200 }
+  qnap:
+    exposure: public
+    edge: tunnel
+    auth: native # QNAP login; recovery surface (also https://192.168.1.225)
+    access_gated: true
+    lan_dns: false
+    backend: { url: "https://192.168.1.225", tls_insecure_skip_verify: true }
+    smoke: { status_any: [200, 302] }
+  openbao:
+    exposure: public
+    edge: tunnel
+    auth: native # OpenBao token login
+    access_gated: true
+    lan_dns: false
+    # The UI Service stays routable while the vault is sealed; the cert has no openbao-ui SAN.
+    backend:
+      url: "https://openbao-ui.openbao.svc.cluster.local:8200"
+      tls_ca: /openbao-ca/ca.crt
+      tls_server_name: openbao.openbao.svc.cluster.local
+    smoke: { status: 307, location_contains: "/ui/" }
+  # Dev-worker web terminals (passwordless-sudo shells). The worker's own Caddy gate checks the Access
+  # JWT on the tunnel path and Basic auth + cookie otherwise; it answers dwN.chifor.me (role
+  # dev_worker, Caddyfile.j2), so Host and SNI are the public name. cloudflared sent Host: <IP>.
+  dw1:
+    exposure: public
+    edge: tunnel
+    auth: native
+    access_gated: true
+    lan_dns: false
+    backend: { url: "https://192.168.0.8", tls_insecure_skip_verify: true, tls_server_name: dw1.chifor.me }
+    smoke: { status: 401 }
+  dw2:
+    exposure: public
+    edge: tunnel
+    auth: native
+    access_gated: true
+    lan_dns: false
+    backend: { url: "https://192.168.0.9", tls_insecure_skip_verify: true, tls_server_name: dw2.chifor.me }
+    smoke: { status: 401 }
+  dw3:
+    exposure: public
+    edge: tunnel
+    auth: native
+    access_gated: true
+    lan_dns: false
+    backend: { url: "https://192.168.0.10", tls_insecure_skip_verify: true, tls_server_name: dw3.chifor.me }
+    smoke: { status: 401 }
+  dw4:
+    exposure: public
+    edge: tunnel
+    auth: native
+    access_gated: true
+    lan_dns: false
+    backend: { url: "https://192.168.0.11", tls_insecure_skip_verify: true, tls_server_name: dw4.chifor.me }
+    smoke: { status: 401 }
+
+  # ---- the canary: the first direct host, and the outside probe's target ----------------------
+  edge-canary:
+    exposure: public
+    edge: default
+    auth: none # a fixed answer that names the peer; nothing behind it
+    access_gated: false
+    lan_dns: false
+    backend: { respond: "edge-canary ok peer={remote_host}" }
+    smoke: { status: 200 }

@@ -217,7 +217,8 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Only the Cloudflare tunnel in the "edge" namespace, on 8080.
+    # Only the Cloudflare tunnel and the edge proxy (ADR 0040) in the "edge" namespace, on 8080. Both
+    # overwrite cf-connecting-ip, which the router trusts (router.yaml); never admit a client that does not.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -225,6 +226,13 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflared
+        # The edge proxy (ADR 0040): it overwrites CF-Connecting-IP on every request.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge-proxy
       ports:
         - protocol: TCP
           port: 8080

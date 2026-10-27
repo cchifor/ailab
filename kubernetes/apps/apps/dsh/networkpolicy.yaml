@@ -29,6 +29,9 @@ spec:
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
           podSelector: { matchLabels: { app.kubernetes.io/name: cloudflared } }
+        # The edge proxy (ADR 0040): it overwrites CF-Connecting-IP on every request.
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: edge-proxy } }
       ports: [{ port: 8080, protocol: TCP }]
     # NO homepage exception. An earlier revision allowed the homepage pod through so its siteMonitor
     # could paint an up/down dot on home.chifor.me. Review called it what it is: a path to the agent

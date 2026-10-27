@@ -12,9 +12,10 @@ spec:
   policyTypes:
   - Ingress
   - Egress
-  # Only cloudflared may reach Relay. relay.yaml sets RELAY_CLIENT_ADDRESS_HEADER=cf-connecting-ip,
-  # which is trustworthy only while this is the sole ingress: adding another source here would let
-  # it choose its own client address. Remove that setting first.
+  # Only cloudflared and the edge proxy may reach Relay. relay.yaml sets
+  # RELAY_CLIENT_ADDRESS_HEADER=cf-connecting-ip, which is trustworthy only because both overwrite that
+  # header on every request (Cloudflare's edge; the edge proxy, ADR 0040). Adding any OTHER source here
+  # would let it choose its own client address: remove that setting first.
   ingress:
   - from:
     - namespaceSelector:
@@ -23,6 +24,13 @@ spec:
       podSelector:
         matchLabels:
           app.kubernetes.io/name: cloudflared
+    # The edge proxy (ADR 0040): it overwrites CF-Connecting-IP on every request.
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: edge
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: edge-proxy
     ports:
     - protocol: TCP
       port: 8788

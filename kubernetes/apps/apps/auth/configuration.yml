@@ -108,6 +108,26 @@ access_control:
     # that frontend message to explain it. See docs/runbooks/passkeys.md.
     - domain: '2fa-unlock.chifor.me'
       policy: 'two_factor'
+    # The edge proxy's forward-auth hosts (ADR 0040; `auth: authelia` in kubernetes/edge/hostnames.yaml).
+    # None of them has a per-person login of its own (Prometheus and Alertmanager none at all), and
+    # Cloudflare Access used to be their only gate. Admins only: the allow rule is followed by a deny
+    # for the same domains, so the `one_factor` default above never applies to them. The renderer's
+    # tests (scripts/tests/test_edge_render.py) hold this list equal to the registry's authelia hosts.
+    - domain:
+        - 'alertmanager.chifor.me'
+        - 'dsh.chifor.me'
+        - 'hubble.chifor.me'
+        - 'k8s.chifor.me'
+        - 'prometheus.chifor.me'
+      subject: ['group:admins']
+      policy: 'one_factor'
+    - domain:
+        - 'alertmanager.chifor.me'
+        - 'dsh.chifor.me'
+        - 'hubble.chifor.me'
+        - 'k8s.chifor.me'
+        - 'prometheus.chifor.me'
+      policy: 'deny'
 session:
   # Shared session store (ADR 0016): both authelia replicas see the same sessions. Password via
   # AUTHELIA_SESSION_REDIS_PASSWORD_FILE env. auth-valkey is accepted-ephemeral — a bounce means

@@ -1,0 +1,25 @@
+# Caddy's metrics (per host) and the cert-reloader's counters, both on the metrics port (9180),
+# which has no Service and is admitted only from the monitoring namespace (networkpolicy.yaml).
+# job pinned to edge-proxy so infrastructure/monitoring/edge-proxy-rules.yaml can name it.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: edge-proxy
+  namespace: edge
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge-proxy
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - { targetLabel: job, replacement: edge-proxy }
+    - port: metrics
+      path: /reloader-metrics
+      interval: 60s
+      relabelings:
+        - { targetLabel: job, replacement: edge-proxy }
