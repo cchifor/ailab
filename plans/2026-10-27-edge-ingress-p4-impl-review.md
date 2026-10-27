@@ -1,93 +1,53 @@
-# Implementation review — edge-ingress P4 — round 1
+# Implementation review — edge-ingress P4 — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: pending -->
+
+## Summary
+
+- Five round-1 findings are resolved; registry validation binding and rehearsal documentation remain incomplete. Three important findings below should be fixed before merge.
+- No additional defect found in generated JSON number/boolean types, deterministic ordering, ordinary host removal, or the private fixed-response exception: even declared routes cannot reach a real backend when `respond` is selected.
+- `--check` covers both production outputs. Both are computed before writing, with Caddy written first; interrupted writes after a registry change leave DNS stale or unparsable. The separate registry reads and empty test-profile handling need correction.
+- Accepted the author’s verified tests, clean generated outputs, migration plan, tamper cases, CRLF compatibility and formatting results without repeating them. Additional in-memory probes confirmed the registry-read race and empty-profile behavior; filesystem writes were mocked.
+- The first apply, subsequent deletion of `relay-import.tf`, and live canary rehearsal evidence remain post-apply obligations, not prerequisites for merging the corrected implementation. Record the rehearsal before any real host changes mode.
+
+## Round-1 verification
+
+- **Registry identity mismatches do not stop apply — resolved.** Blocking lifecycle preconditions replace the warning-only check and enforce the generated zone and tunnel identity.
+- **Invalid registry values silently become public DNS — incomplete.** Normal generation validates the registry, but `main()` subsequently rereads it for hashing; a concurrent edit can bind previously generated records to an unvalidated registry.
+- **Retained import IDs obstruct interrupted replacement recovery — resolved.** Previously adopted imports are removed. The remaining relay import explicitly awaits the first apply and subsequent deletion; the runbook covers recreation and importing an unsaved remote replacement.
+- **Older checkouts cannot safely consume migrated state — resolved.** Forward-only migration is documented, with a backup and reverse state moves. The quoted Bash prefix substitution correctly preserves each `["hostname"]` suffix, including the canary that pre-P4 configuration will delete.
+- **The claimed Terraform/Python parity test does not exist — resolved.** DNS now consumes the renderer’s records, eliminating the duplicate mode evaluator. The added tests cover record shapes and shared mode selection; HCL digest compatibility is supported by the supplied plan evidence.
+- **P4 replacement rehearsal is neither documented nor currently schema-valid — incomplete.** The canary’s private mode is safely admitted and transitions are documented, but sampling starts too late to measure the replacement gap, and the standard still prohibits the newly allowed exception.
+- **Operational instructions still target the removed resource — resolved.** Keycloak commands, the Cloudflare README and the Trueswarm note reference the new addresses. Separate omissions in the regeneration steps are raised below.
 
 ## Findings
 
-All seven findings were accepted; none is contested. Fixes: 371d9b24 (generated records behind
-blocking preconditions) and 2a9bb1f3 (import blocks, migration and recovery docs, stale references).
+### Hash the same registry snapshot that was validated
 
-### Registry identity mismatches do not stop apply
-**Location:** kubernetes/infra/cloudflare/dns.tf:70
-**Severity:** important
-**Resolution (accepted):** the `check` block is gone. Three `lifecycle` preconditions on
-`cloudflare_dns_record.edge` fail the plan: registry hash, zone and tunnel identity, record shape.
-Exercised with tofu against a copy of the operator state: pointing `tunnel_id` elsewhere fails the
-plan with "names another zone or tunnel".
+**Location:** scripts/edge/render.py:703  
+**Severity:** important  
+<!-- codex: round-2: main() validates the registry through load() at line 693, then rereads the file after rendering to obtain its digest; an editor save between those reads can produce records from the old registry carrying the new, potentially invalid registry's hash, passing all three DNS preconditions without forging the JSON. Read the registry once and use that same immutable text for parsing, validation and hashing, with a regression test covering a change between the current two reads. -->
 
-### Invalid registry values silently become public DNS
-**Location:** kubernetes/infra/cloudflare/dns.tf:35
-**Severity:** important
-**Resolution (accepted):** dns.tf no longer interprets the registry. It creates the records in
-`kubernetes/edge/dns-records.json`, which `render.py` writes only from a registry that passed
-`validate()` (unknown modes, exposure values and the access_gated/direct/Authelia rule included). The
-file carries the sha256 of the registry it came from (CRs removed); a registry edit without
-`just edge-render`, or a hand edit of the file, fails the plan (both exercised). The shape
-precondition also refuses a record that is not exactly a tunnel, direct or private shape, so a
-private record cannot point anywhere but the VIP.
+### Rollback procedures omit the required regeneration
 
-### Retained import IDs obstruct interrupted replacement recovery
-**Location:** kubernetes/infra/cloudflare/imports.tf:5; router-import.tf:3; relay-import.tf:2; muse-import.tf:2
-**Severity:** important
-**Resolution (accepted):** imports.tf, router-import.tf and muse-import.tf are deleted (their records
-were adopted long ago). relay-import.tf, the one pending adoption, stays for P4's first apply; its
-comment and the runbook say to delete it in the next PR. The runbook documents recovery from an
-interrupted replacement: absent everywhere (plan shows a create), or created remotely but unsaved
-(import by the new id).
+**Location:** docs/runbooks/edge-ingress.md:64  
+**Severity:** important  
+<!-- codex: round-2: The per-host tunnel rollback, force_tunnel instructions and rollback table edit the registry and immediately apply, which now fails the registry-hash precondition; the add-host procedure likewise changes lan_dns after its last render. Add just edge-render after every registry edit in these procedures, commit the registry and both generated outputs, and retain the planned rollback ordering of DNS apply, cache expiry, then merging the proxy change. -->
 
-### Older checkouts cannot safely consume migrated state
-**Location:** kubernetes/infra/cloudflare/moved.tf:3
-**Severity:** important
-**Resolution (accepted):** the "state serial > 48" claim is removed. moved.tf and the runbook state that
-the moves are forward only, with a check (`tofu state list | grep -c 'dns_record.tunnel\['` is 0 on
-migrated state) and a reverse `tofu state mv` loop, after a state backup, for any rollback to pre-P4
-code. The moves stay at least until P9.
+### Start DNS sampling before the replacement
 
-### The claimed Terraform/Python parity test does not exist
-**Location:** kubernetes/infra/cloudflare/dns.tf:10
-**Severity:** important
-**Resolution (accepted):** removed the need for one rather than adding an HCL evaluator to CI: the mode
-rule now has a single implementation (`render.effective_mode()`), and DNS consumes its output.
-`test_edge_render.DnsRecords` asserts type/content/proxied/TTL per mode, every host once, mode
-agreement with the proxy across edge_default and force_tunnel, force_tunnel never publishing a private
-host, the CR-insensitive digest, the committed file being current, and that dns.tf reads the file
-behind three preconditions with no `edge_default`/`force_tunnel` logic or `check` block of its own.
-That the HCL hash equals Python's is proven by the passing plan plus the failing tamper cases.
+**Location:** docs/runbooks/edge-ingress.md:119  
+**Severity:** important  
+<!-- codex: round-2: The foreground tofu apply completes before the sampling loop starts, so the documented commands cannot measure a replacement gap that ends during apply; dig +short also cannot distinguish NXDOMAIN from other empty responses. Start timestamped sampling of both resolvers in another terminal before applying, capture DNS status and answers through recovery and cache expiry, and explicitly record when caching masks a gap rather than reporting an unobserved gap as zero. -->
 
-### P4 replacement rehearsal is neither documented nor currently schema-valid
-**Location:** kubernetes/infra/cloudflare/dns.tf:13; docs/runbooks/edge-ingress.md:53
-**Severity:** important
-**Resolution (accepted):** dns.tf no longer claims a rehearsal. `validate()` now admits `auth: none`
-on a private host only when its backend is a fixed `respond`, so edge-canary is valid in every mode
-(tested: it renders the admin-tier 403 before its answer; a private upstream with auth none is still
-refused). The runbook's "Rehearse a mode change on edge-canary" lists the transitions
-(tunnel to direct, direct to private, private to tunnel, one interrupted replacement), the resolver
-sampling and the evidence to record. The rehearsal itself runs after P4's first apply and its
-evidence goes on the P4 PR (see "Deferred to live verification").
+### Empty test profiles unexpectedly write production DNS
 
-### Operational instructions still target the removed resource
-**Location:** docs/runbooks/keycloak.md:96; kubernetes/infra/cloudflare/README.md:42
-**Severity:** nit
-**Resolution (accepted):** the Keycloak commands target `cloudflare_dns_record.edge["id"]`, the
-README's DNS section describes the registry, the generated file, `edge_records`, the forward-only
-moves and the remaining import, and the trueswarm e2e note names `edge["relay"]`.
+**Location:** scripts/edge/render.py:702  
+**Severity:** nit  
+<!-- codex: round-2: DNS suppression tests the decoded profile's truthiness, so --test-profile containing {} or null writes dns-records.json, including the production default path when only --out points to a fixture destination. Gate DNS generation on args.test_profile being absent, reject malformed or empty profiles explicitly, and test that supplying a profile never writes the DNS artifact. -->
 
-## Deferred to live verification
+### Update the standard for the fixed-response exception
 
-P4's first apply (expected: 27 moves, the relay import, the edge-canary create, 0 changes, 0 destroys,
-with the inputs in the runbook's "Applying"), the deletion of relay-import.tf after it, and the
-edge-canary rehearsal with its recorded evidence.
-
-## Diff stat
-
-```text
- kubernetes/infra/cloudflare/dns.tf           |  79 ++++++++++++------
- kubernetes/infra/cloudflare/imports.tf       |  12 +--
- kubernetes/infra/cloudflare/moved.tf         | 118 +++++++++++++++++++++++++++
- kubernetes/infra/cloudflare/muse-import.tf   |   2 +-
- kubernetes/infra/cloudflare/outputs.tf       |   6 +-
- kubernetes/infra/cloudflare/relay-import.tf  |   2 +-
- kubernetes/infra/cloudflare/router-import.tf |   2 +-
- kubernetes/infra/cloudflare/variables.tf     |   8 +-
- 8 files changed, 186 insertions(+), 43 deletions(-)
-```
+**Location:** docs/standards/edge-ingress.md:59  
+**Severity:** nit  
+<!-- codex: round-2: The standard still says validation MUST reject auth: none on every private host, and its auth table restricts none to public content, contradicting the accepted canary change. Document the narrowly scoped fixed-respond exception in both places while retaining the prohibition for real upstream backends. -->
