@@ -279,7 +279,10 @@ class DnsRecords(unittest.TestCase):
         resource = tf[tf.index('resource "cloudflare_dns_record" "edge"'):]
         for line in [ln.strip() for ln in guard.splitlines() if ln.strip().startswith(("condition", "&& length"))]:
             self.assertIn(line, resource)
-        self.assertEqual(resource.count("precondition {"), 5)
+        self.assertEqual(resource.count("precondition {"), 6)
+        # a direct record needs a DNS-only apex (read, never managed here)
+        self.assertIn('data "cloudflare_dns_records" "apex"', tf)
+        self.assertIn('each.value.mode != "direct" || local.apex_direct_ok', resource)
         # no second implementation of the mode rule, and no warn-only check block
         for word in ("edge_default", "force_tunnel", "check \""):
             self.assertNotIn(word, tf)

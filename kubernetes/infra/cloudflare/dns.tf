@@ -36,7 +36,18 @@
 # before its Access application exists, so the records keep the depends_on below; a partial or
 # failed apply leaves a NEW record absent (fail-safe). The registry refuses to put an Access-gated
 # host in direct mode without Authelia in front (render.py validate()).
+# The apex's own records. Direct hosts are DNS-only CNAMEs to the apex, so they are direct only while it
+# is DNS-only too: proxied, every direct host would quietly run through Cloudflare again. The gateway's
+# DDNS keeps the apex A record on the WAN address; this module reads it and never manages it.
+data "cloudflare_dns_records" "apex" {
+  zone_id = var.zone_id
+  name    = { exact = "chifor.me" }
+}
+
 locals {
+  apex_addresses = [for r in data.cloudflare_dns_records.apex.result : r if contains(["A", "AAAA"], r.type)]
+  apex_direct_ok = (length([for r in local.apex_addresses : r if r.type == "A"]) > 0
+  && alltrue([for r in local.apex_addresses : !r.proxied]))
   edge_registry       = replace(file("${path.module}/../../edge/hostnames.yaml"), "\r", "")
   edge_registry_hosts = keys(yamldecode(local.edge_registry).hosts)
   edge_dns            = jsondecode(file("${path.module}/../../edge/dns-records.json"))
@@ -97,6 +108,10 @@ resource "cloudflare_dns_record" "edge" {
     precondition {
       condition     = local.edge_dns.zone == "chifor.me" && local.edge_dns.tunnel_id == var.tunnel_id
       error_message = "kubernetes/edge/dns-records.json names another zone or tunnel than this module (chifor.me, var.tunnel_id)."
+    }
+    precondition {
+      condition     = each.value.mode != "direct" || local.apex_direct_ok
+      error_message = "${each.key} is direct, a DNS-only CNAME to the apex, but the apex chifor.me has no DNS-only A record (it is missing or proxied), so it would not be direct: fix the apex (the gateway's DDNS) or keep the host in tunnel mode."
     }
     precondition {
       condition = (
