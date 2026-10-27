@@ -1,105 +1,62 @@
-# Implementation review — edge-ingress P3 — round 1
+# Implementation review — edge-ingress P3 — round 2
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: pending -->
+
+## Summary
+
+- Not ready to merge: one blocker, four important findings and one nit remain.
+- Six round-1 resolutions are complete; four have remaining correctness gaps.
+- The phase table covers every emitted operation, including DHCP adopt/forget. Forget preserves matching owned objects; combined forget/adopt operations execute in the correct order. Legacy state without `dhcp_network` loads safely, and intents without fields cannot be silently adopted.
+- Accepted the author’s test results and live-controller facts. Additional verification used in-memory fixtures and mocked sockets; the worktree is unchanged.
+- The supplied evidence establishes read-only planning. P3’s live rollout acceptance—NAT loopback and preservation of Home, Nextcloud and the 60 `*.lan` records—still needs recorded evidence.
+
+## Round-1 verification
+
+- **DHCP network ownership is outside the state file — resolved.** Controller-bound state now records the network ID/name; changing an unowned network requires adoption, and a different owned network must be explicitly forgotten.
+- **An owned forward ID can be repurposed — incomplete.** Planning checks recorded identities, but apply can overwrite a renamed object observed by its final reread. Forward recovery also selects `--forget` using the desired name instead of the recorded name.
+- **The WAN gate is skipped when an owned forward is updated — incomplete.** Enabled creates and updates now run the gate with CA and hostname verification, but the response parser can accept an incomplete response or a marker outside the actual body.
+- **`--skip-vip-check` is not bound to the plan hash — resolved.** Both override flags are hashed, and apply reads them from `plan["options"]`.
+- **Estate provisioning is broken by a literal escape — resolved.** The matrix contains a real continuation. The regression test evaluates shell tokenization and is included by the existing CI test discovery.
+- **Collision checks are bypassed once an object is owned — incomplete.** Owned-object checks now cover duplicate keys/names, port ranges and another forward’s `both` interface; disabled forwards occupy no port but still collide by name. However, apply ignores collisions visible in its final reread.
+- **DHCP changes can shrink beneath live leases — incomplete.** Inclusive range subtraction and fixed-IP exemptions work, and checks run during planning and apply. Missing network IDs silently bypass protection; IPv6 addresses cause an uncaught exception.
+- **Operation sorting does not implement the required precedence — resolved.** Explicit phases implement withdrawal-before-addition ordering; adopt/forget are handled separately for every kind, so emitted DHCP operations do not cause a phase-table `KeyError`.
+- **Intent records omit the desired fields — resolved.** Creates persist their fields before the API call, and recovery checks those fields. Legacy intents without fields fail closed and retain the delete/forget recovery path.
+- **Classic list pagination is not handled — resolved.** The verified complete envelope is accepted; additional pagination metadata is rejected before planning.
 
 ## Findings
 
-All ten findings were accepted; none is contested. Fixes: 5755d7a3 (the reconciler, its tests, the
-state file, the runbook) and eb9ec154 (the provisioning matrix).
+### The final update snapshot bypasses freshness and collision checks
 
-### DHCP network ownership is outside the state file
-**Location:** scripts/edge/gateway.py:326; kubernetes/edge/gateway-state.yaml:8
+**Location:** scripts/edge/gateway.py:715  
 **Severity:** blocker
-**Resolution (accepted):** `gateway-state.yaml` gains `dhcp_network` ({id, name}), inside the file's
-existing controller binding (URL, site, certificate fingerprint). The range is changed only on an owned
-network: `--adopt Home` takes it (name and subnet verified), a difference on an unowned one aborts, and
-a state that owns another network than gateway.yaml names aborts until `--forget <owned name>`. Live:
-`plan --adopt Home` plans the adoption alone (the range already matches).
+<!-- codex: round-2: If a forward is renamed or another WAN 443 forward appears during vip_answers(), the final inventory reread observes that change, but apply checks neither the returned object's digest nor that inventory's collisions before issuing the PUT; both cases were reproduced, and the renamed forward was overwritten. Validate the final object against op["before"] and rerun collisions immediately before mutation, moving create's collision check after the canary gate as well, with regression cases that change the controller during the gate. -->
 
-### An owned forward ID can be repurposed
-**Location:** scripts/edge/gateway.py:406
-**Severity:** blocker
-**Resolution (accepted):** an owned forward must still carry its recorded name (equal to gateway.yaml's);
-otherwise the run stops with no operation for it, and `--forget` then `--adopt` is the recovery. The
-same identity rule now covers DNS records (key) and the network (name), and `--forget` is allowed when
-an owned object is gone or has changed identity.
+### The canary gate does not parse HTTP response framing
 
-### The WAN gate is skipped when an owned forward is updated
-**Location:** scripts/edge/gateway.py:519
-**Severity:** blocker
-**Resolution (accepted):** the gate runs for every forward create or update whose result is enabled. It
-verifies the certificate for edge-canary (CA chain and name) and requires a 200 whose body carries the
-canary's fixed answer (`edge-canary ok peer=`, derived from the registry), not any 200 (`canary_ok`).
-Tests: an update is blocked when the VIP fails the gate and proceeds when it passes; a 200 from another
-site and a 403 carrying the marker both fail.
-
-### `--skip-vip-check` is not bound to the plan hash
-**Location:** scripts/edge/gateway.py:447
-**Severity:** blocker
-**Resolution (accepted):** the option is a plan option inside the hash (apply reads it from the plan,
-not the command line), and a plan with it prints a warning. The new `--ack-dhcp-leases` is bound the
-same way.
-
-### Estate provisioning is broken by a literal escape
-**Location:** kubernetes/apps/infrastructure/security/openbao/estate-provision-job.yaml:105
-**Severity:** blocker
-**Resolution (accepted):** a real line continuation. `test_estate_provision_matrix` evaluates the
-assignment with bash and checks every token is one `seed:field` (it fails on the broken file with the
-stray `\n` token), plus a negative case.
-
-### Collision checks are bypassed once an object is owned
-**Location:** scripts/edge/gateway.py:361
+**Location:** scripts/edge/gateway.py:632  
 **Severity:** important
-**Resolution (accepted):** `collisions()` (a duplicate DNS key, a second forward with our name, any
-other enabled forward covering the WAN port) runs whether or not ours exists, at plan time and again
-from a fresh read right before each create or update. Tests: an owned record with a duplicate, an owned
-forward with a new 443 neighbour (a port range), and a duplicate appearing between plan and apply.
+<!-- codex: round-2: The gate accepts a response that closes before its declared Content-Length and even an empty chunked body whose trailer contains the marker, while rejecting a valid chunked body when the marker spans chunks. Parse the response with an HTTP parser over the verified TLS socket, require a complete bounded body and exact status 200, and inspect only the decoded body; HTTP/2 support is unnecessary here because the probe does not negotiate it. -->
 
-### DHCP changes can shrink beneath live leases
-**Location:** scripts/edge/gateway.py:334
+### A client without a network ID bypasses lease protection
+
+**Location:** scripts/edge/gateway.py:356  
 **Severity:** important
-**Resolution (accepted):** `lease_conflicts()` reads the active clients (`stat/sta`, seen live with
-`ip`, `network_id`, `use_fixedip`, `fixed_ip`) and refuses a change that takes back an address an
-active client on that network holds other than as its fixed IP, unless `--ack-dhcp-leases`. Clients are
-volatile, so they stay out of the hash; the check runs at plan time and again before the write. Tests:
-a refused and an acknowledged shrink, a fixed IP and another network not counting, and a client
-arriving after the plan stopping the write.
+<!-- codex: round-2: A client row containing ip=192.168.0.51 but no network_id is silently discarded, so shrinking the pool from .50 to .52 reports no conflict and permits reclaiming the occupied address without --ack-dhcp-leases. Reject incomplete client rows or conservatively check unknown-network addresses against the removed portion of the IPv4 range, with coverage at both planning and apply time. -->
 
-### Operation sorting does not implement the required precedence
-**Location:** scripts/edge/gateway.py:445
+### IPv6 client addresses crash the IPv4 lease check
+
+**Location:** scripts/edge/gateway.py:362  
+**Severity:** nit
+<!-- codex: round-2: An IPv6 address on a client with the matching network_id reaches the comparison against IPv4 pool bounds and raises an uncaught TypeError, including when --ack-dhcp-leases is supplied. Check address families before comparison and exclude IPv6 addresses from this IPv4 DHCP calculation, with a mixed-family regression case. -->
+
+### Forward recovery uses the wrong forget key
+
+**Location:** scripts/edge/gateway.py:504  
 **Severity:** important
-**Resolution (accepted):** explicit phases (forget, adopt, forward delete, DNS delete, DHCP update, DNS
-update, DNS create, forward create/update) sort before kind and key. Test: a mixed plan (forward and one
-record withdrawn, the range moved, another record added) comes out in that order.
+<!-- codex: round-2: After the controller forward and gateway.yaml are renamed from OLD to NEW while state still records OLD, the documented --forget OLD --adopt NEW recovery remains blocked because the forget branch tests the desired NEW name; the error nevertheless instructs the operator to forget OLD. Select and remove stale ownership using its recorded name, preserving the identity-change guard, and test this recovery through apply. -->
 
-### Intent records omit the desired fields
-**Location:** scripts/edge/gateway.py:531
+### Apply omits the required Nextcloud preservation assertion
+
+**Location:** scripts/edge/gateway.py:734  
 **Severity:** important
-**Resolution (accepted):** an intent records the fields the create sends (the controller binding is the
-state file's own). Adopting under an intent requires an object holding those fields; otherwise the plan
-refuses and the operator deletes it and forgets the intent. Tests: the recorded fields, and a refused
-adoption of a record with the key but other fields.
-
-### Classic list pagination is not handled
-**Location:** scripts/edge/gateway.py:128
-**Severity:** important
-**Resolution (accepted):** the classic API answered every list live with `{"meta": {"rc": "ok"},
-"data": [...]}` and no paging metadata. `_classic_list` now refuses any other metadata key (a count, an
-offset, a cursor) rather than reading a possible page. Test: three paged shapes refused, the real shape
-accepted.
-
-## Diff stat
-
-```text
- .gitea/workflows/manifests.yaml                    |   2 +-
- docs/runbooks/openbao-estate-credentials.md        |   2 +
- docs/runbooks/openbao-recovery.md                  |   2 +-
- justfile                                           |   14 +-
- .../security/openbao/estate-provision-job.yaml     |   2 +-
- .../security/openbao/estate-seeds.sops.yaml        |  48 +-
- kubernetes/edge/gateway-state.yaml                 |  10 +
- kubernetes/edge/gateway.yaml                       |  52 ++
- scripts/edge/gateway.py                            | 609 +++++++++++++++++++++
- scripts/tests/test_edge_gateway.py                 | 356 ++++++++++
- 10 files changed, 1071 insertions(+), 26 deletions(-)
-```
+<!-- codex: round-2: The finalized P3 plan requires both Nextcloud forwards to be asserted unchanged after every apply, but verification examines only each mutated object; an in-memory apply still reported success when a Nextcloud target changed during creation of the edge forward. Retain a baseline of the protected Nextcloud objects and compare their IDs and non-secret fields after apply, failing loudly on disappearance or drift and adding a regression for that case. -->
