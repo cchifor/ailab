@@ -620,4 +620,4 @@ follows `wan` only, and the documented response is `force_tunnel`.
   - Peer revocation works.
   - Recovery access works with Caddy and Authelia stopped.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
