@@ -162,11 +162,44 @@ class RouterSeatTest(unittest.TestCase):
         self.assertEqual(Router.seen[0]["body"]["max_tokens"], 40000)
 
     def test_no_cap_or_an_unusable_one_sends_no_max_tokens(self):
-        for cap in (None, 0, -5, "40000", True, 1.5):
-            Router.script, Router.seen = [(200, {}, sse_answer(json.dumps(REVIEW)))], []
-            seat = self.router_seat(model="claude-route", **({} if cap is None else {"max_tokens": cap}))
-            self.load([seat]).run_llm("t", "d", "diff")
-            self.assertNotIn("max_tokens", Router.seen[0]["body"], cap)
+        for cap in (None, 0, -5, "40000", True, 1.5, {"fable": "40000"}):
+            with self.subTest(cap=cap):
+                Router.script, Router.seen = [(200, {}, sse_answer(json.dumps(REVIEW)))], []
+                seat = self.router_seat(model="claude-route", **({} if cap is None else {"max_tokens": cap}))
+                self.load([seat], llm_models=["fable"]).run_llm("t", "d", "diff")
+                self.assertNotIn("max_tokens", Router.seen[0]["body"])
+
+    def test_a_per_tier_cap_limits_fable_and_leaves_the_opus_fallback_uncapped(self):
+        """reviewer-claude on #1449: one seat cap also bound the opus fallback, whose longest
+        review on record (36312) sits close under 40000. A {tier: cap} map caps only the tiers
+        it names; and a fable answer cut at its cap (finish_reason=length) is a failed attempt
+        that descends to opus on the same seat, which then reviews uncapped."""
+        m = self.load([self.router_seat(route="pool-claude", models={"fable": "fable", "opus": "opus"},
+                                        max_tokens={"fable": 40000})],
+                      llm_models=["fable", "opus"])
+        Router.script = [(200, {}, sse_answer('{"summary": "cut', finish="length")),
+                         (200, {}, sse_answer(json.dumps(REVIEW)))]
+        self.assertEqual(m.run_llm("t", "d", "diff")["summary"], "looks fine")
+        self.assertEqual([(r["body"]["model"], r["body"].get("max_tokens")) for r in Router.seen],
+                         [("fable", 40000), ("opus", None)])
+        self.assertFalse(m.model_parked("r", "fable"))
+
+    def test_an_unusable_cap_is_logged_at_seat_resolution_not_dropped_silently(self):
+        """reviewer-claude on #1449: a cap that is not sent removes the runaway guard, so the
+        operator must be told - once, when the seats are resolved."""
+        for cap, words in ((40000, None), ({"fable": 40000}, None), ("40000", "not a positive int"),
+                           ({"fable": 0}, "not a positive int"), ({"fabel": 40000}, "fabel")):
+            with self.subTest(cap=cap):
+                m = self.load([self.router_seat(models={"fable": "fable"}, max_tokens=cap)],
+                              llm_models=["fable"])
+                with mock.patch.object(m, "log") as log:
+                    m.resolve_seats()
+                said = " ".join(str(c.args[0]) for c in log.call_args_list if "max_tokens" in str(c.args[0]))
+                if words is None:
+                    self.assertEqual(said, "")
+                else:
+                    self.assertIn(words, said)
+                    self.assertIn("no output cap", said)
 
     def test_a_seat_without_a_route_sends_no_route_header(self):
         m = self.load([self.router_seat(model="claude-route")])

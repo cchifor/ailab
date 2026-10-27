@@ -1263,8 +1263,9 @@ def tier_index(model):
 # (model_parked says so), which is how a router seat can carry the top tiers while a
 # subscription seat keeps the rest.
 #
-# `max_tokens` (a positive int; anything else is not sent) is the seat's output cap, sent with
-# every review. The router hands it to Claude Code where the account allows output caps
+# `max_tokens` is the seat's output cap, sent with every review: a positive int caps every tier,
+# a {tier: positive int} map only the tiers it names (reviewer-1 caps fable, not its opus
+# fallback). Anything else is not sent, and resolve_seats logs why. The router hands it to Claude Code where the account allows output caps
 # (llm-router #125) and otherwise drops it and says so in x-router-ignored-params, so the cap is
 # harmless before it is honoured. A review that reaches it ends with finish_reason=length,
 # which is a failed attempt (the next tier is asked), never a truncated verdict.
@@ -1323,6 +1324,34 @@ def router_header_route(seat):
     """The route a router seat names in X-Router-Route (model mode), or None."""
     r = _seat_cfg(seat).get("route")
     return r.strip() if isinstance(r, str) and r.strip() else None
+
+
+def _positive_int(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def router_output_cap(seat, tier):
+    """The output cap a router seat sends for one tier (as max_tokens), or None: `max_tokens` as
+    a positive int caps every tier, a {tier: positive int} map only the tiers it names."""
+    cap = _seat_cfg(seat).get("max_tokens")
+    if isinstance(cap, dict):
+        cap = cap.get(tier)
+    return cap if _positive_int(cap) else None
+
+
+def router_cap_problem(seat):
+    """Why a router seat's `max_tokens` leaves a tier it meant to cap uncapped, or None. Said
+    once at seat resolution: an unsent cap is a runaway guard that silently is not there."""
+    cap = _seat_cfg(seat).get("max_tokens")
+    if cap is None:
+        return None
+    if isinstance(cap, dict):
+        bad = {k: v for k, v in cap.items() if not _positive_int(v)}
+        if bad:
+            return f"max_tokens {bad!r} is not a positive int"
+        stray = sorted(str(k) for k in cap if k not in MODELS)
+        return f"max_tokens names {stray}, which are not tiers of {MODELS}" if stray else None
+    return None if _positive_int(cap) else f"max_tokens {cap!r} is not a positive int"
 
 
 def router_tiers_distinct(seat):
@@ -1898,6 +1927,10 @@ def resolve_seats():
     for name in idle:
         log(f"seat '{name}': router seat maps none of the tiers {MODELS} to a route - "
             f"{'dropped from rotation' if len(idle) < len(SEATS) else 'it cannot serve'}")
+    for s in SEATS:
+        why = is_router_seat(s) and router_cap_problem(s)
+        if why:
+            log(f"seat '{s['name']}': {why} - no output cap is sent for it (host_vars typo?)")
     if idle and len(idle) < len(SEATS):
         _apply_seats([s for s in SEATS if s["name"] not in idle])
     # Nothing to deduplicate with one seat. (This used to return for every kind but codex; the
@@ -2337,10 +2370,11 @@ def _run_router(seat, tier, prompt, remaining):
         raise e
     url = str(s["router_url"]).rstrip("/") + "/v1/chat/completions"
     payload = {"model": route, "stream": True, "messages": [{"role": "user", "content": prompt}]}
-    cap = s.get("max_tokens")
-    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
-        # The seat's output cap (see the shape above): a runaway ends as finish_reason=length,
-        # a failed attempt, instead of streaming into the model's default limit.
+    cap = router_output_cap(seat, tier)
+    if cap is not None:
+        # The seat's output cap for this tier (see the shape above): a runaway ends as
+        # finish_reason=length - "router answer truncated" below, a ModelError, so run_llm asks
+        # the next tier on this seat - instead of streaming into the model's default limit.
         payload["max_tokens"] = cap
     body = json.dumps(payload).encode("utf-8")
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",

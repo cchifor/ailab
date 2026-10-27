@@ -126,9 +126,10 @@ pr_reviewer_llm_sudo_user: ""
 pr_reviewer_llm_seats: []
 # ROUTER SEATS (reviewbot.py § router seats): an entry carrying `router_url` is an API key on
 # the estate's LLM router instead of a subscription login - {name, sudo_user: "", router_url,
-# key_file?, route?, model?, models?: {tier: route}, max_tokens?}. Preferred over every subscription seat within a
-# tier and never sticky; the subscription seats behind it stay as the fallback (and, on
-# reviewer-2, keep the projected Codex logins refreshed - dsh.md § Codex subscriptions).
+# key_file?, route?, model?, models?: {tier: route}, max_tokens?: int | {tier: int}}. Preferred
+# over every subscription seat within a tier and never sticky; the subscription seats behind it
+# stay as the fallback (and, on reviewer-2, keep the projected Codex logins refreshed - dsh.md
+# § Codex subscriptions).
 # The key comes from reviewbot_<persona>_router_key in reviewbot.sops.yaml.
 pr_reviewer_router_key_file: /etc/reviewbot/router-key
 # Model ladder (plans/2026-09-18-claude-seat-rotation-plan.md, ADR 0025): ordered tiers,
