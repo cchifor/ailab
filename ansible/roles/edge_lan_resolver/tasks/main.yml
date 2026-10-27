@@ -1,0 +1,55 @@
+---
+# Route chifor.me and .lan lookups to the home gateway's resolver (ADR 0040, the LAN path): it serves the
+# edge's LAN records, so router.chifor.me and the other lan_dns hosts resolve to the edge proxy's VIP
+# instead of Cloudflare (measured from dev-worker-1 on 2026-10-27: 79 ms through Cloudflare, 22 ms
+# through the VIP). Routing-only domains (~chifor.me ~lan): every other lookup keeps the link's
+# resolvers. Shared by the dev-worker and reviewer playbooks.
+
+- name: Create the systemd-resolved drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Route chifor.me and .lan to the gateway resolver
+  ansible.builtin.template:
+    src: 50-edge-lan.conf.j2
+    dest: /etc/systemd/resolved.conf.d/50-edge-lan.conf
+    mode: "0644"
+  register: edge_lan_resolver_conf
+
+# Restart only on a change, then read back: if the routed resolver does not answer, take the drop-in
+# out again rather than leave this host unable to resolve chifor.me.
+- name: Apply and verify the routed resolver
+  when: edge_lan_resolver_conf.changed
+  block:
+    - name: Restart systemd-resolved
+      ansible.builtin.systemd_service:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Resolve the probe names through the routed resolver
+      ansible.builtin.command: getent ahosts {{ item }}
+      loop: "{{ edge_lan_resolver_probes }}"
+      register: edge_lan_resolver_probe
+      changed_when: false
+      retries: 3
+      delay: 2
+      until: edge_lan_resolver_probe.rc == 0
+  rescue:
+    - name: Remove the drop-in after a failed read-back
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d/50-edge-lan.conf
+        state: absent
+
+    - name: Restart systemd-resolved without it
+      ansible.builtin.systemd_service:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Fail loudly
+      ansible.builtin.fail:
+        msg: >-
+          {{ edge_lan_resolver_server }} did not resolve {{ edge_lan_resolver_probes | join(', ') }} after
+          routing {{ edge_lan_resolver_domains | join(', ') }} to it; the drop-in was removed again.
+          Check the gateway's local DNS (docs/runbooks/edge-ingress.md, "The gateway").
