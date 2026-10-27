@@ -288,9 +288,19 @@ class Rendering(unittest.TestCase):
     def test_tunnel_client_address_checks_come_first(self):
         tunnel = self.site("http://:8080 {")
         route = tunnel[tunnel.index("\troute {"):]
-        first = [ln.strip() for ln in route.splitlines()[1:6]]
-        self.assertEqual(first, ["respond @unknown_host 404", "respond @cf_client_bad 400", "respond @cf_client_multi 400",
-                                 "respond @cf_visitor_missing 400", "redir @cf_visitor_http https://{host}{uri} 308"])
+        first = [ln.strip() for ln in route.splitlines()[1:7]]
+        self.assertEqual(first, ["respond @unknown_host 404", "respond @cf_client_shape 400", "respond @cf_client_bad 400",
+                                 "respond @cf_client_multi 400", "respond @cf_visitor_missing 400",
+                                 "redir @cf_visitor_http https://{host}{uri} 308"])
+
+    def test_cf_ip_shape(self):
+        import re
+        ok = ["203.0.113.7", "2001:db8::7", "::ffff:192.0.2.1", "::1"]
+        bad = ["203.0.113.9:443", "fe80::1%eth0", "[2001:db8::1]", "1.2.3.4, 5.6.7.8", "not-an-ip", "1:2", ""]
+        for v in ok:
+            self.assertTrue(re.match(render.CF_IP_SHAPE, v), v)
+        for v in bad:
+            self.assertFalse(re.match(render.CF_IP_SHAPE, v), v)
 
     def test_authelia_runs_before_the_proxy(self):
         direct = self.site("https://:8443 {")
@@ -298,8 +308,44 @@ class Rendering(unittest.TestCase):
         self.assertLess(block.index("import edge_authelia"), block.index("reverse_proxy"))
 
     def test_trust_rules_use_the_tcp_peer(self):
-        self.assertIn("@untrusted_peer not remote_ip 192.168.0.0/23", self.text)
+        self.assertIn("@not_lan not remote_ip ", self.text)
+        self.assertIn("@not_admin not remote_ip ", self.text)
         self.assertNotIn("client_ip ", self.text.replace("{client_ip}", ""))
+
+    def test_source_tiers(self):
+        import ipaddress
+        lan, admin = render.source_tiers(self.reg)
+        inside = lambda ip, nets: any(ipaddress.ip_address(ip) in n for n in nets)  # noqa: E731
+        for ip, in_lan, in_admin in [
+            ("192.168.0.86", True, True),     # the workstation (DHCP)
+            ("192.168.1.200", True, True),    # a DHCP client in the upper half
+            ("192.168.50.10", True, True),    # Trusted VLAN
+            ("192.168.0.38", True, True),     # the owner's Windows VM, the named exception
+            ("192.168.0.8", True, False),     # dev-worker-1: automation
+            ("192.168.0.14", True, False),    # ci-runner-1
+            ("192.168.0.25", True, False),    # reviewer-2
+            ("192.168.0.51", True, False),    # the VIP itself
+            ("192.168.0.1", False, False),    # the gateway (NAT loopback)
+            ("192.168.0.41", False, False),   # talos-cp1
+            ("192.168.2.10", False, False),   # Lab VLAN
+            ("192.168.60.10", False, False),  # Guest VLAN
+            ("8.8.8.8", False, False),
+        ]:
+            self.assertEqual(inside(ip, lan), in_lan, ip)
+            self.assertEqual(inside(ip, admin), in_admin, ip)
+
+    def test_admin_surfaces_use_the_admin_tier(self):
+        direct = self.site("https://:8443 {")
+        for name, matcher in (("dsh", "@not_admin"), ("dw1", "@not_admin"), ("proxmox", "@not_admin"),
+                              ("router", "@not_lan"), ("git", "@not_lan")):
+            block = direct[direct.index(f"handle @h_{name} {{"):]
+            block = block[:block.index("\n\t\t}\n")]
+            self.assertIn(f"respond {matcher} 403", block, name)
+
+    def test_admin_include_must_be_inside_the_lan(self):
+        reg = raw()
+        reg["admin_sources"]["include"].append("10.1.2.0/24")
+        self.assertTrue(any("not inside the LAN tier" in e for e in render.validate(reg)))
 
     def test_log_redaction(self):
         # twice each: the site access logs AND the default logger, which carries http.log.error

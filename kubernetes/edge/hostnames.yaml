@@ -16,9 +16,10 @@
 #   backend       url, or respond for a fixed answer; tls_insecure_skip_verify, tls_ca,
 #                 tls_server_name, host_header
 #   uri_guard     refuse dot segments, ';' and encoded dots/slashes/backslashes/percents in the raw path
-#   routes        ordered path rules; the first match wins: {match: {path_regexp|paths}, to: default|<url>}
+#   routes        ordered path rules; the first match wins: {match: {path_regexp: ...}, to: default|<url>}
 #   routes_default  backend | 404 (what happens when routes are defined and none matched)
-#   restricted_paths  [{paths: [...], path_regexp: ..., exposure: access_gated | private}]
+#   restricted_paths  [{path_regexp: ..., exposure: access_gated | private}] (admin tier on the direct
+#                 listener; through the tunnel access_gated is served, Access gating it, private is 404)
 #   smoke         the expected anonymous outcome through the VIP from the LAN (scripts/edge/smoke.py)
 #
 # Out of scope (unchanged): registry.chifor.me (DNS-only A to the zot LXC), the *-lan NodePorts,
@@ -31,8 +32,11 @@ edge_default: tunnel
 force_tunnel: false
 vip: 192.168.0.51
 tunnel_id: f93d9a6a-5172-43d3-8bef-13460ea7607b
-# Private hosts, restricted paths and tunnel-mode hosts on the direct listener are served only to
-# these TCP peers. Never a forwarded header.
+# Source trust is the TCP peer, never a forwarded header, in two tiers (standard 5.3):
+#   LAN   = trusted_sources.allow - trusted_sources.exclude: tunnel-mode hosts on the direct
+#           listener and the HTTP redirect;
+#   admin = LAN - admin_sources.exclude + admin_sources.include: private hosts, Access-gated hosts in
+#           tunnel mode, restricted paths.
 trusted_sources:
   allow:
     - 192.168.0.0/23   # UniFi network Home (lab LAN, workstation, QNAP)
@@ -46,6 +50,16 @@ trusted_sources:
     - 192.168.0.47/32  # talos-agent-node-1
     - 192.168.0.48/32  # talos-agent-node-2
     - 192.168.0.49/32  # talos-agent-node-3
+admin_sources:
+  # The lab statics block .0-.51 (docs/network-plan.md) is infrastructure and automation: dev-workers,
+  # CI runners, reviewers and cloudlab runners run agent- and PR-written code, so none of it reaches
+  # admin surfaces. People's devices take DHCP addresses (.52 and up) or sit on the Trusted/Mgmt VLANs.
+  exclude:
+    - 192.168.0.0/27   # .0-.31
+    - 192.168.0.32/28  # .32-.47
+    - 192.168.0.48/30  # .48-.51
+  include:
+    - 192.168.0.38/32  # constantin-win-01, the owner's Windows VM
 # The tunnel listener trusts CF-Connecting-IP only from these peers; its NetworkPolicy admits only
 # the cloudflared pods.
 tunnel_trusted_proxies:

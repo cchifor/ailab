@@ -92,8 +92,8 @@
 https://:8443 {
 	tls /certs/tls.crt /certs/tls.key
 	import edge_log
-	@untrusted_peer not remote_ip 192.168.0.0/23 192.168.50.0/24 192.168.99.0/24
-	@excluded_peer remote_ip 192.168.0.1/32 192.168.0.41/32 192.168.0.42/32 192.168.0.43/32 192.168.0.47/32 192.168.0.48/32 192.168.0.49/32
+	@not_lan not remote_ip 192.168.0.0/32 192.168.0.2/31 192.168.0.4/30 192.168.0.8/29 192.168.0.16/28 192.168.0.32/29 192.168.0.40/32 192.168.0.44/31 192.168.0.46/32 192.168.0.50/31 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
+	@not_admin not remote_ip 192.168.0.38/32 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
 	@uri_unsafe vars_regexp {http.request.orig_uri} `(?i)^[^?]*(\.\.|/\./|/\.$|;|%2e|%2f|%5c|%25|%3b|\\)`
 	@h_agentforge host agentforge.chifor.me
 	@h_alertmanager host alertmanager.chifor.me
@@ -129,13 +129,9 @@ https://:8443 {
 	@rt_trueswarm_0 path_regexp `^/(media/[^/]+|art/[^/]+|api/v1/uploads/[^/]+/content)$`
 	@h_vault host vault.chifor.me
 	@rp_vault_0 path_regexp `(?i)^/+admin(/|$)`
-	@rp_vault_0_untrusted {
+	@rp_vault_0_not_admin {
 		path_regexp `(?i)^/+admin(/|$)`
-		not remote_ip 192.168.0.0/23 192.168.50.0/24 192.168.99.0/24
-	}
-	@rp_vault_0_excluded {
-		path_regexp `(?i)^/+admin(/|$)`
-		remote_ip 192.168.0.1/32 192.168.0.41/32 192.168.0.42/32 192.168.0.43/32 192.168.0.47/32 192.168.0.48/32 192.168.0.49/32
+		not remote_ip 192.168.0.38/32 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
 	}
 	route {
 		request_header -Forwarded
@@ -148,8 +144,7 @@ https://:8443 {
 		header -Server
 		handle @h_agentforge {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://agentforge-platform.agentforge.svc.cluster.local:8080 {
 					import edge_upstream
 				}
@@ -157,8 +152,7 @@ https://:8443 {
 		}
 		handle @h_alertmanager {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				import edge_authelia
 				reverse_proxy http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093 {
 					import edge_upstream
@@ -167,8 +161,7 @@ https://:8443 {
 		}
 		handle @h_api {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://litellm.ai.svc.cluster.local:4000 {
 					import edge_upstream
 				}
@@ -176,8 +169,7 @@ https://:8443 {
 		}
 		handle @h_chat {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://open-webui.ai.svc.cluster.local:80 {
 					import edge_upstream
 				}
@@ -185,8 +177,7 @@ https://:8443 {
 		}
 		handle @h_dsh {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				import edge_authelia
 				reverse_proxy http://dsh.dsh.svc.cluster.local:80 {
 					import edge_upstream
@@ -195,8 +186,7 @@ https://:8443 {
 		}
 		handle @h_dw1 {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				reverse_proxy https://192.168.0.8 {
 					import edge_upstream
 					header_up Host {host}
@@ -209,8 +199,7 @@ https://:8443 {
 		}
 		handle @h_dw2 {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				reverse_proxy https://192.168.0.9 {
 					import edge_upstream
 					header_up Host {host}
@@ -223,8 +212,7 @@ https://:8443 {
 		}
 		handle @h_dw3 {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				reverse_proxy https://192.168.0.10 {
 					import edge_upstream
 					header_up Host {host}
@@ -237,8 +225,7 @@ https://:8443 {
 		}
 		handle @h_dw4 {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				reverse_proxy https://192.168.0.11 {
 					import edge_upstream
 					header_up Host {host}
@@ -251,15 +238,13 @@ https://:8443 {
 		}
 		handle @h_edge_canary {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				respond "edge-canary ok peer={remote_host}" 200
 			}
 		}
 		handle @h_git {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://gitea-http.gitea.svc.cluster.local:3000 {
 					import edge_upstream
 				}
@@ -267,8 +252,7 @@ https://:8443 {
 		}
 		handle @h_grafana {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80 {
 					import edge_upstream
 				}
@@ -276,8 +260,7 @@ https://:8443 {
 		}
 		handle @h_home {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://oauth2-proxy.homepage.svc.cluster.local:4180 {
 					import edge_upstream
 				}
@@ -285,8 +268,7 @@ https://:8443 {
 		}
 		handle @h_hubble {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				import edge_authelia
 				reverse_proxy http://hubble-ui.kube-system.svc.cluster.local:80 {
 					import edge_upstream
@@ -295,8 +277,7 @@ https://:8443 {
 		}
 		handle @h_id {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				respond @uri_unsafe 404
 				handle @rt_id_0 {
 					reverse_proxy http://keycloak.keycloak.svc.cluster.local:80 {
@@ -320,8 +301,7 @@ https://:8443 {
 		}
 		handle @h_k8s {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				import edge_authelia
 				reverse_proxy http://headlamp.headlamp.svc.cluster.local:80 {
 					import edge_upstream
@@ -330,8 +310,7 @@ https://:8443 {
 		}
 		handle @h_muse {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://muse-stream.muse-stream.svc.cluster.local:80 {
 					import edge_upstream
 				}
@@ -339,8 +318,7 @@ https://:8443 {
 		}
 		handle @h_ntfy {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://ntfy.monitoring.svc.cluster.local:80 {
 					import edge_upstream
 				}
@@ -348,8 +326,7 @@ https://:8443 {
 		}
 		handle @h_openbao {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				reverse_proxy https://openbao-ui.openbao.svc.cluster.local:8200 {
 					import edge_upstream
 					header_up Host {host}
@@ -362,8 +339,7 @@ https://:8443 {
 		}
 		handle @h_prometheus {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				import edge_authelia
 				reverse_proxy http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090 {
 					import edge_upstream
@@ -372,8 +348,7 @@ https://:8443 {
 		}
 		handle @h_proxmox {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				reverse_proxy https://192.168.0.2:8006 {
 					import edge_upstream
 					header_up Host {host}
@@ -385,8 +360,7 @@ https://:8443 {
 		}
 		handle @h_qnap {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_admin 403
 				reverse_proxy https://192.168.1.225 {
 					import edge_upstream
 					header_up Host {host}
@@ -398,8 +372,7 @@ https://:8443 {
 		}
 		handle @h_relay {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://relay.relay.svc.cluster.local:80 {
 					import edge_upstream
 				}
@@ -407,8 +380,7 @@ https://:8443 {
 		}
 		handle @h_router {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://llm-router-edge.llm-router.svc.cluster.local:80 {
 					import edge_upstream
 				}
@@ -416,8 +388,7 @@ https://:8443 {
 		}
 		handle @h_search {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://oauth2-proxy-searxng.dsh.svc.cluster.local:4180 {
 					import edge_upstream
 				}
@@ -425,8 +396,7 @@ https://:8443 {
 		}
 		handle @h_sso {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://authelia.auth.svc.cluster.local:9091 {
 					import edge_upstream
 				}
@@ -434,8 +404,7 @@ https://:8443 {
 		}
 		handle @h_status {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				reverse_proxy http://gatus.gatus.svc.cluster.local:8080 {
 					import edge_upstream
 				}
@@ -443,8 +412,7 @@ https://:8443 {
 		}
 		handle @h_trueswarm {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				handle @rt_trueswarm_0 {
 					reverse_proxy http://trueswarm-muse.trueswarm.svc.cluster.local:80 {
 						import edge_upstream
@@ -459,11 +427,9 @@ https://:8443 {
 		}
 		handle @h_vault {
 			route {
-				respond @untrusted_peer 403
-				respond @excluded_peer 403
+				respond @not_lan 403
 				respond @uri_unsafe 404
-				respond @rp_vault_0_untrusted 403
-				respond @rp_vault_0_excluded 403
+				respond @rp_vault_0_not_admin 403
 				reverse_proxy http://vaultwarden.vaultwarden.svc.cluster.local:80 {
 					import edge_upstream
 				}
@@ -477,8 +443,8 @@ https://:8443 {
 
 http://:8080 {
 	import edge_log
-	@untrusted_peer not remote_ip 192.168.0.0/23 192.168.50.0/24 192.168.99.0/24
-	@excluded_peer remote_ip 192.168.0.1/32 192.168.0.41/32 192.168.0.42/32 192.168.0.43/32 192.168.0.47/32 192.168.0.48/32 192.168.0.49/32
+	@not_lan not remote_ip 192.168.0.0/32 192.168.0.2/31 192.168.0.4/30 192.168.0.8/29 192.168.0.16/28 192.168.0.32/29 192.168.0.40/32 192.168.0.44/31 192.168.0.46/32 192.168.0.50/31 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
+	@not_admin not remote_ip 192.168.0.38/32 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
 	@uri_unsafe vars_regexp {http.request.orig_uri} `(?i)^[^?]*(\.\.|/\./|/\.$|;|%2e|%2f|%5c|%25|%3b|\\)`
 	@h_agentforge host agentforge.chifor.me
 	@h_alertmanager host alertmanager.chifor.me
@@ -514,21 +480,19 @@ http://:8080 {
 	@rt_trueswarm_0 path_regexp `^/(media/[^/]+|art/[^/]+|api/v1/uploads/[^/]+/content)$`
 	@h_vault host vault.chifor.me
 	@rp_vault_0 path_regexp `(?i)^/+admin(/|$)`
-	@rp_vault_0_untrusted {
+	@rp_vault_0_not_admin {
 		path_regexp `(?i)^/+admin(/|$)`
-		not remote_ip 192.168.0.0/23 192.168.50.0/24 192.168.99.0/24
-	}
-	@rp_vault_0_excluded {
-		path_regexp `(?i)^/+admin(/|$)`
-		remote_ip 192.168.0.1/32 192.168.0.41/32 192.168.0.42/32 192.168.0.43/32 192.168.0.47/32 192.168.0.48/32 192.168.0.49/32
+		not remote_ip 192.168.0.38/32 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
 	}
 	@unknown_host not host agentforge.chifor.me alertmanager.chifor.me api.chifor.me chat.chifor.me dsh.chifor.me dw1.chifor.me dw2.chifor.me dw3.chifor.me dw4.chifor.me edge-canary.chifor.me git.chifor.me grafana.chifor.me home.chifor.me hubble.chifor.me id.chifor.me k8s.chifor.me muse.chifor.me ntfy.chifor.me openbao.chifor.me prometheus.chifor.me proxmox.chifor.me qnap.chifor.me relay.chifor.me router.chifor.me search.chifor.me sso.chifor.me status.chifor.me trueswarm.chifor.me vault.chifor.me
 	@cf_client_bad expression `{client_ip} == {remote_host}`
+	@cf_client_shape not vars_regexp {http.request.header.CF-Connecting-IP} `^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f]*:[0-9A-Fa-f]*:[0-9A-Fa-f:.]*)$`
 	@cf_client_multi vars_regexp {http.request.header.CF-Connecting-IP} `,`
 	@cf_visitor_missing not header Cf-Visitor *
 	@cf_visitor_http header_regexp Cf-Visitor `"scheme"\s*:\s*"http"`
 	route {
 		respond @unknown_host 404
+		respond @cf_client_shape 400
 		respond @cf_client_bad 400
 		respond @cf_client_multi 400
 		respond @cf_visitor_missing 400
@@ -811,13 +775,12 @@ http://:8080 {
 
 http://:8081 {
 	import edge_log
-	@untrusted_peer not remote_ip 192.168.0.0/23 192.168.50.0/24 192.168.99.0/24
-	@excluded_peer remote_ip 192.168.0.1/32 192.168.0.41/32 192.168.0.42/32 192.168.0.43/32 192.168.0.47/32 192.168.0.48/32 192.168.0.49/32
+	@not_lan not remote_ip 192.168.0.0/32 192.168.0.2/31 192.168.0.4/30 192.168.0.8/29 192.168.0.16/28 192.168.0.32/29 192.168.0.40/32 192.168.0.44/31 192.168.0.46/32 192.168.0.50/31 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
+	@not_admin not remote_ip 192.168.0.38/32 192.168.0.52/30 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
 	@unknown_host not host agentforge.chifor.me alertmanager.chifor.me api.chifor.me chat.chifor.me dsh.chifor.me dw1.chifor.me dw2.chifor.me dw3.chifor.me dw4.chifor.me edge-canary.chifor.me git.chifor.me grafana.chifor.me home.chifor.me hubble.chifor.me id.chifor.me k8s.chifor.me muse.chifor.me ntfy.chifor.me openbao.chifor.me prometheus.chifor.me proxmox.chifor.me qnap.chifor.me relay.chifor.me router.chifor.me search.chifor.me sso.chifor.me status.chifor.me trueswarm.chifor.me vault.chifor.me
 	route {
 		respond @unknown_host 404
-		respond @untrusted_peer 403
-		respond @excluded_peer 403
+		respond @not_lan 403
 		redir https://{host}{uri} 308
 	}
 }
@@ -839,6 +802,11 @@ http://:9180 {
 		handle /reloader-metrics {
 			root * /config/reloader
 			rewrite * /metrics
+			file_server
+		}
+		handle /probe-metrics {
+			root * /config/reloader
+			rewrite * /probe
 			file_server
 		}
 		metrics /metrics

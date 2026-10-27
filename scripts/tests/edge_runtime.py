@@ -47,9 +47,12 @@ import render  # noqa: E402
 
 DAEMONSET = ROOT / "kubernetes/apps/apps/edge/proxy/daemonset.yaml"
 RELOADER = ROOT / "kubernetes/apps/apps/edge/proxy/cert-reloader.sh"
+PROBE = ROOT / "kubernetes/apps/apps/edge/proxy/cert-probe.sh"
 SUPPORT = pathlib.Path(__file__).resolve().parent / "edge_runtime"
-IMG_PY = "python:3.12-alpine"
-IMG_SSL = "alpine/openssl:3.5.8"
+# Pinned by digest, so a fixture failure is always attributable to the diff; IMG_SSL is also the
+# DaemonSet's cert-probe image (asserted below).
+IMG_PY = "python:3.12-alpine@sha256:5789aa194f757888f41fa3d48e14b6feaa1b57c0af0b56fcb1372d6474d3bff0"
+IMG_SSL = "alpine/openssl:3.5.8@sha256:3f25da71f70eba788067daac3f3df03bd1de7a7c52ed89fa93b94ad2c92d986b"
 LABEL = "ailab.edge-runtime"  # every resource: LABEL=<run id>, LABEL.started=<unix time>
 STALE_AFTER = 2 * 3600       # a run older than this is dead (cancelled without cleanup): removed
 
@@ -62,6 +65,10 @@ RUN = secrets.token_hex(4)
 P = f"edgert-{RUN}"  # docker name prefix, unique per run
 SENTINELS = ["SENTINEL-JWT-7f3a", "SENTINEL-KEY-91bc", "SENTINEL-AUTH-22de", "SENTINEL-Q-55aa",
              "SENTINEL-SECRET-3c1e"]
+
+
+def probe_image_matches() -> bool:
+    return IMG_SSL in DAEMONSET.read_text()
 
 
 def caddy_image() -> str:
@@ -136,10 +143,13 @@ class Fixture:
             raise RuntimeError("no free 198.18.0.0/15 subnets for the fixture")
         NETS.update(prefixes)
         PROXY_IP.update({n: f"{prefixes[n]}.10" for n in ("trusted", "untrusted", "tunnel")})
-        CLIENT_IP.update({"trusted": f"{prefixes['trusted']}.20", "excluded": f"{prefixes['trusted']}.99",
+        # trusted = an admin-tier device; automation = inside the LAN but in the excluded statics block
+        CLIENT_IP.update({"trusted": f"{prefixes['trusted']}.100", "automation": f"{prefixes['trusted']}.20",
+                          "excluded": f"{prefixes['trusted']}.99",
                           "untrusted": f"{prefixes['untrusted']}.20", "tunnel": f"{prefixes['tunnel']}.20"})
         PROFILE.update({"echo": "http://echo:8080", "echo_tls": "https://echotls:8443", "authelia": "auth:9091",
                         "allow": [f"{prefixes['trusted']}.0/24"], "exclude": [f"{prefixes['trusted']}.99/32"],
+                        "admin_exclude": [f"{prefixes['trusted']}.0/27"], "admin_include": [],
                         "tunnel_trusted": [f"{prefixes['tunnel']}.0/24"]})
         for d in ("certs", "config", "openbao-ca", "echocerts"):
             (self.work / d).mkdir()
@@ -192,7 +202,7 @@ class Fixture:
         raise RuntimeError("proxy did not come up:\n" + docker("logs", f"{P}-proxy", check=False).stderr[-3000:])
 
     def request(self, source, cases):
-        net = "trusted" if source == "excluded" else source
+        net = "trusted" if source in ("excluded", "automation") else source
         f = self.work / f"cases-{source}.json"
         f.write_text(json.dumps(cases))
         r = docker("run", "--rm", *labels(), "--network", f"{P}-{net}", "--ip", CLIENT_IP[source],
@@ -302,6 +312,17 @@ def suite_committed(reg):
                           present={"X-Forwarded-Host": "router.chifor.me"})),
         ("untrusted", direct("router-wan", "router.chifor.me"), lambda r: expect(r, 403)),
         ("excluded", direct("router-gw", "router.chifor.me"), lambda r: expect(r, 403)),
+        # automation (a dev-worker or CI runner): the LAN tier reaches tunnel-mode hosts, never admin surfaces
+        ("automation", direct("router-automation", "router.chifor.me"),
+         lambda r: expect(r, 200, be("router"), CLIENT_IP["automation"])),
+        ("automation", direct("dsh-automation", "dsh.chifor.me", headers=[["X-Test-Auth", "allow"]]),
+         lambda r: not_backend(r, 403)),
+        ("automation", direct("dw1-automation", "dw1.chifor.me"), lambda r: not_backend(r, 403)),
+        ("automation", direct("proxmox-automation", "proxmox.chifor.me"), lambda r: not_backend(r, 403)),
+        ("automation", direct("vault-admin-automation", "vault.chifor.me", "/admin"), lambda r: not_backend(r, 403)),
+        ("automation", direct("vault-automation", "vault.chifor.me", "/api/sync"), lambda r: expect(r, 200, be("vault"))),
+        ("automation", {"id": "redir-automation", "port": 8081, "host": "router.chifor.me", "target": "/"},
+         lambda r: expect(r, 308, location="https://router.chifor.me/")),
         ("trusted", direct("unknown", "nope.chifor.me"), lambda r: expect(r, 404)),
         ("trusted", direct("unknown-sni", "router.chifor.me", sni="other.example"),
          lambda r: [] if r.get("error") or r.get("status") in (200, 404) else [f"unexpected {r}"]),
@@ -363,6 +384,10 @@ def suite_committed(reg):
         ("tunnel", tunnel("tun-garbage", "router.chifor.me", cf_ip="not-an-ip"), lambda r: expect(r, 400)),
         ("tunnel", tunnel("tun-bad-v4", "router.chifor.me", cf_ip="999.999.999.999"), lambda r: expect(r, 400)),
         ("tunnel", tunnel("tun-bad-v6", "router.chifor.me", cf_ip="1:2:3"), lambda r: expect(r, 400)),
+        # forms Caddy's own parser would accept by stripping a port or a zone: refused by shape first
+        ("tunnel", tunnel("tun-port", "router.chifor.me", cf_ip="203.0.113.9:443"), lambda r: not_backend(r, 400)),
+        ("tunnel", tunnel("tun-zone", "router.chifor.me", cf_ip="fe80::1%eth0"), lambda r: not_backend(r, 400)),
+        ("tunnel", tunnel("tun-brackets", "router.chifor.me", cf_ip="[2001:db8::1]"), lambda r: not_backend(r, 400)),
         ("tunnel", tunnel("tun-v6", "router.chifor.me", cf_ip="2001:db8::7"), lambda r: expect(r, 200, be("router"), "2001:db8::7")),
         ("tunnel", tunnel("tun-v4mapped", "router.chifor.me", cf_ip="::ffff:192.0.2.1"),
          lambda r: expect(r, 200, be("router")) + ([] if (echo_headers(r) or {}).get("cf-connecting-ip") in
@@ -442,6 +467,9 @@ def suite_direct(reg):
         ("trusted", direct("d-priv-lan", "test-private.chifor.me"), lambda r: expect(r, 200, "http://private.example.svc:80", T)),
         ("untrusted", direct("d-priv-wan", "test-private.chifor.me", headers=SPOOF), lambda r: expect(r, 403)),
         ("excluded", direct("d-priv-gw", "test-private.chifor.me"), lambda r: expect(r, 403)),
+        ("automation", direct("d-priv-automation", "test-private.chifor.me"), lambda r: not_backend(r, 403)),
+        ("automation", direct("d-router-automation", "router.chifor.me"),
+         lambda r: expect(r, 200, be("router"), CLIENT_IP["automation"])),
         ("tunnel", tunnel("d-priv-tun", "test-private.chifor.me"), lambda r: expect(r, 404)),
         # vault direct: /admin private now - LAN-only on the direct listener, 404 through the tunnel
         ("untrusted", direct("d-vault", "vault.chifor.me", "/api/sync"), lambda r: expect(r, 200, be("vault"))),
@@ -507,6 +535,23 @@ def wait_for(pred, seconds=20):
     return False
 
 
+def check_probe(fx):
+    """The cert-probe sidecar reads the certificate Caddy SERVES (run here in the proxy's network
+    namespace, as in the pod) and reports its expiry; the fixture certificates live 2 days."""
+    docker("run", "-d", *labels(), *user_args(), "--name", f"{P}-probe", "--network", f"container:{P}-proxy",
+           "-e", "PROBE_INTERVAL=2", "-v", f"{PROBE}:/probe.sh:ro", "-v", f"{fx.work / 'config'}:/config",
+           "--entrypoint", "sh", IMG_SSL, "/probe.sh")
+    path = fx.work / "config" / "reloader" / "probe"
+    ok = wait_for(lambda: path.exists() and "edge_cert_probe_success 1" in path.read_text(), 30)
+    detail = ""
+    if ok:
+        line = [ln for ln in path.read_text().splitlines() if ln.startswith("edge_cert_served_not_after_seconds ")]
+        left = int(line[0].split()[1]) - int(time.time()) if line else -1
+        ok = 86400 < left < 3 * 86400
+        detail = f"served certificate expires in {left} s"
+    return check("cert-probe reads the served certificate's expiry", ok, detail)
+
+
 def check_reloader(fx):
     """First pass loads what it finds; a mismatched or malformed pair is kept out and counted; a
     valid renewal is served after the bad one is repaired."""
@@ -555,6 +600,9 @@ def main() -> int:
         if sig is not None:
             signal.signal(sig, _terminate)
 
+    if not probe_image_matches():
+        print(f"edge_runtime: daemonset.yaml's cert-probe image is not {IMG_SSL}", file=sys.stderr)
+        return 1
     reg = render.load()
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{P}-"))
     fx = Fixture(work)
@@ -580,6 +628,7 @@ def main() -> int:
         failures += check("no credential or query sentinel in the access or error log", not leaked,
                           f"leaked {leaked}" if leaked else "")
         failures += check("the error log was exercised", '"logger":"http.log.error' in text)
+        failures += check_probe(fx)
         failures += check_reloader(fx)
     finally:
         if failures:

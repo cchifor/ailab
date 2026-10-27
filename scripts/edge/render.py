@@ -38,7 +38,7 @@ AUTHELIA = "authelia.auth.svc.cluster.local:9091"
 CERT = "/certs/tls.crt"
 KEY = "/certs/tls.key"
 
-TOP_KEYS = {"version", "zone", "edge_default", "force_tunnel", "vip", "tunnel_id", "trusted_sources",
+TOP_KEYS = {"version", "zone", "edge_default", "force_tunnel", "vip", "tunnel_id", "trusted_sources", "admin_sources",
             "tunnel_trusted_proxies", "hosts"}
 HOST_KEYS = {"exposure", "edge", "auth", "authelia_group", "access_gated", "lan_dns", "backend",
              "uri_guard", "routes", "routes_default", "restricted_paths", "smoke"}
@@ -58,8 +58,12 @@ SAFE_RESPOND = re.compile(r"^[A-Za-z0-9 =._:-]*(\{remote_host\}[A-Za-z0-9 =._:-]
 URI_GUARD = r"(?i)^[^?]*(\.\.|/\./|/\.$|;|%2e|%2f|%5c|%25|%3b|\\)"
 # The tunnel listener's client address comes from CF-Connecting-IP. Caddy parses that header itself
 # (client_ip_headers) and falls back to the TCP peer when it is missing or not a valid address, so
-# "the client IP equals the peer" is exactly "no valid CF-Connecting-IP". A comma anywhere in the
-# joined header value (several values, or several header lines) is refused separately.
+# "the client IP equals the peer" is exactly "no valid CF-Connecting-IP" (a visitor can never BE the
+# cloudflared pod, so refusing that one address is no loss). Caddy's parser also strips a port or a
+# zone, so the raw value must first have the bare shape of one address: a dotted quad, or IPv6
+# characters with at least two colons; no port, zone, brackets or list. A comma anywhere in the joined
+# header value (several values, or several header lines) is refused separately.
+CF_IP_SHAPE = r"^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f]*:[0-9A-Fa-f]*:[0-9A-Fa-f:.]*)$"
 
 # Removed from every request before routing, on both listeners: identity and forwarding headers
 # only this proxy may set. The direct listener also drops every Cf-* header (no Cloudflare there).
@@ -141,6 +145,18 @@ def validate(reg: dict) -> list[str]:
     if vip and any(n and vip in n for n in [ipaddress.ip_network(c) for c in ts.get("exclude") or []
                                              if _ok_cidr(c)]):
         errors.append("vip: must not be an excluded source")
+    adm = reg["admin_sources"] or {}
+    if set(adm) != {"exclude", "include"}:
+        errors.append("admin_sources: needs exactly exclude and include")
+    for c in (adm.get("exclude") or []) + (adm.get("include") or []):
+        _cidr(c, "admin_sources", errors)
+    if not errors:
+        lan, admin = source_tiers(reg)
+        if not admin:
+            errors.append("admin_sources: the admin tier is empty")
+        for c in adm.get("include") or []:
+            if not any(ipaddress.ip_network(c).subnet_of(n) for n in lan):
+                errors.append(f"admin_sources.include: {c} is not inside the LAN tier")
     for c in reg["tunnel_trusted_proxies"] or []:
         _cidr(c, "tunnel_trusted_proxies", errors)
     if not reg["tunnel_trusted_proxies"]:
@@ -257,6 +273,39 @@ def _regex(value, where, errors):
         errors.append(f"{where}: backticks are not allowed in regexes")
 
 
+def _subtract(nets, minus):
+    """CIDRs covering `nets` without `minus`. CIDRs either nest or are disjoint, so each removal
+    either drops a network, splits it (address_exclude), or leaves it alone."""
+    out = list(nets)
+    for m in minus:
+        nxt = []
+        for n in out:
+            if n.version != m.version or not n.overlaps(m):
+                nxt.append(n)
+            elif m.supernet_of(n):
+                continue
+            else:
+                nxt.extend(n.address_exclude(m))
+        out = nxt
+    return out
+
+
+def source_tiers(reg, profile=None):
+    """The two source tiers as explicit CIDR lists (docs/standards/edge-ingress.md 5.3):
+    LAN   = trusted_sources.allow - trusted_sources.exclude
+    admin = LAN - admin_sources.exclude + admin_sources.include"""
+    if profile:
+        allow, exclude = profile["allow"], profile["exclude"]
+        admin_ex, admin_in = profile["admin_exclude"], profile.get("admin_include", [])
+    else:
+        allow, exclude = reg["trusted_sources"]["allow"], reg["trusted_sources"]["exclude"]
+        admin_ex, admin_in = reg["admin_sources"]["exclude"], reg["admin_sources"]["include"]
+    net = lambda xs: [ipaddress.ip_network(x) for x in xs]  # noqa: E731
+    lan = sorted(ipaddress.collapse_addresses(_subtract(net(allow), net(exclude))))
+    admin = sorted(ipaddress.collapse_addresses(_subtract(lan, net(admin_ex)) + net(admin_in)))
+    return lan, admin
+
+
 def effective_mode(reg: dict, name: str) -> str:
     """direct | tunnel for public hosts, private for private ones."""
     h = reg["hosts"][name]
@@ -283,10 +332,10 @@ def _fqdn(reg, name):
     return f"{name}.{reg['zone']}"
 
 
-def _peer_matchers(allow, exclude):
+def _peer_matchers(lan, admin):
     return [
-        "\t@untrusted_peer not remote_ip " + " ".join(allow),
-        "\t@excluded_peer remote_ip " + " ".join(exclude),
+        "\t@not_lan not remote_ip " + " ".join(str(n) for n in lan),
+        "\t@not_admin not remote_ip " + " ".join(str(n) for n in admin),
     ]
 
 
@@ -335,10 +384,12 @@ def _host_body(reg, name, listener, profile):
     out = ["\t\t\troute {"]
     add = out.append
 
-    # 1. who may reach the host at all on this listener
-    if listener == "direct" and mode in ("private", "tunnel"):
-        add("\t\t\t\trespond @untrusted_peer 403")
-        add("\t\t\t\trespond @excluded_peer 403")
+    # 1. who may reach the host at all on this listener: admin surfaces (private hosts, Access-gated
+    #    hosts still in the tunnel) the admin tier; other tunnel-mode hosts the LAN tier
+    if listener == "direct" and (mode == "private" or (mode == "tunnel" and h["access_gated"])):
+        add("\t\t\t\trespond @not_admin 403")
+    elif listener == "direct" and mode == "tunnel":
+        add("\t\t\t\trespond @not_lan 403")
     # 2. the raw-URI guard
     if h.get("uri_guard"):
         add("\t\t\t\trespond @uri_unsafe 404")
@@ -346,8 +397,7 @@ def _host_body(reg, name, listener, profile):
     for i, rp in enumerate(h.get("restricted_paths") or []):
         m = f"@rp_{_ident(name)}_{i}"
         if listener == "direct":
-            add(f"\t\t\t\trespond {m}_untrusted 403")
-            add(f"\t\t\t\trespond {m}_excluded 403")
+            add(f"\t\t\t\trespond {m}_not_admin 403")
         elif rp["exposure"] == "private":
             add(f"\t\t\t\trespond {m} 404")
         # tunnel + access_gated: Cloudflare Access's path application gates it at the edge
@@ -380,8 +430,8 @@ def _ident(name):
     return name.replace("-", "_")
 
 
-def _site_matchers(reg, names, allow, exclude):
-    lines = _peer_matchers(allow, exclude)
+def _site_matchers(reg, names, lan, admin):
+    lines = _peer_matchers(lan, admin)
     lines.append(f"\t@uri_unsafe vars_regexp {{http.request.orig_uri}} `{URI_GUARD}`")
     for name in names:
         h = reg["hosts"][name]
@@ -392,25 +442,19 @@ def _site_matchers(reg, names, allow, exclude):
             m = f"@rp_{_ident(name)}_{i}"
             rx = f"(?i){rp['path_regexp']}" if not rp["path_regexp"].startswith("(?i)") else rp["path_regexp"]
             lines.append(f"\t{m} path_regexp `{rx}`")
-            lines.append(f"\t{m}_untrusted {{")
+            lines.append(f"\t{m}_not_admin {{")
             lines.append(f"\t\tpath_regexp `{rx}`")
-            lines.append("\t\tnot remote_ip " + " ".join(allow))
-            lines.append("\t}")
-            lines.append(f"\t{m}_excluded {{")
-            lines.append(f"\t\tpath_regexp `{rx}`")
-            lines.append("\t\tremote_ip " + " ".join(exclude))
+            lines.append("\t\tnot remote_ip " + " ".join(str(n) for n in admin))
             lines.append("\t}")
     return lines
 
 
 def render(reg: dict, profile: dict | None = None) -> str:
     """The Caddyfile for the registry. `profile` swaps backends/ranges for the docker fixture."""
-    allow = list(reg["trusted_sources"]["allow"])
-    exclude = list(reg["trusted_sources"]["exclude"])
+    lan, admin = source_tiers(reg, profile)
     tunnel_trusted = list(reg["tunnel_trusted_proxies"])
     authelia = AUTHELIA
     if profile:
-        allow, exclude = profile["allow"], profile["exclude"]
         tunnel_trusted, authelia = profile["tunnel_trusted"], profile["authelia"]
     names = sorted(reg["hosts"])
     public = [n for n in names if reg["hosts"][n]["exposure"] == "public"]
@@ -510,7 +554,7 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w("https://:8443 {")
     w(f"\ttls {CERT} {KEY}")
     w("\timport edge_log")
-    o.extend(_site_matchers(reg, names, allow, exclude))
+    o.extend(_site_matchers(reg, names, lan, admin))
     w("\troute {")
     for hdr in STRIP_ALWAYS + STRIP_DIRECT:
         w(f"\t\trequest_header -{hdr}")
@@ -529,14 +573,16 @@ def render(reg: dict, profile: dict | None = None) -> str:
     # :8080 tunnel (public hosts only)
     w("http://:8080 {")
     w("\timport edge_log")
-    o.extend(_site_matchers(reg, public, allow, exclude))
+    o.extend(_site_matchers(reg, public, lan, admin))
     w("\t@unknown_host not host " + " ".join(_fqdn(reg, n) for n in public))
     w("\t@cf_client_bad expression `{client_ip} == {remote_host}`")
+    w(f"\t@cf_client_shape not vars_regexp {{http.request.header.CF-Connecting-IP}} `{CF_IP_SHAPE}`")
     w("\t@cf_client_multi vars_regexp {http.request.header.CF-Connecting-IP} `,`")
     w("\t@cf_visitor_missing not header Cf-Visitor *")
     w("\t@cf_visitor_http header_regexp Cf-Visitor `\"scheme\"\\s*:\\s*\"http\"`")
     w("\troute {")
     w("\t\trespond @unknown_host 404")
+    w("\t\trespond @cf_client_shape 400")
     w("\t\trespond @cf_client_bad 400")
     w("\t\trespond @cf_client_multi 400")
     w("\t\trespond @cf_visitor_missing 400")
@@ -558,12 +604,11 @@ def render(reg: dict, profile: dict | None = None) -> str:
     # :8081 redirect (trusted sources only)
     w("http://:8081 {")
     w("\timport edge_log")
-    o.extend(_peer_matchers(allow, exclude))
+    o.extend(_peer_matchers(lan, admin))
     w("\t@unknown_host not host " + " ".join(_fqdn(reg, n) for n in names))
     w("\troute {")
     w("\t\trespond @unknown_host 404")
-    w("\t\trespond @untrusted_peer 403")
-    w("\t\trespond @excluded_peer 403")
+    w("\t\trespond @not_lan 403")
     w("\t\tredir https://{host}{uri} 308")
     w("\t}")
     w("}")
@@ -585,6 +630,11 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w("\t\thandle /reloader-metrics {")
     w("\t\t\troot * /config/reloader")
     w("\t\t\trewrite * /metrics")
+    w("\t\t\tfile_server")
+    w("\t\t}")
+    w("\t\thandle /probe-metrics {")
+    w("\t\t\troot * /config/reloader")
+    w("\t\t\trewrite * /probe")
     w("\t\t\tfile_server")
     w("\t\t}")
     w("\t\tmetrics /metrics")
