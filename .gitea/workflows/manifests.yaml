@@ -99,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/edge/render.py --check
-          python3 -m unittest scripts.tests.test_edge_render
+          python3 -m unittest scripts.tests.test_edge_render scripts.tests.test_edge_gateway
           python3 scripts/tests/edge_runtime.py
 
       # Renovate never fails a run on these: a duplicate config key drops rules, and a bad name

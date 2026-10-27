@@ -315,7 +315,17 @@ edge-render:
 edge-smoke *args:
     python scripts/edge/smoke.py {{args}}
 
-# The renderer's unit tests and the docker runtime fixture (the pinned Caddy, real requests).
+# The renderer's and the reconciler's unit tests, and the docker runtime fixture (the pinned Caddy).
 edge-test:
-    python -m unittest scripts.tests.test_edge_render
+    python -m unittest scripts.tests.test_edge_render scripts.tests.test_edge_gateway
     python scripts/tests/edge_runtime.py
+
+# The home gateway (UniFi) half: kubernetes/edge/gateway.yaml + the lan_dns hosts. `plan` prints the
+# diff and a plan hash and never mutates; `apply` carries out exactly the plan whose hash it is given.
+# Commit kubernetes/edge/gateway-state.yaml after every apply. Options: --only dhcp|dns|forward,
+# --adopt KEY, --forget KEY (the same ones on plan and apply: they are part of the hash).
+edge-gateway-plan *args:
+    python scripts/edge/gateway.py plan {{args}}
+
+edge-gateway-apply *args:
+    python scripts/edge/gateway.py apply {{args}}

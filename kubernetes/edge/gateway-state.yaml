@@ -1,0 +1,10 @@
+# Written by scripts/edge/gateway.py apply: the UniFi objects the edge reconciler owns.
+# Commit after every apply. Never edit IDs by hand: use --adopt / --forget.
+controller:
+  cert_sha256: 55ef62f960610952c987555690ac1c5493ae57c8a87911c6ec7130863e4c4b0b
+  site: default
+  url: https://192.168.1.152
+intents: []
+port_forward: null
+static_dns: {}
+version: 1
