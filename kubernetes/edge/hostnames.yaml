@@ -330,7 +330,7 @@ hosts:
   # ---- the canary: the first direct host, and the outside probe's target ----------------------
   edge-canary:
     exposure: public
-    edge: default
+    edge: direct # the first direct host (P6): the WAN path's end-to-end proof
     auth: none # a fixed answer that names the peer; nothing behind it
     access_gated: false
     lan_dns: true

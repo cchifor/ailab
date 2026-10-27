@@ -236,7 +236,6 @@ https://:8443 {
 		}
 		handle @h_edge_canary {
 			route {
-				respond @not_lan 403
 				respond "edge-canary ok peer={remote_host}" 200
 			}
 		}

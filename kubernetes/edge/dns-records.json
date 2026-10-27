@@ -1,7 +1,7 @@
 {
   "_generated": "by scripts/edge/render.py from kubernetes/edge/hostnames.yaml; do not edit, run `just edge-render`",
-  "registry_sha256": "7a66a2302db929d82b1aa2116771299b51f5c849df392d5de657d9118a127138",
-  "binding_sha256": "18b63bcc6364321da1a5b19abb6bbe5a2397f9f8f1311e0f8304a41224e9dc2f",
+  "registry_sha256": "03c668bc61c64ac81621a9bc46cb51f36d70e2dc59cf79499d04290a321d4cdf",
+  "binding_sha256": "4d1b378f6b536ef2a45293b34afe04b2cbe2ed01a54baeef2b3ac14ead42a06c",
   "zone": "chifor.me",
   "tunnel_id": "f93d9a6a-5172-43d3-8bef-13460ea7607b",
   "vip": "192.168.0.51",
@@ -70,11 +70,11 @@
       "ttl": 1
     },
     "edge-canary": {
-      "mode": "tunnel",
+      "mode": "direct",
       "type": "CNAME",
-      "content": "f93d9a6a-5172-43d3-8bef-13460ea7607b.cfargotunnel.com",
-      "proxied": true,
-      "ttl": 1
+      "content": "chifor.me",
+      "proxied": false,
+      "ttl": 60
     },
     "git": {
       "mode": "tunnel",
