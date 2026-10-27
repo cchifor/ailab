@@ -60,6 +60,13 @@ import yaml  # noqa: E402  (render.py already requires PyYAML)
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GATEWAY = ROOT / "kubernetes/edge/gateway.yaml"
 STATE = ROOT / "kubernetes/edge/gateway-state.yaml"
+CADDYFILE = ROOT / "kubernetes/apps/apps/edge/proxy/Caddyfile"
+
+
+def metrics_bounded(caddyfile=CADDYFILE) -> bool:
+    """The WAN may reach the proxy only while its metrics are bounded: with per_host on a TLS server, Caddy
+    labels any Host a client sends, so a scanner could grow its memory and Prometheus without bound."""
+    return "per_host" not in caddyfile.read_text(encoding="utf-8")
 BACKUPS = pathlib.Path.home() / ".ailab-edge" / "backups"
 KINDS = ("dhcp", "dns", "forward")
 
@@ -436,7 +443,7 @@ def op_order(op):
 
 
 def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check=False,
-              ack_dhcp_leases=False) -> dict:
+              ack_dhcp_leases=False, metrics_ok=True) -> dict:
     """Pure: compute the operations from the desired state, the state file and the inventory."""
     only = set(only or KINDS)
     errors, warnings, ops = [], [], []
@@ -586,7 +593,10 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
                             "before": digest(named[0])})
                 own_id = named[0]["_id"]
         if not blocked:
-            if pf["enabled"]:
+            if pf["enabled"] and not metrics_ok:
+                errors.append("the edge proxy's metrics are not bounded (per_host in the Caddyfile): the WAN "
+                              "forward waits until they are (docs/runbooks/edge-ingress.md)")
+            elif pf["enabled"]:
                 if not own_id and any(f.get("name") == pf["name"] for f in inv["portforward"]):
                     errors.append(f"a forward named {pf['name']} exists and is not ours: inspect it, then "
                                   f"--adopt {pf['name']}")
@@ -898,7 +908,8 @@ def main(argv=None) -> int:
         state = load_state(g)
         client = UnifiClient(g["controller"]["url"], g["controller"]["site"], g["controller"]["cert_sha256"], api_key())
         plan = make_plan(g, reg, state, client.inventory(), args.only, args.adopt, args.forget,
-                         skip_vip_check=args.skip_vip_check, ack_dhcp_leases=args.ack_dhcp_leases)
+                         skip_vip_check=args.skip_vip_check, ack_dhcp_leases=args.ack_dhcp_leases,
+                         metrics_ok=metrics_bounded())
         if any(o["kind"] == "dhcp" and o["action"] == "update" for o in plan["ops"]):
             check_leases(plan, client.active_clients())
         print(show(plan))

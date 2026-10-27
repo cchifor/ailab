@@ -295,6 +295,17 @@ class Planning(Base):
 
 
 class Forward(Base):
+    def test_the_forward_waits_for_bounded_metrics(self):
+        self.g["port_forward"]["enabled"] = True
+        plan = self.plan(metrics_ok=False)
+        self.assertTrue(any("metrics are not bounded" in e for e in plan["errors"]), plan["errors"])
+        self.assertFalse([o for o in plan["ops"] if o["kind"] == "forward"])
+        caddy = pathlib.Path(self.tmp.name) / "Caddyfile"
+        caddy.write_text("{\n\tmetrics {\n\t\tper_host\n\t}\n}\n", encoding="utf-8")
+        self.assertFalse(gateway.metrics_bounded(caddy))
+        caddy.write_text("{\n\tmetrics\n}\n", encoding="utf-8")
+        self.assertTrue(gateway.metrics_bounded(caddy))
+
     def test_create_forward_leaves_nextcloud_alone(self):
         self.g["port_forward"]["enabled"] = True
         before = copy.deepcopy([r for r in self.api.inv["portforward"] if r["name"].startswith("nextcloud")])
