@@ -4,6 +4,10 @@
 #     lives here) only comes up once the apps layer is healthy, including Authelia rolled out with the
 #     admins-only rules for the forward-auth hosts (apps/auth/configuration.yml). A proxy that started
 #     beside a lagging Authelia replica could let a non-admin through on its old one_factor default.
+#     This holds only while Authelia's config stays a hash-named generated ConfigMap (apps/auth), so
+#     that a rule change rolls every replica before apps reports Ready.
+#   - NOT dependsOn metallb-config, deliberately: the LoadBalancer Service waits pending until the
+#     pool exists, and proxy updates (from P5 the tunnel path's) must not wait on MetalLB's health.
 #   - ISOLATION: the proxy's health (a certificate that has not issued yet, a pending pod) must not
 #     turn the whole apps layer, and everything that depends on it, unready.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
