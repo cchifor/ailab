@@ -317,7 +317,7 @@ edge-smoke *args:
 
 # The renderer's and the reconciler's unit tests, and the docker runtime fixture (the pinned Caddy).
 edge-test:
-    python -m unittest scripts.tests.test_edge_render scripts.tests.test_edge_gateway
+    python -m unittest scripts.tests.test_edge_render scripts.tests.test_edge_gateway scripts.tests.test_estate_provision_matrix
     python scripts/tests/edge_runtime.py
 
 # The home gateway (UniFi) half: kubernetes/edge/gateway.yaml + the lan_dns hosts. `plan` prints the

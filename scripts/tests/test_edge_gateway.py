@@ -645,6 +645,22 @@ class Binding(Base):
         with self.assertRaises(gateway.GatewayError):
             gateway.UnifiClient._v2_list(500, None, "x")
 
+    def test_a_change_between_plan_and_apply_start_is_refused(self):
+        plan = self.plan()
+        self.api.inv["static_dns"].append({"_id": "dns-new", "key": "x.lan", "value": "192.168.0.99",
+                                           "record_type": "A", "enabled": True, "ttl": 0})
+        with self.assertRaises(gateway.GatewayError):
+            self.apply(plan)
+
+    def test_an_update_answered_with_no_object_is_a_gateway_error(self):
+        with self.assertRaises(gateway.GatewayError):
+            gateway.UnifiClient._one(200, {"meta": {"rc": "ok"}, "data": []}, "update port forward")
+
+    def test_desired_dns_keys_are_lowercase(self):
+        self.reg["hosts"]["router"]["lan_dns"] = True
+        self.reg["zone"] = "Chifor.ME"
+        self.assertEqual(list(gateway.desired_dns(self.reg)), ["router.chifor.me"])
+
     def test_a_paged_listing_is_refused(self):
         ok = {"meta": {"rc": "ok"}, "data": [{"_id": "a"}]}
         self.assertEqual(gateway.UnifiClient._classic_list(200, ok, "x"), [{"_id": "a"}])

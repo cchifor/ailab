@@ -188,9 +188,16 @@ class UnifiClient:
             raise GatewayError("create port forward: no object returned")
         return rows[0]
 
+    @classmethod
+    def _one(cls, status, payload, what):
+        rows = cls._classic_list(status, payload, what)
+        if len(rows) != 1:
+            raise GatewayError(f"{what}: {len(rows)} objects returned, not 1 (the write may have happened: re-plan)")
+        return rows[0]
+
     def update_portforward(self, oid, obj):
         st, p = self.request("PUT", self._classic(f"portforward/{oid}"), obj)
-        return self._classic_list(st, p, "update port forward")[0]
+        return self._one(st, p, "update port forward")
 
     def delete_portforward(self, oid):
         st, p = self.request("DELETE", self._classic(f"portforward/{oid}"))
@@ -198,7 +205,7 @@ class UnifiClient:
 
     def update_network(self, oid, obj):
         st, p = self.request("PUT", self._classic(f"networkconf/{oid}"), obj)
-        return self._classic_list(st, p, "update network")[0]
+        return self._one(st, p, "update network")
 
     def create_dns(self, fields):
         st, p = self.request("POST", self._v2("static-dns"), fields)
@@ -219,6 +226,8 @@ class UnifiClient:
 
 
 def fingerprint(url: str) -> str:
+    if not url.startswith("https://"):
+        raise GatewayError("controller.url must be https")
     host, _, port = url[len("https://"):].rstrip("/").partition(":")
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -308,7 +317,8 @@ def save_state(state, path=STATE):
 
 
 def desired_dns(reg) -> dict:
-    return {f"{n}.{reg['zone']}": reg["vip"] for n, h in sorted(reg["hosts"].items()) if h["lan_dns"]}
+    # lowercase, as every comparison with the controller's keys is
+    return {f"{n}.{reg['zone']}".lower(): reg["vip"] for n, h in sorted(reg["hosts"].items()) if h["lan_dns"]}
 
 
 def forward_fields(g, reg) -> dict:
@@ -574,7 +584,8 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
     body = {"controller": g["controller"]["url"], "site": g["controller"]["site"],
             "inventory": {k: digest(v) for k, v in sorted(inv.items())}, "ops": ops, "options": options}
     plan_hash = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:20]
-    return {"ops": ops, "errors": errors, "warnings": warnings, "options": options, "hash": plan_hash}
+    return {"ops": ops, "errors": errors, "warnings": warnings, "options": options, "hash": plan_hash,
+            "inventory": body["inventory"]}
 
 
 def check_leases(plan, clients) -> None:
@@ -723,6 +734,9 @@ def _check_unowned(before: dict, known: set, inv: dict, created: set) -> list:
 def apply(client, g, reg, state, plan, state_path=STATE, log=print):
     options = plan["options"]
     start = client.inventory()
+    # the preservation baseline must be the inventory the plan hash covered, not a later read
+    if {k: digest(v) for k, v in sorted(start.items())} != plan["inventory"]:
+        raise GatewayError("the controller changed between the plan and the apply; re-plan")
     baseline = _unowned_snapshot(start, state, plan)
     known = {(kind, r["_id"]) for kind in ("portforward", "static_dns", "networkconf") for r in start[kind]}
     created = set()
