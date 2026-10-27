@@ -330,6 +330,35 @@ class Forward(Base):
         self.assertTrue(any("not ours while the edge forward is disabled" in e for e in plan["errors"]), plan["errors"])
         self.assertEqual(plan["ops"], [])
 
+    def test_a_twin_appearing_before_the_delete_stops_it(self):
+        self.g["port_forward"]["enabled"] = True
+        self.apply(self.plan())
+        oid = self.state["port_forward"]["id"]
+        self.g["port_forward"]["enabled"] = False
+        plan = self.plan()
+        self.assertEqual(self.ops(plan), [("delete", "forward", "ailab-edge-https")])
+        self.api.inv["portforward"].append({"_id": "pf-twin", "name": "ailab-edge-https", "enabled": True,
+                                            "pfwd_interface": "wan", "dst_port": "443", "fwd": "192.168.0.77",
+                                            "fwd_port": "443", "proto": "tcp"})
+        with self.assertRaises(gateway.GatewayError):
+            self.apply(plan)
+        self.assertNotIn(("delete_portforward", oid), self.api.calls)
+
+    def test_an_object_appearing_during_an_apply_is_reported(self):
+        self.lan_dns("router")
+        plan = self.plan()
+        real = self.api.create_dns
+
+        def create_and_add(fields):
+            self.api.inv["portforward"].append({"_id": "pf-new", "name": "surprise", "enabled": True,
+                                                "pfwd_interface": "wan", "dst_port": "8080", "fwd": "192.168.0.9",
+                                                "fwd_port": "80", "proto": "tcp"})
+            return real(fields)
+        self.api.create_dns = create_and_add
+        with self.assertRaises(gateway.GatewayError) as cm:
+            self.apply(plan)
+        self.assertIn("portforward pf-new: appeared", str(cm.exception))
+
     def test_disable_deletes_first(self):
         self.g["port_forward"]["enabled"] = True
         self.lan_dns("router")

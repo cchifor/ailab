@@ -709,19 +709,25 @@ def _unowned_snapshot(inv, state, plan) -> dict:
             for r in inv[kind] if r["_id"] not in mine}
 
 
-def _check_unowned(before: dict, inv: dict, created: set) -> list:
+def _check_unowned(before: dict, known: set, inv: dict, created: set) -> list:
+    """Unowned objects that changed or vanished during the apply, and objects nobody planned that
+    appeared (a new forward or record is as much a surprise as a changed one)."""
     now = {(kind, r["_id"]): digest(r) for kind in ("portforward", "static_dns", "networkconf")
            for r in inv[kind] if r["_id"] not in created}
-    return sorted(f"{kind} {oid}: {'gone' if (kind, oid) not in now else 'changed'}"
-                  for (kind, oid), d in before.items() if now.get((kind, oid)) != d)
+    out = [f"{kind} {oid}: {'gone' if (kind, oid) not in now else 'changed'}"
+           for (kind, oid), d in before.items() if now.get((kind, oid)) != d]
+    out += [f"{kind} {oid}: appeared" for (kind, oid) in now if (kind, oid) not in known]
+    return sorted(out)
 
 
 def apply(client, g, reg, state, plan, state_path=STATE, log=print):
     options = plan["options"]
-    baseline = _unowned_snapshot(client.inventory(), state, plan)
+    start = client.inventory()
+    baseline = _unowned_snapshot(start, state, plan)
+    known = {(kind, r["_id"]) for kind in ("portforward", "static_dns", "networkconf") for r in start[kind]}
     created = set()
     _apply_ops(client, g, reg, state, plan, options, state_path, log, created)
-    drift = _check_unowned(baseline, client.inventory(), created)
+    drift = _check_unowned(baseline, known, client.inventory(), created)
     if drift:
         raise GatewayError("objects the reconciler does not own changed or vanished during the apply "
                            f"(check them in the UniFi UI now): {drift}")
@@ -739,9 +745,17 @@ def _apply_ops(client, g, reg, state, plan, options, state_path, log, created):
             log(f"forgot  {kind} {key}")
             continue
         if action in ("delete", "adopt"):
-            cur, _ = _current(client, kind, op["id"])
+            cur, inv = _current(client, kind, op["id"])
             if cur is None or digest(cur) != op["before"]:
                 raise GatewayError(f"{kind} {key} changed on the controller since the plan; re-plan")
+            if action == "delete" and kind in ("dns", "forward"):
+                # deleting ours must not leave an unowned twin behind (for a forward: still exposing)
+                rows = inv["static_dns"] if kind == "dns" else inv["portforward"]
+                field = "key" if kind == "dns" else "name"
+                twins = [r["_id"] for r in rows if str(r.get(field, "")).lower() == key.lower() and r["_id"] != op["id"]]
+                if twins:
+                    raise GatewayError(f"{kind} {key}: other objects carry the same {field} {twins} (since the plan); "
+                                       "inspect them in the UI and re-plan")
         if action == "adopt":
             _own(state, kind, key, op["id"])
             _drop_intent(state, kind, key)
