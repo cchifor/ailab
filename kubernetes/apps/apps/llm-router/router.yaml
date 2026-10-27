@@ -121,7 +121,7 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 1f92b9d1e920a110808378472ebf83670c282b6 (llm-router #124, account menu portal and keyboard fix);
+          # Source 1f92b9d1e920a110808378472ebf83670c282b6b (llm-router #124, account menu portal and keyboard fix);
           # parity-8f6eb6ba8d10-110130 image, all blobs pulled anonymously and verified;
           # Relay run 110130, archive sha256:c1b491d1c180d552cd3a79771664b310ec030e883c3a2ba4cc91d1ab18c40b60.
           image: registry.chifor.me/llm-router/router@sha256:731d43fa2f3bf9a7a48cd0d724eeee47e4677ca2c01d025a83ca68572f2d8b73

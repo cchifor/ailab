@@ -2548,7 +2548,7 @@ again and becomes one budget for every visitor, as it was before the switch.
 
 ### Account menu visibility fix (2026-10-27, llm-router#124)
 
-`router-0.1.0-20261027-account-menu` deploys llm-router main `1f92b9d1e920a110808378472ebf83670c282b6` ([#124](https://git.chifor.me/cchifor/llm-router/pulls/124)). The profile menu is now rendered through a document portal, so the expanded navigation rail cannot clip it; viewport collision handling covers desktop and mobile layouts. Opening focuses the first action, arrow/Home/End navigate actions, Escape restores the trigger, and Tab/Shift+Tab close the menu without stranding focus.
+`router-0.1.0-20261027-account-menu` deploys llm-router main `1f92b9d1e920a110808378472ebf83670c282b6b` ([#124](https://git.chifor.me/cchifor/llm-router/pulls/124)). The profile menu is now rendered through a document portal, so the expanded navigation rail cannot clip it; viewport collision handling covers desktop and mobile layouts. Opening focuses the first action, arrow/Home/End navigate actions, Escape restores the trigger, and Tab/Shift+Tab close the menu without stranding focus.
 
 **Image.**
 - Archive `router-0.1.0-20261027-account-menu.tar.gz`, SHA-256 `c1b491d1c180d552cd3a79771664b310ec030e883c3a2ba4cc91d1ab18c40b60`, Relay v0.2.0 assets 399/400.
