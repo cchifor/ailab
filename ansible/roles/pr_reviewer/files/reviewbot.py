@@ -1257,10 +1257,19 @@ def tier_index(model):
 # the model has no tools, never sees the PAT, and never sees the key (it lives in a 0600 file
 # the service user reads per call - `key_file`, default ROUTER_KEY_FILE).
 #
-# Shape: {name, sudo_user: "", router_url, key_file?, route?, model?, models?: {tier: route}}. A
-# tier's router model is models[tier], else `model`, else - with neither configured - the tier
-# name itself. A tier with no route is one this seat does not serve (model_parked says so), which
-# is how a router seat can carry the top tiers while a subscription seat keeps the rest.
+# Shape: {name, sudo_user: "", router_url, key_file?, route?, model?, models?: {tier: route},
+# max_tokens?}. A tier's router model is models[tier], else `model`, else - with neither
+# configured - the tier name itself. A tier with no route is one this seat does not serve
+# (model_parked says so), which is how a router seat can carry the top tiers while a
+# subscription seat keeps the rest.
+#
+# `max_tokens` is the seat's output cap, sent with every review: a positive int caps every tier,
+# a {tier: positive int} map only the tiers it names (reviewer-1 caps fable, not its opus
+# fallback). Anything else is not sent, and resolve_seats logs why. The router hands it to
+# Claude Code where the account allows output caps (llm-router #125) and otherwise drops it and
+# says so in x-router-ignored-params, so the cap is harmless before it is honoured. A review
+# that reaches it ends with finish_reason=length, which is a failed attempt (the next tier is
+# asked), never a truncated verdict.
 #
 # `route` IS THE ROUTER'S MODEL MODE (2026-10-26): sent as the X-Router-Route header, with the
 # tier's model in `model`. A pool whose targets are `*` serves the model a request names, and a
@@ -1316,6 +1325,39 @@ def router_header_route(seat):
     """The route a router seat names in X-Router-Route (model mode), or None."""
     r = _seat_cfg(seat).get("route")
     return r.strip() if isinstance(r, str) and r.strip() else None
+
+
+def _positive_int(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def router_output_cap(seat, tier):
+    """The output cap a router seat sends for one tier (as max_tokens), or None: `max_tokens` as
+    a positive int caps every tier, a {tier: positive int} map only the tiers it names."""
+    cap = _seat_cfg(seat).get("max_tokens")
+    if isinstance(cap, dict):
+        cap = cap.get(tier)
+    return cap if _positive_int(cap) else None
+
+
+def router_cap_problem(seat):
+    """Why part (or all) of a router seat's `max_tokens` is not sent, and what still is, or
+    None. Said once at seat resolution: an unsent cap is a runaway guard that silently is not
+    there - and a map that still caps some tier must say so, not claim the guard is gone."""
+    cap = _seat_cfg(seat).get("max_tokens")
+    if cap is None:
+        return None
+    if not isinstance(cap, dict):
+        return None if _positive_int(cap) else \
+            f"max_tokens {cap!r} is not a positive int - no output cap is sent"
+    unusable = sorted(str(k) for k, v in cap.items() if not _positive_int(v))
+    stray = sorted(str(k) for k in cap if k not in MODELS)
+    if not unusable and not stray:
+        return None
+    kept = [t for t in MODELS if router_output_cap(seat, t) is not None]
+    said = ([f"max_tokens for {unusable} is not a positive int"] if unusable else []) + \
+        ([f"max_tokens names {stray}, which are not tiers of {MODELS}"] if stray else [])
+    return "; ".join(said) + (f" - still capped: {kept}" if kept else " - no output cap is sent")
 
 
 def router_tiers_distinct(seat):
@@ -1891,6 +1933,10 @@ def resolve_seats():
     for name in idle:
         log(f"seat '{name}': router seat maps none of the tiers {MODELS} to a route - "
             f"{'dropped from rotation' if len(idle) < len(SEATS) else 'it cannot serve'}")
+    for s in SEATS:
+        why = is_router_seat(s) and router_cap_problem(s)
+        if why:
+            log(f"seat '{s['name']}': {why} (host_vars typo?)")
     if idle and len(idle) < len(SEATS):
         _apply_seats([s for s in SEATS if s["name"] not in idle])
     # Nothing to deduplicate with one seat. (This used to return for every kind but codex; the
@@ -2329,8 +2375,14 @@ def _run_router(seat, tier, prompt, remaining):
         e.why = f"router key file unusable ({why})"
         raise e
     url = str(s["router_url"]).rstrip("/") + "/v1/chat/completions"
-    body = json.dumps({"model": route, "stream": True,
-                       "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+    payload = {"model": route, "stream": True, "messages": [{"role": "user", "content": prompt}]}
+    cap = router_output_cap(seat, tier)
+    if cap is not None:
+        # The seat's output cap for this tier (see the shape above): a runaway ends as
+        # finish_reason=length - "router answer truncated" below, a ModelError, so run_llm asks
+        # the next tier on this seat - instead of streaming into the model's default limit.
+        payload["max_tokens"] = cap
+    body = json.dumps(payload).encode("utf-8")
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
                "Accept": "text/event-stream", "User-Agent": ROUTER_UA}
     pool = router_header_route(seat)
