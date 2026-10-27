@@ -72,7 +72,7 @@ hosts:
     edge: default
     auth: native # oauth2-proxy -> Authelia, admins_only
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://oauth2-proxy.homepage.svc.cluster.local:4180" }
     smoke: { status: 302, location_contains: "sso.chifor.me" }
   sso:
@@ -80,7 +80,7 @@ hosts:
     edge: default
     auth: native # Authelia itself
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://authelia.auth.svc.cluster.local:9091" }
     smoke: { status: 200 }
   status:
@@ -88,7 +88,7 @@ hosts:
     edge: default
     auth: none # Gatus: a public status page
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://gatus.gatus.svc.cluster.local:8080" }
     smoke: { status: 200 }
   chat:
@@ -96,7 +96,7 @@ hosts:
     edge: default
     auth: native # Open WebUI
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://open-webui.ai.svc.cluster.local:80" }
     smoke: { status: 200 }
   grafana:
@@ -104,7 +104,7 @@ hosts:
     edge: default
     auth: native # Grafana login (Authelia OIDC)
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80" }
     smoke: { status: 302, location_contains: "/login" }
   api:
@@ -112,7 +112,7 @@ hosts:
     edge: default
     auth: native # LiteLLM master/virtual keys
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://litellm.ai.svc.cluster.local:4000" }
     smoke: { status: 200 }
   router:
@@ -129,7 +129,7 @@ hosts:
     edge: default
     auth: native # Relay owns browser and connector authentication
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://relay.relay.svc.cluster.local:80" }
     smoke: { status: 200 }
   id:
@@ -137,7 +137,7 @@ hosts:
     edge: default
     auth: native # Keycloak; only the relay and llm-router realms and the static resources
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://keycloak.keycloak.svc.cluster.local:80" }
     uri_guard: true
     routes:
@@ -151,7 +151,7 @@ hosts:
     edge: default
     auth: native # its own oauth2-proxy -> Authelia (apps/dsh/searxng-auth.yaml)
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://oauth2-proxy-searxng.dsh.svc.cluster.local:4180" }
     smoke: { status: 302, location_contains: "sso.chifor.me" }
   ntfy:
@@ -159,7 +159,7 @@ hosts:
     edge: default
     auth: native # ntfy deny-all default + token users
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://ntfy.monitoring.svc.cluster.local:80" }
     smoke: { status: 200 }
   trueswarm:
@@ -167,7 +167,7 @@ hosts:
     edge: default
     auth: native # Trueswarm owns authentication
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://trueswarm.trueswarm.svc.cluster.local:80" }
     # Only native media and ticket-bound upload paths reach the isolated Muse instance.
     routes:
@@ -180,7 +180,7 @@ hosts:
     edge: default
     auth: native # Muse native user/agent/mobile auth; published songs are public
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://muse-stream.muse-stream.svc.cluster.local:80" }
     smoke: { status: 200 }
   git:
@@ -188,7 +188,7 @@ hosts:
     edge: default
     auth: native # Gitea (Authelia OIDC for the UI, tokens for git)
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://gitea-http.gitea.svc.cluster.local:3000" }
     smoke: { status: 200 }
   agentforge:
@@ -196,7 +196,7 @@ hosts:
     edge: default
     auth: native # the CP's own Authelia OIDC + org membership (ADR 0019)
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://agentforge-platform.agentforge.svc.cluster.local:8080" }
     smoke: { status: 200 }
   vault:
@@ -204,10 +204,13 @@ hosts:
     edge: default
     auth: native # Vaultwarden master password + 2FA; native clients cannot do Access
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     backend: { url: "http://vaultwarden.vaultwarden.svc.cluster.local:80" }
     uri_guard: true
-    # /admin is Access-gated at Cloudflare today (access.tf vault_admin); private once WireGuard works (P7).
+    # /admin: through the tunnel, Cloudflare Access gates it (access.tf vault_admin); on the direct
+    # listener (the VIP, which lan_dns points LAN clients at) only the admin tier reaches it, everyone
+    # else gets 403 (restricted_paths below), and Vaultwarden's admin token still applies. Private once
+    # WireGuard works (P7).
     restricted_paths:
       - { path_regexp: "^/+admin(/|$)", exposure: access_gated }
     smoke: { status: 200 }

@@ -102,6 +102,11 @@ from the committed registry (a hash of it), when its records are not the ones re
 registry's hosts, when it names another zone or tunnel, or when a record has no valid shape. Fix the
 registry and re-render; never edit the JSON.
 
+Any registry edit moves both hashes, even one that changes no record (a `lan_dns` flip, a comment):
+`registry_sha256` is over the registry text, and `binding_sha256` over that text plus the records. That
+is the whole file; the LAN records live on the gateway (`gateway.py`), not here. `render.py --check`
+(CI, every push) is what proves the committed file current.
+
 **Applying.** A plain `tofu plan` of this module is not clean: the live Trueswarm admin gate was applied by
 `scripts/trueswarm-admin-access.sh` with inputs `terraform.tfvars` does not hold. Export them first:
 `TF_VAR_enable_trueswarm_admin=true`, `TF_VAR_enable_trueswarm_admin_e2e=true`,
