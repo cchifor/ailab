@@ -13,6 +13,5 @@ resources:
   - cloudflared.yaml
   - tailscale-oauth.sops.yaml
   - tailscale.yaml
-  # The edge proxy (ADR 0040): the single front door for *.chifor.me, on the VIP 192.168.0.51 (MetalLB)
-  # and, from P5, behind cloudflared. Its Caddyfile is generated from kubernetes/edge/hostnames.yaml.
-  - proxy
+  # NOT here: the edge proxy (./proxy) has its own Flux Kustomization, clusters/ai/edge-proxy.yaml,
+  # which applies it only after this layer (Authelia's rules) is healthy.

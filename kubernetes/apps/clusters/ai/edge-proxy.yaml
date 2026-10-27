@@ -1,0 +1,25 @@
+# The edge proxy (ADR 0040, kubernetes/apps/apps/edge/proxy): a DEDICATED Flux Kustomization, for two
+# reasons:
+#   - ORDER: dependsOn apps, and apps has wait: true, so the proxy (and with it the VIP, whose Service
+#     lives here) only comes up once the apps layer is healthy, including Authelia rolled out with the
+#     admins-only rules for the forward-auth hosts (apps/auth/configuration.yml). A proxy that started
+#     beside a lagging Authelia replica could let a non-admin through on its old one_factor default.
+#   - ISOLATION: the proxy's health (a certificate that has not issued yet, a pending pod) must not
+#     turn the whole apps layer, and everything that depends on it, unready.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: edge-proxy
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 2m
+  timeout: 10m
+  dependsOn:
+    - name: apps
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/apps/edge/proxy
+  prune: true
+  wait: true
