@@ -360,6 +360,16 @@ class Rendering(unittest.TestCase):
             block = block[:block.index("\n\t\t}\n")]
             self.assertIn("header_up Host {host}", block, name)
 
+    def test_sidecar_metrics_have_a_prometheus_content_type(self):
+        # Prometheus 3 refuses a blank Content-Type ("non-compliant scrape target"): seen live on
+        # 2026-10-27, both sidecar targets down while Caddy's own /metrics was up.
+        block = self.text[self.text.index("http://:9180 {"):]
+        for path in ("/reloader-metrics", "/probe-metrics"):
+            handler = block[block.index(f"handle {path} {{"):]
+            handler = handler[:handler.index("\n\t\t}")]
+            self.assertIn(f'header Content-Type "{render.PROM_TEXT}"', handler, path)
+            self.assertLess(handler.index("header Content-Type"), handler.index("file_server"), path)
+
     def test_forward_auth_gets_the_canonical_client(self):
         snippet = self.text[self.text.index("(edge_authelia) {"):]
         snippet = snippet[:snippet.index("\n}\n")]

@@ -526,6 +526,17 @@ def reloader_metrics(fx):
     return p.read_text() if p.exists() else ""
 
 
+def scrape(fx, path, metric):
+    """GET :9180<path> as Prometheus would: 200, the text exposition Content-Type, the metric."""
+    r = fx.request("trusted", [{"id": "scrape", "port": 9180, "host": "x", "target": path}])
+    if not r:
+        return False, "no response"
+    ctype = ";".join(r[0].get("headers", {}).get("content-type", []))
+    ok = (r[0].get("status") == 200 and ctype.startswith("text/plain") and "version=0.0.4" in ctype
+          and metric in (r[0].get("body") or ""))
+    return ok, f"status {r[0].get('status')}, content-type {ctype!r}"
+
+
 def wait_for(pred, seconds=20):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -549,7 +560,9 @@ def check_probe(fx):
         left = int(line[0].split()[1]) - int(time.time()) if line else -1
         ok = 86400 < left < 3 * 86400
         detail = f"served certificate expires in {left} s"
-    return check("cert-probe reads the served certificate's expiry", ok, detail)
+    failures = check("cert-probe reads the served certificate's expiry", ok, detail)
+    return failures + check("/probe-metrics scrapes like Prometheus",
+                            *scrape(fx, "/probe-metrics", "edge_cert_probe_success"))
 
 
 def check_reloader(fx):
@@ -567,6 +580,8 @@ def check_reloader(fx):
     failures += check("reloader heartbeat and loaded gauge exported",
                       wait_for(lambda: "edge_cert_files_not_loaded 0" in reloader_metrics(fx)
                                and "edge_cert_reloader_heartbeat_seconds" in reloader_metrics(fx)))
+    failures += check("/reloader-metrics scrapes like Prometheus",
+                      *scrape(fx, "/reloader-metrics", "edge_cert_reloader_heartbeat_seconds"))
     loaded = served_fingerprint()
     # a mismatched pair (new cert, old key): never loaded, counted, flagged not-loaded
     fx.make_cert("bad", "*.chifor.me", key_from="certs")
