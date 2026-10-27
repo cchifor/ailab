@@ -1,5 +1,13 @@
 # Edge ingress: a self-hosted front door, with the Cloudflare tunnel kept as a switchable fallback
 
+## Codex Review
+
+- The round-1 fixes for initial tunnel mode, mode-independent admin authentication, Relay isolation, backend parity, and read-only DDNS are accepted.
+- MetalLB L2 with `externalTrafficPolicy: Local` is sound in principle with Cilium's VXLAN/SNAT setup: [Cilium preserves external sources for local endpoints](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/#client-source-ip-preservation), and [MetalLB considers endpoints in its election](https://metallb.io/concepts/layer2/). Allocation, bootstrap ordering, and failure behavior still need the checks below.
+- Remaining security gaps concern tunnel HTTP scheme handling, Access-token logging, and verification of path normalization and source exclusions.
+- The committed gateway state needs crash recovery and concurrency rules; the stated deletion rule does not implement `lan_dns: false` rollback.
+- Recovery must restore DNS as well as connector routes, retain origin restrictions, and work with the front door stopped. Both pushbacks are narrowed below.
+
 ## Context
 
 Every tunnel-published `*.chifor.me` hostname (the about 28 in `kubernetes/apps/apps/edge/cloudflared.yaml`)
@@ -165,7 +173,7 @@ provider before any real host moves.
 - **Clients on public resolvers** reach direct hosts through the UXG's NAT loopback. Their source
   then becomes the gateway, so attribution collapses to one address. For that reason the ailab VMs
   (dev-workers, reviewers, runners) move to the gateway resolver in P6 through their IaC.
-<!-- codex: Successful hairpin access still collapses LAN callers to the gateway address under the stated SNAT behavior, preserving the shared rate-limit problem. Public resolvers also remain a WAN dependency on cache misses, so local DNS for VMs and cluster callers is required to achieve the stated offline and client-attribution goals, not merely a fallback for failed loopback. -->
+<!-- codex: round-2: Keeping public cluster DNS avoids the documented RFC1918 egress denial, and router.yaml confirms bearer inference does not need OIDC; however Relay's router calls and new llm-router/Relay/searxng-auth OIDC sessions still depend on public DNS, so this is more than one caller's attribution tradeoff. Explicitly limit the offline guarantee to LAN bearer clients and prove it with cold caches and the WAN disconnected, or provide narrowly allowed access through the sanitizing :8443 listener without admitting Relay directly to llm-router-edge. -->
 <!-- opus-pushback: Accepted for the VMs (P6 moves dev-workers, reviewers and runners to the gateway resolver). Not for the Talos nodes: pods would then resolve chifor.me names to 192.168.0.51, and the relay/llm-router/searxng-auth egress policies exclude RFC1918, so OIDC and router calls would break; in-cluster callers keep public resolution, loop back through the UXG (one caller, relay, whose attribution as the gateway is acceptable), and local inference never crosses the edge. -->
 
 ### 2. The proxy: Caddy, as a DaemonSet on the control-plane nodes
@@ -193,6 +201,7 @@ hold the wildcard key.
 **Listeners** (`auto_https off`, protocols h1 h2, no HTTP/3, `read_header 10s`, `idle 5m`,
 `max_header_size 64KB`, no response timeouts, `stream_close_delay 5m` on every reverse_proxy so a
 config or cert reload does not cut WebSockets):
+<!-- codex: Caddy's stream_close_delay postpones forced WebSocket closure for five minutes; it does not preserve the connection indefinitely ([documented behavior](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming)). State the accepted reconnect behavior and keep the renewal test running past that delay so it cannot report a false continuity success. -->
 
 - **:8443 "direct"** (TLS, wildcard cert) = VIP :443.
 - **:8081** = VIP :80. Sources outside the trusted ranges get 403; trusted sources get a 308 to
@@ -203,6 +212,7 @@ config or cert reload does not cut WebSockets):
   - `trusted_proxies 10.244.0.0/16`, `client_ip_headers CF-Connecting-IP`.
   - A request whose `CF-Connecting-IP` is missing, not exactly one valid IP, or contains a comma
     gets **400**.
+<!-- codex: The tunnel may carry a visitor's plain-HTTP request, but the header policy unconditionally tells every backend and Authelia that it was HTTPS; the Cloudflare module does not manage an Always Use HTTPS rule. Verify/enforce that redirect at Cloudflare or validate Cloudflare's overwritten scheme header before sanitization and reject/redirect HTTP before authentication or proxying, with a live http:// hostname test ([header semantics](https://developers.cloudflare.com/fundamentals/reference/http-headers/)). -->
 - **:8082** `/healthz` (probes), **:9180** `/metrics` (PodMonitor; the NetworkPolicy admits the
   monitoring namespace on that port only), admin API on localhost:2019.
 
@@ -238,6 +248,7 @@ path (routed VLAN, NAT loopback, pod-to-VIP, WAN) is tested by measurement.
    - matched case-insensitively on Caddy's cleaned, decoded path;
    - a raw-URI guard refuses encoded slashes or dots in that prefix (`%2f`, `%2e`, any case, double
      encoding).
+<!-- codex: These rules privatize vault/admin as soon as P5 redirects cloudflared, while working WireGuard is deferred to P7 and the Tailscale-to-VIP path is explicitly denied. Make VPN readiness a prerequisite for that path's cutover too, or explicitly accept and document the intervening LAN-only administration window. -->
 4. **Public host, effective mode direct**: :8443 serves any source; :8080 serves.
 5. **Public host, effective mode tunnel**: :8443 serves trusted peers only; :8080 serves. This keeps
    WAN 443 from serving anything that has not been switched to direct, and it closes any direct
@@ -278,6 +289,7 @@ active endpoint when `externalTrafficPolicy: Local`. That is the property Cilium
 - `loadBalancerClass: metallb.io/metallb` on both MetalLB and the Service, so Cilium's LB-IPAM
   ignores it.
 - `IPAddressPool` `edge` = 192.168.0.51/32 with `autoAssign: false`.
+<!-- codex: With autoAssign disabled, the Service must explicitly request this pool or IP, for example metallb.io/address-pool: edge and metallb.io/loadBalancerIPs: 192.168.0.51; the listed Service currently requests neither and can remain Pending ([allocation rules](https://metallb.io/configuration/_advanced_ipaddresspool_configuration/)). Assert its assigned status address before advertising or enabling the gateway forward. -->
 - `L2Advertisement` with `nodeSelectors` for control-plane nodes.
 - Speakers run only on the control-plane nodes with `ignoreExcludeLB: true`; the label is honoured
   everywhere else.
@@ -301,10 +313,12 @@ A failed reload is retried and counted in a metric. Alerts: `EdgeCertReloadFaili
 
 **Config rollout**: a `configMapGenerator` (namespace set: the estate's Flux-stall trap), so the
 hash suffix rolls the DaemonSet.
+<!-- codex: An announcing-node change sends existing direct TCP flows to a different local Caddy endpoint, which has neither their TLS nor connection state; graceful shutdown cannot migrate those streams. Exercise a normal config rollout and speaker failover with active SSE/WebSockets/uploads, and document interruption/reconnect semantics separately from the recovery target for new connections. -->
 
 **Observability**:
 - **Logs**: JSON access logs, with query strings replaced and credentials redacted (Caddy's
   default for Authorization/Cookie).
+<!-- codex: Caddy's default redaction does not cover Cf-Access-Jwt-Assertion, which this proxy deliberately retains on :8080, so the new central log can expose replayable Access credentials ([default redacted headers](https://caddyserver.com/docs/caddyfile/directives/log)). Explicitly remove/redact Access JWT and service-token secret headers in logs, and assert their absence using sentinel values in the runtime fixture. -->
 - **Alerts**: `EdgeProxyDown`, `EdgeUpstreamErrors` (sustained 5xx per host), the two certificate
   alerts.
 - **Gatus probes**:
@@ -321,9 +335,12 @@ hash suffix rolls the DaemonSet.
 - **Network**: WAN interface, LAN network ID and subnet, the trusted ranges.
 - **Owned objects**: listed in `kubernetes/edge/gateway-state.yaml` (committed, no secrets, written
   by `apply`).
+<!-- codex: An API create can succeed before its returned ID is durably saved or committed, leaving an orphan that the next run must treat as unowned; a git revert or another checkout can also restore stale IDs. Specify atomic per-operation checkpoints, an intent/recovery journal for ambiguous API outcomes, controller/site/type/key binding for each ID, and explicit recovery/adoption without broad automatic ownership. -->
 
 `plan` prints the diff and a **plan hash**; `apply --plan-hash <h>` recomputes and aborts if
 anything differs. Every mutation is checked by a re-read.
+<!-- codex: A plan hash does not serialize two applies from different checkouts or bind apply-only options unless those inputs are hashed. Require a single-writer lock and freshness check for the canonical state, include adoption/enable/disable options in the plan, and test concurrent/stale applies before either mutates objects. -->
+<!-- codex: The API inventory must be complete and schema-validated, including pagination and success/error envelopes, before computing the plan or interpreting an object as absent. Fail closed on partial or unexpected responses; otherwise collision checks can miss an existing DNS record or WAN forward despite the new ID ownership rule. -->
 
 1. **Port forward** `ailab-edge-https`: WAN TCP 443 -> 192.168.0.51:443.
    - Ownership is the ID in the state file.
@@ -336,10 +353,12 @@ anything differs. Every mutation is checked by a re-read.
    - An existing record with the same key that it does not own aborts the run, unless the operator
      passes `--adopt <key>`.
    - Deletes happen only for owned IDs whose host left the registry.
+<!-- codex: This predicate never deletes a local record when its host remains registered but lan_dns becomes false, contradicting both Global and Front-door failure rollback. Define the desired DNS set as the hosts with lan_dns: true, delete only owned IDs outside that set, and test true -> false -> true without deleting the hostname. -->
    - An empty or invalid registry aborts before any mutation.
 3. **`Home` DHCP range**: preconditions on the network ID, the subnet `192.168.0.1/23` and the full
    object's hash from plan time. Re-read right before the PUT, change only the start/stop fields,
    and write a full backup first. A drift between plan and apply aborts.
+<!-- codex: A last-moment re-read still leaves a race before the full-object PUT, so an intervening controller/UI edit can be overwritten. Use a server-enforced conditional update if available; otherwise require an exclusive network-configuration maintenance window and describe this residual race rather than guaranteeing that all drift aborts. -->
 4. **DDNS**: read-only assertion that the `chifor.me` and `chifor.net` entries exist on `wan`.
    Credentials are never read or printed. A missing entry is reported with the runbook procedure;
    the token scope for chifor.net is not established, so nothing is created.
@@ -372,6 +391,7 @@ the objects listed above.
 - **Relay is unchanged**: it keeps `https://router.chifor.me/v1`. Once the router is direct it loops
   back through the UXG to the proxy, which overwrites `CF-Connecting-IP`. Calling llm-router-edge
   directly would let it forge the router's trusted address, including loopback for break-glass.
+<!-- codex: The P3 loopback probe originates on a VM, while Relay originates behind Cilium and its RFC1918-excluding egress policy; it does not prove this new pod-to-public-IP-to-VIP path works. Before switching router/id/sso to direct, run Relay inference and real OIDC discovery/token exchanges from the affected pods, checking Cilium drops and backend-observed source addresses. -->
 - **Authelia (P2, before any LAN exposure)**: admins-only allow + deny rules for prometheus,
   alertmanager, hubble, k8s and dsh.
 - **proxmox, qnap, openbao and the dw terminals** keep their own logins.
@@ -393,6 +413,9 @@ the objects listed above.
 | P8 | Optional, separate decision: CrowdSec (custom Caddy build, LAPI, bouncer fail-open/closed policy) | WAF-like filtering |
 | P9 | Cleanup: Access apps for private hosts, cloudflared peers in app NetworkPolicies, vestigial strive rules. Removing the cloudflared peers ends the P5 revert path, so this phase states that decision explicitly. Private A records stay | none |
 
+<!-- codex: P2 advertises .51 before P3 can reconcile DHCP, so a rebuild still depends on today's manual pool correction and may collide with an existing lease. Make live DHCP exclusion and lease/reservation checks a prerequisite to creating the pool/advertisement; validating only the declared gateway.yaml range does not establish that prerequisite. -->
+<!-- codex: Reverting the entire P5 PR also removes Vaultwarden's new ingress NetworkPolicy and reopens the header-forgery path the review required closing. Put that restriction in the persistent additive-policy phase, or define a routing-only rollback that retains it. -->
+
 **Residual risk accepted** (in the ADR):
 - WAN traffic now reaches the control-plane nodes, with no upstream volumetric protection. Bounds:
   per-pod resource limits, header timeouts and sizes.
@@ -407,6 +430,8 @@ the objects listed above.
 - **Front-door failure** (Caddy or MetalLB): `git revert` of P5, which takes cloudflared back to the
   per-host backends; LAN clients fall back to public DNS once the local records are removed. Both
   are rehearsed in P5 before P6.
+<!-- codex: After P6, reverting P5 and removing local DNS still leaves direct public CNAMEs pointing at the failed VIP; recovery also requires force_tunnel and a Cloudflare apply, plus expiry of both public and local DNS caches. Define the combined sequence and local-record TTL, and rehearse it after a canary has actually gone direct with Caddy stopped, rather than only in the all-tunnel P5 state. -->
+<!-- codex: The recovery commit must be deliverable while git.chifor.me is behind the failed proxy: Flux reads GitHub, but gotk-sync.yaml documents Gitea as the sole writer and warns its mirror can overwrite emergency GitHub commits. Include and rehearse direct LAN/port-forward access to Gitea or the documented mirror-paused emergency path, using credentials independent of this front door. -->
 
 **WAN failover**: none is connected today. If `Internet 2` is ever connected, the apex DDNS still
 follows `wan` only, and the documented response is `force_tunnel`.
@@ -419,6 +444,7 @@ follows `wan` only, and the documented response is `force_tunnel`.
   Caddy + echo and a fake auth upstream in docker).
 - `kubernetes/apps/infrastructure/sources/metallb.yaml`, `kubernetes/apps/infrastructure/metallb/`
   (HelmRelease, pool, L2Advertisement), wired into the infrastructure kustomization.
+<!-- codex: Do not put the new HelmRelease and its MetalLB custom resources into the same Flux apply: on a rebuild, dry-run encounters missing CRDs/webhooks before Helm can install them, as the existing cert-manager-config and edge-connector split documents. Pin the MetalLB chart version and place pool/advertisement resources in a separate Kustomization that waits for that release, with the dependency manifests included here. -->
 - `kubernetes/apps/apps/edge/proxy/` (DaemonSet, Services, generator, Certificate, NetworkPolicy,
   PodMonitor, PrometheusRule), wired into `edge/kustomization.yaml`.
 - `kubernetes/infra/cloudflare/dns.tf`, `variables.tf`.
@@ -443,6 +469,7 @@ follows `wan` only, and the documented response is `force_tunnel`.
   - Allowlist exclusions.
   - id and vault raw-URI guards (encoded, mixed-case, double-encoded, repeated slashes, dot
     segments).
+<!-- codex: These cases are listed only as unit tests, while the runtime fixture substitutes echo backends; neither establishes how the actual Caddy-to-Keycloak/Vaultwarden chain normalizes an admitted request. Run the same raw request targets through the pinned proxy and real application versions, preserving bytes with --path-as-is and asserting protected handlers are never reached. -->
   - Deterministic output.
   - Reconciler against recorded fixtures: never touches unowned objects, aborts on collisions and
     conflicts, the plan-hash binding, DHCP read-modify-write preserving every other field.
@@ -461,14 +488,17 @@ follows `wan` only, and the documented response is `force_tunnel`.
     and as an Authelia admin and non-admin test user.
   - **Allowlist from other sources**: the same private checks from an ordinary pod (403), a host on
     another VLAN (Trusted), and the Tailscale path (403, documented).
+<!-- codex: A positive test from the Trusted VLAN does not establish that an untrusted routed VLAN remains excluded. Add a real Lab/Guest source denial and record both the socket peer and backend non-reachability, including forged headers, to catch any gateway translation into an allowed range. -->
   - **Header provenance**: the router logs the caller's IP on an API-key request through .51.
   - **Failure tests**:
     - kill the Caddy pod on the announcing node: measure recovery, target ≤ 30 s;
     - roll the DaemonSet with a broken image: the old pods stay serving or the VIP moves;
     - drain one node;
+<!-- codex: kubectl drain with --ignore-daemonsets leaves both Caddy and MetalLB speakers running, so it does not test loss of the announcing node. Add actual node shutdown, endpoint readiness loss without deletion, and Cilium failure while the speaker remains alive; measure EndpointSlice/election and UXG ARP convergence separately, since memberlist's timing alone does not bound those failures. -->
     - restart the MetalLB speakers;
     - force-renew the certificate during an open SSE stream, a WebSocket (dw terminal) and a long
       upload.
+<!-- codex: Also inject a malformed/mismatched certificate update and stop the reload sidecar: valid renewal alone cannot verify the promised retain-old-certificate, retry, and alert behavior. Check the certificate served by every replica and recovery after the bad update is repaired. -->
 - **P3 live**:
   - **NAT loopback**: from a dev-worker,
     `curl --resolve router.chifor.me:443:<public IP> https://router.chifor.me/health` gets Caddy's
@@ -479,9 +509,9 @@ follows `wan` only, and the documented response is `force_tunnel`.
     runtime fixture proves untrusted peers get 403. Together these cover private hosts from the WAN
     for any Host/SNI.
   - **Owner check**: one manual run from a phone on mobile data is recorded.
-<!-- codex: Use a controlled external client with HTTPS --resolve so SNI and Host both select the intended site; a bare public-IP request or HTTP check can hit the wrong TLS site or Nextcloud on port 80. Verify every private/Access-gated host and vault/admin, including forged headers, and correlate socket peer plus backend identity rather than treating one probe as proof for all gateway paths. -->
+<!-- codex: round-2: Composing a measured WAN peer with exhaustive routing fixtures is reasonable, but https://<public IP>/ cannot validate the *.chifor.me certificate and may fail before producing any HTTP access log, so the proposed probe does not yet establish the first fact. Use a DNS-only canary hostname or the existing phone as a hotspot for a laptop running HTTPS --resolve, and record the socket peer; neither requires a paid VPS. -->
 <!-- opus-pushback: There is no controlled external client without paying (no VPS; Internet 2 is not connected). The plan composes two measured facts instead: the external probe proves the UXG preserves WAN sources (HTTPS on 443, so it cannot hit Nextcloud's port 80), and the runtime fixture proves every private host, private path and forged-header case is denied to any untrusted peer whatever the SNI/Host. The owner's mobile-data run adds one end-to-end confirmation. -->
-- **P4**: `tofu plan` shows only moves. Then `edge-canary` goes tunnel -> direct -> private -> tunnel,
+- **P4**: `tofu plan` shows only moves. Then the `edge-canary` goes tunnel -> direct -> private -> tunnel,
   including one deliberately interrupted apply, with the recovery steps recorded in the runbook.
 - **P5**: every host through the tunnel:
   - unauthenticated denial and an authenticated session;
