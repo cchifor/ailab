@@ -1,0 +1,53 @@
+# The home gateway's half of the edge (ADR 0040, docs/standards/edge-ingress.md section 7): what the
+# UniFi gateway must provide, as the desired state scripts/edge/gateway.py reconciles.
+#
+#   just edge-gateway-plan [--only dhcp|dns|forward]        # diff + plan hash; never mutates
+#   just edge-gateway-apply --plan-hash <hash> [--only ...]  # carries out exactly that plan
+#
+# The reconciler owns ONLY the objects whose IDs it recorded in gateway-state.yaml (commit that file
+# after every apply). It never touches the Nextcloud forwards, the *.lan records, other networks or
+# the DDNS credentials. Everything else about the controller is out of its reach on purpose: adopting
+# the whole `Home` network into a provider would make code own every attribute of the house LAN.
+version: 1
+vendor: unifi
+controller:
+  url: https://192.168.1.152 # Cloud Key Gen2 Plus, UniFi Network 10.6.109 (2026-10-27)
+  site: default
+  # SHA-256 of the controller's TLS certificate (self-signed by UniFi OS). TLS is checked against this
+  # pin, not skipped. If the Cloud Key regenerates its certificate, the reconciler refuses until this
+  # is updated: read the new value with `python3 scripts/edge/gateway.py fingerprint` and compare it
+  # with the UniFi OS console before trusting it.
+  cert_sha256: 55ef62f960610952c987555690ac1c5493ae57c8a87911c6ec7130863e4c4b0b
+
+# The LAN the VIP lives on. The reconciler keeps the VIP (hostnames.yaml `vip`) out of the DHCP range,
+# and refuses an apply that would put it back in.
+lan:
+  network_name: Home
+  network_id: 6584469af81ca8458f9a6af1
+  subnet: 192.168.0.1/23
+  dhcp_start: 192.168.0.52 # .2-.51 are lab statics (.51 = the edge VIP); docs/network-plan.md
+  dhcp_stop: 192.168.1.254
+
+# WAN TCP 443 -> the VIP. Created only once the VIP answers (the reconciler checks it), and only while
+# `enabled`; false removes it. The gateway must keep the WAN client's source address (no SNAT) and
+# loop LAN clients back (NAT loopback): to be verified when the forward is first enabled, and recorded
+# on the P3 PR (docs/runbooks/edge-ingress.md).
+port_forward:
+  enabled: false # P3 flips this after the LAN smoke test passes
+  name: ailab-edge-https
+  wan_interface: wan
+  wan_port: 443
+  target_port: 443
+  proto: tcp
+
+# Local A records on the gateway's resolver: one per registry host with `lan_dns: true`, pointing at
+# the VIP, so clients on that resolver reach the proxy directly in every mode.
+local_dns:
+  ttl: 60
+
+# Read-only: the gateway's DDNS must keep these apex records on the WAN address. Reported if missing,
+# never created or edited by the reconciler (its credential lives on the gateway, and the token scope
+# for chifor.net is not established); recreate by hand per the runbook.
+ddns:
+  - { service: cloudflare, host_name: chifor.me, interface: wan }
+  - { service: cloudflare, host_name: chifor.net, interface: wan }
