@@ -3,8 +3,9 @@
 # a source that sets it itself:
 #   - cloudflared (edge): Cloudflare overwrites CF-Connecting-IP on every request;
 #   - edge-proxy (edge): the in-cluster front door overwrites it on every request.
-# Homepage's siteMonitor pings /alive for its status tile (configmap.yaml); it is admitted too and
-# sends no such header. Before this policy any pod could reach Vaultwarden and pick its own address.
+# Nothing else: Homepage's status tile checks the public URL (homepage/configmap.yaml) rather than
+# getting a namespace-wide exception that would also reach /admin and pick its own address. Before
+# this policy any pod could reach Vaultwarden and choose its CF-Connecting-IP.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -31,8 +32,5 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: edge-proxy
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: homepage
       ports:
         - { protocol: TCP, port: 8080 }

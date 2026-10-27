@@ -199,7 +199,9 @@ data:
             href: https://vault.chifor.me
             description: Password manager · own auth
             icon: vaultwarden.png
-            siteMonitor: http://vaultwarden.vaultwarden.svc.cluster.local:80/alive
+            # The public URL, not the Service: Vaultwarden admits only cloudflared and the edge proxy
+            # (vaultwarden/networkpolicy.yaml), because it trusts the client address they set.
+            siteMonitor: https://vault.chifor.me/alive
         # OpenBao — the estate's secret store (ESO SecretStores + agentforge read from it in-cluster).
         # Plain link, no widget: Homepage ships NO widget type for OpenBao or HashiCorp Vault (checked
         # against gethomepage.dev/widgets), so there is no credential to wire and none was invented.
