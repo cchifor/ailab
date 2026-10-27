@@ -8,18 +8,22 @@ Unit tests (test_edge_render.py) check what the renderer writes; this checks wha
 with it, which is where header provenance and route ordering actually live.
 
 Three source networks give the proxy three kinds of TCP peer (each run picks fresh /24s from the
-benchmarking range 198.18.0.0/15 and a unique name prefix, so concurrent runs on one CI runner
-never share or delete each other's networks):
+benchmarking range 198.18.0.0/15, and every container and network carries this run's random id as a
+label, so concurrent runs on one docker daemon never share or delete each other's resources):
   trusted    stands in for the LAN (the profile's allow range); .99 is the excluded address,
              standing in for the gateway's NAT-loopback source
   untrusted  stands in for the internet
   tunnel     stands in for the cloudflared pods (the tunnel's trusted proxies)
-Every backend is one echo server (it reports the headers it received and X-Test-Backend, the
-upstream the proxy chose), and Authelia is a stand-in that allows `X-Test-Auth: allow`.
+HTTP backends become one echo server, HTTPS backends one TLS echo that also reports the SNI it got,
+and Authelia a stand-in (allow / deny / anonymous) that reports the headers it received.
 
-Two registry variants run: AS COMMITTED (every host tunnel-mode) and DIRECT (edge_default direct,
-plus a synthetic private host), so both modes and the private rules are exercised whatever the
-rollout phase. The certificate reloader is tested against the same container.
+Two registry variants run: AS COMMITTED (every host tunnel-mode) and DIRECT (edge_default direct, a
+synthetic private host, vault's /admin made private), so both modes and the private rules are
+exercised whatever the rollout phase. The certificate reloader and log redaction are tested last,
+after the failure cases that make Caddy write error logs.
+
+NOT covered here, by construction: Kubernetes NetworkPolicy (docker networks do not apply it).
+scripts/edge/netpol-check.sh exercises the tunnel listener's policy in the cluster.
 """
 from __future__ import annotations
 
@@ -29,7 +33,9 @@ import os
 import pathlib
 import random
 import re
+import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -44,13 +50,18 @@ RELOADER = ROOT / "kubernetes/apps/apps/edge/proxy/cert-reloader.sh"
 SUPPORT = pathlib.Path(__file__).resolve().parent / "edge_runtime"
 IMG_PY = "python:3.12-alpine"
 IMG_SSL = "alpine/openssl:3.5.8"
+LABEL = "ailab.edge-runtime"  # every resource: LABEL=<run id>, LABEL.started=<unix time>
+STALE_AFTER = 2 * 3600       # a run older than this is dead (cancelled without cleanup): removed
+
 # Filled in by Fixture.up(): the four /24 prefixes this run owns, and the addresses on them.
 NETS: dict = {}
 PROXY_IP: dict = {}
 CLIENT_IP: dict = {}
 PROFILE: dict = {}
-P = f"edgert{os.getpid()}"  # docker name prefix, unique per run
-SENTINELS = ["SENTINEL-JWT-7f3a", "SENTINEL-KEY-91bc", "SENTINEL-AUTH-22de", "SENTINEL-Q-55aa"]
+RUN = secrets.token_hex(4)
+P = f"edgert-{RUN}"  # docker name prefix, unique per run
+SENTINELS = ["SENTINEL-JWT-7f3a", "SENTINEL-KEY-91bc", "SENTINEL-AUTH-22de", "SENTINEL-Q-55aa",
+             "SENTINEL-SECRET-3c1e"]
 
 
 def caddy_image() -> str:
@@ -60,23 +71,44 @@ def caddy_image() -> str:
     return m.group(1)
 
 
-def sh(*args, check=True, capture=True, inp=None):
-    r = subprocess.run(list(args), capture_output=capture, text=True, input=inp,
-                       env=_env())
-    if check and r.returncode != 0:
-        raise RuntimeError(f"{' '.join(args)}\n{r.stdout}\n{r.stderr}")
-    return r
-
-
 def _env():
-    import os
     e = dict(os.environ)
     e["MSYS_NO_PATHCONV"] = "1"  # Git Bash on Windows would rewrite /container/paths
     return e
 
 
-def docker(*args, **kw):
-    return sh("docker", *args, **kw)
+def docker(*args, check=True):
+    r = subprocess.run(["docker", *args], capture_output=True, text=True, env=_env())
+    if check and r.returncode != 0:
+        raise RuntimeError(f"docker {' '.join(args)}\n{r.stdout}\n{r.stderr}")
+    return r
+
+
+def user_args():
+    """Run file-writing containers as the invoking user on POSIX hosts, so the host can read and
+    clean what they write (the CI runner is an unprivileged user; docker would write root-owned
+    files into the bind mounts)."""
+    if hasattr(os, "getuid"):
+        return ["--user", f"{os.getuid()}:{os.getgid()}"]
+    return []
+
+
+def labels():
+    return ["--label", f"{LABEL}={RUN}", "--label", f"{LABEL}.started={int(time.time())}"]
+
+
+def remove_stale_runs():
+    """Containers and networks left by runs that died without cleanup (cancelled jobs), and only
+    those: identified by this fixture's label and an age past STALE_AFTER."""
+    now = int(time.time())
+    for kind, ls, rm in (("container", ["ps", "-a"], ["rm", "-f"]), ("network", ["network", "ls"], ["network", "rm"])):
+        r = docker(*ls, "--filter", f"label={LABEL}", "--format", "{{.ID}}", check=False)
+        for oid in r.stdout.split():
+            fmt = ("{{index .Config.Labels \"" + LABEL + ".started\"}}" if kind == "container"
+                   else "{{index .Labels \"" + LABEL + ".started\"}}")
+            started = docker("inspect", "--format", fmt, oid, check=False).stdout.strip()
+            if started.isdigit() and now - int(started) > STALE_AFTER:
+                docker(*rm, oid, check=False)
 
 
 class Fixture:
@@ -85,14 +117,14 @@ class Fixture:
         self.caddy = caddy_image()
 
     def up(self):
-        self.down()
+        remove_stale_runs()
         for _ in range(20):
             k = random.randrange(256)
             prefixes = {"trusted": f"198.18.{k}", "untrusted": f"198.19.{k}",
                         "tunnel": f"198.18.{(k + 128) % 256}", "back": f"198.19.{(k + 128) % 256}"}
             created = []
             for name, prefix in prefixes.items():
-                r = docker("network", "create", "--subnet", f"{prefix}.0/24", f"{P}-{name}", check=False)
+                r = docker("network", "create", *labels(), "--subnet", f"{prefix}.0/24", f"{P}-{name}", check=False)
                 if r.returncode != 0:
                     break
                 created.append(name)
@@ -106,39 +138,39 @@ class Fixture:
         PROXY_IP.update({n: f"{prefixes[n]}.10" for n in ("trusted", "untrusted", "tunnel")})
         CLIENT_IP.update({"trusted": f"{prefixes['trusted']}.20", "excluded": f"{prefixes['trusted']}.99",
                           "untrusted": f"{prefixes['untrusted']}.20", "tunnel": f"{prefixes['tunnel']}.20"})
-        PROFILE.update({"echo": "http://echo:8080", "authelia": "auth:9091",
+        PROFILE.update({"echo": "http://echo:8080", "echo_tls": "https://echotls:8443", "authelia": "auth:9091",
                         "allow": [f"{prefixes['trusted']}.0/24"], "exclude": [f"{prefixes['trusted']}.99/32"],
                         "tunnel_trusted": [f"{prefixes['tunnel']}.0/24"]})
-        (self.work / "certs").mkdir()
-        (self.work / "config").mkdir()
-        (self.work / "openbao-ca").mkdir()
+        for d in ("certs", "config", "openbao-ca", "echocerts"):
+            (self.work / d).mkdir()
         (self.work / "openbao-ca" / "ca.crt").write_text("")
         self.make_cert("certs", "*.chifor.me")
-        for kind, alias in (("echo", "echo"), ("auth", "auth")):
-            docker("run", "-d", "--name", f"{P}-{kind}", "--network", f"{P}-back",
-                   "--network-alias", alias, "-v", f"{SUPPORT}:/t:ro", IMG_PY,
+        self.make_cert("echocerts", "echotls", names=("echo.crt", "echo.key"))
+        for kind, alias, extra in (("echo", "echo", []), ("auth", "auth", []),
+                                   ("echo-tls", "echotls", ["-v", f"{self.work / 'echocerts'}:/certs:ro"])):
+            docker("run", "-d", *labels(), "--name", f"{P}-{kind}", "--network", f"{P}-back",
+                   "--network-alias", alias, "-v", f"{SUPPORT}:/t:ro", *extra, IMG_PY,
                    "python", "/t/servers.py", kind)
 
-    def make_cert(self, subdir, cn, key_from=None):
-        """A self-signed pair in work/<subdir>; key_from reuses another dir's key (mismatch tests)."""
+    def make_cert(self, subdir, cn, key_from=None, names=("tls.crt", "tls.key")):
+        """A self-signed pair in work/<subdir>. key_from pairs a NEW certificate with another
+        directory's key: a mismatched pair."""
         d = self.work / subdir
         d.mkdir(exist_ok=True)
-        if key_from:
-            # a certificate for a NEW key, paired with the OLD key file: a mismatched pair
-            docker("run", "--rm", "-v", f"{d}:/o", IMG_SSL, "req", "-x509", "-newkey", "rsa:2048",
-                   "-nodes", "-days", "2", "-subj", f"/CN={cn}", "-addext",
-                   f"subjectAltName=DNS:{cn}", "-keyout", "/o/unused.key", "-out", "/o/tls.crt")
-            shutil.copy(self.work / key_from / "tls.key", d / "tls.key")
-            return
-        docker("run", "--rm", "-v", f"{d}:/o", IMG_SSL, "req", "-x509", "-newkey", "rsa:2048",
+        crt, key = names
+        keyout = "unused.key" if key_from else key
+        docker("run", "--rm", *user_args(), "-v", f"{d}:/o", IMG_SSL, "req", "-x509", "-newkey", "rsa:2048",
                "-nodes", "-days", "2", "-subj", f"/CN={cn}", "-addext", f"subjectAltName=DNS:{cn}",
-               "-keyout", "/o/tls.key", "-out", "/o/tls.crt")
+               "-keyout", f"/o/{keyout}", "-out", f"/o/{crt}")
+        if key_from:
+            shutil.copy(self.work / key_from / "tls.key", d / key)
 
     def start_proxy(self, caddyfile: str):
         docker("rm", "-f", f"{P}-proxy", check=False)
         (self.work / "Caddyfile").write_text(caddyfile, encoding="utf-8")
-        docker("create", "--name", f"{P}-proxy", "--network", f"{P}-trusted",
+        docker("create", *labels(), *user_args(), "--name", f"{P}-proxy", "--network", f"{P}-trusted",
                "--ip", PROXY_IP["trusted"], "--network-alias", "edgeproxy",
+               "-e", "XDG_DATA_HOME=/config/data", "-e", "XDG_CONFIG_HOME=/config",
                "-v", f"{self.work / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
                "-v", f"{self.work / 'certs'}:/certs:ro",
                "-v", f"{self.work / 'config'}:/config",
@@ -151,31 +183,38 @@ class Fixture:
                 args += ["--ip", PROXY_IP[net]]
             docker(*args, f"{P}-{net}", f"{P}-proxy")
         docker("start", f"{P}-proxy")
-        for _ in range(50):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
             r = self.request("trusted", [{"id": "up", "port": 8082, "host": "x", "target": "/healthz"}])
-            if r[0].get("status") == 200:
+            if r and r[0].get("status") == 200:
                 return
-            time.sleep(0.2)
-        raise RuntimeError("proxy did not come up:\n" + docker("logs", f"{P}-proxy", check=False).stderr)
+            time.sleep(0.5)
+        raise RuntimeError("proxy did not come up:\n" + docker("logs", f"{P}-proxy", check=False).stderr[-3000:])
 
     def request(self, source, cases):
         net = "trusted" if source == "excluded" else source
         f = self.work / f"cases-{source}.json"
         f.write_text(json.dumps(cases))
-        r = docker("run", "--rm", "--network", f"{P}-{net}", "--ip", CLIENT_IP[source],
+        r = docker("run", "--rm", *labels(), "--network", f"{P}-{net}", "--ip", CLIENT_IP[source],
                    "-v", f"{SUPPORT}:/t:ro", "-v", f"{f}:/cases.json:ro", IMG_PY,
-                   "python", "/t/client.py", "/cases.json", PROXY_IP[net])
+                   "python", "/t/client.py", "/cases.json", PROXY_IP[net], check=False)
         return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
 
+    def logs(self):
+        r = docker("logs", f"{P}-proxy", check=False)
+        return r.stdout + r.stderr
+
     def down(self):
-        for c in ("proxy", "echo", "auth"):
-            docker("rm", "-f", f"{P}-{c}", check=False)
-        for name in ("trusted", "untrusted", "tunnel", "back"):
-            docker("network", "rm", f"{P}-{name}", check=False)
+        r = docker("ps", "-aq", "--filter", f"label={LABEL}={RUN}", check=False)
+        for cid in r.stdout.split():
+            docker("rm", "-f", cid, check=False)
+        r = docker("network", "ls", "-q", "--filter", f"label={LABEL}={RUN}", check=False)
+        for nid in r.stdout.split():
+            docker("network", "rm", nid, check=False)
 
 
 # --------------------------------------------------------------------------------------------
-# cases. Each: (source, request, expectation). Expectations are checked by `check`.
+# cases. Each: (source, request, check). Checks return a list of problems (empty = pass).
 
 
 def direct(id_, host, target="/", sni=None, headers=()):
@@ -198,23 +237,27 @@ SPOOF = [["X-Forwarded-For", "6.6.6.6"], ["X-Real-IP", "6.6.6.6"], ["True-Client
 CF_SPOOF = [["CF-Connecting-IP", "6.6.6.6"], ["Cf-Ray", "spoofed"], ["Cf-Access-Jwt-Assertion", "forged"]]
 
 
-def echo_headers(res):
+def echo(res):
     try:
-        return {k.lower(): v for k, v in json.loads(res["body"])["headers"]}
+        return json.loads(res["body"])
     except (ValueError, KeyError, TypeError):
         return None
 
 
-def expect(res, status, backend=None, client=None, absent=(), present=None, location=None):
+def echo_headers(res):
+    e = echo(res)
+    return {k.lower(): v for k, v in e["headers"]} if e else None
+
+
+def expect(res, status, backend=None, client=None, absent=(), present=None, location=None, sni=None):
     errs = []
     if res.get("error"):
         return [f"transport error {res['error']}"]
     if res["status"] != status:
-        errs.append(f"status {res['status']} != {status} (body {res['body'][:120]!r})")
-        return errs
+        return [f"status {res['status']} != {status} (body {res['body'][:120]!r})"]
     if location and not any(location in v for v in res["headers"].get("location", [])):
         errs.append(f"location {res['headers'].get('location')} lacks {location!r}")
-    if backend or client or absent or present:
+    if backend or client or absent or present or sni:
         eh = echo_headers(res)
         if eh is None:
             return errs + ["not an echo response"]
@@ -232,14 +275,26 @@ def expect(res, status, backend=None, client=None, absent=(), present=None, loca
         for h, v in (present or {}).items():
             if eh.get(h.lower()) != v:
                 errs.append(f"{h}={eh.get(h.lower())!r} != {v!r}")
+        if sni and echo(res).get("sni") != sni:
+            errs.append(f"SNI {echo(res).get('sni')!r} != {sni!r}")
+    return errs
+
+
+def not_backend(res, status):
+    """The request was answered by the proxy or the auth service and never reached a backend."""
+    if res.get("error"):
+        return [f"transport error {res['error']}"]
+    errs = [] if res["status"] == status else [f"status {res['status']} != {status}"]
+    if echo(res) is not None:
+        errs.append("the backend was reached")
     return errs
 
 
 def suite_committed(reg):
     """The registry as committed (P2: every host tunnel-mode)."""
     be = lambda n: reg["hosts"][n]["backend"]["url"]  # noqa: E731
-    T, U, X, C = CLIENT_IP["trusted"], CLIENT_IP["untrusted"], CLIENT_IP["excluded"], CLIENT_IP["tunnel"]
-    cases = [
+    T, U = CLIENT_IP["trusted"], CLIENT_IP["untrusted"]
+    return [
         # direct listener, tunnel-mode host: LAN only, with the header policy
         ("trusted", direct("router-lan", "router.chifor.me", headers=SPOOF + CF_SPOOF),
          lambda r: expect(r, 200, be("router"), T, absent=["Cf-Ray", "Cf-Access-Jwt-Assertion", "Forwarded",
@@ -252,11 +307,23 @@ def suite_committed(reg):
          lambda r: [] if r.get("error") or r.get("status") in (200, 404) else [f"unexpected {r}"]),
         # SNI of one host, Host of another: routing and trust follow Host
         ("untrusted", direct("sni-mismatch", "dsh.chifor.me", sni="router.chifor.me"), lambda r: expect(r, 403)),
-        # authelia host
+        # HTTPS backends: the public Host, and the configured SNI where the registry sets one
+        ("trusted", direct("dw1-host-sni", "dw1.chifor.me"),
+         lambda r: expect(r, 200, be("dw1"), T, present={"Host": "dw1.chifor.me"}, sni="dw1.chifor.me")),
+        ("trusted", direct("proxmox-host", "proxmox.chifor.me"),
+         lambda r: expect(r, 200, be("proxmox"), T, present={"Host": "proxmox.chifor.me"})),
+        ("trusted", direct("openbao-host", "openbao.chifor.me"),
+         lambda r: expect(r, 200, be("openbao"), T, present={"Host": "openbao.chifor.me"},
+                          sni="openbao.openbao.svc.cluster.local")),
+        # authelia host: anonymous, allowed (and what Authelia saw), denied (never reaches the backend)
         ("trusted", direct("dsh-anon", "dsh.chifor.me"), lambda r: expect(r, 302, location="sso.chifor.me")),
-        ("trusted", direct("dsh-auth", "dsh.chifor.me", headers=[["X-Test-Auth", "allow"], ["Remote-User", "mallory"]]),
-         lambda r: expect(r, 200, be("dsh"), T, present={"Remote-User": "alice", "Remote-Groups": "admins"},
-                          absent=["Remote-Extra"])),
+        ("trusted", direct("dsh-auth", "dsh.chifor.me", headers=[["X-Test-Auth", "allow"], ["Remote-User", "mallory"],
+                                                                  ["CF-Connecting-IP", "6.6.6.6"]]),
+         lambda r: expect(r, 200, be("dsh"), T, absent=["Remote-Extra"], present={
+             "Remote-User": "alice", "Remote-Groups": "admins",
+             "Remote-Name": f"cf={T};xff={T};proto=https;host=dsh.chifor.me"})),
+        ("trusted", direct("dsh-nonadmin", "dsh.chifor.me", headers=[["X-Test-Auth", "deny"]]),
+         lambda r: not_backend(r, 403)),
         # id: Keycloak realm guard
         ("trusted", direct("id-relay", "id.chifor.me", "/realms/relay/protocol/openid-connect/auth?redirect_uri=https%3A%2F%2Fx"),
          lambda r: expect(r, 200, be("id"))),
@@ -271,6 +338,7 @@ def suite_committed(reg):
         ("trusted", direct("id-double", "id.chifor.me", "/realms/relay/%252e%252e/master/"), lambda r: expect(r, 404)),
         ("trusted", direct("id-semi", "id.chifor.me", "/realms/relay;x/"), lambda r: expect(r, 404)),
         ("trusted", direct("id-slash", "id.chifor.me", "/realms/relay%2f..%2fmaster/"), lambda r: expect(r, 404)),
+        ("trusted", direct("id-dslash", "id.chifor.me", "//realms/master/"), lambda r: expect(r, 404)),
         # trueswarm media split
         ("trusted", direct("ts-media", "trueswarm.chifor.me", "/media/abc"),
          lambda r: expect(r, 200, "http://trueswarm-muse.trueswarm.svc.cluster.local:80")),
@@ -293,35 +361,57 @@ def suite_committed(reg):
         ("tunnel", tunnel("tun-list", "router.chifor.me", cf_ip="1.2.3.4, 5.6.7.8"), lambda r: expect(r, 400)),
         ("tunnel", tunnel("tun-dup", "router.chifor.me", headers=[["CF-Connecting-IP", "5.6.7.8"]]), lambda r: expect(r, 400)),
         ("tunnel", tunnel("tun-garbage", "router.chifor.me", cf_ip="not-an-ip"), lambda r: expect(r, 400)),
+        ("tunnel", tunnel("tun-bad-v4", "router.chifor.me", cf_ip="999.999.999.999"), lambda r: expect(r, 400)),
+        ("tunnel", tunnel("tun-bad-v6", "router.chifor.me", cf_ip="1:2:3"), lambda r: expect(r, 400)),
         ("tunnel", tunnel("tun-v6", "router.chifor.me", cf_ip="2001:db8::7"), lambda r: expect(r, 200, be("router"), "2001:db8::7")),
+        ("tunnel", tunnel("tun-v4mapped", "router.chifor.me", cf_ip="::ffff:192.0.2.1"),
+         lambda r: expect(r, 200, be("router")) + ([] if (echo_headers(r) or {}).get("cf-connecting-ip") in
+                                                    ("192.0.2.1", "::ffff:192.0.2.1") else ["v4-mapped address not kept"])),
         ("tunnel", tunnel("tun-no-visitor", "router.chifor.me", visitor=None), lambda r: expect(r, 400)),
         ("tunnel", tunnel("tun-http", "router.chifor.me", "/x?y=1", visitor='{"scheme":"http"}'),
          lambda r: expect(r, 308, location="https://router.chifor.me/x?y=1")),
         ("tunnel", tunnel("tun-unknown", "nope.chifor.me"), lambda r: expect(r, 404)),
+        ("tunnel", tunnel("tun-unknown-noip", "nope.chifor.me", cf_ip=None, visitor=None), lambda r: expect(r, 404)),
+        ("tunnel", tunnel("tun-unknown-http", "nope.chifor.me", visitor='{"scheme":"http"}'), lambda r: expect(r, 404)),
         ("tunnel", tunnel("tun-vault-admin", "vault.chifor.me", "/admin"), lambda r: expect(r, 200, be("vault"))),
         ("tunnel", tunnel("tun-dsh-anon", "dsh.chifor.me"), lambda r: expect(r, 302, location="sso.chifor.me")),
         ("tunnel", tunnel("tun-dsh-auth", "dsh.chifor.me", headers=[["X-Test-Auth", "allow"]]),
-         lambda r: expect(r, 200, be("dsh"), "203.0.113.7", present={"Remote-User": "alice"})),
-        # a non-cloudflared peer on the tunnel port cannot choose its client address
-        ("untrusted", tunnel("tun-forged", "router.chifor.me", cf_ip="6.6.6.6"),
-         lambda r: [] if r.get("status") in (200,) and echo_headers(r).get("cf-connecting-ip") == U
-         else ([] if r.get("status") == 400 else [f"forged CF-Connecting-IP accepted: {r.get('status')} {r.get('body','')[:200]}"])),
+         lambda r: expect(r, 200, be("dsh"), "203.0.113.7", present={
+             "Remote-User": "alice", "Remote-Name": "cf=203.0.113.7;xff=203.0.113.7;proto=https;host=dsh.chifor.me"})),
+        # a non-cloudflared peer on the tunnel port cannot choose its client address: the proxy
+        # ignores its header (the peer is not a trusted proxy), so the client is the peer itself, and
+        # "client equals peer" is exactly what the tunnel listener refuses. (In the cluster the
+        # NetworkPolicy refuses the connection first: scripts/edge/netpol-check.sh.)
+        ("untrusted", tunnel("tun-forged", "router.chifor.me", cf_ip="6.6.6.6"), lambda r: not_backend(r, 400)),
         # redirect listener and health
         ("trusted", {"id": "redir-lan", "port": 8081, "host": "router.chifor.me", "target": "/a?b=1"},
          lambda r: expect(r, 308, location="https://router.chifor.me/a?b=1")),
+        ("trusted", {"id": "redir-unknown", "port": 8081, "host": "nope.chifor.me", "target": "/"}, lambda r: expect(r, 404)),
         ("untrusted", {"id": "redir-wan", "port": 8081, "host": "router.chifor.me", "target": "/"}, lambda r: expect(r, 403)),
         ("excluded", {"id": "redir-gw", "port": 8081, "host": "router.chifor.me", "target": "/"}, lambda r: expect(r, 403)),
         ("trusted", {"id": "health", "port": 8082, "host": "x", "target": "/healthz"}, lambda r: expect(r, 200)),
-        # log redaction: sentinels through both listeners
-        ("trusted", direct("log-direct", "router.chifor.me", "/x?token=" + SENTINELS[3],
-                           headers=[["Authorization", "Bearer " + SENTINELS[2]], ["X-Api-Key", SENTINELS[1]]]),
-         lambda r: expect(r, 200)),
-        ("tunnel", tunnel("log-tunnel", "router.chifor.me", "/x?token=" + SENTINELS[3],
-                          headers=[["Cf-Access-Jwt-Assertion", SENTINELS[0]], ["Authorization", "Bearer " + SENTINELS[2]],
-                                   ["X-Api-Key", SENTINELS[1]]]),
-         lambda r: expect(r, 200)),
     ]
-    return cases
+
+
+def sentinel_cases():
+    """Credentials and query strings on successful AND failing requests, both listeners; the
+    failing ones make Caddy write error logs (forward-auth unreachable, upstream unreachable)."""
+    q = "/x?token=" + SENTINELS[3]
+    hd = [["Authorization", "Bearer " + SENTINELS[2]], ["X-Api-Key", SENTINELS[1]],
+          ["Cf-Access-Client-Secret", SENTINELS[4]]]
+    return [
+        ("trusted", direct("log-direct", "router.chifor.me", q, headers=hd), lambda r: expect(r, 200)),
+        ("tunnel", tunnel("log-tunnel", "router.chifor.me", q, headers=hd + [["Cf-Access-Jwt-Assertion", SENTINELS[0]]]),
+         lambda r: expect(r, 200)),
+        ("trusted", direct("log-authfail", "dsh.chifor.me", q, headers=hd + [["X-Test-Auth", "allow"]]),
+         lambda r: expect(r, 502)),
+        ("tunnel", tunnel("log-authfail-tun", "dsh.chifor.me", q,
+                          headers=hd + [["X-Test-Auth", "allow"], ["Cf-Access-Jwt-Assertion", SENTINELS[0]]]),
+         lambda r: expect(r, 502)),
+        ("trusted", direct("log-upstreamfail", "router.chifor.me", q, headers=hd), lambda r: expect(r, 502)),
+        ("tunnel", tunnel("log-upstreamfail-tun", "router.chifor.me", q,
+                          headers=hd + [["Cf-Access-Jwt-Assertion", SENTINELS[0]]]), lambda r: expect(r, 502)),
+    ]
 
 
 def variant_direct(reg):
@@ -329,6 +419,11 @@ def variant_direct(reg):
     r["edge_default"] = "direct"
     r["hosts"]["test-private"] = {"exposure": "private", "auth": "native", "access_gated": False, "lan_dns": False,
                                   "backend": {"url": "http://private.example.svc:80"}, "smoke": {"status": 200}}
+    for rp in r["hosts"]["vault"]["restricted_paths"]:
+        rp["exposure"] = "private"  # P7's shape: /admin private, never through the tunnel
+    errors = render.validate(r)
+    if errors:
+        raise RuntimeError(f"direct variant invalid: {errors}")
     return r
 
 
@@ -348,7 +443,7 @@ def suite_direct(reg):
         ("untrusted", direct("d-priv-wan", "test-private.chifor.me", headers=SPOOF), lambda r: expect(r, 403)),
         ("excluded", direct("d-priv-gw", "test-private.chifor.me"), lambda r: expect(r, 403)),
         ("tunnel", tunnel("d-priv-tun", "test-private.chifor.me"), lambda r: expect(r, 404)),
-        # vault direct: /admin stays LAN-only, every variant of the path
+        # vault direct: /admin private now - LAN-only on the direct listener, 404 through the tunnel
         ("untrusted", direct("d-vault", "vault.chifor.me", "/api/sync"), lambda r: expect(r, 200, be("vault"))),
         ("untrusted", direct("d-vault-admin", "vault.chifor.me", "/admin"), lambda r: expect(r, 403)),
         ("untrusted", direct("d-vault-admin2", "vault.chifor.me", "/admin/users"), lambda r: expect(r, 403)),
@@ -360,14 +455,15 @@ def suite_direct(reg):
         ("untrusted", direct("d-vault-enc-dot", "vault.chifor.me", "/x/%2e%2e/admin"), lambda r: expect(r, 404)),
         ("excluded", direct("d-vault-admin-gw", "vault.chifor.me", "/admin"), lambda r: expect(r, 403)),
         ("trusted", direct("d-vault-admin-lan", "vault.chifor.me", "/admin"), lambda r: expect(r, 200, be("vault"))),
+        ("tunnel", tunnel("d-vault-admin-tun", "vault.chifor.me", "/admin"), lambda r: expect(r, 404)),
+        ("tunnel", tunnel("d-vault-admin-tun2", "vault.chifor.me", "/Admin/x"), lambda r: expect(r, 404)),
+        ("tunnel", tunnel("d-vault-tun", "vault.chifor.me", "/api/sync"), lambda r: expect(r, 200, be("vault"))),
         ("untrusted", direct("d-canary", "edge-canary.chifor.me"),
          lambda r: [] if r.get("status") == 200 and f"peer={U}" in r["body"] else [f"canary {r}"]),
     ]
 
 
-def run_suite(fx, label, reg, suite):
-    caddyfile = render.render(reg, PROFILE)
-    fx.start_proxy(caddyfile)
+def run_suite(fx, label, suite):
     by_source = {}
     for src, case, chk in suite:
         by_source.setdefault(src, []).append((case, chk))
@@ -378,58 +474,73 @@ def run_suite(fx, label, reg, suite):
         for case, chk in items:
             res = got.get(case["id"], {"error": "no result"})
             errs = chk(res)
-            status = "ok  " if not errs else "FAIL"
-            print(f"  {status} [{label}] {src:9s} {case['id']}" + ("" if not errs else f": {'; '.join(errs)}"))
+            print(f"  {'ok  ' if not errs else 'FAIL'} [{label}] {src:9s} {case['id']}" +
+                  ("" if not errs else f": {'; '.join(errs)}"))
             if errs:
                 failures.append(case["id"])
     return failures
 
 
-def check_logs(fx):
-    logs = docker("logs", f"{P}-proxy", check=False)
-    text = logs.stdout + logs.stderr
-    leaked = [s for s in SENTINELS if s in text]
-    print(f"  {'ok  ' if not leaked else 'FAIL'} [logs] no credential sentinel in the access log" +
-          (f": leaked {leaked}" if leaked else ""))
-    return ["log-redaction"] if leaked else []
+def check(label, ok, detail=""):
+    print(f"  {'ok  ' if ok else 'FAIL'} [{label}]" + (f" {detail}" if detail else ""))
+    return [] if ok else [label]
 
 
-def served_fingerprint(fx):
-    """SHA-256 of the certificate the proxy presents, read by openssl from the trusted network."""
-    r = docker("run", "--rm", "--network", f"{P}-trusted", "--entrypoint", "sh", IMG_SSL, "-c",
+def served_fingerprint():
+    r = docker("run", "--rm", *labels(), "--network", f"{P}-trusted", "--entrypoint", "sh", IMG_SSL, "-c",
                f"echo | openssl s_client -connect {PROXY_IP['trusted']}:8443 -servername router.chifor.me 2>/dev/null "
                "| openssl x509 -noout -fingerprint -sha256", check=False)
     return r.stdout.strip()
 
 
+def reloader_metrics(fx):
+    p = fx.work / "config" / "reloader" / "metrics"
+    return p.read_text() if p.exists() else ""
+
+
+def wait_for(pred, seconds=20):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(1)
+    return False
+
+
 def check_reloader(fx):
-    """Valid renewal -> served; mismatched pair -> kept out and counted; repaired -> served."""
+    """First pass loads what it finds; a mismatched or malformed pair is kept out and counted; a
+    valid renewal is served after the bad one is repaired."""
     failures = []
+    # a renewal that lands BEFORE the reloader starts must still be loaded on its first pass
+    before = served_fingerprint()
+    fx.make_cert("early", "*.chifor.me")
+    for f in ("tls.key", "tls.crt"):
+        shutil.copy(fx.work / "early" / f, fx.work / "certs" / f)
     docker("exec", "-d", "-e", "RELOAD_INTERVAL=1", f"{P}-proxy", "sh", "/reloader.sh")
-    time.sleep(2)
-    before = served_fingerprint(fx)
-    # 1. a mismatched pair (new cert, old key): must not load
+    failures += check("reloader first pass loads a pair that changed before it started",
+                      wait_for(lambda: served_fingerprint() not in ("", before)))
+    failures += check("reloader heartbeat and loaded gauge exported",
+                      wait_for(lambda: "edge_cert_files_not_loaded 0" in reloader_metrics(fx)
+                               and "edge_cert_reloader_heartbeat_seconds" in reloader_metrics(fx)))
+    loaded = served_fingerprint()
+    # a mismatched pair (new cert, old key): never loaded, counted, flagged not-loaded
     fx.make_cert("bad", "*.chifor.me", key_from="certs")
     shutil.copy(fx.work / "bad" / "tls.crt", fx.work / "certs" / "tls.crt")
+    failures += check("mismatched pair kept out and flagged",
+                      wait_for(lambda: "edge_cert_files_not_loaded 1" in reloader_metrics(fx)
+                               and "edge_cert_invalid_total 0" not in reloader_metrics(fx))
+                      and served_fingerprint() == loaded)
+    # a malformed pair: garbage PEM
+    (fx.work / "certs" / "tls.crt").write_text("-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n")
     time.sleep(4)
-    after_bad = served_fingerprint(fx)
-    metrics = (fx.work / "config" / "reloader" / "metrics").read_text() if (fx.work / "config" / "reloader" / "metrics").exists() else ""
-    ok = after_bad == before and "edge_cert_invalid_total 0" not in metrics
-    print(f"  {'ok  ' if ok else 'FAIL'} [reloader] mismatched pair kept out (served unchanged, counted invalid)")
-    failures += [] if ok else ["reloader-mismatch"]
-    # 2. a valid new pair: served within a few passes
+    failures += check("malformed pair kept out", served_fingerprint() == loaded)
+    # repaired with a valid renewal: served
     fx.make_cert("good", "*.chifor.me")
-    shutil.copy(fx.work / "good" / "tls.key", fx.work / "certs" / "tls.key")
-    shutil.copy(fx.work / "good" / "tls.crt", fx.work / "certs" / "tls.crt")
-    new = ""
-    for _ in range(15):
-        time.sleep(1)
-        new = served_fingerprint(fx)
-        if new and new != before:
-            break
-    ok = bool(new) and new != before
-    print(f"  {'ok  ' if ok else 'FAIL'} [reloader] valid renewal served after reload")
-    failures += [] if ok else ["reloader-renewal"]
+    for f in ("tls.key", "tls.crt"):
+        shutil.copy(fx.work / "good" / f, fx.work / "certs" / f)
+    failures += check("valid renewal served after repair",
+                      wait_for(lambda: served_fingerprint() not in ("", loaded))
+                      and wait_for(lambda: "edge_cert_files_not_loaded 0" in reloader_metrics(fx)))
     return failures
 
 
@@ -437,28 +548,42 @@ def main() -> int:
     if shutil.which("docker") is None:
         print("edge_runtime: docker is required", file=sys.stderr)
         return 2
+
+    def _terminate(signum, _frame):  # a cancelled CI job: let `finally` clean up this run
+        raise SystemExit(128 + signum)
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is not None:
+            signal.signal(sig, _terminate)
+
     reg = render.load()
-    work = pathlib.Path(tempfile.mkdtemp(prefix="edgert-", dir=ROOT / ".edge-runtime-tmp"
-                                         if (ROOT / ".edge-runtime-tmp").is_dir() else None))
+    work = pathlib.Path(tempfile.mkdtemp(prefix=f"{P}-"))
     fx = Fixture(work)
     failures = []
     try:
         fx.up()
-        print("edge runtime fixture: registry as committed")
-        failures += run_suite(fx, "committed", reg, suite_committed(reg))
-        failures += check_logs(fx)
-        print("edge runtime fixture: edge_default direct + a private host")
-        failures += run_suite(fx, "direct", variant_direct(reg), suite_direct(reg))
-        # auth service down -> fail closed
+        print(f"edge runtime fixture {RUN}: registry as committed")
+        fx.start_proxy(render.render(reg, PROFILE))
+        failures += run_suite(fx, "committed", suite_committed(reg))
+        print("edge runtime fixture: edge_default direct, a private host, vault /admin private")
+        fx.start_proxy(render.render(variant_direct(reg), PROFILE))
+        failures += run_suite(fx, "direct", suite_direct(variant_direct(reg)))
+        print("edge runtime fixture: failures (auth service and upstreams down) and log redaction")
+        fx.start_proxy(render.render(reg, PROFILE))
         docker("stop", f"{P}-auth")
-        res = fx.request("trusted", [direct("dsh-auth-down", "dsh.chifor.me", headers=[["X-Test-Auth", "allow"]])])[0]
-        ok = res.get("status") == 502
-        print(f"  {'ok  ' if ok else 'FAIL'} [direct] auth service down -> 502 (got {res.get('status')})")
-        failures += [] if ok else ["auth-down"]
+        docker("stop", f"{P}-echo")
+        failures += run_suite(fx, "fail", sentinel_cases()[2:])
+        docker("start", f"{P}-echo")
+        time.sleep(1)
+        failures += run_suite(fx, "logs", sentinel_cases()[:2])
+        text = fx.logs()
+        leaked = [s for s in SENTINELS if s in text]
+        failures += check("no credential or query sentinel in the access or error log", not leaked,
+                          f"leaked {leaked}" if leaked else "")
+        failures += check("the error log was exercised", '"logger":"http.log.error' in text)
         failures += check_reloader(fx)
     finally:
         if failures:
-            print(docker("logs", "--tail", "40", f"{P}-proxy", check=False).stderr[-4000:])
+            print(fx.logs()[-4000:])
         fx.down()
         shutil.rmtree(work, ignore_errors=True)
     print(f"edge runtime fixture: {'FAILED ' + str(len(failures)) if failures else 'all passed'}")

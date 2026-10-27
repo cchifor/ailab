@@ -37,6 +37,8 @@ class PinnedHTTPS(http.client.HTTPSConnection):
     def connect(self):
         sock = socket.create_connection((self._address, self.port), self.timeout)
         self.sock = self._context.wrap_socket(sock, server_hostname=self._server_name)
+        # read now: getresponse() drops the socket when the server closes the connection
+        self.peer_cert = self.sock.getpeercert()
 
 
 def check(vip, fqdn, expect, insecure=False, path="/"):
@@ -50,7 +52,7 @@ def check(vip, fqdn, expect, insecure=False, path="/"):
         conn.request("GET", path, headers={"User-Agent": "edge-smoke/1"})
         resp = conn.getresponse()
         resp.read(4096)
-        cert = conn.sock.getpeercert() if not insecure else None
+        cert = getattr(conn, "peer_cert", None) if not insecure else None
     except (OSError, ssl.SSLError, http.client.HTTPException) as e:
         return False, f"{type(e).__name__}: {e}"
     finally:

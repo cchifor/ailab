@@ -1,10 +1,12 @@
 """Raw HTTP client for the edge runtime fixture; runs inside a container on one source network.
 
-    python client.py cases.json   -> prints one JSON result per case, in order
+    python client.py cases.json [proxy-address]   -> prints one JSON result per case, in order
 
 A case is {"id", "port", "tls", "sni", "host", "target", "headers": [[k, v], ...]}. The request
 line carries `target` byte for byte (no normalisation, like curl --path-as-is) and header lines are
-sent exactly as listed, duplicates included, so the proxy sees what an attacker would send.
+sent exactly as listed, duplicates included, so the proxy sees what an attacker would send. Every
+failure, including a refused connection, is reported as that case's result and never aborts the run,
+so the harness can retry a proxy that is still starting.
 """
 import json
 import socket
@@ -13,8 +15,9 @@ import sys
 
 
 def run(case, proxy):
-    raw = socket.create_connection((proxy, case["port"]), timeout=10)
+    raw = None
     try:
+        raw = socket.create_connection((proxy, case["port"]), timeout=10)
         if case.get("tls"):
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -32,7 +35,8 @@ def run(case, proxy):
     except (ssl.SSLError, OSError) as e:
         return {"id": case["id"], "error": f"{type(e).__name__}: {e}"}
     finally:
-        raw.close()
+        if raw is not None:
+            raw.close()
     head, _, body = data.partition(b"\r\n\r\n")
     status_line, *header_lines = head.decode(errors="replace").split("\r\n")
     headers = {}
