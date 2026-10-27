@@ -63,22 +63,25 @@ spec:
             description: >-
               Prometheus has no answering edge-proxy target for 15m: the PodMonitor, the metrics
               port 9180 or the NetworkPolicy edge-proxy. The other edge alerts are blind meanwhile.
+        # Per LISTENER (server: direct, tunnel, redirect), not per host: Caddy's per-host labels are
+        # off because on a TLS server they would record any Host a WAN client sends (unbounded). The
+        # failing host is in the access log: kubectl -n edge logs -l app.kubernetes.io/name=edge-proxy -c caddy.
         - alert: EdgeUpstreamErrors
           expr: >-
             (
-              sum by (host) (rate(caddy_http_request_duration_seconds_count{job="edge-proxy",code=~"5.."}[10m]))
-              / sum by (host) (rate(caddy_http_request_duration_seconds_count{job="edge-proxy"}[10m]))
+              sum by (server) (rate(caddy_http_request_duration_seconds_count{job="edge-proxy",code=~"5.."}[10m]))
+              / sum by (server) (rate(caddy_http_request_duration_seconds_count{job="edge-proxy"}[10m]))
             ) > 0.2
-            and sum by (host) (increase(caddy_http_request_duration_seconds_count{job="edge-proxy"}[10m])) >= 20
+            and sum by (server) (increase(caddy_http_request_duration_seconds_count{job="edge-proxy"}[10m])) >= 20
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: "{{ $labels.host }}: over 20 % of requests fail with 5xx at the edge"
+            summary: "edge listener {{ $labels.server }}: over 20 % of requests fail with 5xx"
             description: >-
-              More than a fifth of the requests to {{ $labels.host }} through the edge proxy have
-              answered 5xx for 15m (502 = backend unreachable or Authelia down). Gated on at least
-              20 requests per 10m.
+              More than a fifth of the requests through the edge proxy's {{ $labels.server }} listener
+              have answered 5xx for 15m (502 = backend unreachable or Authelia down). Gated on at least
+              20 requests per 10m. The access log names the hosts.
         - alert: EdgeCertReloadFailing
           expr: >-
             increase(edge_cert_reload_failures_total{job="edge-proxy"}[30m]) > 0

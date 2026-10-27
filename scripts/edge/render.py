@@ -536,9 +536,10 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w("\t}")
     w("\tauto_https off")
     w("\tgrace_period 90s")
-    w("\tmetrics {")
-    w("\t\tper_host")
-    w("\t}")
+    # HTTP metrics on (Caddy 2.10+ needs the global option), WITHOUT per_host: on a TLS server Caddy
+    # labels every Host it is sent, so once the WAN reaches :8443 a scanner could grow Caddy's memory and
+    # Prometheus without bound. Per-host traffic is in the access log; the alerts read per listener.
+    w("\tmetrics")
     w("\tservers :8443 {")
     w("\t\tname direct")
     w("\t\tprotocols h1 h2")

@@ -503,6 +503,13 @@ class Rendering(unittest.TestCase):
             self.assertIn(f'header Content-Type "{render.PROM_TEXT}"', handler, path)
             self.assertLess(handler.index("header Content-Type"), handler.index("file_server"), path)
 
+    def test_metrics_are_bounded(self):
+        # no per-host labels: on a TLS server Caddy would label any Host a WAN client sends
+        glob = self.text[:self.text.index("\n}\n")]
+        self.assertIn("\n\tmetrics\n", glob)
+        self.assertNotIn("per_host", self.text)
+        self.assertNotIn("observe_catchall_hosts", self.text)
+
     def test_forward_auth_gets_the_canonical_client(self):
         snippet = self.text[self.text.index("(edge_authelia) {"):]
         snippet = snippet[:snippet.index("\n}\n")]
