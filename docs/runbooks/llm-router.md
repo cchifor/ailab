@@ -2596,12 +2596,19 @@ one-turn guard failed the whole request. The opus fallback reviewed those PRs.
 
 **After the rollout** (live config, admin API): set `capabilities.maxOutputTokens: true` on `claude`, `claude-2`,
 `claude-3`, `claude-4` and `claude-5` (all `false` at config rev 1791). Only then does a caller's limit reach Claude
-Code. reviewer-1 already sends `max_tokens: { fable: 40000 }` (ailab #1449, deployed 2026-10-27 12:36Z); until the
+Code.
+- **Precondition: the new image is the one serving.** Check that `kubectl --context admin@ai -n llm-router get pods -l
+  app=llm-router` shows exactly one router pod, Ready, whose `imageID` ends in `6c9db895…d013`, and that its
+  `/app/SOURCE_COMMIT` is `f5c0c412…`. The Deployment is one replica with `Recreate` (RWO volume), so no old pod
+  serves the admin API alongside it. Written earlier, the old image refuses the write. reviewer-1 already sends `max_tokens: { fable: 40000 }` (ailab #1449, deployed 2026-10-27 12:36Z); until the
 flag is on, the router drops it and says so.
 
 **Rollback.**
-1. First set `capabilities.maxOutputTokens` back to `false` on the Claude accounts. The old image accepts a config
-   that has it on at startup, but its Claude provider refuses every config write while any Claude account has it on.
+1. First, while this image still serves, set `capabilities.maxOutputTokens` back to `false` on the Claude accounts.
+   The old image starts and serves with the flag on, but its Claude provider refuses every config write while any
+   Claude account has it on, so the flag cannot be cleared through the admin API once the revert runs.
+   - If the revert is already running with the flag on: roll forward to this digest again, clear the flag, then revert.
+     That is safer than editing the stored config in the router's SQLite volume by hand.
 2. Then revert the image digest and both pod-template annotations together to
    `sha256:731d43fa2f3bf9a7a48cd0d724eeee47e4677ca2c01d025a83ca68572f2d8b73` /
    `1f92b9d1e920a110808378472ebf83670c282b6b` / `router-0.1.0-20261027-account-menu`.
