@@ -1,0 +1,53 @@
+# MetalLB in L2 mode, for ONE address: the edge proxy's VIP 192.168.0.51 (ADR 0040).
+#
+# Why MetalLB and not Cilium's L2 announcements: the edge Service needs externalTrafficPolicy: Local
+# to keep client addresses, and Cilium documents its L2 announcements as incompatible with Local
+# (the lease ignores whether the node has a ready endpoint, so a dead proxy on the announcing node
+# black-holes the VIP). MetalLB elects the announcing node among nodes with an active endpoint.
+# Cilium's kube-proxy replacement still carries the traffic; MetalLB only assigns and announces.
+#
+# Isolation from Cilium's LB-IPAM: loadBalancerClass. MetalLB serves only Services that ask for
+# metallb.io/metallb, and LB-IPAM ignores those. No other Service in the cluster is affected.
+#
+# Speakers run only on the control-plane nodes, where the edge proxy runs. Those nodes carry
+# node.kubernetes.io/exclude-from-external-load-balancers; ignoreExcludeLB is the deliberate
+# exception for this one pool (L2Advertisement in metallb-config restricts it to them as well).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: metallb
+  namespace: metallb-system
+spec:
+  interval: 1h
+  timeout: 10m
+  install:
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+  chart:
+    spec:
+      chart: metallb
+      version: "0.16.1" # appVersion v0.16.1
+      sourceRef:
+        kind: HelmRepository
+        name: metallb
+        namespace: flux-system
+  values:
+    loadBalancerClass: metallb.io/metallb
+    frrk8s:
+      enabled: false # 0.16 enables the FRR-K8s BGP backend by default; L2 needs none of it
+    controller:
+      resources:
+        requests: { cpu: 10m, memory: 64Mi }
+        limits: { memory: 256Mi }
+    speaker:
+      ignoreExcludeLB: true
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+      frr:
+        enabled: false # L2 only; no BGP
+      resources:
+        requests: { cpu: 10m, memory: 64Mi }
+        limits: { memory: 256Mi }

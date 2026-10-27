@@ -303,3 +303,19 @@ pin-verify image tag digest="":
 
 # NB: `agent-nodes-plan`/`agent-nodes-apply` already exist above; run `just nested-virt-verify` FIRST
 # (Stage-2 gate) before `just agent-nodes-apply` — the Kata pool needs nested=Y on the target hosts.
+
+# ---- Edge ingress (ADR 0040, docs/standards/edge-ingress.md, docs/runbooks/edge-ingress.md) ----
+# Render the edge proxy's Caddyfile from kubernetes/edge/hostnames.yaml (commit both; CI fails on drift).
+edge-render:
+    python scripts/edge/render.py
+
+# Smoke every registry host through the VIP 192.168.0.51 with SNI/Host set, from a LAN host.
+# `just edge-smoke --as untrusted` from a pod or other non-trusted source expects 403 for every
+# host that is not direct.
+edge-smoke *args:
+    python scripts/edge/smoke.py {{args}}
+
+# The renderer's unit tests and the docker runtime fixture (the pinned Caddy, real requests).
+edge-test:
+    python -m unittest scripts.tests.test_edge_render
+    python scripts/tests/edge_runtime.py

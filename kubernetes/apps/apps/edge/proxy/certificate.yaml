@@ -1,0 +1,24 @@
+# The wildcard certificate the edge proxy serves on its direct listener. Let's Encrypt through the
+# Cloudflare DNS-01 solver (cert-manager-config/clusterissuers.yaml), so it needs no inbound port.
+# Covers one label: every registry host is <name>.chifor.me. The cert-reloader sidecar reloads Caddy
+# after a renewal (cert-reloader.sh).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-wildcard
+  namespace: edge
+  labels:
+    app.kubernetes.io/name: edge-proxy
+    app.kubernetes.io/part-of: edge
+spec:
+  secretName: edge-wildcard-tls
+  dnsNames:
+    - "*.chifor.me"
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: letsencrypt-cloudflare
+    kind: ClusterIssuer
+    group: cert-manager.io

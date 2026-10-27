@@ -1,0 +1,39 @@
+# MetalLB (L2) for the edge proxy's VIP (ADR 0040). A DEDICATED Flux Kustomization, dependsOn
+# infrastructure for the `metallb` HelmRepository (sources/). wait: true, so `metallb-config` (the
+# pool and advertisement custom resources) only applies once the CRDs and the controller's webhook
+# exist: the same split as cert-manager / cert-manager-config.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: metallb
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 2m
+  timeout: 10m
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/metallb
+  prune: true
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: metallb-config
+  namespace: flux-system
+spec:
+  interval: 1h
+  retryInterval: 2m
+  timeout: 5m
+  dependsOn:
+    - name: metallb
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/infrastructure/metallb-config
+  prune: true
+  wait: true

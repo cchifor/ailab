@@ -87,6 +87,21 @@ jobs:
       - name: Router CI rollout acceptance fails on missing or failed evidence
         run: python3 -m unittest scripts.tests.test_router_rollout
 
+      # Edge ingress (ADR 0040, docs/standards/edge-ingress.md). The registry's schema, its parity
+      # with the frozen cloudflared routing, the Authelia rules it implies and the committed
+      # Caddyfile; then the pinned Caddy itself runs the rendered config against echo backends on
+      # trusted / untrusted / tunnel docker networks (header provenance, private and restricted
+      # paths, the Keycloak guard, the tunnel's CF-Connecting-IP checks, log redaction, the
+      # certificate reloader). Rendered text alone proves none of that; this does. Fail closed:
+      # a stale Caddyfile, a schema error or any runtime case is a non-zero exit.
+      - name: Edge registry, generated Caddyfile and proxy runtime fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/edge/render.py --check
+          python3 -m unittest scripts.tests.test_edge_render
+          python3 scripts/tests/edge_runtime.py
+
       # Renovate never fails a run on these: a duplicate config key drops rules, and a bad name
       # only logs a lookup failure. The validator accepts both.
       - name: Renovate config keeps its lookup fixes (single hostRules key, tagless pins off)

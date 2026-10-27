@@ -39,6 +39,13 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflared
+        # The edge proxy (ADR 0040): it overwrites CF-Connecting-IP on every request.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge-proxy
     - from:
         # Tenant workers (config fetch + ingest). Scoped to CP-rendered tenant namespaces
         # (label app.kubernetes.io/managed-by: agentforge-cp — set by the renderer's namespace).

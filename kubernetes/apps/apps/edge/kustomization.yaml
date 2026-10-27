@@ -13,3 +13,5 @@ resources:
   - cloudflared.yaml
   - tailscale-oauth.sops.yaml
   - tailscale.yaml
+  # NOT here: the edge proxy (./proxy) has its own Flux Kustomization, clusters/ai/edge-proxy.yaml,
+  # which applies it only after this layer (Authelia's rules) is healthy.

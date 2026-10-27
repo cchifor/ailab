@@ -1,0 +1,9 @@
+# MetalLB chart repo: L2 announcement of the edge proxy's VIP (ADR 0040, docs/standards/edge-ingress.md).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: metallb
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://metallb.github.io/metallb

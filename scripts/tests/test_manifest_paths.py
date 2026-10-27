@@ -105,6 +105,11 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # 2026-09-29 — Kyverno cleanup policies (terminated ReplicaSet pods), after platform-kyverno
         # for the same CRD-ordering reason as storage-policies. Added deliberately.
         "./kubernetes/apps/cluster-hygiene",
+        # 2026-10-27 — ADR 0040, the self-hosted edge: MetalLB (the VIP 192.168.0.51), its pool and
+        # advertisement, and the edge proxy as its own Kustomization after `apps`. Added deliberately.
+        "./kubernetes/apps/infrastructure/metallb",
+        "./kubernetes/apps/infrastructure/metallb-config",
+        "./kubernetes/apps/apps/edge/proxy",
     }
 )
 

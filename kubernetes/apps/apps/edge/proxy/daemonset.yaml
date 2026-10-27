@@ -1,0 +1,172 @@
+# edge-proxy: the single front door for every *.chifor.me hostname in kubernetes/edge/hostnames.yaml
+# (ADR 0040, docs/standards/edge-ingress.md). Caddy, one pod per control-plane node.
+#
+# Listeners (the generated Caddyfile, scripts/edge/render.py):
+#   8443 direct   TLS, the VIP's :443 (LAN + the gateway's WAN forward); client = the TCP peer
+#   8080 tunnel   plain HTTP, Service edge-proxy-tunnel, only cloudflared may connect (NetworkPolicy);
+#                 client = CF-Connecting-IP
+#   8081 redirect the VIP's :80, trusted sources only
+#   8082 health   /healthz; 503 while /config/drain (an operator's drain: `touch /config/drain` takes
+#                 this node's endpoint out, so MetalLB moves the VIP, without deleting the pod) or
+#                 /config/shutdown (written by preStop; cleared when Caddy starts) exists
+#   9180 metrics  Caddy's /metrics and the cert-reloader's /reloader-metrics
+#
+# Control-plane nodes, deliberately: they already run cloudflared and the apps, and they carry
+# node.kubernetes.io/exclude-from-external-load-balancers, which MetalLB's speakers here ignore
+# (infrastructure/metallb). The agent nodes run untrusted sandboxes and must not hold the wildcard key.
+#
+# externalTrafficPolicy: Local on the Service keeps the client address, so every announcing node
+# must run a ready pod: MetalLB only announces from nodes with a ready endpoint.
+#
+# Runtime settings follow llm-router-edge (apps/llm-router/edge.yaml): uid/gid 1000, NET_BIND_SERVICE
+# added (the binary carries that file capability; with every capability dropped the kernel refuses
+# to exec it), writable /data and /config, grace_period 90s inside a 120 s termination grace.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: edge-proxy
+  namespace: edge
+  labels:
+    app.kubernetes.io/name: edge-proxy
+    app.kubernetes.io/part-of: edge
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge-proxy
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  minReadySeconds: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: edge-proxy
+        app.kubernetes.io/part-of: edge
+    spec:
+      priorityClassName: platform-critical # the public and LAN ingress path
+      automountServiceAccountToken: false # Caddy needs no API access
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000 # the certificate Secret is mounted group-readable for uid 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # 10 s preStop + Caddy's grace_period 90s + headroom before the kubelet's SIGKILL
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: caddy
+          image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+          imagePullPolicy: IfNotPresent
+          # /config is an emptyDir that survives a container restart (a liveness kill also runs preStop),
+          # so the shutdown marker is cleared here or the restarted Caddy would stay unready forever.
+          # An operator's /config/drain is deliberately kept.
+          command: [sh, -c, "rm -f /config/shutdown && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+          env:
+            - { name: XDG_DATA_HOME, value: /data }
+            - { name: XDG_CONFIG_HOME, value: /config }
+          ports:
+            - { name: direct, containerPort: 8443, protocol: TCP }
+            - { name: tunnel, containerPort: 8080, protocol: TCP }
+            - { name: redirect, containerPort: 8081, protocol: TCP }
+            - { name: health, containerPort: 8082, protocol: TCP }
+            - { name: metrics, containerPort: 9180, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            # TCP, not /healthz: a drain must take the endpoint out, never restart the pod.
+            tcpSocket: { port: health }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Readiness turns off first, so MetalLB and the endpoints move before Caddy stops
+              # accepting; open streams then get grace_period 90s.
+              exec:
+                command: [sh, -c, "touch /config/shutdown && sleep 10"]
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+          volumeMounts:
+            - { name: caddyfile, mountPath: /etc/caddy, readOnly: true }
+            - { name: certs, mountPath: /certs, readOnly: true }
+            - { name: openbao-ca, mountPath: /openbao-ca, readOnly: true }
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /config }
+        - name: cert-reloader
+          # Same image: the reloader validates the config (which loads and pairs the new cert and
+          # key) and reloads through the localhost admin API. cert-reloader.sh has the details.
+          image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+          imagePullPolicy: IfNotPresent
+          command: [sh, /etc/caddy/cert-reloader.sh]
+          env:
+            - { name: XDG_DATA_HOME, value: /data }
+            - { name: XDG_CONFIG_HOME, value: /config }
+            - { name: RELOAD_INTERVAL, value: "300" }
+          resources:
+            requests: { cpu: 5m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+          volumeMounts:
+            - { name: caddyfile, mountPath: /etc/caddy, readOnly: true }
+            - { name: certs, mountPath: /certs, readOnly: true }
+            - { name: openbao-ca, mountPath: /openbao-ca, readOnly: true }
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /config }
+        - name: cert-probe
+          # Reads the certificate this pod's Caddy SERVES (TLS to localhost), which no other signal can
+          # see when a node's Secret projection goes stale. cert-probe.sh has the details.
+          image: alpine/openssl:3.5.8@sha256:3f25da71f70eba788067daac3f3df03bd1de7a7c52ed89fa93b94ad2c92d986b
+          imagePullPolicy: IfNotPresent
+          command: [sh, /etc/caddy/cert-probe.sh]
+          env:
+            - { name: PROBE_INTERVAL, value: "60" }
+            - { name: PROBE_SNI, value: edge-canary.chifor.me }
+          resources:
+            requests: { cpu: 5m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: caddyfile, mountPath: /etc/caddy, readOnly: true }
+            - { name: config, mountPath: /config }
+      volumes:
+        - name: caddyfile
+          configMap:
+            name: edge-proxy-caddy # configMapGenerator: a config change rolls the DaemonSet
+        - name: certs
+          secret:
+            secretName: edge-wildcard-tls # Certificate edge-wildcard; a directory mount, never subPath
+            defaultMode: 0440
+        - name: openbao-ca
+          secret:
+            secretName: openbao-tls # issued into edge by openbao-ca-cert.yaml; only the CA is used
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: data
+          emptyDir: {}
+        - name: config
+          emptyDir: {}

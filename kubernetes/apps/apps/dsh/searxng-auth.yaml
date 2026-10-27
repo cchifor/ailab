@@ -123,6 +123,9 @@ spec:
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
           podSelector: { matchLabels: { app.kubernetes.io/name: cloudflared } }
+        # The edge proxy (ADR 0040): it overwrites CF-Connecting-IP on every request.
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: edge-proxy } }
       ports: [{ port: 4180, protocol: TCP }]
   egress:
     # CoreDNS specifically, not every pod in kube-system (same narrowing as dsh-allow).

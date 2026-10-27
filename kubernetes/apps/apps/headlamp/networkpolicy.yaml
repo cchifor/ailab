@@ -29,6 +29,13 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflared
+        # The edge proxy (ADR 0040): it overwrites CF-Connecting-IP on every request.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge-proxy
         # Homepage's siteMonitor pings headlamp.svc directly for the status tile — a reachability
         # health check, not a browsing session (and Headlamp's SA is read-only). Allow it.
         - namespaceSelector:

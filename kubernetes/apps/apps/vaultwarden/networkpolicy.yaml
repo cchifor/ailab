@@ -1,0 +1,36 @@
+# Who may reach Vaultwarden (ADR 0040). Vaultwarden takes the client address for its login rate
+# limiter from CF-Connecting-IP (IP_HEADER, vaultwarden.yaml), so that header must come only from
+# a source that sets it itself:
+#   - cloudflared (edge): Cloudflare overwrites CF-Connecting-IP on every request;
+#   - edge-proxy (edge): the in-cluster front door overwrites it on every request.
+# Nothing else: Homepage's status tile checks the public URL (homepage/configmap.yaml) rather than
+# getting a namespace-wide exception that would also reach /admin and pick its own address. Before
+# this policy any pod could reach Vaultwarden and choose its CF-Connecting-IP.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+  labels:
+    app.kubernetes.io/name: vaultwarden
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vaultwarden
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge-proxy
+      ports:
+        - { protocol: TCP, port: 8080 }

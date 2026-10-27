@@ -4,3 +4,4 @@ resources:
   - namespace.yaml
   - vaultwarden-secret.sops.yaml # SOPS: /admin Argon2id token
   - vaultwarden.yaml # Deployment + Service + PVC
+  - networkpolicy.yaml # only cloudflared and edge-proxy (ADR 0040)
