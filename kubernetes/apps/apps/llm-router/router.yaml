@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 171ff37b67fc246dabb4b11fd19f3aa9badcf470
-        chifor.me/release: router-0.1.0-20261026-auth-hardening
+        chifor.me/source-commit: 1f92b9d1e920a110808378472ebf83670c282b6b
+        chifor.me/release: router-0.1.0-20261027-account-menu
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 171ff37b67fc246dabb4b11fd19f3aa9badcf470 (llm-router #123, auth hardening on top of #117);
-          # parity-875d99035086-109682 image, all blobs pulled anonymously and verified;
-          # Relay run 109682, archive sha256:819b0eed2559f3bed857db0d015aacf7ef17f6035d0d651ce9964862ef85122f.
-          image: registry.chifor.me/llm-router/router@sha256:2e4211a3549b9c98f8896d1e06105c62ed22c7c6803c005acfcead4ba32df6b5
+          # Source 1f92b9d1e920a110808378472ebf83670c282b6b (llm-router #124, account menu portal and keyboard fix);
+          # parity-8f6eb6ba8d10-110130 image, all blobs pulled anonymously and verified;
+          # Relay run 110130, archive sha256:c1b491d1c180d552cd3a79771664b310ec030e883c3a2ba4cc91d1ab18c40b60.
+          image: registry.chifor.me/llm-router/router@sha256:731d43fa2f3bf9a7a48cd0d724eeee47e4677ca2c01d025a83ca68572f2d8b73
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

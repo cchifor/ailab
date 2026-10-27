@@ -2546,6 +2546,19 @@ administrator's own browsers. Keep the realm, the client and the `router_auth` d
 The revert also removes `ROUTER_AUTH_CLIENT_ADDRESS_HEADER`, so the sign-in throttle keys on the edge proxy's address
 again and becomes one budget for every visitor, as it was before the switch.
 
+### Account menu visibility fix (2026-10-27, llm-router#124)
+
+`router-0.1.0-20261027-account-menu` deploys llm-router main `1f92b9d1e920a110808378472ebf83670c282b6b` ([#124](https://git.chifor.me/cchifor/llm-router/pulls/124)). The profile menu is now rendered through a document portal, so the expanded navigation rail cannot clip it; viewport collision handling covers desktop and mobile layouts. Opening focuses the first action, arrow/Home/End navigate actions, Escape restores the trigger, and Tab/Shift+Tab close the menu without stranding focus.
+
+**Image.**
+- Archive `router-0.1.0-20261027-account-menu.tar.gz`, SHA-256 `c1b491d1c180d552cd3a79771664b310ec030e883c3a2ba4cc91d1ab18c40b60`, Relay v0.2.0 assets 399/400.
+- Relay branch `deploy/router-account-menu`, [run 110130](https://git.chifor.me/cchifor/relay/actions/runs/110130), receipt `deployment-images-110130.json`.
+- Image `registry.chifor.me/llm-router/router@sha256:731d43fa2f3bf9a7a48cd0d724eeee47e4677ca2c01d025a83ca68572f2d8b73` (tag `parity-8f6eb6ba8d10-110130`).
+
+The archive passed the production smoke check, Node 24 typecheck/build, focused expanded-rail Playwright regression, Relay image packaging checks, and CI. No database migration or secret change is required.
+
+**Rollback.** Revert the image digest and both pod-template annotations together to `sha256:2e4211a3549b9c98f8896d1e06105c62ed22c7c6803c005acfcead4ba32df6b5` / `171ff37b67fc246dabb4b11fd19f3aa9badcf470` / `router-0.1.0-20261026-auth-hardening`.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
