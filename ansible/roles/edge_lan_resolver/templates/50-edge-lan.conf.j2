@@ -1,7 +1,0 @@
-# Managed by the ansible role edge_lan_resolver (ADR 0040, docs/standards/edge-ingress.md section 4).
-# chifor.me and the gateway's own .lan zone resolve through the home gateway, which serves the edge's
-# LAN records (a CNAME to edge-vip.lan, then the VIP), so LAN callers reach the edge proxy directly
-# instead of through Cloudflare. Every other name keeps this host's link resolvers.
-[Resolve]
-DNS={{ edge_lan_resolver_server }}
-Domains={{ edge_lan_resolver_domains | map('regex_replace', '^', '~') | join(' ') }}

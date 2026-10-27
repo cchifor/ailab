@@ -1,55 +1,87 @@
 ---
-# Route chifor.me and .lan lookups to the home gateway's resolver (ADR 0040, the LAN path): it serves the
-# edge's LAN records, so router.chifor.me and the other lan_dns hosts resolve to the edge proxy's VIP
-# instead of Cloudflare (measured from dev-worker-1 on 2026-10-27: 79 ms through Cloudflare, 22 ms
-# through the VIP). Routing-only domains (~chifor.me ~lan): every other lookup keeps the link's
-# resolvers. Shared by the dev-worker and reviewer playbooks.
+# The home gateway becomes this host's DNS resolver (ADR 0040, the LAN path). It serves the edge's LAN
+# records, so router.chifor.me and the other lan_dns hosts resolve to the edge proxy's VIP instead of
+# Cloudflare (measured from dev-worker-1 on 2026-10-27: 79 ms through Cloudflare, 22 ms through the VIP),
+# and it serves the .lan zone; every other name it forwards, as for every other device on the LAN.
+#
+# Why the whole resolver and not only ~chifor.me: systemd-resolved always adds a GLOBAL DNS= server to
+# the default route (systemd-resolved.service(8), "Protocols and Routing"), so a global routing-only
+# setup still sent every lookup to the gateway as well, in parallel; and a per-link server serves all
+# of that link's names. One resolver is the deterministic version. The .lan zone matters: a lan_dns host
+# is a CNAME to edge-vip.lan, and a resolver that cannot answer .lan returns NXDOMAIN for its AAAA, on
+# which musl (Alpine containers) fails the whole lookup (reproduced on dev-worker-1).
+#
+# A systemd-networkd drop-in on the netplan-generated uplink unit: netplan and cloud-init are untouched
+# (no instance-id change, no regenerated host keys). Shared by the dev-worker and reviewer playbooks.
 
-- name: Create the systemd-resolved drop-in directory
+- name: Check the uplink's netplan-generated network unit exists
+  ansible.builtin.stat:
+    path: "/run/systemd/network/{{ edge_lan_resolver_network_unit }}"
+  register: edge_lan_resolver_unit
+
+- name: Refuse a host without that unit
+  ansible.builtin.assert:
+    that: edge_lan_resolver_unit.stat.exists
+    fail_msg: >-
+      /run/systemd/network/{{ edge_lan_resolver_network_unit }} is missing: this host's uplink is not the
+      netplan/systemd-networkd shape the drop-in targets.
+
+# A global routing-only drop-in was tried on dev-worker-1 before this role settled on the uplink.
+- name: Remove the earlier global resolved drop-in
   ansible.builtin.file:
-    path: /etc/systemd/resolved.conf.d
+    path: /etc/systemd/resolved.conf.d/50-edge-lan.conf
+    state: absent
+  register: edge_lan_resolver_old
+
+- name: Restart systemd-resolved without it
+  ansible.builtin.systemd_service:
+    name: systemd-resolved
+    state: restarted
+  when: edge_lan_resolver_old.changed
+
+- name: Create the uplink unit's drop-in directory
+  ansible.builtin.file:
+    path: "/etc/systemd/network/{{ edge_lan_resolver_network_unit }}.d"
     state: directory
     mode: "0755"
 
-- name: Route chifor.me and .lan to the gateway resolver
+- name: Make the gateway the uplink's resolver
   ansible.builtin.template:
-    src: 50-edge-lan.conf.j2
-    dest: /etc/systemd/resolved.conf.d/50-edge-lan.conf
+    src: 50-edge-dns.conf.j2
+    dest: "/etc/systemd/network/{{ edge_lan_resolver_network_unit }}.d/50-edge-dns.conf"
     mode: "0644"
   register: edge_lan_resolver_conf
 
-# Restart only on a change, then read back: if the routed resolver does not answer, take the drop-in
-# out again rather than leave this host unable to resolve chifor.me.
-- name: Apply and verify the routed resolver
+# Reload only on a change (static addresses: networkd keeps them; tested over SSH), then read back. If the
+# gateway does not answer, take the drop-in out again rather than leave this host unable to resolve.
+- name: Apply and verify the gateway resolver
   when: edge_lan_resolver_conf.changed
   block:
-    - name: Restart systemd-resolved
-      ansible.builtin.systemd_service:
-        name: systemd-resolved
-        state: restarted
+    - name: Reload systemd-networkd
+      ansible.builtin.command: networkctl reload
+      changed_when: true
 
-    - name: Resolve the probe names through the routed resolver
+    - name: Resolve the probe names through the gateway
       ansible.builtin.command: getent ahosts {{ item }}
       loop: "{{ edge_lan_resolver_probes }}"
       register: edge_lan_resolver_probe
       changed_when: false
-      retries: 3
+      retries: 5
       delay: 2
       until: edge_lan_resolver_probe.rc == 0
   rescue:
     - name: Remove the drop-in after a failed read-back
       ansible.builtin.file:
-        path: /etc/systemd/resolved.conf.d/50-edge-lan.conf
+        path: "/etc/systemd/network/{{ edge_lan_resolver_network_unit }}.d/50-edge-dns.conf"
         state: absent
 
-    - name: Restart systemd-resolved without it
-      ansible.builtin.systemd_service:
-        name: systemd-resolved
-        state: restarted
+    - name: Reload systemd-networkd without it
+      ansible.builtin.command: networkctl reload
+      changed_when: true
 
     - name: Fail loudly
       ansible.builtin.fail:
         msg: >-
-          {{ edge_lan_resolver_server }} did not resolve {{ edge_lan_resolver_probes | join(', ') }} after
-          routing {{ edge_lan_resolver_domains | join(', ') }} to it; the drop-in was removed again.
-          Check the gateway's local DNS (docs/runbooks/edge-ingress.md, "The gateway").
+          {{ edge_lan_resolver_server }} did not resolve {{ edge_lan_resolver_probes | join(', ') }} once it
+          became this host's resolver; the drop-in was removed again. Check the gateway's DNS
+          (docs/runbooks/edge-ingress.md, "The gateway").

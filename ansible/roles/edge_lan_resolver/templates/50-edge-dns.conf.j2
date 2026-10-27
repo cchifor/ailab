@@ -1,0 +1,7 @@
+# Managed by the ansible role edge_lan_resolver (ADR 0040, docs/standards/edge-ingress.md section 4).
+# The home gateway is this host's resolver, replacing the link's public resolvers: it serves the edge's
+# LAN records (a CNAME to edge-vip.lan, then the VIP) and the .lan zone, and forwards every other name.
+# The empty DNS= clears the list from the netplan-generated unit.
+[Network]
+DNS=
+DNS={{ edge_lan_resolver_server }}
