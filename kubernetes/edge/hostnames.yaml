@@ -207,7 +207,10 @@ hosts:
     lan_dns: true
     backend: { url: "http://vaultwarden.vaultwarden.svc.cluster.local:80" }
     uri_guard: true
-    # /admin is Access-gated at Cloudflare today (access.tf vault_admin); private once WireGuard works (P7).
+    # /admin: through the tunnel, Cloudflare Access gates it (access.tf vault_admin); on the direct
+    # listener (the VIP, which lan_dns points LAN clients at) only the admin tier reaches it, everyone
+    # else gets 403 (restricted_paths below), and Vaultwarden's admin token still applies. Private once
+    # WireGuard works (P7).
     restricted_paths:
       - { path_regexp: "^/+admin(/|$)", exposure: access_gated }
     smoke: { status: 200 }
