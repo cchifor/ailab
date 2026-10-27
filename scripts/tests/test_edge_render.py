@@ -90,6 +90,20 @@ class RegistrySchema(unittest.TestCase):
     def test_auth_none_only_for_public_respond(self):
         self.assert_rejected(lambda r: r["hosts"]["edge-canary"].update(auth="native"), "must be auth none")
 
+    def test_private_auth_none_only_for_a_fixed_answer(self):
+        # the canary must be able to rehearse every mode, private included
+        reg = raw()
+        reg["hosts"]["edge-canary"]["exposure"] = "private"
+        reg["hosts"]["edge-canary"].pop("edge")
+        self.assertEqual(render.validate(reg), [])
+        body = "\n".join(render._host_body(reg, "edge-canary", "direct", None))
+        self.assertLess(body.index("respond @not_admin 403"), body.index('respond "edge-canary ok'))
+
+        def private_upstream(r):
+            r["hosts"]["status"].update(exposure="private", auth="none")
+            r["hosts"]["status"].pop("edge", None)
+        self.assert_rejected(private_upstream, "auth none on a private host is only for a fixed respond backend")
+
     def test_backend_url_shape(self):
         self.assert_rejected(lambda r: r["hosts"]["router"]["backend"].update(url="http://x/path"), "scheme://host[:port] only")
         self.assert_rejected(lambda r: r["hosts"]["router"]["backend"].update(tls_server_name="x"), "tls_* options need an https url")
@@ -150,6 +164,60 @@ class EffectiveMode(unittest.TestCase):
         reg["hosts"]["router"]["edge"] = "direct"
         reg["force_tunnel"] = True
         self.assertEqual(render.effective_mode(reg, "router"), "tunnel")  # force beats every pin
+
+
+class DnsRecords(unittest.TestCase):
+    """kubernetes/edge/dns-records.json: the records dns.tf creates, from render.py's effective_mode()."""
+
+    def test_one_shape_per_mode(self):
+        reg = committed()
+        reg["edge_default"] = "direct"
+        reg["hosts"]["edge-canary"]["edge"] = "tunnel"
+        recs = render.dns_records(reg)
+        tunnel = f"{reg['tunnel_id']}.cfargotunnel.com"
+        self.assertEqual(recs["router"], {"mode": "direct", "type": "CNAME", "content": "chifor.me", "proxied": False, "ttl": 60})
+        self.assertEqual(recs["edge-canary"], {"mode": "tunnel", "type": "CNAME", "content": tunnel, "proxied": True, "ttl": 1})
+        reg["hosts"]["edge-canary"].update(exposure="private")
+        reg["hosts"]["edge-canary"].pop("edge")
+        self.assertEqual(render.dns_records(reg)["edge-canary"],
+                         {"mode": "private", "type": "A", "content": reg["vip"], "proxied": False, "ttl": 60})
+
+    def test_every_host_once_and_modes_agree_with_the_proxy(self):
+        reg = committed()
+        for default in ("tunnel", "direct"):
+            for force in (False, True):
+                reg["edge_default"], reg["force_tunnel"] = default, force
+                recs = render.dns_records(reg)
+                self.assertEqual(set(recs), set(reg["hosts"]))
+                for name, rec in recs.items():
+                    self.assertEqual(rec["mode"], render.effective_mode(reg, name), name)
+
+    def test_force_tunnel_never_publishes_a_private_host(self):
+        reg = committed()
+        reg["force_tunnel"] = True
+        reg["hosts"]["edge-canary"].update(exposure="private")
+        reg["hosts"]["edge-canary"].pop("edge")
+        self.assertEqual(render.dns_records(reg)["edge-canary"]["type"], "A")
+
+    def test_digest_ignores_carriage_returns_only(self):
+        text = render.REGISTRY.read_bytes().decode("utf-8")
+        self.assertEqual(render.registry_digest(text), render.registry_digest(text.replace("\n", "\r\n")))
+        self.assertNotEqual(render.registry_digest(text), render.registry_digest(text + "#\n"))
+
+    def test_committed_file_is_current(self):
+        text = render.render_dns(committed(), render.REGISTRY.read_bytes().decode("utf-8"))
+        self.assertEqual(render.DNS_OUTPUT.read_text(encoding="utf-8"), text,
+                         "run `just edge-render` and commit kubernetes/edge/dns-records.json")
+
+    def test_dns_tf_consumes_the_file_behind_blocking_guards(self):
+        tf = (ROOT / "kubernetes/infra/cloudflare/dns.tf").read_text(encoding="utf-8")
+        self.assertIn("dns-records.json", tf)
+        self.assertIn("local.edge_dns.registry_sha256 == sha256(local.edge_registry)", tf)
+        self.assertIn('replace(file("${path.module}/../../edge/hostnames.yaml"), "\\r", "")', tf)
+        self.assertEqual(tf.count("precondition {"), 3)
+        # no second implementation of the mode rule, and no warn-only check block
+        for word in ("edge_default", "force_tunnel", "check \""):
+            self.assertNotIn(word, tf)
 
 
 class Parity(unittest.TestCase):

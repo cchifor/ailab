@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Validate the edge registry and render the edge proxy's Caddyfile from it.
 
-    python3 scripts/edge/render.py            # write kubernetes/apps/apps/edge/proxy/Caddyfile
-    python3 scripts/edge/render.py --check    # fail if the committed Caddyfile is stale (CI)
+    python3 scripts/edge/render.py            # write the Caddyfile and kubernetes/edge/dns-records.json
+    python3 scripts/edge/render.py --check    # fail if either committed output is stale (CI)
     python3 scripts/edge/render.py --validate # schema only
 
 The registry (kubernetes/edge/hostnames.yaml) and the standard (docs/standards/edge-ingress.md)
@@ -19,6 +19,7 @@ ranges swapped for a docker fixture (scripts/tests/edge_runtime.sh); production 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import pathlib
@@ -33,6 +34,7 @@ except ImportError:  # pragma: no cover - the runners and the workstation have P
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "kubernetes/edge/hostnames.yaml"
 OUTPUT = ROOT / "kubernetes/apps/apps/edge/proxy/Caddyfile"
+DNS_OUTPUT = ROOT / "kubernetes/edge/dns-records.json"  # consumed by kubernetes/infra/cloudflare/dns.tf
 
 AUTHELIA = "authelia.auth.svc.cluster.local:9091"
 CERT = "/certs/tls.crt"
@@ -221,8 +223,8 @@ def validate(reg: dict) -> list[str]:
                     errors.append(f"{where}.backend.{k}: {b[k]!r} is not a plain token")
             if any(k.startswith("tls_") for k in b) and not str(b.get("url", "")).startswith("https://"):
                 errors.append(f"{where}.backend: tls_* options need an https url")
-        if h["auth"] == "none" and h["exposure"] == "private":
-            errors.append(f"{where}: auth none is for public content only")
+        if h["auth"] == "none" and h["exposure"] == "private" and not (isinstance(b, dict) and "respond" in b):
+            errors.append(f"{where}: auth none on a private host is only for a fixed respond backend")
         if h["auth"] == "none" and h["access_gated"]:
             errors.append(f"{where}: an access_gated host needs authelia or native auth: in tunnel mode the "
                           "direct listener serves it to every trusted source with no Access in front")
@@ -323,6 +325,41 @@ def load(path: pathlib.Path = REGISTRY) -> dict:
     if errors:
         raise RegistryError("\n".join(errors))
     return reg
+
+
+def registry_digest(text: str) -> str:
+    """sha256 of the registry text with CRs removed. dns.tf computes the same value with
+    sha256(replace(file(...), "\\r", "")) and refuses records rendered from any other registry."""
+    return hashlib.sha256(text.replace("\r", "").encode("utf-8")).hexdigest()
+
+
+def dns_records(reg: dict) -> dict:
+    """The DNS record each host's effective mode needs (docs/standards/edge-ingress.md section 4).
+    dns.tf creates exactly these; it does not re-derive modes, so the proxy and DNS cannot disagree."""
+    tunnel = f"{reg['tunnel_id']}.cfargotunnel.com"
+    out = {}
+    for name in sorted(reg["hosts"]):
+        mode = effective_mode(reg, name)
+        if mode == "private":
+            rec = {"type": "A", "content": reg["vip"], "proxied": False, "ttl": 60}
+        elif mode == "tunnel":
+            rec = {"type": "CNAME", "content": tunnel, "proxied": True, "ttl": 1}  # 1 = automatic, required while proxied
+        else:
+            rec = {"type": "CNAME", "content": reg["zone"], "proxied": False, "ttl": 60}
+        out[name] = {"mode": mode, **rec}
+    return out
+
+
+def render_dns(reg: dict, registry_text: str) -> str:
+    doc = {
+        "_generated": "by scripts/edge/render.py from kubernetes/edge/hostnames.yaml; do not edit, run `just edge-render`",
+        "registry_sha256": registry_digest(registry_text),
+        "zone": reg["zone"],
+        "tunnel_id": reg["tunnel_id"],
+        "vip": reg["vip"],
+        "records": dns_records(reg),
+    }
+    return json.dumps(doc, indent=2) + "\n"
 
 
 # --------------------------------------------------------------------------------------------
@@ -652,7 +689,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--registry", type=pathlib.Path, default=REGISTRY)
     ap.add_argument("--out", type=pathlib.Path, default=OUTPUT)
-    ap.add_argument("--check", action="store_true", help="fail if --out differs from the render")
+    ap.add_argument("--dns-out", type=pathlib.Path, default=DNS_OUTPUT)
+    ap.add_argument("--check", action="store_true", help="fail if --out or --dns-out differs from the render")
     ap.add_argument("--validate", action="store_true", help="validate the registry only")
     ap.add_argument("--test-profile", type=pathlib.Path, help="docker fixture overrides (JSON)")
     args = ap.parse_args(argv)
@@ -665,17 +703,22 @@ def main(argv=None) -> int:
         print(f"edge registry ok: {len(reg['hosts'])} hosts")
         return 0
     profile = json.loads(args.test_profile.read_text()) if args.test_profile else None
-    text = render(reg, profile)
+    outputs = [(args.out, render(reg, profile))]
+    if not profile:  # the docker fixture renders a Caddyfile only
+        outputs.append((args.dns_out, render_dns(reg, args.registry.read_bytes().decode("utf-8"))))
     if args.check:
-        current = args.out.read_text(encoding="utf-8") if args.out.exists() else ""
-        if current != text:
-            print(f"{args.out} is stale: run `just edge-render`", file=sys.stderr)
+        stale = [p for p, text in outputs if (p.read_text(encoding="utf-8") if p.exists() else "") != text]
+        for p in stale:
+            print(f"{p} is stale: run `just edge-render`", file=sys.stderr)
+        if stale:
             return 1
-        print(f"{args.out} is up to date")
+        for p, _ in outputs:
+            print(f"{p} is up to date")
         return 0
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(text, encoding="utf-8", newline="\n")
-    print(f"wrote {args.out}")
+    for p, text in outputs:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8", newline="\n")
+        print(f"wrote {p}")
     return 0
 
 
