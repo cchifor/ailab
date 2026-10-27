@@ -120,7 +120,7 @@ hosts:
     edge: default
     auth: native # llm-router bearer keys + Keycloak sign-in
     access_gated: false
-    lan_dns: false
+    lan_dns: true
     # llm-router-edge holds requests while the single router pod restarts (llm-router/edge.yaml).
     backend: { url: "http://llm-router-edge.llm-router.svc.cluster.local:80" }
     smoke: { status: 200 }
