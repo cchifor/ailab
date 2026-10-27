@@ -46,7 +46,7 @@ hand-edited file. The output `edge_records` lists them.
 
 Before P4 (2026-10-27) the resource was `cloudflare_dns_record.tunnel`, fed by `var.tunnel_hostnames`;
 `moved.tf` carries the state across, forward only. Records first created outside Terraform were adopted by
-import blocks, deleted once adopted; `relay-import.tf` is the last, pending until P4's apply. Read
+import blocks, each deleted once adopted (the last, `relay-import.tf`, after P4's apply on 2026-10-27). Read
 `docs/runbooks/edge-ingress.md`, "DNS records and their state", before running an older checkout, a
 targeted apply or a rollback against this state.
 

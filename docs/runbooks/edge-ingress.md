@@ -115,9 +115,11 @@ operator state already holds for the identity provider; never print it). The pla
 **Before P4's first apply** a single-record `-target` is refused (the moves are pending; tofu asks to target
 `cloudflare_dns_record.edge` and `cloudflare_dns_record.tunnel` whole), so the first apply is untargeted.
 
-**P4's first apply** moves the 27 records (`moved.tf`: `tunnel["x"]` becomes `edge["x"]`), imports
-`relay` and creates `edge-canary`: 0 to change, 0 to destroy. Anything else: stop. Then delete
-`relay-import.tf` in the next PR.
+**P4's first apply** moved the 27 records (`moved.tf`: `tunnel["x"]` became `edge["x"]`), imported
+`relay` and created `edge-canary` (2026-10-27, state serial 48 to 49: "1 imported, 1 added, 0 changed,
+0 destroyed"; the plan after it: no changes). `relay-import.tf` went in the next PR, so no import block
+is left in the module. Adopting a record created outside Terraform again: one import block, applied,
+then deleted in the next PR.
 
 **Forward only.** Once the operator state holds `edge[...]` addresses, never plan or apply from a checkout
 older than the P4 merge: it would destroy every `edge[...]` record and try to create `tunnel[...]` ones
