@@ -9,5 +9,6 @@ dhcp_network:
   name: Home
 intents: []
 port_forward: null
-static_dns: {}
+static_dns:
+  edge-canary.chifor.me: 6ae0b774ca11f9b8900a05b8
 version: 1
