@@ -30,10 +30,11 @@ lan:
 
 # WAN TCP 443 -> the VIP. Created only once the VIP answers (the reconciler checks it), and only while
 # `enabled`; false removes it. The gateway must keep the WAN client's source address (no SNAT) and
-# loop LAN clients back (NAT loopback): to be verified when the forward is first enabled, and recorded
-# on the P3 PR (docs/runbooks/edge-ingress.md).
+# loop LAN clients back (NAT loopback): verified when the forward is first applied, and recorded on
+# the PR that enabled it. Apply it only while the proxy's metrics are bounded (no per_host): from the
+# WAN, per-host labels would record any Host a scanner sends (docs/runbooks/edge-ingress.md).
 port_forward:
-  enabled: true # opened 2026-10-27 (P6): 30/30 LAN smoke; per-host metrics bounded first
+  enabled: true # P6 (ADR 0040): gateway.py creates the forward only after the canary gate passes
   name: ailab-edge-https
   wan_interface: wan
   wan_port: 443
