@@ -140,9 +140,9 @@ tests:
     input_series:
       # expiry 13 days after the test's epoch (time() starts at 0); sampled every minute, because a
       # series sampled less often than the 5m lookback goes stale between samples and never holds `for`
-      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager",exported_namespace="edge",name="edge-wildcard"}'
         values: "1123200x180"
-      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="other"}'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager",exported_namespace="edge",name="other"}'
         values: "1123200x180"
     alert_rule_test:
       - eval_time: 2h
@@ -151,6 +151,7 @@ tests:
           - exp_labels:
               severity: warning
               namespace: edge
+              exported_namespace: edge
               name: edge-wildcard
             exp_annotations:
               summary: "edge-wildcard certificate expires in under 14 days"
@@ -161,7 +162,7 @@ tests:
   - interval: 1m
     name: 60 days left does not page
     input_series:
-      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager",exported_namespace="edge",name="edge-wildcard"}'
         values: "5184000x180"
     alert_rule_test:
       - eval_time: 2h
@@ -250,7 +251,7 @@ tests:
     input_series:
       # time() starts at 0: cert-manager has issued a certificate good for 80 days, yet edge-proxy-a
       # still serves one expiring at 13 days (a stale Secret projection); b serves a 60-day one
-      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager",exported_namespace="edge",name="edge-wildcard"}'
         values: "6912000x90"
       - series: 'edge_cert_served_not_after_seconds{job="edge-proxy",source="probe",pod="edge-proxy-a"}'
         values: "1123200x90"

@@ -63,6 +63,18 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
 3. Check from outside: an external HTTP check of `https://<host>.chifor.me`. The proxy's access log
    shows the probe's public address.
 
+**Before the first host goes direct (P6)**: Caddy labels its per-host metrics with whatever `Host`
+arrives over TLS (`per_host` on a TLS server observes every host; only plain-HTTP servers fall back
+to `_other`), so on the WAN a scanner could grow Caddy's in-memory series, and Prometheus, without
+bound. Caddy 2.11.7 has no producer-side bound for TLS hosts short of dropping `per_host`, so choose
+one first: drop `per_host` (EdgeUpstreamErrors then reads the whole proxy, not one host), or keep it
+and drop unknown-host samples at scrape time with a `metricRelabelings` `action: keep` on
+`source_labels: [host]`, on the Caddy endpoint (`source=caddy`) only. Its regex must also match the
+EMPTY value, because a series without a `host` label (Caddy's process and Go metrics) reads as "" and
+would otherwise be dropped too: `^(|router\.chifor\.me|git\.chifor\.me|...)$`, every registry host. The
+second protects Prometheus only, and Caddy still holds every series (restarts reset it). Do not relabel unknown hosts to `_other`: relabeling does not aggregate, it makes
+duplicate series within one scrape.
+
 **To tunnel** (planned): run `tofu apply` first with the host set to `tunnel`, wait 300 s (the apex
 TTL), then merge the proxy change. In an emergency do both at once and accept up to 300 s of 403
 for clients holding the old answer.

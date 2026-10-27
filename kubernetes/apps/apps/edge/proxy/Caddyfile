@@ -802,11 +802,13 @@ http://:9180 {
 		handle /reloader-metrics {
 			root * /config/reloader
 			rewrite * /metrics
+			header Content-Type "text/plain; version=0.0.4; charset=utf-8"
 			file_server
 		}
 		handle /probe-metrics {
 			root * /config/reloader
 			rewrite * /probe
+			header Content-Type "text/plain; version=0.0.4; charset=utf-8"
 			file_server
 		}
 		metrics /metrics

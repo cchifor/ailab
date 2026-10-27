@@ -37,6 +37,7 @@ OUTPUT = ROOT / "kubernetes/apps/apps/edge/proxy/Caddyfile"
 AUTHELIA = "authelia.auth.svc.cluster.local:9091"
 CERT = "/certs/tls.crt"
 KEY = "/certs/tls.key"
+PROM_TEXT = "text/plain; version=0.0.4; charset=utf-8"  # Prometheus text exposition format
 
 TOP_KEYS = {"version", "zone", "edge_default", "force_tunnel", "vip", "tunnel_id", "trusted_sources", "admin_sources",
             "tunnel_trusted_proxies", "hosts"}
@@ -625,16 +626,20 @@ def render(reg: dict, profile: dict | None = None) -> str:
     w("\t}")
     w("}")
     w("")
+    # The sidecars' metrics are files; file_server sends no Content-Type for a name without an
+    # extension, and Prometheus 3 refuses such a scrape, so set the text exposition type.
     w("http://:9180 {")
     w("\troute {")
     w("\t\thandle /reloader-metrics {")
     w("\t\t\troot * /config/reloader")
     w("\t\t\trewrite * /metrics")
+    w(f"\t\t\theader Content-Type \"{PROM_TEXT}\"")
     w("\t\t\tfile_server")
     w("\t\t}")
     w("\t\thandle /probe-metrics {")
     w("\t\t\troot * /config/reloader")
     w("\t\t\trewrite * /probe")
+    w(f"\t\t\theader Content-Type \"{PROM_TEXT}\"")
     w("\t\t\tfile_server")
     w("\t\t}")
     w("\t\tmetrics /metrics")

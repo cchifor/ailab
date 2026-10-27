@@ -49,7 +49,10 @@ def check(vip, fqdn, expect, insecure=False, path="/"):
     conn = PinnedHTTPS(vip, fqdn, context=ctx)
     t0 = time.monotonic()
     try:
-        conn.request("GET", path, headers={"User-Agent": "edge-smoke/1"})
+        # A browser's Accept: Authelia answers a client that sends none with 401 instead of the
+        # 302 to its login page that the registry's smoke outcomes describe.
+        conn.request("GET", path, headers={"User-Agent": "edge-smoke/1",
+                                           "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
         resp = conn.getresponse()
         resp.read(4096)
         cert = getattr(conn, "peer_cert", None) if not insecure else None
