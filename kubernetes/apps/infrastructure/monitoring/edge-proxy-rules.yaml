@@ -1,8 +1,15 @@
 # Alerts for the edge proxy (ADR 0040, docs/standards/edge-ingress.md): the Caddy DaemonSet
 # edge/edge-proxy that fronts every *.chifor.me hostname, directly and behind the tunnel.
-# Metrics via apps/edge/proxy/podmonitor.yaml (job=edge-proxy): Caddy's per-host request histogram
-# and the cert-reloader sidecar's counters; DaemonSet readiness from kube-state-metrics; the
-# certificate's expiry from cert-manager.
+# Metrics via apps/edge/proxy/podmonitor.yaml (job=edge-proxy; source=caddy for Caddy's per-host
+# histogram, source=reloader for the cert-reloader sidecar's counters), DaemonSet readiness from
+# kube-state-metrics, and the issued certificate's expiry from cert-manager.
+#
+# WHAT THE CERTIFICATE RULES PROVE TOGETHER: nothing scrapes the certificate a pod SERVES, so the
+# claim "every pod serves a valid certificate" is composed from three facts, one rule each:
+#   EdgeCertExpiringSoon   the issued certificate (the Secret) is fresh;
+#   EdgeCertNotLoaded      on each pod, the mounted pair is the one Caddy loaded (reloader gauge);
+#   EdgeCertReloaderStale  that gauge is current (the reloader loop's heartbeat), and
+#   EdgeCertReloaderNotScraped  it is being read at all.
 #
 # WHY: from P5 the tunnel and the direct path both go through this proxy, so a proxy that is down,
 # failing upstream or serving a stale certificate takes every public hostname with it.
@@ -43,7 +50,7 @@ spec:
               /config/drain, a failed rollout, or a missing certificate Secret). MetalLB announces
               only from nodes with a ready pod, so the VIP still works, with less headroom.
         - alert: EdgeProxyNotScraped
-          expr: absent(up{job="edge-proxy"} == 1)
+          expr: absent(up{job="edge-proxy",source="caddy"} == 1)
           for: 15m
           labels:
             severity: warning
@@ -81,6 +88,37 @@ spec:
               The cert-reloader sidecar on {{ $labels.pod }} keeps failing to reload Caddy, or the
               renewed pair does not validate, so Caddy is still serving the previous certificate.
               Check `kubectl -n edge logs {{ $labels.pod }} -c cert-reloader`.
+        - alert: EdgeCertNotLoaded
+          expr: edge_cert_files_not_loaded{job="edge-proxy"} == 1
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "edge-proxy on {{ $labels.pod }} serves a certificate other than the mounted one"
+            description: >-
+              For an hour the certificate mounted on {{ $labels.pod }} has not been the one Caddy
+              loaded: a renewal is not being served there. See EdgeCertReloadFailing and the
+              cert-reloader container's log.
+        - alert: EdgeCertReloaderStale
+          expr: time() - edge_cert_reloader_heartbeat_seconds{job="edge-proxy"} > 900
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the cert-reloader loop on {{ $labels.pod }} has stopped"
+            description: >-
+              The cert-reloader on {{ $labels.pod }} has not completed a pass for over 15 minutes,
+              so EdgeCertNotLoaded cannot be trusted there and a renewal would not be loaded.
+        - alert: EdgeCertReloaderNotScraped
+          expr: up{job="edge-proxy",source="reloader"} == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the cert-reloader metrics on {{ $labels.pod }} cannot be read"
+            description: >-
+              /reloader-metrics on {{ $labels.pod }} has failed to scrape for 15m (the sidecar has
+              not written its file yet, or it is gone), so the certificate rules are blind there.
         - alert: EdgeCertExpiringSoon
           expr: >-
             certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}

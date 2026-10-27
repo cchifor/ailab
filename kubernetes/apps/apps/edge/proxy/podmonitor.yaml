@@ -18,8 +18,10 @@ spec:
       interval: 30s
       relabelings:
         - { targetLabel: job, replacement: edge-proxy }
+        - { targetLabel: source, replacement: caddy } # same port and address as below: keep the series apart
     - port: metrics
       path: /reloader-metrics
       interval: 60s
       relabelings:
         - { targetLabel: job, replacement: edge-proxy }
+        - { targetLabel: source, replacement: reloader }

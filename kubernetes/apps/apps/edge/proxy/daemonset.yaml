@@ -6,8 +6,9 @@
 #   8080 tunnel   plain HTTP, Service edge-proxy-tunnel, only cloudflared may connect (NetworkPolicy);
 #                 client = CF-Connecting-IP
 #   8081 redirect the VIP's :80, trusted sources only
-#   8082 health   /healthz; 503 while /config/drain exists (`touch /config/drain` takes this node's
-#                 endpoint out, so MetalLB moves the VIP, without deleting the pod)
+#   8082 health   /healthz; 503 while /config/drain (an operator's drain: `touch /config/drain` takes
+#                 this node's endpoint out, so MetalLB moves the VIP, without deleting the pod) or
+#                 /config/shutdown (written by preStop; cleared when Caddy starts) exists
 #   9180 metrics  Caddy's /metrics and the cert-reloader's /reloader-metrics
 #
 # Control-plane nodes, deliberately: they already run cloudflared and the apps, and they carry
@@ -61,7 +62,10 @@ spec:
         - name: caddy
           image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
           imagePullPolicy: IfNotPresent
-          command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+          # /config is an emptyDir that survives a container restart (a liveness kill also runs preStop),
+          # so the shutdown marker is cleared here or the restarted Caddy would stay unready forever.
+          # An operator's /config/drain is deliberately kept.
+          command: [sh, -c, "rm -f /config/shutdown && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
           env:
             - { name: XDG_DATA_HOME, value: /data }
             - { name: XDG_CONFIG_HOME, value: /config }
@@ -87,7 +91,7 @@ spec:
               # Readiness turns off first, so MetalLB and the endpoints move before Caddy stops
               # accepting; open streams then get grace_period 90s.
               exec:
-                command: [sh, -c, "touch /config/drain && sleep 10"]
+                command: [sh, -c, "touch /config/shutdown && sleep 10"]
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits: { cpu: "1", memory: 512Mi }

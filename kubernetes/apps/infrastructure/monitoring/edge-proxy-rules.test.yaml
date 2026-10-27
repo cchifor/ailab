@@ -58,8 +58,11 @@ tests:
   - interval: 1m
     name: no answering target pages after 15m; one answering target does not
     input_series:
-      - series: 'up{job="edge-proxy",pod="edge-proxy-a"}'
+      - series: 'up{job="edge-proxy",source="caddy",pod="edge-proxy-a"}'
         values: "1x5 0x20"
+      # the reloader endpoint answering does not count as the proxy being scraped
+      - series: 'up{job="edge-proxy",source="reloader",pod="edge-proxy-a"}'
+        values: "1x25"
     alert_rule_test:
       - eval_time: 4m
         alertname: EdgeProxyNotScraped
@@ -164,3 +167,80 @@ tests:
       - eval_time: 2h
         alertname: EdgeCertExpiringSoon
         exp_alerts: []
+
+  - interval: 1m
+    name: a mounted certificate not loaded for an hour pages, for that pod only
+    input_series:
+      - series: 'edge_cert_files_not_loaded{job="edge-proxy",source="reloader",pod="edge-proxy-a"}'
+        values: "0x5 1x70"
+      - series: 'edge_cert_files_not_loaded{job="edge-proxy",source="reloader",pod="edge-proxy-b"}'
+        values: "0x5 1x10 0x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: EdgeCertNotLoaded
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: EdgeCertNotLoaded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: edge-proxy
+              source: reloader
+              pod: edge-proxy-a
+            exp_annotations:
+              summary: "edge-proxy on edge-proxy-a serves a certificate other than the mounted one"
+              description: >-
+                For an hour the certificate mounted on edge-proxy-a has not been the one Caddy
+                loaded: a renewal is not being served there. See EdgeCertReloadFailing and the
+                cert-reloader container's log.
+
+  - interval: 1m
+    name: a reloader heartbeat older than 15 minutes pages; a ticking one does not
+    input_series:
+      # edge-proxy-a stops at t=5m (heartbeat frozen at 300 s); edge-proxy-b keeps beating every minute
+      - series: 'edge_cert_reloader_heartbeat_seconds{job="edge-proxy",source="reloader",pod="edge-proxy-a"}'
+        values: "0+60x5 300x40"
+      - series: 'edge_cert_reloader_heartbeat_seconds{job="edge-proxy",source="reloader",pod="edge-proxy-b"}'
+        values: "0+60x45"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: EdgeCertReloaderStale
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: EdgeCertReloaderStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: edge-proxy
+              source: reloader
+              pod: edge-proxy-a
+            exp_annotations:
+              summary: "the cert-reloader loop on edge-proxy-a has stopped"
+              description: >-
+                The cert-reloader on edge-proxy-a has not completed a pass for over 15 minutes,
+                so EdgeCertNotLoaded cannot be trusted there and a renewal would not be loaded.
+
+  - interval: 1m
+    name: a reloader endpoint failing to scrape for 15m pages
+    input_series:
+      - series: 'up{job="edge-proxy",source="reloader",pod="edge-proxy-a"}'
+        values: "1x3 0x20"
+      - series: 'up{job="edge-proxy",source="caddy",pod="edge-proxy-a"}'
+        values: "1x23"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EdgeCertReloaderNotScraped
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: EdgeCertReloaderNotScraped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: edge-proxy
+              source: reloader
+              pod: edge-proxy-a
+            exp_annotations:
+              summary: "the cert-reloader metrics on edge-proxy-a cannot be read"
+              description: >-
+                /reloader-metrics on edge-proxy-a has failed to scrape for 15m (the sidecar has
+                not written its file yet, or it is gone), so the certificate rules are blind there.
