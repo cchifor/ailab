@@ -10,5 +10,6 @@ dhcp_network:
 intents: []
 port_forward: null
 static_dns:
-  edge-canary.chifor.me: 6ae0b774ca11f9b8900a05b8
+  edge-canary.chifor.me: 6ae0bc77ca11f9b8900a091a
+  edge-vip.lan: 6ae0bc76ca11f9b8900a0917
 version: 1
