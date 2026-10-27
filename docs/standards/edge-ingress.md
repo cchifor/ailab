@@ -41,7 +41,7 @@ it and fails CI on any violation. Every entry MUST declare:
 |---|---|---|
 | `exposure` | `public`, `private` | who may reach it |
 | `edge` | `default`, `direct`, `tunnel` | public only |
-| `auth` | `native`, `authelia`, `none` | who authenticates people; `none` only for public content |
+| `auth` | `native`, `authelia`, `none` | who authenticates people; `none` only for public content or a fixed `respond` backend |
 | `access_gated` | bool | relies on Cloudflare Access while in tunnel mode |
 | `backend` | URL (+ TLS and Host options) or a fixed response | where requests go |
 | `routes` | ordered path rules | exceptions: path guards, splits, restricted paths |
@@ -56,7 +56,8 @@ Validation MUST reject:
 - an `access_gated` host with `auth: none`. In tunnel mode such a host is served to every trusted
   source on the direct listener with no Access in front, so it needs `authelia` or `native` auth
   whatever its mode;
-- `auth: none` on a private host.
+- `auth: none` on a private host, unless its backend is a fixed `respond` (no upstream: the canary,
+  which must be able to rehearse every mode).
 
 A parity test MUST hold every backend equal to the routing it replaced (the frozen 2026-10-27
 cloudflared ingress), except for differences listed in the test with a reason.

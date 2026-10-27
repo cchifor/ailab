@@ -38,6 +38,10 @@ kubectl --context admin@ai -n edge logs ds/edge-proxy -c caddy --tail=50
 To find which node announces the VIP, check `ip neigh show 192.168.0.51` on a LAN host and match
 the MAC to a control-plane VM, or read the speaker logs in `metallb-system`.
 
+**Every registry edit is followed by `just edge-render`**, and the registry, the Caddyfile and
+`kubernetes/edge/dns-records.json` are committed together: from P4 the DNS plan refuses a registry it
+was not rendered from (and CI refuses stale generated files).
+
 ## Add a hostname (complete from P5)
 
 Until P5, cloudflared still routes each host from its own rule in `cloudflared.yaml`, and the DNS
@@ -52,9 +56,10 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
 3. `just edge-render` (it rewrites the Caddyfile and `kubernetes/edge/dns-records.json`), commit both,
    open the PR. CI validates the schema and parity, checks both files are current, and runs the runtime
    fixture. Merge, and wait for Flux to reconcile the policy and the proxy.
-4. `just edge-smoke --host <name>` from the LAN. Only when it passes: set `lan_dns: true`, run
-   `just edge-gateway-plan`, then `just edge-gateway-apply --plan-hash <hash>`, then `tofu apply` for
-   its DNS record.
+4. `just edge-smoke --host <name>` from the LAN. Only when it passes: set `lan_dns: true`,
+   `just edge-render`, commit and merge; then `just edge-gateway-plan`,
+   `just edge-gateway-apply --plan-hash <hash>`, and `tofu apply` for its DNS record from a checkout at
+   that merge.
 
 ## Switch a host between tunnel and direct (from P4)
 
@@ -78,11 +83,12 @@ would otherwise be dropped too: `^(|router\.chifor\.me|git\.chifor\.me|...)$`, e
 second protects Prometheus only, and Caddy still holds every series (restarts reset it). Do not relabel unknown hosts to `_other`: relabeling does not aggregate, it makes
 duplicate series within one scrape.
 
-**To tunnel** (planned): run `tofu apply` first with the host set to `tunnel`, wait 300 s (the apex
-TTL), then merge the proxy change. In an emergency do both at once and accept up to 300 s of 403
-for clients holding the old answer.
+**To tunnel** (planned): on a branch, set the host to `tunnel` and `just edge-render`; run `tofu apply`
+from that branch first, wait 300 s (the apex TTL), then merge (the proxy change). In an emergency do
+both at once and accept up to 300 s of 403 for clients holding the old answer.
 
-**Everything to the tunnel**: set `force_tunnel: true`, commit, `tofu apply`, merge.
+**Everything to the tunnel**: set `force_tunnel: true`, `just edge-render`, commit, `tofu apply` from
+that commit, merge.
 
 ## DNS records and their state (from P4)
 
@@ -130,12 +136,23 @@ block every plan, which is why the adopted records' blocks were deleted.
 
 Before the first real host changes mode (P6), run every DNS transition on `edge-canary` (a fixed answer,
 nothing behind it) and record the evidence on the P4 PR. Each step is a registry edit on a scratch branch,
-`just edge-render`, and a targeted apply from that checkout, with the inputs from "Applying" above:
+`just edge-render`, and a targeted apply from that checkout, with the inputs from "Applying" above.
+
+Start the sampler in a second terminal BEFORE each apply, and keep it running until both resolvers have
+shown the new answer for longer than the record's TTL. It logs each resolver's status (NOERROR, NXDOMAIN)
+with the answer, so a gap is visible as such and not as an empty line:
+
+```bash
+while true; do for r in 1.1.1.1 192.168.0.1; do
+  printf '%s %-11s ' "$(date +%T)" "$r"
+  dig +noall +comments +answer edge-canary.chifor.me @"$r" | grep -E 'status:|IN' | sed 's/.*status: \([A-Z]*\).*/\1/' | tr '\n' ' '
+  echo
+done; sleep 1; done | tee -a canary-dns.log
+```
 
 ```bash
 tofu plan  '-target=cloudflare_dns_record.edge["edge-canary"]'
 tofu apply '-target=cloudflare_dns_record.edge["edge-canary"]'
-for i in $(seq 90); do date +%T; dig +short edge-canary.chifor.me @1.1.1.1; dig +short edge-canary.chifor.me @192.168.0.1; sleep 1; done
 ```
 
 1. tunnel to direct (`edge: direct`): an in-place update, proxied CNAME to a DNS-only CNAME (answered
@@ -146,6 +163,8 @@ for i in $(seq 90); do date +%T; dig +short edge-canary.chifor.me @1.1.1.1; dig 
 4. Interrupt a replacement once (Ctrl-C after the delete) and recover as in "An interrupted replacement".
 
 Record the provider and tofu versions, each plan's summary, each window and what each resolver answered.
+A resolver that kept serving its cached answer through the replacement hides the gap: record that as
+"not observed (cached until <time>)", never as a zero-length gap.
 The canary ends in tunnel mode, as on main; discard the scratch branch.
 
 ## The gateway (from P3)
@@ -171,8 +190,8 @@ just edge-gateway-apply --only dhcp --plan-hash <hash>
 | Situation | Action |
 |---|---|
 | One host misbehaves direct | Switch it to tunnel (above) |
-| All direct hosts | `force_tunnel: true` + `tofu apply` + merge |
-| The proxy or MetalLB is broken (after P5) | (1) `force_tunnel` + `tofu apply`; (2) `git revert` of the P5 commit, which takes cloudflared back to per-host backends (app policies still admit cloudflared until P9); (3) set `lan_dns: false` for the affected hosts, then `just edge-gateway-plan` and `just edge-gateway-apply --plan-hash <hash>`; (4) wait out the caches (300 s public, 60 s local) |
+| All direct hosts | `force_tunnel: true` + `just edge-render` + `tofu apply` + merge |
+| The proxy or MetalLB is broken (after P5) | (1) `force_tunnel` + `just edge-render` + `tofu apply`; (2) `git revert` of the P5 commit, which takes cloudflared back to per-host backends (app policies still admit cloudflared until P9); (3) set `lan_dns: false` for the affected hosts + `just edge-render`, then `just edge-gateway-plan` and `just edge-gateway-apply --plan-hash <hash>`; (4) wait out the caches (300 s public, 60 s local) |
 | Stop serving the WAN at once | `port_forward.enabled: false` in `gateway.yaml`, then `just edge-gateway-plan` and `just edge-gateway-apply --plan-hash <hash>` |
 
 Every apply, emergency or not, takes the hash of the plan it carries out; `--only` narrows both the plan
