@@ -66,8 +66,8 @@ cloudflared ingress), except for differences listed in the test with a reason.
 | | DNS (Cloudflare) | Direct listener (:443) | Tunnel listener |
 |---|---|---|---|
 | public, `direct` | CNAME -> apex, DNS-only | any source | served |
-| public, `tunnel` | CNAME -> tunnel, proxied | trusted sources only | served |
-| private | A -> VIP, DNS-only | trusted sources only | 404 |
+| public, `tunnel` | CNAME -> tunnel, proxied | LAN tier (admin tier if `access_gated`) | served |
+| private | A -> VIP, DNS-only | admin tier only | 404 |
 | unknown host | none | 404 | 404 |
 
 The apex `chifor.me` A record follows the WAN address through the gateway's DDNS; direct hosts are
@@ -107,13 +107,23 @@ and `cloudflared` in their NetworkPolicy.
 
 ### 5.3 Private access
 
-Private hosts and restricted paths are authorised by the **TCP peer only**, never by a header.
+Source trust is decided by the **TCP peer only**, never by a header. There are two tiers.
 
-- **Trusted**: 192.168.0.0/23, 192.168.50.0/24 (Trusted VLAN), 192.168.99.0/24 (Mgmt VLAN) and the
-  VPN range.
-- **Excluded**: the gateway 192.168.0.1 (the NAT-loopback source) and the Talos node addresses.
+- **LAN**: 192.168.0.0/23, 192.168.50.0/24 (Trusted VLAN), 192.168.99.0/24 (Mgmt VLAN) and the VPN
+  range, **minus** the gateway 192.168.0.1 (the NAT-loopback source) and the Talos node addresses.
+  A tunnel-mode host that is not `access_gated` is served to the LAN on the direct listener; so is
+  the HTTP redirect.
+- **Admin**: the LAN **minus the lab statics block** 192.168.0.0–.51, plus named exceptions (the
+  owner's Windows VM .38). That block is infrastructure and automation: the dev-workers, CI runners,
+  reviewers and cloudlab runners run agent- and PR-written code, and must not reach admin surfaces
+  even with the right Host. People's devices take DHCP addresses (.52 and up) or sit on the Trusted
+  and Mgmt VLANs. **Private hosts, `access_gated` hosts in tunnel mode and restricted paths** are
+  served only to this tier.
 
-Every new path into the LAN (a VLAN, a VPN, a loopback) MUST be measured before it is trusted.
+The registry (`trusted_sources`, `admin_sources`) holds both lists, and the renderer turns each tier
+into explicit CIDRs. Every new path into the LAN (a VLAN, a VPN, a loopback) MUST be measured before it
+is trusted, and a new lab static MUST land inside `.2`–`.51` (docs/network-plan.md), which keeps it out
+of the admin tier by construction.
 
 ### 5.4 Authentication
 
