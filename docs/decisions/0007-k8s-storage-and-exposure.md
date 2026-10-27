@@ -13,6 +13,10 @@
   sub-phase — see `docs/k8s-architecture.md`).
 
 ## Internet exposure
+
+> **Superseded 2026-10-27 by ADR 0040** (self-hosted edge ingress, with this tunnel kept as a per-host
+> fallback; standard `docs/standards/edge-ingress.md`). The text below records the original decision.
+
 - **Cloudflare Tunnel** (`cloudflared`, ≥2 replicas) as the public path — egress-only, no open ports,
   hides the home IP, free WAF; fronts **Traefik** which does per-app routing in-cluster.
 - **cert-manager** with the Cloudflare **DNS-01** solver issues a wildcard `*.chifor.me` (works behind
