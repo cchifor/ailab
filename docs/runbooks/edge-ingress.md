@@ -90,14 +90,30 @@ just edge-gateway-plan --only dhcp             # first step on a rebuild ...
 just edge-gateway-apply --only dhcp --plan-hash <hash>
 ```
 
-- **Owned objects**: listed in `gateway-state.yaml` (commit it after every apply). The reconciler
-  never touches anything else: the Nextcloud forwards, the `*.lan` records and the other networks.
+- **Owned objects**: listed in `gateway-state.yaml` (commit it after every apply): the LAN network
+  whose DHCP range the reconciler sets, its DNS records and its WAN forward. It never touches anything
+  else: the Nextcloud forwards, the `*.lan` records, the other networks. On a controller the state
+  does not know yet, take the network over first: `just edge-gateway-plan --adopt Home`, then apply
+  that plan (bookkeeping only; the range changes only if it differs). Until then a range difference
+  aborts.
+- **An owned ID with another identity aborts**: a record whose key, a forward whose name, or a
+  network whose name no longer matches the state (renamed, or the ID reused). Inspect it in the UI;
+  `--forget <recorded name>` drops it, then `--adopt` if it is in fact ours.
 - **"collision" abort**: an unowned object has a key the registry wants. Inspect it in the UniFi UI;
-  if it should be managed, run `--adopt <key>`.
-- **"intent without ID" abort**: a create was interrupted. The run lists the matching objects; adopt
-  the right one with `--adopt <key>`, or delete it in the UI and re-run.
-- **Network-config changes** (the DHCP range) run in a declared window: UniFi has no conditional
-  update, so a concurrent UI edit could be overwritten.
+  if it should be managed, run `--adopt <key>`. A second record with our key, a second forward with
+  our name, or any other enabled forward on WAN 443 aborts even when ours exists, and every check runs
+  again from a fresh read right before each change.
+- **"interrupted create" abort**: a create's outcome is unknown. `--adopt <key>` takes the object only
+  if it holds the fields the create sent (the state records them); otherwise delete it in the UI and
+  `--forget <key>`.
+- **The DHCP range** is changed only after a check that no active client holds an address the change
+  gives back (other than its fixed IP); the check runs at plan time and again right before the write.
+  Move or reserve those clients, or re-plan with `--ack-dhcp-leases` (it is part of the plan hash).
+  Network-config changes still run in a declared window: UniFi has no conditional update, so a
+  concurrent UI edit could be overwritten.
+- **The WAN forward** (create, or an update that enables it) first needs the VIP to serve
+  edge-canary's own answer with a valid certificate. `--skip-vip-check` overrides that, is part of the
+  plan hash and prints a warning in the plan.
 
 ## Rollback
 

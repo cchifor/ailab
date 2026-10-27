@@ -54,6 +54,10 @@ class FakeUnifi:
         self.calls = []
         self.fail_next_create = False
         self.n = 0
+        self.clients = []
+
+    def active_clients(self):
+        return copy.deepcopy(self.clients)
 
     def inventory(self):
         return copy.deepcopy(self.inv)
@@ -117,11 +121,16 @@ class Base(unittest.TestCase):
         self.tmp.cleanup()
 
     def plan(self, **kw):
+        # the WAN gate needs a live VIP; tests that exercise it pass skip_vip_check=False
+        kw.setdefault("skip_vip_check", True)
         return gateway.make_plan(self.g, self.reg, self.state, self.api.inventory(), **kw)
 
     def apply(self, plan, **kw):
         gateway.apply(self.api, self.g, self.reg, self.state, plan, state_path=self.state_path,
-                      skip_vip_check=True, log=lambda *_: None, **kw)
+                      log=lambda *_: None, **kw)
+
+    def ops(self, plan):
+        return [(o["action"], o["kind"], o["key"]) for o in plan["ops"]]
 
     def lan_dns(self, *names, on=True):
         for n in names:
@@ -197,6 +206,7 @@ class Planning(Base):
         with self.assertRaises(gateway.GatewayError):
             self.apply(self.plan())
         self.assertEqual([(i["kind"], i["key"]) for i in self.state["intents"]], [("dns", "router.chifor.me")])
+        self.assertEqual(self.state["intents"][0]["fields"]["value"], "192.168.0.51")
         on_disk = gateway.load_state(self.g, self.state_path)
         self.assertEqual(len(on_disk["intents"]), 1)
         plan = self.plan()
@@ -221,6 +231,48 @@ class Planning(Base):
         self.apply(plan)
         self.assertEqual(self.state["intents"], [])
         self.assertIn("router.chifor.me", self.state["static_dns"])
+
+    def test_adopting_an_intent_needs_the_fields_it_sent(self):
+        # an object carrying the key but not the create's fields is somebody else's
+        self.lan_dns("router")
+        self.state["intents"].append({"kind": "dns", "key": "router.chifor.me", "at": 0, "fields": {
+            "key": "router.chifor.me", "value": "192.168.0.51", "record_type": "A", "enabled": True, "ttl": 60}})
+        self.api.inv["static_dns"].append({"_id": "dns-x", "key": "router.chifor.me", "value": "10.0.0.1",
+                                           "record_type": "A", "enabled": True, "ttl": 0})
+        plan = self.plan(adopt=["router.chifor.me"])
+        self.assertTrue(any("not that create's" in e for e in plan["errors"]), plan["errors"])
+        self.assertEqual(plan["ops"], [])
+
+    def test_owned_record_with_a_duplicate_key_aborts(self):
+        self.lan_dns("router")
+        self.apply(self.plan())
+        self.api.inv["static_dns"].append({"_id": "dns-dup", "key": "router.chifor.me", "value": "10.0.0.1",
+                                           "record_type": "A", "enabled": True, "ttl": 0})
+        plan = self.plan()
+        self.assertTrue(any("other record(s) carry this key" in e for e in plan["errors"]), plan["errors"])
+
+    def test_a_collision_after_the_plan_stops_the_apply(self):
+        self.lan_dns("router")
+        plan = self.plan()
+        self.api.inv["static_dns"].append({"_id": "dns-late", "key": "router.chifor.me", "value": "10.0.0.1",
+                                           "record_type": "A", "enabled": True, "ttl": 0})
+        with self.assertRaises(gateway.GatewayError):
+            self.apply(plan)
+        self.assertNotIn(("create_dns", "router.chifor.me"), self.api.calls)
+
+    def test_mixed_operations_follow_the_phases(self):
+        # owned: the Home network, router's record, the forward; then withdraw both, move the range, add git
+        self.g["port_forward"]["enabled"] = True
+        self.lan_dns("router")
+        self.apply(self.plan(adopt=["Home"]))
+        self.g["port_forward"]["enabled"] = False
+        self.lan_dns("router", on=False)
+        self.lan_dns("git")
+        self.g["lan"]["dhcp_start"] = "192.168.0.53"
+        self.assertEqual(self.ops(self.plan()), [("delete", "forward", "ailab-edge-https"),
+                                                 ("delete", "dns", "router.chifor.me"),
+                                                 ("update", "dhcp", "Home"),
+                                                 ("create", "dns", "git.chifor.me")])
 
     def test_empty_registry_is_refused_before_planning(self):
         with self.assertRaises(render.RegistryError):
@@ -279,14 +331,65 @@ class Forward(Base):
         plan = self.plan()
         self.assertEqual([o["kind"] for o in plan["ops"]], ["dns", "forward"])
 
+    def owned_forward(self):
+        self.g["port_forward"]["enabled"] = True
+        self.apply(self.plan())
+        return self.state["port_forward"]["id"]
+
+    def test_a_reused_or_renamed_forward_id_stops_the_run(self):
+        oid = self.owned_forward()
+        for r in self.api.inv["portforward"]:
+            if r["_id"] == oid:
+                r["name"] = "someone-else"
+        plan = self.plan()
+        self.assertTrue(any("may have been reused" in e for e in plan["errors"]), plan["errors"])
+        self.assertEqual(plan["ops"], [])
+        plan = self.plan(forget=["ailab-edge-https"])
+        self.assertEqual(self.ops(plan)[0], ("forget", "forward", "ailab-edge-https"))
+
+    def test_an_owned_forward_with_a_new_443_neighbour_aborts(self):
+        self.owned_forward()
+        self.api.inv["portforward"].append({"_id": "pf-new", "name": "game", "enabled": True,
+                                            "pfwd_interface": "wan", "dst_port": "400-500", "fwd": "192.168.0.99",
+                                            "fwd_port": "443", "proto": "tcp"})
+        plan = self.plan()
+        self.assertTrue(any("already takes WAN port 443" in e for e in plan["errors"]), plan["errors"])
+        self.assertEqual(plan["ops"], [])
+
+    def test_the_wan_gate_also_guards_an_update(self):
+        oid = self.owned_forward()
+        for r in self.api.inv["portforward"]:
+            if r["_id"] == oid:
+                r["enabled"] = False  # disabled by hand in the UI
+        plan = self.plan(skip_vip_check=False)
+        self.assertEqual(self.ops(plan), [("update", "forward", "ailab-edge-https")])
+        real = gateway.vip_answers
+        try:
+            gateway.vip_answers = lambda *a: False
+            with self.assertRaises(gateway.GatewayError):
+                self.apply(plan)
+            self.assertNotIn(("update_portforward", oid), self.api.calls)
+            gateway.vip_answers = lambda *a: True
+            self.apply(plan)
+        finally:
+            gateway.vip_answers = real
+        self.assertEqual(self.plan()["ops"], [])
+
+    def test_the_gate_wants_the_canarys_own_answer(self):
+        marker = gateway.canary_marker(self.reg)
+        self.assertEqual(marker, b"edge-canary ok peer=")
+        self.assertTrue(gateway.canary_ok(b"HTTP/1.1 200 OK\r\nServer: x\r\n\r\nedge-canary ok peer=1.2.3.4", marker))
+        self.assertFalse(gateway.canary_ok(b"HTTP/1.1 200 OK\r\n\r\n<html>some other site</html>", marker))
+        self.assertFalse(gateway.canary_ok(b"HTTP/1.1 403 Forbidden\r\n\r\nedge-canary ok peer=", marker))
+
 
 class Dhcp(Base):
     def test_drift_is_corrected_preserving_every_other_field(self):
         home = self.api.inv["networkconf"][0]
         home["dhcpd_start"] = "192.168.0.50"
         before = copy.deepcopy(home)
-        plan = self.plan()
-        self.assertEqual([(o["kind"], o["action"]) for o in plan["ops"]], [("dhcp", "update")])
+        plan = self.plan(adopt=["Home"])
+        self.assertEqual([(o["kind"], o["action"]) for o in plan["ops"]], [("dhcp", "adopt"), ("dhcp", "update")])
         gateway.BACKUPS = pathlib.Path(self.tmp.name) / "backups"
         self.apply(plan)
         after = self.api.inv["networkconf"][0]
@@ -296,6 +399,53 @@ class Dhcp(Base):
                 self.assertEqual(after[k], v, k)
         backup = list((pathlib.Path(self.tmp.name) / "backups").glob("*.json"))[0].read_text()
         self.assertNotIn("x_something", backup)
+
+    def test_an_unowned_network_is_never_changed(self):
+        self.api.inv["networkconf"][0]["dhcpd_start"] = "192.168.0.50"
+        plan = self.plan()
+        self.assertTrue(any("not ours" in e for e in plan["errors"]), plan["errors"])
+        self.assertEqual(plan["ops"], [])
+
+    def test_state_owning_another_network_is_refused(self):
+        self.state["dhcp_network"] = {"id": "net-lab", "name": "Lab"}
+        self.assertTrue(any("but gateway.yaml names" in e for e in self.plan()["errors"]))
+        plan = self.plan(forget=["Home"])  # the forget names gateway.yaml's network: no effect on Lab's entry
+        self.assertTrue(any("but gateway.yaml names" in e for e in plan["errors"]))
+        plan = self.plan(forget=["Lab"])  # the owned entry's own name releases it
+        self.assertEqual(self.ops(plan), [("forget", "dhcp", "Lab")])
+        self.assertEqual(plan["errors"], [])
+
+    def lease_plan(self, **kw):
+        self.api.inv["networkconf"][0]["dhcpd_start"] = "192.168.0.50"
+        self.state["dhcp_network"] = {"id": HOME, "name": "Home"}
+        plan = self.plan(**kw)
+        gateway.check_leases(plan, self.api.active_clients())
+        return plan
+
+    def test_taking_back_an_active_clients_address_is_refused(self):
+        self.api.clients = [{"ip": "192.168.0.51", "network_id": HOME, "hostname": "phone", "mac": "aa"},
+                            {"ip": "192.168.0.80", "network_id": HOME, "mac": "bb"}]
+        plan = self.lease_plan()
+        self.assertTrue(any("192.168.0.51 (phone)" in e for e in plan["errors"]), plan["errors"])
+        self.assertFalse(any("192.168.0.80" in e for e in plan["errors"]))
+        acked = self.lease_plan(ack_dhcp_leases=True)
+        self.assertEqual(acked["errors"], [])
+        self.assertNotEqual(plan["hash"], acked["hash"])
+
+    def test_a_fixed_ip_client_is_not_a_conflict(self):
+        self.api.clients = [{"ip": "192.168.0.50", "network_id": HOME, "use_fixedip": True,
+                             "fixed_ip": "192.168.0.50", "mac": "cc"},
+                            {"ip": "192.168.0.51", "network_id": "net-lab", "mac": "dd"}]
+        self.assertEqual(self.lease_plan()["errors"], [])
+
+    def test_a_client_arriving_after_the_plan_stops_the_write(self):
+        plan = self.lease_plan()
+        self.assertEqual(plan["errors"], [])
+        self.api.clients = [{"ip": "192.168.0.50", "network_id": HOME, "mac": "ee"}]
+        gateway.BACKUPS = pathlib.Path(self.tmp.name) / "backups"
+        with self.assertRaises(gateway.GatewayError):
+            self.apply(plan)
+        self.assertNotIn(("update_network", HOME), self.api.calls)
 
     def test_vip_inside_the_range_is_refused(self):
         self.g["lan"]["dhcp_start"] = "192.168.0.50"
@@ -312,6 +462,8 @@ class Binding(Base):
         self.assertEqual(h0, self.plan()["hash"])
         self.assertNotEqual(h0, self.plan(only=["dns"])["hash"])
         self.assertNotEqual(h0, self.plan(adopt=["x.chifor.me"])["hash"])
+        self.assertNotEqual(h0, self.plan(skip_vip_check=False)["hash"])
+        self.assertNotEqual(h0, self.plan(ack_dhcp_leases=True)["hash"])
         self.api.inv["portforward"][0]["log"] = False  # an unrelated object changed
         self.assertNotEqual(h0, self.plan()["hash"])
 
@@ -344,6 +496,15 @@ class Binding(Base):
             gateway.UnifiClient._classic_list(200, {"meta": {"rc": "error", "msg": "api.err.LoginRequired"}}, "x")
         with self.assertRaises(gateway.GatewayError):
             gateway.UnifiClient._v2_list(500, None, "x")
+
+    def test_a_paged_listing_is_refused(self):
+        ok = {"meta": {"rc": "ok"}, "data": [{"_id": "a"}]}
+        self.assertEqual(gateway.UnifiClient._classic_list(200, ok, "x"), [{"_id": "a"}])
+        for paged in ({"meta": {"rc": "ok", "count": 500}, "data": [{"_id": "a"}]},
+                      {"meta": {"rc": "ok"}, "data": [{"_id": "a"}], "offset": 0},
+                      {"meta": {"rc": "ok", "next": "cursor"}, "data": []}):
+            with self.assertRaises(gateway.GatewayError):
+                gateway.UnifiClient._classic_list(200, paged, "x")
 
     def test_missing_ddns_is_a_warning_not_a_change(self):
         self.api.inv["dynamicdns"] = self.api.inv["dynamicdns"][:1]

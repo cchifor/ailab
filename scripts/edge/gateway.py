@@ -2,6 +2,7 @@
 """Reconcile the home gateway (UniFi) with the edge's desired state (ADR 0040).
 
     python3 scripts/edge/gateway.py plan  [--only dhcp|dns|forward] [--adopt KEY] [--forget KEY]
+                                          [--skip-vip-check] [--ack-dhcp-leases]
     python3 scripts/edge/gateway.py apply --plan-hash HASH [same options as the plan]
     python3 scripts/edge/gateway.py fingerprint      # the controller certificate's SHA-256
 
@@ -9,16 +10,27 @@ Desired state: kubernetes/edge/gateway.yaml (the gateway contract) and kubernete
 (the hosts with lan_dns: true, the VIP). Owned objects: kubernetes/edge/gateway-state.yaml.
 
 Guarantees (docs/standards/edge-ingress.md section 6, plans/2026-10-27-edge-ingress-plan.md section 3):
-  - Ownership: only objects whose IDs are in the state file are updated or deleted. An unowned object
-    in the way (a static DNS key, a forward name, any other WAN 443 forward) aborts the run; --adopt
-    takes one over explicitly. An owned object that vanished aborts; --forget drops it from the state.
-  - Fail closed: every listing is validated (classic `meta.rc == "ok"` + list, v2 list); anything
-    partial or unexpected aborts before a plan exists, so "absent" is never inferred from a bad read.
-  - Plan binding: the hash covers the whole inventory read, the operations and every option, and apply
-    recomputes it and aborts on any difference. Each mutation re-reads its object first and checks it
-    is unchanged since the plan, and is verified by a read afterwards.
-  - Crash safety: a create writes an intent to the state file BEFORE the API call and replaces it
-    with the returned ID after; an intent left behind stops the next run until it is adopted.
+  - Ownership: only objects whose IDs are in the state file are changed, and only while they still carry
+    the identity recorded with the ID (a DNS record's key, the forward's name, the network named in
+    gateway.yaml): a reused or renamed ID stops the run. The DHCP network is owned like the rest. An
+    unowned object in the way aborts; --adopt takes one over explicitly. An owned object that vanished
+    or changed identity aborts; --forget drops it from the state.
+  - Collisions: a duplicate DNS key, a second forward with our name, or any other enabled forward on
+    the WAN port aborts, owned or not, at plan time and again from a fresh read before each mutation.
+  - Fail closed: every listing is validated (classic `meta.rc == "ok"`, no paging metadata, a list; v2
+    a list); anything partial or unexpected aborts before a plan exists, so "absent" is never inferred
+    from a bad read.
+  - Plan binding: the hash covers the whole inventory read, the operations and every option (including
+    --skip-vip-check and --ack-dhcp-leases), and apply recomputes it and aborts on any difference. Each
+    mutation re-reads its object first and checks it is unchanged since the plan, and is verified by a
+    read afterwards.
+  - The WAN: any change that leaves an enabled forward to the VIP needs the VIP to serve the canary's
+    own answer first (a CA-valid certificate for edge-canary and its fixed response, not just any 200).
+  - DHCP: a range change that would take back an address an active client holds (not as a fixed IP)
+    is refused unless --ack-dhcp-leases; the check runs at plan time and again before the write.
+  - Crash safety: a create writes an intent (with the fields it sends) to the state file BEFORE the API
+    call and replaces it with the returned ID after; an intent left behind stops the next run until it
+    is adopted (only an object holding those fields) or forgotten.
   - TLS is checked against the pinned certificate fingerprint, never skipped.
   - DDNS is checked, never changed. Secrets (x_* fields, the API key) are never printed or stored.
 """
@@ -86,7 +98,8 @@ class UnifiClient:
     def _connect(self):
         ctx = ssl.create_default_context()
         # The Cloud Key's certificate is self-signed by UniFi OS: no CA can vouch for it, so trust is
-        # the pinned fingerprint, checked below before a single request byte is sent.
+        # the pinned fingerprint, checked below before a single request byte is sent. Every request
+        # opens its own connection (and checks the pin); redirects are never followed.
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         host, _, port = self.host.partition(":")
@@ -121,14 +134,25 @@ class UnifiClient:
     def _classic(self, rest):
         return f"/proxy/network/api/s/{self.site}/rest/{rest}"
 
+    def _stat(self, rest):
+        return f"/proxy/network/api/s/{self.site}/stat/{rest}"
+
     def _v2(self, rest):
         return f"/proxy/network/v2/api/site/{self.site}/{rest}"
 
     @staticmethod
     def _classic_list(status, payload, what):
-        if status != 200 or not isinstance(payload, dict) or (payload.get("meta") or {}).get("rc") != "ok" \
+        meta = payload.get("meta") if isinstance(payload, dict) else None
+        if status != 200 or not isinstance(meta, dict) or meta.get("rc") != "ok" \
                 or not isinstance(payload.get("data"), list):
             raise GatewayError(f"{what}: unexpected answer (HTTP {status}); refusing to plan on a partial read")
+        # The classic API answers whole collections ({"meta": {"rc": "ok"}, "data": [...]}, seen live
+        # 2026-10-27). Anything else (a count, an offset, a cursor) would mean a page, and a page can make
+        # an owned object look absent, so it is refused rather than interpreted.
+        extra = sorted((set(meta) - {"rc", "msg"}) | (set(payload) - {"meta", "data"}))
+        if extra:
+            raise GatewayError(f"{what}: unexpected metadata {extra} (a paged answer?); refusing a possibly "
+                               "partial list")
         return payload["data"]
 
     @staticmethod
@@ -149,6 +173,11 @@ class UnifiClient:
                 if not isinstance(r, dict) or not r.get("_id"):
                     raise GatewayError(f"{kind}: an entry without an _id; refusing to plan")
         return inv
+
+    def active_clients(self) -> list:
+        """Connected clients (ip, network_id, use_fixedip, fixed_ip). Volatile, so never hashed: read
+        for the DHCP lease check at plan time and again right before the write."""
+        return self._classic_list(*self.request("GET", self._stat("sta")), "active clients")
 
     # ---- mutations; each returns the object the controller now holds
     def create_portforward(self, fields):
@@ -247,7 +276,7 @@ def load_gateway(path=GATEWAY) -> dict:
 def empty_state(g) -> dict:
     c = g["controller"]
     return {"version": 1, "controller": {"url": c["url"], "site": c["site"], "cert_sha256": c["cert_sha256"]},
-            "port_forward": None, "static_dns": {}, "intents": []}
+            "dhcp_network": None, "port_forward": None, "static_dns": {}, "intents": []}
 
 
 def load_state(g, path=STATE) -> dict:
@@ -259,6 +288,7 @@ def load_state(g, path=STATE) -> dict:
     if s.get("version") != 1 or s.get("controller") != {"url": c["url"], "site": c["site"], "cert_sha256": c["cert_sha256"]}:
         raise GatewayError(f"{path} belongs to another controller, site or certificate than gateway.yaml; "
                            "refusing to act on its IDs")
+    s.setdefault("dhcp_network", None)
     s.setdefault("static_dns", {})
     s.setdefault("intents", [])
     return s
@@ -299,19 +329,72 @@ def _forward_covers(f, port: int) -> bool:
     return False
 
 
-def make_plan(g, reg, state, inv, only=None, adopt=(), forget=()) -> dict:
+def collisions(g, kind, key, rows, own_id) -> list:
+    """What else on the controller would clash with our object (own_id excluded; None for a create).
+    Checked when planning and again from a fresh read right before the mutation."""
+    if kind == "dns":
+        others = [r for r in rows if str(r.get("key", "")).lower() == key and r["_id"] != own_id]
+        return [f"DNS record {key}: {len(others)} other record(s) carry this key"] if others else []
+    pf = g["port_forward"]
+    out = []
+    if any(f.get("name") == pf["name"] and f["_id"] != own_id for f in rows):
+        out.append(f"another forward is named {pf['name']}")
+    taken = [f.get("name") for f in rows if f["_id"] != own_id and f.get("enabled", True)
+             and f.get("pfwd_interface", "wan") in (pf["wan_interface"], "both") and _forward_covers(f, pf["wan_port"])]
+    if taken:
+        out.append(f"another forward already takes WAN port {pf['wan_port']}: {taken}")
+    return out
+
+
+def lease_conflicts(clients, network_id, old, new) -> list:
+    """Active clients on the network holding an address the range change gives back (in the old range,
+    not in the new one) that is not their fixed IP."""
+    o0, o1 = (ipaddress.ip_address(x) for x in old)
+    n0, n1 = (ipaddress.ip_address(x) for x in new)
+    hits = []
+    for c in clients:
+        if not isinstance(c, dict) or c.get("network_id") != network_id or not c.get("ip"):
+            continue
+        try:
+            ip = ipaddress.ip_address(c["ip"])
+        except ValueError:
+            continue
+        if o0 <= ip <= o1 and not n0 <= ip <= n1 and not (c.get("use_fixedip") and c.get("fixed_ip") == c["ip"]):
+            hits.append(f"{c['ip']} ({c.get('hostname') or c.get('name') or c.get('mac', '?')})")
+    return sorted(hits)
+
+
+def _intent_mismatch(intent, obj) -> bool:
+    """An interrupted create may only be adopted as an object holding the fields it sent."""
+    fields = intent.get("fields")
+    return not isinstance(fields, dict) or any(obj.get(k) != v for k, v in fields.items())
+
+
+# The order operations run in: bookkeeping first, then everything that withdraws or narrows exposure,
+# then the network, then additions, and the WAN forward last of all.
+PHASES = {("forward", "delete"): 2, ("dns", "delete"): 3, ("dhcp", "update"): 4, ("dns", "update"): 5,
+          ("dns", "create"): 6, ("forward", "update"): 7, ("forward", "create"): 7}
+
+
+def phase(op) -> int:
+    return {"forget": 0, "adopt": 1}.get(op["action"]) if op["action"] in ("forget", "adopt") \
+        else PHASES[(op["kind"], op["action"])]
+
+
+def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check=False,
+              ack_dhcp_leases=False) -> dict:
     """Pure: compute the operations from the desired state, the state file and the inventory."""
     only = set(only or KINDS)
     errors, warnings, ops = [], [], []
     # An intent is a create whose outcome is unknown. It stops every run until the operator names it:
-    # --adopt <key> takes the object the create may have made, --forget <key> drops the intent (and the
-    # create is planned again if the object is still wanted and absent).
+    # --adopt <key> takes the object the create may have made (only if it holds the fields the create
+    # sent), --forget <key> drops the intent (the create is planned again if still wanted and absent).
     pending = [i for i in state["intents"] if i["key"] not in adopt and i["key"] not in forget]
     if pending:
         keys = ", ".join(f"{i['kind']}:{i['key']}" for i in pending)
         errors.append(f"interrupted create(s) recorded in the state file ({keys}): find the object in the "
                       "controller and re-run with --adopt <key>, or delete it there and --forget <key>")
-    intent_keys = {(i["kind"], i["key"]) for i in state["intents"]}
+    intents = {(i["kind"], i["key"]): i for i in state["intents"]}
     vip = ipaddress.ip_address(reg["vip"])
     lan = g["lan"]
     net = ipaddress.ip_interface(lan["subnet"]).network
@@ -321,22 +404,41 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=()) -> dict:
     if start <= vip <= stop:
         errors.append(f"vip {vip} lies inside the desired DHCP range {start}-{stop}")
 
-    # ---- dhcp
+    # ---- dhcp: the network named in gateway.yaml, owned through the state file like everything else
     if "dhcp" in only:
-        homes = [n for n in inv["networkconf"] if n["_id"] == lan["network_id"]]
-        if len(homes) != 1:
+        owned = state.get("dhcp_network")
+        nets = {n["_id"]: n for n in inv["networkconf"]}
+        name = lan["network_name"]
+        if owned and owned["name"] in forget and (owned["id"] not in nets or owned["id"] != lan["network_id"]
+                                                  or nets[owned["id"]].get("name") != owned["name"]):
+            ops.append({"kind": "dhcp", "action": "forget", "key": owned["name"], "id": owned["id"]})
+            owned = None
+        h = nets.get(lan["network_id"])
+        if owned and (owned["id"] != lan["network_id"] or owned["name"] != name):
+            errors.append(f"the state owns network {owned['id']} ({owned['name']}) but gateway.yaml names "
+                          f"{lan['network_id']} ({name}): fix gateway.yaml, or --forget {owned['name']}")
+        elif h is None:
             errors.append(f"network {lan['network_id']} not found")
+        elif h.get("name") != name or h.get("ip_subnet") != lan["subnet"]:
+            errors.append(f"network {lan['network_id']} is {h.get('name')!r} {h.get('ip_subnet')!r}, "
+                          f"not {name!r} {lan['subnet']!r}")
         else:
-            h = homes[0]
-            if h.get("name") != lan["network_name"] or h.get("ip_subnet") != lan["subnet"]:
-                errors.append(f"network {lan['network_id']} is {h.get('name')!r} {h.get('ip_subnet')!r}, "
-                              f"not {lan['network_name']!r} {lan['subnet']!r}")
-            elif (h.get("dhcpd_start"), h.get("dhcpd_stop")) != (lan["dhcp_start"], lan["dhcp_stop"]):
-                ops.append({"kind": "dhcp", "action": "update", "key": lan["network_name"], "id": h["_id"],
-                            "before": digest(h), "fields": {"dhcpd_start": lan["dhcp_start"],
-                                                            "dhcpd_stop": lan["dhcp_stop"]},
-                            "show": f"{h.get('dhcpd_start')}-{h.get('dhcpd_stop')} -> "
-                                    f"{lan['dhcp_start']}-{lan['dhcp_stop']}"})
+            if not owned and name in adopt:
+                ops.append({"kind": "dhcp", "action": "adopt", "key": name, "id": h["_id"], "before": digest(h)})
+                owned = {"id": h["_id"], "name": name}
+            cur = (h.get("dhcpd_start"), h.get("dhcpd_stop"))
+            want = (lan["dhcp_start"], lan["dhcp_stop"])
+            if cur != want and not owned:
+                errors.append(f"the DHCP range of {name} is {cur[0]}-{cur[1]}, not {want[0]}-{want[1]}, and the "
+                              f"network is not ours: inspect it, then --adopt {name}")
+            elif cur != want:
+                if not all(cur):
+                    errors.append(f"network {name} has no DHCP range to compare; set it by hand first")
+                else:
+                    ops.append({"kind": "dhcp", "action": "update", "key": name, "id": h["_id"],
+                                "before": digest(h), "from": list(cur), "to": list(want),
+                                "fields": {"dhcpd_start": want[0], "dhcpd_stop": want[1]},
+                                "show": f"{cur[0]}-{cur[1]} -> {want[0]}-{want[1]}"})
 
     # ---- static dns
     if "dns" in only:
@@ -347,20 +449,26 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=()) -> dict:
             by_key.setdefault(str(r.get("key", "")).lower(), []).append(r)
         owned = dict(state["static_dns"])
         for key in forget:
-            if key in owned and owned[key] not in by_id:
+            if key in owned and (owned[key] not in by_id or str(by_id[owned[key]].get("key", "")).lower() != key):
                 ops.append({"kind": "dns", "action": "forget", "key": key, "id": owned.pop(key)})
-            elif ("dns", key) in intent_keys and key not in owned:
+            elif ("dns", key) in intents and key not in owned:
                 ops.append({"kind": "dns", "action": "forget", "key": key, "id": None})
         for key, oid in sorted(owned.items()):
             if oid not in by_id:
                 errors.append(f"owned DNS record {key} ({oid}) is gone from the controller: --forget {key}")
             elif str(by_id[oid].get("key", "")).lower() != key:
-                errors.append(f"owned DNS record {oid} now has key {by_id[oid].get('key')!r}, not {key}")
+                errors.append(f"owned DNS record {oid} now has key {by_id[oid].get('key')!r}, not {key}: "
+                              f"inspect it, then --forget {key}")
         for key, value in sorted(want.items()):
             fields = {"key": key, "value": value, "record_type": "A", "enabled": True, "ttl": g["local_dns"]["ttl"]}
             if key in owned and owned[key] in by_id:
                 r = by_id[owned[key]]
-                if any(r.get(k) != v for k, v in fields.items()):
+                if str(r.get("key", "")).lower() != key:
+                    continue  # identity error above
+                clash = collisions(g, "dns", key, inv["static_dns"], r["_id"])
+                if clash:
+                    errors.extend(clash)
+                elif any(r.get(k) != v for k, v in fields.items()):
                     ops.append({"kind": "dns", "action": "update", "key": key, "id": r["_id"],
                                 "before": digest(r), "fields": fields})
                 continue
@@ -370,6 +478,10 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=()) -> dict:
                     errors.append(f"--adopt {key}: {len(existing)} records carry that key; resolve by hand")
                     continue
                 r = existing[0]
+                if ("dns", key) in intents and _intent_mismatch(intents[("dns", key)], r):
+                    errors.append(f"--adopt {key}: the record does not hold the fields the interrupted create "
+                                  f"sent, so it is not that create's: inspect it, delete it there and --forget {key}")
+                    continue
                 ops.append({"kind": "dns", "action": "adopt", "key": key, "id": r["_id"], "before": digest(r)})
                 if any(r.get(k) != v for k, v in fields.items()):
                     ops.append({"kind": "dns", "action": "update", "key": key, "id": r["_id"],
@@ -379,7 +491,7 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=()) -> dict:
             else:
                 ops.append({"kind": "dns", "action": "create", "key": key, "fields": fields})
         for key, oid in sorted(owned.items()):
-            if key not in want and oid in by_id:
+            if key not in want and oid in by_id and str(by_id[oid].get("key", "")).lower() == key:
                 ops.append({"kind": "dns", "action": "delete", "key": key, "id": oid, "before": digest(by_id[oid])})
 
     # ---- port forward
@@ -388,67 +500,85 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=()) -> dict:
         fields = forward_fields(g, reg)
         by_id = {f["_id"]: f for f in inv["portforward"]}
         owned = state.get("port_forward")
-        if owned and pf["name"] in forget and owned["id"] not in by_id:
+        intent = intents.get(("forward", pf["name"]))
+        if owned and pf["name"] in forget and (owned["id"] not in by_id
+                                               or by_id[owned["id"]].get("name") != owned["name"]):
             ops.append({"kind": "forward", "action": "forget", "key": pf["name"], "id": owned["id"]})
             owned = None
-        elif not owned and pf["name"] in forget and ("forward", pf["name"]) in intent_keys:
+        elif not owned and pf["name"] in forget and intent:
             ops.append({"kind": "forward", "action": "forget", "key": pf["name"], "id": None})
+        blocked = False
         if owned and owned["id"] not in by_id:
             errors.append(f"owned forward {owned['name']} ({owned['id']}) is gone from the controller: "
                           f"--forget {owned['name']}")
-            owned = None
-        same_name = [f for f in inv["portforward"] if f.get("name") == pf["name"]
-                     and (not owned or f["_id"] != owned["id"])]
-        conflicts = [f for f in inv["portforward"] if (not owned or f["_id"] != owned["id"])
-                     and f.get("enabled", True) and f.get("pfwd_interface", "wan") in (pf["wan_interface"], "both")
-                     and _forward_covers(f, pf["wan_port"])]
-        if pf["enabled"]:
-            if owned:
-                cur = by_id[owned["id"]]
-                if any(cur.get(k) != v for k, v in fields.items()):
-                    ops.append({"kind": "forward", "action": "update", "key": pf["name"], "id": cur["_id"],
-                                "before": digest(cur), "fields": fields})
-            elif len(same_name) == 1 and pf["name"] in adopt:
-                cur = same_name[0]
-                ops.append({"kind": "forward", "action": "adopt", "key": pf["name"], "id": cur["_id"],
-                            "before": digest(cur)})
-                if any(cur.get(k) != v for k, v in fields.items()):
-                    ops.append({"kind": "forward", "action": "update", "key": pf["name"], "id": cur["_id"],
-                                "before": digest(cur), "fields": fields})
-            elif same_name:
-                errors.append(f"a forward named {pf['name']} exists and is not ours: inspect it, then --adopt {pf['name']}")
-            elif conflicts:
-                errors.append("another forward already takes WAN port "
-                              f"{pf['wan_port']}: {[c.get('name') for c in conflicts]}")
+            owned, blocked = None, True
+        elif owned and (by_id[owned["id"]].get("name") != owned["name"] or owned["name"] != pf["name"]):
+            errors.append(f"owned forward {owned['id']} is now named {by_id[owned['id']].get('name')!r}, not "
+                          f"{owned['name']!r} (gateway.yaml: {pf['name']!r}): the ID may have been reused; "
+                          f"inspect it, then --forget {owned['name']} (and --adopt it if it is ours)")
+            owned, blocked = None, True
+        own_id = owned["id"] if owned else None
+        if not owned and not blocked and pf["name"] in adopt:
+            named = [f for f in inv["portforward"] if f.get("name") == pf["name"]]
+            if len(named) != 1:
+                errors.append(f"--adopt {pf['name']}: {len(named)} forwards carry that name; resolve by hand")
+                blocked = True
+            elif intent and _intent_mismatch(intent, named[0]):
+                errors.append(f"--adopt {pf['name']}: the forward does not hold the fields the interrupted create "
+                              f"sent, so it is not that create's: inspect it, delete it there and --forget {pf['name']}")
+                blocked = True
             else:
-                ops.append({"kind": "forward", "action": "create", "key": pf["name"], "fields": fields})
-        elif owned:
-            ops.append({"kind": "forward", "action": "delete", "key": pf["name"], "id": owned["id"],
-                        "before": digest(by_id[owned["id"]])})
+                ops.append({"kind": "forward", "action": "adopt", "key": pf["name"], "id": named[0]["_id"],
+                            "before": digest(named[0])})
+                own_id = named[0]["_id"]
+        if not blocked:
+            if pf["enabled"]:
+                if not own_id and any(f.get("name") == pf["name"] for f in inv["portforward"]):
+                    errors.append(f"a forward named {pf['name']} exists and is not ours: inspect it, then "
+                                  f"--adopt {pf['name']}")
+                else:
+                    clash = collisions(g, "forward", pf["name"], inv["portforward"], own_id)
+                    if clash:
+                        errors.extend(clash)
+                    elif own_id:
+                        cur = by_id[own_id]
+                        if any(cur.get(k) != v for k, v in fields.items()):
+                            ops.append({"kind": "forward", "action": "update", "key": pf["name"], "id": own_id,
+                                        "before": digest(cur), "fields": fields})
+                    else:
+                        ops.append({"kind": "forward", "action": "create", "key": pf["name"], "fields": fields})
+            elif own_id:
+                ops.append({"kind": "forward", "action": "delete", "key": pf["name"], "id": own_id,
+                            "before": digest(by_id[own_id])})
 
     # ---- ddns: checked, never changed
-    for want in g["ddns"]:
-        hits = [d for d in inv["dynamicdns"] if all(d.get(k) == v for k, v in want.items())]
+    for want_dd in g["ddns"]:
+        hits = [d for d in inv["dynamicdns"] if all(d.get(k) == v for k, v in want_dd.items())]
         if not hits:
-            warnings.append(f"DDNS entry missing on the gateway: {want} (recreate by hand: runbook)")
+            warnings.append(f"DDNS entry missing on the gateway: {want_dd} (recreate by hand: runbook)")
 
-    # Order: DHCP first; DNS before the forward when it is created, the forward first when it goes.
-    def rank(op):
-        if op["kind"] == "dhcp":
-            return 0
-        if op["kind"] == "forward" and op["action"] == "delete":
-            return 1
-        if op["kind"] == "dns":
-            return 2
-        return 3
-    # Within a key: bookkeeping (forget, adopt) before any API change, deletes before writes.
-    action_rank = {"forget": 0, "adopt": 1, "delete": 2, "update": 3, "create": 4}
-    ops.sort(key=lambda o: (rank(o), o["key"], action_rank[o["action"]]))
+    if skip_vip_check:
+        warnings.append("--skip-vip-check: this plan exposes the WAN forward WITHOUT proving the VIP serves the canary")
+    ops.sort(key=lambda o: (phase(o), o["kind"], o["key"]))
+    options = {"only": sorted(only), "adopt": sorted(adopt), "forget": sorted(forget),
+               "skip_vip_check": bool(skip_vip_check), "ack_dhcp_leases": bool(ack_dhcp_leases)}
     body = {"controller": g["controller"]["url"], "site": g["controller"]["site"],
-            "inventory": {k: digest(v) for k, v in sorted(inv.items())},
-            "ops": ops, "options": {"only": sorted(only), "adopt": sorted(adopt), "forget": sorted(forget)}}
+            "inventory": {k: digest(v) for k, v in sorted(inv.items())}, "ops": ops, "options": options}
     plan_hash = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:20]
-    return {"ops": ops, "errors": errors, "warnings": warnings, "hash": plan_hash}
+    return {"ops": ops, "errors": errors, "warnings": warnings, "options": options, "hash": plan_hash}
+
+
+def check_leases(plan, clients) -> None:
+    """Add a DHCP range change's lease conflicts to the plan: an error, or with --ack-dhcp-leases a
+    warning. Kept out of make_plan (and out of the hash): client lists change by the second."""
+    for op in plan["ops"]:
+        if op["kind"] == "dhcp" and op["action"] == "update":
+            hits = lease_conflicts(clients, op["id"], op["from"], op["to"])
+            if hits and plan["options"]["ack_dhcp_leases"]:
+                plan["warnings"].append(f"DHCP {op['show']} takes back addresses active clients hold: {hits}")
+            elif hits:
+                plan["errors"].append(f"DHCP {op['show']} would take back addresses active clients hold: {hits}; "
+                                      "move or reserve them first, or re-plan with --ack-dhcp-leases")
 
 
 def show(plan) -> str:
@@ -470,16 +600,38 @@ def show(plan) -> str:
 # apply
 
 
-def vip_answers(vip: str, name: str) -> bool:
-    """The VIP must answer HTTPS for the canary before the WAN is pointed at it."""
+def canary_marker(reg) -> bytes:
+    """The fixed start of edge-canary's answer (`edge-canary ok peer=`): a 200 from anything else is
+    not proof that the VIP serves the edge proxy."""
+    respond = reg["hosts"]["edge-canary"]["backend"]["respond"]
+    marker = respond.split("{remote_host}")[0].strip()
+    if len(marker) < 8:
+        raise GatewayError("edge-canary's fixed answer has no distinctive text to check")
+    return marker.encode()
+
+
+def vip_answers(vip: str, name: str, marker: bytes) -> bool:
+    """The VIP must serve the canary (a CA-valid certificate for its name, a 200 carrying its fixed
+    answer) before the WAN is pointed at it."""
     ctx = ssl.create_default_context()
     try:
         with socket.create_connection((vip, 443), timeout=10) as s:
             with ctx.wrap_socket(s, server_hostname=name) as t:
                 t.sendall(f"GET / HTTP/1.1\r\nHost: {name}\r\nConnection: close\r\n\r\n".encode())
-                return t.recv(64).startswith(b"HTTP/1.1 200")
+                data = b""
+                while len(data) < 16384:
+                    chunk = t.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
     except (OSError, ssl.SSLError):
         return False
+    return canary_ok(data, marker)
+
+
+def canary_ok(response: bytes, marker: bytes) -> bool:
+    head, _, body = response.partition(b"\r\n\r\n")
+    return head.startswith(b"HTTP/1.1 200") and marker in body
 
 
 def _current(client, kind, oid):
@@ -489,17 +641,37 @@ def _current(client, kind, oid):
     return hits[0] if hits else None, inv
 
 
-def apply(client, g, reg, state, plan, state_path=STATE, skip_vip_check=False, log=print):
+def _drop_intent(state, kind, key):
+    state["intents"] = [i for i in state["intents"] if not (i["kind"] == kind and i["key"] == key)]
+
+
+def _own(state, kind, key, oid):
+    if kind == "dns":
+        state["static_dns"][key] = oid
+    elif kind == "forward":
+        state["port_forward"] = {"id": oid, "name": key}
+    else:
+        state["dhcp_network"] = {"id": oid, "name": key}
+
+
+def _disown(state, kind, key):
+    if kind == "dns":
+        state["static_dns"].pop(key, None)
+    elif kind == "forward":
+        state["port_forward"] = None
+    else:
+        state["dhcp_network"] = None
+
+
+def apply(client, g, reg, state, plan, state_path=STATE, log=print):
+    options = plan["options"]
     for op in plan["ops"]:
         kind, action, key = op["kind"], op["action"], op["key"]
         if action == "forget":
             # id None: only an interrupted create's intent is dropped; an owned ID is never touched then
             if op["id"] is not None:
-                if kind == "dns":
-                    state["static_dns"].pop(key, None)
-                else:
-                    state["port_forward"] = None
-            state["intents"] = [i for i in state["intents"] if not (i["kind"] == kind and i["key"] == key)]
+                _disown(state, kind, key)
+            _drop_intent(state, kind, key)
             save_state(state, state_path)
             log(f"forgot  {kind} {key}")
             continue
@@ -508,33 +680,35 @@ def apply(client, g, reg, state, plan, state_path=STATE, skip_vip_check=False, l
             if cur is None or digest(cur) != op["before"]:
                 raise GatewayError(f"{kind} {key} changed on the controller since the plan; re-plan")
         if action == "adopt":
-            if kind == "dns":
-                state["static_dns"][key] = op["id"]
-            else:
-                state["port_forward"] = {"id": op["id"], "name": key}
-            state["intents"] = [i for i in state["intents"] if not (i["kind"] == kind and i["key"] == key)]
+            _own(state, kind, key, op["id"])
+            _drop_intent(state, kind, key)
             save_state(state, state_path)
             log(f"adopted {kind} {key} ({op['id']})")
             continue
-        if kind == "forward" and action == "create" and not skip_vip_check:
-            canary = f"edge-canary.{reg['zone']}"
-            if not vip_answers(reg["vip"], canary):
-                raise GatewayError(f"the VIP {reg['vip']} does not answer {canary}; not pointing the WAN at it "
-                                   "(--skip-vip-check overrides)")
-        if action == "create":
+        if action in ("create", "update") and kind in ("dns", "forward"):
+            # the collision checks again, from a fresh read: something may have appeared since the plan
             _, inv = _current(client, kind, "")
             rows = inv["static_dns"] if kind == "dns" else inv["portforward"]
-            field = "key" if kind == "dns" else "name"
-            if any(str(r.get(field, "")).lower() == key.lower() for r in rows):
-                raise GatewayError(f"{kind} {key} appeared on the controller since the plan; re-plan")
-            state["intents"].append({"kind": kind, "key": key, "at": int(time.time())})
+            clash = collisions(g, kind, key, rows, op.get("id"))
+            if clash:
+                raise GatewayError(f"{kind} {key}: {'; '.join(clash)} (since the plan); re-plan")
+        if kind == "forward" and action in ("create", "update") and op["fields"].get("enabled") \
+                and not options["skip_vip_check"]:
+            canary = f"edge-canary.{reg['zone']}"
+            if not vip_answers(reg["vip"], canary, canary_marker(reg)):
+                raise GatewayError(f"the VIP {reg['vip']} does not serve {canary}'s answer; not pointing the WAN "
+                                   "at it (--skip-vip-check, in the plan, overrides)")
+        if kind == "dhcp" and action == "update":
+            hits = lease_conflicts(client.active_clients(), op["id"], op["from"], op["to"])
+            if hits and not options["ack_dhcp_leases"]:
+                raise GatewayError(f"DHCP {op['show']}: active clients now hold addresses it takes back: {hits}; "
+                                   "re-plan")
+        if action == "create":
+            state["intents"].append({"kind": kind, "key": key, "at": int(time.time()), "fields": op["fields"]})
             save_state(state, state_path)
             obj = client.create_dns(op["fields"]) if kind == "dns" else client.create_portforward(op["fields"])
-            if kind == "dns":
-                state["static_dns"][key] = obj["_id"]
-            else:
-                state["port_forward"] = {"id": obj["_id"], "name": key}
-            state["intents"] = [i for i in state["intents"] if not (i["kind"] == kind and i["key"] == key)]
+            _own(state, kind, key, obj["_id"])
+            _drop_intent(state, kind, key)
             save_state(state, state_path)
             oid = obj["_id"]
         elif action == "update":
@@ -550,10 +724,7 @@ def apply(client, g, reg, state, plan, state_path=STATE, skip_vip_check=False, l
             oid = op["id"]
         elif action == "delete":
             {"dns": client.delete_dns, "forward": client.delete_portforward}[kind](op["id"])
-            if kind == "dns":
-                state["static_dns"].pop(key, None)
-            else:
-                state["port_forward"] = None
+            _disown(state, kind, key)
             save_state(state, state_path)
             cur, _ = _current(client, kind, op["id"])
             if cur is not None:
@@ -577,7 +748,10 @@ def main(argv=None) -> int:
     ap.add_argument("--adopt", action="append", default=[], metavar="KEY")
     ap.add_argument("--forget", action="append", default=[], metavar="KEY")
     ap.add_argument("--plan-hash")
-    ap.add_argument("--skip-vip-check", action="store_true")
+    ap.add_argument("--skip-vip-check", action="store_true",
+                    help="expose the WAN forward without the canary check (part of the plan hash)")
+    ap.add_argument("--ack-dhcp-leases", action="store_true",
+                    help="accept a DHCP range change under active clients (part of the plan hash)")
     args = ap.parse_args(argv)
     try:
         g = load_gateway()
@@ -587,7 +761,10 @@ def main(argv=None) -> int:
         reg = render.load()
         state = load_state(g)
         client = UnifiClient(g["controller"]["url"], g["controller"]["site"], g["controller"]["cert_sha256"], api_key())
-        plan = make_plan(g, reg, state, client.inventory(), args.only, args.adopt, args.forget)
+        plan = make_plan(g, reg, state, client.inventory(), args.only, args.adopt, args.forget,
+                         skip_vip_check=args.skip_vip_check, ack_dhcp_leases=args.ack_dhcp_leases)
+        if any(o["kind"] == "dhcp" and o["action"] == "update" for o in plan["ops"]):
+            check_leases(plan, client.active_clients())
         print(show(plan))
         if plan["errors"]:
             return 1
@@ -597,7 +774,7 @@ def main(argv=None) -> int:
             print(f"refusing: --plan-hash {args.plan_hash!r} is not this plan ({plan['hash']}); re-plan and review",
                   file=sys.stderr)
             return 1
-        apply(client, g, reg, state, plan, skip_vip_check=args.skip_vip_check)
+        apply(client, g, reg, state, plan)
         print("applied; commit kubernetes/edge/gateway-state.yaml")
         return 0
     except (GatewayError, render.RegistryError) as e:
