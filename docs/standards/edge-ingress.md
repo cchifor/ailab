@@ -79,7 +79,9 @@ Hosts with `lan_dns: true` also get a local record on the gateway resolver, so c
 reach the proxy directly in every mode: a CNAME to one local name for the VIP (`edge-vip.lan`, whose
 only record is an A to the VIP). A local A record per host is not enough: the resolver still forwards
 AAAA queries for the name, and a dual-stack client then takes Cloudflare's IPv6. A CNAME to an A-only
-name in the resolver's own local domain answers AAAA with no data.
+name in the resolver's own local domain answers AAAA with no data. That is intended: the VIP is IPv4 only, so
+on the gateway resolver a `lan_dns` host has no AAAA at all. Dual-stack clients use the A record; an
+IPv6-only LAN client would need an IPv6 VIP, which is not designed (the LAN has none today).
 
 ## 5. Trust model
 
