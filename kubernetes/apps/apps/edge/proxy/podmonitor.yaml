@@ -25,3 +25,9 @@ spec:
       relabelings:
         - { targetLabel: job, replacement: edge-proxy }
         - { targetLabel: source, replacement: reloader }
+    - port: metrics
+      path: /probe-metrics
+      interval: 60s
+      relabelings:
+        - { targetLabel: job, replacement: edge-proxy }
+        - { targetLabel: source, replacement: probe }

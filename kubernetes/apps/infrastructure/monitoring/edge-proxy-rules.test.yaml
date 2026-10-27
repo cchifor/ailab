@@ -244,3 +244,66 @@ tests:
               description: >-
                 /reloader-metrics on edge-proxy-a has failed to scrape for 15m (the sidecar has
                 not written its file yet, or it is gone), so the certificate rules are blind there.
+
+  - interval: 1m
+    name: a pod serving an old certificate pages although the issued one is fresh; the other pod does not
+    input_series:
+      # time() starts at 0: cert-manager has issued a certificate good for 80 days, yet edge-proxy-a
+      # still serves one expiring at 13 days (a stale Secret projection); b serves a 60-day one
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}'
+        values: "6912000x90"
+      - series: 'edge_cert_served_not_after_seconds{job="edge-proxy",source="probe",pod="edge-proxy-a"}'
+        values: "1123200x90"
+      - series: 'edge_cert_served_not_after_seconds{job="edge-proxy",source="probe",pod="edge-proxy-b"}'
+        values: "5184000x90"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: EdgeCertServedExpiringSoon
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: EdgeCertExpiringSoon
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: EdgeCertServedExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: edge-proxy
+              source: probe
+              pod: edge-proxy-a
+            exp_annotations:
+              summary: "edge-proxy-a serves a certificate that expires in under 14 days"
+              description: >-
+                The certificate edge-proxy on edge-proxy-a actually serves expires in under 14
+                days. If EdgeCertExpiringSoon is quiet the Secret was renewed and this pod is not
+                serving it: check EdgeCertNotLoaded, the cert-reloader log and the node's Secret volume.
+
+  - interval: 1m
+    name: a failing probe pages after 15m; a succeeding one does not
+    input_series:
+      - series: 'edge_cert_probe_success{job="edge-proxy",source="probe",pod="edge-proxy-a"}'
+        values: "1x3 0x25"
+      - series: 'edge_cert_probe_heartbeat_seconds{job="edge-proxy",source="probe",pod="edge-proxy-a"}'
+        values: "0+60x28"
+      - series: 'edge_cert_probe_success{job="edge-proxy",source="probe",pod="edge-proxy-b"}'
+        values: "1x28"
+      - series: 'edge_cert_probe_heartbeat_seconds{job="edge-proxy",source="probe",pod="edge-proxy-b"}'
+        values: "0+60x28"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EdgeCertProbeFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: EdgeCertProbeFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: edge-proxy
+              source: probe
+              pod: edge-proxy-a
+            exp_annotations:
+              summary: "the served-certificate probe on edge-proxy-a is not answering"
+              description: >-
+                The cert-probe sidecar on edge-proxy-a has not read the served certificate for
+                15m (Caddy's TLS listener, the sidecar, or its metrics endpoint), so
+                EdgeCertServedExpiringSoon is blind there.

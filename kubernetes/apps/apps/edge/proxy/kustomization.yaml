@@ -16,3 +16,4 @@ configMapGenerator:
     files:
       - Caddyfile
       - cert-reloader.sh
+      - cert-probe.sh

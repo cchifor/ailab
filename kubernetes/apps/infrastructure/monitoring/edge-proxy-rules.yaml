@@ -4,12 +4,12 @@
 # histogram, source=reloader for the cert-reloader sidecar's counters), DaemonSet readiness from
 # kube-state-metrics, and the issued certificate's expiry from cert-manager.
 #
-# WHAT THE CERTIFICATE RULES PROVE TOGETHER: nothing scrapes the certificate a pod SERVES, so the
-# claim "every pod serves a valid certificate" is composed from three facts, one rule each:
-#   EdgeCertExpiringSoon   the issued certificate (the Secret) is fresh;
-#   EdgeCertNotLoaded      on each pod, the mounted pair is the one Caddy loaded (reloader gauge);
-#   EdgeCertReloaderStale  that gauge is current (the reloader loop's heartbeat), and
-#   EdgeCertReloaderNotScraped  it is being read at all.
+# THE CERTIFICATE RULES: the cert-probe sidecar reads the certificate each pod's Caddy SERVES (TLS
+# to localhost), so EdgeCertServedExpiringSoon is the direct answer, and EdgeCertProbeFailing says
+# when that answer is missing. The others locate the cause:
+#   EdgeCertExpiringSoon   the issued certificate (the Secret) is not being renewed;
+#   EdgeCertNotLoaded      a pod's mounted pair is not the one Caddy loaded (reloader gauge);
+#   EdgeCertReloaderStale / EdgeCertReloaderNotScraped  the reloader loop or its metrics are gone.
 #
 # WHY: from P5 the tunnel and the direct path both go through this proxy, so a proxy that is down,
 # failing upstream or serving a stale certificate takes every public hostname with it.
@@ -119,6 +119,31 @@ spec:
             description: >-
               /reloader-metrics on {{ $labels.pod }} has failed to scrape for 15m (the sidecar has
               not written its file yet, or it is gone), so the certificate rules are blind there.
+        - alert: EdgeCertServedExpiringSoon
+          expr: edge_cert_served_not_after_seconds{job="edge-proxy"} - time() < 14 * 86400
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }} serves a certificate that expires in under 14 days"
+            description: >-
+              The certificate edge-proxy on {{ $labels.pod }} actually serves expires in under 14
+              days. If EdgeCertExpiringSoon is quiet the Secret was renewed and this pod is not
+              serving it: check EdgeCertNotLoaded, the cert-reloader log and the node's Secret volume.
+        - alert: EdgeCertProbeFailing
+          expr: >-
+            edge_cert_probe_success{job="edge-proxy"} == 0
+            or (time() - edge_cert_probe_heartbeat_seconds{job="edge-proxy"}) > 600
+            or up{job="edge-proxy",source="probe"} == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the served-certificate probe on {{ $labels.pod }} is not answering"
+            description: >-
+              The cert-probe sidecar on {{ $labels.pod }} has not read the served certificate for
+              15m (Caddy's TLS listener, the sidecar, or its metrics endpoint), so
+              EdgeCertServedExpiringSoon is blind there.
         - alert: EdgeCertExpiringSoon
           expr: >-
             certmanager_certificate_expiration_timestamp_seconds{namespace="edge",name="edge-wildcard"}
