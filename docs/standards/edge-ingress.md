@@ -75,8 +75,11 @@ The apex `chifor.me` A record follows the WAN address through the gateway's DDNS
 CNAMEs to it, so one record moves them all. Direct hosts MUST NOT acquire an AAAA record unless an
 IPv6 ingress is designed and tested.
 
-Hosts with `lan_dns: true` also get a local A record on the gateway resolver pointing at the VIP,
-so clients that use it reach the proxy directly in every mode.
+Hosts with `lan_dns: true` also get a local record on the gateway resolver, so clients that use it
+reach the proxy directly in every mode: a CNAME to one local name for the VIP (`edge-vip.lan`, whose
+only record is an A to the VIP). A local A record per host is not enough: the resolver still forwards
+AAAA queries for the name, and a dual-stack client then takes Cloudflare's IPv6. A CNAME to an A-only
+name in the resolver's own local domain answers AAAA with no data.
 
 ## 5. Trust model
 
@@ -154,7 +157,8 @@ Any gateway that fronts this estate MUST provide:
 1. A **TCP 443 forward** from the WAN address to the VIP that **preserves the client's source
    address** (no SNAT on inbound WAN traffic).
 2. **NAT loopback** for LAN clients that resolve the public address.
-3. A **local DNS** resolver able to serve per-host A records.
+3. A **local DNS** resolver able to serve per-host CNAMEs to a local A-only name, answering AAAA for
+   them with no data (no upstream IPv6 for a name served locally).
 4. **DDNS** that keeps the apex A record on the WAN address.
 5. A **DHCP pool that excludes the VIP**.
 6. Later (P7): a **WireGuard server** whose clients keep their own source range, so they can be

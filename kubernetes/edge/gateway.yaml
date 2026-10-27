@@ -40,10 +40,14 @@ port_forward:
   target_port: 443
   proto: tcp
 
-# Local A records on the gateway's resolver: one per registry host with `lan_dns: true`, pointing at
-# the VIP, so clients on that resolver reach the proxy directly in every mode.
+# Local records on the gateway's resolver, so clients on it reach the proxy directly in every mode: per
+# registry host with `lan_dns: true` a CNAME to vip_name, and vip_name's one A record (the VIP). Not an A
+# record per host: the resolver forwards AAAA for such a name upstream, and a dual-stack client then got
+# Cloudflare's IPv6 (2026-10-27). A CNAME to an A-only name under the resolver's own .lan domain answers
+# AAAA with no data (tested on the live UXG).
 local_dns:
   ttl: 60
+  vip_name: edge-vip.lan
 
 # Read-only: the gateway's DDNS must keep these apex records on the WAN address. Reported if missing,
 # never created or edited by the reconciler (its credential lives on the gateway, and the token scope

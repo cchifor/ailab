@@ -146,14 +146,17 @@ class Planning(Base):
     def test_dns_create_apply_then_idempotent(self):
         self.lan_dns("router", "git")
         plan = self.plan()
+        # the VIP's local A record first, then the CNAMEs that point at it
         self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
-                         [("create", "git.chifor.me"), ("create", "router.chifor.me")])
+                         [("create", "edge-vip.lan"), ("create", "git.chifor.me"), ("create", "router.chifor.me")])
         self.apply(plan)
-        self.assertEqual(set(self.state["static_dns"]), {"git.chifor.me", "router.chifor.me"})
+        self.assertEqual(set(self.state["static_dns"]), {"edge-vip.lan", "git.chifor.me", "router.chifor.me"})
         self.assertEqual(self.state["intents"], [])
         self.assertEqual(self.plan()["ops"], [])
-        rec = [r for r in self.api.inv["static_dns"] if r["key"] == "router.chifor.me"][0]
-        self.assertEqual((rec["value"], rec["ttl"], rec["record_type"]), ("192.168.0.51", 60, "A"))
+        rec = {r["key"]: r for r in self.api.inv["static_dns"]}
+        self.assertEqual((rec["router.chifor.me"]["record_type"], rec["router.chifor.me"]["value"],
+                          rec["router.chifor.me"]["ttl"]), ("CNAME", "edge-vip.lan", 60))
+        self.assertEqual((rec["edge-vip.lan"]["record_type"], rec["edge-vip.lan"]["value"]), ("A", "192.168.0.51"))
 
     def test_lan_records_are_never_touched(self):
         self.lan_dns("router")
@@ -168,12 +171,15 @@ class Planning(Base):
         self.apply(self.plan())
         self.lan_dns("router", on=False)
         plan = self.plan()
-        self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]], [("delete", "router.chifor.me")])
+        # the last CNAME goes before the A record it points at
+        self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
+                         [("delete", "router.chifor.me"), ("delete", "edge-vip.lan")])
         self.apply(plan)
-        self.assertNotIn("router.chifor.me", self.state["static_dns"])
+        self.assertEqual(self.state["static_dns"], {})
         self.lan_dns("router")
         plan = self.plan()
-        self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]], [("create", "router.chifor.me")])
+        self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
+                         [("create", "edge-vip.lan"), ("create", "router.chifor.me")])
 
     def test_unowned_record_in_the_way_aborts_then_adopt(self):
         self.api.inv["static_dns"].append({"_id": "dns-x", "key": "router.chifor.me", "value": "10.0.0.1",
@@ -183,11 +189,15 @@ class Planning(Base):
         self.assertTrue(any("not ours" in e for e in plan["errors"]))
         plan = self.plan(adopt=["router.chifor.me"])
         self.assertEqual(plan["errors"], [])
+        # an adopted A record becomes the CNAME by replacement
         self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
-                         [("adopt", "router.chifor.me"), ("update", "router.chifor.me")])
+                         [("adopt", "router.chifor.me"), ("delete", "router.chifor.me"),
+                          ("create", "edge-vip.lan"), ("create", "router.chifor.me")])
         self.apply(plan)
-        self.assertEqual(self.state["static_dns"]["router.chifor.me"], "dns-x")
-        self.assertEqual([r["value"] for r in self.api.inv["static_dns"] if r["_id"] == "dns-x"], ["192.168.0.51"])
+        self.assertNotEqual(self.state["static_dns"]["router.chifor.me"], "dns-x")
+        self.assertFalse(any(r["_id"] == "dns-x" for r in self.api.inv["static_dns"]))
+        mine = [r for r in self.api.inv["static_dns"] if r["key"] == "router.chifor.me"]
+        self.assertEqual([(r["record_type"], r["value"]) for r in mine], [("CNAME", "edge-vip.lan")])
 
     def test_owned_record_vanished_aborts_then_forget(self):
         self.lan_dns("router")
@@ -205,7 +215,8 @@ class Planning(Base):
         self.api.fail_next_create = True
         with self.assertRaises(gateway.GatewayError):
             self.apply(self.plan())
-        self.assertEqual([(i["kind"], i["key"]) for i in self.state["intents"]], [("dns", "router.chifor.me")])
+        # the first create (the VIP's A record) is the one interrupted
+        self.assertEqual([(i["kind"], i["key"]) for i in self.state["intents"]], [("dns", "edge-vip.lan")])
         self.assertEqual(self.state["intents"][0]["fields"]["value"], "192.168.0.51")
         on_disk = gateway.load_state(self.g, self.state_path)
         self.assertEqual(len(on_disk["intents"]), 1)
@@ -213,11 +224,11 @@ class Planning(Base):
         self.assertTrue(any("interrupted" in e for e in plan["errors"]))
         # the record did get created; naming it with --adopt is the recovery, and clears the intent
         self.state = on_disk
-        plan = self.plan(adopt=["router.chifor.me"])
+        plan = self.plan(adopt=["edge-vip.lan"])
         self.assertEqual(plan["errors"], [])
         self.apply(plan)
         self.assertEqual(self.state["intents"], [])
-        self.assertIn("router.chifor.me", self.state["static_dns"])
+        self.assertEqual(set(self.state["static_dns"]), {"edge-vip.lan", "router.chifor.me"})
         self.assertEqual(self.plan()["ops"], [])
 
     def test_interrupted_create_that_never_happened_is_forgotten_and_retried(self):
@@ -227,7 +238,7 @@ class Planning(Base):
         plan = self.plan(forget=["router.chifor.me"])
         self.assertEqual(plan["errors"], [])
         self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
-                         [("forget", "router.chifor.me"), ("create", "router.chifor.me")])
+                         [("forget", "router.chifor.me"), ("create", "edge-vip.lan"), ("create", "router.chifor.me")])
         self.apply(plan)
         self.assertEqual(self.state["intents"], [])
         self.assertIn("router.chifor.me", self.state["static_dns"])
@@ -241,7 +252,7 @@ class Planning(Base):
                                            "record_type": "A", "enabled": True, "ttl": 0})
         plan = self.plan(adopt=["router.chifor.me"])
         self.assertTrue(any("not that create's" in e for e in plan["errors"]), plan["errors"])
-        self.assertEqual(plan["ops"], [])
+        self.assertFalse([o for o in plan["ops"] if o["key"] == "router.chifor.me"])
 
     def test_owned_record_with_a_duplicate_key_aborts(self):
         self.lan_dns("router")
@@ -366,7 +377,9 @@ class Forward(Base):
         self.g["port_forward"]["enabled"] = False
         self.lan_dns("router", on=False)
         plan = self.plan()
-        self.assertEqual([(o["action"], o["kind"]) for o in plan["ops"]], [("delete", "forward"), ("delete", "dns")])
+        self.assertEqual([(o["action"], o["kind"], o["key"]) for o in plan["ops"]],
+                         [("delete", "forward", "ailab-edge-https"), ("delete", "dns", "router.chifor.me"),
+                          ("delete", "dns", "edge-vip.lan")])
         self.apply(plan)
         self.assertIsNone(self.state["port_forward"])
         self.assertFalse(any(r["name"] == "ailab-edge-https" for r in self.api.inv["portforward"]))
@@ -375,7 +388,8 @@ class Forward(Base):
         self.g["port_forward"]["enabled"] = True
         self.lan_dns("router")
         plan = self.plan()
-        self.assertEqual([o["kind"] for o in plan["ops"]], ["dns", "forward"])
+        self.assertEqual([(o["kind"], o["key"]) for o in plan["ops"]],
+                         [("dns", "edge-vip.lan"), ("dns", "router.chifor.me"), ("forward", "ailab-edge-https")])
 
     def owned_forward(self):
         self.g["port_forward"]["enabled"] = True
@@ -659,7 +673,66 @@ class Binding(Base):
     def test_desired_dns_keys_are_lowercase(self):
         self.reg["hosts"]["router"]["lan_dns"] = True
         self.reg["zone"] = "Chifor.ME"
-        self.assertEqual(list(gateway.desired_dns(self.reg)), ["router.chifor.me"])
+        self.assertEqual(list(gateway.desired_dns(self.reg, self.g)), ["edge-vip.lan", "router.chifor.me"])
+
+    def test_lan_records_are_cnames_to_one_a_only_vip_name(self):
+        self.assertEqual(gateway.desired_dns(self.reg, self.g), {})  # nothing at all without a lan_dns host
+        self.lan_dns("router", "git")
+        self.assertEqual(gateway.desired_dns(self.reg, self.g), {
+            "edge-vip.lan": ("A", "192.168.0.51"),
+            "git.chifor.me": ("CNAME", "edge-vip.lan"),
+            "router.chifor.me": ("CNAME", "edge-vip.lan")})
+
+    def test_an_old_a_record_is_replaced_by_a_cname(self):
+        # what the reconciler created before this change: a per-host A record
+        self.api.inv["static_dns"].append({"_id": "dns-old", "key": "edge-canary.chifor.me", "value": "192.168.0.51",
+                                           "record_type": "A", "enabled": True, "ttl": 60})
+        self.state["static_dns"]["edge-canary.chifor.me"] = "dns-old"
+        self.lan_dns("edge-canary")
+        plan = self.plan()
+        self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
+                         [("delete", "edge-canary.chifor.me"), ("create", "edge-vip.lan"),
+                          ("create", "edge-canary.chifor.me")])
+        self.apply(plan)
+        recs = {r["key"]: (r["record_type"], r["value"]) for r in self.api.inv["static_dns"]}
+        self.assertEqual(recs["edge-canary.chifor.me"], ("CNAME", "edge-vip.lan"))
+        self.assertEqual(recs["edge-vip.lan"], ("A", "192.168.0.51"))
+        self.assertEqual(self.plan()["ops"], [])
+
+    def test_renaming_the_vip_name_moves_the_aliases_before_the_old_target_goes(self):
+        self.lan_dns("router", "git")
+        self.apply(self.plan())
+        self.g["local_dns"]["vip_name"] = "edge-vip2.lan"
+        plan = self.plan()
+        self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
+                         [("create", "edge-vip2.lan"), ("update", "git.chifor.me"), ("update", "router.chifor.me"),
+                          ("delete", "edge-vip.lan")])
+        seen = []
+        real = self.api.delete_dns
+
+        def delete_after_check(oid):
+            # at the moment the old target goes, no alias may still point at it
+            seen.extend(r["key"] for r in self.api.inv["static_dns"]
+                        if r.get("record_type") == "CNAME" and r.get("value") == "edge-vip.lan")
+            return real(oid)
+        self.api.delete_dns = delete_after_check
+        self.apply(plan)
+        self.assertEqual(seen, [])
+        recs = {r["key"]: (r["record_type"], r["value"]) for r in self.api.inv["static_dns"]}
+        self.assertEqual(recs["router.chifor.me"], ("CNAME", "edge-vip2.lan"))
+        self.assertNotIn("edge-vip.lan", recs)
+        self.assertEqual(self.plan()["ops"], [])
+
+    def test_vip_name_is_one_label_under_lan(self):
+        import yaml
+        base = yaml.safe_load(gateway.GATEWAY.read_text(encoding="utf-8"))
+        for bad in ("edge-vip.chifor.me", "a.b.lan", "", "Edge_VIP.lan"):
+            doc = copy.deepcopy(base)
+            doc["local_dns"]["vip_name"] = bad
+            path = pathlib.Path(self.tmp.name) / "g.yaml"
+            path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+            with self.assertRaises(gateway.GatewayError, msg=bad):
+                gateway.load_gateway(path)
 
     def test_a_paged_listing_is_refused(self):
         ok = {"meta": {"rc": "ok"}, "data": [{"_id": "a"}]}

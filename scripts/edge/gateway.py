@@ -46,6 +46,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import re
 import socket
 import ssl
 import subprocess
@@ -280,6 +281,10 @@ def load_gateway(path=GATEWAY) -> dict:
     need = {"version", "vendor", "controller", "lan", "port_forward", "local_dns", "ddns"}
     if not isinstance(g, dict) or set(g) != need or g["version"] != 1 or g["vendor"] != "unifi":
         raise GatewayError(f"{path}: expected exactly {sorted(need)} with version 1, vendor unifi")
+    ld = g["local_dns"]
+    if not isinstance(ld, dict) or set(ld) != {"ttl", "vip_name"} \
+            or not re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?\.lan", str(ld["vip_name"])):
+        raise GatewayError(f"{path}: local_dns needs exactly ttl and vip_name, a single label under .lan")
     return g
 
 
@@ -316,9 +321,28 @@ def save_state(state, path=STATE):
     os.replace(tmp, path)
 
 
-def desired_dns(reg) -> dict:
-    # lowercase, as every comparison with the controller's keys is
-    return {f"{n}.{reg['zone']}".lower(): reg["vip"] for n, h in sorted(reg["hosts"].items()) if h["lan_dns"]}
+def desired_dns(reg, g) -> dict:
+    """{key: (record_type, value)}: per host with lan_dns, a CNAME to the VIP's local name, and that name's
+    one A record. A name served locally as an A record only still has its AAAA forwarded upstream, so a
+    dual-stack client got Cloudflare's IPv6 (seen 2026-10-27); a CNAME to an A-only name under the
+    resolver's own .lan domain answers AAAA with no data. Keys lowercase, as every comparison is."""
+    vip_name = g["local_dns"]["vip_name"]
+    hosts = {f"{n}.{reg['zone']}".lower(): ("CNAME", vip_name)
+             for n, h in sorted(reg["hosts"].items()) if h["lan_dns"]}
+    return {vip_name: ("A", reg["vip"]), **hosts} if hosts else {}
+
+
+def _dns_change(ops, key, r, fields):
+    """Bring an owned record to `fields`: an update in place, or, when the record type differs, a
+    replacement (delete, then create): whether UniFi changes a record's type in place is not established,
+    and a replacement is never ambiguous."""
+    if r.get("record_type") != fields["record_type"]:
+        ops.append({"kind": "dns", "action": "delete", "key": key, "id": r["_id"], "before": digest(r),
+                    "rtype": r.get("record_type")})
+        ops.append({"kind": "dns", "action": "create", "key": key, "fields": fields})
+    elif any(r.get(k) != v for k, v in fields.items()):
+        ops.append({"kind": "dns", "action": "update", "key": key, "id": r["_id"], "before": digest(r),
+                    "fields": fields})
 
 
 def forward_fields(g, reg) -> dict:
@@ -385,14 +409,30 @@ def _intent_mismatch(intent, obj) -> bool:
 
 
 # The order operations run in: bookkeeping first, then everything that withdraws or narrows exposure,
-# then the network, then additions, and the WAN forward last of all.
-PHASES = {("forward", "delete"): 2, ("dns", "delete"): 3, ("dhcp", "update"): 4, ("dns", "update"): 5,
-          ("dns", "create"): 6, ("forward", "update"): 7, ("forward", "create"): 7}
+# then the network, then additions (the VIP's local A record before the CNAMEs that point at it), then
+# the deletes of records some CNAME still points at (a renamed vip_name: the new target and the retargeted
+# aliases exist first), and the WAN forward last of all. Within the DNS deletes, CNAMEs go first.
+PHASES = {("forward", "delete"): 2, ("dns", "delete"): 3, ("dhcp", "update"): 4, ("forward", "update"): 8,
+          ("forward", "create"): 8}
+
+
+def _rtype(op):
+    return (op.get("fields") or {}).get("record_type") or op.get("rtype")
 
 
 def phase(op) -> int:
-    return {"forget": 0, "adopt": 1}.get(op["action"]) if op["action"] in ("forget", "adopt") \
-        else PHASES[(op["kind"], op["action"])]
+    if op["action"] in ("forget", "adopt"):
+        return {"forget": 0, "adopt": 1}[op["action"]]
+    if op["kind"] == "dns" and op["action"] in ("create", "update"):
+        return 5 if _rtype(op) == "A" else 6
+    if op["kind"] == "dns" and op["action"] == "delete" and op.get("alias_target"):
+        return 7
+    return PHASES[(op["kind"], op["action"])]
+
+
+def op_order(op):
+    sub = 0 if (op["kind"] == "dns" and op["action"] == "delete" and _rtype(op) == "CNAME") else 1
+    return (phase(op), op["kind"], sub, op["key"])
 
 
 def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check=False,
@@ -456,7 +496,7 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
 
     # ---- static dns
     if "dns" in only:
-        want = desired_dns(reg)
+        want = desired_dns(reg, g)
         by_id = {r["_id"]: r for r in inv["static_dns"]}
         by_key = {}
         for r in inv["static_dns"]:
@@ -473,8 +513,8 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
             elif str(by_id[oid].get("key", "")).lower() != key:
                 errors.append(f"owned DNS record {oid} now has key {by_id[oid].get('key')!r}, not {key}: "
                               f"inspect it, then --forget {key}")
-        for key, value in sorted(want.items()):
-            fields = {"key": key, "value": value, "record_type": "A", "enabled": True, "ttl": g["local_dns"]["ttl"]}
+        for key, (rtype, value) in sorted(want.items()):
+            fields = {"key": key, "value": value, "record_type": rtype, "enabled": True, "ttl": g["local_dns"]["ttl"]}
             if key in owned and owned[key] in by_id:
                 r = by_id[owned[key]]
                 if str(r.get("key", "")).lower() != key:
@@ -482,9 +522,8 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
                 clash = collisions(g, "dns", key, inv["static_dns"], r["_id"])
                 if clash:
                     errors.extend(clash)
-                elif any(r.get(k) != v for k, v in fields.items()):
-                    ops.append({"kind": "dns", "action": "update", "key": key, "id": r["_id"],
-                                "before": digest(r), "fields": fields})
+                else:
+                    _dns_change(ops, key, r, fields)
                 continue
             existing = by_key.get(key, [])
             if existing and key in adopt:
@@ -497,16 +536,17 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
                                   f"sent, so it is not that create's: inspect it, delete it there and --forget {key}")
                     continue
                 ops.append({"kind": "dns", "action": "adopt", "key": key, "id": r["_id"], "before": digest(r)})
-                if any(r.get(k) != v for k, v in fields.items()):
-                    ops.append({"kind": "dns", "action": "update", "key": key, "id": r["_id"],
-                                "before": digest(r), "fields": fields})
+                _dns_change(ops, key, r, fields)
             elif existing:
                 errors.append(f"DNS record {key} exists and is not ours: inspect it, then --adopt {key}")
             else:
                 ops.append({"kind": "dns", "action": "create", "key": key, "fields": fields})
         for key, oid in sorted(owned.items()):
             if key not in want and oid in by_id and str(by_id[oid].get("key", "")).lower() == key:
-                ops.append({"kind": "dns", "action": "delete", "key": key, "id": oid, "before": digest(by_id[oid])})
+                # a record some CNAME on the controller still points at goes only after the aliases moved
+                targets = {str(r.get("value", "")).lower() for r in inv["static_dns"] if r.get("record_type") == "CNAME"}
+                ops.append({"kind": "dns", "action": "delete", "key": key, "id": oid, "before": digest(by_id[oid]),
+                            "rtype": by_id[oid].get("record_type"), "alias_target": key in targets})
 
     # ---- port forward
     if "forward" in only:
@@ -578,7 +618,7 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
 
     if skip_vip_check:
         warnings.append("--skip-vip-check: this plan exposes the WAN forward WITHOUT proving the VIP serves the canary")
-    ops.sort(key=lambda o: (phase(o), o["kind"], o["key"]))
+    ops.sort(key=op_order)
     options = {"only": sorted(only), "adopt": sorted(adopt), "forget": sorted(forget),
                "skip_vip_check": bool(skip_vip_check), "ack_dhcp_leases": bool(ack_dhcp_leases)}
     body = {"controller": g["controller"]["url"], "site": g["controller"]["site"],

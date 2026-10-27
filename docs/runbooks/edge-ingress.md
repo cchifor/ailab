@@ -197,6 +197,12 @@ just edge-gateway-apply --only dhcp --plan-hash <hash>
   does not know yet, take the network over first: `just edge-gateway-plan --adopt Home`, then apply
   that plan (bookkeeping only; the range changes only if it differs). Until then a range difference
   aborts.
+- **Local records**: each `lan_dns` host is a CNAME to `edge-vip.lan`, whose one A record is the VIP
+  (`gateway.yaml` `local_dns.vip_name`). Check a host with `nslookup -type=A <host> 192.168.0.1` (the
+  alias, then 192.168.0.51) and `-type=AAAA` (a name, no addresses). An A record per host would let the
+  resolver forward AAAA upstream, and a dual-stack client would take Cloudflare's IPv6.
+  After every apply, run `just edge-gateway-plan` again and expect `no changes`: a controller that stores
+  a CNAME value normalised (a trailing dot, another case) would otherwise show as an update on every run.
 - **An owned ID with another identity aborts**: a record whose key, a forward whose name, or a
   network whose name no longer matches the state (renamed, or the ID reused). Inspect it in the UI;
   `--forget <recorded name>` drops it, then `--adopt` if it is in fact ours.
