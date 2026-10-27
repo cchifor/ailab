@@ -150,6 +150,24 @@ class RouterSeatTest(unittest.TestCase):
         self.assertEqual(hdrs.get("x-router-route"), "pool-claude")
         self.assertEqual(req["body"]["model"], "fable")
 
+    # ── an output cap the seat asks the router to pass on (max_tokens) ───────────────
+    # fable runaways on workbricks streamed ~530 s into Claude Code's 64000-token default
+    # (2026-10-26/27). A seat cap makes such a run end sooner as finish_reason=length, which is
+    # a failed attempt (test_truncated_answer_is_refused) that descends to the next tier.
+    def test_a_seat_cap_is_sent_as_max_tokens(self):
+        m = self.load([self.router_seat(route="pool-claude", models={"fable": "fable"},
+                                        max_tokens=40000)], llm_models=["fable"])
+        Router.script = [(200, {}, sse_answer(json.dumps(REVIEW)))]
+        m.run_llm("t", "d", "diff")
+        self.assertEqual(Router.seen[0]["body"]["max_tokens"], 40000)
+
+    def test_no_cap_or_an_unusable_one_sends_no_max_tokens(self):
+        for cap in (None, 0, -5, "40000", True, 1.5):
+            Router.script, Router.seen = [(200, {}, sse_answer(json.dumps(REVIEW)))], []
+            seat = self.router_seat(model="claude-route", **({} if cap is None else {"max_tokens": cap}))
+            self.load([seat]).run_llm("t", "d", "diff")
+            self.assertNotIn("max_tokens", Router.seen[0]["body"], cap)
+
     def test_a_seat_without_a_route_sends_no_route_header(self):
         m = self.load([self.router_seat(model="claude-route")])
         Router.script = [(200, {}, sse_answer(json.dumps(REVIEW)))]

@@ -25,10 +25,17 @@ pr_reviewer_llm_cmd:
 # `*`: a request naming a route carries no model for a `*` target (`model_unspecified`), and the
 # day claude-5 hit its weekly wall (2026-10-26 04:56Z) every review was refused with attempts 0.
 # Runbook llm-router.md § "Reviewer routes".
+# OUTPUT CAP 40000 (2026-10-27): above every router review on record (475 completed 10-22..27:
+# fable max 20829, opus max 36312 output tokens), below the fable runaways on workbricks docs PRs
+# that streamed ~530 s into Claude Code's 64000 default and died as SEAT_PROTOCOL_ERROR (10-26
+# 08:59Z, 11:04Z, 10-27 08:39Z). Honoured once llm-router #125 is released AND the Claude
+# accounts allow output caps (capabilities.maxOutputTokens); until then the router drops it and
+# says so (x-router-ignored-params) - harmless. Reaching it is finish_reason=length: a failed
+# attempt, so opus is asked next.
 pr_reviewer_llm_seats:
   - { name: r, sudo_user: "", router_url: "https://router.chifor.me",
       key_file: "{{ pr_reviewer_router_key_file }}", route: pool-claude,
-      models: { fable: fable, opus: opus } }
+      models: { fable: fable, opus: opus }, max_tokens: 40000 }
 pr_reviewer_retired_seat_users: [clauderun, clauderun2, clauderun3]
 # ---- model ladder ----
 # fable first, then opus - tier-major. NO SONNET RUNG (owner, 2026-10-26). Floating aliases on

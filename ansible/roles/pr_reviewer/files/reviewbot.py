@@ -1257,10 +1257,17 @@ def tier_index(model):
 # the model has no tools, never sees the PAT, and never sees the key (it lives in a 0600 file
 # the service user reads per call - `key_file`, default ROUTER_KEY_FILE).
 #
-# Shape: {name, sudo_user: "", router_url, key_file?, route?, model?, models?: {tier: route}}. A
-# tier's router model is models[tier], else `model`, else - with neither configured - the tier
-# name itself. A tier with no route is one this seat does not serve (model_parked says so), which
-# is how a router seat can carry the top tiers while a subscription seat keeps the rest.
+# Shape: {name, sudo_user: "", router_url, key_file?, route?, model?, models?: {tier: route},
+# max_tokens?}. A tier's router model is models[tier], else `model`, else - with neither
+# configured - the tier name itself. A tier with no route is one this seat does not serve
+# (model_parked says so), which is how a router seat can carry the top tiers while a
+# subscription seat keeps the rest.
+#
+# `max_tokens` (a positive int; anything else is not sent) is the seat's output cap, sent with
+# every review. The router hands it to Claude Code where the account allows output caps
+# (llm-router #125) and otherwise drops it and says so in x-router-ignored-params, so the cap is
+# harmless before it is honoured. A review that reaches it ends with finish_reason=length,
+# which is a failed attempt (the next tier is asked), never a truncated verdict.
 #
 # `route` IS THE ROUTER'S MODEL MODE (2026-10-26): sent as the X-Router-Route header, with the
 # tier's model in `model`. A pool whose targets are `*` serves the model a request names, and a
@@ -2329,8 +2336,13 @@ def _run_router(seat, tier, prompt, remaining):
         e.why = f"router key file unusable ({why})"
         raise e
     url = str(s["router_url"]).rstrip("/") + "/v1/chat/completions"
-    body = json.dumps({"model": route, "stream": True,
-                       "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+    payload = {"model": route, "stream": True, "messages": [{"role": "user", "content": prompt}]}
+    cap = s.get("max_tokens")
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+        # The seat's output cap (see the shape above): a runaway ends as finish_reason=length,
+        # a failed attempt, instead of streaming into the model's default limit.
+        payload["max_tokens"] = cap
+    body = json.dumps(payload).encode("utf-8")
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
                "Accept": "text/event-stream", "User-Agent": ROUTER_UA}
     pool = router_header_route(seat)

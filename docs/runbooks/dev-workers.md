@@ -800,6 +800,14 @@ How it behaves - the existing park machinery, unchanged:
 - **429 reason `busy`**: waited out in place (Retry-After, at most 6 x 30 s). Any other 429 parks
   the seat until Retry-After (else 15 min) and the review moves to the subscription seats.
 - **5xx / 504 / a stream error chunk / a truncated answer**: an ordinary failure, no park.
+- **Output cap (`max_tokens`, reviewer-1 seat `r`: 40000 since 2026-10-27).** Sent with every review. A review
+  that reaches it ends with `finish_reason=length`, i.e. a truncated answer: an ordinary failure, and the next
+  tier (opus) is asked. Why 40000: every router review on record stayed under it (fable max 20829, opus max
+  36312 output tokens, 475 reviews 10-22..27); the fable runaways on workbricks docs PRs streamed ~530 s into
+  Claude Code's 64000 default and failed as `SEAT_PROTOCOL_ERROR: SDK transport exceeded one model turn`.
+  The router honours it only after llm-router #125 is released **and** the Claude accounts allow output caps
+  (`capabilities.maxOutputTokens: true`). Until then it drops the cap and lists it in `x-router-ignored-params`,
+  so the setting is harmless before that.
 - The usage poller never probes a router seat (no window to read); the router's own console shows
   its usage per key. **Keep the subscription seats configured on reviewer-2**: the hourly probe
   is what refreshes the seat logins dsh and LiteLLM read (dsh.md § Codex subscriptions).
