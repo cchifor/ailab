@@ -8,16 +8,27 @@ Keep them in sync.
 
 | Network | Purpose | Notes |
 |---|---|---|
-| `192.168.0.0/24` | Proxmox management LAN | nodes `.2/.3/.4`, UI `https://192.168.0.2:8006` |
-| `192.168.1.0/24` | QNAP / general LAN | QNAP mgmt `ai-storage` = `192.168.1.225` (routed from `.0.x`) |
+| `192.168.0.0/23` | UniFi network `Home` (gateway `.0.1`, a UniFi UXG) | ONE /23, verified on the UniFi controller 2026-10-27. The lower half is the Proxmox management LAN (nodes `.2/.3/.4`, UI `https://192.168.0.2:8006`) and this file's static registry; the upper half holds the QNAP (`ai-storage` = `192.168.1.225`), the UniFi Cloud Key (`192.168.1.152`) and DHCP clients. Same L2 segment, not routed |
+| `192.168.2.0/24`, `.20`, `.25`, `.30`, `.40`, `.50`, `.60`, `.99` | UniFi VLANs Lab, Smarthome, Automation, Appliances, Cameras, Trusted, Guest, Mgmt | Routed through the UXG. Trusted (`.50`) and Mgmt (`.99`) are trusted sources for the edge's private hosts (`docs/standards/edge-ingress.md`) |
 
-### Management LAN `192.168.0.0/24` — static allocations (IPAM registry)
+### Lab statics in the lower half of `192.168.0.0/23` — static allocations (IPAM registry)
 
 **This table is the IPAM registry. Verified against the live estate 2026-09-03** (every ailab
 `ipconfig0`/`net0`, plus an ARP/ping sweep of the segment). Allocate from the `free` rows ONLY, and
 update this table in the SAME change that allocates the address.
 
-Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (`.51`–`.254`).
+Static reservations are `.2`–`.51`; the **router DHCP pool starts at `.52`** (`192.168.0.52`–`192.168.1.254`).
+Until 2026-10-27 the controller's pool actually started at `.50` (this file said `.51`), so it could
+lease cloud-ci-11's static `.50`; the edge work moved it to `.52` and took `.51` for the edge VIP
+(ADR 0040). From that work's phase P3 the pool start is asserted by `kubernetes/edge/gateway.yaml`
+(`just edge-gateway-plan`).
+
+> ⚠️ **Not every address in the pool is free.** Devices that are NOT ailab's lab statics hold addresses
+> inside `192.168.0.52`–`192.168.1.254` with **no UniFi reservation** (measured 2026-10-27): the QNAP
+> `ai-storage` (`.1.225`), the UniFi Cloud Key (`.1.152`), Nextcloud (`.0.160`) and the `home-lab` k3s
+> nodes (`.0.131`–`.134`, `.0.187`). Only 15 smart-home devices have reservations. A lease can collide
+> with any of them; the fix is a UniFi fixed-IP reservation per device (open item, owner decision).
+> Never allocate a lab static from the pool on the strength of this table alone.
 
 > ⚠️ **This LAN is SHARED with the `cloudlab` GPU cluster** (separate Proxmox cluster, separate repo
 > `../cloudlab`). Its hosts and LXCs hold `.20`–`.22` and `.26`–`.28` and are **invisible to ailab's
@@ -55,7 +66,8 @@ Static reservations are `.2`–`.50`; the **router DHCP pool starts at `.51`** (
 | `.45 / .46` | AI LLM LXCs `ai-llm-2/3` | 5002–5003 | `kubernetes/infra/ai-lxc/variables.tf` |
 | `.47 / .48 / .49` | Talos agent-node VMs `agent-node-1/2/3` (ADR 0019) | 4301–4303 | `kubernetes/infra/agent-nodes/variables.tf` |
 | `.50` | 🔒 **cloudlab** CI runner VM `cloud-ci-11` (cloud2, third; 2026-10-04, disk on `local-nvme`) | 6111 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
-| `.51`–`.254` | router DHCP pool | — | router |
+| `.51` | **Edge ingress VIP** — reserved 2026-10-27 for MetalLB pool `edge`, the `edge-proxy` front door for `*.chifor.me` (ADR 0040; deployed in its P2, and the gateway's WAN 443 forward points here from P3) | — | `kubernetes/apps/infrastructure/metallb-config/`, `kubernetes/edge/hostnames.yaml` |
+| `.52`–`.1.254` | router DHCP pool (see the warning above: it also holds unreserved non-lab devices) | — | UniFi controller (`kubernetes/edge/gateway.yaml` from P3) |
 
 **Free static space: NONE** since 2026-10-12, when `.37`/`.39` went to the cloud1 CI runners
 `cloud-ci-14`/`15` (they had been released 2026-10-10 with the test-env pool, ADR 0037). Before
@@ -63,12 +75,27 @@ that there was none since 2026-10-04, when the last five — `.7`, `.12`, `.13`,
 cloudlab CI runner VMs `cloud-ci-9..13`; `.29`, `.30` and `.32`–`.35` went to cloud runners on
 2026-09-23, `.5`/`.6` on 2026-09-30, and `.38` to the cloudlab Windows VM `constantin-win-01` on
 2026-09-30. The next static address needs either a release (a retired guest's row
-going back to free) or a deliberate shrink of the router's DHCP pool — never an address from `.51`+
+going back to free) or a deliberate shrink of the router's DHCP pool — never an address from `.52`+
 while the router can still lease it.
 
-> **Keep all lab static IPs inside `.2`–`.50`.** The DHCP pool starts at `.51`, so anything `.51`+
+> **Keep all lab static IPs inside `.2`–`.51`.** The DHCP pool starts at `.52`, so anything `.52`+
 > can be leased to a random client — exactly the collision that pushed the AI LXCs off `.51`–`.53`
 > into the static block (`kubernetes/infra/ai-lxc/variables.tf`).
+
+### WAN port forwards (UniFi UXG)
+
+Verified on the controller 2026-10-27; WAN 443 forwards nowhere today. From ADR 0040's phase P3 the
+edge reconciler (`just edge-gateway-plan`) creates and owns one more forward (its ID recorded in
+`kubernetes/edge/gateway-state.yaml`); it never touches the others, which are not ailab's.
+
+| WAN port | Target | Owner |
+|---|---|---|
+| 443/tcp | *(planned, P3)* `192.168.0.51:443` (edge VIP) | ailab edge, `ailab-edge-https` |
+| 9443 | `192.168.0.160:443` | Nextcloud (`nextcloud`, not ailab) |
+| 80 | `192.168.0.160:80` | Nextcloud (`nextcloud-http`, not ailab) |
+
+Removed 2026-10-27 because nothing answered at their targets, both inside the DHCP pool: 443 ->
+`.250` (`k8s`) and 22 -> `.68` (`git`).
 
 #### ⚠️ VMs not managed by OpenTofu
 
