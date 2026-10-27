@@ -1,8 +1,10 @@
 # P4 of ADR 0040: the per-hostname tunnel CNAMEs became registry-driven records
 # (cloudflare_dns_record.edge, dns.tf). These blocks carry the existing records' state across, so
-# the refactor is moves only: no record is recreated. Keep them until every operator checkout has
-# applied past the refactor (state serial > 48 on 2026-10-27); removing one early would DESTROY and
-# recreate that record.
+# the refactor is moves only: no record is recreated. The moves only work FORWARD: a checkout older
+# than P4 must never plan against migrated state (it would destroy every edge[...] record); rolling
+# back needs the reverse `tofu state mv` in docs/runbooks/edge-ingress.md, "DNS records and their
+# state". Keep these blocks at least until P9; dropping one while some state still holds that
+# tunnel[...] address would DESTROY and recreate the record.
 
 moved {
   from = cloudflare_dns_record.tunnel["home"]

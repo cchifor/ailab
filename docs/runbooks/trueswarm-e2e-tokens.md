@@ -94,7 +94,8 @@ TRUESWARM_ADMIN_CHECKOUT=/path/to/trueswarm-admin bash scripts/trueswarm-admin-a
 
 The helper plans with `-target` on the token, its policy and the application only, so pending work
 someone else left in this shared state (on 2026-10-04: the adoption import of the published
-`trueswarm-admin` DNS record and the `tunnel["relay"]` record import) is neither applied nor allowed
+`trueswarm-admin` DNS record and the `tunnel["relay"]` record import, `edge["relay"]` since P4 of
+ADR 0040) is neither applied nor allowed
 to block it. Those stay visible in a plain `tofu plan` for their owners.
 
 The plan guard refuses anything except:

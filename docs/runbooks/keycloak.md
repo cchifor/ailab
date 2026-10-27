@@ -93,8 +93,9 @@ The console shows a "temporary admin" banner for this account. That is accepted 
    - Use a **targeted** apply:
 
      ```bash
-     tofu plan  '-target=cloudflare_dns_record.tunnel["id"]'   # must be: 1 to add, 0 to change, 0 to destroy
-     tofu apply '-target=cloudflare_dns_record.tunnel["id"]'
+     tofu plan  '-target=cloudflare_dns_record.edge["id"]'   # must be: 1 to add, 0 to change, 0 to destroy
+     tofu apply '-target=cloudflare_dns_record.edge["id"]'
+     # (cloudflare_dns_record.tunnel["id"] before P4 of ADR 0040; the record now comes from the edge registry)
      ```
 
    On 2026-10-13 an untargeted plan against the operator state also carried unrelated drift: a

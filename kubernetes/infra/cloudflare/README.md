@@ -39,9 +39,16 @@ Authelia IdP in `access.tf`), `DNS` (Zone=chifor.me, Edit). **No** Cloudflare Tu
 
 ## DNS
 
-`dns.tf` manages a proxied CNAME per `tunnel_hostnames` entry. Records already created by
-`cloudflared tunnel route dns` (home/sso/chat/grafana/api) are adopted via `imports.tf`; the only record
-this **creates** is `status.chifor.me` (previously 530-ing for lack of a DNS record).
+`dns.tf` manages one record per host of the edge registry (ADR 0040): it creates exactly the records in
+`kubernetes/edge/dns-records.json`, which `just edge-render` generates from `kubernetes/edge/hostnames.yaml`
+after validating it. Add, remove or switch a host in the registry, never here; the plan refuses a stale or
+hand-edited file. The output `edge_records` lists them.
+
+Before P4 (2026-10-27) the resource was `cloudflare_dns_record.tunnel`, fed by `var.tunnel_hostnames`;
+`moved.tf` carries the state across, forward only. Records first created outside Terraform were adopted by
+import blocks, deleted once adopted; `relay-import.tf` is the last, pending until P4's apply. Read
+`docs/runbooks/edge-ingress.md`, "DNS records and their state", before running an older checkout, a
+targeted apply or a rollback against this state.
 
 ## Access (opt-in)
 

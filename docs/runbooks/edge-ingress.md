@@ -49,7 +49,8 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
    at `edge: tunnel` and `lan_dns: false`.
 2. In the SAME PR, if the backend has an ingress NetworkPolicy, admit the `edge-proxy` pods (namespace
    `edge`, `app.kubernetes.io/name: edge-proxy`), or the proxy cannot reach it and step 4 fails.
-3. `just edge-render`, commit, open the PR. CI validates the schema and parity, and runs the runtime
+3. `just edge-render` (it rewrites the Caddyfile and `kubernetes/edge/dns-records.json`), commit both,
+   open the PR. CI validates the schema and parity, checks both files are current, and runs the runtime
    fixture. Merge, and wait for Flux to reconcile the policy and the proxy.
 4. `just edge-smoke --host <name>` from the LAN. Only when it passes: set `lan_dns: true`, run
    `just edge-gateway-plan`, then `just edge-gateway-apply --plan-hash <hash>`, then `tofu apply` for
@@ -58,10 +59,12 @@ Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registr
 ## Switch a host between tunnel and direct (from P4)
 
 **To direct** (planned):
-1. Set `edge: direct`, commit, merge. Flux updates the proxy, so WAN 443 now serves the host.
-2. `tofu apply`: the DNS record becomes a DNS-only CNAME to the apex.
+1. Set `edge: direct`, `just edge-render`, commit both files, merge. Flux updates the proxy, so WAN 443
+   now serves the host.
+2. `tofu apply` from a checkout at that merge: the DNS record becomes a DNS-only CNAME to the apex.
 3. Check from outside: an external HTTP check of `https://<host>.chifor.me`. The proxy's access log
-   shows the probe's public address.
+   shows the probe's public address. Cloudflare flattens the CNAME, so resolvers answer with the
+   apex's A record, not a CNAME: that is expected.
 
 **Before the first host goes direct (P6)**: Caddy labels its per-host metrics with whatever `Host`
 arrives over TLS (`per_host` on a TLS server observes every host; only plain-HTTP servers fall back
@@ -80,6 +83,70 @@ TTL), then merge the proxy change. In an emergency do both at once and accept up
 for clients holding the old answer.
 
 **Everything to the tunnel**: set `force_tunnel: true`, commit, `tofu apply`, merge.
+
+## DNS records and their state (from P4)
+
+`kubernetes/infra/cloudflare/dns.tf` creates exactly the records in `kubernetes/edge/dns-records.json`,
+which `just edge-render` generates from the validated registry. Its plan FAILS (lifecycle preconditions)
+when the file was not rendered from the committed registry (a hash of it), names another zone or tunnel,
+or holds a record of no valid shape. Fix the registry and re-render; never edit the JSON.
+
+**Applying.** A plain `tofu plan` of this module is not clean: the live Trueswarm admin gate was applied by
+`scripts/trueswarm-admin-access.sh` with inputs `terraform.tfvars` does not hold. Export them first:
+`TF_VAR_enable_trueswarm_admin=true`, `TF_VAR_enable_trueswarm_admin_e2e=true`,
+`TF_VAR_publish_trueswarm_admin=false` (keeps that script's own pending DNS import out of an edge apply)
+and `TF_VAR_trueswarm_admin_access_client_secret` (the trueswarm-admin checkout's
+`deploy/foundation/admin-access-identity.sops.yaml`, `stringData.OIDC_CLIENT_SECRET`; or the value the
+operator state already holds for the identity provider; never print it). The plan must then touch only
+`cloudflare_dns_record.edge[...]`.
+
+**P4's first apply** moves the 27 records (`moved.tf`: `tunnel["x"]` becomes `edge["x"]`), imports
+`relay` and creates `edge-canary`: 0 to change, 0 to destroy. Anything else: stop. Then delete
+`relay-import.tf` in the next PR.
+
+**Forward only.** Once the operator state holds `edge[...]` addresses, never plan or apply from a checkout
+older than the P4 merge: it would destroy every `edge[...]` record and try to create `tunnel[...]` ones
+on the same names. `tofu state list | grep -c 'dns_record.tunnel\['` is 0 on migrated state. To roll the
+module back to pre-P4 code, back up the state, move the addresses back, then use the old checkout
+(it has no `edge-canary`, so its plan deletes that record, which is fine):
+
+```bash
+cp terraform.tfstate terraform.tfstate.pre-rollback
+for a in $(tofu state list | grep '^cloudflare_dns_record\.edge\['); do
+  tofu state mv "$a" "cloudflare_dns_record.tunnel${a#cloudflare_dns_record.edge}"
+done
+```
+
+**An interrupted replacement.** A CNAME/A switch deletes the record, then creates the new one. If the
+apply stops in between:
+- the record is gone remotely and from state: the next plan shows one create; apply it;
+- the new record exists remotely but the apply did not save it: the create fails with "record already
+  exists"; import it (`tofu import 'cloudflare_dns_record.edge["<host>"]' <zone_id>/<record_id>`, the id
+  from the Cloudflare API), then plan clean.
+No import block may target a record that is already managed: one would re-import a deleted id here and
+block every plan, which is why the adopted records' blocks were deleted.
+
+## Rehearse a mode change on edge-canary (P4)
+
+Before the first real host changes mode (P6), run every DNS transition on `edge-canary` (a fixed answer,
+nothing behind it) and record the evidence on the P4 PR. Each step is a registry edit on a scratch branch,
+`just edge-render`, and a targeted apply from that checkout, with the inputs from "Applying" above:
+
+```bash
+tofu plan  '-target=cloudflare_dns_record.edge["edge-canary"]'
+tofu apply '-target=cloudflare_dns_record.edge["edge-canary"]'
+for i in $(seq 90); do date +%T; dig +short edge-canary.chifor.me @1.1.1.1; dig +short edge-canary.chifor.me @192.168.0.1; sleep 1; done
+```
+
+1. tunnel to direct (`edge: direct`): an in-place update, proxied CNAME to a DNS-only CNAME (answered
+   flattened, as the apex's A record).
+2. direct to private (`exposure: private`, drop `edge`): a replacement, CNAME to A. Measure the NXDOMAIN
+   window on both resolvers.
+3. private to tunnel: a replacement, A to CNAME.
+4. Interrupt a replacement once (Ctrl-C after the delete) and recover as in "An interrupted replacement".
+
+Record the provider and tofu versions, each plan's summary, each window and what each resolver answered.
+The canary ends in tunnel mode, as on main; discard the scratch branch.
 
 ## The gateway (from P3)
 
