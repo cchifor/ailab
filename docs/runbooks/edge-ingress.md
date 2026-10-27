@@ -38,7 +38,12 @@ kubectl --context admin@ai -n edge logs ds/edge-proxy -c caddy --tail=50
 To find which node announces the VIP, check `ip neigh show 192.168.0.51` on a LAN host and match
 the MAC to a control-plane VM, or read the speaker logs in `metallb-system`.
 
-## Add a hostname (from P2)
+## Add a hostname (complete from P5)
+
+Until P5, cloudflared still routes each host from its own rule in `cloudflared.yaml`, and the DNS
+record comes from the Cloudflare module only from P4. A host added before then needs those two by
+the old procedure (`docs/runbooks/internet-exposure.md`) as well, or only the LAN VIP serves it.
+Steps 1-3 work from P2; step 4 needs the gateway reconciler (P3) and the registry-driven DNS (P4).
 
 1. Add the entry to `hostnames.yaml`, with every security field and a `smoke` outcome, and start it
    at `edge: tunnel` and `lan_dns: false`.

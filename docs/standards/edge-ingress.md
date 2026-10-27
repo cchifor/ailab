@@ -168,8 +168,10 @@ Order matters. Each step is idempotent:
 
 1. **Gateway DHCP**: `just edge-gateway-plan --only dhcp`, then `just edge-gateway-apply --only dhcp
    --plan-hash <hash>`. Then confirm the VIP has no lease and answers no ARP.
-2. **Flux**: the infrastructure layer installs MetalLB; `metallb-config` then creates the pool and
-   advertisement; `apps` deploys the proxy. Assert the Service's assigned address equals the VIP.
+2. **Flux**: `metallb` installs MetalLB and `metallb-config` then creates the pool and
+   advertisement; `edge-proxy`, its own Kustomization, deploys the proxy only after `apps` is healthy,
+   so Authelia's admins-only rules are live before the proxy can forward to their hosts. Assert the
+   Service's assigned address equals the VIP.
 3. **Smoke**: `just edge-smoke` passes on the LAN through the VIP.
 4. **Gateway, the rest**: local DNS records (hosts with `lan_dns`), then the 443 forward:
    `just edge-gateway-plan`, then `just edge-gateway-apply --plan-hash <hash>`.
