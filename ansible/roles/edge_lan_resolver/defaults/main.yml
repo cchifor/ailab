@@ -1,0 +1,8 @@
+---
+# The home gateway's resolver (UniFi). It serves the edge's LAN records (ADR 0040) and the .lan zone,
+# and forwards every other name, as it does for every other device on the LAN.
+edge_lan_resolver_server: 192.168.0.1
+# The netplan-generated systemd-networkd unit of the uplink; the drop-in replaces its DNS= list.
+edge_lan_resolver_network_unit: "10-netplan-{{ ansible_default_ipv4.interface }}.network"
+# Read back after a change: names that must resolve through the gateway.
+edge_lan_resolver_probes: [chifor.me, edge-vip.lan]

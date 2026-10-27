@@ -46,6 +46,12 @@
       tags: [dev_workers, time]
       when: dev_worker_enabled | default(false)
 
+    # The home gateway as the resolver, so router.chifor.me and the other lan_dns hosts reach the
+    # edge proxy's VIP, not Cloudflare (ADR 0040). Own tag: --tags edge_dns.
+    - role: edge_lan_resolver
+      tags: [dev_workers, edge_dns]
+      when: dev_worker_enabled | default(false)
+
     # Fleet observability — the same node_exporter the hypervisors + runners emit (scraped at :9100).
     - role: node_exporter
       tags: [dev_workers, monitoring]

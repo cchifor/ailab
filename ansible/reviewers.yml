@@ -113,6 +113,10 @@
 
   roles:
     - role: node_exporter
+    # The home gateway as the resolver: the reviewbot's router.chifor.me calls reach the edge proxy's
+    # VIP, not Cloudflare (ADR 0040). Own tag: --tags edge_dns.
+    - role: edge_lan_resolver
+      tags: [edge_dns]
     # journald -> Loki. These VMs reported numbers and nothing else: on 2026-09-06 the reason a
     # PR could not be reviewed (`'utf-8' codec can't decode byte 0xf6`) existed only in journald
     # here, so every occurrence cost an SSH round trip to two machines.
