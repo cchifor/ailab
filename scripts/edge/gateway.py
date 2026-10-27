@@ -41,6 +41,7 @@ import base64
 import copy
 import hashlib
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -347,17 +348,20 @@ def collisions(g, kind, key, rows, own_id) -> list:
 
 
 def lease_conflicts(clients, network_id, old, new) -> list:
-    """Active clients on the network holding an address the range change gives back (in the old range,
-    not in the new one) that is not their fixed IP."""
+    """Active clients holding an address the range change gives back (in the old range, not in the new
+    one) that is not their fixed IP. A client of another network is skipped; one whose row names no
+    network counts (conservatively). Only addresses of the range's own family are compared."""
     o0, o1 = (ipaddress.ip_address(x) for x in old)
     n0, n1 = (ipaddress.ip_address(x) for x in new)
     hits = []
     for c in clients:
-        if not isinstance(c, dict) or c.get("network_id") != network_id or not c.get("ip"):
+        if not isinstance(c, dict) or not c.get("ip") or c.get("network_id") not in (network_id, None, ""):
             continue
         try:
             ip = ipaddress.ip_address(c["ip"])
         except ValueError:
+            continue
+        if ip.version != o0.version:
             continue
         if o0 <= ip <= o1 and not n0 <= ip <= n1 and not (c.get("use_fixedip") and c.get("fixed_ip") == c["ip"]):
             hits.append(f"{c['ip']} ({c.get('hostname') or c.get('name') or c.get('mac', '?')})")
@@ -501,9 +505,9 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
         by_id = {f["_id"]: f for f in inv["portforward"]}
         owned = state.get("port_forward")
         intent = intents.get(("forward", pf["name"]))
-        if owned and pf["name"] in forget and (owned["id"] not in by_id
-                                               or by_id[owned["id"]].get("name") != owned["name"]):
-            ops.append({"kind": "forward", "action": "forget", "key": pf["name"], "id": owned["id"]})
+        if owned and owned["name"] in forget and (owned["id"] not in by_id or owned["name"] != pf["name"]
+                                                  or by_id[owned["id"]].get("name") != owned["name"]):
+            ops.append({"kind": "forward", "action": "forget", "key": owned["name"], "id": owned["id"]})
             owned = None
         elif not owned and pf["name"] in forget and intent:
             ops.append({"kind": "forward", "action": "forget", "key": pf["name"], "id": None})
@@ -612,14 +616,14 @@ def canary_marker(reg) -> bytes:
 
 def vip_answers(vip: str, name: str, marker: bytes) -> bool:
     """The VIP must serve the canary (a CA-valid certificate for its name, a 200 carrying its fixed
-    answer) before the WAN is pointed at it."""
+    answer) before the WAN is pointed at it. The TLS socket asks for HTTP/1.1 only (no ALPN)."""
     ctx = ssl.create_default_context()
     try:
         with socket.create_connection((vip, 443), timeout=10) as s:
             with ctx.wrap_socket(s, server_hostname=name) as t:
                 t.sendall(f"GET / HTTP/1.1\r\nHost: {name}\r\nConnection: close\r\n\r\n".encode())
                 data = b""
-                while len(data) < 16384:
+                while len(data) <= CANARY_LIMIT:
                     chunk = t.recv(4096)
                     if not chunk:
                         break
@@ -629,9 +633,34 @@ def vip_answers(vip: str, name: str, marker: bytes) -> bool:
     return canary_ok(data, marker)
 
 
+CANARY_LIMIT = 65536
+
+
+class _Raw:
+    """Lets http.client parse bytes already read from the verified TLS socket."""
+
+    def __init__(self, data: bytes):
+        self._f = io.BytesIO(data)
+
+    def makefile(self, *_args, **_kw):
+        return self._f
+
+
 def canary_ok(response: bytes, marker: bytes) -> bool:
-    head, _, body = response.partition(b"\r\n\r\n")
-    return head.startswith(b"HTTP/1.1 200") and marker in body
+    """The raw answer, parsed as HTTP/1.1 with its framing: exactly 200, a complete body (Content-Length
+    or chunked), and the marker in the decoded body. A truncated body, a marker only in headers or
+    trailers, an oversized answer, anything unparsable: False."""
+    if len(response) > CANARY_LIMIT:
+        return False
+    resp = http.client.HTTPResponse(_Raw(response), method="GET")
+    try:
+        resp.begin()
+        if resp.status != 200:
+            return False
+        body = resp.read()
+    except (http.client.HTTPException, ValueError, OSError):
+        return False
+    return marker in body
 
 
 def _current(client, kind, oid):
@@ -663,8 +692,37 @@ def _disown(state, kind, key):
         state["dhcp_network"] = None
 
 
+def _unowned_snapshot(inv, state, plan) -> dict:
+    """{(kind, id): digest} of every listed object the reconciler neither owns nor is about to touch:
+    the Nextcloud forwards, the *.lan records, the other networks. They must be unchanged after apply."""
+    mine = set(state["static_dns"].values())
+    mine |= {o["id"] for o in plan["ops"] if o.get("id")}
+    for owned in (state.get("port_forward"), state.get("dhcp_network")):
+        if owned:
+            mine.add(owned["id"])
+    return {(kind, r["_id"]): digest(r) for kind in ("portforward", "static_dns", "networkconf")
+            for r in inv[kind] if r["_id"] not in mine}
+
+
+def _check_unowned(before: dict, inv: dict, created: set) -> list:
+    now = {(kind, r["_id"]): digest(r) for kind in ("portforward", "static_dns", "networkconf")
+           for r in inv[kind] if r["_id"] not in created}
+    return sorted(f"{kind} {oid}: {'gone' if (kind, oid) not in now else 'changed'}"
+                  for (kind, oid), d in before.items() if now.get((kind, oid)) != d)
+
+
 def apply(client, g, reg, state, plan, state_path=STATE, log=print):
     options = plan["options"]
+    baseline = _unowned_snapshot(client.inventory(), state, plan)
+    created = set()
+    _apply_ops(client, g, reg, state, plan, options, state_path, log, created)
+    drift = _check_unowned(baseline, client.inventory(), created)
+    if drift:
+        raise GatewayError("objects the reconciler does not own changed or vanished during the apply "
+                           f"(check them in the UniFi UI now): {drift}")
+
+
+def _apply_ops(client, g, reg, state, plan, options, state_path, log, created):
     for op in plan["ops"]:
         kind, action, key = op["kind"], op["action"], op["key"]
         if action == "forget":
@@ -675,7 +733,7 @@ def apply(client, g, reg, state, plan, state_path=STATE, log=print):
             save_state(state, state_path)
             log(f"forgot  {kind} {key}")
             continue
-        if action in ("update", "delete", "adopt"):
+        if action in ("delete", "adopt"):
             cur, _ = _current(client, kind, op["id"])
             if cur is None or digest(cur) != op["before"]:
                 raise GatewayError(f"{kind} {key} changed on the controller since the plan; re-plan")
@@ -685,13 +743,7 @@ def apply(client, g, reg, state, plan, state_path=STATE, log=print):
             save_state(state, state_path)
             log(f"adopted {kind} {key} ({op['id']})")
             continue
-        if action in ("create", "update") and kind in ("dns", "forward"):
-            # the collision checks again, from a fresh read: something may have appeared since the plan
-            _, inv = _current(client, kind, "")
-            rows = inv["static_dns"] if kind == "dns" else inv["portforward"]
-            clash = collisions(g, kind, key, rows, op.get("id"))
-            if clash:
-                raise GatewayError(f"{kind} {key}: {'; '.join(clash)} (since the plan); re-plan")
+        # the gates, which take time, come BEFORE the final read below
         if kind == "forward" and action in ("create", "update") and op["fields"].get("enabled") \
                 and not options["skip_vip_check"]:
             canary = f"edge-canary.{reg['zone']}"
@@ -703,16 +755,27 @@ def apply(client, g, reg, state, plan, state_path=STATE, log=print):
             if hits and not options["ack_dhcp_leases"]:
                 raise GatewayError(f"DHCP {op['show']}: active clients now hold addresses it takes back: {hits}; "
                                    "re-plan")
+        if action in ("create", "update"):
+            # ONE final read, right before the mutation: the object is still the planned one, and nothing
+            # has appeared in the way since (also not while a gate above was running)
+            cur, inv = _current(client, kind, op.get("id") or "")
+            if action == "update" and (cur is None or digest(cur) != op["before"]):
+                raise GatewayError(f"{kind} {key} changed on the controller since the plan; re-plan")
+            if kind in ("dns", "forward"):
+                rows = inv["static_dns"] if kind == "dns" else inv["portforward"]
+                clash = collisions(g, kind, key, rows, op.get("id"))
+                if clash:
+                    raise GatewayError(f"{kind} {key}: {'; '.join(clash)} (since the plan); re-plan")
         if action == "create":
             state["intents"].append({"kind": kind, "key": key, "at": int(time.time()), "fields": op["fields"]})
             save_state(state, state_path)
             obj = client.create_dns(op["fields"]) if kind == "dns" else client.create_portforward(op["fields"])
+            created.add(obj["_id"])
             _own(state, kind, key, obj["_id"])
             _drop_intent(state, kind, key)
             save_state(state, state_path)
             oid = obj["_id"]
         elif action == "update":
-            cur, _ = _current(client, kind, op["id"])
             if kind == "dhcp":
                 BACKUPS.mkdir(parents=True, exist_ok=True)
                 bk = BACKUPS / f"networkconf-{op['id']}-{int(time.time())}.json"

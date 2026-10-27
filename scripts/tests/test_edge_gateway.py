@@ -375,6 +375,98 @@ class Forward(Base):
             gateway.vip_answers = real
         self.assertEqual(self.plan()["ops"], [])
 
+    def gate_that_changes_the_controller(self, change):
+        real = gateway.vip_answers
+
+        def gate(*_a):
+            change()
+            return True
+        gateway.vip_answers = gate
+        return real
+
+    def test_a_rename_during_the_gate_stops_the_update(self):
+        oid = self.owned_forward()
+        for r in self.api.inv["portforward"]:
+            if r["_id"] == oid:
+                r["enabled"] = False
+        plan = self.plan(skip_vip_check=False)
+
+        def rename():
+            for r in self.api.inv["portforward"]:
+                if r["_id"] == oid:
+                    r["name"] = "renamed-in-the-ui"
+        real = self.gate_that_changes_the_controller(rename)
+        try:
+            with self.assertRaises(gateway.GatewayError):
+                self.apply(plan)
+        finally:
+            gateway.vip_answers = real
+        self.assertNotIn(("update_portforward", oid), self.api.calls)
+
+    def test_a_443_forward_appearing_during_the_gate_stops_the_create(self):
+        self.g["port_forward"]["enabled"] = True
+        plan = self.plan(skip_vip_check=False)
+
+        def add():
+            self.api.inv["portforward"].append({"_id": "pf-late", "name": "late", "enabled": True,
+                                                "pfwd_interface": "wan", "dst_port": "443", "fwd": "192.168.0.9",
+                                                "fwd_port": "443", "proto": "tcp"})
+        real = self.gate_that_changes_the_controller(add)
+        try:
+            with self.assertRaises(gateway.GatewayError):
+                self.apply(plan)
+        finally:
+            gateway.vip_answers = real
+        self.assertNotIn(("create_portforward", "ailab-edge-https"), self.api.calls)
+        self.assertEqual(self.state["intents"], [])
+
+    def test_recovery_after_a_rename_forgets_the_recorded_name(self):
+        oid = self.owned_forward()
+        for r in self.api.inv["portforward"]:
+            if r["_id"] == oid:
+                r["name"] = "ailab-edge-https-v2"
+        self.g["port_forward"]["name"] = "ailab-edge-https-v2"
+        self.assertTrue(any("may have been reused" in e for e in self.plan()["errors"]))
+        plan = self.plan(forget=["ailab-edge-https"], adopt=["ailab-edge-https-v2"])
+        self.assertEqual(plan["errors"], [])
+        self.assertEqual(self.ops(plan), [("forget", "forward", "ailab-edge-https"),
+                                          ("adopt", "forward", "ailab-edge-https-v2")])
+        self.apply(plan)
+        self.assertEqual(self.state["port_forward"], {"id": oid, "name": "ailab-edge-https-v2"})
+        self.assertEqual(self.plan()["ops"], [])
+
+    def test_unowned_objects_changed_during_an_apply_fail_it(self):
+        self.g["port_forward"]["enabled"] = True
+        plan = self.plan()
+        real = self.api.create_portforward
+
+        def create_and_disturb(fields):
+            for r in self.api.inv["portforward"]:
+                if r["_id"] == "pf-nc":
+                    r["fwd"] = "192.168.0.99"  # someone retargets Nextcloud meanwhile
+            return real(fields)
+        self.api.create_portforward = create_and_disturb
+        with self.assertRaises(gateway.GatewayError) as cm:
+            self.apply(plan)
+        self.assertIn("portforward pf-nc: changed", str(cm.exception))
+
+    def test_the_gate_parses_http_framing(self):
+        m = b"edge-canary ok peer="
+        ok = gateway.canary_ok
+        self.assertTrue(ok(b"HTTP/1.1 200 OK\r\nContent-Length: 27\r\n\r\nedge-canary ok peer=1.2.3.4", m))
+        # the server closed before the declared length
+        self.assertFalse(ok(b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\nedge-canary ok peer=1.2.3.4", m))
+        # chunked, the marker split across chunks: decoded, it is there
+        self.assertTrue(ok(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                           b"8\r\nedge-can\r\nc\r\nary ok peer=\r\n0\r\n\r\n", m))
+        # chunked, empty body, the marker only in a trailer
+        self.assertFalse(ok(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                            b"0\r\nX-Note: edge-canary ok peer=\r\n\r\n", m))
+        # the marker in a header only
+        self.assertFalse(ok(b"HTTP/1.1 200 OK\r\nX-Note: edge-canary ok peer=\r\nContent-Length: 2\r\n\r\nhi", m))
+        self.assertFalse(ok(b"garbage", m))
+        self.assertFalse(ok(b"HTTP/1.1 200 OK\r\n\r\n" + b"x" * (gateway.CANARY_LIMIT + 1), m))
+
     def test_the_gate_wants_the_canarys_own_answer(self):
         marker = gateway.canary_marker(self.reg)
         self.assertEqual(marker, b"edge-canary ok peer=")
@@ -437,6 +529,16 @@ class Dhcp(Base):
                              "fixed_ip": "192.168.0.50", "mac": "cc"},
                             {"ip": "192.168.0.51", "network_id": "net-lab", "mac": "dd"}]
         self.assertEqual(self.lease_plan()["errors"], [])
+
+    def test_a_client_without_a_network_id_counts(self):
+        self.api.clients = [{"ip": "192.168.0.51", "mac": "ff"}]
+        self.assertTrue(any("192.168.0.51" in e for e in self.lease_plan()["errors"]))
+
+    def test_ipv6_clients_do_not_break_the_check(self):
+        self.api.clients = [{"ip": "fe80::1", "network_id": HOME, "mac": "11"},
+                            {"ip": "2001:db8::5", "mac": "22"}]
+        self.assertEqual(self.lease_plan()["errors"], [])
+        self.assertFalse(any("DHCP" in w for w in self.lease_plan(ack_dhcp_leases=True)["warnings"]))
 
     def test_a_client_arriving_after_the_plan_stops_the_write(self):
         plan = self.lease_plan()
