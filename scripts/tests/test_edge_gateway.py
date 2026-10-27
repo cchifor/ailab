@@ -699,6 +699,30 @@ class Binding(Base):
         self.assertEqual(recs["edge-vip.lan"], ("A", "192.168.0.51"))
         self.assertEqual(self.plan()["ops"], [])
 
+    def test_renaming_the_vip_name_moves_the_aliases_before_the_old_target_goes(self):
+        self.lan_dns("router", "git")
+        self.apply(self.plan())
+        self.g["local_dns"]["vip_name"] = "edge-vip2.lan"
+        plan = self.plan()
+        self.assertEqual([(o["action"], o["key"]) for o in plan["ops"]],
+                         [("create", "edge-vip2.lan"), ("update", "git.chifor.me"), ("update", "router.chifor.me"),
+                          ("delete", "edge-vip.lan")])
+        seen = []
+        real = self.api.delete_dns
+
+        def delete_after_check(oid):
+            # at the moment the old target goes, no alias may still point at it
+            seen.extend(r["key"] for r in self.api.inv["static_dns"]
+                        if r.get("record_type") == "CNAME" and r.get("value") == "edge-vip.lan")
+            return real(oid)
+        self.api.delete_dns = delete_after_check
+        self.apply(plan)
+        self.assertEqual(seen, [])
+        recs = {r["key"]: (r["record_type"], r["value"]) for r in self.api.inv["static_dns"]}
+        self.assertEqual(recs["router.chifor.me"], ("CNAME", "edge-vip2.lan"))
+        self.assertNotIn("edge-vip.lan", recs)
+        self.assertEqual(self.plan()["ops"], [])
+
     def test_vip_name_is_one_label_under_lan(self):
         import yaml
         base = yaml.safe_load(gateway.GATEWAY.read_text(encoding="utf-8"))

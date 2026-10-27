@@ -409,10 +409,11 @@ def _intent_mismatch(intent, obj) -> bool:
 
 
 # The order operations run in: bookkeeping first, then everything that withdraws or narrows exposure,
-# then the network, then additions (the VIP's local A record before the CNAMEs that point at it), and the
-# WAN forward last of all. Within the DNS deletes, CNAMEs go before the A record.
-PHASES = {("forward", "delete"): 2, ("dns", "delete"): 3, ("dhcp", "update"): 4, ("forward", "update"): 7,
-          ("forward", "create"): 7}
+# then the network, then additions (the VIP's local A record before the CNAMEs that point at it), then
+# the deletes of records some CNAME still points at (a renamed vip_name: the new target and the retargeted
+# aliases exist first), and the WAN forward last of all. Within the DNS deletes, CNAMEs go first.
+PHASES = {("forward", "delete"): 2, ("dns", "delete"): 3, ("dhcp", "update"): 4, ("forward", "update"): 8,
+          ("forward", "create"): 8}
 
 
 def _rtype(op):
@@ -424,6 +425,8 @@ def phase(op) -> int:
         return {"forget": 0, "adopt": 1}[op["action"]]
     if op["kind"] == "dns" and op["action"] in ("create", "update"):
         return 5 if _rtype(op) == "A" else 6
+    if op["kind"] == "dns" and op["action"] == "delete" and op.get("alias_target"):
+        return 7
     return PHASES[(op["kind"], op["action"])]
 
 
@@ -540,8 +543,10 @@ def make_plan(g, reg, state, inv, only=None, adopt=(), forget=(), skip_vip_check
                 ops.append({"kind": "dns", "action": "create", "key": key, "fields": fields})
         for key, oid in sorted(owned.items()):
             if key not in want and oid in by_id and str(by_id[oid].get("key", "")).lower() == key:
+                # a record some CNAME on the controller still points at goes only after the aliases moved
+                targets = {str(r.get("value", "")).lower() for r in inv["static_dns"] if r.get("record_type") == "CNAME"}
                 ops.append({"kind": "dns", "action": "delete", "key": key, "id": oid, "before": digest(by_id[oid]),
-                            "rtype": by_id[oid].get("record_type")})
+                            "rtype": by_id[oid].get("record_type"), "alias_target": key in targets})
 
     # ---- port forward
     if "forward" in only:
