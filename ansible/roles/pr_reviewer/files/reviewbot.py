@@ -1265,10 +1265,11 @@ def tier_index(model):
 #
 # `max_tokens` is the seat's output cap, sent with every review: a positive int caps every tier,
 # a {tier: positive int} map only the tiers it names (reviewer-1 caps fable, not its opus
-# fallback). Anything else is not sent, and resolve_seats logs why. The router hands it to Claude Code where the account allows output caps
-# (llm-router #125) and otherwise drops it and says so in x-router-ignored-params, so the cap is
-# harmless before it is honoured. A review that reaches it ends with finish_reason=length,
-# which is a failed attempt (the next tier is asked), never a truncated verdict.
+# fallback). Anything else is not sent, and resolve_seats logs why. The router hands it to
+# Claude Code where the account allows output caps (llm-router #125) and otherwise drops it and
+# says so in x-router-ignored-params, so the cap is harmless before it is honoured. A review
+# that reaches it ends with finish_reason=length, which is a failed attempt (the next tier is
+# asked), never a truncated verdict.
 #
 # `route` IS THE ROUTER'S MODEL MODE (2026-10-26): sent as the X-Router-Route header, with the
 # tier's model in `model`. A pool whose targets are `*` serves the model a request names, and a
