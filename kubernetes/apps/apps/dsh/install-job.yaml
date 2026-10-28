@@ -11,12 +11,12 @@
 # carries app=dsh-install, which the deny policy's podSelector (app=dsh) does not match, so the npm
 # reach exists ONLY here and only while installing.
 #
-# TO UPGRADE: bump the version/plugin-set identity and Job name together.
+# TO UPGRADE: bump the version/build/plugin-set identity and Job name together.
 # Preserve prior directories and PVCs for rollback; never delete state to force an upgrade.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dsh-install-0-1-5-alpha-2-glibc-ps2
+  name: dsh-install-0-1-5-alpha-2-glibc-node26-ps2
   annotations:
     # A Job's spec.template is IMMUTABLE, so any edit Flux applies to this object under the SAME
     # name is rejected with "field is immutable" — which fails the whole dsh Kustomization, not
@@ -57,21 +57,22 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: install
-          # node:22 (Debian bookworm), NOT alpine. The alpine image has no bash, and dsh's shell
+          # node:26 (Debian bookworm), NOT alpine. The alpine image has no bash, and dsh's shell
           # backends spawn the literal binary "bash" -- every Bash tool call failed with
           # `spawn bash ENOENT`. It also had no python3/git/curl, so the agent had essentially no
           # toolchain. MEASURED in-cluster on 2026-09-08: alpine has none of bash/git/curl/python3;
-          # node:22-slim adds only bash; node:22 has bash, git, curl, python3 AND make/g++, which
+          # node:26-slim adds only bash; node:26 has bash, git, curl, python3 AND make/g++, which
           # also lets npm build a native module from source when no prebuilt matches this platform.
           image: mirror.gcr.io/library/node:26
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            # The install directory is keyed on version AND libc. Moving alpine -> Debian changes
-            # musl -> glibc, and the existing /app/0.1.2-rc.1 tree was resolved by npm for musl;
-            # reusing it would run platform-specific prebuilds against the wrong libc. The marker
-            # check below is per-directory, so without a distinct path npm would simply skip the
-            # reinstall and the mismatch would be silent. Bump this on any base-image libc change.
-            - { name: DSH_BUILD, value: "glibc" }
+            # The install directory is keyed on the dsh version, libc, and Node runtime major.
+            # Moving alpine -> Debian changes musl -> glibc, and Node 24 -> 26 changes
+            # NODE_MODULE_VERSION; reusing an existing tree could load native prebuilds against
+            # either the wrong libc or the wrong Node ABI. The marker check below is per-directory,
+            # so without a distinct path npm would simply skip the reinstall and the mismatch would
+            # be silent. Bump this value on any base-image libc or Node-major change.
+            - { name: DSH_BUILD, value: "glibc-node26" }
             # The profile-plugin set, hashed into the staging path. WITHOUT IT a provider change
             # silently overwrites the same directory and a rollback has nowhere to roll back to:
             # the closure this revision names and the closure on disk would be the same path with
@@ -286,8 +287,8 @@ spec:
                       [ "$ok" = 1 ] && { cp "$SP/pnpm-workspace.yaml" "$STAGE/pnpm-workspace.yaml" || ok=0; }
                       # A PINNED pnpm, run THROUGH corepack, never a `pnpm` shim. `corepack enable`
                       # writes its shims into /usr/local/bin, which uid 1000 cannot do -- verified in
-                      # docker on node:22 AND node:24 -- so it was always a silent no-op here, and a
-                      # bare `pnpm` only resolves where a shim already exists. node:24 ships none:
+                      # docker on node:22 AND node:26 -- so it was always a silent no-op here, and a
+                      # bare `pnpm` only resolves where a shim already exists. node:26 ships none:
                       # the 2026-09-11 run ended in `/bin/sh: pnpm: not found`, staging reported
                       # `failed`, and dsh booted without the codex provider. `corepack <pm>@<ver>`
                       # downloads that exact version into COREPACK_HOME and runs it; the cache

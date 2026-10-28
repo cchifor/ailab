@@ -7,7 +7,7 @@ import {Script} from 'node:vm';
 import {pathToFileURL} from 'node:url';
 
 export const VERSION='0.1.5-alpha.2';
-export const BUILD='glibc';
+export const BUILD='glibc-node26';
 export const PACKAGE='@deepseek-ai/dsh-client-ui-chat';
 export const SOURCE_SHA256='3891fc589652c50be24c6d8e68d35c5d4066ed9ae7b7d57a086d5a34ad20c0d9';
 export const OUTPUT_SHA256='9f53814b335eaa3f892fd70e8a22f167b4ba6fef412c598309a17d001bcf847c';

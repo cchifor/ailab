@@ -90,7 +90,7 @@ spec:
           image: mirror.gcr.io/library/node:26
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -101,7 +101,7 @@ spec:
                 # Both conditions, not just the binary. npm creates node_modules/.bin/dsh part-way
                 # through the install; the Job writes .installed only after it completes AND
                 # verifies the binary. Waiting on the executable alone can therefore start dsh
-                # against a half-populated tree -- a race the forced glibc reinstall makes real,
+                # against a half-populated tree -- a race the forced runtime rebuild makes real,
                 # because this path is empty on first roll rather than already complete.
                 [ -x "$BIN" ] && [ -f "$MARK" ] && { echo "dsh ${DSH_VERSION} present"; exit 0; }
                 echo "waiting for the dsh-install Job to populate /app/${DSH_VERSION}-${DSH_BUILD} ($i/60)"; sleep 5
@@ -122,7 +122,7 @@ spec:
           command: [node, /ui-fix-source/build-command-ui-fix.mjs, /app, /ui-client-fix/client.js]
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
           volumeMounts:
             - { name: app, mountPath: /app, readOnly: true }
             - { name: command-ui-fix-source, mountPath: /ui-fix-source, readOnly: true }
@@ -440,7 +440,7 @@ spec:
               node /seed/reconcile-bundles.js
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
             - { name: DSH_PLUGINSET, value: "ps1" }
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
@@ -587,7 +587,7 @@ spec:
             - rm -f /dsh-home/team-conductor/readiness.json; exec "/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
             - { name: DSH_TEAM_CONDUCTOR_CONFIG, value: /conductor-release/conductor.runtime.json }
             - name: DSH_POD_UID
               valueFrom: { fieldRef: { fieldPath: metadata.uid } }
@@ -640,7 +640,7 @@ spec:
             # `uv pip install cairosvg`, then cairosvg rendering the agent's own SVG to PNG.
             - { name: npm_config_prefix, value: /dsh-home/.npm-global }
             # PATH is spelled out in full because a container env var cannot reference the
-            # image's own PATH. The tail is the image's default (verified live on node:22; node:24
+            # image's own PATH. The tail is the image's default (verified live on node:22; node:26
             # since 2026-09-11 ships the same one) -- do not trim it.
             - { name: PATH, value: "/dsh-home/.local/bin:/dsh-home/.npm-global/bin:/app/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
           volumeMounts:
@@ -649,7 +649,7 @@ spec:
             # Deliberately version-pinned; test_dsh_command_ui_fix.py cross-checks the
             # install-job version/build against this path. Remove/rebase on upgrades.
             - name: command-ui-fix
-              mountPath: /app/0.1.5-alpha.2-glibc/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
+              mountPath: /app/0.1.5-alpha.2-glibc-node26/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
               subPath: client.js
               readOnly: true
             - { name: home, mountPath: /dsh-home }
