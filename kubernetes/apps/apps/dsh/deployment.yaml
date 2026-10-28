@@ -63,7 +63,7 @@ spec:
         # entry inside them is already node:node (verified live), so recursion would walk ~71 MiB
         # of session history on every pod start to change nothing.
         - name: fix-ownership
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -87,7 +87,7 @@ spec:
         # Fail loudly if the install Job has not populated the app volume, rather than letting the
         # main container crash-loop on a missing binary.
         - name: wait-for-install
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
             - { name: DSH_BUILD, value: "glibc" }
@@ -141,7 +141,7 @@ spec:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { cpu: 500m, memory: 256Mi }
         - name: seed-settings
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -490,7 +490,7 @@ spec:
         # fresh install, cached hit without network, 0644 repaired to 0755, wrong pin leaves the
         # destination absent with the WARNING, stale content replaced.
         - name: install-kubectl
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           env:
             - { name: KUBECTL_VERSION, value: "v1.31.4" }
             - { name: KUBECTL_SHA256, value: "298e19e9c6c17199011404278f0ff8168a7eca4217edad9097af577023a5620f" }
@@ -549,7 +549,7 @@ spec:
             limits:   { cpu: 500m, memory: 128Mi }
       containers:
         - name: dsh
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           # The agent's sandbox root is process.cwd(): dsh-base sets
           #     sandbox-policy.workspaceRoot: !!js process.cwd()
           # with mode `workspace-write` by default. The container's cwd was `/`, so the sandbox
@@ -698,7 +698,7 @@ spec:
             requests: { cpu: 250m, memory: 512Mi }
             limits:   { cpu: "2",  memory: 4Gi }
         - name: relay
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           command: ["node", "/relay/relay.js"]
           env:
             - { name: RELAY_PORT, value: "8080" }
