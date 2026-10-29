@@ -640,7 +640,7 @@ spec:
             # `uv pip install cairosvg`, then cairosvg rendering the agent's own SVG to PNG.
             - { name: npm_config_prefix, value: /dsh-home/.npm-global }
             # PATH is spelled out in full because a container env var cannot reference the
-            # image's own PATH. The tail is the image's default (verified live on node:22; node:26
+            # image's own PATH. The tail is the image's default (verified live on node:22; node:24
             # since 2026-09-11 ships the same one) -- do not trim it.
             - { name: PATH, value: "/dsh-home/.local/bin:/dsh-home/.npm-global/bin:/app/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
           volumeMounts:

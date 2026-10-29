@@ -57,12 +57,13 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: install
-          # node:26 (Debian bookworm), NOT alpine. The alpine image has no bash, and dsh's shell
+          # A Debian-based Node image, NOT alpine. The alpine image has no bash, and dsh's shell
           # backends spawn the literal binary "bash" -- every Bash tool call failed with
           # `spawn bash ENOENT`. It also had no python3/git/curl, so the agent had essentially no
-          # toolchain. MEASURED in-cluster on 2026-09-08: alpine has none of bash/git/curl/python3;
-          # node:26-slim adds only bash; node:26 has bash, git, curl, python3 AND make/g++, which
-          # also lets npm build a native module from source when no prebuilt matches this platform.
+          # toolchain. Historical measurement in-cluster on 2026-09-08: alpine had none of
+          # bash/git/curl/python3; node:22-slim added only bash; node:22 had bash, git, curl,
+          # python3 AND make/g++, which also let npm build a native module from source when no
+          # prebuilt matched that platform. Keep this measurement separate from the Node 26 image.
           image: mirror.gcr.io/library/node:26
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
@@ -287,8 +288,8 @@ spec:
                       [ "$ok" = 1 ] && { cp "$SP/pnpm-workspace.yaml" "$STAGE/pnpm-workspace.yaml" || ok=0; }
                       # A PINNED pnpm, run THROUGH corepack, never a `pnpm` shim. `corepack enable`
                       # writes its shims into /usr/local/bin, which uid 1000 cannot do -- verified in
-                      # docker on node:22 AND node:26 -- so it was always a silent no-op here, and a
-                      # bare `pnpm` only resolves where a shim already exists. node:26 ships none:
+                      # docker on node:22 AND node:24 -- so it was always a silent no-op here, and a
+                      # bare `pnpm` only resolves where a shim already exists. node:24 ships none:
                       # the 2026-09-11 run ended in `/bin/sh: pnpm: not found`, staging reported
                       # `failed`, and dsh booted without the codex provider. `corepack <pm>@<ver>`
                       # downloads that exact version into COREPACK_HOME and runs it; the cache
