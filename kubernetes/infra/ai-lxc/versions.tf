@@ -3,7 +3,7 @@ terraform {
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
-      version = "~> 0.118" # device_passthrough{} + host-path mount_point{} (validated on 0.109.0)
+      version = "~> 0.119" # device_passthrough{} + host-path mount_point{} (validated on 0.109.0)
     }
   }
 }
