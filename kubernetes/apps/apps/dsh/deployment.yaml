@@ -63,7 +63,7 @@ spec:
         # entry inside them is already node:node (verified live), so recursion would walk ~71 MiB
         # of session history on every pod start to change nothing.
         - name: fix-ownership
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -87,10 +87,10 @@ spec:
         # Fail loudly if the install Job has not populated the app volume, rather than letting the
         # main container crash-loop on a missing binary.
         - name: wait-for-install
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -101,7 +101,7 @@ spec:
                 # Both conditions, not just the binary. npm creates node_modules/.bin/dsh part-way
                 # through the install; the Job writes .installed only after it completes AND
                 # verifies the binary. Waiting on the executable alone can therefore start dsh
-                # against a half-populated tree -- a race the forced glibc reinstall makes real,
+                # against a half-populated tree -- a race the forced runtime rebuild makes real,
                 # because this path is empty on first roll rather than already complete.
                 [ -x "$BIN" ] && [ -f "$MARK" ] && { echo "dsh ${DSH_VERSION} present"; exit 0; }
                 echo "waiting for the dsh-install Job to populate /app/${DSH_VERSION}-${DSH_BUILD} ($i/60)"; sleep 5
@@ -122,7 +122,7 @@ spec:
           command: [node, /ui-fix-source/build-command-ui-fix.mjs, /app, /ui-client-fix/client.js]
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
           volumeMounts:
             - { name: app, mountPath: /app, readOnly: true }
             - { name: command-ui-fix-source, mountPath: /ui-fix-source, readOnly: true }
@@ -141,7 +141,7 @@ spec:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { cpu: 500m, memory: 256Mi }
         - name: seed-settings
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -440,7 +440,7 @@ spec:
               node /seed/reconcile-bundles.js
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
             - { name: DSH_PLUGINSET, value: "ps1" }
           volumeMounts:
             - { name: home, mountPath: /dsh-home }
@@ -490,7 +490,7 @@ spec:
         # fresh install, cached hit without network, 0644 repaired to 0755, wrong pin leaves the
         # destination absent with the WARNING, stale content replaced.
         - name: install-kubectl
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           env:
             - { name: KUBECTL_VERSION, value: "v1.31.4" }
             - { name: KUBECTL_SHA256, value: "298e19e9c6c17199011404278f0ff8168a7eca4217edad9097af577023a5620f" }
@@ -549,7 +549,7 @@ spec:
             limits:   { cpu: 500m, memory: 128Mi }
       containers:
         - name: dsh
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           # The agent's sandbox root is process.cwd(): dsh-base sets
           #     sandbox-policy.workspaceRoot: !!js process.cwd()
           # with mode `workspace-write` by default. The container's cwd was `/`, so the sandbox
@@ -587,7 +587,7 @@ spec:
             - rm -f /dsh-home/team-conductor/readiness.json; exec "/app/${DSH_VERSION}-${DSH_BUILD}/node_modules/.bin/dsh" web --no-open --port 3080 --trusted-host dsh.chifor.me
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
-            - { name: DSH_BUILD, value: "glibc" }
+            - { name: DSH_BUILD, value: "glibc-node26" }
             - { name: DSH_TEAM_CONDUCTOR_CONFIG, value: /conductor-release/conductor.runtime.json }
             - name: DSH_POD_UID
               valueFrom: { fieldRef: { fieldPath: metadata.uid } }
@@ -649,7 +649,7 @@ spec:
             # Deliberately version-pinned; test_dsh_command_ui_fix.py cross-checks the
             # install-job version/build against this path. Remove/rebase on upgrades.
             - name: command-ui-fix
-              mountPath: /app/0.1.5-alpha.2-glibc/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
+              mountPath: /app/0.1.5-alpha.2-glibc-node26/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js
               subPath: client.js
               readOnly: true
             - { name: home, mountPath: /dsh-home }
@@ -698,7 +698,7 @@ spec:
             requests: { cpu: 250m, memory: 512Mi }
             limits:   { cpu: "2",  memory: 4Gi }
         - name: relay
-          image: mirror.gcr.io/library/node:24
+          image: mirror.gcr.io/library/node:26
           command: ["node", "/relay/relay.js"]
           env:
             - { name: RELAY_PORT, value: "8080" }
