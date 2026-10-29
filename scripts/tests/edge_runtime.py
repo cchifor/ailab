@@ -52,7 +52,7 @@ SUPPORT = pathlib.Path(__file__).resolve().parent / "edge_runtime"
 # Pinned by digest, so a fixture failure is always attributable to the diff; IMG_SSL is also the
 # DaemonSet's cert-probe image (asserted below).
 IMG_PY = "python:3.12-alpine@sha256:5789aa194f757888f41fa3d48e14b6feaa1b57c0af0b56fcb1372d6474d3bff0"
-IMG_SSL = "alpine/openssl:3.5.8@sha256:3f25da71f70eba788067daac3f3df03bd1de7a7c52ed89fa93b94ad2c92d986b"
+IMG_SSL = "alpine/openssl:3.5.9@sha256:1c361a204e9791bec6202bccbd1065eafaa65cb5a1a9a06ae000238569fba6a2"
 LABEL = "ailab.edge-runtime"  # every resource: LABEL=<run id>, LABEL.started=<unix time>
 STALE_AFTER = 2 * 3600       # a run older than this is dead (cancelled without cleanup): removed
 
