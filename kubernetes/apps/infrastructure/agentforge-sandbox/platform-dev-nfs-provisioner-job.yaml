@@ -63,7 +63,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: af-sbx-provision-tenant-zero-platform-dev-6894333052 # suffix = sha256(image+args)[:10] — recompute on edit (header)
+  name: af-sbx-provision-tenant-zero-platform-dev-843636b94e # suffix = sha256(image+args)[:10] — recompute on edit (header)
   namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
   annotations:
     # Backstop for a forgotten suffix recompute (see CONTENT-ADDRESSED NAME in the header): recreate
@@ -102,7 +102,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: provision
-          image: mirror.gcr.io/library/busybox:1.38@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e # estate registry-mirror cache (avoids Docker Hub anon 429); digest-pinned (immutable) per estate convention — tag kept for readability
+          image: mirror.gcr.io/library/busybox:1.38@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4 # estate registry-mirror cache (avoids Docker Hub anon 429); digest-pinned (immutable) per estate convention — tag kept for readability
           command: ["/bin/sh", "-c"]
           args:
             - |
