@@ -10,6 +10,9 @@
 # operator (main Flux, a different identity) owns it. A single resourceRule (DELETE / all kinds / any
 # scope) covers both the cluster-scoped Namespace delete and any namespaced-object delete; every other
 # reconciler DELETE (e.g. pruning a REAL tenant's ns at deprovision) is admitted unchanged.
+#
+# 2026-10-30: the playground was RETIRED. Main Flux (kustomize-controller, not the reconciler this guard
+# matches) pruned the namespace; the reservation stays, alongside tenant-guard (16).
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:

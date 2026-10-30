@@ -465,6 +465,45 @@ CASES: list[tuple[str, dict[str, Any], int | None]] = [
         ),
         16,
     ),
+    # (16) on the Namespace itself. The playground was retired 2026-10-30 and its tenant-map entry
+    # removed; the name stays reserved by (16), which is name-based and reads no map entry. The
+    # companion tenant-reserved-guard.yaml (DELETE, a separate policy) is not evaluated here.
+    (
+        "namespace-create-reserved-tenant-zero",
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": "af-tenant-tenant-zero-playground",
+                "labels": {
+                    "agentforge.io/org": CP_ORG,
+                    "agentforge.io/workspace": "playground",
+                    "agentforge.io/pool": "planner",
+                    "app.kubernetes.io/managed-by": "agentforge-cp",
+                    "pod-security.kubernetes.io/enforce": "baseline",
+                },
+            },
+        },
+        16,
+    ),
+    (
+        "namespace-create-platform-dev-as-rendered",
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": CP_NS,
+                "labels": {
+                    "agentforge.io/org": CP_ORG,
+                    "agentforge.io/workspace": CP_WS,
+                    "agentforge.io/pool": CP_POOL,
+                    "app.kubernetes.io/managed-by": "agentforge-cp",
+                    "pod-security.kubernetes.io/enforce": "baseline",
+                },
+            },
+        },
+        None,
+    ),
     # ---- (12)-(15) ESO correlation: proof the map lookup is really being evaluated ---------
     ("cp-externalsecret-as-shipped", cp_externalsecret(), None),
     (
