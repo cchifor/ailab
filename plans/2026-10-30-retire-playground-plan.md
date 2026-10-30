@@ -130,6 +130,18 @@ After merge:
 - no new alerts for 2h (this covers ForgeConductWakesUnanswered's window);
 - the platform-dev permission baseline is unchanged.
 
+**The expected alert set for this window is EMPTY.** Any alert that fires is a regression, not noise. Per rule, against the exprs on main:
+- **Worker and dispatcher rules** (`agentforge-rules.yaml`, deleted only in 1b) read an instant selector or `increase()`/`changes()` of a scraped family, so they go EMPTY about 5 minutes after their targets vanish. Stopping a pod adds no increase.
+  - ForgeTargetDown needs a discovered target with `up == 0` for 5m; a deleted pod's target is dropped, not failed.
+  - ForgeScaleOracleMissing's `absent(...)` is gated `and on() (count(up{job="agentforge-dispatcher"} == 1) > 0)`, so it needs a RUNNING dispatcher.
+- **Conductor rules:**
+  - ForgeConductDown, NeverObserved and TierUnknown join on a Ready `conductor` container, and there is none.
+  - ForgeConductBlind is `time() - last_pass_timestamp > 1800` on an instant selector, so it is stale long before 1800s.
+  - PassesFailing, DetectorBlind, SensorUnrecognised and UnexpectedWrites count increases, which stop.
+  - SecretNotReady reads ESO status, and the ExternalSecret stays Ready in 1a.
+  - WakesUnanswered: its series never existed (Phase 0).
+- **Coverage and generic rules:** ForgeOrchestratorUnscraped joins on Ready `orchestrator` containers. KubeDeploymentReplicasMismatch compares spec 0 with available 0. The HPA is gone, so no HPA rule applies.
+
 ### Phase 1b: ailab PR "retire the playground workspace"
 
 Flux prunes deleted objects (`prune: true`). Every deleted file is also removed from its kustomization's `resources:` list in the same commit, so `kustomize build` stays green.
