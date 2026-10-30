@@ -23,17 +23,16 @@ spec:
       # a node-level log agent doesn't compromise it. (2026-07-22)
       tolerations:
         - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
-        # value=env was added 2026-09-07 for talos-env-node-1 (the test-env pool node). That node
-        # was retired 2026-10-10 (ADR 0037), so no node carries the taint; the entry is inert and
-        # kept so this DaemonSet is not rolled for nothing. Drop it with the next real change here.
-        - { key: dedicated, operator: Equal, value: env, effect: NoSchedule }
     alloy:
       resources:
         # 256Mi -> 512Mi: the cp2 replica repeatedly OOMKilled (exit 137) at 256Mi — its working set
         # (tailing /var/log/pods + Loki WAL/batching) exceeds 256Mi under a chattier log source, dropping
         # log shipping on each restart. 512Mi gives headroom; request bumped 128->192Mi. (2026-07-22)
+        # 512Mi -> 768Mi: the agent-node-1 replica (AgentForge workers, the chattiest node) sat at
+        # 493-495Mi for the whole week to 2026-10-30, touched 512Mi within 30 days, and kept
+        # MonitoringContainerNearMemoryLimit (>90% for 15m) firing. The others peak at 186-308Mi.
         requests: { cpu: 50m, memory: 192Mi }
-        limits: { memory: 512Mi }
+        limits: { memory: 768Mi }
       # mount /var/log so we can read node pod-log files directly (no API-tailing rate limits)
       mounts:
         varlog: true
