@@ -47,8 +47,8 @@ metadata:
     # annotation did not survive: kustomize-controller's SSA apply owns
     # metadata.annotations on this object and stripped it on the next reconcile
     # (observed 2026-08-11 19:41Z; KEDA then re-created the HPA and scaled back to 2).
-    # So the pause lives HERE, in git, until the engine#186 dispatcher/claim fix ships —
-    # that issue owns removing this annotation, nothing else should.
+    # So the pause lived HERE, in git, until the engine#186 dispatcher/claim fix shipped —
+    # that issue owned removing this annotation (historical: superseded by the retirement below).
     #
     # 2026-10-30: "0", not "1" — the playground is being retired
     # (plans/2026-10-30-retire-playground-plan.md, Phase 1a). Stopping the pod while its CNP,
