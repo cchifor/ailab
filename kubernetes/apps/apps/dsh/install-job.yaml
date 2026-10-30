@@ -57,12 +57,14 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: install
-          # node:22 (Debian bookworm), NOT alpine. The alpine image has no bash, and dsh's shell
+          # A Debian-based Node image, NOT alpine. The alpine image has no bash, and dsh's shell
           # backends spawn the literal binary "bash" -- every Bash tool call failed with
           # `spawn bash ENOENT`. It also had no python3/git/curl, so the agent had essentially no
-          # toolchain. MEASURED in-cluster on 2026-09-08: alpine has none of bash/git/curl/python3;
-          # node:22-slim adds only bash; node:22 has bash, git, curl, python3 AND make/g++, which
-          # also lets npm build a native module from source when no prebuilt matches this platform.
+          # toolchain. Historical measurement in-cluster on 2026-09-08: alpine had none of
+          # bash/git/curl/python3; node:22-slim added only bash; node:22 had bash, git, curl,
+          # python3 AND make/g++, which also let npm build a native module from source when no
+          # prebuilt matched that platform.
+          # Node 24, held by renovate.json: the Node 26 move (#1479) was rolled back -- see #1494.
           image: mirror.gcr.io/library/node:24
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
@@ -70,7 +72,10 @@ spec:
             # musl -> glibc, and the existing /app/0.1.2-rc.1 tree was resolved by npm for musl;
             # reusing it would run platform-specific prebuilds against the wrong libc. The marker
             # check below is per-directory, so without a distinct path npm would simply skip the
-            # reinstall and the mismatch would be silent. Bump this on any base-image libc change.
+            # reinstall and the mismatch would be silent. Bump this on any base-image libc change,
+            # and on a Node major (NODE_MODULE_VERSION changes, so native prebuilds do too). The
+            # install is NOT lockfile-pinned yet, so a new tree also re-resolves every dependency
+            # range -- the Node 26 tree came out with 232 different @deepseek-ai versions (#1494).
             - { name: DSH_BUILD, value: "glibc" }
             # The profile-plugin set, hashed into the staging path. WITHOUT IT a provider change
             # silently overwrites the same directory and a rollback has nowhere to roll back to:

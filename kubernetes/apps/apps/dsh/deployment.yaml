@@ -101,8 +101,9 @@ spec:
                 # Both conditions, not just the binary. npm creates node_modules/.bin/dsh part-way
                 # through the install; the Job writes .installed only after it completes AND
                 # verifies the binary. Waiting on the executable alone can therefore start dsh
-                # against a half-populated tree -- a race the forced glibc reinstall makes real,
-                # because this path is empty on first roll rather than already complete.
+                # against a half-populated tree -- a race any new install tree makes real (the
+                # forced glibc reinstall did), because the path is empty on first roll rather than
+                # already complete. Rolling back to an existing marked tree passes immediately.
                 [ -x "$BIN" ] && [ -f "$MARK" ] && { echo "dsh ${DSH_VERSION} present"; exit 0; }
                 echo "waiting for the dsh-install Job to populate /app/${DSH_VERSION}-${DSH_BUILD} ($i/60)"; sleep 5
               done
