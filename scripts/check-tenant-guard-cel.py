@@ -57,6 +57,12 @@ except ImportError as exc:  # pragma: no cover
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POLICY = REPO_ROOT / "kubernetes/apps/apps/agentforge/admission/tenant-guard.yaml"
+# Its DELETE-only companion. tenant-guard matches CREATE/UPDATE only, so the reservation of the retired
+# playground namespace on DELETE lives in this second policy, evaluated by `evaluate_delete` below.
+RESERVED_GUARD = REPO_ROOT / "kubernetes/apps/apps/agentforge/admission/tenant-reserved-guard.yaml"
+RECONCILER = "system:serviceaccount:flux-system:agentforge-tenants-reconciler"
+MAIN_FLUX = "system:serviceaccount:flux-system:kustomize-controller"
+RESERVED_NS = "af-tenant-tenant-zero-playground"
 
 # The operator-owned correlation ConfigMap the binding pins -- read from the SAME tenant-map.yaml
 # the cluster runs rather than re-typed here, so a map edit cannot silently invalidate the ESO
@@ -628,6 +634,54 @@ def evaluate(
     return None
 
 
+def delete_request(user: str, name: str, namespace: str | None, kind: str) -> dict[str, Any]:
+    """A DELETE AdmissionRequest as the apiserver builds it: `namespace` is OMITTED (not "") for a
+    cluster-scoped object such as a Namespace, which is what the guard's `has(request.namespace)` reads."""
+    req: dict[str, Any] = {
+        "kind": {"group": "", "version": "v1", "kind": kind},
+        "operation": "DELETE",
+        "name": name,
+        "userInfo": {"username": user},
+    }
+    if namespace is not None:
+        req["namespace"] = namespace
+    return req
+
+
+#: (case, DELETE request, expected) where expected is "UNMATCHED" (matchConditions exclude the
+#: request, so the policy never runs), "ADMIT", or the 1-based index of the denying validation.
+DELETE_CASES: list[tuple[str, dict[str, Any], str | int]] = [
+    ("reconciler-deletes-reserved-namespace",
+     delete_request(RECONCILER, RESERVED_NS, None, "Namespace"), 1),
+    ("reconciler-deletes-object-in-reserved-namespace",
+     delete_request(RECONCILER, "af-tenant-limits", RESERVED_NS, "LimitRange"), 1),
+    ("reconciler-deletes-platform-dev-namespace-at-deprovision",
+     delete_request(RECONCILER, CP_NS, None, "Namespace"), "ADMIT"),
+    ("reconciler-deletes-object-in-platform-dev",
+     delete_request(RECONCILER, "af-orch-platform-dev-delivery", CP_NS, "Deployment"), "ADMIT"),
+    # The 2026-10-30 retirement prune itself: main Flux, a different identity, is not governed.
+    ("main-flux-prunes-reserved-namespace",
+     delete_request(MAIN_FLUX, RESERVED_NS, None, "Namespace"), "UNMATCHED"),
+]
+
+
+def evaluate_delete(policy: dict[str, Any], request: dict[str, Any]) -> str | int:
+    """Apply `spec.matchConditions` first, as the apiserver does, then the validations in order."""
+    env = celpy.Environment()
+    act = {
+        "request": celpy.json_to_cel(request),
+        "object": celpy.json_to_cel(None),
+        "oldObject": celpy.json_to_cel({"metadata": {"name": request["name"]}}),
+    }
+    for cond in policy["spec"].get("matchConditions", []):
+        if not env.program(env.compile(cond["expression"]), functions=EXTRA_FUNCTIONS).evaluate(act):
+            return "UNMATCHED"
+    for idx, val in enumerate(policy["spec"]["validations"], 1):
+        if not env.program(env.compile(val["expression"]), functions=EXTRA_FUNCTIONS).evaluate(act):
+            return idx
+    return "ADMIT"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -649,7 +703,20 @@ def main() -> int:
         if not ok:
             failures.append(name)
 
-    print(f"\n{len(CASES) - len(failures)}/{len(CASES)} tenant-guard CEL cases passed")
+    reserved = load_policy(RESERVED_GUARD)
+    delete_failures: list[str] = []
+    for name, request, expected in DELETE_CASES:
+        got = evaluate_delete(reserved, copy.deepcopy(request))
+        if args.verbose or got != expected:
+            print(f"{'ok  ' if got == expected else 'FAIL'} {name}: {got}"
+                  + ("" if got == expected else f"  [want {expected}]"))
+        if got != expected:
+            delete_failures.append(name)
+    guard_failures = len(failures)
+    failures += delete_failures
+
+    print(f"\n{len(CASES) - guard_failures}/{len(CASES)} tenant-guard CEL cases passed")
+    print(f"{len(DELETE_CASES) - len(delete_failures)}/{len(DELETE_CASES)} tenant-reserved-guard DELETE cases passed")
     if failures:
         print("FAILED: " + ", ".join(failures), file=sys.stderr)
         return 1
