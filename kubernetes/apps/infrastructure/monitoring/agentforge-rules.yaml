@@ -3,11 +3,12 @@
 # ruleSelector picks it up. This file IS listed in kustomization.yaml — a rule file Flux never applies
 # is the same defect as a rule that cannot fire, and this file was BOTH until 2026-08-10.
 #
-# -- 2026-10-30: PLAYGROUND RETIRED ---------------------------------------------------------------------
-# The worker/dispatcher rules analysed below were deleted with the playground and the af-dispatcher
-# (plans/2026-10-30-retire-playground-plan.md): their only targets are gone. What remains is the
-# broker-fleet pair, ForgeBrokerTargetDown + ForgeBrokerSeatReplicasUnavailable. The sections below
-# are kept as the record of what the deleted rules could and could not see.
+# -- 2026-10-30: DISPATCHER RETIRED WITH THE PLAYGROUND ----------------------------------------------
+# (plans/2026-10-30-retire-playground-plan.md) Its two rules, ForgeDispatchStalled and
+# ForgeScaleOracleMissing, and the dispatcher half of ForgeTargetDown's selector were deleted. The
+# WORKER rules STAY: job="agentforge-worker" is also the CP-rendered pools' job (their PodMonitor relabels
+# to it), so they now cover platform-dev, its only series. Sections below that say the CP pool has no
+# series, or that the playground is the covered half, predate the CP PodMonitor and the retirement.
 #
 # -- WHY EVERY RULE IN HERE WAS REWRITTEN (measured 2026-08-10) ---------------------------------------
 #
@@ -173,14 +174,261 @@ spec:
   groups:
     - name: agentforge
       rules:
-        # 2026-10-30: the nine worker/dispatcher rules that stood here (ForgeTargetDown, ForgeReconcileStalled,
-        # ForgeNeedsHumanBacklogNotDraining, ForgeEngineAuthDegraded, ForgeReconcileDriftHigh, ForgeDispatchStalled,
-        # ForgeUnexplainedEscalations, ForgeOperatorServiceFailing, ForgeScaleOracleMissing) were DELETED with the
-        # playground retirement (plans/2026-10-30-retire-playground-plan.md). Each read only job="agentforge-worker"
-        # (the operator-managed playground pool, the only pod that job ever had) or job="agentforge-dispatcher" /
-        # forge_pending (its scale oracle), so with both gone they were empty vectors forever. The CP-rendered pools
-        # were never covered by them (the ailab#284 boundary above); git history has their text and evidence.
-        # NEW (C-P0-07), and DIFFERENT JOB FAMILY from the retired worker/dispatcher rules: job="agentforge-broker" is
+        # RE-POINTED from `up{job="agentforge"} == 0` (renamed from ForgeWorkerDown: the semantics
+        # changed from "a host systemd unit stopped" to "a pod target exists but will not scrape").
+        # Spanned the worker AND dispatcher jobs until the dispatcher was retired with the playground
+        # (2026-10-30); now the worker job only, which is also every CP-rendered pool's (their PodMonitor
+        # relabels job=agentforge-worker; platform-dev is its only series today).
+        - alert: ForgeTargetDown
+          expr: up{job="agentforge-worker"} == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge target {{ $labels.job }}/{{ $labels.pod }} is failing to scrape"
+            description: >-
+              The metrics endpoint on {{ $labels.pod }} ({{ $labels.namespace }}) has been unscrapeable
+              for >5m while the pod still exists — a crash-loop, a wedged event loop, or a
+              NetworkPolicy change, NOT a scale-down (KEDA scale-to-zero removes the target entirely
+              and this rule correctly stays silent). The worker's held claims release on SIGTERM or
+              expire with the lease TTL so work recovers, but that pool's capacity is cut. Check `kubectl --context admin@ai -n
+              {{ $labels.namespace }} describe pod {{ $labels.pod }}` and the container log. A pool with
+              no target at all (no PodMonitor) is ForgeOrchestratorUnscraped's case, not this one.
+        # RE-POINTED to job=agentforge-worker. The `> 0` inner filter is load-bearing twice over: it
+        # drops the dispatcher (which never reconciles, so its ts is a structural 0 and `time() - 0`
+        # would breach forever) and it drops a freshly-started worker before its first stamp — which
+        # can be up to 600s, since the discovery loop backs off 60s->600s while the forge is
+        # unreachable and _stamp_reconcile only runs after a FULLY SUCCESSFUL pass.
+        - alert: ForgeReconcileStalled
+          expr: time() - (forge_last_reconcile_timestamp{job="agentforge-worker"} > 0) > 900
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge worker {{ $labels.pod }} has not reconciled for >15m"
+            description: >-
+              The reconcile loop is the delivery guarantee — webhooks are only hints, the poll is what
+              actually picks work up — so when it stalls, issues strand in place silently. Observed
+              healthy staleness is 30-90s against a 900s threshold, so this is a wide margin: a breach
+              means the loop is genuinely wedged (Gitea unreachable from the tenant namespace, or the
+              orchestrator task died without killing the process). Note the gauge only advances on a
+              fully successful pass, so a partial failure freezes it rather than zeroing it. Check the
+              orchestrator container log for reconcile backoff and Gitea reachability from
+              {{ $labels.namespace }}.
+        # REDESIGNED TWICE. History matters here because the second form failed in the SAME class as
+        # the first, and the reason is a PromQL semantics trap worth writing down.
+        #
+        #  1. `forge_needs_human_pending > 0` (original). Fires immediately and never clears, because
+        #     the playground carries a permanently parked backlog. Duty cycle 100% = ignored-by-default.
+        #  2. `delta(max by (namespace)(...)[1h:1m]) > 0.5` (shipped 2026-08-10 06:47Z, THIS rule's
+        #     predecessor). Wrong for a subtler reason: **delta() measures CHANGE, not PERSISTENCE.** A
+        #     standing backlog is FLAT, so its delta is 0 — the rule was structurally unable to fire on
+        #     the only condition anyone cares about. Measured, at the moment of this rewrite: backlog =
+        #     9 (a real standing backlog), delta expr = 0, `> 0.5` -> EMPTY VECTOR.
+        #     It was not merely mis-tuned, it was mis-shaped. The lifecycle that proves it (all UTC):
+        #       06:03:31 backlog steps 8 -> 9; delta goes 0 -> ~1.017 (extrapolated)
+        #       06:47:24 the PrometheusRule is created — 44 min into the only 60-min window it had
+        #       06:48:23 pending (ALERTS_FOR_STATE activeAt), accumulating against `for: 30m`
+        #       07:02    delta falls back under 0.5 as the step ages out of the [1h] subquery -> RESET
+        #     ~14 of the required 30 min accumulated; zero Forge alerts ever reached Alertmanager.
+        #     A clean +1 step gives a 60-min window of which `for: 30m` eats half, so the BEST case was
+        #     ~28 min of firing, and only if the rule happened to be live before the step. Over the
+        #     full 3.12d of retained history the delta form exceeded 0.5 for 218 of 4481 min (4.9%) in
+        #     8 runs, longest 58 min — so "can fire in principle, cannot fire on a standing backlog".
+        #
+        # THE TRADE-OFF THIS FORM TAKES, stated explicitly because it is a judgement call, not a fix.
+        # Two honest rules were available:
+        #   (a) PERSISTENCE: `min_over_time(backlog[6h]) > 0` — "a backlog exists and has never been
+        #       empty". Fires once and stays firing. Arguably the most honest representation of a real
+        #       standing condition. REJECTED, on a measured routing fact rather than on taste:
+        #       Alertmanager here routes EVERY alert to the ntfy receiver with NO severity-based route
+        #       (only `alertname="Watchdog"` is dropped) and `repeat_interval: 4h`. A permanently-firing
+        #       rule is therefore a phone push every 4h forever — `severity: info` would NOT de-page it
+        #       — and the predictable end state is a muted ntfy topic, which loses EVERY ailab alert.
+        #       That is a worse failure than the one being fixed. Making (a) safe needs an Alertmanager
+        #       route + inhibition change; that is a real piece of work and is deliberately NOT smuggled
+        #       into a rule-file PR. Named as the residual gap in the PR body.
+        #   (b) WHAT SHIPPED: persistence of an UN-DRAINED INCREMENT. Compare the level against its own
+        #       6h low-water mark: "escalations arrived and the backlog has not been worked back down to
+        #       where it was". This is a persistence test, not a change test — it stays true for as long
+        #       as the elevated level persists, which is exactly what delta() could not do — while
+        #       staying silent on the parked baseline that made form 1 useless.
+        # Consequence to be clear-eyed about: a backlog that is parked and NEVER drained goes quiet
+        # after 6h. That is intentional (it is an operator-created known state), but it means this rule
+        # is a "new halted work" detector, NOT a backlog-size SLO. The size belongs on a dashboard.
+        #
+        # Shape decisions, each measured over the full 3.12d of retained history (2026-08-10):
+        #  * AGGREGATE AWAY `pod` FIRST. The gauge is unlabelled and recomputed per pass as a pool-wide
+        #    total, so every pod in a pool reports the same number: `max by (namespace)` is correct and
+        #    `sum` would double-count (2 pods x 9 = 18). This — NOT the join — is what makes the rule
+        #    churn-proof: 46 pod generations in 3.12d (~15/day, median lifetime ~115 min, 11 of them
+        #    under 45 min) collapse into ONE continuous per-namespace series. `max` also absorbs the
+        #    brief inter-pod skew that does occur (max-minus-min across pods was observed in {0,1}), and
+        #    it absorbs it in the SAFE direction: a skew dip cannot drag the low-water mark down and
+        #    suppress a real alert.
+        #  * KEEP THE `forge_last_reconcile_timestamp > 0` GATE, and note it is now MORE load-bearing
+        #    than it was under delta(), not less. Both gauges are written by the same _stamp_reconcile()
+        #    call, so a non-zero stamp proves the pod has completed a pass and its count is real. The
+        #    worker Deployment declares NO readinessProbe, so a pod becomes a scrape target as soon as
+        #    it is Running and "first scrape beats first reconcile" is an OPEN RACE. Under delta() a
+        #    spurious 0 polluted a 1h window; under min_over_time it would pin the low-water mark to 0
+        #    for a full 6h and page at the full backlog value. Never observed (no worker pod has EVER
+        #    reported ts == 0 across all 46 generations, including recovery from KEDA scale-to-zero,
+        #    which returned samples of 7 and 8 directly) — but it is a race, not a guarantee, so the
+        #    gate stays. It is free: gated and ungated aggregates have IDENTICAL sample counts (4433 of
+        #    4433) over 3.12d, i.e. the gate has never dropped a worker sample. NB the job pin already
+        #    excludes the dispatcher (whose ts is a structural 0 forever), so fresh-pod validity is the
+        #    gate's only remaining job.
+        #  * WINDOW 6h, chosen against the measured alternatives (duty cycle / longest run over 3.12d):
+        #    2h 11.4%/1.9h · 4h 17.9%/3.9h · 6h 23.4%/5.9h · 12h 39.6%/11.9h · 24h 54.4%/21.3h. 6h is
+        #    the knee: a ~5.5h firing window after the 30m hold (vs the delta form's ~28 min best case,
+        #    ~12x) at a duty cycle still well clear of the 100% that made form 1 useless. It is also
+        #    sized off the measured failure modes — the one observed scrape gap was 53 min (KEDA
+        #    scale-to-zero, `minReplicaCount: 0`), and a gap restarts the 30m hold, so the window must
+        #    exceed gap + hold = ~83 min with margin. 2h would not.
+        #  * THRESHOLD `>= 1`, exact. min_over_time and max return real samples, so — unlike delta() and
+        #    increase(), which extrapolate at window edges and forced the old 0.5 fudge — there is no
+        #    extrapolation artefact to fudge around. The gauge is an integer count of open issues.
+        #  * `for: 30m` KEPT, and now genuinely satisfiable: it is 8% of the firing window rather than
+        #    50% of it. It preserves the original SLA ("nobody picked it up in 30m") and debounces a
+        #    label that is added and removed by hand.
+        - alert: ForgeNeedsHumanBacklogNotDraining
+          expr: |
+            (
+              max by (namespace) (
+                forge_needs_human_pending{job="agentforge-worker"}
+                  and on(namespace, pod) (forge_last_reconcile_timestamp{job="agentforge-worker"} > 0)
+              )
+              -
+              min_over_time(
+                max by (namespace) (
+                  forge_needs_human_pending{job="agentforge-worker"}
+                    and on(namespace, pod) (forge_last_reconcile_timestamp{job="agentforge-worker"} > 0)
+                ) [6h:5m]
+              )
+            ) >= 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge {{ $labels.namespace }}: {{ $value }} needs-human escalation(s) added in the last 6h and not cleared"
+            description: >-
+              The needs-human backlog for this tenant is {{ $value }} above its own 6h low-water mark —
+              escalations arrived and nobody has worked the backlog back down. needs-human is a GLOBAL
+              STOP for an issue: no agent will touch it until the label is cleared, so each un-cleared
+              one is a permanently halted piece of work (budget breach, protected-path diff, repeated
+              gate disagreement, or an engine auth failure). DO THIS: list the tenant's open issues
+              carrying the needs-human label, newest first, and for each read the disagreement-summary
+              comment the agent left, then either fix the cause and REMOVE the label to resume the run,
+              or close the issue — the runbook has the per-cause procedure
+              (docs/runbooks/agentforge.md). Removing the label is what resolves this alert; it clears
+              once the count returns to its prior floor, so working the NEWEST escalations is what
+              silences it. This is deliberately NOT a backlog-size alert: a parked backlog that is
+              never drained goes quiet after 6h (see the note above the rule), so use the dashboard,
+              not this alert, to judge total backlog. NOTE: it watches only the PLAYGROUND tenant
+              today — CP-rendered delivery pools export nothing (ailab#284) and KEDA scale-to-zero
+              blinds it while the pool is idle, so a quiet fleet is not proof of a quiet backlog.
+        # NEW, and the reason ForgeWebhookHMACFailures could be retired without losing what mattered:
+        # it carries that rule's inferred intent, "a credential failed and delivery silently stopped".
+        # forge_auth_degraded is the current surface for exactly that — a ONE-WAY latch set after
+        # _MAX_AUTH_FAILURES=2 consecutive LLM-engine auth refusals, after which the worker STOPS
+        # CLAIMING entirely and /readyz fails. Nothing in the source ever clears it (recovery is a
+        # human re-login plus a worker restart), so no `for:` is needed to debounce and the alert is
+        # intentionally sticky until the pod is replaced — note it therefore self-clears on RESTART
+        # rather than on repair, so correlate with /readyz before believing a resolve.
+        # Worker-pinned: the dispatcher never runs the claim loop, so its 0 is structural.
+        - alert: ForgeEngineAuthDegraded
+          expr: forge_auth_degraded{job="agentforge-worker"} > 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "AgentForge worker {{ $labels.pod }} has latched engine-auth degraded (claiming stopped)"
+            description: >-
+              Two consecutive LLM-engine auth refusals latched auth_degraded on {{ $labels.pod }}: this
+              worker has stopped claiming ALL work and will not resume on its own — the latch is
+              one-way, so recovery is a human re-login for the engine credential plus a worker restart.
+              This is the silent-wedge class the latch exists to make visible (a latched worker keeps
+              polling and heartbeating with no other trace). A revoked or expired subscription login is
+              the usual cause. Check the orchestrator log for "auth_degraded latched" and the engine
+              credential in the tenant's ExternalSecret.
+        # RE-POINTED to job=agentforge-worker (the dispatcher never reconciles, so it can never drift).
+        # Summed by namespace rather than per-pod: drift is a fleet-level rate and the pod set churns.
+        # "Drift" is specifically state-label <-> af:run marker divergence healed by the reconciler —
+        # despite the metric's own help string, it is no longer a count of webhook-missed work items.
+        - alert: ForgeReconcileDriftHigh
+          expr: sum by (namespace) (increase(forge_reconcile_drift_total{job="agentforge-worker"}[30m])) > 5
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge {{ $labels.namespace }}: reconciler healing >5 state drifts/30m"
+            description: >-
+              The reconciler keeps converging issue state labels onto their authoritative af:run
+              markers. Occasional healing is the design working; a sustained rate means labels are
+              being lost or rewritten faster than they are being healed — a worker crashing between
+              writes, or webhook deliveries not arriving so the poll is now the only delivery path.
+              Check the Gitea org webhook delivery log for this tenant's repo and ALLOWED_HOST_LIST,
+              and the orchestrator log for _heal_state_label. This is also the surviving proxy for the
+              retired ForgeWebhookHMACFailures: a drifted webhook secret shows up here as work that
+              only ever arrives via the poll.
+        # NEW (C-P0-08), and the P0 residue of the "escalate() recovery reconciler" item: the
+        # comment-before-label ordering already ships (R4, agentforge #236) and
+        # _heal_unexplained_escalation re-explains any needs-human park lacking an af:esc record, so
+        # the remaining gap was that nobody would ever SEE it happen. The counter is deliberately
+        # unlabelled (metrics.py: the engine cannot tell a torn escalation from a hand-applied label)
+        # and pre-exported at 0 on every process that builds the registry, so `increase()` of a
+        # never-written series is exactly 0 and the rule stays silent — including on the dispatcher,
+        # which is why the job pin is convention (every worker-owned rule above carries it) rather
+        # than a correctness guard here. Aggregated by namespace like ForgeReconcileDriftHigh: the
+        # pod set churns (~15 generations/day measured above) and a per-pod series would lose its
+        # window on every restart. `> 0` is exact for a counter that moves in integer steps; no
+        # `for:` because the healer's write is the whole event — it does not persist to debounce.
+        # The summary rounds `$value`: increase() extrapolates to the window edges, so a single
+        # increment reads as e.g. 1.02 — harmless for the threshold, misleading in the alert text.
+        - alert: ForgeUnexplainedEscalations
+          expr: sum by (namespace) (increase(forge_escalations_unexplained_total{job="agentforge-worker"}[1h])) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge {{ $labels.namespace }}: {{ $value | printf \"%.0f\" }} needs-human park(s) without an escalation record in the last 1h"
+            description: >-
+              The reconciler found an issue parked at needs-human with NO af:esc record and wrote a
+              synthesized explanation for it. That is the healer working, but the cause is one of two
+              things worth a look: a TORN escalation (the label and the comment are two forge writes,
+              so a worker died between them — check for a pod restart in this namespace around the
+              increment) or a needs-human label applied BY HAND without the runbook comment (an
+              operator parked work and left no reason, so the synthesized one is a placeholder).
+              Either way find the issue: search the tenant's open needs-human issues for the
+              healer's own comment (the af:esc record it wrote names itself), read what it could
+              reconstruct, and if it was a hand-park replace the placeholder with the real reason so
+              the next operator does not have to guess. Sustained increments across many issues mean
+              a worker crash-looping mid-escalation — correlate with ForgeTargetDown and the pod's
+              restart count, not with the issues themselves.
+        # NEW (C-P0-08), consuming the C-P0-01 counter: reconcile_once's per-issue operator services
+        # (a needs-budget grant, a needs-replan request) are guarded per issue — log + count + skip —
+        # so that one issue's failing forge write no longer propagates into the discovery loop's
+        # 60->600s backoff and blacks out discovery for EVERY repo. The counter is what makes that
+        # guard visible: a failure before the request label cleared is retried next pass (the label
+        # stays), one after it is consumed and only counted here, so a rising rate is either a forge
+        # write that keeps failing for the same issue every pass or an operator request that was
+        # silently eaten. Labelled by kind (grant | replan), pre-touched at 0 for both, so `increase()`
+        # is 0 until a real failure and the rule is inert until then. `> 3` in 30m: the reconcile pass
+        # runs roughly every minute, so a retried failure counts once per pass and clears 3 in ~4
+        # passes — one transient forge blip does not page, a stuck one does within five minutes.
+        # `$value` rounded in the summary for the same increase()-extrapolation reason as above.
+        - alert: ForgeOperatorServiceFailing
+          expr: sum by (namespace, kind) (increase(forge_operator_service_failures_total{job="agentforge-worker"}[30m])) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: "AgentForge {{ $labels.namespace }}: {{ $labels.kind }} operator service failed {{ $value | printf \"%.0f\" }} times in 30m"
+            description: >-
+              A per-issue operator service ({{ $labels.kind }}: grant = a needs-budget budget grant,
+              replan = a needs-replan request) failed inside the reconcile pass more than 3 times in
+              30 minutes and was skipped for those passes. The pass itself kept going — that is the
+              C-P0-01 guard working, and discovery for the other repos was NOT blacked out — but the
+              request it was serving is stuck: if the failure happens before the request label
+              clears, the same issue is retried every pass and this keeps counting; if after, the
+              operator's request was consumed without effect and the issue sits with its label gone
+              and nothing done. Check the orchestrator log in this namespace for the guarded
+              exception (it names the issue and the failing forge call), fix the cause (usually a
+              Gitea write the bot token no longer has, or a repo/label that was renamed), then re-apply
+              the needs-budget / needs-replan label on the issue to have it served again.
+        # NEW (C-P0-07), and DIFFERENT JOB FAMILY from every rule above: job="agentforge-broker" is
         # the operator-owned credential broker fleet in its own namespace (agentforge-broker), not a
         # CP-rendered tenant pool or the dispatcher — a third, disjoint (namespace, job) pair from the
         # ailab#284 coverage boundary documented at the top of this file. Before this PR the broker

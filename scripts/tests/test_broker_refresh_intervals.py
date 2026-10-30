@@ -13,12 +13,10 @@ Three facts, pinned so that a later edit cannot quietly undo them:
      (agentforge broker/config.py BrokerSettings.oauth_reload_interval_s), i.e. invisible in the
      manifest that documents every other AF_BROKER_* knob, and 5x slower than the -kids reload it
      sits beside.
-  3. monitoring/agentforge-rules.yaml extracts as a single PrometheusRule spec that
-     scripts/rules-lint.sh hands to `promtool check rules` (the real parser; this module only checks
-     structure). Until 2026-10-30 it also pinned the three alerts that consumed the P0 engine gauges
-     (ForgeDispatchStalled, ForgeUnexplainedEscalations, ForgeOperatorServiceFailing); those read only
-     the retired playground worker and dispatcher and were deleted with them
-     (plans/2026-10-30-retire-playground-plan.md).
+  3. monitoring/agentforge-rules.yaml carries the alerts that consume the P0 engine counters
+     (ForgeUnexplainedEscalations, ForgeOperatorServiceFailing; ForgeDispatchStalled went with the
+     dispatcher on 2026-10-30, plans/2026-10-30-retire-playground-plan.md), and the file extracts as a single PrometheusRule spec that scripts/rules-lint.sh hands to
+     `promtool check rules` (the real parser; this module only checks structure).
 
 Nothing here talks to a cluster (BRIEFING: never run kubectl against ailab) and nothing here runs
 docker: `promtool` itself is exercised by scripts/rules-lint.sh, which CI runs. Stdlib-only, like
@@ -60,6 +58,11 @@ OAUTH_REFRESH_CEILING_S = 5 * 60
 #: must carry: in step with AF_BROKER_KID_RELOAD_INTERVAL_S, and well under the 300s code default.
 OAUTH_RELOAD_KNOB = "AF_BROKER_OAUTH_RELOAD_INTERVAL_S"
 OAUTH_RELOAD_S = 60
+#: alert name -> the engine series its expr must read.
+P0_ALERTS = {
+    "ForgeUnexplainedEscalations": "forge_escalations_unexplained_total",
+    "ForgeOperatorServiceFailing": "forge_operator_service_failures_total",
+}
 
 # The Go-duration subset ESO's refreshInterval is written in here (h/m/s, in that order). Anything
 # else (a bare number, "5min", "") is a ValueError so a typo fails the test instead of parsing as 0.
@@ -100,6 +103,19 @@ def _load_extractor():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _alert_blocks(spec_text: str) -> dict[str, str]:
+    """alert name -> the text of that rule (from its `- alert:` line to the next rule)."""
+    starts = [
+        (m.start(), m.group(1))
+        for m in re.finditer(r"(?m)^[ ]*-[ ]*alert:[ \t]*(\S+)[ \t]*$", spec_text)
+    ]
+    blocks: dict[str, str] = {}
+    for i, (pos, name) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(spec_text)
+        blocks[name] = spec_text[pos:end]
+    return blocks
 
 
 class OauthExternalSecretsRefreshWithinFiveMinutes(unittest.TestCase):
@@ -161,7 +177,7 @@ class ConfigMapPinsTheOauthReloadInterval(unittest.TestCase):
         )
 
 
-class AgentforgeRulesFileExtracts(unittest.TestCase):
+class AgentforgeRulesCarryTheP0EngineAlerts(unittest.TestCase):
     def _spec(self) -> str:
         mod = _load_extractor()
         return mod.extract_spec(RULES.read_text(encoding="utf-8"), RULES.name)
@@ -170,6 +186,18 @@ class AgentforgeRulesFileExtracts(unittest.TestCase):
         spec = self._spec()
         self.assertRegex(spec, r"(?m)^groups:[ \t]*$")
         self.assertNotRegex(spec, r"(?m)^(apiVersion|kind|metadata):", "metadata leaked into the spec")
+
+    def test_the_p0_alerts_exist_and_read_the_engine_series(self) -> None:
+        blocks = _alert_blocks(self._spec())
+        for alert, series in P0_ALERTS.items():
+            with self.subTest(alert=alert):
+                self.assertIn(alert, blocks, f"{RULES.name} has no `- alert: {alert}`")
+                block = blocks[alert]
+                self.assertRegex(block, r"(?m)^[ ]*expr:")
+                self.assertIn(series, block, f"{alert} does not read {series}")
+                self.assertRegex(block, r"severity:[ \t]*warning")
+                self.assertRegex(block, r"(?m)^[ ]*summary:")
+                self.assertRegex(block, r"(?m)^[ ]*description:")
 
     def test_no_alert_name_is_declared_twice(self) -> None:
         names = re.findall(r"(?m)^[ ]*-[ ]*alert:[ \t]*(\S+)", self._spec())

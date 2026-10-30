@@ -5,7 +5,8 @@
 # pinned to the dead job="agentforge" — but ailab#288 fixed both: it is now listed in
 # kustomization.yaml and each of the five rules it carries is scoped to a live job
 # (`agentforge-worker`, plus `agentforge-dispatcher` in ForgeTargetDown's regex). 2026-10-30: those
-# worker/dispatcher rules were deleted with the playground; that file now holds only the broker pair.
+# dispatcher and its two rules were retired with the playground; its worker rules stay and now cover the
+# CP-rendered pools, whose PodMonitor relabels job=agentforge-worker.
 #
 # The split is by DATA SOURCE, and it is the whole point of this rule. Every rule in that file reads a
 # forge_* series, and a forge_*-reading rule is structurally blind to a pod that is never scraped (see
