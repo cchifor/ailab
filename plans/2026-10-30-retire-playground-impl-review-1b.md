@@ -1,6 +1,6 @@
 # Implementation review — retire-playground — round 1 (Phase 1b)
 
-<!-- codex-impl-review-status: complete -->
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
@@ -22,14 +22,13 @@ Accepted. Fixed in 98b73087: configure_audit_logging routes agentforge.provision
 ### Required namespace lifecycle admission tests are absent
 **Location:** scripts/check-tenant-guard-cel.py:547  
 **Severity:** important  
-<!-- codex: round-2: The name-based reservation is independent of tenant-map, but plans/2026-10-30-retire-playground-plan.md:160 explicitly makes CREATE/UPDATE/DELETE fixtures a Phase 1b requirement. The new CREATE cases pass; the harness still hardcodes CREATE at scripts/check-tenant-guard-cel.py:592, loads only tenant-guard by default at :59, and evaluates validations without policy matching at :624. Thus 36/36 cannot detect a missing or broken DELETE guard. That guard has distinct request.name/request.namespace logic at kubernetes/apps/apps/agentforge/admission/tenant-reserved-guard.yaml:38 and an identity condition at :33. Phase 2's successful main-Flux prune exercises the exempt identity, so it cannot establish denial to the tenant reconciler or admission of platform-dev DELETEs. Complete the required lifecycle fixtures with realistic DELETE requests and policy matching, covering reconciler denial for playground, platform-dev admission, and operator cleanup. -->
-<!-- opus-pushback: Accepted in part (424d88fd): rule 16 is name-based and reads no tenant-map entry, and new Namespace CREATE fixtures prove the reserved name is denied (16) and platform-dev's is admitted, 36/36. A DELETE harness for tenant-reserved-guard is out of scope: this PR does not change that policy (name-based, matches only the tenants-reconciler identity), and Phase 2 checks the one DELETE this PR causes live, main Flux pruning the namespace. -->
+Round 2: accepted in full. The plan did promise CREATE/UPDATE/DELETE coverage, and Phase 2 only exercises the exempt identity. Fixed in the following commits: Namespace CREATE fixtures (36/36) and DELETE fixtures for tenant-reserved-guard with matchConditions applied first (5/5, mutation-checked).
 
 ### Seat-entitlement remediation and its fixture were not updated
 **Location:** kubernetes/apps/infrastructure/monitoring/agentforge-provisioner-rules.yaml:405  
 **Severity:** nit  
 Accepted. Fixed in 1fba37e2: annotation and promtool fixture changed together; the folded descriptions match exactly.
-<!-- codex: round-2: The annotation and fixture agree after label expansion, but both now prematurely declare the revocation complete: kubernetes/apps/infrastructure/monitoring/agentforge-provisioner-rules.yaml:404 says the finding "was resolved on 2026-10-30" by revoking the kid, mirrored in agentforge-provisioner-rules.test.yaml:319. Revocation remains Phase 3, after Phase 2 (plans/2026-10-30-retire-playground-plan.md:226). When these rules deploy in Phase 1b, the still-expected standing finding will therefore be described as an incomplete revocation or reintroduced grant. State that the finding remains expected until Phase 3 completes, and make the recurrence guidance conditional on verified revocation; update the fixture together. -->
+Round 2: accepted. The annotation and fixture now say the tz- finding is EXPECTED until Phase 3 of the retirement, and that a recurrence after it means an incomplete revocation or a re-introduced grant; the folded descriptions match.
 
 ### Documentation declares the deferred revocation complete
 **Location:** docs/decisions/0019-agentforge-v2-control-plane.md:334  
