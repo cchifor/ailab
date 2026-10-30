@@ -35,10 +35,12 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
-  replicas: 1 # a single read-only poller; the forge_pending gauge is idempotent, but one is enough. Also
-              # the single webhook endpoint — acceptable because the webhook is an EDGE optimization, not
-              # the correctness path: a delivery missed during a restart is re-covered by the next poll
-              # loop pass (and Gitea keeps redelivery history). Do not scale this up for "webhook HA".
+  # 2026-10-30: 0 — retired with the playground, its only consumer
+  # (plans/2026-10-30-retire-playground-plan.md, Phase 1a; the next PR deletes this file).
+  # While it ran, ONE was the count: a single read-only poller (the forge_pending gauge is
+  # idempotent) and the single webhook endpoint, acceptable because the webhook is an EDGE
+  # optimization and the poll loop re-covers a missed delivery.
+  replicas: 0
   strategy:
     type: Recreate
   selector:

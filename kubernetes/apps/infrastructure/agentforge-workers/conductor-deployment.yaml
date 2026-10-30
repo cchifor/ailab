@@ -43,7 +43,11 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
-  replicas: 1
+  # 2026-10-30: PARKED at 0. Its tenant config binds only the playground repo, which is being
+  # retired, and at T0 its findings reach no one (plans/2026-10-30-retire-playground-plan.md,
+  # "Decision: park the conductor"). The next PR unlists this file; re-arming is a tracked
+  # follow-up that needs an agentforge change first. It runs at most ONE replica when armed.
+  replicas: 0
   # Recreate, not RollingUpdate: two conductors would both read the estate and — from the acting rungs
   # on — both propose writes against the same parked issues.
   strategy:

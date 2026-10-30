@@ -53,10 +53,13 @@ resources:
   - conductor-serviceaccount.yaml  # the eso SA the SecretStore authenticates as (no automount for the pod)
   - conductor-externalsecret.yaml  # SecretStore + ES: operator/conductor/forge -> AF_BOT_TOKENS (REQUIRED by the pod)
   - conductor-netpol.yaml          # egress: DNS, gitea:3000, prometheus:9090, CP:8080; ingress: monitoring -> :9464
-  - conductor-deployment.yaml      # replicas 1, Recreate, observe tier; refuses to start on a missing knob
+  - conductor-deployment.yaml      # PARKED at replicas 0 since 2026-10-30 (playground retirement, Phase 1a); Recreate, observe tier
   - conductor-podmonitor.yaml      # kube-prometheus scrape of forge_conduct_* on :9464 (its OWN registry)
                                    # OPERATOR-managed pods ONLY — CP-rendered tenant pools stay unscraped until the CP
                                    # renderer emits a 9464 port + a monitoring ingress rule (see the file's COVERAGE BOUNDARY).
+  # 2026-10-30, retirement Phase 1a (plans/2026-10-30-retire-playground-plan.md): the worker below is held at
+  # 0 by its ScaledObject (paused-replicas "0") and the dispatcher at replicas 0; the next PR deletes both.
+  # The text that follows describes them as they were while running.
   # BOTH Deployments ARE listed and live (the gating described below was lifted when their
   # digests were pinned; the comment outlived it and is corrected here 2026-08-15 — it read
   # as "intentionally not listed" directly above the two lines listing them, which is how a
