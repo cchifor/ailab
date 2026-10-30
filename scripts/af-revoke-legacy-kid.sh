@@ -32,7 +32,10 @@ esac
 
 # AF_REVOKE_KUBECTL exists only so scripts/tests can substitute a fake kubectl.
 KUBECTL=("${AF_REVOKE_KUBECTL:-kubectl}" --context admin@ai -n openbao)
-PY=$(command -v python || command -v python3)
+# The local verifier needs an interpreter; `python` first because on Windows `python3` can resolve to
+# the Store stub. A missing interpreter is reported as such, not as a bad rollback record.
+PY=$(command -v python || command -v python3 || true)
+[ -n "$PY" ] || { echo "ABORT: no python/python3 on PATH to verify the rollback record; nothing was run" >&2; exit 3; }
 here=$(cd "$(dirname "$0")" && pwd)
 rollback_dir=${AF_REVOKE_ROLLBACK_DIR:-$HOME/.af-revoke}
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-${aud//\//_}"
