@@ -21,10 +21,10 @@
 # missing map fails CLOSED). Each ESO object is correlated against `data[<its namespace>]`; an
 # un-onboarded namespace has no entry, so it gets NO ExternalSecret/SecretStore.
 #
-# P2 holds ONE operator-committed entry (the tenant-zero shadow, org=tenant-zero,
-# workspace=playground, pool=planner). The allowed-creds name is the CP renderer's
-# `creds_secret_name` = `af-creds-<workspace>-<pool>` (agentforge-platform renderer.py;
-# config_bearer_secret unset for the shadow). Multi-tenant P3 populates this from the operator
+# P2 started with ONE operator-committed entry (the tenant-zero shadow, org=tenant-zero,
+# workspace=playground, pool=planner; retired 2026-10-30), and today holds platform-dev's. The
+# allowed-creds name is the CP renderer's `creds_secret_name` = `af-creds-<workspace>-<pool>`
+# (agentforge-platform renderer.py). Multi-tenant P3 populates this from the operator
 # provisioner (CP-untrusted-input-validated), NEVER from CP labels.
 apiVersion: v1
 kind: ConfigMap
@@ -36,7 +36,12 @@ metadata:
     app.kubernetes.io/part-of: agentforge
 data:
   # af-tenant-<org>-<ws> = "<org>/<workspace>/<allowed creds Secret names, comma-separated>"
-  af-tenant-tenant-zero-playground: "tenant-zero/playground/af-creds-playground-planner"
+  #
+  # The tenant-zero/playground entry was removed 2026-10-30 when the playground was retired
+  # (plans/2026-10-30-retire-playground-plan.md): with no entry, an ESO object in that namespace
+  # fails closed. The namespace itself stays reserved by tenant-guard rule 16 (CREATE/UPDATE) and
+  # tenant-reserved-guard (DELETE).
+  #
   # platform-dev, added when its delivery pool was rolled onto P2 R-1 (sandbox)
   # manifests. A sandbox render emits a SecretStore + ExternalSecret into the tenant
   # namespace, and agentforge-tenant-guard refuses BOTH unless this map names the
