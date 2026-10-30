@@ -30,13 +30,15 @@ case "$aud" in
   *) echo "refusing aud '$aud': tz-213512e80fde7c84 was granted only on claude-max-1, claude-max-2, codex-pro" >&2; exit 2 ;;
 esac
 
-KUBECTL=(kubectl --context admin@ai -n openbao)
+# AF_REVOKE_KUBECTL exists only so scripts/tests can substitute a fake kubectl.
+KUBECTL=("${AF_REVOKE_KUBECTL:-kubectl}" --context admin@ai -n openbao)
+PY=$(command -v python || command -v python3)
 here=$(cd "$(dirname "$0")" && pwd)
 rollback_dir=${AF_REVOKE_ROLLBACK_DIR:-$HOME/.af-revoke}
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-${aud//\//_}"
 
 run() {  # run the driver in the provisioner pod; extra args are appended
-  "${KUBECTL[@]}" exec -i deploy/agentforge-provisioner -c provisioner -- python - \
+  "${KUBECTL[@]}" exec -i deploy/agentforge-provisioner -c provisioner -- python -u - \
     --aud "$aud" \
     --kid tz-213512e80fde7c84 \
     --expect-pk b864a0136bbc8d39 \
@@ -56,16 +58,19 @@ fi
 (umask 077; mkdir -p "$rollback_dir")
 rb="$rollback_dir/$stamp.rollback.json"
 (umask 077; printf '%s\n' "$dry" | sed -n 's/^ROLLBACK //p' > "$rb")
-python -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['aud']==sys.argv[2] and d['kid']=='tz-213512e80fde7c84' and d['record']['public_key']" "$rb" "$aud" \
+"$PY" -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['aud']==sys.argv[2] and d['kid']=='tz-213512e80fde7c84' and d['record']['public_key']" "$rb" "$aud" \
   || { echo "ABORT: rollback record $rb did not verify; nothing was written" >&2; exit 3; }
 echo "rollback record (public key material only) saved and verified: $rb"
 [ "$execute" = 1 ] || exit 0
 
-# 2. EXECUTE pass. Its full output is kept on every path, success or failure.
+# 2. EXECUTE pass. Its output is STREAMED into the log as it arrives (python -u in the pod, tee here),
+# so an interrupted session still leaves every line it saw, including the audit record; kubectl's own
+# exit status is kept through the pipe.
 log="$rollback_dir/$stamp.execute.log"
-rc=0
-out=$(run --execute 2>&1) || rc=$?
-(umask 077; printf '%s\n' "$out" > "$log")
-printf '%s\n' "$out" | grep -v '^ROLLBACK '
+(umask 077; : > "$log")
+set +e
+run --execute 2>&1 | tee -a "$log" | grep --line-buffered -v '^ROLLBACK '
+rc=${PIPESTATUS[0]}
+set -e
 echo "execute output saved: $log (exit $rc)"
 exit "$rc"

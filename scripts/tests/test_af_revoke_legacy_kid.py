@@ -15,9 +15,12 @@ from __future__ import annotations
 import importlib.util
 import io
 import logging
+import os
 import pathlib
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -104,6 +107,61 @@ class AuditLogging(unittest.TestCase):
         stream = io.StringIO()
         sinks = mod.configure_audit_logging(stream, extra_paths=("/nonexistent-dir/x/y",))
         self.assertEqual(sinks, ["stream"])
+
+
+FAKE_KUBECTL = """#!/usr/bin/env bash
+# Stands in for `kubectl exec ... -- python -u -`: swallows the driver on stdin, then prints what the
+# driver would. FAKE_MODE=fail exits 7 after the audit line; anything else hangs, to be interrupted.
+cat > /dev/null
+for a in "$@"; do [ "$a" = --execute ] && execute=1; done
+echo 'ROLLBACK {"aud": "anthropic/claude-max-1", "version": 1, "kid": "tz-213512e80fde7c84", "record": {"public_key": "PEM"}}'
+if [ -z "${execute:-}" ]; then echo "anthropic/claude-max-1: DRY RUN"; exit 0; fi
+echo 'INFO agentforge.provisioner.audit provisioner.audit {"outcome":"revoked"}'
+[ "${FAKE_MODE:-hang}" = fail ] && exit 7
+sleep 60
+"""
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "needs POSIX process groups and bash")
+class WrapperKeepsTheExecuteRecord(unittest.TestCase):
+    """The execute pass is streamed into its log as it arrives, so a failed or interrupted session
+    still leaves the audit line of a removal that already happened."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        d = pathlib.Path(self.tmp.name)
+        self.fake = d / "kubectl"
+        self.fake.write_text(FAKE_KUBECTL, encoding="utf-8")
+        self.fake.chmod(0o755)
+        self.rollback = d / "rollback"
+        self.env = dict(os.environ, AF_REVOKE_KUBECTL=str(self.fake), AF_REVOKE_ROLLBACK_DIR=str(self.rollback))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _log(self) -> str:
+        logs = list(self.rollback.glob("*.execute.log"))
+        return logs[0].read_text(encoding="utf-8") if logs else ""
+
+    def test_a_failed_execute_keeps_its_audit_line_and_exit_status(self) -> None:
+        proc = subprocess.run(["bash", Wrapper.SCRIPT, "anthropic/claude-max-1", "--execute"], cwd=REPO,
+                              env=dict(self.env, FAKE_MODE="fail"), capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertIn('"outcome":"revoked"', self._log())
+        self.assertEqual(len(list(self.rollback.glob("*.rollback.json"))), 1)
+
+    def test_an_interrupted_execute_keeps_the_lines_already_seen(self) -> None:
+        proc = subprocess.Popen(["bash", Wrapper.SCRIPT, "anthropic/claude-max-1", "--execute"], cwd=REPO,
+                                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        try:
+            deadline = time.monotonic() + 20
+            while '"outcome":"revoked"' not in self._log() and time.monotonic() < deadline:
+                time.sleep(0.1)
+        finally:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+        self.assertIn('"outcome":"revoked"', self._log(), "the audit line was lost on interruption")
 
 
 class Wrapper(unittest.TestCase):
