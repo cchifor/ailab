@@ -326,6 +326,9 @@ spec:
     #      the name here (a comment-only invariant is not enough — codex): the reconciler may neither create/
     #      update the tenant-zero Namespace nor any object inside it. (DELETE of the ns is barred by the
     #      companion tenant-reserved-guard.yaml, since this VAP matches only CREATE/UPDATE.)
+    #      2026-10-30: the playground was RETIRED and main Flux pruned the namespace; the name STAYS
+    #      reserved so the CP cannot mint a workspace over its retained NFS data and OpenBao paths.
+    #      This check is name-based and reads no tenant-map entry (that entry was removed).
     - expression: >-
         (request.kind.kind == 'Namespace')
           ? object.metadata.name != 'af-tenant-tenant-zero-playground'

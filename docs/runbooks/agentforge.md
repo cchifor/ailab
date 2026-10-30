@@ -131,6 +131,9 @@ running agentforge as a host systemd service (ansible role `dev_worker`), relabe
 | `agentforge-worker` | `agentforge-workers/worker-podmonitor.yaml` → operator-managed pool pods | 20 |
 | `agentforge-dispatcher` | `monitoring/agentforge-dispatcher` ServiceMonitor | 19 |
 
+(2026-10-30: both of those sources were retired with the playground. `job=agentforge-worker` is now
+carried by the CP-rendered pools, whose PodMonitor relabels to it; platform-dev is its only series.)
+
 So do **not** reach for `job=agentforge` when diagnosing; and note CP-rendered tenant pools are
 scraped by neither — see `worker-podmonitor.yaml`'s COVERAGE BOUNDARY and ailab#284. Whether the
 dev-worker static target should be removed or repaired is part of that open question, not settled
@@ -158,8 +161,8 @@ ForgeWebhookHMACFailures / ForgeReconcileDriftHigh → ntfy. First diagnostics s
 |---|---|
 | `agentforge-broker` | Per-account **broker** Deployments `broker-anthropic-max1`, `broker-anthropic-max2`, `broker-openai-codex` (each **2 replicas** + PDB + a **pinned-ClusterIP** Service on :8700). Also the `af-codex-refresh` CronJob. Brokers run the `…/agentforge/orchestrator` image (CLI-free broker build), NOT p1-worker. Since plan A1 also the `BrokerSeat` CRD + seat RBAC/VAPs (inert until A2/A3b — see *Controller seats (BrokerSeat)* below). |
 | `agentforge-sandbox` | Ephemeral **Kata microVM** Job pods `af-sbx-*` (one per agent run), the reaper's cross-ns RBAC target, the sandbox-guard / sandbox-job-guard VAPs, and the shared NFS staging/workspace PVs. |
-| `af-tenant-tenant-zero-playground` | The planner **orchestrator** Deployment `af-orch-playground-planner` (the KEDA scale **target**, `agentforge serve`, `AF_EXECUTOR=sandbox`) + the KEDA `ScaledObject/af-orch-playground-planner`. Runs as SA `af-orch-playground-planner`. |
-| `agentforge` | Trusted home: `agentforge-dispatcher` (always-on KEDA scale **oracle**, exports `forge_pending`), `agentforge-reaper` (leader-elected GC of leaked Jobs/Pods/dirs), and `agentforge-platform` (the CP webapp/reconciler). |
+| `af-tenant-tenant-zero-playground` | **RETIRED 2026-10-30** (see "Retiring a workspace"); the namespace stays reserved by tenant-guard rule 16. Was: the planner **orchestrator** Deployment `af-orch-playground-planner` (the KEDA scale **target**, `agentforge serve`, `AF_EXECUTOR=sandbox`) + the KEDA `ScaledObject/af-orch-playground-planner`. Runs as SA `af-orch-playground-planner`. |
+| `agentforge` | Trusted home: `agentforge-dispatcher` (the KEDA scale **oracle**; RETIRED 2026-10-30 with the playground), `agentforge-reaper` (leader-elected GC of leaked Jobs/Pods/dirs), and `agentforge-platform` (the CP webapp/reconciler). |
 
 Quick posture check:
 
@@ -300,6 +303,9 @@ Then ESO re-syncs `broker-openai-codex-oauth` and each broker replica **reloads 
 
 ## KEDA scaling gotchas (the planner ScaledObject)
 
+> **Historical since 2026-10-30.** The playground ScaledObject and the dispatcher were retired
+> (see "Retiring a workspace"); no AgentForge pool is KEDA-scaled today. Kept for the next one.
+
 `ScaledObject/af-orch-playground-planner` scales the planner on **`forge_pending`** — a
 Prometheus gauge exported by the **`agentforge-dispatcher`** (`sum(forge_pending{account="claude-max-2",
 role=~"planner|reviewer|implementer|tester"})`, threshold 1, `ignoreNullValues=true`).
@@ -431,16 +437,53 @@ Per-replica liveness is in `GET /api/workers`, keyed per instance: each pod repo
 `AF_WORKER_INSTANCE` (its pod name), so `instances`/`instances_online` show the replicas
 individually while the row stays one-per-pool.
 
+## Retiring a workspace
+
+First done 2026-10-30 for `tenant-zero/playground`; the full record, with two codex review rounds, is
+`plans/2026-10-30-retire-playground-plan.md`. The order is what matters:
+
+1. **Pre-flight (read-only).**
+   - In-flight work: sandbox Jobs and Pods by `agentforge.io/workspace`. Leases are unlabelled, so
+     correlate each `af-sbx-*` holder with a live pod. Also check claims and issue activity.
+   - Signers: `AF_CAPABILITY_KID` across every Secret (kid values only).
+   - The kid registries: kid names per aud. `scripts/af-revoke-legacy-kid.sh <aud>` dry-runs this
+     in-pod, without a workstation token.
+   - The surviving tenant's baseline: `kubectl auth can-i --as=<its SA>` on the shared Endpoints and
+     sandbox verbs, and every broker replica's `/internal/kid/<kid>`.
+2. **Stop, then delete, in separate PRs.** The first PR only scales the pool to 0 (KEDA
+   `paused-replicas: "0"`, `replicas: 0`), so pods exit while their CNPs, SecretStores and RBAC still
+   exist. Expect NO alerts: instant-selector rules go stale, and `absent()` rules are gated on a
+   running target.
+3. **The deletion PR:**
+   - workload files and their kustomization entries;
+   - the operator-owned tenant namespace. Its `agentforge.io/provisioner` finalizer tears down the
+     tenant OpenBao role and policy; never force-remove it;
+   - the retired subjects on shared RoleBindings;
+   - the tenant-map entry. KEEP tenant-guard rule 16 and the reservation;
+   - the seed fragment: `sops edit` with an editor shim, then `just af-record-seed-coverage`;
+   - rules that can only read the retired pool, and docs.
+4. **Revoke the kid only after its signer is gone.** A provisioner-minted `cap-` kid is torn down by
+   the provisioner. A legacy kid needs the provisioner's own `_cas_remove_from_registry`, as in
+   `scripts/af-revoke-legacy-kid.sh`. Do one aud at a time, and poll every broker replica until it
+   reports `served:false`.
+5. **Owner, in the forge UI:** archive the repo, remove its collaborators, and delete hooks that
+   target retired receivers. NEVER rotate the shared bot PATs; the surviving tenant uses them.
+
+**Left behind on purpose, each with a follow-up:**
+- dormant KV docs (no operator identity can delete `operator/*`);
+- Retain PVs and NFS directories;
+- anything a shared component still mounts (the reaper) or a canary still targets.
+
 ## Image repin cycle (how a code change ships)
 
 AgentForge **code** changes ride the p1-worker image; **config** changes do not:
 
 - **Code change** → PR to `cchifor/agentforge` → **squash-merge** → Gitea CI rebuilds
-  `registry.chifor.me/agentforge/p1-worker` → **repin the 4 ailab digests** (all the same `@sha256`):
+  `registry.chifor.me/agentforge/p1-worker` → **repin the ailab digests** (all the same `@sha256`):
   1. `kubernetes/apps/apps/agentforge/deployment.yaml` (the CP's `AFP_WORKER_IMAGE`)
   2. `kubernetes/apps/infrastructure/agentforge-sandbox/reaper-deployment.yaml`
-  3. `kubernetes/apps/infrastructure/agentforge-workers/dispatcher-deployment.yaml`
-  4. `kubernetes/apps/infrastructure/agentforge-workers/worker-deployment.yaml`
+
+  (Until 2026-10-30 there were two more, the dispatcher and the playground worker, both retired.)
 
   → open the ailab PR → merge → **Flux rolls** the pods. (The brokers + `af-codex-refresh` run the
   separate `…/agentforge/orchestrator` image, repinned independently.)
@@ -449,6 +492,10 @@ AgentForge **code** changes ride the p1-worker image; **config** changes do not:
   repin**, effective ~2 min after merge.
 
 ## Webhook secret durability (2026-08-11 program follow-up)
+
+> **Historical since 2026-10-30.** The dispatcher was retired with the playground. Its
+> `operator/dispatcher/{forge,webhook}` docs are dormant (only an owner can delete `operator/*` docs),
+> and the `operator/dispatcher/forge` seed fragment was removed.
 
 `AF_WEBHOOK_SECRET` (dispatcher listener HMAC; minted 2026-08-11) lives in OpenBao at
 `af/data/operator/dispatcher/webhook` and — worker copy — inside

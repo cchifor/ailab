@@ -13,9 +13,9 @@ Three facts, pinned so that a later edit cannot quietly undo them:
      (agentforge broker/config.py BrokerSettings.oauth_reload_interval_s), i.e. invisible in the
      manifest that documents every other AF_BROKER_* knob, and 5x slower than the -kids reload it
      sits beside.
-  3. monitoring/agentforge-rules.yaml carries the three alerts that consume the P0 engine gauges
-     and counters (ForgeDispatchStalled, ForgeUnexplainedEscalations, ForgeOperatorServiceFailing),
-     and the file extracts as a single PrometheusRule spec that scripts/rules-lint.sh hands to
+  3. monitoring/agentforge-rules.yaml carries the alerts that consume the P0 engine counters
+     (ForgeUnexplainedEscalations, ForgeOperatorServiceFailing; ForgeDispatchStalled went with the
+     dispatcher on 2026-10-30, plans/2026-10-30-retire-playground-plan.md), and the file extracts as a single PrometheusRule spec that scripts/rules-lint.sh hands to
      `promtool check rules` (the real parser; this module only checks structure).
 
 Nothing here talks to a cluster (BRIEFING: never run kubectl against ailab) and nothing here runs
@@ -60,7 +60,6 @@ OAUTH_RELOAD_KNOB = "AF_BROKER_OAUTH_RELOAD_INTERVAL_S"
 OAUTH_RELOAD_S = 60
 #: alert name -> the engine series its expr must read.
 P0_ALERTS = {
-    "ForgeDispatchStalled": "forge_last_dispatch_timestamp",
     "ForgeUnexplainedEscalations": "forge_escalations_unexplained_total",
     "ForgeOperatorServiceFailing": "forge_operator_service_failures_total",
 }
@@ -188,7 +187,7 @@ class AgentforgeRulesCarryTheP0EngineAlerts(unittest.TestCase):
         self.assertRegex(spec, r"(?m)^groups:[ \t]*$")
         self.assertNotRegex(spec, r"(?m)^(apiVersion|kind|metadata):", "metadata leaked into the spec")
 
-    def test_the_three_p0_alerts_exist_and_read_the_engine_series(self) -> None:
+    def test_the_p0_alerts_exist_and_read_the_engine_series(self) -> None:
         blocks = _alert_blocks(self._spec())
         for alert, series in P0_ALERTS.items():
             with self.subTest(alert=alert):
@@ -199,16 +198,6 @@ class AgentforgeRulesCarryTheP0EngineAlerts(unittest.TestCase):
                 self.assertRegex(block, r"severity:[ \t]*warning")
                 self.assertRegex(block, r"(?m)^[ ]*summary:")
                 self.assertRegex(block, r"(?m)^[ ]*description:")
-
-    def test_dispatch_stalled_is_pinned_to_the_dispatcher_and_debounced(self) -> None:
-        block = _alert_blocks(self._spec())["ForgeDispatchStalled"]
-        # The gauge is a structural 0 until the first successful pass (and on every worker,
-        # which builds the same registry): the `> 0` inner filter is what keeps `time() - 0`
-        # from breaching forever, exactly as ForgeReconcileStalled does.
-        self.assertIn('job="agentforge-dispatcher"', block)
-        self.assertRegex(block, r"forge_last_dispatch_timestamp\{[^}]*\}[ ]*>[ ]*0")
-        self.assertRegex(block, r">[ ]*600")
-        self.assertRegex(block, r"(?m)^[ ]*for:[ \t]*5m")
 
     def test_no_alert_name_is_declared_twice(self) -> None:
         names = re.findall(r"(?m)^[ ]*-[ ]*alert:[ \t]*(\S+)", self._spec())

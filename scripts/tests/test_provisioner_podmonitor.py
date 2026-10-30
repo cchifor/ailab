@@ -20,7 +20,8 @@ this estate rather than a way it might:
     naming a port no container declares also discovers zero targets, silently.
   * agentforge-rules.yaml's header: five rules pinned to a job label with zero targets. So the job
     label the PodMonitor writes and the job label every rule selects on are asserted equal.
-  * agentforge-workers/worker-podmonitor.yaml's own note: the Prometheus adopts a monitor by the
+  * agentforge-workers/worker-podmonitor.yaml's own note (that file was retired with the playground
+    on 2026-10-30; the rule it recorded still holds): the Prometheus adopts a monitor by the
     `release: kube-prometheus-stack` label and looks for it in ns `monitoring`. A monitor missing
     either is applied by Flux, reconciles clean, and is never loaded.
   * The registration half: a rules file Flux never applies is the same defect as a rule that cannot

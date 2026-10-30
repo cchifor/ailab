@@ -326,3 +326,17 @@ the P0 procedure.
   `privilege_hardening: v1.1`.
 - **P3:** external clusters (pull model, read-only deploy keys, hostile-payload handling); per-org
   quotas; per-tenant LiteLLM virtual keys w/ budget caps; dogfood.
+
+## Update (2026-10-30) — the tenant-zero playground is retired
+
+The owner retired the `tenant-zero/playground` workspace (plans/2026-10-30-retire-playground-plan.md):
+- Gone: its operator-managed planner pool (the only KEDA-scaled, estate-managed pool) and the af-dispatcher scale oracle that served only it.
+- Revoked in the retirement's Phase 3, once the prune is verified: its legacy hand-seeded capability kid `tz-213512e80fde7c84`, which the seat-entitlement audit flagged as an undeclared grant since 2026-09-07 and which the kid schema could never declare.
+- Parked: the conductor, whose tenant config bound only the playground repo.
+
+`tenant-zero/platform-dev`, CP-rendered, is now the only AgentForge workspace.
+
+Kept on purpose:
+- the namespace reservation (tenant-guard rule 16 + tenant-reserved-guard);
+- the boundary canary's playground storage and broker rule, until the canary moves to a disposable identity;
+- the reaper's mount, until it is re-pointed at platform-dev. It only ever reaped the playground.

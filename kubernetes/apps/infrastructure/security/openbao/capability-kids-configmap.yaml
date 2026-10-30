@@ -43,7 +43,12 @@
 # diagnostic cycle. Decode the kid registry and check the WORKSPACE scope first; existence and
 # ExternalSecret sync are not authorization. Tracked as cchifor/agentforge#123.
 #
-# ── OPEN OPERATOR DECISION (agentforge#123): the PLAYGROUND workspace is not declared here ──
+# ── OPERATOR DECISION (agentforge#123): the PLAYGROUND workspace is not declared here ──
+# RESOLVED 2026-10-30: the owner RETIRED the playground (plans/2026-10-30-retire-playground-plan.md).
+# Its orchestrator is deleted, and Phase 3 of the retirement revokes `tz-213512e80fde7c84` from the
+# claude-max-1, claude-max-2 and codex-pro registries with scripts/af-revoke-legacy-kid.sh. Nothing here changes: the
+# block below is kept as the record of why that kid could never be declared, only revoked.
+#
 # Re-derived live 2026-08-10 while adding the seat-entitlement audit (agentforge#152). Three facts
 # that change what "fix claude-max-3" means, and none of which follow from the asymmetry above:
 #

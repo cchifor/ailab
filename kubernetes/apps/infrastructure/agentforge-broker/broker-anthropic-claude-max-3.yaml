@@ -353,6 +353,8 @@ spec:
             - { port: "8700", protocol: TCP }
     # (1) ONLY sandbox AGENT pods of the MATCHING pool/tenant, on the STABLE per-pool/org/workspace identity
     #     labels (NOT the high-cardinality per-job label). Preserved verbatim from the single-broker policy.
+    # 2026-10-30: the playground was RETIRED, but this rule is KEPT as the ADR 0019 boundary canary's positive control
+    # (its agent pod carries these labels). Remove it once the canary moves to a disposable identity (plans/2026-10-30-retire-playground-plan.md).
     - fromEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: agentforge-sandbox

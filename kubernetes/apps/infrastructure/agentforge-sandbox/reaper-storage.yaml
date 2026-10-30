@@ -1,4 +1,10 @@
 # REAPER PV+PVC — the reaper's view of the shared NFS export, in the reaper's TRUSTED home namespace
+#
+# 2026-10-30: the playground workspace was RETIRED (plans/2026-10-30-retire-playground-plan.md), but this
+# pair is KEPT: reaper-deployment.yaml mounts it, and pruning it would break the reaper. The reaper finds
+# work by listing job dirs under THIS mount (agentforge adapters/exec/reaper.py run_once), so it only ever
+# reaped the playground and now idles — platform-dev's sandbox Jobs and Leases have never been reaped.
+# Re-pointing it at platform-dev (new PV+PVC first, then the mount) closes that gap; tracked follow-up.
 # `agentforge` (codex R-1 #1/#5). The reaper was moved OUT of agentforge-sandbox (where the
 # sandbox-guard VAP + the zero-egress default-deny would reject it) into `agentforge`; PVCs are
 # ns-scoped, so it needs its own PVC there, pointing at the SAME per-org/ws export subdir as the

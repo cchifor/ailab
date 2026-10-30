@@ -4,8 +4,8 @@
 #             :8720 probe port is reached by the kubelet, which is node-local and not an endpoint.
 #   egress  — DNS; the forge (gitea:3000); Prometheus (:9090); the control plane (:8080).
 #
-# THE ENDPOINT SELECTOR KEYS ON `name` ALONE, and that is not a shortcut. The two templates in this
-# directory genuinely differ: worker-deployment.yaml puts `app.kubernetes.io/managed-by` on its POD
+# THE ENDPOINT SELECTOR KEYS ON `name` ALONE, and that is not a shortcut. The two templates this
+# directory held until the 2026-10-30 playground retirement genuinely differed: worker-deployment.yaml puts `app.kubernetes.io/managed-by` on its POD
 # TEMPLATE (so cilium-egress.yaml can key on the pair), while dispatcher-deployment.yaml puts it on the
 # Deployment and NOT on the pod template. The conductor follows the dispatcher, so a selector copied
 # from the worker would match NOTHING — and a CNP that selects nothing fails in two opposite directions

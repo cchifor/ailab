@@ -57,9 +57,8 @@ roleRef:
   kind: Role
   name: agentforge-orchestrator-sandbox
 subjects:
-  - kind: ServiceAccount
-    name: af-orch-playground-planner
-    namespace: af-tenant-tenant-zero-playground
+  # (The tenant-zero/playground subject af-orch-playground-planner was removed 2026-10-30 when the
+  # playground was retired: plans/2026-10-30-retire-playground-plan.md.)
   # tenant-zero/platform-dev subscription workspace (pool `delivery`) — the CP renderer names its
   # orchestrator SA `af-orch-<workspace>-<pool>` = af-orch-platform-dev-delivery in the CP-rendered
   # tenant ns af-tenant-tenant-zero-platform-dev. It shares this sandbox ns, so it needs the same

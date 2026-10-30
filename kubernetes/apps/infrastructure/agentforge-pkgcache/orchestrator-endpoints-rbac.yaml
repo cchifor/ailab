@@ -38,11 +38,8 @@ roleRef:
   kind: Role
   name: agentforge-orchestrator-pkgcache-endpoints
 subjects:
-  # playground/planner (org=tenant-zero, workspace=playground, pool=planner) — for the #209 epic
-  # acceptance runs, which also exercise dependency_proxy repos.
-  - kind: ServiceAccount
-    name: af-orch-playground-planner
-    namespace: af-tenant-tenant-zero-playground
+  # (The playground/planner subject af-orch-playground-planner, granted for the #209 epic acceptance
+  # runs, was removed 2026-10-30 when the playground was retired: plans/2026-10-30-retire-playground-plan.md.)
   # platform-dev/delivery (org=tenant-zero, workspace=platform-dev, pool=delivery) — the canary pool;
   # its orchestrator resolves the npm-cache Endpoints -> pod IP for the Kata PREPARE path.
   - kind: ServiceAccount

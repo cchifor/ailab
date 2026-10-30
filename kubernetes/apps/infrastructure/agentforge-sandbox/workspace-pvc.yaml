@@ -1,5 +1,12 @@
 # Per-WORKSPACE RWX staging volume for the tenant-zero shadow — SANDBOX side (codex R-1 #1).
 #
+# 2026-10-30: the playground workspace was RETIRED (plans/2026-10-30-retire-playground-plan.md). This PV+PVC
+# is KEPT for one reason only: it is the target of the ADR 0019 boundary canary (egress-canary.yaml,
+# test-egress-canary.yaml, scripts/verify-sandbox-boundary.sh), whose pods carry playground labels and so
+# must mount the af-sbx-ws-<org>-<ws> claim those labels name (sandbox-guard). No workload uses it any more.
+# Re-targeting the canary to a disposable identity, then deleting this file, is a tracked follow-up — never
+# point the canary at platform-dev's live workspace instead.
+#
 # PVCs are namespace-scoped, so a dynamic PVC in agentforge-sandbox could NOT be shared with the
 # orchestrator (tenant ns) or the reaper (agentforge ns). R-1 therefore uses a genuinely-shared NFS
 # backing. P2 R-2 §C keys that backing on ORG+workspace for multi-tenant isolation: each org/workspace

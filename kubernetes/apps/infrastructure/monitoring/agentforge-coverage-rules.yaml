@@ -4,7 +4,9 @@
 # NOT because that file is inert. It was — commented out of kustomization.yaml with all of its rules
 # pinned to the dead job="agentforge" — but ailab#288 fixed both: it is now listed in
 # kustomization.yaml and each of the five rules it carries is scoped to a live job
-# (`agentforge-worker`, plus `agentforge-dispatcher` in ForgeTargetDown's regex).
+# (`agentforge-worker`, plus `agentforge-dispatcher` in ForgeTargetDown's regex). 2026-10-30: those
+# dispatcher and its two rules were retired with the playground; its worker rules stay and now cover the
+# CP-rendered pools, whose PodMonitor relabels job=agentforge-worker.
 #
 # The split is by DATA SOURCE, and it is the whole point of this rule. Every rule in that file reads a
 # forge_* series, and a forge_*-reading rule is structurally blind to a pod that is never scraped (see
@@ -44,7 +46,8 @@ spec:
         # LEFT: every Ready container named `orchestrator` in a tenant namespace. That container name
         # is hard-coded in BOTH renderers — the CP GitOps renderer (agentforge-platform
         # adapters/gitops/renderer.py) and the operator-managed pool (agentforge-workers/
-        # worker-deployment.yaml) — so the selector covers CP- and operator-rendered pools alike. The
+        # worker-deployment.yaml, retired with the playground 2026-10-30, so today every pool is
+        # CP-rendered) — so the selector covers CP- and operator-rendered pools alike. The
         # `af-tenant-.*` namespace regex is deliberate: it needs no per-tenant edit when a workspace
         # is provisioned, which is the growth problem the PodMonitor's namespaceSelector has.
         # RIGHT: forge_worker_up is exported by the orchestrator process itself, so its presence is
@@ -76,9 +79,9 @@ spec:
               (`app.kubernetes.io/managed-by=agentforge-cp` + `agentforge.io/{org,workspace,pool}`)
               is selected by a PodMonitor the CP commits into the pool's OWN namespace; an
               operator-rendered worker (`app.kubernetes.io/name=agentforge-worker` +
-              `managed-by=agentforge-operator`) is selected by
-              infrastructure/agentforge-workers/worker-podmonitor.yaml in ns `monitoring`. The two
-              label sets are disjoint by design, so neither monitor can cover the other's pods.
+              `managed-by=agentforge-operator`) needs an operator PodMonitor in ns `monitoring`;
+              the only one, the playground's, was retired with it on 2026-10-30, so today every
+              pool is CP-rendered. The two label sets are disjoint by design.
               MOST LIKELY CAUSE for a CP-rendered pool: no monitor was ever committed for it. That
               file is emitted only when AFP_METRICS_PODMONITOR_ENABLED is set on the CP Deployment
               AND the pool has been re-rendered since — nothing re-renders on a CP restart or a Flux

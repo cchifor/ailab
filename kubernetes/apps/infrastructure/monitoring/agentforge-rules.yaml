@@ -3,6 +3,13 @@
 # ruleSelector picks it up. This file IS listed in kustomization.yaml — a rule file Flux never applies
 # is the same defect as a rule that cannot fire, and this file was BOTH until 2026-08-10.
 #
+# -- 2026-10-30: DISPATCHER RETIRED WITH THE PLAYGROUND ----------------------------------------------
+# (plans/2026-10-30-retire-playground-plan.md) Its two rules, ForgeDispatchStalled and
+# ForgeScaleOracleMissing, and the dispatcher half of ForgeTargetDown's selector were deleted. The
+# WORKER rules STAY: job="agentforge-worker" is also the CP-rendered pools' job (their PodMonitor relabels
+# to it), so they now cover platform-dev, its only series. Sections below that say the CP pool has no
+# series, or that the playground is the covered half, predate the CP PodMonitor and the retirement.
+#
 # -- WHY EVERY RULE IN HERE WAS REWRITTEN (measured 2026-08-10) ---------------------------------------
 #
 # The five rules this file used to hold ALL pinned `job="agentforge"`. That job has ZERO targets and
@@ -169,10 +176,11 @@ spec:
       rules:
         # RE-POINTED from `up{job="agentforge"} == 0` (renamed from ForgeWorkerDown: the semantics
         # changed from "a host systemd unit stopped" to "a pod target exists but will not scrape").
-        # Spans BOTH jobs deliberately — `up` is synthesised per target so it is uniform across them,
-        # unlike forge_worker_up which is a constant 0 on the dispatcher.
+        # Spanned the worker AND dispatcher jobs until the dispatcher was retired with the playground
+        # (2026-10-30); now the worker job only, which is also every CP-rendered pool's (their PodMonitor
+        # relabels job=agentforge-worker; platform-dev is its only series today).
         - alert: ForgeTargetDown
-          expr: up{job=~"agentforge-worker|agentforge-dispatcher"} == 0
+          expr: up{job="agentforge-worker"} == 0
           for: 5m
           labels: { severity: critical }
           annotations:
@@ -181,13 +189,10 @@ spec:
               The metrics endpoint on {{ $labels.pod }} ({{ $labels.namespace }}) has been unscrapeable
               for >5m while the pod still exists — a crash-loop, a wedged event loop, or a
               NetworkPolicy change, NOT a scale-down (KEDA scale-to-zero removes the target entirely
-              and this rule correctly stays silent). If this is the DISPATCHER, the KEDA scale oracle
-              is blind and no worker will scale up on backlog — a silent full stop on delivery. If it
-              is a WORKER, its held claims release on SIGTERM or expire with the lease TTL so work
-              recovers, but fleet capacity is cut. Check `kubectl --context admin@ai -n
-              {{ $labels.namespace }} describe pod {{ $labels.pod }}` and the container log. Blind to
-              CP-rendered pools and the reaper (ailab#284) — those have no target at all, which is
-              ailab#286's rule, not this one.
+              and this rule correctly stays silent). The worker's held claims release on SIGTERM or
+              expire with the lease TTL so work recovers, but that pool's capacity is cut. Check `kubectl --context admin@ai -n
+              {{ $labels.namespace }} describe pod {{ $labels.pod }}` and the container log. A pool with
+              no target at all (no PodMonitor) is ForgeOrchestratorUnscraped's case, not this one.
         # RE-POINTED to job=agentforge-worker. The `> 0` inner filter is load-bearing twice over: it
         # drops the dispatcher (which never reconciles, so its ts is a structural 0 and `time() - 0`
         # would breach forever) and it drops a freshly-started worker before its first stamp — which
@@ -362,39 +367,6 @@ spec:
               and the orchestrator log for _heal_state_label. This is also the surviving proxy for the
               retired ForgeWebhookHMACFailures: a drifted webhook secret shows up here as work that
               only ever arrives via the poll.
-        # NEW (C-P0-08). The dispatcher twin of ForgeReconcileStalled, and the alert that gives the
-        # C-P0-04 backoff cap (600s -> 120s) its teeth: the dispatcher is the KEDA scale oracle for
-        # EVERY pool, so a frozen forge_pending costs the whole fleet, unlike one stale worker scan.
-        # forge_last_dispatch_timestamp is stamped only on the SUCCESS arm of a dispatch pass, so a
-        # dispatcher that is up, scraped and looping on failed forge reads ("target present, oracle
-        # dead") shows as an ageing stamp here while ForgeTargetDown stays silent — that gap, which
-        # nothing above can see, is this rule's whole reason to exist.
-        # The `> 0` inner filter is load-bearing exactly as in ForgeReconcileStalled: the gauge is a
-        # structural 0 on every WORKER (the same registry is built there and never stamped) and on a
-        # fresh dispatcher before its first successful pass, and `time() - 0` would breach forever.
-        # Pinned to job="agentforge-dispatcher" for the same reason in the other direction — only that
-        # job ever writes it. Threshold 600s = 5x the capped 120s backoff, i.e. at least four
-        # consecutive failed passes after the cap, so a single transient forge error cannot page;
-        # `for: 5m` on top of that clears Prometheus' staleness window and a restart's first pass.
-        - alert: ForgeDispatchStalled
-          expr: time() - (forge_last_dispatch_timestamp{job="agentforge-dispatcher"} > 0) > 600
-          for: 5m
-          labels: { severity: warning }
-          annotations:
-            summary: "AgentForge dispatcher {{ $labels.pod }} has not completed a dispatch pass for >10m"
-            description: >-
-              The dispatcher is scraped (ForgeTargetDown is quiet) but its last SUCCESSFUL dispatch
-              pass is more than 10 minutes old, so forge_pending — the ONE query every KEDA
-              ScaledObject scales on — is frozen at whatever it last published. Backlog will not
-              scale any pool up and a scaled-to-zero pool stays at zero: a silent fleet-wide stop on
-              delivery, which is why this pages while a single worker's stale scan would not. The
-              stamp only advances on a fully successful pass, so this is a dispatcher that keeps
-              failing its forge reads (Gitea unreachable from the agentforge namespace, a revoked
-              bot token, a repo that no longer exists) and is now in its capped 120s backoff. Check
-              the dispatcher log for the failing pass (`kubectl --context admin@ai -n
-              {{ $labels.namespace }} logs deploy/agentforge-dispatcher`) and Gitea reachability
-              from that namespace. NOT a scrape outage — ForgeTargetDown owns that and this rule needs a
-              live target to fire at all.
         # NEW (C-P0-08), and the P0 residue of the "escalate() recovery reconciler" item: the
         # comment-before-label ordering already ships (R4, agentforge #236) and
         # _heal_unexplained_escalation re-explains any needs-human park lacking an af:esc record, so
@@ -456,45 +428,6 @@ spec:
               exception (it names the issue and the failing forge call), fix the cause (usually a
               Gitea write the bot token no longer has, or a repo/label that was renamed), then re-apply
               the needs-budget / needs-replan label on the issue to have it served again.
-        # The KEDA scale oracle reads ONE query; this asserts that query still resolves. It is
-        # deliberately NOT `absent(forge_pending)` — see the measurement note at the top. The
-        # `and on() (count(up{...}) > 0)` guard is what makes it worth having: WITHOUT it the rule
-        # duplicates ForgeTargetDown on every dispatcher outage (measured: 1270 of the last 1440
-        # minutes, the tail of the 48-day CrashLoopBackOff), and a second chronic red on the same
-        # ntfy channel is strictly worse than none — that channel is exactly how the 48-day outage
-        # stayed invisible while ForgeTargetDown paged every 4h. WITH the guard it fires only when
-        # the publisher is UP and the scaler's own selector still resolves to nothing.
-        #
-        # That is a real, dated incident, not a hypothesis. On 2026-08-09 the playground planner
-        # moved claude-max-1 -> claude-max-2 and this query was left naming claude-max-1
-        # (scaledobject.yaml:16-25): it matched nothing, ignoreNullValues treated that as 0, the
-        # trigger went Active=False, and the pool sat at 0 replicas with FOUR pending planner issues
-        # invisible to it. The ScaledObject stayed Ready=True and nothing logged an error at any
-        # layer. The existing control is a comment saying the binding must move in the same change —
-        # discipline that has already failed once. This is the mechanical backstop.
-        #
-        # THE SELECTOR BELOW MUST TRACK scaledobject.yaml's `query` EXACTLY. If they diverge, this
-        # rule fires a false positive rather than going quiet — loud in the correct direction, and
-        # the fix is to re-align the two.
-        - alert: ForgeScaleOracleMissing
-          expr: |
-            absent(sum(forge_pending{account="claude-max-2",role=~"planner|reviewer|implementer|tester"}))
-              and on() (count(up{job="agentforge-dispatcher"} == 1) > 0)
-          for: 15m
-          labels: { severity: warning }
-          annotations:
-            summary: "AgentForge KEDA scale oracle resolves to nothing while the dispatcher is up"
-            description: >-
-              The dispatcher is scraping normally, but the exact query the playground ScaledObject
-              scales on returns NO SERIES, so KEDA's ignoreNullValues=true is reading "no pending
-              work" from what is actually a dead oracle. Backlog will not scale the pool up; only the
-              Mon-Fri 08:00-18:00 cron warm-floor will, so evening and weekend delivery stops
-              silently. Most likely the account/role labels in scaledobject.yaml no longer match what
-              the dispatcher emits (the 2026-08-09 seat move), or a repo left the dispatcher's config.
-              Compare `kubectl --context admin@ai -n af-tenant-tenant-zero-playground get scaledobject
-              af-orch-playground-planner -o jsonpath='{.spec.triggers[0].metadata.query}'` against the
-              live label set: `count by (account,role) (forge_pending)`. NOT a dispatcher outage —
-              ForgeTargetDown owns that and this rule stays silent for it by construction.
         # NEW (C-P0-07), and DIFFERENT JOB FAMILY from every rule above: job="agentforge-broker" is
         # the operator-owned credential broker fleet in its own namespace (agentforge-broker), not a
         # CP-rendered tenant pool or the dispatcher — a third, disjoint (namespace, job) pair from the
