@@ -88,7 +88,7 @@ jobs:
       # made them documentation rather than a guard — the seed-coverage record's parsing in
       # particular has already regressed once (a file-wide regex swept missingOauthPaths back in as
       # declared, and the record oscillated between two states on successive runs). Runs on
-      # unittest (stdlib) plus PyYAML (scripts/tests/test_worker_probes.py, C-P0-06) — PyYAML is
+      # unittest (stdlib) plus PyYAML (e.g. scripts/tests/test_authelia_oidc_consent.py) — PyYAML is
       # the runner's system package (Ubuntu 24.04 cloud image; same unguarded-baseline assumption
       # scripts/check-tenant-guard-cel.py makes), not something this step installs, so a runner
       # image change that drops it fails this step rather than silently skipping the test.

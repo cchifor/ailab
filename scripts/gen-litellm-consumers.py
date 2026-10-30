@@ -77,7 +77,7 @@ idempotent. Non-canonical JSON in open-webui.yaml is refused rather than normali
 Files are read and written with their line endings intact (newline=""), so a CRLF checkout is
 rewritten only inside the owned spans and compared as real bytes. Any parse failure is a FAILURE,
 never a skip. Stdlib + PyYAML, which is the CI runner's system package (the same assumption
-scripts/tests/test_worker_probes.py makes).
+scripts/tests/test_authelia_oidc_consent.py makes).
 """
 from __future__ import annotations
 

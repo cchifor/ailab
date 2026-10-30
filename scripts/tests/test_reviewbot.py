@@ -2686,7 +2686,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
 
         PyYAML is not installed by CI: it is the runner image's system package (python3-yaml on the
         Ubuntu 24.04 cloud image), as .gitea/workflows/broker-inventory.yaml's "Script unit tests"
-        step records, and test_worker_probes.py already imports it at module level in that same run.
+        step records, and test_authelia_oidc_consent.py already imports it at module level in that same run.
         Imported here rather than at module level, so a runner without it fails these allowlist tests
         (an ImportError is an error, never a skip) without taking the rest of this file down."""
         import yaml
