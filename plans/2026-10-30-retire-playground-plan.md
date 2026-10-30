@@ -124,12 +124,11 @@ Why this goes first:
 
 After merge:
 
-- the three pods are gone;
-- the generated HPA reports 0 desired;
+- the ScaledObject reports `Paused=True`;
+- the worker, dispatcher and conductor Deployments are at desired = current = 0, with their pods absent;
+- the generated HPA is **absent**: KEDA 2.20.1 (`autoscaling/keda/helmrelease.yaml:18`) removes it while the ScaledObject is paused (`scaledobject.yaml:43,49,52`);
 - no new alerts for 2h (this covers ForgeConductWakesUnanswered's window);
 - the platform-dev permission baseline is unchanged.
-
-<!-- codex: KEDA pause removes the generated HPA rather than retaining an HPA with desiredReplicas=0. This estate pins KEDA 2.20.1 (kubernetes/apps/infrastructure/autoscaling/keda/helmrelease.yaml:18), and kubernetes/apps/infrastructure/agentforge-workers/scaledobject.yaml:43,49,52 already documents the paused pool and HPA recreation when the pause is removed. Gate Phase 1a on the ScaledObject's Paused condition, the worker Deployment's desired/current replicas being zero, and pod absence; expect the HPA to be absent. Apply the same correction to the Phase 1a Verification bullet below. -->
 
 ### Phase 1b: ailab PR "retire the playground workspace"
 
@@ -168,10 +167,8 @@ Flux prunes deleted objects (`prune: true`). Every deleted file is also removed 
 7. **Tests**
    - `scripts/tests/test_worker_probes.py` reads the worker and dispatcher manifests (`:45`, `:115`): drop those cases, keep the rest.
    - `scripts/tests/test_broker_refresh_intervals.py:181` `AgentforgeRulesCarryTheP0EngineAlerts` requires deleted alerts (`:203`): narrow it to the surviving broker rules.
-   - Add the kid-revoke helper's tests (Phase 3).
-8. **Phase 3 tooling, reviewed here**
-   - `scripts/af_kid_revoke.py`: a pure transform with validation, plus unit tests.
-   - `scripts/openbao-revoke-kid.sh`: the I/O wrapper.
+   - Add the revoke driver's pre-check tests (Phase 3).
+8. **Phase 3 tooling, reviewed here:** `scripts/af-revoke-legacy-kid.sh` plus its in-pod Python driver. It wraps the provisioner's own `_cas_remove_from_registry`; see Phase 3.
 9. **Docs**
    - Add a "Retiring a workspace" section to `docs/runbooks/agentforge.md`, written from this run.
    - Update the playground references in `agentforge.md`, `agentforge-v3-cutover.md` and `sandbox-boundary-canary.md`.
@@ -198,19 +195,17 @@ Flux prunes deleted objects (`prune: true`). Every deleted file is also removed 
 | Bot PATs in `AF_BOT_TOKENS` (planner/tester/impl/reviewer/ops) | **Not rotated or revoked.** Shared with platform-dev (`agentforge-v3-cutover.md:243`). Removing the playground's ESO copy is all this plan does. |
 | `tz-` signing key (in the playground Secret and KV doc) | Useless after Phase 3 revokes its public record; the Secret is pruned in 1b. |
 | KV `af/tenants/tenant-zero/playground/orchestrator` | Kept for now as a dormant copy, readable only by the operator-provisioner and provisioner policies (`bootstrap.py:1347`). Seed removed in 1b so DR does not restore it. Follow-up: the provisioner identity deletes it (KV-v2 delete, then a metadata delete for history), by a stated date. |
-| KV `af/operator/dispatcher/{forge,webhook}` | Same as above. The seed for `forge` is removed in 1b; `webhook` was never seeded. Follow-up deletes both. |
+| KV `af/operator/dispatcher/{forge,webhook}` | Kept for now as a dormant copy (operator-provisioner read/update only). The seed for `forge` is removed in 1b; `webhook` was never seeded. Neither the provisioner identity (operator grants cover only `provisioner/*` and `broker/*`, `bootstrap.py:1260,1265`) nor the operator-provisioner token (no delete, `:1345,1346`) can delete them, so the follow-up is an **owner** action with administrative OpenBao authority. |
 | OpenBao role/policy `af-tenant-tenant-zero-playground` | Removed by the provisioner's namespace teardown. Phase 2 verifies they are actually absent; never force-remove the finalizer. |
 | OpenBao role `af-operator-dispatcher` | Stays: it is in `DEFAULT_OPERATOR_ROLES` and re-created by reconciliation (`bootstrap.py:341,1106`). Follow-up: remove it from the declarative source in agentforge. |
 | conductor-bot PAT and grants | Retained deliberately (see the Decision). Owned by the re-arm follow-up. |
 
 ### Phase 2: verify the prune (after 1b merges)
 
-**Flux.** For each Kustomization, the Ready condition must carry the merge revision and a current `observedGeneration` (several are `wait: false`, so an old Ready proves nothing):
+**Flux.** Each Kustomization must be Ready with a current `observedGeneration`, and its `status.lastAppliedRevision` must equal its OWN source's artifact (several are `wait: false`, so an old Ready proves nothing):
 
-- `agentforge-workers`, `agentforge-sandbox`, `agentforge-broker`, `agentforge-pkgcache`, `apps`, `infrastructure` (which carries monitoring), `openbao`;
-- plus the surviving `agentforge-tenants` and `agentforge-tenant-platform-dev`.
-
-<!-- codex: agentforge-tenants cannot report the ailab merge revision: it reconciles the separate GitRepository agentforge-tenants (kubernetes/apps/clusters/ai/agentforge-tenants.yaml:24), whereas agentforge-tenant-platform-dev uses flux-system (kubernetes/apps/clusters/ai/agentforge-tenant-platform-dev.yaml:37). Compare each Kustomization's status.lastAppliedRevision with its own source artifact: the ailab merge for ailab-backed units, and the tenant-repository revision captured in Phase 0 for agentforge-tenants, alongside current Ready/observedGeneration. Requiring the same merge SHA for both makes this gate impossible to pass. -->
+- the ailab merge SHA for the ailab-backed units: `agentforge-workers`, `agentforge-sandbox`, `agentforge-broker`, `agentforge-pkgcache`, `apps`, `infrastructure` (which carries monitoring), `openbao`, and `agentforge-tenant-platform-dev` (source `flux-system`, `clusters/ai/agentforge-tenant-platform-dev.yaml:37`);
+- the tenant-repository revision captured in Phase 0 for `agentforge-tenants`, which reconciles its own GitRepository (`clusters/ai/agentforge-tenants.yaml:24`).
 
 **Objects gone:**
 
@@ -230,34 +225,34 @@ Flux prunes deleted objects (`prune: true`). Every deleted file is also removed 
 
 ### Phase 3: revoke `tz-213512e80fde7c84` (after Phase 2)
 
-`scripts/openbao-revoke-kid.sh --kid tz-213512e80fde7c84 --aud <p>/<a> [--dry-run]`, one aud at a time: claude-max-1, then claude-max-2, then codex-pro. It is narrowly scoped; no generic revocation framework and no new OpenBao privilege.
+**Mechanism: reuse the provisioner's own removal, don't write a new one.** agentforge already ships `capability_kid._cas_remove_from_registry` (`capability_kid.py:546-590`). It:
+- removes a kid only when its `public_key` equals the expected one, returning `superseded` for any other incarnation;
+- treats a read error as an error, never as absence, and returns `absent` idempotently when the kid is already gone;
+- mutates the parsed doc in place, preserving every KV sibling and every other kid;
+- validates the WHOLE result with the broker's `parse_kid_registry` (`_validate_full_doc`, `:593`);
+- CAS-writes with a bounded re-read and retry;
+- emits a `revoked` audit record.
 
-**Read.**
+The provisioner's own OpenBao identity already writes these docs (its operator grants cover `broker/*`), so no workstation-held token and no new privilege are needed.
 
-- In-pod read of `af/operator/broker/<p>/<a>/kids` on `openbao-0` (loopback; the `openbao-operator-provisioner-token` on stdin, per `agentforge-v3-cutover.md:221-245`) yields the whole KV data object plus its version.
-- An unreadable read is an error, distinct from "kid absent".
+**`scripts/af-revoke-legacy-kid.sh --aud <p>/<a> [--execute]`** (reviewed in 1b) pipes a short Python driver into `kubectl exec -i deploy/agentforge-provisioner -- python -`. The DEPLOYED image's code runs, and the client is built the way `build_provisioner_deps` builds it (`app.py:549`: URL, token and CA from the pod's own configuration). One aud at a time: claude-max-1, then claude-max-2, then codex-pro. The default is a dry run.
 
-**Transform** (`af_kid_revoke.py`, pure):
+**Every run (dry or not):**
+- Read the doc and its version through the same client.
+- Require the `tz-213512e80fde7c84` record to match the expected identity: `allowed_workspaces == ['playground']`, `allowed_tenants == ['tenant-zero']`, and the public-key fingerprint recorded in Phase 0.
+- Require `cap-b5663179…` present wherever Phase 0 found it.
+- Print kid names, the version and the fingerprint only.
 
-- Parse `registry.json`.
-- Require the retired kid's record to match the expected identity: kid, public-key fingerprint, and scope (`allowed_workspaces == ['playground']`).
-- Require the expected platform-dev kid (`cap-b566…`) present wherever Phase 0 found it, with its record unchanged.
-- Remove only `kids["tz-…"]`.
-- Preserve every outer KV sibling and every other registry field and kid record. This is checked as parsed-value equality, because `bao kv put` replaces the whole data object.
-- If the kid is already absent (a resumed run), report it and write nothing.
+**Rollback artifact** (before an execute): save the complete removed public record plus the aud and KV version to an out-of-repo scratch file. It is public-key material, no secrets.
 
-**Validate.** Pipe the complete candidate into the DEPLOYED parser, `kubectl exec <broker pod> -- python -c '...parse_kid_registry...'` (`broker/config.py:369,393`), so it is checked with the broker's own code and ceilings. Fail closed.
+**`--execute`:**
+- Call `_cas_remove_from_registry(client, aud, "tz-213512e80fde7c84", org="tenant-zero", ws="playground", expected_public_key=<that record's public_key>, audit=<the provisioner's audit sink>)`.
+- Require the outcome `removed` (or `absent` on a resumed run); `superseded` is a hard stop.
+- Re-read and assert that `cap-b566…`'s record is identical to before.
 
-**Rollback artifact.** Before writing, save the complete removed public record plus the aud and KV version to an out-of-repo scratch file. It is public-key material, no secrets.
+**Tests** (in 1b): the driver's identity and platform-dev pre-checks, against fixture registries (match, mismatch, missing platform-dev kid, already absent). The removal semantics themselves are covered by agentforge's own tests of `_cas_remove_from_registry`.
 
-**Write.**
-
-- `bao kv put -cas=<read version>` with the full data object.
-- On a CAS conflict: re-read, re-run the transform and validation on the fresh document, and never replay the stale one.
-
-**Output.** Kid names, the version, and before/after key sets only.
-
-**Tests** (in 1b): malformed registry, preserved siblings and platform-dev record, identity mismatch, already-absent, CAS-conflict re-read.
+**Fallback,** only if the provisioner pod cannot build its client this way: the same pre-checks around an in-pod `bao` read and CAS write on `openbao-0` with the `openbao-operator-provisioner-token` on stdin (`agentforge-v3-cutover.md:221-245`), validated by piping the candidate into a broker pod's `parse_kid_registry`.
 
 **Verify after each aud,** with a bounded timeout. ESO (1m), the Secret volume and the broker's 60s reload are separate propagation stages, so poll EVERY serving replica by pod endpoint until:
 
@@ -285,8 +280,9 @@ A Ready replica still serving `tz-` is a failure: a broker with an invalid reloa
    - remove `af-operator-dispatcher` from `DEFAULT_OPERATOR_ROLES`;
    - have provisioner teardown delete the tenant KV doc.
 2. **Conductor re-arm or retire,** by a stated date: the CP-only changes above, its future config source, then credential and config validation. Otherwise revoke the conductor-bot PAT and grants.
-3. **Delete the dormant KV docs** (the playground orchestrator, `operator/dispatcher/{forge,webhook}`) via the provisioner identity, including metadata and history, by a stated date.
-   <!-- codex: The provisioner identity can delete the tenant doc, but cannot delete either dispatcher doc: its operator KV grants cover only provisioner/* and broker/* (agentforge src/agentforge/provisioner/bootstrap.py:1260,1265), while its tenant deletion grant is at :1290. The operator-provisioner token can read/update operator/* but has no data or metadata delete authority (:1345,1346). Assign dispatcher data/history cleanup to an owner with suitable administrative authority, and correct the corresponding credential-disposition row; the proposed provisioner cleanup would be denied. -->
+3. **Delete the dormant KV docs,** including metadata and history, by a stated date:
+   - the playground orchestrator doc, by the provisioner identity (its tenant delete grant is at `bootstrap.py:1290`);
+   - `operator/dispatcher/{forge,webhook}`, by an **owner** with administrative OpenBao authority (no operator identity can delete them).
 4. **Re-point the reaper** at platform-dev: create and verify a new PV/PVC first, then switch the mount (closes the existing platform-dev GC gap; the 7 stale Leases). **Re-target the canary** to a disposable identity and storage, then remove the broker playground ingress rule.
 5. **Delete storage last,** only after 4: the old PVs and PVCs, then, as a separate irreversible step after checking all mounts and closing the rollback window, the NFS directory `/pve-nfs/agentforge-sandbox/tenant-zero/playground`.
 6. **Archive `cchifor/agentforge-config`** once no reader remains. It still has a host-mode consumer in Ansible (`dev_worker` defaults `:289,292`, disabled by default): verify no installed units on any dev-worker, and decide the conductor's config source first.
@@ -299,27 +295,26 @@ A Ready replica still serving `tz-` is a failure: a broker with an invalid reloa
 - `kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml` (encrypted; protected, so an owner merge) and `capability-kids-configmap.yaml` (comments only)
 - `kubernetes/apps/apps/agentforge/admission/tenant-map.yaml`, `scripts/check-tenant-guard-cel.py`
 - `kubernetes/apps/infrastructure/monitoring/agentforge-{rules,coverage-rules,provisioner-rules}.yaml` (+ `.test.yaml`)
-- `scripts/af_kid_revoke.py`, `scripts/openbao-revoke-kid.sh` (new); `scripts/tests/{test_worker_probes,test_broker_refresh_intervals,test_af_kid_revoke}.py`
+- `scripts/af-revoke-legacy-kid.sh` + its Python driver (new); `scripts/tests/{test_worker_probes,test_broker_refresh_intervals,test_af_revoke_legacy_kid}.py`
 - `docs/runbooks/{agentforge,agentforge-v3-cutover,sandbox-boundary-canary}.md`, `docs/decisions/0019-*.md`, `agentforge-tenant-platform-dev/externalsecret.yaml` (comment)
 
 ## Verification
 
 - **Pre-merge:** the local gates and reference audit above; CI green; both reviewer bots.
-- **Phase 1a:** the three pods are gone and the HPA is at 0; no new alerts for 2h; the platform-dev baseline is unchanged.
+- **Phase 1a:** ScaledObject `Paused=True`; the three Deployments at 0 with no pods; the HPA absent; no new alerts for 2h; the platform-dev baseline is unchanged.
 - **Phase 2:** the Flux revision and generation checks, the object-absence inventory, the OpenBao role/policy absence, the kept-object checks with the canary green, and the platform-dev baseline.
 - **Phase 3:** per-aud, per-replica kid endpoints; audit at 0 findings; the alert resolved; brokers stable; the platform-dev baseline and canary green.
 
 **Rollback:**
 
-<!-- codex: An unmodified 1b revert can start the worker before steps 1 and 2 complete. worker-deployment.yaml deliberately omits spec.replicas and explicitly documents that a fresh Deployment defaults to one replica until KEDA reconciles it (kubernetes/apps/infrastructure/agentforge-workers/worker-deployment.yaml:47,55); restoring paused-replicas=0 does not make that creation atomic, and the Flux unit has wait:false (kubernetes/apps/clusters/ai/agentforge-workers.yaml:38). Restore dependencies with the worker Deployment still unlisted or explicitly created at replicas:0, verify broker authorization, ESO credentials and bound storage, then restore/start the worker. The dispatcher and conductor retain their explicit zero counts from 1a, but the worker currently does not. -->
-
 - **1a:** revert. The pods return.
-- **1b:** revert, then in order:
+- **1b:** NOT a plain revert. `worker-deployment.yaml` omits `spec.replicas` and a fresh Deployment starts at one replica before KEDA reconciles it (`worker-deployment.yaml:47,55`); the unit is `wait: false`. So:
   1. If Phase 3 already ran, restore `tz-` first (below) and verify every broker replica serves it.
-  2. Wait for the provisioner to re-create the tenant role and policy, ESO to sync `af-creds-playground-planner`, and the staging PV and PVC to bind.
-  3. Only then revert 1a to start the pods.
+  2. Restore everything EXCEPT `worker-deployment.yaml` (still unlisted), with the dispatcher and conductor at their 1a `replicas: 0`.
+  3. Wait for the provisioner to re-create the tenant role and policy, ESO to sync `af-creds-playground-planner`, and the staging PV and PVC to bind. Verify broker authorization for `tz-`.
+  4. Only then list the worker Deployment, and revert 1a to start the pods.
 - The reverted seeds fragment returns with the git revert. The KV doc was never deleted.
-- **Phase 3:** merge the saved record into a FRESHLY read document (preserving any concurrent platform-dev change), validate it with the deployed parser, CAS-write it, and poll every replica until `tz-` is served.
+- **Phase 3:** re-publish the saved record through the provisioner's own `_cas_publish_to_registry` (`capability_kid.py:505`), which merges it into a freshly read document (preserving any concurrent platform-dev change), validates the whole doc and CAS-writes. Then poll every replica until `tz-` is served.
 - **Phase 4** is not undone by git. Each step needs its inverse owner act: un-archive, re-add collaborators, re-create the hooks from the recorded IDs and URLs.
 
 <!-- codex-review-status: complete -->
