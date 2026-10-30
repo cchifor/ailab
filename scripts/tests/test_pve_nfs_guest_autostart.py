@@ -67,8 +67,8 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
     def run_script(self, wait_s=2):
         env = dict(os.environ, CONF_DIR=self.conf.as_posix(), PCT=self.pct.as_posix(),
                    MOUNT_PREFIX=self.prefix.as_posix() + '/', STATE_DIR=self.state.as_posix(),
-                   HA_RESOURCES=self.ha.as_posix(), WAIT_S=str(wait_s), STEP_S='1', PROBE_S='2',
-                   **self.env)
+                   HA_RESOURCES=self.ha.as_posix(), WAIT_S=str(wait_s), STEP_S='1', PROBE_S='2')
+        env.update(self.env)
         return subprocess.run([BASH, SCRIPT.as_posix()], env=env, capture_output=True, text=True,
                               timeout=60)
 
@@ -125,6 +125,23 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         run = self.run_script(wait_s=2)
         self.assertLess(time.monotonic() - start, 20)
         self.assertEqual(run.returncode, 1)
+        self.assertEqual(self.started(), [])
+
+    def test_the_budget_bounds_the_whole_run_not_each_candidate(self):
+        # Five candidates behind a hung NFS mount: once the shared budget is spent the rest are
+        # given up without another (possibly hung) probe each.
+        hang = self.tmp / 'hang'
+        hang.write_text('#!/usr/bin/env bash\nsleep 30\n', newline='\n')
+        hang.chmod(0o755)
+        self.env.update(PROBE_CMD=hang.as_posix(), PROBE_S='3')
+        src = self.nfs_src()
+        for ctid in range(5001, 5006):
+            self.ct(ctid, 'onboot: 1', f'mp0: {src.as_posix()},mp=/models')
+        start = time.monotonic()
+        run = self.run_script(wait_s=1)
+        self.assertLess(time.monotonic() - start, 9)   # one probe per candidate would be >= 15 s
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual(run.stdout.count('NOT starting it'), 5)
         self.assertEqual(self.started(), [])
 
     def test_leaves_running_containers_alone(self):

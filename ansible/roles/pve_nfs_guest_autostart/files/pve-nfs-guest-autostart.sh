@@ -72,12 +72,12 @@ ct_state() {
   awk '{print $2}' <<< "$out"
 }
 
-source_ready() {
+source_ready() {  # $1 = source, $2 = seconds this probe may take
   local pid i
   # stdio detached, so an abandoned probe cannot pin the unit's journal pipe either.
   ( $PROBE_CMD "$1" ) </dev/null >/dev/null 2>&1 &
   pid=$!
-  for ((i = 0; i < PROBE_S * 10; i++)); do
+  for ((i = 0; i < $2 * 10; i++)); do
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid"
       return
@@ -110,9 +110,15 @@ for ctid in "${candidates[@]}"; do
   mapfile -t srcs < <( [ -f "$conf" ] && live_config "$conf" | nfs_sources )
   missing=""
   for src in "${srcs[@]}"; do
-    until source_ready "$src"; do
-      if [ "$SECONDS" -ge "$deadline" ]; then missing="$src"; break; fi
-      sleep "$STEP_S"
+    # The deadline is checked BEFORE each probe and caps both the probe and the sleep, so the
+    # budget is a real bound: once it has passed, a remaining candidate costs nothing more
+    # instead of one more possibly-hung probe each.
+    while :; do
+      left=$((deadline - SECONDS))
+      if [ "$left" -le 0 ]; then missing="$src"; break; fi
+      source_ready "$src" "$((left < PROBE_S ? left : PROBE_S))" && break
+      left=$((deadline - SECONDS))
+      [ "$left" -le 0 ] || sleep "$((left < STEP_S ? left : STEP_S))"
     done
     [ -z "$missing" ] || break
   done
