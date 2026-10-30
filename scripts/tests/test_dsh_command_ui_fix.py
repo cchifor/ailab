@@ -45,7 +45,7 @@ class CommandUiFixTests(unittest.TestCase):
         install = yaml.safe_load((APP / 'install-job.yaml').read_text())
         env = {v['name']: v.get('value') for v in install['spec']['template']['spec']['containers'][0]['env']}
         self.assertEqual(env['DSH_VERSION'], '0.1.5-alpha.2', 'Remove/rebase the UI hotfix when upgrading DSH')
-        self.assertEqual(env['DSH_BUILD'], 'glibc-node26')
+        self.assertEqual(env['DSH_BUILD'], 'glibc')
         self.assertIn(env['DSH_BUILD'], install['metadata']['name'], 'A runtime identity change must create a fresh install Job')
         overlay = [m for m in self.main['volumeMounts'] if m['name'] == 'command-ui-fix']
         self.assertEqual(overlay, [{'name': 'command-ui-fix', 'mountPath': f"/app/{env['DSH_VERSION']}-{env['DSH_BUILD']}/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js", 'subPath': 'client.js', 'readOnly': True}])

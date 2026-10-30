@@ -45,6 +45,19 @@
       "groupName": "relay node runtime"
     },
     {
+      "description": "Keep dsh on its validated Node 24 runtime. #1479 moved it to Node 26 and left it down for a day: the unlocked npm install re-resolved 232 @deepseek-ai packages to rc.3, the Command UI hotfix could not find or verify its target, and the image ships no corepack for plugin staging. Lift this hold in the same change that lands the migration in #1494.",
+      "matchFileNames": [
+        "kubernetes/apps/apps/dsh/**"
+      ],
+      "matchPackageNames": [
+        "mirror.gcr.io/library/node",
+        "docker.io/library/node",
+        "node"
+      ],
+      "allowedVersions": "/^24\\./",
+      "groupName": "dsh node runtime"
+    },
+    {
       "description": "Keep Relay PostgreSQL server and dump tools on major 17. PostgreSQL 18 cannot open the existing PG17 data directory; major upgrades require a planned migration and restore rehearsal.",
       "matchFileNames": [
         "kubernetes/apps/apps/relay/**"
