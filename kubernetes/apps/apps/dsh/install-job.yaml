@@ -11,7 +11,7 @@
 # carries app=dsh-install, which the deny policy's podSelector (app=dsh) does not match, so the npm
 # reach exists ONLY here and only while installing.
 #
-# TO UPGRADE: bump the version/plugin-set identity and Job name together.
+# TO UPGRADE: bump the version/build/plugin-set identity and Job name together.
 # Preserve prior directories and PVCs for rollback; never delete state to force an upgrade.
 apiVersion: batch/v1
 kind: Job
