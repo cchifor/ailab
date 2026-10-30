@@ -38,12 +38,10 @@ roleRef:
   kind: Role
   name: agentforge-orchestrator-broker-endpoints
 subjects:
-  - kind: ServiceAccount
-    name: af-orch-playground-planner
-    namespace: af-tenant-tenant-zero-playground
+  # (The tenant-zero/playground subject af-orch-playground-planner was removed 2026-10-30 when the
+  # playground was retired: plans/2026-10-30-retire-playground-plan.md.)
   # platform-dev/delivery subscription worker (org=tenant-zero, workspace=platform-dev, pool=delivery).
-  # Same af-orch-<workspace>-<pool> SA in af-tenant-<org>-<workspace> shape as the playground subject above;
-  # its orchestrator resolves broker Endpoints -> pod IPs for the Kata sandbox path (additive, read-only).
+  # The CP renderer's af-orch-<workspace>-<pool> SA in af-tenant-<org>-<workspace>; its orchestrator resolves broker Endpoints -> pod IPs for the Kata sandbox path (additive, read-only).
   - kind: ServiceAccount
     name: af-orch-platform-dev-delivery
     namespace: af-tenant-tenant-zero-platform-dev
