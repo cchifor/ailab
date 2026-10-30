@@ -1,12 +1,21 @@
 ---
+# Pinned in BOTH files, as openbao_agent does. The Proxmox cloud-init user-data sets
+# manage_etc_hosts, so cloud-init rewrites /etc/hosts from the template on every boot: a block
+# in /etc/hosts alone vanished on the 2026-10-30 power-cut reboot and the publisher failed every
+# run with URLError (CodexProjectionFailing). The template block survives reboots; the
+# /etc/hosts block makes the pin live now.
 - name: Resolve the TLS-verified OpenBao LAN endpoint
   ansible.builtin.blockinfile:
-    path: /etc/hosts
+    path: "{{ item }}"
     marker: "# {mark} DSH CODEX OPENBAO"
     block: |
       192.168.0.41 openbao.lan.chifor.me
       192.168.0.42 openbao.lan.chifor.me
       192.168.0.43 openbao.lan.chifor.me
+    create: false # the Ubuntu cloud image ships the template; a host without cloud-init is not one of ours
+  loop:
+    - /etc/hosts
+    - /etc/cloud/templates/hosts.debian.tmpl
 
 - name: Create publisher directories
   ansible.builtin.file:
