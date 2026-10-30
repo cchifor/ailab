@@ -1,0 +1,11 @@
+[Unit]
+Description=Start onboot containers whose /mnt/pve bind-mount source was late at boot
+After=pve-guests.service
+
+[Service]
+# exec, not oneshot: a oneshot would hold multi-user.target in "activating" for the whole wait.
+Type=exec
+ExecStart=/usr/local/sbin/pve-nfs-guest-autostart
+
+[Install]
+WantedBy=multi-user.target
