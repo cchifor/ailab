@@ -400,10 +400,11 @@ spec:
               2-minute window rather than one on every reconcile pass, the most recent of which may
               be up to a minute old. This compares each broker seat's kid registry against the
               operator declaration in openbao/capability-kids-configmap.yaml and NEVER writes - resolving a
-              finding is a privilege change and stays a reviewed, human act. KNOWN STANDING FINDING
-              at the time this rule shipped - `seat-undeclared-grant` for kid
-              tz-213512e80fde7c84 on three of four seats, the open question in ailab#287; if that is
-              what is firing, this alert is correct and the ticket is where it gets decided.
+              finding is a privilege change and stays a reviewed, human act. The long-standing `seat-undeclared-grant` for kid tz-213512e80fde7c84 (claude-max-1,
+              claude-max-2, codex-pro; ailab#287) was resolved on 2026-10-30 by retiring the playground
+              and revoking that kid with scripts/af-revoke-legacy-kid.sh; if it fires for that kid
+              again, the revocation is incomplete or the grant was re-introduced - check each broker's
+              kid registry and the agentforge seat templates.
               Otherwise - `seat-registry-unreadable` means a seat's registry could not be read at
               all (fail-closed, never reported as consistent), `seat-missing-grant` means a declared
               entitlement is absent so that workspace's capabilities are rejected 401, and
