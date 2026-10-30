@@ -13,8 +13,11 @@ in scripts/tests.
 from __future__ import annotations
 
 import importlib.util
+import io
+import logging
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -74,6 +77,35 @@ class Precheck(unittest.TestCase):
                 mod.precheck(reg, **checks())
 
 
+class AuditLogging(unittest.TestCase):
+    """_cas_remove_from_registry emits its `revoked` record on agentforge.provisioner.audit at INFO,
+    which Python's default WARNING level drops; the driver must route it somewhere that is kept."""
+
+    def tearDown(self) -> None:
+        log = logging.getLogger(mod.AUDIT_LOGGER)
+        for h in list(log.handlers):
+            log.removeHandler(h)
+            h.close()
+
+    def test_info_audit_record_reaches_the_stream_and_the_extra_sink(self) -> None:
+        stream = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            extra = str(pathlib.Path(d) / "pid1-stdout")
+            sinks = mod.configure_audit_logging(stream, extra_paths=(extra,))
+            logging.getLogger(mod.AUDIT_LOGGER).info("provisioner.audit {\"outcome\":\"revoked\"}")
+            for h in logging.getLogger(mod.AUDIT_LOGGER).handlers:
+                h.flush()
+            self.assertEqual(sinks, ["stream", extra])
+            self.assertIn('"outcome":"revoked"', stream.getvalue())
+            self.assertIn('"outcome":"revoked"', pathlib.Path(extra).read_text(encoding="utf-8"))
+            self.tearDown()
+
+    def test_an_unopenable_extra_sink_is_skipped_not_fatal(self) -> None:
+        stream = io.StringIO()
+        sinks = mod.configure_audit_logging(stream, extra_paths=("/nonexistent-dir/x/y",))
+        self.assertEqual(sinks, ["stream"])
+
+
 class Wrapper(unittest.TestCase):
     SCRIPT = "scripts/af-revoke-legacy-kid.sh"
 
@@ -83,6 +115,18 @@ class Wrapper(unittest.TestCase):
                 proc = subprocess.run(["bash", self.SCRIPT, aud], cwd=REPO, capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 2, proc.stderr)
                 self.assertIn("refusing aud", proc.stderr)
+
+    def test_rejects_unknown_arguments(self) -> None:
+        proc = subprocess.run(["bash", self.SCRIPT, "anthropic/claude-max-1", "--exec"], cwd=REPO,
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("unknown argument", proc.stderr)
+
+    def test_saves_and_verifies_the_rollback_record_before_executing(self) -> None:
+        text = (REPO / self.SCRIPT).read_text(encoding="utf-8")
+        verify = text.index("did not verify; nothing was written")
+        execute = text.index("run --execute")
+        self.assertLess(verify, execute, "the rollback record must be verified before the execute pass")
 
     def test_pins_the_retired_and_surviving_identities(self) -> None:
         text = (REPO / self.SCRIPT).read_text(encoding="utf-8")

@@ -8,12 +8,23 @@
 #
 # One aud at a time (anthropic/claude-max-1, then anthropic/claude-max-2, then openai/codex-pro), and
 # poll every broker replica's /internal/kid/<kid> until it reports served:false before the next one.
-# On --execute the removed PUBLIC record is saved under ${AF_REVOKE_ROLLBACK_DIR:-$HOME/.af-revoke},
-# outside the repo; it is the input to a rollback via _cas_publish_to_registry.
+#
+# Every run first does a DRY pass and saves the kid's PUBLIC record (the ROLLBACK line; public-key
+# material only) under ${AF_REVOKE_ROLLBACK_DIR:-$HOME/.af-revoke}, outside the repo, and verifies the
+# file before --execute is allowed to write. The execute pass's full output, including the provisioner
+# audit record, is saved beside it whatever the outcome. Rollback = re-publish that record with
+# agentforge's _cas_publish_to_registry.
 set -euo pipefail
 
 aud=${1:?usage: $0 <provider>/<account> [--execute]}
 shift
+execute=0
+for a in "$@"; do
+  case "$a" in
+    --execute) execute=1 ;;
+    *) echo "unknown argument '$a'" >&2; exit 2 ;;
+  esac
+done
 case "$aud" in
   anthropic/claude-max-1|anthropic/claude-max-2|openai/codex-pro) ;;
   *) echo "refusing aud '$aud': tz-213512e80fde7c84 was granted only on claude-max-1, claude-max-2, codex-pro" >&2; exit 2 ;;
@@ -22,21 +33,39 @@ esac
 KUBECTL=(kubectl --context admin@ai -n openbao)
 here=$(cd "$(dirname "$0")" && pwd)
 rollback_dir=${AF_REVOKE_ROLLBACK_DIR:-$HOME/.af-revoke}
+stamp="$(date -u +%Y%m%dT%H%M%SZ)-${aud//\//_}"
 
-out=$("${KUBECTL[@]}" exec -i deploy/agentforge-provisioner -c provisioner -- python - \
-  --aud "$aud" \
-  --kid tz-213512e80fde7c84 \
-  --expect-pk b864a0136bbc8d39 \
-  --expect-tenant tenant-zero \
-  --expect-workspace playground \
-  --keep-kid cap-b5663179affeeaba5366c3ffd232681d \
-  --keep-pk db3a6d0ec8e1d6a9 \
-  "$@" < "$here/af_revoke_legacy_kid.py") || { rc=$?; printf '%s\n' "${out:-}" | grep -v '^ROLLBACK ' || true; exit "$rc"; }
+run() {  # run the driver in the provisioner pod; extra args are appended
+  "${KUBECTL[@]}" exec -i deploy/agentforge-provisioner -c provisioner -- python - \
+    --aud "$aud" \
+    --kid tz-213512e80fde7c84 \
+    --expect-pk b864a0136bbc8d39 \
+    --expect-tenant tenant-zero \
+    --expect-workspace playground \
+    --keep-kid cap-b5663179affeeaba5366c3ffd232681d \
+    --keep-pk db3a6d0ec8e1d6a9 \
+    "$@" < "$here/af_revoke_legacy_kid.py"
+}
 
-if printf '%s\n' "$out" | grep -q '^ROLLBACK '; then
-  (umask 077; mkdir -p "$rollback_dir")
-  f="$rollback_dir/$(date -u +%Y%m%dT%H%M%SZ)-${aud//\//_}.json"
-  (umask 077; printf '%s\n' "$out" | sed -n 's/^ROLLBACK //p' > "$f")
-  echo "rollback record (public key material only) saved to $f"
+# 1. DRY pass: pre-checks, and the rollback record BEFORE anything can be written.
+dry=$(run) || { rc=$?; printf '%s\n' "$dry"; exit "$rc"; }
+printf '%s\n' "$dry" | grep -v '^ROLLBACK '
+if ! printf '%s\n' "$dry" | grep -q '^ROLLBACK '; then
+  exit 0  # already absent: nothing to save, nothing to do
 fi
+(umask 077; mkdir -p "$rollback_dir")
+rb="$rollback_dir/$stamp.rollback.json"
+(umask 077; printf '%s\n' "$dry" | sed -n 's/^ROLLBACK //p' > "$rb")
+python -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['aud']==sys.argv[2] and d['kid']=='tz-213512e80fde7c84' and d['record']['public_key']" "$rb" "$aud" \
+  || { echo "ABORT: rollback record $rb did not verify; nothing was written" >&2; exit 3; }
+echo "rollback record (public key material only) saved and verified: $rb"
+[ "$execute" = 1 ] || exit 0
+
+# 2. EXECUTE pass. Its full output is kept on every path, success or failure.
+log="$rollback_dir/$stamp.execute.log"
+rc=0
+out=$(run --execute 2>&1) || rc=$?
+(umask 077; printf '%s\n' "$out" > "$log")
 printf '%s\n' "$out" | grep -v '^ROLLBACK '
+echo "execute output saved: $log (exit $rc)"
+exit "$rc"

@@ -16,9 +16,13 @@ Pre-checks, on every run (dry or not), via `precheck()`, which is pure so script
   * the retired kid's record matches the expected identity: the sha256 prefix of its public key,
     its allowed_tenants and its allowed_workspaces. Anything else is a hard stop.
   * the kid that must SURVIVE (platform-dev's) is present with its expected public-key prefix.
-Output is kid names, KV versions and key fingerprints only. With --execute it also prints one
-`ROLLBACK <json>` line: the removed PUBLIC record plus aud and version, which is public-key material
-only. The wrapper saves it out of the repo.
+Output is kid names, KV versions and key fingerprints, plus one `ROLLBACK <json>` line on EVERY run
+that finds the kid: its PUBLIC record with aud and version (public-key material only), printed before
+anything is written. The wrapper saves and verifies it from a dry run before it allows --execute.
+
+The audit record that `_cas_remove_from_registry` emits (logger agentforge.provisioner.audit, INFO)
+is routed to this process's stdout and, best effort, to the provisioner container's own stdout
+(/proc/1/fd/1), so it lands in the provisioner's log stream beside the records it writes itself.
 
 Written for the 2026-10-30 playground retirement (plans/2026-10-30-retire-playground-plan.md, Phase 3).
 """
@@ -27,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -75,6 +80,32 @@ def precheck(
     if record.get("allowed_workspaces") != expect_workspaces:
         raise PrecheckError(f"kid {kid!r}: allowed_workspaces is {record.get('allowed_workspaces')!r}")
     return dict(record)
+
+
+AUDIT_LOGGER = "agentforge.provisioner.audit"
+
+
+def configure_audit_logging(stream, extra_paths: tuple[str, ...] = ("/proc/1/fd/1",)) -> list[str]:
+    """Route INFO records of the provisioner audit logger to `stream` and, best effort, to each of
+    `extra_paths`. Returns the sinks actually attached. Without this the INFO audit record is dropped
+    by Python's default WARNING level."""
+    log = logging.getLogger(AUDIT_LOGGER)
+    log.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    sinks = []
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(fmt)
+    log.addHandler(handler)
+    sinks.append("stream")
+    for path in extra_paths:
+        try:
+            fh = logging.FileHandler(path, mode="a", encoding="utf-8", delay=False)
+        except OSError:
+            continue
+        fh.setFormatter(fmt)
+        log.addHandler(fh)
+        sinks.append(path)
+    return sinks
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -127,10 +158,12 @@ async def _run(args: argparse.Namespace) -> int:  # pragma: no cover - runs insi
         return 0
     print(f"{args.aud}: {args.kid} matches (pk sha256 {pk_sha256(record)[:16]}, "
           f"tenants={record['allowed_tenants']}, workspaces={record['allowed_workspaces']})")
+    print("ROLLBACK " + json.dumps({"aud": args.aud, "version": version, "kid": args.kid, "record": record}),
+          flush=True)
     if not args.execute:
         print(f"{args.aud}: DRY RUN - pass --execute to remove it")
         return 0
-    print("ROLLBACK " + json.dumps({"aud": args.aud, "version": version, "kid": args.kid, "record": record}))
+    print(f"audit sinks: {configure_audit_logging(sys.stdout)}", flush=True)
     outcome = await _cas_remove_from_registry(
         client, args.aud, args.kid,
         org=args.expect_tenant[0], ws=args.expect_workspace[0],
