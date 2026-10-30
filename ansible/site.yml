@@ -5,6 +5,7 @@
 #   just net           # base + net  (tags: base,net)
 #   just node-exporter # host node_exporter for the AI Lab Fleet dashboard (tags: monitoring)
 #   just perf          # pin CPU governor to performance (tags: performance)
+#   just autostart     # start onboot LXCs whose NFS bind source was late at boot (tags: autostart)
 #   just mounts        # NFS test mount (tags: mounts)  -- after QNAP export exists
 #   just validate      # link/throughput checks (tags: validate)
 
@@ -41,6 +42,11 @@
 
     - role: qnap_mounts
       tags: [mounts]
+
+    # Start onboot containers whose /mnt/pve NFS bind-mount source was not there yet when
+    # pve-guests ran (the hosts and the QNAP share a power feed; 2026-10-30). `just autostart`.
+    - role: pve_nfs_guest_autostart
+      tags: [autostart]
 
     - role: validate_links
       tags: [validate]
