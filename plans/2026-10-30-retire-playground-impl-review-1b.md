@@ -1,51 +1,44 @@
 # Implementation review — retire-playground — round 1 (Phase 1b)
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- Changes required: deleting the worker alert family also removes coverage for CP-rendered pools, including platform-dev, which use the same `agentforge-worker` job label.
-- The resource cleanup otherwise follows the planned Flux split. Assuming Phase 1a’s shutdown checks passed, the retained RBAC, reaper, canary storage, broker policies, and namespace reservation remain coherent; removing the tenant-map entry does not block operator or ESO cleanup.
-- The seed coverage hash matches the encrypted document, all Secret values remain encrypted, and `gen-broker-inventory.py --check` passes. The recorded removals fit the provision Job’s seed iteration, but decrypted path coverage could not be independently verified here.
-- The revocation driver uses the correct agentforge helper signature and handles absence and supersession safely, but rollback persistence and audit logging are defective. Planned admission fixtures and several operational documentation updates are missing.
-- Thirty-eight focused tests and all 34 existing CEL cases passed. Broader tests encountered read-only temporary-directory and shell-execution failures; kustomize/promtool validation remains unverified.
+<!-- codex-impl-review-status: complete -->
 
 ## Findings
 
 ### Worker alert deletion also removes platform-dev coverage
 **Location:** kubernetes/apps/infrastructure/monitoring/agentforge-rules.yaml:179  
 **Severity:** blocker  
-<!-- codex: The claim that job="agentforge-worker" belongs exclusively to the playground is false: scripts/check-tenant-guard-cel.py:105 models the CP monitor with that job, agentforge-platform's origin/main renderer confirms it, and AFP_METRICS_PODMONITOR_ENABLED remains true, so seven deleted alerts also cover CP pools; ForgeOrchestratorUnscraped cannot replace their reconcile, authentication, backlog, drift, escalation, and operator-service checks. Retain the worker alert family and ForgeTargetDown's worker selector, remove only the dispatcher-specific coverage, and add a platform-dev Prometheus fixture to prevent this regression. -->
+Accepted (blocker, verified live): platform-dev's CP PodMonitor relabels job=agentforge-worker and is that job's only series. Fixed in 08d7bfdf: the six worker rules are restored, ForgeTargetDown is narrowed to the worker job, and only ForgeDispatchStalled and ForgeScaleOracleMissing are deleted; the P0 rule tests are restored minus ForgeDispatchStalled.
 
 ### Rollback record is saved after mutation and discarded on failure
 **Location:** scripts/af-revoke-legacy-kid.sh:34  
 **Severity:** important  
-<!-- codex: The wrapper waits for the entire remote execution before saving the rollback record, and its error branch explicitly removes the ROLLBACK line even when removal succeeded but the subsequent read or platform-dev comparison failed; an unwritable rollback directory is likewise discovered only after revocation. Persist and verify the complete public rollback artifact before permitting mutation, retain it on every failure path, and test successful removal followed by verification failure and local persistence failure. -->
+Accepted. Fixed in 98b73087: the driver prints ROLLBACK on every run before any write; the wrapper runs a dry pass, saves and verifies the record, and only then executes; the execute output is kept on every path. Re-verified live (dry run).
 
 ### The revocation audit record never reaches a configured sink
 **Location:** scripts/af_revoke_legacy_kid.py:138  
 **Severity:** important  
-<!-- codex: This creates a new audit object with an unexported metrics registry inside an unconfigured python process: ProvisionerAudit.emit logs at INFO, which the default WARNING level suppresses, leaving the revoked record only in memory until exit rather than in the provisioner's audit trail. Configure and retain the sanitized audit output through an explicit sink, and exercise the execute path in a test that asserts a revoked record is actually emitted. -->
+Accepted. Fixed in 98b73087: configure_audit_logging routes agentforge.provisioner.audit INFO records to stdout (kept in the execute log) and, best effort, to /proc/1/fd/1, the provisioner container's own log stream; tested with a stream and a file sink. The private metrics registry stays unexported by design: the live provisioner exports its own counters.
 
 ### Required namespace lifecycle admission tests are absent
 **Location:** scripts/check-tenant-guard-cel.py:547  
 **Severity:** important  
 <!-- codex: Phase 1b explicitly requires playground and platform-dev CREATE/UPDATE/DELETE coverage, but this harness is unchanged, hardcodes CREATE, never loads tenant-reserved-guard, and tests the playground reservation only through a PodMonitor creation. Add namespace lifecycle fixtures for both policies, including the DELETE request shape and identity matching, proving that the tenant reconciler remains barred from the reserved namespace while platform-dev operations and operator cleanup remain allowed. -->
+<!-- opus-pushback: Accepted in part (424d88fd): rule 16 is name-based and reads no tenant-map entry, and new Namespace CREATE fixtures prove the reserved name is denied (16) and platform-dev's is admitted, 36/36. A DELETE harness for tenant-reserved-guard is out of scope: this PR does not change that policy (name-based, matches only the tenants-reconciler identity), and Phase 2 checks the one DELETE this PR causes live, main Flux pruning the namespace. -->
 
 ### Seat-entitlement remediation and its fixture were not updated
 **Location:** kubernetes/apps/infrastructure/monitoring/agentforge-provisioner-rules.yaml:405  
 **Severity:** nit  
-<!-- codex: The alert still directs operators to an open playground authorization decision and describes three of four seats, while its matching expectation in agentforge-provisioner-rules.test.yaml:317 preserves the same stale guidance; both updates were explicitly required by Phase 1b. Replace this with the retirement decision and guidance for an incomplete revocation or reintroduced grant, updating the fixture alongside the annotation without weakening the alert expression. -->
+Accepted. Fixed in 1fba37e2: annotation and promtool fixture changed together; the folded descriptions match exactly.
 
 ### Documentation declares the deferred revocation complete
 **Location:** docs/decisions/0019-agentforge-v2-control-plane.md:334  
 **Severity:** nit  
-<!-- codex: This Phase 1b change ships the revocation tool but does not execute Phase 3, so “Revoked” prematurely asserts an authority change that namespace pruning does not perform for the legacy kid; capability-kids-configmap.yaml:48 and agentforge-tenant-platform-dev/externalsecret.yaml:14 make the same assertion. Mark revocation as pending Phase 2 verification and Phase 3 execution, then record completion only after every broker replica confirms absence. -->
+Accepted. Fixed in dc648bfc: ADR 0019, the ConfigMap and the platform-dev comment now describe revocation as Phase 3 of the retirement, not as done.
 
 ### Active runbook procedures still reference deleted workloads
 **Location:** docs/runbooks/agentforge.md:482  
 **Severity:** nit  
-<!-- codex: The active image-repin procedure still instructs operators to edit the deleted dispatcher-deployment.yaml and worker-deployment.yaml, while the namespace table at line 162 continues to describe the dispatcher as always-on. Update the current operating procedures and inventory to the surviving workloads, and explicitly mark obsolete instructions as historical rather than leaving commands that now fail. -->
+Accepted. Fixed in dc648bfc: the repin procedure lists the two surviving digests, the inventory marks the dispatcher retired, and the job table notes that the CP pools now carry job=agentforge-worker.
 
 ## Diff stat
 
