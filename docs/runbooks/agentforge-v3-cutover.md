@@ -1,5 +1,10 @@
 # Runbook — AgentForge v3 coordinated cutover (schema v3, `AF_BOT_TOKENS`, ops-bot)
 
+> **2026-10-30:** the tenant-zero **playground** workspace and the af-dispatcher were retired
+> (plans/2026-10-30-retire-playground-plan.md). Rows and commands below that name
+> `af-orch-playground-planner`, `tenants/tenant-zero/playground/orchestrator` or `operator/dispatcher/*`
+> are the record of the 2026-08 cutover, not live objects. The vault-access pattern in them still applies.
+
 **One coordinated cutover window, not a gradual gate.** Worker main (`cchifor/agentforge`, ≥ `9da00b3`)
 carries the full v3 program: `SUPPORTED_SCHEMA=3` **and** `MIN_SUPPORTED_SCHEMA=3` (v2 configs are
 rejected with a migration pointer), the `AF_BOT_TOKENS` JSON map replacing the four `AF_BOT_TOKEN_*`

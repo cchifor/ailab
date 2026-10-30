@@ -41,6 +41,12 @@ AF_CANARY_KEEP=1 scripts/verify-sandbox-boundary.sh   # leave the canary Jobs fo
 - **Disposable + safe:** runs ONLY against the throwaway `tenant-zero/playground` workspace (a fresh
   random 32-char job-id subPath) and **HARD-REFUSES `platform-dev`** (the real-repo tenant). Both
   canary Jobs are torn down on exit.
+- **The playground workspace was retired 2026-10-30, but the canary still targets it on purpose.** What it
+  needs was KEPT: the sandbox workspace PV/PVC `af-sbx-ws-tenant-zero-playground`
+  (agentforge-sandbox/workspace-pvc.yaml) and the broker CNP rule admitting playground/planner agent
+  pods (its positive control). With the playground's kid revoked, that connection authorizes nothing.
+  Moving the canary to a disposable identity, then deleting both, is a tracked follow-up. Never point
+  it at platform-dev's live workspace instead (plans/2026-10-30-retire-playground-plan.md).
 - The two Kata canaries run **sequentially** (one microVM at a time — two concurrent boots on the
   small agent nodes was flaky). Expect ~1–3 min total (Kata boot + 5 s-timeout probes).
 - The gated canary manifests are `kubernetes/apps/infrastructure/agentforge-sandbox/{egress-canary,

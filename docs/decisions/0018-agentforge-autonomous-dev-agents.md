@@ -148,3 +148,10 @@ revocable centrally.
 6. **Onboard further repos one at a time**; weekly smoke timer. Rollback anywhere: set
    `FORGE_PAUSED` first (≤2 min propagation; workers finish/release claims), then
    `systemctl stop agentforge` if needed — SIGTERM releases claims, lease expiry covers crashes.
+
+## Update (2026-10-30)
+
+`cchifor/agentforge-playground`, the v1 allowlist's only repo, was retired with the tenant-zero playground
+workspace (ADR 0019 update, plans/2026-10-30-retire-playground-plan.md). The playground-only exemption in
+agentforge's config validator (`PRIVILEGE_HARDENING_EXEMPT_REPO`) is now dead code. Removing it, while
+keeping the v1.1 requirement for every other repo, is an agentforge follow-up.
