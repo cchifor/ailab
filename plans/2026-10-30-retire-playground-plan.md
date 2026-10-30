@@ -317,4 +317,4 @@ A Ready replica still serving `tz-` is a failure: a broker with an invalid reloa
 - **Phase 3:** re-publish the saved record through the provisioner's own `_cas_publish_to_registry` (`capability_kid.py:505`), which merges it into a freshly read document (preserving any concurrent platform-dev change), validates the whole doc and CAS-writes. Then poll every replica until `tz-` is served.
 - **Phase 4** is not undone by git. Each step needs its inverse owner act: un-archive, re-add collaborators, re-create the hooks from the recorded IDs and URLs.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
