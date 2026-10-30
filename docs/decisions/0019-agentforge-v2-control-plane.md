@@ -331,7 +331,7 @@ the P0 procedure.
 
 The owner retired the `tenant-zero/playground` workspace (plans/2026-10-30-retire-playground-plan.md):
 - Gone: its operator-managed planner pool (the only KEDA-scaled, estate-managed pool) and the af-dispatcher scale oracle that served only it.
-- Revoked: its legacy hand-seeded capability kid `tz-213512e80fde7c84`, which the seat-entitlement audit flagged as an undeclared grant since 2026-09-07 and which the kid schema could never declare.
+- Revoked in the retirement's Phase 3, once the prune is verified: its legacy hand-seeded capability kid `tz-213512e80fde7c84`, which the seat-entitlement audit flagged as an undeclared grant since 2026-09-07 and which the kid schema could never declare.
 - Parked: the conductor, whose tenant config bound only the playground repo.
 
 `tenant-zero/platform-dev`, CP-rendered, is now the only AgentForge workspace.
