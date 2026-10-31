@@ -53,12 +53,8 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: The local paths below are checked against actual kustomization.yaml files.
 EXPECTED_LOCAL_PATHS = frozenset(
     {
-        "./kubernetes/apps/infrastructure/agentforge-ci-runners",
-        "./kubernetes/apps/infrastructure/agentforge-pkgcache",
         "./kubernetes/apps/infrastructure/agentforge-runtimeclasses",
-        "./kubernetes/apps/infrastructure/agentforge-sandbox",
         "./kubernetes/apps/agentforge-tenants-bootstrap",
-        "./kubernetes/apps/infrastructure/agentforge-workers",
         "./kubernetes/apps/apps",
         "./kubernetes/apps/backup",
         "./kubernetes/apps/infrastructure/cert-manager-config",

@@ -11,12 +11,7 @@ no reloader/controller to keep them honest:
      the gateway serving the previous routing table.
   2. The same `checksum/config` annotation in litellm.yaml (the MAIN proxy) —
      found stale the same day as litellm-local's, which is why both are gated.
-  3. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
-     Job's `metadata.name` (platform-dev-nfs-provisioner-job.yaml) — a Job's
-     `spec.template` is immutable, so the suffix changes whenever the
-     container image/args script changes, letting Flux prune+recreate the Job
-     instead of failing an in-place patch.
-  4. The `checksum/chatgpt-chat` pod-template annotation in litellm.yaml —
+  3. The `checksum/chatgpt-chat` pod-template annotation in litellm.yaml —
      must equal sha256(bytes of kubernetes/apps/apps/ai/chatgpt_chat.py)[:12].
      That file is merged into the litellm-config ConfigMap in place (no name
      hash) and the proxy imports it only at startup, so this annotation is the
@@ -88,50 +83,6 @@ def _literal_block(text: str, marker_re: "re.Pattern[str]") -> tuple[list[str], 
             raw.pop()
         return raw, (content_indent if content_indent is not None else marker_indent + 2)
     raise ValueError(f"no line matching {marker_re.pattern!r} found")
-
-
-def check_platform_dev_job_suffix() -> Site:
-    """The platform-dev NFS provisioner Job's content-addressed name suffix
-    vs a fresh sha256(image + "\\n---\\n" + args-script)[:10].
-
-    ⚠ RECIPE NOTE: the header comment describes hashing the container image
-    plus the args "shell script" (i.e. the clean, YAML-dedented script text).
-    That reading does NOT reproduce the current suffix. Reverse-engineering
-    the value that DOES verify shows the suffix was actually computed from
-    the args block's RAW, still-YAML-indented text (leading whitespace on
-    every line kept, NOT dedented) with only the trailing newline stripped —
-    consistent with a naive text-extraction (e.g. sed/awk over the raw file)
-    rather than a YAML-aware dedent. Implemented as discovered so the CURRENT
-    value verifies; see the task report for detail. Any future edit must
-    recompute the suffix the SAME way this script does (raw indented args
-    text), not via the header's plain-English "shell script" reading.
-    """
-    job_path = REPO / "kubernetes/apps/infrastructure/agentforge-sandbox/platform-dev-nfs-provisioner-job.yaml"
-    text = job_path.read_text(encoding="utf-8")
-
-    name_m = re.search(
-        r"^\s*name:\s*af-sbx-provision-tenant-zero-platform-dev-([0-9a-f]{10})\s*(?:#.*)?$",
-        text,
-        re.MULTILINE,
-    )
-    if not name_m:
-        raise ValueError(f"content-addressed Job name suffix not found in {job_path}")
-    expected = name_m.group(1)
-
-    image_m = re.search(r"^\s*image:\s*(\S+)", text, re.MULTILINE)
-    if not image_m:
-        raise ValueError(f"container image not found in {job_path}")
-    image = image_m.group(1)
-
-    args_m = re.search(r"^\s*args:\s*$", text, re.MULTILINE)
-    if not args_m:
-        raise ValueError(f"container args block not found in {job_path}")
-    raw_lines, _ = _literal_block(text[args_m.start() :], re.compile(r"^[ ]*-\s*\|[-+]?\s*$"))
-    body = "".join(raw_lines).rstrip("\n")
-
-    actual = sha256_hex(f"{image}\n---\n{body}")[:10]
-    return Site(job_path, expected, actual)
-
 
 
 def check_litellm_local_config_checksum() -> Site:
@@ -239,7 +190,6 @@ def check_litellm_chatgpt_chat_checksum() -> Site:
 # Table of hash sites to verify. Add a `check_...() -> Site` function above
 # and append it here to cover a new site.
 SITES = [
-    check_platform_dev_job_suffix,
     check_litellm_local_config_checksum,
     check_litellm_config_checksum,
     check_litellm_chatgpt_chat_checksum,
