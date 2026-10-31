@@ -11,7 +11,9 @@
 # (monitoring/openbao-retired-credentials-rules.yaml) is the backstop if this ever fails for 45 minutes.
 #
 # Authority: get + delete on that ONE Secret name (resourceNames), nothing else; no OpenBao role or policy.
-# Never prints the token.
+# Never prints the token. Because the pod briefly holds a privileged token, its image is digest-pinned and its
+# egress is default-deny with an allow-list of exactly DNS, the kube-apiserver and the OpenBao server pods
+# (CiliumNetworkPolicy below, modelled on openbao-unsealer's).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -128,7 +130,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: revoke
-              image: mirror.gcr.io/library/python:3.15-slim
+              image: mirror.gcr.io/library/python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 # digest-pinned: this pod holds a privileged token
               command: ["python3", "-u", "/scripts/revoke.py"]
               env:
                 # Headless per-pod name, as the sibling openbao Jobs use: resolves even while sealed.
@@ -154,3 +156,51 @@ spec:
               configMap:
                 name: openbao-retired-token-revoker-script
                 defaultMode: 0555
+---
+# Default-deny egress for the revoker: selecting the endpoint for egress puts it into egress default-deny, so
+# this allow-list is its COMPLETE reach. (1) DNS, (2) kube-apiserver (read + delete the one Secret),
+# (3) the OpenBao SERVER pods on :8200 (revoke-self / lookup-self). No world, no other namespace.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openbao-retired-token-revoker
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-retired-token-revoker }
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: openbao-retired-token-revoker
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # kube-apiserver: its Cilium identity is composite (host/remote-node + kube-apiserver), so it must NOT be
+    # shadowed by a host/remote-node egressDeny (the openbao-unsealer lesson); only the CIDR deny is kept below.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - { port: "6443", protocol: TCP }
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: openbao
+            app.kubernetes.io/name: openbao
+            component: server
+      toPorts:
+        - ports:
+            - { port: "8200", protocol: TCP }
+  egressDeny:
+    - toEntities:
+        - world
+    - toCIDR:
+        - 169.254.169.254/32
+        - 169.254.0.0/16
+        - ::/0
