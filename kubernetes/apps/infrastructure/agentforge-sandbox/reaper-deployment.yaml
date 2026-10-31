@@ -17,12 +17,10 @@
 # the tokenless sandbox pod has NO API access so it can never touch it. The reaper reclaims only by
 # CAS-acquiring an absent/expired Lease (a conflict = the orchestrator renewed → back off).
 #
-# ⚠️ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors the CP deployment.yaml precedent). The
-# image below is a PLACEHOLDER @sha256:0000… — unpullable. TO ENABLE THE REAPER:
-#   1. pin the immutable @sha256 of the built p1-worker image (registry.chifor.me/agentforge/p1-worker,
-#      from the cchifor/agentforge release CI — same digest the CP's AFP_WORKER_IMAGE gets);
-#   2. add `- reaper-deployment.yaml` back to kustomization.yaml (no lease Secret to seed — the Lease is
-#      RBAC-gated, granted by reaper-rbac.yaml which is already active). The ORCHESTRATOR must set
+# LISTED in kustomization.yaml and LIVE: the image below is a pinned p1-worker digest. (It began as an
+# unpullable PLACEHOLDER @sha256:0000… and was unlisted until pinned, which is what older notes in this
+# directory describe.) The Lease needs no Secret: it is RBAC-gated by reaper-rbac.yaml. The ORCHESTRATOR
+# of the reaped workspace must set
 #      AF_SANDBOX_STAGING_ROOT (same value below), AF_SANDBOX_NAMESPACE=agentforge-sandbox,
 #      AF_SANDBOX_ORG=tenant-zero, AF_SANDBOX_WORKSPACE=platform-dev,
 #      AF_SANDBOX_WORKSPACE_PVC=af-sbx-ws-tenant-zero-platform-dev (the VAP rejects any pod whose workspace
