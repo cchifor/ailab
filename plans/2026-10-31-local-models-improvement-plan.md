@@ -58,24 +58,23 @@ still the cloud3 half of LiteLLM's `qwen3.8-27b-vllm-cloud` (`litellm.yaml` and
    in lazy mode for this architecture (Qwen4Exp); its CUDA reviewer numbers: 467.5 → 826.9 t/s
    prefill. Latest release: b12020 (2026-10-31).
 
-## Decisions for the owner (recommendations in bold)
+## Decisions (owner, 2026-10-31)
 
-- **D1. cloud3 after w4a16:** **retire the `default` alias** (a sweep of ailab and cloudlab found no
-  client that requests `default`; re-check in WS0.3; `.26`'s router catalog has no `default` entry
-  today) with **no preload in the interim** (WS3.2), then **preload `qwen3.8-flash-next` with the old
-  default's idle TTL (86400 s) only at WS2.7, once it has qualified**. Preload happens at boot only:
-  any request for another cloud3 model evicts it, and it stays cold until next asked or next boot.
-  Alternatives: preload `qwen3.8-27b-fp8` (183 s vLLM start), or nothing at all.
-- **D2. Files:** **delete `/models-local/vllm/models/Qwen3.8-27B-W4A16-AutoRound-fast` after WS4
-  passes** (hygiene; it is not a prerequisite — 62 GiB is already free and a llama.cpp build needs a
-  few GiB); **keep the NFS GGUFs of `qwen3-coder-30b-a3b` and `qwen3.8-27b` Q6_K unserved until
-  2026-12-01**, then delete after checking no other host references them (Unsloth no longer
-  publishes that plain Q6_K, so deletion ends the rollback path).
-- **D3. A fast 27B in the picker:** **set `exposeModels: true` on `lan-192.168.0.28-18020`** in the
-  same atomic change that disables cloud3's `qwen3.8-27b`, so `local/qwen3.8-27b` resolves to cloud2's
-  vLLM (~160 tok/s, always loaded). That account's catalog is only `qwen3.8-27b`, so nothing else
-  becomes visible. The bare name `qwen3.8-27b` is the cloud2 ROUTE either way (dsh's worker and the
-  Conductor use it, `kubernetes/apps/apps/dsh/conductor.runtime.json:20`) and is unaffected.
+- **D1. cloud3 after w4a16: preload `qwen3.8-27b-fp8` at boot** (owner's choice), with the old
+  default's idle TTL (86400 s; fp8 has 7200 s today), applied in WS3.2 — it does not depend on WS2.
+  The `default` alias is retired (a sweep of ailab and cloudlab found no client that requests
+  `default`; re-check in WS0.3; `.26`'s router catalog has no `default` entry today). Preload happens
+  at boot only: a request for another cloud3 model evicts fp8, which stays cold until next asked or
+  next boot.
+- **D2. Files:** delete `/models-local/vllm/models/Qwen3.8-27B-W4A16-AutoRound-fast` after WS4
+  passes (hygiene; not a prerequisite — 62 GiB is already free and a llama.cpp build needs a few
+  GiB); **keep the NFS GGUFs of `qwen3-coder-30b-a3b` and `qwen3.8-27b` Q6_K unserved until
+  2026-12-01** (owner's choice), then delete after checking no other host references them (Unsloth no
+  longer publishes that plain Q6_K, so deletion ends the rollback path).
+- **D3. `local/qwen3.8-27b` is removed entirely** (owner's choice): it is retired with the other
+  three ids, and `lan-192.168.0.28-18020` stays `exposeModels: false`. The bare name `qwen3.8-27b`
+  remains the cloud2 ROUTE (dsh's worker and the Conductor use it,
+  `kubernetes/apps/apps/dsh/conductor.runtime.json:20`) and is unaffected.
 - **D4. `qwen3.8-27b-ailab`** (17–22 tok/s, 162 tok/s prefill) is slow but not on the owner's list:
   **keep it; out of scope**. With WS1 it should complete Assistant turns, slowly (~2–3 min a step).
 - **D5. `qwen3.8-27b-vllm-cloud` becomes cloud2-only. Accept:** cloud3's half serves garbage today.
@@ -223,8 +222,7 @@ Run it once against the current state (b10857, current flags) for every model th
    statistics and passes the quality comparison; Unsloth documents it on a custom branch
    (`danielhanchen/llama.cpp` `qwen4exp/mtp`), which is never deployed. Otherwise skip and record.
 7. **Cut over** in its own cloudlab PR and deploy gate: point `qwen3.8-flash-next` at the new
-   binary, flags and (if changed) weights; apply D1's flash-next preload and TTL now that it has
-   qualified; delete the temporary entry; deploy by the runbook
+   binary, flags and (if changed) weights; delete the temporary entry; deploy by the runbook
    (timestamped on-box backup, `pct push 5101 … /etc/llama-swap.yaml`, restart at a quiet moment);
    verify the running binary (`/proc/<pid>/exe`, the version in the log), the flags, health and a real
    completion; then a rollback smoke (switch to b10857 with its flags and assets, verify, switch
@@ -234,33 +232,33 @@ Run it once against the current state (b10857, current flags) for every model th
 
 1. **Router, before cloud3 changes (after the WS0 gate).** Snapshot the config. In ONE
    `PUT /admin/v1/config` with `If-Match` (no partial state, no lost concurrent edit): add
-   `qwen3.8-27b` and `qwen3-coder-30b-a3b` to `.26`'s `disabledModels` (w4a16 is already there), and
-   D3's `exposeModels: true` on `.28`. Confirm first that no route deployment, `disabledModelFallback`
-   (none on `.26` today) or capability list names the three. Verify with a request that
-   `local/qwen3.8-27b` is served by `lan-192.168.0.28-18020` (trajectory `accountId`).
+   `qwen3.8-27b` and `qwen3-coder-30b-a3b` to `.26`'s `disabledModels` (w4a16 is already there).
+   `.28` stays unexposed (D3). Confirm first that no route deployment, `disabledModelFallback` (none
+   on `.26` today) or capability list names the three. Verify that the bare `qwen3.8-27b` route
+   still answers from `lan-192.168.0.28-18020` (trajectory `accountId`).
 2. **cloudlab `host/llama-swap.yaml` (removal PR):** delete the `qwen3.8-27b`,
-   `qwen3-coder-30b-a3b` and `qwen3.8-27b-w4a16` entries; apply D1's interim state (the `default`
-   alias retired, no preload — flash-next's preload waits for WS2.7);
+   `qwen3-coder-30b-a3b` and `qwen3.8-27b-w4a16` entries; apply D1 (retire the `default` alias;
+   preload `qwen3.8-27b-fp8`; fp8 `ttl` 7200 → 86400, keeping its `useModelName`);
    update README's cloud3 table, the runbook, any monitoring rule or rule test naming them, and retire
    `scripts/cloud3-w4a16-gate.sh` with a pointer in the runbook. Deploy (WS2.7 procedure) and verify
    `/v1/models`, `/running` and a completion on each retained model.
 3. **Router, after that deploy:** drop the three from `.26`'s `allowedModels` and `disabledModels`
-   (one If-Match PUT). The retired request ids are exactly `qwen3-coder-30b-a3b`,
-   `local/qwen3-coder-30b-a3b`, `qwen3.8-27b-w4a16` and `local/qwen3.8-27b-w4a16`: they now answer
-   404 `MODEL_NOT_FOUND` (before this step: 400 `MODEL_NOT_SUPPORTED`). `local/qwen3.8-27b` is NOT
-   retired (D3: it is now cloud2), nor is the bare `qwen3.8-27b` route; on cloud3 itself, `default`
-   and the three names answer 404 from llama-swap.
+   (one If-Match PUT). The retired request ids are exactly `local/qwen3.8-27b`,
+   `qwen3-coder-30b-a3b`, `local/qwen3-coder-30b-a3b`, `qwen3.8-27b-w4a16` and
+   `local/qwen3.8-27b-w4a16`: they now answer 404 `MODEL_NOT_FOUND` (before this step: 400
+   `MODEL_NOT_SUPPORTED`). The bare `qwen3.8-27b` is NOT retired: it is the cloud2 route. On cloud3
+   itself, `default` and the three names answer 404 from llama-swap.
 4. **Files per D2.**
 
 ### WS4 — Validate the remaining models (item 6)
 
 Models: `local/qwen3.8-27b-fp8`, `local/qwen3.8-flash-next`, `local/qwen3.5-122b`,
-`local/qwen3.8-27b-ailab`, `local/qwen3.8-27b` (cloud2, D3), and the route `qwen3.8-27b`.
+`local/qwen3.8-27b-ailab`, and the route `qwen3.8-27b` (cloud2).
 Inference checks go through the PUBLIC URL with the P0 key. Assistant checks need a management
 session, which an api-key cannot give: they use the router's admin bearer from INSIDE the pod (it
 never leaves the pod and is never given to the harness), which also reads trajectories.
 1. **Catalog:** `/v1/models` is exactly the intended set; the retired ids answer as WS3.3 says;
-   `local/qwen3.8-27b` is served by `.28`.
+   the `qwen3.8-27b` route is served by `.28`.
 2. **Correctness, per model, cold then warm, streaming** (a cold load through the public URL only
    survives as a stream): a fixed set (one factual question, one short
    reasoning question, "Explain how a Fresnel lens concentrates light, in about 120 words") with
@@ -345,7 +343,7 @@ reasoning in the Assistant; moving `qwen3.5-122b` to local NVMe (no space); driv
 ## Verification
 
 Done when: the retired ids answer 404 from the router (WS3.3's list) and the three models are gone
-from LiteLLM, Open WebUI, dsh and cloud3, while `local/qwen3.8-27b` now reaches cloud2;
+from LiteLLM, Open WebUI, dsh and cloud3, while the `qwen3.8-27b` route still reaches cloud2;
 every remaining model passes WS4.2 and WS4.3 (any failure is decided by the owner, not recorded and
 passed); a 90-second cold load no longer fails an Assistant turn and a cold 122B no longer fails a
 streaming API call; flash-next meets at least the WS2.5 minimum and holds it in WS4.5; the
