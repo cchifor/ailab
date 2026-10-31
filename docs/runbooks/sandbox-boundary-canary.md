@@ -44,13 +44,17 @@ AF_CANARY_PREFLIGHT_ONLY=1 scripts/verify-sandbox-boundary.sh   # resolve image 
   (agentforge-sandbox/boundary-canary-workspace-pvc.yaml). No tenant namespace, orchestrator, seat or
   capability exists for that identity. Every other workspace is **refused, with no override** (the old
   `AF_CANARY_DANGEROUS_OVERRIDE` is gone): platform-dev's workspace is live, and the retired playground's
-  storage is deleted. Both canary Jobs are torn down on exit.
+  storage is unused, deleted once this identity's first runs are verified (#1505). Both canary Jobs are
+  torn down on exit.
 - **Brokers.** The positive control is a Ready pod of `AF_CANARY_BROKER` (default `broker-openai-codex`), the
   only broker whose CNP admits the canary identity (rule 1c). Its login is revoked and the canary holds no
   capability, so that rule grants reachability, never authorization. The **denied-broker probe** targets a
   Ready pod of `AF_CANARY_DENY_BROKER` (default `broker-anthropic-max1`, which does not admit the identity)
   by pod IP. It proves broker ingress admits only the matching identity, not just that a DNS name is
   refused, and the run is inconclusive if that pod changes or goes unready during the probe.
+- **Mutation check.** `AF_CANARY_DENY_BROKER=broker-openai-codex` must FAIL: the denied target is then the
+  admitting broker's OTHER replica, which the canary can reach. This proves the denied-broker probe and its
+  assertion can see a reachable target.
 - **Image.** The sandbox image is `AF_CANARY_IMAGE`, else the `AF_SANDBOX_IMAGE` that every live
   orchestrator (`af-tenant-*`) runs, else the committed canary's digest, and the run prints which. A failed
   lookup, disagreeing orchestrators or a non-digest value stop the run.

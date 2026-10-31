@@ -69,7 +69,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: af-sbx-provision-tenant-zero-platform-dev-6cdbb262e7 # suffix = sha256(image+args)[:10] — recompute on edit (header)
+  name: af-sbx-provision-tenant-zero-platform-dev-72495e3cd0 # suffix = sha256(image+args)[:10] — recompute on edit (header)
   namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
   annotations:
     # Backstop for a forgotten suffix recompute (see CONTENT-ADDRESSED NAME in the header): recreate
@@ -119,10 +119,14 @@ spec:
                 stat -c 'provisioned %n uid=%u gid=%g mode=%a' "$DIR"
               done
               # Canary retention: each run leaves an EMPTY subPath dir. rmdir is non-recursive, so only
-              # empty dirs go; anything else is logged and kept.
-              find /export/tenant-zero/boundary-canary -mindepth 1 -maxdepth 1 -type d -mmin +120 | while read -r d; do
+              # empty dirs go; anything else is logged and kept. find runs in an assignment so that, under
+              # set -e, a failed enumeration fails the Job instead of passing as "nothing to remove".
+              old=$(find /export/tenant-zero/boundary-canary -mindepth 1 -maxdepth 1 -type d -mmin +120)
+              set -f
+              for d in $old; do
                 if rmdir "$d" 2>/dev/null; then echo "removed empty canary dir $d"; else echo "kept non-empty $d"; fi
               done
+              set +f
               echo "sandbox NFS subdirs ready (idempotent)"
           volumeMounts:
             - name: sandbox-export

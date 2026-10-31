@@ -151,10 +151,14 @@ spec:
               echo "GUEST_KERNEL: $(uname -r)"
               # PID/mount-namespace isolation: this pod's pid-1 is the sandbox's OWN init (the Kata VM),
               # never the orchestrator's — so /proc/1/environ can carry none of its credential markers.
-              if grep -aqE 'ANTHROPIC_AUTH_TOKEN|GITEA_BOT_TOKEN|OPENBAO_TOKEN|CLAUDE_CODE_OAUTH|VAULT_TOKEN' /proc/1/environ 2>/dev/null; then
+              # grep: 0 = a marker found (BREACH), 1 = read and none found (CLEAN), else = unreadable (INCONCLUSIVE).
+              grep -aqE 'ANTHROPIC_AUTH_TOKEN|GITEA_BOT_TOKEN|OPENBAO_TOKEN|CLAUDE_CODE_OAUTH|VAULT_TOKEN' /proc/1/environ 2>/dev/null; g=$?
+              if [ "$g" -eq 0 ]; then
                 echo "BREACH: orchestrator credential visible in the sandbox /proc/1/environ"; rc=1
-              else
+              elif [ "$g" -eq 1 ]; then
                 echo "PROC1 CLEAN: no orchestrator credential in the sandbox pid-1 environ"
+              else
+                echo "INCONCLUSIVE: /proc/1/environ unreadable (grep rc=$g)"; rc=1
               fi
               [ "$rc" -eq 0 ] && echo "BOUNDARY OK: all denied targets unreachable"
               exit "$rc"

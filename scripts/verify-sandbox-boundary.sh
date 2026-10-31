@@ -19,9 +19,10 @@
 # DISPOSABLE + SAFE: runs ONLY against the canary's own identity tenant-zero/boundary-canary (pool canary,
 # PVC af-sbx-ws-tenant-zero-boundary-canary; no tenant, orchestrator, seat or capability exists for it)
 # with a fresh random job-id subPath. Every other workspace is REFUSED, with no override: platform-dev
-# drives the real cchifor/ailab + cchifor/platform repos, and the retired playground's PVC is gone. Both
+# drives the real cchifor/ailab + cchifor/platform repos, and the retired playground's PVC is unused. Both
 # canary Jobs are TORN DOWN afterwards. A green run is the standing proof v1.1 is safe; ANY breach is a
-# P0 — STOP and escalate with the reproduction.
+# P0 — STOP and escalate with the reproduction. (The playground's PV/PVC pairs are retired: unused since
+# 2026-10-31 and deleted once this identity's first runs are verified, #1505.)
 #
 # Brokers: the agent tier's POSITIVE control is a Ready pod of AF_CANARY_BROKER (default
 # broker-openai-codex, the one broker whose CNP admits the canary identity, rule 1c), and its new
@@ -33,7 +34,10 @@
 #         AF_CANARY_KEEP=1 scripts/verify-sandbox-boundary.sh   # keep the canary Jobs for inspection
 #         AF_CANARY_IMAGE=<repo>@sha256:<64 hex> ...           # pin the sandbox image explicitly
 #         AF_CANARY_PREFLIGHT_ONLY=1 ...   # resolve workspace, image and brokers, print them, stop
-# AF_CANARY_KUBECTL replaces the kubectl binary (scripts/tests/test_verify_sandbox_boundary.py).
+# Test seams (scripts/tests/test_verify_sandbox_boundary.py): AF_CANARY_KUBECTL replaces the kubectl binary;
+# AF_CANARY_FAKE_RUN=<dir> reads the two canary logs from <dir>/{agent,test}.log and the agent pod's
+# "<node> <runtimeClass>" from <dir>/agent.meta instead of running Jobs. A fake run is NEVER a proof: it
+# says so, and it ends with exit 3 even when every assertion passes.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -72,9 +76,16 @@ COMMITTED_IMAGE="$(grep -oE 'registry[^ ]*sandbox@sha256:[0-9a-f]+' kubernetes/a
 if [ -n "${AF_CANARY_IMAGE:-}" ]; then
   IMAGE="$AF_CANARY_IMAGE"; IMAGE_SRC="AF_CANARY_IMAGE"
 else
-  found="$("${K[@]}" get deploy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{range .spec.template.spec.containers[*].env[?(@.name=="AF_SANDBOX_IMAGE")]}{.value}{end}{"\n"}{end}' 2>/dev/null)" \
+  # "declared:" marks every AF_SANDBOX_IMAGE env entry, so one set through valueFrom (or set empty) is seen
+  # and refused, never mistaken for "no orchestrator here".
+  found="$("${K[@]}" get deploy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{range .spec.template.spec.containers[*].env[?(@.name=="AF_SANDBOX_IMAGE")]}{"declared:"}{.value}{end}{"\n"}{end}' 2>/dev/null)" \
     || die "image discovery failed: could not list Deployments (kubectl error)"
-  live="$(printf '%s\n' "$found" | awk -F'\t' '$1 ~ /^af-tenant-/ && $2 != ""')"
+  live="$(printf '%s\n' "$found" | awk -F'\t' '$1 ~ /^af-tenant-/ && $2 ~ /^declared:/ { v = $2; sub(/^declared:/, "", v); print $1 "\t" v }')"
+  while IFS=$'\t' read -r dep val; do
+    [ -n "$dep" ] || continue
+    [[ "$val" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] \
+      || die "orchestrator $dep declares AF_SANDBOX_IMAGE without a literal digest-pinned value ('$val': valueFrom, empty or a tag)"
+  done <<< "$live"
   if [ -z "$live" ]; then
     IMAGE="$COMMITTED_IMAGE"; IMAGE_SRC="committed fallback (no live orchestrator sets AF_SANDBOX_IMAGE)"
   else
@@ -86,17 +97,26 @@ else
 fi
 [[ "$IMAGE" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || die "sandbox image '$IMAGE' ($IMAGE_SRC) is not digest-pinned"
 
-# Broker targets: "<pod> <ip>" of the first Ready, non-terminating pod of app.kubernetes.io/name=$1.
+# Broker targets. A pod's fingerprint is its uid, container restart counts and Ready transition time: any
+# restart, replacement or unready spell between two reads changes it.
+POD_FIELDS='{.metadata.name}{"|"}{.status.podIP}{"|"}{.metadata.deletionTimestamp}{"|"}{.metadata.uid}{"|"}{range .status.containerStatuses[*]}{.restartCount}{","}{end}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{"/"}{.lastTransitionTime}{end}'
+POD_PICK='$2 != "" && $3 == "" && $6 ~ /^True\// { print $1, $2, $4 "|" $5 "|" $6; exit }'
+# "<pod> <ip> <fingerprint>" of the first Ready, non-terminating pod of app.kubernetes.io/name=$1 whose IP is not $2.
 ready_broker() {
-  "${K[@]}" -n "$BROKER_NS" get pods -l "app.kubernetes.io/name=$1" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.podIP}{"|"}{.metadata.deletionTimestamp}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null \
-    | awk -F'|' '$2 != "" && $3 == "" && $4 == "True" { print $1, $2; exit }'
+  "${K[@]}" -n "$BROKER_NS" get pods -l "app.kubernetes.io/name=$1" -o jsonpath="{range .items[*]}${POD_FIELDS}{\"\\n\"}{end}" 2>/dev/null \
+    | awk -F'|' -v skip="${2:-}" "\$2 != skip && ${POD_PICK}"
+}
+# The same for ONE named pod; nothing if it is gone, terminating or not Ready.
+pod_now() {
+  "${K[@]}" -n "$BROKER_NS" get pod "$1" -o jsonpath="${POD_FIELDS}{\"\\n\"}" 2>/dev/null | awk -F'|' "${POD_PICK}"
 }
 echo "== sandbox-boundary canary =="
 echo "context=$KCTX  ns=$NS  workspace=$ORG/$WS  pool=$POOL  pvc=$PVC"
 echo "image=$IMAGE  source=$IMAGE_SRC"
-read -r BROKER_POD BROKER_IP <<< "$(ready_broker "$POS_BROKER")"
-read -r DENY_POD DENY_IP <<< "$(ready_broker "$DENY_BROKER")"
+read -r BROKER_POD BROKER_IP _ <<< "$(ready_broker "$POS_BROKER")"
+# Never the positive pod: with AF_CANARY_DENY_BROKER set to the admitting broker this picks its OTHER
+# replica, which the canary can reach, so the run must FAIL (the mutation check in the runbook).
+read -r DENY_POD DENY_IP DENY_FP <<< "$(ready_broker "$DENY_BROKER" "${BROKER_IP:-}")"
 [ -n "${BROKER_IP:-}" ] && info "positive control: $POS_BROKER pod $BROKER_POD ($BROKER_IP)" \
   || { bad "no Ready $POS_BROKER pod (cannot run the positive control)"; BROKER_IP=""; }
 [ -n "${DENY_IP:-}" ] && info "negative control: $DENY_BROKER pod $DENY_POD ($DENY_IP)" \
@@ -126,13 +146,14 @@ psa="$("${K[@]}" get ns "$NS" -o jsonpath='{.metadata.labels.pod-security\.kuber
 amount="$("${K[@]}" -n "$NS" get sa agentforge-sandbox -o jsonpath='{.automountServiceAccountToken}' 2>/dev/null)"
 [ "$amount" = "false" ] && ok "sandbox SA automountServiceAccountToken=false" || bad "sandbox SA automount=$amount"
 # the tokenless SA must have NO RoleBinding/ClusterRoleBinding subject anywhere (no OpenBao/apiserver reach).
-rb="$("${K[@]}" get rolebindings,clusterrolebindings -A -o json 2>/dev/null \
-  | grep -c "\"name\": \"agentforge-sandbox\"" || true)"
-# (subjects OR the RB's own name may match; treat 0 subject-refs to the SA as the goal — check subjects)
-sarefs="$("${K[@]}" get rolebindings,clusterrolebindings -A -o jsonpath='{range .items[*]}{range .subjects[*]}{.kind}/{.namespace}/{.name}{"\n"}{end}{end}' 2>/dev/null \
-  | grep -c "ServiceAccount/${NS}/agentforge-sandbox" || true)"
-[ "${sarefs:-0}" = "0" ] && ok "sandbox SA has NO Role/ClusterRoleBinding (no apiserver/OpenBao RBAC)" \
-  || bad "sandbox SA is bound by $sarefs RoleBinding subject(s)"
+# A failed list is a FAIL: an unreadable answer is not an empty one.
+if subjects="$("${K[@]}" get rolebindings,clusterrolebindings -A -o jsonpath='{range .items[*]}{range .subjects[*]}{.kind}/{.namespace}/{.name}{"\n"}{end}{end}' 2>/dev/null)"; then
+  sarefs="$(printf '%s\n' "$subjects" | grep -c "^ServiceAccount/${NS}/agentforge-sandbox$")"
+  [ "$sarefs" = "0" ] && ok "sandbox SA has NO Role/ClusterRoleBinding (no apiserver/OpenBao RBAC)" \
+    || bad "sandbox SA is bound by $sarefs RoleBinding subject(s)"
+else
+  bad "could not list Role/ClusterRoleBindings — the tokenless-SA check is unproven"
+fi
 echo
 
 # ---- 2. NEGATIVE admission (the pinned pod-shape VAPs REJECT breaches) ----------------------
@@ -232,7 +253,11 @@ AGENT_ARGS=$(mktemp); cat > "$AGENT_ARGS" <<'PROBE'
     if curl -sSk --max-time 5 --connect-timeout 5 -o /dev/null "http://${AF_CANARY_BROKER_IP}:8700/"; then echo "BROKER REACHABLE ($AF_CANARY_BROKER_IP:8700)"; else echo "INCONCLUSIVE: broker unreachable"; rc=1; fi
   else echo "INCONCLUSIVE: no AF_CANARY_BROKER_IP"; rc=1; fi
   echo "GUEST_KERNEL: $(uname -r)"
-  if grep -aqE 'ANTHROPIC_AUTH_TOKEN|GITEA_BOT_TOKEN|OPENBAO_TOKEN|CLAUDE_CODE_OAUTH|VAULT_TOKEN' /proc/1/environ 2>/dev/null; then echo "BREACH: orchestrator credential in /proc/1/environ"; rc=1; else echo "PROC1 CLEAN"; fi
+  # grep: 0 = a marker found (BREACH), 1 = read and none found (CLEAN), anything else = could not read.
+  grep -aqE 'ANTHROPIC_AUTH_TOKEN|GITEA_BOT_TOKEN|OPENBAO_TOKEN|CLAUDE_CODE_OAUTH|VAULT_TOKEN' /proc/1/environ 2>/dev/null; g=$?
+  if [ "$g" -eq 0 ]; then echo "BREACH: orchestrator credential in /proc/1/environ"; rc=1
+  elif [ "$g" -eq 1 ]; then echo "PROC1 CLEAN"
+  else echo "INCONCLUSIVE: /proc/1/environ unreadable (grep rc=$g)"; rc=1; fi
   [ "$rc" -eq 0 ] && echo "BOUNDARY OK: agent confined"
   exit "$rc"
 PROBE
@@ -283,16 +308,25 @@ run_tier() {  # $1=job $2=trust-class $3=job-id $4=args-file $5=meta-out-file $6
 }
 NODE_OUT=$(mktemp)
 echo; echo "[4] running canaries SEQUENTIALLY (one Kata microVM at a time; ~30-90s each)"
+FAKE="${AF_CANARY_FAKE_RUN:-}"
 info "agent canary $AGENT_JOB ..."
-AGENT_LOG="$(run_tier "$AGENT_JOB" agent "agent${JOBID:5:27}" "$AGENT_ARGS" "$NODE_OUT" "$DENY_IP")"
+if [ -n "$FAKE" ]; then
+  echo "  !!    TEST MODE (AF_CANARY_FAKE_RUN=$FAKE): logs are read from files, no Job runs — NOT a boundary proof"
+  AGENT_LOG="$(cat "$FAKE/agent.log" 2>/dev/null)"; cat "$FAKE/agent.meta" > "$NODE_OUT" 2>/dev/null
+else
+  AGENT_LOG="$(run_tier "$AGENT_JOB" agent "agent${JOBID:5:27}" "$AGENT_ARGS" "$NODE_OUT" "$DENY_IP")"
+fi
 read -r AGENT_NODE AGENT_RTC < "$NODE_OUT"
-# The denied broker must have stayed the same Ready pod for the whole probe; a churned or unready target
-# could "block" a probe by being down, which proves nothing about the policy.
-read -r DENY_POD_AFTER DENY_IP_AFTER <<< "$(ready_broker "$DENY_BROKER")"
-[ -z "${AF_CANARY_KEEP:-}" ] && "${K[@]}" -n "$NS" delete job "$AGENT_JOB" --ignore-not-found --wait=false >/dev/null 2>&1
+# The denied broker must still be the SAME pod, Ready, with the same fingerprint (uid, restarts, Ready
+# transition) as when it was picked: a target that restarted or went unready during the probe could have
+# "blocked" it by being down, which proves nothing about the policy.
+DENY_IP_AFTER="" DENY_FP_AFTER=""
+[ -n "${DENY_POD:-}" ] && read -r _ DENY_IP_AFTER DENY_FP_AFTER <<< "$(pod_now "$DENY_POD")"
+[ -z "${AF_CANARY_KEEP:-}" ] && [ -z "$FAKE" ] && "${K[@]}" -n "$NS" delete job "$AGENT_JOB" --ignore-not-found --wait=false >/dev/null 2>&1
 info "test canary $TEST_JOB ..."
-TEST_LOG="$(run_tier "$TEST_JOB" test "testc${JOBID:5:27}" "$TEST_ARGS" "$NODE_OUT")"
-[ -z "${AF_CANARY_KEEP:-}" ] && "${K[@]}" -n "$NS" delete job "$TEST_JOB" --ignore-not-found --wait=false >/dev/null 2>&1
+if [ -n "$FAKE" ]; then TEST_LOG="$(cat "$FAKE/test.log" 2>/dev/null)"
+else TEST_LOG="$(run_tier "$TEST_JOB" test "testc${JOBID:5:27}" "$TEST_ARGS" "$NODE_OUT")"; fi
+[ -z "${AF_CANARY_KEEP:-}" ] && [ -z "$FAKE" ] && "${K[@]}" -n "$NS" delete job "$TEST_JOB" --ignore-not-found --wait=false >/dev/null 2>&1
 rm -f "$NODE_OUT" "$AGENT_ARGS" "$TEST_ARGS"
 echo "--- agent canary log ---"; printf '%s\n' "$AGENT_LOG" | sed 's/^/    /'
 echo "--- test canary log ---";  printf '%s\n' "$TEST_LOG"  | sed 's/^/    /'
@@ -301,15 +335,16 @@ echo
 # ---- 5. assert the matrix ------------------------------------------------------------------
 echo "[5] egress + kata + proc matrix"
 has() { printf '%s' "$1" | grep -q "$2"; }
+has_line() { printf '%s\n' "$1" | grep -qxF -- "$2"; }   # the WHOLE line, literally
 # EMPTY-LOG GUARD: an empty log means the canary never ran (boot/schedule failure) — treat it as a
 # FAIL, never a pass. Without this, "no BREACH in an empty log" would spuriously read as "all blocked".
 if [ -z "$AGENT_LOG" ]; then bad "AGENT: canary produced NO log (never ran) — inconclusive, fail closed"
 elif has "$AGENT_LOG" "BREACH"; then bad "AGENT: a denied target was REACHED (egress BREACH)"
 else ok "AGENT: all denied targets blocked (world/metadata/alt-dns/other-broker/openbao)"; fi
 if [ -z "$DENY_IP" ]; then bad "AGENT: denied-broker probe had no target — inconclusive, fail closed"
-elif [ "${DENY_POD_AFTER:-}" != "$DENY_POD" ] || [ "${DENY_IP_AFTER:-}" != "$DENY_IP" ]; then
-  bad "AGENT: denied broker $DENY_POD ($DENY_IP) changed or went unready during the probe (now '${DENY_POD_AFTER:-none}' ${DENY_IP_AFTER:-}) — inconclusive"
-elif has "$AGENT_LOG" "ok (blocked): denied-broker-ip"; then ok "AGENT: $DENY_BROKER (does not admit $ORG/$WS) UNREACHABLE by pod IP — per-identity broker ingress holds"
+elif [ "$DENY_IP_AFTER" != "$DENY_IP" ] || [ "$DENY_FP_AFTER" != "$DENY_FP" ]; then
+  bad "AGENT: denied broker pod $DENY_POD restarted, was replaced or went unready during the probe (fingerprint '$DENY_FP' -> '${DENY_FP_AFTER:-gone}') — inconclusive"
+elif has_line "$AGENT_LOG" "ok (blocked): denied-broker-ip"; then ok "AGENT: $DENY_BROKER (does not admit $ORG/$WS) UNREACHABLE by pod IP — per-identity broker ingress holds"
 else bad "AGENT: no denied-broker-ip evidence in the log — the ingress-isolation probe did not run"; fi
 if has "$AGENT_LOG" "BROKER REACHABLE"; then ok "AGENT: positive control — reached its pool broker (allow path works)"; else bad "AGENT: broker NOT reached — INCONCLUSIVE (netless?), not a pass"; fi
 if has "$AGENT_LOG" "PROC1 CLEAN"; then ok "AGENT: /proc/1/environ carries no orchestrator credential (PID-ns isolated)"; else bad "AGENT: could not confirm /proc/1 isolation"; fi
@@ -338,6 +373,10 @@ if has "$TEST_LOG" "BOUNDARY OK"; then ok "TEST: BOUNDARY OK sentinel (pod exit 
 echo
 
 echo "== RESULT: $pass passed, $fail failed =="
+if [ -n "$FAKE" ]; then
+  echo "TEST MODE (AF_CANARY_FAKE_RUN): no canary ran, so this is NOT a boundary proof." >&2
+  [ "$fail" -eq 0 ] && exit 3 || exit 1
+fi
 if [ "$fail" -ne 0 ]; then
   echo "SANDBOX BOUNDARY BREACH or INCONCLUSIVE — this is a P0. Do NOT flip/keep privilege_hardening: v1.1." >&2
   exit 1
