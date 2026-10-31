@@ -29,6 +29,7 @@
   "owner_approval_label": {{ pr_reviewer_owner_approval_label | to_json }},
   "owner_approvers": {{ pr_reviewer_owner_approvers | to_json }},
   "owner_approvers_by_repo": {{ pr_reviewer_owner_approvers_by_repo | to_json }},
+  "owner_approval_paths_by_repo": {{ pr_reviewer_owner_approval_paths_by_repo | default({}) | to_json }},
   "unattended_authors": {{ pr_reviewer_unattended_authors | default([]) | to_json }},
   "guarded_paths": {{ pr_reviewer_guarded_paths | default([]) | to_json }},
   "pin_authors": {{ pr_reviewer_pin_authors | to_json }},

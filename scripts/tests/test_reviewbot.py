@@ -5505,6 +5505,181 @@ class OwnerApprovalMergeTest(unittest.TestCase):
                     self.assertEqual(value, config[key])
 
 
+class OwnerApprovalPathsTest(unittest.TestCase):
+    """A PR touching a repo's owner-only paths waits for the owner as if it carried the label."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, automerge=True, merge_personas=["test", "peer"],
+                      merge_authors=["someone"], owner_approvers=["chifor"],
+                      owner_approval_paths_by_repo={"o/r": [".gitea/workflows/", "scripts/test.sh"]})
+        self.head = "f" * 40
+        self.pr = {"state": "open", "draft": False, "mergeable": True,
+                   "user": {"login": "someone"}, "labels": [], "head": {"sha": self.head}}
+        self.reviews = [{"user": {"login": "reviewer-" + p}, "state": "APPROVED", "id": i,
+                         "commit_id": self.head, "dismissed": False, "stale": False,
+                         "body": f"<!-- review-bot:v1 persona={p} head={self.head} verdict=clean -->"}
+                        for i, p in enumerate(("test", "peer"), 1)]
+        self.diff = self._section("scripts/test.sh")
+        self.moved_to = None
+        self.calls, self.posts = [], []
+        self.m.api = self._api
+
+    @staticmethod
+    def _section(old, new=None):
+        new = new or old
+        head = f"diff --git a/{old} b/{new}\n"
+        if old != new:
+            return (head + f"similarity index 100%\nrename from {old}\nrename to {new}\n").encode()
+        return (head + f"index 1111111..2222222 100644\n--- a/{old}\n+++ b/{new}\n"
+                       "@@ -1 +1 @@\n-a\n+b\n").encode()
+
+    def _api(self, path, method="GET", body=None, raw=False):
+        self.calls.append(path)
+        if method == "POST":
+            self.posts.append((path, body))
+            return {}
+        if path == "/repos/o/r/pulls/7":
+            pr_fetches = self.calls.count(path)
+            if self.moved_to and pr_fetches > 1:
+                return dict(self.pr, head={"sha": self.moved_to})
+            return self.pr
+        if path == "/repos/o/r/pulls/7.diff":
+            self.assertTrue(raw)
+            return self.diff
+        if path.startswith("/repos/o/r/pulls/7/reviews?"):
+            return self.reviews
+        if path == f"/repos/o/r/commits/{self.head}/status":
+            return {"state": "success"}
+        self.fail(f"unexpected call: {method} {path}")
+
+    def _owner_approves(self):
+        self.reviews.append({"user": {"login": "chifor"}, "state": "APPROVED", "id": 9,
+                             "commit_id": self.head, "dismissed": False, "stale": False})
+
+    def _held(self, why):
+        with mock.patch.object(self.m, "log") as log:
+            self.assertIsNone(self.m.maybe_merge("o/r", 7))
+        self.assertEqual([], self.posts)
+        log.assert_called_once_with(f"merge o/r#7 held at {self.head[:9]}: {why}")
+
+    def _merged(self):
+        self.m.maybe_merge("o/r", 7)
+        self.assertEqual([("/repos/o/r/pulls/7/merge",
+                           {"Do": "merge", "head_commit_id": self.head})], self.posts)
+
+    def test_unlabelled_pr_touching_an_owner_path_holds_until_the_owner_approves(self):
+        self._held("owner approval (owner-only paths: scripts/test.sh)")
+        self._owner_approves()
+        self._merged()
+
+    def test_a_directory_entry_covers_what_is_under_it_and_a_file_entry_one_path(self):
+        for paths, held in ((["docs/x.md", ".gitea/workflows/ci.yml"], True),
+                            ([".gitea/workflowsx/ci.yml"], False),
+                            (["scripts/test.sh.orig", "scripts/tests/a.py"], False)):
+            with self.subTest(paths=paths):
+                self.posts.clear()
+                self.diff = b"".join(self._section(p) for p in paths)
+                if held:
+                    self._held("owner approval (owner-only paths: .gitea/workflows/ci.yml)")
+                else:
+                    self._merged()
+
+    def test_renaming_or_deleting_an_owner_path_holds(self):
+        deleted = (b"diff --git a/.gitea/workflows/ci.yml b/.gitea/workflows/ci.yml\n"
+                   b"deleted file mode 100644\nindex 1111111..0000000\n"
+                   b"--- a/.gitea/workflows/ci.yml\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n")
+        for diff, path in ((self._section("scripts/test.sh", "scripts/run.sh"), "scripts/test.sh"),
+                           (deleted, ".gitea/workflows/ci.yml")):
+            with self.subTest(path=path):
+                self.diff = diff
+                self._held(f"owner approval (owner-only paths: {path})")
+
+    def test_sections_without_a_text_hunk_are_named_not_unreadable(self):
+        # Additions, binary changes and mode-only changes name their file from other header lines
+        # (reviewer-claude, round 1): an unrelated PR of these shapes merges, and an owner path is
+        # held under its real name.
+        shapes = {
+            "added": b"diff --git a/docs/new.md b/docs/new.md\nnew file mode 100644\n"
+                     b"index 0000000..1111111\n--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1 @@\n+a\n",
+            "binary": b"diff --git a/img/a.png b/img/a.png\nindex 1111111..2222222 100644\n"
+                      b"Binary files a/img/a.png and b/img/a.png differ\n",
+            "binary added": b"diff --git a/img/b.png b/img/b.png\nnew file mode 100644\n"
+                            b"index 0000000..2222222\nBinary files /dev/null and b/img/b.png differ\n",
+            "mode only": b"diff --git a/scripts/x.sh b/scripts/x.sh\nold mode 100644\nnew mode 100755\n",
+        }
+        for name, diff in shapes.items():
+            with self.subTest(shape=name):
+                self.posts.clear()
+                self.diff = diff
+                self._merged()
+        self.posts.clear()
+        self.diff = b"diff --git a/scripts/test.sh b/scripts/test.sh\nold mode 100644\nnew mode 100755\n"
+        self._held("owner approval (owner-only paths: scripts/test.sh)")
+
+    def test_a_pr_touching_no_owner_path_merges_without_the_owner(self):
+        self.diff = self._section("docs/x.md")
+        self._merged()
+
+    def test_a_repo_without_owner_paths_reads_no_diff(self):
+        self.m.CFG["owner_approval_paths_by_repo"] = {"o/other": ["scripts/test.sh"]}
+        self._merged()
+        self.assertNotIn("/repos/o/r/pulls/7.diff", self.calls)
+        del self.m.CFG["owner_approval_paths_by_repo"]
+        self.posts.clear()
+        self._merged()
+
+    def test_a_diff_or_name_the_parser_cannot_read_holds(self):
+        for diff, why in ((b"", "<unreadable diff>"), (b"not a diff\n", "<unreadable diff>"),
+                          (b"diff --git a/x b/y\n", "<unreadable path>")):
+            with self.subTest(diff=diff):
+                self.diff = diff
+                self._held(f"owner approval (owner-only paths: {why})")
+
+    def test_a_head_that_moves_while_the_diff_is_read_merges_nothing(self):
+        self.moved_to = "a" * 40
+        self.diff = self._section("docs/x.md")
+        self._held("head moved while reading the diff")
+
+    def test_a_labelled_pr_touching_an_owner_path_keeps_the_label_log(self):
+        self.pr["labels"] = [{"name": "owner-approval"}]
+        self._held("owner approval")
+        self._owner_approves()
+        self._merged()
+
+    def test_the_owner_paths_do_not_override_other_holds(self):
+        self._owner_approves()
+        self.pr["labels"] = [{"name": "no-automerge"}]
+        self.assertIsNone(self.m.maybe_merge("o/r", 7))
+        self.pr["labels"] = []
+        self.reviews[0]["body"] = self.reviews[0]["body"].replace("clean", "findings")
+        self.assertEqual("verdicts", self.m.maybe_merge("o/r", 7))
+        self.assertEqual([], self.posts)
+
+    def test_role_defaults_and_rendered_config_carry_the_workbricks_owner_paths(self):
+        import jinja2
+
+        role = ROOT / "ansible" / "roles" / "pr_reviewer"
+        defaults = AllowlistDefaultsTest._strict_yaml(
+            (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
+        paths = defaults["pr_reviewer_owner_approval_paths_by_repo"]["cchifor/workbricks"]
+        for path in (".gitea/workflows/", ".github/workflows/", "scripts/test.sh", "scripts/guards/denylist.sha256",
+                     "scripts/guards/denylist-allow.txt", "scripts/guards/check_denylist.py",
+                     "scripts/guards/owner_approval.py", "scripts/guards/check_test_locks.py",
+                     "scripts/guards/check_milestones.py"):
+            self.assertIn(path, paths)
+        for path in ("tests/locks.sha256", "tests/milestones/registry.json"):
+            self.assertNotIn(path, paths)
+        self.assertEqual(["cchifor/workbricks"], list(defaults["pr_reviewer_owner_approval_paths_by_repo"]))
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        template = env.from_string((role / "templates" / "config.json.j2").read_text(encoding="utf-8"))
+        config = json.loads(template.render(defaults))
+        self.assertEqual(defaults["pr_reviewer_owner_approval_paths_by_repo"],
+                         config["owner_approval_paths_by_repo"])
+
+
 class MergeAuthorTransitionTest(unittest.TestCase):
     """One Gitea identity per dev-worker slot (ailab plan 2026-10-11-worker-identities, Phase 3),
     against the SHIPPED pr_reviewer_merge_authors rather than a synthetic list.
