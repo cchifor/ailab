@@ -2679,8 +2679,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
     The behavioural enqueue tests use repos=["o/kept"], so restoring cchifor/review-bot-fixture to
     the role defaults would leave them green. This is the test that would actually go red."""
 
-    EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
-                "cchifor/agentforge-platform", "cchifor/dsh-team-conductor",
+    EXPECTED = ["cchifor/ailab", "cchifor/platform", "cchifor/dsh-team-conductor",
                 "cchifor/forge", "cchifor/relay", "cchifor/llm-router", "cchifor/dsh-acp-plus",
                 "cchifor/workbricks", "cchifor/workbricks-apps"]
 
@@ -2815,7 +2814,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
     # The merge-author allowlist, same contract (ailab plan 2026-10-11-worker-identities, Phase 3).
     # dev-worker-bot STAYS next to the four slot bots: eligibility keys on the PR author, so its
     # open PRs need it until none is left (Phase 5 removes it, and then this list changes on purpose).
-    EXPECTED_MERGE_AUTHORS = ["chifor", "agentforge-ci-bot", "renovate-bot", "dev-worker-bot",
+    EXPECTED_MERGE_AUTHORS = ["chifor", "renovate-bot", "dev-worker-bot",
                               "workstation-bot", "dev-worker-1-bot", "dev-worker-2-bot",
                               "dev-worker-3-bot", "dev-worker-4-bot"]
 
