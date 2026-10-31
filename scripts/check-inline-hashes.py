@@ -5,18 +5,18 @@ the manifests haven't silently drifted from the content they describe.
 The repo carries a couple of inline, hand-computed content-hash values with
 no reloader/controller to keep them honest:
 
-  2. The `checksum/config` pod-template annotation in litellm-local.yaml —
+  1. The `checksum/config` pod-template annotation in litellm-local.yaml —
      must equal sha256(config.yaml value)[:12]. LiteLLM reads its config only
      at startup and no Reloader is installed, so a stale value silently leaves
      the gateway serving the previous routing table.
-  3. The same `checksum/config` annotation in litellm.yaml (the MAIN proxy) —
+  2. The same `checksum/config` annotation in litellm.yaml (the MAIN proxy) —
      found stale the same day as litellm-local's, which is why both are gated.
-  4. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
+  3. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
      Job's `metadata.name` (platform-dev-nfs-provisioner-job.yaml) — a Job's
      `spec.template` is immutable, so the suffix changes whenever the
      container image/args script changes, letting Flux prune+recreate the Job
      instead of failing an in-place patch.
-  5. The `checksum/chatgpt-chat` pod-template annotation in litellm.yaml —
+  4. The `checksum/chatgpt-chat` pod-template annotation in litellm.yaml —
      must equal sha256(bytes of kubernetes/apps/apps/ai/chatgpt_chat.py)[:12].
      That file is merged into the litellm-config ConfigMap in place (no name
      hash) and the proxy imports it only at startup, so this annotation is the
