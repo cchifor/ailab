@@ -106,6 +106,13 @@ seats:
 # checkout one commit behind main that combination stamped a seeds document still carrying a
 # REVOKED dispatcher PAT against paths read from the corrected live Secret. Same-file sourcing
 # makes that divergence unrepresentable, so the recipe above is the only supported one.
+#
+# FROZEN since 2026-10-31 (AgentForge retirement, plans/2026-10-31-retire-agentforge-plan.md PR-2a).
+# Its refresher (gen-broker-inventory.py --refresh-seed-coverage, `just af-record-seed-coverage`)
+# and its drift check (broker-inventory.yaml workflow) are removed. Its only runtime consumer, the
+# provisioner's KV garbage collector at startup, goes in PR-2b, and this whole file goes in PR-2c.
+# operator-seeds.sops.yaml is edited only in PR-4, after all of them. So nothing needs this record
+# refreshed between now and its deletion: it is retired in place, not orphaned.
 seedCoverage:
   recordedAt: "2026-10-30"
   seedsDocumentSha256: "f8e1c9ce3b124d330397256813e720160e5672a0ab45fb0c1be4a71df33158fd"
