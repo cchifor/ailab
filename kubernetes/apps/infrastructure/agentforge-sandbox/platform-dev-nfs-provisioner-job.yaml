@@ -20,7 +20,7 @@
 #   It also rmdir's that retired subdir, tenant-zero/playground (empty; its PV/PVCs were deleted first).
 #   ROLLBACK: reverting this does NOT recreate it — add tenant-zero/playground back to the mkdir loop.
 #
-# GROUND TRUTH (stat via the live reaper mount of the playground subdir):
+# GROUND TRUTH (stat via the reaper's mount of the playground subdir, before that subdir was retired):
 #   /pve-nfs/agentforge-sandbox/tenant-zero/playground -> uid=0 gid=0 mode=0777 (drwxrwxrwx)
 #   The manual step created the subdir root:root 0777. mode 0777 (NOT ownership) is what lets uid 65532
 #   — the sandbox securityContext runAsUser/runAsGroup (sandbox-guard.yaml validation 3) — AND the
@@ -71,7 +71,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: af-sbx-provision-tenant-zero-platform-dev-c5524d4658 # suffix = sha256(image+args)[:10] — recompute on edit (header)
+  name: af-sbx-provision-tenant-zero-platform-dev-064b3a6793 # suffix = sha256(image+args)[:10] — recompute on edit (header)
   namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
   annotations:
     # Backstop for a forgotten suffix recompute (see CONTENT-ADDRESSED NAME in the header): recreate
@@ -131,9 +131,10 @@ spec:
               set +f
               # The retired playground's subdir (#1505 PR-B2): its PV/PVCs are deleted and it was verified
               # empty. rmdir is atomic and non-recursive, so a non-empty dir fails the Job (set -e) instead of
-              # losing data; once gone this is a no-op on every re-run.
+              # losing data; once gone this is a no-op on every re-run. A dir that vanishes between the test
+              # and the rmdir is success; a dir still present after a failed rmdir fails the Job.
               P=/export/tenant-zero/playground
-              if [ -d "$P" ]; then rmdir "$P"; echo "removed the empty retired subdir $P"; fi
+              if [ -d "$P" ]; then rmdir "$P" || [ ! -e "$P" ]; echo "removed the empty retired subdir $P"; fi
               echo "sandbox NFS subdirs ready (idempotent)"
           volumeMounts:
             - name: sandbox-export
