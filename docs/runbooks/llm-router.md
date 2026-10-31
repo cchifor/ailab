@@ -2636,7 +2636,9 @@ for now."* whenever a local model needed more than 90 s. The trajectory showed `
   over the console's event feed, which sends heartbeats, and reconnects to a running turn after a reload
   (`GET /admin/v1/chat`). So no proxy between the browser and the pod sees ten silent minutes. API clients that
   stream get SSE headers at once and a `: keepalive` comment every 15 s. A non-streaming API call to a cold model
-  is still cut by Cloudflare's edge at ~100–125 s, whatever the router allows.
+  was expected to be cut at Cloudflare's edge (~100–125 s). One non-streaming request on 2026-10-31, to a cold
+  `local/qwen3.8-27b-fp8`, returned 200 after 130.3 s: the cut is not at ~100–125 s, but the real edge limit is
+  unknown. This is no clearance for multi-minute non-streaming calls (a cold 122B takes ~250 s): stream them.
 - **A restart cancels in-flight steps.** The drain grace is unchanged (`terminationGracePeriodSeconds: 60`), so a
   rollout or pod restart during a long cold-load wait ends that step. The user sees a failed step, not a hang;
   that is expected.
@@ -2677,7 +2679,7 @@ for now."* whenever a local model needed more than 90 s. The trajectory showed `
   2. Set `accounts[id == "lan-192.168.0.26-8080"].timeouts = { waitMs: 600000 }` on the object read.
   3. `PUT /admin/v1/config` with header `If-Match: <the revision read>` and the whole object as the body; the body
      keeps its `revision`. A 409 means someone changed the config in between: read it again and retry.
-  4. Record the new revision here.
+  4. Record the new revision here: **2158** (2026-10-31; read back `{"waitMs":600000}`).
 - **Read-back.** `GET /admin/v1/config`, then select `.accounts[] | select(.id == "lan-192.168.0.26-8080") |
   .timeouts`. It must show `{"waitMs":600000}`.
 
@@ -2689,6 +2691,61 @@ in the config first, because the old account schema strips the unknown `timeouts
 - **Persistence.** The stored config keeps `timeouts` until the old image writes the configuration, which any admin
   change does. That write drops the field. So after rolling forward again, run the read-back above and re-apply the
   step if the value is gone.
+
+### Results of the local-models plan (2026-10-31)
+
+Every change of `plans/2026-10-31-local-models-improvement-plan.md` landed the same day. Still open: the next-day
+durability check of flash-next's prefill (WS4.5), and the owner's decisions on the fp8 and 122B Assistant failures
+below. The record is `plans/2026-10-31-local-models-improvement-impl-review.md`.
+
+**Router configuration, changed through the admin API with `If-Match` PUTs:**
+
+| Revision | Change |
+|---|---|
+| 2093 | `qwen3.8-27b-w4a16` turned off on `lan-192.168.0.26-8080` |
+| 2128 | `qwen3.8-27b` and `qwen3-coder-30b-a3b` turned off there too |
+| 2136 | The three dropped from that account's `allowedModels`; they answer 404 `MODEL_NOT_FOUND` from then on |
+| 2158 | `timeouts.waitMs: 600000` on that account (the step above) |
+
+**Benchmark.** Measured through the router with `scripts/bench-router-local.mjs`: decode tok/s, prefill tok/s at
+9.3k and 15k tokens, load in seconds.
+
+| Model | Before | After |
+|---|---|---|
+| `local/qwen3.8-flash-next` (b10857 → b12020) | decode 44, prefill 505 / 564 | decode 60, prefill 1,469 / 1,555 |
+| `local/qwen3.8-27b-fp8` | decode 70, prefill 1,294 / 1,353, load 183 | decode 88, prefill 1,381 / 1,408, load 129 |
+| `local/qwen3.5-122b` | cold call `TIMEOUT` at 300 s; decode 58 | cold call served, load 246 s; decode 67, prefill 1,642 / 1,757 |
+| `local/qwen3.8-27b-ailab` (`.45`, shared) | decode 10–22, prefill 149 | decode 13, prefill 178 |
+| route `qwen3.8-27b` (cloud2) | decode 104, prefill 1,430 | decode 116, prefill 1,414 |
+
+- **Measurement noise.** fp8's decode varies with its MTP acceptance. The `.45` node is shared with tenants.
+- **The flash-next A/B of record** is cloudlab runbook §13d: backend mode, file-cold. Prefill went 575/605 →
+  1,633/1,677, decode 46.1 → 59.7.
+
+**Assistant turns.** Each model was pinned in its own conversation with Apply set to ask, given a read-only tool
+task, and started cold:
+
+| Model | Result |
+|---|---|
+| `qwen3.8-27b-ailab` | Pass in 160 s. Its first step read 16,315 tokens in 130 s, which the old 90 s cap failed. |
+| `qwen3.8-flash-next` | Pass in 36 s from cold. |
+| `qwen3.8-27b-fp8` | **Fail.** It reasoned without calling a tool until the 15-minute cap, which ended the turn with its message. |
+| `qwen3.5-122b`, swapped in over a resident fp8 | **Fail.** The swap and the tool call work (step 1: 331.7 s), but the model gives no real answer, and its tool calls leak template text into the arguments on both llama.cpp builds. |
+| Stop during a cold wait | Ended at once, silently; the upstream request was cancelled. |
+
+The two failures are model behaviour, not router behaviour, and are the owner's call.
+
+**Consumers.**
+- **Open WebUI's default** `qwen3.8-27b-vllm-cloud` answers through both gateways, served by cloud2.
+- **dsh's five router models** answer through the public URL, streaming, with dsh's own key. fp8's cold start took 142 s.
+
+**cloud3 outage during the benchmark (15:58 UTC).** cloud3 dropped off the network while vLLM was cold-starting fp8.
+- **What was seen:** no log lines before the stop; the NVMe peaked at 90.9 °C and the CPU at 90 °C over the
+  preceding 20 minutes.
+- **Recovery:** the owner powered it on, and the boot preload of fp8 then ran cleanly at normal temperatures.
+- **Re-runs** used a thermal guard (abort at NVMe > 85 °C or CPU > 92 °C) and peaked at 70.8 °C and 83 °C.
+  The NVMe limit is the one that guards against the recorded condition (90.9 °C); the CPU limit was only a
+  ceiling and would not have fired at the outage's 90 °C. Lower it if the CPU is ever the suspect.
 
 ## Relay access requests
 
