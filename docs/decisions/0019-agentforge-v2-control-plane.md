@@ -1,5 +1,8 @@
 # ADR 0019 — AgentForge v2: self-service, multi-tenant, sandboxed control plane
 
+> **SUPERSEDED 2026-10-31 by [ADR 0041](0041-retire-agentforge.md): AgentForge is retired.** Nothing this
+> ADR describes runs any more; the text below is kept as the historical record.
+
 **Status:** PROPOSED (2026-07-11). Plan adversarially reviewed (codex, finalized). This ailab PR
 carries the **P1 infra/deploy companion** only — the applications land in `cchifor/agentforge` (v1,
 extended) and the NEW `cchifor/agentforge-platform`. Full plan:

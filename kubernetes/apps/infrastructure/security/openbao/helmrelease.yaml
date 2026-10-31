@@ -20,7 +20,7 @@
 #                           roles/policies come from — runtime, but now codified, not a manual step.
 #   - canary-secretstore.yaml — a k8s-auth login canary; its Ready status is the Stage-1 activation gate.
 # The unseal key lives in an in-cluster Secret (accepted homelab residual — etcd-at-rest encryption is a
-# separate CP-rolling change; see docs/runbooks/agentforge-activation.md).
+# separate CP-rolling change; see docs/runbooks/openbao-recovery.md § "The bootstrap Jobs, and disaster notes").
 #
 # ── HA NOTE ──────────────────────────────────────────────────────────────────────────────────────────
 # This runs single-node raft (replicas: 1) — a real on-disk vault (NOT dev/in-memory), dev-ish sizing

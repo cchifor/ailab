@@ -653,9 +653,10 @@ ADR records them; see "How to record" below). The decisions:
   - `org-ops-bot` is an org owner. write:organization (cloud-power's runner pause, for which Gitea
     has no narrower scope) can also manage team membership. That token lives only in the
     cloud-power api pod, whose ingress is oauth2-proxy-only.
-  - Two read-only tokens on the site-admin `gitea_admin` are held by automation:
-    `af-ci-scaler-2941` (read:admin, `agentforge-ci/agentforge-ci-scaler-token`) and
-    `flux-ailab-read` (read:repository, `flux-system/flux-gitea-auth`).
+  - One read-only token on the site-admin `gitea_admin` is held by automation: `flux-ailab-read`
+    (read:repository, `flux-system/flux-gitea-auth`). The second, `af-ci-scaler-2941` (read:admin),
+    was deleted with AgentForge on 2026-10-31 (ADR 0041), along with every token of the twelve
+    AgentForge bot accounts.
   - The operator's temporary `phase0-setup-20261006` is deleted after the Phase 3 owner merge.
 
 - **D3: RESTRICT PRE-FLIP (decided 2026-10-06).** Gatekeeper supports a per-audience `grant_types`

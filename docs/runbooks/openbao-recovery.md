@@ -39,25 +39,24 @@ share a precedence — check which one owns a path before reasoning about it:
 
 **Rotation: refresh the seeds file in the same change, for all three — but for different reasons.**
 
-- *operator seeds*: the seed can no longer revert your rotation, but it is still the **DR floor**. A
-  stale fragment restores a **revoked** credential after a wipe, and reports as drift on every
-  provision run until it is refreshed. `agentforge-bootstrap --seeds-out` (requires
-  `--write-openbao`) emits the fragment; that command **rotates on every invocation**.
+- *operator seeds*: **empty (`{}`) since the AgentForge retirement (2026-10-31, ADR 0041)**: every path
+  they held was AgentForge's. The mechanism stays (the provision Job mounts the file, and a missing or
+  empty file is fatal; `{}` is the explicit "seed nothing"). Should a path ever be added again, the
+  seed can no longer revert a rotation, but it is still the **DR floor**: a stale fragment restores a
+  **revoked** credential after a wipe, and reports as drift on every provision run until it is refreshed.
 - *dev-worker / estate seeds*: unchanged and literal — a vault-only rotation is overwritten back to
   the old value within a day.
 
 > **Open gap — "reported as drift" has no consumer in this repo yet.** Nothing in `kubernetes/` or
-> `.gitea/` alerts on, counts, or gates a seed/vault divergence: `ForgeReconcileDriftHigh` is issue
-> state-label drift (unrelated), and `scripts/gen-broker-inventory.py`'s `DRIFT seed-coverage` checks
-> only which broker paths the seeds file *declares*, never whether a seeded value still matches the
-> vault. So today the report lands in the `openbao-provision` Job's own log, which nobody reads on a
-> green Job. Until an alert or CI check consumes it, **treat the same-change seeds refresh as the
+> `.gitea/` alerts on, counts, or gates a seed/vault divergence. The report lands in the
+> `openbao-provision` Job's own log, which nobody reads on a green Job. (Moot while `operator-seeds` is
+> `{}`, and the dev-worker and estate seeders are seed-wins, so they cannot drift.) Until an alert or CI check consumes it, **treat the same-change seeds refresh as the
 > only control** — create-if-absent removed the silent *revert*, not the silent *staleness*.
 
 **What this means for the path taxonomy below.** The classes answer *"what restores this path after a
 wipe"* — **not** *"who may write it while the estate is running"*. A path can be both **seeded** (so
 it comes back) and **owner-managed** (so the seed can never overwrite the owner's value);
-`tenants/<org>/<ws>/orchestrator` is exactly that. Collapsing the two questions into one is what made
+`tenants/<org>/<ws>/orchestrator` was exactly that until the AgentForge retirement (2026-10-31). Collapsing the two questions into one is what made
 this runbook and `provision-job.yaml` contradict each other for months.
 
 ## What survives a wipe (the corrected invariant)
@@ -73,19 +72,16 @@ this runbook and `provision-job.yaml` contradict each other for months.
 > `seeds.json` survives **only** because ESO's default `deletionPolicy: Retain` keeps the last-good target
 > k8s Secret — the value is gone from the vault and must be re-seeded or re-provisioned by hand.
 
-- **ESO Retain** → every synced k8s Secret survives the wipe; brokers keep serving from their mounts and
-  live-reload (no restarts).
+- **ESO Retain** → every synced k8s Secret survives the wipe; consumers keep serving from their mounts
+  (no restarts).
 - **The seed contract.** `provisioner/bootstrap.py::_apply_operator_seeds` merge-writes
   (**create-if-absent**, **no `options.cas`** — see the contract above) each entry of the decrypted
   `openbao-operator-seeds` blob (`operator-seeds.sops.yaml`, `kind: Secret`, single encrypted
   `stringData.seeds.json`, a flat `{ "<path>": { "<field>": "<value>" } }`) to `af/data/<logical_path>`.
-  **Hard constraint — seed only NON-CAS paths:** the broker `oauth` paths are `cas_required=true`
-  (contract C3) and a no-CAS seed write would **fail closed** (seeding an oauth path would first require
-  `bootstrap.py` to CAS-write). `operator/broker/*/kids` must **NEVER** be seeded regardless of CAS — the
-  `registry.json` it holds is rebuilt by the broker keypair lifecycle, so a floor entry would only pin a
-  stale public-key registry. `tenants/<org>/<ws>/orchestrator` **IS** seeded (since #230, both tenant
-  orchestrator paths) and that is deliberate — but as a **floor only**: it makes the subtree come back
-  after a wipe, and it can never overwrite what the control plane or the keypair lifecycle wrote.
+  **Hard constraint — seed only NON-CAS paths:** a `cas_required=true` path cannot be seeded, because
+  the no-CAS seed write **fails closed** (it would first need `bootstrap.py` to CAS-write). The blob is
+  `{}` since the AgentForge retirement (2026-10-31, ADR 0041); every path it held (broker ledgers, CI
+  tokens, forge PATs, the platform-dev tenant document) was AgentForge's.
 
 ### Post-wipe handling, by path class
 
@@ -95,10 +91,7 @@ seed the answer is always "the live value wins over the seed".
 
 | Class | Paths | Post-wipe action |
 |---|---|---|
-| **SEED** — self-heals from `seeds.json` | `operator/dispatcher/forge` (`AF_BOT_TOKENS`), `operator/conductor/forge` (`AF_BOT_TOKENS`), `operator/reaper/ledger` (`AF_REAPER_LEDGER_DSN`), `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,anthropic/claude-max-3,anthropic/claude-max-4,openai/codex-pro}/ledger` (all five `AF_BROKER_LEDGER_DSN`, one shared `agentforge_broker` DB on infra-pg), `operator/ci/runner-registration` (`token`), `operator/ci/scaler-token` (`token`) | **Nothing for the KV** — re-provision restores them. (The broker-ledger + CI paths were added on 2026-07-26 and were RESCUE before that. The ledger set has GROWN since: three broker ledgers existed at that commit — `claude-max-{1,2}` plus `codex-pro` — `claude-max-3` landed later the same day and `claude-max-4` on 2026-09-05. Count the broker manifests, never this sentence.) **But a seeded forge PAT is only as fresh as its last commit:** both `*/forge` paths carry a Gitea PAT, which a wipe does not revoke, so what comes back is whatever `operator-seeds.sops.yaml` last recorded. If a PAT was rotated without re-committing the seed, re-provision restores a **revoked** credential and the consumer 401s — re-mint and re-seed rather than debugging the consumer. |
-| **RESCUE** — from the Retain'd Secret | `operator/broker/{anthropic/claude-max-1,anthropic/claude-max-2,anthropic/claude-max-3,anthropic/claude-max-4,openai/codex-pro}/oauth` — **all FIVE**, confirmed against the live vault 2026-09-13 | Re-seed from the Retain'd k8s Secret via the recipe in step 5. **Cannot be seeded** (`cas_required=true`) unless `bootstrap.py` is changed to CAS-write. Codex (`codex-pro/oauth`) **also rotates nightly** (single-use refresh token) so it stays a rescue regardless. **This row said THREE until 2026-09-13**, having been written when three brokers existed; a recovery that followed it would have left `claude-max-3` and `claude-max-4` with no OAuth credential while every step reported success. Derive the list from the broker manifests (or `bao kv list af/operator/broker/...`), never from this cell. |
-| **RE-PROVISION** — by owner, never seeded | `operator/broker/*/kids` (registry.json — public key registry) | Rebuilt by the broker **keypair lifecycle**. It is not in `seeds.json` and must not be added (see the hard constraint above). |
-| **SEED-FLOOR + OWNER** — seeded, but the seed can never overwrite a live value | `tenants/<org>/<ws>/orchestrator` (bot PATs / `AF_BOT_TOKENS`, `AF_CONTROL_PLANE_TOKEN`, `AF_CAPABILITY_SIGNING_KEY`+`AF_CAPABILITY_KID`) | **Partly automatic, and the split matters.** `_apply_operator_seeds` restores the seeded fragment — the `AF_BOT_TOKENS` map + the CP bearer **as of the last `operator-seeds.sops.yaml` refresh**, so REVOKED if a rotation was never committed with it; re-mint through the **control plane** in that case. The capability keypair is **not** seeded and does not come back with it: `AF_CAPABILITY_SIGNING_KEY`/`AF_CAPABILITY_KID` are restored only by the **keypair lifecycle** (owner action). Expect a short worker-401 window. This row is the reconciliation of the old "`tenants/*` — restore via the control plane, **not** by re-seeding" rule: the path *is* seeded, and the rule survives as **"the seed cannot override a live value"** — enforced now by create-if-absent rather than by everyone remembering. |
+| **RETIRED** — AgentForge's operator and tenant paths (2026-10-31, ADR 0041) | `operator/{broker,reaper,ci,conductor,dispatcher}/*`, `tenants/*` and `dev-workers/codex-auth` (the broker ledgers and OAuth documents, the reaper ledger, the CI registration and scaler tokens, the conductor and dispatcher forge PATs, the platform-dev orchestrator document) | **Nothing, and do not restore them.** They were deleted with the retirement, and `operator-seeds.sops.yaml` is now `{}`, so a re-provision brings none of them back. Their consumers are gone, and the Gitea PATs they held were revoked. If an old `seeds.json` fragment ever reappears in that file, it is a regression: delete it rather than letting the bootstrap floor recreate retired credentials. **Expected remnant:** the retained bootstrap image re-stamps `cas_required` on four broker `oauth` paths (`claude-max-1/2/3`, `codex-pro`) on every provision run, leaving metadata-only stubs with no versions and no data. They hold nothing; they go with #1536. |
 | **SEED (dev-worker subtree)** — a SECOND, independent seed path | `dev-workers/common`, `dev-workers/<hostname>` (ADR 0020) | **Nothing for the KV** — the daily `openbao-devworker-provision` Job re-creates the `approle` mount, the six `dev-worker-*` policies/roles, and seed-patches these paths from `devworker-seeds.sops.yaml`. **But every AppRole secret-id is invalidated by the wipe** → re-run the mint ceremony for all six workers (`docs/runbooks/openbao-dev-workers.md` §Activation (e)) or the workers' `bao agent`s log `invalid role or secret ID` forever. |
 | **SEED (estate subtree)** — a THIRD, independent seed path | `estate/{proxmox,qnap,cloudflare,registry,gitea,github,restic,platform,oauth,strive-realm,cloudlab-win11,unifi}` (`docs/runbooks/openbao-estate-credentials.md` — that page's table is the list; don't trust this copy of it over that one) | **Nothing** — the daily `openbao-estate-provision` Job seed-patches these from `estate-seeds.sops.yaml`, and its fail-closed matrix covers every path/field named here. Nothing logs in against them (escrow), so there is no credential to re-mint. **But the subtree is wider than the seed:** `estate/{litellm,wifi}` are live in KV with no seed and no matrix entry (`estate/unifi` was seeded on 2026-10-27, ADR 0040), so a wipe loses them silently and this row does NOT cover them. `estate/litellm` also has one reader — policy `af-app-dsh`. |
 | **PUBLISHER-OWNED** — not seeded, and not restorable by any seeder (ADR 0026) | `dsh/credentials.DSH_CODEX_*`, `litellm/chatgpt.*` — the reviewer-2 seats' access tokens, projected every minute by `dsh-codex-publisher` on that host (`docs/runbooks/dsh.md` § Codex subscriptions) | **LOST until the publisher's next successful minute, and the order matters.** These are access tokens that the reviewer host renews every few days; a seed would put a stale token back daily, so there is none. Sequence: **(0)** restore the k8s-auth role `af-app-dsh` BY HAND first — `bao write auth/kubernetes/role/af-app-dsh bound_service_account_names=dsh-eso bound_service_account_namespaces=dsh token_policies=af-app-dsh token_ttl=1h alias_name_source=serviceaccount_uid` — because the unchanged `openbao-dsh-provision` Job only ASSERTS that role and aborts without it (a pre-existing gap ADR 0026 records rather than fixes; the chatgpt Job needs no such step, it writes its own role). **(1)** the `openbao-chatgpt-provision` and `openbao-dsh-provision` Jobs (both `openbao-breakglass-token`-auth, both in this directory) recreate both policies (`dsh-codex-publisher`, `af-app-litellm`), the k8s-auth role `af-app-litellm`, and both documents with their EMPTY keys — `af/litellm/chatgpt` with its four `CHATGPT_*` fields + `CHATGPT_OPENBAO_CANARY`, `af/dsh/credentials` with ONLY its `DSH_OPENBAO_CANARY`; that document's other operator fields (forge PAT, operator SSH) follow the ceremonies in `docs/runbooks/dsh.md`. **(2)** The AppRole ceremony in `dsh.md` recreates AppRole `dsh-codex-publisher` and mints a NEW role-id/secret-id into `/etc/dsh-codex-publisher/approle.json` on reviewer-2 — the wipe invalidated the old one, exactly as it does the dev-worker secret-ids. **(3)** The publisher's next minute fills both documents. It can only **PATCH** (no put, no create), so (1) MUST come first or every run fails on a 404; and a SOFT-DELETED document is refused (`deletion_time` set on the current version) until an operator `bao kv undelete`s it or the Job's loud-failure branch ("neither readable nor creatable") is resolved. ESO Retain keeps dsh and litellm serving the last-good token throughout — until it expires (~7 days), which is the real deadline. Verify with `dsh_codex_projection_ok == 1` for both documents. |
@@ -108,8 +101,8 @@ seed the answer is always "the live value wins over the seed".
 
 ### Privileged consumers to account for before a wipe
 
-The bootstrap Jobs listed in the ceremony below (`openbao-init`, `openbao-provision`,
-`provisioner-deploy`) all run the orchestrator image and are covered by the repin in step 1. Four
+The bootstrap workloads listed in the ceremony below (`openbao-init`, `openbao-unsealer`,
+`openbao-provision`) all run the orchestrator image and are covered by the repin in step 1. Four
 more privileged consumers do **not** ride that image:
 
 - **`openbao-devworker-provision`** (ns `openbao`, `kubernetes/apps/infrastructure/security/openbao/
@@ -136,6 +129,41 @@ more privileged consumers do **not** ride that image:
   replacement breakglass token can be captured is during the re-bootstrap, while that fresh root
   token still exists — capture it then and rewrite the `openbao-breakglass-token` Secret, or the
   dev-worker subtree stops converging with no privileged path left to fix it.
+
+## The bootstrap Jobs, and disaster notes
+
+Moved here from the AgentForge activation runbook when AgentForge was retired (2026-10-31, ADR 0041). OpenBao's
+bootstrap still runs `agentforge` CLI code from the orchestrator image pinned in the three manifests below.
+Flux deploys OpenBao (TLS via `openbao-tls`), and these run on their own:
+- **`openbao-init`** (`unseal-job.yaml`) initializes and unseals, writing `openbao-keys` (the unseal key and
+  `cluster_id`) and `openbao-bootstrap-token` (root). It is idempotent and fail-closed: it never re-inits
+  over a live vault, and a `cluster_id` disagreement or a partial death is a hard failure.
+- **`openbao-unsealer`** (`unsealer.yaml`, a Deployment) re-unseals after any restart. It reads
+  `openbao-keys` only.
+- **`openbao-provision`** (`provision-job.yaml`) creates the `af` KV mount, the `kubernetes` auth backend
+  (server-SA TokenReview, no static JWT), the base policies, the canary role and seed, and the operator
+  seeds (`{}` now). It mints the durable, add-only operator reconcile token into the Secret
+  **`openbao-operator-provisioner-token`** (policy `agentforge-operator-provisioner`; the identity every
+  later run uses, and the one ceremony step 7 checks). It writes the `openbao-state` sentinel, then
+  **revokes root and deletes `openbao-bootstrap-token`**. On that same root path it also mints `openbao-provisioner-token` for the
+  retired provisioner; `retired-token-revoker.yaml` removes it (§ "After a re-bootstrap" below).
+
+Verify with `just openbao-status`: the init and provision Jobs Succeeded, `openbao-state.provisioned=true`,
+`openbao-bootstrap-token` gone, and the **`openbao-canary` ExternalSecret Ready=True** (the end-to-end
+k8s-auth proof).
+
+**Disaster notes:**
+- `openbao-init` refuses to re-init if `openbao-keys` exists but the vault is uninitialized (a stale key or a
+  lost PV). It fails loudly rather than minting a NEW vault that orphans every stored secret.
+- Losing `openbao-keys` after init means an unrecoverable seal unless the key comes back: restore it from the
+  escrow copy `kubernetes/infra/openbao-unseal.sops.yaml` (ceremony step 6), or restore the vault PV from a
+  backup together with its matching key. There is no re-key path (OpenBao 2.5.5 answers 405 to `operator rekey`, as
+  it does to `generate-root`; see "When to use" at the top); otherwise it is the wipe ceremony below.
+- The unseal key and the root token (before its revocation) live only in the `openbao` namespace. The
+  unsealer reads the unseal key only.
+- **Accepted residual:** `openbao-keys` is an ordinary Kubernetes Secret. The cluster runs without etcd
+  encryption at rest, so the unseal key is recoverable from a raw etcd or disk read. Encrypting Secrets at rest
+  (or Talos disk encryption) would be a separate control-plane rolling change, not done.
 
 ## Raft snapshot (before ANY server upgrade or risky change)
 
@@ -170,7 +198,7 @@ rollback — restore the snapshot onto the version that took it instead.
 
 ## Ceremony
 1. **Repin FIRST** (or the gap you're fixing reproduces): the three bootstrap refs in
-   `kubernetes/apps/infrastructure/security/openbao/{unseal-job,provision-job,provisioner-deploy}.yaml`
+   `kubernetes/apps/infrastructure/security/openbao/{unseal-job,unsealer,provision-job}.yaml`
    must point at the orchestrator digest whose `bootstrap.py` contains the desired roles/policies.
    PR → approve → merge; reconcile the flux source (immutable-Job warnings are expected).
 2. **Scale down + (optional) backup**: `kubectl -n openbao scale sts openbao --replicas=0` → wait
@@ -185,38 +213,18 @@ rollback — restore the snapshot onto the version that took it instead.
    Jobs recreate on the pinned image: `openbao-init` (fresh init = NEW unseal key + cluster_id,
    writes `openbao-keys`) then `openbao-provision` (mount, k8s-auth, ALL policies/roles, seeds,
    `cas_required` stamps, tokens). Wait both `succeeded=1` (provision may retry 1-2×).
-5. **Re-seed the RESCUE-class paths** — all FIVE broker `oauth` (every SEED-class path self-heals from
-   `seeds.json` and needs nothing — read the SEED row above for the list rather than trusting a second
-   copy of it here, which is how `operator/conductor/forge` was missed once already; `kids` is
-   owner-restored; the SEED-FLOOR +
-   OWNER row — `tenants/*` — comes back from the seed but still needs its keypair-lifecycle half, and a
-   control-plane re-mint if the seeded PATs were stale). For each `oauth`: read its Retain'd k8s Secret,
-   stage the value + the new provisioner token
-   into the pod via `exec -i -- sh -c 'cat > /tmp/f'` (NOT stdin `read` — dies silently under MSYS),
-   sha-verify pod==source, then in-pod with the durable operator-provisioner token (Secret
-   `openbao-operator-provisioner-token`; the pod listens HTTPS so use `BAO_ADDR=https://127.0.0.1:8200
-   BAO_SKIP_VERIFY=true` — MSYS `curl` is Schannel and `--cacert` fails exit 60):
-   `bao kv put -cas=<current_version|0> -mount=af operator/broker/<broker>/oauth <field>=@/tmp/f`.
-   **The field name is provider-specific** — `CLAUDE_CODE_OAUTH_TOKEN` for **all four** anthropic
-   `claude-max-{1,2,3,4}` brokers, `auth.json` for `openai/codex-pro` (the ESO extract copies the whole doc, so
-   the wrong key would sync a wrong-shaped Secret). Field names read back from the live vault 2026-09-13;
-   this said "the two anthropic `claude-max-{1,2}`" while four existed. Then re-stamp `bao kv metadata put -cas-required=true
-   ...`. Verify the read-back sha equals the
-   broker's `/readyz` `credential_generation` (:8700), force-annotate the matching `broker-*-oauth`
-   ExternalSecret (`force-sync="$(date +%s)"`), confirm `SecretSynced=True`, and delete `/tmp/f`.
-   **The `bao kv put` is classifier-BLOCKED (shared-infra mutation) — the OPERATOR runs the ready
-   script.** Codex (`codex-pro/oauth`) additionally rotates nightly, so rescue it every wipe or the
-   refresh chain dies at the next expiry.
+5. **Re-seed the RESCUE-class paths: none are left.** That class was the five AgentForge broker `oauth`
+   documents, retired with AgentForge on 2026-10-31 (ADR 0041). Go straight to the dev-worker and
+   estate Jobs' rows in the table above, then retire the provisioner token the root path re-minted
+   (§ "After a re-bootstrap" below; the revoker CronJob does it within 15 minutes).
 6. **Re-escrow the NEW seal** in `kubernetes/infra/openbao-unseal.sops.yaml`. The file MUST stay a
    `kind: Secret` manifest with `stringData:` — the SOPS creation rules encrypt ONLY
    Secret-shaped keys; a flat yaml passes through **PLAINTEXT** while sops still adds
    metadata+mac (this caused a real 2026-07-24 leak → seal rotation). Before pushing, assert BOTH
    values start with `ENC[` AND the decrypt round-trip hash matches the live Secret.
-7. **Verify**: role probe matrix (positive + negative per role), `cas_required` on all broker
-   oauth keys, all ExternalSecrets `SecretSynced`, broker generations unchanged, a manual
-   `af-codex-refresh` Job succeeds and stamps the status custom-metadata. (While that CronJob is
-   suspended, since 2026-10-11, the login it rotates is revoked and the Job can only `401`: skip this
-   check unless seat a was re-seeded; see `openbao-dev-workers.md` § "The shared codex login".)
+7. **Verify**: role probe matrix (positive + negative per role), all ExternalSecrets `SecretSynced`,
+   the `openbao-canary` ExternalSecret Ready, `openbao/openbao-operator-provisioner-token` recreated and
+   usable (`bao token lookup` with it succeeds), and `openbao/openbao-provisioner-token` absent again.
 
 ## Adding a SEED path (making a static value self-heal)
 
@@ -227,9 +235,8 @@ instead (`docs/runbooks/openbao-dev-workers.md` § "Adding a secret",
 `seeds.json`, would be written by the wrong owner, on the wrong schedule, and under the **wrong
 precedence**: those Jobs are seed-wins, this one is create-if-absent (contract above).
 
-Only **non-CAS** paths qualify (never `.../oauth` or `operator/broker/*/kids` — see the hard constraint
-above). A `tenants/*` fragment does belong here — it is how that subtree survives a wipe — but purely as
-a **floor**: it is kept in step with the live values, never used to push a value into a live vault.
+Only **non-CAS** paths qualify (see the hard constraint above), and a fragment here is purely a
+**floor**: it is kept in step with the live values, never used to push a value into a live vault.
 Never hand-edit ciphertext:
 
 1. `export SOPS_AGE_KEY_FILE="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out/age.agekey"`

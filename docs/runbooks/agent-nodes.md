@@ -1,9 +1,17 @@
-# Runbook — Talos agent node pool (AgentForge v2 compute)
+# Runbook — Talos agent node pool
 
-Dedicated Talos **worker** pool for AgentForge v2 — three VMs (`agent-node-1/2/3`, IPs
+> **Built for AgentForge v2 (ADR 0019); AgentForge was retired on 2026-10-31 (ADR 0041).** The nodes stay:
+> llm-router, llm-router-edge and relay (with relay-postgres) run here, and Workbricks uses the `kata`/`gvisor`
+> RuntimeClasses (`kubernetes/apps/infrastructure/agentforge-runtimeclasses/`, name kept on purpose).
+
+Dedicated Talos **worker** pool, originally for AgentForge v2 — three VMs (`agent-node-1/2/3`, IPs
 `192.168.0.47–.49`, vmids `4301–4303`, one per Proxmox host) that JOIN the existing `ai` cluster,
 labelled `ailab.io/agent-pool=true` and tainted `dedicated=agent:NoSchedule`. Module:
 `kubernetes/infra/agent-nodes/` (separate local state). ADR 0019.
+
+> **Current state:** the P1/P2 text below is the build history. Kata and gVisor are live (the `kata_gvisor`
+> schematic on agent-node-3, ADR 0037), and the `kata`/`gvisor` RuntimeClasses ship from
+> `kubernetes/apps/infrastructure/agentforge-runtimeclasses/`.
 
 **P1 = plain workers (no Kata/gVisor yet).** Kata/gVisor are P2 image-factory extensions + the
 nested-virt host prerequisite below; the VMs are already sized (`cpu.type=host`, fixed memory) so P2
@@ -101,5 +109,5 @@ for Kata in P2. Two placement options:
 - Rebuild the agent-node image with the Kata/gVisor Talos system extensions (image factory /
   `talos_extensions`; confirm the gVisor extension exists on the Sidero Image Factory) → re-stage →
   re-import the VMs; uncomment the `vhost_net`/`vhost_vsock` kernel modules in `worker.yaml.tftpl`.
-- Ship the `kata`/`gvisor` RuntimeClasses (`kubernetes/apps/apps/agentforge/runtimeclasses.yaml`)
+- Ship the `kata`/`gvisor` RuntimeClasses (done: `kubernetes/apps/infrastructure/agentforge-runtimeclasses/`)
   once the handlers exist on the nodes.

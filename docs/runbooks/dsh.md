@@ -282,7 +282,7 @@ contents**; the fields are operator-owned by design.
    `read:admin`/`write:admin`), and human accounts are Authelia/OIDC with no local password, so the
    account was created by API with `gitea_admin` HTTP Basic auth, the password read from the
    SOPS-managed Secret `gitea/gitea-admin` into a 0600 curl config (the same route
-   `agentforge-platform-activation.md` uses to mint bot tokens; OpenBao holds no Gitea admin
+   the retired AgentForge activation runbook used to mint bot tokens; OpenBao holds no Gitea admin
    credential). `POST /api/v1/admin/users` with `restricted: true`, `visibility: private`,
    `must_change_password: false`, `send_notify: false`; then `PATCH /api/v1/admin/users/dsh` for
    `max_repo_creation: 0` and `allow_create_organization: false` — that endpoint **requires

@@ -1,5 +1,8 @@
 # ADR 0018 — AgentForge: autonomous label-driven dev agents on Gitea + dev-workers
 
+> **SUPERSEDED 2026-10-31 by [ADR 0041](0041-retire-agentforge.md): AgentForge is retired.** Nothing this
+> ADR describes runs any more; the text below is kept as the historical record.
+
 **Status:** PROPOSED (2026-07-10). Plan adversarially reviewed (codex, finalized); this ailab PR
 carries only the infra/deploy companion — the application lands in the new repo
 `cchifor/agentforge`. Full plan: `plans/2026-07-10-agentforge-plan.md`. **Relates to:** ADR 0017

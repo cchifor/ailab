@@ -351,6 +351,14 @@ pool is HAND-installed over SSH, mirroring the role):**
   ci-runner-N --labels self-hosted-hv:host` → install the reclaim/cleanup + daemon units → start.
 
 ## 8. AgentForge v2 image-build CI (HOST-MODE) + PREFLIGHT #2
+> **Retired 2026-10-31 (ADR 0041).** AgentForge is gone and `cchifor/agentforge` is archived, so nothing
+> below builds any more. One image still matters: OpenBao's init, unseal and provision Jobs run the
+> `orchestrator` image, pinned by digest `sha256:ed8c94fa…` (built from agentforge commit `f76c9ce`) and
+> mirrored as `registry.chifor.me/infra/openbao-bootstrap:orchestrator-f76c9ce`. Zot's `agentforge/**`
+> retention keeps it. Rebuilding it would mean unarchiving the repo first (Gitea allows that); the
+> intended path is #1536, moving OpenBao off that image. PREFLIGHT #2 (`just ci-runners-preflight`)
+> still checks the host-mode pool. The rest of this section is the historical record.
+
 AgentForge v2's gated activation (`plans/2026-07-13-iac-activation-plan.md`, Stage 0/4) builds+pushes its
 container images ON this **host-mode `act_runner` pool** — this is the user's deliberate override of the
 ADR 0019 §Phasing **"k8s-native CI runners"** proposal (a KEDA `ScaledJob` on the Kata pool). **Host-mode
@@ -638,8 +646,9 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
   fires if the self-heal ever fails to restore ownership.
 - **`pull_request` runs of a bot-authored PR sit at `waiting` forever (never picked up, while the
   same workflows run fine for humans and on `push`):** this is NOT a runner/label/capacity problem.
-  Gitea inserts `pull_request` runs for PRs opened by a **restricted** user (the AGit PRs
-  `agentforge-infra-bot` / `agentforge-ci-bot` open, ADR 0019) in the *blocked* state — the same
+  Gitea inserts `pull_request` runs for PRs opened by a **restricted** user (historically the AGit PRs
+  that the AgentForge bots `agentforge-infra-bot` / `agentforge-ci-bot` opened, ADR 0019; both were retired
+  on 2026-10-31 and hold no tokens, but any restricted author hits the same gate) in the *blocked* state — the same
   "approve first-time contributor" gate GitHub has — and only a repo writer's click on **Approve**
   on the run page (`/cchifor/<repo>/actions/runs/<id>`) releases it; every earlier bot run on ailab
   was approved by hand. There is no API route for that click in 1.26. To make bot PRs run without a
