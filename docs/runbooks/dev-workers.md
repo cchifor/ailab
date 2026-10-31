@@ -1,12 +1,14 @@
 # Runbook: dev-worker VMs (Claude Code + Codex)
 
-Six interactive developer VMs (`dev-worker-1..6`, **two per Proxmox node**) that run **Claude Code**
+Four interactive developer VMs (`dev-worker-1..4`) that run **Claude Code**
 and **Codex** inside tmux, with the homelab claude-worker feature set ported to ailab's idiom: a
-tofu module creates the VMs, the `dev_worker` Ansible role configures them.
+tofu module creates the VMs, the `dev_worker` Ansible role configures them. There were six until
+vmids 4206 (2026-09-21) and 4203 (2026-09-23) were retired and the survivors re-slotted, so slot ≠
+vmid: dw3 is vmid 4204 and dw4 is vmid 4205 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`).
 
 - tofu: `kubernetes/infra/dev-workers/`
 - role: `ansible/roles/dev_worker/` · playbook: `ansible/dev-workers.yml`
-- inventory group: `dev_workers` (`.37/.38/.39` + `.5/.6/.7`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
+- inventory group: `dev_workers` (`.8`–`.11`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
 
 **The base spec is shared** — cores + ceiling + floor are module-wide scalars in
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
@@ -64,8 +66,8 @@ and the dw4 floor, node2) — low floor by design, because ballooning
 now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
 two workers-at-floor at once.
 
-(IPs `.37/.38/.39` + `.5/.6/.7` are free static addresses inside the `.2`–`.50` reserve, below the
-DHCP pool — no router change is needed.)
+(Addresses come from `docs/network-plan.md`, the IPAM registry. `.37`/`.38`/`.39` and `.5`/`.6`/`.7`,
+the original dev-worker addresses, now belong to cloudlab guests; there is no free static address.)
 
 ## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01 — closed 2026-09-21)
 
@@ -127,14 +129,14 @@ leaves it alone, but a recreated VM comes back at the default. Reapply it after 
 ## Provision
 
 ```bash
-# 1. tofu — create the 3 VMs (separate state from runners/Talos)
+# 1. tofu — create the 4 VMs (separate state from runners/Talos)
 cp kubernetes/infra/dev-workers/terraform.tfvars.example kubernetes/infra/dev-workers/terraform.tfvars
 #   fill pve_api_token + dev_worker_ssh_public_key (reuse the runners' values)
-just dev-workers-plan      # expect 1 download_file + 3 VMs (scsi0 40G import + scsi1 128G blank)
+just dev-workers-plan      # expect 1 download_file + 4 VMs (scsi0 40G import + scsi1 128G blank)
 just dev-workers-apply
 
 # 2. reach the guests (c4 is created by cloud-init on first boot)
-just ping-dev-workers      # or: ssh c4@192.168.0.37
+just ping-dev-workers      # or: ssh c4@192.168.0.8
 
 # 3. ansible — configure (Claude Code + Codex + docker + tmux + ttyd/Caddy + dashboard …)
 just dev-workers
@@ -154,7 +156,7 @@ By default **everything runs as `c4`**
 so you log in **once as `c4`** and both the console and the web UI are authenticated:
 
 ```bash
-ssh c4@192.168.0.37          # (.38/.39) — the ttyd web UI is the SAME c4 session
+ssh c4@192.168.0.8           # (.9/.10/.11) — the ttyd web UI is the SAME c4 session
 claude                       # Claude (Max/Pro) OAuth login  → ~/.claude
 codex login                  # Codex (ChatGPT) login         → ~/.codex
 gh auth login                # for the dashboard 'github' window (gh-dash)
@@ -166,7 +168,7 @@ started in one continues seamlessly in the other.
 
 Verify:
 ```bash
-ssh c4@192.168.0.37 'claude --version && codex --version'   # both resolve from ~/.npm-global/bin
+ssh c4@192.168.0.8 'claude --version && codex --version'   # both resolve from ~/.npm-global/bin
 ```
 
 **Codex version + model are ansible-managed** (role `dev_worker`, `tasks/codex.yml`, tag `codex`):
