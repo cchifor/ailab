@@ -83,10 +83,6 @@ moved {
   to   = cloudflare_dns_record.edge["vault"]
 }
 moved {
-  from = cloudflare_dns_record.tunnel["agentforge"]
-  to   = cloudflare_dns_record.edge["agentforge"]
-}
-moved {
   from = cloudflare_dns_record.tunnel["openbao"]
   to   = cloudflare_dns_record.edge["openbao"]
 }

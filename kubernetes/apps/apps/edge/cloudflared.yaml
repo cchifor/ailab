@@ -74,7 +74,7 @@ data:
       # and now also answers a browser. NOT behind Cloudflare Access, and NOT pointed at the searxng
       # Service: it terminates on that namespace's oauth2-proxy, which is an OIDC client of Authelia and
       # completes the SSO flow before proxying anything. Same Access-free convention as the other
-      # own-gate surfaces above and below (git, agentforge, vault) — and as home.chifor.me itself, which
+      # own-gate surfaces above and below (git, vault) — and as home.chifor.me itself, which
       # this UI is linked from. Sending the tunnel at searxng:8080 directly would publish an
       # unauthenticated search engine, so the port here (:4180) is the load-bearing detail.
       - hostname: search.chifor.me
@@ -140,12 +140,6 @@ data:
         service: http://muse-stream.muse-stream.svc.cluster.local:80
       - hostname: git.chifor.me
         service: http://gitea-http.gitea.svc.cluster.local:3000
-      # AgentForge v2 control plane (ADR 0019) — NOT behind Cloudflare Access: the CP does its OWN
-      # Authelia OIDC (browser SSO) and enforces org membership on every route, so an Access gate would
-      # double-login. Estate convention for own-auth apps (Gitea above, Vaultwarden apex below) is
-      # Access-free. Dials the CP Service on :8080 (== container port; no DNAT port translation).
-      - hostname: agentforge.chifor.me
-        service: http://agentforge-platform.agentforge.svc.cluster.local:8080
       # Vaultwarden — apex NOT behind Cloudflare Access (the Bitwarden native clients hit /api,/identity,
       # /notifications/hub and can't do the Access browser SSO); its own master-password+2FA is the gate.
       # access.tf path-gates only /admin*.

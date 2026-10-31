@@ -284,21 +284,6 @@ dev_worker_restic_nfs_mount: /mnt/qnap-restic
 # Each item: { name, description, calendar | (boot_sec + active_sec), enabled (timer), autostart }
 dev_worker_jobs: []
 
-# ---- agentforge — autonomous dev-agent orchestrator (ADR 0018; opt-in via group_vars at go-live) ----
-# The role installs only the runtime shell (env, dirs, units, atomic self-updater); the code arrives
-# as pinned releases from the Gitea generic package registry, selected by the `release` pin in the
-# config repo's agentforge.json. See docs/runbooks/agentforge.md.
-dev_worker_enable_agentforge: false
-dev_worker_agentforge_port: 8700 # webhook receiver + /healthz + /readyz (LAN-only via ufw)
-dev_worker_agentforge_metrics_port: 9464 # prometheus exporter (scraped via monitoring/agentforge.yaml)
-dev_worker_agentforge_config_repo: "cchifor/agentforge-config" # owner/name; agentforge.json = control plane
-dev_worker_agentforge_litellm_base: "http://192.168.0.41:30400" # litellm-local LAN NodePort (local models ONLY)
-# Memory caps for the orchestrator + its agent subprocesses (claude/codex CLIs) — one cgroup, so a
-# runaway run is OOM-killed in isolation (same idea as dev_worker_job_memory_* above).
-dev_worker_agentforge_memory_high: "6G"
-dev_worker_agentforge_memory_max: "8G"
-dev_worker_agentforge_memory_swap_max: "2G"
-
 # ---- herdr pilot (enabled ONLY on dev-worker-4 via host_vars, NOT in group_vars) ----
 # Agent-native terminal multiplexer (herdr.dev) trialled BESIDE tmux — tmux keeps the 'main'
 # session, ttyd parity, the dashboard, and reboot persistence; herdr adds the agent attention queue
@@ -312,7 +297,7 @@ dev_worker_herdr_version: "0.8.2"
 # Upstream releases ship no checksum file; this is the sha256 of herdr-linux-x86_64 as hashed at
 # pin time (2026-08-31). Recompute whenever the version bumps.
 dev_worker_herdr_sha256: "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4"
-# Same idea as dev_worker_agentforge_memory_* above: one cgroup for the server + the pane processes
+# Same idea as dev_worker_job_memory_* above: one cgroup for the server + the pane processes
 # it spawns, so a leak is contained inside the unit instead of starving the VM.
 dev_worker_herdr_memory_high: "6G"
 dev_worker_herdr_memory_max: "8G"
@@ -347,15 +332,6 @@ dev_worker_openbao_sha256: "2c5577707e97fc95c2086950f39880ead5e45b356c94388e5cb6
 dev_worker_restic_password: ""
 dev_worker_cf_tunnel_token: ""
 dev_worker_admin_password: ""
-# agentforge secrets (asserted non-empty in tasks/agentforge.yml when the feature is enabled).
-# Bot PATs + the webhook HMAC are minted print-once by cchifor/agentforge's bootstrap_gitea.py;
-# the litellm key is litellm-local-secret's master-key (kubernetes/apps/apps/ai).
-dev_worker_agentforge_webhook_secret: ""
-dev_worker_agentforge_litellm_key: ""
-dev_worker_agentforge_planner_token: ""
-dev_worker_agentforge_tester_token: ""
-dev_worker_agentforge_impl_token: ""
-dev_worker_agentforge_reviewer_token: ""
 # openbao AppRole login (per-host map keyed by inventory_hostname; minted by the ceremony in
 # docs/runbooks/openbao-dev-workers.md and stored ONLY in the local SOPS file + the worker).
 # Shape: { dev-worker-1: { role_id: "...", secret_id: "..." }, ... }

@@ -180,17 +180,17 @@ fmt:
 storage-status:
     cd {{ansible_dir}} && ansible pve_nodes -b -m command -a "pvesm status" --one-line
 
-# ============================ AgentForge v2 activation ============================
-# Fully-IaC activation of the dormant v2 stack (docs/runbooks/agentforge-activation.md).
-# Staged: 0 images -> ⛔1 operators/security merge (OpenBao auto-init/unseal/provision) ->
-# ⛔2 Kata pool -> ⛔3 agentforge merge -> ⛔4 un-gate -> ⛔5 boundary tests -> v1.1.
+# ============================ Cluster tooling (ex-AgentForge activation) ============================
+# What survived the AgentForge retirement (2026-10-31, ADR 0041): the nested-virt gate for the agent-node
+# Kata pool, the static manifest checks, the image pinning helper and the OpenBao bootstrap status. The
+# OpenBao bootstrap Jobs are described in docs/runbooks/openbao-recovery.md.
 
 # Stage-2 gate: assert AMD nested virt is live on every Proxmox host (Kata /dev/kvm prereq)
 nested-virt-verify:
     python scripts/check-nested-virt.py
 
-# Verify hand-computed content hashes (checksum/capability-kids annotation, platform-dev NFS
-# provisioner Job name suffix) haven't silently drifted from the content they describe. Static-only.
+# Verify hand-computed content hashes (the LiteLLM checksum/config and checksum/chatgpt-chat
+# annotations) haven't silently drifted from the content they describe. Static-only.
 af-verify-hashes:
     python scripts/check-inline-hashes.py
 
@@ -219,10 +219,11 @@ af-gen-litellm:
 ci-runners-preflight *args:
     python scripts/check-ci-runners.py {{args}}
 
-# Stage-0 pin: bootstrap-class image digests ONLY (orchestrator + platform). Its own commit; MUST NOT
-# un-gate a workload. Usage: just pin-bootstrap sha256:<orch> sha256:<platform>
-pin-bootstrap orchestrator platform:
-    python scripts/pin-image-digests.py "orchestrator={{orchestrator}}" "agentforge-platform={{platform}}"
+# Pin the bootstrap-class image: the orchestrator that OpenBao's init/unseal/provision Jobs run (the CP's
+# agentforge-platform image left with AgentForge, ADR 0041). Its own commit. Usage:
+#   just pin-bootstrap sha256:<orch>
+pin-bootstrap orchestrator:
+    python scripts/pin-image-digests.py "orchestrator={{orchestrator}}"
 
 # Stage-4 pin: workload image digests. Usage: just pin-workloads broker=sha256:.. sandbox=sha256:.. ...
 pin-workloads +pins:
@@ -233,39 +234,6 @@ openbao-status:
     kubectl --context admin@ai -n openbao get pods,jobs,secrets,cm,secretstore,externalsecret 2>/dev/null || true
     @echo "--- canary ExternalSecret (must be Ready=True after provision) ---"
     kubectl --context admin@ai -n openbao get externalsecret openbao-canary -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}{"\n"}' 2>/dev/null || true
-
-# agentforge-platform-activation.md step 3: create the agentforge_platform DB + afp_admin/afp_app
-# roles via the bootstrap.sql \gexec one-shot (idempotent; resolves the infra-pg primary per run).
-# Kube context defaults to admin@ai here (estate convention — the CURRENT default context is a
-# DIFFERENT cluster, a write-path hazard for anything that touches infra-pg). scripts/af-db.sh itself
-# keeps an empty=current-context contract (see its header); sibling scripts/verify-sandbox-boundary.sh
-# instead defaults its own KUBECTL_CONTEXT to admin@ai internally — this recipe pins the default here
-# at the call site instead, but AF_KUBE_CONTEXT can still be set/overridden by the caller.
-# Bootstrap the agentforge_platform DB (roles + DB, idempotent \gexec)
-af-db-init:
-    AF_KUBE_CONTEXT="${AF_KUBE_CONTEXT:-admin@ai}" bash scripts/af-db.sh init
-
-# agentforge-platform-activation.md step 4: (re-)run the platform schema/RLS migration Job + verify
-# alembic head + RLS forced. Kube context defaults to admin@ai (see af-db-init comment above).
-# Run the platform schema/RLS migration Job and verify alembic head + RLS
-af-db-migrate:
-    AF_KUBE_CONTEXT="${AF_KUBE_CONTEXT:-admin@ai}" bash scripts/af-db.sh migrate
-
-# PR-B go-live verification walk: rollout status, pinned-digest match, in-pod /readyz, external
-# /healthz over the cloudflared tunnel. Run AFTER PR-B (- deployment.yaml) has merged + reconciled.
-# Kube context defaults to admin@ai (see af-db-init comment above).
-# Post-deploy smoke test for the agentforge-platform CP (rollout, digest, readyz, healthz)
-af-cp-smoke:
-    AF_KUBE_CONTEXT="${AF_KUBE_CONTEXT:-admin@ai}" bash scripts/af-cp-smoke.sh
-
-# Step-0 pin verify (scripted, replaces the eyeball curl): assert <image>:<tag> still resolves to
-# <digest> before trusting/merging a pin. digest is OPTIONAL for image=agentforge-platform (self-
-# defaults to whatever's currently pinned in deployment.yaml, so this example can't drift stale). Usage:
-#   just pin-verify agentforge-platform 276ccad                  # self-defaulting, always current
-#   just pin-verify agentforge-platform 276ccad sha256:<64hex>   # explicit override
-# Verify an image:tag still resolves to its approved (or self-defaulted) digest
-pin-verify image tag digest="":
-    bash scripts/verify-image-digest.sh {{image}} {{tag}} {{digest}}
 
 # NB: `agent-nodes-plan`/`agent-nodes-apply` already exist above; run `just nested-virt-verify` FIRST
 # (Stage-2 gate) before `just agent-nodes-apply` — the Kata pool needs nested=Y on the target hosts.

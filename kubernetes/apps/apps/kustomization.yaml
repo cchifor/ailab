@@ -9,7 +9,6 @@ resources:
   - cloud-power # ON/OFF buttons on home.chifor.me for the separate `pve` GPU cluster
   - gatus # uptime monitoring + status page at status.chifor.me
   - headlamp # live k8s cluster explorer (read-only) at k8s.chifor.me
-  - agentforge # AgentForge v2 self-service control plane at agentforge.chifor.me (ADR 0019)
   - gitea # self-hosted Git forge at git.chifor.me (OIDC login, SQLite on iSCSI)
   - vaultwarden # password manager at vault.chifor.me (own auth; /admin behind CF Access)
   - renovate # dependency-update bot (CronJob; opens PRs against this repo)

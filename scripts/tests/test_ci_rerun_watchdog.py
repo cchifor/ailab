@@ -576,6 +576,13 @@ class Pagination(Base):
         self.assertIn("cchifor/unlisted", s["unlisted_repos"])
         self.assertNotIn("cchifor/no-actions", s["unlisted_repos"])
 
+    def test_archived_repos_are_never_unlisted(self):
+        self.gitea.org_repos.append({"full_name": "cchifor/agentforge", "has_actions": True, "archived": True})
+        s = self.scan()
+        self.assertTrue(s["ok"])
+        self.assertEqual(self.metrics.get("unlisted_repos"), 1)
+        self.assertNotIn("cchifor/agentforge", s["unlisted_repos"])
+
     def test_pulls_page_two_found(self):
         self.candidate_pr_run(pr=7)
         self.gitea.pulls[REPO] = [{"number": i, "head": {"sha": "z%d" % i}, "state": "open"} for i in range(12)] + self.gitea.pulls[REPO]
