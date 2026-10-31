@@ -13,19 +13,27 @@
 // USAGE
 //   ROUTER_KEY=... node scripts/bench-router-local.mjs --model local/qwen3.8-27b-fp8 [--model ...]
 //       [--router https://router.chifor.me] [--server http://192.168.0.26:8080] [--unload]
-//       [--runs 3] [--only decode,prefill,depth,quality,tools,vision,concurrency] [--out results.jsonl]
+//       [--runs 3] [--only decode,prefill,depth,quality,tools,vision,concurrency] [--vision]
+//       [--out results.jsonl]
 //   node scripts/bench-router-local.mjs --backend http://192.168.0.26:8080 --model qwen3.8-flash-next ...
 //
 //   --server   the model server behind --model: its llama-swap /running is recorded before and after,
 //              and --unload calls its /unload before the cold request (llama-swap only; it evicts
 //              whatever is loaded there, so use it in a reserved window).
 //   --backend  talk to that server directly instead of the router (qualification of a new backend).
+//   --vision   the models take images: run the vision probe. Without it the phase is recorded as
+//              skipped (a text-only model would fail it for a reason that is not a regression).
 //
 // METRICS, and what each one is not:
-//   load_s         cold request: time to the first byte of the response minus the warm median of the
-//                  same; llama-swap's journal ("Health check passed") is the authority, this is a check.
-//   first_s        client time to the first usable delta: content or a tool call. Reasoning deltas and
-//                  SSE keepalive comments are excluded (the router drops reasoning anyway).
+//   firstGenS      time to the first GENERATED delta of any kind (content, reasoning, tool call). Not
+//                  the first byte: the router sends SSE headers and keepalive comments at once, so the
+//                  first byte says nothing about the backend. Through the router reasoning is dropped,
+//                  so there it is the first content or tool delta.
+//   loadS          the cold request's firstGenS minus the same prompt's warm firstGenS (the quality
+//                  phase repeats it). An estimate; llama-swap's journal ("Health check passed") is the
+//                  authority.
+//   firstS         client time to the first usable delta: content or a tool call.
+//   servedRoute    the router's x-router-route header, on every record, so a fallback cannot hide.
 //   e2e_tok_s      usage.completion_tokens / whole request time (reasoning included, prefill included).
 //   decode_tok_s   backend timings when the response carries them (llama.cpp `timings`, backend mode),
 //                  else completion_tokens / (total - prompt_tokens / prefill_tok_s of the same model).
@@ -63,7 +71,10 @@ const QUALITY = [
   { id: 'prose', prompt: 'Explain how a Fresnel lens concentrates light, in about 120 words.', expect: /fresnel|lens|light/i },
 ];
 const filler = (n) => Array.from({ length: n }, (_, i) => `Entry ${i} (${Math.random().toString(36).slice(2, 8)}): the keeper logged the wind, trimmed the wick and polished the lens.`).join('\n');
-const LONG = { '9k': filler(330), '15k': filler(535) };
+// 330 entries measured 9,321 prompt tokens on Qwen3.8 (8,965 on Qwen3-Coder) on 2026-10-31; 535 scale to
+// ~15k. Every prefill record carries the real prompt_tokens and a sizeWarning when it is >15% off target.
+const ENTRIES = { '9k': 330, '15k': 535 }, TARGET = { '9k': 9300, '15k': 15000 };
+const LONG = { '15k': filler(ENTRIES['15k']) };
 const COUNT_Q = '\n\nHow many entries are listed above? Answer with a number only.';
 
 // A 32x32 solid red PNG, built here so the harness needs no files.
@@ -91,7 +102,7 @@ async function running() {
 // One streamed chat completion. Returns timings, usage, content and tool calls.
 async function chat(model, messages, { maxTokens, tools } = {}) {
   const t0 = performance.now(), ctl = new AbortController(), timer = setTimeout(() => ctl.abort(new Error('deadline')), DEADLINE_MS);
-  const res = { status: 0, firstByteS: null, firstS: null, totalS: null, content: '', toolCalls: [], usage: null, timings: null, finish: null, error: null, servedRoute: null };
+  const res = { status: 0, firstByteS: null, firstGenS: null, firstS: null, totalS: null, content: '', toolCalls: [], usage: null, timings: null, finish: null, error: null, servedRoute: null };
   try {
     const r = await fetch(`${BASE}/v1/chat/completions`, { method: 'POST', headers, signal: ctl.signal,
       body: JSON.stringify({ model, messages, max_tokens: maxTokens, stream: true, stream_options: { include_usage: true }, ...(tools ? { tools } : {}) }) });
@@ -109,6 +120,7 @@ async function chat(model, messages, { maxTokens, tools } = {}) {
         let j; try { j = JSON.parse(data); } catch { continue; }
         if (j.error) res.error = JSON.stringify(j.error).slice(0, 300);
         const c = j.choices?.[0];
+        if (c?.delta?.content || c?.delta?.reasoning_content || c?.delta?.reasoning || c?.delta?.tool_calls?.length) res.firstGenS ??= (performance.now() - t0) / 1000;
         if (c?.delta?.content) { res.content += c.delta.content; res.firstS ??= (performance.now() - t0) / 1000; }
         for (const tc of c?.delta?.tool_calls ?? []) {
           res.firstS ??= (performance.now() - t0) / 1000;
@@ -127,7 +139,7 @@ async function chat(model, messages, { maxTokens, tools } = {}) {
 
 const round = (v, d = 1) => (v == null || !Number.isFinite(v) ? null : Number(v.toFixed(d)));
 const median = (xs) => { const s = xs.filter((x) => x != null).sort((a, b) => a - b); return s.length ? s[Math.floor((s.length - 1) / 2)] : null; };
-const summary = (r) => ({ status: r.status, error: r.error, finish: r.finish, firstByteS: round(r.firstByteS, 2), firstS: round(r.firstS, 2), totalS: round(r.totalS, 2),
+const summary = (r) => ({ status: r.status, servedRoute: r.servedRoute, error: r.error, finish: r.finish, firstByteS: round(r.firstByteS, 2), firstGenS: round(r.firstGenS, 2), firstS: round(r.firstS, 2), totalS: round(r.totalS, 2),
   promptTokens: r.usage?.prompt_tokens ?? null, completionTokens: r.usage?.completion_tokens ?? null,
   backendDecode: round(r.timings?.predicted_per_second), backendPrefill: round(r.timings?.prompt_per_second), cacheN: r.timings?.cache_n ?? null,
   degenerate: degenerate(r.content), sample: r.content.slice(0, 120).replace(/\s+/g, ' ') });
@@ -146,20 +158,24 @@ async function benchModel(model) {
     for (let i = 0; i < RUNS; i++) { const r = await chat(model, [{ role: 'user', content: DECODE }], { maxTokens: 2048 }); warm.push(r); record({ model, phase: `decode${i + 1}`, ...summary(r), e2eTokS: round((r.usage?.completion_tokens ?? 0) / r.totalS) }); }
     out.decodeE2E = median(warm.map((r) => (r.usage?.completion_tokens ?? 0) / r.totalS));
     out.decodeBackend = median(warm.map((r) => r.timings?.predicted_per_second));
-    out.loadS = round(cold.firstByteS - median(warm.map((r) => r.firstByteS)), 1);
   }
   if (ONLY.has('prefill')) {
     for (const size of ['9k', '15k']) {
       const runs = [];
-      for (let i = 0; i < RUNS; i++) { const r = await chat(model, [{ role: 'user', content: filler(size === '9k' ? 330 : 535) + COUNT_Q }], { maxTokens: 16 }); runs.push(r); record({ model, phase: `prefill${size}-${i + 1}`, ...summary(r), prefillTokS: round((r.usage?.prompt_tokens ?? 0) / r.totalS) }); }
+      for (let i = 0; i < RUNS; i++) {
+        const r = await chat(model, [{ role: 'user', content: filler(ENTRIES[size]) + COUNT_Q }], { maxTokens: 16 }); runs.push(r);
+        const got = r.usage?.prompt_tokens ?? null, off = got ? Math.abs(got - TARGET[size]) / TARGET[size] : null;
+        record({ model, phase: `prefill${size}-${i + 1}`, ...summary(r), prefillTokS: round((got ?? 0) / r.totalS), ...(off !== null && off > 0.15 ? { sizeWarning: `prompt_tokens ${got} is ${Math.round(off * 100)}% off the ${TARGET[size]} target` } : {}) });
+      }
       out[`prefill${size}`] = median(runs.map((r) => r.timings?.prompt_per_second ?? (r.usage?.prompt_tokens ?? 0) / r.totalS));
     }
   }
   if (ONLY.has('depth')) {
     const r = await chat(model, [{ role: 'user', content: LONG['15k'] + '\n\nSummarise the pattern of the entries above in about 300 words.' }], { maxTokens: 1024 });
-    const pre = out.prefill15k ? (r.usage?.prompt_tokens ?? 0) / out.prefill15k : 0;
-    out.decodeAt15k = round(r.timings?.predicted_per_second ?? (r.usage?.completion_tokens ?? 0) / Math.max(0.001, r.totalS - pre));
-    record({ model, phase: 'depth15k', ...summary(r), decodeAt15k: out.decodeAt15k });
+    // Without a measured 15k prefill rate the prefill share of the request is unknown: no figure beats a wrong one.
+    const pre = out.prefill15k ? (r.usage?.prompt_tokens ?? 0) / out.prefill15k : null;
+    out.decodeAt15k = r.timings?.predicted_per_second ?? (pre === null ? null : round((r.usage?.completion_tokens ?? 0) / Math.max(0.001, r.totalS - pre)));
+    record({ model, phase: 'depth15k', ...summary(r), decodeAt15k: out.decodeAt15k, ...(out.decodeAt15k === null ? { note: 'no backend timings and no 15k prefill rate in this run: run the prefill phase too' } : {}) });
   }
   if (ONLY.has('quality')) {
     out.quality = [];
@@ -167,6 +183,8 @@ async function benchModel(model) {
       const r = await chat(model, [{ role: 'user', content: q.prompt }], { maxTokens: 4096 });
       const pass = r.status === 200 && !r.error && r.finish === 'stop' && r.content.trim().length > 0 && q.expect.test(r.content) && !degenerate(r.content);
       out.quality.push(`${q.id}:${pass ? 'pass' : 'FAIL'}`); record({ model, phase: `quality-${q.id}`, pass, ...summary(r) });
+      // The cold request asked the first prompt; this is the same prompt warm.
+      if (q === QUALITY[0] && cold.firstGenS != null && r.firstGenS != null) out.loadS = round(cold.firstGenS - r.firstGenS, 1);
     }
   }
   if (ONLY.has('tools')) {
@@ -175,14 +193,16 @@ async function benchModel(model) {
     const r1 = await chat(model, ask, { maxTokens: 4096, tools });
     const call = r1.toolCalls.find((c) => c?.name === 'get_tide');
     let args = null; try { args = JSON.parse(call?.arguments ?? ''); } catch { /* invalid JSON fails below */ }
-    let pass = !!call && typeof args?.harbour === 'string', r2 = null;
+    let pass = r1.status === 200 && !r1.error && !!call && typeof args?.harbour === 'string', r2 = null;
     if (pass) {
       r2 = await chat(model, [...ask, { role: 'assistant', content: null, tool_calls: [{ id: call.id ?? 'call_0', type: 'function', function: { name: 'get_tide', arguments: call.arguments } }] },
         { role: 'tool', tool_call_id: call.id ?? 'call_0', content: JSON.stringify({ harbour: args.harbour, high_tide: '16:42' }) }], { maxTokens: 4096, tools });
-      pass = r2.status === 200 && /16[:.]42/.test(r2.content) && !degenerate(r2.content);
+      // The same bar as the quality phase: a clean stop, no stream error, the tool's answer, no degeneration.
+      pass = r2.status === 200 && !r2.error && r2.finish === 'stop' && /16[:.]42/.test(r2.content) && !degenerate(r2.content);
     }
     out.tools = pass ? 'pass' : 'FAIL'; record({ model, phase: 'tools', pass, call: call ? { name: call.name, arguments: call.arguments.slice(0, 120) } : null, first: summary(r1), final: r2 ? summary(r2) : null });
   }
+  if (ONLY.has('vision') && !flag('vision')) { out.vision = 'skipped'; record({ model, phase: 'vision', skipped: 'no --vision flag: the model is not declared image-capable for this run' }); }
   if (ONLY.has('vision') && flag('vision')) {
     const r = await chat(model, [{ role: 'user', content: [{ type: 'text', text: 'What single colour fills this image? Answer with one word.' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${redPng()}` } }] }], { maxTokens: 4096 });
     out.vision = /red/i.test(r.content) ? 'pass' : 'FAIL'; record({ model, phase: 'vision', pass: out.vision === 'pass', ...summary(r) });
