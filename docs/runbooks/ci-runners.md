@@ -506,7 +506,7 @@ this way on 2026-09-24 (#848).
   2. Run `qm reset <vmid>`. The boot replays the journal; the on-disk fsck found the directory intact both times.
   3. A host-side `e2fsck -fy` via `losetup -P` on the stopped VM's LV is needed only if the boot drops into emergency mode.
   4. **If the reset hangs in the initramfs, rebuild instead of repairing.** cloud-ci-15 did this after the 2026-10-30 power cuts (#1507): the reset stopped about 2.4 s into boot; `dumpe2fs -h` on a read-only loop device (`losetup -r -P`) showed `Filesystem state: clean with errors`.
-     - `qm stop` alone does not keep it down. `onboot: 1` starts it again at the next morning's host power-on, and `CloudCIRunnerDownWhileHostUp` fires again. If the rebuild has to wait, quarantine it (`started = false`, below).
+     - `qm stop` alone does not keep it down. `onboot: 1` starts it again at the next morning's host power-on, and `CloudCIRunnerDownWhileHostUp` fires again. If the rebuild has to wait, quarantine it (`started = false`, the quarantine paragraph above).
      - Do it with no OFF schedule in flight (`cloud-power-state`, above). The drain pauses every enabled cloud runner, the new registration included.
      - `qm stop <vmid>` first, and check `qm status` says `stopped`. The module sets `stop_on_destroy = false`, so a destroy of a running guest is a graceful shutdown, and a guest hung in the initramfs never answers it.
      - Rebuild from a cloudlab checkout at `main`. The state and `terraform.tfvars` are local to the cloudlab checkout that holds them (both gitignored). A worktree needs:
