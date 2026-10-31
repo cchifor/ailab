@@ -128,14 +128,14 @@ leaves it alone, but a recreated VM comes back at the default. Reapply it after 
 ## Provision
 
 ```bash
-# 1. tofu — create the 3 VMs (separate state from runners/Talos)
+# 1. tofu — create the 4 VMs (separate state from runners/Talos)
 cp kubernetes/infra/dev-workers/terraform.tfvars.example kubernetes/infra/dev-workers/terraform.tfvars
 #   fill pve_api_token + dev_worker_ssh_public_key (reuse the runners' values)
-just dev-workers-plan      # expect 1 download_file + 3 VMs (scsi0 40G import + scsi1 128G blank)
+just dev-workers-plan      # expect 1 download_file + 4 VMs (scsi0 40G import + scsi1 128G blank)
 just dev-workers-apply
 
 # 2. reach the guests (c4 is created by cloud-init on first boot)
-just ping-dev-workers      # or: ssh c4@192.168.0.37
+just ping-dev-workers      # or: ssh c4@192.168.0.8
 
 # 3. ansible — configure (Claude Code + Codex + docker + tmux + ttyd/Caddy + dashboard …)
 just dev-workers
@@ -167,7 +167,7 @@ started in one continues seamlessly in the other.
 
 Verify:
 ```bash
-ssh c4@192.168.0.37 'claude --version && codex --version'   # both resolve from ~/.npm-global/bin
+ssh c4@192.168.0.8 'claude --version && codex --version'   # both resolve from ~/.npm-global/bin
 ```
 
 **Codex version + model are ansible-managed** (role `dev_worker`, `tasks/codex.yml`, tag `codex`):
