@@ -2899,7 +2899,7 @@ def author_rubric(author):
     """The lane rubric for a PR by `author`, or "" for the general review. The pin lane is
     checked FIRST: it is the stricter rubric, written for images this estate builds, and an
     author listed in both must not be reviewed under the looser dependency rules."""
-    if (author or "").lower() in [x.lower() for x in CFG.get("pin_authors", [])]:
+    if (author or "").lower() in [x.lower() for x in (CFG.get("pin_authors") or [])]:
         return PIN_RUBRIC
     if is_dependency_author(author):
         return DEPENDENCY_RUBRIC

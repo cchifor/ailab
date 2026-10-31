@@ -2679,8 +2679,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
     The behavioural enqueue tests use repos=["o/kept"], so restoring cchifor/review-bot-fixture to
     the role defaults would leave them green. This is the test that would actually go red."""
 
-    EXPECTED = ["cchifor/ailab", "cchifor/agentforge", "cchifor/platform",
-                "cchifor/agentforge-platform", "cchifor/dsh-team-conductor",
+    EXPECTED = ["cchifor/ailab", "cchifor/platform", "cchifor/dsh-team-conductor",
                 "cchifor/forge", "cchifor/relay", "cchifor/llm-router", "cchifor/dsh-acp-plus",
                 "cchifor/workbricks", "cchifor/workbricks-apps"]
 
@@ -2815,7 +2814,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
     # The merge-author allowlist, same contract (ailab plan 2026-10-11-worker-identities, Phase 3).
     # dev-worker-bot STAYS next to the four slot bots: eligibility keys on the PR author, so its
     # open PRs need it until none is left (Phase 5 removes it, and then this list changes on purpose).
-    EXPECTED_MERGE_AUTHORS = ["chifor", "agentforge-ci-bot", "renovate-bot", "dev-worker-bot",
+    EXPECTED_MERGE_AUTHORS = ["chifor", "renovate-bot", "dev-worker-bot",
                               "workstation-bot", "dev-worker-1-bot", "dev-worker-2-bot",
                               "dev-worker-3-bot", "dev-worker-4-bot"]
 
@@ -2824,6 +2823,14 @@ class AllowlistDefaultsTest(unittest.TestCase):
             encoding="utf-8")
         self.assertEqual(self._parse_repos(text, "pr_reviewer_merge_authors"),
                          self.EXPECTED_MERGE_AUTHORS)
+
+    def test_the_shipped_pin_authors_are_empty(self):
+        """Empty since the AgentForge retirement (2026-10-31): agentforge-ci-bot was the pin lane's only
+        member. The behavioural pin tests pass their own lists, so only this goes red on a re-add. Read
+        through the YAML decoder, not _parse_repos, because the value is the flow-style `[]`."""
+        text = (ROOT / "ansible" / "roles" / "pr_reviewer" / "defaults" / "main.yml").read_text(
+            encoding="utf-8")
+        self.assertEqual(self._strict_yaml(text)["pr_reviewer_pin_authors"], [])
 
     def test_every_live_slot_login_is_a_merge_author(self):
         """dev_worker_gitea_users is held to the live slot list by check-slot-enumerations.py;
@@ -3142,6 +3149,14 @@ class DependencyLaneTest(unittest.TestCase):
         """A host still on the previous config.json must keep reviewing exactly as before."""
         m, rubric = self._rubric_for("renovate-bot")
         self.assertNotIn(m.DEPENDENCY_RUBRIC, rubric)
+
+    def test_an_empty_or_null_pin_list_is_no_pin_lane(self):
+        """The template renders `[]` (to_json), but a null must not raise either: the reader is
+        `CFG.get("pin_authors") or []`, the same shape as the dependency-author reader."""
+        for value in ([], None):
+            with self.subTest(pin_authors=value):
+                m, rubric = self._rubric_for("agentforge-ci-bot", pin_authors=value)
+                self.assertNotIn(m.PIN_RUBRIC, rubric)
 
     def test_the_pin_lane_wins_over_the_dependency_lane(self):
         """The pin rubric is the stricter, estate-built-image one; an author listed in both must
