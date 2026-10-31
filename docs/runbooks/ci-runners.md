@@ -351,6 +351,13 @@ pool is HAND-installed over SSH, mirroring the role):**
   ci-runner-N --labels self-hosted-hv:host` → install the reclaim/cleanup + daemon units → start.
 
 ## 8. AgentForge v2 image-build CI (HOST-MODE) + PREFLIGHT #2
+> **Retired 2026-10-31 (ADR 0041).** AgentForge is gone and `cchifor/agentforge` is archived, so nothing
+> below builds any more. One image still matters: OpenBao's init, unseal and provision Jobs run the
+> `orchestrator` image, pinned by digest (`f76c9ce`) and mirrored as
+> `registry.chifor.me/infra/openbao-bootstrap:orchestrator-f76c9ce`. Rebuilding it needs the repo
+> unarchived; the follow-up is moving OpenBao off that image. PREFLIGHT #2 (`just ci-runners-preflight`)
+> still checks the host-mode pool. The rest of this section is the historical record.
+
 AgentForge v2's gated activation (`plans/2026-07-13-iac-activation-plan.md`, Stage 0/4) builds+pushes its
 container images ON this **host-mode `act_runner` pool** — this is the user's deliberate override of the
 ADR 0019 §Phasing **"k8s-native CI runners"** proposal (a KEDA `ScaledJob` on the Kata pool). **Host-mode

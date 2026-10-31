@@ -152,31 +152,17 @@ creation and cannot be changed without rebuilding the cluster.
 | `10.244.0.0/16` | **Pod** CIDR (`kube-controller-manager --cluster-cidr`) | Talos machine config |
 | `10.96.0.0/12` | **Service / ClusterIP** CIDR (`kube-apiserver --service-cluster-ip-range`) | Talos machine config |
 
-### Reserved broker ClusterIP range
+### Service ClusterIP range
 
-`10.96.0.0/12` spans **`10.96.0.0`–`10.111.255.255`**. Every Service ClusterIP in the cluster —
-including the AgentForge broker Services — is allocated from it by the apiserver.
+`10.96.0.0/12` spans **`10.96.0.0`–`10.111.255.255`**. Every Service ClusterIP in the cluster is
+allocated from it by the apiserver.
 
-> **Do not hand out a broker ClusterIP by picking one.** A few broker Services **pin** their
-> ClusterIP (`spec.clusterIP`) so the address survives a Service delete/recreate. A pinned address
-> must (a) fall inside `10.96.0.0/12` — the apiserver rejects anything outside it — and (b) not
-> collide with an address already allocated, which the apiserver also rejects, leaving the Service
-> uncreated and the broker unreachable.
->
-> The safe procedure is: create the Service **without** `clusterIP`, let the apiserver allocate,
-> then pin the address it chose. Never invent one.
->
-> **Exception**: CP-managed adds (Settings → Subscriptions → Add account) allocate from the
-> operator-reserved `AFP_BROKER_CLUSTERIP_POOL` (currently `10.96.0.192/26`, inside the KEP-3070
-> static band the dynamic allocator prefers not to use) and pin that chosen address directly — see
-> `docs/runbooks/agentforge-platform-activation.md` (Day-2 — LLM subscriptions operations) for the
-> KEP-3070 fallback caveat (the static band is a preference, not an absolute reservation) and how
-> a collision would surface (failed `kubectl apply`, not a silent outage).
->
-> Both rules are machine-checked. `scripts/gen-broker-inventory.py` fails if a pinned broker
-> ClusterIP falls outside the CIDR or is pinned twice, and the current allocation is listed in the
-> generated `kubernetes/apps/infrastructure/agentforge-broker/broker-inventory.yaml`. Check that
-> file (and `kubectl -n agentforge-broker get svc`) before pinning a new one.
+> **Do not hand out a ClusterIP by picking one.** The AgentForge brokers were the estate's only
+> Services that pinned `spec.clusterIP` (and the CP's reserved `10.96.0.192/26` pool), and they were
+> retired on 2026-10-31 (ADR 0041). If a Service ever needs a pinned address again, create it
+> **without** `clusterIP`, let the apiserver allocate, then pin the address it chose. An invented one
+> must fall inside `10.96.0.0/12` and must not collide with a live allocation; the apiserver rejects
+> both, leaving the Service uncreated.
 
 ## Dedicated storage fabric — `10.55.0.0/24`
 

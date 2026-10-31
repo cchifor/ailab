@@ -1,4 +1,4 @@
-# infra-pg — the shared CNPG Postgres (gitea, authelia, litellm, grafana, open-webui, agentforge)
+# infra-pg — the shared CNPG Postgres (gitea, authelia, litellm, grafana, open-webui, keycloak, router_auth)
 
 Manifests: `kubernetes/apps/databases/` (Flux Kustomization `databases`). The Cluster is
 `infra-pg` (2 instances, 20 Gi shared data+WAL on `qnap-iscsi`, `max_slot_wal_keep_size: 1GB`).
@@ -174,9 +174,10 @@ and `cnpg_gitea_site_admins_total`. Counts and ages only, never a token hash, na
 - **Source of truth:** `apps/databases/gitea-credential-inventory.sql`, an operator-run one-shot, idempotent
   (the header has the `kubectl exec ... psql -f -` command; run it on the PRIMARY). The objects live in
   the database, so they replicate and are in the nightly dump: a failover or restore needs no re-run.
-- **The allowlist** (`gitea_admin`'s two documented tokens, keyed by id, name and scope) is in that file.
-  Rotating `af-ci-scaler-2941` or `flux-ailab-read` gives the token a new id: edit the `VALUES` list and
-  re-run the file in the same PR that records the rotation, or `GiteaAdminTokenNotAllowlisted` fires.
+- **The allowlist** (`gitea_admin`'s one documented token, keyed by id, name and scope) is in that file.
+  Rotating `flux-ailab-read` gives the token a new id: edit the `VALUES` list and re-run the file in the
+  same PR that records the rotation, or `GiteaAdminTokenNotAllowlisted` fires. (`af-ci-scaler-2941` left
+  with AgentForge on 2026-10-31: the token was deleted first, then its row.)
 - **A Gitea upgrade that fails in a migration** naming `credential_inventory.*` ("cannot alter type of a
   column used by a view"): `DROP SCHEMA credential_inventory CASCADE;`, finish the upgrade, re-run the file.
   Until then `GiteaCredentialInventoryMissing` fires after 30 minutes, which is the intended signal.
@@ -308,3 +309,19 @@ chart's; adjust if it differs.) The password lives only in shell variables and i
 
 Run it before the provision Job runs (or use `bao kv patch` after); then follow the rotation order above (steps 2-4) so both
 ExternalSecrets, the role and the harness converge. `openbao-recovery.md` lists this path.
+
+## Retired: the AgentForge databases (2026-10-31)
+
+`agentforge_platform` and `agentforge_broker` were dropped with AgentForge (ADR 0041), together with their
+five roles (`afp_admin`, `afp_app`, `agentforge_broker_admin`, `agentforge_broker`, `agentforge_reaper`;
+`ensure: absent` in `infra-pg.yaml` keeps them dropped). Before the drop they were dumped with the
+same CNPG image and the `backup_dumper` role, and restore-verified. Each archive was `pg_restore`d into a
+private, throwaway server, and exact per-table row counts were diffed against the live source:
+`agentforge_platform` has 30 tables and 747 rows; `agentforge_broker` has 3 tables and 6075 rows.
+
+- **Where:** `postgres-dumps:/dumps/retired/agentforge-2026-10-31/`, holding the `*.dump` (`-Fc`) and `*.toc`
+  files, `globals.sql` (no role passwords), `*.rowcounts`, `SHA256SUMS` and `COMPLETE`. It sits outside
+  the nightly prune glob (`/dumps/[0-9]*`), so retention never deletes it, and Velero backs it up
+  through `postgres-dumps-holder` like the nightly generations.
+- **To restore one:** recreate its roles (from `globals.sql`, then set passwords), `CREATE DATABASE … OWNER`
+  the original owner, and `pg_restore --exit-on-error -d <db>` the archive. Compare against `*.rowcounts`.
