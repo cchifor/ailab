@@ -276,7 +276,8 @@ The AgentForge provisioner was retired on 2026-10-31 (plans/2026-10-31-retire-ag
 bootstrap still runs AgentForge code. On the root path of a first bootstrap it mints a long-lived scoped token
 into the Secret `openbao/openbao-provisioner-token`. The daily provision run on a provisioned vault never does.
 Nothing reads that token any more, and its policy can write tenant policies and k8s-auth roles. So after any
-re-bootstrap, revoke and delete it; `OpenBaoRetiredProvisionerTokenPresent` fires after 15 minutes until you do:
+re-bootstrap it must be revoked and deleted. The `openbao-retired-token-revoker` CronJob (`security/openbao/retired-token-revoker.yaml`)
+does that automatically every 15 minutes, and `OpenBaoRetiredProvisionerTokenPresent` fires if the Secret is still there after 45. By hand:
 1. From a short-lived pod or shell that reads the token from the Secret without printing it, POST
    `v1/auth/token/revoke-self` with it. Any token may revoke itself: expect 204, then 403 from `lookup-self`.
 2. `kubectl --context admin@ai -n openbao delete secret openbao-provisioner-token`.

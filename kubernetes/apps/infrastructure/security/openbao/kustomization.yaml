@@ -25,6 +25,7 @@ resources:
   # copy would fight the sync and revert to a stale bearer token. They are cluster-derived, so a wipe
   # loses them until the next successful sync rather than until an operator acts. Recovery ordering:
   # docs/runbooks/openbao-recovery.md § the *sync-owned* path class.
+  - retired-token-revoker.yaml # revokes + deletes the retired AgentForge provisioner token should a re-bootstrap re-mint it (every 15m; get/delete on that one Secret only)
   - k8stoken-sync.yaml # TokenRequest -> per-worker kubeconfigs in af/dev-workers/* (k8s-auth, ADR 0021)
   - estate-seeds.sops.yaml # SOPS seed values for af/estate/* (proxmox/qnap/cloudflare/... — seed-wins)
   - estate-provision-job.yaml # seeds the af/estate/* operator-credential escrow (breakglass-auth)

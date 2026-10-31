@@ -1,0 +1,156 @@
+# Automatic retirement of the AgentForge provisioner's OpenBao token, should it ever be re-minted.
+#
+# The AgentForge provisioner was retired on 2026-10-31 (plans/2026-10-31-retire-agentforge-plan.md, PR-2b);
+# its token revoked itself and the Secret openbao-provisioner-token was deleted. OpenBao's retained bootstrap
+# (`agentforge openbao-provision`) never re-mints it on its daily run, but the ROOT path of a FIRST bootstrap
+# (after a vault wipe) does, and nothing reads it any more while its policy can write tenant policies and
+# k8s-auth roles. Until the follow-up removes that mint from the bootstrap code, this CronJob guarantees the
+# token does not outlive a re-bootstrap: every 15 minutes, if the Secret exists, it revokes the token WITH
+# ITSELF (auth/token/revoke-self; any token may revoke itself, so this needs no OpenBao authority of its own),
+# proves it dead (lookup-self 403), and deletes the Secret. OpenBaoRetiredProvisionerTokenPresent
+# (monitoring/openbao-retired-credentials-rules.yaml) is the backstop if this ever fails for 45 minutes.
+#
+# Authority: get + delete on that ONE Secret name (resourceNames), nothing else; no OpenBao role or policy.
+# Never prints the token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-retired-token-revoker
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-retired-token-revoker, app.kubernetes.io/component: credential-retirement }
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-retired-token-revoker
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-retired-token-revoker }
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-provisioner-token"]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-retired-token-revoker
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-retired-token-revoker }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: openbao-retired-token-revoker }
+subjects:
+  - { kind: ServiceAccount, name: openbao-retired-token-revoker, namespace: openbao }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-retired-token-revoker-script
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-retired-token-revoker }
+data:
+  revoke.py: |
+    """Revoke + delete openbao/openbao-provisioner-token if it exists. Stdlib only. Never prints the token."""
+    import base64, json, os, ssl, sys, urllib.error, urllib.request
+
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    NS, NAME = "openbao", "openbao-provisioner-token"
+    API = f"https://kubernetes.default.svc/api/v1/namespaces/{NS}/secrets/{NAME}"
+    BAO = os.environ["BAO_ADDR"].rstrip("/")
+
+
+    def http(url, method="GET", headers=None, ctx=None, body=None):
+        req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+
+    kctx = ssl.create_default_context(cafile=f"{SA}/ca.crt")
+    kauth = {"Authorization": "Bearer " + open(f"{SA}/token").read().strip()}
+    code, body = http(API, headers=kauth, ctx=kctx)
+    if code == 404:
+        print("openbao-provisioner-token: absent - nothing to retire")
+        sys.exit(0)
+    if code != 200:
+        print(f"FAIL: reading the Secret answered HTTP {code}")
+        sys.exit(1)
+    data = json.loads(body).get("data") or {}
+    tok = base64.b64decode(data["token"]).decode().strip() if data.get("token") else ""
+    if tok:
+        bctx = ssl.create_default_context(cafile=os.environ["BAO_CACERT"])
+        bauth = {"X-Vault-Token": tok}
+        rc, _ = http(f"{BAO}/v1/auth/token/revoke-self", method="POST", headers=bauth, ctx=bctx)
+        lc, _ = http(f"{BAO}/v1/auth/token/lookup-self", headers=bauth, ctx=bctx)
+        print(f"revoke-self -> HTTP {rc}; lookup-self -> HTTP {lc}")
+        if lc != 403:
+            print("FAIL: the token still authenticates; NOT deleting the Secret, so a retry can revoke it")
+            sys.exit(1)
+    else:
+        print("the Secret holds no `token` key; deleting it")
+    dc, _ = http(API, method="DELETE", headers=kauth, ctx=kctx)
+    print(f"delete Secret -> HTTP {dc}")
+    sys.exit(0 if dc in (200, 202, 404) else 1)
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: openbao-retired-token-revoker
+  namespace: openbao
+  labels: { app.kubernetes.io/name: openbao-retired-token-revoker, app.kubernetes.io/component: credential-retirement }
+spec:
+  schedule: "*/15 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels: { app.kubernetes.io/name: openbao-retired-token-revoker }
+        spec:
+          restartPolicy: Never
+          enableServiceLinks: false
+          serviceAccountName: openbao-retired-token-revoker
+          # true: it reads and deletes ONE Secret through the kube-apiserver with its own SA token.
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: revoke
+              image: mirror.gcr.io/library/python:3.15-slim
+              command: ["python3", "-u", "/scripts/revoke.py"]
+              env:
+                # Headless per-pod name, as the sibling openbao Jobs use: resolves even while sealed.
+                - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+                - { name: BAO_CACERT, value: "/tls/ca.crt" }
+              volumeMounts:
+                - { name: tls, mountPath: /tls, readOnly: true }
+                - { name: script, mountPath: /scripts, readOnly: true }
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
+                seccompProfile: { type: RuntimeDefault }
+          volumes:
+            - name: tls
+              secret:
+                secretName: openbao-tls
+                items: [{ key: ca.crt, path: ca.crt }]
+            - name: script
+              configMap:
+                name: openbao-retired-token-revoker-script
+                defaultMode: 0555
