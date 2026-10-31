@@ -1,9 +1,10 @@
 # Runbook: dev-worker VMs (Claude Code + Codex)
 
-Four interactive developer VMs (`dev-worker-1..4`; six until the 2026-09-21/23 retirements in
-`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) that run **Claude Code**
+Four interactive developer VMs (`dev-worker-1..4`) that run **Claude Code**
 and **Codex** inside tmux, with the homelab claude-worker feature set ported to ailab's idiom: a
-tofu module creates the VMs, the `dev_worker` Ansible role configures them.
+tofu module creates the VMs, the `dev_worker` Ansible role configures them. There were six until
+vmids 4206 (2026-09-21) and 4203 (2026-09-23) were retired and the survivors re-slotted, so slot ≠
+vmid: dw3 is vmid 4204 and dw4 is vmid 4205 (`plans/2026-09-21-retire-dev-workers-3-6-plan.md`).
 
 - tofu: `kubernetes/infra/dev-workers/`
 - role: `ansible/roles/dev_worker/` · playbook: `ansible/dev-workers.yml`
