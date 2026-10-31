@@ -346,4 +346,4 @@ Kept on purpose:
 subdir. The canary runs on its own identity `tenant-zero/boundary-canary` (pool `canary`), with its own PVC and a
 single ingress rule on `broker-openai-codex`. The playground broker rule is gone from all five brokers, and the
 canary gained a denied-broker probe (GREEN 24/24 on 2026-10-31). The playground's two PV/PVC pairs were then
-deleted; its empty NFS subdir is removed in a last PR once that prune is verified.
+deleted, and then its empty NFS subdir. Nothing of the playground's storage remains.
