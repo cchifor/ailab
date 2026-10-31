@@ -20,7 +20,7 @@ there is no DinD and no capability to nest one.)
 | Read OpenBao (SA token / network path) | tokenless SA with **no RoleBinding**; agent egress allowlist excludes the `openbao` ns and resolves no OpenBao FQDN; both canaries fail to reach `openbao.openbao.svc:8200` | unit + live (both canaries) |
 | Read orchestrator `/proc/1/environ` | separate PID namespace — the sandbox pid-1 environ carries no orchestrator credential marker | live (agent canary) |
 | Egress from `test_cmd` (`--network none`) | **zero egress** — even the broker is unreachable | live (test canary) |
-| Agent → non-allowlisted host denied, allowlisted (broker) succeeds | **exact matrix**: world/metadata/alt-DNS/other-pool-broker/OpenBao DENIED **and** the pool broker (by pod IP) REACHABLE (positive control) | live (agent canary) |
+| Agent → non-allowlisted host denied, allowlisted (broker) succeeds | **exact matrix**: world/metadata/alt-DNS/other-pool-broker/OpenBao DENIED, a broker that does not admit the identity UNREACHABLE by pod IP, **and** the admitting broker (by pod IP) REACHABLE (positive control) | live (agent canary) |
 | `uname -r` = Kata **guest** kernel (microVM) | guest kernel differs from the host node's kernel | live (agent canary) |
 | Privileged DinD escapes the microVM | unconstructible — no `privileged`, no added caps, masked `/proc`, read-only rootfs; admission REJECTS a non-kata runtimeClass / privileged / hostPath / hostNetwork / automount-token | unit + live negative-admission |
 
@@ -33,20 +33,31 @@ ready broker **pod IP** (`AF_CANARY_BROKER_IP`).
 
 ```bash
 # from an ailab checkout, with kube context admin@ai merged (see docs/runbooks/00-access-prereqs.md)
-scripts/verify-sandbox-boundary.sh                 # full matrix against tenant-zero/playground
+scripts/verify-sandbox-boundary.sh                 # full matrix against tenant-zero/boundary-canary
 KUBECTL_CONTEXT=admin@ai scripts/verify-sandbox-boundary.sh
 AF_CANARY_KEEP=1 scripts/verify-sandbox-boundary.sh   # leave the canary Jobs for inspection
+AF_CANARY_PREFLIGHT_ONLY=1 scripts/verify-sandbox-boundary.sh   # resolve image + brokers, print, stop
 ```
 
-- **Disposable + safe:** runs ONLY against the throwaway `tenant-zero/playground` workspace (a fresh
-  random 32-char job-id subPath) and **HARD-REFUSES `platform-dev`** (the real-repo tenant). Both
-  canary Jobs are torn down on exit.
-- **The playground workspace was retired 2026-10-30, but the canary still targets it on purpose.** What it
-  needs was KEPT: the sandbox workspace PV/PVC `af-sbx-ws-tenant-zero-playground`
-  (agentforge-sandbox/workspace-pvc.yaml) and the broker CNP rule admitting playground/planner agent
-  pods (its positive control). With the playground's kid revoked, that connection authorizes nothing.
-  Moving the canary to a disposable identity, then deleting both, is a tracked follow-up. Never point
-  it at platform-dev's live workspace instead (plans/2026-10-30-retire-playground-plan.md).
+- **Disposable + safe:** runs ONLY on the canary's own identity `tenant-zero/boundary-canary` (pool
+  `canary`), with a fresh random 32-char job-id subPath on its own PVC `af-sbx-ws-tenant-zero-boundary-canary`
+  (agentforge-sandbox/boundary-canary-workspace-pvc.yaml). No tenant namespace, orchestrator, seat or
+  capability exists for that identity. Every other workspace is **refused, with no override** (the old
+  `AF_CANARY_DANGEROUS_OVERRIDE` is gone): platform-dev's workspace is live, and the retired playground's
+  storage is deleted. Both canary Jobs are torn down on exit.
+- **Brokers.** The positive control is a Ready pod of `AF_CANARY_BROKER` (default `broker-openai-codex`), the
+  only broker whose CNP admits the canary identity (rule 1c). Its login is revoked and the canary holds no
+  capability, so that rule grants reachability, never authorization. The **denied-broker probe** targets a
+  Ready pod of `AF_CANARY_DENY_BROKER` (default `broker-anthropic-max1`, which does not admit the identity)
+  by pod IP. It proves broker ingress admits only the matching identity, not just that a DNS name is
+  refused, and the run is inconclusive if that pod changes or goes unready during the probe.
+- **Image.** The sandbox image is `AF_CANARY_IMAGE`, else the `AF_SANDBOX_IMAGE` that every live
+  orchestrator (`af-tenant-*`) runs, else the committed canary's digest, and the run prints which. A failed
+  lookup, disagreeing orchestrators or a non-digest value stop the run.
+- **Retention.** Each run leaves two empty subPath dirs in the canary's NFS subdir. The parent-export mkdir
+  Job (`platform-dev-nfs-provisioner-job.yaml`, re-run about hourly) `rmdir`s those older than 2 hours. Until
+  2026-10-31 the canary ran on the retired playground's labels and storage, and the reaper collected them
+  (#1505, plans/2026-10-31-playground-leftovers-plan.md).
 - The two Kata canaries run **sequentially** (one microVM at a time — two concurrent boots on the
   small agent nodes was flaky). Expect ~1–3 min total (Kata boot + 5 s-timeout probes).
 - The gated canary manifests are `kubernetes/apps/infrastructure/agentforge-sandbox/{egress-canary,

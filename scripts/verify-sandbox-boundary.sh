@@ -16,14 +16,24 @@
 #   KATA/PROC— the agent canary's guest kernel differs from the host node's (microVM isolation) and its
 #              /proc/1/environ carries no orchestrator credential (separate PID namespace).
 #
-# DISPOSABLE + SAFE: runs ONLY against the throwaway tenant-zero/playground workspace with a fresh random
-# job-id subPath, and HARD-REFUSES platform-dev (which drives the real cchifor/ailab + cchifor/platform
-# repos). Both canary Jobs are TORN DOWN afterwards. A green run is the standing proof v1.1 is safe; ANY
-# breach is a P0 — STOP and escalate with the reproduction.
+# DISPOSABLE + SAFE: runs ONLY against the canary's own identity tenant-zero/boundary-canary (pool canary,
+# PVC af-sbx-ws-tenant-zero-boundary-canary; no tenant, orchestrator, seat or capability exists for it)
+# with a fresh random job-id subPath. Every other workspace is REFUSED, with no override: platform-dev
+# drives the real cchifor/ailab + cchifor/platform repos, and the retired playground's PVC is gone. Both
+# canary Jobs are TORN DOWN afterwards. A green run is the standing proof v1.1 is safe; ANY breach is a
+# P0 — STOP and escalate with the reproduction.
 #
-# Usage:  scripts/verify-sandbox-boundary.sh            # full matrix against admin@ai / playground
-#         KUBECTL_CONTEXT=admin@ai AF_CANARY_WORKSPACE=playground scripts/verify-sandbox-boundary.sh
+# Brokers: the agent tier's POSITIVE control is a Ready pod of AF_CANARY_BROKER (default
+# broker-openai-codex, the one broker whose CNP admits the canary identity, rule 1c), and its new
+# NEGATIVE control is a Ready pod of AF_CANARY_DENY_BROKER (default broker-anthropic-max1, which does not
+# admit it): reaching that pod's IP is a BREACH of the per-identity broker ingress.
+#
+# Usage:  scripts/verify-sandbox-boundary.sh            # full matrix against admin@ai / boundary-canary
+#         KUBECTL_CONTEXT=admin@ai scripts/verify-sandbox-boundary.sh
 #         AF_CANARY_KEEP=1 scripts/verify-sandbox-boundary.sh   # keep the canary Jobs for inspection
+#         AF_CANARY_IMAGE=<repo>@sha256:<64 hex> ...           # pin the sandbox image explicitly
+#         AF_CANARY_PREFLIGHT_ONLY=1 ...   # resolve workspace, image and brokers, print them, stop
+# AF_CANARY_KUBECTL replaces the kubectl binary (scripts/tests/test_verify_sandbox_boundary.py).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,8 +42,11 @@ NS="agentforge-sandbox"
 ORCH_NS="agentforge"
 BROKER_NS="agentforge-broker"
 ORG="tenant-zero"
-WS="${AF_CANARY_WORKSPACE:-playground}"
-K=(kubectl --context "$KCTX")
+WS="boundary-canary"
+POOL="canary"
+POS_BROKER="${AF_CANARY_BROKER:-broker-openai-codex}"
+DENY_BROKER="${AF_CANARY_DENY_BROKER:-broker-anthropic-max1}"
+K=("${AF_CANARY_KUBECTL:-kubectl}" --context "$KCTX")
 
 pass=0 fail=0
 ok()   { echo "  PASS  $*"; pass=$((pass+1)); }
@@ -42,28 +55,59 @@ info() { echo "  ..    $*"; }
 die()  { echo "FATAL: $*" >&2; exit 2; }
 
 # ---- 0. preflight + disposable-target guard ------------------------------------------------
+# The canary mounts a REAL workspace PVC and writes a job-id subPath, so it runs ONLY on its own
+# disposable identity. This is checked before any kubectl call, and there is deliberately no override.
+if [ -n "${AF_CANARY_WORKSPACE:-}" ] && [ "$AF_CANARY_WORKSPACE" != "$WS" ]; then
+  die "REFUSING workspace '$AF_CANARY_WORKSPACE' — the canary runs only on its own identity $ORG/$WS (no override)"
+fi
 "${K[@]}" version -o json >/dev/null 2>&1 || die "kubectl context $KCTX unreachable"
-# ALLOWLIST, not denylist: the canary mounts a REAL workspace PVC + writes a job-id subPath, so it may
-# run ONLY against a workspace KNOWN to be disposable. 'playground' is the sacrificial workspace (ADR
-# 0018 — the only non-hardened, never-real-repo workspace). Any other name (platform-dev, ailab, web,
-# …) is REFUSED unless the operator sets AF_CANARY_DANGEROUS_OVERRIDE=yes and names it explicitly.
-_ALLOWED_WORKSPACES="playground"
-case " $_ALLOWED_WORKSPACES " in
-  *" $WS "*) : ;;
-  *) [ "${AF_CANARY_DANGEROUS_OVERRIDE:-}" = "yes" ] \
-       || die "REFUSING workspace '$WS' — canary runs only against a disposable workspace ($_ALLOWED_WORKSPACES); set AF_CANARY_DANGEROUS_OVERRIDE=yes to force" ;;
-esac
 PVC="af-sbx-ws-${ORG}-${WS}"
-TENANT_NS="af-tenant-${ORG}-${WS}"   # the worker (holds AF_SANDBOX_IMAGE) runs here, not the CP ns
 "${K[@]}" -n "$NS" get pvc "$PVC" >/dev/null 2>&1 || die "workspace PVC $PVC not found in $NS"
-# resolve the sandbox image the live worker actually uses (AF_SANDBOX_IMAGE); fall back to the
-# digest pinned in the committed egress-canary.yaml so the harness still runs if the env moves.
-IMAGE="$("${K[@]}" -n "$TENANT_NS" get deploy -o jsonpath='{range .items[*].spec.template.spec.containers[*].env[?(@.name=="AF_SANDBOX_IMAGE")]}{.value}{"\n"}{end}' 2>/dev/null | grep -m1 . )"
-[ -n "$IMAGE" ] || IMAGE="$(grep -oE 'registry[^ ]*sandbox@sha256:[0-9a-f]+' kubernetes/apps/infrastructure/agentforge-sandbox/egress-canary.yaml | head -1)"
-[ -n "$IMAGE" ] || die "could not resolve AF_SANDBOX_IMAGE (tenant ns $TENANT_NS or the committed canary)"
+
+# The sandbox image: AF_CANARY_IMAGE, else the AF_SANDBOX_IMAGE every live orchestrator (af-tenant-*
+# namespaces) runs, else the committed canary's digest. A failed discovery, disagreeing orchestrators or
+# a non-digest value is FATAL, never a silent fallback: a green run on a stale image proves nothing
+# about the image the agents use.
+COMMITTED_IMAGE="$(grep -oE 'registry[^ ]*sandbox@sha256:[0-9a-f]+' kubernetes/apps/infrastructure/agentforge-sandbox/egress-canary.yaml | head -1)"
+if [ -n "${AF_CANARY_IMAGE:-}" ]; then
+  IMAGE="$AF_CANARY_IMAGE"; IMAGE_SRC="AF_CANARY_IMAGE"
+else
+  found="$("${K[@]}" get deploy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{range .spec.template.spec.containers[*].env[?(@.name=="AF_SANDBOX_IMAGE")]}{.value}{end}{"\n"}{end}' 2>/dev/null)" \
+    || die "image discovery failed: could not list Deployments (kubectl error)"
+  live="$(printf '%s\n' "$found" | awk -F'\t' '$1 ~ /^af-tenant-/ && $2 != ""')"
+  if [ -z "$live" ]; then
+    IMAGE="$COMMITTED_IMAGE"; IMAGE_SRC="committed fallback (no live orchestrator sets AF_SANDBOX_IMAGE)"
+  else
+    [ "$(printf '%s\n' "$live" | cut -f2 | sort -u | wc -l | tr -d ' ')" = "1" ] \
+      || die "live orchestrators disagree on AF_SANDBOX_IMAGE: $(printf '%s\n' "$live" | tr '\t\n' '= ')"
+    IMAGE="$(printf '%s\n' "$live" | head -1 | cut -f2)"
+    IMAGE_SRC="live: $(printf '%s\n' "$live" | cut -f1 | tr '\n' ' ')"
+  fi
+fi
+[[ "$IMAGE" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || die "sandbox image '$IMAGE' ($IMAGE_SRC) is not digest-pinned"
+
+# Broker targets: "<pod> <ip>" of the first Ready, non-terminating pod of app.kubernetes.io/name=$1.
+ready_broker() {
+  "${K[@]}" -n "$BROKER_NS" get pods -l "app.kubernetes.io/name=$1" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.podIP}{"|"}{.metadata.deletionTimestamp}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null \
+    | awk -F'|' '$2 != "" && $3 == "" && $4 == "True" { print $1, $2; exit }'
+}
 echo "== sandbox-boundary canary =="
-echo "context=$KCTX  ns=$NS  workspace=$ORG/$WS  pvc=$PVC"
-echo "image=$IMAGE"
+echo "context=$KCTX  ns=$NS  workspace=$ORG/$WS  pool=$POOL  pvc=$PVC"
+echo "image=$IMAGE  source=$IMAGE_SRC"
+read -r BROKER_POD BROKER_IP <<< "$(ready_broker "$POS_BROKER")"
+read -r DENY_POD DENY_IP <<< "$(ready_broker "$DENY_BROKER")"
+[ -n "${BROKER_IP:-}" ] && info "positive control: $POS_BROKER pod $BROKER_POD ($BROKER_IP)" \
+  || { bad "no Ready $POS_BROKER pod (cannot run the positive control)"; BROKER_IP=""; }
+[ -n "${DENY_IP:-}" ] && info "negative control: $DENY_BROKER pod $DENY_POD ($DENY_IP)" \
+  || { bad "no Ready $DENY_BROKER pod (cannot run the denied-broker probe)"; DENY_IP=""; }
+if [ -n "$BROKER_IP" ] && [ "$BROKER_IP" = "$DENY_IP" ]; then
+  bad "the positive and denied broker targets are the same IP ($BROKER_IP)"; DENY_IP=""
+fi
+if [ -n "${AF_CANARY_PREFLIGHT_ONLY:-}" ]; then
+  echo "PREFLIGHT workspace=$ORG/$WS pool=$POOL pvc=$PVC image=$IMAGE source=$IMAGE_SRC broker=${BROKER_IP:-none} deny=${DENY_IP:-none} failures=$fail"
+  [ "$fail" -eq 0 ]; exit $?
+fi
 echo
 
 # ---- 1. STATIC boundary --------------------------------------------------------------------
@@ -94,7 +138,7 @@ echo
 # ---- 2. NEGATIVE admission (the pinned pod-shape VAPs REJECT breaches) ----------------------
 echo "[2] negative admission (server dry-run — breaches MUST be rejected)"
 JOBID="canary$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-26)"   # 6+26 = 32 hex-ish
-render_canary() {  # $1=name $2=trust-class $3=job-id $4=broker-ip $5=probe-args-file
+render_canary() {  # $1=name $2=trust-class $3=job-id $4=broker-ip $5=probe-args-file $6=denied-broker-ip
   cat <<YAML
 apiVersion: batch/v1
 kind: Job
@@ -113,7 +157,7 @@ spec:
         agentforge.io/trust-class: $2
         agentforge.io/org: $ORG
         agentforge.io/workspace: $WS
-        agentforge.io/pool: planner
+        agentforge.io/pool: $POOL
         app.kubernetes.io/managed-by: agentforge
         app.kubernetes.io/component: sandbox
     spec:
@@ -132,6 +176,7 @@ spec:
           workingDir: /workspace
           env:
             - { name: AF_CANARY_BROKER_IP, value: "$4" }
+            - { name: AF_CANARY_DENY_BROKER_IP, value: "${6:-}" }
           command: ["/bin/sh","-c"]
           args:
 $(sed 's/^/            /' "$5")
@@ -162,11 +207,7 @@ dryrun_breach "hostPath volume"        's|emptyDir: { sizeLimit: 256Mi }|hostPat
 echo
 
 # ---- 3. resolve a ready broker pod IP (positive-control target) ----------------------------
-echo "[3] resolve broker endpoint + submit canaries"
-BROKER_IP="$("${K[@]}" -n "$BROKER_NS" get pods -l app.kubernetes.io/component=broker \
-  -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.status.podIP}{"\n"}{end}' 2>/dev/null | grep -m1 . )"
-[ -n "$BROKER_IP" ] && info "broker pod IP for the positive control: $BROKER_IP" \
-  || { bad "no Running broker pod IP (cannot run the positive control)"; BROKER_IP=""; }
+echo "[3] submit canaries (broker targets resolved in the preflight)"
 
 # probe scripts (mirror the committed egress-canary.yaml / test-egress-canary.yaml). deny() uses
 # `curl -sSk` (insecure): we assert NETWORK reachability, not cert trust — otherwise a reachable HTTPS
@@ -180,6 +221,10 @@ AGENT_ARGS=$(mktemp); cat > "$AGENT_ARGS" <<'PROBE'
   deny alt-dns           "https://example.com/"
   deny other-pool-broker "http://agentforge-broker.agentforge-broker-otherpool.svc.cluster.local:8700/"
   deny openbao           "https://openbao.openbao.svc.cluster.local:8200/v1/sys/health"
+  # NEGATIVE broker control: a broker whose CNP does NOT admit this identity, by pod IP. Reaching it is a
+  # BREACH of the per-identity broker ingress; a missing IP is INCONCLUSIVE (rc=1), never a pass.
+  if [ -n "${AF_CANARY_DENY_BROKER_IP:-}" ]; then deny denied-broker-ip "http://${AF_CANARY_DENY_BROKER_IP}:8700/"
+  else echo "INCONCLUSIVE: no AF_CANARY_DENY_BROKER_IP"; rc=1; fi
   # POSITIVE control is MANDATORY: a netless pod blocks EVERYTHING (incl. its broker), so without
   # proving the broker reachable "all blocked" is indistinguishable from a broken sandbox. No IP or
   # an unreachable broker ⇒ INCONCLUSIVE (rc=1), never a pass.
@@ -221,10 +266,10 @@ rm -f "$NOOP" "$BASE"
 # Submit ONE canary, wait for it to go terminal, capture its NODE (into $5) and echo its pod log.
 # Runs the tiers SEQUENTIALLY so only ONE Kata microVM boots at a time — two concurrent microVMs on
 # the small agent nodes was flaky (one occasionally failed to boot, yielding an empty log).
-run_tier() {  # $1=job $2=trust-class $3=job-id $4=args-file $5=meta-out-file → echoes the pod log;
+run_tier() {  # $1=job $2=trust-class $3=job-id $4=args-file $5=meta-out-file $6=denied-broker-ip → echoes the pod log;
               # writes "<nodeName> <runtimeClassName>" to $5 BEFORE the caller tears the Job down.
   local s
-  render_canary "$1" "$2" "$3" "$BROKER_IP" "$4" | "${K[@]}" create -f - >/dev/null 2>&1 \
+  render_canary "$1" "$2" "$3" "$BROKER_IP" "$4" "${6:-}" | "${K[@]}" create -f - >/dev/null 2>&1 \
     || { echo "SUBMIT_FAILED"; : > "$5"; return 1; }
   for _ in $(seq 1 60); do   # up to ~5 min for Kata boot + probes
     s="$("${K[@]}" -n "$NS" get job "$1" -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null)"
@@ -239,8 +284,11 @@ run_tier() {  # $1=job $2=trust-class $3=job-id $4=args-file $5=meta-out-file �
 NODE_OUT=$(mktemp)
 echo; echo "[4] running canaries SEQUENTIALLY (one Kata microVM at a time; ~30-90s each)"
 info "agent canary $AGENT_JOB ..."
-AGENT_LOG="$(run_tier "$AGENT_JOB" agent "agent${JOBID:5:27}" "$AGENT_ARGS" "$NODE_OUT")"
+AGENT_LOG="$(run_tier "$AGENT_JOB" agent "agent${JOBID:5:27}" "$AGENT_ARGS" "$NODE_OUT" "$DENY_IP")"
 read -r AGENT_NODE AGENT_RTC < "$NODE_OUT"
+# The denied broker must have stayed the same Ready pod for the whole probe; a churned or unready target
+# could "block" a probe by being down, which proves nothing about the policy.
+read -r DENY_POD_AFTER DENY_IP_AFTER <<< "$(ready_broker "$DENY_BROKER")"
 [ -z "${AF_CANARY_KEEP:-}" ] && "${K[@]}" -n "$NS" delete job "$AGENT_JOB" --ignore-not-found --wait=false >/dev/null 2>&1
 info "test canary $TEST_JOB ..."
 TEST_LOG="$(run_tier "$TEST_JOB" test "testc${JOBID:5:27}" "$TEST_ARGS" "$NODE_OUT")"
@@ -258,6 +306,11 @@ has() { printf '%s' "$1" | grep -q "$2"; }
 if [ -z "$AGENT_LOG" ]; then bad "AGENT: canary produced NO log (never ran) — inconclusive, fail closed"
 elif has "$AGENT_LOG" "BREACH"; then bad "AGENT: a denied target was REACHED (egress BREACH)"
 else ok "AGENT: all denied targets blocked (world/metadata/alt-dns/other-broker/openbao)"; fi
+if [ -z "$DENY_IP" ]; then bad "AGENT: denied-broker probe had no target — inconclusive, fail closed"
+elif [ "${DENY_POD_AFTER:-}" != "$DENY_POD" ] || [ "${DENY_IP_AFTER:-}" != "$DENY_IP" ]; then
+  bad "AGENT: denied broker $DENY_POD ($DENY_IP) changed or went unready during the probe (now '${DENY_POD_AFTER:-none}' ${DENY_IP_AFTER:-}) — inconclusive"
+elif has "$AGENT_LOG" "ok (blocked): denied-broker-ip"; then ok "AGENT: $DENY_BROKER (does not admit $ORG/$WS) UNREACHABLE by pod IP — per-identity broker ingress holds"
+else bad "AGENT: no denied-broker-ip evidence in the log — the ingress-isolation probe did not run"; fi
 if has "$AGENT_LOG" "BROKER REACHABLE"; then ok "AGENT: positive control — reached its pool broker (allow path works)"; else bad "AGENT: broker NOT reached — INCONCLUSIVE (netless?), not a pass"; fi
 if has "$AGENT_LOG" "PROC1 CLEAN"; then ok "AGENT: /proc/1/environ carries no orchestrator credential (PID-ns isolated)"; else bad "AGENT: could not confirm /proc/1 isolation"; fi
 # BOUNDARY OK is printed ONLY when rc=0 (⇒ the pod exited 0), so its presence IS the exit-0 proof.

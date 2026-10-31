@@ -26,7 +26,10 @@
 # ClusterIP). The ops harness injects a ready broker pod IP via AF_CANARY_BROKER_IP; reaching it (any HTTP
 # response) proves the allow path works and the "BOUNDARY OK" is not a netless false-pass.
 # TO RUN (activation): use scripts/verify-sandbox-boundary.sh (injects the broker IP, submits via the exact
-# admitted shape, asserts the matrix, tears down) — NEVER against a real tenant (playground only).
+# admitted shape, asserts the matrix, tears down) — NEVER against a real tenant: only the canary's own
+# disposable identity tenant-zero/boundary-canary (pool canary), whose one broker ingress rule is on
+# broker-openai-codex. NEGATIVE broker control: AF_CANARY_DENY_BROKER_IP, a pod IP of a broker whose CNP
+# does NOT admit this identity, MUST be unreachable (#1505, plans/2026-10-31-playground-leftovers-plan.md).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -53,8 +56,8 @@ spec:
         agentforge.io/job-id: "canary00000000000000000000000000"
         agentforge.io/trust-class: agent
         agentforge.io/org: tenant-zero
-        agentforge.io/workspace: playground
-        agentforge.io/pool: planner
+        agentforge.io/workspace: boundary-canary
+        agentforge.io/pool: canary
         app.kubernetes.io/managed-by: agentforge
         app.kubernetes.io/component: sandbox
     spec:
@@ -74,7 +77,7 @@ spec:
         # (disk-backed, bounded <2Gi). No secret/configMap/broker-cap/hostPath.
         - name: workspace
           persistentVolumeClaim:
-            claimName: af-sbx-ws-tenant-zero-playground
+            claimName: af-sbx-ws-tenant-zero-boundary-canary
         - name: home
           emptyDir:
             sizeLimit: 256Mi
@@ -90,6 +93,10 @@ spec:
             # ClusterIP, which it sees as `world`). Left EMPTY in the standing gated manifest, so the
             # positive probe is skipped and the manifest stays a pure deny-only assertion.
             - name: AF_CANARY_BROKER_IP
+              value: ""
+            # A Ready pod IP of a broker that does NOT admit this identity (the harness injects one of
+            # broker-anthropic-max1's). Empty here, so the standing manifest fails closed (INCONCLUSIVE).
+            - name: AF_CANARY_DENY_BROKER_IP
               value: ""
           # Boundary MATRIX — the deny probes MUST FAIL (egress blocked); the POSITIVE broker probe
           # (when a pod IP is injected) MUST SUCCEED. Any denied SUCCESS => BREACH => exit 1; a
@@ -115,6 +122,14 @@ spec:
               deny "alt-dns"           "https://example.com/"
               deny "other-pool-broker" "http://agentforge-broker.agentforge-broker-otherpool.svc.cluster.local:8700/"
               deny "openbao"           "https://openbao.openbao.svc.cluster.local:8200/v1/sys/health"
+              # NEGATIVE broker control: a broker that does not admit this identity, by pod IP. Reached =
+              # BREACH of the per-identity broker ingress; no IP injected = INCONCLUSIVE (rc=1).
+              if [ -n "${AF_CANARY_DENY_BROKER_IP:-}" ]; then
+                deny "denied-broker-ip" "http://${AF_CANARY_DENY_BROKER_IP}:8700/"
+              else
+                echo "INCONCLUSIVE: no AF_CANARY_DENY_BROKER_IP injected — cannot prove broker ingress isolation"
+                rc=1
+              fi
               # POSITIVE control: the agent's OWN pool broker (by pod IP) MUST be reachable. Any HTTP
               # response (even 401/404 without a capability) proves the allow path — curl exits 0. This
               # is MANDATORY: a netless pod blocks every deny target AND its broker, so WITHOUT proving
