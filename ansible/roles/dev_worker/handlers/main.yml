@@ -28,16 +28,8 @@
     name: cloudflared
     state: restarted
 
-# try-restart = restart only if running. On the FIRST provisioning run the service cannot start
-# until agentforge-update.sh installs a release (timer-first bootstrap), so a plain
-# `state: restarted` would fail the play; try-restart is a no-op then, and day-2 env/unit changes
-# restart the running service as expected.
-- name: Restart agentforge
-  ansible.builtin.command: systemctl try-restart agentforge.service
-  changed_when: true
-  when: dev_worker_enable_agentforge | default(false) | bool
-
-# Same shape as Restart agentforge above, for the same class of reason: the command module is
+# try-restart = restart only if running (the herdr unit may not exist yet), and for the same reason
+# the command module is
 # skipped in check mode, so a first-run `--check` preview (where the unit file was never really
 # written) doesn't die in the handler flush the way a systemd-module restart of a not-found unit
 # does. try-restart is also a no-op on a stopped unit.

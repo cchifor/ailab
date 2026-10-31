@@ -55,8 +55,7 @@ log = logging.getLogger("ci-rerun-watchdog")
 
 # ansible/roles/pr_reviewer/defaults/main.yml pr_reviewer_repos - the repos the reviewbots watch.
 DEFAULT_REPOS = (
-    "cchifor/ailab,cchifor/agentforge,cchifor/platform,"
-    "cchifor/agentforge-platform,cchifor/dsh-team-conductor"
+    "cchifor/ailab,cchifor/platform,cchifor/dsh-team-conductor"
 )
 SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 USER_AGENT = "git/2.47.0"  # Cloudflare fronting git.chifor.me 403s default python UAs (code 1010)

@@ -191,14 +191,6 @@ hosts:
     lan_dns: true
     backend: { url: "http://gitea-http.gitea.svc.cluster.local:3000" }
     smoke: { status: 200 }
-  agentforge:
-    exposure: public
-    edge: default
-    auth: native # the CP's own Authelia OIDC + org membership (ADR 0019)
-    access_gated: false
-    lan_dns: true
-    backend: { url: "http://agentforge-platform.agentforge.svc.cluster.local:8080" }
-    smoke: { status: 200 }
   vault:
     exposure: public
     edge: default

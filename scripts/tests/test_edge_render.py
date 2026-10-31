@@ -32,6 +32,7 @@ INTENDED = {
 DROPPED = {
     "strive.place": "vestigial: strive.place rides cloudflared-strive on another Cloudflare account",
     "id.strive.place": "vestigial: never live (the real host is auth.strive.place, another tunnel)",
+    "agentforge.chifor.me": "retired with AgentForge on 2026-10-31 (plans/2026-10-31-retire-agentforge-plan.md)",
 }
 
 

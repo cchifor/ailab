@@ -54,7 +54,6 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 EXPECTED_LOCAL_PATHS = frozenset(
     {
         "./kubernetes/apps/infrastructure/agentforge-runtimeclasses",
-        "./kubernetes/apps/agentforge-tenants-bootstrap",
         "./kubernetes/apps/apps",
         "./kubernetes/apps/backup",
         "./kubernetes/apps/infrastructure/cert-manager-config",
