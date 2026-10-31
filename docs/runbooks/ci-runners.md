@@ -507,10 +507,16 @@ this way on 2026-09-24 (#848).
   3. A host-side `e2fsck -fy` via `losetup -P` on the stopped VM's LV is needed only if the boot drops into emergency mode.
   4. **If the reset hangs in the initramfs, rebuild instead of repairing.** cloud-ci-15 did this after the 2026-10-30 power cuts (#1507): the reset stopped about 2.4 s into boot; `dumpe2fs -h` on a read-only loop device (`losetup -r -P`) showed `Filesystem state: clean with errors`.
      - `qm stop` alone does not keep it down. `onboot: 1` starts it again at the next morning's host power-on, and `CloudCIRunnerDownWhileHostUp` fires again. If the rebuild has to wait, quarantine it (`started = false`, below).
-     - Rebuild from a cloudlab checkout at `main`: `tofu plan -replace='proxmox_virtual_environment_vm.runner["cloud-ci-N"]'`. The plan must replace exactly that VM and its `terraform_data.enable_guest_agent`, then apply. The state is local to the cloudlab checkout; a worktree points at it with `tofu init -backend-config=path=<that checkout>/kubernetes/infra/ci-runners/terraform.tfstate`.
+     - Do it with no OFF schedule in flight (`cloud-power-state`, above). The drain pauses every enabled cloud runner, the new registration included.
+     - `qm stop <vmid>` first, and check `qm status` says `stopped`. The module sets `stop_on_destroy = false`, so a destroy of a running guest is a graceful shutdown, and a guest hung in the initramfs never answers it.
+     - Rebuild from a cloudlab checkout at `main`. The state and `terraform.tfvars` are local to the cloudlab checkout that holds them (both gitignored). A worktree needs:
+       - `tofu init -backend-config=path=<that checkout>/kubernetes/infra/ci-runners/terraform.tfstate`;
+       - `-var-file=<that checkout>/kubernetes/infra/ci-runners/terraform.tfvars` on every plan;
+       - a copy of that checkout's `.env`, because the guest-agent hook runs `scripts/node-ssh.py` from the worktree. Remove the copy afterwards.
+     - Run a plain `plan` first; it must show no drift beyond the dead VM. Then `plan -replace='proxmox_virtual_environment_vm.runner["cloud-ci-N"]' -out=<file>`. It must replace exactly that VM and its `terraform_data.enable_guest_agent`. `apply <file>`: a bare `apply` re-plans without the `-replace`.
      - The new VM has a new MAC and new SSH host keys, and no guest agent until the role installs it. So pin the key this way: on the cloud host, `ip neigh show <ip>` must show the new `net0` MAC, and `ssh-keyscan` from the host and from the workstation must return the same key. Then replace the `<ip>` line in both the Windows and the WSL `known_hosts`.
-     - Run `just cloud-runners -l cloud-ci-N`. It registers a NEW runner row, and the dead one lingers `offline` under the same name.
-     - Delete the old row once it is past the watchdog's 2 h lookback (next paragraph): `DELETE /api/v1/orgs/cchifor/actions/runners/<old id>`, with cloud-power's `write:organization` PAT, sent from inside the `cloud-power` pod so the token never leaves it. Read the ids from the Gitea DB (`action_runner` table, `name`, `last_online`, `deleted`); the workstation PAT cannot list org runners.
+     - Run `just cloud-runners -l cloud-ci-N` (from WSL, with the up-to-date checkout's `ansible/ansible.cfg` as `ANSIBLE_CONFIG`; see "no hosts matched" under Troubleshooting below). It registers a NEW runner row, and the dead one lingers `offline` under the same name. If the runner had been quarantined, its `started`, inventory entry and Endpoints address go back together (the quarantine paragraph above).
+     - Delete the old row only when every run it took is terminal and completed more than 2 h ago. The watchdog's lookback (next paragraph) is keyed on the run's `completed_at`, not on the runner's `last_online`. Send `DELETE /api/v1/orgs/cchifor/actions/runners/<old id>` with cloud-power's `write:organization` PAT, from inside the `cloud-power` pod so the token never leaves it. Read the ids and their tasks from the Gitea DB (`action_runner`: `name`, `last_online`, `deleted`; `action_task.runner_id`), because the workstation PAT cannot list org runners.
 - **While it is down,** the act_runner daemon keeps running from memory and can accept a job and fail it. If a reset is not possible right away, pause the runner in Gitea from outside: `PATCH /api/v1/orgs/cchifor/actions/runners/<id>` with body `{"disabled": true}`.
   - The endpoint is in the deployed Gitea's API (1.26.1, `EditActionRunnerOption`), and the cloud-power drain uses it (`set_disabled` in `kubernetes/apps/apps/cloud-power/app.py`). It needs a token with `write:organization`: cloud-power's PAT, or an org owner. The workstation PAT cannot.
   - A paused runner finishes nothing new and keeps its registration. Never DELETE it here (see the next paragraph).
@@ -580,7 +586,7 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     kernel and boots the new one next time. Afterwards `dpkg --audit` prints nothing.
   - *Sweep the pool* from the inventory, which `just cloud-runners` and `just gitea-runners` use too:
     `cd ansible && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible cloud_gitea_runners:gitea_runners -b -m command -a
-    'dpkg --audit'`. A healthy runner prints nothing. A stopped VM (cloud-ci-6, §9) or a cloud runner offline at
+    'dpkg --audit'`. A healthy runner prints nothing. A stopped (quarantined) VM (§9) or a cloud runner offline at
     night shows as UNREACHABLE. On 2026-10-12 only cloud-ci-2 was affected.
 - **Every Playwright test of a job fails at `browserType.launch: Target page, context or browser has been
   closed`, on a freshly built runner only:** the browser cannot load its shared libraries. Jobs install them

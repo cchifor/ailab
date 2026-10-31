@@ -1,12 +1,13 @@
 # Runbook: dev-worker VMs (Claude Code + Codex)
 
-Six interactive developer VMs (`dev-worker-1..6`, **two per Proxmox node**) that run **Claude Code**
+Four interactive developer VMs (`dev-worker-1..4`; six until the 2026-09-21/23 retirements in
+`plans/2026-09-21-retire-dev-workers-3-6-plan.md`) that run **Claude Code**
 and **Codex** inside tmux, with the homelab claude-worker feature set ported to ailab's idiom: a
 tofu module creates the VMs, the `dev_worker` Ansible role configures them.
 
 - tofu: `kubernetes/infra/dev-workers/`
 - role: `ansible/roles/dev_worker/` · playbook: `ansible/dev-workers.yml`
-- inventory group: `dev_workers` (`.37/.38/.39` + `.5/.6/.7`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
+- inventory group: `dev_workers` (`.8`–`.11`) · secrets: `ansible/secrets/dev-worker.sops.yaml`
 
 **The base spec is shared** — cores + ceiling + floor are module-wide scalars in
 `kubernetes/infra/dev-workers/variables.tf` (`dev_worker_cores`, `dev_worker_memory_mib`,
@@ -64,8 +65,8 @@ and the dw4 floor, node2) — low floor by design, because ballooning
 now inflates busy workers and 4 GiB is what lets a node hold its on-demand heavyweight **plus** its
 two workers-at-floor at once.
 
-(IPs `.37/.38/.39` + `.5/.6/.7` are free static addresses inside the `.2`–`.50` reserve, below the
-DHCP pool — no router change is needed.)
+(Addresses come from `docs/network-plan.md`, the IPAM registry. `.37`/`.38`/`.39` and `.5`/`.6`/`.7`,
+the original dev-worker addresses, now belong to cloudlab guests; there is no free static address.)
 
 ## Post-testpool ceiling downsize (POC on dev-worker-6, 2026-09-01 — closed 2026-09-21)
 
@@ -154,7 +155,7 @@ By default **everything runs as `c4`**
 so you log in **once as `c4`** and both the console and the web UI are authenticated:
 
 ```bash
-ssh c4@192.168.0.37          # (.38/.39) — the ttyd web UI is the SAME c4 session
+ssh c4@192.168.0.8           # (.9/.10/.11) — the ttyd web UI is the SAME c4 session
 claude                       # Claude (Max/Pro) OAuth login  → ~/.claude
 codex login                  # Codex (ChatGPT) login         → ~/.codex
 gh auth login                # for the dashboard 'github' window (gh-dash)
