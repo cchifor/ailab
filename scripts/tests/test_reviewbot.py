@@ -26,12 +26,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-
-# The REAL subprocess.run, bound before any test runs (#1513). Dozens of tests here assign
-# `self.m.subprocess.run = <fake>` on the process-wide module and do not restore it; tearDownModule
-# puts this back so test modules that run after this one in the same `unittest discover` process
-# get a real subprocess instead of this module's canned CLI output.
-_SUBPROCESS_RUN_AT_IMPORT = subprocess.run
 import sys
 import tempfile
 import threading
@@ -39,6 +33,12 @@ import time as real_time
 import unittest
 import urllib.error
 from unittest import mock
+
+# The REAL subprocess.run, bound before any test runs (#1513). Dozens of tests here assign
+# `self.m.subprocess.run = <fake>` on the process-wide module and do not restore it; tearDownModule
+# puts this back so test modules that run after this one in the same `unittest discover` process
+# get a real subprocess instead of this module's canned CLI output.
+_SUBPROCESS_RUN_AT_IMPORT = subprocess.run
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SRC = ROOT / "ansible" / "roles" / "pr_reviewer" / "files" / "reviewbot.py"

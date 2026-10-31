@@ -61,9 +61,15 @@ Destructive steps are release gates, each placed after its own backup or disposa
 
 ### PR-0: preparation (deletes nothing)
 1. **`.gitea/workflows/script-tests.yaml`** runs the full `unittest discover -s scripts/tests` on **every push and PR**, the same triggers as broker-inventory today, with the same Python bootstrap. broker-inventory then keeps only its generator check.
-2. **#1513:** audit every direct assignment to the shared `subprocess.run` (and its siblings) in `test_reviewbot.py`, restore each one (`mock.patch.object` or `addCleanup`), and run the full discovery in one process.
-3. **Scale to 0:** `agentforge-platform` (the CP and its tenants reconciler), the five brokers, the reaper, `npm-cache`, and the conductor (already 0). The provisioner stays up.
-4. **Before merge:**
+2. **#1513:** the audit found 77 direct assignments of the shared `subprocess.run` in `test_reviewbot.py` and no other mutated subprocess attribute. The cross-module leak is the defect, so a module-level `tearDownModule` restores the real function, bound after the imports. Within-module ordering is unchanged; each test sets its own fake first.
+   - Proven with a probe module: run after it, the probe gets the canned JSON on main and a real subprocess with the fix.
+3. **Remove the AgentForge alerts and status checks of the services this PR stops,** so the stop is not alert noise:
+   - every AgentForge rule file except the provisioner's, which stays until PR-3, with its promtool tests;
+   - the dormant `monitoring/agentforge.yaml`;
+   - the two script tests that read `agentforge-rules.yaml`. Their generic promrule-spec and rules-lint classes move verbatim to `test_promrule_spec.py`;
+   - the gatus check and the homepage tile.
+4. **Scale to 0:** `agentforge-platform` (the CP and its tenants reconciler), the five brokers, the reaper, `npm-cache`, and the conductor (already 0). The provisioner stays up.
+5. **Before merge:**
    - **Durable image copy:** copy `agentforge/orchestrator@sha256:ed8c94fa…` to `registry.chifor.me/infra/openbao-bootstrap`. That is outside `agentforge/**`, so the catch-all keep-everything rule applies. Verify both paths serve the same digest.
    - **Baseline:** save the Flux status of every unit and the live inventory: all Kustomizations' `.status.inventory` for the AgentForge units, the tenants repo revision, BrokerSeats, TriggerAuthentications, ClusterTriggerAuthentications, HPAs on external metrics, the PVs, the Gitea hooks and tokens, and the OpenBao KV leaf names.
 
@@ -85,11 +91,7 @@ Destructive steps are release gates, each placed after its own backup or disposa
 
 ### PR-2: workloads, CP, admission, monitoring, CI, edge
 1. **Flux Kustomizations and dirs:** `agentforge-broker`, `-sandbox`, `-workers`, `-pkgcache`, `-codex-refresh`, `-ci-runners` and `-tenants-git-auth` (with `agentforge-tenants-bootstrap/`, now unneeded). Also `apps/agentforge/` (CP, admission VAPs, `agentforge-infra-bot.sops.yaml`), removed from `apps/kustomization.yaml`.
-2. **Monitoring:**
-   - delete `agentforge-rules`, `agentforge-coverage-rules` and `agentforge-{conductor,platform}-rules`, each with its test;
-   - delete the dormant `monitoring/agentforge.yaml` and its commented entry;
-   - edit `monitoring/kustomization.yaml`;
-   - keep the provisioner rules until PR-3.
+2. **Monitoring:** nothing left here; PR-0 removed it. The provisioner rules go in PR-3.
 3. **Scripts, tests, the justfile and workflows:**
    - delete `af-cp-smoke.sh`, `af-db.sh`, `af-revoke-legacy-kid.sh` and `af_revoke_legacy_kid.py`, `check-{seat,tenant}-guard-cel.py` and `verify-sandbox-boundary.sh`, each with its tests;
    - keep `gen-broker-inventory.py` and `test_provisioner_podmonitor.py` (which imports it) until PR-3, and delete the rest of the broker tests now;
