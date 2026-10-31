@@ -44,7 +44,7 @@ AF_CANARY_PREFLIGHT_ONLY=1 scripts/verify-sandbox-boundary.sh   # resolve image 
   (agentforge-sandbox/boundary-canary-workspace-pvc.yaml). No tenant namespace, orchestrator, seat or
   capability exists for that identity. Every other workspace is **refused, with no override** (the old
   `AF_CANARY_DANGEROUS_OVERRIDE` is gone): platform-dev's workspace is live, and the retired playground's
-  PV/PVC objects are deleted; its empty NFS subdir goes last (#1505). Both canary Jobs are torn down on exit.
+  PV/PVC objects and its NFS subdir are deleted (#1505). Both canary Jobs are torn down on exit.
 - **Brokers.** The positive control is a Ready pod of `AF_CANARY_BROKER` (default `broker-openai-codex`), the
   only broker whose CNP admits the canary identity (rule 1c). Its login is revoked and the canary holds no
   capability, so that rule grants reachability, never authorization. The **denied-broker probe** targets a
