@@ -403,8 +403,8 @@ agent-nodes** (`kubernetes/infra/agent-nodes`, now live at .47/.48/.49). `infra/
 
 ## 9. Cloud opportunistic runners (`cloud-ci-N` on the cloudlab cluster — ADR 0032)
 
-Extra act_runners on the **cloudlab** Proxmox cluster (cloud1, cloud2 and cloud3 — 12 active since
-2026-10-04, plus cloud-ci-6 in quarantine), same label and same roles as the pool above, so they take
+Extra act_runners on the **cloudlab** Proxmox cluster (cloud1, cloud2 and cloud3 — 15 since
+2026-10-12: cloud-ci-6 rebuilt out of quarantine, plus cloud-ci-14/15 on cloud1), same label and same roles as the pool above, so they take
 the same jobs. cloud2 hosts runners only since its BIOS SVM was enabled on 2026-10-04 (Gigabyte TRX40
 AORUS MASTER: Tweaker → Advanced CPU Settings → SVM Mode, **default Disabled** — a CMOS clear or
 Load Optimized Defaults turns it off again; the cloudlab runbook has the check). The cloud
@@ -505,6 +505,12 @@ this way on 2026-09-24 (#848).
   1. First check it is still dead: another session or operator may already have reset it. Re-read `errors_count`, and check the PVE task log `/var/log/pve/tasks/index`.
   2. Run `qm reset <vmid>`. The boot replays the journal; the on-disk fsck found the directory intact both times.
   3. A host-side `e2fsck -fy` via `losetup -P` on the stopped VM's LV is needed only if the boot drops into emergency mode.
+  4. **If the reset hangs in the initramfs, rebuild instead of repairing.** cloud-ci-15 did this after the 2026-10-30 power cuts (#1507): the reset stopped about 2.4 s into boot; `dumpe2fs -h` on a read-only loop device (`losetup -r -P`) showed `Filesystem state: clean with errors`.
+     - `qm stop` alone does not keep it down. `onboot: 1` starts it again at the next morning's host power-on, and `CloudCIRunnerDownWhileHostUp` fires again. If the rebuild has to wait, quarantine it (`started = false`, below).
+     - Rebuild from a cloudlab checkout at `main`: `tofu plan -replace='proxmox_virtual_environment_vm.runner["cloud-ci-N"]'`. The plan must replace exactly that VM and its `terraform_data.enable_guest_agent`, then apply. The state is local to the cloudlab checkout; a worktree points at it with `tofu init -backend-config=path=<that checkout>/kubernetes/infra/ci-runners/terraform.tfstate`.
+     - The new VM has a new MAC and new SSH host keys, and no guest agent until the role installs it. So pin the key this way: on the cloud host, `ip neigh show <ip>` must show the new `net0` MAC, and `ssh-keyscan` from the host and from the workstation must return the same key. Then replace the `<ip>` line in both the Windows and the WSL `known_hosts`.
+     - Run `just cloud-runners -l cloud-ci-N`. It registers a NEW runner row, and the dead one lingers `offline` under the same name.
+     - Delete the old row once it is past the watchdog's 2 h lookback (next paragraph): `DELETE /api/v1/orgs/cchifor/actions/runners/<old id>`, with cloud-power's `write:organization` PAT, sent from inside the `cloud-power` pod so the token never leaves it. Read the ids from the Gitea DB (`action_runner` table, `name`, `last_online`, `deleted`); the workstation PAT cannot list org runners.
 - **While it is down,** the act_runner daemon keeps running from memory and can accept a job and fail it. If a reset is not possible right away, pause the runner in Gitea from outside: `PATCH /api/v1/orgs/cchifor/actions/runners/<id>` with body `{"disabled": true}`.
   - The endpoint is in the deployed Gitea's API (1.26.1, `EditActionRunnerOption`), and the cloud-power drain uses it (`set_disabled` in `kubernetes/apps/apps/cloud-power/app.py`). It needs a token with `write:organization`: cloud-power's PAT, or an org owner. The workstation PAT cannot.
   - A paused runner finishes nothing new and keeps its registration. Never DELETE it here (see the next paragraph).
