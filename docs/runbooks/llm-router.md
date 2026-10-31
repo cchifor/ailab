@@ -2613,6 +2613,62 @@ flag is on, the router drops it and says so.
    `sha256:731d43fa2f3bf9a7a48cd0d724eeee47e4677ca2c01d025a83ca68572f2d8b73` /
    `1f92b9d1e920a110808378472ebf83670c282b6b` / `router-0.1.0-20261027-account-menu`.
 
+## Step-timeouts release: slow local models in the Assistant (2026-10-31, llm-router#126)
+
+`router-0.1.0-20261031-step-timeouts` deploys llm-router main `372ce1ee829f665a489a6afe7e513ab13e4ef868`
+([#126](https://git.chifor.me/cchifor/llm-router/pulls/126)). It is WS1 of `plans/2026-10-31-local-models-improvement-plan.md`.
+
+**Why.** The Assistant answered *"The model route `local/qwen3.8-27b` failed (CANCELLED). I'll answer in guided mode
+for now."* whenever a local model needed more than 90 s. The trajectory showed `client.closed` at 89.99 s, cause
+`CLIENT_CLOSED`, agent `router-agent`, while cloud3 was still loading the model.
+- **The step cap:** the Assistant loop capped every model step at 90 s, request to end of stream.
+- **Step size:** a step carries 13–15.5k prompt tokens, so a slow-prefill model missed that cap even when warm.
+- **Cold loads:** a cold 122B on cloud3 (~325 s from NFS, up to ~490 s after a vLLM unload) also exceeded the
+  engine's 300 s first-byte wait.
+
+**What changes.**
+- **No deadline per Assistant step.** The engine's timers bound a silent upstream: wait before output, idle after,
+  both reset by raw upstream bytes. So does the turn cap.
+- **The turn cap is 15 minutes (was 10).** When the cap, not Stop, ends a turn, the user sees one line: *"The model
+  did not finish within 15 minutes."*
+- **A waiting label.** After 15 s with no event the step shows *"Waiting for <route>'s answer… Ns"*, refreshed every
+  5 s.
+- **`Account.timeouts { waitMs?, idleMs? }`.** It applies to models requested by name: direct requests,
+  `local/<model>`, and the Assistant's pinned model. When several accounts serve the model, the largest applies, and
+  an account that sets nothing counts at its default. Named routes ignore it. Bounds: wait 1 s–30 min, idle
+  5 s–10 min.
+- **`STEP_TIMEOUT_MS` stays exported, deprecated and unused**, because cchifor/platform's harness re-exports it from
+  its vendored copy.
+
+**Image.**
+- **Archive:** `router-0.1.0-20261031-step-timeouts.tar.gz`, SHA-256
+  `271a85a7c2c581b6a26d7d213937feaae2a73d1ee5010a15f0bd50a6242d5324`, Relay v0.2.0 assets 406 (archive) and 407
+  (`.sha256`). It was built in a volume-free pod on the pinned Node 26.10.0 runtime; the production smoke passed.
+- **Relay:** branch `release/router-0.1.0-20261031-step-timeouts-image`,
+  [run 114726](https://git.chifor.me/cchifor/relay/actions/runs/114726), receipt `deployment-images-114726.json`
+  (asset 408).
+- **Image:** `registry.chifor.me/llm-router/router@sha256:dad0e721e2a83afc89432ce2328a378c89873e3f2c37874bfa35d0b3e960685f`
+  (tag `parity-5ade03fd21af-114726`). Anonymous pull of the index, the manifest, the config and all 9 layers checked.
+  `SOURCE_COMMIT` is `372ce1ee`.
+- **No database migration, no secret change.** The new account field is optional.
+
+**Before the roll.**
+- A backup was taken in the live pod: `/data/backups/pre-step-timeouts-20261031`. It holds a `VACUUM INTO` copy of
+  `router.sqlite` (integrity ok, 311 MB, sha256 `f27e82ec…`) plus `router.secrets.key` (mode 600).
+- `validate-live` (script from llm-router main, run in the live pod) gave **6/9**: the three known `MODEL_REQUIRED`
+  Codex failures, everything else served.
+
+**After the rollout** (live config, admin API): set `timeouts: { waitMs: 600000 }` on `lan-192.168.0.26-8080`.
+- **Why 600 s:** up to 120 s for a vLLM unload, ~367 s for the worst 122B NFS load, plus prefill.
+- **Precondition: the new image is the one serving.** One router pod, Ready, `imageID` ending `dad0e721…685f`,
+  `/app/SOURCE_COMMIT` `372ce1ee…`. The old image does not reject the field; it silently drops it on load.
+
+**Rollback.** Revert the image digest and both pod-template annotations together to
+`sha256:6c9db895a9a3ee0dd7f4551d87f9b381d1874e91f83105be5cc64509f51ad013` /
+`f5c0c412b1a4f23248013dafa62ac25a7308a64f` / `router-0.1.0-20261027-claude-output-limit`. Nothing has to be undone
+in the config first, because the old account schema strips the unknown `timeouts` key. The cloud3 account then waits
+300 s again, and Assistant steps are capped at 90 s again.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
