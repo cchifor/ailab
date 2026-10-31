@@ -73,6 +73,18 @@
     group: root
     mode: "0644"
 
+# Host-mode jobs run kind on this kernel, and Ubuntu's fs.inotify.max_user_instances of 128 is below the 512 kind
+# documents for several clusters per host. Measured 2026-10-30: a Workbricks CI job that brings up a second kind
+# cluster while its dev stack's is up failed in kubeadm with "too many open files", the same failure as on
+# dev-worker-2 (dev_worker's tasks/inotify.yml).
+- name: Raise fs.inotify.max_user_instances for kind
+  ansible.posix.sysctl:
+    name: fs.inotify.max_user_instances
+    value: "{{ gitea_runner_inotify_max_user_instances | string }}"
+    sysctl_file: /etc/sysctl.d/99-inotify.conf
+    state: present
+    reload: true
+
 # ── 2. act_runner binary ─────────────────────────────────────────────────────
 - name: Install act_runner {{ gitea_runner_version }}
   ansible.builtin.get_url:

@@ -104,6 +104,10 @@
 - name: Reboot on kernel panic (after the dev-worker-1 12h silent outage, 2026-08-11)
   ansible.builtin.import_tasks: kernel_panic.yml
 
+# Enough inotify instances for two kind clusters at once (a profile's dev stack plus a guard's replay).
+- name: inotify instances for kind (after the dev-worker-2 kubeadm failure, 2026-10-30)
+  ansible.builtin.import_tasks: inotify.yml
+
 # Third member of the out-of-memory family above, and the one that decides who PAYS for a spike. The
 # swapfile delays the OOM-killer and kernel_panic.yml recovers the box if the kernel dies; this one
 # makes sure a single OOM-killed child does not take a live tmux pane (and the Claude session in it)

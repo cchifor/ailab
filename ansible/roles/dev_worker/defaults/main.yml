@@ -182,6 +182,8 @@ dev_worker_kernel_panic_timeout: 10
 # once DevWorkerNodeDown has actually caught a worker wedged after an oops (`journalctl -k -b -1 |
 # grep -i oops`) — i.e. once the trade is paid for by evidence rather than symmetry.
 dev_worker_kernel_panic_on_oops: 0
+# fs.inotify.max_user_instances (tasks/inotify.yml): kind documents 512 for several clusters per host.
+dev_worker_inotify_max_user_instances: 512
 dev_worker_job_memory_high: "2G"
 dev_worker_job_memory_max: "2560M"
 dev_worker_job_memory_swap_max: "2G"
