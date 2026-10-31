@@ -5280,6 +5280,194 @@ class MergeAuthorScopeTest(unittest.TestCase):
         self.assertEqual(["/repos/o/other/pulls/7/merge"], self.merged)
 
 
+class OwnerApprovalMergeTest(unittest.TestCase):
+    """Owner consent is an additional current-head gate, never a persona/CI override."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name, automerge=True, merge_personas=["test", "peer"],
+                      merge_authors=["someone"], owner_approvers=["chifor"])
+        self.head = "f" * 40
+        self.pr = {"state": "open", "draft": False, "mergeable": True,
+                   "user": {"login": "someone"}, "labels": [{"name": "owner-approval"}],
+                   "head": {"sha": self.head}}
+        self.reviews = [dict(self._approval("reviewer-" + p), id=i,
+                             body=f"<!-- review-bot:v1 persona={p} head={self.head} verdict=clean -->")
+                        for i, p in enumerate(("test", "peer"), 1)]
+        self.posts = []
+        self.ci = "success"
+        self.m.api = self._api
+
+    def _approval(self, login="chifor", **overrides):
+        return dict({"user": {"login": login}, "state": "APPROVED",
+                     "commit_id": self.head, "dismissed": False, "stale": False}, **overrides)
+
+    def _api(self, path, method="GET", body=None, raw=False):
+        if method == "POST":
+            self.posts.append((path, body))
+            return {}
+        if path == "/repos/o/r/pulls/7":
+            return self.pr
+        if path.startswith("/repos/o/r/pulls/7/reviews?"):
+            return self.reviews
+        if path == f"/repos/o/r/commits/{self.head}/status":
+            return {"state": self.ci}
+        self.fail(f"unexpected call: {method} {path}")
+
+    def _held_for_owner(self):
+        with mock.patch.object(self.m, "log") as log:
+            self.assertIsNone(self.m.maybe_merge("o/r", 7))
+        self.assertEqual([], self.posts)
+        log.assert_called_once_with(f"merge o/r#7 held at {self.head[:9]}: owner approval")
+
+    def _merged(self):
+        self.m.maybe_merge("o/r", 7)
+        self.assertEqual([("/repos/o/r/pulls/7/merge",
+                           {"Do": "merge", "head_commit_id": self.head})], self.posts)
+
+    def test_label_without_owner_review_holds_and_logs_once_per_sweep(self):
+        self._held_for_owner()
+        self._held_for_owner()
+
+    def test_owner_approval_at_current_head_merges(self):
+        self.reviews.append(self._approval())
+        self._merged()
+
+    def test_old_dismissed_stale_or_non_approval_reviews_hold(self):
+        for change in ({"commit_id": "a" * 40}, {"commit_id": None}, {"dismissed": True},
+                       {"stale": True}, {"state": "COMMENT"}, {"state": "REQUEST_CHANGES"}):
+            with self.subTest(change=change):
+                self.reviews = self.reviews[:2] + [self._approval(**change)]
+                self._held_for_owner()
+
+    def test_persona_or_author_cannot_be_an_owner_approver_even_if_configured(self):
+        for login in ("reviewer-test", "reviewer-peer", "reviewer-claude", "someone"):
+            for scoped in (False, True):
+                with self.subTest(login=login, scoped=scoped):
+                    self.m.CFG["owner_approvers"] = [] if scoped else [login.upper()]
+                    self.m.CFG["owner_approvers_by_repo"] = {"o/r": [login.upper()]} if scoped else {}
+                    self.reviews = self.reviews[:2] + [self._approval(login.upper())]
+                    self._held_for_owner()
+
+    def test_no_automerge_wins_even_with_owner_approval(self):
+        self.pr["labels"].append({"name": "NO-AUTOMERGE"})
+        self.reviews.append(self._approval())
+        self.assertIsNone(self.m.maybe_merge("o/r", 7))
+        self.assertEqual([], self.posts)
+
+    def test_unlabelled_pr_still_merges_without_owner_review(self):
+        self.pr["labels"] = []
+        self._merged()
+
+    def test_empty_or_absent_approver_config_fails_closed(self):
+        self.reviews.append(self._approval())
+        self.m.CFG["owner_approvers"] = []
+        self.m.CFG["owner_approvers_by_repo"] = {}
+        self._held_for_owner()
+        del self.m.CFG["owner_approvers"]
+        del self.m.CFG["owner_approvers_by_repo"]
+        self._held_for_owner()
+
+    def test_repo_scoped_owner_does_not_grant_approval_elsewhere(self):
+        self.m.CFG["owner_approvers"] = []
+        self.m.CFG["owner_approvers_by_repo"] = {"o/other": ["chifor"]}
+        self.reviews.append(self._approval())
+        self._held_for_owner()
+
+    def test_repo_scoped_owner_adds_to_global_approvers(self):
+        self.m.CFG["owner_approvers"] = ["global-owner"]
+        self.m.CFG["owner_approvers_by_repo"] = {"o/r": ["chifor"]}
+        for login in ("chifor", "global-owner"):
+            with self.subTest(login=login):
+                self.posts.clear()
+                self.reviews = self.reviews[:2] + [self._approval(login)]
+                self._merged()
+
+    def test_configured_label_and_logins_match_case_insensitively(self):
+        self.m.CFG["owner_approval_label"] = "Architecture-Approval"
+        self.pr["labels"] = [{"name": "ARCHITECTURE-APPROVAL"}]
+        self._held_for_owner()
+        self.m.CFG["owner_approvers"] = ["CHIFOR"]
+        self.reviews.append(self._approval("Chifor"))
+        self._merged()
+
+    def test_any_qualifying_owner_review_is_enough(self):
+        self.reviews.extend([self._approval("stranger"), self._approval(stale=True),
+                             self._approval(), self._approval(state="COMMENT")])
+        self._merged()
+
+    def test_waiting_for_owner_is_not_a_verdict_block_even_with_findings_or_missing_reviews(self):
+        for verdict in ("findings", None):
+            with self.subTest(verdict=verdict):
+                self.reviews = self.reviews[:1]
+                if verdict:
+                    self.reviews[0]["body"] = self.reviews[0]["body"].replace("clean", verdict)
+                else:
+                    self.reviews = []
+                self._held_for_owner()
+
+    def test_owner_approval_does_not_override_other_merge_gates(self):
+        self.reviews.append(self._approval())
+        for change in ({"state": "closed"}, {"draft": True}, {"mergeable": False},
+                       {"user": {"login": "stranger"}}):
+            with self.subTest(change=change), mock.patch.dict(self.pr, change):
+                self.assertIsNone(self.m.maybe_merge("o/r", 7))
+                self.assertEqual([], self.posts)
+        self.ci = "failure"
+        self.assertIsNone(self.m.maybe_merge("o/r", 7))
+        self.assertEqual([], self.posts)
+        self.ci = "success"
+        self.reviews[0]["body"] = self.reviews[0]["body"].replace("clean", "findings")
+        self.assertEqual("verdicts", self.m.maybe_merge("o/r", 7))
+        self.assertEqual([], self.posts)
+        self.reviews.pop(0)
+        self.assertEqual("no-review", self.m.maybe_merge("o/r", 7))
+        self.assertEqual([], self.posts)
+
+    def test_chunk_path_requires_owner_approval_and_preserves_merge_guard(self):
+        self.m.CFG["chunk_review_repos"] = ["o/r"]
+        guard_ok = True
+
+        def chunk_call(name, repo, pr, head):
+            self.assertEqual(("o/r", 7, self.head), (repo, pr, head))
+            if name == "verdicts":
+                return {"test": "clean", "peer": "clean"}
+            self.assertEqual("merge_guard", name)
+            return guard_ok
+
+        with mock.patch.object(self.m, "chunk_call", side_effect=chunk_call) as chunk:
+            self._held_for_owner()
+            self.reviews.append(self._approval())
+            guard_ok = False
+            self.assertIsNone(self.m.maybe_merge("o/r", 7))
+            self.assertEqual([], self.posts)
+            guard_ok = True
+            self._merged()
+            self.assertEqual(mock.call("merge_guard", "o/r", 7, self.head), chunk.call_args)
+
+    def test_role_defaults_and_rendered_config_carry_owner_approval_settings(self):
+        import jinja2
+
+        role = ROOT / "ansible" / "roles" / "pr_reviewer"
+        defaults = AllowlistDefaultsTest._strict_yaml(
+            (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
+        expected = {"owner_approval_label": "owner-approval", "owner_approvers": [],
+                    "owner_approvers_by_repo": {"cchifor/workbricks": ["chifor"]}}
+        for key, value in expected.items():
+            self.assertEqual(value, defaults["pr_reviewer_" + key])
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        template = env.from_string((role / "templates" / "config.json.j2").read_text(encoding="utf-8"))
+        for values in (expected, {"owner_approval_label": "architecture", "owner_approvers": ["owner"],
+                                  "owner_approvers_by_repo": {"o/r": ["other-owner"]}}):
+            with self.subTest(values=values):
+                config = json.loads(template.render(dict(defaults, **{
+                    "pr_reviewer_" + k: v for k, v in values.items()})))
+                for key, value in values.items():
+                    self.assertEqual(value, config[key])
+
+
 class MergeAuthorTransitionTest(unittest.TestCase):
     """One Gitea identity per dev-worker slot (ailab plan 2026-10-11-worker-identities, Phase 3),
     against the SHIPPED pr_reviewer_merge_authors rather than a synthetic list.
