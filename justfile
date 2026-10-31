@@ -201,25 +201,6 @@ af-verify-hashes:
 manifest-lint:
     bash scripts/manifest-lint.sh
 
-# Evaluate the agentforge-tenant-guard VAP's CEL against a fixture table of admission requests:
-# the CP's live PodMonitor render must stay ADMITTED and each shape the policy exists to stop must
-# be DENIED by the expected clause. Nothing else in this estate evaluates that CEL — a client
-# dry-run parses the YAML and a server dry-run only proves it COMPILES — so run this after EVERY
-# edit to admission/tenant-guard.yaml. Static-only; needs cel-python (PyYAML comes with it). This
-# is what .gitea/workflows/tenant-guard-cel.yaml runs on every PR that touches admission/.
-af-verify-tenant-guard *args:
-    python scripts/check-tenant-guard-cel.py {{args}}
-
-# Verify every value derived from the broker seat inventory still agrees with the broker manifests
-# that declare it (the two AFP_* maps, the provisioner barrier list + readyz map, broker-inventory
-# .yaml). Static-only; this is what .gitea/workflows/broker-inventory.yaml runs on every PR.
-af-verify-brokers:
-    python scripts/gen-broker-inventory.py --check
-
-# Regenerate those derived values from the broker manifests after adding/removing a seat.
-af-gen-brokers:
-    python scripts/gen-broker-inventory.py --write
-
 # Verify the two LiteLLM consumer spans (Open WebUI's Local-group model_ids, litellm.yaml's
 # checksum/config annotation) still agree with litellm.yaml's model_list that derives them. dsh is
 # not one: it takes its models from llm-router (ADR 0039). Static-only; this is what
@@ -230,25 +211,6 @@ af-verify-litellm:
 # Regenerate those two spans from model_list after adding/removing/hiding a route.
 af-gen-litellm:
     python scripts/gen-litellm-consumers.py --write
-
-# Re-record which KV paths the SOPS operator seeds file actually declares (KEY NAMES ONLY — never
-# a value), and stamp the SHA-256 of that file's CIPHERTEXT so the record cannot go stale in
-# silence. Needed after adding a seat — the KV garbage collector (agentforge #69) refuses to start
-# unless the seeds file names every declared broker credential — AND after ANY edit to
-# operator-seeds.sops.yaml, including a value-only credential re-cut: the drift check fails on a
-# coverage record taken against a different seat list OR against a different seeds document.
-#
-# The paths are read from the SAME FILE the digest is taken from. Reading them from the live
-# cluster Secret instead (`kubectl get secret openbao-operator-seeds`) looks equivalent and is not:
-# the two sources diverge whenever the working tree is behind or ahead of what Flux has reconciled,
-# and the refresh would then stamp one document while recording another's paths — a record that is
-# wrong AND reads green. That is not hypothetical: on a checkout one commit behind main it stamped
-# a seeds document still carrying a REVOKED dispatcher PAT while recording paths from the corrected
-# live Secret. Same-file sourcing makes the divergence unrepresentable.
-af-record-seed-coverage:
-    sops -d --extract '["stringData"]["seeds.json"]' \
-      kubernetes/apps/infrastructure/security/openbao/operator-seeds.sops.yaml \
-      | python scripts/gen-broker-inventory.py --refresh-seed-coverage
 
 # PREFLIGHT #2: assert the host-mode Gitea act_runner CI pool is fit before the Stage-0/Stage-4 image
 # builds run on it (daemon, docker, host-mode label, egress, capacity + the Gitea-API online check).
