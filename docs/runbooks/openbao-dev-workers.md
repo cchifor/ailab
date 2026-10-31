@@ -60,7 +60,7 @@ Secret.
   AgentForge `af-codex-refresh` CronJob. That CronJob and the broker document it rotated were removed
   with AgentForge (ADR 0041), and the document was deleted. No host rendered it after 2026-09-29.
   What is still dormant: `roles/openbao_agent/files/codex-auth.ctmpl` and the hosts' read grant
-  (`CODEX_AUTH_GRANT` in `devworker-provision-job.yaml`); a follow-up removes them. See § "The shared
+  (`CODEX_AUTH_GRANT` in `devworker-provision-job.yaml`); #1537 removes them. See § "The shared
   codex login".
 
 - `af/dev-workers/common` — shared across all six. **Identity (2026-10-06):** its three Gitea tokens

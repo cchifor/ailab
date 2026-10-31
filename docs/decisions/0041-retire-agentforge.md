@@ -85,8 +85,9 @@ longer runs the AgentForge image (#1536).
     its `claimRef` UID cleared before it rebinds.
   - **Restorable from the kept dump:** the two databases, from
     `postgres-dumps:/dumps/retired/agentforge-2026-10-31/`, with `SHA256SUMS` and per-table row counts
-    alongside. The procedure is `docs/runbooks/infra-pg.md` § "Retired: the AgentForge databases": recreate
-    the roles, create the databases with their owners, then `pg_restore` and compare the counts.
+    alongside. The procedure is `docs/runbooks/infra-pg.md` § "Retired: the AgentForge databases": flip the
+    roles back to `ensure: present` first (CNPG keeps `absent` roles dropped), create the databases with
+    their owners, then `pg_restore` and compare the counts.
   - **Reissued, never restored:** the revoked Gitea tokens and deploy key, and the destroyed KV documents.
     Their values are gone by design, so they are minted afresh; the KV layout and seed rules are in
     `docs/runbooks/openbao-recovery.md`. An owner can unarchive the repos.

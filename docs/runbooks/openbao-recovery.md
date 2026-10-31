@@ -142,8 +142,10 @@ Flux deploys OpenBao (TLS via `openbao-tls`), and these run on their own:
   `openbao-keys` only.
 - **`openbao-provision`** (`provision-job.yaml`) creates the `af` KV mount, the `kubernetes` auth backend
   (server-SA TokenReview, no static JWT), the base policies, the canary role and seed, and the operator
-  seeds (`{}` now). It writes the `openbao-state` sentinel, then **revokes root and deletes
-  `openbao-bootstrap-token`**. On that same root path it also mints `openbao-provisioner-token` for the
+  seeds (`{}` now). It mints the durable, add-only operator reconcile token into the Secret
+  **`openbao-operator-provisioner-token`** (policy `agentforge-operator-provisioner`; the identity every
+  later run uses, and the one ceremony step 7 checks). It writes the `openbao-state` sentinel, then
+  **revokes root and deletes `openbao-bootstrap-token`**. On that same root path it also mints `openbao-provisioner-token` for the
   retired provisioner; `retired-token-revoker.yaml` removes it (§ "After a re-bootstrap" below).
 
 Verify with `just openbao-status`: the init and provision Jobs Succeeded, `openbao-state.provisioned=true`,
@@ -155,10 +157,13 @@ k8s-auth proof).
   lost PV). It fails loudly rather than minting a NEW vault that orphans every stored secret.
 - Losing `openbao-keys` after init means an unrecoverable seal unless the key comes back: restore it from the
   escrow copy `kubernetes/infra/openbao-unseal.sops.yaml` (ceremony step 6), or restore the vault PV from a
-  backup together with its matching key. There is no re-key path (`operator rekey` is disabled, see the top
-  of this runbook); otherwise it is the wipe ceremony below.
+  backup together with its matching key. There is no re-key path (OpenBao 2.5.5 answers 405 to `operator rekey`, as
+  it does to `generate-root`; see "When to use" at the top); otherwise it is the wipe ceremony below.
 - The unseal key and the root token (before its revocation) live only in the `openbao` namespace. The
   unsealer reads the unseal key only.
+- **Accepted residual:** `openbao-keys` is an ordinary Kubernetes Secret. The cluster runs without etcd
+  encryption at rest, so the unseal key is recoverable from a raw etcd or disk read. Encrypting Secrets at rest
+  (or Talos disk encryption) would be a separate control-plane rolling change, not done.
 
 ## Raft snapshot (before ANY server upgrade or risky change)
 

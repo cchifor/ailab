@@ -323,5 +323,11 @@ private, throwaway server, and exact per-table row counts were diffed against th
   files, `globals.sql` (no role passwords), `*.rowcounts`, `SHA256SUMS` and `COMPLETE`. It sits outside
   the nightly prune glob (`/dumps/[0-9]*`), so retention never deletes it, and Velero backs it up
   through `postgres-dumps-holder` like the nightly generations.
-- **To restore one:** recreate its roles (from `globals.sql`, then set passwords), `CREATE DATABASE … OWNER`
-  the original owner, and `pg_restore --exit-on-error -d <db>` the archive. Compare against `*.rowcounts`.
+- **To restore one:**
+  1. **First** flip that database's roles from `ensure: absent` back to `ensure: present` in `infra-pg.yaml`
+     (with their `passwordSecret`s, if the consumer needs them). Merge it and wait until
+     `status.managedRolesStatus` shows them reconciled. While they say `absent`, CNPG drops any role
+     created by hand.
+  2. Apply the role attributes and grants from `globals.sql`.
+  3. `CREATE DATABASE … OWNER` the original owner.
+  4. `pg_restore --exit-on-error -d <db>` the archive, and compare against `*.rowcounts`.
