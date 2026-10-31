@@ -185,10 +185,9 @@ identity_providers:
   oidc:
     # jwks (RSA issuer key) + the *_secret values are merged from /secrets (SOPS) + *_FILE env.
     # Authelia 4.39 releases groups/email/name via the USERINFO endpoint by default, NOT the id_token.
-    # A client that reads its claims from the id_token therefore needs a claims policy. (The AgentForge
-    # control plane was the first such client; it was retired on 2026-10-31.)
+    # A client that reads its claims from the id_token therefore needs a claims policy.
     claims_policies:
-      # Cloudflare Access needs that escape hatch, for a blunt reason: per Authelia's own
+      # Cloudflare Access needs a claims policy that puts email in the id_token, for a blunt reason: per Authelia's own
       # integration guide it "does not support OpenID Connect 1.0 as it does not honor the expected
       # process to retrieve the claims it needs" — it never calls the userinfo endpoint and reads
       # identity straight off the id_token. Without this the id_token carries no `email`, and the

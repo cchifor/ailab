@@ -28,11 +28,10 @@
     name: cloudflared
     state: restarted
 
-# try-restart = restart only if running (the herdr unit may not exist yet), and for the same reason
-# the command module is
-# skipped in check mode, so a first-run `--check` preview (where the unit file was never really
-# written) doesn't die in the handler flush the way a systemd-module restart of a not-found unit
-# does. try-restart is also a no-op on a stopped unit.
+# try-restart = restart only if running, so a missing unit (herdr may not be installed yet) or a stopped
+# one is a no-op. Separately, the command module is skipped in check mode, so a first-run `--check`
+# preview (where the unit file was never really written) doesn't die in the handler flush the way a
+# systemd-module restart of a not-found unit does.
 - name: Restart herdr
   ansible.builtin.command: systemctl try-restart herdr.service
   changed_when: true

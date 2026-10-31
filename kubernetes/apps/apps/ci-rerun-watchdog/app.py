@@ -1111,8 +1111,11 @@ class Scan:
         self.summary["cloud_runners"] = sorted(cloud.values())
 
         listed = set(cfg.repos)
+        # Archived repos are read-only and run no Actions, so they are never "unlisted" (the AgentForge
+        # repos were archived, then dropped from REPOS, on 2026-10-31).
         unlisted = sorted(r.get("full_name") for r in api.org_repos(cfg.gitea_org)
-                          if isinstance(r, dict) and r.get("has_actions") and r.get("full_name") not in listed)
+                          if isinstance(r, dict) and r.get("has_actions") and not r.get("archived")
+                          and r.get("full_name") not in listed)
         metrics.set("unlisted_repos", len(unlisted))
         if unlisted != _LAST_UNLISTED.get("repos"):
             _LAST_UNLISTED["repos"] = unlisted
