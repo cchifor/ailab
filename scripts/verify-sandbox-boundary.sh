@@ -103,8 +103,8 @@ fi
 _reg="${IMAGE%%/*}"; _rest="${IMAGE#*/}"
 _code="$("${AF_CANARY_CURL:-curl}" -s -o /dev/null -m 20 -w '%{http_code}' \
   -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json' \
-  "https://${_reg}/v2/${_rest%@*}/manifests/${_rest#*@}" 2>/dev/null)"
-[ "$_code" = "200" ] || die "sandbox image '$IMAGE' ($IMAGE_SRC) is not in the registry (manifest HTTP ${_code:-none}); pass a present digest as AF_CANARY_IMAGE"
+  "https://${_reg}/v2/${_rest%@*}/manifests/${_rest#*@}" 2>/dev/null)"; _crc=$?
+[ "$_crc" -eq 0 ] && [ "$_code" = "200" ] || die "sandbox image '$IMAGE' ($IMAGE_SRC) is not in the registry (manifest HTTP ${_code:-none}, curl rc=$_crc); pass a present digest as AF_CANARY_IMAGE"
 
 # Broker targets. A pod's fingerprint is its uid, container restart counts and Ready transition time: any
 # restart, replacement or unready spell between two reads changes it.

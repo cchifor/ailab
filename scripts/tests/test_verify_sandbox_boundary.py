@@ -106,10 +106,11 @@ echo "fake kubectl: unexpected call: $args" >&2
 exit 3
 """
 
-# Answers the manifest HEAD the harness makes: FAKE_REGISTRY=present (200), missing (404), down (000).
+# Answers the manifest HEAD the harness makes: FAKE_REGISTRY=present (200), missing (404), down (000), cut
+# (200 then a failed transfer, curl rc 28).
 FAKE_CURL = r"""#!/usr/bin/env bash
 echo "curl $*" >> "$FAKE_LOG"
-case "${FAKE_REGISTRY:-present}" in present) printf 200 ;; missing) printf 404 ;; down) printf 000; exit 7 ;; esac
+case "${FAKE_REGISTRY:-present}" in present) printf 200 ;; missing) printf 404 ;; down) printf 000; exit 7 ;; cut) printf 200; exit 28 ;; esac
 """
 
 AGENT_OK = """ok (blocked): world-ip
@@ -217,7 +218,7 @@ class Preflight(Harness):
         self.assertIn("not digest-pinned", proc.stderr)
 
     def test_an_image_the_registry_no_longer_has_is_fatal(self) -> None:
-        for reg in ("missing", "down"):
+        for reg in ("missing", "down", "cut"):
             with self.subTest(registry=reg):
                 proc = self.run_script(FAKE_REGISTRY=reg)
                 self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
