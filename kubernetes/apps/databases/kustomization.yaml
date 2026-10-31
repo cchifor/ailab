@@ -20,10 +20,6 @@ resources:
   # llm-router browser-auth store (llm-router#121). Password MUST stay in sync with auth-database-url in
   # apps/llm-router/llm-router-oidc.sops.yaml. The DATABASE comes from the router-auth-db-bootstrap.sql one-shot.
   - infra-pg-router-auth.sops.yaml # basic-auth creds for the router_auth DB (managed role)
-  # AgentForge v2 RLS boundary (ADR 0019): two managed roles, one basic-auth secret each. Each password
-  # MUST stay in sync with the matching DSN in apps/agentforge/agentforge-db.sops.yaml (see those headers).
-  - infra-pg-afp-admin.sops.yaml # basic-auth creds for afp_admin (DB owner, BYPASSRLS — admin_dsn)
-  - infra-pg-afp-app.sops.yaml # basic-auth creds for afp_app (non-owner, NOBYPASSRLS — app_dsn)
   - infra-pg.yaml
   - infra-pg-gitea-credential-queries.yaml # CNPG exporter queries over the gitea DB's credential inventory (token/grant/admin counts and ages ONLY, never hashes) — referenced from infra-pg.yaml's spec.monitoring.customQueriesConfigMap next to the default; alerts in monitoring/gitea-credential-rules.yaml. They read the views created by the operator-run one-shot gitea-credential-inventory.sql (NOT a resource, deliberately not listed: the exporter runs as pg_monitor, which cannot read Gitea's tables)
   - infra-pg-slotwatch.sops.yaml # basic-auth creds for the LOGIN-only slotwatch role (managed role in infra-pg.yaml) that cnpg-lost-slot-reclone probes with

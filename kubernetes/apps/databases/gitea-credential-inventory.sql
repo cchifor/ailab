@@ -13,9 +13,9 @@
 -- default; do NOT set security_invoker), return AGGREGATES ONLY - counts and ages, never a hash, name or id
 -- - and pg_monitor gets SELECT on the views and nothing else.
 --
--- THE ALLOWLIST lives here, in owner_credentials: the (id, name, scope) of gitea_admin's two documented
--- tokens (docs/runbooks/s2s-identity.md, "Still open"). It is compared inside the view; only the COUNT of
--- non-matching tokens leaves. ROTATING either token gives it a new id, so edit the VALUES list below and
+-- THE ALLOWLIST lives here, in owner_credentials: the (id, name, scope) of gitea_admin's one documented
+-- token (docs/runbooks/s2s-identity.md, "Still open"). It is compared inside the view; only the COUNT of
+-- non-matching tokens leaves. ROTATING the token gives it a new id, so edit the VALUES list below and
 -- re-run this file in the same PR that records the rotation, or GiteaAdminTokenNotAllowlisted fires.
 --
 -- RUN against the PRIMARY (`kubectl -n databases get cluster infra-pg -o jsonpath='{.status.currentPrimary}'`),
@@ -46,8 +46,9 @@ GRANT USAGE ON SCHEMA credential_inventory TO pg_monitor;
 DROP VIEW IF EXISTS credential_inventory.owner_credentials;
 CREATE VIEW credential_inventory.owner_credentials AS
 WITH allowlist (id, name, scope) AS (
-  VALUES (1::bigint, 'flux-ailab-read'::text, 'read:repository'::text),
-         (12::bigint, 'af-ci-scaler-2941'::text, 'read:admin'::text)
+  -- af-ci-scaler-2941 (id 12, read:admin) left with the AgentForge retirement (2026-10-31): the token was
+  -- deleted first, then this row, so the alert never saw an unlisted token.
+  VALUES (1::bigint, 'flux-ailab-read'::text, 'read:repository'::text)
 )
 SELECT u.name AS owner,
        count(t.id)::float8 AS tokens,
