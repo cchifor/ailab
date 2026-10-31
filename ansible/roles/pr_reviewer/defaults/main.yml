@@ -256,17 +256,28 @@ pr_reviewer_textfile: /var/lib/prometheus/node-exporter/reviewbot.prom
 # EVERY persona below has a verdict=clean review at the current head, CI is green, the
 # author is in the allowlist, and no `no-automerge` label is present. Applies to all
 # personas' configs identically - whichever persona completes the picture merges (races
-# are benign: the second merge attempt gets a 405).
+# are benign: the second merge attempt gets a 405). Labelled owner approval below is an
+# additional gate; it never bypasses CI, persona findings or branch protection.
 pr_reviewer_automerge: true
 pr_reviewer_merge_personas: [claude, codex]
+# Owner decision, 2026-10-31: architectural/policy changes wait for the owner's Gitea
+# Approve at the CURRENT head, then reviewers merge. Keep the label so CI can use it to
+# recognize the policy-change lane without forcing the owner to merge by hand.
+# no-automerge remains an absolute hold, even with owner approval. Global approvers plus
+# this repo's additive grant are eligible; persona accounts and the author never count.
+# Empty approver lists fail closed: labelled PRs remain held until an owner is configured.
+pr_reviewer_owner_approval_label: owner-approval
+pr_reviewer_owner_approvers: []
+pr_reviewer_owner_approvers_by_repo:
+  cchifor/workbricks: [chifor]
 # renovate-bot added 2026-09-09 (operator-directed): its PRs automerge on the SAME gate as
 # everyone else's — every persona clean at the current head, CI green, no `no-automerge`
 # label. Deliberately NOT added to pr_reviewer_pin_authors: the pin-lane rubric is written
 # for digest-only bumps of images this estate builds, and renovate also moves base-image
 # tags and major versions, which that rubric does not describe. It reviewed under the
 # general rubric until 2026-10-11 and under the dependency-lane rubric since
-# (pr_reviewer_dependency_authors). `no-automerge` remains the per-PR brake for a bump that
-# wants a human — a major runtime bump touching something load-bearing, say.
+# (pr_reviewer_dependency_authors). Use `owner-approval` when a bump needs owner consent;
+# `no-automerge` remains the absolute per-PR brake.
 # dev-worker-bot: the dev workers' own non-admin identity since 2026-10-06 (ailab plan
 # 2026-10-06-s2s-identity-openbao, owner decision D1), replacing their use of `chifor`. This is
 # PARITY, not a new grant: worker PRs were already automerge-eligible as `chifor`. Owner-protected
