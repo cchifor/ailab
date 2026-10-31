@@ -2628,9 +2628,18 @@ for now."* whenever a local model needed more than 90 s. The trajectory showed `
 
 **What changes.**
 - **No deadline per Assistant step.** The engine's timers bound a silent upstream: wait before output, idle after,
-  both reset by raw upstream bytes. So does the turn cap.
-- **The turn cap is 15 minutes (was 10).** When the cap, not Stop, ends a turn, the user sees one line: *"The model
+  both reset by raw upstream bytes. Over both sits the turn cap.
+- **The turn cap is 15 minutes (was 10).** It is an absolute deadline counted from the turn's start, not an
+  inactivity timer: output does not reset it. When the cap, not Stop, ends a turn, the user sees one line: *"The model
   did not finish within 15 minutes."*
+- **Where the wait happens.** An Assistant turn runs in the router, not on a held connection: the browser follows it
+  over the console's event feed, which sends heartbeats, and reconnects to a running turn after a reload
+  (`GET /admin/v1/chat`). So no proxy between the browser and the pod sees ten silent minutes. API clients that
+  stream get SSE headers at once and a `: keepalive` comment every 15 s. A non-streaming API call to a cold model
+  is still cut by Cloudflare's edge at ~100–125 s, whatever the router allows.
+- **A restart cancels in-flight steps.** The drain grace is unchanged (`terminationGracePeriodSeconds: 60`), so a
+  rollout or pod restart during a long cold-load wait ends that step. The user sees a failed step, not a hang;
+  that is expected.
 - **A waiting label.** After 15 s with no event the step shows *"Waiting for <route>'s answer… Ns"*, refreshed every
   5 s.
 - **`Account.timeouts { waitMs?, idleMs? }`.** It applies to models requested by name: direct requests,
@@ -2654,7 +2663,8 @@ for now."* whenever a local model needed more than 90 s. The trajectory showed `
 
 **Before the roll.**
 - A backup was taken in the live pod: `/data/backups/pre-step-timeouts-20261031`. It holds a `VACUUM INTO` copy of
-  `router.sqlite` (integrity ok, 311 MB, sha256 `f27e82ec…`) plus `router.secrets.key` (mode 600).
+  `router.sqlite` (integrity ok, 311 MB, sha256
+  `f27e82ec10658d9a45a255e0d3172a6fd9180df88311c041d7bbc6957e36c43d`) plus `router.secrets.key` (mode 600).
 - `validate-live` (script from llm-router main, run in the live pod) gave **6/9**: the three known `MODEL_REQUIRED`
   Codex failures, everything else served.
 
@@ -2662,12 +2672,23 @@ for now."* whenever a local model needed more than 90 s. The trajectory showed `
 - **Why 600 s:** up to 120 s for a vLLM unload, ~367 s for the worst 122B NFS load, plus prefill.
 - **Precondition: the new image is the one serving.** One router pod, Ready, `imageID` ending `dad0e721…685f`,
   `/app/SOURCE_COMMIT` `372ce1ee…`. The old image does not reject the field; it silently drops it on load.
+- **How.** Do it inside the router pod with its admin bearer, which never leaves the pod:
+  1. `GET /admin/v1/config`.
+  2. Set `accounts[id == "lan-192.168.0.26-8080"].timeouts = { waitMs: 600000 }` on the object read.
+  3. `PUT /admin/v1/config` with header `If-Match: <the revision read>` and the whole object as the body; the body
+     keeps its `revision`. A 409 means someone changed the config in between: read it again and retry.
+  4. Record the new revision here.
+- **Read-back.** `GET /admin/v1/config`, then select `.accounts[] | select(.id == "lan-192.168.0.26-8080") |
+  .timeouts`. It must show `{"waitMs":600000}`.
 
 **Rollback.** Revert the image digest and both pod-template annotations together to
 `sha256:6c9db895a9a3ee0dd7f4551d87f9b381d1874e91f83105be5cc64509f51ad013` /
 `f5c0c412b1a4f23248013dafa62ac25a7308a64f` / `router-0.1.0-20261027-claude-output-limit`. Nothing has to be undone
 in the config first, because the old account schema strips the unknown `timeouts` key. The cloud3 account then waits
 300 s again, and Assistant steps are capped at 90 s again.
+- **Persistence.** The stored config keeps `timeouts` until the old image writes the configuration, which any admin
+  change does. That write drops the field. So after rolling forward again, run the read-back above and re-apply the
+  step if the value is gone.
 
 ## Relay access requests
 
