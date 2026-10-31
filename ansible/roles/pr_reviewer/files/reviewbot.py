@@ -2874,11 +2874,19 @@ def owner_approval_ok(repo, pr, head_sha, author):
                and x != (author or "").lower()}
     if not allowed:
         return False
-    return any(rv.get("state") == "APPROVED"
-               and ((rv.get("user") or {}).get("login") or "").lower() in allowed
-               and rv.get("commit_id") == head_sha
-               and not rv.get("dismissed") and not rv.get("stale")
-               for rv in iter_reviews(repo, pr))
+    # Each approver's position is their LATEST decisive review (Gitea lists oldest first): a later
+    # REQUEST_CHANGES withdraws an approval at the same head, which Gitea leaves undismissed and
+    # non-stale, clearing only `official`. COMMENT reviews take no position; dismissed ones count for
+    # nothing. Any approver still objecting holds the merge, whatever another approver said.
+    latest = {}
+    for rv in iter_reviews(repo, pr):
+        login = ((rv.get("user") or {}).get("login") or "").lower()
+        if login in allowed and rv.get("state") in ("APPROVED", "REQUEST_CHANGES") \
+                and not rv.get("dismissed"):
+            latest[login] = rv
+    if any(rv.get("state") == "REQUEST_CHANGES" for rv in latest.values()):
+        return False
+    return any(rv.get("commit_id") == head_sha and not rv.get("stale") for rv in latest.values())
 
 
 def is_dependency_author(author):

@@ -11,7 +11,9 @@ configurable `owner_approval_label`) and have the owner click Gitea's **Approve*
 the current head; keep the label in place so CI can recognize the policy-change lane.
 Reviewbot then merges when every existing gate passes, including green CI and clean reviews
 from both personas. The approval must be `APPROVED`, match the current `commit_id`, and be
-neither dismissed nor stale; a new head requires a new approval. Eligible logins are the
+neither dismissed nor stale; a new head requires a new approval. Each approver's latest decisive
+review is what counts: a later **Request changes** withdraws an approval, and any approver still
+requesting changes holds the PR. Eligible logins are the
 global `owner_approvers` plus this repository's `owner_approvers_by_repo` entry (role variables
 use the `pr_reviewer_` prefix); defaults grant only `chifor` on `cchifor/workbricks` and no
 global approvers. Persona accounts and the PR author never qualify, even if listed, and an
