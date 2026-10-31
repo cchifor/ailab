@@ -65,7 +65,6 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # not something the discovery should silently absorb.
         "./kubernetes/apps/infrastructure/helmtest",
         "./kubernetes/apps/infrastructure",
-        "./kubernetes/apps/infrastructure/autoscaling/keda",
         "./kubernetes/apps/infrastructure/autoscaling/kro",
         "./kubernetes/apps/infrastructure/security/openbao-canary",
         "./kubernetes/apps/infrastructure/security/openbao",

@@ -11,7 +11,7 @@
 #
 #   2. At 2026-09-09 00:10-00:11Z, 24 containers across 10 namespaces terminated together — all four
 #      Flux controllers, all four Kyverno controllers, both cert-manager pods, cilium-operator,
-#      kube-controller-manager, kube-scheduler, cnpg-operator, keda, kro, the csi-nfs sidecars,
+#      kube-controller-manager, kube-scheduler, cnpg-operator, kro, the csi-nfs sidecars,
 #      snapshot-controller and kube-state-metrics. Every leader-elected controller in the cluster
 #      restarted at once, and NOT ONE alert in the 00:00-01:30Z window relates to it.
 #      KubePodCrashLooping structurally cannot catch this: each container restarted ONCE and came
@@ -86,7 +86,7 @@ spec:
             count(
               increase(
                 kube_pod_container_status_restarts_total{
-                  namespace=~"kube-system|flux-system|cert-manager|cnpg-system|kyverno|keda|kro-system|monitoring|trident|velero"
+                  namespace=~"kube-system|flux-system|cert-manager|cnpg-system|kyverno|kro-system|monitoring|trident|velero"
                 }[10m]
               ) > 0
             ) > 8
