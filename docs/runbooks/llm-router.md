@@ -2693,8 +2693,9 @@ in the config first, because the old account schema strips the unknown `timeouts
 
 ### Results of the local-models plan (2026-10-31)
 
-The whole of `plans/2026-10-31-local-models-improvement-plan.md` landed the same day. The record is
-`plans/2026-10-31-local-models-improvement-impl-review.md`.
+Every change of `plans/2026-10-31-local-models-improvement-plan.md` landed the same day. Still open: the next-day
+durability check of flash-next's prefill (WS4.5), and the owner's decisions on the fp8 and 122B Assistant failures
+below. The record is `plans/2026-10-31-local-models-improvement-impl-review.md`.
 
 **Router configuration, changed through the admin API with `If-Match` PUTs:**
 
@@ -2702,7 +2703,7 @@ The whole of `plans/2026-10-31-local-models-improvement-plan.md` landed the same
 |---|---|
 | 2093 | `qwen3.8-27b-w4a16` turned off on `lan-192.168.0.26-8080` |
 | 2128 | `qwen3.8-27b` and `qwen3-coder-30b-a3b` turned off there too |
-| 2136 | The three dropped from that account's `allowedModels`. They answer 404 `MODEL_NOT_FOUND` since |
+| 2136 | The three dropped from that account's `allowedModels`; they answer 404 `MODEL_NOT_FOUND` from then on |
 | 2158 | `timeouts.waitMs: 600000` on that account (the step above) |
 
 **Benchmark.** Measured through the router with `scripts/bench-router-local.mjs`: decode tok/s, prefill tok/s at
