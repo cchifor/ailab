@@ -2889,6 +2889,37 @@ def owner_approval_ok(repo, pr, head_sha, author):
     return any(rv.get("commit_id") == head_sha and not rv.get("stale") for rv in latest.values())
 
 
+def owner_approval_paths(repo, pr, head_sha):
+    """The owner-only paths of `repo` that this PR touches: a PR touching one needs the owner's
+    approval exactly as if it carried the owner-approval label (owner, 2026-10-31). The rule lives
+    HERE, outside the PR, because the repo's own guards run from the PR's copy: a PR could edit a
+    guard together with what it guards, or the CI workflow that runs it, and still go green.
+
+    An entry ending in "/" matches every path under it; any other entry matches one path exactly.
+    Both sides of every section count, so a rename or deletion of an owner-only file is caught.
+    [] when the repo lists no paths (no diff is fetched). FAILS CLOSED: a diff the parser refuses
+    (an empty diff included) or a section whose name it cannot read counts as touching one. None
+    when the head moved while the diff was read, so the caller merges nothing on this sweep."""
+    patterns = [g for g in ((CFG.get("owner_approval_paths_by_repo") or {}).get(repo) or []) if g]
+    if not patterns:
+        return []
+    raw = api(f"/repos/{repo}/pulls/{pr}.diff", raw=True)
+    # The .diff endpoint serves the PR's current head: confirm it is still the head being merged.
+    if ((api(f"/repos/{repo}/pulls/{pr}").get("head") or {}).get("sha")) != head_sha:
+        return None
+    try:
+        sections = split_sections(raw)
+    except ValueError:
+        return ["<unreadable diff>"]
+    paths = set()
+    for sec in sections:
+        if not sec.get("a") or not sec.get("b"):
+            return ["<unreadable path>"]
+        paths.update((sec["a"], sec["b"]))
+    return sorted(p for p in paths
+                  if any(p == g or (g.endswith("/") and p.startswith(g)) for g in patterns))
+
+
 def is_dependency_author(author):
     """A dependency-update bot (renovate-bot): its PRs get DEPENDENCY_RUBRIC and their own
     held-PR gauge. Absent from an older config.json means no such lane, as before."""
@@ -2949,8 +2980,9 @@ def guard_findings(author, paths):
 def maybe_merge(repo, pr):
     """Merge authority (operator-directed 2026-09-02): the reviewer SYSTEM merges only when
     every configured persona's review at the CURRENT head is verdict=clean, CI is green,
-    the author is allowlisted, and no no-automerge label is set. An owner-approval label
-    additionally requires an independent owner's live approval at this head. One persona
+    the author is allowlisted, and no no-automerge label is set. An owner-approval label, or a
+    change to one of the repo's owner-only paths, additionally requires an independent owner's
+    live approval at this head. One persona
     alone never merges; third-party PRs are never merged.
 
     Returns "verdicts" when the personas are not all clean at this head AND nothing else is
@@ -2988,9 +3020,16 @@ def maybe_merge(repo, pr):
         st = api(f"/repos/{repo}/commits/{head}/status")
         if st.get("state") != "success":
             return
-        if CFG.get("owner_approval_label", "owner-approval").lower() in labels \
-                and not owner_approval_ok(repo, pr, head, author):
-            log(f"merge {repo}#{pr} held at {head[:9]}: owner approval")
+        labelled = CFG.get("owner_approval_label", "owner-approval").lower() in labels
+        owner_paths = owner_approval_paths(repo, pr, head)
+        if owner_paths is None:
+            log(f"merge {repo}#{pr} held at {head[:9]}: head moved while reading the diff")
+            return
+        if (labelled or owner_paths) and not owner_approval_ok(repo, pr, head, author):
+            log(f"merge {repo}#{pr} held at {head[:9]}: owner approval"
+                + ("" if labelled else
+                   " (owner-only paths: " + ", ".join(_safe_path(p) for p in owner_paths[:5])
+                   + (", ..." if len(owner_paths) > 5 else "") + ")"))
             # None keeps an intentional owner wait out of the merge_blocked gauges and
             # ReviewbotMergeBlocked. Check before verdicts: while consent is pending,
             # even a non-clean persona is not the SOLE remaining blocker. Both ordinary

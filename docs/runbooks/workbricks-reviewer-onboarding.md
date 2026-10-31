@@ -21,6 +21,19 @@ empty eligible list holds the PR indefinitely. This applies to ordinary and chun
 waiting logs `owner approval` without paging `ReviewbotMergeBlocked`. `no-automerge` remains
 an absolute hold even with owner approval, and branch protection still applies.
 
+**Owner-only paths (owner decision, 2026-10-31).** A PR that touches a path listed under its
+repository in `owner_approval_paths_by_repo` waits for the same owner approval as a labelled PR,
+whether or not it carries the label. Workbricks' guards run from the PR's own copy, so a PR could
+change a guard together with what it guards, or the workflow that runs it, and stay green; this
+list is read here, outside the PR. An entry ending in `/` covers everything under it; any other
+entry is one exact path; both sides of a rename count. The reviewbot reads the PR's diff after CI
+is green and checks that the head did not move while it read it. A diff it cannot parse, or a
+file name it cannot read, counts as touching a listed path. Waiting logs `owner approval
+(owner-only paths: ...)`. The Workbricks list (`ansible/roles/pr_reviewer/defaults/main.yml`) is
+the CI definition and entry point, the denylist and its guard, and the guards that demand the
+label; `tests/locks.sha256` and `tests/milestones/registry.json` are left out, because appending a
+lock line or moving an entry from red to green needs no owner there, and their guards are listed.
+
 History:
 
 - **2026-10-20/21:** the first `cchifor/workbricks` was created and onboarded (allowlist entry,

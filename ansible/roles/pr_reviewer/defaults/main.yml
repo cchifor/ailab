@@ -269,6 +269,24 @@ pr_reviewer_owner_approval_label: owner-approval
 pr_reviewer_owner_approvers: []
 pr_reviewer_owner_approvers_by_repo:
   cchifor/workbricks: [chifor]
+# Owner decision, 2026-10-31: a PR that touches one of these paths needs the owner's Approve as if
+# it carried the label, whether or not anyone added it. The repo's own guards run from the PR's
+# copy, so a PR could edit a guard with what it guards, or the workflow that runs it, and stay
+# green; this list is enforced here, outside the PR. An entry ending in "/" covers everything
+# under it; any other entry is one exact path. Workbricks: the CI definition and entry point, the
+# denylist and its guard, and the guards that demand the owner-approval label. tests/locks.sha256
+# and tests/milestones/registry.json are NOT listed: appending a lock line or moving an entry red
+# to green needs no owner (Workbricks decision 0036), and their guards, listed, hold the rest.
+pr_reviewer_owner_approval_paths_by_repo:
+  cchifor/workbricks:
+    - .gitea/workflows/
+    - scripts/test.sh
+    - scripts/guards/denylist.sha256
+    - scripts/guards/denylist-allow.txt
+    - scripts/guards/check_denylist.py
+    - scripts/guards/owner_approval.py
+    - scripts/guards/check_test_locks.py
+    - scripts/guards/check_milestones.py
 # renovate-bot added 2026-09-09 (operator-directed): its PRs automerge on the SAME gate as
 # everyone else's — every persona clean at the current head, CI green, no `no-automerge`
 # label. Deliberately NOT added to pr_reviewer_pin_authors: the pin-lane rubric is written
