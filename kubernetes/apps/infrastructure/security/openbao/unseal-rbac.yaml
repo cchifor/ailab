@@ -155,34 +155,11 @@ metadata:
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: openbao-provision }
 subjects:
   - { kind: ServiceAccount, name: openbao-provision, namespace: openbao }
----
-# (4) agentforge-provisioner — the long-running controller: reads the SCOPED provisioner token ONLY (never
-#     root/bootstrap). It authenticates to OpenBao with that token; it holds no other cluster authority.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: agentforge-provisioner
-  namespace: openbao
-  labels: { app.kubernetes.io/name: agentforge-provisioner, app.kubernetes.io/part-of: agentforge }
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: agentforge-provisioner
-  namespace: openbao
-  labels: { app.kubernetes.io/name: agentforge-provisioner, app.kubernetes.io/part-of: agentforge }
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["openbao-provisioner-token"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: agentforge-provisioner
-  namespace: openbao
-  labels: { app.kubernetes.io/name: agentforge-provisioner, app.kubernetes.io/part-of: agentforge }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: agentforge-provisioner }
-subjects:
-  - { kind: ServiceAccount, name: agentforge-provisioner, namespace: openbao }
+# (4) agentforge-provisioner was REMOVED with AgentForge (plans/2026-10-31-retire-agentforge-plan.md, PR-2b).
+# Before that merge its scoped OpenBao token revoked itself (auth/token/revoke-self 204; lookup-self then 403)
+# and the Secret openbao-provisioner-token was deleted. The DAILY openbao-provision run does NOT re-mint it:
+# on a provisioned vault (sentinel set, root revoked) `agentforge openbao-provision` is a no-op that only
+# re-runs the add-only operator reconcile with openbao-operator-provisioner-token (agentforge main.py,
+# the sentinel branch). The provisioner token is minted ONLY on the root path of a first bootstrap
+# (bootstrap.py, "mint the long-lived provisioner token"), i.e. after a vault wipe + re-bootstrap; the
+# follow-up that moves OpenBao off the AgentForge image removes that mint.

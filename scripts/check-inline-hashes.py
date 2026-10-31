@@ -5,23 +5,18 @@ the manifests haven't silently drifted from the content they describe.
 The repo carries a couple of inline, hand-computed content-hash values with
 no reloader/controller to keep them honest:
 
-  1. The `checksum/capability-kids` pod-template annotation in
-     provisioner-deploy.yaml — must equal sha256 of the `capability-kids.json`
-     value embedded in capability-kids-configmap.yaml. No reloader is
-     installed, so this is what bumps the pod template (Recreate strategy) on
-     any policy edit, forcing a re-read of the mounted file.
-  2. The `checksum/config` pod-template annotation in litellm-local.yaml —
+  1. The `checksum/config` pod-template annotation in litellm-local.yaml —
      must equal sha256(config.yaml value)[:12]. LiteLLM reads its config only
      at startup and no Reloader is installed, so a stale value silently leaves
      the gateway serving the previous routing table.
-  3. The same `checksum/config` annotation in litellm.yaml (the MAIN proxy) —
+  2. The same `checksum/config` annotation in litellm.yaml (the MAIN proxy) —
      found stale the same day as litellm-local's, which is why both are gated.
-  4. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
+  3. The content-addressed 10-hex suffix on the platform-dev NFS provisioner
      Job's `metadata.name` (platform-dev-nfs-provisioner-job.yaml) — a Job's
      `spec.template` is immutable, so the suffix changes whenever the
      container image/args script changes, letting Flux prune+recreate the Job
      instead of failing an in-place patch.
-  5. The `checksum/chatgpt-chat` pod-template annotation in litellm.yaml —
+  4. The `checksum/chatgpt-chat` pod-template annotation in litellm.yaml —
      must equal sha256(bytes of kubernetes/apps/apps/ai/chatgpt_chat.py)[:12].
      That file is merged into the litellm-config ConfigMap in place (no name
      hash) and the proxy imports it only at startup, so this annotation is the
@@ -93,35 +88,6 @@ def _literal_block(text: str, marker_re: "re.Pattern[str]") -> tuple[list[str], 
             raw.pop()
         return raw, (content_indent if content_indent is not None else marker_indent + 2)
     raise ValueError(f"no line matching {marker_re.pattern!r} found")
-
-
-def check_capability_kids_checksum() -> Site:
-    """checksum/capability-kids (provisioner-deploy.yaml) vs a fresh sha256 of
-    the capability-kids.json value it stamps (capability-kids-configmap.yaml).
-
-    Recipe (matches the header comment in provisioner-deploy.yaml): sha256 of
-    the YAML-parsed (dedented) `capability-kids.json` string value, UTF-8
-    encoded, INCLUDING its single YAML-clip trailing newline.
-    """
-    deploy_path = REPO / "kubernetes/apps/infrastructure/security/openbao/provisioner-deploy.yaml"
-    cm_path = REPO / "kubernetes/apps/infrastructure/security/openbao/capability-kids-configmap.yaml"
-
-    deploy_text = deploy_path.read_text(encoding="utf-8")
-    m = re.search(r'checksum/capability-kids:\s*"([0-9a-f]{64})"', deploy_text)
-    if not m:
-        raise ValueError(f"checksum/capability-kids annotation not found in {deploy_path}")
-    expected = m.group(1)
-
-    cm_text = cm_path.read_text(encoding="utf-8")
-    raw_lines, content_indent = _literal_block(
-        cm_text, re.compile(r"^[ ]*capability-kids\.json:\s*\|\s*$")
-    )
-    # YAML `|` (clip chomping) dedents by the block's own indentation and
-    # keeps exactly one trailing newline — this recovers the literal
-    # capability-kids.json string value as the ConfigMap embeds it.
-    dedented = "".join("\n" if l.strip() == "" else l[content_indent:] for l in raw_lines)
-    actual = sha256_hex(dedented)
-    return Site(deploy_path, expected, actual)
 
 
 def check_platform_dev_job_suffix() -> Site:
@@ -273,7 +239,6 @@ def check_litellm_chatgpt_chat_checksum() -> Site:
 # Table of hash sites to verify. Add a `check_...() -> Site` function above
 # and append it here to cover a new site.
 SITES = [
-    check_capability_kids_checksum,
     check_platform_dev_job_suffix,
     check_litellm_local_config_checksum,
     check_litellm_config_checksum,

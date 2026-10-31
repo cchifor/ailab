@@ -17,9 +17,6 @@ resources:
   # contract". operator-seeds = create-if-absent (bootstrap floor, live vault wins, drift reported);
   # devworker-seeds + estate-seeds = `bao kv patch` seed-wins (seed overwrites live KV daily).
   - operator-seeds.sops.yaml # SOPS seed values (dispatcher PAT + reaper DSN) mounted into provision-job — FLOOR, create-if-absent
-  - capability-kids-configmap.yaml # OPERATOR-owned capability-kid policy (mounted by provisioner-deploy); CP-unwritable
-  - provisioner-deploy.yaml # `agentforge provisioner` controller Deployment + egress CiliumNetworkPolicy
-  - provisioner-podmonitor.yaml # kube-prometheus scrape of af_provisioner_* on :9465 (ailab#293) — object lives in ns `monitoring`, target is the Deployment above
   - openbao-lan.yaml # LAN NodePort :30820 for the dev-worker bao agents (ADR 0020)
   - devworker-seeds.sops.yaml # SOPS seed values for af/dev-workers/* (seed-wins contract)
   - devworker-provision-job.yaml # approle + per-worker policies/roles + KV seed (breakglass-auth)
@@ -28,6 +25,7 @@ resources:
   # copy would fight the sync and revert to a stale bearer token. They are cluster-derived, so a wipe
   # loses them until the next successful sync rather than until an operator acts. Recovery ordering:
   # docs/runbooks/openbao-recovery.md § the *sync-owned* path class.
+  - retired-token-revoker.yaml # revokes + deletes the retired AgentForge provisioner token should a re-bootstrap re-mint it (every 15m; get/delete on that one Secret only)
   - k8stoken-sync.yaml # TokenRequest -> per-worker kubeconfigs in af/dev-workers/* (k8s-auth, ADR 0021)
   - estate-seeds.sops.yaml # SOPS seed values for af/estate/* (proxmox/qnap/cloudflare/... — seed-wins)
   - estate-provision-job.yaml # seeds the af/estate/* operator-credential escrow (breakglass-auth)
