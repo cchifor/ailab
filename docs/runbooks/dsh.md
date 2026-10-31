@@ -110,7 +110,7 @@ authenticated by ONE router key:
 |---|---|---|---|
 | `llm-router-codex` — LLM Router (Codex) | `openai-responses` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` (image input), `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | header `X-Router-Route: pool-codex`: the smart pool over the Codex subscriptions |
 | `llm-router-claude` — LLM Router (Claude) | `openai-completions` | `opus`, `sonnet`, `haiku`, `fable` | the Claude subscriptions, by model name (direct policy) |
-| `llm-router-local` — LLM Router (Local) | `openai-completions` | `qwen3.8-flash-next` (default), `qwen3.8-27b`, `qwen3.8-27b-ailab`, `qwen3.8-27b-fp8`, `qwen3.8-27b-w4a16`, `qwen3.5-122b`, `qwen3-coder-30b-a3b` | the self-hosted servers |
+| `llm-router-local` — LLM Router (Local) | `openai-completions` | `qwen3.8-flash-next` (default), `qwen3.8-27b`, `qwen3.8-27b-ailab`, `qwen3.8-27b-fp8`, `qwen3.5-122b` | the self-hosted servers (`qwen3.8-27b-w4a16` and `qwen3-coder-30b-a3b` removed 2026-10-31) |
 
 The blocks live in `settings.seed.yaml` (its header records why three providers, why the public
 hostname, and the two Responses-path defects the Codex block works around) and are reconciled

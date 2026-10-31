@@ -264,6 +264,11 @@ data:
       # VISION: images work (host VISION=1). Verified with distinct-image probe 2026-09-07 --
       # red/blue/green -> RED/Blue/Green, 3/3 distinct AND correct. VIDEO IS UNTESTED: this
       # INT4 export ships no video_preprocessor_config.json, so do not advertise video.
+      # CLOUD3'S DEPLOYMENT REMOVED 2026-10-31: its w4a16 engine answered HTTP 200 with degenerate
+      # text (one token repeated, 8/8 replies, after two cold starts) while the same checkpoint on
+      # cloud2 answered correctly, and the owner retired the model (plans/2026-10-31-local-models-improvement-plan.md).
+      # This name is cloud2-only from then on; the fallback chain below still applies. The two-box
+      # history that follows is kept as the record of why the pool existed.
       # TWO BOXES, ONE CHECKPOINT, since 2026-09-21: the entry below is cloud2's persistent vLLM unit
       # (:18020, TP=2 while its 03:00.0 slot is empty -- cloudlab runbook section 11), and the one
       # after it is cloud3's `qwen3.8-27b-w4a16` llama-swap entry -- the SAME
@@ -342,21 +347,6 @@ data:
         litellm_params:
           model: openai/qwen3.8-27b
           api_base: http://192.168.0.28:18020/v1
-          api_key: "sk-noauth"
-          temperature: 1.0
-          top_p: 0.95
-          extra_body:
-            top_k: 20
-            chat_template_kwargs: { reasoning_effort: xhigh }
-        model_info: { supports_vision: true, max_input_tokens: 212992 }
-      # cloud3 -- the second deployment (see the block comment above). max_input_tokens 212992 is the
-      # same arithmetic as cloud2's: host --max-model-len 262144 minus 49152 for xhigh reasoning.
-      # Both hosts moved 131072 -> 262144 on 2026-09-23 TOGETHER: the same-checkpoint carve-out
-      # that lets them share this name assumes the same request-shaping, and the window is part of it.
-      - model_name: qwen3.8-27b-vllm-cloud
-        litellm_params:
-          model: openai/qwen3.8-27b-w4a16
-          api_base: http://192.168.0.26:8080/v1
           api_key: "sk-noauth"
           temperature: 1.0
           top_p: 0.95
@@ -463,21 +453,8 @@ data:
             chat_template_kwargs: { reasoning_effort: xhigh }
         model_info: { max_input_tokens: 81920, alias_of: qwen3.8-27b-fp8-cloud }
       # ---- COGNITIVE TIER: cloud3 ---------------------------------------------------------------
-      # qwen3-coder-next REPOINTED 2026-09-07: that model_name no longer exists. cloud3's llama-swap
-      # then served exactly two models (qwen3-coder-30b-a3b, qwen3.8-27b) — a THIRD, qwen3.5-122b,
-      # was added 2026-09-08 when it moved off ailab — and the weights for a
-      # "qwen3-coder-next" are not on the store at all, so every request under the old name 404'd at
-      # the backend. Registered here under the name llama-swap actually answers to.
-      # 30B MoE with 3B ACTIVE -- decode speed tracks ACTIVE parameters, not total, which is what makes
-      # this usable for agent loops. host -c 262144 across --parallel 2 => 131072/slot; minus ~8K output
-      # headroom = 122880.
-      # NOTE cloud3 now has FOUR GPUs (96 GiB), not the three this section was written for.
-      - model_name: qwen3-coder-30b-a3b-cloud
-        litellm_params:
-          model: openai/qwen3-coder-30b-a3b
-          api_base: http://192.168.0.26:8080/v1
-          api_key: "sk-noauth"
-        model_info: { max_input_tokens: 122880 }
+      # qwen3-coder-30b-a3b-cloud REMOVED 2026-10-31: the owner retired it from cloud3 as older and
+      # weaker than the models that stay (plans/2026-10-31-local-models-improvement-plan.md).
       # qwen3.8-flash-next — the PLANNING tier, added 2026-09-08. 80B-class MoE with few active
       # params, which is what makes a long-context planner usable: decode speed tracks ACTIVE
       # parameters, not total. MEASURED on cloud3: 59.8 tok/s generation, 128 tok/s prompt eval,
@@ -1179,7 +1156,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "4fead844c878"
+        checksum/config: "c65e2decbbca"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
