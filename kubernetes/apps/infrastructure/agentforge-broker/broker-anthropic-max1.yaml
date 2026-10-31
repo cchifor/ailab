@@ -31,7 +31,7 @@ metadata:
     app.kubernetes.io/managed-by: agentforge-operator
     app.kubernetes.io/part-of: agentforge
 spec:
-  replicas: 2
+  replicas: 0 # 0: AgentForge retired 2026-10-31 (plans/2026-10-31-retire-agentforge-plan.md, PR-0); deleted in PR-2
   strategy:
     type: RollingUpdate
     rollingUpdate:
