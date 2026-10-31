@@ -180,17 +180,17 @@ fmt:
 storage-status:
     cd {{ansible_dir}} && ansible pve_nodes -b -m command -a "pvesm status" --one-line
 
-# ============================ AgentForge v2 activation ============================
-# Fully-IaC activation of the dormant v2 stack (docs/runbooks/agentforge-activation.md).
-# Staged: 0 images -> ⛔1 operators/security merge (OpenBao auto-init/unseal/provision) ->
-# ⛔2 Kata pool -> ⛔3 agentforge merge -> ⛔4 un-gate -> ⛔5 boundary tests -> v1.1.
+# ============================ Cluster tooling (ex-AgentForge activation) ============================
+# What survived the AgentForge retirement (2026-10-31, ADR 0041): the nested-virt gate for the agent-node
+# Kata pool, the static manifest checks, the image pinning helper and the OpenBao bootstrap status. The
+# OpenBao bootstrap Jobs are described in docs/runbooks/openbao-recovery.md.
 
 # Stage-2 gate: assert AMD nested virt is live on every Proxmox host (Kata /dev/kvm prereq)
 nested-virt-verify:
     python scripts/check-nested-virt.py
 
-# Verify hand-computed content hashes (checksum/capability-kids annotation, platform-dev NFS
-# provisioner Job name suffix) haven't silently drifted from the content they describe. Static-only.
+# Verify hand-computed content hashes (the LiteLLM checksum/config and checksum/chatgpt-chat
+# annotations) haven't silently drifted from the content they describe. Static-only.
 af-verify-hashes:
     python scripts/check-inline-hashes.py
 
@@ -233,15 +233,6 @@ openbao-status:
     kubectl --context admin@ai -n openbao get pods,jobs,secrets,cm,secretstore,externalsecret 2>/dev/null || true
     @echo "--- canary ExternalSecret (must be Ready=True after provision) ---"
     kubectl --context admin@ai -n openbao get externalsecret openbao-canary -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}{"\n"}' 2>/dev/null || true
-
-# Step-0 pin verify (scripted, replaces the eyeball curl): assert <image>:<tag> still resolves to
-# <digest> before trusting/merging a pin. digest is OPTIONAL for image=agentforge-platform (self-
-# defaults to whatever's currently pinned in deployment.yaml, so this example can't drift stale). Usage:
-#   just pin-verify agentforge-platform 276ccad                  # self-defaulting, always current
-#   just pin-verify agentforge-platform 276ccad sha256:<64hex>   # explicit override
-# Verify an image:tag still resolves to its approved (or self-defaulted) digest
-pin-verify image tag digest="":
-    bash scripts/verify-image-digest.sh {{image}} {{tag}} {{digest}}
 
 # NB: `agent-nodes-plan`/`agent-nodes-apply` already exist above; run `just nested-virt-verify` FIRST
 # (Stage-2 gate) before `just agent-nodes-apply` — the Kata pool needs nested=Y on the target hosts.
