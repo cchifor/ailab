@@ -9,8 +9,7 @@ spec:
   timeout: 5m
   # Its OWN path/Kustomization (NOT a line in apps/ or infrastructure/kustomization.yaml) so the
   # operator-owned worker-autoscaling boundary does not collide with the P1 agentforge admission (apps
-  # layer) or the concurrent P2 operators work under infrastructure/{security,autoscaling}. Mirrors the
-  # agentforge-broker wiring. dependsOn:
+  # layer) or the concurrent P2 operators work under infrastructure/{security,autoscaling}. dependsOn:
   #   * external-secrets — installs the external-secrets.io/v1 CRDs (SecretStore/ExternalSecret) this tree's
   #     dispatcher-externalsecret.yaml applies; without it a bootstrap/rebuild could try to apply those CRs
   #     before the CRDs exist (codex Phase B #3).
