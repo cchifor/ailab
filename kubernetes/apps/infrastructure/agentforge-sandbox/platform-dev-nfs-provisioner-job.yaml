@@ -71,7 +71,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: af-sbx-provision-tenant-zero-platform-dev-064b3a6793 # suffix = sha256(image+args)[:10] — recompute on edit (header)
+  name: af-sbx-provision-tenant-zero-platform-dev-1a07e2b606 # suffix = sha256(image+args)[:10] — recompute on edit (header)
   namespace: agentforge # reaper's trusted home (baseline PSA); NOT agentforge-sandbox (restricted)
   annotations:
     # Backstop for a forgotten suffix recompute (see CONTENT-ADDRESSED NAME in the header): recreate
@@ -134,7 +134,7 @@ spec:
               # losing data; once gone this is a no-op on every re-run. A dir that vanishes between the test
               # and the rmdir is success; a dir still present after a failed rmdir fails the Job.
               P=/export/tenant-zero/playground
-              if [ -d "$P" ]; then rmdir "$P" || [ ! -e "$P" ]; echo "removed the empty retired subdir $P"; fi
+              if [ -d "$P" ]; then rmdir "$P" || [ ! -e "$P" ]; echo "retired subdir $P is gone"; fi
               echo "sandbox NFS subdirs ready (idempotent)"
           volumeMounts:
             - name: sandbox-export
