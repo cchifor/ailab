@@ -182,17 +182,19 @@ changes only `required_approvals` or `block_admin_merge_override` (plus `chifor`
      --token-name "$NAME" --scopes write:repository --raw 2>/dev/null | tr -d '\r\n')
    [[ $T =~ ^[0-9a-f]{40}$ ]] || { echo "mint failed"; exit 1; }
    g -f -o $W/rule.json "$API/branch_protections/main" || exit 1         # the record
-   python3 - $W "$MODE" "${APPROVALS:-0}" "$HEAD" <<'PY' || exit 1
+   python3 - $W "$MODE" "${APPROVALS:-}" "$HEAD" <<'PY' || exit 1
    import json, sys
-   w, mode, n, head = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+   w, mode, n, head = sys.argv[1:5]                  # n is unused (may be empty) in override mode
+   if mode == "approvals" and not n.isdigit():
+       sys.exit("MODE=approvals needs APPROVALS: the approvals the PR has at HEAD, 0 or 1")
    r = json.load(open(w + "/rule.json"))
    keep = {k: r[k] for k in ("merge_whitelist_usernames", "block_admin_merge_override",
                              "required_approvals")}
    json.dump(keep, open(w + "/restore.json", "w"))
    mwl = keep["merge_whitelist_usernames"] or []
    op = {"merge_whitelist_usernames": mwl + ([] if "chifor" in mwl else ["chifor"])}
-   if mode == "approvals" and 0 <= n < keep["required_approvals"]:
-       op["required_approvals"] = n
+   if mode == "approvals" and int(n) < keep["required_approvals"]:
+       op["required_approvals"] = int(n)
    elif mode == "override":
        op["block_admin_merge_override"] = False
    else:
