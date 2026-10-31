@@ -13,7 +13,7 @@
 // USAGE
 //   ROUTER_KEY=... node scripts/bench-router-local.mjs --model local/qwen3.8-27b-fp8 [--model ...]
 //       [--router https://router.chifor.me] [--server http://192.168.0.26:8080] [--unload]
-//       [--runs 3] [--only decode,prefill,depth,quality,tools,vision,concurrency] [--vision]
+//       [--runs 3] [--only decode,prefill,depth,quality,tools,vision,concurrency] [--vision] [--seed N]
 //       [--out results.jsonl]
 //   node scripts/bench-router-local.mjs --backend http://192.168.0.26:8080 --model qwen3.8-flash-next ...
 //
@@ -70,11 +70,15 @@ const QUALITY = [
   { id: 'reasoning', prompt: 'A train leaves at 14:40 and the journey takes 2 hours 35 minutes. At what time does it arrive? Answer with the time only.', expect: /17[:.]15/ },
   { id: 'prose', prompt: 'Explain how a Fresnel lens concentrates light, in about 120 words.', expect: /fresnel|lens|light/i },
 ];
-const filler = (n) => Array.from({ length: n }, (_, i) => `Entry ${i} (${Math.random().toString(36).slice(2, 8)}): the keeper logged the wind, trimmed the wick and polished the lens.`).join('\n');
+// Seeded, so a before/after pair sends byte-identical prompts; one seed per run, so the runs of one
+// invocation still differ and cannot hit each other's prefix cache. Records carry cachedTokens.
+const SEED = Number(opt('seed', '20261031'));
+function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const filler = (n, seed) => { const r = rng(SEED + seed); return Array.from({ length: n }, (_, i) => `Entry ${i} (${r().toString(36).slice(2, 8)}): the keeper logged the wind, trimmed the wick and polished the lens.`).join('\n'); };
 // 330 entries measured 9,321 prompt tokens on Qwen3.8 (8,965 on Qwen3-Coder) on 2026-10-31; 535 scale to
 // ~15k. Every prefill record carries the real prompt_tokens and a sizeWarning when it is >15% off target.
 const ENTRIES = { '9k': 330, '15k': 535 }, TARGET = { '9k': 9300, '15k': 15000 };
-const LONG = { '15k': filler(ENTRIES['15k']) };
+const LONG = { '15k': filler(ENTRIES['15k'], 1000) };
 const COUNT_Q = '\n\nHow many entries are listed above? Answer with a number only.';
 
 // A 32x32 solid red PNG, built here so the harness needs no files.
@@ -141,6 +145,7 @@ const round = (v, d = 1) => (v == null || !Number.isFinite(v) ? null : Number(v.
 const median = (xs) => { const s = xs.filter((x) => x != null).sort((a, b) => a - b); return s.length ? s[Math.floor((s.length - 1) / 2)] : null; };
 const summary = (r) => ({ status: r.status, servedRoute: r.servedRoute, error: r.error, finish: r.finish, firstByteS: round(r.firstByteS, 2), firstGenS: round(r.firstGenS, 2), firstS: round(r.firstS, 2), totalS: round(r.totalS, 2),
   promptTokens: r.usage?.prompt_tokens ?? null, completionTokens: r.usage?.completion_tokens ?? null,
+  cachedTokens: r.usage?.prompt_tokens_details?.cached_tokens ?? r.timings?.cache_n ?? null,
   backendDecode: round(r.timings?.predicted_per_second), backendPrefill: round(r.timings?.prompt_per_second), cacheN: r.timings?.cache_n ?? null,
   degenerate: degenerate(r.content), sample: r.content.slice(0, 120).replace(/\s+/g, ' ') });
 
@@ -163,7 +168,7 @@ async function benchModel(model) {
     for (const size of ['9k', '15k']) {
       const runs = [];
       for (let i = 0; i < RUNS; i++) {
-        const r = await chat(model, [{ role: 'user', content: filler(ENTRIES[size]) + COUNT_Q }], { maxTokens: 16 }); runs.push(r);
+        const r = await chat(model, [{ role: 'user', content: filler(ENTRIES[size], (size === '9k' ? 100 : 200) + i) + COUNT_Q }], { maxTokens: 16 }); runs.push(r);
         const got = r.usage?.prompt_tokens ?? null, off = got ? Math.abs(got - TARGET[size]) / TARGET[size] : null;
         record({ model, phase: `prefill${size}-${i + 1}`, ...summary(r), prefillTokS: round((got ?? 0) / r.totalS), ...(off !== null && off > 0.15 ? { sizeWarning: `prompt_tokens ${got} is ${Math.round(off * 100)}% off the ${TARGET[size]} target` } : {}) });
       }
