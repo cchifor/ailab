@@ -1,13 +1,5 @@
 # Local models: fix the timeouts, speed up flash-next, prune cloud3, re-validate
 
-## Codex Review
-
-- Round 1 substantially improved consumer migration, benchmark comparability, cancellation coverage and rollback; the remaining findings below concern unresolved or newly introduced gaps.
-- P0's proposed model-limited key is unsupported, and WS4's Assistant checks require separate management authentication.
-- Removing the step timer is reasonable, but the real turn deadline needs integration coverage; the new account timeout policy needs precedence/failover tests and an Assistant budget check.
-- Alias retirement must include runtime catalogs, the retained cloud2 name must be excluded from removal assertions, and preload must follow qualification.
-- The qualification path still risks exposing experimental models, lacks a cgroup-specific abort gate, and permits performance noise to satisfy its minimum.
-
 ## Context
 
 The owner asked (2026-10-31) for seven things: fix the timeout issues, improve `qwen3.8-flash-next`
@@ -69,11 +61,11 @@ still the cloud3 half of LiteLLM's `qwen3.8-27b-vllm-cloud` (`litellm.yaml` and
 ## Decisions for the owner (recommendations in bold)
 
 - **D1. cloud3 after w4a16:** **retire the `default` alias** (a sweep of ailab and cloudlab found no
-  client that requests `default`; re-check in WS0.3) and **preload `qwen3.8-flash-next` with the old
-  default's idle TTL (86400 s)**, conditional on WS2 qualifying it. Preload happens at boot only: any
-  request for another cloud3 model evicts it, and it stays cold until next asked or next boot.
-  Alternatives: preload `qwen3.8-27b-fp8` (183 s vLLM start), or nothing.
-  <!-- codex: Retirement must also audit and remove any `.26` runtime catalog entry or deployment naming `default`; a git-only client sweep misses SQLite state, and model refresh never removes stale entries (llm-router/packages/plugins/provider-registry/models-api.ts:73). Verify the retired alias directly against llama-swap and, if previously exposed, as `local/default`, while preserving the router's separate named `default` route. -->
+  client that requests `default`; re-check in WS0.3; `.26`'s router catalog has no `default` entry
+  today) with **no preload in the interim** (WS3.2), then **preload `qwen3.8-flash-next` with the old
+  default's idle TTL (86400 s) only at WS2.7, once it has qualified**. Preload happens at boot only:
+  any request for another cloud3 model evicts it, and it stays cold until next asked or next boot.
+  Alternatives: preload `qwen3.8-27b-fp8` (183 s vLLM start), or nothing at all.
 - **D2. Files:** **delete `/models-local/vllm/models/Qwen3.8-27B-W4A16-AutoRound-fast` after WS4
   passes** (hygiene; it is not a prerequisite — 62 GiB is already free and a llama.cpp build needs a
   few GiB); **keep the NFS GGUFs of `qwen3-coder-30b-a3b` and `qwen3.8-27b` Q6_K unserved until
@@ -98,21 +90,24 @@ before cloud3 deletes it. The timeout fix ships independently of the llama.cpp w
 ### P0 — Freeze the benchmark harness and take a baseline (before any change)
 
 Commit `scripts/bench-router-local.mjs` to ailab (from today's `bench.mjs`): it reads the router URL
-and an **inference-scoped router key** from the environment (an `api-keys` key limited to the local
-models, 14-day expiry, revoked at the end), never the admin token, and sends no production prompts.
-<!-- codex: Blocking: `api-keys` grants accept existing named routes, not direct-model allowlists, and route-scoped principals cannot invoke virtual policies (llm-router/packages/plugins/api-keys/keys.ts:47; packages/modules/inference/index.ts:234). Choose an implementable credential strategy before P0: temporary named benchmark routes would bypass WS1.2, whereas an all-routes key inherits the issuer's access, so neither silently substitutes for the promised restricted direct-model test (packages/plugins/api-keys/keys.ts:195). -->
-It records per run: router config revision, backend build, flags, sampling, `max_tokens`, token
-counts, cache state (process-cold / file-cold / warm), and the spread of three runs. Metrics:
-
+and a router key from the environment, never the admin token, and sends no production prompts.
+The key is an **all-routes `api-keys` key with a 7-day expiry, revoked at the end**. A key scoped to
+named routes cannot make direct-model requests (`packages/modules/inference/index.ts:234`), and every
+api-key principal has role `client`, which `/admin/` refuses (`packages/plugins/api-keys/keys.ts:162`).
+It inherits the issuing admin's access, so it can reach subscription models too; the harness only
+names local ids. It also has a **backend mode** (a server URL instead of the router) for WS2
+qualification. Every request gets its own wall-clock deadline (900 s) with abort and stream cleanup
+(a heartbeat- or reasoning-only response can keep the engine alive indefinitely,
+`tests/stream-timeouts.test.ts:85`); a deadline hit is recorded as a result, not a hang. It records
+per run: router config revision, backend build, flags, sampling, `max_tokens`, token counts, cache
+state (process-cold / file-cold / warm), and the spread of three runs. Metrics:
 - load (llama-swap journal), client time to first usable content or tool delta (SSE keepalives and
   hidden reasoning excluded), and backend compute rates (llama.cpp `timings`; vLLM metrics) kept
   separate from client-visible latency;
 - prefill at 9.3k and at 15k tokens (the Assistant's size), decode at short and at 15k depth;
 - a fixed quality set (below) instead of the "250 words" prompt, which sent Qwen3.8 into
   word-counting.
-
 Run it once against the current state (b10857, current flags) for every model that stays.
-<!-- codex: Give each harness request an explicit wall-clock deadline and abort/stream cleanup, including heartbeat-only responses; inference calls have no Assistant turn cap, and upstream activity can keep the engine alive indefinitely (llm-router/tests/stream-timeouts.test.ts:85). Record deadline failures as baseline results so a hung run cannot block the timeout fix. -->
 
 ### WS0 — Stop pointing at the removed models (ailab PR)
 
@@ -143,34 +138,41 @@ Run it once against the current state (b10857, current flags) for every model th
 ### WS1 — Timeouts (llm-router PR + image release; independent of WS2)
 
 1. **Remove the 90 s step timer** from `agent-llm/loop.ts`. A step then runs under the turn signal
-   (10-minute `TURN_CAP_MS`, Stop) and the engine's wait/idle timers, which already end a dead or
-   stalled upstream. Changes:
-
-   - when the turn CAP (not the user) ends a step, show "The model did not finish within 10 minutes"
-     instead of ending silently; an explicit Stop still ends the turn with no fallback (U13);
+   (`TURN_CAP_MS`, Stop) and the engine's wait/idle timers, which already end a dead or stalled
+   upstream. Changes:
+   - **raise `TURN_CAP_MS` from 10 to 15 minutes.** WS1.2's 600 s wait is the time one cold step
+     may legitimately spend before its first byte (≤120 s vLLM unload + ~367 s 122B load + prefill);
+     a 10-minute turn would leave ~113 s for every other step, prefill, reasoning and tool of that
+     turn. Make the host deadline testable (agent-core builds it with native `AbortSignal.timeout`,
+     `agent-core/index.ts:707`, which fake timers do not drive) by injecting the timer;
+   - when the turn CAP (not the user) ends a step, show "The model did not finish within 15 minutes"
+     exactly once instead of ending silently; an explicit Stop still ends the turn silently with no
+     fallback (U13) and releases the request;
    - after 15 s with no event, set the existing working label (`t.working`, `loop.ts:152,168`) to
      "Waiting for <model>'s answer… Ns", refreshed every 5 s and cleared on any text, tool, usage,
      finish, error or abort, so a late tick cannot overwrite a finished step. It says "waiting", not
      "loading": hidden reasoning and a cold load look the same at this layer.
-
    Tests (vitest, fake timers): a step whose first event arrives at 150 s completes; a silent upstream
    ends through the engine wait and falls back to guided mode; a stall after output ends through the
    idle timer; a reasoning- or heartbeat-only upstream (`tests/stream-timeouts.test.ts:85` pattern)
-   is bounded by the turn cap with the new message; Stop during the wait aborts the upstream and
+   is bounded by the turn cap with the new message; the real host turn deadline (not only the loop
+   fixture) produces that message exactly once; Stop during the wait aborts the upstream and
    releases the admission slot; a cold multi-step tool round trip completes; the label timer is
    cleared on every exit path. `loop.ts` is in the vendorable set: keep
    `scripts/check-architecture.mjs` and `tests/library-boundary.test.ts` passing and note the change
    for cchifor/platform's vendored copy (`scripts/sync-llm-router.mjs`).
-   <!-- codex: Test the actual host-created turn deadline as well as loop fixtures: agent-core uses native `AbortSignal.timeout`, whereas the current fake-timer test exercises the step's `setTimeout` (llm-router/packages/plugins/agent-core/index.ts:707; tests/agent-loop.test.ts:235). Make that host deadline testable and assert that expiry produces the new message exactly once while explicit Stop remains silent and releases the request. -->
 2. **Per-account wait for slow cold loads (same PR).** Add optional `Account.timeouts { waitMs,
    idleMs }`, validated (1 s–30 min). It applies to direct-model (virtual) policies — which is how
    pinned Assistant requests and `local/<model>` API calls resolve (`agent-llm/index.ts:88`) — as the
    largest override among the served accounts, else `defaults`, else the built-ins. Named routes keep
-   their own `timeoutMs` (the main Codex/Claude routes set 300 s explicitly today). Then set
-   `lan-192.168.0.26-8080` to `waitMs: 600000` (≤120 s vLLM unload + ~367 s worst 122B NFS load +
-   prefill). Rejected alternative: raising the router-wide `defaults.timeouts.waitMs` would also
+   their own `timeoutMs` (the main Codex/Claude routes set 300 s explicitly today). The engine fixes
+   the timeouts once, from the requested policy, for every attempt (`inference/index.ts:391`), so the
+   largest override also governs a faster sibling's attempt; accepted, because every local model here
+   is served by one account (`.45`/`.46` share a name, and `.46` is unexposed). Tests: mixed-account
+   failover, a `waitMs`-only override, a disabled-model replacement, and named routes unchanged. Then
+   set `lan-192.168.0.26-8080` to `waitMs: 600000` (≤120 s vLLM unload + ~367 s worst 122B NFS load
+   + prefill). Rejected alternative: raising the router-wide `defaults.timeouts.waitMs` would also
    lengthen every direct subscription request (dsh asks for `opus` and `sonnet` directly).
-   <!-- codex: The engine computes timeouts once before selecting an account and reuses them for all attempts, so taking the largest override also lengthens faster siblings' attempts, even when the slow candidate is later rejected by eligibility checks (llm-router/packages/modules/inference/index.ts:245,391). Explicitly accept or change that coupling, and add routing/engine tests for mixed-account failover, partial wait/idle overrides, disabled-model replacements and unchanged named-route behavior. -->
 3. **Public clients must stream for cold local models.** Document in `docs/runbooks/llm-router.md`
    and the router's agent skill that a non-streaming request through `router.chifor.me` is cut by
    Cloudflare at ~100–125 s; streaming survives through keepalives. WS4 confirms dsh streams.
@@ -199,25 +201,30 @@ Run it once against the current state (b10857, current flags) for every model th
    record `sha256` in `host/qwen3.8-flash-next.SHA256SUMS`; keep a verified NFS copy of the current
    shards and `mmproj` before touching `/models-local` (62 GiB free cannot hold two 84 GiB copies, so
    the local swap is copy-then-rename, not atomic). New weights restart WS2.5.
-5. **Qualify, one variable at a time,** on a temporary llama-swap entry kept out of the router: use
-   llama-swap's per-model `unlisted` option if v250 has it; otherwise remove the entry from the router
-   catalog by hand after deleting it (catalog refresh only adds). Steps: (a) new build, current
-   flags; (b) + `-ub 2048 -b 4096`; (c) only if WS2.1 showed faults dominate: `--lazy-mode off
-   --no-mmap`, with measured placement (per-card VRAM, LXC anon and file peaks) and abort thresholds
-   (host `MemAvailable` < 16 GiB, or memory PSI `some avg10` > 10). Each step runs the P0 harness,
-   the quality set, a vision probe (flash-next has `mmproj`) and two concurrent requests.
-   <!-- codex: Post-test cleanup does not prevent experimental models becoming available during qualification, because refresh imports them enabled (llm-router/packages/plugins/provider-registry/models-api.ts:73). Specify isolation before advertising the entry and a matching backend mode for the benchmark harness, or an explicitly controlled test route; an entry kept out of the router cannot simply be tested through P0's ordinary direct-model path. -->
-   <!-- codex: Host MemAvailable/PSI thresholds do not protect the LXC's independent 160 GiB limit: prior runs reached 159 GiB with reclaim active (cloudlab gitea/main:docs/runbooks/cloud-gpu-cluster.md:1957). Add cgroup headroom/reclaim and memory.events abort criteria monitored during startup as well as inference before trying the no-mmap variant. -->
-   **Target:** prefill ≥ 600 tok/s at 9.3k and 15k, decode ≥ 55 tok/s. **Minimum to ship:** better
-   prefill than the P0 baseline, decode within −5 %, every quality, vision and concurrency check
-   passing. Meeting the minimum but not the target ships, with the gap recorded as a follow-up.
-   <!-- codex: “Better prefill” can pass on measurement noise while decode regresses by 5%; the new bar therefore does not yet demonstrate the requested improvement. Define a material improvement margin against the three-run spread at both prompt lengths and matched cache states, and apply the decode floor separately at short and 15k depth. -->
+5. **Qualify, one variable at a time,** on a temporary llama-swap entry that never reaches the
+   router: the P0 harness in backend mode talks to llama-swap directly; the entry is `unlisted` if
+   llama-swap v250 supports that per-model option (check first); nobody refreshes the `.26` catalog
+   during qualification (the health monitor only reports new server models,
+   `upstream-health/monitor.ts:183`; an explicit refresh would import it enabled,
+   `models-api.ts:73`); and after cut-over `.26`'s `allowedModels` is checked for the temporary name.
+   Steps: (a) new build, current flags; (b) + `-ub 2048 -b 4096`; (c) only if WS2.1 showed faults
+   dominate: `--lazy-mode off --no-mmap`, with measured placement (per-card VRAM, LXC anon and file
+   peaks) and abort criteria watched during startup AND inference: the LXC's own cgroup (headroom
+   under its 160 GiB `memory.max` below 16 GiB, or any new `high`/`max` in `memory.events`), host
+   `MemAvailable` < 16 GiB, or memory PSI `some avg10` > 10. Each step runs the P0 harness, the
+   quality set, a vision probe (flash-next has `mmproj`) and two concurrent requests.
+   **Target:** prefill ≥ 600 tok/s at 9.3k and 15k, decode ≥ 55 tok/s. **Minimum to ship:** prefill
+   at least 1.5× the P0 baseline median at BOTH 9.3k and 15k, outside the baseline's three-run spread,
+   with matched cache states; decode no worse than −5 % at short AND at 15k depth, each measured
+   separately; every quality, vision and concurrency check passing. Meeting the minimum but not the
+   target ships, with the gap recorded as a follow-up; missing the minimum keeps b10857.
 6. **MTP is optional.** Only if the frozen mainline build loads Unsloth's MTP draft
    (`MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`, 2.79 GB) for this checkpoint, reports acceptance
    statistics and passes the quality comparison; Unsloth documents it on a custom branch
    (`danielhanchen/llama.cpp` `qwen4exp/mtp`), which is never deployed. Otherwise skip and record.
 7. **Cut over** in its own cloudlab PR and deploy gate: point `qwen3.8-flash-next` at the new
-   binary, flags and (if changed) weights; delete the temporary entry; deploy by the runbook
+   binary, flags and (if changed) weights; apply D1's flash-next preload and TTL now that it has
+   qualified; delete the temporary entry; deploy by the runbook
    (timestamped on-box backup, `pct push 5101 … /etc/llama-swap.yaml`, restart at a quiet moment);
    verify the running binary (`/proc/<pid>/exe`, the version in the log), the flags, health and a real
    completion; then a rollback smoke (switch to b10857 with its flags and assets, verify, switch
@@ -232,40 +239,46 @@ Run it once against the current state (b10857, current flags) for every model th
    (none on `.26` today) or capability list names the three. Verify with a request that
    `local/qwen3.8-27b` is served by `lan-192.168.0.28-18020` (trajectory `accountId`).
 2. **cloudlab `host/llama-swap.yaml` (removal PR):** delete the `qwen3.8-27b`,
-   `qwen3-coder-30b-a3b` and `qwen3.8-27b-w4a16` entries; apply D1 (`default` alias, preload, TTL);
+   `qwen3-coder-30b-a3b` and `qwen3.8-27b-w4a16` entries; apply D1's interim state (the `default`
+   alias retired, no preload — flash-next's preload waits for WS2.7);
    update README's cloud3 table, the runbook, any monitoring rule or rule test naming them, and retire
    `scripts/cloud3-w4a16-gate.sh` with a pointer in the runbook. Deploy (WS2.7 procedure) and verify
    `/v1/models`, `/running` and a completion on each retained model.
-   <!-- codex: The rollout executes this removal PR before WS2 qualification, so applying D1's flash-next preload/TTL here violates D1's own qualification condition. Retire the alias and remove w4a16 now with an explicit interim preload choice, then apply the qualified flash-next preload/TTL in WS2.7. -->
 3. **Router, after that deploy:** drop the three from `.26`'s `allowedModels` and `disabledModels`
-   (one If-Match PUT). Removed ids now answer 404 `MODEL_NOT_FOUND` (before this step: 400
-   `MODEL_NOT_SUPPORTED`).
-   <!-- codex: D3 deliberately preserves `local/qwen3.8-27b`, and the bare `qwen3.8-27b` route also remains, so neither should return 400 or 404 (llm-router/packages/modules/routing/index.ts:108). Enumerate the retired request IDs and fix the corresponding WS4.1 and final Verification assertions; removal of a cloud3 deployment is not removal of its reused public name. -->
+   (one If-Match PUT). The retired request ids are exactly `qwen3-coder-30b-a3b`,
+   `local/qwen3-coder-30b-a3b`, `qwen3.8-27b-w4a16` and `local/qwen3.8-27b-w4a16`: they now answer
+   404 `MODEL_NOT_FOUND` (before this step: 400 `MODEL_NOT_SUPPORTED`). `local/qwen3.8-27b` is NOT
+   retired (D3: it is now cloud2), nor is the bare `qwen3.8-27b` route; on cloud3 itself, `default`
+   and the three names answer 404 from llama-swap.
 4. **Files per D2.**
 
 ### WS4 — Validate the remaining models (item 6)
 
 Models: `local/qwen3.8-27b-fp8`, `local/qwen3.8-flash-next`, `local/qwen3.5-122b`,
 `local/qwen3.8-27b-ailab`, `local/qwen3.8-27b` (cloud2, D3), and the route `qwen3.8-27b`.
-Through the PUBLIC URL with the inference-scoped key, streaming and non-streaming; admin access in
-the pod only to read trajectories.
-<!-- codex: An inference key cannot create/configure an Assistant conversation or call Stop: api-keys principals have role `client`, which is refused on every `/admin/` endpoint (llm-router/packages/plugins/api-keys/keys.ts:162; packages/kernel/http.ts:387). Specify a separate authenticated management session for WS4.3, including the public browser Stop/reconnect check, while keeping that credential outside the inference harness. -->
-
-1. **Catalog:** `/v1/models` is exactly the intended set; the three removed ids answer as WS3.3 says.
-2. **Correctness, per model, cold then warm:** a fixed set (one factual question, one short
+Inference checks go through the PUBLIC URL with the P0 key. Assistant checks need a management
+session, which an api-key cannot give: they use the router's admin bearer from INSIDE the pod (it
+never leaves the pod and is never given to the harness), which also reads trajectories.
+1. **Catalog:** `/v1/models` is exactly the intended set; the retired ids answer as WS3.3 says;
+   `local/qwen3.8-27b` is served by `.28`.
+2. **Correctness, per model, cold then warm, streaming** (a cold load through the public URL only
+   survives as a stream): a fixed set (one factual question, one short
    reasoning question, "Explain how a Fresnel lens concentrates light, in about 120 words") with
    `max_tokens` 4096: `finish_reason` `stop`, non-empty content, no repetition loop; a full tool round
    trip (a call with valid JSON arguments → the tool result → a final answer); a vision probe where
-   the model advertises vision; on cloud3, two concurrent requests and one swap transition.
-   <!-- codex: Separate the public non-streaming negative test from the correctness pass matrix: cold requests that exceed Cloudflare's documented limit cannot satisfy WS4.2 through that path (ailab/docs/runbooks/llm-router.md:114). Require cold correctness through streaming and record the expected edge cutoff separately. -->
+   the model advertises vision; on cloud3, two concurrent requests and one swap transition. Separately,
+   one public NON-streaming request to a cold cloud3 model, recorded as the expected Cloudflare edge
+   cut (a negative test, not part of the pass matrix).
 3. **Assistant, per model, starting cold** (cloud3 models explicitly unloaded through llama-swap
    first): a dedicated conversation with Apply set to ask, and a read-only task that uses a tool
    ("list the router's routes"). **Pass:** the turn answers without the guided-mode fallback, within
    the turn cap. Record input tokens, serving account and elapsed time from the trajectory, and assert
-   the config revision did not change. Then Stop a running turn through `POST /admin/v1/chat/stop` and
-   confirm the upstream request ended. A model that fails is a FAIL, not a footnote: it goes back to
-   the owner to fix or remove.
-   <!-- codex: The 600-second engine wait does not extend the 600-second whole-turn deadline (llm-router/packages/plugins/agent-core/index.ts:707): the stated 120 + 367 seconds already leave only 113 seconds for both model steps, prefill, reasoning and tools. Add a representative 13–15.5k-token FP8-to-122B Assistant tool round trip, including unload time, because explicitly unloading before this test skips the transition used to justify WS1.2. -->
+   the config revision did not change. Plus the worst real transition, NOT pre-unloaded: with
+   `qwen3.8-27b-fp8` resident, a pinned `local/qwen3.5-122b` Assistant turn with a tool round trip
+   (13–15.5k input tokens, as every Assistant step carries) must complete inside the 15-minute turn.
+   Then Stop a running turn through `POST /admin/v1/chat/stop`, confirm `GET /admin/v1/chat` shows it
+   ended and the upstream request was released (the browser Stop/reconnect path is not automated
+   here). A model that fails is a FAIL, not a footnote: it goes back to the owner to fix or remove.
 4. **Consumers:** from the dsh pod, one streaming request per model dsh lists; Open WebUI's default
    (`qwen3.8-27b-vllm-cloud`) through the main gateway, served by cloud2 (check the LiteLLM log);
    litellm-local's diagnostic copy; the main gateway's fallback chain is checked in config only (no
@@ -281,7 +294,8 @@ cloud3 table; update the memory note.
 
 ## Critical files
 
-- llm-router: `packages/plugins/agent-llm/loop.ts`, `packages/contracts/` (`Account.timeouts`),
+- llm-router: `packages/plugins/agent-llm/loop.ts`, `packages/plugins/agent-core/index.ts`
+  (`TURN_CAP_MS`, an injectable deadline), `packages/contracts/` (`Account.timeouts`),
   `packages/modules/routing/index.ts` (`timeoutsFor` for direct policies), config validation, tests
   under `tests/` (new + `stream-timeouts.test.ts`)
 - ailab: `kubernetes/apps/apps/ai/litellm.yaml`, `litellm-local.yaml`, `open-webui.yaml` (generated
@@ -330,7 +344,8 @@ reasoning in the Assistant; moving `qwen3.5-122b` to local NVMe (no space); driv
 
 ## Verification
 
-Done when: the three models are gone from the router (404), LiteLLM, Open WebUI, dsh and cloud3;
+Done when: the retired ids answer 404 from the router (WS3.3's list) and the three models are gone
+from LiteLLM, Open WebUI, dsh and cloud3, while `local/qwen3.8-27b` now reaches cloud2;
 every remaining model passes WS4.2 and WS4.3 (any failure is decided by the owner, not recorded and
 passed); a 90-second cold load no longer fails an Assistant turn and a cold 122B no longer fails a
 streaming API call; flash-next meets at least the WS2.5 minimum and holds it in WS4.5; the
