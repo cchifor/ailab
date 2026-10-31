@@ -8,7 +8,7 @@ from, not a manifest under test here). Every `kind: Kustomization` document
 in that directory names a `spec.path` this repo's own tooling can attempt to
 `kustomize build`.
 
-NOT EVERY ONE OF THOSE PATHS IS LOCAL. The agentforge-tenants, platform,
+NOT EVERY ONE OF THOSE PATHS IS LOCAL. The platform,
 muse-stream, Trueswarm and cloudlab (monitoring) stages reference other repositories.
 Trueswarm's runtime and administrative stages are now sourced from the private
 cchifor/trueswarm-admin repository. Their paths are built and validated by that
@@ -34,7 +34,7 @@ then classifies each Kustomization by looking its reference UP in that table:
   * EXTERNAL — the resolved object's url is a different repo AND the object
                is a reviewed entry in `EXPECTED_EXTERNAL_SOURCES`, the closed
                allowlist of externally-sourced objects this step is ALLOWED
-               to skip (currently exactly `agentforge-tenants`, `platform` and
+               to skip (currently exactly `platform`,
                `muse-stream`, `trueswarm`, `trueswarm-admin`, `cloudlab`, `envoy-gateway` and
                `workbricks-c1`). The path is excluded and the exclusion is printed
                to stderr so a CI log makes the gate's real coverage visible.
@@ -103,7 +103,7 @@ REPO = Path(__file__).resolve().parents[1]
 CLUSTER_AI = REPO / "kubernetes/apps/clusters/ai"
 
 #: `<owner>/<repo>` of THIS repository, and the ONLY hosts that serve it: the in-cluster Gitea
-#: http and ssh Services (gotk-sync.yaml / agentforge-tenants-source.yaml use them), the public
+#: http and ssh Services (gotk-sync.yaml and the external sources use them), the public
 #: Gitea hostname, and the GitHub push-mirror ADR 0017 keeps as the rollback. A GitRepository url
 #: is this repo's content only when BOTH the host is one of these AND its path is exactly this
 #: slug (`.git` suffix or not, any scheme/userinfo/port, scp-like form included). The slug alone
@@ -125,7 +125,6 @@ LOCAL_REPO_HOSTS = frozenset(
 #: tree and must STILL resolve to a non-local url; the allowlist never overrides resolution.
 EXPECTED_EXTERNAL_SOURCES = frozenset(
     {
-        ("flux-system", "agentforge-tenants"),
         ("flux-system", "platform"),
         ("flux-system", "muse-stream"),
         ("flux-system", "trueswarm"),

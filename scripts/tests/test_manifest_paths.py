@@ -47,7 +47,7 @@ REAL_CLUSTER_AI = pathlib.Path(mp.CLUSTER_AI)
 #: The full set of Flux Kustomization paths in kubernetes/apps/clusters/ai that this checkout can
 #: actually `kustomize build` — i.e. sourceRef resolves to THIS repo's own flux-system source, per
 #: kubernetes/apps/clusters/ai/flux-system/gotk-sync.yaml (GitRepository flux-system's url IS
-#: cchifor/ailab.git). External stages name paths in agentforge-tenants, platform,
+#: cchifor/ailab.git). External stages name paths in platform,
 #: muse-stream and the private trueswarm-admin repo. Their source objects form a closed,
 #: reviewed allowlist; a new external source without an entry fails discovery.
 #: The local paths below are checked against actual kustomization.yaml files.
@@ -59,7 +59,6 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/agentforge-pkgcache",
         "./kubernetes/apps/infrastructure/agentforge-runtimeclasses",
         "./kubernetes/apps/infrastructure/agentforge-sandbox",
-        "./kubernetes/apps/infrastructure/agentforge-tenant-platform-dev",
         "./kubernetes/apps/agentforge-tenants-bootstrap",
         "./kubernetes/apps/infrastructure/agentforge-workers",
         "./kubernetes/apps/apps",
@@ -114,7 +113,7 @@ EXPECTED_LOCAL_PATHS = frozenset(
 )
 
 EXCLUDED_EXTERNAL_PATHS = frozenset({
-    "./tenants", "./deploy/gitops/flux/clusters/ailab", "./deploy/kubernetes/overlays/ailab",
+    "./deploy/gitops/flux/clusters/ailab", "./deploy/kubernetes/overlays/ailab",
     "./deploy/foundation", "./deploy/security", "./deploy/ailab-migration", "./deploy/ailab",
     "./deploy/qualification", "./deploy/platform-migration", "./deploy/platform-owner-rotation",
     "./deploy/security-checks", "./deploy/monitoring", "./deploy/platform",
@@ -124,7 +123,7 @@ EXCLUDED_EXTERNAL_PATHS = frozenset({
 #: the in-cluster Gitea forge is the master; GitHub is a push-mirror backup of the SAME repo).
 LOCAL_URL = "http://gitea-http.gitea.svc.cluster.local:3000/cchifor/ailab.git"
 GITHUB_BACKUP_URL = "ssh://git@github.com/cchifor/ailab"
-TENANTS_URL = "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/agentforge-tenants.git"
+EXTERNAL_URL = "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/cchifor/muse-stream.git"
 
 
 @contextlib.contextmanager
@@ -274,10 +273,9 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         sources = mp.declared_git_repositories()
         self.assertEqual(
             set(sources),
-            {("flux-system", "flux-system"), ("flux-system", "agentforge-tenants"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab"), ("flux-system", "envoy-gateway"), ("flux-system", "workbricks-c1")},
+            {("flux-system", "flux-system"), ("flux-system", "platform"), ("flux-system", "muse-stream"), ("flux-system", "trueswarm"), ("flux-system", "trueswarm-admin"), ("flux-system", "cloudlab"), ("flux-system", "envoy-gateway"), ("flux-system", "workbricks-c1")},
         )
         self.assertTrue(mp.is_this_repo(sources[("flux-system", "flux-system")]))
-        self.assertFalse(mp.is_this_repo(sources[("flux-system", "agentforge-tenants")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "platform")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "muse-stream")]))
         self.assertFalse(mp.is_this_repo(sources[("flux-system", "trueswarm")]))
@@ -343,7 +341,7 @@ class RepoUrlIdentity(unittest.TestCase):
         self.assertTrue(mp.is_this_repo("https://git.chifor.me/cchifor/ailab.git"))
 
     def test_other_repos_are_not_this_repo(self):
-        self.assertFalse(mp.is_this_repo(TENANTS_URL))
+        self.assertFalse(mp.is_this_repo(EXTERNAL_URL))
         self.assertFalse(mp.is_this_repo("ssh://git@github.com/cchifor/platform"))
         self.assertFalse(mp.is_this_repo("https://github.com/qnap-dev/QNAP-CSI-PlugIn"))
         self.assertFalse(mp.is_this_repo("https://github.com/someone-else/ailab.git"))
@@ -458,25 +456,25 @@ class FailClosedOnABrokenFixture(_FixtureRepo):
         # An ALLOWLISTED external source that IS declared as a GitRepository in this tree (no local
         # kustomization.yaml, and never could have one) must be excluded rather than reported as a
         # local failure — and the exclusion must be printed, not silent.
-        (self.cluster_ai / "agentforge-tenants-source.yaml").write_text(
-            _git_repository_doc("agentforge-tenants", TENANTS_URL)
+        (self.cluster_ai / "muse-stream-source.yaml").write_text(
+            _git_repository_doc("muse-stream", EXTERNAL_URL)
         )
         (self.cluster_ai / "external.yaml").write_text(
-            _kustomization_doc("external", "./somewhere-else", source_name="agentforge-tenants")
+            _kustomization_doc("external", "./somewhere-else", source_name="muse-stream")
         )
         for ctx in (contextlib.nullcontext(), _regex_mode()):
             buf = io.StringIO()
             with ctx, contextlib.redirect_stderr(buf):
                 self.assertEqual(mp.discover_paths(), [])
-            self.assertIn("agentforge-tenants", buf.getvalue())
+            self.assertIn("muse-stream", buf.getvalue())
 
     def test_externally_sourced_kustomization_with_missing_path_fails_closed(self):
         # An allowlisted external sourceRef must not exempt a Kustomization from the same
         # spec.path validity check local ones get: a missing or malformed path on the Flux
         # object itself is still a broken manifest, not something safe to silently exclude
         # (round-3 codex finding, :489).
-        (self.cluster_ai / "agentforge-tenants-source.yaml").write_text(
-            _git_repository_doc("agentforge-tenants", TENANTS_URL)
+        (self.cluster_ai / "muse-stream-source.yaml").write_text(
+            _git_repository_doc("muse-stream", EXTERNAL_URL)
         )
         (self.cluster_ai / "external-nopath.yaml").write_text(
             "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
@@ -487,17 +485,17 @@ class FailClosedOnABrokenFixture(_FixtureRepo):
             "spec:\n"
             "  sourceRef:\n"
             "    kind: GitRepository\n"
-            "    name: agentforge-tenants\n"
+            "    name: muse-stream\n"
             "  prune: true\n"
         )
         self._assert_raises_both_modes("spec.path")
 
     def test_externally_sourced_kustomization_with_empty_path_fails_closed(self):
-        (self.cluster_ai / "agentforge-tenants-source.yaml").write_text(
-            _git_repository_doc("agentforge-tenants", TENANTS_URL)
+        (self.cluster_ai / "muse-stream-source.yaml").write_text(
+            _git_repository_doc("muse-stream", EXTERNAL_URL)
         )
         (self.cluster_ai / "external-emptypath.yaml").write_text(
-            _kustomization_doc("external-emptypath", "", source_name="agentforge-tenants")
+            _kustomization_doc("external-emptypath", "", source_name="muse-stream")
         )
         self._assert_raises_both_modes("spec.path")
 
@@ -664,12 +662,12 @@ class SourceRefResolution(_FixtureRepo):
         self.assertEqual(self._discover_both_modes(), ["./kubernetes/apps/x"])
 
     def test_allowlisted_external_source_must_still_be_declared(self):
-        # `agentforge-tenants` is on the reviewed allowlist, but nothing declares a GitRepository
+        # `muse-stream` is on the reviewed allowlist, but nothing declares a GitRepository
         # of that name here: an unresolvable reference is an error even when its name is familiar.
         (self.cluster_ai / "external.yaml").write_text(
-            _kustomization_doc("external", "./tenants", source_name="agentforge-tenants")
+            _kustomization_doc("external", "./deploy/kubernetes/overlays/ailab", source_name="muse-stream")
         )
-        self._assert_raises_both_modes("flux-system/agentforge-tenants")
+        self._assert_raises_both_modes("flux-system/muse-stream")
 
     def test_allowlisted_name_whose_declared_url_is_this_repo_is_local(self):
         # The allowlist never overrides resolution: if the object named `platform` actually points
@@ -680,7 +678,7 @@ class SourceRefResolution(_FixtureRepo):
         self.assertEqual(self._discover_both_modes(), ["./kubernetes/apps/x"])
 
     def test_duplicate_git_repository_declaration_fails_closed(self):
-        (self.cluster_ai / "dup-source.yaml").write_text(_git_repository_doc("flux-system", TENANTS_URL))
+        (self.cluster_ai / "dup-source.yaml").write_text(_git_repository_doc("flux-system", EXTERNAL_URL))
         self._assert_raises_both_modes("declared twice")
 
     def test_git_repository_without_url_fails_closed(self):
