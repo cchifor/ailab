@@ -29,7 +29,9 @@ request must add the same template workflow, because the `main` rule below alrea
 
 1. Give `reviewer-claude` and `reviewer-codex` write access to the repository. Apply the same
    `main` protection as `cchifor/relay`: push and force push disabled for everyone; two required
-   approvals whitelisted to the two reviewers; merge whitelist limited to them; stale approvals
+   approvals whitelisted to the two reviewers; merge whitelist the two reviewers and the owner
+   `chifor` (added 2026-10-31, `relay-reviewer-onboarding.md` § "The owner in the merge
+   whitelist"); stale approvals
    dismissed on push; merge blocked on an outdated branch; admin override blocked; required
    status context `CI / verify (pull_request)`. Do not grant the implementation worker a merge
    override. An empty repository needs a `main` first, or its first pull request has no base
@@ -58,7 +60,7 @@ and the token answered 401 after deletion.
 | `reviewer-claude`, `reviewer-codex` | write collaborators | write collaborators |
 | Push and force push | disabled for everyone | disabled for everyone |
 | Required approvals | 2, approval whitelist `reviewer-claude`, `reviewer-codex` | same |
-| Merge whitelist | `reviewer-claude`, `reviewer-codex` | same |
+| Merge whitelist | `reviewer-claude`, `reviewer-codex`; `chifor` since 2026-10-31 | same |
 | Stale approvals | dismissed on push | dismissed on push |
 | Rejected reviews | block the merge | block the merge |
 | Outdated branch | merge blocked (`block_on_outdated_branch`) | merge blocked |

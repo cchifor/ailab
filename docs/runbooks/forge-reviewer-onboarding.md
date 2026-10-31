@@ -22,7 +22,9 @@ retain both personas, author allowlists and all CI/current-head requirements.
 3. Main protection requires `forge-quality / forge-quality (pull_request)`, an
    up-to-date branch, two reviewer approvals and stale-approval dismissal. Direct
    push, force push and administrator merge override are disabled. Only the reviewer
-   identities are in approval/merge allowlists. Preserve these settings.
+   identities are in the approval allowlist; the merge allowlist also holds the owner
+   `chifor` since 2026-10-31 (`relay-reviewer-onboarding.md` § "The owner in the merge
+   whitelist"). Preserve these settings.
 4. After this PR merges, run `ansible-playbook reviewers.yml -t reviewbot` from the
    `ansible/` directory using normal encrypted variables and inventory. The existing
    `ansible/reviewers.yml` playbook applies `tags: [reviewbot]` directly to

@@ -11,11 +11,13 @@ allowed authors and the `no-automerge` exclusion without exceptions.
 The repository API confirms main protection is already active: two approvals,
 stale-approval dismissal, rejection blocking, and required checks
 `Conformance / conformance (pull_request)` and
-`Conformance / holder-conformance (pull_request)`. Approvals and merges are
-restricted to `reviewer-claude` and `reviewer-codex`; both have scoped repository
-write access. Direct and force pushes are disabled and administrator merge
-override is blocked. This confirmation precedes allowlist activation; recheck
-the same settings before any later convergence.
+`Conformance / holder-conformance (pull_request)`. Approvals are restricted to
+`reviewer-claude` and `reviewer-codex`. Merges were restricted to the same two;
+since 2026-10-31 the owner `chifor` is in the merge whitelist too
+(`relay-reviewer-onboarding.md` section "The owner in the merge whitelist").
+Both reviewers have scoped repository write access. Direct and force pushes are
+disabled and administrator merge override is blocked. This confirmation precedes
+allowlist activation; recheck the same settings before any later convergence.
 The verification endpoints are
 `GET /api/v1/repos/cchifor/dsh-acp-plus/branch_protections/main` and
 `GET /api/v1/repos/cchifor/dsh-acp-plus/collaborators`; their responses contain

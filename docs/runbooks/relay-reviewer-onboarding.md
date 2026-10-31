@@ -65,7 +65,7 @@ protection as `cchifor/forge`:
 | --- | --- | --- |
 | Push and force push | disabled for everyone | disabled for everyone |
 | Required approvals | 2, approval whitelist `reviewer-claude`, `reviewer-codex` | same |
-| Merge whitelist | `reviewer-claude`, `reviewer-codex` | same |
+| Merge whitelist | `reviewer-claude`, `reviewer-codex`; `chifor` since 2026-10-31 | same |
 | Stale approvals | dismissed on push | dismissed on push |
 | Outdated branch | merge blocked (`block_on_outdated_branch`) | merge blocked |
 | Admin merge override | blocked | blocked |
@@ -85,25 +85,71 @@ protection as `cchifor/forge`:
 - **Still pending when this was written:** the first reviewer-owned relay merge, the one
   whose `merged_by` names a reviewer. Add it here when it lands.
 
+## The owner in the merge whitelist (2026-10-31)
+
+On the operator's instruction, `chifor` was added to the `main` merge whitelist of every
+repository that had one without it: `relay`, `llm-router`, `dsh-acp-plus`, `forge`,
+`workbricks`, `workbricks-apps`, `workbricks-old` (each now `reviewer-claude`,
+`reviewer-codex`, `chifor`) and `agentforge-playground` (`reviewer-bot`, `gitea_admin`,
+`chifor`). `dsh-team-conductor` and `trueswarm-admin` already listed `chifor`. Repositories
+without a merge whitelist (`ailab`, `platform`, `agentforge`, `agentforge-platform`) were left
+without one: turning it on would shut out every other writer, the reviewbot included.
+
+The trigger was workbricks#82: both reviewers had approved its head, CI was green and the
+branch was current, but it carried `no-automerge`, so the reviewbot held it, and the owner's
+Merge button said "You are not authorized to merge this pull request".
+
+Only the merge whitelist changed; every other field of each rule is as it was. On the seven
+reviewer-protected repositories that means the reviewer-only approvals whitelist, two
+required approvals, the required context, the outdated-branch block and
+`block_admin_merge_override: true`, so the owner can merge only a PR that already meets the
+rule; the web UI's Merge button is enough, with no token.
+
+How it was applied (2026-10-31 09:02Z): two runs, `agentforge-playground` alone as a canary and
+then the other seven, each with one one-shot `chifor` token (`write:repository,read:user`,
+`owner-credentials.md`) minted for the whole run. Per repository the run read the rule, sent a
+`PATCH` holding only `merge_whitelist_usernames`, and read the rule back: it differed from the
+record only in that list, and `GET /branches/main` as `chifor` answered `user_can_merge` false
+before and true after. Each token was deleted from the database and then answered 401.
+Gitea 1.26.1's `EditBranchProtection` leaves every field the body omits unchanged (all of
+`EditBranchProtectionOption` is pointers or nil-able slices). But when a whitelist changes, it
+re-checks every listed user and silently drops one without write access to the repository
+(`updateUserWhitelist`). Before a later edit of these lists, check that every listed user
+still has write access, or the read-back will show a name missing.
+
 ## Break-glass: when the protection stops every merge
 
 With exactly two whitelisted approvers, two required approvals and one required context,
-one reviewer-host outage or a renamed CI context stops every merge on these repositories.
-Lowering `required_approvals` alone recovers nothing: the reviewbot still merges only on
-both personas' clean verdicts, the merge whitelist names only the two reviewers, and the
-admin override is blocked, so nobody else can merge either. Relaxing only
-`block_admin_merge_override` is not enough: Gitea 1.26.1's `CheckPullMergeable` asks whether
-the user may merge (the merge whitelist) BEFORE it considers `force_merge`, so `chifor`
-is still refused; and disabling the merge whitelist would admit every repository writer.
+one reviewer-host outage or a renamed CI context stops every merge on these repositories:
+the reviewbot merges only on both personas' clean verdicts. Since 2026-10-31 `chifor` is in
+the merge whitelist (section above), so the owner can recover. Use the **least permissive**
+option that works; each keeps more of the protection than the next:
 
-Recovery is therefore an **owner merge of one specific PR at its exact head**, with a
-one-shot `chifor` token under the same discipline as `scripts/gitea-owner-merge.sh` (that
-script cannot do it: its gate requires both reviewer approvals at the head). The rule is
-opened by exactly two fields, `chifor` added to `merge_whitelist_usernames` and
-`block_admin_merge_override: false`; the approvals whitelist and everything else stay.
+- **A renamed CI context:** `PATCH` `status_check_contexts` to the new name under the token
+  discipline below, and read it back. Merges then flow again, the reviewbot's included.
+- **A reviewer is down, so the PR has fewer than two approvals at its head** (`MODE=approvals`
+  in the script): lower `required_approvals` to the number of approvals the PR has at its head
+  (0 or 1), merge it as `chifor` with a plain merge (no `force_merge`), and restore. The required
+  context, the outdated-branch block and the rejected-review block still apply. Only `chifor` can
+  use the window: the merge whitelist names only the reviewers and the owner, and the reviewbot
+  still requires both personas.
+- **A check other than approvals has to be bypassed**, for example a required context that
+  cannot pass for a reason outside the PR (`MODE=override`): open `block_admin_merge_override`
+  and merge with `force_merge`, which bypasses every protection check, CI included. Gitea
+  1.26.1's `CheckPullMergeable` asks whether the user may merge (the merge whitelist) BEFORE it
+  considers `force_merge`, so `chifor` must be in the whitelist too. The script adds it if
+  it is missing.
 
-1. Open an issue in the affected repository: the reason, the time (UTC), the PR and its full
-   head SHA. Check that head's CI yourself: a forced merge bypasses the required context.
+Never disable the merge whitelist: that would admit every repository writer.
+
+The last two are an **owner merge of one specific PR at its exact head**, with a one-shot
+`chifor` token under the same discipline as `scripts/gitea-owner-merge.sh` (that script cannot
+do it: its gate requires both reviewer approvals at the head). The script records the rule,
+changes only `required_approvals` or `block_admin_merge_override` (plus `chifor` in
+`merge_whitelist_usernames` if it is missing), and restores all three from the record.
+
+1. Open an issue in the affected repository: the reason, the mode, the time (UTC), the PR and its
+   full head SHA. Check that head's CI yourself; with `MODE=override` nothing else does.
 2. Run the script below in WSL bash, as a FILE (`bash break-glass.sh`), not pasted into an
    interactive shell: its `EXIT` trap is what restores the rule, reads it back and deletes the
    token, also when the merge or anything before it fails. `K`, `GP`, `DB` and `sql` are the
@@ -112,6 +158,7 @@ opened by exactly two fields, `chifor` added to `merge_whitelist_usernames` and
    ```bash
    set -u
    REPO=relay PR=<n> HEAD=<full head sha>
+   MODE=approvals APPROVALS=<approvals the PR has at HEAD: 0 or 1>   # or MODE=override (bypasses CI too)
    API=https://git.chifor.me/api/v1/repos/cchifor/$REPO; W=/dev/shm/break-glass; rm -rf $W; mkdir -m 700 $W
    NAME=owner-op-$REPO-$PR-breakglass-$(date -u +%Y%m%d%H%M%S); T=""
    g() { printf 'Authorization: token %s\n' "$T" | curl -q -sS --proto =https --max-redirs 0 -H @- "$@"; }
@@ -135,18 +182,29 @@ opened by exactly two fields, `chifor` added to `merge_whitelist_usernames` and
      --token-name "$NAME" --scopes write:repository --raw 2>/dev/null | tr -d '\r\n')
    [[ $T =~ ^[0-9a-f]{40}$ ]] || { echo "mint failed"; exit 1; }
    g -f -o $W/rule.json "$API/branch_protections/main" || exit 1         # the record
-   python3 - $W <<'PY' || exit 1
+   python3 - $W "$MODE" "${APPROVALS:-}" "$HEAD" <<'PY' || exit 1
    import json, sys
-   w = sys.argv[1]; r = json.load(open(w + "/rule.json"))
-   keep = {"merge_whitelist_usernames": r["merge_whitelist_usernames"],
-           "block_admin_merge_override": r["block_admin_merge_override"]}
+   w, mode, n, head = sys.argv[1:5]                  # n is unused (may be empty) in override mode
+   if mode == "approvals" and not n.isdigit():
+       sys.exit("MODE=approvals needs APPROVALS: the approvals the PR has at HEAD, 0 or 1")
+   r = json.load(open(w + "/rule.json"))
+   keep = {k: r[k] for k in ("merge_whitelist_usernames", "block_admin_merge_override",
+                             "required_approvals")}
    json.dump(keep, open(w + "/restore.json", "w"))
-   json.dump({"merge_whitelist_usernames": keep["merge_whitelist_usernames"] + ["chifor"],
-              "block_admin_merge_override": False}, open(w + "/open.json", "w"))
+   mwl = keep["merge_whitelist_usernames"] or []
+   op = {"merge_whitelist_usernames": mwl + ([] if "chifor" in mwl else ["chifor"])}
+   if mode == "approvals" and int(n) < keep["required_approvals"]:
+       op["required_approvals"] = int(n)
+   elif mode == "override":
+       op["block_admin_merge_override"] = False
+   else:
+       sys.exit("MODE must be approvals (with APPROVALS below the rule's count) or override")
+   json.dump(op, open(w + "/open.json", "w"))
+   json.dump({"Do": "merge", "head_commit_id": head, "force_merge": mode == "override"},
+             open(w + "/merge.json", "w"))
    PY
    g -f -X PATCH -H 'Content-Type: application/json' --data-binary @$W/open.json \
      -o /dev/null -w 'open: HTTP %{http_code}\n' "$API/branch_protections/main" || exit 1
-   printf '{"Do":"merge","head_commit_id":"%s","force_merge":true}' "$HEAD" > $W/merge.json
    g -X POST -H 'Content-Type: application/json' --data-binary @$W/merge.json \
      -w 'merge: HTTP %{http_code}\n' "$API/pulls/$PR/merge"
    ```
@@ -156,8 +214,9 @@ opened by exactly two fields, `chifor` added to `merge_whitelist_usernames` and
    token and read it back against the table above. Record the result (merge SHA or the
    refusal, and the read-back) in the issue, then close it.
 
-For a renamed CI context, the fix is a `PATCH` of `status_check_contexts` under the same
-token discipline, recorded and read back the same way.
+For a renamed CI context (the first option above), the fix is a `PATCH` of
+`status_check_contexts` under the same token discipline, recorded and read back the same way;
+it is a lasting change to the rule, so update the table above in the same PR.
 
 `gitea_admin` stays the last resort, as everywhere else
 ([`owner-credentials.md`](owner-credentials.md) § Break-glass).
