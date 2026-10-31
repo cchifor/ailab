@@ -1,0 +1,48 @@
+# The repo's Python script tests: every module under scripts/tests, in ONE process.
+#
+# Moved here from broker-inventory.yaml on 2026-10-31 (plans/2026-10-31-retire-agentforge-plan.md, PR-0):
+# that workflow was the only one running this suite, and it goes away with AgentForge. Same triggers
+# (every push, every PR) and the same fail-closed rules:
+#   * ONE job, no `needs:`, no matrix, no aggregator (the estate shipped a `ci-gate` that could not fail);
+#   * no `continue-on-error`, no `if:`, no `|| true`; a missing interpreter fails the job;
+#   * `set -euo pipefail`.
+# Runs on unittest (stdlib) plus the runner's system PyYAML, as before.
+name: script-tests
+
+on:
+  # Every branch, not just main: the pull_request run is the one least likely to be served on this
+  # forge, and a feature-branch push gives the same pre-merge signal (see broker-inventory's history).
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: script-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: script unit tests
+    # There are no hosted runners on this forge: every runner carries `self-hosted-hv`.
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    # Starvation must be loud, not a silent sweep-cancel.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Script unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            PY=python3
+          elif command -v python >/dev/null 2>&1; then
+            PY=python
+          else
+            echo "no python3/python on the runner — failing closed rather than skipping the tests"
+            exit 1
+          fi
+          "$PY" --version
+          "$PY" -m unittest discover -s scripts/tests -p "test_*.py" -v

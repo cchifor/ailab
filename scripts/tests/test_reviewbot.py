@@ -26,6 +26,12 @@ import re
 import shutil
 import sqlite3
 import subprocess
+
+# The REAL subprocess.run, bound before any test runs (#1513). Dozens of tests here assign
+# `self.m.subprocess.run = <fake>` on the process-wide module and do not restore it; tearDownModule
+# puts this back so test modules that run after this one in the same `unittest discover` process
+# get a real subprocess instead of this module's canned CLI output.
+_SUBPROCESS_RUN_AT_IMPORT = subprocess.run
 import sys
 import tempfile
 import threading
@@ -6222,6 +6228,10 @@ class ChunkAdapterContractTest(unittest.TestCase):
             state, _, _ = bot.review_job(1, "o/r", 1, head)
         self.assertEqual("progress", state)
         bot.run_llm.assert_called_once()
+
+
+def tearDownModule() -> None:  # noqa: N802 - unittest's hook name
+    subprocess.run = _SUBPROCESS_RUN_AT_IMPORT
 
 
 if __name__ == "__main__":

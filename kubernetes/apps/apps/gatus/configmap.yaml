@@ -495,12 +495,6 @@ data:
         url: tcp://10.55.0.254:3260
         interval: 120s
         conditions: ["[CONNECTED] == true"]
-      # --- AgentForge ---
-      - name: AgentForge CP
-        group: AgentForge
-        url: https://agentforge.chifor.me/healthz
-        interval: 60s
-        conditions: ["[STATUS] == 200"]
       # --- Strive edge (public path: Cloudflare -> cloudflared -> Traefik -> origin) ---------------
       # Black-box probes of the strive platform's public hostnames from OUTSIDE its edge, because the
       # 2026-10-06 18:06-18:10Z incident left no view of failures that happen BEFORE Traefik (item 4 /

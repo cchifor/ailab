@@ -15,8 +15,8 @@
 #     result aggregation here at all, so that failure mode has nowhere to live: the check's exit
 #     status IS the script's exit status. The steps below are sequential within that one job, so
 #     each still fails the job directly — the invariant is "no cross-job result aggregation", not a
-#     step count. (This said "ONE step" until the generator grew unit tests; a second step in the
-#     same job cannot reintroduce the aggregation bug, while tests that CI never runs guard nothing.)
+#     step count. (The scripts/tests suite ran as a second step here until 2026-10-31; it moved to
+#     script-tests.yaml, which outlives this workflow's AgentForge check.)
 #   * No `continue-on-error`, no `if:` conditions, no `|| true`, no soft skips. A missing
 #     interpreter, an unreadable manifest, a source that does not parse — every one of those is a
 #     non-zero exit from the script, which fails the job.
@@ -83,25 +83,3 @@ jobs:
           fi
           "$PY" --version
           "$PY" scripts/gen-broker-inventory.py --check
-
-      # The generator's own unit tests. These existed before this step did and ran NOWHERE, which
-      # made them documentation rather than a guard — the seed-coverage record's parsing in
-      # particular has already regressed once (a file-wide regex swept missingOauthPaths back in as
-      # declared, and the record oscillated between two states on successive runs). Runs on
-      # unittest (stdlib) plus PyYAML (e.g. scripts/tests/test_authelia_oidc_consent.py) — PyYAML is
-      # the runner's system package (Ubuntu 24.04 cloud image; same unguarded-baseline assumption
-      # scripts/check-tenant-guard-cel.py makes), not something this step installs, so a runner
-      # image change that drops it fails this step rather than silently skipping the test.
-      - name: Script unit tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          if command -v python3 >/dev/null 2>&1; then
-            PY=python3
-          elif command -v python >/dev/null 2>&1; then
-            PY=python
-          else
-            echo "no python3/python on the runner — failing closed rather than skipping the tests"
-            exit 1
-          fi
-          "$PY" -m unittest discover -s scripts/tests -p "test_*.py" -v
