@@ -5392,6 +5392,22 @@ class OwnerApprovalMergeTest(unittest.TestCase):
         self.reviews.append(self._approval("Chifor"))
         self._merged()
 
+    def test_a_later_request_for_changes_withdraws_the_owner_approval(self):
+        # Gitea leaves the earlier APPROVED undismissed and non-stale, clearing only `official`.
+        self.reviews.extend([dict(self._approval(), id=10), dict(self._approval(state="REQUEST_CHANGES"), id=11)])
+        self._held_for_owner()
+
+    def test_an_approval_after_a_request_for_changes_merges(self):
+        self.reviews.extend([dict(self._approval(state="REQUEST_CHANGES"), id=10), dict(self._approval(), id=11)])
+        self._merged()
+
+    def test_an_objection_by_another_approver_holds(self):
+        self.m.CFG["owner_approvers"] = ["global-owner"]
+        self.m.CFG["owner_approvers_by_repo"] = {"o/r": ["chifor"]}
+        self.reviews.extend([dict(self._approval(), id=10),
+                             dict(self._approval("global-owner", state="REQUEST_CHANGES", commit_id="a" * 40), id=11)])
+        self._held_for_owner()
+
     def test_any_qualifying_owner_review_is_enough(self):
         self.reviews.extend([self._approval("stranger"), self._approval(stale=True),
                              self._approval(), self._approval(state="COMMENT")])
