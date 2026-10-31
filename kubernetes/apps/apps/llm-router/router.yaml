@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: f5c0c412b1a4f23248013dafa62ac25a7308a64f
-        chifor.me/release: router-0.1.0-20261027-claude-output-limit
+        chifor.me/source-commit: 372ce1ee829f665a489a6afe7e513ab13e4ef868
+        chifor.me/release: router-0.1.0-20261031-step-timeouts
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,11 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source f5c0c412b1a4f23248013dafa62ac25a7308a64f (llm-router #125, Claude output limit, effort and early stops);
-          # parity-68b1ebbe28b0-110442 image, all blobs pulled and verified, /app/SOURCE_COMMIT f5c0c412 confirmed;
-          # Relay run 110442, archive sha256:49f1f71b854be9540a5277b3452b6e7ac6e1755357bbc868cb01a9a6b16a7294.
-          image: registry.chifor.me/llm-router/router@sha256:6c9db895a9a3ee0dd7f4551d87f9b381d1874e91f83105be5cc64509f51ad013
+          # Source 372ce1ee829f665a489a6afe7e513ab13e4ef868 (llm-router #126, no 90 s Assistant step cap, a 15-minute
+          # turn cap, per-account waits); parity-5ade03fd21af-114726 image, all blobs pulled anonymously and verified,
+          # /app/SOURCE_COMMIT 372ce1ee confirmed; Relay run 114726, archive
+          # sha256:271a85a7c2c581b6a26d7d213937feaae2a73d1ee5010a15f0bd50a6242d5324.
+          image: registry.chifor.me/llm-router/router@sha256:dad0e721e2a83afc89432ce2328a378c89873e3f2c37874bfa35d0b3e960685f
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
