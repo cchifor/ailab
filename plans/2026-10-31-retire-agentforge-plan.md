@@ -90,6 +90,14 @@ Destructive steps are release gates, each placed after its own backup or disposa
 - no BrokerSeat exists.
 
 ### PR-2: workloads, CP, admission, monitoring, CI, edge
+
+**Execution note (2026-10-31): split in four,** because the reviewers skip any diff over `pr_reviewer_max_diff_bytes` (400 KB), and this one is about 1 MB of deletions. The four go in sequence, since each edits `test_manifest_paths.py`'s exact path set with its own deletions:
+- **2a:** broker and codex-refresh (which depends on broker), the broker-inventory generator and its workflow, the BrokerSeat tests, and the CEL checks with their workflow.
+- **2b:** sandbox, workers (which depends on sandbox), pkgcache and ci-runners, plus the canary harness and its test. The NFS cleanup Job and the npm-cache reclaim flip are gates before 2b.
+- **2c:** the CP (`apps/agentforge/`) and tenants-bootstrap with git-auth, plus the justfile, edge, auth, cloudflared, repo lists and dev_worker edits.
+- **2d:** the provisioner, folded in from PR-3. Its only remaining duties were finalizers on the tenant namespace (gone after PR-1) and on BrokerSeats (none exist). It leaves with its rules, the `af-revoke` scripts and `check_capability_kids_checksum`.
+
+PR-3 is then KEDA alone.
 1. **Flux Kustomizations and dirs:** `agentforge-broker`, `-sandbox`, `-workers`, `-pkgcache`, `-codex-refresh`, `-ci-runners` and `-tenants-git-auth` (with `agentforge-tenants-bootstrap/`, now unneeded). Also `apps/agentforge/` (CP, admission VAPs, `agentforge-infra-bot.sops.yaml`), removed from `apps/kustomization.yaml`.
 2. **Monitoring:** nothing left here; PR-0 removed it. The provisioner rules go in PR-3.
 3. **Scripts, tests, the justfile and workflows:**
