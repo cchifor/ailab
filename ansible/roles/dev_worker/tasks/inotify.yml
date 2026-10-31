@@ -1,0 +1,13 @@
+---
+# inotify instances for kind. Ubuntu's default fs.inotify.max_user_instances is 128, and kind documents 512 for
+# hosts that run several clusters ("too many open files" in its known issues). Measured 2026-10-30 on
+# dev-worker-2: a Workbricks profile keeps its dev stack's kind cluster up while its red-green guard replays a
+# lane on a second one, and the second control plane failed in kubeadm with "too many open files" at 128.
+# max_user_watches was 124464 there and did not run out, so only the instance count changes.
+- name: Raise fs.inotify.max_user_instances for kind
+  ansible.posix.sysctl:
+    name: fs.inotify.max_user_instances
+    value: "{{ dev_worker_inotify_max_user_instances | string }}"
+    sysctl_file: /etc/sysctl.d/99-inotify.conf
+    state: present
+    reload: true
