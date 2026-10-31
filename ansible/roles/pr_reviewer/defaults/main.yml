@@ -280,6 +280,7 @@ pr_reviewer_owner_approvers_by_repo:
 pr_reviewer_owner_approval_paths_by_repo:
   cchifor/workbricks:
     - .gitea/workflows/
+    - .github/workflows/   # Gitea reads it when .gitea/workflows/ is absent
     - scripts/test.sh
     - scripts/guards/denylist.sha256
     - scripts/guards/denylist-allow.txt

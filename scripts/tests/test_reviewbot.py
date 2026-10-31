@@ -5596,6 +5596,28 @@ class OwnerApprovalPathsTest(unittest.TestCase):
                 self.diff = diff
                 self._held(f"owner approval (owner-only paths: {path})")
 
+    def test_sections_without_a_text_hunk_are_named_not_unreadable(self):
+        # Additions, binary changes and mode-only changes name their file from other header lines
+        # (reviewer-claude, round 1): an unrelated PR of these shapes merges, and an owner path is
+        # held under its real name.
+        shapes = {
+            "added": b"diff --git a/docs/new.md b/docs/new.md\nnew file mode 100644\n"
+                     b"index 0000000..1111111\n--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1 @@\n+a\n",
+            "binary": b"diff --git a/img/a.png b/img/a.png\nindex 1111111..2222222 100644\n"
+                      b"Binary files a/img/a.png and b/img/a.png differ\n",
+            "binary added": b"diff --git a/img/b.png b/img/b.png\nnew file mode 100644\n"
+                            b"index 0000000..2222222\nBinary files /dev/null and b/img/b.png differ\n",
+            "mode only": b"diff --git a/scripts/x.sh b/scripts/x.sh\nold mode 100644\nnew mode 100755\n",
+        }
+        for name, diff in shapes.items():
+            with self.subTest(shape=name):
+                self.posts.clear()
+                self.diff = diff
+                self._merged()
+        self.posts.clear()
+        self.diff = b"diff --git a/scripts/test.sh b/scripts/test.sh\nold mode 100644\nnew mode 100755\n"
+        self._held("owner approval (owner-only paths: scripts/test.sh)")
+
     def test_a_pr_touching_no_owner_path_merges_without_the_owner(self):
         self.diff = self._section("docs/x.md")
         self._merged()
@@ -5642,7 +5664,7 @@ class OwnerApprovalPathsTest(unittest.TestCase):
         defaults = AllowlistDefaultsTest._strict_yaml(
             (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
         paths = defaults["pr_reviewer_owner_approval_paths_by_repo"]["cchifor/workbricks"]
-        for path in (".gitea/workflows/", "scripts/test.sh", "scripts/guards/denylist.sha256",
+        for path in (".gitea/workflows/", ".github/workflows/", "scripts/test.sh", "scripts/guards/denylist.sha256",
                      "scripts/guards/denylist-allow.txt", "scripts/guards/check_denylist.py",
                      "scripts/guards/owner_approval.py", "scripts/guards/check_test_locks.py",
                      "scripts/guards/check_milestones.py"):
