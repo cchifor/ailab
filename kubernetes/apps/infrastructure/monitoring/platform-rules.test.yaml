@@ -34,7 +34,7 @@ tests:
         values: "0x5 1+0x40"
       - series: 'kube_pod_container_status_restarts_total{namespace="cnpg-system", pod="cnpg-operator-1", container="manager"}'
         values: "0x5 1+0x40"
-      - series: 'kube_pod_container_status_restarts_total{namespace="keda", pod="keda-operator-1", container="keda"}'
+      - series: 'kube_pod_container_status_restarts_total{namespace="velero", pod="velero-1", container="velero"}'
         values: "0x5 1+0x40"
       - series: 'kube_pod_container_status_restarts_total{namespace="kube-system", pod="kube-scheduler-cp1", container="kube-scheduler"}'
         values: "0x5 1+0x40"
