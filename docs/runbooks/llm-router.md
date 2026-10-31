@@ -2636,8 +2636,9 @@ for now."* whenever a local model needed more than 90 s. The trajectory showed `
   over the console's event feed, which sends heartbeats, and reconnects to a running turn after a reload
   (`GET /admin/v1/chat`). So no proxy between the browser and the pod sees ten silent minutes. API clients that
   stream get SSE headers at once and a `: keepalive` comment every 15 s. A non-streaming API call to a cold model
-  was expected to be cut at Cloudflare's edge (~100–125 s); measured 2026-10-31 it was not: a non-streaming request
-  to a cold `local/qwen3.8-27b-fp8` returned 200 after 130.3 s. Streaming stays the advice for multi-minute loads.
+  was expected to be cut at Cloudflare's edge (~100–125 s). One non-streaming request on 2026-10-31, to a cold
+  `local/qwen3.8-27b-fp8`, returned 200 after 130.3 s: the cut is not at ~100–125 s, but the real edge limit is
+  unknown. This is no clearance for multi-minute non-streaming calls (a cold 122B takes ~250 s): stream them.
 - **A restart cancels in-flight steps.** The drain grace is unchanged (`terminationGracePeriodSeconds: 60`), so a
   rollout or pod restart during a long cold-load wait ends that step. The user sees a failed step, not a hang;
   that is expected.
@@ -2743,6 +2744,8 @@ The two failures are model behaviour, not router behaviour, and are the owner's 
   preceding 20 minutes.
 - **Recovery:** the owner powered it on, and the boot preload of fp8 then ran cleanly at normal temperatures.
 - **Re-runs** used a thermal guard (abort at NVMe > 85 °C or CPU > 92 °C) and peaked at 70.8 °C and 83 °C.
+  The NVMe limit is the one that guards against the recorded condition (90.9 °C); the CPU limit was only a
+  ceiling and would not have fired at the outage's 90 °C. Lower it if the CPU is ever the suspect.
 
 ## Relay access requests
 
