@@ -63,9 +63,9 @@ Conventions the comments around the existing entries enforce, and the generator 
   to — `api_base`, and `model` where the two hosts advertise different served names (cloud2 serves
   `qwen3.8-27b`, cloud3 `qwen3.8-27b-w4a16`, the same weights) — plus host-side facts the request
   never sees, such as tensor-parallel width. That is a router-balanced HA/capacity pool, not two
-  engines — `qwen3.8-27b-ailab` (node2 + node3, 2026-09-16, identical `model` too) and
-  `qwen3.8-27b-vllm-cloud` (cloud2 + cloud3, 2026-09-21; cloud2-only since 2026-10-31, when
-  cloud3's w4a16 copy was found answering with degenerate text and retired) were the two. The comments on those entries
+  engines — `qwen3.8-27b-ailab` (node2 + node3, 2026-09-16, identical `model` too) is the one such
+  pool today; `qwen3.8-27b-vllm-cloud` (cloud2 + cloud3, 2026-09-21) was the other until 2026-10-31,
+  when cloud3's w4a16 copy was found answering with degenerate text and retired. The comments on those entries
   carry the invariants: `model_info` byte-identical (the consumer generator de-duplicates
   first-wins), the first-listed deployment wins least-busy ties, and each deployment's vision claim
   was probed on *that* box before the shared `supports_vision` was allowed to stand. Per-request
@@ -154,7 +154,8 @@ not from a dev-worker.
   timeout for a backend that is down, or a silent fallback if one is configured. The probe in
   step 4 is what catches that before a user does.
 - **cloud3 holds one model at a time.** Every cloud3 route (`qwen3.5-122b-cloud`,
-  `qwen3.8-flash-next-cloud`, `qwen3.8-27b-fp8-cloud` and its `-fp8-unc-cloud` alias; `qwen3-coder-30b-a3b-cloud` was removed
+  `qwen3.8-flash-next-cloud`, `qwen3.8-27b-fp8-cloud` and its `-fp8-unc-cloud` alias;
+  `qwen3.8-flash-next-q6-cloud` left with its llama-swap entry on 2026-09-21, `qwen3-coder-30b-a3b-cloud` was removed
   2026-10-31) shares one llama-swap; a request for a different one swaps the whole model (60–330 s
   measured 2026-10-31, the 122B from NFS the slowest). Do not fan an agent team across two cloud3
   routes.

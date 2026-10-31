@@ -97,14 +97,13 @@ data:
       # diagnostic key (litellm-vkeys.yaml org `dev-workers-diag`, projected to
       # af/dev-workers/common as litellm_diag_key) is issued here and whitelisted to this name.
       #
-      # ONE ENTRY SINCE 2026-10-31: cloud3's w4a16 deployment was removed on both gateways (it
-      # answered with degenerate text; plans/2026-10-31-local-models-improvement-plan.md). The text below
-      # still says "pair" and "two engines": read it as the main gateway's entries, whatever their count.
-      # THE TWO ENTRIES ARE A VERBATIM COPY of the main gateway's pair (litellm.yaml, same image
+      # THE ENTRY BELOW IS A VERBATIM COPY of the main gateway's qwen3.8-27b-vllm-cloud deployment
+      # (one per side since 2026-10-31, when cloud3's w4a16 deployment left both gateways: it answered
+      # with degenerate text; plans/2026-10-31-local-models-improvement-plan.md) (litellm.yaml, same image
       # digest on both deployments: ghcr.io/berriai/litellm@sha256:bd089afd…) — same `model`,
       # `api_base`, sampling params, extra_body and model_info, same order — so a request through
       # this gateway exercises the same proxy version + the same per-route transformation on the
-      # same two engines. At the ROUTE level the only difference is the synthetic per-token cost
+      # same engine. At the ROUTE level the only difference is the synthetic per-token cost
       # (needed so the diagnostic key's budget meters; not sent upstream). The lockstep is
       # ENFORCED, not asked for: scripts/check-litellm-mirrored-routes.py (CI, manifests.yaml)
       # fails when the two pairs differ modulo cost, or when a copy here lacks the cost fields.
@@ -184,7 +183,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "72422c6819e8"
+        checksum/config: "61461e6a6a9d"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux

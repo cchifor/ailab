@@ -136,7 +136,7 @@ llm-pi-ai:
     #                                                 192.168.0.28:18020, which serves that name)
     #   qwen3.8-flash-next-cloud                   -> qwen3.8-flash-next
     #   qwen3.8-27b-fp8-unc-cloud                  -> qwen3.8-27b-fp8
-    #   qwen3.5-122b-cloud, qwen3-coder-30b-a3b-cloud, qwen3.8-27b-ailab  -> the same names, no suffix
+    #   qwen3.5-122b-cloud, qwen3.8-27b-ailab      -> the same names, no suffix
     # qwen3.8-27b-w4a16 and qwen3-coder-30b-a3b were REMOVED 2026-10-31 with their cloud3 entries
     # (plans/2026-10-31-local-models-improvement-plan.md); qwen3.8-27b stays, it is the cloud2 route.
     # No contextWindow, as before: the route's defaultContextWindow (262144) applies.
