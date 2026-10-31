@@ -40,7 +40,8 @@ runtime guard against a half-deployed rollout. Ready reviews are comments, never
 approvals. Each persona publishes one final approval only after every part and final
 integration completes cleanly. The merge check accepts only the matching current
 snapshot pair and repeats the check immediately before its merge request. Existing CI,
-author, no-automerge and branch-protection checks remain mandatory. The legacy approval
+author, no-automerge and branch-protection checks remain mandatory, as does the
+[owner-approval gate](workbricks-reviewer-onboarding.md) when labelled. The legacy approval
 upgrade path is disabled for opted-in repositories; old clean or skipped markers cannot
 satisfy the new gate.
 

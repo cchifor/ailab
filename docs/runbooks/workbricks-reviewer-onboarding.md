@@ -6,6 +6,19 @@ the same review loop as the other admitted repositories: both personas review th
 CI is green, the author is allowed, and `no-automerge` holds stacked pull requests. Admitting
 them adds allowlist entries only, with no new persona, author exception or merge-gate exception.
 
+For architectural or policy changes requiring owner consent, use `owner-approval` (the
+configurable `owner_approval_label`) and have the owner click Gitea's **Approve** button on
+the current head; keep the label in place so CI can recognize the policy-change lane.
+Reviewbot then merges when every existing gate passes, including green CI and clean reviews
+from both personas. The approval must be `APPROVED`, match the current `commit_id`, and be
+neither dismissed nor stale; a new head requires a new approval. Eligible logins are the
+global `owner_approvers` plus this repository's `owner_approvers_by_repo` entry (role variables
+use the `pr_reviewer_` prefix); defaults grant only `chifor` on `cchifor/workbricks` and no
+global approvers. Persona accounts and the PR author never qualify, even if listed, and an
+empty eligible list holds the PR indefinitely. This applies to ordinary and chunk reviews;
+waiting logs `owner approval` without paging `ReviewbotMergeBlocked`. `no-automerge` remains
+an absolute hold even with owner approval, and branch protection still applies.
+
 History:
 
 - **2026-10-20/21:** the first `cchifor/workbricks` was created and onboarded (allowlist entry,

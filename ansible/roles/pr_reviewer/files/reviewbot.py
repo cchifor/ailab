@@ -2863,6 +2863,24 @@ def merge_author_ok(repo, author):
     return a in allowed
 
 
+def owner_approval_ok(repo, pr, head_sha, author):
+    """An independent owner's live approval of this head, scoped to this repository."""
+    allowed = {x.lower() for x in (CFG.get("owner_approvers") or [])}
+    allowed.update(x.lower() for x in
+                   ((CFG.get("owner_approvers_by_repo") or {}).get(repo) or []))
+    # reviewer-<persona> is the persona-account namespace (see marker_of). Neither
+    # a persona nor the PR's own author can supply owner consent, even if misconfigured.
+    allowed = {x for x in allowed if x and not x.startswith("reviewer-")
+               and x != (author or "").lower()}
+    if not allowed:
+        return False
+    return any(rv.get("state") == "APPROVED"
+               and ((rv.get("user") or {}).get("login") or "").lower() in allowed
+               and rv.get("commit_id") == head_sha
+               and not rv.get("dismissed") and not rv.get("stale")
+               for rv in iter_reviews(repo, pr))
+
+
 def is_dependency_author(author):
     """A dependency-update bot (renovate-bot): its PRs get DEPENDENCY_RUBRIC and their own
     held-PR gauge. Absent from an older config.json means no such lane, as before."""
@@ -2923,11 +2941,13 @@ def guard_findings(author, paths):
 def maybe_merge(repo, pr):
     """Merge authority (operator-directed 2026-09-02): the reviewer SYSTEM merges only when
     every configured persona's review at the CURRENT head is verdict=clean, CI is green,
-    the author is allowlisted, and no no-automerge label is set. One persona alone never
-    merges; third-party PRs are never merged.
+    the author is allowlisted, and no no-automerge label is set. An owner-approval label
+    additionally requires an independent owner's live approval at this head. One persona
+    alone never merges; third-party PRs are never merged.
 
     Returns "verdicts" when the personas are not all clean at this head AND nothing else is
-    holding the PR - CI green, author allowlisted, no no-automerge label - and "no-review"
+    holding the PR - CI green, author allowlisted, no no-automerge label, owner consent
+    satisfied when required - and "no-review"
     for the same hold when every persona short of clean simply has no review at this head
     yet (a parked seat holds every PR this way at once). The reconciler tallies both into the
     merge_blocked gauges, so that "sole remaining blocker" reading is what
@@ -2939,9 +2959,11 @@ def maybe_merge(repo, pr):
         d = api(f"/repos/{repo}/pulls/{pr}")
         if d.get("state") != "open" or d.get("draft") or not d.get("mergeable"):
             return
-        if not merge_author_ok(repo, (d.get("user") or {}).get("login")):
+        author = (d.get("user") or {}).get("login")
+        if not merge_author_ok(repo, author):
             return
-        if any((l.get("name") or "").lower() == "no-automerge" for l in d.get("labels") or []):
+        labels = {(l.get("name") or "").lower() for l in d.get("labels") or []}
+        if "no-automerge" in labels:
             return
         head = d["head"]["sha"]
         # CI IS CHECKED BEFORE THE VERDICT GATE, and the order is the whole point of the
@@ -2957,6 +2979,14 @@ def maybe_merge(repo, pr):
         # per sweep - bounded, since only marker-bearing mergeable allowlisted PRs get here.
         st = api(f"/repos/{repo}/commits/{head}/status")
         if st.get("state") != "success":
+            return
+        if CFG.get("owner_approval_label", "owner-approval").lower() in labels \
+                and not owner_approval_ok(repo, pr, head, author):
+            log(f"merge {repo}#{pr} held at {head[:9]}: owner approval")
+            # None keeps an intentional owner wait out of the merge_blocked gauges and
+            # ReviewbotMergeBlocked. Check before verdicts: while consent is pending,
+            # even a non-clean persona is not the SOLE remaining blocker. Both ordinary
+            # and chunk merges pass here before reaching their mutation paths below.
             return
         verdicts = persona_verdicts(repo, pr, head)
         needed = CFG.get("merge_personas", [])
