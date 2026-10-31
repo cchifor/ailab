@@ -269,3 +269,15 @@ Delete the branch → in the gitea pod
 `cd /data/git/gitea-repositories/<org>/<repo>.git && git gc --prune=now` → verify
 `git cat-file -e <sha>` fails → **rotate the exposed secret regardless** (for the seal: this
 ceremony, steps 2–6).
+
+## After a re-bootstrap: retire the AgentForge provisioner token again
+
+The AgentForge provisioner was retired on 2026-10-31 (plans/2026-10-31-retire-agentforge-plan.md), but OpenBao's own
+bootstrap still runs AgentForge code. On the root path of a first bootstrap it mints a long-lived scoped token
+into the Secret `openbao/openbao-provisioner-token`. The daily provision run on a provisioned vault never does.
+Nothing reads that token any more, and its policy can write tenant policies and k8s-auth roles. So after any
+re-bootstrap, revoke and delete it; `OpenBaoRetiredProvisionerTokenPresent` fires after 15 minutes until you do:
+1. From a short-lived pod or shell that reads the token from the Secret without printing it, POST
+   `v1/auth/token/revoke-self` with it. Any token may revoke itself: expect 204, then 403 from `lookup-self`.
+2. `kubectl --context admin@ai -n openbao delete secret openbao-provisioner-token`.
+Leave `openbao-operator-provisioner-token` alone: the provision run's operator reconcile uses it.
