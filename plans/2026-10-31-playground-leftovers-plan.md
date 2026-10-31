@@ -5,9 +5,9 @@
 The playground retirement (#1503, `plans/2026-10-30-retire-playground-plan.md`) kept three things on purpose. #1505 tracks them.
 
 **1. The reaper still mounts the playground staging subdir.** `KubernetesReaperBackend.list_job_ids` lists 32-char alnum dirs under its one staging mount. That mount is `af-sbx-reaper-tenant-zero-playground` (NFS `/pve-nfs/agentforge-sandbox/tenant-zero/playground`), which is now empty. So platform-dev has never been reaped. Measured 2026-10-31:
-- `tenant-zero/platform-dev` staging holds 25 job dirs, all 74–87 days old, about 416 MB in total.
+- `tenant-zero/platform-dev` staging holds 24 job dirs, all 74–87 days old, about 416 MB in total.
 - `.deps` and `.deps-staging` are not 32-char alnum, so the reaper never lists them.
-- Seven of those dirs still have `af-sbx-<id>` Leases. Their holders are dead `af-orch-platform-dev-delivery-*` pods, and each renewTime is from 2026-08-16/17 with a 300 s duration, so all seven are expired. The other 18 dirs have no Lease.
+- Seven of those dirs still have `af-sbx-<id>` Leases. Their holders are dead `af-orch-platform-dev-delivery-*` pods, and each renewTime is from 2026-08-16/17 with a 300 s duration, so all seven are expired. The other 17 dirs have no Lease.
 - There are no Jobs or Pods in `agentforge-sandbox`.
 - Every file is owned 65532:65532, and the subdir root is 0777. The reaper runs as 65532 with fsGroup 65532.
 
@@ -100,7 +100,7 @@ Three PRs, in order, each verified live before the next opens.
   - **Protection test.** Create a fresh Lease `af-sbx-<test-id>` (holder `reaper-protect-test`, renewTime now, duration 900 s) and its dir, through the reaper pod's mount.
     - Wait 3 reaper passes, then assert that the dir and the Lease both survive.
     - Delete the Lease and assert the next passes reclaim the dir. That is the full cycle end-to-end.
-  - The saved stale set (7 Leases, 25 dirs) is reclaimed, ID by ID. `.deps` and `.deps-staging` are intact.
+  - The saved stale set (7 Leases, 24 dirs) is reclaimed, ID by ID. `.deps` and `.deps-staging` are intact.
   - platform-dev's orchestrator is Ready with no restarts.
   - The canary is GREEN 24/24, with the image source reported as platform-dev's orchestrator.
   - **Mutation run:** `AF_CANARY_DENY_BROKER=broker-openai-codex` (the admitted broker) must FAIL on the deny assertion.
