@@ -71,7 +71,9 @@ longer runs the AgentForge image (#1536).
 - **Dormant leftovers, deliberately deferred.** They are inert because they bind identities in deleted
   namespaces or are rendered by no host:
   - the operator k8s-auth roles that `openbao-provision` re-applies from image code, which go with
-    moving OpenBao off the AgentForge image (#1536);
+    moving OpenBao off the AgentForge image (#1536). The same reconcile also re-stamps `cas_required` on
+    four broker `oauth` paths, which leaves empty metadata stubs (no versions, no data) after every
+    provision run;
   - `CODEX_AUTH_GRANT` and the reviewer AppRoles in `devworker-provision-job.yaml`, plus the
     `codex-hosts-publisher` role bound to the deleted `agentforge-broker/af-codex-refresher` (#1537);
   - the empty NFS export root on the QNAP (#1539).
