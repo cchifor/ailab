@@ -44,8 +44,7 @@ AF_CANARY_PREFLIGHT_ONLY=1 scripts/verify-sandbox-boundary.sh   # resolve image 
   (agentforge-sandbox/boundary-canary-workspace-pvc.yaml). No tenant namespace, orchestrator, seat or
   capability exists for that identity. Every other workspace is **refused, with no override** (the old
   `AF_CANARY_DANGEROUS_OVERRIDE` is gone): platform-dev's workspace is live, and the retired playground's
-  storage is unused, deleted once this identity's first runs are verified (#1505). Both canary Jobs are
-  torn down on exit.
+  PV/PVC objects are deleted; its empty NFS subdir goes last (#1505). Both canary Jobs are torn down on exit.
 - **Brokers.** The positive control is a Ready pod of `AF_CANARY_BROKER` (default `broker-openai-codex`), the
   only broker whose CNP admits the canary identity (rule 1c). Its login is revoked and the canary holds no
   capability, so that rule grants reachability, never authorization. The **denied-broker probe** targets a
@@ -57,7 +56,11 @@ AF_CANARY_PREFLIGHT_ONLY=1 scripts/verify-sandbox-boundary.sh   # resolve image 
   assertion can see a reachable target.
 - **Image.** The sandbox image is `AF_CANARY_IMAGE`, else the `AF_SANDBOX_IMAGE` that every live
   orchestrator (`af-tenant-*`) runs, else the committed canary's digest, and the run prints which. A failed
-  lookup, disagreeing orchestrators or a non-digest value stop the run.
+  lookup, disagreeing orchestrators or a non-digest value stop the run, and so does a digest the registry no
+  longer has (the manifest must answer HTTP 200). On 2026-10-31 that was platform-dev's own sandbox digest:
+  its CP-rendered pool still points at a GC'd image (#1519). Until it is re-rendered, run with
+  `AF_CANARY_IMAGE=registry.chifor.me/agentforge/sandbox@sha256:aa49b808a6289157eb61a2a8ab95edfd536aeea235d70279c1207094040e43b0`
+  (the ailab-pinned digest; GREEN 24/24 on 2026-10-31).
 - **Retention.** Each run leaves two empty subPath dirs in the canary's NFS subdir. The parent-export mkdir
   Job (`platform-dev-nfs-provisioner-job.yaml`, re-run about hourly) `rmdir`s those older than 2 hours. Until
   2026-10-31 the canary ran on the retired playground's labels and storage, and the reaper collected them

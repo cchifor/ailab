@@ -1,5 +1,5 @@
 # platform-dev sandbox NFS subdir provisioner — IaC replacement for the MANUAL operator
-# `mkdir -m 0777` prerequisite (documented in workspace-pvc.yaml, and in #121's
+# `mkdir -m 0777` prerequisite (documented in the retired playground's workspace-pvc.yaml, deleted 2026-10-31 by #1505, and in #121's
 # platform-dev-workspace-pvc.yaml header: "OPERATOR PREREQUISITE ... `mkdir -m 0777` the per-org/ws
 # export subdir on the NFS server BEFORE this binds usefully"). The 100%-IaC mandate replaces that
 # hand step with this Flux-reconciled Job.
@@ -23,7 +23,7 @@
 #   The manual step created the subdir root:root 0777. mode 0777 (NOT ownership) is what lets uid 65532
 #   — the sandbox securityContext runAsUser/runAsGroup (sandbox-guard.yaml validation 3) — AND the
 #   orchestrator/reaper uids all read+write, and it sidesteps the NFS-ignores-fsGroup caveat
-#   (workspace-pvc.yaml). This Job creates the platform-dev subdir the same way (root:root on a fresh
+#   (playground workspace-pvc.yaml, now deleted). This Job creates the platform-dev subdir the same way (root:root on a fresh
 #   create) and idempotently enforces its existence + mode 0777 on every re-run (ownership of a
 #   pre-existing dir is left untouched — 0777 is the load-bearing bit, not ownership).
 #

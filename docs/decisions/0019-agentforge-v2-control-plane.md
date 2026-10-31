@@ -345,5 +345,5 @@ Kept on purpose:
 2026-10-31 (#1505, plans/2026-10-31-playground-leftovers-plan.md): the reaper now mounts platform-dev's staging
 subdir. The canary runs on its own identity `tenant-zero/boundary-canary` (pool `canary`), with its own PVC and a
 single ingress rule on `broker-openai-codex`. The playground broker rule is gone from all five brokers, and the
-canary gained a denied-broker probe. The playground's two PV/PVC pairs and its NFS subdir are deleted in
-follow-up PRs once this is verified.
+canary gained a denied-broker probe (GREEN 24/24 on 2026-10-31). The playground's two PV/PVC pairs were then
+deleted; its empty NFS subdir is removed in a last PR once that prune is verified.

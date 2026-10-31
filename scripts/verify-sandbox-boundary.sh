@@ -19,10 +19,10 @@
 # DISPOSABLE + SAFE: runs ONLY against the canary's own identity tenant-zero/boundary-canary (pool canary,
 # PVC af-sbx-ws-tenant-zero-boundary-canary; no tenant, orchestrator, seat or capability exists for it)
 # with a fresh random job-id subPath. Every other workspace is REFUSED, with no override: platform-dev
-# drives the real cchifor/ailab + cchifor/platform repos, and the retired playground's PVC is unused. Both
+# drives the real cchifor/ailab + cchifor/platform repos, and the retired playground's PVC is deleted. Both
 # canary Jobs are TORN DOWN afterwards. A green run is the standing proof v1.1 is safe; ANY breach is a
-# P0 — STOP and escalate with the reproduction. (The playground's PV/PVC pairs are retired: unused since
-# 2026-10-31 and deleted once this identity's first runs are verified, #1505.)
+# P0 — STOP and escalate with the reproduction. (The retired playground's PV/PVC pairs were deleted on
+# 2026-10-31, #1505.)
 #
 # Brokers: the agent tier's POSITIVE control is a Ready pod of AF_CANARY_BROKER (default
 # broker-openai-codex, the one broker whose CNP admits the canary identity, rule 1c), and its new
@@ -34,7 +34,8 @@
 #         AF_CANARY_KEEP=1 scripts/verify-sandbox-boundary.sh   # keep the canary Jobs for inspection
 #         AF_CANARY_IMAGE=<repo>@sha256:<64 hex> ...           # pin the sandbox image explicitly
 #         AF_CANARY_PREFLIGHT_ONLY=1 ...   # resolve workspace, image and brokers, print them, stop
-# Test seams (scripts/tests/test_verify_sandbox_boundary.py): AF_CANARY_KUBECTL replaces the kubectl binary;
+# Test seams (scripts/tests/test_verify_sandbox_boundary.py): AF_CANARY_KUBECTL and AF_CANARY_CURL replace the
+# kubectl and curl binaries;
 # AF_CANARY_FAKE_RUN=<dir> reads the two canary logs from <dir>/{agent,test}.log and the agent pod's
 # "<node> <runtimeClass>" from <dir>/agent.meta instead of running Jobs. A fake run is NEVER a proof: it
 # says so, and it ends with exit 3 even when every assertion passes.
@@ -96,6 +97,14 @@ else
   fi
 fi
 [[ "$IMAGE" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || die "sandbox image '$IMAGE' ($IMAGE_SRC) is not digest-pinned"
+# The digest must still be in the registry. Zot GCs digests nothing re-pulls, and a CP-rendered pool keeps
+# the digest it was rendered with (#1519): without this, a GC'd image surfaces 5 minutes later as "the
+# canary never ran". Only an HTTP 200 for the manifest passes; anything else (404, auth, unreachable) stops.
+_reg="${IMAGE%%/*}"; _rest="${IMAGE#*/}"
+_code="$("${AF_CANARY_CURL:-curl}" -s -o /dev/null -m 20 -w '%{http_code}' \
+  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+  "https://${_reg}/v2/${_rest%@*}/manifests/${_rest#*@}" 2>/dev/null)"; _crc=$?
+[ "$_crc" -eq 0 ] && [ "$_code" = "200" ] || die "sandbox image '$IMAGE' ($IMAGE_SRC) is not in the registry (manifest HTTP ${_code:-none}, curl rc=$_crc); pass a present digest as AF_CANARY_IMAGE"
 
 # Broker targets. A pod's fingerprint is its uid, container restart counts and Ready transition time: any
 # restart, replacement or unready spell between two reads changes it.

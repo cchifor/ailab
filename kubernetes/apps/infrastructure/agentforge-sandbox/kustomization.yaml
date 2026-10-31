@@ -16,7 +16,6 @@ resources:
   - cilium-egress.yaml # trust-class=test ZERO egress (R-1) + the R-2 trust-class=agent broker-only egress
   - resource-limits.yaml # namespace ResourceQuota + LimitRange (node-DoS ceiling)
   # --- Per-org/ws NFS backing (10.55.0.254:/pve-nfs/agentforge-sandbox/<org>/<ws>), one static PV per consumer ---
-  - workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-tenant-zero-playground static PV + PVC — UNUSED since the canary moved to boundary-canary (2026-10-31); kept until the reaper/canary switch is verified, then deleted (#1505)
   - boundary-canary-workspace-pvc.yaml # SANDBOX ns: af-sbx-ws-tenant-zero-boundary-canary static PV + PVC — the ADR 0019 boundary canary's disposable target
   # --- NFS subdir provisioners: IaC replacement for the manual `mkdir -m 0777` per-org/ws export prereq ---
   - platform-dev-nfs-provisioner-storage.yaml # agentforge ns: parent-export static PV + PVC (mountOptions nfsvers=4.0) the provisioner Job mounts
@@ -26,7 +25,6 @@ resources:
   - platform-dev-staging-pv.yaml # TENANT ns: af-sbx-stage-tenant-zero-platform-dev static PV ONLY (tenant-ns PVC is CP-rendered: 70-staging-pvc.yaml in the tenants repo)
   # --- Reaper: TRUSTED `agentforge` ns (moved out of agentforge-sandbox), cross-ns RBAC into the sandbox ns ---
   - reaper-rbac.yaml # reaper SA (agentforge ns) + Jobs/Pods GC Role + cross-ns RoleBinding (pre-staged, active)
-  - reaper-storage.yaml # af-sbx-reaper-tenant-zero-playground static PV + PVC (agentforge ns) — UNUSED since the reaper moved to platform-dev (2026-10-31); kept only as PR-A's rollback target, then deleted (#1505)
   - platform-dev-reaper-storage.yaml # af-sbx-reaper-tenant-zero-platform-dev static PV + PVC (agentforge ns) — the reaper's mount: platform-dev's staging subdir
   - reaper-netpol.yaml # reaper egress CiliumNetworkPolicy (agentforge ns): kube-apiserver + DNS + infra-pg
   - reaper-ledger.yaml # reaper close-only ledger cred (ESO auth SA + SecretStore + ExternalSecret, agentforge ns)

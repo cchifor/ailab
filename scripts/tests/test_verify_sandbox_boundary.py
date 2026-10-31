@@ -106,6 +106,13 @@ echo "fake kubectl: unexpected call: $args" >&2
 exit 3
 """
 
+# Answers the manifest HEAD the harness makes: FAKE_REGISTRY=present (200), missing (404), down (000), cut
+# (200 then a failed transfer, curl rc 28).
+FAKE_CURL = r"""#!/usr/bin/env bash
+echo "curl $*" >> "$FAKE_LOG"
+case "${FAKE_REGISTRY:-present}" in present) printf 200 ;; missing) printf 404 ;; down) printf 000; exit 7 ;; cut) printf 200; exit 28 ;; esac
+"""
+
 AGENT_OK = """ok (blocked): world-ip
 ok (blocked): metadata
 ok (blocked): alt-dns
@@ -137,6 +144,9 @@ class Harness(unittest.TestCase):
         self.fake = self.dir / "kubectl"
         self.fake.write_text(FAKE_KUBECTL, encoding="utf-8", newline="\n")
         self.fake.chmod(0o755)
+        self.curl = self.dir / "curl"
+        self.curl.write_text(FAKE_CURL, encoding="utf-8", newline="\n")
+        self.curl.chmod(0o755)
         self.log = self.dir / "calls.log"
         self.log.write_text("", encoding="utf-8")
 
@@ -145,7 +155,7 @@ class Harness(unittest.TestCase):
 
     def run_script(self, deploy="one", pods="ok", preflight=True, **extra) -> subprocess.CompletedProcess:
         env = {k: v for k, v in os.environ.items() if not k.startswith("AF_CANARY_")}
-        env.update(AF_CANARY_KUBECTL=str(self.fake), FAKE_LOG=str(self.log), FAKE_DEPLOY=deploy,
+        env.update(AF_CANARY_KUBECTL=str(self.fake), AF_CANARY_CURL=str(self.curl), FAKE_LOG=str(self.log), FAKE_DEPLOY=deploy,
                    FAKE_PODS=pods, FAKE_IMAGE=DIGEST, FAKE_OTHER=OTHER, **extra)
         if preflight:
             env["AF_CANARY_PREFLIGHT_ONLY"] = "1"
@@ -206,6 +216,14 @@ class Preflight(Harness):
         proc = self.run_script(AF_CANARY_IMAGE="registry.chifor.me/agentforge/sandbox:latest")
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("not digest-pinned", proc.stderr)
+
+    def test_an_image_the_registry_no_longer_has_is_fatal(self) -> None:
+        for reg in ("missing", "down", "cut"):
+            with self.subTest(registry=reg):
+                proc = self.run_script(FAKE_REGISTRY=reg)
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertIn("is not in the registry", proc.stderr)
+        self.assertIn(f"/v2/agentforge/sandbox/manifests/sha256:{'ab' * 32}", self.calls())
 
     def test_no_live_orchestrator_falls_back_to_the_committed_digest_and_says_so(self) -> None:
         proc = self.run_script(deploy="none")

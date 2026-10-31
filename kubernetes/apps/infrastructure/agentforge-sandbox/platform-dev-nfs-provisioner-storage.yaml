@@ -1,11 +1,11 @@
 # PROVISIONER PV+PVC — the subdir-provisioner Job's view of the shared NFS export, in the reaper's
 # TRUSTED home namespace `agentforge` (same ns the Job runs in; baseline PSA). Mirrors the PV/PVC shape
-# of reaper-storage.yaml / staging-pv.yaml / workspace-pvc.yaml (storageClassName "" static bind,
+# of the retired playground's reaper-storage.yaml / staging-pv.yaml / workspace-pvc.yaml, all deleted (storageClassName "" static bind,
 # claimRef pre-binding, accessModes RWX, capacity 5Gi, reclaim Retain, mountOptions).
 #
 # WHY a PV/PVC instead of an inline `nfs:` volume (codex finding, ailab #123): an inline `nfs:` volume
 # CANNOT set mountOptions, so the Job negotiated the kernel-default NFS version. Every OTHER consumer of
-# this export pins `nfsvers=4.0` because QuTS hero NFS rejects 4.1 (see workspace-pvc.yaml). Routing the
+# this export pins `nfsvers=4.0` because QuTS hero NFS rejects 4.1 (see platform-dev-workspace-pvc.yaml). Routing the
 # mount through a PV lets it carry the SAME mountOptions and matches the estate's static-NFS convention.
 #
 # DELIBERATE DEVIATION from the sibling PVs: those scope nfs.path to the per-org/ws leaf
