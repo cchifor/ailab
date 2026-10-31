@@ -59,7 +59,7 @@ Abbreviations: `K/` = `kubernetes/apps/`, `I/` = `kubernetes/apps/infrastructure
 - `I/sources/kustomization.yaml:14`
 - `I/security/openbao/kustomization.yaml:20-22`
 
-**OpenBao:** `devworker-provision-job.yaml:127-142` (codex-hosts-publisher).
+**OpenBao:** `devworker-provision-job.yaml:127-142` (codex-hosts-publisher). **Deferred by the plan** to a follow-up, together with `CODEX_AUTH_GRANT` and the reviewer AppRoles. All three are dormant, and changing that shared Job is its own review; this retirement does not touch it.
 
 **infra-pg:**
 - `K/databases/infra-pg.yaml` 159-187 (postInitSQL) and 282-310 (managed.roles)

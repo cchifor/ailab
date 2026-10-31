@@ -95,6 +95,8 @@ The deletions total about 1 MB, but the reviewers skip any diff over `pr_reviewe
 
 Every replica change in this plan is made **in git**. Flux would revert a `kubectl scale` on a manifest with explicit replicas; PR-0 already set them to 0.
 
+**Preflight for every deletion PR:** no Flux Kustomization or HelmRelease being deleted has `spec.suspend: true`. Flux skips garbage collection and Helm uninstall for a suspended object, which would orphan its inventory. Checked 2026-10-31: none is suspended. codex-refresh's suspension is its CronJob's own `spec.suspend`, a workload field, not the Flux object's.
+
 **PR-2a. CI checks only; nothing live changes.**
 - Delete `check-seat-guard-cel.py`, `check-tenant-guard-cel.py` and their workflow `tenant-guard-cel.yaml`.
 - Delete `gen-broker-inventory.py` and its workflow `broker-inventory.yaml`. Its unit-test step already moved to `script-tests.yaml` in PR-0.
