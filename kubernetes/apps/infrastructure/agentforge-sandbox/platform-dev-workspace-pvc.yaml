@@ -1,5 +1,5 @@
 # Per-WORKSPACE RWX staging volume for the tenant-zero/platform-dev subscription workspace — SANDBOX
-# side. Clone of workspace-pvc.yaml (playground) for the CP-created workspace `platform-dev` (pool
+# side. Clone of the retired playground's workspace-pvc.yaml (deleted 2026-10-31, #1505) for the CP-created workspace `platform-dev` (pool
 # `delivery`). Same per-org/ws NFS backing model (P2 R-2 §C): org+workspace-keyed export subdir
 # `10.55.0.254:/pve-nfs/agentforge-sandbox/tenant-zero/platform-dev`, one STATIC PV per consumer, all
 # pointing at that SAME server:path — so one tenant orchestrator's PV can never reach another org's tree.
