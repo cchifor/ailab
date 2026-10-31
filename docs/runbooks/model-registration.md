@@ -64,7 +64,8 @@ Conventions the comments around the existing entries enforce, and the generator 
   `qwen3.8-27b`, cloud3 `qwen3.8-27b-w4a16`, the same weights) — plus host-side facts the request
   never sees, such as tensor-parallel width. That is a router-balanced HA/capacity pool, not two
   engines — `qwen3.8-27b-ailab` (node2 + node3, 2026-09-16, identical `model` too) and
-  `qwen3.8-27b-vllm-cloud` (cloud2 + cloud3, 2026-09-21) are the two. The comments on those entries
+  `qwen3.8-27b-vllm-cloud` (cloud2 + cloud3, 2026-09-21; cloud2-only since 2026-10-31, when
+  cloud3's w4a16 copy was found answering with degenerate text and retired) were the two. The comments on those entries
   carry the invariants: `model_info` byte-identical (the consumer generator de-duplicates
   first-wins), the first-listed deployment wins least-busy ties, and each deployment's vision claim
   was probed on *that* box before the shared `supports_vision` was allowed to stand. Per-request
@@ -152,10 +153,11 @@ not from a dev-worker.
   selection time — a 404 for a served name the backend does not know, a connection error or
   timeout for a backend that is down, or a silent fallback if one is configured. The probe in
   step 4 is what catches that before a user does.
-- **cloud3 holds one model at a time.** Every cloud3 route (`qwen3-coder-30b-a3b-cloud`,
-  `qwen3.5-122b-cloud`, `qwen3.8-flash-next-cloud`, `qwen3.8-flash-next-q6-cloud`,
-  `qwen3.8-27b-fp8-cloud`) shares one llama-swap; a request for a different one swaps the whole
-  model (52–110 s). Do not fan an agent team across two cloud3 routes.
+- **cloud3 holds one model at a time.** Every cloud3 route (`qwen3.5-122b-cloud`,
+  `qwen3.8-flash-next-cloud`, `qwen3.8-27b-fp8-cloud` and its `-fp8-unc-cloud` alias; `qwen3-coder-30b-a3b-cloud` was removed
+  2026-10-31) shares one llama-swap; a request for a different one swaps the whole model (60–330 s
+  measured 2026-10-31, the 122B from NFS the slowest). Do not fan an agent team across two cloud3
+  routes.
 - **`--parallel 1` routes and abandoned requests.** The pinned LiteLLM (1.91.0) does not propagate a
   client's disconnect to the backend (`litellm.yaml`'s own note, measured 2026-08 in
   `ai-model-swap.md`), so an abandoned request keeps a single-slot backend busy until its

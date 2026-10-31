@@ -97,6 +97,9 @@ data:
       # diagnostic key (litellm-vkeys.yaml org `dev-workers-diag`, projected to
       # af/dev-workers/common as litellm_diag_key) is issued here and whitelisted to this name.
       #
+      # ONE ENTRY SINCE 2026-10-31: cloud3's w4a16 deployment was removed on both gateways (it
+      # answered with degenerate text; plans/2026-10-31-local-models-improvement-plan.md). The text below
+      # still says "pair" and "two engines": read it as the main gateway's entries, whatever their count.
       # THE TWO ENTRIES ARE A VERBATIM COPY of the main gateway's pair (litellm.yaml, same image
       # digest on both deployments: ghcr.io/berriai/litellm@sha256:bd089afd…) — same `model`,
       # `api_base`, sampling params, extra_body and model_info, same order — so a request through
@@ -127,19 +130,6 @@ data:
         litellm_params:
           model: openai/qwen3.8-27b
           api_base: http://192.168.0.28:18020/v1   # cloud2 vLLM, TP=2 (see litellm.yaml)
-          api_key: "sk-noauth"
-          temperature: 1.0
-          top_p: 0.95
-          extra_body:
-            top_k: 20
-            chat_template_kwargs: { reasoning_effort: xhigh }
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000001
-        model_info: { supports_vision: true, max_input_tokens: 212992 }   # 262144 - 49152; mirrors litellm.yaml (native window since 2026-09-23)
-      - model_name: qwen3.8-27b-vllm-cloud
-        litellm_params:
-          model: openai/qwen3.8-27b-w4a16
-          api_base: http://192.168.0.26:8080/v1   # cloud3 llama-swap → vLLM w4a16 (see litellm.yaml)
           api_key: "sk-noauth"
           temperature: 1.0
           top_p: 0.95
@@ -194,7 +184,7 @@ spec:
         # startup; no Reloader in-cluster). Recompute on every model_list change with EXACTLY:
         #   yq -r 'select(.kind=="ConfigMap" and .metadata.name=="litellm-local-config") | .data."config.yaml"' \
         #     kubernetes/apps/apps/ai/litellm-local.yaml | sha256sum | cut -c1-12
-        checksum/config: "a34aa9a45e23"
+        checksum/config: "72422c6819e8"
     spec:
       # Gate the gateway on the litellm DB being reachable. The DB is created declaratively by the CNPG
       # Database resource (databases/infra-pg-litellm-database.yaml), but the `apps` and `databases` Flux
