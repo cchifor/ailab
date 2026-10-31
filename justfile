@@ -219,10 +219,11 @@ af-gen-litellm:
 ci-runners-preflight *args:
     python scripts/check-ci-runners.py {{args}}
 
-# Stage-0 pin: bootstrap-class image digests ONLY (orchestrator + platform). Its own commit; MUST NOT
-# un-gate a workload. Usage: just pin-bootstrap sha256:<orch> sha256:<platform>
-pin-bootstrap orchestrator platform:
-    python scripts/pin-image-digests.py "orchestrator={{orchestrator}}" "agentforge-platform={{platform}}"
+# Pin the bootstrap-class image: the orchestrator that OpenBao's init/unseal/provision Jobs run (the CP's
+# agentforge-platform image left with AgentForge, ADR 0041). Its own commit. Usage:
+#   just pin-bootstrap sha256:<orch>
+pin-bootstrap orchestrator:
+    python scripts/pin-image-digests.py "orchestrator={{orchestrator}}"
 
 # Stage-4 pin: workload image digests. Usage: just pin-workloads broker=sha256:.. sandbox=sha256:.. ...
 pin-workloads +pins:
