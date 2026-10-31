@@ -91,7 +91,7 @@ seed the answer is always "the live value wins over the seed".
 
 | Class | Paths | Post-wipe action |
 |---|---|---|
-| **RETIRED** — AgentForge's operator and tenant paths (2026-10-31, ADR 0041) | `operator/{broker,reaper,ci,conductor,dispatcher}/*` and `tenants/*` (the broker ledgers and OAuth documents, the reaper ledger, the CI registration and scaler tokens, the conductor and dispatcher forge PATs, the platform-dev orchestrator document) | **Nothing, and do not restore them.** They were deleted with the retirement, and `operator-seeds.sops.yaml` is now `{}`, so a re-provision brings none of them back. Their consumers are gone, and the Gitea PATs they held were revoked. If an old `seeds.json` fragment ever reappears in that file, it is a regression: delete it rather than letting the bootstrap floor recreate retired credentials. **Expected remnant:** the retained bootstrap image re-stamps `cas_required` on four broker `oauth` paths (`claude-max-1/2/3`, `codex-pro`) on every provision run, leaving metadata-only stubs with no versions and no data. They hold nothing; they go with #1536. |
+| **RETIRED** — AgentForge's operator and tenant paths (2026-10-31, ADR 0041) | `operator/{broker,reaper,ci,conductor,dispatcher}/*`, `tenants/*` and `dev-workers/codex-auth` (the broker ledgers and OAuth documents, the reaper ledger, the CI registration and scaler tokens, the conductor and dispatcher forge PATs, the platform-dev orchestrator document) | **Nothing, and do not restore them.** They were deleted with the retirement, and `operator-seeds.sops.yaml` is now `{}`, so a re-provision brings none of them back. Their consumers are gone, and the Gitea PATs they held were revoked. If an old `seeds.json` fragment ever reappears in that file, it is a regression: delete it rather than letting the bootstrap floor recreate retired credentials. **Expected remnant:** the retained bootstrap image re-stamps `cas_required` on four broker `oauth` paths (`claude-max-1/2/3`, `codex-pro`) on every provision run, leaving metadata-only stubs with no versions and no data. They hold nothing; they go with #1536. |
 | **SEED (dev-worker subtree)** — a SECOND, independent seed path | `dev-workers/common`, `dev-workers/<hostname>` (ADR 0020) | **Nothing for the KV** — the daily `openbao-devworker-provision` Job re-creates the `approle` mount, the six `dev-worker-*` policies/roles, and seed-patches these paths from `devworker-seeds.sops.yaml`. **But every AppRole secret-id is invalidated by the wipe** → re-run the mint ceremony for all six workers (`docs/runbooks/openbao-dev-workers.md` §Activation (e)) or the workers' `bao agent`s log `invalid role or secret ID` forever. |
 | **SEED (estate subtree)** — a THIRD, independent seed path | `estate/{proxmox,qnap,cloudflare,registry,gitea,github,restic,platform,oauth,strive-realm,cloudlab-win11,unifi}` (`docs/runbooks/openbao-estate-credentials.md` — that page's table is the list; don't trust this copy of it over that one) | **Nothing** — the daily `openbao-estate-provision` Job seed-patches these from `estate-seeds.sops.yaml`, and its fail-closed matrix covers every path/field named here. Nothing logs in against them (escrow), so there is no credential to re-mint. **But the subtree is wider than the seed:** `estate/{litellm,wifi}` are live in KV with no seed and no matrix entry (`estate/unifi` was seeded on 2026-10-27, ADR 0040), so a wipe loses them silently and this row does NOT cover them. `estate/litellm` also has one reader — policy `af-app-dsh`. |
 | **PUBLISHER-OWNED** — not seeded, and not restorable by any seeder (ADR 0026) | `dsh/credentials.DSH_CODEX_*`, `litellm/chatgpt.*` — the reviewer-2 seats' access tokens, projected every minute by `dsh-codex-publisher` on that host (`docs/runbooks/dsh.md` § Codex subscriptions) | **LOST until the publisher's next successful minute, and the order matters.** These are access tokens that the reviewer host renews every few days; a seed would put a stale token back daily, so there is none. Sequence: **(0)** restore the k8s-auth role `af-app-dsh` BY HAND first — `bao write auth/kubernetes/role/af-app-dsh bound_service_account_names=dsh-eso bound_service_account_namespaces=dsh token_policies=af-app-dsh token_ttl=1h alias_name_source=serviceaccount_uid` — because the unchanged `openbao-dsh-provision` Job only ASSERTS that role and aborts without it (a pre-existing gap ADR 0026 records rather than fixes; the chatgpt Job needs no such step, it writes its own role). **(1)** the `openbao-chatgpt-provision` and `openbao-dsh-provision` Jobs (both `openbao-breakglass-token`-auth, both in this directory) recreate both policies (`dsh-codex-publisher`, `af-app-litellm`), the k8s-auth role `af-app-litellm`, and both documents with their EMPTY keys — `af/litellm/chatgpt` with its four `CHATGPT_*` fields + `CHATGPT_OPENBAO_CANARY`, `af/dsh/credentials` with ONLY its `DSH_OPENBAO_CANARY`; that document's other operator fields (forge PAT, operator SSH) follow the ceremonies in `docs/runbooks/dsh.md`. **(2)** The AppRole ceremony in `dsh.md` recreates AppRole `dsh-codex-publisher` and mints a NEW role-id/secret-id into `/etc/dsh-codex-publisher/approle.json` on reviewer-2 — the wipe invalidated the old one, exactly as it does the dev-worker secret-ids. **(3)** The publisher's next minute fills both documents. It can only **PATCH** (no put, no create), so (1) MUST come first or every run fails on a 404; and a SOFT-DELETED document is refused (`deletion_time` set on the current version) until an operator `bao kv undelete`s it or the Job's loud-failure branch ("neither readable nor creatable") is resolved. ESO Retain keeps dsh and litellm serving the last-good token throughout — until it expires (~7 days), which is the real deadline. Verify with `dsh_codex_projection_ok == 1` for both documents. |
@@ -101,8 +101,8 @@ seed the answer is always "the live value wins over the seed".
 
 ### Privileged consumers to account for before a wipe
 
-The bootstrap Jobs listed in the ceremony below (`openbao-init`, `openbao-provision`,
-`provisioner-deploy`) all run the orchestrator image and are covered by the repin in step 1. Four
+The bootstrap workloads listed in the ceremony below (`openbao-init`, `openbao-unsealer`,
+`openbao-provision`) all run the orchestrator image and are covered by the repin in step 1. Four
 more privileged consumers do **not** ride that image:
 
 - **`openbao-devworker-provision`** (ns `openbao`, `kubernetes/apps/infrastructure/security/openbao/
@@ -132,7 +132,7 @@ more privileged consumers do **not** ride that image:
 
 ## The bootstrap Jobs, and disaster notes
 
-Moved here from `agentforge-activation.md` when AgentForge was retired (2026-10-31, ADR 0041). OpenBao's
+Moved here from the AgentForge activation runbook when AgentForge was retired (2026-10-31, ADR 0041). OpenBao's
 bootstrap still runs `agentforge` CLI code from the orchestrator image pinned in the three manifests below.
 Flux deploys OpenBao (TLS via `openbao-tls`), and these run on their own:
 - **`openbao-init`** (`unseal-job.yaml`) initializes and unseals, writing `openbao-keys` (the unseal key and
@@ -153,8 +153,10 @@ k8s-auth proof).
 **Disaster notes:**
 - `openbao-init` refuses to re-init if `openbao-keys` exists but the vault is uninitialized (a stale key or a
   lost PV). It fails loudly rather than minting a NEW vault that orphans every stored secret.
-- Losing `openbao-keys` after init means an unrecoverable seal: restore the vault PV from backup, or re-key.
-  The escrow copy is `kubernetes/infra/openbao-unseal.sops.yaml` (ceremony step 6).
+- Losing `openbao-keys` after init means an unrecoverable seal unless the key comes back: restore it from the
+  escrow copy `kubernetes/infra/openbao-unseal.sops.yaml` (ceremony step 6), or restore the vault PV from a
+  backup together with its matching key. There is no re-key path (`operator rekey` is disabled, see the top
+  of this runbook); otherwise it is the wipe ceremony below.
 - The unseal key and the root token (before its revocation) live only in the `openbao` namespace. The
   unsealer reads the unseal key only.
 
@@ -193,7 +195,6 @@ rollback — restore the snapshot onto the version that took it instead.
 1. **Repin FIRST** (or the gap you're fixing reproduces): the three bootstrap refs in
    `kubernetes/apps/infrastructure/security/openbao/{unseal-job,unsealer,provision-job}.yaml`
    must point at the orchestrator digest whose `bootstrap.py` contains the desired roles/policies.
-   (The fourth, `provisioner-deploy.yaml`, left with the AgentForge provisioner on 2026-10-31.)
    PR → approve → merge; reconcile the flux source (immutable-Job warnings are expected).
 2. **Scale down + (optional) backup**: `kubectl -n openbao scale sts openbao --replicas=0` → wait
    pod gone. For a backup, mount PVC `data-openbao-0` in a throwaway busybox pod and tar `/data`
@@ -217,7 +218,8 @@ rollback — restore the snapshot onto the version that took it instead.
    metadata+mac (this caused a real 2026-07-24 leak → seal rotation). Before pushing, assert BOTH
    values start with `ENC[` AND the decrypt round-trip hash matches the live Secret.
 7. **Verify**: role probe matrix (positive + negative per role), all ExternalSecrets `SecretSynced`,
-   the `openbao-canary` ExternalSecret Ready, and `openbao/openbao-provisioner-token` absent again.
+   the `openbao-canary` ExternalSecret Ready, `openbao/openbao-operator-provisioner-token` recreated and
+   usable (`bao token lookup` with it succeeds), and `openbao/openbao-provisioner-token` absent again.
 
 ## Adding a SEED path (making a static value self-heal)
 

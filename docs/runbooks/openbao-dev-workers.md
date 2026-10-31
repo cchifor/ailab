@@ -722,7 +722,8 @@ revokes them.
 **The dev workers no longer render the shared login below.** `dev_worker_codex_host_owned_login`
 (role default `true`) drops the codex `template {}` from each worker's `agent.hcl`, so the bao agent
 never touches `~/.codex/auth.json` and each host keeps the login the operator made on it. The shared
-login still exists and reviewer-2's `codexrun` still renders it; only the dev workers left it.
+login itself is gone (retired with AgentForge on 2026-10-31; § "The shared codex login"); reviewer-2 holds
+its own seat login.
 
 **Why:** seat a (the shared login) was revoked server-side on 2026-09-21 and again on 2026-09-29
 (~09:49Z, `token_revoked`), which took every worker down at once; a `codex login` made on a worker
@@ -770,9 +771,9 @@ login), and `validate-codex-host.sh` FAILs with `expected=host-owned`. The valid
 expectation from the host's own `agent.hcl`: a template for the user's `auth.json` means
 `projection`, none means `host-owned`.
 
-**Back to the shared login:** set `dev_worker_codex_host_owned_login: false` (group_vars or per host)
-and converge. Only once seat a works again (re-seed per the section below) — otherwise the agent
-replaces working host logins with a revoked token.
+**There is no shared login to go back to** (retired 2026-10-31). Do NOT set
+`dev_worker_codex_host_owned_login: false`: the agent would render a template for a KV document that no
+longer exists, and `exit_on_retry_failure` would stop the agent (and with it `~/.git-credentials`).
 
 ## The shared codex login (RETIRED 2026-10-31)
 

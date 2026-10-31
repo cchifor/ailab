@@ -36,12 +36,15 @@ Remove everything that exists only for AgentForge, in verified, separately revie
   - the edge hostname;
   - the AgentForge OpenBao KV leaves, and every path in `operator-seeds` (now `{}`).
 - **Repos:** `agentforge`, `agentforge-platform`, `agentforge-tenants`, `agentforge-config`,
-  `agentforge-playground` and `primes-lab` are archived in Gitea (read-only, unarchivable), after the
+  `agentforge-playground` and `primes-lab` are archived in Gitea (read-only; an owner can unarchive them), after the
   reviewbot allowlists dropped them (#1533).
 - **Tooling:** the AgentForge-only CI checks, generators, recipes, alerts, dashboards and runbooks.
 
 **Kept, because something outside AgentForge needs it.** These are listed explicitly; never select
-objects by the `app.kubernetes.io/part-of: agentforge` label, which shared objects also carry.
+objects by the `app.kubernetes.io/part-of: agentforge` label, which shared objects also carry. The
+object-level checklist (OpenBao TLS, the `openbao-keys` / `openbao-operator-provisioner-token` Secrets,
+`openbao-state`, `operator-seeds`, `unseal-rbac` blocks 1–3, the canary, and the non-AgentForge
+provisioning Jobs) is section C of `plans/2026-10-31-retire-agentforge-classification.md`.
 - **OpenBao's bootstrap still runs AgentForge code.** `openbao-init`, `openbao-unsealer` and
   `openbao-provision` use `agentforge/orchestrator@sha256:ed8c94fa…`, also mirrored as
   `registry.chifor.me/infra/openbao-bootstrap:orchestrator-f76c9ce`. The image, its Zot retention rule
@@ -77,7 +80,13 @@ longer runs the AgentForge image (#1536).
   - `CODEX_AUTH_GRANT` and the reviewer AppRoles in `devworker-provision-job.yaml`, plus the
     `codex-hosts-publisher` role bound to the deleted `agentforge-broker/af-codex-refresher` (#1537);
   - the empty NFS export root on the QNAP (#1539).
-- **Rollback is per PR (revert).** The databases restore from
-  `postgres-dumps:/dumps/retired/agentforge-2026-10-31/` (SHA256SUMS and per-table row counts are
-  alongside), with the roles recreated. Revoked tokens, keys and KV are reissued, not restored. The
-  archived repos can be unarchived.
+- **Rollback** has three kinds of part:
+  - **Reversible by revert:** the manifests, one PR at a time (PR-0 to PR-4). A recreated Retain PV needs
+    its `claimRef` UID cleared before it rebinds.
+  - **Restorable from the kept dump:** the two databases, from
+    `postgres-dumps:/dumps/retired/agentforge-2026-10-31/`, with `SHA256SUMS` and per-table row counts
+    alongside. The procedure is `docs/runbooks/infra-pg.md` § "Retired: the AgentForge databases": recreate
+    the roles, create the databases with their owners, then `pg_restore` and compare the counts.
+  - **Reissued, never restored:** the revoked Gitea tokens and deploy key, and the destroyed KV documents.
+    Their values are gone by design, so they are minted afresh; the KV layout and seed rules are in
+    `docs/runbooks/openbao-recovery.md`. An owner can unarchive the repos.
