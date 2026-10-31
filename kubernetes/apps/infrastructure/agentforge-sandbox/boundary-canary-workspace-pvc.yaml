@@ -1,0 +1,64 @@
+# SANDBOX-ns workspace PV+PVC for the ADR 0019 boundary canary's DISPOSABLE identity
+# tenant-zero/boundary-canary (pool `canary`), #1505, plans/2026-10-31-playground-leftovers-plan.md.
+#
+# sandbox-guard pins a sandbox pod's workspace volume to the PVC 'af-sbx-ws-' + <org label> + '-' +
+# <workspace label>, so the canary needs a PVC of its own: on platform-dev's labels it would mount
+# platform-dev's LIVE workspace, which scripts/verify-sandbox-boundary.sh refuses. This pair replaced
+# the retired playground's af-sbx-ws-tenant-zero-playground as the canary's target on 2026-10-31.
+#
+# No tenant namespace, orchestrator, seat or capability exists for this identity: only the canary
+# harness creates pods with these labels, and its one broker ingress rule (broker-openai-codex.yaml)
+# grants reachability for the positive control, never authorization.
+#
+# The subdir /pve-nfs/agentforge-sandbox/tenant-zero/boundary-canary is created (0777) by the
+# parent-export mkdir Job, platform-dev-nfs-provisioner-job.yaml, which also bounds what the canary
+# leaves behind: each run's subPath dir is empty, and the Job rmdir's those older than 2 hours.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: af-sbx-ws-tenant-zero-boundary-canary
+  labels:
+    velero.io/exclude-from-backup: "true" # raw nfs: PV (no CSI driver) -> Velero skips the data mover and the native-snapshot fallback is a NO-OP, so this was never actually backed up; contents are per-run canary scratch. Explicit beats silent (ADR 0010)
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: boundary-canary
+    agentforge.io/role: sandbox-workspace
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "" # static bind — do NOT let the nfs-csi default class provision this
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.0 # QuTS hero NFS rejects 4.1; 4.0 is single-port + NAT-friendly (matches storageclass-nfs)
+    - hard
+    - nconnect=4
+  nfs:
+    server: 10.55.0.254 # QNAP storage-fabric IP (matches the platform-dev PVs)
+    path: /pve-nfs/agentforge-sandbox/tenant-zero/boundary-canary # the canary's own subdir, never a tenant's
+  # Pre-bind to exactly this PVC so no other claim can grab the PV (cross-consumer safety).
+  claimRef:
+    namespace: agentforge-sandbox
+    name: af-sbx-ws-tenant-zero-boundary-canary
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: af-sbx-ws-tenant-zero-boundary-canary
+  namespace: agentforge-sandbox
+  labels:
+    velero.io/exclude-from-backup: "true" # raw nfs: PV (no CSI driver) -> Velero skips the data mover and the native-snapshot fallback is a NO-OP, so this was never actually backed up; contents are per-run canary scratch. Explicit beats silent (ADR 0010)
+    app.kubernetes.io/managed-by: agentforge-operator
+    app.kubernetes.io/part-of: agentforge
+    agentforge.io/org: tenant-zero
+    agentforge.io/workspace: boundary-canary
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "" # bind to the static PV above, not the dynamic default
+  volumeName: af-sbx-ws-tenant-zero-boundary-canary
+  resources:
+    requests:
+      storage: 1Gi

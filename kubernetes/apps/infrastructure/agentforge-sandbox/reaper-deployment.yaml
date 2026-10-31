@@ -6,25 +6,26 @@
 # agentforge-sandbox, and its egress policy (reaper-netpol.yaml) allows the kube-apiserver + DNS.
 # replicas:1 is REQUIRED — the shipped elector (SingleReplicaElector) is an always-leader stub safe ONLY
 # at one replica; strategy Recreate so a rollout never briefly runs two reapers. Mounts the
-# af-sbx-reaper-tenant-zero-playground PVC (SAME per-org/ws NFS subdir as the workspace/staging PVs) at
-# the staging root to scan for orphan <job-id> dirs
-# and rmtree reclaimed ones AFTER winning the Lease.
+# af-sbx-reaper-tenant-zero-platform-dev PVC (SAME per-org/ws NFS subdir as platform-dev's workspace and
+# staging PVs) at the staging root to scan for orphan <job-id> dirs and rmtree reclaimed ones AFTER
+# winning the Lease. The subdir it mounts is the ONLY workspace it reaps: it mounted the retired
+# playground's until 2026-10-31 and so never reaped platform-dev (#1505,
+# plans/2026-10-31-playground-leftovers-plan.md). A second workspace needs a second reaper.
 #
 # The owner-lease is a coordination.k8s.io/v1 Lease `af-sbx-<job-id>` (agentforge-sandbox ns), NOT an NFS
 # file or a shared HMAC: the apiserver's resourceVersion CAS + this RBAC are the integrity boundary, and
 # the tokenless sandbox pod has NO API access so it can never touch it. The reaper reclaims only by
 # CAS-acquiring an absent/expired Lease (a conflict = the orchestrator renewed → back off).
 #
-# ⚠️ DELIBERATELY NOT LISTED in kustomization.yaml (mirrors the CP deployment.yaml precedent). The
-# image below is a PLACEHOLDER @sha256:0000… — unpullable. TO ENABLE THE REAPER:
-#   1. pin the immutable @sha256 of the built p1-worker image (registry.chifor.me/agentforge/p1-worker,
-#      from the cchifor/agentforge release CI — same digest the CP's AFP_WORKER_IMAGE gets);
-#   2. add `- reaper-deployment.yaml` back to kustomization.yaml (no lease Secret to seed — the Lease is
-#      RBAC-gated, granted by reaper-rbac.yaml which is already active). The ORCHESTRATOR must set
+# LISTED in kustomization.yaml and LIVE: the image below is a pinned p1-worker digest. (It began as an
+# unpullable PLACEHOLDER @sha256:0000… and was unlisted until pinned, which is what older notes in this
+# directory describe.) The Lease needs no Secret: it is RBAC-gated by reaper-rbac.yaml. The ORCHESTRATOR
+# of the reaped workspace must set
 #      AF_SANDBOX_STAGING_ROOT (same value below), AF_SANDBOX_NAMESPACE=agentforge-sandbox,
-#      AF_SANDBOX_ORG=tenant-zero, AF_SANDBOX_WORKSPACE=playground,
-#      AF_SANDBOX_WORKSPACE_PVC=af-sbx-ws-tenant-zero-playground (the VAP rejects any pod whose workspace
-#      PVC name != 'af-sbx-ws-' + its org label + '-' + its workspace label).
+#      AF_SANDBOX_ORG=tenant-zero, AF_SANDBOX_WORKSPACE=platform-dev,
+#      AF_SANDBOX_WORKSPACE_PVC=af-sbx-ws-tenant-zero-platform-dev (the VAP rejects any pod whose workspace
+#      PVC name != 'af-sbx-ws-' + its org label + '-' + its workspace label). platform-dev's CP-rendered
+#      orchestrator sets exactly these.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -108,8 +109,8 @@ spec:
                   # Deployment is gated/unlisted, so this binds only at activation — where the Secret is
                   # Ready by construction (OpenBao/ledger provisioned before the image is pinned + listed).
           volumeMounts:
-            # The af-sbx-reaper-tenant-zero-playground PVC (same per-org/ws NFS subdir) at the staging root: scans for orphan <job-id> dirs
-            # and rmtree's reclaimed <root>/<job-id>/ dirs AFTER a successful Lease CAS-acquire.
+            # The af-sbx-reaper-tenant-zero-platform-dev PVC (same per-org/ws NFS subdir) at the staging root: scans for orphan
+            # <job-id> dirs and rmtree's reclaimed <root>/<job-id>/ dirs AFTER a successful Lease CAS-acquire.
             - name: staging
               mountPath: /workspace/agentforge/sandbox
           resources:
@@ -123,4 +124,4 @@ spec:
       volumes:
         - name: staging
           persistentVolumeClaim:
-            claimName: af-sbx-reaper-tenant-zero-playground # agentforge-ns PVC -> per-org/ws NFS subdir
+            claimName: af-sbx-reaper-tenant-zero-platform-dev # agentforge-ns PVC -> per-org/ws NFS subdir (platform-dev-reaper-storage.yaml)

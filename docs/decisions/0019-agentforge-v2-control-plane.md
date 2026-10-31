@@ -265,8 +265,9 @@ safe. It has two tiers and a live matrix; a **green suite is the gate**, and **a
   (the per-pod-DinD sidecar design is **superseded** by ephemeral per-job Kata Jobs — there is no
   DinD and no cap to nest one, so "privileged DinD escapes the microVM" is unconstructible).
 - **Live tier (activation-time, `admin@ai`).** `scripts/verify-sandbox-boundary.sh` (this repo) runs
-  the matrix against the ACTUAL flipped sandbox on a **disposable** throwaway `tenant-zero/playground`
-  workspace (it HARD-REFUSES `platform-dev`, which drives the real repos) and tears the canaries down.
+  the matrix against the ACTUAL flipped sandbox on a **disposable** identity (`tenant-zero/boundary-canary`
+  since 2026-10-31, the throwaway `tenant-zero/playground` workspace before; it HARD-REFUSES `platform-dev`,
+  which drives the real repos) and tears the canaries down.
   It asserts: (i) the static boundary (kata RuntimeClass, both egress CNPs + default-deny, separate
   restricted-PSA ns, tokenless SA with no RoleBinding); (ii) **negative admission** — the pinned
   pod-shape VAPs REJECT `privileged`, `automountServiceAccountToken:true`, `hostNetwork`, a **non-kata
@@ -340,3 +341,9 @@ Kept on purpose:
 - the namespace reservation (tenant-guard rule 16 + tenant-reserved-guard);
 - the boundary canary's playground storage and broker rule, until the canary moves to a disposable identity;
 - the reaper's mount, until it is re-pointed at platform-dev. It only ever reaped the playground.
+
+2026-10-31 (#1505, plans/2026-10-31-playground-leftovers-plan.md): the reaper now mounts platform-dev's staging
+subdir. The canary runs on its own identity `tenant-zero/boundary-canary` (pool `canary`), with its own PVC and a
+single ingress rule on `broker-openai-codex`. The playground broker rule is gone from all five brokers, and the
+canary gained a denied-broker probe. The playground's two PV/PVC pairs and its NFS subdir are deleted in
+follow-up PRs once this is verified.

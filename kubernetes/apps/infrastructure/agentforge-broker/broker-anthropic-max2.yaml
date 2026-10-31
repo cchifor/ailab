@@ -339,23 +339,10 @@ spec:
       toPorts:
         - ports:
             - { port: "8700", protocol: TCP }
-    # (1) ONLY sandbox AGENT pods of the MATCHING pool/tenant, on the STABLE per-pool/org/workspace identity
-    #     labels (NOT the high-cardinality per-job label). Preserved verbatim from the single-broker policy.
-    # 2026-10-30: the playground was RETIRED, but this rule is KEPT as the ADR 0019 boundary canary's positive control
-    # (its agent pod carries these labels). Remove it once the canary moves to a disposable identity (plans/2026-10-30-retire-playground-plan.md).
-    - fromEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: agentforge-sandbox
-            agentforge.io/trust-class: agent
-            agentforge.io/pool: planner
-            agentforge.io/org: tenant-zero
-            agentforge.io/workspace: playground
-      toPorts:
-        - ports:
-            - { port: "8700", protocol: TCP }
-    # (1b) platform-dev/delivery subscription worker (tenant-zero) — its sandbox AGENT pods, matched on the
-    #      SAME STABLE per-pool/org/workspace identity labels as the playground admission above. Additive:
-    #      mirrors (1) exactly with pool=delivery / workspace=platform-dev; preserves the playground admission.
+    # (1b) platform-dev/delivery subscription worker (tenant-zero) — ONLY its sandbox AGENT pods, on the
+    #      STABLE per-pool/org/workspace identity labels (NOT the high-cardinality per-job label). Rule (1),
+    #      the retired playground/planner admission, was removed 2026-10-31 when the boundary canary moved
+    #      to its own identity (#1505, plans/2026-10-31-playground-leftovers-plan.md).
     - fromEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: agentforge-sandbox

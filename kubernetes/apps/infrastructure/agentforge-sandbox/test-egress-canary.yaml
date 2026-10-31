@@ -40,8 +40,8 @@ spec:
         agentforge.io/job-id: "testcanary0000000000000000000000"
         agentforge.io/trust-class: test
         agentforge.io/org: tenant-zero
-        agentforge.io/workspace: playground
-        agentforge.io/pool: planner
+        agentforge.io/workspace: boundary-canary
+        agentforge.io/pool: canary
         app.kubernetes.io/managed-by: agentforge
         app.kubernetes.io/component: sandbox
     spec:
@@ -59,7 +59,7 @@ spec:
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: af-sbx-ws-tenant-zero-playground
+            claimName: af-sbx-ws-tenant-zero-boundary-canary
         - name: home
           emptyDir:
             sizeLimit: 256Mi
