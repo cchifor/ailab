@@ -131,7 +131,7 @@ Abbreviations: `K/` = `kubernetes/apps/`, `I/` = `kubernetes/apps/infrastructure
    - each rule file leaves with its promtool test.
 8. infra-pg: removing a managed role does not drop it, and Flux never drops a database. Order: dump, DROP, `ensure: absent`.
 9. Gitea admin token: delete the token before the allowlist edit, or `GiteaAdminTokenNotAllowlisted` fires.
-10. Retain storage: the NFS af-sbx-* PVs and the npm-cache iSCSI PV.
+10. Retain storage: the NFS af-sbx-* PVs and the npm-cache iSCSI PV keep their data when deleted. The plan resolves this: a cleanup Job erases the NFS data, and the npm-cache PV is flipped to `Delete`, before PR-2d removes them.
 11. Live OpenBao state: seeds come first (create-if-absent on every provision run); the operator roles are re-applied from image code.
 12. Remove the repos from `pr_reviewer_repos` before archiving them.
 

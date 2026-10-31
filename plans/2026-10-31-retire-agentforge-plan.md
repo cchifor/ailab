@@ -51,7 +51,7 @@ The dev workers have no AgentForge units installed (0 on all four, checked 2026-
 
 ## Approach
 
-Six PRs, each verified live before the next. Every deleted file leaves its `kustomization.yaml` in the same commit, and every deleted script or rule leaves together with its tests and checks, so `wait: true` layers and CI never see a dangling reference.
+Each PR is verified live before the next; PR-2 and PR-3 are split, as described in their sections. Every deleted file leaves its `kustomization.yaml` in the same commit, and every deleted script or rule leaves together with its tests and checks, so `wait: true` layers and CI never see a dangling reference.
 
 Owner-level live steps use a one-shot owner credential (approved), in two ways:
 - **Gitea:** a token minted in the gitea pod, passed via stdin, deleted from the DB, and proven dead with a 401.
@@ -64,11 +64,11 @@ Destructive steps are release gates, each placed after its own backup or disposa
 2. **#1513:** the audit found 77 direct assignments of the shared `subprocess.run` in `test_reviewbot.py` and no other mutated subprocess attribute. The cross-module leak is the defect, so a module-level `tearDownModule` restores the real function, bound after the imports. Within-module ordering is unchanged; each test sets its own fake first.
    - Proven with a probe module: run after it, the probe gets the canned JSON on main and a real subprocess with the fix.
 3. **Remove the AgentForge alerts and status checks of the services this PR stops,** so the stop is not alert noise:
-   - every AgentForge rule file except the provisioner's, which stays until PR-3, with its promtool tests;
+   - every AgentForge rule file except the provisioner's, which stays until PR-2b, with its promtool tests;
    - the dormant `monitoring/agentforge.yaml`;
    - the two script tests that read `agentforge-rules.yaml`. Their generic promrule-spec and rules-lint classes move verbatim to `test_promrule_spec.py`;
    - the gatus check and the homepage tile.
-4. **Scale to 0:** `agentforge-platform` (the CP and its tenants reconciler), the five brokers, the reaper, `npm-cache`, and the conductor (already 0). The provisioner stays up.
+4. **Scale to 0, in git:** `agentforge-platform` (the CP and its tenants reconciler), the five brokers, the reaper, `npm-cache`, and the conductor (already 0). The provisioner stays up.
 5. **Before merge:**
    - **Durable image copy:** copy `agentforge/orchestrator@sha256:ed8c94fa…` to `registry.chifor.me/infra/openbao-bootstrap`. That is outside `agentforge/**`, so the catch-all keep-everything rule applies. Verify both paths serve the same digest.
    - **Baseline:** save the Flux status of every unit and the live inventory: all Kustomizations' `.status.inventory` for the AgentForge units, the tenants repo revision, BrokerSeats, TriggerAuthentications, ClusterTriggerAuthentications, HPAs on external metrics, the PVs, the Gitea hooks and tokens, and the OpenBao KV leaf names.
@@ -89,62 +89,67 @@ Destructive steps are release gates, each placed after its own backup or disposa
 - the provisioner logged its teardown;
 - no BrokerSeat exists.
 
-### PR-2: workloads, CP, admission, monitoring, CI, edge
+### PR-2a … PR-2e: the AgentForge objects, in five PRs
 
-**Execution note (2026-10-31): split in four,** because the reviewers skip any diff over `pr_reviewer_max_diff_bytes` (400 KB), and this one is about 1 MB of deletions. The four go in sequence, since each edits `test_manifest_paths.py`'s exact path set with its own deletions:
-- **2a:** broker and codex-refresh (which depends on broker), the broker-inventory generator and its workflow, the BrokerSeat tests, and the CEL checks with their workflow.
-- **2b:** sandbox, workers (which depends on sandbox), pkgcache and ci-runners, plus the canary harness and its test. The NFS cleanup Job and the npm-cache reclaim flip are gates before 2b.
-- **2c:** the CP (`apps/agentforge/`) and tenants-bootstrap with git-auth, plus the justfile, edge, auth, cloudflared, repo lists and dev_worker edits.
-- **2d:** the provisioner, folded in from PR-3. Its only remaining duties were finalizers on the tenant namespace (gone after PR-1) and on BrokerSeats (none exist). It leaves with its rules, the `af-revoke` scripts and `check_capability_kids_checksum`.
+The deletions total about 1 MB, but the reviewers skip any diff over `pr_reviewer_max_diff_bytes` (400 KB). So this phase runs as five PRs, **in sequence**, each one verified before the next. Each edits `test_manifest_paths.py`'s exact path set together with its own deletions.
 
-PR-3 is then KEDA alone.
-1. **Flux Kustomizations and dirs:** `agentforge-broker`, `-sandbox`, `-workers`, `-pkgcache`, `-codex-refresh`, `-ci-runners` and `-tenants-git-auth` (with `agentforge-tenants-bootstrap/`, now unneeded). Also `apps/agentforge/` (CP, admission VAPs, `agentforge-infra-bot.sops.yaml`), removed from `apps/kustomization.yaml`.
-2. **Monitoring:** nothing left here; PR-0 removed it. The provisioner rules go in PR-3.
-3. **Scripts, tests, the justfile and workflows:**
-   - delete `af-cp-smoke.sh`, `af-db.sh`, `af-revoke-legacy-kid.sh` and `af_revoke_legacy_kid.py`, `check-{seat,tenant}-guard-cel.py` and `verify-sandbox-boundary.sh`, each with its tests;
-   - keep `gen-broker-inventory.py` and `test_provisioner_podmonitor.py` (which imports it) until PR-3, and delete the rest of the broker tests now;
-   - remove `check_platform_dev_job_suffix` from `check-inline-hashes.py` and fix the step name in `manifests.yaml`;
-   - remove the af-* recipes, keeping the shared ones listed above;
-   - delete `tenant-guard-cel.yaml` and the broker-inventory generator step. Delete `broker-inventory.yaml` itself in PR-3, when the generator goes;
-   - update `test_manifest_paths.py`.
-4. **Edge, auth and status:**
-   - Authelia: remove only the `agentforge` OIDC client and its `agentforge_id_token` claims policy. Inventory the encrypted users DB for `af:tenant-zero:*` groups and remove them in a SOPS edit, asserting `ENC[`.
-   - Edge: remove the hostname from `kubernetes/edge/hostnames.yaml`, then `just edge-render`, and add it to `DROPPED` in `test_edge_render.py`.
-   - DNS: after merge, delete the UniFi static DNS record by reconciling with `scripts/edge/gateway.py`, and commit its state. Apply Cloudflare with `tofu` by hand.
-   - Remove the cloudflared ingress, the gatus check and the homepage tile.
-5. **Repo lists:** `ci-rerun-watchdog` `REPOS` and `scripts/ci-queue-stats.py` `DEFAULT_REPOS`, with their tests.
-6. **dev_worker role:** remove the host-mode AgentForge feature (`tasks/agentforge.yml`, `agentforge-update.sh`, the templates, the handlers, the defaults, the firewall rules, the group_vars and the example secrets). The workers and the shared OpenBao agent stay.
-7. **Before merge (gates):**
-   - **NFS:** run a one-shot cleanup Job on the parent-export PVC that erases `/export/tenant-zero/*` (disposable, as above), and wait for it to complete.
-   - **npm-cache:** patch its PV to `persistentVolumeReclaimPolicy: Delete`, so Trident deletes the LUN.
+Every replica change in this plan is made **in git**. Flux would revert a `kubectl scale` on a manifest with explicit replicas; PR-0 already set them to 0.
 
-**Verify:**
-- the namespaces `agentforge`, `agentforge-broker`, `agentforge-sandbox`, `agentforge-pkgcache` and `agentforge-ci` are gone;
-- the AgentForge VAPs and bindings and the `brokerseats` CRD are gone;
-- the Retain NFS PVs are deleted (data already erased; the empty export root is noted as a QNAP leftover);
-- the npm-cache LUN is gone from Trident and the QNAP;
-- every surviving ailab unit reconciles the merge revision, and external units match their baseline;
-- CI is green.
+**PR-2a. CI checks only; nothing live changes.**
+- Delete `check-seat-guard-cel.py`, `check-tenant-guard-cel.py` and their workflow `tenant-guard-cel.yaml`.
+- Delete `gen-broker-inventory.py` and its workflow `broker-inventory.yaml`. Its unit-test step already moved to `script-tests.yaml` in PR-0.
+- Delete the canary harness `verify-sandbox-boundary.sh`.
+- Delete their tests: `_brokerseat_support.py`, `test_brokerseat_{admission,crd,rbac}.py`, `test_gen_broker_inventory.py`, `test_verify_sandbox_boundary.py`, and `test_provisioner_podmonitor.py`, which imports the generator.
+- Remove the justfile recipes that ran them (af-verify-tenant-guard, af-verify-brokers, af-gen-brokers, af-record-seed-coverage).
+- **Why first:** the checks only keep the soon-deleted objects consistent, and removing a check before its subject is always safe. It is about 295 KB.
 
-### PR-3: provisioner and KEDA
-1. **OpenBao:**
-   - delete `provisioner-deploy.yaml`, `provisioner-podmonitor.yaml` and `capability-kids-configmap.yaml`;
-   - delete the provisioner identity block in `unseal-rbac.yaml`;
-   - delete the provisioner rules and their tests;
-   - delete `gen-broker-inventory.py`, `test_provisioner_podmonitor.py` and `broker-inventory.yaml`;
-   - remove `check_capability_kids_checksum`;
-   - remove the codex-hosts-publisher policy and role from `devworker-provision-job.yaml`;
-   - edit the kustomizations.
+**PR-2b. The provisioner, before the brokers.**
+- **Why:** its BrokerSeat controller watches the `brokerseats` CRD, which PR-2c deletes. After PR-1's gate it has no duties left (the tenant namespace is gone, and no BrokerSeat exists).
+- Delete `provisioner-deploy.yaml` (with its CiliumNetworkPolicy and its namespaces ClusterRole/Binding), `provisioner-podmonitor.yaml` and `capability-kids-configmap.yaml`, with their entries in `security/openbao/kustomization.yaml`.
+- Delete the provisioner identity block (4) in `unseal-rbac.yaml`.
+- Delete `agentforge-provisioner-rules.yaml` with its test and its monitoring kustomization entry.
+- Delete `af-revoke-legacy-kid.sh` and `af_revoke_legacy_kid.py` with their test, and `check_capability_kids_checksum` in `check-inline-hashes.py`.
+- **After merge:** revoke the provisioner's OpenBao token and delete the Secret `openbao-provisioner-token`. Keep `openbao-operator-provisioner-token`.
+- **Verify:** OpenBao is unsealed, the canary is green, and an ESO refresh succeeds outside AgentForge.
+- **Deferred to a follow-up**, not this plan: `devworker-provision-job.yaml`'s codex-hosts-publisher, `CODEX_AUTH_GRANT` and the reviewer AppRoles. All three are dormant, and changing that Job is a review of its own.
 
-   The provisioner's own OpenBao token and Secret (`openbao-provisioner-token`) are revoked by hand after merge. Keep `openbao-operator-provisioner-token`.
-2. **KEDA:**
-   - **Preflight:** no ScaledObjects, ScaledJobs, TriggerAuthentications or ClusterTriggerAuthentications, and no HPA on external metrics. Read the installed chart's CRD behaviour.
-   - Delete `clusters/ai/keda.yaml`, `autoscaling/keda/` and `sources/keda.yaml`, and drop `keda` from the platform-rules regex and its test.
-   - **After merge:** confirm the HelmRelease uninstalled while its namespace still existed, then remove any residual KEDA CRDs and the `v1beta1.external.metrics.k8s.io` APIService (a dangling one hangs namespace deletion cluster-wide), then the namespace.
-3. **Verify:**
-   - OpenBao is unsealed, and the unsealer is healthy and can read its Secret (`kubectl auth can-i`);
-   - the canary is green;
-   - an ESO secret in a non-AgentForge namespace refreshes.
+**PR-2c. The brokers and codex-refresh.**
+- Delete the Flux units `agentforge-broker` (five seats, the `brokerseats` CRD, its admission and RBAC, the inventory) and `agentforge-codex-refresh`, which dependsOn it, with their directories.
+- **Verify:** the namespace `agentforge-broker` and the CRD are gone, and its VAPs and bindings are gone.
+
+**PR-2d. Sandbox, workers, pkgcache, ci-runners.**
+- **Gates before merge:**
+  - a one-shot cleanup Job on the parent-export PVC erases `/export/tenant-zero/*` (disposable data, as in Context);
+  - npm-cache's PV is patched to `persistentVolumeReclaimPolicy: Delete`, so Trident deletes the LUN.
+- Delete the Flux units `agentforge-sandbox`, `-workers` (which dependsOn the sandbox and KEDA), `-pkgcache` and `-ci-runners` (which dependsOn KEDA), with their directories. Remove `check_platform_dev_job_suffix` from `check-inline-hashes.py`.
+- **Verify:**
+  - the namespaces `agentforge-sandbox`, `agentforge-pkgcache` and `agentforge-ci` are gone, with their VAPs;
+  - the Retain NFS PVs are gone. Their data was already erased; the empty export root is a noted QNAP leftover;
+  - the npm-cache LUN is gone from Trident and the QNAP.
+
+**PR-2e. The CP and the tenants bootstrap, plus the shared-file edits.**
+- Delete `apps/agentforge/` (the CP, the admission VAPs, `agentforge-infra-bot.sops.yaml`) and drop it from `apps/kustomization.yaml`.
+- Delete `agentforge-tenants-git-auth.yaml` and `agentforge-tenants-bootstrap/`. Gate: PR-1's GC has finished.
+- Delete `af-db.sh`, `af-cp-smoke.sh`, `test_cp_env.py` and their recipes.
+- Edge, auth and status:
+  - remove the Authelia `agentforge` client and its `agentforge_id_token` claims policy, plus any `af:tenant-zero:*` groups in the users DB (a SOPS edit, asserting `ENC[`);
+  - remove the edge hostname, then `just edge-render`, and add it to `DROPPED`; delete the UniFi DNS record via `gateway.py` after merge, and apply Cloudflare with `tofu` by hand;
+  - remove the cloudflared ingress.
+- Repo lists: ci-rerun-watchdog `REPOS` and `ci-queue-stats` `DEFAULT_REPOS`, with their tests.
+- The dev_worker role's host-mode AgentForge feature.
+- **Verify:** the namespace `agentforge` is gone with its VAPs and bindings; every surviving ailab unit is at the merge revision; external units match their baseline.
+
+### PR-3a and PR-3b: KEDA, uninstalled before its namespace goes
+
+**PR-3a. Uninstall only.**
+- **Preflight:** no ScaledObjects, ScaledJobs, TriggerAuthentications or ClusterTriggerAuthentications, and no HPA on external metrics. Read the installed chart's CRD behaviour.
+- Remove only the HelmRelease from `autoscaling/keda/kustomization.yaml`. The namespace, the Flux Kustomization and the HelmRepository stay.
+- **After merge:**
+  - helm-controller has uninstalled the release while the namespace still exists;
+  - then remove any residual KEDA CRDs and the `v1beta1.external.metrics.k8s.io` APIService (a dangling one hangs namespace deletion cluster-wide), and confirm both are gone.
+
+**PR-3b. The rest.** Delete `clusters/ai/keda.yaml`, `autoscaling/keda/` and `sources/keda.yaml`, and drop `keda` from the `platform-rules.yaml` regex and its test.
+- **Verify:** the namespace `keda` is gone, no `keda.sh` CRD remains, and OpenBao, ESO and workbricks are healthy.
 
 ### PR-4: data and identity
 1. **infra-pg**, all on `--context admin@ai -n databases`:
@@ -167,7 +172,7 @@ PR-3 is then KEDA alone.
 3. **Gitea admin token `af-ci-scaler-2941`:** delete it first, then the inventory SQL allowlist, the alert text and its test.
 
 ### Live owner steps (each after the PR that frees it)
-- **OpenBao**, after PR-3 and the PR-4 seeds:
+- **OpenBao**, after PR-2b and the PR-4 seeds:
   - Enumerate the exact KV-v2 leaves (names only) under `operator/{broker,reaper,ci,conductor,dispatcher,provisioner}` and `tenants/`, plus `dev-workers/codex-auth`. Keep `operator/canary`.
   - Print the list, then **permanently** delete each leaf (`metadata delete`), using the break-glass token only after confirming it exists and resolves.
   - Rollback is credential reissuance, recorded.
@@ -204,7 +209,7 @@ Per PR, as listed above. The full delete/edit/keep classification (2026-10-31) i
   - the retired KV and seeds stay absent after a provision run.
 
 **Rollback.**
-- PR-0 to PR-3 revert. Recreated Retain PVs need their `claimRef` UIDs cleared before they rebind.
+- PR-0 to PR-3b revert. Recreated Retain PVs need their `claimRef` UIDs cleared before they rebind.
 - The databases restore from the retirement dump, with the roles recreated.
 - The NFS data and the LUN are disposable.
 - Permanently deleted KV, revoked PATs and deploy keys are reissued, not restored.
