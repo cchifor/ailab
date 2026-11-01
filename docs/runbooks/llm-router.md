@@ -3010,10 +3010,12 @@ the fields keep their plain lines on this build.
 ### Results of the reply-shape release (2026-11-01)
 
 **The roll.** ailab #1559 merged, and Flux rolled the pod. Checks after the roll:
-- the pod runs `sha256:f3390a7c…`, with `/app/SOURCE_COMMIT` `6e8104a4…`;
+- the pod runs `sha256:f3390a7c7e13e9ff79e3ddced468dc173935d79f63e0cfae48c061db770df5be` (the image above), with
+  `/app/SOURCE_COMMIT` `6e8104a4a236ae1f8285476403d3bcc7e07e3a5d`;
 - no error lines in the log;
 - public `/health` answers 200 and an unauthenticated `/v1/models` 401;
-- `validate-live` gives 6/9, the same as the baseline.
+- `validate-live` gives 6/9, the same three failures as the baseline: `codex text`, `codex stream` and
+  `codex tool call`, each a 400 `MODEL_REQUIRED` because the check sends a bare `model: 'codex'`.
 
 **The journal.** `attempt.completed` now carries the outcome, for example
 `{"finish":"tool_calls","output":{"textChars":120,"toolCalls":1,"tools":["exec_command"]}}`.
@@ -3032,8 +3034,15 @@ The one-sided Fisher exact p is about 0.01. Together with the direct replay (8 o
 confirms the fix. The narrations are still there ("The file uses single quotes. Let me check exact bytes:"), but each
 one now comes with its tool call.
 
-**Measuring it from now on.** An early stop in the journal is an `attempt.completed` with `finish: stop`,
-`output.toolCalls: 0` and `output.textChars > 0`, followed by no further request from the same agent session.
+**Measuring it from now on.** The journal never records content, so it can't tell an early stop from a normal final
+answer: both are an `attempt.completed` with `finish: stop`, `output.toolCalls: 0` and `output.textChars > 0`, with no
+further request in the session. That pattern only gives **candidates**, and a count of them includes every finished
+task.
+- **The authoritative signal is the agent's own result:** whether the task finished. For example, the task asks for
+  a completion marker (`ALL-STEPS-DONE`) in its final message, and a final message without it is an early stop.
+- **A candidate that the same conversation follows with a new user turn** (a resume such as "continue") is very
+  likely an early stop.
+- **To measure the rate on known turns,** replay them as above.
 
 ## Relay access requests
 
