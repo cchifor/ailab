@@ -292,11 +292,13 @@
 #      above is never matched). A TUI or app-server daemon reads profile files at start: `codex app-server daemon
 #      restart` (when no TUI is attached) before `-p` in the TUI sees a new one; `codex exec` reads them every run.
 #   2. A managed block in the file each CLI reads at session start (the user's own notes there survive):
-#      - Codex (~/.codex/AGENTS.md): its sub-agents take a `model` override (`spawn_agent`), so a sub-agent on
-#        qwen-27b is native; its built-in model list names only OpenAI models, hence the note.
-#      - Claude Code (~/.claude/CLAUDE.md): its sub-agents run on Claude models only, so an agent on a local model is
-#        a background `codex exec -p <name>`, which the skill spells out.
+#      - Codex (~/.codex/AGENTS.md) and Claude Code (~/.claude/CLAUDE.md): an agent on a local model is a
+#        `local-agent` process (item 4); neither CLI's own sub-agents can run these models.
 #   3. The `local-model-agent` skill, ~/.claude/skills/local-model-agent/SKILL.md.
+#   4. /usr/local/bin/local-agent (files/local-agent): `local-agent <model> -C <dir> "<task>"`, a `codex exec` on the
+#      model's profile with a private CODEX_HOME. Both CLIs start local-model agents with it: Codex's own `spawn_agent`
+#      accepts only models of its built-in catalog (codex 0.166: "Unknown model `qwen-27b` for spawn_agent"), and a
+#      plain `codex exec` from inside a Codex session cannot start (its sandbox makes ~/.codex read-only).
 - name: Whether the local-model artifacts are wanted (router on and local models on)
   ansible.builtin.set_fact:
     dev_worker_codex_local_models_on: "{{ (dev_worker_codex_router_enabled | bool) and (dev_worker_codex_local_models_enabled | bool) }}"
@@ -372,10 +374,12 @@
         exact values from tool output unreliably (times, numbers, paths): check what it reports. cloud3 serves
         one model at a time, so its first request after another cloud3 model waits for the swap.
 
-      When the user asks for an agent on one of them, call `spawn_agent` with `model` set to that name. If
-      `spawn_agent` refuses the name, run the agent as a process instead:
-      `codex exec -p <name> --skip-git-repo-check -C <dir> -s workspace-write --output-last-message <file> "<task>"`.
-      Agents on these models get no web search and no sub-agents of their own.
+      When the user asks for an agent (or sub-agent) on one of them, do NOT use `spawn_agent`: it accepts only the
+      models of your built-in catalog and refuses these names. Run the agent as a shell command instead, one per
+      agent (several can run in parallel):
+      `local-agent <name> -C <dir> "<self-contained task>"`. It prints the agent's final message (its
+      transcript path goes to stderr). The agent works only in <dir> and sees only the task text, not this
+      conversation. Agents on these models get no web search and no sub-agents of their own.
   when: dev_worker_codex_local_models_on | bool
   loop: "{{ dev_worker_users }}"
   loop_control:
@@ -395,7 +399,7 @@
       This worker's router key reaches two local models, `qwen-27b` (cloud2, the better one for code) and
       `flash-next` (cloud3); both see images. Your own sub-agents (the Task tool) run on Claude models only. When
       the user asks for an agent on a local model, use the `local-model-agent` skill: it runs the task as a
-      background `codex exec -p <model>` and reads its answer.
+      background `local-agent <model> -C <dir> "<task>"` and reads its answer.
   when: dev_worker_codex_local_models_on | bool
   loop: "{{ dev_worker_users }}"
   loop_control:
@@ -425,6 +429,15 @@
   loop_control:
     label: "{{ item.name }}"
 
+- name: The local-agent command (how both CLIs start an agent on a local model)
+  ansible.builtin.copy:
+    src: local-agent
+    dest: /usr/local/bin/local-agent
+    owner: root
+    group: root
+    mode: "0755"
+  when: dev_worker_codex_local_models_on | bool
+
 # Removal, when off: blockinfile `state: absent` fails on a missing file, so only files that exist are edited.
 - name: Find the instruction files that may carry the local-models block
   ansible.builtin.stat:
@@ -453,3 +466,9 @@
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
+
+- name: No local-agent command while the local models are off
+  ansible.builtin.file:
+    path: /usr/local/bin/local-agent
+    state: absent
+  when: not (dev_worker_codex_local_models_on | bool)

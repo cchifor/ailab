@@ -427,26 +427,43 @@ Each worker's router key also reaches two local models. They use no subscription
   disclosed lenient-route control. The response carries `x-router-adapted: codex-responses` (llm-router#127,
   `docs/runbooks/llm-router.md` § "Local follow-ups release").
 
-**From Codex.** Codex's own sub-agents take a `model` override, so "spawn an agent on qwen-27b" makes the main
-Codex call `spawn_agent` with `model: "qwen-27b"`.
-- Codex's built-in model list names only OpenAI models. A managed block in each user's `~/.codex/AGENTS.md` names
-  the two local ones.
-- By hand, a whole session on a local model: `codex -p qwen-27b` (or `-p flash-next`). The profile files
-  `~/.codex/<name>.config.toml` set the model and its real context window.
+**`local-agent <model> -C <dir> "<task>"`** (`/usr/local/bin/local-agent`) is how either CLI starts an agent on a
+local model. It runs `codex exec` on the model's profile, with Codex as the harness for the model's tool calls, and
+prints the agent's final message. The transcript path goes to stderr. Each run gets a private `CODEX_HOME` under
+`$TMPDIR`, seeded with copies of `config.toml`, the profile and `AGENTS.md`.
+- **Sandbox, fail closed:** the agent runs without a sandbox of its own only inside a Codex tool call
+  (`CODEX_TOOL_CALL_ID` set) whose sandbox demonstrably confines it, shown by `~/.codex` being read-only. There the
+  parent's sandbox keeps applying, and a nested one cannot be built. Anywhere else, including under an unsandboxed
+  Codex parent, it runs `workspace-write`, so writes go only to `<dir>` and temp.
+- **What it leaves:** the private `CODEX_HOME` (copied config, Codex's session files) is deleted when the run ends.
+  The answer and transcript stay in `$TMPDIR/local-agent-*` for 3 days, then the next run prunes them.
+
+**From Codex.** Ask for an agent on `qwen-27b` or `flash-next`. The managed block in `~/.codex/AGENTS.md` tells Codex
+to run `local-agent`, because neither of Codex's own ways works:
+- **It refuses the model:** codex 0.166 checks its `model` override against the built-in catalog ("Unknown model
+  `qwen-27b` for spawn_agent").
+- **A plain `codex exec` from inside a Codex session cannot start:** the session's sandbox makes `~/.codex`
+  read-only ("failed to initialize in-process app-server client: Read-only file system").
+- **A nested sandbox cannot be built either:** "app-server socket directory must be a user-owned directory with mode
+  0700".
+
+`local-agent` handles all three. A `model_catalog_json` file with local entries would make `spawn_agent` accept the
+names (tested 2026-11-01), but it freezes the GPT models' metadata on every worker. It is not used.
+
+**By hand, a whole session on a local model:** `codex -p qwen-27b` (or `-p flash-next`). The profile files
+`~/.codex/<name>.config.toml` set the model and its real context window.
 
 **From Claude Code.** Claude's own sub-agents (the Task tool) run on Claude models only: Claude Code sends them to
-Anthropic, and the router has no Anthropic endpoint (llm-router#128 is the plan for one).
-- So the agent is a background Codex process on the local model. The `local-model-agent` skill (each user's
-  `~/.claude/skills/`) and a block in `~/.claude/CLAUDE.md` tell Claude to run
-  `codex exec -p <name> --skip-git-repo-check -C <dir> -s workspace-write --output-last-message <file> "<task>"`
-  with `run_in_background`, then read the answer file.
-- Codex is only the harness that runs the local model's tool calls.
+Anthropic, and the router has no Anthropic endpoint (llm-router#128 is the plan for one). The `local-model-agent`
+skill (each user's `~/.claude/skills/`) and a block in `~/.claude/CLAUDE.md` tell Claude to run `local-agent` with
+`run_in_background` and read its answer.
 
 **Managed by** role `dev_worker`, `tasks/codex.yml`, while `dev_worker_codex_router_enabled` and
 `dev_worker_codex_local_models_enabled` are both true:
 - the two profile files;
 - the AGENTS.md and CLAUDE.md blocks (marker `local models`);
-- the skill.
+- the skill;
+- `/usr/local/bin/local-agent` (`files/local-agent`).
 
 All are removed when either is false. `dev_worker_codex_local_models_enabled: false` retires only the local models
 and keeps the router and `dw-N`. List: `dev_worker_codex_local_profiles` in `defaults/main.yml`; a profile dropped

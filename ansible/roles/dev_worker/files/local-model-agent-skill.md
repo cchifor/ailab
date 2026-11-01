@@ -17,21 +17,19 @@ cloud3 serves one model at a time, so the first `flash-next` request after anoth
 
 ## How
 
-The agent is a Codex CLI process. Codex is the harness that runs the local model's tool calls (shell, file edits)
-and talks to the router with this worker's key. Run it with the Bash tool and `run_in_background: true`, one
-process per agent. Several can run at once.
+The agent is a `local-agent` process: a Codex CLI run on the local model, with Codex as the harness that runs the
+model's tool calls (shell, file edits) and talks to the router with this worker's key. Run it with the Bash tool and
+`run_in_background: true`, one process per agent. Several can run at once.
 
 ```bash
-out=/tmp/local-agent-$(date +%s)-$RANDOM
-codex exec -p qwen-27b --skip-git-repo-check -C "$PWD" -s workspace-write \
-  --output-last-message "$out.answer" "<the task, self-contained>" > "$out.log" 2>&1; echo "exit $? answer $out.answer"
+out=/tmp/agent-$(date +%s)-$RANDOM
+local-agent qwen-27b -C "$PWD" "<the task, self-contained>" > "$out.answer" 2> "$out.err"; echo "exit $? answer $out.answer err $out.err"
 ```
 
-- `-p qwen-27b` or `-p flash-next` picks the model. The profile also sets its real context window.
-- `-C <dir>` is the directory the agent works in. `-s workspace-write` lets it write only there, and in temp
-  directories.
-- When the background command finishes, read `$out.answer` for the agent's final message. `$out.log` holds the
-  transcript (commands it ran, their output).
+- The first argument picks the model: `qwen-27b` or `flash-next`.
+- `-C <dir>` is the directory the agent works in. It can write only there and in temp directories.
+- When the background command finishes, its output names the files: read `$out.answer` for the agent's final
+  message. `$out.err` names the transcript (the commands the agent ran and their output), kept for 3 days.
 
 ## Writing the task
 

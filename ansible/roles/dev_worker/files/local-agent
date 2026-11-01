@@ -1,0 +1,55 @@
+#!/bin/bash
+# local-agent: run a task as an agent on one of the estate's local models, through the LLM router.
+#
+#   local-agent <model> [-C <dir>] "<task>"      model: qwen-27b | flash-next
+#
+# The agent is a `codex exec` on that model's profile (~/.codex/<model>.config.toml, managed by the dev_worker role):
+# Codex is the harness that runs the model's tool calls (shell, file edits) in <dir> (default: the current directory).
+# The agent's final message goes to stdout; the path of its transcript to stderr.
+#
+# Why a wrapper and not `codex exec` directly: an agent started from inside a Codex session runs in that session's
+# sandbox, where ~/.codex is read-only and a nested Codex cannot start ("failed to initialize in-process app-server
+# client: Read-only file system"). So each run gets a private CODEX_HOME under $TMPDIR, seeded with copies of the
+# user's config.toml, the model's profile and AGENTS.md, and deleted when the run ends. Codex's own `spawn_agent`
+# cannot do this either: codex 0.166 accepts only models of its built-in catalog ("Unknown model `qwen-27b` for
+# spawn_agent"). Managed by ansible (dev_worker role); runbook docs/runbooks/dev-workers.md § "Local models".
+set -uo pipefail
+
+usage() { echo "usage: local-agent <qwen-27b|flash-next> [-C <dir>] \"<task>\"" >&2; exit 2; }
+[ $# -ge 2 ] || usage
+model=$1; shift
+case "$model" in qwen-27b|flash-next) ;; *) echo "local-agent: unknown model '$model' (qwen-27b or flash-next)" >&2; exit 2 ;; esac
+dir=$PWD
+if [ "${1:-}" = "-C" ]; then [ $# -ge 3 ] || usage; dir=$2; shift 2; fi
+[ -d "$dir" ] || { echo "local-agent: no such directory: $dir" >&2; exit 2; }
+task="$*"
+[ -n "$task" ] || usage
+[ -f "$HOME/.codex/$model.config.toml" ] || { echo "local-agent: no profile ~/.codex/$model.config.toml (local models off on this worker?)" >&2; exit 2; }
+
+# Runs are kept for 3 days (the answer and the transcript only), then pruned by the next run.
+tmp=${TMPDIR:-/tmp}
+find "$tmp" -maxdepth 1 -type d -name 'local-agent-*' -user "$(id -u)" -mtime +3 -exec rm -rf {} + 2>/dev/null
+run=$(mktemp -d "$tmp/local-agent-$model-XXXXXX") || exit 1
+mkdir -m 700 "$run/codex-home" || exit 1
+trap 'rm -rf "$run/codex-home"' EXIT   # copied config and Codex's own session files: never kept
+for f in config.toml "$model.config.toml" AGENTS.md; do
+  if [ -f "$HOME/.codex/$f" ]; then cp "$HOME/.codex/$f" "$run/codex-home/$f" || exit 1; fi
+done
+
+# The agent's sandbox. Fail closed: it runs without a sandbox of its own ONLY inside a Codex tool call
+# (CODEX_TOOL_CALL_ID) whose sandbox demonstrably confines it, shown by ~/.codex being read-only there. A nested
+# bubblewrap sandbox cannot be built inside that one ("app-server socket directory must be a user-owned directory with
+# mode 0700", codex 0.166), and the parent's sandbox keeps applying. Anywhere else (Claude Code, a shell, an
+# unsandboxed Codex parent): workspace-write, writes limited to <dir> and temp.
+if [ -n "${CODEX_TOOL_CALL_ID:-}" ] && [ ! -w "$HOME/.codex" ]; then
+  sandbox=(--dangerously-bypass-approvals-and-sandbox)
+else
+  sandbox=(-s workspace-write)
+fi
+
+CODEX_HOME="$run/codex-home" codex exec -p "$model" --skip-git-repo-check -C "$dir" "${sandbox[@]}" \
+  --output-last-message "$run/answer.txt" "$task" < /dev/null > "$run/transcript.log" 2>&1
+rc=$?
+[ -f "$run/answer.txt" ] && cat "$run/answer.txt"
+echo "local-agent: model $model, exit $rc, transcript $run/transcript.log" >&2
+exit $rc
