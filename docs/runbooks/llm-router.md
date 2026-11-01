@@ -2823,7 +2823,7 @@ The two failures are model behaviour, not router behaviour, and are the owner's 
    - cloud3's account `assistantModels: ["qwen3.8-flash-next"]`;
    - the four dev-worker keys get `routes: [dw-N, qwen-27b, flash-next]`, keeping `defaultRoute: dw-N`. Codex's
      default model still takes `dw-N`, while a request naming a local model is route mode on its pointer.
-   - Record both revisions here.
+   - Done: revision **2197** for `assistantModels`; the key PATCHes are audited as `key.updated` (results below).
 
 **Rollback, in this order.**
 1. While this image is still live:
@@ -2837,6 +2837,62 @@ The two failures are model behaviour, not router behaviour, and are the owner's 
 
 The old image has no PATCH endpoint. Its account schema is not strict, so it strips `assistantModels`, and fp8 and
 122B reappear in the Assistant. `visionModels` stays valid.
+
+### Results of the local follow-ups (2026-11-01)
+
+**The roll.** ailab #1553 merged, and Flux rolled the pod in ~2 minutes. It runs `sha256:5add0d2c…`, with
+`/app/SOURCE_COMMIT` `1f897ac3…` and no error lines in the log. Public `/health` answers 200 and an unauthenticated
+`/v1/models` 401. `validate-live` gives 6/9, the same as the baseline.
+
+**Configuration after the roll.**
+- Revision **2197**: cloud3's account has `assistantModels: ["qwen3.8-flash-next"]`.
+- The four dev-worker keys were PATCHed in place to `routes: [dw-N, qwen-27b, flash-next]`, keeping
+  `defaultRoute: dw-N`. Each change is in the audit log as `key.updated`.
+
+**The Assistant.**
+- The model list shows `local/qwen3.8-flash-next` and `local/qwen3.8-27b-ailab`, plus the two image models in
+  image mode. `qwen3.8-27b-fp8` and `qwen3.5-122b` are gone.
+- Pinning `local/qwen3.8-27b-fp8` is refused: "That model is not available here."
+- A turn on flash-next passes: `list_routes` and an answer in 18.8 s.
+
+**Images.** Each enabled model was checked through the router with one image, three images, and mixed text and
+image content:
+- `qwen3.8-27b` (cloud2), `local/qwen3.8-27b-ailab`, `local/qwen3.8-27b-fp8` and `local/qwen3.8-flash-next` all read
+  the test image;
+- `local/qwen3.5-122b` is refused with `vision_unsupported`, before any upstream call.
+
+**The dev workers** (role applied with `-t codex`; a `--check` run first changed only the local-model tasks):
+- **Every key works.** An agent on each model, on each of the four workers, ran a command and wrote its file.
+  - `qwen-27b` took 6-12 s.
+  - `flash-next` took 12-19 s, or 220 s for the first request after `fp8` had to be swapped out on cloud3.
+  - The journal shows `qwen-27b` → route `qwen3.8-27b` → cloud2 and `flash-next` → `qwen3.8-flash-next` → cloud3,
+    all complete, with `reasoning_effort` disclosed as dropped.
+- **From Codex**, in plain language: "spawn an agent on qwen-27b that writes … to cx.txt". Codex ran
+  `local-agent qwen-27b` on its own, and the agent wrote the file (30 s).
+- **From Claude Code**, in plain language: "spawn an agent on flash-next …". Claude used the `local-model-agent`
+  skill and started `local-agent flash-next` in the background. It waited for it and checked the file (47 s).
+- `scripts/validate-codex-fleet.sh dev_workers`: 4/4 OK. The workers' default Codex path through `dw-N` is
+  unchanged.
+- **Found on the way and fixed in ailab #1554:**
+  - Codex 0.166's `spawn_agent` refuses a model outside its built-in catalog ("Unknown model `qwen-27b` for
+    spawn_agent").
+  - A plain `codex exec` started from inside a Codex session cannot run: `~/.codex` is read-only there, and a nested
+    sandbox cannot be built.
+  - `local-agent` (dev-workers runbook, "Local models") is the way both CLIs start a local-model agent.
+
+**MTP for flash-next** was qualified and rejected: no median decode gain, about 30% less prefill, and broken image
+answers (cloudlab runbook 13e, cloudlab #48).
+
+**Follow-ups.**
+- **llm-router#128:** an Anthropic-compatible endpoint, so Claude Code itself can run on a router route. It holds the
+  plan and its codex review.
+- **Native Codex sub-agents on the local models:** the router could serve Codex catalog entries for chat-backed
+  routes, so that `spawn_agent` accepts them. A `model_catalog_json` file on the workers would do it too, but it
+  freezes the GPT models' metadata, so it is not used.
+- **flash-next garbles copied values** in about 55% of samples (cloudlab 13e): treat its reports of exact values with
+  care.
+- **The Activity page and `explain_request`** show an adaptation-only `parameters_adjusted` event with an empty
+  "ignored" list (llm-router#127 notes).
 
 ## Relay access requests
 
