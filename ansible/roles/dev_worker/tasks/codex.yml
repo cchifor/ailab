@@ -277,3 +277,31 @@
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
+
+# The local-model profiles (defaults/main.yml: dev_worker_codex_local_profiles): `codex -p qwen-27b`. Each file
+# sets only the model and its real context window; the provider, the key helper and the retry budget come from
+# config.toml. A TUI or app-server daemon reads profile files at start: `codex app-server daemon restart` (when no
+# TUI is attached) before `-p` in the TUI sees a new one. `codex exec` reads them on every run.
+- name: The local-model codex profiles per user (router enabled)
+  ansible.builtin.copy:
+    dest: "{{ item.0.home }}/.codex/{{ item.1.name }}.config.toml"
+    content: |
+      # Managed by ansible (dev_worker role). `codex -p {{ item.1.name }}`: {{ item.1.model }} through the router.
+      model = "{{ item.1.model }}"
+      model_context_window = {{ item.1.context_window }}
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0600"
+  when: dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users | product(dev_worker_codex_local_profiles) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1.name }}"
+
+- name: No local-model codex profiles while the router is off (they would name routes no provider serves)
+  ansible.builtin.file:
+    path: "{{ item.0.home }}/.codex/{{ item.1.name }}.config.toml"
+    state: absent
+  when: not (dev_worker_codex_router_enabled | bool)
+  loop: "{{ dev_worker_users | product(dev_worker_codex_local_profiles) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1.name }}"
