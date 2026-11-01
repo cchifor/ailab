@@ -361,6 +361,18 @@
   loop_control:
     label: "{{ item.name }}"
 
+- name: Each user's ~/.claude/skills, owned by the user (a clean worker, or an agent user, may not have it yet)
+  ansible.builtin.file:
+    path: "{{ item.home }}/.claude/skills"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0755"
+  when: dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: The local-model-agent skill directory per user (router enabled)
   ansible.builtin.file:
     path: "{{ item.home }}/.claude/skills/local-model-agent"
