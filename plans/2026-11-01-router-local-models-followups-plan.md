@@ -1,13 +1,5 @@
 # Router local models: follow-ups (Assistant list, images, MTP, dev-worker access)
 
-## Codex Review
-
-- A2's pre-parser rewrite can break conversation placement and cannot report its drops through the existing execution journal without explicit plumbing; it also needs stricter tool and input validation.
-- A1/A3 need clearer empty-state and live-authorization semantics, while B4 must verify that the existing worker principals actually have local access.
-- B1 and C still schedule cloud3 qualification loads during D's power-safety pause, and the cloud2 image-cap assumption needs reconciliation and enforcement.
-- D1/D2 need a reproducible artifact pin and deterministic acceptance criteria for the known stochastic tool corruption.
-- Rollback and verification are incomplete: the old image cannot remove routes through the new PATCH API, and stale qwen routes/profiles can remain selectable.
-
 ## Context
 
 The 2026-10-31 plan (`plans/2026-10-31-local-models-improvement-plan.md`, results in `docs/runbooks/llm-router.md`
@@ -66,7 +58,7 @@ role; D is cloud3 MTP; E is the record. Every repo change goes through its PR wi
   Same shape and doc style as `visionModels`.
 - Config schema (`packages/runtime/config.ts`): same bounds as `visionModels`; names must be in `allowedModels`
   (the same check `visionModels` gets at line ~85).
-<!-- codex: Define and test empty versus unset explicitly: an empty assistantModels array should exclude every model (or be rejected), while unset preserves today's fallback. Cover mixed accounts, pinned routes, fallbacks, and assistant_excluded decisions, not just the catalog. -->
+- Semantics (codex r1): unset = today's behavior; `[]` = the Assistant uses none of the account's models (valid, tested). Tests cover mixed accounts, pinned conversations, routes with fallbacks and the routing reason, not only the catalog.
 - Enforced in three places, through one helper next to `seesImages` (`packages/modules/accounts/index.ts`):
   1. `routerModelCatalog`: a model the account does not allow is not listed at all (hidden, not "unavailable");
      with several accounts serving one id, it is listed when any allowing account serves it.
@@ -82,17 +74,17 @@ role; D is cloud3 MTP; E is the record. Every repo change goes through its PR wi
   revert the two models reappear in the list (no failure).
 
 **A2. Codex CLI requests on chat-backed routes (`/v1/responses`, route not Codex-native).**
-<!-- codex: originator is a caller-supplied header and is spoofable. Treat this only as client-declared compatibility mode and ensure it cannot influence authorization, route eligibility, or any privileged behavior. -->
+  - The `originator` header only selects a parsing compatibility mode. It never affects authorization, route eligibility, admission or any privileged behavior (a spoofed header gets exactly the subset's checks on an adapted body).
 - When the request comes from the Codex CLI (`originator` header starting `codex_`) and the selected route is not
   native, the body is adapted to the subset BEFORE `parseRequest`, which then applies every existing check:
-<!-- codex: Preserve the raw request (or extract conversation metadata before rewriting). api-openai calls conversationOf on req.body after parsing; removing prompt_cache_key/client_metadata first loses thread, parent/fork placement, and prompt-cache rekey identity. -->
+  - Conversation identity is read from the RAW request (headers and body) before adaptation: `conversationOf` runs on the original body, so thread, parent/fork placement and the prompt-cache re-key identity are kept.
   - dropped (hints with no meaning for a chat backend): `prompt_cache_key`, `client_metadata`, `reasoning.summary`,
     `reasoning.context`, `text.verbosity`; `include` when every entry is `reasoning.encrypted_content` (the router
     emits no encrypted reasoning), refused as today otherwise;
-<!-- codex: Dropping fields from reasoning must normalize an empty object (and similarly partially stripped text/include shapes), otherwise parseRequest still rejects the adapted request. -->
+  - Containers left empty by a drop (`reasoning`, `text`) are removed, so `parseRequest` never sees `{}`.
   - tools: `function` tools kept (`strict` kept or dropped per what the subset accepts); `web_search`, `namespace`,
     and any other non-function tool dropped; a `tool_choice` naming a dropped tool refused;
-<!-- codex: Specify strict normalization and validation for nested function tools and additional_tools: reject malformed shapes, duplicate or invalid call IDs, mixed content parts, and ambiguous ordering before passing the body to parseRequest. -->
+  - Shapes are validated before the subset sees them: a tool or `additional_tools` entry that is not an object with a string `name` is refused; duplicate function names with different definitions are refused; a `function_call_output` content array may mix only text and image parts (anything else refused); item order is preserved exactly.
   - input items: `reasoning` items dropped; `additional_tools` items' function tools merged into `tools`, the rest
     dropped; `id`/`status` stripped from `function_call` and `function_call_output`; a `function_call_output` whose
     `output` is a content array becomes its text, and an image part becomes a following user message with the image
@@ -100,10 +92,10 @@ role; D is cloud3 MTP; E is the record. Every repo change goes through its PR wi
     `local_shell_call` refused with a message naming the item (Codex sends them only for OpenAI model families).
 - Disclosed: response header `x-router-adapted: codex-responses` and the journal's adjusted-parameters record list
   what was dropped (names only, never values).
-<!-- codex: Existing adjusted-parameter data is populated inside inference after account adaptation. A pre-parser adapter must carry its drop list into Execution.served and the recorder, or the promised header/journal disclosure will be false. -->
+  - The drop list is carried explicitly from the adapter into the execution (the same record `Execution.served` and the trajectory recorder use for adjusted parameters), so the header and the journal state the same thing; a test asserts both.
 - Requests from other clients, and every Codex-native route, are unchanged. No body-size change: the subset's
   2 MiB limit stays (recorded as a risk: a long Codex session with screenshots can reach it).
-<!-- codex: The 2 MiB ingress cap bounds the raw body, not necessarily the expanded adapted representation (merged tools/messages and image parts). Enforce a post-adaptation item/tool/message and serialized-size budget so a boundary-sized request cannot amplify memory or upstream work. -->
+  - The adapter only removes or moves content (image parts move, `additional_tools` tools move into `tools`), never duplicates it; a test asserts the serialized adapted body is never larger than the raw body plus a fixed bound, and tool/message counts stay within the subset's existing limits.
 - Tests: the two captured 0.166 bodies as fixtures (identifiers replaced with synthetic ones); adapter unit tests per
   rule; an HTTP test through a chat-backed route to a fake OpenAI-compatible backend asserting the upstream chat body
   (tools = the function tools only, messages in order, tool result linked) and the Responses events back
@@ -112,19 +104,19 @@ role; D is cloud3 MTP; E is the record. Every repo change goes through its PR wi
 - Before merge, the real Codex 0.166 CLI on a dev worker runs `codex exec` through a locally started router (this
   branch) to a fake chat backend that returns one `exec_command` call and then text: the CLI must run the command
   and finish the turn (the precedent of the Codex-native release).
-<!-- codex: Extend this fixture to assert conversation/thread and parent metadata survive adaptation, mixed text/image tool output, multiple tool calls, and ordering; one command-call turn will miss the highest-risk regressions. -->
+    Fixtures also cover: conversation/thread/parent metadata surviving adaptation, a mixed text+image tool output, two tool calls in one turn, and item ordering.
 
 **A3. `PATCH /admin/v1/keys/:id` (a key's routes, in place).**
 - Body `{routes?: string[] | "all", defaultRoute?: string | null}`; administrators only; the same validation as
   `POST /admin/v1/keys` (`routesArg`, every route exists in the key's namespace, `defaultRoute` one of `routes`);
   refuses revoked or expired keys; the token, prefix, id, expiry and usage history are unchanged; audit entry
   `key.updated` with the route lists before and after; returns the key's public view.
-<!-- codex: Define PATCH omission semantics separately from explicit all/null: omitted routes/defaultRoute must preserve current values, while a route change must validate the resulting default route atomically. -->
+- Omission semantics (codex r1): an omitted field keeps its value; `routes: "all"` and `defaultRoute: null` are explicit; when `routes` changes, the resulting `defaultRoute` (sent or kept) is validated atomically against the new routes.
 - Why: the workers' keys live in OpenBao and the workers read them live; changing routes in place avoids re-minting
   four secrets and re-seeding `devworker-seeds.sops.yaml`.
 - Tests: update, validation refusals, revoked key, viewer refused, the next request authorizes against the new
   routes (cache, if any, invalidated).
-<!-- codex: KeyService registers a Principal snapshot and does not re-register an existing id. PATCH must unregister/re-register (or atomically replace) the live HTTP principal; state persistence alone leaves old route authorization active. Test every non-admin role, namespace ownership, default-route retention, and immediate authorization changes. -->
+- The live HTTP principal is replaced atomically (unregister + register, or an in-place replace) so the next request authorizes against the new routes; tests cover every non-admin role, namespace ownership, default-route retention and immediate authorization changes.
 
 **A4. Release.** PR on llm-router (reviewbot merges); image built by relay CI from the merged commit; ailab PR rolls
 the digest with the usual backup (`/data/backups/pre-local-followups-20261101`), `validate-live` before and after
@@ -133,12 +125,12 @@ the digest with the usual backup (`/data/backups/pre-local-followups-20261101`),
 ### B. Router configuration (If-Match `PUT /admin/v1/config`, one change per step, read back each)
 
 - **B1 images (current image, before A).** First test each backend DIRECTLY with one PNG whose content must be read
-<!-- codex: This probes cloud3 (flash-next/fp8) despite D's explicit no-further-qualification-load pause after the power failures. Gate or defer the cloud3 probes on the owner's power decision; .45/.46/cloud2 can be tested independently. -->
+  (cloud3 probes: the owner lifted the pause on 2026-11-01 ~11:55Z, ordinary loads allowed; done, all five read the image.)
   (a large printed number) and read the answer: .45, .46, cloud2 `qwen3.8-27b`, cloud3 flash-next, cloud3 fp8.
   Then set `visionModels` only on the models that read it correctly (expected: .45/.46 `qwen3.8-27b-ailab`, cloud2
   `qwen3.8-27b`, cloud3 `qwen3.8-flash-next`; fp8 if it passes; never 122B). Verify through the router with the
-  harness's vision check; record cloud2's 1-image cap in the runbook.
-<!-- codex: This treats the cloud2 one-image cap as documentation only, and cloudlab `main` currently documents `MM_IMAGES=64`; reconcile which setting is live. If any cap remains, enforce/refuse multi-image requests in the router or encode it as a capability, otherwise `visionModels` advertises support the route cannot safely provide. -->
+  harness's vision check; record cloud2's live image cap (not 1, see below) in the runbook.
+  Image cap reconciled 2026-11-01: cloud2 accepted THREE images in one request and answered "3, 4719" (the live cap is not 1; cloudlab main documents `MM_IMAGES=64`); .45 accepted three (counted 2, read the number). No router-side cap is needed; the verification below sends multi-image and mixed content.
 - **B2 Assistant list (after the A roll):** cloud3 account `assistantModels: ["qwen3.8-flash-next"]`.
 - **B3 route `qwen3.8-flash-next`:** priority, `access: [local]`, one target `lan-192.168.0.26-8080:qwen3.8-flash-next`,
   `timeoutMs` 600000 (a swap from fp8 is unload + load + prefill), `idleTimeoutMs` 120000, `maxAttempts` 1.
@@ -146,12 +138,12 @@ the digest with the usual backup (`/data/backups/pre-local-followups-20261101`),
   `key_23f0823b6934`, `key_dc874b9d0a75` to `routes: [dw-N, qwen3.8-27b, qwen3.8-flash-next]`, `defaultRoute`
   unchanged. Codex's default model (`gpt-6-astra`) is not one of the key's routes, so it still takes `dw-N` in
   model mode; a request naming `qwen3.8-27b` or `qwen3.8-flash-next` is route mode on that route.
-<!-- codex: Route membership does not grant access to a target whose access kind is local; verify each existing worker key's access includes local before PATCH. If not, this plan has no safe in-place migration path because PATCH cannot change access. -->
+  Verified 2026-11-01: all four keys have `access: [local, api, subscription]`, so PATCHing routes is enough.
 
 ### C. Dev-worker role (ailab `ansible/roles/dev_worker/tasks/codex.yml`)
 
 - Two profile files per user, like the existing `chatgpt.config.toml`, only while the router is enabled:
-<!-- codex: Only while router enabled needs explicit absent tasks for both new profile files when disabled; otherwise stale qwen profiles remain selectable and may send work to a disabled or changed provider. Verify profile merge, ownership/mode, and removal behavior. -->
+- When `dev_worker_codex_router_enabled` is false the role REMOVES both profile files (explicit `state: absent`), so no stale profile can send work to a disabled provider; mode 0600, owned by the user, verified by `codex -p <profile>` resolving the provider.
   `~/.codex/qwen3.8-27b.config.toml` and `~/.codex/qwen3.8-flash-next.config.toml`, each setting `model` and
   `model_context_window` (cloud2 262144 = its live `/v1/models` `max_model_len`; flash-next 262144 = `-c 524288
   --parallel 2`), and
@@ -159,14 +151,14 @@ the digest with the usual backup (`/data/backups/pre-local-followups-20261101`),
 - Converge the four workers with the role's usual recipe; then on each worker `codex exec -p <profile>` with a task
   that needs one shell call and one file write in a scratch directory, both models; `scripts/validate-codex-fleet.sh
   dev_workers` still passes for the default path.
-<!-- codex: These per-worker flash-next runs can cold-load or swap cloud3 models, so they are also qualification loads blocked by D's power-safety pause. Make the model-specific tests owner-gated or run only after the pause is lifted. -->
-<!-- codex: Include daemon state in the rollout check: a running Codex app-server may retain the old provider/config. Either restart it under the documented safe conditions or prove these profile tests bypass the daemon. -->
+  (Owner allowed ordinary cloud3 loads on 2026-11-01.)
+- Validation uses `codex exec`, which does not use the app-server daemon; the TUI does, so the runbook says to run `codex app-server daemon restart` per user (when no TUI is attached) before `-p` in the TUI sees new profile files.
 - Runbook `docs/runbooks/dev-workers.md` § "Codex through the router": the two profiles, the routes on the keys,
   cloud3's one-model-at-a-time swap cost, and that these runs use no subscription quota.
 
 ### D. cloud3: MTP for flash-next (cloudlab)
 
-**Status 2026-11-01 11:50Z — PAUSED for the owner.** cloud3 lost power abruptly twice in 18 hours, each time
+**Status 2026-11-01 11:50Z — paused, then RESUMED by the owner (~11:55Z: "Continue, guarded").** cloud3 lost power abruptly twice in 18 hours, each time
 seconds after a heavy multi-GPU model start that my qualification triggered (2026-10-31 15:58Z, fp8 cold vLLM;
 2026-11-01 09:47:45Z, the MTP n-max 3 cold load). The second time cloud2 (last log 09:47:21Z) and the
 workstation went down too, while the ailab nodes and cloud1 stayed up (all rebooted ~10:53Z; cloud2/cloud3/workstation
@@ -191,14 +183,14 @@ Original D steps, for when it resumes:
   warm, then file-cold (fadvise-evicted, as in WS2.1). Pass: prefill within 15% of 2026-10-31's 1,633/1,677 tok/s.
 - **D1 draft:** download `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` (~2.79 GB) from `unsloth/Qwen3.8-Flash-Next-GGUF`
   at a pinned commit to `/models-local/qwen3.8-flash-next/MTP/`; record its sha256.
-<!-- codex: Pinned commit is not a reproducible supply-chain pin unless the exact HF revision and complete expected SHA-256 are recorded before download; the abbreviated hash in Context cannot verify the artifact. -->
+  Pin (recorded): HF revision `766911a6b7369840a91dbcd95f9f997acaab6cd6`; `MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf` (self-contained, the head mainline can load) sha256 `58a47d6a216307e9b97172d5bfdc3436a8994b632f5e436b9bb6edf8951da8d1`, 4,137,429,120 bytes. `shared-Q8_0` (sha256 `5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6`) cannot be loaded by mainline: delete it.
 - **D2 qualification (backend mode, thermal guard v2: abort at NVMe > 85 °C or Tctl > 92 °C, kill by Windows PID):**
   variants (a) current, (b) `-md <draft> --spec-type draft-mtp --spec-draft-n-max 3`, (c) the same with 5. Measured
   with the frozen harness: decode, prefill 9k/15k, depth, quality, tools (arguments read by hand), vision (MTP with
   `--mmproj` must still load and answer), concurrency (`--parallel 2`), VRAM. Accept the best variant if decode
   improves by >= 20% with no quality/tools/vision failure and prefill within 10%. If MTP refuses to load with
   `--mmproj`: stop and ask the owner (images or MTP), do not drop either silently.
-<!-- codex: Define the frozen baseline, sample count, pass/fail metric, and tolerance for quality/tools. The known stochastic tool corruption makes a single hand-read tool turn insufficient and can make the >=20% comparison irreproducible. -->
+  Acceptance (deterministic): baseline = D0 (b12020, same flags, file-cold, frozen harness 0c5d57a9). Decode: backend decode of the harness >= 1.20x D0's 62 tok/s. Prefill 9k/15k >= 0.90x D0. Quality factual+reasoning pass. Tool CALL correctness 20/20 on the glitch probe (`get_tide` with `{"harbour":"Dover"}`), and the garbled-answer count on the same 20-sample probe <= 16/20 (baseline 11-12/20, sd ~2.2). Vision and 2-way concurrency pass. >= 1.5 GiB free on every GPU when loaded.
 - **D3 cloudlab PR:** llama-swap entry, runbook section 13e, README; deploy with backup and box sha256 check;
   verify through the router (harness router mode for flash-next) and one Assistant turn on flash-next (must still
   pass: MTP must not change the tool behavior).
@@ -213,7 +205,7 @@ Original D steps, for when it resumes:
 B1 (config, independent) runs while A is implemented and reviewed; D waits for the owner (see D). Then A roll →
 B2, B3, B4 → C → D3 → final router-mode benchmark of the changed models (flash-next; the others only if a change
 touched them) → E.
-<!-- codex: This ordering is unsafe: B1 and C still load cloud3 while D is paused, and D3 is listed after them. Split non-cloud3 work from owner-gated cloud3 work and make the gate explicit. -->
+(Owner decision 2026-11-01 ~11:55Z: MTP continues guarded, one cold load at a time; ordinary loads allowed. So B1, C and D run as listed; D's cold loads are never concurrent with another heavy load.)
 
 ## Critical files
 
@@ -234,22 +226,22 @@ touched them) → E.
   whose model can use tools" reason; an Assistant turn on flash-next still passes; `validate-live` = baseline.
 - Images: harness vision check through the router passes on each enabled model; a 122B image request is refused
   before any upstream call.
-<!-- codex: Vision verification must include multiple images and mixed text/image content, with expected refusal behavior for the cloud2 limit; one positive check does not verify the documented cap. -->
+- Images, every enabled model through the router: one image, three images, and mixed text+image content; 122B refused before any upstream call.
 - Dev workers: per worker and model, `codex exec -p ...` completes a shell call and a file write; the journal shows
   `route: qwen3.8-27b` / `qwen3.8-flash-next` served by the expected account with `x-router-adapted: codex-responses`;
   default Codex still served by `pool-codex`.
-<!-- codex: Repeat each model check across several tool turns and mixed targets, and verify the adapted journal/header on every attempt; one shell plus one file write can pass despite the known stochastic corruption. -->
+- Dev workers, per model: 5 `codex exec` tasks on dev-worker-1 (each several tool calls: list, write, read back) and one on each other worker; every request's journal shows the expected route/account and `x-router-adapted: codex-responses`.
 - MTP: D2 table recorded; after deploy, router-mode benchmark of flash-next; Assistant turn on flash-next passes.
-<!-- codex: One Assistant turn and one benchmark are too weak to detect intermittent tool corruption or mixed-target regressions; require repeated tool calls and fallback/route-path checks. -->
+- MTP: the D2 acceptance above, then 3 Assistant turns on flash-next after the cut-over (all must pass) and the router-mode benchmark.
 
 ## Rollback
 
 - Image: the reviewed GitOps revert to `dad0e721…`. The old image strips `assistantModels` (models reappear),
   refuses Codex requests on chat routes again with 400 (the workers' default path is unaffected), and has no key
   `PATCH` (keys keep the routes already written).
-<!-- codex: This rollback is internally inconsistent: after the old image is live, its API has no PATCH endpoint, so the later remove-extra-key-routes step cannot run. Remove routes before the image revert (or retain an admin path) and verify key state. -->
+- Order (codex r1): FIRST, with the new image still live, PATCH the four keys back to `[dw-N]`, remove route `qwen3.8-flash-next`, and turn the profiles off (role); THEN revert the image. The old image has no PATCH endpoint.
 - Config: remove `visionModels` / `assistantModels` / the route / the extra key routes (same `PUT`/`PATCH`).
-<!-- codex: Reverting the image makes assistantModels disappear but leaves qwen routes and profile files selectable; old-image chat-backed requests then fail again. Disable/remove the new routes and profiles before or as part of rollback, and restart affected daemons. -->
+- After the revert, verify: keys `[dw-N]`, no `qwen3.8-flash-next` route, no profile files; restart the app-server daemons where a TUI is not attached.
 - Dev workers: the profile files are inert unless `-p` names them; removed with the role change revert.
 - MTP: revert the llama-swap entry (backup file), the draft file stays until deleted.
 
@@ -263,4 +255,4 @@ touched them) → E.
 - The adapter covers Codex 0.166's request shape; an unknown future field is refused with a clear 400, never
   silently dropped.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
