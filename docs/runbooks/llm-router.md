@@ -2905,6 +2905,14 @@ answers (cloudlab runbook 13e, cloudlab #48).
   freezes the GPT models' metadata, so it is not used.
 - **flash-next garbles copied values** in about 55% of samples (cloudlab 13e): treat its reports of exact values with
   care.
+- **The console does not show `assistantModels`.** `inspect_account` in the chat does. Editing cloud3's account does
+  not drop it:
+  - the console has no full account editor;
+  - its two direct account writes change only their own fields: the label, and the model catalog
+    (`PUT /admin/v1/accounts/:id/models`, `disabledModels`/fallback);
+  - "Change in chat" uses the Assistant's `update_account`, which sets or clears `assistantModels` only when asked.
+  The one way to lose it is a hand-written `PUT /admin/v1/config` built from a body that lacks the field.
+- **There is no chat tool for changing a key's routes:** use `PATCH /admin/v1/keys/:id` (admin API).
 - **The Activity page and `explain_request`** show an adaptation-only `parameters_adjusted` event with an empty
   "ignored" list (llm-router#127 notes).
 
