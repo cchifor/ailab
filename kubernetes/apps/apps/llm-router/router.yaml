@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 1f897ac390debd78eea85c747d97ec013d926d7e
-        chifor.me/release: router-0.1.0-20261101-local-followups
+        chifor.me/source-commit: 6e8104a4a236ae1f8285476403d3bcc7e07e3a5d
+        chifor.me/release: router-0.1.0-20261101-reply-shape
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,11 +121,11 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 1f897ac390debd78eea85c747d97ec013d926d7e (llm-router #127: per-model Assistant eligibility, the Codex CLI
-          # on chat-backed routes, PATCH a key's routes, reasoning effort as a planned control); parity-061d471fef1a-115361
-          # image, all blobs pulled anonymously and verified, /app/SOURCE_COMMIT 1f897ac3 confirmed; Relay run 115361,
-          # archive sha256:d572004de1770c3b1e918d46107906d0e65d854f7ec50476b15773fece7da9eb.
-          image: registry.chifor.me/llm-router/router@sha256:5add0d2c80b797c8307596a184c9d19404bf860bdf22495be67251d7642a5f22
+          # Source 6e8104a4a236ae1f8285476403d3bcc7e07e3a5d (llm-router #130: a Responses reply's text and its calls are one
+          # assistant message; #129: attempt.completed records the finish and the reply's shape); parity-584ce8899be5-116010
+          # image, all blobs pulled anonymously and verified, /app/SOURCE_COMMIT 6e8104a4 confirmed; Relay run 116010,
+          # archive sha256:e2f0cd0de55af25fbd46b588668684595a4d2cfe8e7e01fe4bb0aca3fbeeb438.
+          image: registry.chifor.me/llm-router/router@sha256:f3390a7c7e13e9ff79e3ddced468dc173935d79f63e0cfae48c061db770df5be
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

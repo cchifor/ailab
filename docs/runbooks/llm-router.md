@@ -2930,6 +2930,80 @@ answers (cloudlab runbook 13e, cloudlab #48).
 - **The Activity page and `explain_request`** show an adaptation-only `parameters_adjusted` event with an empty
   "ignored" list (llm-router#127 notes).
 
+## Reply-shape release: agents on local models no longer stop early (2026-11-01, llm-router#129, #130)
+
+`router-0.1.0-20261101-reply-shape` deploys llm-router main `6e8104a4a236ae1f8285476403d3bcc7e07e3a5d`
+([#129](https://git.chifor.me/cchifor/llm-router/pulls/129) and [#130](https://git.chifor.me/cchifor/llm-router/pulls/130)).
+
+**Why.** A Codex agent on `qwen-27b` (cloud2's qwen3.8-27b) sometimes ends a turn with only a narration, such as
+"Target test passes. Running the whole file:", with `finish: stop` and no tool call. `codex exec` takes that as its
+final answer, so the run stops partway. It is the model's own choice, not lost output: the visible text accounts for
+the output tokens that are not reasoning, and the stop reproduces when the router's request goes straight to vLLM. The
+cause is the prompt the router builds:
+- the Responses→chat converter turned one reply, stored by Codex as a `message` item followed by its `function_call`
+  items, into **two** assistant messages (the text, then `content: null` with the calls);
+- Qwen's template renders each as a turn ending in `<|im_end|>`, so the history shows the model, turn after turn,
+  ending a turn right after a narration, and the model copies it.
+
+Measured on the four turns of a real 38-turn Codex run where the model stopped, replayed to the same vLLM (streamed,
+the model's own sampling, temperature 1.0, thinking on), 12 samples per turn and variant, interleaved:
+
+| History | Replies with no tool call |
+|---|---|
+| Split, as the router sent it | 8 of 48 |
+| Text and calls in one message | 0 of 48 |
+
+Ruled out:
+- streaming vs not: no difference;
+- dropping `reasoning_effort`: cloud2's template default is `xhigh`, which is what Codex sends, so the prompt is
+  identical (`high` would be a 400 from vLLM);
+- `chat_template_kwargs.preserve_thinking=false`: the same token count;
+- the 10-31/11-01 router changes: before ff853cd (#127) every call was its own message; #127 grouped the calls but
+  left the text separate. #127 is what first ran Codex agent loops through this converter.
+
+**What changes.**
+- **#130, the fix:** a `function_call` input item attaches to the assistant text message directly before it.
+  - Adjacency only: a user message or a tool output in between keeps them apart.
+  - The text becomes a string (assistant parts are text only); no text is `content: null`, as a calls-only
+    message.
+  - Native routes, which forward the body unchanged, are not affected.
+- **#129, the journal:** `attempt.completed` records `finish` (the provider's finish reason, or `length` after an
+  enforced cut) and `output: { textChars, toolCalls, refusalChars?, tools?, toolsTruncated? }`. `tools` holds each
+  tool name once, at most 8, and `toolsTruncated` is set only when the cap left a name out. The text, refusal text and
+  tool arguments are never recorded. Activity shows `Answered · stop · no tool call · 98 chars`; `explain_request`
+  shows `· ended stop · 0 tool call(s) · 98 chars of text`. A stream without a finish is still a failed attempt
+  (INCOMPLETE_STREAM), so `finish: stop` is always a real stop. This makes the early-stop rate measurable from the
+  journal: `finish: stop`, `toolCalls: 0`, `textChars > 0` in the middle of an agent session.
+
+**Verified before release.**
+- Full suite on a dev worker, twice: 1973 passed, 14 skipped, 0 failed. Main before these changes has two flaky
+  tests under full-suite load (`smoke-pool` / `subscription-login` teardown, `system-messages` failover), recorded in
+  #129.
+- The four stop turns rebuilt through #130's router: no consecutive assistant messages, and the prompt sizes equal
+  the merged replay's (state 15: 30961 tokens).
+- Reviews:
+  - #129: three rounds; findings fixed: the truncation mark, the refusal count, the guard test;
+  - #130: codex reviewed the plan first (one claimed blocker rejected with evidence, four findings accepted), then
+    one review round (empty text keeps `null`).
+
+**Image.**
+- Archive `router-0.1.0-20261101-reply-shape.tar.gz`, SHA-256 `e2f0cd0de55af25fbd46b588668684595a4d2cfe8e7e01fe4bb0aca3fbeeb438` (relay v0.2.0 assets 412/413).
+- Relay branch `release/router-0.1.0-20261101-reply-shape-image`,
+  [run 116010](https://git.chifor.me/cchifor/relay/actions/runs/116010), receipt `deployment-images-116010.json` (asset
+  414).
+- `registry.chifor.me/llm-router/router@sha256:f3390a7c7e13e9ff79e3ddced468dc173935d79f63e0cfae48c061db770df5be`, tag `parity-584ce8899be5-116010`. Every blob (index, manifest, config, 9 layers,
+  attestation) was pulled anonymously and verified, and `/app/SOURCE_COMMIT` = `6e8104a4…`.
+
+**Before the roll:**
+- backup `/data/backups/pre-reply-shape-20261101`: integrity ok, 36,226 trajectories, SHA-256
+  `2015406452137791c3c0d1a570b44e21c4be8310c648846f81a297a72400edf7`, key 600;
+- `validate-live` 6/9, the known baseline (the three `codex` checks send a bare `model: 'codex'`).
+
+**Rollback:** revert to
+`registry.chifor.me/llm-router/router@sha256:5add0d2c80b797c8307596a184c9d19404bf860bdf22495be67251d7642a5f22`
+(source `1f897ac390debd78eea85c747d97ec013d926d7e`, release `router-0.1.0-20261101-local-followups`). Neither change
+touches the schema or config, and older journal entries (no `finish`/`output`) keep their plain lines.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
