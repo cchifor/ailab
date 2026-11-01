@@ -44,15 +44,16 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "edge"))
 import render  # noqa: E402
+import yaml  # noqa: E402  (render.py has already required PyYAML, with an install hint)
 
 DAEMONSET = ROOT / "kubernetes/apps/apps/edge/proxy/daemonset.yaml"
 RELOADER = ROOT / "kubernetes/apps/apps/edge/proxy/cert-reloader.sh"
 PROBE = ROOT / "kubernetes/apps/apps/edge/proxy/cert-probe.sh"
 SUPPORT = pathlib.Path(__file__).resolve().parent / "edge_runtime"
-# Pinned by digest, so a fixture failure is always attributable to the diff; IMG_SSL is also the
-# DaemonSet's cert-probe image (asserted below).
+# Pinned by digest, so a fixture failure is always attributable to the diff.
 IMG_PY = "python:3.12-alpine@sha256:5789aa194f757888f41fa3d48e14b6feaa1b57c0af0b56fcb1372d6474d3bff0"
-IMG_SSL = "alpine/openssl:3.5.9@sha256:1c361a204e9791bec6202bccbd1065eafaa65cb5a1a9a06ae000238569fba6a2"
+# The DaemonSet's cert-probe image, filled in by main() from daemonset.yaml (probe_image()).
+IMG_SSL = ""
 LABEL = "ailab.edge-runtime"  # every resource: LABEL=<run id>, LABEL.started=<unix time>
 STALE_AFTER = 2 * 3600       # a run older than this is dead (cancelled without cleanup): removed
 
@@ -67,8 +68,22 @@ SENTINELS = ["SENTINEL-JWT-7f3a", "SENTINEL-KEY-91bc", "SENTINEL-AUTH-22de", "SE
              "SENTINEL-SECRET-3c1e"]
 
 
-def probe_image_matches() -> bool:
-    return IMG_SSL in DAEMONSET.read_text()
+def probe_image() -> str:
+    """The cert-probe container's image, READ from daemonset.yaml so the fixture runs cert-probe.sh
+    under exactly what the pod runs. It used to be a copy here, asserted equal to the manifest, and
+    Renovate moves only the manifest: every bump of the image failed CI until the copy was edited by
+    hand (#1464, #1511). It must still be pinned by tag and digest, so a fixture failure is always
+    attributable to the diff."""
+    images = [c.get("image") for doc in yaml.safe_load_all(DAEMONSET.read_text(encoding="utf-8"))
+              if isinstance(doc, dict) and doc.get("kind") == "DaemonSet"
+              for c in doc["spec"]["template"]["spec"].get("containers") or []
+              if c.get("name") == "cert-probe"]
+    if len(images) != 1:
+        sys.exit(f"daemonset.yaml: expected one cert-probe container, found {len(images)}")
+    # name (may carry a registry port) : tag (docker's tag grammar, so no '/' or ':') @ digest
+    if not re.fullmatch(r"[^\s@]+:\w[\w.-]{0,127}@sha256:[0-9a-f]{64}", images[0] or ""):
+        sys.exit(f"daemonset.yaml: the cert-probe image is not pinned by tag and digest: {images[0]!r}")
+    return images[0]
 
 
 def caddy_image() -> str:
@@ -615,9 +630,8 @@ def main() -> int:
         if sig is not None:
             signal.signal(sig, _terminate)
 
-    if not probe_image_matches():
-        print(f"edge_runtime: daemonset.yaml's cert-probe image is not {IMG_SSL}", file=sys.stderr)
-        return 1
+    global IMG_SSL
+    IMG_SSL = probe_image()
     reg = render.load()
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{P}-"))
     fx = Fixture(work)
