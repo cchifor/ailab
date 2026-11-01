@@ -409,6 +409,62 @@ the host's own ChatGPT login. Revoke the keys on the router if they are no longe
 | `400 UNSUPPORTED_PARAMETER: include` | the request reached a route without `native: ["codex-responses"]` (subset parser): check where `dw-N` points |
 | `429 ... busy` | every account in `pool-codex` is at its concurrency: wait, or raise an account's `concurrency` |
 
+#### Local models: agents on `qwen-27b` and `flash-next` (since 2026-11-01)
+
+Each worker's router key also reaches two local models. They use no subscription quota.
+
+| name (route) | serves | speed | context | notes |
+|---|---|---|---|---|
+| `qwen-27b` → route `qwen3.8-27b` | cloud2, vLLM, Qwen3.8-27B | ~116 tok/s output | 262k | the better local choice for code |
+| `flash-next` → route `qwen3.8-flash-next` | cloud3, llama.cpp, Qwen3.8-Flash-Next | ~60 tok/s output | 262k | copies exact values from tool output unreliably (cloudlab runbook 13e); cloud3 serves one model at a time, so its first request after another cloud3 model waits for the swap |
+
+**How a request gets there.**
+- `qwen-27b` and `flash-next` are router pointers, and the worker's key allows them besides its `dw-N`.
+- A request that names one is route mode on that pointer, while Codex's default model still takes `dw-N` → `pool-codex`.
+- Both targets are chat-backed (OpenAI-compatible servers), so the router brings the Codex CLI's own Responses
+  request into its Responses subset. It drops what a chat server cannot use: `prompt_cache_key`, `client_metadata`,
+  reasoning summaries, the `web_search` and multi-agent tool groups. It also drops `reasoning_effort`, as a
+  disclosed lenient-route control. The response carries `x-router-adapted: codex-responses` (llm-router#127,
+  `docs/runbooks/llm-router.md` § "Local follow-ups release").
+
+**From Codex.** Codex's own sub-agents take a `model` override, so "spawn an agent on qwen-27b" makes the main
+Codex call `spawn_agent` with `model: "qwen-27b"`.
+- Codex's built-in model list names only OpenAI models. A managed block in each user's `~/.codex/AGENTS.md` names
+  the two local ones.
+- By hand, a whole session on a local model: `codex -p qwen-27b` (or `-p flash-next`). The profile files
+  `~/.codex/<name>.config.toml` set the model and its real context window.
+
+**From Claude Code.** Claude's own sub-agents (the Task tool) run on Claude models only: Claude Code sends them to
+Anthropic, and the router has no Anthropic endpoint (llm-router#128 is the plan for one).
+- So the agent is a background Codex process on the local model. The `local-model-agent` skill (each user's
+  `~/.claude/skills/`) and a block in `~/.claude/CLAUDE.md` tell Claude to run
+  `codex exec -p <name> --skip-git-repo-check -C <dir> -s workspace-write --output-last-message <file> "<task>"`
+  with `run_in_background`, then read the answer file.
+- Codex is only the harness that runs the local model's tool calls.
+
+**Managed by** role `dev_worker`, `tasks/codex.yml`, while `dev_worker_codex_router_enabled` is true:
+- the two profile files;
+- the AGENTS.md and CLAUDE.md blocks (marker `local models`);
+- the skill.
+
+All are removed when the router is turned off. List: `dev_worker_codex_local_profiles` in `defaults/main.yml`.
+Apply with `ansible-playbook dev-workers.yml -t codex`. A running TUI reads AGENTS.md and CLAUDE.md at its next
+session; `codex exec` reads the profiles on every run.
+
+**Limits.**
+- Agents on these models get no web search and cannot start sub-agents of their own.
+- A Codex conversation that has used GPT-family `custom` tools cannot continue on a local model: `custom_tool_call`
+  is refused by name.
+- Request bodies on these routes are capped at the Responses subset's 2 MiB, so a long session with many
+  screenshots can reach it.
+
+| symptom | cause / fix |
+|---|---|
+| `403 ROUTE_NOT_ALLOWED` naming `qwen-27b` / `flash-next` | the key lacks the pointer: `PATCH /admin/v1/keys/<id>` with `routes: [dw-N, qwen-27b, flash-next]` |
+| `400 UNSUPPORTED_INPUT: custom_tool_call …` | the conversation started on a GPT model with custom tools; start a new one on the local model |
+| a timeout on `flash-next` right after another cloud3 model | the swap (unload + load); retry once |
+| `413 PAYLOAD_TOO_LARGE … Responses subset` | the 2 MiB cap; start a fresh session (or `/compact`) |
+
 ### Optional: sandboxed separate agent account
 To isolate the headless agent from `c4`'s sudo, set `dev_worker_agent_user: claude-agent` in
 `group_vars/dev_workers.yml` and re-run. That restores the homelab two-user split: `claude-agent`
