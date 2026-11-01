@@ -2823,7 +2823,10 @@ The two failures are model behaviour, not router behaviour, and are the owner's 
    - cloud3's account `assistantModels: ["qwen3.8-flash-next"]`;
    - the four dev-worker keys get `routes: [dw-N, qwen-27b, flash-next]`, keeping `defaultRoute: dw-N`. Codex's
      default model still takes `dw-N`, while a request naming a local model is route mode on its pointer.
-   - Done: revision **2197** for `assistantModels`; the key PATCHes are audited as `key.updated` (results below).
+   - Done: revision **2197** for `assistantModels`. The key PATCHes are audit entries 2396-2399 (`key.updated`,
+     2026-11-01 ~15:14Z, actor `administrator`): `key_056782fff988`, `key_f68566fbf013`, `key_23f0823b6934` and
+     `key_dc874b9d0a75`, each from `routes: [dw-N]` to `[dw-N, qwen-27b, flash-next]`, `defaultRoute: dw-N`
+     unchanged. Rollback PATCHes them back to `[dw-N]`.
 
 **Rollback, in this order.**
 1. While this image is still live:
@@ -2842,7 +2845,9 @@ The old image has no PATCH endpoint. Its account schema is not strict, so it str
 
 **The roll.** ailab #1553 merged, and Flux rolled the pod in ~2 minutes. It runs `sha256:5add0d2c…`, with
 `/app/SOURCE_COMMIT` `1f897ac3…` and no error lines in the log. Public `/health` answers 200 and an unauthenticated
-`/v1/models` 401. `validate-live` gives 6/9, the same as the baseline.
+`/v1/models` 401. `validate-live` gives 6/9, the same as the baseline: the three that do not pass are `codex text`,
+`codex stream` and `codex tool call`. They send a bare `model: 'codex'` and get `400 MODEL_REQUIRED` from the live
+configuration, as on every run since ≤10-26; that is not a release regression.
 
 **Configuration after the roll.**
 - Revision **2197**: cloud3's account has `assistantModels: ["qwen3.8-flash-next"]`.
@@ -2865,6 +2870,10 @@ image content:
 - **Every key works.** An agent on each model, on each of the four workers, ran a command and wrote its file.
   - `qwen-27b` took 6-12 s.
   - `flash-next` took 12-19 s, or 220 s for the first request after `fp8` had to be swapped out on cloud3.
+  - **cloud3 holds one model at a time.** `qwen3.8-27b-fp8` (the boot preload), `qwen3.8-flash-next` and
+    `qwen3.5-122b` cannot be co-resident, so a request for one may first wait for a swap: ~1-4 minutes, the
+    longest when vLLM's fp8 has to unload. That applies to API callers pinning `local/qwen3.8-27b-fp8` while dev
+    workers or the Assistant use flash-next, and the other way round.
   - The journal shows `qwen-27b` → route `qwen3.8-27b` → cloud2 and `flash-next` → `qwen3.8-flash-next` → cloud3,
     all complete, with `reasoning_effort` disclosed as dropped.
 - **From Codex**, in plain language: "spawn an agent on qwen-27b that writes … to cx.txt". Codex ran
@@ -2884,6 +2893,11 @@ image content:
 answers (cloudlab runbook 13e, cloudlab #48).
 
 **Follow-ups.**
+- **cloud3 lost power abruptly twice during 4-GPU cold loads** (2026-10-31 15:58Z alone; 2026-11-01 09:47Z together
+  with cloud2 and the owner's workstation). Hypothesis: the circuit. If it happens again, stop multi-GPU cold loads
+  and inspect the circuit, the PSUs and the hosts' logs before resuming (cloudlab runbook 13e).
+- **Dated cleanup on 2026-12-01:** delete `/models-local/qwen3.8-flash-next/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf`
+  (4.1 GB) on cloud3, together with the NFS GGUFs of the models retired on 10-31.
 - **llm-router#128:** an Anthropic-compatible endpoint, so Claude Code itself can run on a router route. It holds the
   plan and its codex review.
 - **Native Codex sub-agents on the local models:** the router could serve Codex catalog entries for chat-backed

@@ -44,3 +44,4 @@ owner). This file records how each part was reviewed and what changed because of
 - There is no chat tool for the key PATCH.
 - flash-next's garbled copied values (cloudlab 13e).
 - cloud3's two abrupt power losses during 4-GPU cold loads: the circuit and PSU are the owner's to inspect.
+- 2026-12-01: delete the MTP draft head on cloud3 (`/models-local/qwen3.8-flash-next/MTP/`, 4.1 GB).
