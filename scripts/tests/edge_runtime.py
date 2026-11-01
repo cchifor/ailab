@@ -28,6 +28,7 @@ scripts/edge/netpol-check.sh exercises the tunnel listener's policy in the clust
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import os
 import pathlib
@@ -52,8 +53,7 @@ PROBE = ROOT / "kubernetes/apps/apps/edge/proxy/cert-probe.sh"
 SUPPORT = pathlib.Path(__file__).resolve().parent / "edge_runtime"
 # Pinned by digest, so a fixture failure is always attributable to the diff.
 IMG_PY = "python:3.12-alpine@sha256:5789aa194f757888f41fa3d48e14b6feaa1b57c0af0b56fcb1372d6474d3bff0"
-# The DaemonSet's cert-probe image, filled in by main() from daemonset.yaml (probe_image()).
-IMG_SSL = ""
+# The OpenSSL image (the DaemonSet's cert-probe) has no constant here: see probe_image().
 LABEL = "ailab.edge-runtime"  # every resource: LABEL=<run id>, LABEL.started=<unix time>
 STALE_AFTER = 2 * 3600       # a run older than this is dead (cancelled without cleanup): removed
 
@@ -68,16 +68,22 @@ SENTINELS = ["SENTINEL-JWT-7f3a", "SENTINEL-KEY-91bc", "SENTINEL-AUTH-22de", "SE
              "SENTINEL-SECRET-3c1e"]
 
 
+@functools.cache
 def probe_image() -> str:
     """The cert-probe container's image, READ from daemonset.yaml so the fixture runs cert-probe.sh
     under exactly what the pod runs. It used to be a copy here, asserted equal to the manifest, and
     Renovate moves only the manifest: every bump of the image failed CI until the copy was edited by
     hand (#1464, #1511). It must still be pinned by tag and digest, so a fixture failure is always
-    attributable to the diff."""
-    images = [c.get("image") for doc in yaml.safe_load_all(DAEMONSET.read_text(encoding="utf-8"))
-              if isinstance(doc, dict) and doc.get("kind") == "DaemonSet"
-              for c in doc["spec"]["template"]["spec"].get("containers") or []
-              if c.get("name") == "cert-probe"]
+    attributable to the diff. Every caller calls this (cached: one read per run) rather than a
+    module constant filled in later, so no reader can ever see an unset image."""
+    images = []
+    for doc in yaml.safe_load_all(DAEMONSET.read_text(encoding="utf-8")):
+        if not isinstance(doc, dict) or doc.get("kind") != "DaemonSet":
+            continue
+        # Tolerant walk: a malformed manifest reaches the clean "found 0" exit below, not a traceback.
+        pod = ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+        images += [c.get("image") for c in pod.get("containers") or []
+                   if isinstance(c, dict) and c.get("name") == "cert-probe"]
     if len(images) != 1:
         sys.exit(f"daemonset.yaml: expected one cert-probe container, found {len(images)}")
     # name (may carry a registry port) : tag (docker's tag grammar, so no '/' or ':') @ digest
@@ -184,7 +190,7 @@ class Fixture:
         d.mkdir(exist_ok=True)
         crt, key = names
         keyout = "unused.key" if key_from else key
-        docker("run", "--rm", *user_args(), "-v", f"{d}:/o", IMG_SSL, "req", "-x509", "-newkey", "rsa:2048",
+        docker("run", "--rm", *user_args(), "-v", f"{d}:/o", probe_image(), "req", "-x509", "-newkey", "rsa:2048",
                "-nodes", "-days", "2", "-subj", f"/CN={cn}", "-addext", f"subjectAltName=DNS:{cn}",
                "-keyout", f"/o/{keyout}", "-out", f"/o/{crt}")
         if key_from:
@@ -530,7 +536,7 @@ def check(label, ok, detail=""):
 
 
 def served_fingerprint():
-    r = docker("run", "--rm", *labels(), "--network", f"{P}-trusted", "--entrypoint", "sh", IMG_SSL, "-c",
+    r = docker("run", "--rm", *labels(), "--network", f"{P}-trusted", "--entrypoint", "sh", probe_image(), "-c",
                f"echo | openssl s_client -connect {PROXY_IP['trusted']}:8443 -servername router.chifor.me 2>/dev/null "
                "| openssl x509 -noout -fingerprint -sha256", check=False)
     return r.stdout.strip()
@@ -566,7 +572,7 @@ def check_probe(fx):
     namespace, as in the pod) and reports its expiry; the fixture certificates live 2 days."""
     docker("run", "-d", *labels(), *user_args(), "--name", f"{P}-probe", "--network", f"container:{P}-proxy",
            "-e", "PROBE_INTERVAL=2", "-v", f"{PROBE}:/probe.sh:ro", "-v", f"{fx.work / 'config'}:/config",
-           "--entrypoint", "sh", IMG_SSL, "/probe.sh")
+           "--entrypoint", "sh", probe_image(), "/probe.sh")
     path = fx.work / "config" / "reloader" / "probe"
     ok = wait_for(lambda: path.exists() and "edge_cert_probe_success 1" in path.read_text(), 30)
     detail = ""
@@ -630,8 +636,7 @@ def main() -> int:
         if sig is not None:
             signal.signal(sig, _terminate)
 
-    global IMG_SSL
-    IMG_SSL = probe_image()
+    probe_image()  # a missing or unpinned cert-probe image fails here, before any container starts
     reg = render.load()
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{P}-"))
     fx = Fixture(work)
