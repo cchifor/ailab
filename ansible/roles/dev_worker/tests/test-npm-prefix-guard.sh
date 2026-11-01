@@ -48,20 +48,24 @@ import yaml
 tasks_path, defaults_path, t, guard, probe, install = sys.argv[1:]
 tasks = yaml.safe_load(open(tasks_path)) or []
 picked = []
+guard_become_user = ""
 for task in tasks:
     name = task.get("name", "")
     if name.startswith(guard) or name in (probe, install):
         task = dict(task)
+        if name.startswith(guard) and task.get("become") is True:
+            guard_become_user = str(task.get("become_user", ""))
         task.pop("become", None)
         task.pop("become_user", None)
         picked.append(task)
 seq = ["guard" if p["name"].startswith(guard) else p["name"] for p in picked]
 if sorted(seq) != sorted(["guard", probe, install]):
-    print("missing:" + "|".join(seq))
+    status = "missing:" + "|".join(seq)
 elif seq[0] != "guard":
-    print("order:" + "|".join(seq))
+    status = "order:" + "|".join(seq)
 else:
-    print("ok")
+    status = "ok"
+print(status + ";become_user=" + guard_become_user)
 defaults = yaml.safe_load(open(defaults_path))
 users = [{"name": "u%d" % n, "home": os.path.join(t, "home%d" % n)} for n in (1, 2)]
 play = [{
@@ -81,13 +85,23 @@ PY
 )" || { echo "FATAL: could not read $TASKS / $DEFAULTS"; exit 2; }
 
 # A wrong order is reported but the run goes on: the checks below then show what it breaks.
-case "$found" in
+status="${found%%;*}"
+case "$status" in
 ok) ok "guard, probe and install found, guard first" ;;
-order:*) bad "the guard is not ahead of the probe and the install" "task order: ${found#order:}" ;;
-*) bad "expected one '$GUARD...' task plus the probe and the install" "found: ${found#missing:}"; echo; echo "failed=$fails"; exit 1 ;;
+order:*) bad "the guard is not ahead of the probe and the install" "task order: ${status#order:}" ;;
+*) bad "expected one '$GUARD...' task plus the probe and the install" "found: ${status#missing:}"; echo; echo "failed=$fails"; exit 1 ;;
 esac
+# `become` is stripped for the run below (no root here), so check it statically: the guard must act
+# as the prefix's owner, never as the play's root (a planted symlink must not reach the system npm).
+# shellcheck disable=SC2016 # a literal Jinja expression, not a shell expansion
+if [ "${found#*;become_user=}" = '{{ item.0.name }}' ]; then
+	ok "the guard runs as the prefix's owner (become_user: item.0.name)"
+else
+	bad "the guard does not become the prefix's owner" "become_user: '${found#*;become_user=}'"
+fi
 
-# ---- fixtures ----------------------------------------------------------------------------------------
+# ---- fixtures (set -e: a broken fixture must fail here, not as a confusing assertion later) ------------
+set -e
 NPM_DIR="$(cat "$T/npm_dir")"
 P1="$T/home1/$NPM_DIR"
 P2="$T/home2/$NPM_DIR"
@@ -101,6 +115,7 @@ install_stub() {
 	printf '%s\n' '#!/bin/sh' \
 		"echo \"$1 \$npm_config_prefix \$*\" >>'$LOG'" \
 		'[ "$1" = install ] || exit 0' \
+		'[ -n "$npm_config_prefix" ] || { echo "stub npm: npm_config_prefix unset - did the install task stop exporting it?" >&2; exit 99; }' \
 		'd="$npm_config_prefix/lib/node_modules/@anthropic-ai/claude-code/bin"; mkdir -p "$d" "$npm_config_prefix/bin"' \
 		"$( [ "$2" = native ] && echo 'printf "%s\n" "#!/bin/sh" "echo \"2.1.316 (Claude Code)\"" >"$d/claude.exe"' \
 			|| echo 'printf "%s\n" "echo \"Error: claude native binary not installed.\" >&2" "exit 1" >"$d/claude.exe"' )" \
@@ -123,6 +138,7 @@ install_stub shadow placeholder "$P1/lib/node_modules/npm/bin/npm-cli.js"
 echo npx12 >"$P1/lib/node_modules/npm/bin/npx-cli.js"
 ln -s ../lib/node_modules/npm/bin/npm-cli.js "$P1/bin/npm"
 ln -s ../lib/node_modules/npm/bin/npx-cli.js "$P1/bin/npx"
+set +e
 
 run() { PATH="$P1/bin:$T/sysbin:$PATH" ANSIBLE_NOCOLOR=1 ANSIBLE_LOCALHOST_WARNING=0 \
 	ANSIBLE_INVENTORY_UNPARSED_WARNING=0 ansible-playbook -i localhost, "$T/play.yml" 2>&1; }
