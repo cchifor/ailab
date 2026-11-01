@@ -44,8 +44,10 @@
 # (there since 10-03, and unsupported on this Node 20) blocked the update's `postinstall: node
 # install.cjs` (npm >= 12 runs no install script outside allowScripts), so the 500-byte placeholder
 # stayed as bin/claude.exe, npm still exited 0, and claude failed with "native binary not installed".
-# Ordered before the probe so one run also heals that state: the placeholder exits 1, the probe
-# fails, and the install below re-runs with the system npm. tests/test-npm-prefix-guard.sh.
+# One role run heals that state (the placeholder exits 1, so the probe fails and the install below
+# re-runs); removing the shadow is what keeps the NEXT self-update from breaking claude again. It runs
+# first so the role's own install cannot pick up the shadow either: ansible's PATH lacks the per-user
+# bin/ today, but this must not hinge on that. tests/test-npm-prefix-guard.sh.
 - name: Remove a per-user npm that would shadow the system npm (Claude Code self-updates use it)
   ansible.builtin.file:
     path: "{{ item.0.home }}/{{ dev_worker_npm_dir }}/{{ item.1 }}"
