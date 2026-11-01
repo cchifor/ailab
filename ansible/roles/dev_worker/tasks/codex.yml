@@ -279,7 +279,11 @@
     label: "{{ item.name }}"
 
 # The local-model profiles (defaults/main.yml: dev_worker_codex_local_profiles): `codex -p qwen-27b`. Each file
-# sets only the model and its real context window; the provider, the key helper and the retry budget come from
+# is ~/.codex/<name>.config.toml, NOT a [profiles.<name>] table in config.toml: codex 0.162+ reads `-p <name>` from that
+# file and refuses the table. Verified with codex 0.166.0 on dev-worker-1, 2026-11-01, against a mock (ailab#1553):
+# the file is loaded (the request carries its model), while the table alone fails with "--profile `qwen-27b` cannot
+# be used while config.toml contains legacy ... `[profiles.qwen-27b]` config; move those settings into
+# .../qwen-27b.config.toml". The `chatgpt` profile below works the same way. Each file sets only the model and its real context window; the provider, the key helper and the retry budget come from
 # config.toml. A TUI or app-server daemon reads profile files at start: `codex app-server daemon restart` (when no
 # TUI is attached) before `-p` in the TUI sees a new one. `codex exec` reads them on every run.
 - name: The local-model codex profiles per user (router enabled)
