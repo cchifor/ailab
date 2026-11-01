@@ -305,3 +305,101 @@
   loop: "{{ dev_worker_users | product(dev_worker_codex_local_profiles) | list }}"
   loop_control:
     label: "{{ item.0.name }}: {{ item.1.name }}"
+
+# Agents on the local models (defaults/main.yml: dev_worker_codex_local_profiles). Each CLI learns about them in the
+# file it reads at session start, as a managed block (the user's own notes in the same file survive):
+#   - Codex (~/.codex/AGENTS.md): its own sub-agents take a `model` override (`spawn_agent`), so a sub-agent on
+#     qwen-27b is native; its built-in model list names only OpenAI models, hence the note.
+#   - Claude Code (~/.claude/CLAUDE.md + the `local-model-agent` skill): its own sub-agents run on Claude models only,
+#     so an agent on a local model is a background `codex exec -p <name>`, which the skill spells out.
+- name: Tell Codex about the local models (router enabled)
+  ansible.builtin.blockinfile:
+    path: "{{ item.home }}/.codex/AGENTS.md"
+    marker: "<!-- {mark} ANSIBLE MANAGED - local models -->"
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+    block: |
+      ## Local models through the router
+
+      Besides your default model, this worker's router key reaches two local models. They use no subscription
+      quota: {% for p in dev_worker_codex_local_profiles %}`{{ p.model }}`{{ ', ' if not loop.last else '.' }}{% endfor %}
+
+      - `qwen-27b`: Qwen3.8-27B on cloud2 (vLLM), ~116 tok/s, 262k context, sees images. The better local choice
+        for coding sub-tasks.
+      - `flash-next`: Qwen3.8-Flash-Next on cloud3 (llama.cpp), ~60 tok/s, 262k context, sees images. It copies
+        exact values from tool output unreliably (times, numbers, paths): check what it reports. cloud3 serves
+        one model at a time, so its first request after another cloud3 model waits for the swap.
+
+      When the user asks for an agent on one of them, call `spawn_agent` with `model` set to that name. If
+      `spawn_agent` refuses the name, run the agent as a process instead:
+      `codex exec -p <name> --skip-git-repo-check -C <dir> -s workspace-write --output-last-message <file> "<task>"`.
+      Agents on these models get no web search and no sub-agents of their own.
+  when: dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Tell Claude Code about the local models (router enabled)
+  ansible.builtin.blockinfile:
+    path: "{{ item.home }}/.claude/CLAUDE.md"
+    marker: "<!-- {mark} ANSIBLE MANAGED - local models -->"
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+    block: |
+      ## Agents on the local models
+
+      This worker's router key reaches two local models, `qwen-27b` (cloud2, the better one for code) and
+      `flash-next` (cloud3). Your own sub-agents (the Task tool) run on Claude models only. When the user asks for
+      an agent on a local model, use the `local-model-agent` skill: it runs the task as a background
+      `codex exec -p <model>` and reads its answer.
+  when: dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: The local-model-agent skill directory per user (router enabled)
+  ansible.builtin.file:
+    path: "{{ item.home }}/.claude/skills/local-model-agent"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0755"
+  when: dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: The local-model-agent skill per user (router enabled)
+  ansible.builtin.copy:
+    src: local-model-agent-skill.md
+    dest: "{{ item.home }}/.claude/skills/local-model-agent/SKILL.md"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+  when: dev_worker_codex_router_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: No local-model notes or skill while the router is off
+  ansible.builtin.blockinfile:
+    path: "{{ item.0.home }}/{{ item.1 }}"
+    marker: "<!-- {mark} ANSIBLE MANAGED - local models -->"
+    state: absent
+  when: not (dev_worker_codex_router_enabled | bool)
+  loop: "{{ dev_worker_users | product(['.codex/AGENTS.md', '.claude/CLAUDE.md']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+- name: No local-model-agent skill while the router is off
+  ansible.builtin.file:
+    path: "{{ item.home }}/.claude/skills/local-model-agent"
+    state: absent
+  when: not (dev_worker_codex_router_enabled | bool)
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
