@@ -2859,6 +2859,16 @@ configuration, as on every run since ≤10-26; that is not a release regression.
   image mode. `qwen3.8-27b-fp8` and `qwen3.5-122b` are gone.
 - Pinning `local/qwen3.8-27b-fp8` is refused: "That model is not available here."
 - A turn on flash-next passes: `list_routes` and an answer in 18.8 s.
+- **cloud2's Qwen3.8-27B joins the list** (revision **2198**, 2026-11-01 ~16:20Z). The owner's rule: the models
+  tested and approved, with the higher token rates, are visible. `lan-192.168.0.28-18020` no longer sets
+  `exposeModels: false`, which reverses the 10-31 decision D3 that had retired the name `local/qwen3.8-27b`. The name
+  is now served by cloud2's vLLM (~116 tok/s), not the retired cloud3 Q6_K.
+  - An Assistant turn on `local/qwen3.8-27b` passes in 14.8 s: a 16,283-token step in 11.3 s, the fastest local one.
+  - The list is now `local/qwen3.8-flash-next`, `local/qwen3.8-27b` and `local/qwen3.8-27b-ailab`, plus the image
+    models.
+  - **Side effect:** API clients may call `local/qwen3.8-27b` directly again (served by cloud2). The route
+    `qwen3.8-27b` and the pointer `qwen-27b` are unchanged.
+  - **To undo:** set `exposeModels: false` on that account again.
 
 **Images.** Each enabled model was checked through the router with one image, three images, and mixed text and
 image content:
