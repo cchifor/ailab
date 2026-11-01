@@ -93,12 +93,18 @@ changed() { sed -n 's/.*localhost[[:space:]]*:.* changed=\([0-9]*\).*/\1/p' <<<"
 # ---- 1. first run removes the shadowing npm, nothing else -----------------------------------------
 out="$(run)"; rc=$?
 if [ "$rc" -eq 0 ]; then ok "first run succeeds"; else bad "first run failed (rc=$rc)" "$out"; fi
-[ ! -e "$P1/bin/npm" ] && [ ! -L "$P1/bin/npm" ] && [ ! -e "$P1/bin/npx" ] && [ ! -L "$P1/bin/npx" ]
-if [ $? -eq 0 ]; then ok "bin/npm and bin/npx are gone"; else bad "bin/npm or bin/npx survived"; fi
+if [ ! -e "$P1/bin/npm" ] && [ ! -L "$P1/bin/npm" ] && [ ! -e "$P1/bin/npx" ] && [ ! -L "$P1/bin/npx" ]; then
+	ok "bin/npm and bin/npx are gone"
+else
+	bad "bin/npm or bin/npx survived"
+fi
 if [ ! -e "$P1/lib/node_modules/npm" ]; then ok "lib/node_modules/npm is gone"; else bad "lib/node_modules/npm survived"; fi
 for p in "$P1" "$P2"; do
-	[ "$(cat "$p/bin/claude" 2>/dev/null)" = native ] && [ "$(cat "$p/bin/codex" 2>/dev/null)" = codex ]
-	if [ $? -eq 0 ]; then ok "claude and codex untouched in ${p#"$T"/}"; else bad "claude or codex damaged in ${p#"$T"/}"; fi
+	if [ "$(cat "$p/bin/claude" 2>/dev/null)" = native ] && [ "$(cat "$p/bin/codex" 2>/dev/null)" = codex ]; then
+		ok "claude and codex untouched in ${p#"$T"/}"
+	else
+		bad "claude or codex damaged in ${p#"$T"/}"
+	fi
 done
 if [ "$(changed "$out")" != 0 ]; then ok "first run reports a change"; else bad "first run reported changed=0" "$out"; fi
 
