@@ -38,6 +38,29 @@
   loop_control:
     label: "{{ item.name }}"
 
+# Claude Code self-updates with the FIRST `npm` on the user's PATH, and the two tasks above put the
+# per-user prefix's bin/ first, so an npm installed INTO that prefix replaces the system npm for every
+# self-update. The role never installs one there. 2026-11-01, dev-worker-3: an out-of-band npm 12.2.0
+# (there since 10-03, and unsupported on this Node 20) blocked the update's `postinstall: node
+# install.cjs` (npm >= 12 runs no install script outside allowScripts), so the 500-byte placeholder
+# stayed as bin/claude.exe, npm still exited 0, and claude failed with "native binary not installed".
+# One role run heals that state (the placeholder exits 1, so the probe fails and the install below
+# re-runs); removing the shadow is what keeps the NEXT self-update from breaking claude again. It runs
+# first so the role's own install cannot pick up the shadow either: ansible's PATH lacks the per-user
+# bin/ today, but this must not hinge on that. Runs AS the user, not as the play's root: the prefix
+# lives in a home that user (an agent) can write, and root following a planted symlink (say
+# lib -> /usr/lib) would delete the system npm; as the user that attempt fails loudly instead.
+# tests/test-npm-prefix-guard.sh.
+- name: Remove a per-user npm that would shadow the system npm (Claude Code self-updates use it)
+  become: true
+  become_user: "{{ item.0.name }}"
+  ansible.builtin.file:
+    path: "{{ item.0.home }}/{{ dev_worker_npm_dir }}/{{ item.1 }}"
+    state: absent
+  loop: "{{ dev_worker_users | product(['bin/npm', 'bin/npx', 'lib/node_modules/npm']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
 - name: Probe installed Claude Code per user
   become: true
   become_user: "{{ item.name }}"
