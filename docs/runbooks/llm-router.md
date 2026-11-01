@@ -2747,6 +2747,97 @@ The two failures are model behaviour, not router behaviour, and are the owner's 
   The NVMe limit is the one that guards against the recorded condition (90.9 °C); the CPU limit was only a
   ceiling and would not have fired at the outage's 90 °C. Lower it if the CPU is ever the suspect.
 
+## Local follow-ups release (2026-11-01, llm-router#127)
+
+`router-0.1.0-20261101-local-followups` deploys llm-router main `1f897ac390debd78eea85c747d97ec013d926d7e`
+([#127](https://git.chifor.me/cchifor/llm-router/pulls/127)). It is section A of
+`plans/2026-11-01-router-local-models-followups-plan.md`.
+
+**Why.**
+- **The Assistant's model list** offered every model of a tools-capable account. cloud3's account serves three, and
+  two of them fail as Assistant models: `qwen3.8-27b-fp8` reasons until the turn cap without calling a tool, and
+  `qwen3.5-122b` puts template text (`</think>`) in its tool arguments.
+- **The dev workers' Codex** could not use any local model. Codex 0.166 sends its own Responses dialect even for a
+  non-OpenAI model, and the router's Responses subset refused it: `include`, `prompt_cache_key`, `client_metadata`,
+  `reasoning.summary`, a `namespace` tool group and a `web_search` tool.
+
+**What changes.**
+- **`Account.assistantModels`.** Set, it alone decides which of the account's models the Assistant may run on: the
+  model list, a pinned conversation, the automatic route choice, and routing (reason `assistant_excluded`, for the
+  Assistant's own requests with tools). `[]` means none; unset keeps the old behavior. `inspect_account` shows it and
+  `update_account` sets it.
+- **The Codex CLI on chat-backed routes.** On a non-native route, a request whose `originator` header starts with
+  `codex_` is first brought into the subset; every subset check then applies.
+  - **Dropped:** hints (`prompt_cache_key`, `client_metadata`, `reasoning.summary`, `text.verbosity`, an `include` of
+    only `reasoning.encrypted_content`), non-function tools, and `reasoning` input items.
+  - **Moved:** `additional_tools` into `tools`, and tool-output images after the tool results.
+  - **Still refused, by name:** unknown top-level keys and `custom_tool_call` items.
+  - **Not affected:** the conversation identity is read from the raw request, and the header never affects
+    authorization.
+  - **Disclosed** as `x-router-adapted: codex-responses`, with the names of what was dropped in the journal's
+    `parameters_adjusted.changes`. For these requests, usage leaves `output_tokens_details` out when no reasoning
+    count was reported: Codex 0.166 requires `reasoning_tokens` inside it.
+- **Reasoning effort is a planned control.** On a lenient route a provider without it (local servers, the Anthropic
+  API) gets it dropped and disclosed (`x-router-ignored-params: reasoning_effort`). On a strict route the target is
+  skipped. Before this release, that provider refused the attempt in its own guard. An account's `params.drop` /
+  `params.reject` can name it.
+- **`PATCH /admin/v1/keys/:id`** changes a key's `routes` and `defaultRoute` in place, for administrators only.
+  - An omitted field keeps its value.
+  - Revoked or expired keys get 409 `KEY_NOT_ACTIVE`; relay-managed ones get 409 `KEY_MANAGED`.
+  - The live principal is replaced at once, and the change is audited as `key.updated`.
+  - The token, id, expiry and usage history do not change.
+- **One behavior change for every Responses caller:** consecutive `function_call` input items become one assistant
+  message with several tool calls.
+
+**Verified before release.**
+- Full suite: 1959 passed, 19 skipped. `check:architecture`: only the known #79 line.
+- The real Codex 0.166 CLI ran through the branch's router to a fake chat backend: tool call → tool result → final
+  answer, exit 0. Its first runs found the two fixes above, the reasoning-effort control and the usage shape.
+- Reviews: reviewer-codex and reviewer-claude approved after one round (their findings fixed: `CONTROL_PARAMS`,
+  usage keyed on the caller, the shared key view).
+
+**Image.**
+- Archive `router-0.1.0-20261101-local-followups.tar.gz`, SHA-256
+  `d572004de1770c3b1e918d46107906d0e65d854f7ec50476b15773fece7da9eb` (relay v0.2.0 assets 409/410).
+- Relay branch `release/router-0.1.0-20261101-local-followups-image`,
+  [run 115361](https://git.chifor.me/cchifor/relay/actions/runs/115361), receipt `deployment-images-115361.json`
+  (asset 411).
+- `registry.chifor.me/llm-router/router@sha256:5add0d2c80b797c8307596a184c9d19404bf860bdf22495be67251d7642a5f22`,
+  tag `parity-061d471fef1a-115361`. Every blob was pulled anonymously and verified, and `/app/SOURCE_COMMIT` =
+  `1f897ac3…`.
+
+**Before the roll:**
+- backup `/data/backups/pre-local-followups-20261101`: integrity ok, 37,346 trajectories, SHA-256
+  `8c4cc3a7e6077f4443f89fc647fa68c8f720ebb44e6eca9fa4c6b8c5277914f9`, key 600;
+- `validate-live` 6/9, the known baseline (the 3 `codex` checks send a bare `model: 'codex'`, answered with
+  `MODEL_REQUIRED`).
+
+**Configuration with this release** (If-Match `PUT /admin/v1/config` and `PATCH /admin/v1/keys/:id`, each read back):
+1. Before the roll, valid on the old image too:
+   - `visionModels` on the four local accounts (rev 2182). The five models that read a test image, through the
+     router: one image, three images, and mixed content. `qwen3.5-122b` has no vision projector and is refused
+     before any upstream call.
+   - Route `qwen3.8-flash-next`: cloud3, `timeoutMs` 600000, lenient (rev 2183).
+   - Pointers `qwen-27b` → `qwen3.8-27b` and `flash-next` → `qwen3.8-flash-next` (rev 2192).
+2. After the roll:
+   - cloud3's account `assistantModels: ["qwen3.8-flash-next"]`;
+   - the four dev-worker keys get `routes: [dw-N, qwen-27b, flash-next]`, keeping `defaultRoute: dw-N`. Codex's
+     default model still takes `dw-N`, while a request naming a local model is route mode on its pointer.
+   - Record both revisions here.
+
+**Rollback, in this order.**
+1. While this image is still live:
+   - PATCH the four keys back to `[dw-N]`;
+   - remove the pointers and the `qwen3.8-flash-next` route;
+   - turn the dev workers' local models off: `dev_worker_codex_local_models_enabled: false` in
+     `group_vars/dev_workers.yml`, then `ansible-playbook dev-workers.yml -t codex`. That removes the profiles, the
+     AGENTS.md/CLAUDE.md blocks and the skill, and keeps the router provider and the default `dw-N` path.
+2. Then revert to `registry.chifor.me/llm-router/router@sha256:dad0e721e2a83afc89432ce2328a378c89873e3f2c37874bfa35d0b3e960685f`
+   (source `372ce1ee829f665a489a6afe7e513ab13e4ef868`, release `router-0.1.0-20261031-step-timeouts`).
+
+The old image has no PATCH endpoint. Its account schema is not strict, so it strips `assistantModels`, and fp8 and
+122B reappear in the Assistant. `visionModels` stays valid.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem

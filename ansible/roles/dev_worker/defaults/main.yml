@@ -135,6 +135,19 @@ dev_worker_codex_router_key_field: "llm_router_codex_key"
 # Measured values and when they take effect (daemon restart): docs/runbooks/dev-workers.md, "Retry budget".
 dev_worker_codex_router_stream_max_retries: 8
 dev_worker_codex_router_request_max_retries: 6
+# The estate's local models for agents on the workers. Each `model` is a router pointer on the worker's key besides
+# `dw-N` (qwen-27b -> route qwen3.8-27b, cloud2 vLLM; flash-next -> route qwen3.8-flash-next, cloud3 llama-swap), so
+# the router serves it in route mode on a chat-backed route and adapts the CLI's request (llm-router#127; runbook
+# dev-workers.md § "Local models"). Used three ways: Codex's own sub-agents (`spawn_agent` with `model`, told in
+# ~/.codex/AGENTS.md), Claude Code's `local-model-agent` skill (a background `codex exec -p <name>`), and
+# `codex -p <name>` by hand. The profile file sets the model and its real context window (cloud2's vLLM
+# `max_model_len`; flash-next's `-c 524288 --parallel 2` per slot). Profile names must be plain words: codex 0.166
+# refuses `-p qwen3.8-27b`. All of it is written only while the router AND `dev_worker_codex_local_models_enabled` are on, and
+# removed otherwise: false retires only the local models (profiles, notes, skill) and keeps the router and `dw-N`.
+dev_worker_codex_local_models_enabled: true
+dev_worker_codex_local_profiles:
+  - { name: qwen-27b, model: qwen-27b, context_window: 262144 }
+  - { name: flash-next, model: flash-next, context_window: 262144 }
 
 # ---- feature toggles ----
 dev_worker_install_docker: true
