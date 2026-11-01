@@ -102,8 +102,9 @@ jobs:
       # provisioning (roles/gitea_runner) installs no ansible, so this step installs the pinned bundle
       # into a throwaway venv, as relay-router-workers.yaml does: ansible==14.0.0 is ansible-core
       # 2.21.0 plus community.general 13.0.1 (git_config). A failed install fails the step; it never
-      # skips.
-      - name: per-slot Gitea identity converged through ansible-playbook
+      # skips. The same venv then runs claude_code.yml's per-user npm shadow guard (2026-11-01: an npm
+      # in ~/.npm-global blocked Claude Code's self-update postinstall on dev-worker-3).
+      - name: per-slot Gitea identity + npm prefix guard converged through ansible-playbook
         shell: bash
         run: |
           set -euo pipefail
@@ -111,6 +112,7 @@ jobs:
           python3 -m venv .venv-dev-worker-converge
           .venv-dev-worker-converge/bin/pip install --quiet ansible==14.0.0
           PATH="$PWD/.venv-dev-worker-converge/bin:$PATH" bash ansible/roles/dev_worker/tests/test-gitea-converge.sh
+          PATH="$PWD/.venv-dev-worker-converge/bin:$PATH" bash ansible/roles/dev_worker/tests/test-npm-prefix-guard.sh
 
       - name: codex router-key helper (vault, cache, fallback)
         shell: bash
