@@ -442,14 +442,19 @@ Anthropic, and the router has no Anthropic endpoint (llm-router#128 is the plan 
   with `run_in_background`, then read the answer file.
 - Codex is only the harness that runs the local model's tool calls.
 
-**Managed by** role `dev_worker`, `tasks/codex.yml`, while `dev_worker_codex_router_enabled` is true:
+**Managed by** role `dev_worker`, `tasks/codex.yml`, while `dev_worker_codex_router_enabled` and
+`dev_worker_codex_local_models_enabled` are both true:
 - the two profile files;
 - the AGENTS.md and CLAUDE.md blocks (marker `local models`);
 - the skill.
 
-All are removed when the router is turned off. List: `dev_worker_codex_local_profiles` in `defaults/main.yml`.
-Apply with `ansible-playbook dev-workers.yml -t codex`. A running TUI reads AGENTS.md and CLAUDE.md at its next
-session; `codex exec` reads the profiles on every run.
+All are removed when either is false. `dev_worker_codex_local_models_enabled: false` retires only the local models
+and keeps the router and `dw-N`. List: `dev_worker_codex_local_profiles` in `defaults/main.yml`; a profile dropped
+from it is removed too. Apply with `ansible-playbook dev-workers.yml -t codex`.
+- A running TUI reads AGENTS.md and CLAUDE.md at its next session.
+- `codex exec` reads the profiles on every run. A running TUI or app-server daemon reads them only at start, so `-p
+  <name>` in a TUI needs `codex app-server daemon restart` (as the user, with no TUI attached) after the role writes
+  a new profile.
 
 **Limits.**
 - Agents on these models get no web search and cannot start sub-agents of their own.

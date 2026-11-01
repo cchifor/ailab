@@ -278,45 +278,81 @@
   loop_control:
     label: "{{ item.name }}"
 
-# The local-model profiles (defaults/main.yml: dev_worker_codex_local_profiles): `codex -p qwen-27b`. Each file
-# is ~/.codex/<name>.config.toml, NOT a [profiles.<name>] table in config.toml: codex 0.162+ reads `-p <name>` from that
-# file and refuses the table. Verified with codex 0.166.0 on dev-worker-1, 2026-11-01, against a mock (ailab#1553):
-# the file is loaded (the request carries its model), while the table alone fails with "--profile `qwen-27b` cannot
-# be used while config.toml contains legacy ... `[profiles.qwen-27b]` config; move those settings into
-# .../qwen-27b.config.toml". The `chatgpt` profile below works the same way. Each file sets only the model and its real context window; the provider, the key helper and the retry budget come from
-# config.toml. A TUI or app-server daemon reads profile files at start: `codex app-server daemon restart` (when no
-# TUI is attached) before `-p` in the TUI sees a new one. `codex exec` reads them on every run.
-- name: The local-model codex profiles per user (router enabled)
+# ---- Agents on the local models (defaults/main.yml: dev_worker_codex_local_models_enabled, _local_profiles) ----
+# Three artifacts per user, all on while the router AND dev_worker_codex_local_models_enabled are on, all removed
+# otherwise. `dev_worker_codex_local_models_enabled: false` retires only these and keeps the router provider and the
+# default `dw-N` path (rollback step 1 of llm-router.md "Local follow-ups release"):
+#   1. Profiles, ~/.codex/<name>.config.toml: `codex -p qwen-27b`. Each is a file, NOT a [profiles.<name>] table in
+#      config.toml: codex 0.162+ reads `-p <name>` from that file and refuses the table. Verified with codex 0.166.0
+#      on dev-worker-1, 2026-11-01, against a mock (ailab#1553): the file is loaded (the request carries its model),
+#      while the table alone fails with "--profile `qwen-27b` cannot be used while config.toml contains legacy ...
+#      `[profiles.qwen-27b]` config; move those settings into .../qwen-27b.config.toml". Each file sets only the model
+#      and its real context window; the provider, the key helper and the retry budget come from config.toml. Their
+#      header says "local model", so a profile dropped from the list is found and removed (the `chatgpt` profile
+#      above is never matched). A TUI or app-server daemon reads profile files at start: `codex app-server daemon
+#      restart` (when no TUI is attached) before `-p` in the TUI sees a new one; `codex exec` reads them every run.
+#   2. A managed block in the file each CLI reads at session start (the user's own notes there survive):
+#      - Codex (~/.codex/AGENTS.md): its sub-agents take a `model` override (`spawn_agent`), so a sub-agent on
+#        qwen-27b is native; its built-in model list names only OpenAI models, hence the note.
+#      - Claude Code (~/.claude/CLAUDE.md): its sub-agents run on Claude models only, so an agent on a local model is
+#        a background `codex exec -p <name>`, which the skill spells out.
+#   3. The `local-model-agent` skill, ~/.claude/skills/local-model-agent/SKILL.md.
+- name: Whether the local-model artifacts are wanted (router on and local models on)
+  ansible.builtin.set_fact:
+    dev_worker_codex_local_models_on: "{{ (dev_worker_codex_router_enabled | bool) and (dev_worker_codex_local_models_enabled | bool) }}"
+
+# A `-t codex` run skips the tasks that usually create these; created here owned by the user, never by the
+# blockinfile/copy below (which would make a missing parent root-owned).
+- name: Each user's ~/.codex, ~/.claude and ~/.claude/skills, owned by the user
+  ansible.builtin.file:
+    path: "{{ item.0.home }}/{{ item.1.path }}"
+    state: directory
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "{{ item.1.mode }}"
+  when: dev_worker_codex_local_models_on | bool
+  loop: "{{ dev_worker_users | product([{'path': '.codex', 'mode': '0700'}, {'path': '.claude', 'mode': '0700'}, {'path': '.claude/skills', 'mode': '0755'}]) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1.path }}"
+
+- name: The local-model codex profiles per user
   ansible.builtin.copy:
     dest: "{{ item.0.home }}/.codex/{{ item.1.name }}.config.toml"
     content: |
-      # Managed by ansible (dev_worker role). `codex -p {{ item.1.name }}`: {{ item.1.model }} through the router.
+      # Managed by ansible (dev_worker role, local model). `codex -p {{ item.1.name }}`: {{ item.1.model }} through the router.
       model = "{{ item.1.model }}"
       model_context_window = {{ item.1.context_window }}
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
     mode: "0600"
-  when: dev_worker_codex_router_enabled | bool
+  when: dev_worker_codex_local_models_on | bool
   loop: "{{ dev_worker_users | product(dev_worker_codex_local_profiles) | list }}"
   loop_control:
     label: "{{ item.0.name }}: {{ item.1.name }}"
 
-- name: No local-model codex profiles while the router is off (they would name routes no provider serves)
+- name: Find the managed local-model profile files per user
+  ansible.builtin.find:
+    paths: "{{ item.home }}/.codex"
+    patterns: "*.config.toml"
+    contains: "# Managed by ansible \\(dev_worker role, local model\\)"  # find matches from the start of a line
+  register: dev_worker_codex_local_profile_files
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove local-model profiles that are off or no longer listed
   ansible.builtin.file:
-    path: "{{ item.0.home }}/.codex/{{ item.1.name }}.config.toml"
+    path: "{{ item.path }}"
     state: absent
-  when: not (dev_worker_codex_router_enabled | bool)
-  loop: "{{ dev_worker_users | product(dev_worker_codex_local_profiles) | list }}"
+  when: >-
+    not (dev_worker_codex_local_models_on | bool)
+    or (item.path | basename | regex_replace('\.config\.toml$', ''))
+       not in (dev_worker_codex_local_profiles | map(attribute='name') | list)
+  loop: "{{ dev_worker_codex_local_profile_files.results | map(attribute='files') | flatten }}"
   loop_control:
-    label: "{{ item.0.name }}: {{ item.1.name }}"
+    label: "{{ item.path }}"
 
-# Agents on the local models (defaults/main.yml: dev_worker_codex_local_profiles). Each CLI learns about them in the
-# file it reads at session start, as a managed block (the user's own notes in the same file survive):
-#   - Codex (~/.codex/AGENTS.md): its own sub-agents take a `model` override (`spawn_agent`), so a sub-agent on
-#     qwen-27b is native; its built-in model list names only OpenAI models, hence the note.
-#   - Claude Code (~/.claude/CLAUDE.md + the `local-model-agent` skill): its own sub-agents run on Claude models only,
-#     so an agent on a local model is a background `codex exec -p <name>`, which the skill spells out.
-- name: Tell Codex about the local models (router enabled)
+- name: Tell Codex about the local models
   ansible.builtin.blockinfile:
     path: "{{ item.home }}/.codex/AGENTS.md"
     marker: "<!-- {mark} ANSIBLE MANAGED - local models -->"
@@ -340,12 +376,12 @@
       `spawn_agent` refuses the name, run the agent as a process instead:
       `codex exec -p <name> --skip-git-repo-check -C <dir> -s workspace-write --output-last-message <file> "<task>"`.
       Agents on these models get no web search and no sub-agents of their own.
-  when: dev_worker_codex_router_enabled | bool
+  when: dev_worker_codex_local_models_on | bool
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
-- name: Tell Claude Code about the local models (router enabled)
+- name: Tell Claude Code about the local models
   ansible.builtin.blockinfile:
     path: "{{ item.home }}/.claude/CLAUDE.md"
     marker: "<!-- {mark} ANSIBLE MANAGED - local models -->"
@@ -357,65 +393,63 @@
       ## Agents on the local models
 
       This worker's router key reaches two local models, `qwen-27b` (cloud2, the better one for code) and
-      `flash-next` (cloud3). Your own sub-agents (the Task tool) run on Claude models only. When the user asks for
-      an agent on a local model, use the `local-model-agent` skill: it runs the task as a background
-      `codex exec -p <model>` and reads its answer.
-  when: dev_worker_codex_router_enabled | bool
+      `flash-next` (cloud3); both see images. Your own sub-agents (the Task tool) run on Claude models only. When
+      the user asks for an agent on a local model, use the `local-model-agent` skill: it runs the task as a
+      background `codex exec -p <model>` and reads its answer.
+  when: dev_worker_codex_local_models_on | bool
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
-- name: Each user's ~/.claude/skills, owned by the user (a clean worker, or an agent user, may not have it yet)
-  ansible.builtin.file:
-    path: "{{ item.home }}/.claude/skills"
-    state: directory
-    owner: "{{ item.name }}"
-    group: "{{ item.name }}"
-    mode: "0755"
-  when: dev_worker_codex_router_enabled | bool
-  loop: "{{ dev_worker_users }}"
-  loop_control:
-    label: "{{ item.name }}"
-
-- name: The local-model-agent skill directory per user (router enabled)
+- name: The local-model-agent skill directory per user
   ansible.builtin.file:
     path: "{{ item.home }}/.claude/skills/local-model-agent"
     state: directory
     owner: "{{ item.name }}"
     group: "{{ item.name }}"
     mode: "0755"
-  when: dev_worker_codex_router_enabled | bool
+  when: dev_worker_codex_local_models_on | bool
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
-- name: The local-model-agent skill per user (router enabled)
+- name: The local-model-agent skill per user
   ansible.builtin.copy:
     src: local-model-agent-skill.md
     dest: "{{ item.home }}/.claude/skills/local-model-agent/SKILL.md"
     owner: "{{ item.name }}"
     group: "{{ item.name }}"
     mode: "0644"
-  when: dev_worker_codex_router_enabled | bool
+  when: dev_worker_codex_local_models_on | bool
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
-- name: No local-model notes or skill while the router is off
-  ansible.builtin.blockinfile:
+# Removal, when off: blockinfile `state: absent` fails on a missing file, so only files that exist are edited.
+- name: Find the instruction files that may carry the local-models block
+  ansible.builtin.stat:
     path: "{{ item.0.home }}/{{ item.1 }}"
-    marker: "<!-- {mark} ANSIBLE MANAGED - local models -->"
-    state: absent
-  when: not (dev_worker_codex_router_enabled | bool)
+  register: dev_worker_codex_local_notes
+  when: not (dev_worker_codex_local_models_on | bool)
   loop: "{{ dev_worker_users | product(['.codex/AGENTS.md', '.claude/CLAUDE.md']) | list }}"
   loop_control:
     label: "{{ item.0.name }}: {{ item.1 }}"
 
-- name: No local-model-agent skill while the router is off
+- name: No local-models block while the local models are off
+  ansible.builtin.blockinfile:
+    path: "{{ item.stat.path }}"
+    marker: "<!-- {mark} ANSIBLE MANAGED - local models -->"
+    state: absent
+  when: not (dev_worker_codex_local_models_on | bool)
+  loop: "{{ dev_worker_codex_local_notes.results | default([]) | selectattr('stat', 'defined') | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.stat.path }}"
+
+- name: No local-model-agent skill while the local models are off
   ansible.builtin.file:
     path: "{{ item.home }}/.claude/skills/local-model-agent"
     state: absent
-  when: not (dev_worker_codex_router_enabled | bool)
+  when: not (dev_worker_codex_local_models_on | bool)
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"

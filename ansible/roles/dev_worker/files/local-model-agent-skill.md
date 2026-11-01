@@ -9,7 +9,7 @@ This worker's router key reaches two local models. They cost no subscription quo
 
 | model | where | speed | context | notes |
 |---|---|---|---|---|
-| `qwen-27b` | cloud2, vLLM (Qwen3.8-27B) | ~116 tok/s output, ~1,400 tok/s prompt | 262k | the better local choice for coding work |
+| `qwen-27b` | cloud2, vLLM (Qwen3.8-27B) | ~116 tok/s output, ~1,400 tok/s prompt | 262k | sees images; the better local choice for coding work |
 | `flash-next` | cloud3, llama.cpp (Qwen3.8-Flash-Next) | ~60 tok/s output, ~1,700 tok/s prompt | 262k | sees images; copies exact values from tool output unreliably (times, numbers, paths): check what it reports |
 
 cloud3 serves one model at a time, so the first `flash-next` request after another cloud3 model waits for the swap

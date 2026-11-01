@@ -2829,7 +2829,9 @@ The two failures are model behaviour, not router behaviour, and are the owner's 
 1. While this image is still live:
    - PATCH the four keys back to `[dw-N]`;
    - remove the pointers and the `qwen3.8-flash-next` route;
-   - turn the dev workers' local-model profiles off (role).
+   - turn the dev workers' local models off: `dev_worker_codex_local_models_enabled: false` in
+     `group_vars/dev_workers.yml`, then `ansible-playbook dev-workers.yml -t codex`. That removes the profiles, the
+     AGENTS.md/CLAUDE.md blocks and the skill, and keeps the router provider and the default `dw-N` path.
 2. Then revert to `registry.chifor.me/llm-router/router@sha256:dad0e721e2a83afc89432ce2328a378c89873e3f2c37874bfa35d0b3e960685f`
    (source `372ce1ee829f665a489a6afe7e513ab13e4ef868`, release `router-0.1.0-20261031-step-timeouts`).
 
