@@ -158,7 +158,7 @@ spec:
                 - { name: script, mountPath: /opt/reclone, readOnly: true }
           containers:
             - name: reclone
-              image: docker.io/alpine/k8s:1.34.12@sha256:d50424976a0a888d2531f13035dce45c004ec2b6f877f233005ba35c0d61be5d
+              image: docker.io/alpine/k8s:1.34.13@sha256:dea899fe8ac3fa25bcf8a9c7e1dee4caad82ef18e84922a3b159dedc9cabee9f
               imagePullPolicy: IfNotPresent
               resources:
                 requests: { cpu: 50m, memory: 64Mi }
