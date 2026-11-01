@@ -2704,7 +2704,7 @@ below. The record is `plans/2026-10-31-local-models-improvement-impl-review.md`.
 |---|---|
 | 2093 | `qwen3.8-27b-w4a16` turned off on `lan-192.168.0.26-8080` |
 | 2128 | `qwen3.8-27b` and `qwen3-coder-30b-a3b` turned off there too |
-| 2136 | The three dropped from that account's `allowedModels`; they answer 404 `MODEL_NOT_FOUND` from then on |
+| 2136 | The three dropped from that account's `allowedModels`; they answer 404 `MODEL_NOT_FOUND` from then on. **Partly superseded on 2026-11-01:** the NAME `local/qwen3.8-27b` answers again, now served by cloud2's vLLM (revision 2198, see "Results of the local follow-ups"). Do not re-apply 10-31's D3 (`exposeModels: false` on `lan-192.168.0.28-18020`) from the plan file. |
 | 2158 | `timeouts.waitMs: 600000` on that account (the step above) |
 
 **Benchmark.** Measured through the router with `scripts/bench-router-local.mjs`: decode tok/s, prefill tok/s at
@@ -2863,11 +2863,15 @@ configuration, as on every run since ≤10-26; that is not a release regression.
   tested and approved, with the higher token rates, are visible. `lan-192.168.0.28-18020` no longer sets
   `exposeModels: false`, which reverses the 10-31 decision D3 that had retired the name `local/qwen3.8-27b`. The name
   is now served by cloud2's vLLM (~116 tok/s), not the retired cloud3 Q6_K.
-  - An Assistant turn on `local/qwen3.8-27b` passes in 14.8 s: a 16,283-token step in 11.3 s, the fastest local one.
+  - An Assistant turn on `local/qwen3.8-27b` passes in 14.8 s, with a 16,283-token step in 11.3 s. On the same
+    16k-token step, flash-next takes 30.5 s cold and `.45` 130.1 s; decode is ~116 tok/s here, against ~60 and
+    ~13-22 (this runbook's 10-31 benchmark).
   - The list is now `local/qwen3.8-flash-next`, `local/qwen3.8-27b` and `local/qwen3.8-27b-ailab`, plus the image
     models.
-  - **Side effect:** API clients may call `local/qwen3.8-27b` directly again (served by cloud2). The route
-    `qwen3.8-27b` and the pointer `qwen-27b` are unchanged.
+  - **Side effect:** API clients may call `local/qwen3.8-27b` directly again. It is the same name but a different
+    model build: cloud2's vLLM W4A16 (AutoRound), 262144-token window, instead of the retired cloud3 llama.cpp
+    Q6_K. A client that pinned the old name should re-validate its outputs rather than assume the old model came
+    back. The route `qwen3.8-27b` and the pointer `qwen-27b` (already cloud2) are unchanged.
   - **To undo:** set `exposeModels: false` on that account again.
 
 **Images.** Each enabled model was checked through the router with one image, three images, and mixed text and
