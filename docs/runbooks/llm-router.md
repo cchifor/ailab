@@ -2964,8 +2964,8 @@ Ruled out:
 **What changes.**
 - **#130, the fix:** a `function_call` input item attaches to the assistant text message directly before it.
   - Adjacency only: a user message or a tool output in between keeps them apart.
-  - The text becomes a string (assistant parts are text only); no text is `content: null`, as a calls-only
-    message.
+  - The text becomes a string (assistant parts are text only). A reply with no text gets `content: null`, the
+    same as a message that only has calls.
   - Native routes, which forward the body unchanged, are not affected.
 - **#129, the journal:** `attempt.completed` records `finish` (the provider's finish reason, or `length` after an
   enforced cut) and `output: { textChars, toolCalls, refusalChars?, tools?, toolsTruncated? }`. `tools` holds each
@@ -2984,7 +2984,7 @@ Ruled out:
 - Reviews:
   - #129: three rounds; findings fixed: the truncation mark, the refusal count, the guard test;
   - #130: codex reviewed the plan first (one claimed blocker rejected with evidence, four findings accepted), then
-    one review round (empty text keeps `null`).
+    one review round (a reply with empty text gets `content: null`).
 
 **Image.**
 - Archive `router-0.1.0-20261101-reply-shape.tar.gz`, SHA-256 `e2f0cd0de55af25fbd46b588668684595a4d2cfe8e7e01fe4bb0aca3fbeeb438` (relay v0.2.0 assets 412/413).
@@ -3002,7 +3002,47 @@ Ruled out:
 **Rollback:** revert to
 `registry.chifor.me/llm-router/router@sha256:5add0d2c80b797c8307596a184c9d19404bf860bdf22495be67251d7642a5f22`
 (source `1f897ac390debd78eea85c747d97ec013d926d7e`, release `router-0.1.0-20261101-local-followups`). Neither change
-touches the schema or config, and older journal entries (no `finish`/`output`) keep their plain lines.
+touches the database schema or the config. The journal entries this build writes carry two extra fields of
+`attempt.completed` data (`finish`, `output`). The older build reads them safely: its Activity line is `Answered`, its
+`explain_request` line has no outcome suffix, and metrics and OTel read only `usage` and `code`. Older entries without
+the fields keep their plain lines on this build.
+
+### Results of the reply-shape release (2026-11-01)
+
+**The roll.** ailab #1559 merged, and Flux rolled the pod. Checks after the roll:
+- the pod runs `sha256:f3390a7c7e13e9ff79e3ddced468dc173935d79f63e0cfae48c061db770df5be` (the image above), with
+  `/app/SOURCE_COMMIT` `6e8104a4a236ae1f8285476403d3bcc7e07e3a5d`;
+- no error lines in the log;
+- public `/health` answers 200 and an unauthenticated `/v1/models` 401;
+- `validate-live` gives 6/9, the same three failures as the baseline: `codex text`, `codex stream` and
+  `codex tool call`, each a 400 `MODEL_REQUIRED` because the check sends a bare `model: 'codex'`.
+
+**The journal.** `attempt.completed` now carries the outcome, for example
+`{"finish":"tool_calls","output":{"textChars":120,"toolCalls":1,"tools":["exec_command"]}}`.
+
+**The early stops, through the live router.** The four turns of the 38-turn Codex run where `qwen-27b` stopped were
+sent again, as the Codex requests that were captured. They went to `https://router.chifor.me/v1/responses` as
+dev-worker-1's own key with `originator: codex_exec`, on cloud2's qwen3.8-27b (the model's own sampling), one request
+at a time.
+
+| Router | Replies with no tool call |
+|---|---|
+| `router-0.1.0-20261101-local-followups` (before) | 4 of 48 (12 per turn) |
+| `router-0.1.0-20261101-reply-shape` (after) | **0 of 96** (24 per turn) |
+
+The one-sided Fisher exact p is about 0.01. Together with the direct replay (8 of 48 split, 0 of 48 merged), this
+confirms the fix. The narrations are still there ("The file uses single quotes. Let me check exact bytes:"), but each
+one now comes with its tool call.
+
+**Measuring it from now on.** The journal never records content, so it can't tell an early stop from a normal final
+answer: both are an `attempt.completed` with `finish: stop`, `output.toolCalls: 0` and `output.textChars > 0`, with no
+further request in the session. That pattern only gives **candidates**, and a count of them includes every finished
+task.
+- **The authoritative signal is the agent's own result:** whether the task finished. For example, the task asks for
+  a completion marker (`ALL-STEPS-DONE`) in its final message, and a final message without it is an early stop.
+- **A candidate that the same conversation follows with a new user turn** (a resume such as "continue") is very
+  likely an early stop.
+- **To measure the rate on known turns,** replay them as above.
 
 ## Relay access requests
 
