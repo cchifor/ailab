@@ -22,13 +22,14 @@ model's tool calls (shell, file edits) and talks to the router with this worker'
 `run_in_background: true`, one process per agent. Several can run at once.
 
 ```bash
-local-agent qwen-27b -C "$PWD" "<the task, self-contained>" > /tmp/agent-$RANDOM.answer
+out=/tmp/agent-$(date +%s)-$RANDOM
+local-agent qwen-27b -C "$PWD" "<the task, self-contained>" > "$out.answer" 2> "$out.err"; echo "exit $? answer $out.answer err $out.err"
 ```
 
 - The first argument picks the model: `qwen-27b` or `flash-next`.
 - `-C <dir>` is the directory the agent works in. It can write only there and in temp directories.
-- It prints the agent's final message on stdout, so redirect it to a file and read that when the background
-  command finishes. The transcript (the commands it ran and their output) is named on stderr.
+- When the background command finishes, its output names the files: read `$out.answer` for the agent's final
+  message. `$out.err` names the transcript (the commands the agent ran and their output), kept for 3 days.
 
 ## Writing the task
 

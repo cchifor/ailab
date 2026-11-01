@@ -431,11 +431,15 @@ Each worker's router key also reaches two local models. They use no subscription
 local model. It runs `codex exec` on the model's profile, with Codex as the harness for the model's tool calls, and
 prints the agent's final message. The transcript path goes to stderr. Each run gets a private `CODEX_HOME` under
 `$TMPDIR`, seeded with copies of `config.toml`, the profile and `AGENTS.md`.
-- **Sandbox:** inside a Codex tool call, where `CODEX_TOOL_CALL_ID` is set, the agent runs without a sandbox of its
-  own, confined by the parent's. Anywhere else it runs `workspace-write`, so writes go only to `<dir>` and temp.
+- **Sandbox, fail closed:** the agent runs without a sandbox of its own only inside a Codex tool call
+  (`CODEX_TOOL_CALL_ID` set) whose sandbox demonstrably confines it, shown by `~/.codex` being read-only. There the
+  parent's sandbox keeps applying, and a nested one cannot be built. Anywhere else, including under an unsandboxed
+  Codex parent, it runs `workspace-write`, so writes go only to `<dir>` and temp.
+- **What it leaves:** the private `CODEX_HOME` (copied config, Codex's session files) is deleted when the run ends.
+  The answer and transcript stay in `$TMPDIR/local-agent-*` for 3 days, then the next run prunes them.
 
 **From Codex.** Ask for an agent on `qwen-27b` or `flash-next`. The managed block in `~/.codex/AGENTS.md` tells Codex
-to run `local-agent`. Codex's own `spawn_agent` cannot be used:
+to run `local-agent`, because neither of Codex's own ways works:
 - **It refuses the model:** codex 0.166 checks its `model` override against the built-in catalog ("Unknown model
   `qwen-27b` for spawn_agent").
 - **A plain `codex exec` from inside a Codex session cannot start:** the session's sandbox makes `~/.codex`
@@ -445,8 +449,9 @@ to run `local-agent`. Codex's own `spawn_agent` cannot be used:
 
 `local-agent` handles all three. A `model_catalog_json` file with local entries would make `spawn_agent` accept the
 names (tested 2026-11-01), but it freezes the GPT models' metadata on every worker. It is not used.
-- **By hand, a whole session on a local model:** `codex -p qwen-27b` (or `-p flash-next`). The profile files
-  `~/.codex/<name>.config.toml` set the model and its real context window.
+
+**By hand, a whole session on a local model:** `codex -p qwen-27b` (or `-p flash-next`). The profile files
+`~/.codex/<name>.config.toml` set the model and its real context window.
 
 **From Claude Code.** Claude's own sub-agents (the Task tool) run on Claude models only: Claude Code sends them to
 Anthropic, and the router has no Anthropic endpoint (llm-router#128 is the plan for one). The `local-model-agent`
