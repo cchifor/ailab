@@ -131,7 +131,8 @@ the digest with the usual backup (`/data/backups/pre-local-followups-20261101`),
 
 - Two profile files per user, like the existing `chatgpt.config.toml`, only while the router is enabled:
   `~/.codex/qwen3.8-27b.config.toml` and `~/.codex/qwen3.8-flash-next.config.toml`, each setting `model` and
-  `model_context_window` (cloud2 131072 = `--max-model-len`; flash-next 262144 = `-c 524288 --parallel 2`), and
+  `model_context_window` (cloud2 262144 = its live `/v1/models` `max_model_len`; flash-next 262144 = `-c 524288
+  --parallel 2`), and
   nothing else unless the CLI needs it (verified on a worker before the PR). Usage: `codex -p qwen3.8-27b`.
 - Converge the four workers with the role's usual recipe; then on each worker `codex exec -p <profile>` with a task
   that needs one shell call and one file write in a scratch directory, both models; `scripts/validate-codex-fleet.sh
@@ -140,6 +141,27 @@ the digest with the usual backup (`/data/backups/pre-local-followups-20261101`),
   cloud3's one-model-at-a-time swap cost, and that these runs use no subscription quota.
 
 ### D. cloud3: MTP for flash-next (cloudlab)
+
+**Status 2026-11-01 11:50Z — PAUSED for the owner.** cloud3 lost power abruptly twice in 18 hours, each time
+seconds after a heavy multi-GPU model start that my qualification triggered (2026-10-31 15:58Z, fp8 cold vLLM;
+2026-11-01 09:47:45Z, the MTP n-max 3 cold load). The second time cloud2 (last log 09:47:21Z) and the workstation
+went down too, while the ailab nodes and cloud1 stayed up (all rebooted ~10:53Z; cloud2/cloud3/workstation back
+~11:00Z): a shared circuit, not a host fault. Temperatures were normal (NVMe 70.8 C, Tctl 76 C). No further
+qualification load on cloud3 until the owner has looked at the power side. What D found before the pause:
+- D0 (durability) PASSED: file-cold prefill 1,696/1,718 tok/s (10-31: 1,633/1,677), decode 62 tok/s.
+- MTP on mainline b12020 is unproven: Unsloth's MTP README (HF revision 766911a6, 2026-10-06) says mainline has no
+  MTP graph for `qwen4exp`; upstream #28243 closed unmerged. The draft (`shared-Q8_0`, sha256 5ff54097...) is on
+  `/models-local/qwen3.8-flash-next/MTP/`. The n-max 2 entry exited during load four times ("upstream command exited
+  prematurely"; the log buffer was lost with the reboot). If mainline cannot run it, MTP needs Unsloth's fork:
+  an owner decision (the 10-31 plan said never to deploy a personal fork).
+- **Answer quality (pre-existing, not a b12020 regression):** on the harness's tool-result turn, flash-next garbles
+  the copied time ("16:aka 4:42 PM", "16:</think>") in 11-12 of 20 samples on BOTH b10857 and b12020 at its
+  configured sampler (temp 1.0); 15/20 at temp 0.6 and 0.3; greedy 3/3 clean (b12020). `--lazy-mode off` does not
+  change it. An f16-KV variant is deployed but untested. This matters for Codex on dev workers (command text).
+- cloud3 still runs the temporary config (unlisted qualification entries; listed models unchanged). Restoring the
+  production file needs a llama-swap restart, which starts an fp8 cold vLLM load: done only with the owner's OK.
+
+Original D steps, for when it resumes:
 
 - **D0 durability check (the open WS4.5 item):** backend-mode run of today's flash-next (b12020, current flags):
   warm, then file-cold (fadvise-evicted, as in WS2.1). Pass: prefill within 15% of 2026-10-31's 1,633/1,677 tok/s.
@@ -162,7 +184,7 @@ the digest with the usual backup (`/data/backups/pre-local-followups-20261101`),
 
 ### Order
 
-B1 (config, independent) and D0-D2 (cloud3, independent) run while A is implemented and reviewed. Then A roll →
+B1 (config, independent) runs while A is implemented and reviewed; D waits for the owner (see D). Then A roll →
 B2, B3, B4 → C → D3 → final router-mode benchmark of the changed models (flash-next; the others only if a change
 touched them) → E.
 
