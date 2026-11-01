@@ -140,21 +140,37 @@ the digest with the usual backup (`/data/backups/pre-local-followups-20261101`),
   model mode; a request naming `qwen3.8-27b` or `qwen3.8-flash-next` is route mode on that route.
   Verified 2026-11-01: all four keys have `access: [local, api, subscription]`, so PATCHing routes is enough.
 
-### C. Dev-worker role (ailab `ansible/roles/dev_worker/tasks/codex.yml`)
+### C. Dev-worker role (ailab `ansible/roles/dev_worker/tasks/codex.yml`) — REVISED by the owner 2026-11-01
 
-- Two profile files per user, like the existing `chatgpt.config.toml`, only while the router is enabled:
-- When `dev_worker_codex_router_enabled` is false the role REMOVES both profile files (explicit `state: absent`), so no stale profile can send work to a disabled provider; mode 0600, owned by the user, verified by `codex -p <profile>` resolving the provider.
-  `~/.codex/qwen3.8-27b.config.toml` and `~/.codex/qwen3.8-flash-next.config.toml`, each setting `model` and
-  `model_context_window` (cloud2 262144 = its live `/v1/models` `max_model_len`; flash-next 262144 = `-c 524288
-  --parallel 2`), and
-  nothing else unless the CLI needs it (verified on a worker before the PR). Usage: `codex -p qwen3.8-27b`.
-- Converge the four workers with the role's usual recipe; then on each worker `codex exec -p <profile>` with a task
-  that needs one shell call and one file write in a scratch directory, both models; `scripts/validate-codex-fleet.sh
-  dev_workers` still passes for the default path.
-  (Owner allowed ordinary cloud3 loads on 2026-11-01.)
-- Validation uses `codex exec`, which does not use the app-server daemon; the TUI does, so the runbook says to run `codex app-server daemon restart` per user (when no TUI is attached) before `-p` in the TUI sees new profile files.
-- Runbook `docs/runbooks/dev-workers.md` § "Codex through the router": the two profiles, the routes on the keys,
-  cloud3's one-model-at-a-time swap cost, and that these runs use no subscription quota.
+**Owner direction:** from a dev worker, Codex or Claude Code must be able to spawn an agent on `qwen-27b` or
+`flash-next`. A `codex -p` profile is not the interface. Revised design:
+- **Router:**
+  - pointers `qwen-27b` → route `qwen3.8-27b` and `flash-next` → route `qwen3.8-flash-next` (done, rev 2192);
+  - B4 gives the keys `[dw-N, qwen-27b, flash-next]`: the short names only, one naming everywhere.
+- **Codex:**
+  - its sub-agent tool takes a `model` override (0.166 `spawn_agent` schema), so a sub-agent on a local model is
+    native;
+  - a managed block in each user's `~/.codex/AGENTS.md` names the two models, since Codex's built-in list names
+    only OpenAI models, with the `codex exec` fallback if `spawn_agent` refuses an unknown name.
+- **Claude Code:**
+  - its own sub-agents run on Claude models only, and the router has no Anthropic endpoint (llm-router#128 is
+    the plan for one);
+  - so a managed block in `~/.claude/CLAUDE.md`, plus a `local-model-agent` skill per user, runs the agent as a
+    background `codex exec -p <model>` and reads its `--output-last-message`.
+- **Profiles:** `~/.codex/qwen-27b.config.toml` and `flash-next.config.toml` stay, with `model` and
+  `model_context_window` 262144: the background runs need the real window. Profile names must be plain words
+  (codex 0.166 refuses `-p qwen3.8-27b`).
+- **Router off:** every one of these (profiles, blocks, skill) is removed while `dev_worker_codex_router_enabled` is
+  false.
+- **Convergence:** `ansible-playbook dev-workers.yml -t codex` on the four workers.
+- **Validation:** on each worker, from Codex (a `spawn_agent` with `model`) and from Claude Code (the skill), an agent
+  on each model runs a command and writes a file in a scratch directory. The router journal shows route `qwen-27b` /
+  `flash-next`, the expected account and `x-router-adapted: codex-responses`. `scripts/validate-codex-fleet.sh`
+  still passes for the default path. `codex exec` does not use the app-server daemon; a TUI picks up the new
+  AGENTS.md block at its next session.
+- **Runbook** `docs/runbooks/dev-workers.md`: a "Local models" section covering both paths, the routes on the keys,
+  cloud3's one-model-at-a-time swap cost, flash-next's garbling caveat, and that these runs use no subscription
+  quota.
 
 ### D. cloud3: MTP for flash-next (cloudlab)
 
