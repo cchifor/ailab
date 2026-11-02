@@ -3127,6 +3127,94 @@ no progress event; a Codex client still gives up at its 300 s idle timeout durin
 (source `6e8104a4a236ae1f8285476403d3bcc7e07e3a5d`, release `router-0.1.0-20261101-reply-shape`). There is no schema,
 config or secret change, so the image digest and its two annotations are the whole rollback.
 
+### Results of the progress-events release (2026-11-02)
+
+**The roll.** ailab #1567 merged; Flux applied `4ae5a378` and the pod `llm-router-7645967764-s5wp8` came up Ready at
+13:33:35Z on `sha256:b59d918b0b0d5c10c582c0be782009f30c4c6abdba637be74806fedbacd9dd5b`. Checks after the roll:
+- `/app/SOURCE_COMMIT` `08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6`; no error lines in the log;
+- public `/health` 200, unauthenticated `/v1/models` 401;
+- `validate-live` **6/9**, the known baseline: only `codex text`, `codex stream` and `codex tool call` (bare
+  `model: 'codex'`, 400 `MODEL_REQUIRED`). The vision check that got 429 before the roll passed on `codex-2`.
+
+**Live acceptance, qwen-27b (cloud2).** On dev-worker-1, Codex 0.166.0 with `stream_idle_timeout_ms` lowered to 60 000,
+on a task that makes the first turn think before any output (count the 6x6 0/1 matrices with two 1s per row and column,
+by reasoning alone):
+- exit 0 at 14:18:36Z, the right answer (67950), 0 reconnects;
+- the journal: request `5d7d1adb` on `lan-192.168.0.28-18020`, **first content after 94.1 s** (13,284 reasoning
+  tokens), completed in one request; then the final turn (1.6 s).
+
+Before the release that turn would have been cut at 60 s and resent. flash-next's acceptance waits for cloud3: the
+same day a VRAM test found one of its four GPUs faulty (under investigation; flash-next is to be re-tested on the three
+good cards).
+
+## Reasoning-forwarding release: the upstream's thinking, for accounts that opt in (2026-11-02, llm-router#132)
+
+`router-0.1.0-20261102-forward-reasoning` deploys llm-router main `93108f5e308a7333b5f11acb8db8e48908250bed`
+([#132](https://git.chifor.me/cchifor/llm-router/pulls/132)). The plan is `plans/2026-11-02-router-reasoning-forwarding-plan.md`
+(codex, two rounds) and the implementation review `plans/2026-11-02-router-reasoning-forwarding-impl-review.md` (codex,
+two rounds; every finding fixed, one withdrawn on evidence).
+
+**Why.** The owner asked for the router to forward a local model's thinking, as a pass-through would. The chat adapter
+read only content, refusals and tool calls, so an agent's thinking was invisible: a run that "went silent for 7 minutes"
+could not be told from a stall.
+
+**What changes.**
+- **`Account.forwardReasoning`** (optional boolean). Unset or false: nothing changes for that account. Set, the chat
+  adapter yields the upstream's `reasoning_content` (else `reasoning`).
+- **Responses:** one leading reasoning item (`rs_<id>`, `summary: []`, one `reasoning_text` part, no
+  `encrypted_content`) at output index 0, streamed as `response.reasoning_text.delta`, closed exactly once before the
+  first visible delta or before a completed/incomplete terminal. Reasoning after visible output is not forwarded on this
+  protocol (it is counted). Codex shows it with `show_raw_agent_reasoning = true`.
+- **Chat:** `reasoning_content` deltas (every segment); non-streaming `message.reasoning_content`.
+- **Replays:** a reasoning item of the shape the router emits (the Codex echo and the OpenAI SDKs' dumps included) and
+  chat assistant `reasoning_content`/`reasoning` are accepted and dropped: the model never sees its past reasoning.
+- **Once the adapter has yielded reasoning, the request is treated as having output:** the idle timer replaces the
+  wait timer and it is no longer failed over, for every caller.
+- **Journal:** `attempt.completed.output.reasoningChars` (a count); Activity and `explain_request` show it. Activity
+  says "nothing was sent" only when `emitted` is false (every account).
+- **Budget:** reasoning counts in the 8 MiB stream guard (code units).
+
+**Verified before release.**
+- **The real Codex CLI** 0.162.1 and 0.166.0 (docker, router in-process, forwarding on, 25 s of reasoning per turn
+  against a 20 s idle timeout): every scenario exits 0 with the expected 1 or 2 upstream requests; Codex displays the
+  thinking each turn; the turn-2 upstream request carries no reasoning.
+- **OpenAI SDK helpers** (Node `openai@7.23.0`, Python `openai==3.42.1`): the Responses final response holds the
+  reasoning item first; a second turn echoing it is accepted; chat chunks carry `reasoning_content`. The Node chat
+  stream helper keeps only the last `reasoning_content` delta in its final message (the raw chunks keep all of it).
+- **Suite in docker (node 24), at `2fad440`, plus the reasoning suites at `f422bf4`:** typecheck, build, build:lib,
+  test:production clean; 2032 passed; the two load-flaky tests recorded in #129 pass alone; `check:architecture` only
+  the known #79 line. Mutation checks for the drain guards, the close's separation from `routerTerminal`, and the
+  budget's code-unit and late-reasoning counting.
+- **Reviews:** reviewer-codex and reviewer-claude approved #132; reviewer-claude's notes (`lead` as a length, the replay
+  docstring, the progress sentence) were fixed in `f422bf4`.
+
+**Image.**
+- Archive `router-0.1.0-20261102-forward-reasoning.tar.gz`, SHA-256 `1167889e3ec254411bd5f435c8eed40fb8ee12f668065e1bcff4ab0402a3f828` (relay v0.2.0 assets 418/419).
+- Relay branch `release/router-0.1.0-20261102-forward-reasoning-image`,
+  [run 117742](https://git.chifor.me/cchifor/relay/actions/runs/117742), receipt `deployment-images-117742.json`
+  (asset 420).
+- `registry.chifor.me/llm-router/router@sha256:7ec9726b6f4e42e5535bc108a87d1fac5e84207b02f950a44bdfc280428b05a3`, tag `parity-5b04446d6ff9-117742`. Every blob (index, amd64 manifest, config, 9 layers,
+  attestation) was pulled anonymously and verified, and `/app/SOURCE_COMMIT` = `93108f5e308a7333b5f11acb8db8e48908250bed`.
+
+**Before the roll:**
+- backup `/data/backups/pre-forward-reasoning-20261102`: integrity ok, 33,535 trajectories, 221.0 MB, SHA-256
+  `d15a8e8377e51ec5e7a512426fa1b85b71c710d737266ee0f2f62c3d5cda064a`, key 600;
+- `validate-live` 6/9, the known baseline (`codex text`, `codex stream`, `codex tool call`: a bare `model: 'codex'`, 400
+  `MODEL_REQUIRED`).
+
+**After the roll (R1):** `forwardReasoning: true` on `lan-192.168.0.28-18020` (cloud2) and `lan-192.168.0.26-8080`
+(cloud3), through `PUT /admin/v1/config` with `If-Match` and a read-back, run in the router pod with its admin bearer.
+Every client of those accounts then gets reasoning: the dev workers' Codex, the Assistant (which discards it), and chat
+clients (dsh, the platform eval key) as `reasoning_content` deltas, the field they would get from vLLM directly.
+
+**Rollback, in this order.**
+1. `forwardReasoning: false` on both accounts (`If-Match`, read-back): the old image does not strip the saved field
+   until a validated config write.
+2. Revert to `registry.chifor.me/llm-router/router@sha256:b59d918b0b0d5c10c582c0be782009f30c4c6abdba637be74806fedbacd9dd5b`
+   (source `08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6`, release `router-0.1.0-20261102-progress-events`) with its two
+   annotations. No schema or secret change. After an image rollback, non-Codex clients whose saved histories carry
+   reasoning get 400 on a replay and start a new conversation; Codex is unaffected.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem

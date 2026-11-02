@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6
-        chifor.me/release: router-0.1.0-20261102-progress-events
+        chifor.me/source-commit: 93108f5e308a7333b5f11acb8db8e48908250bed
+        chifor.me/release: router-0.1.0-20261102-forward-reasoning
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,11 +121,11 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6 (llm-router #131: a Responses stream gets response.in_progress
-          # while the upstream sends bytes before its first output item); parity-77cd30ac5652-117327 image, all blobs pulled
-          # anonymously and verified, /app/SOURCE_COMMIT 08c0fc35 confirmed; Relay run 117327,
-          # archive sha256:cbd485d6e8c4633baa0a01bc00b2d0a340b5939351fd0dabe6b91dd4efa8f376.
-          image: registry.chifor.me/llm-router/router@sha256:b59d918b0b0d5c10c582c0be782009f30c4c6abdba637be74806fedbacd9dd5b
+          # Source 93108f5e308a7333b5f11acb8db8e48908250bed (llm-router #132: the upstream's reasoning, forwarded for accounts
+          # that set forwardReasoning); parity-5b04446d6ff9-117742 image, all blobs pulled anonymously and verified,
+          # /app/SOURCE_COMMIT 93108f5e confirmed; Relay run 117742,
+          # archive sha256:1167889e3ec254411bd5f435c8eed40fb8ee12f668065e1bcff4ab0402a3f828.
+          image: registry.chifor.me/llm-router/router@sha256:7ec9726b6f4e42e5535bc108a87d1fac5e84207b02f950a44bdfc280428b05a3
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
