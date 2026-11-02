@@ -3087,7 +3087,8 @@ round, every finding fixed).
 - **The OpenAI SDK stream helpers**, Node `openai@7.47.0` `finalResponse()` and Python `openai==3.42.1`
   `get_final_response()`: for text, a tool call, an empty `length` ending and a `maxDurationMs` failure, the outcomes
   are identical to `main` (the Python helper raises on a non-completed ending on both).
-- **Suite in docker (node 24):** 1992 passed, 14 skipped, 0 failed; typecheck, build, build:lib and test:production
+- **Suite in docker (node 24), at `8b45cd0` (the merged code; `503d506` after it changed only comments):** 1992 passed,
+  14 skipped, 0 failed; typecheck, build, build:lib and test:production
   clean; `check:architecture` reports only the known #79 line, as on `main`. 19 new tests, and mutation checks for
   the drain guards, the attempt-ownership fixes and the envelope capture.
 - **Reviews:** codex on the plan (two rounds) and the implementation (one round). reviewer-codex and reviewer-claude
@@ -3099,6 +3100,10 @@ model stops or the adapter's 16 MiB / 200 000-event stream limits end it (about 
 cut by Codex at 300 s and retried from scratch. Progress tracks transport activity: an upstream that sends its own
 keepalives while stalled keeps progress events coming, as it keeps the wait and idle timers alive. No configuration
 changes with this release.
+
+**Not covered: cloud3 cold loads.** llama-swap sends no bytes while it loads a model, so there is no upstream activity and
+no progress event; a Codex client still gives up at its 300 s idle timeout during a long swap (the route waits up to its
+`timeoutMs` 600 s). That is the dev_worker profile's `stream_idle_timeout_ms`, not the router.
 
 **Image.**
 - Archive `router-0.1.0-20261102-progress-events.tar.gz`, SHA-256 `cbd485d6e8c4633baa0a01bc00b2d0a340b5939351fd0dabe6b91dd4efa8f376` (relay v0.2.0 assets 415/416).
@@ -3114,7 +3119,8 @@ changes with this release.
 - `validate-live` 5/9 (13:13Z). Three are the known baseline: `codex text`, `codex stream` and `codex tool call` send a bare
   `model: 'codex'` and get 400 `MODEL_REQUIRED`. The fourth, `codex image (vision model)`, got 429 `CAPACITY_UNAVAILABLE`
   because no Codex seat could serve then (`codex` and `codex-3` had exhausted their primary window, `codex-2` was cooling
-  down, `codex-4` is disabled pending re-authentication); it does not involve this release.
+  down, `codex-4` is disabled pending re-authentication); it does not involve this release. The acceptance bar after the
+  roll stays the known baseline, 6/9: the vision check is re-run once a Codex seat can serve it.
 
 **Rollback:** revert to
 `registry.chifor.me/llm-router/router@sha256:f3390a7c7e13e9ff79e3ddced468dc173935d79f63e0cfae48c061db770df5be`
