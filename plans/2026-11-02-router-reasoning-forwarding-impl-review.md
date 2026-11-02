@@ -10,7 +10,7 @@
 **Severity:** important  
 **Resolved (98f0f7f).** New tests: a client leaving while the first close frame waits for a drain that never comes (the upstream is cancelled), a shutdown after the early close while the answer is unfinished (the connection is cut, no terminal event, the item closed once), and maxDurationMs during endless reasoning (response.failed, never closed). The close never sets `routerTerminal`, so a shutdown cuts it like any non-terminal event.
 
-**Round 2, resolved (a1ad1d0... see the llm-router branch head):** the shutdown test asserts the cut (the body read fails rather than ending normally). Mutation check: setting `routerTerminal` in the early close makes it fail.
+**Round 2, resolved (2fad440):** the shutdown test asserts the cut (the body read fails rather than ending normally). Mutation check: setting `routerTerminal` in the early close makes it fail.
 
 ### Reasoning-specific timeout and progress transitions are untested
 **Location:** tests/reasoning-forwarding.test.ts:166; tests/reasoning-forwarding-http.test.ts:21  
@@ -22,7 +22,7 @@
 **Severity:** important  
 **Resolved (98f0f7f).** 9M code units of non-ASCII reasoning end both a Responses stream and a chat stream with RESPONSE_TOO_LARGE; without `a.reasoning.length` in the guard the test would pass the reasoning through.
 
-**Round 2, resolved:** exactly 8 MiB of non-ASCII output (reasoning + text) completes and one more code unit fails, on Responses and chat; reasoning after visible text that would cross the limit fails a Responses stream though it is not forwarded. Mutation checks: counting bytes fails the exact case; counting only the forwarded `lead` fails the late case.
+**Round 2, resolved (2fad440):** exactly 8 MiB of non-ASCII output (reasoning + text) completes and one more code unit fails, on Responses and chat; reasoning after visible text that would cross the limit fails a Responses stream though it is not forwarded. Mutation checks: counting bytes fails the exact case; counting only the forwarded `lead` fails the late case.
 
 ### Two tests do not establish their advertised event boundaries
 **Location:** tests/reasoning-forwarding-http.test.ts:108; tests/reasoning-forwarding.test.ts:154  
