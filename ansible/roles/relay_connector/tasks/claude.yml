@@ -1,8 +1,9 @@
 ---
 # Relay messaging for the execution user's Claude Code sessions (docs/runbooks/relay-connectors.md,
 # "Claude Code messaging"). Imported at the end of configure.yml, so the pinned binary is installed
-# and its --version verified before anything here points at it; validate.yml already rejected a
-# `present` on a release older than 0.8.0.
+# and its --version verified before anything here points at it. claude_preflight.yml (the end of
+# validate.yml) already planned the MCP change, checked the CLI and dry-ran the settings.json merge
+# before any write.
 #
 # Two files the USER owns, each changed only through a writer that preserves the rest:
 #   * ~/.claude.json holds the user-scope MCP servers. Running Claude sessions rewrite it, so the
@@ -11,83 +12,9 @@
 #     the user added (and managedMcpServers takes https servers only).
 #   * ~/.claude/settings.json holds hooks among the user's own settings. files/claude_relay_hook.py
 #     replaces only Relay's inbox-hint entry.
-# Nothing here restarts the connector, tmux or an agent. A Claude session reads both files when it
-# starts, so sessions already running pick this up only when they are started again.
-
-- name: Derive the pinned connector's Claude Code entry points
-  ansible.builtin.set_fact:
-    relay_connector_claude_mcp:
-      type: stdio
-      command: "{{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector"
-      args: [--state, "{{ relay_connector_state_file }}", mcp]
-    relay_connector_claude_hook_command: >-
-      {{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector
-      --state {{ relay_connector_state_file }} inbox-hint
-
-- name: Inspect the user's Claude Code configuration
-  ansible.builtin.stat:
-    path: "{{ relay_connector_home }}/.claude.json"
-  become: true
-  become_user: "{{ relay_connector_user }}"
-  register: relay_connector_claude_config_stat
-
-# ~/.claude.json carries account details, and an API key on a key login: never display it.
-- name: Read the user's Claude Code configuration
-  ansible.builtin.slurp:
-    src: "{{ relay_connector_home }}/.claude.json"
-  become: true
-  become_user: "{{ relay_connector_user }}"
-  register: relay_connector_claude_config
-  no_log: true
-  when: relay_connector_claude_config_stat.stat.exists
-
-# A missing file means no user-scope servers yet. One that does not parse fails here, before any
-# change: the CLI could not update it either. Only type/command/args are compared; the CLI may add
-# keys of its own (an empty env).
-- name: Compare the user-scope relay MCP server with the pinned connector
-  ansible.builtin.set_fact:
-    relay_connector_claude_mcp_remove: "{{ ('relay' in servers) and not (wanted and matches) }}"
-    relay_connector_claude_mcp_add: "{{ wanted and not matches }}"
-  vars:
-    wanted: "{{ relay_connector_claude_messaging == 'present' }}"
-    config: >-
-      {{ (relay_connector_claude_config.content | b64decode | from_json)
-         if relay_connector_claude_config.content is defined else {} }}
-    servers: >-
-      {{ config.mcpServers
-         if config is mapping and config.mcpServers is defined and config.mcpServers is mapping
-         else {} }}
-    matches: >-
-      {{ servers.relay is defined and servers.relay is mapping
-         and (servers.relay.type | default('stdio')) == relay_connector_claude_mcp.type
-         and (servers.relay.command | default('')) == relay_connector_claude_mcp.command
-         and (servers.relay.args | default([])) == relay_connector_claude_mcp.args }}
-
-- name: Release the Claude Code configuration bytes
-  ansible.builtin.set_fact:
-    relay_connector_claude_config: {}
-  no_log: true
-
-# Runs before the MCP change, so an unparsable settings.json stops the run with nothing changed.
-# The helper is piped to the user's python3 (argv, no shell, nothing left on the worker); it writes
-# only on change and prints `changed` or `unchanged`. --check makes it report without writing.
-- name: Converge the Relay inbox hook in the user's Claude Code settings
-  ansible.builtin.command:
-    argv: >-
-      {{ ['/usr/bin/python3', '-',
-          '--settings', relay_connector_home ~ '/.claude/settings.json',
-          '--state', relay_connector_claude_messaging,
-          '--command', relay_connector_claude_hook_command,
-          '--timeout', relay_connector_claude_hook_timeout | int | string]
-         + (['--check'] if ansible_check_mode else []) }}
-    stdin: "{{ lookup('ansible.builtin.file', 'claude_relay_hook.py') }}"
-  become: true
-  become_user: "{{ relay_connector_user }}"
-  environment:
-    HOME: "{{ relay_connector_home }}"
-  check_mode: false
-  register: relay_connector_claude_hook
-  changed_when: relay_connector_claude_hook.stdout | trim == 'changed'
+# Order: the MCP change first, the hook only once that succeeded, so a failed run never leaves a
+# hook that calls into a server that is not registered. Nothing here restarts the connector, tmux
+# or an agent: a Claude session reads both files when it starts.
 
 - name: Report the relay MCP change a real run would make
   ansible.builtin.debug:
@@ -99,30 +26,82 @@
       {{ 'remove' if not relay_connector_claude_mcp_add
          else ('replace' if relay_connector_claude_mcp_remove else 'register') }}
 
-# `add-json` refuses a name that already exists, so a stale entry goes first.
-- name: Remove the user-scope relay MCP server
-  ansible.builtin.command:
-    argv: ["{{ relay_connector_claude_bin }}", mcp, remove, --scope, user, relay]
-    chdir: "{{ relay_connector_home }}"
+- name: Change the user-scope relay MCP server, restoring the previous one if that fails
+  when: not ansible_check_mode and (relay_connector_claude_mcp_remove or relay_connector_claude_mcp_add)
   become: true
   become_user: "{{ relay_connector_user }}"
   environment:
     HOME: "{{ relay_connector_home }}"
-  when: relay_connector_claude_mcp_remove and not ansible_check_mode
+  block:
+    # `add-json` refuses a name that already exists, so a stale entry goes first.
+    - name: Remove the user-scope relay MCP server
+      ansible.builtin.command:
+        argv: ["{{ relay_connector_claude_bin }}", mcp, remove, --scope, user, relay]
+        chdir: "{{ relay_connector_home }}"
+      register: relay_connector_claude_mcp_removed
+      when: relay_connector_claude_mcp_remove
 
-- name: Register the pinned connector as the user-scope relay MCP server
+    - name: Register the pinned connector as the user-scope relay MCP server
+      ansible.builtin.command:
+        argv:
+          - "{{ relay_connector_claude_bin }}"
+          - mcp
+          - add-json
+          - --scope
+          - user
+          - relay
+          - "{{ relay_connector_claude_mcp | to_json }}"
+        chdir: "{{ relay_connector_home }}"
+      when: relay_connector_claude_mcp_add
+
+  rescue:
+    - name: Restore the previous user-scope relay MCP server
+      ansible.builtin.command:
+        argv:
+          - "{{ relay_connector_claude_bin }}"
+          - mcp
+          - add-json
+          - --scope
+          - user
+          - relay
+          - "{{ relay_connector_claude_mcp_previous | to_json }}"
+        chdir: "{{ relay_connector_home }}"
+      register: relay_connector_claude_mcp_restore
+      failed_when: false
+      no_log: true  # The user's definition may carry env secrets.
+      when:
+        - relay_connector_claude_mcp_removed is defined
+        - relay_connector_claude_mcp_removed is succeeded
+        - relay_connector_claude_mcp_removed is changed
+        - relay_connector_claude_mcp_previous is mapping
+        - relay_connector_claude_mcp_previous | length > 0
+
+    - name: Stop after the failed relay MCP change, with settings.json untouched
+      ansible.builtin.fail:
+        msg: >-
+          Changing the user-scope relay MCP server for {{ relay_connector_user }} failed at
+          '{{ ansible_failed_task.name }}': {{ (ansible_failed_result.stderr | default('', true)
+          or ansible_failed_result.msg | default('')) | trim }}. {{ restore_note }}
+          settings.json was not changed. Fix the cause and converge again.
+      vars:
+        restore_failed: >-
+          Restoring the previous definition failed too: add it back with claude mcp add-json
+          --scope user relay.
+        restore_note: >-
+          {{ 'Nothing had been removed, so nothing needed restoring.'
+             if relay_connector_claude_mcp_restore is skipped
+             else ('The previous definition was restored.'
+                   if relay_connector_claude_mcp_restore.rc | default(1) == 0 else restore_failed) }}
+
+# Commits the merge the preflight dry-ran. --check in check mode reports without writing.
+- name: Converge the Relay inbox hook in the user's Claude Code settings
   ansible.builtin.command:
-    argv:
-      - "{{ relay_connector_claude_bin }}"
-      - mcp
-      - add-json
-      - --scope
-      - user
-      - relay
-      - "{{ relay_connector_claude_mcp | to_json }}"
-    chdir: "{{ relay_connector_home }}"
+    argv: "{{ relay_connector_claude_hook_argv + (['--check'] if ansible_check_mode else []) }}"
+    stdin: "{{ lookup('ansible.builtin.file', 'claude_relay_hook.py') }}"
   become: true
   become_user: "{{ relay_connector_user }}"
   environment:
     HOME: "{{ relay_connector_home }}"
-  when: relay_connector_claude_mcp_add and not ansible_check_mode
+  check_mode: false
+  register: relay_connector_claude_hook
+  changed_when: relay_connector_claude_hook.stdout | trim == 'changed'

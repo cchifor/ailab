@@ -4,18 +4,22 @@
 No credentials, network, sudo or host service changes. TMPDIR belongs on /workspace.
 Also unit-tests the role's Claude Code settings helper (files/claude_relay_hook.py).
 """
+import contextlib
 import grp
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import platform
 import pwd
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 import yaml
@@ -124,9 +128,11 @@ else: sys.exit('unexpected service command: '+repr(args))
             "    fields=out.split(':'); fields[5]=state['passwdHome']; fields[3]='0'; out=':'.join(fields)\n"+
             "print(out)\n")
         getent.chmod(0o755)
-        # Claude Code's CLI, limited to the two calls the role may make. Like the real one, it
-        # refuses to add a name that exists or remove one that does not.
+        # Claude Code's CLI, limited to the two calls the role may make. Like the real one (2.1.316),
+        # it stores exactly the JSON it is given and refuses to add a name that exists or remove one
+        # that does not. claude-fail.json injects one-shot failures: {"add-json": 1, "remove": 1}.
         cls.claude_log = cls.root / 'claude.jsonl'
+        cls.claude_fail = cls.root / 'claude-fail.json'
         claude = commands / 'claude'
         claude.write_text('#!/usr/bin/env python3\n' + '''import json, os, pathlib, sys
 args = sys.argv[1:]
@@ -135,17 +141,23 @@ with pathlib.Path(LOG_PATH).open('a') as log:
 config = pathlib.Path(os.environ['HOME'])/'.claude.json'
 data = json.loads(config.read_text()) if config.exists() else {}
 servers = data.setdefault('mcpServers', {})
-if len(args) == 6 and args[:5] == ['mcp', 'add-json', '--scope', 'user', 'relay']:
+if len(args) == 6 and args[:5] == ['mcp', 'add-json', '--scope', 'user', 'relay']: op = 'add-json'
+elif args == ['mcp', 'remove', '--scope', 'user', 'relay']: op = 'remove'
+else: sys.exit('unexpected claude invocation: '+repr(args))
+fail = pathlib.Path(FAIL_PATH)
+failures = json.loads(fail.read_text()) if fail.exists() else {}
+if failures.get(op, 0) > 0:
+    failures[op] -= 1
+    fail.write_text(json.dumps(failures))
+    sys.exit('injected failure: '+op)
+if op == 'add-json':
     if 'relay' in servers: sys.exit('MCP server relay already exists in user config')
-    entry = json.loads(args[5])
-    entry.setdefault('env', {})
-    servers['relay'] = entry
-elif args == ['mcp', 'remove', '--scope', 'user', 'relay']:
+    servers['relay'] = json.loads(args[5])
+else:
     if 'relay' not in servers: sys.exit('No user-scoped MCP server found with name: relay')
     del servers['relay']
-else: sys.exit('unexpected claude invocation: '+repr(args))
 config.write_text(json.dumps(data, indent=2))
-'''.replace('LOG_PATH', repr(str(cls.claude_log))))
+'''.replace('LOG_PATH', repr(str(cls.claude_log))).replace('FAIL_PATH', repr(str(cls.claude_fail))))
         claude.chmod(0o755)
         (home / '.npm-global/bin').mkdir(parents=True)
         (home / '.npm-global/bin/claude').symlink_to(claude)  # The role's default CLI path.
@@ -205,7 +217,7 @@ config.write_text(json.dumps(data, indent=2))
     @staticmethod
     def failed_task(output):
         """Name of the role task that failed the run."""
-        head = output[:output.index('fatal: [localhost]')]
+        head = output[:output.rindex('fatal: [localhost]')]  # A rescue's own failure comes last.
         return head[head.rindex('TASK [relay_connector : ') + len('TASK [relay_connector : '):].split('] *')[0]
 
     # Claude Code messaging fixtures and probes.
@@ -371,7 +383,8 @@ config.write_text(json.dumps(data, indent=2))
         out = self.role({**self.claude_values, 'relay_connector_claude_messaging': 'enabled'}, success=False)
         self.assertEqual(self.failed_task(out), 'Require a known Claude Code messaging state')
         out = self.role({**self.present, 'relay_connector_claude_bin': str(self.root/'missing/claude')}, success=False)
-        self.assertEqual(self.failed_task(out), 'Require the Claude Code CLI before registering Relay messaging')
+        self.assertEqual(self.failed_task(out),
+            'Require a Claude Code CLI the user can run before changing the relay MCP server')
         out = self.role({**self.present, 'relay_connector_claude_bin': '/opt/claude; rm'}, success=False)
         self.assertEqual(self.failed_task(out), 'Reject an unsafe Claude Code path or hook timeout')
         out = self.role({**self.present, 'relay_connector_claude_hook_timeout': 0}, success=False)
@@ -389,7 +402,7 @@ config.write_text(json.dumps(data, indent=2))
         self.assertEqual(json.loads(args[5]), self.expected_mcp(self.claude_artifact))
         self.assertEqual((self.claude_calls[0]['home'], self.claude_calls[0]['cwd']), (str(self.home),) * 2)
         config = json.loads(self.claude_json.read_text())
-        self.assertEqual(self.mcp_relay(), self.expected_mcp(self.claude_artifact))
+        self.assertEqual(config['mcpServers']['relay'], self.expected_mcp(self.claude_artifact))
         self.assertEqual({k: v for k, v in config.items() if k != 'mcpServers'},
             {k: v for k, v in USER_CLAUDE_CONFIG.items() if k != 'mcpServers'})
         self.assertEqual(config['mcpServers']['other'], USER_MCP)
@@ -409,7 +422,7 @@ config.write_text(json.dumps(data, indent=2))
         # A hand-added copy inside the user's own group goes too; the user's hook beside it stays.
         settings = json.loads(self.settings.read_text())
         settings['hooks']['UserPromptSubmit'][0]['hooks'].append(
-            {'type': 'command', 'command': 'relay-connector --state /elsewhere inbox-hint'})
+            {'type': 'command', 'command': '/opt/relay/connector/old/relay-connector --state /elsewhere inbox-hint'})
         self.settings.write_text(json.dumps(settings))
         rebuilt = self.root/'connector-bin-0.8.0-rebuilt'
         rebuilt.write_bytes(self.claude_artifact.read_bytes()+b'# rebuilt release fixture\n')
@@ -454,25 +467,34 @@ config.write_text(json.dumps(data, indent=2))
         self.assertEqual(self.claude_calls, [])
         self.assertEqual(self.snapshot(), before)
 
-    def test_15_claude_unparsable_files_fail_loudly_before_any_change(self):
-        self.seed_claude()
-        self.role(self.claude_values)
-        self.settings.write_text('{"model": "opus",')
-        before = self.snapshot()
-        out = self.role(self.present, success=False)
-        self.assertEqual(self.failed_task(out), "Converge the Relay inbox hook in the user's Claude Code settings")
-        self.assertIn('is not valid JSON', out)
-        self.assertIn('nothing was written', out)
-        self.assertEqual(self.claude_calls, [])
-        self.assertEqual(self.snapshot(), before)
-        # ~/.claude.json is only read, never displayed, even when it does not parse.
-        self.seed_claude()
-        self.claude_json.write_text(json.dumps(USER_CLAUDE_CONFIG)[:-1])
-        before = self.snapshot()
-        out = self.role(self.present, success=False)  # role() also asserts the API key never appears.
-        self.assertEqual(self.failed_task(out), 'Compare the user-scope relay MCP server with the pinned connector')
-        self.assertEqual(self.claude_calls, [])
-        self.assertEqual(self.snapshot(), before)
+    def test_15_claude_unparsable_files_fail_before_the_binary_unit_or_service_change(self):
+        # A release change with service management on: past the preflight, this run would install
+        # new bytes, rewrite the unit, restart the service and rewrite the receipt.
+        self.assertTrue(self.receipt.exists())
+        upgrade = self.root/'connector-bin-0.8.0-upgrade'
+        upgrade.write_bytes(self.claude_artifact.read_bytes()+b'# upgrade release fixture\n')
+        upgrade.chmod(0o755)
+        values = {**self.pin(upgrade, '0.8.0'), 'relay_connector_manage_service': True,
+                  'relay_connector_claude_messaging': 'present'}
+        dry_run = "Dry-run the Relay inbox hook merge in the user's Claude Code settings"
+        cases = [
+            (self.settings, '{"model": "opus",', dry_run, 'is not valid JSON'),
+            (self.settings, '{"hooks": {"UserPromptSubmit": [{"hooks": {}}]}}', dry_run,
+             "is not an object with a 'hooks' array"),
+            # ~/.claude.json is only read and never displayed: role() asserts its API key stays out.
+            (self.claude_json, json.dumps(USER_CLAUDE_CONFIG)[:-1], 'Plan the user-scope relay MCP change',
+             "Expecting ',' delimiter"),
+        ]
+        for path, content, task, message in cases:
+            self.seed_claude()
+            path.write_text(content)
+            before = self.snapshot()
+            out = self.role(values, success=False)
+            self.assertEqual(self.failed_task(out), task)
+            self.assertIn(message, out)
+            self.assertEqual((self.claude_calls, self.commands), ([], []))
+            self.assertEqual(self.snapshot(), before)  # Binary, unit, receipt and both Claude files.
+            self.assertFalse(Path(self.connector_path(upgrade)).parent.exists())
 
     def test_16_claude_unmanaged_touches_nothing(self):
         self.seed_claude()
@@ -490,9 +512,108 @@ config.write_text(json.dumps(data, indent=2))
         self.assertEqual(self.snapshot(), before)
 
 
+    def test_17_claude_cli_must_be_runnable_by_the_user_and_only_when_needed(self):
+        cli_task = 'Require a Claude Code CLI the user can run before changing the relay MCP server'
+        if os.geteuid() != 0:  # Root may run any file with an x bit; its owner only with the owner's.
+            unrunnable = self.root/'claude-not-for-its-owner'
+            unrunnable.write_bytes((self.root/'commands/claude').read_bytes())
+            unrunnable.chmod(0o655)
+            self.seed_claude()
+            before = self.snapshot()
+            out = self.role({**self.present, 'relay_connector_claude_bin': str(unrunnable)}, success=False)
+            self.assertEqual(self.failed_task(out), cli_task)
+            self.assertEqual(self.claude_calls, [])
+            self.assertEqual(self.snapshot(), before)
+        # `absent` with a registered server but no CLI fails before the hook is touched.
+        self.seed_claude()
+        self.role(self.present)
+        before = self.snapshot()
+        without_cli = {**self.absent, 'relay_connector_claude_bin': str(self.root/'missing/claude')}
+        out = self.role(without_cli, success=False)
+        self.assertEqual(self.failed_task(out), cli_task)
+        self.assertIn('needed to remove the relay MCP server', out)
+        self.assertEqual(self.snapshot(), before)
+        # With nothing registered, `absent` needs no CLI and still removes the hook.
+        config = json.loads(self.claude_json.read_text())
+        del config['mcpServers']['relay']
+        self.claude_json.write_text(json.dumps(config))
+        self.role(without_cli)
+        self.assertEqual(self.claude_calls, [])
+        self.assertEqual(json.loads(self.settings.read_text()), USER_SETTINGS)
+
+    def test_18_claude_failed_mcp_change_restores_the_previous_server_and_leaves_the_hook(self):
+        stop = 'Stop after the failed relay MCP change, with settings.json untouched'
+        stale = {'type': 'stdio', 'command': '/opt/relay/connector/old/relay-connector',
+                 'args': ['--state', str(self.identity), 'mcp'], 'env': {'RELAY_TOKEN': 'fixture_relay_env_never_log'}}
+        ops = lambda: [call['args'][1] for call in self.claude_calls]
+        servers = lambda: json.loads(self.claude_json.read_text())['mcpServers']
+        try:
+            # Replacing: the add fails after the remove, so the user's definition goes back whole.
+            self.seed_claude()
+            config = json.loads(self.claude_json.read_text())
+            config['mcpServers']['relay'] = stale
+            self.claude_json.write_text(json.dumps(config))
+            settings = self.settings.read_bytes()
+            self.claude_fail.write_text(json.dumps({'add-json': 1}))
+            out = self.role(self.present, success=False)
+            self.assertNotIn('fixture_relay_env_never_log', out)
+            self.assertEqual(self.failed_task(out), stop)
+            self.assertIn('injected failure: add-json', out)
+            self.assertIn('The previous definition was restored.', out)
+            self.assertEqual(ops(), ['remove', 'add-json', 'add-json'])
+            self.assertEqual(servers(), {'other': USER_MCP, 'relay': stale})
+            self.assertEqual(self.settings.read_bytes(), settings)
+            self.role(self.present)  # The failure is gone: the rerun converges both.
+            self.assertEqual(ops(), ['remove', 'add-json'])
+            self.assertEqual(servers()['relay'], self.expected_mcp(self.claude_artifact))
+            self.assertEqual(self.relay_hooks(), [self.expected_hook(self.claude_artifact)])
+            # A first registration that fails: nothing to restore, nothing registered, no hook.
+            self.seed_claude()
+            settings = self.settings.read_bytes()
+            self.claude_fail.write_text(json.dumps({'add-json': 1}))
+            out = self.role(self.present, success=False)
+            self.assertEqual(self.failed_task(out), stop)
+            self.assertIn('Nothing had been removed, so nothing needed restoring.', out)
+            self.assertEqual(ops(), ['add-json'])
+            self.assertEqual(servers(), {'other': USER_MCP})
+            self.assertEqual(self.settings.read_bytes(), settings)
+            self.role(self.present)
+            self.assertEqual(servers()['relay'], self.expected_mcp(self.claude_artifact))
+            # Removing: a failed remove keeps both the server and the hook.
+            settings = self.settings.read_bytes()
+            self.claude_fail.write_text(json.dumps({'remove': 1}))
+            out = self.role(self.absent, success=False)
+            self.assertEqual(self.failed_task(out), stop)
+            self.assertEqual(ops(), ['remove'])
+            self.assertEqual(servers()['relay'], self.expected_mcp(self.claude_artifact))
+            self.assertEqual(self.settings.read_bytes(), settings)
+            self.role(self.absent)
+            self.assertEqual(servers(), {'other': USER_MCP})
+            self.assertEqual(json.loads(self.settings.read_text()), USER_SETTINGS)
+            # The restore can fail too: the run says so, and the next run still converges.
+            self.seed_claude()
+            config = json.loads(self.claude_json.read_text())
+            config['mcpServers']['relay'] = stale
+            self.claude_json.write_text(json.dumps(config))
+            settings = self.settings.read_bytes()
+            self.claude_fail.write_text(json.dumps({'add-json': 2}))
+            out = self.role(self.present, success=False)
+            self.assertNotIn('fixture_relay_env_never_log', out)
+            self.assertEqual(self.failed_task(out), stop)
+            self.assertIn('Restoring the previous definition failed too', out)
+            self.assertEqual(ops(), ['remove', 'add-json', 'add-json'])
+            self.assertEqual(servers(), {'other': USER_MCP})
+            self.assertEqual(self.settings.read_bytes(), settings)
+            self.role(self.present)
+            self.assertEqual(servers()['relay'], self.expected_mcp(self.claude_artifact))
+            self.assertEqual(self.relay_hooks(), [self.expected_hook(self.claude_artifact)])
+        finally:
+            self.claude_fail.unlink(missing_ok=True)
+
 RELAY_HINT = ('/opt/relay/connector/' + 'a' * 64 + '/relay-connector'
               ' --state /home/c4/.config/relay-connector/connector.json inbox-hint')
 RELAY_ENTRY = {'type': 'command', 'command': RELAY_HINT, 'timeout': 2}
+OLD_RELAY = {'type': 'command', 'command': '/opt/relay/connector/old/relay-connector --state /s inbox-hint'}
 
 
 class ClaudeRelayHookScript(unittest.TestCase):
@@ -514,19 +635,54 @@ class ClaudeRelayHookScript(unittest.TestCase):
                                   text=True, capture_output=True, timeout=30)
         return subprocess.run([sys.executable, str(HOOK), *argv], text=True, capture_output=True, timeout=30)
 
+    def run_in_process(self, before_replace, state='present'):
+        """main() in this process, with `before_replace` run between its read and its rename."""
+        out, err = io.StringIO(), io.StringIO()
+        argv = ['--settings', str(self.settings), '--state', state, '--command', RELAY_HINT, '--timeout', '2']
+        with mock.patch.object(hook, '_before_replace', before_replace), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = hook.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
     def write(self, data, mode=0o644):
         self.settings.parent.mkdir(mode=0o700, exist_ok=True)
         self.settings.write_text(data if isinstance(data, str) else json.dumps(data, indent=2))
         self.settings.chmod(mode)
 
-    def test_matches_only_relay_connector_inbox_hint_commands(self):
-        for command in [RELAY_HINT, 'relay-connector inbox-hint', "exec '/opt/relay dir/relay-connector' inbox-hint",
-                        '/usr/bin/env relay-connector --state "/a b" inbox-hint']:
+    def assert_refused(self, message, path=None):
+        """Both states fail with `message`, and neither touches the file or leaves a temp file."""
+        path = path or self.settings
+        before = path.read_bytes()
+        for state in ('present', 'absent'):
+            for check in (False, True):
+                result = self.run_hook(state=state, check=check)
+                self.assertEqual((result.returncode, result.stdout), (1, ''), (state, check, result.stderr))
+                self.assertIn(message, result.stderr)
+                self.assertIn('nothing was written', result.stderr)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual([p.name for p in path.parent.iterdir() if p.name.startswith('.settings.json.')], [])
+
+    def test_matches_only_the_exact_command_the_role_writes(self):
+        for command in [RELAY_HINT, "'/opt/relay dir/relay-connector' --state '/a b' inbox-hint"]:
             self.assertTrue(hook.is_relay_inbox_hint({'type': 'command', 'command': command}), command)
-        for entry in [{'type': 'command', 'command': '/opt/relay/connector/x/relay-connector --state /s serve'},
-                      {'type': 'command', 'command': 'echo inbox-hint relay-connector'},
-                      {'type': 'command', 'command': '/opt/relay-connector-old inbox-hint'},
-                      {'type': 'command'}, {'command': 7}, 'relay-connector inbox-hint', None]:
+        for command in ['echo relay-connector inbox-hint',
+                        'relay-connector inbox-hint',
+                        'relay-connector --state /s inbox-hint',  # Not an absolute binary path.
+                        '/x/relay-connector --state /s inbox-hint && /usr/local/bin/user-action',
+                        '/x/relay-connector --state /s inbox-hint; notify-send done',
+                        '/x/relay-connector --state /s inbox-hint | tee /tmp/log',
+                        'exec /x/relay-connector --state /s inbox-hint',
+                        '/usr/bin/env /x/relay-connector --state /s inbox-hint',
+                        '/x/relay-connector inbox-hint',
+                        '/x/relay-connector --state relative/state inbox-hint',
+                        '/x/relay-connector --state /s serve',
+                        '/x/relay-connector --state /s inbox-hint --verbose',
+                        '/x/relay-connector-old --state /s inbox-hint',
+                        '"/x/relay-connector --state /s inbox-hint',  # Does not parse: kept.
+                        ]:
+            self.assertFalse(hook.is_relay_inbox_hint({'type': 'command', 'command': command}), command)
+        for entry in [{'type': 'prompt', 'command': RELAY_HINT}, {'command': RELAY_HINT}, {'type': 'command'},
+                      {'type': 'command', 'command': 7}, RELAY_HINT, None]:
             self.assertFalse(hook.is_relay_inbox_hint(entry), entry)
 
     def test_new_file_is_created_0644_in_a_private_claude_dir_and_rerun_is_unchanged(self):
@@ -545,19 +701,20 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (0, 'unchanged\n'), result.stderr)
         self.assertFalse(self.settings.parent.exists())
 
-    def test_present_replaces_every_relay_entry_and_keeps_everything_else(self):
+    def test_present_replaces_only_exact_relay_entries_and_keeps_everything_else(self):
         user_hook = {'type': 'command', 'command': '/usr/local/bin/user-prompt-hook'}
-        not_relay = {'hooks': [{'type': 'command', 'command': '/opt/relay/connector/x/relay-connector --state /s serve'},
-                               {'type': 'command', 'command': 'echo inbox-hint'}]}
-        other_event = {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': 'relay-connector inbox-hint'}]}
+        mentions = {'hooks': [{'type': 'command', 'command': 'echo relay-connector inbox-hint'},
+                              {'type': 'command', 'command': OLD_RELAY['command'] + ' && /usr/local/bin/user-action'},
+                              {'type': 'command', 'command': '/opt/relay/connector/x/relay-connector --state /s serve'}]}
+        other_event = {'matcher': 'Bash', 'hooks': [OLD_RELAY]}
         settings = {
             'model': 'opus', 'note': 'café ☕', 'env': {'A': '1'},
             'hooks': {
                 'UserPromptSubmit': [
-                    {'hooks': [user_hook, {'type': 'command', 'command': 'exec /opt/relay/old/relay-connector inbox-hint'}]},
-                    {'matcher': '', 'hooks': [{'type': 'command', 'command': 'relay-connector inbox-hint', 'timeout': 9}]},
+                    {'hooks': [user_hook, OLD_RELAY]},
+                    {'matcher': '', 'hooks': [{**OLD_RELAY, 'timeout': 9}]},
                     {'hooks': []},
-                    not_relay,
+                    mentions,
                 ],
                 'PreToolUse': [other_event],
             },
@@ -567,7 +724,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
         written = json.loads(self.settings.read_text())
         self.assertEqual(written, {**settings, 'hooks': {
-            'UserPromptSubmit': [{'hooks': [user_hook]}, {'hooks': []}, not_relay, {'hooks': [RELAY_ENTRY]}],
+            'UserPromptSubmit': [{'hooks': [user_hook]}, {'hooks': []}, mentions, {'hooks': [RELAY_ENTRY]}],
             'PreToolUse': [other_event]}})
         self.assertEqual(self.settings.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.run_hook().stdout, 'unchanged\n')
@@ -606,6 +763,80 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual(json.loads(target.read_text())['hooks']['UserPromptSubmit'], [{'hooks': [RELAY_ENTRY]}])
         self.assertEqual(sorted(p.name for p in dotfiles.iterdir()), ['claude-settings.json'])
 
+    def test_rewrite_keeps_a_supplementary_group(self):
+        groups = [gid for gid in os.getgroups() if gid != os.getegid()]
+        if not groups:
+            self.skipTest('the test user has no supplementary group')
+        self.write({'model': 'opus'}, mode=0o640)
+        os.chown(self.settings, -1, groups[0])
+        result = self.run_hook()
+        self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
+        status = self.settings.stat()
+        self.assertEqual((status.st_uid, status.st_gid, status.st_mode & 0o7777), (os.geteuid(), groups[0], 0o640))
+        self.assertIn('hooks', json.loads(self.settings.read_text()))
+
+    def test_a_target_owned_by_someone_else_is_refused(self):
+        if os.geteuid() == 0:
+            target = self.home/'foreign.json'
+            target.write_text('{"model": "opus"}')
+            os.chown(target, 65534, 65534)
+        else:
+            target = next((Path(p) for p in ('/etc/hostname', '/etc/passwd')
+                           if Path(p).is_file() and Path(p).stat().st_uid != os.geteuid()), None)
+            if target is None:
+                self.skipTest('no readable file owned by another user')
+        self.settings.parent.mkdir(mode=0o700)
+        self.settings.symlink_to(target)
+        self.assert_refused('is owned by uid', path=target)
+        self.assertTrue(self.settings.is_symlink())
+
+    def test_a_file_with_a_posix_acl_is_refused(self):
+        self.write({'model': 'opus'}, mode=0o640)
+        # system.posix_acl_access, version 2: user::rw- user:<self>:r-- group::r-- mask::r-- other::---.
+        undefined = 0xFFFFFFFF
+        acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', tag, perm, ident) for tag, perm, ident in [
+            (0x01, 6, undefined), (0x02, 4, os.geteuid()), (0x04, 4, undefined), (0x10, 4, undefined),
+            (0x20, 0, undefined)])
+        try:
+            os.setxattr(self.settings, 'system.posix_acl_access', acl)
+        except OSError as error:
+            self.skipTest(f'no POSIX ACLs on this filesystem: {error}')
+        self.assert_refused('POSIX ACL')
+
+    def test_a_concurrent_edit_is_merged_not_overwritten(self):
+        self.write({'model': 'opus'})
+        edits = []
+
+        def user_edits_once():
+            if not edits:
+                edits.append(1)
+                self.settings.write_text(json.dumps({'model': 'opus', 'theme': 'dark'}))
+        code, out, err = self.run_in_process(user_edits_once)
+        self.assertEqual((code, out), (0, 'changed\n'), err)
+        self.assertEqual(json.loads(self.settings.read_text()),
+                         {'model': 'opus', 'theme': 'dark', 'hooks': {'UserPromptSubmit': [{'hooks': [RELAY_ENTRY]}]}})
+        # A file created between the read and the write is merged too, not replaced.
+        self.settings.unlink()
+        edits.clear()
+        code, out, err = self.run_in_process(user_edits_once)
+        self.assertEqual((code, out), (0, 'changed\n'), err)
+        self.assertEqual(json.loads(self.settings.read_text())['theme'], 'dark')
+        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+
+    def test_a_file_that_keeps_changing_fails_and_keeps_the_last_edit(self):
+        self.write({'model': 'opus'})
+        edits = []
+
+        def user_edits_every_time():
+            edits.append(1)
+            self.settings.write_text(json.dumps({'model': 'opus', 'edit': len(edits)}))
+        code, out, err = self.run_in_process(user_edits_every_time)
+        self.assertEqual((code, out), (1, ''))
+        self.assertIn('changed while being updated, 3 times in a row', err)
+        self.assertIn('nothing was written', err)
+        self.assertEqual(json.loads(self.settings.read_text()), {'model': 'opus', 'edit': 3})
+        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+
     def test_check_reports_without_writing(self):
         result = self.run_hook(check=True)
         self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
@@ -619,22 +850,27 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual(self.run_hook(check=True).stdout, 'unchanged\n')
 
     def test_unparsable_or_misshapen_settings_fail_without_writing(self):
-        for content in ['{"model": "opus",', '', '[]', '"text"', '{"hooks": []}', '{"hooks": null}',
-                        '{"hooks": {"UserPromptSubmit": {}}}', b'\xff\xfe{}']:
-            self.settings.parent.mkdir(mode=0o700, exist_ok=True)
-            if isinstance(content, bytes): self.settings.write_bytes(content)
-            else: self.settings.write_text(content)
-            before = self.settings.read_bytes()
-            for state in ('present', 'absent'):
-                result = self.run_hook(state=state)
-                self.assertEqual(result.returncode, 1, (content, state, result.stdout))
-                self.assertIn('nothing was written', result.stderr)
-                self.assertEqual(result.stdout, '')
-                self.assertEqual(self.settings.read_bytes(), before)
-                self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        group = "is not an object with a 'hooks' array"
+        entry = 'holds an entry that is not an object'
+        cases = [('{"model": "opus",', 'not valid JSON'), ('', 'not valid JSON'), (b'\xff\xfe{}', 'not valid JSON'),
+                 # JSON null is a document, not a missing file: never replaced with fresh settings.
+                 ('null', 'top level is not a JSON object'), ('[]', 'top level is not a JSON object'),
+                 ('"text"', 'top level is not a JSON object'),
+                 ('{"hooks": []}', "'hooks' is not a JSON object"), ('{"hooks": null}', "'hooks' is not a JSON object"),
+                 ('{"hooks": {"UserPromptSubmit": {}}}', 'is not a JSON array')]
+        cases += [('{"hooks": {"UserPromptSubmit": %s}}' % groups, message) for groups, message in [
+            ('[{"hooks": {}}]', group), ('[{}]', group), ('[1]', group), ('[{"matcher": "", "hooks": "x"}]', group),
+            ('[{"hooks": [1]}]', entry), ('[{"hooks": [null]}]', entry)]]
+        for content, message in cases:
+            with self.subTest(content=content):
+                self.settings.parent.mkdir(mode=0o700, exist_ok=True)
+                if isinstance(content, bytes): self.settings.write_bytes(content)
+                else: self.settings.write_text(content)
+                self.assert_refused(message)
 
     def test_present_refuses_a_command_it_would_not_recognise_on_the_next_run(self):
-        for command in ['/usr/bin/true', '/opt/relay/connector/x/relay-connector --state /s serve']:
+        for command in ['/usr/bin/true', '/opt/relay/connector/x/relay-connector --state /s serve',
+                        'relay-connector --state /s inbox-hint', OLD_RELAY['command'] + ' && true']:
             result = self.run_hook(command=command)
             self.assertEqual(result.returncode, 2, result.stdout)
             self.assertIn('inbox-hint', result.stderr)

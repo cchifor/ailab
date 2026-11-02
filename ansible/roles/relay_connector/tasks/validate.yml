@@ -65,35 +65,6 @@
     - "{{ relay_connector_source }}"
     - "{{ relay_connector_state_file }}"
 
-- name: Reject an unsafe Claude Code path or hook timeout
-  ansible.builtin.assert:
-    that:
-      - relay_connector_claude_bin is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
-      - "'/../' not in relay_connector_claude_bin + '/' and '/./' not in relay_connector_claude_bin + '/'"
-      - (relay_connector_claude_hook_timeout | string) is match('^[1-9][0-9]?$')
-    quiet: true
-    fail_msg: relay_connector_claude_bin must be a plain absolute path and relay_connector_claude_hook_timeout 1-99 seconds.
-  when: relay_connector_claude_messaging != 'unmanaged'
-
-# The npm prefix's bin/claude is a symlink into lib/node_modules, so follow it.
-- name: Inspect the user's Claude Code CLI
-  ansible.builtin.stat:
-    path: "{{ relay_connector_claude_bin }}"
-    follow: true
-  register: relay_connector_claude_bin_stat
-  when: relay_connector_claude_messaging == 'present'
-
-- name: Require the Claude Code CLI before registering Relay messaging
-  ansible.builtin.assert:
-    that:
-      - relay_connector_claude_bin_stat.stat.isreg | default(false)
-      - relay_connector_claude_bin_stat.stat.executable | default(false)
-    quiet: true
-    fail_msg: >-
-      No executable Claude Code CLI at {{ relay_connector_claude_bin }}. Install Claude Code for
-      {{ relay_connector_user }} (the dev_worker role does) or set relay_connector_claude_bin.
-  when: relay_connector_claude_messaging == 'present'
-
 - name: Check reviewed tmux sockets
   ansible.builtin.assert:
     that:
@@ -227,3 +198,10 @@
     quiet: true
     fail_msg: Staging requires the selected connector inactive/dead with no queued job and a reachable user manager.
   when: not (relay_connector_manage_service | bool)
+
+# Last, once every other input is known good, and still before any write: a malformed Claude Code
+# file, an unusable CLI or an unkeepable settings.json fails here, before the binary, the unit or
+# the service changes.
+- name: Preflight Claude Code messaging without changing anything
+  ansible.builtin.import_tasks: claude_preflight.yml
+  when: relay_connector_claude_messaging != 'unmanaged'

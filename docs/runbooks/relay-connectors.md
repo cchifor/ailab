@@ -222,10 +222,20 @@ sets up two things for the execution user. Both point at the pinned, content-add
   `relay-connector --state <state file> inbox-hint` before each prompt, with a 2 s timeout
   (`relay_connector_claude_hook_timeout`). `inbox-hint` prints hook JSON, answers within 300 ms
   and never fails the prompt. The role replaces only Relay's entry
-  (`files/claude_relay_hook.py`). Every other key and hook in the file stays.
+  (`files/claude_relay_hook.py`): an entry whose command is exactly
+  `/…/relay-connector --state /… inbox-hint`. A command that only mentions Relay, or runs it as
+  part of a longer shell command, belongs to the user and stays, like every other key and hook.
 
 A repin moves both to the new binary in the same run: the old MCP entry is removed and added
 again, and exactly one Relay hook entry remains.
+
+**Order and failure handling.** Before anything on the worker changes (binary, unit, service),
+the role reads `~/.claude.json`, works out the MCP change, checks as the user that the CLI can run
+when that change needs it, and dry-runs the `settings.json` merge
+(`tasks/claude_preflight.yml`). After the binary is verified, it changes the MCP server first and
+writes the hook only once that succeeded. If adding the new definition fails after the old one
+was removed, the role adds the old definition back through the CLI and stops with the hook
+unchanged.
 
 **Turn it on** per worker in `ansible/host_vars/dev-worker-N.yml`, in the same change as a
 reviewed 0.8.0 or later `relay_connector_release` pin:
@@ -235,8 +245,9 @@ relay_connector_claude_messaging: present
 ```
 
 With an older pin, `present` fails before anything is written. Claude Code must be installed for
-the user at `~/.npm-global/bin/claude` (`relay_connector_claude_bin`). Converge with `--check
---diff` first; it reports both changes without making them.
+the user at `~/.npm-global/bin/claude` (`relay_connector_claude_bin`) whenever the MCP server has to
+change; `absent` with nothing registered works without it. Converge with `--check --diff` first;
+it reports both changes without making them.
 
 The role restarts nothing: not the connector service, not tmux, not an agent. A Claude session
 loads its MCP servers and hooks when it starts, so sessions that are already running join only
@@ -247,8 +258,13 @@ hook under `/hooks` in a new session.
 `relay` server and the hook and keeps everything else. `unmanaged`, the default, leaves whatever
 is there alone, so going straight from `present` to `unmanaged` leaves both in place.
 
-If `~/.claude.json` or `settings.json` does not parse, the run fails before it changes anything.
-Repair the file by hand; the role never overwrites a file it could not read.
+The run fails before it changes anything if `~/.claude.json` or `settings.json` does not parse, or
+if the `UserPromptSubmit` hooks in `settings.json` are not in the documented shape. It also fails if a rewrite could not
+keep the file's metadata: another owner (a symlink target included), a group the user is not in,
+or a POSIX ACL. Repair the file by hand; the role never overwrites a file it could not read. The
+rewrite keeps the mode and the group. If someone else changes the file between the role's read
+and its write, the merge is redone from the new content (up to three times), so a concurrent edit
+is not lost.
 
 ## Qualification
 
@@ -261,6 +277,7 @@ private state, unapproved/cross-account inputs, staging safety, linger, drop-in
 denial, interrupted activation, idempotence, check mode and offline unit parsing.
 For Claude Code messaging, a strict fake `claude` CLI on `PATH` keeps `~/.claude.json`. The cases
 cover the 0.8.0 gate before any write, registration and the hook alongside the user's own settings,
-a repin, `absent`, check mode, unparsable files and `unmanaged`. Unit tests cover
+a repin, `absent`, check mode, unparsable files before a release change, `unmanaged`, a CLI the
+user cannot run, and failed MCP changes with their restore. Unit tests cover
 `claude_relay_hook.py` on its own. Set `TMPDIR` under `/workspace` for local runs. Real estate convergence and
 logout/reboot evidence are operator acceptance work.

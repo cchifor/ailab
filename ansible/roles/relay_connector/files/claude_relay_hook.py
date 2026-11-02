@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """Converge Relay's inbox hook in one user's Claude Code settings.json.
 
-The relay_connector role pipes this file to `python3 -` as the settings' owner (tasks/claude.yml).
-Standard library only.
+The relay_connector role pipes this file to `python3 -` as the settings' owner: once with --check
+before anything on the worker changes (tasks/claude_preflight.yml), and once more to commit after
+the MCP change succeeded (tasks/claude.yml). Standard library only.
 
-It removes every UserPromptSubmit hook entry whose command runs a `relay-connector` binary with
-`inbox-hint`. For --state present it then appends one entry for the pinned connector:
+It removes every UserPromptSubmit hook entry that is exactly the command this role writes,
+
+    <absolute path ending in /relay-connector> --state <absolute path> inbox-hint
+
+and nothing else: a command that only mentions Relay, or runs it inside a longer shell command, is
+the user's. For --state present it then appends one entry for the pinned connector:
 
     {"hooks": [{"type": "command", "command": <--command>, "timeout": <--timeout>}]}
 
 Everything else in the file is kept. A matcher group is dropped only when this removal leaves it
 empty, and so are the UserPromptSubmit list and the `hooks` object, so `absent` undoes `present`.
 
-The file is written only when its content changes: atomically (temp file and rename in the same
-directory), keeping the file's mode, or 0644 for a new file in a ~/.claude created 0700. A
-symlinked settings.json keeps its link; the target is replaced. Prints `changed` or `unchanged`.
---check reports the same without writing. A file that does not parse, or whose `hooks` is not
-the documented shape, is an error (exit 1) and is never rewritten.
+The file is written only when its content changes, atomically (temp file and rename in the same
+directory), with the file's mode and group, or 0644 for a new file in a ~/.claude created 0700.
+A symlinked settings.json is resolved once; the link stays and its target is replaced. Just
+before the rename the target is read again; if anyone changed it meanwhile (device, inode, size,
+mtime or content), the merge is redone from the new content, up to three times.
+
+Errors (exit 1, nothing written, also under --check): a file that does not parse or whose hooks
+are not the documented shape; a file owned by another user, in a group this user cannot keep, or
+carrying a POSIX ACL. Prints `changed` or `unchanged`; --check reports without writing.
 """
 import argparse
 import copy
+import errno
+import hashlib
 import json
 import os
 import shlex
@@ -28,25 +39,32 @@ import sys
 import tempfile
 
 EVENT = 'UserPromptSubmit'
+ATTEMPTS = 3
 
 
 class SettingsError(Exception):
     pass
 
 
+class ChangedMeanwhile(Exception):
+    pass
+
+
 def is_relay_inbox_hint(hook):
-    """True for a hook entry whose command runs a relay-connector binary with `inbox-hint`."""
-    command = hook.get('command') if isinstance(hook, dict) else None
+    """True only for the exact hook entry this role writes, whatever the paths."""
+    if not isinstance(hook, dict) or hook.get('type') != 'command':
+        return False
+    command = hook.get('command')
     if not isinstance(command, str):
         return False
     try:
         words = shlex.split(command)
     except ValueError:
-        words = command.split()
-    for index, word in enumerate(words):
-        if os.path.basename(word) == 'relay-connector':
-            return 'inbox-hint' in words[index + 1:]
-    return False
+        return False  # Not ours to interpret: keep it.
+    return (len(words) == 4
+            and words[0].startswith('/') and os.path.basename(words[0]) == 'relay-connector'
+            and words[1] == '--state' and words[2].startswith('/')
+            and words[3] == 'inbox-hint')
 
 
 def converge(settings, state, command=None, timeout=None):
@@ -61,16 +79,20 @@ def converge(settings, state, command=None, timeout=None):
     groups = hooks.get(EVENT, [])
     if not isinstance(groups, list):
         raise SettingsError(f"'hooks.{EVENT}' is not a JSON array")
+    for index, group in enumerate(groups):
+        if not isinstance(group, dict) or not isinstance(group.get('hooks'), list):
+            raise SettingsError(f"'hooks.{EVENT}[{index}]' is not an object with a 'hooks' array")
+        if not all(isinstance(entry, dict) for entry in group['hooks']):
+            raise SettingsError(f"'hooks.{EVENT}[{index}].hooks' holds an entry that is not an object")
 
     kept, removed = [], 0
     for group in groups:
-        if isinstance(group, dict) and isinstance(group.get('hooks'), list):
-            entries = [hook for hook in group['hooks'] if not is_relay_inbox_hint(hook)]
-            if len(entries) != len(group['hooks']):
-                removed += len(group['hooks']) - len(entries)
-                if not entries:
-                    continue  # Emptied by this removal: drop the group.
-                group = {**group, 'hooks': entries}
+        entries = [entry for entry in group['hooks'] if not is_relay_inbox_hint(entry)]
+        if len(entries) != len(group['hooks']):
+            removed += len(group['hooks']) - len(entries)
+            if not entries:
+                continue  # Emptied by this removal: drop the group.
+            group = {**group, 'hooks': entries}
         kept.append(group)
     if state == 'present':
         kept.append({'hooks': [{'type': 'command', 'command': command, 'timeout': timeout}]})
@@ -92,41 +114,94 @@ def render(settings):
     return json.dumps(settings, indent=4, sort_keys=True, separators=(',', ': '))
 
 
-def load(path):
-    """Parsed settings, or None for a missing file. Raises SettingsError when it does not parse."""
+def read(target):
+    """(fstat, bytes) of the regular file at `target`, or None when it does not exist."""
     try:
-        with open(path, 'rb') as handle:
-            raw = handle.read()
+        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
         return None
+    with os.fdopen(descriptor, 'rb') as handle:
+        status = os.fstat(handle.fileno())
+        if not stat.S_ISREG(status.st_mode):
+            raise SettingsError('it is not a regular file')
+        return status, handle.read(), _extended_attributes(handle.fileno())
+
+
+def _extended_attributes(descriptor):
+    try:
+        return os.listxattr(descriptor)
+    except OSError as error:
+        if error.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+            return []
+        raise
+
+
+def identity(found):
+    if found is None:
+        return None
+    status, raw, _ = found
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns,
+            hashlib.sha256(raw).hexdigest())
+
+
+def check_metadata(status, attributes):
+    """Refuse a file whose owner, group or ACL a rewrite by this user could not keep."""
+    user = os.geteuid()
+    if status.st_uid != user:
+        raise SettingsError(f'it is owned by uid {status.st_uid}, not by this user (uid {user}); '
+                            'give it back to the user')
+    if status.st_gid != os.getegid() and status.st_gid not in os.getgroups():
+        raise SettingsError(f'its group (gid {status.st_gid}) is not one of this user\'s groups, '
+                            'so a rewrite could not keep it')
+    if 'system.posix_acl_access' in attributes:
+        raise SettingsError('it carries a POSIX ACL, which a rewrite would drop; remove the ACL '
+                            '(setfacl -b) or add the hook by hand')
+
+
+def parse(raw):
     try:
         return json.loads(raw.decode('utf-8'))
     except (UnicodeDecodeError, ValueError) as error:
         raise SettingsError(f'it is not valid JSON ({error})') from None
 
 
-def write_atomically(path, text):
-    target = os.path.realpath(path)
+def _before_replace():
+    """Test seam: runs between writing the temporary file and re-checking the target."""
+
+
+def replace(target, found, text):
+    """Atomically put `text` at `target`, unless the target is no longer what was `found`."""
     directory = os.path.dirname(target)
-    try:
-        mode = stat.S_IMODE(os.stat(target).st_mode)
-    except FileNotFoundError:
-        mode = 0o644
+    if found is None:
         os.makedirs(directory, mode=0o700, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix='.settings.json.', suffix='.tmp', dir=directory)
     try:
         with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
             handle.write(text)
             handle.flush()
-            os.fchmod(handle.fileno(), mode)
+            if found is None:
+                os.fchmod(handle.fileno(), 0o644)
+            else:
+                status = found[0]
+                if os.fstat(handle.fileno()).st_gid != status.st_gid:
+                    os.fchown(handle.fileno(), -1, status.st_gid)
+                os.fchmod(handle.fileno(), stat.S_IMODE(status.st_mode))  # After chown: it clears setgid.
             os.fsync(handle.fileno())
-        os.replace(temporary, target)
-    except BaseException:
+        _before_replace()
+        if identity(read(target)) != identity(found):
+            raise ChangedMeanwhile()
+        if found is None:
+            try:
+                os.link(temporary, target)  # Fails instead of replacing a file created meanwhile.
+            except FileExistsError:
+                raise ChangedMeanwhile() from None
+        else:
+            os.replace(temporary, target)
+    finally:
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
-        raise
     try:  # Best effort: the rename is already done.
         directory_fd = os.open(directory, os.O_RDONLY)
         try:
@@ -149,33 +224,49 @@ def parse_args(argv):
     parser.add_argument('--check', action='store_true', help='report without writing')
     args = parser.parse_args(argv)
     if args.state == 'present':
-        if not args.command or not is_relay_inbox_hint({'command': args.command}):
-            parser.error('--state present needs a --command that runs relay-connector ... inbox-hint')
+        if not args.command or not is_relay_inbox_hint({'type': 'command', 'command': args.command}):
+            parser.error('--state present needs a --command of the form '
+                         '"/path/to/relay-connector --state /path/to/state inbox-hint"')
         if args.timeout is None or args.timeout < 1:
             parser.error('--state present needs a positive --timeout')
     args.settings = os.path.expanduser(args.settings)
     return args
 
 
+def converge_file(target, args):
+    """One read-merge-write pass. Returns 'changed' or 'unchanged'."""
+    found = read(target)
+    if found is None:
+        if args.state == 'absent':
+            return 'unchanged'
+        current = None
+    else:
+        check_metadata(found[0], found[2])
+        current = parse(found[1])  # JSON null is a value like any other, not a missing file.
+    desired = converge({} if found is None else current, args.state, args.command, args.timeout)
+    if found is not None and desired == current:
+        return 'unchanged'
+    if not args.check:
+        replace(target, found, render(desired))
+    return 'changed'
+
+
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    target = os.path.realpath(args.settings)  # Resolved once: read and replace the same file.
     try:
-        current = load(args.settings)
-        if current is None and args.state == 'absent':
-            print('unchanged')
-            return 0
-        desired = converge({} if current is None else current, args.state, args.command, args.timeout)
-        if current is not None and desired == current:
-            print('unchanged')
-            return 0
-        if not args.check:
-            write_atomically(args.settings, render(desired))
+        for _ in range(ATTEMPTS):
+            try:
+                print(converge_file(target, args))
+                return 0
+            except ChangedMeanwhile:
+                continue
+        raise SettingsError(f'it changed while being updated, {ATTEMPTS} times in a row; '
+                            'converge again once it is quiet')
     except (SettingsError, OSError) as error:
         print(f'claude_relay_hook.py: {args.settings}: {error}; nothing was written',
               file=sys.stderr)
         return 1
-    print('changed')
-    return 0
 
 
 if __name__ == '__main__':
