@@ -1,41 +1,82 @@
 # Implementation review — router-progress-events — round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
-## Summary
+Plan: `plans/2026-11-02-router-progress-events-plan.md` (finalized after two codex rounds). Implementation: llm-router
+branch `fix/responses-progress-events` off `main` `6e8104a`. Codex (`gpt-6-astra`, `review` profile, read-only)
+reviewed `6e8104a..f40beef`; the fixes below are `8b45cd0`. Every finding was accepted; none was pushed back, so the
+review converged after one round.
 
-- The implementation largely follows the planned scope. The normal streaming path preserves sequence ordering, pre-output gating, backpressure handling and a stable `created_at`.
-- Changes are needed around synchronous provider-open failures: activity ownership survives into asynchronous failure handling, allowing callbacks from a failed provider to authorize progress.
-- The supplied Codex and mutation results support the reported fix, but do not establish the required OpenAI Node/Python stream-helper compatibility.
-- Tests miss important cleanup windows, and the new cancellation test can hang when the behavior it checks regresses. Progress envelopes also drift from the promised identical snapshot.
-- Review remained read-only; the supplied checks were not rerun. No new authentication or secret-exposure issue was identified; duration caps and accepted uncapped paths remain the plan’s explicit release decision.
-
-## Findings
+## Findings and resolutions
 
 ### Clear activity ownership before recording synchronous open failures
-**Location:** packages/modules/inference/index.ts:599, packages/modules/inference/index.ts:696
+**Location:** packages/modules/inference/index.ts (attempt loop)
 **Severity:** important
-<!-- codex: A synchronous throw from open() or [Symbol.asyncIterator]() bypasses the inner cleanup and leaves the failed attempt owning activity during awaited failure recording; an isolated in-memory probe with mocked routing and recording observed upstreamActivity() remain 1 and increase to 2 when that failed provider’s saved callback ran. Invalidate ownership before the catch’s awaits, so failed-provider callbacks cannot authorize progress events, and add a delayed-recorder regression test for this path. -->
+**Resolved (8b45cd0).** An attempt now takes ownership only once `open()` has returned its iterator, so an `open()`
+that throws never owns the activity, and the attempt's `catch` clears ownership before its awaited failure recording.
+The inner `finally` (before the awaited close) and the outer `finally` keep their clears. Test: "a failed attempt stops
+counting before its failure is recorded", for an `open()` that throws and for a read that fails, with the
+`attempt.failed` journal write held while the failed provider's saved callback runs. Mutation check: with ownership
+claimed before `open()` and no clear in the `catch` (the state codex probed), the test fails with
+`open: expected 3 to be undefined`.
 
 ### Ownership tests do not exercise the cleanup window
-**Location:** tests/stream-timeouts.test.ts:735, tests/stream-timeouts.test.ts:747
+**Location:** tests/stream-timeouts.test.ts (engine block)
 **Severity:** important
-<!-- codex: The new engine tests inspect activity only after execution finishes or the second attempt starts, so removing the inner ownership clear at inference/index.ts:648 would still satisfy them through the outer clear and subsequent ownership replacement. Hold an upstream return() pending during timeout cleanup, invoke the abandoned attempt’s callback, and assert activity is already undefined before closeGrace expires, during failure recording, and until the next attempt receives its own bytes. -->
+**Resolved (8b45cd0).** Test: "a timed-out attempt stops counting at once, while its upstream close is still pending":
+the attempt hangs ignoring the abort, the 100 ms wait timer ends it, `closeGrace` is 1 s, and 200 ms into the close
+window (before `attempt.failed` is recorded) the abandoned provider's callback leaves `upstreamActivity()` undefined.
+Mutation check: without the inner `finally` clear it fails with `expected 3 to be undefined`.
 
 ### Broad client enablement lacks the planned SDK release evidence
-**Location:** packages/plugins/api-openai/index.ts:485
+**Location:** packages/plugins/api-openai/index.ts (progress gate)
 **Severity:** important
-<!-- codex: Progress events are enabled for every non-native Responses caller, but the supplied verification does not cover the finalized plan’s explicit Node/Python stream-helper release gate, and the repository contains no Responses helper tests exercising it. Record pinned-version comparisons against main for text, tool arguments, usage, incomplete completion and timeout failure before release, applying the planned Codex-only fallback if helper compatibility fails. -->
+**Resolved with the evidence (plan verification step 4), run in docker against the harness router in-process, `main`
+`6e8104a` vs the branch `f40beef`:** OpenAI Node `openai@7.47.0` `responses.stream().finalResponse()` and Python
+`openai==3.42.1` `responses.stream()` + `get_final_response()`, each for thinking → text, thinking → tool call,
+thinking → no output (`finish: length`) and thinking → the route's `maxDurationMs` (`response.failed`).
+
+| Case | Node, main and branch | Python, main and branch |
+|---|---|---|
+| text | `completed`, text `SDK-DONE`, same usage | same |
+| tool call | `completed`, `exec_command` `{"cmd":"echo sdk"}` | same |
+| no output | `incomplete`, `output: []` | `RuntimeError: Didn't receive a response.completed event` |
+| cap | `failed`, `output: []` | the same `RuntimeError` |
+
+The branch adds 5-7 `response.in_progress` events per case and changes no outcome. The Python helper's error on a
+non-`completed` ending is its own behavior, identical on `main`. The Codex-only fallback is therefore not applied.
 
 ### Progress envelopes are rebuilt from mutable state
-**Location:** packages/plugins/api-openai/index.ts:488, tests/stream-timeouts.test.ts:561
+**Location:** packages/plugins/api-openai/index.ts (progress frame)
 **Severity:** nit
-<!-- codex: outputIndex === 0 does not guarantee an unchanged accumulator: a permitted usage event before the first output changes a.usage, so subsequent progress envelopes contain different usage and router_usage_confidence fields from response.created, contrary to the plan’s identical-envelope promise; the partial toMatchObject assertion misses this. Capture and reuse the initial envelope, and test full equality after an early usage event followed by continued upstream activity. -->
+**Resolved (8b45cd0).** The envelope `response.created` carried is captured once and every progress event repeats it.
+Test: "every progress envelope is exactly the response.created envelope, even after a usage event before the first
+output" (whole-object equality). Mutation check: rebuilding it from the accumulator fails the test.
 
-### Bound and clean up the cancellation test’s read loop
-**Location:** tests/stream-timeouts.test.ts:725
+### Bound and clean up the cancellation test's read loop
+**Location:** tests/stream-timeouts.test.ts (HTTP block)
 **Severity:** important
-<!-- codex: The loop waiting for progress ignores reader.read().done: an early EOF produces an endless chain of immediately resolved reads that can starve timeout timers, while a stream that merely never produces progress leaves the client open because client.abort() is reached only on success. Check EOF, bound both the read and upstream-abort waits, and register unconditional client cancellation in cleanup before starting fetch so failures cannot strand the connection and upstream. -->
+**Resolved (8b45cd0).** The cancellation test registers the client's abort in `cleanup` before `fetch`, stops at the
+end of the stream, bounds the read loop and the upstream-abort wait (5 s each) and asserts both. The held-delivery
+test's loop also stops at the end of the stream.
+
+## Verification of the final branch
+
+- The real Codex CLI end to end (plan step 3, branch `d3a016d`, unchanged since in the paths it exercises): 0.162.1 and
+  0.166.0 through the router in-process, 45 s of reasoning-only output per turn, `stream_idle_timeout_ms` 20 000: text
+  exit 0 with 1 upstream request; tool-then-answer exit 0 with 2. On `main`: exit 1 after 2 requests, "idle timeout
+  waiting for SSE".
+- CI gates in docker (node 24) on `d3a016d`: typecheck, build, build:lib, test:production clean; 1985 passed, 0 failed;
+  `check:architecture` only the known #79 line, as on `main`. The final head is re-run before the PR.
+- Mutation checks: the backpressure guards (18 timer writes in the needs-drain window without them), and the three
+  above.
+
+## Owner decision D1 (2026-11-02)
+
+**No caps; the gap is accepted.** The local routes `qwen3.8-27b` and `qwen3.8-flash-next` keep no `maxDurationMs`, and
+direct `local/<model>` requests stay uncapped as they are. A degenerate thinking loop runs until the model stops or the
+adapter's 16 MiB / 200 000-event stream limits end it (about 70k streamed tokens). The release records this decision;
+no configuration changes with it, so the rollback is the image digest alone.
 
 ## Diff stat
 
@@ -49,3 +90,4 @@
  tests/stream-timeouts.test.ts        | 250 ++++++++++++++++++++++++++++++++++-
  7 files changed, 342 insertions(+), 19 deletions(-)
 ```
+(as reviewed, `6e8104a..f40beef`)
