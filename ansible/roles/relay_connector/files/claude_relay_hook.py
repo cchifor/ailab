@@ -5,12 +5,14 @@ The relay_connector role pipes this file to `python3 -` as the settings' owner: 
 before anything on the worker changes (tasks/claude_preflight.yml), and once more to commit after
 the MCP change succeeded (tasks/claude.yml). Standard library only.
 
-It removes every UserPromptSubmit hook entry that is exactly the command this role writes,
+It removes every UserPromptSubmit hook entry whose command is, character for character, the
+literal form this role writes:
 
     <absolute path ending in /relay-connector> --state <absolute path> inbox-hint
 
-and nothing else: a command that only mentions Relay, or runs it inside a longer shell command, is
-the user's. For --state present it then appends one entry for the pinned connector:
+with single spaces and only characters that need no shell quoting. Anything else is the user's
+and stays: a command that mentions Relay, chains it (`;`, `&&`, `|`), redirects it, quotes it or
+substitutes into it (`$(...)`, backticks). For --state present it then appends one entry:
 
     {"hooks": [{"type": "command", "command": <--command>, "timeout": <--timeout>}]}
 
@@ -20,12 +22,15 @@ empty, and so are the UserPromptSubmit list and the `hooks` object, so `absent` 
 The file is written only when its content changes, atomically (temp file and rename in the same
 directory), with the file's mode and group, or 0644 for a new file in a ~/.claude created 0700.
 A symlinked settings.json is resolved once; the link stays and its target is replaced. Just
-before the rename the target is read again; if anyone changed it meanwhile (device, inode, size,
-mtime or content), the merge is redone from the new content, up to three times.
+before the rename the target is read again; if anyone changed it meanwhile (content or any of
+device, inode, size, mtime, ctime, owner, group, mode, extended attributes), every check and the
+merge are redone from the new state, up to three times.
 
-Errors (exit 1, nothing written, also under --check): a file that does not parse or whose hooks
-are not the documented shape; a file owned by another user, in a group this user cannot keep, or
-carrying a POSIX ACL. Prints `changed` or `unchanged`; --check reports without writing.
+Errors (exit 1, nothing written, also under --check): a file that does not parse, or whose
+UserPromptSubmit hooks are not the documented shape; a file owned by another user, in a group this
+user cannot keep, or carrying a POSIX ACL; a directory with a default POSIX ACL (a new file would
+inherit it); a change that this user could not write (directory or file not writable). Prints
+`changed` or `unchanged`; --check reports without writing.
 """
 import argparse
 import copy
@@ -40,6 +45,8 @@ import tempfile
 
 EVENT = 'UserPromptSubmit'
 ATTEMPTS = 3
+ACCESS_ACL = 'system.posix_acl_access'
+DEFAULT_ACL = 'system.posix_acl_default'
 
 
 class SettingsError(Exception):
@@ -51,7 +58,7 @@ class ChangedMeanwhile(Exception):
 
 
 def is_relay_inbox_hint(hook):
-    """True only for the exact hook entry this role writes, whatever the paths."""
+    """True only for the exact, literal hook entry this role writes, whatever the paths."""
     if not isinstance(hook, dict) or hook.get('type') != 'command':
         return False
     command = hook.get('command')
@@ -61,10 +68,38 @@ def is_relay_inbox_hint(hook):
         words = shlex.split(command)
     except ValueError:
         return False  # Not ours to interpret: keep it.
-    return (len(words) == 4
+    # Literal: every word needs no quoting and the string is exactly those words joined by single
+    # spaces, so no shell syntax (;, &&, |, <, >, $(...), backticks, quotes, globs) can hide in it.
+    return (command == ' '.join(words) and all(shlex.quote(word) == word for word in words)
+            and len(words) == 4
             and words[0].startswith('/') and os.path.basename(words[0]) == 'relay-connector'
             and words[1] == '--state' and words[2].startswith('/')
             and words[3] == 'inbox-hint')
+
+
+def _positive_int(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def validate(groups):
+    """Reject UserPromptSubmit groups and entries that are not the documented shape."""
+    for index, group in enumerate(groups):
+        where = f'hooks.{EVENT}[{index}]'
+        if not isinstance(group, dict) or not isinstance(group.get('hooks'), list):
+            raise SettingsError(f"'{where}' is not an object with a 'hooks' array")
+        if 'matcher' in group and not isinstance(group['matcher'], str):
+            raise SettingsError(f"'{where}.matcher' is not a string")
+        for position, entry in enumerate(group['hooks']):
+            at = f'{where}.hooks[{position}]'
+            if not isinstance(entry, dict):
+                raise SettingsError(f"'{at}' is not an object")
+            if not isinstance(entry.get('type'), str) or not entry['type']:
+                raise SettingsError(f"'{at}' has no string 'type'")
+            if entry['type'] == 'command':
+                if not isinstance(entry.get('command'), str) or not entry['command']:
+                    raise SettingsError(f"'{at}' is a command hook without a string 'command'")
+                if 'timeout' in entry and not _positive_int(entry['timeout']):
+                    raise SettingsError(f"'{at}.timeout' is not a positive integer")
 
 
 def converge(settings, state, command=None, timeout=None):
@@ -79,11 +114,7 @@ def converge(settings, state, command=None, timeout=None):
     groups = hooks.get(EVENT, [])
     if not isinstance(groups, list):
         raise SettingsError(f"'hooks.{EVENT}' is not a JSON array")
-    for index, group in enumerate(groups):
-        if not isinstance(group, dict) or not isinstance(group.get('hooks'), list):
-            raise SettingsError(f"'hooks.{EVENT}[{index}]' is not an object with a 'hooks' array")
-        if not all(isinstance(entry, dict) for entry in group['hooks']):
-            raise SettingsError(f"'hooks.{EVENT}[{index}].hooks' holds an entry that is not an object")
+    validate(groups)
 
     kept, removed = [], 0
     for group in groups:
@@ -114,8 +145,17 @@ def render(settings):
     return json.dumps(settings, indent=4, sort_keys=True, separators=(',', ': '))
 
 
+def _extended_attributes(target):
+    try:
+        return os.listxattr(target)
+    except OSError as error:
+        if error.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+            return []
+        raise
+
+
 def read(target):
-    """(fstat, bytes) of the regular file at `target`, or None when it does not exist."""
+    """(fstat, bytes, xattr names) of the regular file at `target`, or None when it is missing."""
     try:
         descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
@@ -127,20 +167,13 @@ def read(target):
         return status, handle.read(), _extended_attributes(handle.fileno())
 
 
-def _extended_attributes(descriptor):
-    try:
-        return os.listxattr(descriptor)
-    except OSError as error:
-        if error.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
-            return []
-        raise
-
-
 def identity(found):
+    """Everything a concurrent change could alter: any difference forces a full re-check."""
     if found is None:
         return None
-    status, raw, _ = found
-    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns,
+    status, raw, attributes = found
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns,
+            status.st_uid, status.st_gid, status.st_mode, tuple(sorted(attributes)),
             hashlib.sha256(raw).hexdigest())
 
 
@@ -153,16 +186,34 @@ def check_metadata(status, attributes):
     if status.st_gid != os.getegid() and status.st_gid not in os.getgroups():
         raise SettingsError(f'its group (gid {status.st_gid}) is not one of this user\'s groups, '
                             'so a rewrite could not keep it')
-    if 'system.posix_acl_access' in attributes:
+    if ACCESS_ACL in attributes:
         raise SettingsError('it carries a POSIX ACL, which a rewrite would drop; remove the ACL '
                             '(setfacl -b) or add the hook by hand')
 
 
-def parse(raw):
-    try:
-        return json.loads(raw.decode('utf-8'))
-    except (UnicodeDecodeError, ValueError) as error:
-        raise SettingsError(f'it is not valid JSON ({error})') from None
+def _existing(directory):
+    while not os.path.isdir(directory):
+        directory = os.path.dirname(directory)
+    return directory
+
+
+def check_directory(directory):
+    """Refuse a directory (or, if it is missing, the parent it would be created in) whose default
+    POSIX ACL a new file would inherit."""
+    existing = _existing(directory)
+    if DEFAULT_ACL in _extended_attributes(existing):
+        raise SettingsError(f'{existing} has a default POSIX ACL, which the rewritten file would '
+                            f'inherit; remove it (setfacl -k {existing}) or add the hook by hand')
+
+
+def check_writable(target, found):
+    """Refuse, already under --check, a write this user could not make."""
+    existing = _existing(os.path.dirname(target))
+    if not os.access(existing, os.W_OK | os.X_OK):
+        raise SettingsError(f'{existing} is not writable for this user, so the file cannot be '
+                            'replaced there')
+    if found is not None and not os.access(target, os.W_OK):
+        raise SettingsError('it is not writable for this user')
 
 
 def _before_replace():
@@ -177,6 +228,9 @@ def replace(target, found, text):
     descriptor, temporary = tempfile.mkstemp(prefix='.settings.json.', suffix='.tmp', dir=directory)
     try:
         with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            if ACCESS_ACL in _extended_attributes(handle.fileno()):
+                raise SettingsError(f'a new file in {directory} inherits a POSIX ACL from its default '
+                                    f'ACL; remove it (setfacl -k {directory}) or add the hook by hand')
             handle.write(text)
             handle.flush()
             if found is None:
@@ -212,6 +266,13 @@ def replace(target, found, text):
         pass
 
 
+def parse(raw):
+    try:
+        return json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise SettingsError(f'it is not valid JSON ({error})') from None
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         prog='claude_relay_hook.py',
@@ -225,7 +286,7 @@ def parse_args(argv):
     args = parser.parse_args(argv)
     if args.state == 'present':
         if not args.command or not is_relay_inbox_hint({'type': 'command', 'command': args.command}):
-            parser.error('--state present needs a --command of the form '
+            parser.error('--state present needs a literal --command of the form '
                          '"/path/to/relay-connector --state /path/to/state inbox-hint"')
         if args.timeout is None or args.timeout < 1:
             parser.error('--state present needs a positive --timeout')
@@ -234,7 +295,7 @@ def parse_args(argv):
 
 
 def converge_file(target, args):
-    """One read-merge-write pass. Returns 'changed' or 'unchanged'."""
+    """One read-check-merge-write pass. Returns 'changed' or 'unchanged'."""
     found = read(target)
     if found is None:
         if args.state == 'absent':
@@ -243,9 +304,11 @@ def converge_file(target, args):
     else:
         check_metadata(found[0], found[2])
         current = parse(found[1])  # JSON null is a value like any other, not a missing file.
+    check_directory(os.path.dirname(target))
     desired = converge({} if found is None else current, args.state, args.command, args.timeout)
     if found is not None and desired == current:
         return 'unchanged'
+    check_writable(target, found)
     if not args.check:
         replace(target, found, render(desired))
     return 'changed'
@@ -260,7 +323,7 @@ def main(argv=None):
                 print(converge_file(target, args))
                 return 0
             except ChangedMeanwhile:
-                continue
+                continue  # Re-read, and re-run every check, from the new state.
         raise SettingsError(f'it changed while being updated, {ATTEMPTS} times in a row; '
                             'converge again once it is quiet')
     except (SettingsError, OSError) as error:

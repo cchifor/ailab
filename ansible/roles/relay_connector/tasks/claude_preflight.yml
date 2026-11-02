@@ -71,13 +71,14 @@
          and (servers.relay.command | default('')) == relay_connector_claude_mcp.command
          and (servers.relay.args | default([])) == relay_connector_claude_mcp.args }}
 
-# A replacement removes before it adds (add-json refuses an existing name). If the add then fails,
-# claude.yml puts this definition back. It is the user's, so it may carry env secrets.
-- name: Keep the definition a replacement would remove
+# Whatever this run removes (a replacement removes before it adds, since add-json refuses an
+# existing name; `absent` only removes). If a later step fails, claude.yml puts this definition
+# back. It is the user's, so it may carry env secrets.
+- name: Keep the definition this run would remove
   ansible.builtin.set_fact:
     relay_connector_claude_mcp_previous: >-
       {{ (relay_connector_claude_config.content | b64decode | from_json).mcpServers.relay
-         if relay_connector_claude_mcp_remove and relay_connector_claude_mcp_add else {} }}
+         if relay_connector_claude_mcp_remove else {} }}
   no_log: true
 
 - name: Release the Claude Code configuration bytes
@@ -109,8 +110,9 @@
       relay_connector_claude_bin.
   when: relay_connector_claude_mcp_remove or relay_connector_claude_mcp_add
 
-# Dry run of the settings.json merge, as the user: an unparsable or misshapen file, or one a
-# rewrite could not keep (another owner, a group the user is not in, a POSIX ACL) fails here.
+# Dry run of the settings.json merge, as the user: an unparsable or misshapen file, one a rewrite
+# could not keep (another owner, a group the user is not in, a POSIX ACL, a directory default ACL),
+# or a change the user could not write (directory or file not writable) fails here.
 - name: Dry-run the Relay inbox hook merge in the user's Claude Code settings
   ansible.builtin.command:
     argv: "{{ relay_connector_claude_hook_argv + ['--check'] }}"

@@ -232,10 +232,23 @@ again, and exactly one Relay hook entry remains.
 **Order and failure handling.** Before anything on the worker changes (binary, unit, service),
 the role reads `~/.claude.json`, works out the MCP change, checks as the user that the CLI can run
 when that change needs it, and dry-runs the `settings.json` merge
-(`tasks/claude_preflight.yml`). After the binary is verified, it changes the MCP server first and
-writes the hook only once that succeeded. If adding the new definition fails after the old one
-was removed, the role adds the old definition back through the CLI and stops with the hook
-unchanged.
+(`tasks/claude_preflight.yml`). The dry run also proves the user can write the change: a
+read-only `~/.claude` or `settings.json` fails here. After the binary is verified, the role
+changes the MCP server and then writes the hook, as one unit. If any of those steps fails, it puts
+the MCP server back through the CLI as it was before the run (it removes a server this run added
+and adds back a definition this run removed) and stops with `settings.json` unchanged.
+
+**What a failed run can leave behind.**
+
+- The Claude Code steps run last, so the release steps before them have already happened: the new
+  binary and unit are in place and, with `relay_connector_manage_service: true`, the connector
+  has restarted on the new release. The MCP server and hook keep pointing at the previous binary,
+  which stays installed, until a run succeeds.
+- If putting the MCP server back fails as well, the run says so. Check `claude mcp get relay` as
+  the user and add the previous definition back with `claude mcp add-json --scope user relay`.
+- Claude Code takes no lock on `settings.json`. The helper re-reads it just before its rename and
+  redoes the merge if anything changed, but an edit that lands inside that last instant can still
+  be lost.
 
 **Turn it on** per worker in `ansible/host_vars/dev-worker-N.yml`, in the same change as a
 reviewed 0.8.0 or later `relay_connector_release` pin:
@@ -249,9 +262,11 @@ the user at `~/.npm-global/bin/claude` (`relay_connector_claude_bin`) whenever t
 change; `absent` with nothing registered works without it. Converge with `--check --diff` first;
 it reports both changes without making them.
 
-The role restarts nothing: not the connector service, not tmux, not an agent. A Claude session
-loads its MCP servers and hooks when it starts, so sessions that are already running join only
-once they are started again. To confirm, run `claude mcp get relay` as the user and look for the
+The Claude Code messaging tasks restart nothing: not the connector service, not tmux, not an
+agent. A release repin applied in the same run follows the role's normal rules, so with
+`relay_connector_manage_service: true` it restarts the managed connector service (and only that).
+A Claude session loads its MCP servers and hooks when it starts, so sessions that are already
+running join only once they are started again. To confirm, run `claude mcp get relay` as the user and look for the
 hook under `/hooks` in a new session.
 
 **Turn it off** with `relay_connector_claude_messaging: absent` and converge. The role removes the
@@ -261,10 +276,14 @@ is there alone, so going straight from `present` to `unmanaged` leaves both in p
 The run fails before it changes anything if `~/.claude.json` or `settings.json` does not parse, or
 if the `UserPromptSubmit` hooks in `settings.json` are not in the documented shape. It also fails if a rewrite could not
 keep the file's metadata: another owner (a symlink target included), a group the user is not in,
-or a POSIX ACL. Repair the file by hand; the role never overwrites a file it could not read. The
-rewrite keeps the mode and the group. If someone else changes the file between the role's read
-and its write, the merge is redone from the new content (up to three times), so a concurrent edit
-is not lost.
+a POSIX ACL on the file, or a default ACL on `~/.claude` that a new file would inherit. Repair
+the file by hand; the role never overwrites a file it could not read. The rewrite keeps the mode
+and the group. If the file's content or metadata changes between the role's read and its write,
+every check and the merge are redone from the new state (up to three times).
+
+Only the exact command the role writes counts as Relay's hook: the literal
+`/…/relay-connector --state /… inbox-hint`, single-spaced, with no quoting or shell syntax. A
+variant with `;`, `&&`, `|`, redirection, `$(...)` or backticks is left alone as the user's.
 
 ## Qualification
 
