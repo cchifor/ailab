@@ -3144,8 +3144,8 @@ by reasoning alone):
   tokens), completed in one request; then the final turn (1.6 s).
 
 Before the release that turn would have been cut at 60 s and resent. flash-next's acceptance waits for cloud3: the
-same day a VRAM test found one of its four GPUs faulty (under investigation; flash-next is to be re-tested on the three
-good cards).
+same day a VRAM test found one of its four GPUs faulty (confirmed that evening; see the results of the
+reasoning-forwarding release below).
 
 ## Reasoning-forwarding release: the upstream's thinking, for accounts that opt in (2026-11-02, llm-router#132)
 
@@ -3232,6 +3232,36 @@ that investigation closes and is recorded with its result.
    (source `08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6`, release `router-0.1.0-20261102-progress-events`) with its two
    annotations. No schema or secret change. After an image rollback, non-Codex clients whose saved histories carry
    reasoning get 400 on a replay and start a new conversation; Codex is unaffected.
+
+### Results of the reasoning-forwarding release (2026-11-02)
+
+**The roll.** ailab #1570 merged; Flux applied `cd5b31da` and the pod `llm-router-6b7c9876c9-fc7hq` came up Ready at
+16:36:48Z on `sha256:7ec9726b6f4e42e5535bc108a87d1fac5e84207b02f950a44bdfc280428b05a3`. Checks after the roll:
+- `/app/SOURCE_COMMIT` `93108f5e308a7333b5f11acb8db8e48908250bed`, both annotations as rolled; the log's only warning
+  was a client-cancelled `codex-2` request;
+- public `/health` 200, unauthenticated `/v1/models` 401;
+- `validate-live` **6/9**, the known baseline (`codex text`, `codex stream`, `codex tool call`: bare `model: 'codex'`,
+  400).
+
+**R1, cloud2 only.** `forwardReasoning: true` on `lan-192.168.0.28-18020`: config revision 2212 → 2213 at 16:43:33Z,
+read back `true`. cloud3 stays off (see below).
+
+**Live acceptance, qwen-27b (cloud2).** On dev-worker-1, Codex 0.166.0,
+`codex exec -p qwen-27b -c show_raw_agent_reasoning=true` on a counting question that the model checked with a tool
+call:
+- exit 0, the right answer (76);
+- Codex printed the model's thinking before the tool call and again before the final answer (before the release a
+  chat-backed route showed nothing until the answer);
+- the journal, filtered on `lan-192.168.0.28-18020`: `667f1079` (turn 1, `reasoningChars` 572) and `9c24d8fa` (the
+  turn after the tool, 183), both `complete`. Turn 2 carried Codex's echo of the turn-1 reasoning item, and the replay
+  rule accepted and dropped it.
+
+**cloud3.** The GPU investigation closed the same evening: GPU3 (PCI `4D:00.0`) has a hard VRAM fault (a contiguous
+~2.47 GiB region with bits stuck at 1, the same words at 150 W and at a 47 % lower memory clock, so not temperature).
+With GPU3 left out, flash-next's saved 27k-token probe picks the right token at p=0.999 and its garble probe is 0/20
+(11/20 on four cards): the card, not the model or llama.cpp, produced flash-next's junk. The owner chose RMA; in the
+meantime cloud3 moves to GPUs 0-2 through a cloudlab change. cloud3's `forwardReasoning` opt-in, and flash-next's
+agent acceptance, wait for that change.
 
 ## Relay access requests
 
