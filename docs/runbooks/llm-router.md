@@ -3044,6 +3044,83 @@ task.
   likely an early stop.
 - **To measure the rate on known turns,** replay them as above.
 
+## Progress-events release: Codex agents on local models survive long thinking (2026-11-02, llm-router#131)
+
+`router-0.1.0-20261102-progress-events` deploys llm-router main `08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6`
+([#131](https://git.chifor.me/cchifor/llm-router/pulls/131)). The plan is `plans/2026-11-02-router-progress-events-plan.md`
+(codex, two rounds) and the implementation review `plans/2026-11-02-router-progress-events-impl-review.md` (codex, one
+round, every finding fixed).
+
+**Why.** A Codex agent on a local model died whenever one turn thought for more than 300 s:
+`stream disconnected before completion: idle timeout waiting for SSE` after its reconnects, exit 1.
+- **The router drops reasoning.** The chat adapter forwards only content, refusals and tool calls, so until the first
+  output a Responses stream carried only `: keepalive` comments.
+- **Codex counts events, not bytes.** Its `stream_idle_timeout_ms` (300 s by default; the dev_worker role does not set
+  it) is reset only by parsed SSE events. It hung up, resent the same request, which thought from scratch again, and
+  gave up after its retries.
+- **Evidence, 2026-11-02 09:29-10:15Z:** dev-worker-2's conversation `ba741bcd` sent 9 identical requests. Each was
+  `CLIENT_CLOSED` at 300.0 s with no `stream.first_content` and router utilization 0.25, while cloud2's vLLM decoded it
+  the whole time (2 running, 0 waiting, 0 preemptions, KV cache at most 44 %). Such kills: 10 on 11-01 and 9 on 11-02
+  on cloud2, 1 on cloud3 (flash-next, 11:16Z). The sibling run's turns reached first content after 218-234 s of
+  thinking (18-22k reasoning tokens), so the 300 s cliff was routinely close.
+
+**What changes.**
+- **Progress events.** A Responses stream on a non-native route, before its first output item, with no event for 15 s
+  (`streamProgress`) and upstream bytes since its last event, gets `response.in_progress` instead of the next keepalive
+  comment. The event repeats exactly the envelope `response.created` carried (`output: []`, the same `id` and
+  `created_at`).
+  - The keepalive timer writes it synchronously: never while the socket needs drain, never after a terminal state.
+  - A silent upstream (a queue, a prefill, a cold model load) still gets comments only, so a client's idle timer still
+    bounds it. Once output began, comments only.
+  - Progress events are not output: not `stream.first_content`, not upstream activity, no change to failover.
+- **The engine exposes upstream activity** (`Execution.upstreamActivity`, an optional contract addition): a count of
+  raw body chunks, visible while the running attempt has received bytes. An attempt owns it once `open()` returned its
+  iterator and until its read ends; a failover's abandoned provider calling back late never counts.
+- **One `created_at`** on every envelope of a streamed response (`response.created` and `response.completed` differed).
+- **Unchanged:** Chat Completions streams, native routes, non-streaming requests, the journal and the engine's timers.
+
+**Verified before release.**
+- **The real Codex CLI** (docker): 0.162.1 (the dev workers') and 0.166.0 through the router in-process, against a fake
+  vLLM-style server streaming only `reasoning_content` for 45 s per turn, with `stream_idle_timeout_ms` 20000.
+  - `main` (`6e8104a`): exit 1, "idle timeout waiting for SSE", each turn resent.
+  - The release: a text turn exits 0 with 1 upstream request; tool-then-answer exits 0 with exactly 2.
+- **The OpenAI SDK stream helpers**, Node `openai@7.47.0` `finalResponse()` and Python `openai==3.42.1`
+  `get_final_response()`: for text, a tool call, an empty `length` ending and a `maxDurationMs` failure, the outcomes
+  are identical to `main` (the Python helper raises on a non-completed ending on both).
+- **Suite in docker (node 24):** 1992 passed, 14 skipped, 0 failed; typecheck, build, build:lib and test:production
+  clean; `check:architecture` reports only the known #79 line, as on `main`. 19 new tests, and mutation checks for
+  the drain guards, the attempt-ownership fixes and the envelope capture.
+- **Reviews:** codex on the plan (two rounds) and the implementation (one round). reviewer-codex and reviewer-claude
+  approved #131; reviewer-claude's one nit (two defensive clears with an inaccurate comment) was answered in `503d506`.
+
+**Owner decision D1 (2026-11-02): no wall-clock cap.** The local routes `qwen3.8-27b` and `qwen3.8-flash-next` keep no
+`maxDurationMs`, and direct `local/<model>` requests have none either. A degenerate thinking loop now runs until the
+model stops or the adapter's 16 MiB / 200 000-event stream limits end it (about 70k streamed tokens), instead of being
+cut by Codex at 300 s and retried from scratch. Progress tracks transport activity: an upstream that sends its own
+keepalives while stalled keeps progress events coming, as it keeps the wait and idle timers alive. No configuration
+changes with this release.
+
+**Image.**
+- Archive `router-0.1.0-20261102-progress-events.tar.gz`, SHA-256 `cbd485d6e8c4633baa0a01bc00b2d0a340b5939351fd0dabe6b91dd4efa8f376` (relay v0.2.0 assets 415/416).
+- Relay branch `release/router-0.1.0-20261102-progress-events-image`,
+  [run 117327](https://git.chifor.me/cchifor/relay/actions/runs/117327), receipt `deployment-images-117327.json`
+  (asset 417).
+- `registry.chifor.me/llm-router/router@sha256:b59d918b0b0d5c10c582c0be782009f30c4c6abdba637be74806fedbacd9dd5b`, tag `parity-77cd30ac5652-117327`. Every blob (index, amd64 manifest, config, 9 layers,
+  attestation) was pulled anonymously and verified, and `/app/SOURCE_COMMIT` = `08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6`.
+
+**Before the roll:**
+- backup `/data/backups/pre-progress-events-20261102`: integrity ok, 33,920 trajectories, 224.8 MB, SHA-256
+  `0a7f737771da6147d8ee580a00ded77da6a9948e376fa6ff2d918c42f85e7fdb`, key 600;
+- `validate-live` 5/9 (13:13Z). Three are the known baseline: `codex text`, `codex stream` and `codex tool call` send a bare
+  `model: 'codex'` and get 400 `MODEL_REQUIRED`. The fourth, `codex image (vision model)`, got 429 `CAPACITY_UNAVAILABLE`
+  because no Codex seat could serve then (`codex` and `codex-3` had exhausted their primary window, `codex-2` was cooling
+  down, `codex-4` is disabled pending re-authentication); it does not involve this release.
+
+**Rollback:** revert to
+`registry.chifor.me/llm-router/router@sha256:f3390a7c7e13e9ff79e3ddced468dc173935d79f63e0cfae48c061db770df5be`
+(source `6e8104a4a236ae1f8285476403d3bcc7e07e3a5d`, release `router-0.1.0-20261101-reply-shape`). There is no schema,
+config or secret change, so the image digest and its two annotations are the whole rollback.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem

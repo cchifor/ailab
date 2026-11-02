@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 6e8104a4a236ae1f8285476403d3bcc7e07e3a5d
-        chifor.me/release: router-0.1.0-20261101-reply-shape
+        chifor.me/source-commit: 08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6
+        chifor.me/release: router-0.1.0-20261102-progress-events
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -125,7 +125,7 @@ spec:
           # assistant message; #129: attempt.completed records the finish and the reply's shape); parity-584ce8899be5-116010
           # image, all blobs pulled anonymously and verified, /app/SOURCE_COMMIT 6e8104a4 confirmed; Relay run 116010,
           # archive sha256:e2f0cd0de55af25fbd46b588668684595a4d2cfe8e7e01fe4bb0aca3fbeeb438.
-          image: registry.chifor.me/llm-router/router@sha256:f3390a7c7e13e9ff79e3ddced468dc173935d79f63e0cfae48c061db770df5be
+          image: registry.chifor.me/llm-router/router@sha256:b59d918b0b0d5c10c582c0be782009f30c4c6abdba637be74806fedbacd9dd5b
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
