@@ -3172,6 +3172,10 @@ could not be told from a stall.
   wait timer and it is no longer failed over, for every caller.
 - **Journal:** `attempt.completed.output.reasoningChars` (a count); Activity and `explain_request` show it. Activity
   says "nothing was sent" only when `emitted` is false (every account).
+- **Telemetry:** for a forwarding account the HTTP span's `ttfbMs` is now the time to the first reasoning event (the
+  first event the engine yields), so it drops for thinking models; the journal's `stream.first_content` stays the time
+  to the first visible output. Compare first-content latency across the release on `stream.first_content`, not
+  `ttfbMs`.
 - **Budget:** reasoning counts in the 8 MiB stream guard (code units).
 
 **Verified before release.**
@@ -3185,6 +3189,12 @@ could not be told from a stall.
   test:production clean; 2032 passed; the two load-flaky tests recorded in #129 pass alone; `check:architecture` only
   the known #79 line. Mutation checks for the drain guards, the close's separation from `routerTerminal`, and the
   budget's code-unit and late-reasoning counting.
+- **The deployed commit is the tested tree.** `93108f5e` is Gitea's merge of #132: first parent `08c0fc35` (the
+  progress-events release, main before the merge), second parent `f422bf4`, and no other commit. Its tree is
+  byte-identical to `f422bf4`'s (`git rev-parse 93108f5e^{tree}` = `git rev-parse f422bf4^{tree}` =
+  `d58db0df2fc730293e3442f4375774e1e0a1f92e`; `git diff f422bf4 93108f5e` is empty), so the gates above cover the
+  image's source exactly. `f422bf4` changed only the accumulator field `lead` to a length, a docstring and the README on
+  top of `2fad440`; the reasoning suites were rerun on it.
 - **Reviews:** reviewer-codex and reviewer-claude approved #132; reviewer-claude's notes (`lead` as a length, the replay
   docstring, the progress sentence) were fixed in `f422bf4`.
 
@@ -3202,14 +3212,22 @@ could not be told from a stall.
 - `validate-live` 6/9, the known baseline (`codex text`, `codex stream`, `codex tool call`: a bare `model: 'codex'`, 400
   `MODEL_REQUIRED`).
 
-**After the roll (R1):** `forwardReasoning: true` on `lan-192.168.0.28-18020` (cloud2) and `lan-192.168.0.26-8080`
-(cloud3), through `PUT /admin/v1/config` with `If-Match` and a read-back, run in the router pod with its admin bearer.
-Every client of those accounts then gets reasoning: the dev workers' Codex, the Assistant (which discards it), and chat
-clients (dsh, the platform eval key) as `reasoning_content` deltas, the field they would get from vLLM directly.
+**After the roll (R1):** `forwardReasoning: true` on `lan-192.168.0.28-18020` (cloud2) **only**, through
+`PUT /admin/v1/config` with `If-Match` and a read-back, run in the router pod with its admin bearer. Every client of
+that account then gets reasoning: the dev workers' Codex, the Assistant (which discards it), and chat clients (dsh, the
+platform eval key) as `reasoning_content` deltas, the field they would get from vLLM directly.
+
+**cloud3 (`lan-192.168.0.26-8080`) is deferred** (the plan's R1 named both accounts). The same day a VRAM test found
+one of cloud3's four GPUs faulty (stuck bits in fixed blocks; under investigation, with flash-next to be re-tested on
+the three good cards). Turning forwarding on there now would put the faulty card's output in front of every client as
+visible thinking, and the validation could not tell a router fault from a hardware one. cloud3's opt-in waits until
+that investigation closes and is recorded with its result.
 
 **Rollback, in this order.**
-1. `forwardReasoning: false` on both accounts (`If-Match`, read-back): the old image does not strip the saved field
-   until a validated config write.
+1. `forwardReasoning: false` on every account that has it (`If-Match`, read-back). The old image's account schema is not
+   strict: its loader accepts the unknown `forwardReasoning` key at startup and strips it from the in-memory config
+   (no error, no effect), but the saved config keeps the field until the next validated config write, so a later
+   roll-forward would turn forwarding back on silently. Turning it off first makes the saved state explicit.
 2. Revert to `registry.chifor.me/llm-router/router@sha256:b59d918b0b0d5c10c582c0be782009f30c4c6abdba637be74806fedbacd9dd5b`
    (source `08c0fc35a475bf36e9ae1ce7de7d3bdc2d8305e6`, release `router-0.1.0-20261102-progress-events`) with its two
    annotations. No schema or secret change. After an image rollback, non-Codex clients whose saved histories carry
