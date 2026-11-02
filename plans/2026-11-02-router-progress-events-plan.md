@@ -1,5 +1,13 @@
 # llm-router: a real Responses event while the upstream thinks (progress events)
 
+## Codex Review
+
+- The pre-output scope resolves the snapshot and payload-size objections: `outputIndex` covers text, refusal and tools, while empty endings still depend on lifecycle gates.
+- Activity tracking still needs collision-free marks across attempts and cleanup that covers opening errors and cancellation.
+- Synchronous timer writes remove the promise race, but backpressure must also suppress comments; submission and drain ordering need direct tests.
+- D1 needs whole-request semantics and explicit treatment of uncapped direct-model paths. Tests need bounded gates, clock control and coverage of every first-item and ending type.
+- LiteLLM concern dropped: ailab's manifests route directly to backends (`kubernetes/apps/apps/ai/litellm.yaml:349,878,886`, `litellm-local.yaml:73,83,131`); the custom ChatGPT provider also calls ChatGPT directly (`chatgpt_chat.py:4,17`). Both disputed comments are removed.
+
 ## Context
 
 Codex agents on the local models (`qwen-27b` → cloud2 vLLM, `flash-next` → cloud3 llama.cpp) die with
@@ -50,8 +58,10 @@ while the upstream is sending bytes**, so a client's idle timer tracks upstream 
    - **Ownership:** each attempt's `onActivity` closure carries its attempt id. A callback from an attempt that is no
      longer the running one (a failover's abandoned provider calling late, after `closeGrace`) is ignored. The attempt
      clears its state in the same `finally` that stops its watchdog.
+   <!-- codex: round-2: The watchdog's inner finally starts after provider.open/[Symbol.asyncIterator], so an opening failure can bypass the proposed cleanup (packages/modules/inference/index.ts:587-590,634-644). Invalidate before awaited close/failure recording on every exit, with an outer cleanup fallback and guards for aborted attemptSignal/gone, not only a matching attempt id (packages/modules/inference/index.ts:603,683-705). -->
    - **No clocks:** the transport compares the value with the one it saw at its last event (inequality only), so the
      engine's injectable clock and `Date.now()` are never compared.
+   <!-- codex: round-2: A per-attempt count can equal the previous attempt's last emitted mark: attempt 1 emits at count 1, attempt 2 receives one chunk and also returns 1, so inequality suppresses genuine new activity; the transport need not observe the intervening undefined state (packages/modules/inference/index.ts:536,587,698). Use an execution-wide increasing activity sequence hidden while inactive, or compare attempt identity plus count, and test equal counts across failover. -->
    - **Availability:** the getter is on the `Execution` that `execute()` returns, before the generator first runs; it
      reads `undefined` until an attempt receives bytes.
    - **What counts:** body chunks only (`readSseEvents`/`readJson` call `onActivity` after `reader.read()`), never
@@ -87,6 +97,7 @@ while the upstream is sending bytes**, so a client's idle timer tracks upstream 
    hold at most one progress frame above the high-water mark; the main loop's own `sendLine` then awaits drain as it
    does today. A client that disconnects is noticed by the main loop's next write (as today); the timer never reports
    errors.
+   <!-- codex: round-2: After a timer write(false), draining remains false, so falling back to today's comment branch still appends keepalives while writableNeedDrain is true; sendLine also submits its next frame before awaiting drain (packages/plugins/api-openai/index.ts:442,451). Apply the socket/backpressure/abort no-write guards to both timer branches, and document the bounded extra main-loop frame; a synchronous progress write alone does not coordinate all writes. -->
    - One burst of activity followed by a stall authorizes at most one progress event: the mark then equals the value
      until new bytes arrive.
 3. **Payload and scope.** `{type: 'response.in_progress', sequence_number, response}` where `response` is the same
@@ -125,7 +136,9 @@ The same gap let flash-next's runaway tool-call argument on 11-02 run 9 minutes 
   1 800 000 (30 min; its longest observed turn is ~4 min). `qwen3.8-flash-next`: 900 000 (15 min). The release
   records the config revision; a rollback of the image keeps the caps (they are valid on the old image and bound the
   same gap there).
+  <!-- codex: round-2: maxDurationMs covers cold load, all attempts, visible generation and downstream drain, so it can cut a valid response after output begins (packages/modules/inference/index.ts:390-416; packages/plugins/api-openai/index.ts:451-457). D1 should approve whole-request budgets and record that these policy settings also affect Chat Completions and non-streaming requests on the same routes. -->
 - **The owner decides** before the roll PR: the caps as proposed, other values, or no cap with the gap accepted.
+  <!-- codex: round-2: These caps do not cover virtual local/... policies or requests entering through another policy's fallback chain, although those streams also receive progress (packages/modules/routing/index.ts:69-87; packages/modules/inference/index.ts:389-391); direct local/qwen3.8-27b access is explicitly enabled in wt-progress-events/docs/runbooks/llm-router.md:2871. Record acceptance or treatment of those uncapped paths, and qualify the Risks claim that D1 supplies a bound by both the selected policy and the owner's decision to set a cap. -->
 
 ## Out of scope (follow-ups, named so they are not lost)
 
@@ -167,6 +180,7 @@ annotations) and a `docs/runbooks/llm-router.md` release section with rollback a
    - **Delivery while the upstream is held:** a real listening server and a streaming `fetch` reader; the upstream
      emits reasoning chunks and waits on a gate the test opens only after the client has read at least 2
      `response.in_progress` events. Then text; `response.completed` follows.
+     <!-- codex: round-2: If the upstream stops emitting when it waits on this gate, one burst can authorize at most one progress event, so waiting for two deadlocks. Keep activity running while gated, impose a bounded reader timeout, and release/abort in finally so the expected failure on main cannot leave app.close waiting on the held request (tests/stream-timeouts.test.ts:245-250,343-357). -->
    - Reasoning-only phase then text (adapter path): ≥ 3 progress events between `response.created` and the first
      `response.output_item.added`; `sequence_number`s strictly increasing; the normalized output items and terminal
      event equal those of the same reply without the quiet phase.
@@ -176,6 +190,7 @@ annotations) and a `docs/runbooks/llm-router.md` release section with rollback a
    - One burst then a stall: exactly one progress event, then comments only.
    - Text streaming continuously: no progress events (visible events suppress them).
    - After the first output item: a quiet phase with activity gets comments only.
+     <!-- codex: round-2: Exercise this with refusal and tool as the first item, including a tool announcement with empty arguments, then further deltas: both increment outputIndex before the awaited item write, just like text (packages/plugins/api-openai/index.ts:475-481). Also cover empty-output length/content_filter endings and include refusal/incomplete cases in the SDK gate: outputIndex remains zero for those endings, so invalidation and terminal gates must supply the protection (packages/plugins/api-openai/index.ts:241-244,489-491). -->
    - Chat Completions with the reasoning upstream: no new chunks.
    - Native route: no injected events (existing native passthrough tests stay green).
    - An `Execution` without `upstreamActivity` (a stub engine): comments only, no error.
@@ -190,6 +205,8 @@ annotations) and a `docs/runbooks/llm-router.md` release section with rollback a
    - Engine unit: `upstreamActivity()` is `undefined` before an attempt, grows with that attempt's `onActivity`,
      resets to `undefined` at the attempt's end, ignores a stale attempt's callback.
    - The same `created_at` on `response.created`, progress and terminal envelopes.
+     <!-- codex: round-2: Force this test across an epoch-second boundary, otherwise the old per-call Date.now implementation can pass (packages/plugins/api-openai/index.ts:244). The counter removes cross-clock comparisons but transport quiet/deadline checks still use Date.now; tests/stream-timeouts.test.ts:55 fakes only timers, so deterministic writer tests must advance Date consistently too. -->
+   <!-- codex: round-2: Add controlled write(false) coverage for response.created and for a timer progress frame, with activity arriving during drain, subsequent output, and close/deadline termination. The timer is armed before response.created and that event can suspend in sendLine, so assert created-before-progress ordering, submission-time activity marks, no timer writes while blocked, and no duplicate/reordered sequences (packages/plugins/api-openai/index.ts:440-466); the existing large-output drain tests do not exercise this path (tests/stream-timeouts.test.ts:258,277). -->
 2. **CI gates in docker** (node:24, pnpm 10.32.1): a copy of the read-only mounted checkout, `pnpm install
    --frozen-lockfile` with a store volume, then `pnpm typecheck`, `pnpm test`, `pnpm build`, `pnpm build:lib`,
    `pnpm test:production`, `pnpm check:architecture`. Compared to the `main` baseline above. PostgreSQL auth
@@ -231,8 +248,6 @@ config revision that the rollback deliberately keeps.
   reference, which defines the envelope but promises neither "once" nor periodic repeats; repeat handling is a
   per-client, per-version claim. Measured: Codex 0.162.1 and 0.166.0. Gated: the OpenAI Node and Python helpers
   (verification step 4), with the Codex-only fallback.
-  <!-- codex: LiteLLM is missing from the matrix: the deployment pins v1.106.6 (wt-progress-events/kubernetes/apps/apps/ai/litellm.yaml:1199), whose [Responses transformation](https://github.com/BerriAI/litellm/blob/v1.106.6/litellm/llms/openai/responses/transformation.py#L620) recognizes in_progress, but that alone does not verify proxy hooks or Responses-to-Chat conversion. Test the relevant deployed path for duplicate output, filtering, and timeout behavior; if broad compatibility remains unresolved, restrict the initial change to the existing codexCaller branch rather than adding client-specific machinery (packages/plugins/api-openai/index.ts:401). -->
-  <!-- opus-pushback: LiteLLM is not a client of this router: kubernetes/apps/apps/ai/litellm.yaml has zero references to router.chifor.me or the llm-router service (grep, gitea/main 2026-11-02); its models point at the backends directly, so no deployed LiteLLM path receives these events. The SDK helper gate (step 4) with the codexCaller fallback covers the Responses clients that do exist. -->
 - **Transport activity, not model progress.** An upstream that sends its own keepalives while stalled keeps progress
   events going, as it keeps the router's timers going today. The bound is D1's cap.
 - **Hiding a stuck upstream.** See D1: without a cap, a degenerate reasoning loop runs until the model stops or the
