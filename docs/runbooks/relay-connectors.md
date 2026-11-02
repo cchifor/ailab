@@ -9,21 +9,48 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
-The default release is the v0.7.3 connector manifest from Relay release
-[v0.7.3](https://git.chifor.me/cchifor/relay/releases/tag/v0.7.3) (release
-workflow run 87699, 2026-10-15). The upgraded hub serves the same manifest at
-`https://relay.chifor.me/downloads/connector/v0.7.3/manifest.json`:
+The default release is the v0.7.7 connector manifest from Relay release
+[v0.7.7](https://git.chifor.me/cchifor/relay/releases/tag/v0.7.7) (release
+workflow run 117872, 2026-11-02). The upgraded hub serves the same manifest at
+`https://relay.chifor.me/downloads/connector/v0.7.7/manifest.json`:
 
 | Field | Pin |
 |---|---|
-| Source | `0684b75f2ae662711a2497ec155bc06400348fc5` |
-| Linux amd64 SHA-256 | `bb10c127235ca453dd74fdbdbb5f6381cb71ced5d4ba8c96d1ea0fbc11a8df61` |
-| Linux arm64 SHA-256 | `1b66b3ffa00223884f0df1352ade8f13d10d9e84d45196604cf9294dbdd9df27` |
+| Source | `122efe126c4abc47943ab9492b2e19a41f321b07` |
+| Linux amd64 SHA-256 | `87f78d2bcf5d4e2813e6e3a81bf5b700acc0949ec0e1ecbd8751b61372ad623d` |
+| Linux arm64 SHA-256 | `d4e33ef2288b6e80aaed7df0fe30e104e524ae3ceb160b7b616276904e8565ed` |
 
-The pins were checked on 2026-10-15 against the release's `manifest.json` and
+The pins were checked on 2026-11-02 against the release's `manifest.json` and
 `SHA256SUMS` and the downloaded binaries; all three agree on these digests.
-`manifest.json` and `deployment-images-87699.json` both name source commit
-`0684b75f2ae662711a2497ec155bc06400348fc5`, and the latter records the hub image digest.
+`manifest.json` and `deployment-images-117872.json` both name source commit
+`122efe126c4abc47943ab9492b2e19a41f321b07`, and the latter records the hub image digest
+(`sha256:afaae66d72c56cc11d39f3b1f4ebe880a293091a8011ea2f4daab1e9fb59b6d0`).
+
+**What v0.7.7 changes for connectors** (v0.7.4 and v0.7.5 changed only the hub
+image; v0.7.6 was tagged but never published, so v0.7.7 carries it):
+
+- **Agent messaging with communication only**
+  ([Relay #166](https://git.chifor.me/cchifor/relay/pulls/166)). Until now, the
+  connector's agent-control loop called `/question-replies` on every cycle. That route
+  exists only with `RELAY_AGENT_CONTROL_PLANE`, so the cycle aborted on a 404 and never
+  reached `/end`, and ended sessions stayed open. A v0.7.7 hub advertises
+  `controlPlane: false`, and the v0.7.7 connector then skips the control-plane calls
+  but still posts `/end`. An older connector keeps the old behaviour against a v0.7.7
+  hub; nothing regresses.
+- **UTF-8 tmux output whatever the locale**
+  ([Relay #168](https://git.chifor.me/cchifor/relay/pulls/168)). Every tmux call passes
+  `-u`. The dev-workers' services already run with `LANG=C.UTF-8`, so this only
+  matters on hosts without a locale.
+- **Hub only:** dependency-safe message retention
+  ([Relay #167](https://git.chifor.me/cchifor/relay/pulls/167), migration 052). Row
+  deletion stays off unless `RELAY_MESSAGE_ROW_RETENTION=1`, which this estate does not
+  set; bodies are still cleared after 30 days as before.
+
+Rolling the hub back to v0.7.5 is an image revert. Migration 052 only adds a table
+and indexes. The v0.7.5 migrator applies just its own unrecorded files, and nothing
+in v0.7.5 reads the new objects.
+
+Earlier releases, for reference:
 
 [Relay #161](https://git.chifor.me/cchifor/relay/pulls/161) describes what v0.7.3 adds;
 [Relay #159](https://git.chifor.me/cchifor/relay/pulls/159) describes v0.7.2, which it
