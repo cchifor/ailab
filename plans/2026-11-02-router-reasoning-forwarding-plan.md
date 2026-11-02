@@ -1,5 +1,13 @@
 # llm-router: forward the upstream's reasoning (thinking) to the client
 
+## Codex Review
+
+- Round 2 still needs explicit protocol-specific accumulation, discarded-reasoning budget semantics, and rollback handling for saved histories.
+- Leading-only forwarding fits the existing writer, including tool/refusal boundaries and incomplete terminals; the proposed input subset covers the supplied Codex echo.
+- Remaining coverage gaps include empty-argument tool announcements, failures after reasoning has closed, backpressure during early closure, and transport regressions with forwarding disabled.
+- The preflight-budget objection is dropped: one leading item removes the segment-growth concern, and preserving the existing post-send guard is reasonable.
+- Reviewed read-only against `08c0fc3`; concurrent working-tree edits were excluded. No implementation, SDK probes, or verification gates were run.
+
 ## Context
 
 The owner asked (2026-11-02) for the router to forward a local model's thinking, so it behaves like a pass-through
@@ -68,14 +76,17 @@ Facts verified for this plan (do not re-derive):
      before the first visible delta (text, refusal or tool) is written, or, if the stream ends with only reasoning,
      before `response.completed` / `response.incomplete`. Usage events neither close nor split it. On
      `response.failed` it is not closed with done events; the failed snapshot lists it as it stood.
+     <!-- codex: round-2: Keep item closure separate from routerTerminal: setting that flag when reasoning closes before visible output would change shutdown handling for a response that is still running (packages/plugins/api-openai/index.ts:479; packages/plugins/api-openai/index.ts:541). Close reasoning-only completed/incomplete output inside the normal terminal path at line 517, and leave the failure path at line 535 snapshot-only. -->
    - Reasoning that arrives after visible output began is not forwarded on this protocol (counted in
      `reasoningChars`). vLLM's and llama.cpp's reasoning parsers emit reasoning before the answer; interleaved
      segments would need open-item bookkeeping this release does not take on.
    - The accumulator gains `reasoning: string` and a tagged order entry `'reasoning'` that is always first; the terminal
      done loop skips the already-closed reasoning item; `response.completed`, `response.incomplete`, `response.failed`
      and non-streaming bodies list it first. Message/tool grouping is unchanged.
+     <!-- codex: round-2: accumulate() is shared by both protocols and both streaming modes, so specify its protocol-dependent retention policy rather than only filtering Responses deltas (packages/plugins/api-openai/index.ts:236; packages/plugins/api-openai/index.ts:438; packages/plugins/api-openai/index.ts:513). Responses must retain only the leading text and never append to it after closure, while Chat must retain every segment; otherwise terminal/non-streaming snapshots can resurrect suppressed reasoning or Chat can lose later segments. -->
    - Budget: reasoning counts in the existing stream guard (same code units, same post-send check) and in the
      non-streaming size check; accounts that do not forward never carry reasoning, so their thresholds are unchanged.
+     <!-- codex: round-2: Decide explicitly whether discarded post-visible reasoning counts toward the Responses stream budget: the current streaming guard sums retained fields, whereas non-streaming charges every serialized event before accumulation (packages/plugins/api-openai/index.ts:438; packages/plugins/api-openai/index.ts:513). If all reasoning is to count, track its cumulative length separately from the retained leading string, without storing the discarded text. -->
    - Progress events (#131) are unchanged: once the reasoning item opens, the stream carries deltas, not progress. Limit:
      one reasoning delta followed by a long ping-only phase gets no further progress events (keepalive comments only);
      broadening progress after output is a separate design.
@@ -106,19 +117,24 @@ Facts verified for this plan (do not re-derive):
      them, or they select other event types).
    - Activity: the `attempt.failed` explanation says "nothing was sent" only when `emitted` is false; Activity and
      `explain_request` show `reasoningChars` as a count.
+   <!-- codex: round-2: The consumer audit still misses scripts/validate-shared-routes.mjs:45, which accepts any output item's content[].text as an answer; a reasoning-only completed response will now pass that check. Require a message/output_text part there so the validation continues to prove visible answer output. -->
 
 ## Rollout (owner decision R1)
 
 The image changes nothing for requests and outputs that were accepted before, until an account sets
 `forwardReasoning: true`. The parser does newly accept reasoning-bearing histories (point 6) for every caller.
 
+<!-- codex: round-2: The Activity correction is another global behavior change: retryable failures after text, tools or usage will lose the old explanation even on accounts without forwarding (apps/web/pages/Activity.tsx:132; packages/modules/inference/index.ts:641; packages/modules/inference/index.ts:701). Keep the correction, but disclose it alongside parser acceptance rather than retaining this unconditional compatibility claim. -->
+
 - **Proposal R1:** after the roll, `forwardReasoning: true` on `lan-192.168.0.28-18020` (cloud2) and
   `lan-192.168.0.26-8080` (cloud3) through the admin API (`If-Match`, read-back, revision recorded). Every caller and
   model on those accounts then gets reasoning: the dev workers' Codex (Responses), the Assistant, and chat clients (dsh,
   the platform eval key) as `reasoning_content` deltas, the field they would get from vLLM directly. Those requests also
   lose failover once reasoning has started (point 3).
+  <!-- codex: round-2: Distinguish internal event delivery from user-visible reasoning here: the Assistant, admin-bridge and test_route still discard the payload (packages/plugins/agent-llm/loop.ts:210; packages/plugins/admin-bridge/index.ts:123; packages/plugins/router-engine/tools.ts:29). The statement that every caller gets reasoning otherwise contradicts point 7 and the excluded Assistant thinking UI. -->
 - **Rollback:** first `forwardReasoning: false` on those accounts (`If-Match`, read-back), then the image. The old image
   does not strip the saved field until a validated config write, so the flag must be turned off explicitly.
+  <!-- codex: round-2: Flag-off stops new reasoning but does not remove it from clients' saved histories: rolling back the parser makes non-Codex Responses replays and chat assistant replays fail with 400 again (packages/modules/protocol/index.ts:8; packages/modules/protocol/index.ts:62). Specify a rollback image retaining input compatibility or a documented history-cleanup/new-conversation procedure, and verify a history produced before rollback; Codex's existing adaptation already handles its own replay. -->
 
 ## Out of scope
 
@@ -145,13 +161,17 @@ llm-router (branch `feat/forward-reasoning` off `main` `08c0fc35`):
    - adapter: unset / false / true; both aliases (precedence), null/empty/non-string, reasoning+text+tool in one
      chunk (reasoning first), reasoning-only replies, fragmented SSE frames, non-streaming; usage and finish unchanged;
      with the flag off, the event sequence is identical to today's for the same body;
+     <!-- codex: round-2: Adapter event equality does not cover regressions introduced by changing the shared accumulator and terminal loop (packages/plugins/api-openai/index.ts:236; packages/plugins/api-openai/index.ts:517). Add unset/false HTTP regressions for both protocols and modes, including refusal/tool order, incomplete and failed Responses, and unchanged native output. -->
    - Responses streaming: reasoning item 0 then message/tool items at 1..n; the three done events exactly once, before
      the first visible item's `output_item.added`; reasoning-only replies closed before `response.completed` and before
      `response.incomplete`; not closed before `response.failed`; usage between reasoning deltas; reasoning after output
      not forwarded but counted; ids and indexes equal the terminal snapshot; sequence numbers strictly increasing; no
      delta after its item's done;
+     <!-- codex: round-2: Explicitly test a tool announcement with empty arguments, refusal-first output, and reasoning sharing an upstream chunk with each: tool metadata already opens a visible item, so closure cannot wait for non-empty arguments (packages/plugins/api-openai/index.ts:508; tests/codex-chat-routes.test.ts:36). Also test visible output followed by the first reasoning event, which must never create a reasoning item. -->
+     <!-- codex: round-2: Qualify “not closed before response.failed” to a reasoning item still open when the failure occurs: reasoning → visible output → error must retain its earlier close exactly once, with the same text in the failed snapshot (packages/plugins/api-openai/index.ts:535). Cover both length and content_filter incomplete endings, and assert that the failure handler never starts or repeats the close sequence. -->
    - non-streaming Responses body; chat streaming (canonical field, order of role/finish/usage/[DONE]) and
      non-streaming; true-with-no-reasoning adds no empty field or item;
+     <!-- codex: round-2: Exercise reasoning A → text/tool → reasoning B in both modes: Responses snapshots must contain only A, while Chat's accumulated reasoning must contain A+B (packages/plugins/api-openai/index.ts:438; packages/plugins/api-openai/index.ts:513). Checking only streamed delta suppression would miss leakage through the terminal or non-streaming body. -->
    - input: a non-Codex Responses history echoing the router's reasoning items and Codex's echo shape is accepted, the
      upstream never receives reasoning, calls stay grouped; encrypted items, other part types, reasoning fields on
      Responses messages and on non-assistant chat roles are refused; chat assistant `reasoning_content`/`reasoning`
@@ -161,6 +181,7 @@ llm-router (branch `feat/forward-reasoning` off `main` `08c0fc35`):
      the visible-output limit and never counts reasoning; capture holds no reasoning;
    - progress: before the first reasoning item as in #131, none after; the budget counts reasoning (non-ASCII, at the
      boundary);
+     <!-- codex: round-2: Add controlled write/drain tests during a reasoning delta and the early close events, including disconnect and maxDurationMs while full-text done frames await drain (packages/plugins/api-openai/index.ts:469; tests/stream-timeouts.test.ts:679). Assert no next provider read or visible-item write while blocked, and no attempt to finish a partially written close sequence after cancellation; ordinary SSE decoding does not exercise this new path. -->
    - admin-bridge skips reasoning in its size charge; Activity's "nothing was sent" only when `emitted` is false.
 2. **CI gates in docker** (node:24, pnpm 10.32.1, `pnpm install --frozen-lockfile`): typecheck, test, build,
    build:lib, test:production, check:architecture on the candidate, against the `main` baseline; PostgreSQL auth tier
@@ -184,8 +205,5 @@ llm-router (branch `feat/forward-reasoning` off `main` `08c0fc35`):
 - **Volume:** a 20k-token thinking phase is roughly 80 KB of text plus SSE framing and the repeated full text in the
   done and terminal events; transcripts that log raw reasoning grow. Measured sizes go in the budget tests.
 - **Chat clients on enabled accounts** get `reasoning_content` deltas; gated per account by R1.
-
-<!-- codex: The current stream guard runs after sending and accumulating the event, and response.failed then serializes that accumulator (packages/plugins/api-openai/index.ts:501; packages/plugins/api-openai/index.ts:513; packages/plugins/api-openai/index.ts:535). Define preflight charging for reasoning, include retained segment/item overhead, and maintain incremental totals rather than rescanning every segment per delta; otherwise many tiny alternating segments defeat the intended memory/work bound. -->
-<!-- opus-pushback: With one leading reasoning segment there are no "many tiny alternating segments", and the post-send check is the existing semantics for every other event type (text, tools); changing it to preflight for reasoning alone would make the guard inconsistent. Reasoning is counted in the same running total, so a runaway ends at the same 8 MiB bound one event late, exactly as text does today. -->
 
 <!-- codex-review-status: complete -->
