@@ -188,7 +188,7 @@ spec:
         # else. Generating it here rather than storing a Secret keeps key material out of git and
         # out of the API server for a value nothing else needs to know.
         - name: seed-settings
-          image: docker.io/searxng/searxng@sha256:63f50f92d266cd2859193ed46c10de9f39d4e44fc24344b2f2f1d2a80ba3689c
+          image: docker.io/searxng/searxng@sha256:9f59681775ba8d99744796e161d46dfecc771b972572edddb31d92dcfafc12b7
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -213,7 +213,7 @@ spec:
             limits:   { cpu: 200m, memory: 128Mi }
       containers:
         - name: searxng
-          image: docker.io/searxng/searxng@sha256:63f50f92d266cd2859193ed46c10de9f39d4e44fc24344b2f2f1d2a80ba3689c
+          image: docker.io/searxng/searxng@sha256:9f59681775ba8d99744796e161d46dfecc771b972572edddb31d92dcfafc12b7
           env:
             # The PUBLIC origin. MEASURED against the running instance rather than assumed, because
             # the list of what this value actually reaches is shorter than it looks. SearXNG stamps
