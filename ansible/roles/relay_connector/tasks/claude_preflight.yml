@@ -1,0 +1,175 @@
+---
+# Read-only half of Relay messaging for Claude Code (docs/runbooks/relay-connectors.md, "Claude
+# Code messaging"). Imported at the END of validate.yml, so it runs before anything on the worker
+# changes: the binary, the unit, the service and both Claude Code files. It plans the MCP change,
+# proves the CLI that would make it is usable, and dry-runs the settings.json merge. tasks/claude.yml
+# then applies the plan after the binary is installed and its version verified.
+
+- name: Reject an unsafe Claude Code path or hook timeout
+  ansible.builtin.assert:
+    that:
+      - relay_connector_claude_bin is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - "'/../' not in relay_connector_claude_bin + '/' and '/./' not in relay_connector_claude_bin + '/'"
+      - (relay_connector_claude_hook_timeout | string) is match('^[1-9][0-9]?$')
+    quiet: true
+    fail_msg: relay_connector_claude_bin must be a plain absolute path and relay_connector_claude_hook_timeout 1-99 seconds.
+
+- name: Derive the pinned connector's Claude Code entry points
+  ansible.builtin.set_fact:
+    relay_connector_claude_mcp:
+      type: stdio
+      command: "{{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector"
+      args: [--state, "{{ relay_connector_state_file }}", mcp]
+    # files/claude_relay_hook.py, piped to the interpreter Ansible runs its own modules with on this
+    # host (an inventory path, else the discovered one): argv, no shell, nothing left behind.
+    relay_connector_claude_hook_argv:
+      - >-
+        {{ ansible_python_interpreter
+           if (ansible_python_interpreter | default('') | string) is match('^/')
+           else ansible_facts.discovered_interpreter_python | default('/usr/bin/python3') }}
+      - "-"
+      - --settings
+      - "{{ relay_connector_home }}/.claude/settings.json"
+      - --state
+      - "{{ relay_connector_claude_messaging }}"
+      - --command
+      - "{{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector --state {{ relay_connector_state_file }} inbox-hint"
+      - --timeout
+      - "{{ relay_connector_claude_hook_timeout | int | string }}"
+
+- name: Inspect the user's Claude Code configuration
+  ansible.builtin.stat:
+    path: "{{ relay_connector_home }}/.claude.json"
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  register: relay_connector_claude_config_stat
+
+# ~/.claude.json carries account details, and an API key on a key login: never display it.
+- name: Read the user's Claude Code configuration
+  ansible.builtin.slurp:
+    src: "{{ relay_connector_home }}/.claude.json"
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  register: relay_connector_claude_config
+  no_log: true
+  when: relay_connector_claude_config_stat.stat.exists
+
+# A missing file means no user-scope servers yet. One that does not parse fails here, with the JSON
+# error and not its content. So does one that parses but is not the shape the CLI keeps (a top level
+# other than an object, or an mcpServers or mcpServers.relay that is not one): otherwise `present`
+# would only meet it in `claude mcp add-json`, after the binary and service changed, and `absent`
+# could report success without knowing what is registered.
+- name: Require the shape Claude Code keeps its configuration in
+  ansible.builtin.assert:
+    that:
+      - config is mapping
+      - config.mcpServers is not defined or config.mcpServers is mapping
+      - >-
+        config.mcpServers is not defined or config.mcpServers.relay is not defined
+        or config.mcpServers.relay is mapping
+    quiet: true
+    fail_msg: >-
+      {{ relay_connector_home }}/.claude.json must be a JSON object whose mcpServers, and
+      mcpServers.relay, are objects where present. Repair the file, then converge again.
+  vars:
+    config: >-
+      {{ (relay_connector_claude_config.content | b64decode | from_json)
+         if relay_connector_claude_config.content is defined else {} }}
+
+# The CLI stores exactly type/command/args, so those are compared.
+- name: Plan the user-scope relay MCP change
+  ansible.builtin.set_fact:
+    relay_connector_claude_mcp_remove: "{{ ('relay' in servers) and not (wanted and matches) }}"
+    relay_connector_claude_mcp_add: "{{ wanted and not matches }}"
+  vars:
+    wanted: "{{ relay_connector_claude_messaging == 'present' }}"
+    config: >-
+      {{ (relay_connector_claude_config.content | b64decode | from_json)
+         if relay_connector_claude_config.content is defined else {} }}
+    servers: "{{ config.mcpServers | default({}) }}"
+    matches: >-
+      {{ servers.relay is defined and servers.relay is mapping
+         and (servers.relay.type | default('stdio')) == relay_connector_claude_mcp.type
+         and (servers.relay.command | default('')) == relay_connector_claude_mcp.command
+         and (servers.relay.args | default([])) == relay_connector_claude_mcp.args }}
+
+# Whatever this run removes (a replacement removes before it adds, since add-json refuses an
+# existing name; `absent` only removes). If a later step fails, claude.yml puts this definition
+# back. It is the user's, so it may carry env secrets.
+- name: Keep the definition this run would remove
+  ansible.builtin.set_fact:
+    relay_connector_claude_mcp_previous: >-
+      {{ (relay_connector_claude_config.content | b64decode | from_json).mcpServers.relay
+         if relay_connector_claude_mcp_remove else {} }}
+  no_log: true
+
+- name: Release the Claude Code configuration bytes
+  ansible.builtin.set_fact:
+    relay_connector_claude_config: {}
+  no_log: true
+
+# As the user, not as root: root may execute a file its owner cannot. Only needed when the plan
+# changes the MCP entry; `absent` with nothing registered works without Claude Code installed.
+- name: Inspect the Claude Code CLI as the user who runs it
+  ansible.builtin.stat:
+    path: "{{ relay_connector_claude_bin }}"
+    follow: true  # The npm prefix's bin/claude is a symlink into lib/node_modules.
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  register: relay_connector_claude_bin_stat
+  when: relay_connector_claude_mcp_remove or relay_connector_claude_mcp_add
+
+# An x bit is not enough: the npm CLI starts through `#!/usr/bin/env node`, and claude.yml runs it
+# under become with sudo's secure_path. So start it here exactly as claude.yml will (same user,
+# environment and directory); `--version` changes nothing.
+- name: Start the Claude Code CLI the way the change will
+  ansible.builtin.command:
+    argv: ["{{ relay_connector_claude_bin }}", --version]
+    chdir: "{{ relay_connector_home }}"
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  environment:
+    HOME: "{{ relay_connector_home }}"
+  register: relay_connector_claude_bin_run
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  when:
+    - relay_connector_claude_mcp_remove or relay_connector_claude_mcp_add
+    - relay_connector_claude_bin_stat.stat.isreg | default(false)
+    - relay_connector_claude_bin_stat.stat.executable | default(false)
+
+- name: Require a Claude Code CLI the user can run before changing the relay MCP server
+  ansible.builtin.assert:
+    that:
+      - relay_connector_claude_bin_stat.stat.isreg | default(false)
+      - relay_connector_claude_bin_stat.stat.executable | default(false)
+      - relay_connector_claude_bin_run.rc | default(1) == 0
+    quiet: true
+    fail_msg: >-
+      {{ relay_connector_user }} cannot run a Claude Code CLI at {{ relay_connector_claude_bin }},
+      which is needed to {{ 'register' if relay_connector_claude_mcp_add else 'remove' }} the relay
+      MCP server. {{ started_note }}Install Claude Code for the user (the dev_worker role does) or set
+      relay_connector_claude_bin.
+  vars:
+    started_note: >-
+      {{ ('`' ~ relay_connector_claude_bin ~ ' --version` failed: '
+          ~ ((relay_connector_claude_bin_run.stderr | default('', true)
+              or relay_connector_claude_bin_run.msg | default('')) | trim | truncate(300)) ~ '. ')
+         if relay_connector_claude_bin_run.rc is defined and relay_connector_claude_bin_run.rc != 0 else '' }}
+  when: relay_connector_claude_mcp_remove or relay_connector_claude_mcp_add
+
+# Dry run of the settings.json merge, as the user: an unparsable or misshapen file fails here. So
+# does a change the merge would have to write but could not keep (another owner, a group the user
+# is not in, a POSIX ACL, a directory default ACL) or could not make (directory or file not
+# writable). A file already converged passes whatever its owner or ACL: nothing will be written.
+- name: Dry-run the Relay inbox hook merge in the user's Claude Code settings
+  ansible.builtin.command:
+    argv: "{{ relay_connector_claude_hook_argv + ['--check'] }}"
+    stdin: "{{ lookup('ansible.builtin.file', 'claude_relay_hook.py') }}"
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  environment:
+    HOME: "{{ relay_connector_home }}"
+  check_mode: false
+  changed_when: false

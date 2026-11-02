@@ -135,3 +135,7 @@
     group: "{{ relay_connector_artifact_group }}"
     mode: "0644"
   when: relay_connector_manage_service | bool and not ansible_check_mode
+
+- name: Converge Relay messaging for the user's Claude Code sessions
+  ansible.builtin.import_tasks: claude.yml
+  when: relay_connector_claude_messaging != 'unmanaged'

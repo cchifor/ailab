@@ -18,6 +18,16 @@ relay_connector_state_file: ""
 # Exact existing service settings, reviewed per worker; never written to identity.
 relay_connector_name: ""
 relay_connector_sockets: []
+# Relay messaging for the execution user's Claude Code sessions (tasks/claude.yml): the connector's
+# `mcp` stdio server registered at user scope as `relay`, plus a UserPromptSubmit hook running
+# `inbox-hint`. `unmanaged` leaves both alone; `present` needs a >= 0.8.0 release pin; `absent`
+# removes both and keeps everything else the user configured.
+relay_connector_claude_messaging: unmanaged
+# The user's Claude Code CLI. Only it writes ~/.claude.json; running sessions rewrite that file too.
+relay_connector_claude_bin: "{{ relay_connector_home }}/.npm-global/bin/claude"
+# Seconds Claude Code waits for `inbox-hint` before continuing the prompt without it (it answers in
+# under 300 ms and never fails the prompt).
+relay_connector_claude_hook_timeout: 2
 # v0.7.7 release manifest observed 2026-11-02; change through release review.
 relay_connector_release:
   version: 0.7.7

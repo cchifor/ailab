@@ -16,6 +16,27 @@
       - relay_connector_sockets | length <= 16
     quiet: true
 
+- name: Require a known Claude Code messaging state
+  ansible.builtin.assert:
+    that:
+      - relay_connector_claude_messaging in ['unmanaged', 'present', 'absent']
+    fail_msg: relay_connector_claude_messaging must be unmanaged, present or absent.
+    quiet: true
+
+# The `mcp` and `inbox-hint` subcommands first ship in 0.8.0. Checked here, before the binary is
+# installed, so a pin that cannot serve them changes nothing on the worker.
+- name: Require a connector release that serves Claude Code messaging
+  ansible.builtin.assert:
+    that:
+      - relay_connector_release.version is version('0.8.0', '>=')
+    fail_msg: >-
+      relay_connector_claude_messaging: present needs relay-connector 0.8.0 or later (the mcp and
+      inbox-hint subcommands), but this host pins {{ relay_connector_release.version }}. Repin
+      relay_connector_release to a reviewed 0.8.0+ release in the same change, or leave messaging
+      unmanaged.
+    quiet: true
+  when: relay_connector_claude_messaging == 'present'
+
 - name: Resolve the existing execution account before deriving paths or ownership
   ansible.builtin.getent:
     database: passwd
@@ -177,3 +198,10 @@
     quiet: true
     fail_msg: Staging requires the selected connector inactive/dead with no queued job and a reachable user manager.
   when: not (relay_connector_manage_service | bool)
+
+# Last, once every other input is known good, and still before any write: a malformed Claude Code
+# file, an unusable CLI or an unkeepable settings.json fails here, before the binary, the unit or
+# the service changes.
+- name: Preflight Claude Code messaging without changing anything
+  ansible.builtin.import_tasks: claude_preflight.yml
+  when: relay_connector_claude_messaging != 'unmanaged'
