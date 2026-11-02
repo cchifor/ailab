@@ -128,7 +128,7 @@ else: sys.exit('unexpected service command: '+repr(args))
             "    fields=out.split(':'); fields[5]=state['passwdHome']; fields[3]='0'; out=':'.join(fields)\n"+
             "print(out)\n")
         getent.chmod(0o755)
-        # Claude Code's CLI, limited to the two calls the role may make. Like the real one (2.1.316),
+        # Claude Code's CLI, limited to the calls the role may make. Like the real one (2.1.316),
         # it stores exactly the JSON it is given and refuses to add a name that exists or remove one
         # that does not. claude-fail.json injects one-shot failures, {"add-json": 1, "remove": 1}, and
         # {"lock-claude-dir": 1} makes ~/.claude read-only after the next successful call.
@@ -139,6 +139,9 @@ else: sys.exit('unexpected service command: '+repr(args))
 args = sys.argv[1:]
 with pathlib.Path(LOG_PATH).open('a') as log:
     log.write(json.dumps(dict(args=args, home=os.environ.get('HOME'), cwd=os.getcwd()))+'\\n')
+if args == ['--version']:
+    print('2.1.316 (Claude Code)')
+    sys.exit(0)
 config = pathlib.Path(os.environ['HOME'])/'.claude.json'
 data = json.loads(config.read_text()) if config.exists() else {}
 servers = data.setdefault('mcpServers', {})
@@ -214,7 +217,10 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
         self.assertNotIn(USER_CLAUDE_CONFIG['primaryApiKey'], output)
         self.assertEqual(result.returncode == 0, success, output[-7000:])
         self.commands = [json.loads(line) for line in self.command_log.read_text().splitlines()]
-        self.claude_calls = [json.loads(line) for line in self.claude_log.read_text().splitlines()]
+        calls = [json.loads(line) for line in self.claude_log.read_text().splitlines()]
+        # The preflight's `claude --version` starts, apart from the calls that change something.
+        self.claude_starts = [call for call in calls if call['args'] == ['--version']]
+        self.claude_calls = [call for call in calls if call['args'] != ['--version']]
         if not values['relay_connector_manage_service']:
             self.assertTrue(all(c[0] == 'list-units' for c in self.commands), self.commands)
         return output
@@ -406,6 +412,8 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
         self.assertEqual((args[:5], len(args)), (['mcp', 'add-json', '--scope', 'user', 'relay'], 6))
         self.assertEqual(json.loads(args[5]), self.expected_mcp(self.claude_artifact))
         self.assertEqual((self.claude_calls[0]['home'], self.claude_calls[0]['cwd']), (str(self.home),) * 2)
+        # The preflight started the CLI once, the way the change then ran it.
+        self.assertEqual([(c['home'], c['cwd']) for c in self.claude_starts], [(str(self.home),) * 2])
         config = json.loads(self.claude_json.read_text())
         self.assertEqual(config['mcpServers']['relay'], self.expected_mcp(self.claude_artifact))
         self.assertEqual({k: v for k, v in config.items() if k != 'mcpServers'},
@@ -419,7 +427,7 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
         self.assertEqual(self.settings.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.settings.stat().st_uid, os.getuid())
         self.assertRegex(self.role(self.present), r'changed=0\s')
-        self.assertEqual(self.claude_calls, [])
+        self.assertEqual((self.claude_calls, self.claude_starts), ([], []))  # Nothing to change: no CLI.
 
     def test_12_claude_new_artifact_replaces_mcp_and_hook(self):
         self.seed_claude()
@@ -482,24 +490,35 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
         values = {**self.pin(upgrade, '0.8.0'), 'relay_connector_manage_service': True,
                   'relay_connector_claude_messaging': 'present'}
         dry_run = "Dry-run the Relay inbox hook merge in the user's Claude Code settings"
+        shape = 'Require the shape Claude Code keeps its configuration in'
+        shape_message = 'must be a JSON object whose mcpServers, and mcpServers.relay, are objects'
         cases = [
             (self.settings, '{"model": "opus",', dry_run, 'is not valid JSON'),
             (self.settings, '{"hooks": {"UserPromptSubmit": [{"hooks": {}}]}}', dry_run,
              "is not an object with a 'hooks' array"),
             # ~/.claude.json is only read and never displayed: role() asserts its API key stays out.
-            (self.claude_json, json.dumps(USER_CLAUDE_CONFIG)[:-1], 'Plan the user-scope relay MCP change',
-             "Expecting ',' delimiter"),
+            (self.claude_json, json.dumps(USER_CLAUDE_CONFIG)[:-1], shape, "Expecting ',' delimiter"),
         ]
+        # Parses, but not as the CLI keeps it: `claude mcp add-json` would only fail after the
+        # binary and service changed, and `absent` cannot tell what is registered.
+        cases += [(self.claude_json, content, shape, shape_message) for content in [
+            'null', '[]', '"text"', json.dumps({**USER_CLAUDE_CONFIG, 'mcpServers': []}),
+            json.dumps({**USER_CLAUDE_CONFIG, 'mcpServers': None}),
+            json.dumps({**USER_CLAUDE_CONFIG, 'mcpServers': {'other': USER_MCP, 'relay': 'x'}})]]
         for path, content, task, message in cases:
-            self.seed_claude()
-            path.write_text(content)
-            before = self.snapshot()
-            out = self.role(values, success=False)
-            self.assertEqual(self.failed_task(out), task)
-            self.assertIn(message, out)
-            self.assertEqual((self.claude_calls, self.commands), ([], []))
-            self.assertEqual(self.snapshot(), before)  # Binary, unit, receipt and both Claude files.
-            self.assertFalse(Path(self.connector_path(upgrade)).parent.exists())
+            for state in ('present', 'absent'):
+                with self.subTest(path=path.name, content=content[:40], state=state):
+                    self.seed_claude()
+                    path.write_text(content)
+                    before = self.snapshot()
+                    out = self.role({**values, 'relay_connector_claude_messaging': state}, success=False)
+                    self.assertEqual(self.failed_task(out), task)
+                    self.assertIn(message, out)
+                    self.assertEqual((self.claude_calls, self.commands), ([], []))
+                    # Only a planned MCP change starts the CLI, and only `--version` (read-only).
+                    self.assertEqual(len(self.claude_starts), int(path == self.settings and state == 'present'))
+                    self.assertEqual(self.snapshot(), before)  # Binary, unit, receipt and both Claude files.
+                    self.assertFalse(Path(self.connector_path(upgrade)).parent.exists())
 
     def test_16_claude_unmanaged_touches_nothing(self):
         self.seed_claude()
@@ -513,7 +532,7 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
         self.assertRegex(self.role(self.claude_values), r'changed=0\s')
         self.assertRegex(self.role({**self.claude_values, 'relay_connector_claude_bin': '/nonexistent claude'}),
             r'changed=0\s')
-        self.assertEqual(self.claude_calls, [])
+        self.assertEqual((self.claude_calls, self.claude_starts), ([], []))
         self.assertEqual(self.snapshot(), before)
 
 
@@ -529,6 +548,19 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
             self.assertEqual(self.failed_task(out), cli_task)
             self.assertEqual(self.claude_calls, [])
             self.assertEqual(self.snapshot(), before)
+        # An x bit is not enough: a CLI whose interpreter the user's environment cannot find (the npm
+        # CLI's `#!/usr/bin/env node` under sudo's secure_path) fails before the release changes.
+        no_node = self.root/'claude-without-its-interpreter'
+        no_node.write_text('#!/usr/bin/env relay-test-missing-node\n')
+        no_node.chmod(0o755)
+        self.seed_claude()
+        before = self.snapshot()
+        out = self.role({**self.present, 'relay_connector_claude_bin': str(no_node)}, success=False)
+        self.assertEqual(self.failed_task(out), cli_task)
+        self.assertIn(f'`{no_node} --version` failed', out)
+        self.assertIn('relay-test-missing-node', out)
+        self.assertEqual(self.claude_calls, [])
+        self.assertEqual(self.snapshot(), before)
         # `absent` with a registered server but no CLI fails before the hook is touched.
         self.seed_claude()
         self.role(self.present)
@@ -667,10 +699,54 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
             claude_dir.chmod(0o700)
             self.claude_fail.unlink(missing_ok=True)
 
+    def test_20_claude_converged_settings_never_block_a_run(self):
+        # Settings the hook helper could not rewrite faithfully (a POSIX ACL on the file, a default
+        # ACL on ~/.claude) block only a run that has to rewrite them, never one with nothing to do.
+        self.seed_claude()
+        self.role(self.present)
+        claude_dir = self.settings.parent
+        try:
+            set_acl(self, self.settings)
+            set_acl(self, claude_dir, 'system.posix_acl_default')
+            self.assertRegex(self.role(self.present), r'changed=0\s')
+            self.assertEqual(self.relay_hooks(), [self.expected_hook(self.claude_artifact)])
+            repinned = self.root/'connector-bin-0.8.0-acl'
+            repinned.write_bytes(self.claude_artifact.read_bytes()+b'# acl release fixture\n')
+            repinned.chmod(0o755)
+            before = self.snapshot()
+            out = self.role({**self.pin(repinned, '0.8.0'), 'relay_connector_claude_messaging': 'present'},
+                            success=False)
+            self.assertEqual(self.failed_task(out), "Dry-run the Relay inbox hook merge in the user's Claude Code settings")
+            self.assertIn('POSIX ACL', out)
+            self.assertEqual((self.claude_calls, self.snapshot()), ([], before))
+            self.assertFalse(Path(self.connector_path(repinned)).parent.exists())
+        finally:
+            for path, name in ((self.settings, 'system.posix_acl_access'), (claude_dir, 'system.posix_acl_default')):
+                with contextlib.suppress(OSError):
+                    os.removexattr(path, name)
+
+
+def set_acl(test, path, name='system.posix_acl_access'):
+    """Give `path` a minimal POSIX ACL, or skip `test` where the filesystem has none."""
+    # Version 2 of the Linux xattr format: user::rw- user:<self>:r-- group::r-- mask::r-- other::---.
+    undefined = 0xFFFFFFFF
+    acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', tag, perm, ident) for tag, perm, ident in [
+        (0x01, 6, undefined), (0x02, 4, os.geteuid()), (0x04, 4, undefined), (0x10, 4, undefined),
+        (0x20, 0, undefined)])
+    try:
+        os.setxattr(path, name, acl)
+    except OSError as error:
+        test.skipTest(f'no POSIX ACLs on this filesystem: {error}')
+
+
 RELAY_HINT = ('/opt/relay/connector/' + 'a' * 64 + '/relay-connector'
               ' --state /home/c4/.config/relay-connector/connector.json inbox-hint')
 RELAY_ENTRY = {'type': 'command', 'command': RELAY_HINT, 'timeout': 2}
 OLD_RELAY = {'type': 'command', 'command': '/opt/relay/connector/old/relay-connector --state /s inbox-hint'}
+# Settings each state must rewrite (an older Relay entry), and settings already converged for it.
+STALE = {'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [OLD_RELAY]}]}}
+CONVERGED = {'present': {'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [RELAY_ENTRY]}]}},
+             'absent': {'model': 'opus'}}
 
 
 class ClaudeRelayHookScript(unittest.TestCase):
@@ -857,41 +933,59 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual((status.st_uid, status.st_gid, status.st_mode & 0o7777), (os.geteuid(), groups[0], 0o640))
         self.assertIn('hooks', json.loads(self.settings.read_text()))
 
-    def test_a_target_owned_by_someone_else_is_refused(self):
-        if os.geteuid() == 0:
-            target = self.home/'foreign.json'
-            target.write_text('{"model": "opus"}')
-            os.chown(target, 65534, 65534)
-        else:
-            target = next((Path(p) for p in ('/etc/hostname', '/etc/passwd')
-                           if Path(p).is_file() and Path(p).stat().st_uid != os.geteuid()), None)
-            if target is None:
-                self.skipTest('no readable file owned by another user')
-        self.settings.parent.mkdir(mode=0o700)
-        self.settings.symlink_to(target)
-        self.assert_refused('is owned by uid', path=target)
-        self.assertTrue(self.settings.is_symlink())
+    def assert_left_alone(self, mode=0o644, **patches):
+        """A file already converged for either state is 'unchanged', untouched, whatever its owner
+        or ACLs: those only matter to a rewrite."""
+        for state, data in CONVERGED.items():
+            self.settings.write_text(json.dumps(data, indent=2))  # In place: the inode keeps its ACL.
+            self.settings.chmod(mode)
+            before = self.settings.read_bytes()
+            for check in (False, True):
+                code, out, err = self.main_in_process(state, check, **patches)
+                self.assertEqual((code, out), (0, 'unchanged\n'), (state, check, err))
+                self.assertEqual(self.settings.read_bytes(), before)
+
+    def main_in_process(self, state='present', check=False, geteuid=None):
+        """main() in this process, optionally as if this user had another uid."""
+        out, err = io.StringIO(), io.StringIO()
+        argv = ['--settings', str(self.settings), '--state', state, '--command', RELAY_HINT, '--timeout', '2']
+        with contextlib.ExitStack() as stack:
+            if geteuid is not None:
+                stack.enter_context(mock.patch.object(hook.os, 'geteuid', return_value=geteuid))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            code = hook.main(argv + (['--check'] if check else []))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_target_owned_by_someone_else_is_refused_only_when_it_would_change(self):
+        # As this script sees it, the file belongs to another uid (works as root and as a user).
+        other = os.geteuid() + 1
+        self.write(STALE)
+        before = self.settings.read_bytes()
+        for state in ('present', 'absent'):
+            for check in (False, True):
+                code, out, err = self.main_in_process(state, check, geteuid=other)
+                self.assertEqual((code, out), (1, ''), (state, check))
+                self.assertIn(f'it is owned by uid {os.geteuid()}, not by this user (uid {other})', err)
+                self.assertIn('nothing was written', err)
+                self.assertEqual(self.settings.read_bytes(), before)
+        self.assert_left_alone(geteuid=other)
 
     def set_acl(self, path, name='system.posix_acl_access'):
-        # Version 2 of the Linux xattr format: user::rw- user:<self>:r-- group::r-- mask::r-- other::---.
-        undefined = 0xFFFFFFFF
-        acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', tag, perm, ident) for tag, perm, ident in [
-            (0x01, 6, undefined), (0x02, 4, os.geteuid()), (0x04, 4, undefined), (0x10, 4, undefined),
-            (0x20, 0, undefined)])
-        try:
-            os.setxattr(path, name, acl)
-        except OSError as error:
-            self.skipTest(f'no POSIX ACLs on this filesystem: {error}')
+        set_acl(self, path, name)
 
-    def test_a_file_with_a_posix_acl_is_refused(self):
-        self.write({'model': 'opus'}, mode=0o640)
+    def test_a_file_with_a_posix_acl_is_refused_only_when_it_would_change(self):
+        self.write(STALE, mode=0o640)
         self.set_acl(self.settings)
         self.assert_refused('POSIX ACL')
+        self.assert_left_alone(mode=0o640)
+        self.assertIn('system.posix_acl_access', os.listxattr(self.settings))
 
-    def test_a_directory_default_acl_is_refused(self):
-        self.write({'model': 'opus'})
+    def test_a_directory_default_acl_is_refused_only_when_it_would_change(self):
+        self.write(STALE)
         self.set_acl(self.settings.parent, 'system.posix_acl_default')
         self.assert_refused('has a default POSIX ACL')
+        self.assert_left_alone()
         # A missing ~/.claude would be created under the default ACL of its parent: refused too.
         fresh = self.home/'fresh'
         fresh.mkdir()
@@ -1029,7 +1123,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         group = "is not an object with a 'hooks' array"
         entry = "hooks[0]' is not an object"
         no_type, no_command = "has no string 'type'", "is a command hook without a string 'command'"
-        timeout = "timeout' is not a positive integer"
+        timeout = "timeout' is not a positive number of seconds"
         cases = [('{"model": "opus",', 'not valid JSON'), ('', 'not valid JSON'), (b'\xff\xfe{}', 'not valid JSON'),
                  # JSON null is a document, not a missing file: never replaced with fresh settings.
                  ('null', 'top level is not a JSON object'), ('[]', 'top level is not a JSON object'),
@@ -1046,13 +1140,24 @@ class ClaudeRelayHookScript(unittest.TestCase):
             ('[{"hooks": [{"type": "command", "command": 1}]}]', no_command),
             ('[{"hooks": [{"type": "command", "command": ""}]}]', no_command),
             *(('[{"hooks": [{"type": "command", "command": "x", "timeout": %s}]}]' % value, timeout)
-              for value in ('0', '-1', '"5"', 'true', '1.5', 'null'))]]
+              for value in ('0', '-1', '-0.5', '0.0', '"5"', 'true', 'null', 'NaN', 'Infinity', '1e999'))]]
         for content, message in cases:
             with self.subTest(content=content):
                 self.settings.parent.mkdir(mode=0o700, exist_ok=True)
                 if isinstance(content, bytes): self.settings.write_bytes(content)
                 else: self.settings.write_text(content)
                 self.assert_refused(message)
+
+    def test_a_users_fractional_hook_timeout_is_valid_and_kept(self):
+        # Claude Code takes any positive number of seconds; the user's 1.5 must not block the role.
+        user_hook = {'type': 'command', 'command': '/usr/local/bin/user-prompt-hook', 'timeout': 1.5}
+        self.write({'hooks': {'UserPromptSubmit': [{'hooks': [user_hook]}]}})
+        result = self.run_hook()
+        self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
+        self.assertEqual(json.loads(self.settings.read_text())['hooks']['UserPromptSubmit'],
+                         [{'hooks': [user_hook]}, {'hooks': [RELAY_ENTRY]}])
+        self.assertEqual(self.run_hook(state='absent').stdout, 'changed\n')
+        self.assertEqual(json.loads(self.settings.read_text())['hooks']['UserPromptSubmit'], [{'hooks': [user_hook]}])
 
     def test_present_refuses_a_command_it_would_not_recognise_on_the_next_run(self):
         for command in ['/usr/bin/true', '/opt/relay/connector/x/relay-connector --state /s serve',

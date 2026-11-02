@@ -27,16 +27,18 @@ device, inode, size, mtime, ctime, owner, group, mode, extended attributes), eve
 merge are redone from the new state, up to three times.
 
 Errors (exit 1, nothing written, also under --check): a file that does not parse, or whose
-UserPromptSubmit hooks are not the documented shape; a file owned by another user, in a group this
-user cannot keep, or carrying a POSIX ACL; a directory with a default POSIX ACL (a new file would
-inherit it); a change that this user could not write (directory or file not writable). Prints
-`changed` or `unchanged`; --check reports without writing.
+UserPromptSubmit hooks are not the documented shape. And, only when the merge would change the
+file: a file owned by another user, in a group this user cannot keep, or carrying a POSIX ACL; a
+directory with a default POSIX ACL (a new file would inherit it); a directory or file this user
+cannot write. A file that is already converged is left alone whatever its owner or ACLs, so it never
+blocks a run. Prints `changed` or `unchanged`; --check reports without writing.
 """
 import argparse
 import copy
 import errno
 import hashlib
 import json
+import math
 import os
 import shlex
 import stat
@@ -77,8 +79,10 @@ def is_relay_inbox_hint(hook):
             and words[3] == 'inbox-hint')
 
 
-def _positive_int(value):
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+def _positive_seconds(value):
+    # Claude Code takes any positive number of seconds, 1.5 as well as 2.
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
 
 
 def validate(groups):
@@ -98,8 +102,8 @@ def validate(groups):
             if entry['type'] == 'command':
                 if not isinstance(entry.get('command'), str) or not entry['command']:
                     raise SettingsError(f"'{at}' is a command hook without a string 'command'")
-                if 'timeout' in entry and not _positive_int(entry['timeout']):
-                    raise SettingsError(f"'{at}.timeout' is not a positive integer")
+                if 'timeout' in entry and not _positive_seconds(entry['timeout']):
+                    raise SettingsError(f"'{at}.timeout' is not a positive number of seconds")
 
 
 def converge(settings, state, command=None, timeout=None):
@@ -302,12 +306,14 @@ def converge_file(target, args):
             return 'unchanged'
         current = None
     else:
-        check_metadata(found[0], found[2])
         current = parse(found[1])  # JSON null is a value like any other, not a missing file.
-    check_directory(os.path.dirname(target))
     desired = converge({} if found is None else current, args.state, args.command, args.timeout)
     if found is not None and desired == current:
         return 'unchanged'
+    # Only a rewrite has to keep the owner, group and ACLs, or be allowed at all.
+    if found is not None:
+        check_metadata(found[0], found[2])
+    check_directory(os.path.dirname(target))
     check_writable(target, found)
     if not args.check:
         replace(target, found, render(desired))

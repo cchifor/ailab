@@ -230,8 +230,9 @@ A repin moves both to the new binary in the same run: the old MCP entry is remov
 again, and exactly one Relay hook entry remains.
 
 **Order and failure handling.** Before anything on the worker changes (binary, unit, service),
-the role reads `~/.claude.json`, works out the MCP change, checks as the user that the CLI can run
-when that change needs it, and dry-runs the `settings.json` merge
+the role reads `~/.claude.json`, works out the MCP change, starts the CLI as the user
+(`claude --version`, with the same environment the change uses) when that change needs it, and
+dry-runs the `settings.json` merge
 (`tasks/claude_preflight.yml`). The dry run also proves the user can write the change: a
 read-only `~/.claude` or `settings.json` fails here. After the binary is verified, the role
 changes the MCP server and then writes the hook, as one unit. If any of those steps fails, it puts
@@ -273,11 +274,14 @@ hook under `/hooks` in a new session.
 `relay` server and the hook and keeps everything else. `unmanaged`, the default, leaves whatever
 is there alone, so going straight from `present` to `unmanaged` leaves both in place.
 
-The run fails before it changes anything if `~/.claude.json` or `settings.json` does not parse, or
-if the `UserPromptSubmit` hooks in `settings.json` are not in the documented shape. It also fails if a rewrite could not
-keep the file's metadata: another owner (a symlink target included), a group the user is not in,
-a POSIX ACL on the file, or a default ACL on `~/.claude` that a new file would inherit. Repair
-the file by hand; the role never overwrites a file it could not read. The rewrite keeps the mode
+The run fails before it changes anything if `~/.claude.json` or `settings.json` does not parse, if
+`~/.claude.json` is not an object whose `mcpServers` (and `mcpServers.relay`) are objects, or if
+the `UserPromptSubmit` hooks in `settings.json` are not in the documented shape. When the hook has
+to change, it also fails if a rewrite could not keep the file's metadata: another owner (a symlink
+target included), a group the user is not in, a POSIX ACL on the file, or a default ACL on
+`~/.claude` that a new file would inherit. A `settings.json` that is already converged is left
+alone whatever its owner or ACLs, so it never blocks an unrelated run. Repair the file by hand;
+the role never overwrites a file it could not read. The rewrite keeps the mode
 and the group. If the file's content or metadata changes between the role's read and its write,
 every check and the merge are redone from the new state (up to three times).
 
