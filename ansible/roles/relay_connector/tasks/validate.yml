@@ -16,6 +16,27 @@
       - relay_connector_sockets | length <= 16
     quiet: true
 
+- name: Require a known Claude Code messaging state
+  ansible.builtin.assert:
+    that:
+      - relay_connector_claude_messaging in ['unmanaged', 'present', 'absent']
+    fail_msg: relay_connector_claude_messaging must be unmanaged, present or absent.
+    quiet: true
+
+# The `mcp` and `inbox-hint` subcommands first ship in 0.8.0. Checked here, before the binary is
+# installed, so a pin that cannot serve them changes nothing on the worker.
+- name: Require a connector release that serves Claude Code messaging
+  ansible.builtin.assert:
+    that:
+      - relay_connector_release.version is version('0.8.0', '>=')
+    fail_msg: >-
+      relay_connector_claude_messaging: present needs relay-connector 0.8.0 or later (the mcp and
+      inbox-hint subcommands), but this host pins {{ relay_connector_release.version }}. Repin
+      relay_connector_release to a reviewed 0.8.0+ release in the same change, or leave messaging
+      unmanaged.
+    quiet: true
+  when: relay_connector_claude_messaging == 'present'
+
 - name: Resolve the existing execution account before deriving paths or ownership
   ansible.builtin.getent:
     database: passwd
@@ -43,6 +64,35 @@
     - "{{ relay_connector_artifact_dir }}"
     - "{{ relay_connector_source }}"
     - "{{ relay_connector_state_file }}"
+
+- name: Reject an unsafe Claude Code path or hook timeout
+  ansible.builtin.assert:
+    that:
+      - relay_connector_claude_bin is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - "'/../' not in relay_connector_claude_bin + '/' and '/./' not in relay_connector_claude_bin + '/'"
+      - (relay_connector_claude_hook_timeout | string) is match('^[1-9][0-9]?$')
+    quiet: true
+    fail_msg: relay_connector_claude_bin must be a plain absolute path and relay_connector_claude_hook_timeout 1-99 seconds.
+  when: relay_connector_claude_messaging != 'unmanaged'
+
+# The npm prefix's bin/claude is a symlink into lib/node_modules, so follow it.
+- name: Inspect the user's Claude Code CLI
+  ansible.builtin.stat:
+    path: "{{ relay_connector_claude_bin }}"
+    follow: true
+  register: relay_connector_claude_bin_stat
+  when: relay_connector_claude_messaging == 'present'
+
+- name: Require the Claude Code CLI before registering Relay messaging
+  ansible.builtin.assert:
+    that:
+      - relay_connector_claude_bin_stat.stat.isreg | default(false)
+      - relay_connector_claude_bin_stat.stat.executable | default(false)
+    quiet: true
+    fail_msg: >-
+      No executable Claude Code CLI at {{ relay_connector_claude_bin }}. Install Claude Code for
+      {{ relay_connector_user }} (the dev_worker role does) or set relay_connector_claude_bin.
+  when: relay_connector_claude_messaging == 'present'
 
 - name: Check reviewed tmux sockets
   ansible.builtin.assert:

@@ -207,6 +207,49 @@ until rollback qualification completes, then delete obsolete artifacts. Full
 decommission uses the existing host revoke/drain and service uninstall workflow;
 turning this role off only disables reconciliation.
 
+## Claude Code messaging
+
+From relay-connector 0.8.0, the Claude Code agents in a worker's tmux can take part in Relay
+messaging. `relay_connector_claude_messaging` (`ansible/roles/relay_connector/tasks/claude.yml`)
+sets up two things for the execution user. Both point at the pinned, content-addressed binary:
+
+- **The `relay` MCP server.** It runs `relay-connector --state <state file> mcp` over stdio and is
+  registered at user scope with the user's own CLI, `claude mcp add-json --scope user relay`. The
+  CLI writes `~/.claude.json`. The role only reads that file, because running sessions rewrite it.
+  The role does not use `/etc/claude-code/managed-mcp.json`: that file is exclusive and would turn
+  off every MCP server the user added.
+- **A `UserPromptSubmit` hook** in `~/.claude/settings.json`. It runs
+  `relay-connector --state <state file> inbox-hint` before each prompt, with a 2 s timeout
+  (`relay_connector_claude_hook_timeout`). `inbox-hint` prints hook JSON, answers within 300 ms
+  and never fails the prompt. The role replaces only Relay's entry
+  (`files/claude_relay_hook.py`). Every other key and hook in the file stays.
+
+A repin moves both to the new binary in the same run: the old MCP entry is removed and added
+again, and exactly one Relay hook entry remains.
+
+**Turn it on** per worker in `ansible/host_vars/dev-worker-N.yml`, in the same change as a
+reviewed 0.8.0 or later `relay_connector_release` pin:
+
+```yaml
+relay_connector_claude_messaging: present
+```
+
+With an older pin, `present` fails before anything is written. Claude Code must be installed for
+the user at `~/.npm-global/bin/claude` (`relay_connector_claude_bin`). Converge with `--check
+--diff` first; it reports both changes without making them.
+
+The role restarts nothing: not the connector service, not tmux, not an agent. A Claude session
+loads its MCP servers and hooks when it starts, so sessions that are already running join only
+once they are started again. To confirm, run `claude mcp get relay` as the user and look for the
+hook under `/hooks` in a new session.
+
+**Turn it off** with `relay_connector_claude_messaging: absent` and converge. The role removes the
+`relay` server and the hook and keeps everything else. `unmanaged`, the default, leaves whatever
+is there alone, so going straight from `present` to `unmanaged` leaves both in place.
+
+If `~/.claude.json` or `settings.json` does not parse, the run fails before it changes anything.
+Repair the file by hand; the role never overwrites a file it could not read.
+
 ## Qualification
 
 The dedicated workflow runs
@@ -216,5 +259,8 @@ fixtures, never host service commands, sudo or production credentials. Cases
 cover disabled mode, checksum/architecture rejection, identity preservation,
 private state, unapproved/cross-account inputs, staging safety, linger, drop-in
 denial, interrupted activation, idempotence, check mode and offline unit parsing.
-Set `TMPDIR` under `/workspace` for local runs. Real estate convergence and
+For Claude Code messaging, a strict fake `claude` CLI on `PATH` keeps `~/.claude.json`. The cases
+cover the 0.8.0 gate before any write, registration and the hook alongside the user's own settings,
+a repin, `absent`, check mode, unparsable files and `unmanaged`. Unit tests cover
+`claude_relay_hook.py` on its own. Set `TMPDIR` under `/workspace` for local runs. Real estate convergence and
 logout/reboot evidence are operator acceptance work.
