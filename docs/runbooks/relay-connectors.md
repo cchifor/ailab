@@ -101,8 +101,15 @@ cannot run against schema 56.
 
   Data written since the deploy is lost.
 
-**v0.8.0** (2026-11-03, run 118693, source `04960c3b`, hub `sha256:f2c3e1be…`) added the Conversations page, the
-tmux messaging path and read-only terminal Chat. v0.9.0 removes the last two.
+**v0.8.0** (2026-11-03, run 118693) added the Conversations page, the tmux messaging path and read-only terminal
+Chat; v0.9.0 removes the last two. Its pins, for the rollbacks above:
+
+| Field | v0.8.0 pin |
+|---|---|
+| Source | `04960c3b7267b5d9e5f82f1ad0f42451c22321b7` |
+| Linux amd64 SHA-256 | `072fe6c4db6ff88eabb50ba27cca2c7657fb896af7601fcdc3a035a32c5126c9` |
+| Linux arm64 SHA-256 | `965d47866d48ff598f7b1444011a84d2c1a14e0c0a290fba1056b3804a3e0ae4` |
+| Hub image | `registry.chifor.me/relay/control-plane@sha256:f2c3e1be224cdc54c4371af1b5d4d81937da9b5b5d22678f8e337c024daa6aef` |
 
 **What v0.7.7 changed for connectors** (v0.7.4 and v0.7.5 changed only the hub
 image; v0.7.6 was tagged but never published, so v0.7.7 carries it):
