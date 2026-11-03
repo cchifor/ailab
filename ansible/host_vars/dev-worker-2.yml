@@ -23,4 +23,6 @@ relay_connector_sockets: ['']
 # relay-bus skill and a key instead (docs/runbooks/relay-connectors.md, "Claude Code messaging").
 # `absent` removes the user's `relay` MCP server and `inbox-hint` hook. It must converge here before a
 # connector without those subcommands is installed: a UserPromptSubmit hook that exits 2 blocks prompts.
+# Keep this line until the role's Claude Code messaging is removed: deleting it falls back to
+# `unmanaged`, which leaves an existing hook in place.
 relay_connector_claude_messaging: absent
