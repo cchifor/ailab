@@ -267,13 +267,15 @@ turning this role off only disables reconciliation.
 ## Claude Code messaging
 
 **Being retired (2026-11-03).** Relay is replacing this path with a skill that any agent can load,
-authenticated by a per-agent key that an admin approves. Relay v0.9.0 removes the connector's `mcp`
-and `inbox-hint` subcommands. dev-worker-1, -2 and -3 are set to `absent`, and every worker must
-converge with `absent` **before** it gets a v0.9.0 or later connector. Until then its
-`settings.json` still runs `relay-connector … inbox-hint` before each prompt. The newer binary
-rejects the unknown subcommand with exit code 2, and Claude Code blocks a prompt when a
-`UserPromptSubmit` hook exits 2. No agent had enrolled through this path, so nothing is lost. The
-section below describes the role as it stands until v0.9.0 removes it.
+authenticated by a per-agent key that an admin approves. Relay v0.9.0 removes the connector's
+messaging path. It keeps `mcp` and `inbox-hint` only as hidden, deprecated stubs that exit 0 (`mcp`
+prints one line to stderr). A hook or MCP entry that is still loaded therefore never sees clap's
+exit code 2 for an unknown subcommand, and Claude Code blocks a prompt when a `UserPromptSubmit`
+hook exits 2. The stubs stay until every Claude session that was running when the hook was
+installed has exited. Even so, dev-worker-1, -2 and -3 are set to `absent`, and every worker must
+converge with `absent` **before** it gets a v0.9.0 or later connector, so that no stale entry
+outlives the stubs. No agent had enrolled through this path, so nothing is lost. The section below
+describes the role as it stands until the cleanup after v0.9.0 removes it.
 
 The role enforces that order (`tasks/legacy_hook_preflight.yml`). A `relay_connector_release` pin
 of 0.9.0 or later is refused, before anything on the worker changes and whatever
