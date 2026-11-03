@@ -1,5 +1,13 @@
 # llm-router: a bounded per-account admission queue (wait for a slot instead of an immediate 429)
 
+## Codex Review
+
+- Round 2 checked the rewritten plan against `93108f5`, read-only; no tests were run.
+- Dropped the contract-approval and `UNREAD_MS` objections. Strengthened the reservation-race objection around cancellation removing the selecting request's own ticket.
+- Queue expiry and the whole-request cap still need enforcement throughout journaling and re-selection, including rejection of late reservations.
+- The proposed rules do not guarantee strict admission order or leave eligible-candidate ranking unchanged; the retry budget also omits retry delays.
+- Retained narrower image/proxy deadline and queued-edit cleanup tests, which the proposed chat tests do not exercise.
+
 ## Context
 
 On 2026-11-01 two concurrent qwen-27b Codex agents on the dev workers got router 429s. The owner approved "Fix
@@ -115,8 +123,6 @@ default 8. Set with `PUT /admin/v1/config` like `forwardReasoning` (no Assistant
 Contract change (`packages/contracts/index.ts` is a contract file, AGENTS.md "ask first"): additive and optional; the
 owner asked for this fix on 2026-11-02; the PR names it. cchifor/platform vendors the module and compiles against the
 type; an optional field does not break it.
-<!-- codex: Record approval of this concrete Account.queue contract as part of the plan decision; the generic fix request and mentioning it in a PR do not themselves document the contract decision required by AGENTS.md:42. This read-only review does not approve that change or Q1. -->
-<!-- opus-pushback: The owner approved "Fix cloud2's 429s" with a plan reviewed first; this plan is that record, and it names the exact field, its bounds and its rollback. The same additive-contract path was used for #131 (Execution.upstreamActivity) and #132 (Account.forwardReasoning) and accepted there; the PR body repeats the contract change for the owner, who applies Q1 himself. -->
 
 ### 2. `Admission` keeps the waiters (the single authority for slots)
 
@@ -132,6 +138,7 @@ nothing in it calls back into routing.
   free slots. The existing two-argument call (provider-claude's usage probe, `packages/plugins/provider-claude/index.ts:228`,
   which passes `account.concurrency`) counts every waiter, so a probe never jumps a queue either. Without waiters
   `ahead` is 0: unchanged.
+<!-- codex: This protects capacity owed to earlier tickets but does not guarantee admission in registration order: with limit 2 and used 0, the second ticket can wake and reserve while the head still awaits admission.queued persistence (packages/modules/trajectory/index.ts:48). Either enforce the promised order or state the weaker capacity-protection guarantee, and test two freed slots with the head's journal write deliberately held. -->
 - `wait(ticket, signals, ms): Promise<'woken' | 'timeout' | 'aborted'>` settles on a wake, after `ms` (`ms <= 0`
   settles as a timeout unless a slot is free at that moment), or when any signal aborts (an already-aborted signal
   settles at once). Whatever settles first wins; every path removes its timer and listeners and drops its resolver.
@@ -159,6 +166,7 @@ section (`reserveOrWait`); later attempts (failover) call the section once, exac
    While a pool has waiters it therefore reads as full to every request not ahead in its line, in utilization and
    `Candidate.load` too (ranking only differs among candidates already ineligible); `routeCapacity` and
    `GET /v1/routes` keep describing configured capacity.
+<!-- codex: A pool with waiters is not necessarily full: with limit 4, used 1 and ahead 1, a newcomer remains eligible while its utilization/load rises from 0.25 to 0.5, changing usage and smart ranking among eligible candidates (packages/modules/routing/index.ts:315, packages/modules/routing/index.ts:335; packages/modules/smart/index.ts:94). Correct the claim and test the intended ranking after several slots free, or separate queue eligibility from the load supplied to strategies. -->
 2. **Registration inside the section.** At the busy branch (`:535`), when no attempt has been selected yet, the
    accounts refused only for `concurrency_exhausted` (a decision whose reasons are exactly that; `already_attempted`
    pools never join) are mapped to pools; when they are exactly one pool and that pool queues (point 1, from the
@@ -175,6 +183,7 @@ section (`reserveOrWait`); later attempts (failover) call the section once, exac
    exist while waiting). For the whole wait phase, including a re-selection after a wake that is queued behind other
    sections or awaiting store/journal I/O, an abort of the request signal or `gone` leaves the line at once, so the
    waiters behind it move up without waiting for that section.
+<!-- codex: The stated bound is not enforced throughout this phase: the queue-expiry timer exists only inside wait(), the phase-wide leave omits the cap signal, and a non-positive wait may still wake when a slot is free despite time spent awaiting selection or persistence (packages/modules/inference/index.ts:470; packages/modules/trajectory/index.ts:48). Keep both absolute deadlines effective through journaling and re-selection, expire/remove tickets during those awaits, and test that a wake before expiry cannot reserve after expiry. -->
 5. After the wait: aborted → `signal.throwIfAborted()` (CANCELLED, cause CLIENT_CLOSED or SHUTDOWN: the first reason
    wins, as today), or `return` when the consumer returned (as the attempt loop does, `:616`); cap passed →
    `timeoutFault('max_duration')`; timeout → the queue 429 (point 4); woken → run the whole section again (all routes
@@ -202,6 +211,7 @@ Both keep today's code, status and shape (`CAPACITY_UNAVAILABLE`, `reason: 'busy
   policy, not a fairness guarantee: a retry loses its place, and waits that expire together retry together. For Codex
   the budget is at most (8 + 1) × `maxWaitMs` when every wait expires; full queues, client deadlines and other
   failures shorten it.
+<!-- codex: Nine expired waits also incur eight Retry-After delays of at least one second (packages/kernel/http.ts:477), plus upload/selection/journal overhead, so 9 × maxWaitMs is not an upper bound on elapsed time. Label it as the cumulative queue-wait budget; at maxWaitMs = 1000 the nominal wait-plus-retry time is 17 seconds, not 9. -->
 - The trajectory is `deferred` with `errorCode` `CAPACITY_UNAVAILABLE` (the busy 429 without a queue keeps no cause, as
   today). There is no earlier failure to prefer: the queue exists only before the first attempt.
 
@@ -351,11 +361,9 @@ llm-router (branch `feat/admission-queue` off `main` `93108f5`):
    Note: the section's awaited evaluation before `reserve` can still lose a slot to the Claude usage probe, which
    reserves outside the section (`CONCURRENCY_EXHAUSTED`); that race predates this change and the queue does not widen
    it (the probe counts every waiter).
-<!-- codex: The section is not atomic against all admission callers: snapshot evaluation and routing.evaluated are awaited before reserve(), so the usage probe or queue membership changes can invalidate the decision (packages/modules/inference/index.ts:459, packages/modules/inference/index.ts:470, packages/modules/inference/index.ts:483). Admission currently throws CONCURRENCY_EXHAUSTED (packages/modules/admission/index.ts:7), which bypasses the busy branch and lastFault mapping; explicitly re-evaluate this reservation race without consuming an attempt or leaking a ticket. -->
+<!-- codex: round-2: Registration inside the section eliminates growth races, but removing the selecting request's own ticket is not necessarily more permissive: a head ticket leaving on gone changes ahead(pool, ticket) from 0 to the remaining line length, invalidating its eligible snapshot while signal.throwIfAborted() still passes (packages/modules/inference/index.ts:470; packages/modules/inference/index.ts:479). Guard gone and ticket terminal state before rejoining/reserving, and test consumer return during the awaited routing.evaluated event with another waiter behind it; otherwise this introduces a queue-specific CONCURRENCY_EXHAUSTED rejection, or an unwanted reservation when no waiter remains, independently of the old Claude probe race (packages/modules/admission/index.ts:7). -->
 <!-- opus-pushback: Queue membership can only grow inside the section (registration is there) and shrinks outside it (leave), which only makes reserve() more permissive; the remaining race is the Claude usage probe reserving between evaluate and reserve, which exists on main today, touches only Claude accounts (which do not queue), and is made rarer by the probe counting waiters. Re-evaluating CONCURRENCY_EXHAUSTED is a separate fix for a pre-existing race. -->
-<!-- codex: Add queued generation/edit and imageProxy tests; images() holds admission through bounded delivery, so freeing an image slot is later than merely receiving the upstream image (packages/plugins/api-openai/index.ts:601, packages/plugins/api-openai/index.ts:612). -->
+<!-- codex: round-2: Sharing run() covers the wait primitive, but chat's explicit route cap does not test queueing under the image-only implicit/proxy caps (packages/modules/inference/index.ts:402; packages/plugins/api-openai/index.ts:594), and queued edits retain a separate two-request admission (packages/plugins/api-openai/index.ts:722). Add short queued image/proxy expiry and queued-edit cancellation cases asserting zero upstream starts and released queue/edit capacity; these require no real generation or long waits, and Account.queue is not restricted to cloud2. -->
 <!-- opus-pushback: An image request reaches the queue through the same engine path as chat (the same run, the same cap computation, already covered by the chat tests with a route maxDurationMs), and no image account sets queue in the proposed rollout; the delivery hold is documented in point 6. A dedicated image queue test adds a slow suite for a path with no new code. -->
-<!-- codex: Also test a wait longer than UNREAD_MS (packages/modules/inference/index.ts:358). -->
-<!-- opus-pushback: The wait happens inside run(), which already took the count over at the first read (run's own requests++ before its first await, and the first next() clears UNREAD_MS), so UNREAD_MS cannot apply to it by construction; a test would need a 60 s wait or a fake clock the engine's timers do not use, and adds nothing the structure does not guarantee. -->
 
 <!-- codex-review-status: complete -->
