@@ -53,18 +53,16 @@ data:
       # name" as the alternative; this takes it. Callers now get an explicit model-not-found instead of
       # quiet wrong answers. gpt-oss-120b weights DO still sit on cloud3's NFS store (60 GiB) but are
       # not loaded by any llama-swap config, so nothing serves them. See docs/runbooks/ai-model-swap.md.
-      - model_name: qwen3.5-122b-cloud
-        litellm_params:
-          model: openai/qwen3.5-122b
-          api_base: http://192.168.0.26:8080/v1
-          api_key: "sk-noauth"
-        model_info:
-          # cloud3 llama-swap serves this with `-c 262144 --parallel 2`. In llama.cpp `-c` is the
-          # TOTAL KV context shared across slots, so each of the 2 slots gets 262144/2 = 131072.
-          # 131072 - 32768 output headroom = 98304. (The previous 24576 described node3's retired
-          # CTX=32768/--parallel 1 host and under-declared cloud3 by 4x.)
-          max_input_tokens: 98304
-      # ---- CLOUD GPU CLUSTER (cloud3, 4x RTX 3090 = 96 GiB VRAM) -------------------------------
+      # qwen3.5-122b-cloud WITHDRAWN 2026-11-03. cloud3's GPU3 has a hard VRAM fault (RMA), so cloud3
+      # runs on three cards (cloudlab PR #49). The 122B's 71 GiB of weights do not fit in 72 GiB of
+      # VRAM with room for its KV, and the CPU-offload layout was never qualified. The owner chose
+      # removal over an untested half-speed model. Callers get an explicit model-not-found. The weights
+      # stay on cloud3's NFS store; the entry returns when the repaired card is back. The router withdrew
+      # it from its cloud3 account the same day. Its old max_input_tokens was 98304 = 262144 (`-c`, the
+      # TOTAL KV across slots in llama.cpp) / 2 (`--parallel 2`) - 32768 output headroom: recompute it
+      # from the restored llama-swap entry's -c/--parallel, and regenerate the consumers with
+      # `just af-gen-litellm` (never hand-edit Open WebUI's model_ids or the checksum).
+      # ---- CLOUD GPU CLUSTER (cloud3, 3x RTX 3090 = 72 GiB VRAM; GPU3 out for RMA) --------------
       # Served by llama-swap in LXC 5101 on cloud3 at 192.168.0.26:8080 — a plain LAN address, not a
       # k8s Service: the `pve` cloud cluster is a SEPARATE Proxmox cluster and these are not cluster
       # workloads. Serving side: git.chifor.me/cchifor/cloudlab (host/llama-swap.yaml).
@@ -82,7 +80,7 @@ data:
       # The per-model --parallel values live in cchifor/cloudlab host/llama-swap.yaml — pinned at
       # commit 9907877, which is the change that moved the 122B off a single slot. Verify there, not here.
       #
-      # The three models total ~145 GiB against cloud3's 96 GiB of VRAM, so llama-swap holds ONE at a time and
+      # The models total more than cloud3's VRAM (72 GiB on three cards since 2026-11-03; 96 GiB before), so llama-swap holds ONE at a time and
       # unloads on TTL — a model switch costs a cold load from local NVMe. llama-swap always answers
       # :8080, so the router never sees a down backend while the cluster is awake.
       #
@@ -386,7 +384,7 @@ data:
         # Same engine, same window: 262144 - 49152 = 212992 since 2026-09-23 (the thinking-off
         # alias keeps the route's headroom figure rather than inventing a second one).
         model_info: { max_input_tokens: 212992 }
-      # ---- cloud3 vLLM: qwen3.8-27b-fp8 — the UNCENSORED FP8 checkpoint, TP=4 over all four RTX 3090s ---
+      # ---- cloud3 vLLM: qwen3.8-27b-fp8 — the UNCENSORED FP8 checkpoint (TP=2 on GPU0+GPU1 since 2026-11-03, cloudlab #49; TP=4 before) ---
       # orcarouter/Qwen3.8-27B-Uncensored-FP8 at HF 0f3cdb83, served by vLLM 0.28.0 (cu129 wheel: cloud3
       # chosen when cloud3 ran driver 550 / CUDA 12.4, kept on NVIDIA's runfile 580.178.04 since 2026-09-14 under
       # CUDA minor-version compatibility) UNDER llama-swap on
@@ -980,8 +978,8 @@ data:
       # rejection is about prompt + max_tokens, and dsh's failing shape is 98k + 32768. dsh maps this
       # exception class to a friendly context_window_exceeded (platform PR #636); whether it then
       # compacts on its own is NOT verified and is the follow-up. An honest error was chosen over a
-      # silent hop onto a slower model with no more room. qwen3.5-122b-cloud stays routable by
-      # name; nothing else changes for it.
+      # silent hop onto a slower model with no more room. qwen3.5-122b-cloud stayed routable by
+      # name until it was withdrawn on 2026-11-03 (see the note at the top of model_list).
       #
       # cloud3's Qwen3.8 engine joined THIS route as the second deployment on 2026-09-21 (the block
       # comment on the route). The chain is unchanged by that: both deployments are daytime-only
@@ -1160,7 +1158,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "82c9eef97f27"
+        checksum/config: "3ed0b604e600"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an

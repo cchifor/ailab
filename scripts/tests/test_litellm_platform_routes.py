@@ -109,6 +109,29 @@ class PlatformModelRoutes(unittest.TestCase):
                 self.assertFalse(guarded.intersection(rule),
                                  f"Document-table extraction must not use {key}")
 
+    def test_every_fallback_and_alias_names_a_registered_route(self):
+        # A fallback or alias whose target is not in model_list does not give the caller a clean
+        # model-not-found: depending on the LiteLLM version the proxy rejects it at startup or the
+        # request fails mid-hop. Withdrawing a route (qwen3.5-122b-cloud, 2026-11-03) must take
+        # every reference with it, and this makes that a CI fact instead of a grep.
+        names = {entry["model_name"] for entry in self.config["model_list"]}
+        for section in ("router_settings", "litellm_settings"):
+            settings = self.config.get(section) or {}
+            for key in ("fallbacks", "context_window_fallbacks", "content_policy_fallbacks"):
+                for rule in settings.get(key) or []:
+                    self.assertIsInstance(rule, dict, f"{section}.{key} entries are {{source: [targets]}}")
+                    for source, targets in rule.items():
+                        if source != "*":
+                            self.assertIn(source, names, f"{section}.{key}: source {source!r} is not in model_list")
+                        for target in targets:
+                            self.assertIn(target, names,
+                                          f"{section}.{key}: {source!r} falls back to {target!r}, not in model_list")
+            for target in settings.get("default_fallbacks") or []:
+                self.assertIn(target, names, f"{section}.default_fallbacks: {target!r} is not in model_list")
+            for alias, target in (settings.get("model_group_alias") or {}).items():
+                group = target.get("model") if isinstance(target, dict) else target
+                self.assertIn(group, names, f"{section}.model_group_alias: {alias!r} -> {group!r}, not in model_list")
+
 
 if __name__ == "__main__":
     unittest.main()
