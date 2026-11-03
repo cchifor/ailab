@@ -3469,6 +3469,16 @@ the plan's provisional values (point 9).
   `router.chifor.me` through Cloudflare, and dsh offers the local models. It is above the slowest next-slot release
   seen for a busy 429 (75.9 s). That figure is a lower bound on how long a waiter stays queued, so a later waiter can
   still meet `QUEUE_TIMEOUT` and retry at the back.
+- **The 100 s margin holds for streams only.** A stream gets its head at admission. A non-streaming request gets no
+  head until its whole completion is done.
+  - Through Cloudflare, such a request now has 100 s minus its wait for the whole generation. Before this release it
+    got an immediate 429 it could retry; a long one now meets a 524 instead.
+  - Whether the router then sees the client go, and frees the slot or the queue place, depends on cloudflared and the
+    edge closing the origin request. That is not verified.
+  - **Who uses cloud2.** The dev workers' Codex always streams, on the LAN. The 400 most recent cloud2 requests
+    (11-02 09:17Z to the roll) came from dev-worker-2 (392), dev-worker-1 (4) and the Assistant (4, whose model calls
+    the router makes itself). dsh, relay and the platform eval key reach cloud2 at times through Cloudflare. They were
+    not in that sample, and whether they stream was not checked.
 - **The wait costs no generation time on cloud2.** A waiter counts against a whole-request cap, but none applies
   here.
   - The account's only route, `qwen3.8-27b` (and its pointer `qwen-27b`), has no `maxDurationMs` (owner decision D1),
@@ -3489,7 +3499,9 @@ the plan's provisional values (point 9).
 - **Acceptance before relying on it:** 4 running plus queued requests, overflow and cancellation against cloud2, with
   the small body budget (`llm_router_native_body_budget_bytes{pool="small"}`) and `body_budget` 429s watched.
 - **Revisit when:** `timeout` or `full` outcomes for cloud2 above a handful a day, any `body_budget` 429 while cloud2
-  has waiters, or an end-to-end Codex failure on qwen-27b.
+  has waiters, an end-to-end Codex failure on qwen-27b, or a 524 on a cloud2 request through Cloudflare (a
+  non-streaming caller there). The remedies for the last one are a shorter `maxWaitMs`, or the per-key opt-out the
+  plan lists as a follow-up.
 
 **Rollback, in this order.**
 1. Remove `queue` from `lan-192.168.0.28-18020` (`If-Match`, read-back). Requests already waiting drain within their
