@@ -9,79 +9,95 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
-The default release is the v0.8.0 connector manifest from Relay release
-[v0.8.0](https://git.chifor.me/cchifor/relay/releases/tag/v0.8.0) (release
-workflow run 118693, 2026-11-03). The upgraded hub serves the same manifest at
-`https://relay.chifor.me/downloads/connector/v0.8.0/manifest.json`:
+The default release is the v0.9.0 connector manifest from Relay release
+[v0.9.0](https://git.chifor.me/cchifor/relay/releases/tag/v0.9.0) (release
+workflow run 120163, 2026-11-04). The upgraded hub serves the same manifest at
+`https://relay.chifor.me/downloads/connector/v0.9.0/manifest.json`:
 
 | Field | Pin |
 |---|---|
-| Source | `04960c3b7267b5d9e5f82f1ad0f42451c22321b7` |
-| Linux amd64 SHA-256 | `072fe6c4db6ff88eabb50ba27cca2c7657fb896af7601fcdc3a035a32c5126c9` |
-| Linux arm64 SHA-256 | `965d47866d48ff598f7b1444011a84d2c1a14e0c0a290fba1056b3804a3e0ae4` |
+| Source | `e71399f29c68d1a19cb6594dad4c1d125624b14e` |
+| Linux amd64 SHA-256 | `402f8d36bfa24469c92617937b009ddbfa656aeba62bf7bfd202a31f8b0e97d1` |
+| Linux arm64 SHA-256 | `d675fc3ccf1a94ee1324affefc77c5e9568ade78d193d9a160d9bd61489f532a` |
+| relay-bus `SKILL.md` SHA-256 | `a515392d9352a1bf82a46981b1b4ab52a0b788a1033178862a9f37c0e93f0fe2` |
+| relay-bus `relay-bus.py` SHA-256 | `e86983b9a879e425a6cc6cf56f895d4bf71bf14b6edb8606122582c318cd3986` |
 
-The pins were checked on 2026-11-03 against the release's `manifest.json` and
-`SHA256SUMS` and the downloaded binaries; all three agree on these digests.
-`manifest.json` and `deployment-images-118693.json` both name source commit
-`04960c3b7267b5d9e5f82f1ad0f42451c22321b7`, and the latter records the hub image digest
-(`sha256:f2c3e1be224cdc54c4371af1b5d4d81937da9b5b5d22678f8e337c024daa6aef`).
+These pins were checked on 2026-11-04 against four sources, and all agree:
+- the release's `manifest.json`;
+- `SHA256SUMS`;
+- the downloaded files;
+- for the skill, the tagged `packages/agent-skill` sources.
 
-**What v0.8.0 changes for connectors** (v0.7.8 was a version on Relay's main branch
-and was never tagged; v0.8.0 carries it):
+`deployment-images-120163.json` names the same source commit and records the hub image digest
+(`sha256:d16ff16eeaa99e23ff0144c8a7bf47d0201acb33940fa81b46d7ad4d3327f5cc`).
 
-- **Claude Code agents in tmux can join Relay messaging**
-  ([Relay #172](https://git.chifor.me/cchifor/relay/pulls/172)). The connector adds
-  `relay-connector mcp`, a stdio MCP server with Relay's messaging tools, and
-  `inbox-hint`, which tells an agent about unread messages before each prompt.
-  `relay_connector_claude_messaging` installs both for the user (see
-  [Claude Code messaging](#claude-code-messaging)). The connector answers only a caller
-  it can trace through the kernel and `/proc` to exactly one Claude Code agent on an
-  approved socket. That needs Linux 6.5 or later; the dev-workers run 6.8. Nothing
-  joins until an admin turns on **Agent messaging** for the host in Relay, which is off
-  by default. Codex agents cannot join: Codex starts MCP servers from its shared
-  app-server daemon, so no process ancestry leads to a pane, and Relay reports them as
-  `codex-shared-daemon`.
-- **Read-only Chat for agents in tmux**
-  ([Relay #176](https://git.chifor.me/cchifor/relay/pulls/176),
-  [#177](https://git.chifor.me/cchifor/relay/pulls/177)). When someone opens Chat,
-  the connector reads that Claude Code agent's own transcript under `~/.claude` and
-  streams it to the hub. Nothing is installed on the worker and no text is stored.
-  The hub's `RELAY_TERMINAL_CHAT=1` turns it on, and until a worker runs a 0.8.0
-  connector, Chat says the connector needs an upgrade. Codex Chat
-  (`RELAY_TERMINAL_CHAT_CODEX`) stays off in this estate.
-- **Hub only:** the Conversations page replaces Sessions and Messages
-  ([Relay #169](https://git.chifor.me/cchifor/relay/pulls/169),
-  [#170](https://git.chifor.me/cchifor/relay/pulls/170),
-  [#171](https://git.chifor.me/cchifor/relay/pulls/171)). Only operators and admins see
-  message text and transcripts, and each one opened writes an audit row without text.
-  The restore fence counts only client backends
-  ([Relay #178](https://git.chifor.me/cchifor/relay/pulls/178)).
+**What v0.9.0 changes.** v0.8.1 was a version on Relay's main branch and was never tagged; v0.9.0 carries it. The
+full plan is `docs/plans/2026-11-03-agent-bus-skill/plan.md` in the relay repository.
 
-Two migrations run in the `migrate` init container, after its pre-migration dump:
-053 adds the Conversations audit and read-position tables, and 054 adds tmux
-messaging (`agent_sessions.kind`, nullable holder columns for tmux rows,
-`connectors.messaging_enabled`, `agent_principals.suspended_at`, and
-`agent_messages.sender_session_id` with a backfill).
+- **Terminal Chat is gone.** The connector no longer reads agents' transcripts, so the hub needs no
+  `RELAY_TERMINAL_CHAT`.
+- **The tmux messaging path is gone.**
+  - Migration 055 closes tmux sessions and revokes their principals.
+  - The connector keeps `mcp` and `inbox-hint` only as hidden stubs that exit 0, so a hook that is
+    still loaded never blocks a prompt. The new preflight
+    ([Claude Code messaging](#claude-code-messaging)) still refuses this pin while the old hook is
+    installed.
+- **Agents join the bus with a key** through the `relay-bus` skill ([The relay-bus skill](#the-relay-bus-skill)).
+  - Migration 056 adds agent keys and their requests.
+  - Keys are issued by device grant (an admin approves the agent's code) or created in the console. Both live
+    under Settings > Agent communication > Agent keys.
+- **Connector hardening.** The connector:
+  - streams only watched panes, fairly, over slow links;
+  - isolates a pane's or a command's failure from the rest;
+  - posts discovery only when it changed;
+  - pastes bulk input through one tmux buffer;
+  - reports health in the heartbeat and `relay-connector status --json`.
+- **The connector needs tmux 3.2 or later**, because every tmux command passes `-N`, so the connector never
+  starts a tmux server. The dev-workers run tmux 3.4.
+- **The unit changes:**
+  - `Type=notify` with `WatchdogSec=60`;
+  - `Restart=always`;
+  - limits `MemoryMax=1G`, `TasksMax=1024` and `LimitNOFILE=8192`, sized by a soak with 500 agents and
+    64 Full tmux views.
 
-Rolling the hub back to v0.7.7 is an image revert while no tmux session is open.
-v0.7.7 ignores the new tables and columns, and its own writes satisfy the new
-constraints. Once an agent has enrolled, first turn Agent messaging off on every
-host, which suspends the tmux principals and closes their sessions, and only then
-deploy the older image: v0.7.7 would treat an open tmux principal as a managed one.
+  Changing the unit makes the role restart the connector service. That restart never touches the agents'
+  tmux servers: `KillMode=control-group` covers only the connector and its own tmux clients, as
+  qualified under a real `systemd --user`.
 
-Do not roll back the whole v0.8.0 change with a plain revert. Its host_vars would
-fall back to `unmanaged`, which leaves the `relay` MCP server and the inbox hook in
-each user's Claude Code configuration, and every new session would keep starting a
-tool server for a release that is no longer the pin. Roll back in this order, so
-the hub is never older than a connector:
+**Roll out in this order**, and stop at any step whose check fails. No agent or tmux session is ever restarted.
 
-1. Turn Agent messaging off on every host in Relay.
-2. Set `relay_connector_claude_messaging: absent` on dev-worker-1, -2 and -3 and
-   converge each one. `absent` removes the `relay` server and Relay's hook whatever
-   binary they name, and it works with any pin: the 0.8.0 check applies only to
-   `present`.
-3. Repin `relay_connector_release` to v0.7.7 and converge each worker.
-4. Revert the hub image to v0.7.7.
+1. **Confirm the old hook is gone.** Check that dev-worker-1, -2 and -3 converged with
+   `relay_connector_claude_messaging: absent`, with no `inbox-hint` entry in `~/.claude/settings.json` and no
+   `relay` MCP server. Verified on 2026-11-04 for all four workers.
+2. **Deploy the hub.** Flux applies the hub. The `migrate` init container takes its pre-migration dump and runs
+   055 and 056, each committed separately. Check:
+   - the schema is 56;
+   - the pod is Ready;
+   - `/agent/skill.md` answers with `text/markdown`, and `/agent/x` answers 404, not HTML.
+
+   If 056 fails, 055 stays committed. Keep the rollout stopped and rerun the unchanged migrations.
+3. **Smoke the v0.9 hub with the v0.8 connectors** still running: Agent pane, Full tmux view, input and uploads.
+4. **Converge the connector one worker at a time.** Start with dev-worker-1, then -2, -3 and -4. On each, check
+   that `relay-connector status --json` is fresh and connected and that the host's health appears in
+   Agents > host details.
+5. **Apply the skill role** (`just relay-agent-skill`) on each worker.
+
+**Rolling back.** Forward fixes are the default. v0.8.0's restore fence needs exactly schema 54, so a v0.8.0 hub
+cannot run against schema 56.
+- **Connectors** can go back to v0.8.0 on their own: repin `relay_connector_release` and converge. A v0.8
+  connector works against the v0.9 hub, as qualified in both directions. Keep
+  `relay_connector_claude_messaging: absent`.
+- **The skill hook** stays inert against an old hub. `relay_agent_skill_state: absent` removes it and the skill
+  files.
+- **A real hub rollback:**
+  1. Stop issuance with `RELAY_AGENT_KEY_ISSUANCE=0`.
+  2. Revoke every key, then restart the hub.
+  3. Restore the pre-migration dump with the v0.8.0 image, using v0.8.0's own recovery tooling.
+
+  Data written since the deploy is lost.
+
+**v0.8.0** (2026-11-03, run 118693, source `04960c3b`, hub `sha256:f2c3e1be…`) added the Conversations page, the
+tmux messaging path and read-only terminal Chat. v0.9.0 removes the last two.
 
 **What v0.7.7 changed for connectors** (v0.7.4 and v0.7.5 changed only the hub
 image; v0.7.6 was tagged but never published, so v0.7.7 carries it):

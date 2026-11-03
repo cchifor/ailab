@@ -1,15 +1,22 @@
 [Unit]
 Description=Relay persistent tmux connector
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStart={{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector --state {{ relay_connector_state_file }} serve
-Restart=on-failure
+Restart=always
 RestartSec=10
+WatchdogSec=60
 UMask=0077
 NoNewPrivileges=true
 KillMode=control-group
 TimeoutStopSec=15
+MemoryMax=1G
+TasksMax=1024
+LimitNOFILE=8192
 
 [Install]
 WantedBy=default.target

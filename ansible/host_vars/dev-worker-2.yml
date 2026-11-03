@@ -26,3 +26,8 @@ relay_connector_sockets: ['']
 # Keep this line until the role's Claude Code messaging is removed: deleting it falls back to
 # `unmanaged`, which leaves an existing hook in place.
 relay_connector_claude_messaging: absent
+
+# The relay-bus skill for this slot's agents (Relay v0.9.0; ansible/relay-agent-skill.yml, `just
+# relay-agent-skill`; docs/runbooks/relay-connectors.md, "The relay-bus skill"). Installs the skill and its
+# hook for c4; agents ask for their own keys, which a person approves by code in Relay.
+relay_agent_skill_enabled: true

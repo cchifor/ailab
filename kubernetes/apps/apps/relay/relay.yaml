@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.8.0-release-118693
-        chifor.me/source-commit: 04960c3b7267b5d9e5f82f1ad0f42451c22321b7
+        chifor.me/release: relay-0.9.0-release-120163
+        chifor.me/source-commit: e71399f29c68d1a19cb6594dad4c1d125624b14e
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -132,9 +132,9 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-      # Relay v0.8.0, source 04960c3b7267b5d9e5f82f1ad0f42451c22321b7
-      # release v0.8.0 / run 118693.
-      - image: registry.chifor.me/relay/control-plane@sha256:f2c3e1be224cdc54c4371af1b5d4d81937da9b5b5d22678f8e337c024daa6aef
+      # Relay v0.9.0, source e71399f29c68d1a19cb6594dad4c1d125624b14e
+      # release v0.9.0 / run 120163.
+      - image: registry.chifor.me/relay/control-plane@sha256:d16ff16eeaa99e23ff0144c8a7bf47d0201acb33940fa81b46d7ad4d3327f5cc
         workingDir: /app
         envFrom:
         - secretRef:
@@ -178,9 +178,9 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.8.0, source 04960c3b7267b5d9e5f82f1ad0f42451c22321b7
-      # release v0.8.0 / run 118693.
-      - image: registry.chifor.me/relay/control-plane@sha256:f2c3e1be224cdc54c4371af1b5d4d81937da9b5b5d22678f8e337c024daa6aef
+      # Relay v0.9.0, source e71399f29c68d1a19cb6594dad4c1d125624b14e
+      # release v0.9.0 / run 120163.
+      - image: registry.chifor.me/relay/control-plane@sha256:d16ff16eeaa99e23ff0144c8a7bf47d0201acb33940fa81b46d7ad4d3327f5cc
         workingDir: /app
         envFrom:
         - secretRef:
@@ -229,13 +229,6 @@ spec:
           value: https://router.chifor.me/v1
         - name: RELAY_LLM_MODEL
           value: gpt-6-luna
-        # Read-only Chat for the Claude Code agents in the workers' tmux (Relay v0.8.0). Only
-        # operators and admins can open one, and each one opened writes an audit row with no text.
-        # RELAY_TERMINAL_CHAT_CODEX stays unset: joining the Codex app-server daemon adds
-        # `relay-connector` to the Codex TUI's model-request User-Agent until the TUI restarts, and
-        # the LLM router has not been qualified with that User-Agent.
-        - name: RELAY_TERMINAL_CHAT
-          value: '1'
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
