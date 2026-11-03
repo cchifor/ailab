@@ -267,13 +267,24 @@ turning this role off only disables reconciliation.
 ## Claude Code messaging
 
 **Being retired (2026-11-03).** Relay is replacing this path with a skill that any agent can load,
-authenticated by a per-agent key that an admin approves. Relay v0.9.0 removes the connector's `mcp`
-and `inbox-hint` subcommands. dev-worker-1, -2 and -3 are set to `absent`, and every worker must
-converge with `absent` **before** it gets a v0.9.0 or later connector. Until then its
-`settings.json` still runs `relay-connector … inbox-hint` before each prompt. The newer binary
-rejects the unknown subcommand with exit code 2, and Claude Code blocks a prompt when a
-`UserPromptSubmit` hook exits 2. No agent had enrolled through this path, so nothing is lost. The
-section below describes the role as it stands until v0.9.0 removes it.
+authenticated by a per-agent key that an admin approves. Relay v0.9.0 removes the connector's
+messaging path. It keeps `mcp` and `inbox-hint` only as hidden, deprecated stubs that exit 0 (`mcp`
+prints one line to stderr). A hook or MCP entry that is still loaded therefore never sees clap's
+exit code 2 for an unknown subcommand, and Claude Code blocks a prompt when a `UserPromptSubmit`
+hook exits 2. The stubs stay until every Claude session that was running when the hook was
+installed has exited. Even so, dev-worker-1, -2 and -3 are set to `absent`, and every worker must
+converge with `absent` **before** it gets a v0.9.0 or later connector, so that no stale entry
+outlives the stubs. No agent had enrolled through this path, so nothing is lost. The section below
+describes the role as it stands until the cleanup after v0.9.0 removes it.
+
+The role enforces that order (`tasks/legacy_hook_preflight.yml`). A `relay_connector_release` pin
+of 0.9.0 or later is refused, before anything on the worker changes and whatever
+`relay_connector_claude_messaging` says, while the user's `~/.claude/settings.json` still holds the
+old hook. It is also refused when that file cannot be read or parsed, because then nobody can tell.
+The match is the role's own: only the literal `/…/relay-connector --state /… inbox-hint` entry. The
+relay-bus skill's hook (`… relay-bus.py inbox --hook …`, [below](#the-relay-bus-skill)) never trips
+it. Converging `absent` and the repin in the same run is refused too: converge `absent` with the
+current pin first, check, then repin. `present` with a 0.9.0 or later pin fails as well.
 
 From relay-connector 0.8.0, the Claude Code agents in a worker's tmux can take part in Relay
 messaging. `relay_connector_claude_messaging` (`ansible/roles/relay_connector/tasks/claude.yml`)
@@ -315,7 +326,14 @@ and adds back a definition this run removed) and stops with `settings.json` unch
   the user and add the previous definition back with `claude mcp add-json --scope user relay`.
 - Claude Code takes no lock on `settings.json`. The helper re-reads it just before its rename and
   redoes the merge if anything changed, but an edit that lands inside that last instant can still
-  be lost.
+  be lost. The estate's own two mergers, this helper and the relay-bus skill role's, never lose
+  each other's change. Each one writes only under an exclusive `flock` on
+  `~/.claude/.settings.json.lock` (0600, an empty file that stays), held from its read through its
+  rename. A report (`--check`) or a run with nothing to change takes no lock and creates none.
+  Whenever a change is due, `--check` included, a lock that could not be taken is refused first: an
+  existing lock that is not the user's regular file, readable and writable, or a missing one in a
+  directory the user cannot create it in. Both roles' preflight dry runs therefore stop on it before
+  anything changes. The dev_worker role's status-line task does not take the lock.
 
 **Turn it on** per worker in `ansible/host_vars/dev-worker-N.yml`, in the same change as a
 reviewed 0.8.0 or later `relay_connector_release` pin:
@@ -344,8 +362,9 @@ hook under `/hooks` in a new session.
 `relay` server and the hook and keeps everything else. `unmanaged`, the default, leaves whatever
 is there alone, so going straight from `present` to `unmanaged` leaves both in place.
 
-The run fails before it changes anything if `~/.claude.json` or `settings.json` does not parse, if
-`~/.claude.json` is not an object whose `mcpServers` (and `mcpServers.relay`) are objects, or if
+The run fails before it changes anything if `~/.claude.json` or `settings.json` is not a regular file
+(a FIFO, a device, a socket or a directory, there or behind its symlink), if either does not parse,
+if `~/.claude.json` is not an object whose `mcpServers` (and `mcpServers.relay`) are objects, or if
 the `UserPromptSubmit` hooks in `settings.json` are not in the documented shape. When the hook has
 to change, it also fails if a rewrite could not keep the file's metadata: another owner (a symlink
 target included), a group the user is not in, a POSIX ACL on the file, or a default ACL on
@@ -358,6 +377,144 @@ every check and the merge are redone from the new state (up to three times).
 Only the exact command the role writes counts as Relay's hook: the literal
 `/…/relay-connector --state /… inbox-hint`, single-spaced, with no quoting or shell syntax. A
 variant with `;`, `&&`, `|`, redirection, `$(...)` or backticks is left alone as the user's.
+
+## The relay-bus skill
+
+From Relay v0.9.0, any agent on a dev-worker (Claude Code or Codex; the Qwen-based agents run
+through Codex) joins Relay's message bus through the **relay-bus skill**, with an agent key that a
+person approves. `ansible/roles/relay_agent_skill` installs it for the agent user (`c4`). It is
+applied by its own playbook, `ansible/relay-agent-skill.yml` (`just relay-agent-skill`), never by
+`site.yml`, `just dev-workers` or the daily fleet converge. A host changes only with
+`relay_agent_skill_enabled: true`, which no host sets yet.
+
+**What `present` installs** (`relay_agent_skill_state`, default `present`):
+
+- `~/.claude/skills/relay-bus/` and `~/.codex/skills/relay-bus/`, each with `SKILL.md` (0644) and
+  `relay-bus.py` (0755), owned by the user. They are the release's two skill assets,
+  `relay-bus-SKILL.md` (installed under its own name, `SKILL.md`) and `relay-bus.py`. Each sha256 is
+  pinned in `relay_agent_skill_release`. The role checks the controller copy before anything on the
+  worker changes, the helper checks the bytes it received before it writes them, and the role checks
+  the installed file once more.
+- `~/.config/relay` and `~/.config/relay/agents`, owned by the user with mode 0700. The role corrects
+  an existing mode, but not recursively. `relay-bus.py` refuses either directory otherwise.
+- `~/.config/relay/bus.json`, mode 0600: `{"origin": "https://relay.chifor.me"}`
+  (`relay_agent_skill_origin`, the hub's `RELAY_URL`).
+- One Claude Code `UserPromptSubmit` hook in `~/.claude/settings.json`, with a 3 s timeout
+  (`relay_agent_skill_claude_hook_timeout`):
+
+  ```sh
+  command -v python3 >/dev/null 2>&1 && python3 "$HOME/.claude/skills/relay-bus/relay-bus.py" inbox --hook 2>/dev/null; exit 0
+  ```
+
+  It fails open. Without `python3` or without the helper it prints nothing and exits 0. Python
+  exits 2 for a missing script before the helper's own guards run, hence the trailing `exit 0`.
+  `inbox --hook` prints the "N unread Relay messages" context only when messages wait. Without a
+  key, or on a 401, 429, timeout or an old hub's HTML 404, it prints nothing and exits 0.
+  `files/claude_skill_hook.py` merges the hook with the same rules as the connector's helper above,
+  under the same lock. Only an entry with exactly this command is the role's; every other hook
+  stays. That includes an old `inbox-hint` entry, which only the connector role removes.
+
+**Every write runs as the user, never as root,** and none follows a link. All of the skill's file
+changes go through one helper, `files/skill_files.py`, run as the user:
+
+- It reaches every path one component at a time from the home directory. Each directory is opened
+  with `O_NOFOLLOW` relative to its parent's descriptor, and each change is made relative to those
+  descriptors: create a directory, set a mode, write a fresh temporary file, rename it.
+- The paths are `~/.config`, `~/.config/relay`, `agents/`, `~/.claude`, `~/.claude/skills`,
+  `~/.codex`, `~/.codex/skills`, both `relay-bus` directories, both trees' skill files and
+  `bus.json`. Each must be absent, or a real directory (a regular file for the files) owned by the
+  user.
+- A symlink, a directory where a file goes, or another user's path is refused, and the run changes
+  nothing. The role does not repair ownership as root: fix such a path by hand.
+- `validate.yml` dry-runs the helper before anything changes, in check mode too. The helper itself
+  checks everything in a first pass before its first change. That pass also proves each change can
+  be made: every directory it would create an entry in, remove from or set a mode on must be
+  writable for the user, or be one the run itself gives an owner-writable mode, and not on a
+  read-only file system. A link that appears later, even on an ancestor, meets the same no-follow
+  operations and stops the run instead of being followed.
+- For `absent`, both dry runs (the removal and the hook merge) run before the hook is removed. A
+  refusal leaves the hook and every file in place.
+- The skill files reach the helper as JSON on its stdin, and it checks each one against its pinned
+  sha256 before writing.
+
+The role never reads or writes a key file, and it restarts nothing. Claude Code and Codex load
+skills, and Claude Code loads hooks, when a session starts, so a running agent picks the skill up in
+its next session. Codex has no prompt hook: a Codex agent checks its inbox at turn boundaries, as
+`SKILL.md` tells it. `present` also needs `python3` 3.10 or later for the user. The role checks the
+`python3` that a privileged run resolves (`/usr/bin/python3` on the workers). The hook resolves
+`python3` from the agent's own PATH.
+
+**Release pins (TODO at release).** The defaults hold placeholders that fail validation, so nothing
+installs until the deploy PR sets them from the v0.9.0 release:
+
+```yaml
+relay_agent_skill_release:
+  version: 0.9.0
+  sha256:
+    relay-bus-SKILL.md: <manifest.json agentSkill.files[asset=relay-bus-SKILL.md].sha256>
+    relay-bus.py: <manifest.json agentSkill.files[asset=relay-bus.py].sha256>
+```
+
+Check each value against the release's `SHA256SUMS` and the downloaded bytes. Fetch both assets on
+Windows from `https://git.chifor.me/cchifor/relay/releases/download/v<version>/<asset>`, as for the
+connector binary: the repository is private and WSL has no internet. Put them in
+`~/.ailab-converge/artifacts/relay-agent-skill/v<version>/` and pass that directory as
+`-e relay_agent_skill_source_dir=…`; it is not committed. Workers never download the skill. The hub's
+`/agent/relay-bus.py` serves the same bytes as the release asset, which is a useful cross-check.
+`/agent/skill.md` does not: the hub fills its origin section in, so never pin that copy.
+
+**Order.** Each step has a stop condition. Re-check the live facts before each one.
+
+1. **Absent convergence.** On dev-worker-1, -2 and -3, `relay_connector_claude_messaging: absent` has
+   converged: `claude mcp get relay` finds no server, `settings.json` has no `inbox-hint` hook, and
+   a rerun reports `changed=0`. The connector role refuses a 0.9.0 pin until this holds (above).
+2. **Hub.** Flux deploys hub v0.9.0. Its migrations run, the schema is 56 and the pod is healthy.
+3. **Connectors,** one host at a time: dev-worker-1, a smoke test, then dev-worker-2, -3 and -4.
+4. **The skill role,** one host at a time. In the deploy PR, set the pins and
+   `relay_agent_skill_enabled: true`. Then:
+
+   ```sh
+   cd ansible
+   ansible-playbook relay-agent-skill.yml --limit dev-worker-1 -e relay_agent_skill_source_dir=<dir> --check --diff
+   ansible-playbook relay-agent-skill.yml --limit dev-worker-1 -e relay_agent_skill_source_dir=<dir> --diff
+   ansible-playbook relay-agent-skill.yml --limit dev-worker-1 -e relay_agent_skill_source_dir=<dir>  # changed=0
+   ```
+
+   `just relay-agent-skill --limit dev-worker-1 -e relay_agent_skill_source_dir=<dir> --check --diff`
+   runs the same. Verify on the host, as the user: both skill directories hold the pinned bytes
+   (`sha256sum`), `stat -c '%a %U' ~/.config/relay ~/.config/relay/agents` prints `700 c4` twice,
+   `bus.json` names the origin, and `relay-bus.py whoami` exits 4 (not connected) until a key is
+   approved.
+5. No agent or tmux session is restarted.
+
+**Approving an agent.** In its next session, an agent asked to join Relay runs
+`relay-bus.py connect --name … --purpose … --harness claude-code|codex`. The helper prints a code
+such as `BCDF-GHJK`, and the agent asks its person to approve it. A Relay administrator opens
+**Settings → Agent communication → Agent keys**, enters the code, checks the name, purpose, host and
+harness the request shows, and approves or denies it. The helper waits up to an hour. On approval it
+stores the key in `~/.config/relay/agents/<identity>.key` (0600) and activates it. The key never
+enters the agent's transcript. An administrator can also create a key in the console. A person then
+installs it on the host as the user with `relay-bus.py install-key [--identity <id>]`, which reads it
+from stdin; never paste a key to an agent. Several agents under one user (one per tmux window, say)
+each need their own `RELAY_BUS_IDENTITY`; without it they share `default`.
+
+**Trust boundary.** Every process running as the user can read that user's key files and act as
+those agents, including authorized Relay terminal control. Admin credentials never live there. To
+cut an agent off, revoke its key in Relay. `relay-bus.py disconnect` revokes the agent's own key and
+deletes the file. Deleting a key file does not revoke the key.
+
+**Rollback.** Set `relay_agent_skill_state: absent` and converge. The role removes the hook first.
+Then the same helper, as the user, removes the two files it installed from each `relay-bus`
+directory, and the directory once that leaves it empty. Anything else there stays, and so does the
+directory. It walks from `~/.claude` and `~/.codex` down through no-follow directory descriptors. It
+refuses a symlink, a non-regular file or another user's path there, in its dry run before the hook
+changes and again when it removes. It keeps `~/.config/relay`: `bus.json` is harmless, and the
+keys belong to the agents and the people who approved them. Revoke them in Relay when agents should
+leave the bus. `absent` needs no pins, controller copy or Python. The hook is inert against an older
+hub: a v0.8 hub has no `/agent/v1/inbox`, and the hook stays silent on whatever it answers instead
+(its HTML page, a 404 or a redirect, which the helper never follows). A hub or connector rollback
+therefore does not have to remove the skill first. `relay_agent_skill_enabled:
+false` only stops managing the host and leaves everything in place.
 
 ## Qualification
 
@@ -372,5 +529,55 @@ For Claude Code messaging, a strict fake `claude` CLI on `PATH` keeps `~/.claude
 cover the 0.8.0 gate before any write, registration and the hook alongside the user's own settings,
 a repin, `absent`, check mode, unparsable files before a release change, `unmanaged`, a CLI the
 user cannot run, and failed MCP changes with their restore. Unit tests cover
-`claude_relay_hook.py` on its own. Set `TMPDIR` under `/workspace` for local runs. Real estate convergence and
-logout/reboot evidence are operator acceptance work.
+`claude_relay_hook.py` on its own. The 0.9.0 preflight cases refuse the old literal hook, alone or
+beside the skill's hook, for 0.9.0 and 0.10.0 pins, including `absent` in the same run and an
+unparsable file. They pass the skill's hook alone, no settings file, and the old hook under a 0.8.0
+pin. A unit test pins the version comparison's edge cases. A settings lock the hook merge could not
+take (a directory, a symlink, a read-only file) fails the Claude Code preflight, for `present` and
+`absent` in apply and check mode, before the binary, unit or service changes. A FIFO as
+`settings.json` (to the 0.9.0 preflight) or as `~/.claude.json` (to the Claude Code preflight) is
+refused at once, never opened blocking, with nothing changed. The helpers open every user path they
+read with `O_NONBLOCK` and check it is a regular file before reading. Subprocess tests with a 10 s
+timeout cover a FIFO as `settings.json` (directly and behind its symlink), as the lock and as a skill
+file. Set `TMPDIR` under `/workspace` for local runs. Real estate convergence and logout/reboot
+evidence are operator acceptance work.
+
+The same workflow runs `scripts/tests/integration/test_relay_agent_skill.py` for the skill role,
+with real Ansible against a disposable home:
+
+- disabled mode;
+- the placeholder pins, mismatched, missing or linked release bytes, and bad inputs, all failing
+  before any write;
+- an install beside the user's own hooks and the old `inbox-hint` entry, with the modes, owners and
+  bytes checked;
+- a rerun with `changed=0`, and a new release;
+- a symlink at each managed directory, from `~/.config` and `~/.claude` down, and a directory or
+  link where a skill file or `bus.json` goes, refused in apply and check mode with nothing changed
+  inside or outside the home;
+- a path swapped for a symlink after validation (`~/.config`, `~/.config/relay`,
+  `~/.claude/skills` or a skill file): the install refuses it and changes nothing, and the link's
+  target stays untouched;
+- Python older than 3.10 or broken, and unparsable settings;
+- check mode, and `absent` keeping `~/.config/relay` and the key untouched. `absent` refuses links
+  on the way (also when swapped in after its dry run) and keeps other files in a skill directory;
+- a static check that `present.yml` and `absent.yml` each run as one block as the user, and that
+  nothing in them writes but the helpers. A fixture without root cannot show that by running;
+- read-only directories in apply and check mode, refused before the hook or any file changes:
+  - for `absent`: a skill directory, or the `skills/` it would be removed from;
+  - for `present`: a `skills/` or `~/.config` that a missing directory would be created in.
+
+  A skill directory the role gives its own mode is repaired instead;
+- a settings lock the hook merge could not take (a directory, a symlink, a read-only file), for
+  `present` and `absent` in apply and check mode, refused before any change.
+
+Unit tests cover `claude_skill_hook.py` and `skill_files.py`, including a link swapped in between the
+helper's checks and its writes, and a change the user could not make. They also run the hook command
+itself through `/bin/sh` with the helper or `python3` missing. Both settings helpers carry the same
+lock code. Check mode refuses an unusable lock and never creates one. A regression holds writer 1
+inside its rename, with the lock, and only then starts writer 2. It checks through explicit
+interprocess events, in both orders, that writer 2 cannot take the lock until writer 1 has renamed.
+The result keeps the skill's hook and drops the old one. Without the flock, writer 2 gets the lock
+at once and the test fails.
+With `RELAY_SKILL_RELEASE_DIR` naming a directory that holds a release's
+two skill assets, one more case installs them and checks that the real `relay-bus.py` accepts what the
+role wrote. Run it once against the v0.9.0 assets before applying the role.

@@ -20,8 +20,10 @@ relay_connector_name: ""
 relay_connector_sockets: []
 # Relay messaging for the execution user's Claude Code sessions (tasks/claude.yml): the connector's
 # `mcp` stdio server registered at user scope as `relay`, plus a UserPromptSubmit hook running
-# `inbox-hint`. `unmanaged` leaves both alone; `present` needs a >= 0.8.0 release pin; `absent`
-# removes both and keeps everything else the user configured.
+# `inbox-hint`. `unmanaged` leaves both alone; `present` needs a 0.8.x release pin (0.9.0 removed
+# both); `absent` removes both and keeps everything else the user configured. Whatever the state, a
+# 0.9.0 or later pin is refused while the user's settings.json still holds the inbox-hint hook
+# (tasks/legacy_hook_preflight.yml).
 relay_connector_claude_messaging: unmanaged
 # The user's Claude Code CLI. Only it writes ~/.claude.json; running sessions rewrite that file too.
 relay_connector_claude_bin: "{{ relay_connector_home }}/.npm-global/bin/claude"

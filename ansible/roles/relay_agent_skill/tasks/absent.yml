@@ -1,0 +1,27 @@
+---
+# The hook first, then the skill. ~/.config/relay stays as it is: bus.json is harmless without the
+# skill, and the agent keys in agents/ belong to the agents and the people who approved them. Revoke a
+# key in Relay (or with `relay-bus.py disconnect` before this runs), never by deleting its file.
+#
+# validate.yml already dry-ran both steps before this file runs: the hook merge (with its lock) and
+# the removal (types, owners and the write permission every unlink and rmdir needs). A refusal there
+# leaves the hook and every file in place.
+
+- name: Remove the hook and the skill as the user, never through a link
+  become: true
+  become_user: "{{ relay_agent_skill_user }}"
+  block:
+    - name: Remove the relay-bus inbox hook first
+      ansible.builtin.import_tasks: hook.yml
+
+    # files/skill_files.py, dry-run in validate.yml: only the two regular files the role installs
+    # and then their emptied directory, through no-follow directory descriptors. A symlink or another
+    # user's path is refused, never followed or removed. Under --check it reports and removes nothing.
+    - name: Remove the relay-bus skill for Claude Code and Codex
+      ansible.builtin.command:
+        argv: "{{ relay_agent_skill_files_argv + (['--check'] if ansible_check_mode else []) }}"
+      environment:
+        HOME: "{{ relay_agent_skill_home }}"
+      check_mode: false
+      register: relay_agent_skill_removed
+      changed_when: relay_agent_skill_removed.stdout | trim == 'changed'

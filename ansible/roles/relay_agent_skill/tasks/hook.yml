@@ -1,0 +1,14 @@
+---
+# Commits the settings.json merge validate.yml dry-ran, as the user; writes only on change. Under
+# --check it runs with --check: it reports the change and writes nothing.
+- name: Converge the relay-bus inbox hook in the user's Claude Code settings
+  ansible.builtin.command:
+    argv: "{{ relay_agent_skill_hook_argv + (['--check'] if ansible_check_mode else []) }}"
+    stdin: "{{ lookup('ansible.builtin.file', 'claude_skill_hook.py') }}"
+  become: true
+  become_user: "{{ relay_agent_skill_user }}"
+  environment:
+    HOME: "{{ relay_agent_skill_home }}"
+  check_mode: false
+  register: relay_agent_skill_hook
+  changed_when: relay_agent_skill_hook.stdout | trim == 'changed'

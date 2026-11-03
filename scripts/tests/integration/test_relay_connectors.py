@@ -43,6 +43,11 @@ USER_SETTINGS = {
     },
 }
 USER_MCP = {'type': 'stdio', 'command': '/usr/local/bin/other-mcp', 'args': [], 'env': {}}
+# The relay_agent_skill role's hook (roles/relay_agent_skill/files/claude_skill_hook.py): the >= 0.9.0
+# preflight must never take it for the old inbox-hint one.
+SKILL_HOOK = {'type': 'command', 'timeout': 3, 'command': (
+    'command -v python3 >/dev/null 2>&1 && '
+    'python3 "$HOME/.claude/skills/relay-bus/relay-bus.py" inbox --hook 2>/dev/null; exit 0')}
 USER_CLAUDE_CONFIG = {'numStartups': 7, 'mcpServers': {'other': USER_MCP},
                       'primaryApiKey': 'fixture_claude_api_key_never_log'}
 
@@ -725,6 +730,144 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
                 with contextlib.suppress(OSError):
                     os.removexattr(path, name)
 
+    def seed_hooks(self, *entries, content=None):
+        """The user's own settings plus `entries`, each in its own UserPromptSubmit group."""
+        self.seed_claude()
+        settings = json.loads(json.dumps(USER_SETTINGS))
+        settings['hooks']['UserPromptSubmit'] += [{'hooks': [entry]} for entry in entries]
+        self.settings.write_text(content if content is not None else json.dumps(settings, indent=2))
+
+    def release(self, version):
+        artifact = self.root/f'connector-bin-{version}'
+        artifact.write_text(Path(self.values['relay_connector_source']).read_text().replace('0.3.5', version))
+        artifact.chmod(0o755)
+        return artifact, self.pin(artifact, version)
+
+    def test_21_a_0_9_connector_is_refused_while_the_old_inbox_hint_hook_is_installed(self):
+        refuse = 'Refuse a connector without inbox-hint while the old hook may still run it'
+        old_hook = self.expected_hook(self.claude_artifact)  # The literal entry `present` wrote for 0.8.0.
+        nine, pin9 = self.release('0.9.0')
+        ten, pin10 = self.release('0.10.0')
+        cases = [  # (hook entries, settings text, values, reason), each refused before any write.
+            ((old_hook,), None, pin9, 'the hook is still there'),
+            ((old_hook, SKILL_HOOK), None, pin9, 'the hook is still there'),
+            ((SKILL_HOOK, old_hook), None, pin10, 'the hook is still there'),
+            # Converging `absent` in the same run as the repin is not the order either.
+            ((old_hook,), None, {**pin9, 'relay_connector_claude_messaging': 'absent'}, 'the hook is still there'),
+            ((), '{"model": "opus",', pin9, 'the file could not be checked ('),
+        ]
+        for entries, content, values, reason in cases:
+            with self.subTest(entries=len(entries), content=content, version=values['relay_connector_release']['version']):
+                self.seed_hooks(*entries, content=content)
+                before = self.snapshot()
+                out = self.role(values, success=False)
+                self.assertEqual(self.failed_task(out), refuse)
+                self.assertIn(reason, out)
+                self.assertIn('Converge this host with relay_connector_claude_messaging: absent', out)
+                self.assertEqual((self.claude_calls, self.claude_starts), ([], []))
+                self.assertEqual(self.snapshot(), before)
+                for artifact in (nine, ten):
+                    self.assertFalse(Path(self.connector_path(artifact)).parent.exists())
+        # `present` cannot ask for the hook on such a pin either.
+        self.seed_hooks()
+        out = self.role({**pin9, 'relay_connector_claude_messaging': 'present'}, success=False)
+        self.assertEqual(self.failed_task(out), 'Refuse Claude Code messaging on a connector that no longer serves it')
+        # A pre-0.9.0 pin is not refused with the old hook in place: that is the pin `absent` converges with.
+        self.seed_hooks(old_hook)
+        self.role(self.claude_values)
+        self.assertEqual(self.relay_hooks(), [old_hook])
+        # The relay-bus skill's hook alone, or no settings at all, never trips it.
+        self.seed_hooks(SKILL_HOOK)
+        settings = self.settings.read_bytes()
+        self.role(pin9)
+        self.assertTrue(Path(self.connector_path(nine)).exists())
+        self.assertEqual(self.settings.read_bytes(), settings)
+        self.settings.unlink()
+        self.role(pin10)
+        self.assertTrue(Path(self.connector_path(ten)).exists())
+        self.assertFalse(self.settings.exists())
+
+    def test_22_a_settings_lock_the_hook_could_not_take_fails_the_preflight_before_any_change(self):
+        # A release change with service management on: past the preflight, this run would install
+        # new bytes, rewrite the unit, restart the service and rewrite the receipt.
+        upgrade = self.root/'connector-bin-0.8.0-lock'
+        upgrade.write_bytes(self.claude_artifact.read_bytes()+b'# lock release fixture\n')
+        upgrade.chmod(0o755)
+        dry_run = "Dry-run the Relay inbox hook merge in the user's Claude Code settings"
+        lock = self.settings.parent/'.settings.json.lock'
+        elsewhere = self.root/'elsewhere.lock'
+        elsewhere.write_text('')
+        kinds = ['directory', 'symlink'] + ([] if os.geteuid() == 0 else ['read-only'])
+        try:
+            for kind in kinds:
+                for state in ('present', 'absent'):
+                    with self.subTest(kind=kind, state=state):
+                        # `absent` has the old hook to remove; `present` has it to add.
+                        self.seed_hooks(*([self.expected_hook(self.claude_artifact)] if state == 'absent' else []))
+                        if lock.is_dir() and not lock.is_symlink():
+                            lock.rmdir()
+                        elif lock.exists() or lock.is_symlink():
+                            lock.unlink()
+                        if kind == 'directory':
+                            lock.mkdir()
+                        elif kind == 'symlink':
+                            lock.symlink_to(elsewhere)
+                        else:
+                            lock.write_text('')
+                            lock.chmod(0o400)
+                        values = {**self.pin(upgrade, '0.8.0'), 'relay_connector_manage_service': True,
+                                  'relay_connector_claude_messaging': state}
+                        before = self.snapshot()
+                        for check in (False, True):
+                            out = self.role(values, success=False, check=check)
+                            self.assertEqual(self.failed_task(out), dry_run)
+                            self.assertIn(f'the lock {lock} is not', out)
+                            self.assertEqual((self.claude_calls, self.commands), ([], []))
+                            self.assertEqual(self.snapshot(), before)
+                            self.assertFalse(Path(self.connector_path(upgrade)).parent.exists())
+                        self.assertEqual(elsewhere.read_text(), '')
+        finally:
+            if lock.is_dir() and not lock.is_symlink():
+                lock.rmdir()
+            elif lock.exists() or lock.is_symlink():
+                lock.unlink()
+
+    def test_23_a_fifo_in_the_users_claude_files_fails_the_preflights_at_once(self):
+        # A FIFO without a writer would block a plain open() (the helper's, or slurp's) forever.
+        nine = self.root/'connector-bin-0.9.0-fifo'  # Bytes no earlier test installed.
+        nine.write_text(Path(self.values['relay_connector_source']).read_text().replace('0.3.5', '0.9.0')
+                        + '# fifo release fixture\n')
+        nine.chmod(0o755)
+        pin9 = self.pin(nine, '0.9.0')
+        fifo_task = 'Require a regular file where Claude Code keeps its configuration'
+        try:
+            # settings.json: the 0.9.0 preflight cannot tell, so it refuses, at once.
+            self.seed_claude()
+            self.settings.unlink()
+            os.mkfifo(self.settings)
+            before = self.snapshot()
+            out = self.role(pin9, success=False)
+            self.assertEqual(self.failed_task(out), 'Refuse a connector without inbox-hint while the old hook may still run it')
+            self.assertIn('the file could not be checked (', out)
+            self.assertIn('it is not a regular file (a FIFO', out)
+            self.assertEqual(self.snapshot(), before)
+            self.assertFalse(Path(self.connector_path(nine)).parent.exists())
+            # ~/.claude.json, read by slurp in the Claude Code preflight: refused before it is opened.
+            self.settings.unlink()  # Writing the FIFO back to a file would block on it as well.
+            self.seed_claude()
+            self.claude_json.unlink()
+            os.mkfifo(self.claude_json)
+            before = self.snapshot()
+            for check in (False, True):
+                out = self.role(self.absent, success=False, check=check)
+                self.assertEqual(self.failed_task(out), fifo_task)
+                self.assertIn('.claude.json, or what it links to, is not a regular file', out)
+                self.assertEqual(self.snapshot(), before)
+        finally:
+            for path in (self.settings, self.claude_json):
+                if path.is_fifo():
+                    path.unlink()
+
 
 def set_acl(test, path, name='system.posix_acl_access'):
     """Give `path` a minimal POSIX ACL, or skip `test` where the filesystem has none."""
@@ -793,7 +936,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertIn('nothing was written', result.stderr)
                 self.assertEqual(path.read_bytes(), before)
-                self.assertEqual([p.name for p in path.parent.iterdir() if p.name.startswith('.settings.json.')], [])
+                self.assertEqual([p.name for p in path.parent.iterdir() if p.name.endswith('.tmp')], [])
 
     def test_matches_only_the_exact_command_the_role_writes(self):
         for command in [RELAY_HINT, '/x/relay-connector --state /s inbox-hint']:
@@ -1013,7 +1156,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual((code, out), (1, ''))
         self.assertIn('inherits a POSIX ACL from its default ACL', err)
         self.assertEqual(self.settings.read_bytes(), before)
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_a_concurrent_chmod_forces_a_fresh_pass_that_keeps_the_new_mode(self):
         self.write({'model': 'opus'}, mode=0o644)
@@ -1040,7 +1183,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertIn('carries a POSIX ACL', err)
         self.assertEqual(self.settings.read_bytes(), before)
         self.assertIn('system.posix_acl_access', os.listxattr(self.settings))
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_a_change_this_user_cannot_write_is_refused_already_under_check(self):
         if os.geteuid() == 0:
@@ -1091,7 +1234,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         code, out, err = self.run_in_process(user_edits_once)
         self.assertEqual((code, out), (0, 'changed\n'), err)
         self.assertEqual(json.loads(self.settings.read_text())['theme'], 'dark')
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_a_file_that_keeps_changing_fails_and_keeps_the_last_edit(self):
         self.write({'model': 'opus'})
@@ -1105,7 +1248,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertIn('changed while being updated, 3 times in a row', err)
         self.assertIn('nothing was written', err)
         self.assertEqual(json.loads(self.settings.read_text()), {'model': 'opus', 'edit': 3})
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_check_reports_without_writing(self):
         result = self.run_hook(check=True)
@@ -1176,6 +1319,90 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual(self.run_hook().stdout, 'changed\n')
         text = self.settings.read_text()
         self.assertEqual(text, to_nice_json(json.loads(text)))
+
+    def test_a_write_takes_the_lock_it_shares_with_the_skill_role_and_waits_for_it(self):
+        import fcntl
+        self.write({'model': 'opus'})
+        lock = self.settings.parent / '.settings.json.lock'
+        holder = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX)  # As claude_skill_hook.py holds it while it merges.
+            out, err = io.StringIO(), io.StringIO()
+            argv = ['--settings', str(self.settings), '--state', 'present', '--command', RELAY_HINT, '--timeout', '2']
+            with mock.patch.object(hook, 'LOCK_WAIT', 0.3), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(hook.main(argv), 1)
+            self.assertIn(f'another merge has held {lock}', err.getvalue())
+            self.assertEqual(json.loads(self.settings.read_text()), {'model': 'opus'})
+            self.assertEqual(self.run_hook(check=True).stdout, 'changed\n')  # A report takes no lock.
+        finally:
+            os.close(holder)
+        self.assertEqual(self.run_hook().stdout, 'changed\n')
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
+    def test_check_mode_refuses_a_lock_it_could_not_take_and_creates_none(self):
+        self.write({'model': 'opus'})
+        before = self.settings.read_bytes()
+        lock = self.settings.parent / '.settings.json.lock'
+        self.assertEqual(self.run_hook(check=True).stdout, 'changed\n')
+        self.assertFalse(lock.exists())  # A missing lock is fine, and --check never creates it.
+        elsewhere = self.home / 'elsewhere.lock'
+        elsewhere.write_text('')
+        cases = [(lock.mkdir, 'is not a regular file of this user'),
+                 (lambda: lock.symlink_to(elsewhere), 'is not a regular file of this user')]
+        if os.geteuid() != 0:  # Root reads and writes through permission bits.
+            cases.append((lambda: (lock.write_text(''), lock.chmod(0o400)), 'is not readable and writable'))
+        for make, message in cases:
+            make()
+            for check in (True, False):
+                result = self.run_hook(check=check)
+                self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                self.assertIn(f'the lock {lock} {message}', result.stderr)
+                self.assertEqual(self.settings.read_bytes(), before)
+            if lock.is_dir() and not lock.is_symlink():
+                lock.rmdir()
+            else:
+                lock.unlink()
+        # With nothing to change there is no lock to take, so none is checked.
+        self.write({'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [RELAY_ENTRY]}]}})
+        lock.mkdir()
+        self.assertEqual(self.run_hook(check=True).stdout, 'unchanged\n')
+
+    def test_a_fifo_settings_json_is_refused_at_once_never_waited_on(self):
+        self.settings.parent.mkdir(mode=0o700)
+        os.mkfifo(self.settings)
+        for state, check in [('absent', True), ('absent', False), ('present', True), ('present', False)]:
+            with self.subTest(state=state, check=check):
+                result = self.run_hook(state=state, check=check)  # Its 30 s timeout fails a hang.
+                self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                self.assertIn('it is not a regular file (a FIFO', result.stderr)
+                self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+
+    def test_the_0_9_preflight_finds_only_the_old_literal_hook(self):
+        # tasks/legacy_hook_preflight.yml runs `--state absent --check` and refuses on anything but
+        # `unchanged` with exit 0.
+        self.assertFalse(hook.is_relay_inbox_hint(SKILL_HOOK))
+        user = {'type': 'command', 'command': '/usr/local/bin/user-prompt-hook'}
+        cases = [((RELAY_ENTRY,), 'changed\n'), ((SKILL_HOOK,), 'unchanged\n'), ((RELAY_ENTRY, SKILL_HOOK), 'changed\n'),
+                 ((SKILL_HOOK, OLD_RELAY), 'changed\n'), ((user,), 'unchanged\n'), ((), 'unchanged\n')]
+        for entries, expected in cases:
+            with self.subTest(entries=entries):
+                self.write({'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [user, *entries]}]}})
+                before = self.settings.read_bytes()
+                result = self.run_hook(state='absent', check=True)
+                self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+                self.assertEqual(self.settings.read_bytes(), before)
+        self.settings.unlink()
+        self.assertEqual(self.run_hook(state='absent', check=True).stdout, 'unchanged\n')
+
+    def test_the_0_9_version_gates_compare_numerically(self):
+        # The exact Jinja test validate.yml uses: `is version('0.9.0', '>=')` (and '<' for `present`).
+        from ansible.plugins.test.core import version_compare
+        for version, refused in [('0.8.0', False), ('0.8.1', False), ('0.8.9', False), ('0.8.10', False),
+                                 ('0.9.0', True), ('0.9.1', True), ('0.9.10', True), ('0.10.0', True),
+                                 ('0.09.0', True), ('1.0.0', True), ('10.0.0', True), ('0.0.9', False)]:
+            with self.subTest(version=version):
+                self.assertEqual(version_compare(version, '0.9.0', '>='), refused)
+                self.assertEqual(version_compare(version, '0.9.0', '<'), not refused)
 
 
 if __name__ == '__main__':

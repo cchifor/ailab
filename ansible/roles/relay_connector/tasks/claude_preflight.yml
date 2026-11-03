@@ -37,12 +37,30 @@
       - --timeout
       - "{{ relay_connector_claude_hook_timeout | int | string }}"
 
+# Followed, as the CLI and the slurp below follow it; stat opens nothing (no checksum, MIME type or
+# attributes), so a FIFO here cannot block it.
 - name: Inspect the user's Claude Code configuration
   ansible.builtin.stat:
     path: "{{ relay_connector_home }}/.claude.json"
+    follow: true
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
   become: true
   become_user: "{{ relay_connector_user }}"
   register: relay_connector_claude_config_stat
+
+# slurp opens the file blocking: a FIFO without a writer (or a device) would hang the preflight
+# forever, so only a regular file is read.
+- name: Require a regular file where Claude Code keeps its configuration
+  ansible.builtin.assert:
+    that:
+      - not relay_connector_claude_config_stat.stat.exists or relay_connector_claude_config_stat.stat.isreg
+    fail_msg: >-
+      {{ relay_connector_home }}/.claude.json, or what it links to, is not a regular file (a FIFO, a
+      device, a socket or a directory). Claude Code keeps its configuration in one: repair it, then
+      converge again.
+    quiet: true
 
 # ~/.claude.json carries account details, and an API key on a key login: never display it.
 - name: Read the user's Claude Code configuration

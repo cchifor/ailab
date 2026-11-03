@@ -4,7 +4,10 @@ on:
     paths:
       - "ansible/roles/relay_connector/**"
       - "ansible/relay-connectors.yml"
+      - "ansible/roles/relay_agent_skill/**"
+      - "ansible/relay-agent-skill.yml"
       - "scripts/tests/integration/test_relay_connectors.py"
+      - "scripts/tests/integration/test_relay_agent_skill.py"
       - "scripts/tests/integration/requirements-relay-connectors.txt"
       - ".gitea/workflows/relay-connectors.yaml"
   push:
@@ -12,16 +15,20 @@ on:
     paths:
       - "ansible/roles/relay_connector/**"
       - "ansible/relay-connectors.yml"
+      - "ansible/roles/relay_agent_skill/**"
+      - "ansible/relay-agent-skill.yml"
       - "scripts/tests/integration/test_relay_connectors.py"
+      - "scripts/tests/integration/test_relay_agent_skill.py"
       - "scripts/tests/integration/requirements-relay-connectors.txt"
       - ".gitea/workflows/relay-connectors.yaml"
 jobs:
   relay-connectors:
     runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
-    timeout-minutes: 10
+    # The relay-bus skill suite and the >= 0.9.0 preflight cases add about 10 minutes of real Ansible runs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Validate connector pins, identity preservation and service convergence
+      - name: Validate connector pins, identity preservation and service convergence, and the relay-bus skill role
         shell: bash
         run: |
           set -euo pipefail
@@ -32,3 +39,5 @@ jobs:
           mkdir -p .relay-connector-tests
           PATH="$PWD/.venv-relay-connector-tests/bin:$PATH" TMPDIR="$PWD/.relay-connector-tests" \
             .venv-relay-connector-tests/bin/python scripts/tests/integration/test_relay_connectors.py
+          PATH="$PWD/.venv-relay-connector-tests/bin:$PATH" TMPDIR="$PWD/.relay-connector-tests" \
+            .venv-relay-connector-tests/bin/python scripts/tests/integration/test_relay_agent_skill.py

@@ -1,0 +1,53 @@
+---
+# The skill's files first, then the hook, so no new session runs a hook whose helper is not there
+# yet. Nothing here reads or writes a key file, and nothing restarts: a Claude Code or Codex session
+# picks the skill up when it starts.
+#
+# Every write runs as the user, never as root, and goes through files/skill_files.py: one component
+# at a time from the home, through directory descriptors opened without following links, with
+# mkdirat, fchmod, a fresh temporary file and a rename in its directory. No write follows a link,
+# whenever the link appeared; a symlink or another user's path on the way is refused. validate.yml
+# dry-ran exactly this change.
+
+- name: Install the skill and its configuration as the user, never through a link
+  become: true
+  become_user: "{{ relay_agent_skill_user }}"
+  block:
+    # Under --check it runs with --check: it reports the change and writes nothing.
+    - name: Install the pinned skill files, the private Relay directories and bus.json
+      ansible.builtin.command:
+        argv: "{{ relay_agent_skill_files_argv + (['--check'] if ansible_check_mode else []) }}"
+        stdin: "{{ {'origin': relay_agent_skill_origin, 'files': relay_agent_skill_payload_files} | to_json }}"
+      environment:
+        HOME: "{{ relay_agent_skill_home }}"
+      check_mode: false
+      register: relay_agent_skill_installed_files
+      changed_when: relay_agent_skill_installed_files.stdout | trim == 'changed'
+
+    - name: Recheck the installed skill files
+      ansible.builtin.stat:
+        path: "{{ relay_agent_skill_home }}/{{ item.0 }}/skills/relay-bus/{{ item.1.name }}"
+        checksum_algorithm: sha256
+        follow: false
+      loop: "{{ relay_agent_skill_harness_dirs | product(relay_agent_skill_files) | list }}"
+      loop_control:
+        label: "{{ item.0 }}/skills/relay-bus/{{ item.1.name }}"
+      register: relay_agent_skill_installed
+      when: not ansible_check_mode
+
+    - name: Require the pinned bytes, mode and owner in place
+      ansible.builtin.assert:
+        that:
+          - item.stat.isreg | default(false)
+          - not item.stat.islnk | default(true)
+          - item.stat.checksum | default('') == relay_agent_skill_release.sha256[item.item.1.asset]
+          - item.stat.mode | default('') == item.item.1.mode
+          - item.stat.pw_name | default('') == relay_agent_skill_user
+        quiet: true
+      loop: "{{ relay_agent_skill_installed.results }}"
+      loop_control:
+        label: "{{ item.item.0 }}/skills/relay-bus/{{ item.item.1.name }}"
+      when: not ansible_check_mode
+
+    - name: Add the relay-bus inbox hook last
+      ansible.builtin.import_tasks: hook.yml

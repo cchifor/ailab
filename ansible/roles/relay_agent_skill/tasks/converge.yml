@@ -1,0 +1,14 @@
+---
+# docs/runbooks/relay-connectors.md, "The relay-bus skill". Everything is checked first
+# (validate.yml); only then does present.yml or absent.yml change the worker.
+
+- name: Validate every input, the release bytes and the user's files before any write
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Install the relay-bus skill, its origin and its Claude Code hook
+  ansible.builtin.import_tasks: present.yml
+  when: relay_agent_skill_state == 'present'
+
+- name: Remove the relay-bus skill's hook and files, keeping ~/.config/relay
+  ansible.builtin.import_tasks: absent.yml
+  when: relay_agent_skill_state == 'absent'
