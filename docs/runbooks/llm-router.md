@@ -3443,6 +3443,9 @@ route's targets is in use, the router answers at once with the busy 429 (`Retry-
   - On 11-03 at 14:30Z, ci-runner-2 had 16 % free and ci-runner-9 24 %. ci-runner-6, where the same tree passed, had
     32 %.
   - Nothing in the image store has changed since `93108f5e`.
+  - **Follow-up: [#1586](https://git.chifor.me/cchifor/ailab/issues/1586).** Free or grow those runners' disks, or
+    give these HTTP tests the fake disk the store's unit tests use, so that main's push CI is green again and the next
+    roll does not have to explain it away.
 - **Reviews:** reviewer-codex and reviewer-claude approved #133 and #134.
 
 **Image.**
@@ -3466,9 +3469,21 @@ the plan's provisional values (point 9).
   `router.chifor.me` through Cloudflare, and dsh offers the local models. It is above the slowest next-slot release
   seen for a busy 429 (75.9 s). That figure is a lower bound on how long a waiter stays queued, so a later waiter can
   still meet `QUEUE_TIMEOUT` and retry at the back.
+- **The wait costs no generation time on cloud2.** A waiter counts against a whole-request cap, but none applies
+  here.
+  - The account's only route, `qwen3.8-27b` (and its pointer `qwen-27b`), has no `maxDurationMs` (owner decision D1),
+    and direct `local/qwen3.8-27b` requests have none either (config revision 2218).
+  - The route's per-attempt timers, the wait timer (`timeoutMs` 300 s) and the idle timer (`idleTimeoutMs` 120 s),
+    start at admission, so they do not run while a request waits.
+  - A route that reaches this pool with a `maxDurationMs` would need its cap to cover 80 s of waiting plus the
+    longest completion.
 - **4 waiters** covers the 4 dev workers; the incident had at most 2 clients waiting at once. It does not by itself
   keep the shared small body budget clear: the 7-day peak use (8.6 MB) plus four p90 bodies (6.4 MB) is more than
   13.4 MB.
+  - **Abort criterion.** A `body_budget` 429 lowers `maxWaiting` to 2, the incident's peak, with the same `If-Match`
+    PUT; it is not left for the revisit. That covers the acceptance run and any time cloud2 has waiters until the
+    first review of the wait histogram. Such 429s show in `llm_router_http_rejections_total{code="BUSY"}`, and the
+    small pool's use in `llm_router_native_body_budget_bytes{pool="small",state="reserved"}`.
 - **`concurrency` stays 4.** With 4 requests running, cloud2's KV-cache use was p95 0.76 and max 0.82; a 5th sequence
   would bring it to about 0.95-1.03.
 - **Acceptance before relying on it:** 4 running plus queued requests, overflow and cancellation against cloud2, with
