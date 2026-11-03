@@ -9,24 +9,81 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
-The default release is the v0.7.7 connector manifest from Relay release
-[v0.7.7](https://git.chifor.me/cchifor/relay/releases/tag/v0.7.7) (release
-workflow run 117872, 2026-11-02). The upgraded hub serves the same manifest at
-`https://relay.chifor.me/downloads/connector/v0.7.7/manifest.json`:
+The default release is the v0.8.0 connector manifest from Relay release
+[v0.8.0](https://git.chifor.me/cchifor/relay/releases/tag/v0.8.0) (release
+workflow run 118693, 2026-11-03). The upgraded hub serves the same manifest at
+`https://relay.chifor.me/downloads/connector/v0.8.0/manifest.json`:
 
 | Field | Pin |
 |---|---|
-| Source | `122efe126c4abc47943ab9492b2e19a41f321b07` |
-| Linux amd64 SHA-256 | `87f78d2bcf5d4e2813e6e3a81bf5b700acc0949ec0e1ecbd8751b61372ad623d` |
-| Linux arm64 SHA-256 | `d4e33ef2288b6e80aaed7df0fe30e104e524ae3ceb160b7b616276904e8565ed` |
+| Source | `04960c3b7267b5d9e5f82f1ad0f42451c22321b7` |
+| Linux amd64 SHA-256 | `072fe6c4db6ff88eabb50ba27cca2c7657fb896af7601fcdc3a035a32c5126c9` |
+| Linux arm64 SHA-256 | `965d47866d48ff598f7b1444011a84d2c1a14e0c0a290fba1056b3804a3e0ae4` |
 
-The pins were checked on 2026-11-02 against the release's `manifest.json` and
+The pins were checked on 2026-11-03 against the release's `manifest.json` and
 `SHA256SUMS` and the downloaded binaries; all three agree on these digests.
-`manifest.json` and `deployment-images-117872.json` both name source commit
-`122efe126c4abc47943ab9492b2e19a41f321b07`, and the latter records the hub image digest
-(`sha256:afaae66d72c56cc11d39f3b1f4ebe880a293091a8011ea2f4daab1e9fb59b6d0`).
+`manifest.json` and `deployment-images-118693.json` both name source commit
+`04960c3b7267b5d9e5f82f1ad0f42451c22321b7`, and the latter records the hub image digest
+(`sha256:f2c3e1be224cdc54c4371af1b5d4d81937da9b5b5d22678f8e337c024daa6aef`).
 
-**What v0.7.7 changes for connectors** (v0.7.4 and v0.7.5 changed only the hub
+**What v0.8.0 changes for connectors** (v0.7.8 was a version on Relay's main branch
+and was never tagged; v0.8.0 carries it):
+
+- **Claude Code agents in tmux can join Relay messaging**
+  ([Relay #172](https://git.chifor.me/cchifor/relay/pulls/172)). The connector adds
+  `relay-connector mcp`, a stdio MCP server with Relay's messaging tools, and
+  `inbox-hint`, which tells an agent about unread messages before each prompt.
+  `relay_connector_claude_messaging` installs both for the user (see
+  [Claude Code messaging](#claude-code-messaging)). The connector answers only a caller
+  it can trace through the kernel and `/proc` to exactly one Claude Code agent on an
+  approved socket. That needs Linux 6.5 or later; the dev-workers run 6.8. Nothing
+  joins until an admin turns on **Agent messaging** for the host in Relay, which is off
+  by default. Codex agents cannot join: Codex starts MCP servers from its shared
+  app-server daemon, so no process ancestry leads to a pane, and Relay reports them as
+  `codex-shared-daemon`.
+- **Read-only Chat for agents in tmux**
+  ([Relay #176](https://git.chifor.me/cchifor/relay/pulls/176),
+  [#177](https://git.chifor.me/cchifor/relay/pulls/177)). When someone opens Chat,
+  the connector reads that Claude Code agent's own transcript under `~/.claude` and
+  streams it to the hub. Nothing is installed on the worker and no text is stored.
+  The hub's `RELAY_TERMINAL_CHAT=1` turns it on, and until a worker runs a 0.8.0
+  connector, Chat says the connector needs an upgrade. Codex Chat
+  (`RELAY_TERMINAL_CHAT_CODEX`) stays off in this estate.
+- **Hub only:** the Conversations page replaces Sessions and Messages
+  ([Relay #169](https://git.chifor.me/cchifor/relay/pulls/169),
+  [#170](https://git.chifor.me/cchifor/relay/pulls/170),
+  [#171](https://git.chifor.me/cchifor/relay/pulls/171)). Only operators and admins see
+  message text and transcripts, and each one opened writes an audit row without text.
+  The restore fence counts only client backends
+  ([Relay #178](https://git.chifor.me/cchifor/relay/pulls/178)).
+
+Two migrations run in the `migrate` init container, after its pre-migration dump:
+053 adds the Conversations audit and read-position tables, and 054 adds tmux
+messaging (`agent_sessions.kind`, nullable holder columns for tmux rows,
+`connectors.messaging_enabled`, `agent_principals.suspended_at`, and
+`agent_messages.sender_session_id` with a backfill).
+
+Rolling the hub back to v0.7.7 is an image revert while no tmux session is open.
+v0.7.7 ignores the new tables and columns, and its own writes satisfy the new
+constraints. Once an agent has enrolled, first turn Agent messaging off on every
+host, which suspends the tmux principals and closes their sessions, and only then
+deploy the older image: v0.7.7 would treat an open tmux principal as a managed one.
+
+Do not roll back the whole v0.8.0 change with a plain revert. Its host_vars would
+fall back to `unmanaged`, which leaves the `relay` MCP server and the inbox hook in
+each user's Claude Code configuration, and every new session would keep starting a
+tool server for a release that is no longer the pin. Roll back in this order, so
+the hub is never older than a connector:
+
+1. Turn Agent messaging off on every host in Relay.
+2. Set `relay_connector_claude_messaging: absent` on dev-worker-1, -2 and -3 and
+   converge each one. `absent` removes the `relay` server and Relay's hook whatever
+   binary they name, and it works with any pin: the 0.8.0 check applies only to
+   `present`.
+3. Repin `relay_connector_release` to v0.7.7 and converge each worker.
+4. Revert the hub image to v0.7.7.
+
+**What v0.7.7 changed for connectors** (v0.7.4 and v0.7.5 changed only the hub
 image; v0.7.6 was tagged but never published, so v0.7.7 carries it):
 
 - **Agent messaging with communication only**
@@ -46,9 +103,9 @@ image; v0.7.6 was tagged but never published, so v0.7.7 carries it):
   deletion stays off unless `RELAY_MESSAGE_ROW_RETENTION=1`, which this estate does not
   set; bodies are still cleared after 30 days as before.
 
-Rolling the hub back to v0.7.5 is an image revert. Migration 052 only adds a table
-and indexes. The v0.7.5 migrator applies just its own unrecorded files, and nothing
-in v0.7.5 reads the new objects.
+Rolling the hub back from v0.7.7 to v0.7.5 is an image revert. Migration 052 only adds
+a table and indexes. The v0.7.5 migrator applies just its own unrecorded files, and
+nothing in v0.7.5 reads the new objects.
 
 Earlier releases, for reference:
 
@@ -257,6 +314,10 @@ reviewed 0.8.0 or later `relay_connector_release` pin:
 ```yaml
 relay_connector_claude_messaging: present
 ```
+
+In this estate dev-worker-1, -2 and -3, whose agents are Claude Code, set `present` with the
+v0.8.0 pin. dev-worker-4 runs Codex, which cannot join (see the v0.8.0 notes above), and stays
+`unmanaged`.
 
 With an older pin, `present` fails before anything is written. Claude Code must be installed for
 the user at `~/.npm-global/bin/claude` (`relay_connector_claude_bin`) whenever the MCP server has to
