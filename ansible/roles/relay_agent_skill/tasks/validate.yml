@@ -24,8 +24,7 @@
     fail_msg: >-
       relay_agent_skill_release must pin an exact Relay release (0.9.0 or later) and the sha256 of both
       skill assets, relay-bus-SKILL.md and relay-bus.py, from that release's manifest.json
-      (agentSkill.files[].sha256) and SHA256SUMS. The role's defaults leave them empty until the release
-      exists (TODO-at-release).
+      (agentSkill.files[].sha256) and SHA256SUMS. Change them only through release review.
     quiet: true
   when: relay_agent_skill_state == 'present'
 

@@ -185,10 +185,14 @@ class SkillRole(unittest.TestCase):
 
     def test_02_placeholder_pins_and_bad_inputs_fail_before_any_write(self):
         before = snapshot(self.home)
-        # The role's own defaults: the TODO-at-release pins are empty, so nothing can install.
-        out = self.role(omit=['relay_agent_skill_release'], success=False)
+        # Empty pins never install anything.
+        empty = dict(version='0.9.0', sha256={'relay-bus-SKILL.md': '', 'relay-bus.py': ''})
+        out = self.role(dict(relay_agent_skill_release=empty), success=False)
         self.assertEqual(self.failed_task(out), 'Require the reviewed skill release pins')
-        self.assertIn('(TODO-at-release)', out)
+        self.assertIn('Change them only through release review', out)
+        # The role's own defaults pin the real release, so this fixture's bytes do not match them.
+        out = self.role(omit=['relay_agent_skill_release'], success=False)
+        self.assertEqual(self.failed_task(out), 'Reject missing, linked or mismatched release bytes')
         mismatched = dict(version='0.9.0', sha256={**self.pins, 'relay-bus.py': 'b' * 64})
         out = self.role(dict(relay_agent_skill_release=mismatched), success=False)
         self.assertEqual(self.failed_task(out), 'Reject missing, linked or mismatched release bytes')
