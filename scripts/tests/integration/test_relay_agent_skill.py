@@ -577,6 +577,20 @@ class SkillRole(unittest.TestCase):
                         self.assertEqual(snapshot(self.home), before)
                     self.assertEqual(elsewhere.read_text(), '')
 
+    def test_19_a_fifo_for_settings_json_fails_the_preflight_at_once(self):
+        # A FIFO without a writer would block a plain open(): the dry run must refuse it instead.
+        self.settings.unlink()
+        os.mkfifo(self.settings)
+        before = snapshot(self.home)
+        for state in ('present', 'absent'):
+            for check in (False, True):
+                with self.subTest(state=state, check=check):
+                    out = self.role(dict(relay_agent_skill_state=state), success=False, check=check)
+                    self.assertEqual(self.failed_task(out), "Dry-run the relay-bus hook merge in the user's Claude Code settings")
+                    self.assertIn('it is not a regular file', out)
+                    self.assertEqual(snapshot(self.home), before)
+        self.assertTrue(stat.S_ISFIFO(self.settings.lstat().st_mode))
+
 
 def files_payload(skill=SKILL_MD, helper=HELPER, origin='https://relay.invalid'):
     return {'origin': origin, 'files': [
@@ -1223,6 +1237,100 @@ class SharedSettingsLock(unittest.TestCase):
                     else:
                         self.lock.unlink()
         self.assertEqual(elsewhere.read_text(), '')
+
+
+class FifosAreRefusedNotWaitedOn(unittest.TestCase):
+    """A FIFO without a writer where a helper reads would block a plain open() forever. Each helper,
+    run as the roles run it, must refuse it at once (a 10 s timeout fails the test instead of
+    hanging it) and write nothing."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='relay-fifo-')
+        self.home = Path(self.temp.name)
+        self.claude = self.home / '.claude'
+        self.claude.mkdir(mode=0o700)
+        self.settings = self.claude / 'settings.json'
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @staticmethod
+    def piped(script, argv):
+        return subprocess.run([sys.executable, '-', *argv], input=script.read_text(), text=True,
+                              capture_output=True, timeout=10)
+
+    def test_a_fifo_settings_json_fails_both_preflights_at_once_and_writes_nothing(self):
+        s = str(self.settings)
+        runs = [(HOOK, ['--settings', s, '--state', 'present', '--timeout', '3', '--check']),  # The skill's dry run.
+                (HOOK, ['--settings', s, '--state', 'present', '--timeout', '3']),
+                (HOOK, ['--settings', s, '--state', 'absent']),
+                (CONNECTOR_HOOK, ['--settings', s, '--state', 'absent', '--check']),  # The 0.9.0 preflight.
+                (CONNECTOR_HOOK, ['--settings', s, '--state', 'absent'])]
+        for linked in (False, True):
+            if linked:  # The documented follow: a symlinked settings.json is read through its link.
+                self.settings.unlink()
+                (self.home / 'dotfiles').mkdir()
+                fifo = self.home / 'dotfiles/settings.json'
+                os.mkfifo(fifo)
+                self.settings.symlink_to(fifo)
+            else:
+                fifo = self.settings
+                os.mkfifo(fifo)
+            for script, argv in runs:
+                with self.subTest(linked=linked, script=script.name, argv=argv[2:]):
+                    result = self.piped(script, argv)
+                    self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                    self.assertIn('it is not a regular file (a FIFO', result.stderr)
+                    self.assertIn('nothing was written', result.stderr)
+                    self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+                    self.assertEqual(sorted(p.name for p in self.claude.iterdir()), ['settings.json'])
+
+    def test_a_fifo_lock_is_refused_at_once(self):
+        self.settings.write_text('{"model": "opus"}')
+        lock = self.claude / '.settings.json.lock'
+        os.mkfifo(lock)
+        for script, argv in [(HOOK, ['--state', 'present', '--timeout', '3']),
+                             (CONNECTOR_HOOK, ['--state', 'present', '--command', OLD_HINT['command'], '--timeout', '2'])]:
+            for check in (True, False):
+                with self.subTest(script=script.name, check=check):
+                    result = self.piped(script, ['--settings', str(self.settings), *argv] + (['--check'] if check else []))
+                    self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                    self.assertIn('is not a regular file of this user', result.stderr)
+                    self.assertEqual(self.settings.read_text(), '{"model": "opus"}')
+        # And settings_lock itself, should a FIFO appear after that check: O_NONBLOCK, then refused.
+        for module in (hook, connector_hook):
+            with self.assertRaises(module.SettingsError) as refused:
+                with module.settings_lock(str(self.settings)):
+                    self.fail('a FIFO was taken as the lock')
+            self.assertIn('is not a regular file of this user', str(refused.exception))
+
+    def test_the_skill_files_helper_refuses_a_fifo_where_a_file_goes_at_once(self):
+        argv = [sys.executable, '-I', '-c', FILES_HELPER.read_text(), '--home', str(self.home)]
+        payload = json.dumps(files_payload())
+        self.assertEqual(subprocess.run(argv + ['--state', 'present'], input=payload, text=True,
+                                        capture_output=True, timeout=10).returncode, 0)
+        skill = self.home / '.codex/skills/relay-bus/SKILL.md'
+        skill.unlink()
+        os.mkfifo(skill)
+        for state, check in [('present', True), ('present', False), ('absent', True), ('absent', False)]:
+            with self.subTest(state=state, check=check):
+                result = subprocess.run(argv + ['--state', state] + (['--check'] if check else []),
+                                        input=payload if state == 'present' else '', text=True,
+                                        capture_output=True, timeout=10)
+                self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                self.assertIn('~/.codex/skills/relay-bus/SKILL.md is not a regular file', result.stderr)
+                self.assertTrue(stat.S_ISFIFO(skill.lstat().st_mode))
+        # read_bytes() itself, should the FIFO appear after regular_file() looked: refused, not read.
+        spec = importlib.util.spec_from_file_location('skill_files_fifo', FILES_HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        parent = os.open(skill.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaises(module.Refused) as refused:
+                module.read_bytes(parent, 'SKILL.md', '~/.codex/skills/relay-bus/SKILL.md')
+        finally:
+            os.close(parent)
+        self.assertIn('is not a regular file', str(refused.exception))
 
 
 class HookCommandFailsOpen(unittest.TestCase):

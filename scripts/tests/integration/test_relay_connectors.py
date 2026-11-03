@@ -832,6 +832,42 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
             elif lock.exists() or lock.is_symlink():
                 lock.unlink()
 
+    def test_23_a_fifo_in_the_users_claude_files_fails_the_preflights_at_once(self):
+        # A FIFO without a writer would block a plain open() (the helper's, or slurp's) forever.
+        nine = self.root/'connector-bin-0.9.0-fifo'  # Bytes no earlier test installed.
+        nine.write_text(Path(self.values['relay_connector_source']).read_text().replace('0.3.5', '0.9.0')
+                        + '# fifo release fixture\n')
+        nine.chmod(0o755)
+        pin9 = self.pin(nine, '0.9.0')
+        fifo_task = 'Require a regular file where Claude Code keeps its configuration'
+        try:
+            # settings.json: the 0.9.0 preflight cannot tell, so it refuses, at once.
+            self.seed_claude()
+            self.settings.unlink()
+            os.mkfifo(self.settings)
+            before = self.snapshot()
+            out = self.role(pin9, success=False)
+            self.assertEqual(self.failed_task(out), 'Refuse a connector without inbox-hint while the old hook may still run it')
+            self.assertIn('the file could not be checked (', out)
+            self.assertIn('it is not a regular file (a FIFO', out)
+            self.assertEqual(self.snapshot(), before)
+            self.assertFalse(Path(self.connector_path(nine)).parent.exists())
+            # ~/.claude.json, read by slurp in the Claude Code preflight: refused before it is opened.
+            self.settings.unlink()  # Writing the FIFO back to a file would block on it as well.
+            self.seed_claude()
+            self.claude_json.unlink()
+            os.mkfifo(self.claude_json)
+            before = self.snapshot()
+            for check in (False, True):
+                out = self.role(self.absent, success=False, check=check)
+                self.assertEqual(self.failed_task(out), fifo_task)
+                self.assertIn('.claude.json, or what it links to, is not a regular file', out)
+                self.assertEqual(self.snapshot(), before)
+        finally:
+            for path in (self.settings, self.claude_json):
+                if path.is_fifo():
+                    path.unlink()
+
 
 def set_acl(test, path, name='system.posix_acl_access'):
     """Give `path` a minimal POSIX ACL, or skip `test` where the filesystem has none."""
@@ -1330,6 +1366,16 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.write({'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [RELAY_ENTRY]}]}})
         lock.mkdir()
         self.assertEqual(self.run_hook(check=True).stdout, 'unchanged\n')
+
+    def test_a_fifo_settings_json_is_refused_at_once_never_waited_on(self):
+        self.settings.parent.mkdir(mode=0o700)
+        os.mkfifo(self.settings)
+        for state, check in [('absent', True), ('absent', False), ('present', True), ('present', False)]:
+            with self.subTest(state=state, check=check):
+                result = self.run_hook(state=state, check=check)  # Its 30 s timeout fails a hang.
+                self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                self.assertIn('it is not a regular file (a FIFO', result.stderr)
+                self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
 
     def test_the_0_9_preflight_finds_only_the_old_literal_hook(self):
         # tasks/legacy_hook_preflight.yml runs `--state absent --check` and refuses on anything but

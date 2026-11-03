@@ -105,9 +105,14 @@ def regular_file(parent, name, shown):
     return status
 
 
-def read_bytes(parent, name):
-    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+def read_bytes(parent, name, shown):
+    """The bytes of the regular file `name` in `parent`. Opened with O_NONBLOCK and checked with
+    fstat before reading, so a FIFO swapped in after regular_file() fails at once, never blocks."""
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
     with os.fdopen(descriptor, 'rb') as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise Refused(f'{shown} is not a regular file (a symlink, a directory or another kind); the '
+                          'role never writes into, through or over it: move it aside')
         return handle.read()
 
 
@@ -194,7 +199,7 @@ def present(tree, files, write):
     for directory, name, mode, data in files:
         parent, shown = opened[directory], f'~/{directory}/{name}'
         status = None if parent is None else regular_file(parent, name, shown)
-        if status is not None and stat.S_IMODE(status.st_mode) == mode and read_bytes(parent, name) == data:
+        if status is not None and stat.S_IMODE(status.st_mode) == mode and read_bytes(parent, name, shown) == data:
             continue
         changed = True
         if parent is not None:

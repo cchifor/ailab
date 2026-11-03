@@ -172,15 +172,20 @@ def _extended_attributes(target):
 
 
 def read(target):
-    """(fstat, bytes, xattr names) of the regular file at `target`, or None when it is missing."""
+    """(fstat, bytes, xattr names) of the regular file at `target`, or None when it is missing.
+
+    Opened with O_NONBLOCK, and refused unless fstat says it is a regular file, before anything
+    reads it: a FIFO without a writer (or a device) there fails at once instead of blocking the
+    role's preflight forever. O_NONBLOCK changes nothing for reading a regular file.
+    """
     try:
-        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
         return None
     with os.fdopen(descriptor, 'rb') as handle:
         status = os.fstat(handle.fileno())
         if not stat.S_ISREG(status.st_mode):
-            raise SettingsError('it is not a regular file')
+            raise SettingsError('it is not a regular file (a FIFO, a device, a socket or a directory)')
         return status, handle.read(), _extended_attributes(handle.fileno())
 
 
@@ -274,7 +279,7 @@ def replace(target, found, text):
         except FileNotFoundError:
             pass
     try:  # Best effort: the rename is already done.
-        directory_fd = os.open(directory, os.O_RDONLY)
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
             os.fsync(directory_fd)
         finally:
@@ -297,7 +302,7 @@ def settings_lock(settings):
     os.makedirs(directory, mode=0o700, exist_ok=True)
     path = os.path.join(directory, LOCK_NAME)
     try:
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
     except OSError as error:
         raise SettingsError(f'cannot open the lock {path} ({error.strerror})') from None
     try:

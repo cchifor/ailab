@@ -362,8 +362,9 @@ hook under `/hooks` in a new session.
 `relay` server and the hook and keeps everything else. `unmanaged`, the default, leaves whatever
 is there alone, so going straight from `present` to `unmanaged` leaves both in place.
 
-The run fails before it changes anything if `~/.claude.json` or `settings.json` does not parse, if
-`~/.claude.json` is not an object whose `mcpServers` (and `mcpServers.relay`) are objects, or if
+The run fails before it changes anything if `~/.claude.json` or `settings.json` is not a regular file
+(a FIFO, a device, a socket or a directory, there or behind its symlink), if either does not parse,
+if `~/.claude.json` is not an object whose `mcpServers` (and `mcpServers.relay`) are objects, or if
 the `UserPromptSubmit` hooks in `settings.json` are not in the documented shape. When the hook has
 to change, it also fails if a rewrite could not keep the file's metadata: another owner (a symlink
 target included), a group the user is not in, a POSIX ACL on the file, or a default ACL on
@@ -533,9 +534,13 @@ beside the skill's hook, for 0.9.0 and 0.10.0 pins, including `absent` in the sa
 unparsable file. They pass the skill's hook alone, no settings file, and the old hook under a 0.8.0
 pin. A unit test pins the version comparison's edge cases. A settings lock the hook merge could not
 take (a directory, a symlink, a read-only file) fails the Claude Code preflight, for `present` and
-`absent` in apply and check mode, before the binary, unit or service changes. Set `TMPDIR` under
-`/workspace` for local runs. Real estate convergence and logout/reboot evidence are operator
-acceptance work.
+`absent` in apply and check mode, before the binary, unit or service changes. A FIFO as
+`settings.json` (to the 0.9.0 preflight) or as `~/.claude.json` (to the Claude Code preflight) is
+refused at once, never opened blocking, with nothing changed. The helpers open every user path they
+read with `O_NONBLOCK` and check it is a regular file before reading. Subprocess tests with a 10 s
+timeout cover a FIFO as `settings.json` (directly and behind its symlink), as the lock and as a skill
+file. Set `TMPDIR` under `/workspace` for local runs. Real estate convergence and logout/reboot
+evidence are operator acceptance work.
 
 The same workflow runs `scripts/tests/integration/test_relay_agent_skill.py` for the skill role,
 with real Ansible against a disposable home:
