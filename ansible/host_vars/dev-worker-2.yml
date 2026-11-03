@@ -19,3 +19,7 @@ relay_connector_host_id: 14123362-bf10-4193-b38a-23bfb8d7ba27
 relay_connector_state_file: /home/c4/.local/state/relay/f765a05a957da5b4/connector.json
 relay_connector_name: dev-worker-2
 relay_connector_sockets: ['']
+# Relay messaging for this worker's Claude Code agents: the `relay` MCP server and the inbox hook
+# (docs/runbooks/relay-connectors.md, "Claude Code messaging"). Takes effect in each agent's next
+# session, and only once an admin turns on Agent messaging for this host in Relay.
+relay_connector_claude_messaging: present
