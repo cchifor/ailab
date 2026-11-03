@@ -787,6 +787,51 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
         self.assertTrue(Path(self.connector_path(ten)).exists())
         self.assertFalse(self.settings.exists())
 
+    def test_22_a_settings_lock_the_hook_could_not_take_fails_the_preflight_before_any_change(self):
+        # A release change with service management on: past the preflight, this run would install
+        # new bytes, rewrite the unit, restart the service and rewrite the receipt.
+        upgrade = self.root/'connector-bin-0.8.0-lock'
+        upgrade.write_bytes(self.claude_artifact.read_bytes()+b'# lock release fixture\n')
+        upgrade.chmod(0o755)
+        dry_run = "Dry-run the Relay inbox hook merge in the user's Claude Code settings"
+        lock = self.settings.parent/'.settings.json.lock'
+        elsewhere = self.root/'elsewhere.lock'
+        elsewhere.write_text('')
+        kinds = ['directory', 'symlink'] + ([] if os.geteuid() == 0 else ['read-only'])
+        try:
+            for kind in kinds:
+                for state in ('present', 'absent'):
+                    with self.subTest(kind=kind, state=state):
+                        # `absent` has the old hook to remove; `present` has it to add.
+                        self.seed_hooks(*([self.expected_hook(self.claude_artifact)] if state == 'absent' else []))
+                        if lock.is_dir() and not lock.is_symlink():
+                            lock.rmdir()
+                        elif lock.exists() or lock.is_symlink():
+                            lock.unlink()
+                        if kind == 'directory':
+                            lock.mkdir()
+                        elif kind == 'symlink':
+                            lock.symlink_to(elsewhere)
+                        else:
+                            lock.write_text('')
+                            lock.chmod(0o400)
+                        values = {**self.pin(upgrade, '0.8.0'), 'relay_connector_manage_service': True,
+                                  'relay_connector_claude_messaging': state}
+                        before = self.snapshot()
+                        for check in (False, True):
+                            out = self.role(values, success=False, check=check)
+                            self.assertEqual(self.failed_task(out), dry_run)
+                            self.assertIn(f'the lock {lock} is not', out)
+                            self.assertEqual((self.claude_calls, self.commands), ([], []))
+                            self.assertEqual(self.snapshot(), before)
+                            self.assertFalse(Path(self.connector_path(upgrade)).parent.exists())
+                        self.assertEqual(elsewhere.read_text(), '')
+        finally:
+            if lock.is_dir() and not lock.is_symlink():
+                lock.rmdir()
+            elif lock.exists() or lock.is_symlink():
+                lock.unlink()
+
 
 def set_acl(test, path, name='system.posix_acl_access'):
     """Give `path` a minimal POSIX ACL, or skip `test` where the filesystem has none."""
@@ -1257,6 +1302,34 @@ class ClaudeRelayHookScript(unittest.TestCase):
             os.close(holder)
         self.assertEqual(self.run_hook().stdout, 'changed\n')
         self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
+    def test_check_mode_refuses_a_lock_it_could_not_take_and_creates_none(self):
+        self.write({'model': 'opus'})
+        before = self.settings.read_bytes()
+        lock = self.settings.parent / '.settings.json.lock'
+        self.assertEqual(self.run_hook(check=True).stdout, 'changed\n')
+        self.assertFalse(lock.exists())  # A missing lock is fine, and --check never creates it.
+        elsewhere = self.home / 'elsewhere.lock'
+        elsewhere.write_text('')
+        cases = [(lock.mkdir, 'is not a regular file of this user'),
+                 (lambda: lock.symlink_to(elsewhere), 'is not a regular file of this user')]
+        if os.geteuid() != 0:  # Root reads and writes through permission bits.
+            cases.append((lambda: (lock.write_text(''), lock.chmod(0o400)), 'is not readable and writable'))
+        for make, message in cases:
+            make()
+            for check in (True, False):
+                result = self.run_hook(check=check)
+                self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                self.assertIn(f'the lock {lock} {message}', result.stderr)
+                self.assertEqual(self.settings.read_bytes(), before)
+            if lock.is_dir() and not lock.is_symlink():
+                lock.rmdir()
+            else:
+                lock.unlink()
+        # With nothing to change there is no lock to take, so none is checked.
+        self.write({'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [RELAY_ENTRY]}]}})
+        lock.mkdir()
+        self.assertEqual(self.run_hook(check=True).stdout, 'unchanged\n')
 
     def test_the_0_9_preflight_finds_only_the_old_literal_hook(self):
         # tasks/legacy_hook_preflight.yml runs `--state absent --check` and refuses on anything but

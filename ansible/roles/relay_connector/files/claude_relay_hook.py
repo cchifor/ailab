@@ -31,7 +31,8 @@ same in the relay_agent_skill role's files/claude_skill_hook.py): an exclusive f
 .settings.json.lock next to the settings path as given (~/.claude/.settings.json.lock), held from
 the read through the rename. Without it, two mergers could both pass the re-read above and then
 rename in turn, so one would drop the other's change (or put back a hook the other removed).
---check, and a run with nothing to change, take no lock and create nothing.
+--check, and a run with nothing to change, take no lock and create nothing; whenever a
+change is due, --check included, a lock that could not be taken is refused first.
 
 Errors (exit 1, nothing written, also under --check): a file that does not parse, or whose
 UserPromptSubmit hooks are not the documented shape. And, only when the merge would change the
@@ -318,6 +319,28 @@ def settings_lock(settings):
         os.close(descriptor)  # Releases the flock.
 
 
+def check_lock(settings):
+    """Refuse, already under --check and without creating anything, a lock settings_lock could not
+    take: an existing LOCK_NAME that is not this user's regular file, readable and writable, or a
+    missing one in a directory this user could not create it in."""
+    directory = os.path.dirname(os.path.abspath(settings))
+    path = os.path.join(directory, LOCK_NAME)
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        existing = _existing(directory)
+        if not os.access(existing, os.W_OK | os.X_OK):
+            raise SettingsError(f'the lock {path} cannot be created: {existing} is not writable for this '
+                                'user') from None
+        return
+    if not stat.S_ISREG(status.st_mode) or status.st_uid != os.geteuid():
+        raise SettingsError(f'the lock {path} is not a regular file of this user (a symlink, a '
+                            'directory or another user\'s); remove it')
+    if not os.access(path, os.R_OK | os.W_OK):
+        raise SettingsError(f'the lock {path} is not readable and writable for this user; fix its mode '
+                            'or remove it')
+
+
 def parse(raw):
     try:
         return json.loads(raw.decode('utf-8'))
@@ -387,8 +410,10 @@ def main(argv=None):
         # A first pass without the lock: a report (--check) or nothing to change needs no lock and
         # creates nothing. A change is then made from a fresh read under the lock.
         result = converge_file(target, args, write=False)
-        if result == 'changed' and not args.check:
-            result = converge_locked(target, args)
+        if result == 'changed':
+            check_lock(args.settings)  # Under --check too: a lock that could not be taken fails here.
+            if not args.check:
+                result = converge_locked(target, args)
         print(result)
         return 0
     except (SettingsError, OSError) as error:

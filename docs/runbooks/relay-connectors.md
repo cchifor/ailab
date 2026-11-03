@@ -329,8 +329,11 @@ and adds back a definition this run removed) and stops with `settings.json` unch
   be lost. The estate's own two mergers, this helper and the relay-bus skill role's, never lose
   each other's change. Each one writes only under an exclusive `flock` on
   `~/.claude/.settings.json.lock` (0600, an empty file that stays), held from its read through its
-  rename. A report (`--check`) or a run with nothing to change takes no lock. The dev_worker role's
-  status-line task does not take it.
+  rename. A report (`--check`) or a run with nothing to change takes no lock and creates none.
+  Whenever a change is due, `--check` included, a lock that could not be taken is refused first: an
+  existing lock that is not the user's regular file, readable and writable, or a missing one in a
+  directory the user cannot create it in. Both roles' preflight dry runs therefore stop on it before
+  anything changes. The dev_worker role's status-line task does not take the lock.
 
 **Turn it on** per worker in `ansible/host_vars/dev-worker-N.yml`, in the same change as a
 reviewed 0.8.0 or later `relay_connector_release` pin:
@@ -423,8 +426,13 @@ changes go through one helper, `files/skill_files.py`, run as the user:
 - A symlink, a directory where a file goes, or another user's path is refused, and the run changes
   nothing. The role does not repair ownership as root: fix such a path by hand.
 - `validate.yml` dry-runs the helper before anything changes, in check mode too. The helper itself
-  checks everything in a first pass before its first change. A link that appears later, even on an
-  ancestor, meets the same no-follow operations and stops the run instead of being followed.
+  checks everything in a first pass before its first change. That pass also proves each change can
+  be made: every directory it would create an entry in, remove from or set a mode on must be
+  writable for the user, or be one the run itself gives an owner-writable mode, and not on a
+  read-only file system. A link that appears later, even on an ancestor, meets the same no-follow
+  operations and stops the run instead of being followed.
+- For `absent`, both dry runs (the removal and the hook merge) run before the hook is removed. A
+  refusal leaves the hook and every file in place.
 - The skill files reach the helper as JSON on its stdin, and it checks each one against its pinned
   sha256 before writing.
 
@@ -523,8 +531,11 @@ user cannot run, and failed MCP changes with their restore. Unit tests cover
 `claude_relay_hook.py` on its own. The 0.9.0 preflight cases refuse the old literal hook, alone or
 beside the skill's hook, for 0.9.0 and 0.10.0 pins, including `absent` in the same run and an
 unparsable file. They pass the skill's hook alone, no settings file, and the old hook under a 0.8.0
-pin. A unit test pins the version comparison's edge cases. Set `TMPDIR` under `/workspace` for local
-runs. Real estate convergence and logout/reboot evidence are operator acceptance work.
+pin. A unit test pins the version comparison's edge cases. A settings lock the hook merge could not
+take (a directory, a symlink, a read-only file) fails the Claude Code preflight, for `present` and
+`absent` in apply and check mode, before the binary, unit or service changes. Set `TMPDIR` under
+`/workspace` for local runs. Real estate convergence and logout/reboot evidence are operator
+acceptance work.
 
 The same workflow runs `scripts/tests/integration/test_relay_agent_skill.py` for the skill role,
 with real Ansible against a disposable home:
@@ -545,13 +556,23 @@ with real Ansible against a disposable home:
 - check mode, and `absent` keeping `~/.config/relay` and the key untouched. `absent` refuses links
   on the way (also when swapped in after its dry run) and keeps other files in a skill directory;
 - a static check that `present.yml` and `absent.yml` each run as one block as the user, and that
-  nothing in them writes but the helpers. A fixture without root cannot show that by running.
+  nothing in them writes but the helpers. A fixture without root cannot show that by running;
+- read-only directories in apply and check mode, refused before the hook or any file changes:
+  - for `absent`: a skill directory, or the `skills/` it would be removed from;
+  - for `present`: a `skills/` or `~/.config` that a missing directory would be created in.
+
+  A skill directory the role gives its own mode is repaired instead;
+- a settings lock the hook merge could not take (a directory, a symlink, a read-only file), for
+  `present` and `absent` in apply and check mode, refused before any change.
 
 Unit tests cover `claude_skill_hook.py` and `skill_files.py`, including a link swapped in between the
-helper's checks and its writes. They also run the hook command itself through
-`/bin/sh` with the helper or `python3` missing. Both settings helpers carry the same lock code. A
-regression starts each with a pause inside its rename and starts the other meanwhile, in both
-orders. The result keeps the skill's hook and drops the old one, and without the lock it does not.
+helper's checks and its writes, and a change the user could not make. They also run the hook command
+itself through `/bin/sh` with the helper or `python3` missing. Both settings helpers carry the same
+lock code. Check mode refuses an unusable lock and never creates one. A regression holds writer 1
+inside its rename, with the lock, and only then starts writer 2. It checks through explicit
+interprocess events, in both orders, that writer 2 cannot take the lock until writer 1 has renamed.
+The result keeps the skill's hook and drops the old one. Without the flock, writer 2 gets the lock
+at once and the test fails.
 With `RELAY_SKILL_RELEASE_DIR` naming a directory that holds a release's
 two skill assets, one more case installs them and checks that the real `relay-bus.py` accepts what the
 role wrote. Run it once against the v0.9.0 assets before applying the role.

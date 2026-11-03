@@ -10,8 +10,11 @@ O_NOFOLLOW relative to its parent's descriptor, and every change is made relativ
 descriptors (mkdirat, fchmod, openat with O_EXCL and O_NOFOLLOW, renameat, unlinkat, rmdirat). So
 nothing is ever followed. A symlink on the way, a directory where a file goes, any other kind of
 file, or a path another user owns is refused (exit 1). A first pass makes every check before the
-first change, so a refusal changes nothing; a path swapped after it meets the same no-follow
-operations in the second pass. Ownership is never repaired: that would need root.
+first change, including that each planned change can be made (the directory it changes is
+writable, or about to be given an owner-writable mode by this run, and not on a read-only file
+system), so a refusal changes nothing; a path swapped after it meets the same no-follow
+operations in the second pass. Ownership and other modes are never repaired: that is the owner's
+call, or would need root.
 
 present reads {"origin": ..., "files": [{"name", "mode", "sha256", "content"}, ...]} as JSON on
 stdin. Every file's bytes must hash to its pinned sha256 before anything is written.
@@ -147,21 +150,44 @@ def wanted_files(payload):
     return files + [('.config/relay', 'bus.json', 0o600, bus.encode('utf-8'))]
 
 
+def changeable(descriptor, shown, why, repaired=False):
+    """Refuse, already in the first pass, a directory whose entries (or mode) this user could not
+    change: on a read-only file system, or without write and search permission. `repaired` is a
+    directory present() gives an owner-writable mode itself before it changes anything inside."""
+    if os.fstatvfs(descriptor).f_flag & os.ST_RDONLY:
+        raise Refused(f'{shown} is on a read-only file system, so {why}')
+    if not repaired and not os.access('.', os.W_OK | os.X_OK, dir_fd=descriptor):
+        raise Refused(f'{shown} is not writable for this user, so {why}; '
+                      'the role does not change its mode: fix it by hand')
+
+
 def present(tree, files, write):
-    """One pass over every directory and file `present` manages. Returns whether anything differs."""
+    """One pass over every directory and file `present` manages. Returns whether anything differs.
+
+    The first pass (write=False) also proves every change it plans can be made: each directory it
+    would create an entry in, or give a mode, is writable (or about to be made so by the role) and
+    not on a read-only file system. So a refusal comes before the first change, never after some.
+    """
     changed = False
-    opened = {'': tree.home}
+    opened, repaired = {'': tree.home}, {'': False}
     for path, mode, enforced in DIRECTORIES:
-        parent, name, shown = opened[os.path.dirname(path)], os.path.basename(path), '~/' + path
+        parent_path = os.path.dirname(path)
+        parent, name, shown = opened[parent_path], os.path.basename(path), '~/' + path
+        parent_shown = '~/' + parent_path if parent_path else 'the home directory'
         descriptor = None if parent is None else tree.directory(parent, name, shown)
+        repaired[path] = False
         if descriptor is None:
             changed = True
+            if parent is not None:  # A missing parent is created by this run, writable.
+                changeable(parent, parent_shown, f'{shown} cannot be created there', repaired[parent_path])
             if write:
                 os.mkdir(name, mode, dir_fd=parent)
                 descriptor = tree.directory(parent, name, shown)
                 os.fchmod(descriptor, mode)  # mkdir's mode is masked by the umask.
         elif enforced and stat.S_IMODE(os.fstat(descriptor).st_mode) != mode:
             changed = True
+            changeable(descriptor, shown, f'its mode cannot be set to {mode:04o}', repaired=True)
+            repaired[path] = True  # Every mode the role sets lets the owner write.
             if write:
                 os.fchmod(descriptor, mode)
         opened[path] = descriptor
@@ -171,13 +197,19 @@ def present(tree, files, write):
         if status is not None and stat.S_IMODE(status.st_mode) == mode and read_bytes(parent, name) == data:
             continue
         changed = True
+        if parent is not None:
+            changeable(parent, '~/' + directory, f'{shown} cannot be written there', repaired[directory])
         if write:
             write_file(parent, name, mode, data)
     return changed
 
 
 def absent(tree, write):
-    """One pass over both skill directories. Returns whether anything is (or was) to remove."""
+    """One pass over both skill directories. Returns whether anything is (or was) to remove.
+
+    The first pass also proves each removal it plans can be made (the directory it removes from is
+    writable and not on a read-only file system), before the first removal.
+    """
     plans = []
     for harness in HARNESSES:
         top = tree.directory(tree.home, harness, '~/' + harness)
@@ -185,9 +217,14 @@ def absent(tree, write):
         skill = None if skills is None else tree.directory(skills, 'relay-bus', f'~/{harness}/skills/relay-bus')
         if skill is None:
             continue
-        files = [name for name in SKILL_FILES
-                 if regular_file(skill, name, f'~/{harness}/skills/relay-bus/{name}') is not None]
-        plans.append((skills, skill, files, not [name for name in os.listdir(skill) if name not in files]))
+        shown = f'~/{harness}/skills/relay-bus'
+        files = [name for name in SKILL_FILES if regular_file(skill, name, f'{shown}/{name}') is not None]
+        emptied = not [name for name in os.listdir(skill) if name not in files]
+        if files:
+            changeable(skill, shown, f'{" and ".join(files)} cannot be removed from it')
+        if emptied:
+            changeable(skills, f'~/{harness}/skills', f'{shown} cannot be removed from it')
+        plans.append((skills, skill, files, emptied))
     if write:
         for skills, skill, files, emptied in plans:
             for name in files:

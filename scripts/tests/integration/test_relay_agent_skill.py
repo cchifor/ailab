@@ -513,6 +513,71 @@ class SkillRole(unittest.TestCase):
         self.assertEqual(hook_task['become_user'], '{{ relay_agent_skill_user }}')
 
 
+    # Refusals that must come before ANY change, the hook included: the permissions the planned
+    # file changes need, and a settings lock the hook merge could not take.
+    def test_17_an_unwritable_directory_is_refused_before_the_hook_or_any_file_changes(self):
+        if os.geteuid() == 0:
+            self.skipTest('root writes through permission bits')
+        absent = dict(relay_agent_skill_state='absent')
+        cases = [  # (installed first, directory made read-only, state, the refusal)
+            (True, '.codex/skills/relay-bus', absent, 'relay-bus.py cannot be removed from it'),
+            (True, '.claude/skills', absent, '~/.claude/skills/relay-bus cannot be removed from it'),
+            (False, '.codex/skills', {}, '~/.codex/skills/relay-bus cannot be created there'),
+            (False, '.config', {}, '~/.config/relay cannot be created there'),
+        ]
+        for installed, directory, state, refusal in cases:
+            with self.subTest(directory=directory, state=state or 'present'):
+                self.setUp()
+                if installed:
+                    self.role()
+                else:
+                    (self.home / directory).mkdir(parents=True, exist_ok=True)
+                    if directory == '.config':
+                        shutil.rmtree(self.home / '.config/relay')
+                (self.home / directory).chmod(0o555)
+                before = snapshot(self.home)
+                for check in (False, True):
+                    out = self.role(state, success=False, check=check)
+                    self.assertEqual(self.failed_task(out), "Dry-run the skill's file changes")
+                    self.assertIn(f'~/{directory} is not writable for this user, so', out)
+                    self.assertIn(refusal, out)
+                    self.assertEqual(snapshot(self.home), before)  # The hook and every file as they were.
+        # A skill directory the role gives its own mode is no obstacle: it is repaired, then written.
+        self.setUp()
+        self.role()
+        (self.home / '.codex/skills/relay-bus').chmod(0o555)
+        self.role()
+        self.assertEqual((self.home / '.codex/skills/relay-bus').stat().st_mode & 0o777, 0o755)
+
+    def test_18_a_settings_lock_the_hook_could_not_take_is_refused_before_any_change(self):
+        lock = self.settings.parent / '.settings.json.lock'
+        elsewhere = self.root / 'elsewhere.lock'
+        elsewhere.write_text('')
+        for kind in ('directory', 'symlink', 'read-only'):
+            if kind == 'read-only' and os.geteuid() == 0:
+                continue
+            for state in ('present', 'absent'):
+                with self.subTest(kind=kind, state=state):
+                    self.setUp()
+                    if state == 'absent':
+                        self.role()  # Installed, so absent has a hook to remove.
+                        lock.unlink()
+                    if kind == 'directory':
+                        lock.mkdir()
+                    elif kind == 'symlink':
+                        lock.symlink_to(elsewhere)
+                    else:
+                        lock.write_text('')
+                        lock.chmod(0o400)
+                    before = snapshot(self.home)
+                    for check in (False, True):
+                        out = self.role(dict(relay_agent_skill_state=state), success=False, check=check)
+                        self.assertEqual(self.failed_task(out), "Dry-run the relay-bus hook merge in the user's Claude Code settings")
+                        self.assertIn(f'the lock {lock} is not', out)
+                        self.assertEqual(snapshot(self.home), before)
+                    self.assertEqual(elsewhere.read_text(), '')
+
+
 def files_payload(skill=SKILL_MD, helper=HELPER, origin='https://relay.invalid'):
     return {'origin': origin, 'files': [
         {'name': 'SKILL.md', 'mode': '0644', 'sha256': hashlib.sha256(skill.encode()).hexdigest(), 'content': skill},
@@ -669,6 +734,39 @@ class SkillFilesScript(unittest.TestCase):
         finally:
             os.close(parent)
         self.assertEqual((outside.read_text(), skill.is_symlink(), skill.read_text()), ('not the role\'s', False, 'new'))
+
+    def test_a_change_this_user_could_not_make_is_refused_before_any(self):
+        if os.geteuid() == 0:
+            self.skipTest('root writes through permission bits')
+        # present: a missing directory under one the user cannot write in.
+        (self.home / '.codex/skills').mkdir(parents=True)
+        (self.home / '.codex/skills').chmod(0o555)
+        before = snapshot(self.home)
+        for check in (True, False):
+            result = self.run_files(check=check)
+            self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+            self.assertIn('~/.codex/skills is not writable for this user, so ~/.codex/skills/relay-bus cannot be '
+                          'created there', result.stderr)
+            self.assertIn('nothing was changed', result.stderr)
+            self.assertEqual(snapshot(self.home), before)  # Not even ~/.config or ~/.claude.
+        (self.home / '.codex/skills').chmod(0o755)
+        # A skill directory the role gives its own mode is repaired first, then written in.
+        self.assertEqual(self.run_files().returncode, 0)
+        (self.home / '.claude/skills/relay-bus').chmod(0o555)
+        result = self.run_files(payload=files_payload(skill=SKILL_MD + 'next\n'))
+        self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
+        self.assertEqual((self.home / '.claude/skills/relay-bus').stat().st_mode & 0o777, 0o755)
+        # absent: a skill directory, or the skills/ it would be removed from, the user cannot write.
+        for directory in ('.codex/skills/relay-bus', '.claude/skills'):
+            with self.subTest(directory=directory):
+                (self.home / directory).chmod(0o555)
+                before = snapshot(self.home)
+                for check in (True, False):
+                    result = self.run_files('absent', check=check)
+                    self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                    self.assertIn(f'~/{directory} is not writable for this user', result.stderr)
+                    self.assertEqual(snapshot(self.home), before)  # Both trees' files still there.
+                (self.home / directory).chmod(0o755)
 
     def test_another_users_path_is_refused(self):
         self.assertEqual(self.run_files().returncode, 0)
@@ -930,23 +1028,42 @@ class ClaudeSkillHookScript(unittest.TestCase):
         self.assertEqual(text, to_nice_json(json.loads(text)))
 
 
-def converge_in_child(module, argv, pause, inside):
-    """A forked merger: `module.main(argv)`, sleeping `pause` s inside its rename once `inside` is set.
-
-    The pause sits between the final re-read and os.replace: the window in which two mergers that
-    both passed the re-read would each rename, the later one dropping the earlier one's change.
-    """
-    real = os.replace
-
-    def slow_replace(*args, **kwargs):
-        if inside is not None:
-            inside.set()
-            time.sleep(pause)
-        return real(*args, **kwargs)
-    module.os.replace = slow_replace  # This child's os module only.
+def run_quietly(module, argv):
     with open(os.devnull, 'w') as quiet, contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
         code = module.main(argv)
     os._exit(code)
+
+
+def first_writer(module, argv, inside, release, done):
+    """Writer 1, forked: once it holds the lock and has passed its final re-read, it says so
+    (`inside`) from within os.replace and waits for `release`; then it renames and sets `done`."""
+    real = os.replace
+
+    def held_replace(*args, **kwargs):
+        inside.set()
+        if not release.wait(60):
+            os._exit(3)
+        result = real(*args, **kwargs)
+        done.set()
+        return result
+    module.os.replace = held_replace  # This child's os module only.
+    run_quietly(module, argv)
+
+
+def second_writer(module, argv, waiting, locked, saw_first_done, first_done):
+    """Writer 2, forked: says when it asks for the lock (`waiting`) and when it holds it (`locked`),
+    and records whether writer 1 had finished its rename by the time it got the lock."""
+    real_lock = module.settings_lock
+
+    @contextlib.contextmanager
+    def observed(settings):
+        waiting.set()
+        with real_lock(settings):
+            saw_first_done.value = int(first_done.is_set())
+            locked.set()
+            yield
+    module.settings_lock = observed
+    run_quietly(module, argv)
 
 
 class SharedSettingsLock(unittest.TestCase):
@@ -967,7 +1084,7 @@ class SharedSettingsLock(unittest.TestCase):
         for name in ('LOCK_NAME', 'LOCK_WAIT'):
             self.assertEqual(getattr(hook, name), getattr(connector_hook, name), name)
         self.assertEqual(hook.LOCK_NAME, '.settings.json.lock')
-        for function in ('settings_lock', 'converge_locked'):
+        for function in ('settings_lock', 'check_lock', 'converge_locked'):
             self.assertEqual(inspect.getsource(getattr(hook, function)),
                              inspect.getsource(getattr(connector_hook, function)), function)
         # main() differs only in the name its error message gives.
@@ -975,18 +1092,30 @@ class SharedSettingsLock(unittest.TestCase):
                          inspect.getsource(connector_hook.main))
 
     def overlap(self, first, second):
-        """Run `first` until it is inside its rename, start `second`, and wait for both."""
+        """Writer 1 holds the lock inside its rename; writer 2 starts only then, and must not get the
+        lock until writer 1 has renamed and let it go."""
         import multiprocessing
         context = multiprocessing.get_context('fork')
-        inside = context.Event()
-        a = context.Process(target=converge_in_child, args=(*first, 1.5, inside))
+        inside, release, done, waiting, locked = (context.Event() for _ in range(5))
+        saw_first_done = context.Value('i', -1)
+        a = context.Process(target=first_writer, args=(*first, inside, release, done))
+        b = None
         a.start()
-        self.assertTrue(inside.wait(20), 'the first merger never reached its rename')
-        b = context.Process(target=converge_in_child, args=(*second, 0, None))
-        b.start()
-        for process in (a, b):
-            process.join(60)
+        try:
+            self.assertTrue(inside.wait(20), 'writer 1 never reached its rename')
+            b = context.Process(target=second_writer, args=(*second, waiting, locked, saw_first_done, done))
+            b.start()
+            self.assertTrue(waiting.wait(20), 'writer 2 never asked for the lock')
+            # Writer 1 is held inside its rename, with the lock: writer 2 must not get it meanwhile.
+            self.assertFalse(locked.wait(1.0), 'writer 2 got the lock while writer 1 held it')
+            self.assertFalse(done.is_set())
+        finally:
+            release.set()
+            for process in (a, b):
+                if process is not None:
+                    process.join(60)
         self.assertEqual((a.exitcode, b.exitcode), (0, 0))
+        self.assertEqual(saw_first_done.value, 1, 'writer 2 got the lock before writer 1 had renamed')
 
     def test_overlapping_connector_absent_and_skill_present_keep_the_skill_hook_only(self):
         user_hook = {'type': 'command', 'command': '/usr/local/bin/user-prompt-hook'}
@@ -1028,24 +1157,72 @@ class SharedSettingsLock(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(hook.main(['--settings', str(self.settings), '--state', 'present', '--timeout', '3']), 0)
 
-    def test_the_lock_is_never_taken_through_a_symlink_or_from_another_kind_of_file(self):
-        self.settings.write_text('{}')
+    def test_check_mode_refuses_a_lock_that_could_not_be_taken_and_creates_none(self):
+        present = ['--settings', str(self.settings), '--state', 'present', '--timeout', '3']
+        connector_absent = ['--settings', str(self.settings), '--state', 'absent']
+        self.settings.write_text(json.dumps({'hooks': {'UserPromptSubmit': [{'hooks': [OLD_HINT]}]}}))
+        before = self.settings.read_bytes()
         elsewhere = self.home / 'elsewhere.lock'
         elsewhere.write_text('')
-        self.lock.symlink_to(elsewhere)
+        for kind, make, message in [
+                ('directory', lambda: self.lock.mkdir(), 'is not a regular file of this user'),
+                ('symlink', lambda: self.lock.symlink_to(elsewhere), 'is not a regular file of this user'),
+                ('read-only', lambda: (self.lock.write_text(''), self.lock.chmod(0o400)),
+                 'is not readable and writable for this user')]:
+            if kind == 'read-only' and os.geteuid() == 0:
+                continue  # Root reads and writes through permission bits.
+            make()
+            for module, argv in [(hook, present), (connector_hook, connector_absent)]:
+                for check in (True, False):
+                    with self.subTest(kind=kind, module=module.__name__, check=check):
+                        err = io.StringIO()
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                            code = module.main(argv + (['--check'] if check else []))
+                        self.assertEqual(code, 1)
+                        self.assertIn(f'the lock {self.lock} {message}', err.getvalue())
+                        self.assertEqual(self.settings.read_bytes(), before)
+            if self.lock.is_dir() and not self.lock.is_symlink():
+                self.lock.rmdir()
+            else:
+                self.lock.unlink()
+        # Another user's lock (as this script sees it): with no settings file yet, so only the lock
+        # is anyone else's.
+        self.settings.unlink()
+        self.lock.write_text('')
         err = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            self.assertEqual(hook.main(['--settings', str(self.settings), '--state', 'present', '--timeout', '3']), 1)
-        self.assertIn('cannot open the lock', err.getvalue())
-        self.assertEqual(self.settings.read_text(), '{}')
+        with mock.patch.object(hook.os, 'geteuid', return_value=os.geteuid() + 1), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(hook.main(present + ['--check']), 1)
+        self.assertIn('is not a regular file of this user', err.getvalue())
+        # A missing lock is fine under --check, and nothing creates it there.
         self.lock.unlink()
-        self.lock.mkdir()
-        err = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            self.assertEqual(connector_hook.main(['--settings', str(self.settings), '--state', 'present',
-                                                  '--command', OLD_HINT['command'], '--timeout', '2']), 1)
-        self.assertIn('lock', err.getvalue())
-        self.assertEqual(self.settings.read_text(), '{}')
+        for module, argv in [(hook, present), (connector_hook, ['--settings', str(self.settings), '--state', 'present',
+                                                                '--command', OLD_HINT['command'], '--timeout', '2'])]:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(module.main(argv + ['--check']), 0)
+            self.assertEqual(out.getvalue(), 'changed\n')
+            self.assertFalse(self.lock.exists() or self.lock.is_symlink())
+
+    def test_the_lock_is_never_taken_through_a_symlink_or_from_another_kind_of_file(self):
+        # check_lock refuses these first; settings_lock itself still never opens through a link or
+        # takes a directory, should one appear between the check and the write.
+        elsewhere = self.home / 'elsewhere.lock'
+        elsewhere.write_text('')
+        for module in (hook, connector_hook):
+            for make, message in [(lambda: self.lock.symlink_to(elsewhere), 'cannot open the lock'),
+                                  (self.lock.mkdir, 'cannot open the lock')]:
+                with self.subTest(module=module.__name__, message=message):
+                    make()
+                    with self.assertRaises(module.SettingsError) as refused:
+                        with module.settings_lock(str(self.settings)):
+                            self.fail('the lock was taken')
+                    self.assertIn(message, str(refused.exception))
+                    if self.lock.is_dir() and not self.lock.is_symlink():
+                        self.lock.rmdir()
+                    else:
+                        self.lock.unlink()
+        self.assertEqual(elsewhere.read_text(), '')
 
 
 class HookCommandFailsOpen(unittest.TestCase):

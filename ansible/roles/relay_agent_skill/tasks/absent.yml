@@ -2,6 +2,10 @@
 # The hook first, then the skill. ~/.config/relay stays as it is: bus.json is harmless without the
 # skill, and the agent keys in agents/ belong to the agents and the people who approved them. Revoke a
 # key in Relay (or with `relay-bus.py disconnect` before this runs), never by deleting its file.
+#
+# validate.yml already dry-ran both steps before this file runs: the hook merge (with its lock) and
+# the removal (types, owners and the write permission every unlink and rmdir needs). A refusal there
+# leaves the hook and every file in place.
 
 - name: Remove the hook and the skill as the user, never through a link
   become: true
