@@ -1,12 +1,5 @@
 # Local-model agent benchmark: flash-next vs qwen3.8-27b as cloud3's resident default
 
-## Codex Review
-
-- Remaining comparison risks include P3 solution leakage through shared instructions, grading and exclusion rules, and unsupported quality transfer to cloud3's FP8 checkpoint.
-- Token-usage provenance and queue outcomes need preserving to avoid incorrect cache, latency and throughput measurements.
-- Command audits do not protect production hosts from privileged tool actions; backend cancellation and capacity checks also remain necessary.
-- The schedule needs an enforced deadline and a budget for reruns, grading and cleanup before 22:00 local.
-
 ## Context
 
 The owner asked (2026-11-03): "Run a benchmark including both planning and implementation in order to decide if
@@ -28,9 +21,9 @@ The two candidates, as deployed:
 **What is decided.** Which model family the estate should prefer as its local agent model, and so which one cloud3
 keeps resident. The 27B measured here is cloud2's W4A16 build. If the answer is "27b", cloud3 would host its fp8 build
 (a different quantisation, TP=2 on two cards, ~70-74 tok/s), which this benchmark does not measure (the coordinator's
-rule: no fp8 requests on cloud3 during it). The results say so; quality transfers from W4A16 to fp8 at least as well
-(higher precision), speed does not.
-<!-- codex: Cloud3's entry in ../cloudlab/host/llama-swap.yaml serves orcarouter/Qwen3.8-27B-Uncensored-FP8, a separately published checkpoint whose agent quality cannot be inferred from higher precision or matching architecture. Limit the conclusion to the measured deployments and make any cloud3 FP8 recommendation provisional pending qualification of that exact checkpoint in a later authorized window. -->
+rule: no fp8 requests on cloud3 during it). cloud3's fp8 entry is also a different checkpoint
+(`Qwen3.8-27B-Uncensored-FP8`), so the conclusion is limited to the two measured deployments; a recommendation for
+27B on cloud3 would be provisional until that exact checkpoint is qualified in a later window.
 
 flash-next's earlier agent failures past ~30k tokens of context (garbled copied values, `show show show` loops,
 tool-call markup leaking into arguments) were traced to cloud3's faulty GPU3. On three cards the deterministic probes
@@ -61,15 +54,15 @@ engine thinks at its own default: an intentional deployment difference, recorded
 profiles, and `AGENTS.md` **with the managed "local models" block removed**. That block (`ansible/roles/dev_worker/
 tasks/codex.yml`) calls qwen-27b "the better local choice" and says flash-next copies values unreliably: model
 guidance no candidate should read. The rest of `AGENTS.md` (disk hygiene, credentials, Gitea) stays, identical for
-both. Each run gets a private `CODEX_HOME` copied from the template.
-<!-- codex: The retained disk-hygiene block from ansible/roles/dev_worker/tasks/disk_guard.yml describes P3's solution: the pressure-triggered guard, thresholds, ordered reclamation and protected resources, none of which existed at P3's base. Remove those solution details from the shared benchmark template while retaining basic safety instructions, or exclude P3 from the planning comparison. -->
+both. For P3 only, the disk-hygiene block is removed too: it describes the disk guard that is P3's answer (P3's own
+template, hashed separately). Each run gets a private `CODEX_HOME` copied from the template.
 
 Per-run overrides, identical for both models: `-c show_raw_agent_reasoning=true` and
 `-c model_providers.llm-router.base_url="http://127.0.0.1:<port>/run/<run-id>/v1"` (the timing tap, §4). The command
 line for one run (bash on dev-worker-1, a login shell so `codex` is on PATH):
 
 ```sh
-CODEX_HOME="$RUN/codex-home" timeout --kill-after=30s 40m codex exec -p "$PROFILE" --skip-git-repo-check \
+CODEX_HOME="$RUN/codex-home" timeout --kill-after=30s 35m codex exec -p "$PROFILE" --skip-git-repo-check \
   -C "$WS" -s workspace-write --json --output-last-message "$RUN/last.md" \
   -c show_raw_agent_reasoning=true -c "model_providers.llm-router.base_url=\"http://127.0.0.1:$PORT/run/$ID/v1\"" \
   "$(cat "$TASKDIR/prompt.md")" </dev/null >"$RUN/events.jsonl" 2>"$RUN/stderr.log"
@@ -92,11 +85,16 @@ the reference plans stay on the workstation and reach the worker only after both
 agents keep the real environment (sandbox network on, the docker socket, the worker's forge credentials), so leakage is
 detected rather than prevented: every command a run executed (Codex JSONL) is audited for forge or internet access
 (`git clone|fetch`, `curl`, `wget` to anything but localhost), and for paths outside its own workspace except
-`/workspace/c4/bench/bin`. A run that touched any of these is flagged and reviewed by hand; if it read an answer it is
-excluded and reported.
-<!-- codex: round-2: Matching the production harness does not make post-run exclusion a safety boundary: an audited command can already have deleted unrelated containers, overwritten host files through a bind mount, or used production credentials to make changes. Preserve the CLI and test image on a disposable worker with scoped credentials, or restrict daemon access to a trusted workspace-only test launcher; removing local answers addresses neither production damage nor credential misuse. -->
-<!-- opus-pushback: The docker socket, the sandbox network and the forge credentials ARE the production agent environment this benchmark is meant to measure; a constrained runner would test a different harness. The answer is removed from the worker during runs, so what remains is the forge, and every executed command is audited and a hit excluded. -->
-<!-- codex: Specify removal or protection of graded workspaces before the next pair: once commit tests are copied in, they and retained candidate outputs become answer material for later pairs and repeats. Treat reads of sibling or prior candidate solutions as contamination too, not only retrieval of reference fixes. -->
+`/workspace/c4/bench/bin`. A run that touched any of these is flagged and reviewed by hand; if it read an answer, or a
+sibling's or an earlier run's work, it is excluded and reported. Graded workspaces never stay on the worker: after
+grading, each run's artifacts are copied to the workstation and its directory on the worker is deleted before the
+next pair starts.
+**Escalated (codex round 2 vs author, unresolved):** codex holds that an audit is not a safety boundary for the
+docker socket and the worker's credentials, and asks for a disposable worker or a workspace-only test launcher. The
+author keeps the production harness: it is exactly what every agent on the dev workers already runs with every day, so
+the benchmark adds no privilege, and a constrained launcher would measure a different harness. Recorded for the
+coordinator; the audit (commands touching other workspaces, the forge, docker beyond `n24`, or credentials) is
+reported in the results.
 
 **Implementation tasks (test-graded).** Merged commits that fix a bug or add a small feature with tests. The agent
 gets the repo at the commit's parent and an issue-style description written from the commit message: the behaviour,
@@ -141,49 +139,50 @@ A planning run passes the sanity check when the plan file exists and no tracked 
 
 - **Pair** = one task-repeat run on both models at the same moment (launch skew recorded), each in a fresh workspace:
   flash-next on cloud3, qwen3.8-27b on cloud2. The next pair starts when both have exited and their tool containers
-  are gone (`docker rm -f` of `bench=1` containers) and the tap shows no open request. So each model has one stream at
+  are gone (`docker rm -f` of `bench=1` containers) and the router journal shows no running trajectory of the
+benchmark key (checked through the router's admin API before each pair; up to 150 s of waiting). So each model has one stream at
   a time; cloud2 carries at most one benchmark stream.
-<!-- codex: An empty tap proves only that its local connections closed; the admission-queue plan documents the edge retaining upstream requests after clients disconnect. Verify cancellation through to the benchmark's router/backend requests and reservation release, including after timeout or reconnect, before claiming one stream or launching another pair. -->
-- **Repeats, predeclared before any scored run:** every task gets the same number of repeats, R = 2, if the dry run's
-  pair time says 18 pairs fit before ~19:45Z; otherwise R = 2 for the implementation tasks and R = 1 for the planning
-  tasks. No selective extra repeats after outcomes are seen.
+- **Coverage, predeclared before any scored run:** 2 repeats of every task are attempted in a seeded order with
+  repeat 1 of all nine tasks before any repeat 2, so whatever the clock allows, every task has at least one pair
+  before any has two. A pair starts only if a run at the cap would end by 19:45Z; the driver stops otherwise. Tasks
+  left with one repeat are reported as such, with the extra repeats that would settle a close call (the owner can
+  extend tomorrow).
 - **Order:** the dry run (I1, unscored), then all scored pairs in a seeded shuffle (seed in the results), repeat 1 of
   every task before any repeat 2, so a slow hour does not land on one task and a repeat does not directly follow its
   twin.
-- **Wall cap per run:** 40 min. A run that reaches it is a "timeout" failure; its work so far is still graded and
+- **Wall cap per run:** 35 min (set from the dry run's times so that the nine first repeats fit). A run that reaches it is a "timeout" failure; its work so far is still graded and
   reported separately ("correct at cutoff").
-<!-- codex: I1 is the smallest task, so its pilot time does not establish that 15–18 pairs fit; even the fallback permits 10 hours before reruns and grading. Predeclare a schedule and cap that fit the remaining time, with an incomplete-coverage rule and an enforced 19:45Z stop, reserving time for kill grace, grading, evidence export and cleanup before 22:00 local. -->
 - **Before each pair** (read-only): cloud3 `pct exec 5101 -- nft list tables` shows no `cloud3hold`, `/running` shows
-  `qwen3.8-flash-next` ready; cloud2's vLLM `num_requests_waiting` is 0 (else wait up to 5 min); `/workspace` on
+  `qwen3.8-flash-next` ready; cloud2's vLLM has `num_requests_waiting` 0, at most 2 running and KV use under 0.6 (else wait up to 5 min),
+  and its running/waiting/KV gauges are sampled every 30 s during the pair; `/workspace` on
   dev-worker-1 has more than 30 % free (stop below 25 %, above the disk guard's 15 % trigger). Before the first pair,
   one warm-up request loads flash-next (approved by the coordinator; the resident fp8 was loaded only to restore an old
   preload state). Residency is re-checked after each pair; a run during which another model was loaded is invalid.
-<!-- codex: Zero requests waiting inside vLLM can coexist with all router slots occupied or nearly exhausted KV capacity, so it does not establish safe headroom for a long benchmark prompt. Use the existing running-request, KV-use and preemption metrics to define admission and stop thresholds, checking pressure during each pair as well as before it. -->
 - **Invalid runs, by objective rules** (from the router journal, the router pod's start time and cloud3's llama-swap
-  journal): a router pod restart during the run; a cloud3 hold or llama-swap restart during the run; a request that
-  failed on the router's or the backend's side (a 5xx, a busy 429, a connection reset) rather than the model's output;
+  journal): a router pod restart during the run; a cloud3 hold or llama-swap restart during the run; a request refused
+  for capacity (a busy 429) or cut by an independently evidenced outage (pod restart, hold, power, network);
   a run overlapping the release agent's announced cloud2 acceptance window. An invalid run's whole pair is rerun from
-  fresh workspaces, once; both observations are kept and listed with the reason. Ordinary admission-queue waits are
-  deployed-service behaviour: kept, and reported separately from model latency.
-<!-- codex: The layer returning an error does not establish an external outage: a candidate's context growth or tool output can trigger a backend crash, resource exhaustion or router conversion failure. Require independent evidence before excluding those failures; otherwise this rule removes precisely the deployed-agent robustness failures the benchmark is meant to detect. -->
+  fresh workspaces, once; both observations are kept and listed with the reason. A backend or router error
+  without such independent evidence counts against the model's run (the candidate's own context or output can crash
+  a backend). Saturation is treated the same before and after the queue roll: a request that was served, whether
+  after a queue wait or not, is kept; a request that was refused (a busy 429, or a queue timeout) makes the run
+  invalid for the quality comparison. All attempts, including invalid ones, are reported as service outcomes.
 - The router roll (admission queue) may land mid-benchmark. Each request's `configRevision` and the router image are
   recorded; the results say which runs came before and after it.
-<!-- codex: round-2: Waiting for the rollout is unnecessary when admission behavior is unchanged, but pre-roll saturation is excluded as a busy 429 while post-roll saturation is retained as queueing, so pooled outcomes use different selection rules. Predeclare a consistent treatment of saturation across revisions and report all-attempt service outcomes alongside the comparable quality subset; otherwise queue policy can change the winner. -->
-<!-- opus-pushback: The roll is another agent's release with no fixed time, and the 22:00 auto-off leaves no room to wait for it. The queue changes behaviour only when all 4 cloud2 slots are busy, which the per-request queue-wait record shows; runs overlapping the roll or the acceptance window are invalid by rule. -->
 
 
 ### 4. Measurements
 
 **Correctness.**
-- Implementation: the agent's diff is saved first (`git add -A; git diff --cached base`). Grading runs on the agent's
-  tree after restoring the test infrastructure from `base` (`package.json`, `pnpm-lock.yaml`, `vitest.config.ts`,
-  `tsconfig*.json`) and copying in the commit's test files. **Pass** = every test in the graded files passes, with the
-  same test count as the validated reference (no skips or missing tests). Recorded beside it: typecheck clean or not
-  (`tsc --noEmit`, the base and the reference are clean), the targeted tests (the ones failing at the base) passed,
-  and, after the last pair, a full-suite run per llm-router workspace compared with the base's own full-suite result
-  (new failures = regressions). The decision uses task-level pass, not test counts.
-<!-- codex: Restoring the listed configuration and graded files leaves editable node_modules, other test files and apps/web/test-setup.ts in control of grading. Use trusted versions of these or reject changes to them, retaining candidate tests separately, so altered assertions or deleted regression tests cannot manufacture a pass. -->
-<!-- codex: The declared task pass still ignores typecheck failures and regressions, allowing a patch that breaks the rest of the project to win on correctness. Make clean typecheck and no new trusted-suite failures prerequisites for decision-level implementation success, while retaining the targeted-test result as a separate diagnostic. -->
+- Implementation: the agent's whole diff is saved first (`git add -A; git diff --cached base`). Grading runs in a
+  FRESH workspace (base tree, fresh dependencies): only the agent's non-test changes are applied (never its tests,
+  test setup, runner or TypeScript config, `package.json` or lockfile), then the commit's test files are copied in.
+  **Pass** = the patch applies, every test in the graded files passes with the same test count as the validated
+  reference (no skips, no missing tests), and the typecheck is clean (`tsc --noEmit`; the base and the reference are
+  clean). The graded-tests-only result is kept as a diagnostic. If time allows after the last pair, the full suite runs
+  on each llm-router patch against the base's own full-suite result (new failures = regressions, reported); it is not
+  part of the decision because it cannot run for every run before the deadline. The decision uses task-level pass,
+  not test counts.
 - Planning: a blind judge, `codex exec --profile review` (gpt-6-astra, xhigh, read-only), run by hand on the
   workstation, not the dispatcher. Per task it gets the problem statement, a frozen task-specific checklist of what a
   good plan must address (written from the problem statement, before any candidate exists), the reference plan
@@ -210,18 +209,20 @@ bodies). Progress events (`response.in_progress`) and `response.created` never c
 cannot give a first-token time: `stream.first_content` fires on the first text or tool event, after the thinking.
 
 Per request (labels are part of the definitions):
-- prompt tokens, cached prompt tokens (where the engine reports them; missing = unknown, not 0), completion tokens
+- prompt tokens, cached prompt tokens and completion tokens from the journal's usage with its `confidence` (the wire
+  usage fills an absent cached count with 0; counts with unknown confidence stay unknown and rates are computed only
+  from reported counts); for cloud3, llama.cpp's own per-request `print_timing` lines (prompt tokens evaluated, eval
+  tokens, both durations) captured from llama-swap's upstream log after each pair, matched by time;
   (both engines count reasoning inside completion tokens: checked on the dry run against `reasoningChars`);
-<!-- codex: The router's responsesUsage() fills absent cached counts with 0, and its adapters can emit 0/0 usage with confidence "unknown", so presence of wire usage does not establish measured tokens. Preserve journal cachedInputTokens and router_usage_confidence/scope, keep unreported counts unknown, and compute token rates or uncached-prefill proxies only from compatible reported counts. -->
-- **queue wait**: the journal's `admission.queued` → `admission.reserved` duration (0 when absent);
-<!-- codex: Use admission.dequeued.waitedMs with its outcome: a queued timeout or cancellation has no admission.reserved, and the event gap can omit time before admission.queued was recorded. A missing completion record for an observed queue entry must remain unknown rather than become zero. -->
+- **queue wait**: the journal's `admission.dequeued` `waitedMs` with its outcome (0 when the request never queued;
+  unknown when a queue entry has no dequeue record);
 - **time to first token** (client-observed): arrival → first reasoning or output delta, reported raw and minus the
   queue wait;
 - **leading think time**: first reasoning delta → first output delta (the router forwards only the reasoning before
   the first output, so this is the observed leading-reasoning interval);
 - **output rate** (client-observed, approximate): completion tokens / (terminal − first token). For cloud3 the
-  engine's own decode and prefill rates come from llama.cpp's per-request timings in the llama-swap journal, matched by
-  time and token counts; for cloud2 there is no per-request engine timing, so cloud2's rates stay client-observed;
+  engine's own decode and prefill rates come from llama.cpp's `print_timing` lines; cloud2's vLLM has no per-request
+  timing, so cloud2's rates stay client-observed (both are shown for cloud3, to size the gap);
 - **prefill proxy**: uncached prompt tokens / (time to first token − queue wait), labelled a latency-derived proxy;
 - the journal's `attempt.started` → `stream.first_content` → `attempt.completed`, joined by trajectory id, as the
   cross-check. A trajectory may hold several attempts and a Codex turn several HTTP requests; the join is
@@ -255,12 +256,11 @@ copied it from); early stops (a final message without the work done); timeouts; 
 - the exact command lines, base commits, frozen task texts, checklists, the judge prompt, the seeds, the template hash;
 - the caveat that speed is "as deployed": 3 cards on cloud3 against 2 on cloud2, different engines and quantisations,
   cloud2 shared with production traffic; not a like-for-like hardware comparison;
-- **decision rule, fixed now:** correctness first (implementation tasks passed, counted per task and repeat; then the
-  mean plan score), robustness second (a long-context corruption on flash-next weighs heavily: it is why it was
-  distrusted), speed third. A gap of at most one implementation run or 1.5 plan points (of 25) is a **practical tie**,
-  then robustness and speed decide; if quality and robustness point opposite ways, or the evidence is too thin (many
-  invalid runs), the recommendation says **inconclusive** and names the extra tasks that would settle it.
-<!-- codex: The word "or" makes a large implementation gap a practical tie whenever plan scores are close, contradicting the implementation-first ordering. Specify the sequence explicitly: compare implementation success first, compare plans only within the implementation tie margin, and consult robustness/speed only after both quality comparisons tie, retaining the stated inconclusive override. -->
+- **decision rule, fixed now, applied in order:** (1) implementation success (runs passed, per task and repeat): a
+  gap of more than one run decides; (2) only if (1) ties, the mean plan score: a gap over 1.5 points (of 25) decides;
+  (3) only if both tie, robustness (a long-context corruption on flash-next weighs heavily: it is why it was
+  distrusted), then speed. If quality and robustness point opposite ways, or too many runs are invalid or missing, the
+  recommendation says **inconclusive** and names the extra repeats or tasks that would settle it.
 
 Phase B of the planning process is a codex review (`--profile review`) of the results report: a check that the
 evidence supports the numbers and that the decision rule above was applied as written.
@@ -268,9 +268,10 @@ evidence supports the numbers and that the decision rule above was applied as wr
 **Evidence kept:** the harness (tap, wrapper, runner, grader, judge prompt), the frozen task texts and checklists, the
 per-request and per-run tables (CSV/JSON), the judge outputs, the agents' diffs and plans, and the Codex JSONL and
 rollouts, as one tarball in dev-worker-1's `/workspace/archive/` (the managed evidence location) and copied to the
-workstation, with its sha256 in the results. Credentials are never in it (the tap logs none; private homes hold no
-token: the provider's key comes from `/usr/local/bin/codex-router-key` at run time).
-<!-- codex: Tap redaction and token-free private homes do not establish that tool output, stderr, rollouts or candidate diffs contain no credentials, especially while agents can invoke the key helper and forge tools. Check and redact those artifacts before archiving or exporting them, with restrictive permissions on the retained evidence. -->
+workstation, with its sha256 in the results. Before archiving, every artifact is scanned for credential patterns (router keys,
+Gitea and OpenBao tokens, `Authorization:` values) and any hit is redacted; the tarball is mode 600. The tap logs no
+header values and the private homes hold no token (the provider's key comes from `/usr/local/bin/codex-router-key` at
+run time).
 
 ## Critical files
 
@@ -291,4 +292,4 @@ token: the provider's key comes from `/usr/local/bin/codex-router-key` at run ti
   benchmark-owned things go (`/workspace/c4/bench`, `bench=1` containers, the `bench-node24:local` image, the
   `node:24-bookworm-slim`/`python:3.12-slim` pulls if they were not there before), and the evidence tarball stays.
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
