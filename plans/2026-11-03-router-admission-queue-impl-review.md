@@ -34,7 +34,11 @@ deadline comparison from `capPassed()` (M15) or the cap check from the commit po
 - CI gates in docker (node 24.22.2, pnpm 10.32.1) at `61f5f2b`: typecheck, test (2073 passed, 14 skipped, 0 failed),
   build, build:lib and test:production pass; check:architecture reports only
   `packages/modules/inference/index.ts: forbidden runtime side effect`, the same line as unchanged `93108f5` (baseline:
-  2034 passed, 14 skipped). The test-only commit `dda2d3c`: typecheck and `tests/admission-queue.test.ts` (38 passed).
+  2034 passed, 14 skipped). Caveat: the full gates ran at `61f5f2b`; the PR head `dda2d3c` (test-only) ran typecheck and
+  `tests/admission-queue.test.ts` (38 passed) only, and the merge's own CI passed at it. No known load-flaky test
+  (llm-router #129) failed in that full run, so none needed a solo rerun; an earlier full run had one failure, the new
+  queued-edit test timing out under load, fixed in `61f5f2b` by removing its dependence on a router timeout. Not run:
+  the PostgreSQL auth tier and the browser (Playwright) suite, which `pnpm test` skips without them (14 skipped).
 - The real Codex CLI (0.162.1 and 0.166.0) end to end, concurrency 1, a 60 s upstream, two agents at once: with
   `queue: { maxWaitMs: 120000 }` both exit 0 and the second's request waits 59-61 s for its head with no 429; with
   `maxWaitMs: 20000` the second meets two 429s with `Retry-After: 1`, rejoins 1.0 s later each time, and exits 0; on
@@ -55,3 +59,8 @@ deadline comparison from `capPassed()` (M15) or the cap check from the commit po
  tests/images.test.ts                |  51 +++
  10 files changed, 1143 insertions(+), 23 deletions(-)
 ```
+
+## After merge (llm-router #133 merged at `2e756d0`)
+
+- Review notes on #133 and ailab #1583: `maxWaiting`'s default lowered from 8 to 4 in llm-router #134 (a test pins four
+  waiters and the full answer for the fifth); the plan's Q1 lowered to `maxWaitMs: 80000` and qualified (point 9).

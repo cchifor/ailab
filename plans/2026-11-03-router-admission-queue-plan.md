@@ -101,7 +101,7 @@ Why this and not the alternatives (all four directions were evaluated):
 
 `queue?: { maxWaitMs: number; maxWaiting?: number }` on `Account` (`packages/contracts/index.ts`), validated in
 `packages/runtime/config.ts` as a strict object: `maxWaitMs` an integer 1000-600000, `maxWaiting` an integer 1-100,
-default 8. Set with `PUT /admin/v1/config` like `forwardReasoning` (no Assistant tool, no UI).
+default 4 (8 in #133; lowered in llm-router #134 after review, for the body budget in point 6). Set with `PUT /admin/v1/config` like `forwardReasoning` (no Assistant tool, no UI).
 - **Scope:** the setting belongs to the account's pool, so it applies to every route, direct-model request, protocol
   and caller that reaches the pool (the Assistant, the platform eval key with its own client-side fallback, chat
   clients), not only Codex. That is deliberate: the slots are the pool's.
@@ -284,16 +284,25 @@ gets its head when admitted"), the journal events and the metric; `docs/implemen
 
 - Image build and roll as usual (llm-router release staging).
 - **Proposal Q1 (provisional):** after the roll, `queue: { maxWaitMs: 80000, maxWaiting: 4 }` on
-  `lan-192.168.0.28-18020` through the admin API (`If-Match`, read back, revision recorded). 80 s is above the slowest
-  next-release the journal shows for a busy 429 (75.9 s, a lower bound on residence) and leaves margin under
-  Cloudflare's 100 s for the account's clients on that path: the dev workers reach the router on the LAN, but dsh and
-  relay use `router.chifor.me` through Cloudflare (`kubernetes/apps/apps/dsh/settings.seed.yaml`) and dsh offers the
-  local models (lowered from 90 s after reviewer-claude's note on llm-router #133); 4 waiters covers the 4 dev workers (the incident had at most 2 clients waiting
-  at once) while keeping queued bodies well inside the shared small body budget (point 6, "Memory and budgets"); the
-  default 8 would not. Before relying on it, the release exercises 4 running plus queued requests, overflow and
-  cancellation against cloud2 (the main session's acceptance). Watch `llm_router_admission_wait_seconds` by outcome:
-  `timeout` or `full` outcomes for cloud2 above a handful a day, or an end-to-end Codex failure on qwen-27b, mean the
-  values need revisiting (a longer `maxWaitMs` only if no Cloudflare-path client uses the account).
+  `lan-192.168.0.28-18020` through the admin API (`If-Match`, read back, revision recorded).
+  - **80 s** leaves margin under Cloudflare's 100 s for the account's clients on that path: the dev workers reach the
+    router on the LAN, but dsh and relay use `router.chifor.me` through Cloudflare
+    (`kubernetes/apps/apps/dsh/settings.seed.yaml`) and dsh offers the local models (lowered from 90 s after review on
+    llm-router #133 and this PR). What the journal supports is narrower than "enough": 80 s is above the slowest
+    next-slot release seen for a busy 429 (75.9 s), so it would have covered the head of the line every time; that
+    figure is a lower bound on residence (the 11-01 sample also counts Codex's 5 s retries of the same work), and a
+    later waiter needs several releases, so it can still meet `QUEUE_TIMEOUT` and retry at the back. The acceptance run
+    and the wait histogram, not this statistic, validate the value.
+  - **4 waiters** covers the 4 dev workers (the incident had at most 2 clients waiting at once). It does not by itself
+    keep the shared small body budget clear: the 7-day peak use of 8.6 MB plus four p90 bodies (6.4 MB) is 15 MB
+    against 13.4 MB, so a deep queue during a busy hour can still give unrelated `/v1/responses` requests
+    `body_budget` 429s (memory stays protected). The default 8 would make that worse; it is 4 since llm-router #134.
+  - **Acceptance before relying on it** (the main session's release): 4 running plus queued requests, overflow and
+    cancellation against cloud2, with representative small-body Responses traffic on other routes running meanwhile and
+    `llm_router_native_body_budget_bytes{pool="small"}` and `body_budget` 429s watched.
+  - **Revisit when:** `timeout` or `full` outcomes for cloud2 above a handful a day, any `body_budget` 429 while cloud2
+    has waiters, or an end-to-end Codex failure on qwen-27b (a longer `maxWaitMs` only if no Cloudflare-path client
+    uses the account; a smaller `maxWaiting` or a larger `codexNativeBodyBudgetMiB` if the budget bites).
 - **Concurrency stays 4** (KV evidence above). A trial of 5 would need a controlled load test comparing peak and
   growing KV use, preemptions, vLLM-side waiting, token throughput and client latency under representative prompts;
   the queue's wait histogram alone cannot establish that.
