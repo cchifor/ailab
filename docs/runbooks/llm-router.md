@@ -2729,7 +2729,7 @@ task, and started cold:
 |---|---|
 | `qwen3.8-27b-ailab` | Pass in 160 s. Its first step read 16,315 tokens in 130 s, which the old 90 s cap failed. |
 | `qwen3.8-flash-next` | Pass in 36 s from cold. |
-| `qwen3.8-27b-fp8` | **Fail.** It reasoned without calling a tool until the 15-minute cap, which ended the turn with its message. |
+| `qwen3.8-27b-fp8` | **Fail.** It reasoned without calling a tool until the 15-minute cap, which ended the turn with its message. **Superseded on 2026-11-03:** on three cards, without the faulty GPU3, it passes; see "`qwen3.8-27b-fp8` re-qualified as an Assistant model". |
 | `qwen3.5-122b`, swapped in over a resident fp8 | **Fail.** The swap and the tool call work (step 1: 331.7 s), but the model gives no real answer, and its tool calls leak template text into the arguments on both llama.cpp builds. |
 | Stop during a cold wait | Ended at once, silently; the upstream request was cancelled. |
 
@@ -3296,6 +3296,57 @@ NFS store.
    - Regenerate Open WebUI's `model_ids` and LiteLLM's `checksum/config` with `just af-gen-litellm`; do not edit them
      by hand.
    - Put `qwen3.5-122b` back in dsh's `llm-router-local` seed.
+
+## `qwen3.8-27b-fp8` re-qualified as an Assistant model (2026-11-03)
+
+**Why.** fp8 failed its Assistant turn on 10-31 (see "Results of the local-models plan"), so it was kept out of the
+Assistant (`assistantModels`, revision 2197). That run used four cards, one of them GPU3, whose VRAM fault was found on
+11-02. On three cards fp8 runs TP=2 on GPU0+GPU1 with the same vLLM flags otherwise (`--gpu-memory-utilization` 0.90 →
+0.95). The router sends the Assistant's request as it did on 10-31: since then #127-#132 changed only the model gate and
+the response side. The owner approved a re-test, and fp8 on cloud3's Assistant list if it passed.
+
+**The test is the 10-31 one** (plan WS4.3; the harness decides exactly as it did then).
+- **Setup:** one pinned conversation per model, Apply set to ask, run in the router pod with its admin bearer.
+- **Task:** "Use your tools to list this router's routes, then tell me in one sentence how many there are."
+- **Start:** cold, from llama-swap's `/unload`.
+- **Pass:** HTTP 200, no guided-mode fallback, a non-empty answer, a tool step done, and no configuration revision
+  change during the turn.
+- **Repeats:** two warm turns per model on the same bar, as consistency evidence.
+- **Control:** flash-next, which is on the list today.
+
+| Model | Turn | Result | Time | Model steps (input tokens, time) | Answer |
+|---|---|---|---|---|---|
+| `qwen3.8-27b-fp8` | cold, 12:36Z | **Pass** | 150.5 s | 16,273 in 146.1 s, with the vLLM load; 18,462 in 4.4 s | 19 routes |
+| `qwen3.8-27b-fp8` | 2 warm | **Pass**, **Pass** | 4.2 s, 3.9 s | ~1.2 s, then ~2.8 s | 19, 19 |
+| `qwen3.8-flash-next` | cold, 12:33Z | **Pass** | 33.8 s | 16,273 in 30.4 s; 18,462 in 3.3 s | 21 routes |
+| `qwen3.8-flash-next` | 2 warm | **Pass**, **Pass** | 4.2 s, 4.4 s | ~0.8 s, then ~3.4 s | 20, 20 |
+
+- **Every turn:** one `list_routes` call, done, its summary "19 routes · 13 accounts". There was no error, and the
+  config revision did not change during any turn.
+- **The count is not part of the bar, but the answers differ.** The truth is 19 routes (10 with targets, 9 pointers).
+  fp8 gave the right total every time, but its breakdowns were wrong (for example "12 with their own targets and 7
+  pointer routes"). flash-next got the total wrong every time.
+- **What changed since 10-31.** The 10-31 fp8 step ran the whole 15-minute cap without visible output and was
+  cancelled at 899,993 ms. Today the cold step ends in 146 s, the load included, with 58 output tokens. This fits
+  GPU3 as the cause: same model, same flags, same request. It does not prove it, because the tensor-parallel degree
+  also changed (4 → 2), and 10-31 was one sample.
+
+**Configuration.** `lan-192.168.0.26-8080` `assistantModels` `["qwen3.8-flash-next"]` →
+`["qwen3.8-flash-next", "qwen3.8-27b-fp8"]`. It was one `If-Match` PUT after a dry run: revision **2215 → 2216** at
+12:36:23Z, read back.
+- **Order.** The change went in before fp8's turns, because the Assistant refuses to pin a model outside the list
+  ("That model is not available here."). It would have been reverted on a failure.
+- **Where it shows.** The Assistant's model list now shows `local/qwen3.8-27b-fp8`.
+- **Unpinned turns are unchanged.** No route targets fp8, so the automatic choice never lands on it.
+- **To undo:** the same PUT with `assistantModels: ["qwen3.8-flash-next"]`.
+
+**Swaps.** cloud3 holds fp8 or flash-next, never both, so a turn on one while the other is resident first waits for a
+swap. For fp8 that is ~2.5-3 minutes from cache and ~5.4 from a cold page cache, inside the account's 600 s wait. The
+cold row above includes one. fp8's KV pool (~155k tokens) holds about eight Assistant steps of ~16-18k tokens.
+
+**Found on the way: fp8's boot preload failed.** After the 09:57Z boot, cloud3's llama-swap logged `failed to preload
+model qwen3.8-27b-fp8: status 404` right after the health check passed. fp8 was resident only once a request loaded
+it. The test left it resident (ttl 86400).
 
 ## Relay access requests
 
