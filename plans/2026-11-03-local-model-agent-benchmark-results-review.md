@@ -9,7 +9,7 @@ All 13 findings were accepted and fixed in the results file. None was pushed bac
 ### Preserve the ordered decision rule
 **Location:** Recommendation — “What would make 27B the default”
 **Severity:** important
-**Disposition:** Accepted. The recommendation now restates day 2's decision in the plan's order (implementation lead over 1 run, then plans over 1.5 points on tasks both delivered, then robustness and speed), counts only matched runs, and calls keeping flash-next a deployment choice, not a benchmark verdict.
+**Disposition:** Accepted. The recommendation now restates day 2's decision in the plan's order (implementation lead over 1 run, then plans over 1.5 points in a delivery-aware mean (see the next disposition), then robustness and speed), counts only matched runs, and calls keeping flash-next a deployment choice, not a benchmark verdict.
 
 ### Narrow the long-context reliability claim
 **Location:** Recommendation — “flash-next’s long-context failure is gone”
@@ -49,7 +49,7 @@ All 13 findings were accepted and fixed in the results file. None was pushed bac
 ### Specify how incomplete planning affects tomorrow’s comparison
 **Location:** Tomorrow — Planning
 **Severity:** important
-**Disposition:** Accepted. Delivery is reported separately (today's P2: 0/1 for each). The judged mean covers only tasks both models delivered on, and fewer than 2 of 3 makes planning inconclusive. The two judge passes are described as a noise check, not replication.
+**Disposition:** Accepted. Delivery is reported separately (today's P2: 0/1 for each). Superseded after reviewer-codex on #1590: the mean is delivery-aware. It covers every task at least one model delivered on, a missing plan scores 5/25 there, and fewer than 2 of 3 tasks with any plan makes planning inconclusive. The two judge passes are described as a noise check, not replication.
 
 ### Reconcile the cloud2 load statements
 **Location:** Invalid or uncounted runs; Caveats — Speed is as deployed

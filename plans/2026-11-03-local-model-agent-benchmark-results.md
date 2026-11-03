@@ -290,6 +290,15 @@ Proposed for 2026-11-04 (cloud cluster on from 08:00 local), same harness, same 
 
 These rules are frozen now, before any day-2 run.
 
+**Schedule and stop rule.** The cluster is up from 08:00 to 22:00 local (06:00Z-20:00Z). A pair starts only if a run
+at its cap would end by 19:45Z; otherwise the driver stops, as on day 1.
+
+Groups 1 and 2 decide the result. Their pairs alternate: P1, I5, P2, I3, P3, I1, I6, I4. That is 3 × 90 + 5 × 35 min
+= 7.4 h of cap time, about 8 h with setup. Group 3 is diagnostic. It runs last, in the order I1, I3, I2, I5, and is
+cut first: whatever does not fit is reported as not run. If a decision pair is invalidated and has to be rerun, the
+rerun goes ahead of group 3.
+
+
 1. **Planning, 90-min cap** (coordinator, 2026-11-03).
    - Runs: P1, P2 and P3, one pair each, about 4.5 h with both models in parallel.
    - Reporting: delivery (a plan written within the cap) is reported per model and task, separately from judged

@@ -282,6 +282,14 @@ owner): **one repeat per task today**, in this priority order: I5 (long context)
 worth rerunning uncapped are listed for tomorrow. A run that hits the cap is recorded with its state at the cap (tests
 passing, files touched, turns, tokens) and counted as a timeout, separately from a wrong answer.
 
+## Amendment: day-2 planning rule (2026-11-03, after reviewer-codex on #1590, before any day-2 run)
+
+Rule (2) of the decision rule is made delivery-aware for day 2. A model's plan mean is taken over every planning task
+that at least one model delivered a plan for, within the cap. A missing plan scores 5/25 on such a task (1 on every
+criterion). A task neither model delivered on is left out. If fewer than 2 of the 3 planning tasks have a plan from
+either model, the planning comparison is inconclusive. Day 2's schedule, stop rule and the matched-runs-only scope are
+frozen in the results file's "Tomorrow" section.
+
 ## Critical files
 
 - `plans/2026-11-03-local-model-agent-benchmark-plan.md` (this plan), `plans/2026-11-03-local-model-agent-benchmark-results.md`.
