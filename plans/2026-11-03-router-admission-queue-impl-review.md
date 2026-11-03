@@ -1,31 +1,45 @@
 # Implementation review - router-admission-queue - round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: complete -->
 
-## Summary
-
-- The implementation largely follows the finalized plan, but two reproduced lifecycle defects need correction before acceptance.
-- Re-selection can override a waiter's cancellation or timeout, and delayed timer callbacks permit admission after the queue deadline.
-- Tests cover many normal paths but miss these interleavings; the timer-cleanup test also lacks assertions that would detect leaked timers.
-- No new credential or request-body disclosure was identified in the queue's error bodies or journal events.
-- Verification was read-only, including in-memory engine reproductions under Node 26. Full tests and CLI acceptance were not rerun: pnpm and dependencies are absent. The architecture check fails on inference's `Date.now()` usage; that violation already exists in `93108f5`.
+Reviewed: llm-router `feat/admission-queue` `93108f5..80d4857` against the finalized plan. Every finding was accepted
+and fixed on the branch; each fix has a regression test that fails on the reviewed code (checked by running the new
+tests against the round-1 engine: 4 of 4 fail there, all pass after the fix).
 
 ## Findings
 
 ### Re-selection failures override an already-ended wait
 **Location:** packages/modules/inference/index.ts:396
 **Severity:** important
-<!-- codex: Mark the queued account offline, wake its waiter, hold the second routing.evaluated write, then trigger consumer return, the whole-request cap, or queue expiry: the resulting non-busy CAPACITY_UNAVAILABLE bypasses ended(), reproducing a deferred trajectory after consumer cancellation and an ordinary 429 instead of MAX_DURATION or QUEUE_TIMEOUT. Check the queued request's terminal state when awaited selection or journal operations settle, before propagating another refusal, preserve the previous busy error for timeout mapping, and test all three interleavings. -->
+**Resolution:** accepted, fixed in llm-router `8955eaa`. `reserveOrWait` now checks, after every selection that did not
+admit, whether the wait phase is already over (`over()`: the request signal or `gone` aborted, the whole-request cap
+passed, the queue's deadline passed, or the request is out of the line) before it looks at the refusal; if so it
+answers by how the wait ended (`ended()`: CONSUMER_CLOSED, MAX_DURATION or QUEUE_TIMEOUT, the previous busy error kept
+for the timeout's 429). Tests (`05219e7`): the account goes offline, the waiter is woken, its re-selection is held at the
+`routing.evaluated` write, then the consumer returns / the queue deadline passes / the cap passes: each answers by that
+ending, with one `admission.dequeued` of the matching outcome and no upstream request.
 
 ### The commit point does not enforce the actual deadline
 **Location:** packages/modules/inference/index.ts:601
 **Severity:** important
-<!-- codex: The guard checks only ticket membership, which remains valid until the expiry callback executes: with maxWaitMs=1000 and a synchronous 1100 ms delay during the awakened routing.evaluated write, the engine dispatched upstream and recorded admitted with waitedMs=1102. Check the absolute queue deadline synchronously immediately before reserve, leave and map QUEUE_LEFT when overdue, and add a regression where time passes without letting the timer callback run; the current write-only waiting.expired field does not enforce this guarantee. -->
+**Resolution:** accepted, fixed in `8955eaa`. `Waiting` carries the absolute `until` (registration time plus
+`maxWaitMs`); the commit point before `reserve` throws `QUEUE_LEFT` when the ticket is out of the line, or
+`Date.now() >= until`, or the execution's whole-request deadline passed; `ended()` reads the cap from the clock too
+(`capPassed()`), so a late timer callback changes nothing. The write-only `expired` field is gone (the expiry timer now
+only takes the request out of the line). Test: the woken request's `routing.evaluated` write blocks the event loop past
+its 100 ms deadline: it answers QUEUE_TIMEOUT with no upstream request and no slot used.
 
 ### Timer cleanup is claimed but not tested
 **Location:** tests/admission-queue.test.ts:87
 **Severity:** nit
-<!-- codex: This test checks results and abort listeners but never checks outstanding timers, so its assertions still pass if clearTimeout(timer) is removed from Admission.wait, leaving the 60-second timers alive after abort or leave. Use fake timers or explicit timer tracking to assert cleanup after wake, timeout, abort and leave, including repeated waits on the same ticket. -->
+**Resolution:** accepted, test added in `05219e7`: with fake timers, `vi.getTimerCount()` is 0 after a wait settles as
+timeout, abort, woken and leave, on the same ticket in turn. Mutation M14 (no `clearTimeout` on settle) fails it.
+
+## Also changed since this review
+
+- `61f5f2b`: the two queued image tests (generation and edit) free the held slot by cancelling its client instead of
+  waiting for a router timeout; the edit test failed once under full-suite load, when the 1.5 s timeout could pass
+  before the edits had queued.
 
 ## Diff stat
 
