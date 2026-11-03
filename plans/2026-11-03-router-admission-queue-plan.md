@@ -94,7 +94,7 @@ Why this and not the alternatives (all four directions were evaluated):
   leg the edge keeps open is invisible to it; "supersede an identical resend of the same conversation" would release
   it but is a heuristic with false positives (a client that deliberately sends the same request twice), and the edge's
   grace for streams is an ailab edge setting. With a queue, a resend waits for the orphan's slot instead of failing at
-  once; whether a given resend outlasts a ~95 s orphan within `maxWaitMs` depends on the settings (a 90 s wait does
+  once; whether a given resend outlasts a ~95 s orphan within `maxWaitMs` depends on the settings (an 80 s wait does
   not cover a 95 s orphan by itself; Codex's next retry rejoins after 1 s). Both changes are follow-ups.
 
 ### 1. Configuration: `Account.queue`
@@ -211,7 +211,7 @@ Both keep today's code, status and shape (`CAPACITY_UNAVAILABLE`, `reason: 'busy
   (the client already waited `maxWaitMs`; its retry rejoins at the back), `errorCause` `QUEUE_TIMEOUT`. This is a retry
   policy, not a fairness guarantee: a retry loses its place, and waits that expire together retry together. For Codex
   the cumulative queue-wait budget is (8 + 1) × `maxWaitMs` when every wait expires, plus eight `Retry-After` delays of
-  at least 1 s and each request's upload, selection and journal time (about 13.6 minutes at 90 s); full queues, client
+  at least 1 s and each request's upload, selection and journal time (about 12 minutes at 80 s); full queues, client
   deadlines and other failures shorten it.
 - The trajectory is `deferred` with `errorCode` `CAPACITY_UNAVAILABLE` (the busy 429 without a queue keeps no cause, as
   today). There is no earlier failure to prefer: the queue exists only before the first attempt.
@@ -283,19 +283,21 @@ gets its head when admitted"), the journal events and the metric; `docs/implemen
 ### 9. Release and config (the main session does these; this change stops before any of them)
 
 - Image build and roll as usual (llm-router release staging).
-- **Proposal Q1 (provisional):** after the roll, `queue: { maxWaitMs: 90000, maxWaiting: 4 }` on
-  `lan-192.168.0.28-18020` through the admin API (`If-Match`, read back, revision recorded). 90 s is above the slowest
-  next-release the journal shows for a busy 429 (75.9 s, a lower bound on residence) and stays under Cloudflare's
-  100 s for any client on that path; 4 waiters covers the 4 dev workers (the incident had at most 2 clients waiting
+- **Proposal Q1 (provisional):** after the roll, `queue: { maxWaitMs: 80000, maxWaiting: 4 }` on
+  `lan-192.168.0.28-18020` through the admin API (`If-Match`, read back, revision recorded). 80 s is above the slowest
+  next-release the journal shows for a busy 429 (75.9 s, a lower bound on residence) and leaves margin under
+  Cloudflare's 100 s for the account's clients on that path: the dev workers reach the router on the LAN, but dsh and
+  relay use `router.chifor.me` through Cloudflare (`kubernetes/apps/apps/dsh/settings.seed.yaml`) and dsh offers the
+  local models (lowered from 90 s after reviewer-claude's note on llm-router #133); 4 waiters covers the 4 dev workers (the incident had at most 2 clients waiting
   at once) while keeping queued bodies well inside the shared small body budget (point 6, "Memory and budgets"); the
   default 8 would not. Before relying on it, the release exercises 4 running plus queued requests, overflow and
   cancellation against cloud2 (the main session's acceptance). Watch `llm_router_admission_wait_seconds` by outcome:
   `timeout` or `full` outcomes for cloud2 above a handful a day, or an end-to-end Codex failure on qwen-27b, mean the
-  values need revisiting (a longer `maxWaitMs` if every client of the account is on the LAN).
+  values need revisiting (a longer `maxWaitMs` only if no Cloudflare-path client uses the account).
 - **Concurrency stays 4** (KV evidence above). A trial of 5 would need a controlled load test comparing peak and
   growing KV use, preemptions, vLLM-side waiting, token throughput and client latency under representative prompts;
   the queue's wait histogram alone cannot establish that.
-- **Rollback:** first remove `queue` from the account (`If-Match`, read back; existing waiters drain within 90 s),
+- **Rollback:** first remove `queue` from the account (`If-Match`, read back; existing waiters drain within 80 s),
   then the image.
 
 ## Out of scope
