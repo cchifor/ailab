@@ -1,0 +1,34 @@
+---
+# The relay-bus skill (Relay v0.9.0 and later) for one user's agents: Claude Code loads it from
+# ~/.claude/skills/relay-bus, Codex from ~/.codex/skills/relay-bus. docs/runbooks/relay-connectors.md,
+# "The relay-bus skill". Applied by ansible/relay-agent-skill.yml (`just relay-agent-skill`), never by
+# site.yml or the daily fleet converge. Nothing happens on a host while this is false.
+relay_agent_skill_enabled: false
+# present: the skill files, ~/.config/relay/bus.json and one Claude Code UserPromptSubmit hook.
+# absent: removes the hook and the skill files; ~/.config/relay stays (agent keys are the agents' and
+# their people's, never the role's).
+relay_agent_skill_state: present
+relay_agent_skill_user: c4
+relay_agent_skill_home: "{{ ansible_facts['getent_passwd'][relay_agent_skill_user][4] }}"
+relay_agent_skill_group: "{{ relay_agent_skill_primary_group }}"
+# Relay's public origin (RELAY_URL in kubernetes/apps/apps/relay/relay.yaml), written to bus.json.
+relay_agent_skill_origin: https://relay.chifor.me
+# Controller-local directory holding the release's two skill assets under their release names,
+# relay-bus-SKILL.md and relay-bus.py, downloaded from
+# https://git.chifor.me/cchifor/relay/releases/download/v<version>/<asset> (the repository is private,
+# and WSL has no internet: fetch on Windows, as for the connector binary). Never committed. Workers
+# never download or build the skill.
+relay_agent_skill_source_dir: ""
+# TODO-at-release: the v0.9.0 release's skill assets. Copy each sha256 from the release's
+# manifest.json (agentSkill.files[].sha256, keyed here by its `asset`), check it against SHA256SUMS
+# and the downloaded bytes, and change it only through release review. Empty pins fail validation, so
+# the role cannot install anything until they are set.
+relay_agent_skill_release:
+  version: 0.9.0  # TODO-at-release: confirm the tag the assets come from.
+  sha256:
+    relay-bus-SKILL.md: ""  # TODO-at-release
+    relay-bus.py: ""  # TODO-at-release
+# Seconds Claude Code waits for the hook before continuing the prompt without it. `relay-bus.py
+# inbox --hook` keeps to its own shorter deadline and always exits 0, and the hook command exits 0
+# even without python3 or the helper (files/claude_skill_hook.py).
+relay_agent_skill_claude_hook_timeout: 3

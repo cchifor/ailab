@@ -1,0 +1,9 @@
+---
+# Fixed by the Relay release (relay packages/agent-skill/skill.ts, agentSkillFiles), not by inventory:
+# a Gitea release asset name cannot hold a directory, so SKILL.md is published as relay-bus-SKILL.md
+# and installed under its own name.
+relay_agent_skill_files:
+  - { asset: relay-bus-SKILL.md, name: SKILL.md, mode: "0644" }
+  - { asset: relay-bus.py, name: relay-bus.py, mode: "0755" }
+# Where each agent harness loads user skills from, relative to the user's home.
+relay_agent_skill_harness_dirs: [.claude, .codex]

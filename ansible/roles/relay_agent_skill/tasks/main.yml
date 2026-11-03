@@ -1,0 +1,4 @@
+---
+- name: Converge the relay-bus skill only when explicitly enabled
+  ansible.builtin.include_tasks: converge.yml
+  when: relay_agent_skill_enabled | bool

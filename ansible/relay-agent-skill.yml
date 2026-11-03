@@ -1,0 +1,11 @@
+---
+# The relay-bus skill for the dev-workers' agent user (roles/relay_agent_skill;
+# docs/runbooks/relay-connectors.md, "The relay-bus skill"). Explicit, like relay-connectors.yml:
+# never imported by site.yml or the daily fleet converge, and a host changes only with
+# relay_agent_skill_enabled: true. Apply it after the v0.9.0 connectors, one host at a time.
+- name: Converge the relay-bus agent skill
+  hosts: dev_workers
+  become: true
+  gather_facts: false
+  roles:
+    - role: relay_agent_skill

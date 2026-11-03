@@ -1,0 +1,199 @@
+---
+# Read-only, and it runs to the end before present.yml or absent.yml writes anything: a wrong input,
+# release bytes that are not the pinned ones, an old Python, an unsafe managed directory or a
+# settings.json the merge could not keep fails here and leaves the worker as it was.
+
+- name: Require a known state and a plain account name
+  ansible.builtin.assert:
+    that:
+      - relay_agent_skill_state in ['present', 'absent']
+      - relay_agent_skill_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+    fail_msg: relay_agent_skill_state must be present or absent, and relay_agent_skill_user a plain account name.
+    quiet: true
+
+- name: Require the reviewed skill release pins
+  ansible.builtin.assert:
+    that:
+      - relay_agent_skill_release is mapping
+      - (relay_agent_skill_release.version | default('') | string) is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+      - (relay_agent_skill_release.version | string) is version('0.9.0', '>=')
+      - relay_agent_skill_release.sha256 is mapping
+      - (relay_agent_skill_release.sha256['relay-bus-SKILL.md'] | default('') | string) is match('^[a-f0-9]{64}$')
+      - (relay_agent_skill_release.sha256['relay-bus.py'] | default('') | string) is match('^[a-f0-9]{64}$')
+    fail_msg: >-
+      relay_agent_skill_release must pin an exact Relay release (0.9.0 or later) and the sha256 of both
+      skill assets, relay-bus-SKILL.md and relay-bus.py, from that release's manifest.json
+      (agentSkill.files[].sha256) and SHA256SUMS. The role's defaults leave them empty until the release
+      exists (TODO-at-release).
+    quiet: true
+  when: relay_agent_skill_state == 'present'
+
+- name: Require a controller copy of the release, an HTTPS origin and a sane hook timeout
+  ansible.builtin.assert:
+    that:
+      - relay_agent_skill_source_dir is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - "'/../' not in relay_agent_skill_source_dir + '/' and '/./' not in relay_agent_skill_source_dir + '/'"
+      - relay_agent_skill_origin is match('^https://[a-z0-9][a-z0-9.-]*(?::[1-9][0-9]{0,4})?$')
+      - (relay_agent_skill_claude_hook_timeout | string) is match('^[1-9][0-9]?$')
+    fail_msg: >-
+      relay_agent_skill_source_dir must be the plain absolute controller directory holding the release's
+      relay-bus-SKILL.md and relay-bus.py, relay_agent_skill_origin a bare https:// origin, and
+      relay_agent_skill_claude_hook_timeout 1-99 seconds.
+    quiet: true
+  when: relay_agent_skill_state == 'present'
+
+- name: Resolve the existing account before deriving paths or ownership
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ relay_agent_skill_user }}"
+
+- name: Resolve the account's primary group by passwd GID
+  ansible.builtin.getent:
+    database: group
+    key: "{{ ansible_facts['getent_passwd'][relay_agent_skill_user][2] }}"
+  register: relay_agent_skill_group_record
+
+- name: Derive the primary group name and the interpreter for the settings merge
+  ansible.builtin.set_fact:
+    relay_agent_skill_primary_group: "{{ relay_agent_skill_group_record.ansible_facts.getent_group.keys() | list | first }}"
+    # The interpreter Ansible runs its own modules with on this host (an inventory path, else the
+    # discovered one): files/claude_skill_hook.py is piped to it, so nothing is left behind.
+    relay_agent_skill_interpreter: >-
+      {{ ansible_python_interpreter
+         if (ansible_python_interpreter | default('') | string) is match('^/')
+         else ansible_facts.discovered_interpreter_python | default('/usr/bin/python3') }}
+
+- name: Reject an unsafe home directory
+  ansible.builtin.assert:
+    that:
+      - relay_agent_skill_home is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - "'/../' not in relay_agent_skill_home + '/' and '/./' not in relay_agent_skill_home + '/'"
+    fail_msg: The home of {{ relay_agent_skill_user }} must be a plain absolute path.
+    quiet: true
+
+- name: Derive the settings.json merge
+  ansible.builtin.set_fact:
+    relay_agent_skill_hook_argv: >-
+      {{ [relay_agent_skill_interpreter | trim, '-',
+          '--settings', relay_agent_skill_home ~ '/.claude/settings.json',
+          '--state', relay_agent_skill_state]
+         + (['--timeout', relay_agent_skill_claude_hook_timeout | int | string]
+            if relay_agent_skill_state == 'present' else []) }}
+
+# Without following links. The skill's own directories and Relay's must be real directories when
+# they exist: the file module would follow a link and change its target, and relay-bus.py refuses a
+# linked ~/.config/relay or agents/ anyway. The rest are only created when missing.
+- name: Inspect the directories the skill lives in
+  ansible.builtin.stat:
+    path: "{{ relay_agent_skill_home }}/{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - .claude
+    - .claude/skills
+    - .claude/skills/relay-bus
+    - .codex
+    - .codex/skills
+    - .codex/skills/relay-bus
+    - .config/relay
+    - .config/relay/agents
+  register: relay_agent_skill_dirs
+
+- name: Index the inspected directories
+  ansible.builtin.set_fact:
+    relay_agent_skill_dir_stat: >-
+      {{ dict(relay_agent_skill_dirs.results | map(attribute='item')
+              | zip(relay_agent_skill_dirs.results | map(attribute='stat'))) }}
+
+- name: Require real directories where the skill and its configuration go
+  ansible.builtin.assert:
+    that:
+      - not found.exists or (found.isdir and not found.islnk)
+    fail_msg: >-
+      {{ relay_agent_skill_home }}/{{ item }} exists but is not a directory (a symlink or a file).
+      The role neither follows nor replaces it: move it aside, then converge again.
+    quiet: true
+  vars:
+    found: "{{ relay_agent_skill_dir_stat[item] }}"
+  loop:
+    - .claude/skills/relay-bus
+    - .codex/skills/relay-bus
+    - .config/relay
+    - .config/relay/agents
+  when: relay_agent_skill_state == 'present'
+
+- name: Verify the controller's copy of each release asset
+  ansible.builtin.stat:
+    path: "{{ relay_agent_skill_source_dir }}/{{ item.asset }}"
+    checksum_algorithm: sha256
+    follow: false
+  delegate_to: localhost
+  become: false
+  loop: "{{ relay_agent_skill_files }}"
+  loop_control:
+    label: "{{ item.asset }}"
+  register: relay_agent_skill_sources
+  when: relay_agent_skill_state == 'present'
+
+- name: Reject missing, linked or mismatched release bytes
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(true)
+      - item.stat.checksum | default('') == relay_agent_skill_release.sha256[item.item.asset]
+    fail_msg: >-
+      {{ relay_agent_skill_source_dir }}/{{ item.item.asset }} must be a regular file whose sha256 is the
+      pinned {{ relay_agent_skill_release.sha256[item.item.asset] }} (found:
+      {{ 'a symlink' if item.stat.islnk | default(false) else (item.stat.checksum | default('no regular file')) }}).
+      Download it again from the v{{ relay_agent_skill_release.version }} release.
+    quiet: true
+  loop: "{{ relay_agent_skill_sources.results }}"
+  loop_control:
+    label: "{{ item.item.asset }}"
+  when: relay_agent_skill_state == 'present'
+
+# The hook runs `python3` as the agent resolves it. Checked as the user, through the same PATH a
+# privileged run gives the user (sudo's secure_path: /usr/bin/python3 on the workers). The hook stays
+# silent with no python3 or an older one; this check is what says the skill would not work.
+- name: Find the python3 the skill runs with, as the user
+  ansible.builtin.command:
+    argv: [python3, -c, "import sys; print('.'.join(map(str, sys.version_info[:3])))"]
+  become: true
+  become_user: "{{ relay_agent_skill_user }}"
+  environment:
+    HOME: "{{ relay_agent_skill_home }}"
+  register: relay_agent_skill_python
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: relay_agent_skill_state == 'present'
+
+- name: Require Python 3.10 or later for relay-bus.py
+  ansible.builtin.assert:
+    that:
+      - relay_agent_skill_python.rc | default(1) == 0
+      - relay_agent_skill_python.stdout | default('') | trim is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+      - relay_agent_skill_python.stdout | trim is version('3.10', '>=')
+    fail_msg: >-
+      relay-bus.py needs Python 3.10 or later as `python3` for {{ relay_agent_skill_user }}, but
+      {{ ('python3 is ' ~ (relay_agent_skill_python.stdout | trim))
+         if relay_agent_skill_python.rc | default(1) == 0
+         else ('python3 did not run: ' ~ ((relay_agent_skill_python.stderr | default('', true)
+              or relay_agent_skill_python.msg | default('')) | trim | truncate(300))) }}.
+      Install a newer python3 on the host before the skill.
+    quiet: true
+  when: relay_agent_skill_state == 'present'
+
+# Dry run of the settings.json merge, as the user: an unparsable or misshapen file fails here, and so
+# does a change the merge would have to write but could not keep or could not make. A file already
+# converged passes whatever its owner or ACL: nothing will be written.
+- name: Dry-run the relay-bus hook merge in the user's Claude Code settings
+  ansible.builtin.command:
+    argv: "{{ relay_agent_skill_hook_argv + ['--check'] }}"
+    stdin: "{{ lookup('ansible.builtin.file', 'claude_skill_hook.py') }}"
+  become: true
+  become_user: "{{ relay_agent_skill_user }}"
+  environment:
+    HOME: "{{ relay_agent_skill_home }}"
+  check_mode: false
+  changed_when: false

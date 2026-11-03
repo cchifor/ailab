@@ -1,0 +1,15 @@
+---
+# The hook first, then the skill. ~/.config/relay stays as it is: bus.json is harmless without the
+# skill, and the agent keys in agents/ belong to the agents and the people who approved them. Revoke a
+# key in Relay (or with `relay-bus.py disconnect` before this runs), never by deleting its file.
+
+- name: Remove the relay-bus inbox hook first
+  ansible.builtin.import_tasks: hook.yml
+
+# The whole `relay-bus` skill directory: Claude Code and Codex treat it as the skill. A symlink there
+# is removed, not followed.
+- name: Remove the relay-bus skill for Claude Code and Codex
+  ansible.builtin.file:
+    path: "{{ relay_agent_skill_home }}/{{ item }}/skills/relay-bus"
+    state: absent
+  loop: "{{ relay_agent_skill_harness_dirs }}"

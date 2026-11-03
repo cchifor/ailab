@@ -1,0 +1,92 @@
+---
+# In order: directories, the skill files (each checked against its pin before it is moved into place,
+# and again after), bus.json, and last the hook, so no new session runs a hook whose helper is not
+# there yet. Nothing here reads or writes a key file, and nothing restarts: a Claude Code or Codex
+# session picks the skill up when it starts.
+
+- name: Create the user's Claude Code and Codex directories where missing, as the dev_worker role does
+  ansible.builtin.file:
+    path: "{{ relay_agent_skill_home }}/{{ item.path }}"
+    state: directory
+    owner: "{{ relay_agent_skill_user }}"
+    group: "{{ relay_agent_skill_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: .claude, mode: "0700" }
+    - { path: .claude/skills, mode: "0755" }
+    - { path: .codex, mode: "0700" }
+    - { path: .codex/skills, mode: "0755" }
+  loop_control:
+    label: "{{ item.path }}"
+  when: not relay_agent_skill_dir_stat[item.path].exists
+
+# Existing modes and owners are corrected: relay-bus.py refuses ~/.config/relay and agents/ unless
+# they are the user's, mode 0700. Not recursive: key files inside are never touched.
+- name: Create the skill's directories and Relay's private configuration directories
+  ansible.builtin.file:
+    path: "{{ relay_agent_skill_home }}/{{ item.path }}"
+    state: directory
+    owner: "{{ relay_agent_skill_user }}"
+    group: "{{ relay_agent_skill_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: .claude/skills/relay-bus, mode: "0755" }
+    - { path: .codex/skills/relay-bus, mode: "0755" }
+    - { path: .config/relay, mode: "0700" }
+    - { path: .config/relay/agents, mode: "0700" }
+  loop_control:
+    label: "{{ item.path }}"
+
+# `validate` hashes the transferred temporary file on the worker before it replaces anything: bytes
+# that are not the pinned release never land, even if the controller copy changed after validate.yml.
+- name: Install the pinned skill files for Claude Code and Codex
+  ansible.builtin.copy:
+    src: "{{ relay_agent_skill_source_dir }}/{{ item.1.asset }}"
+    dest: "{{ relay_agent_skill_home }}/{{ item.0 }}/skills/relay-bus/{{ item.1.name }}"
+    owner: "{{ relay_agent_skill_user }}"
+    group: "{{ relay_agent_skill_group }}"
+    mode: "{{ item.1.mode }}"
+    validate: >-
+      {{ relay_agent_skill_interpreter | trim }} -I -c "import hashlib, sys;
+      sys.exit(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest() != sys.argv[2])"
+      %s {{ relay_agent_skill_release.sha256[item.1.asset] }}
+  loop: "{{ relay_agent_skill_harness_dirs | product(relay_agent_skill_files) | list }}"
+  loop_control:
+    label: "{{ item.0 }}/skills/relay-bus/{{ item.1.name }}"
+
+- name: Recheck the installed skill files
+  ansible.builtin.stat:
+    path: "{{ relay_agent_skill_home }}/{{ item.0 }}/skills/relay-bus/{{ item.1.name }}"
+    checksum_algorithm: sha256
+    follow: false
+  loop: "{{ relay_agent_skill_harness_dirs | product(relay_agent_skill_files) | list }}"
+  loop_control:
+    label: "{{ item.0 }}/skills/relay-bus/{{ item.1.name }}"
+  register: relay_agent_skill_installed
+  when: not ansible_check_mode
+
+- name: Require the pinned bytes, mode and owner in place
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(true)
+      - item.stat.checksum | default('') == relay_agent_skill_release.sha256[item.item.1.asset]
+      - item.stat.mode | default('') == item.item.1.mode
+      - item.stat.pw_name | default('') == relay_agent_skill_user
+    quiet: true
+  loop: "{{ relay_agent_skill_installed.results }}"
+  loop_control:
+    label: "{{ item.item.0 }}/skills/relay-bus/{{ item.item.1.name }}"
+  when: not ansible_check_mode
+
+# relay-bus.py reads the origin from here when neither --origin nor RELAY_ORIGIN is set.
+- name: Name Relay's origin for the helper
+  ansible.builtin.copy:
+    content: "{{ {'origin': relay_agent_skill_origin} | to_nice_json }}\n"
+    dest: "{{ relay_agent_skill_home }}/.config/relay/bus.json"
+    owner: "{{ relay_agent_skill_user }}"
+    group: "{{ relay_agent_skill_group }}"
+    mode: "0600"
+
+- name: Add the relay-bus inbox hook last
+  ansible.builtin.import_tasks: hook.yml

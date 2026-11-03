@@ -97,6 +97,14 @@ dev-workers:
 ping-dev-workers:
     cd {{ansible_dir}} && ansible dev_workers -m ping
 
+# Ansible: the relay-bus agent skill (Relay v0.9.0+) for the dev-workers' agent user. Opt-in per host
+# (relay_agent_skill_enabled) and never part of `just dev-workers`. Needs the release's two skill assets
+# on the controller; one host at a time, check first:
+#   just relay-agent-skill --limit dev-worker-1 -e relay_agent_skill_source_dir=<dir> --check --diff
+# See docs/runbooks/relay-connectors.md § "The relay-bus skill".
+relay-agent-skill *args:
+    cd {{ansible_dir}} && ANSIBLE_CONFIG="$(pwd)/ansible.cfg" ansible-playbook relay-agent-skill.yml {{args}}
+
 # OpenTofu: plan/apply ONLY the Talos AGENT node pool (AgentForge v2 compute; separate state from
 # runners/dev-workers/Talos-CPs). Talos WORKERS that JOIN the existing cluster — the module reads
 # infra/'s state READ-ONLY for the cluster machine_secrets (Option B, ADR 0019), so `tofu apply` in
