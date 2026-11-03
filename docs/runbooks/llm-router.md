@@ -3391,6 +3391,136 @@ same morning: GPU3 was pulled, and the three remaining cards checked out.
 Both local accounts now forward reasoning: cloud2 since 11-02 (revision 2213) and cloud3 since 11-03 (revision 2215).
 To roll back, set the flag to false per account, as in the release's rollback step 1.
 
+## Admission-queue release: cloud2's busy 429s wait for a slot instead (2026-11-03, llm-router#133, #134)
+
+`router-0.1.0-20261103-admission-queue` deploys llm-router main `f9eea0d20fd7d308e21e13c8bf2f88f189b8cb7e`
+([#133](https://git.chifor.me/cchifor/llm-router/pulls/133), [#134](https://git.chifor.me/cchifor/llm-router/pulls/134)).
+The plan is `plans/2026-11-03-router-admission-queue-plan.md` (codex, two rounds) and the implementation review
+`plans/2026-11-03-router-admission-queue-impl-review.md` (codex, two rounds; every finding fixed).
+
+**Why.** On 11-01 two concurrent qwen-27b Codex agents on the dev workers got router 429s. When every slot of a
+route's targets is in use, the router answers at once with the busy 429 (`Retry-After: 5`).
+- **Codex gives up after 40 s.** The Codex CLI (0.162.1 and 0.166.0) retries exactly at `Retry-After`, eight times,
+  then exits 1.
+- **The journal, 8 days to 11-03:** 76 busy 429s on cloud2, 57 of them in the 11-01 17:28-17:33Z incident. For each,
+  the next cloud2 slot freed after p50 20 s, p90 45.7 s, max 75.9 s. A queue's head would have been served every time;
+  Codex had given up at 40 s.
+
+**What changes.**
+- **`Account.queue: { maxWaitMs, maxWaiting? }`** (optional; `maxWaitMs` 1000-600000, `maxWaiting` 1-100, default 4).
+  Unset: nothing changes for that account.
+- **Set, a busy pool queues.** A request whose first admission finds every target of its route chain only busy, with
+  the busy targets all in that one pool, waits for a slot instead of the busy 429.
+  - First come, first served, for at most `maxWaitMs`, with at most `maxWaiting` waiting.
+  - While a pool has waiters, its free slots go to them in order.
+  - The setting is the pool's: every route, protocol and caller that reaches the pool queues.
+- **No head until admitted.** A queued stream gets its headers, `: ok` and events only once admitted. The Codex CLI
+  waits for the head (its idle timer starts with the stream). Behind Cloudflare a client gets a 524 after 100 s
+  without a head, which is why cloud2's wait is 80 s (below).
+- **Still a 429:**
+  - a full queue: `error.queue.outcome: full`, `Retry-After: 5`, `errorCause` `QUEUE_FULL`;
+  - an expired wait: `outcome: timeout`, `Retry-After: 1`, `QUEUE_TIMEOUT` (the retry rejoins at the back).
+- **A waiter leaves at once** when its client goes (`CLIENT_CLOSED`), at shutdown (`SHUTDOWN`, the connection reset)
+  or at the route's whole-request cap (504 `TIMEOUT`, phase `max_duration`).
+- **Unchanged:** failover attempts, targets busy in two pools, and mixed refusals (busy plus offline, cooldown, quota
+  or capability) answer as before.
+- **Journal:** `admission.queued` (`accounts`, `ahead`, `maxWaitMs`), `admission.dequeued` (`waitedMs`, `outcome`:
+  `admitted`, `timeout`, `cancelled`, `max_duration`, `refused`) and `admission.queue_full`.
+- **Metric:** the histogram `llm_router_admission_wait_seconds{account,provider,outcome}` (buckets 0.1-600 s), one
+  observation per wait; `full` is observed at 0 s.
+- **Budget:** a queued `/v1/responses` request keeps its share of the request body budget until it ends. Every body
+  of 2 MiB or less, on every route, shares the small budget (13.4 MB), and `maxWaiting` bounds the waiters per pool.
+
+**Verified before release.**
+- **Suite in docker** (node 24.22.2, pnpm 10.32.1) at `61f5f2b`: typecheck, build, build:lib and test:production
+  clean; 2073 passed, 14 skipped; `check:architecture` reports only the known #79 line, as on `93108f5e`.
+  - 16 mutation checks each fail at least one test (no anti-barging, an ignored request signal or deadline, no
+    version check, `maxWaiting` ignored, queueing on failover, and so on).
+  - `dda2d3c`, the head of #133, added one test on top; its PR CI passed (run 119421).
+- **The real Codex CLI** (0.162.1 and 0.166.0, docker, concurrency 1, a 60 s upstream, two agents at once):
+  - `queue: { maxWaitMs: 120000 }`: both exit 0, and the second waits 59-61 s for its head with no 429;
+  - `maxWaitMs: 20000`: the second meets two 429s with `Retry-After: 1`, rejoins 1.0 s later each time, and exits 0;
+  - `main`: the second exits 1 after 9 × 429 (41-43 s).
+- **The deployed commit is the tested tree.** `f9eea0d` is Gitea's merge of #134: first parent `2e756d0` (the merge of
+  #133), second parent `28dbc66`, and no other commit. Its tree is byte-identical to `28dbc66`'s
+  (`d932c54d7f8c798a9e2afcd0e68a47478f7f523b`). `28dbc66` changed only the `maxWaiting` default (8 → 4), its docs and
+  one test; its PR CI passed (run 119452).
+- **Main's push CI is red because of the runners' disks, not the code.** Runs 119433 (`2e756d0`, ci-runner-2) and
+  119474 (`f9eea0d`, ci-runner-9) fail only the same 8 tests of `tests/assistant-images.test.ts`, all with 507
+  `STORAGE_FULL` ("The router's disk is too full to keep more images").
+  - The Assistant's image store refuses a write when the disk has less than 20 % free (`MIN_FREE_RATIO`).
+  - On 11-03 at 14:30Z, ci-runner-2 had 16 % free and ci-runner-9 24 %. ci-runner-6, where the same tree passed, had
+    32 %.
+  - Nothing in the image store has changed since `93108f5e`.
+  - **Follow-up: [#1586](https://git.chifor.me/cchifor/ailab/issues/1586).** Free or grow those runners' disks, or
+    give these HTTP tests the fake disk the store's unit tests use, so that main's push CI is green again and the next
+    roll does not have to explain it away.
+- **Reviews:** reviewer-codex and reviewer-claude approved #133 and #134.
+
+**Image.**
+- Archive `router-0.1.0-20261103-admission-queue.tar.gz`, SHA-256 `ba2c5264959c08d2556f0dd8b697ae20726a39262acc57449be8e7ce2b70e5df` (relay v0.2.0 assets 448/449).
+- Relay branch `release/router-0.1.0-20261103-admission-queue-image`,
+  [run 119513](https://git.chifor.me/cchifor/relay/actions/runs/119513), receipt `deployment-images-119513.json`
+  (asset 450).
+- `registry.chifor.me/llm-router/router@sha256:fef4916c15098832398317c411cf89ec0a0c56e18c87cea30add932422d0142c`, tag `parity-0e5540995826-119513`. Every blob (index, amd64 manifest, config, 9 layers,
+  attestation) was pulled anonymously and verified, and `/app/SOURCE_COMMIT` = `f9eea0d20fd7d308e21e13c8bf2f88f189b8cb7e`.
+
+**Before the roll:**
+- backup `/data/backups/pre-admission-queue-20261103`: integrity ok, 33,399 trajectories, 218.8 MB, SHA-256
+  `c8c2834f6262a9b674fbbf0b5c3788bdf33bb56b4d8777c6ed06de6853ece5c6`, key 600;
+- `validate-live` 6/9 (14:28Z), the known baseline (`codex text`, `codex stream`, `codex tool call`: a bare
+  `model: 'codex'`, 400 `MODEL_REQUIRED`).
+
+**After the roll (Q1):** `queue: { maxWaitMs: 80000, maxWaiting: 4 }` on `lan-192.168.0.28-18020` (cloud2) **only**,
+through `PUT /admin/v1/config` with `If-Match` and a read-back, run in the router pod with its admin bearer. These are
+the plan's provisional values (point 9).
+- **80 s** leaves margin under Cloudflare's 100 s: the dev workers reach the router on the LAN, but dsh and relay use
+  `router.chifor.me` through Cloudflare, and dsh offers the local models. It is above the slowest next-slot release
+  seen for a busy 429 (75.9 s). That figure is a lower bound on how long a waiter stays queued, so a later waiter can
+  still meet `QUEUE_TIMEOUT` and retry at the back.
+- **The 100 s margin holds for streams only.** A stream gets its head at admission. A non-streaming request gets no
+  head until its whole completion is done.
+  - Through Cloudflare, such a request now has 100 s minus its wait for the whole generation. Before this release it
+    got an immediate 429 it could retry; a long one now meets a 524 instead.
+  - Whether the router then sees the client go, and frees the slot or the queue place, depends on cloudflared and the
+    edge closing the origin request. That is not verified.
+  - **Who uses cloud2.** The dev workers' Codex always streams, on the LAN. The 400 most recent cloud2 requests
+    (11-02 09:17Z to the roll) came from dev-worker-2 (392), dev-worker-1 (4) and the Assistant (4, whose model calls
+    the router makes itself). dsh, relay and the platform eval key reach cloud2 at times through Cloudflare. They were
+    not in that sample, and whether they stream was not checked.
+- **The wait costs no generation time on cloud2.** A waiter counts against a whole-request cap, but none applies
+  here.
+  - The account's only route, `qwen3.8-27b` (and its pointer `qwen-27b`), has no `maxDurationMs` (owner decision D1),
+    and direct `local/qwen3.8-27b` requests have none either (config revision 2218).
+  - The route's per-attempt timers, the wait timer (`timeoutMs` 300 s) and the idle timer (`idleTimeoutMs` 120 s),
+    start at admission, so they do not run while a request waits.
+  - A route that reaches this pool with a `maxDurationMs` would need its cap to cover 80 s of waiting plus the
+    longest completion.
+- **4 waiters** covers the 4 dev workers; the incident had at most 2 clients waiting at once. It does not by itself
+  keep the shared small body budget clear: the 7-day peak use (8.6 MB) plus four p90 bodies (6.4 MB) is more than
+  13.4 MB.
+  - **Abort criterion.** A `body_budget` 429 lowers `maxWaiting` to 2, the incident's peak, with the same `If-Match`
+    PUT; it is not left for the revisit. That covers the acceptance run and any time cloud2 has waiters until the
+    first review of the wait histogram. Such 429s show in `llm_router_http_rejections_total{code="BUSY"}`, and the
+    small pool's use in `llm_router_native_body_budget_bytes{pool="small",state="reserved"}`.
+- **`concurrency` stays 4.** With 4 requests running, cloud2's KV-cache use was p95 0.76 and max 0.82; a 5th sequence
+  would bring it to about 0.95-1.03.
+- **Acceptance before relying on it:** 4 running plus queued requests, overflow and cancellation against cloud2, with
+  the small body budget (`llm_router_native_body_budget_bytes{pool="small"}`) and `body_budget` 429s watched.
+- **Revisit when:** `timeout` or `full` outcomes for cloud2 above a handful a day, any `body_budget` 429 while cloud2
+  has waiters, an end-to-end Codex failure on qwen-27b, or a 524 on a cloud2 request through Cloudflare (a
+  non-streaming caller there). The remedies for the last one are a shorter `maxWaitMs`, or the per-key opt-out the
+  plan lists as a follow-up.
+
+**Rollback, in this order.**
+1. Remove `queue` from `lan-192.168.0.28-18020` (`If-Match`, read-back). Requests already waiting drain within their
+   80 s. The old image's account schema is not strict: it ignores the field and drops it only at its next validated
+   config write, so until then the saved config keeps it, and a later roll-forward would turn the queue back on
+   silently. Removing it first makes the saved state explicit.
+2. Revert to `registry.chifor.me/llm-router/router@sha256:7ec9726b6f4e42e5535bc108a87d1fac5e84207b02f950a44bdfc280428b05a3`
+   (source `93108f5e308a7333b5f11acb8db8e48908250bed`, release `router-0.1.0-20261102-forward-reasoning`) with its two
+   annotations. There is no other schema, config or secret change; `forwardReasoning` stays, since that image has it.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
