@@ -6,48 +6,64 @@ with Codex CLI 0.166.0 through llm-router. Every number below comes from the evi
 
 ## Recommendation
 
-**Today is inconclusive under the predeclared rule. Provisionally, keep flash-next as cloud3's resident default
-until day 2 settles it (confidence: low to medium).**
+**Today's result is inconclusive under the predeclared rule.** Until day 2, keep flash-next as cloud3's resident
+default. That is a deployment choice (keep two model families), not a benchmark verdict.
 
 The rule's first two criteria do not separate the models:
 
 1. **Implementation is a practical tie.** Finished and correct within 35 min, counted per run: flash-next 4/7, qwen3.8-27b 4/7. Correct by the cap, finished or not: flash-next 6/7, qwen3.8-27b 7/7. Wrong at the cap: flash-next 1, qwen3.8-27b 0. No run finished with a wrong patch. The gaps are at most one run, inside the predeclared tie margin.
-2. **Planning has no data.** Both P2 runs hit the 35-min cap with no plan written, still reading code. P1 and P3 did
-   not run.
+2. **Planning has no data.** Each model attempted one planning task (P2) and delivered no plan: both hit the 35-min
+   cap still reading code. P1 and P3 did not run.
 
-Planning is half of the owner's question, so the rule says "inconclusive" for now.
+Planning is half of the owner's question, so the rule ends at "inconclusive" for now.
 
-**What today does show:**
+**What today shows, within one run per task (two for I2):**
 
-- **qwen3.8-27b is slightly ahead on implementation.** It was correct by the cap on every run. It was faster to a
-  finished, correct change on I2, twice: 18.4 and 18.1 min, against flash-next's cap and 30.0. It was also faster on
-  I4: 14.8 against 26.5. flash-next was faster on I5 (31.5 min against qwen's cap), and I6 was a tie (12.4 against
-  12.0). flash-next's one miss was I3, where it was still experimenting when the cap hit.
-- **flash-next's long-context failure is gone.** It ran 217 requests with prompts of 30k-81k tokens. None
-  showed tool-call markup leaks, `show show show` loops or garbled copied values. Every patch it made typechecks. That
-  failure was the reason it was distrusted. qwen made 2 calls to a tool it was not offered (`apply_patch`,
-  "unsupported call"); they did no harm.
-- **qwen thinks about twice as much, and decodes 2.4× faster.** The median output rate was 120 tok/s for qwen and 50
-  for flash-next. qwen generated 1,219,331 output tokens to flash-next's 613,409, nearly all of it reasoning. On
-  their own hardware the two land at similar wall times per task. For both, model generation is 78-99 % of wall time (median 96 %).
-- **Redundancy against diversity.** cloud2 already serves qwen3.8-27b. Making 27B cloud3's default too would give the
-  estate two copies of one model, and no second model family. This is about how the estate's capacity is spread, not
-  about checkpoint quality: cloudlab PR #54 (prepared, not applied) would install cloud2's exact checkpoint on cloud3.
+- **qwen3.8-27b leads slightly on implementation, inside the tie margin.**
+  - It was correct by the cap on every run.
+  - It reached a finished, correct change faster on I2, twice: 18.4 and 18.1 min, against flash-next's capped run (a
+    lower bound) and 30.0.
+  - It was faster on I4: 14.8 min against 26.5.
+  - flash-next was faster on I5: 31.5 min, against qwen's capped run.
+  - I6 was a tie: 12.4 against 12.0.
+  - flash-next's one miss was I3. It was still experimenting when the cap hit.
+- **flash-next showed no long-context corruption in this sample.**
+  - 217 of its requests had prompts of 30k-81k tokens; none reached 100k.
+  - None of its runs showed tool-call markup leaks, `show show show` loops or garbled values in its diffs (checked by
+    script and by hand). That failure was why it was distrusted. Today's sample did not reproduce it, but 217 correlated
+    requests up to 81k is evidence, not proof.
+  - qwen made 2 calls to a tool it was not offered (`apply_patch`, "unsupported call"). They did no harm.
+- **qwen generates about twice the completion tokens, at about 2.4× the client-observed output rate.**
+  - The median output rate was 120 tok/s for qwen and 49 for flash-next (client-observed; flash-next's engine-measured
+    decode agrees: median 49).
+  - qwen generated 1,219,331 completion tokens, flash-next 613,409. Reasoning is included and was most of it: vLLM
+    reports qwen's reasoning tokens directly, llama.cpp reports none for flash-next.
+  - Both models used most of the 35-min budget. Half their runs hit the cap, so those durations are lower bounds, not
+    completion times. Model requests took 78-99 % of each run's wall time (median 96 %).
+- **Redundancy against diversity.** cloud2 already serves qwen3.8-27b, so making 27B cloud3's default would leave the
+  estate with two copies of one model and no second family. This concerns how capacity is spread, not checkpoint
+  quality: cloudlab PR #54 (prepared, not applied) would install cloud2's exact checkpoint on cloud3.
 
-**What would make 27B the default:**
+**How day 2 decides, in the plan's order.** Day 2 adds the second implementation repeats and the planning runs. Only
+matched runs count toward the decision: both models, same task, same cap.
 
-- qwen3.8-27b wins tomorrow's 90-min planning runs by more than 1.5 points (of 25);
-- or it finishes clearly more of the second implementation repeats;
-- or a flash-next run shows long-context corruption.
+1. **Implementation success** over days 1 and 2. A lead of more than one run decides.
+2. **Plans**, only if (1) ties. A gap over 1.5 points (of 25) in the judged mean decides, over the tasks where both
+   models delivered a plan.
+3. **Robustness, then speed**, only if (1) and (2) tie. A long-context corruption weighs heavily.
 
-If 27B does become the default, cloud3 would run cloud2's exact checkpoint, `Qwen3.8-27B-W4A16-AutoRound-fast`, the one measured here. It would be copied with a sha256 manifest and run TP=2 on GPU0+GPU1 with cloud2's flags (cloudlab PR #54). It would still need qualifying on cloud3 first, with #54's script and runbook §13i.
+If quality and robustness point opposite ways, or plans are missing for most tasks, the answer stays inconclusive.
+
+If 27B does become the default, cloud3 would run cloud2's exact checkpoint, `Qwen3.8-27B-W4A16-AutoRound-fast`, the one
+measured here: copied with a sha256 manifest, TP=2 on GPU0+GPU1, with cloud2's flags (cloudlab PR #54). It would still
+need qualifying on cloud3 first, with #54's script and runbook §13i.
 
 ## What ran
 
 - **Paired and simultaneous.** Each task ran on both models at the same moment, each in its own fresh workspace:
   flash-next on cloud3 and qwen3.8-27b on cloud2. A pair ended when both runs had exited. Each model had one run at a
   time.
-- **One repeat per task today.** The dry run showed that the plan's 18 pairs would not fit before the cloud
+- **One repeat per task today, two for I2.** The dry run showed that the plan's 18 pairs would not fit before the cloud
   cluster's 22:00 local auto-off. The coordinator, relaying the owner, approved one repeat per task in this priority
   order: I5, P2, I2, I3, P1, I6, I4, P3, I1. After P2, the coordinator approved moving I1 ahead of P1, P1 and P3 to
   tomorrow. Today's scored pairs, in order: I5, P2, I2, I3, I1, I6, I4, then I2 repeat 2. That was 8 pairs, 16 runs. I2 repeat
@@ -85,6 +101,8 @@ If 27B does become the default, cloud3 would run cloud2's exact checkpoint, `Qwe
 
 ### Per model (scored runs)
 
+The outcome columns count the 7 implementation runs per model. Requests and output tokens also include P2.
+
 | Model | Finished and correct | Timeout, correct at cap | Timeout, not correct | Finished, wrong | Correct by the cap (any) | Mean plan score | Total requests | Total output tokens |
 |---|---|---|---|---|---|---|---|---|
 | flash-next | 4/7 | 2 | 1 | 0 | 6/7 | – (0 plans) | 319 | 613,409 |
@@ -101,16 +119,20 @@ median / p90 (n). Output rate: completion tokens (reasoning included) / (termina
 
 ### Speed by prompt size
 
+This shows an association, not a controlled test: each model chose its own prompts along its own task trajectory, and requests within a run are correlated. p90 is omitted under 5 samples.
+
 | Model | Prompt bucket | Requests | Time to first token, ms | Output rate, tok/s | Prefill proxy, tok/s | Engine decode, tok/s |
 |---|---|---|---|---|---|---|
-| flash-next | < 10k | 4 | 14,040 / 16,576 (n=4) | 61 / 62 (n=4) | 674 / 815 (n=4) | 61 / 61 (n=3) |
+| flash-next | < 10k | 4 | 14,040 / – (n=4) | 61 / – (n=4) | 674 / – (n=4) | 61 / – (n=3) |
 | flash-next | 10k-30k | 94 | 1,894 / 3,716 (n=94) | 55 / 60 (n=91) | 801 / 926 (n=80) | 55 / 61 (n=90) |
 | flash-next | 30k-100k | 217 | 1,369 / 3,039 (n=217) | 47 / 51 (n=217) | 766 / 903 (n=157) | 47 / 51 (n=217) |
 | flash-next | >= 100k | 0 | – | – | – | – |
+| flash-next | no usage (stream cut at the cap) | 4 | 950 / – (n=4) | – | – | – |
 | qwen3.8-27b | < 10k | 7 | 6,311 / 6,407 (n=7) | – | 1,485 / 1,489 (n=7) | – |
 | qwen3.8-27b | 10k-30k | 94 | 1,688 / 2,995 (n=94) | 138 / 163 (n=53) | 1,256 / 1,399 (n=94) | – |
 | qwen3.8-27b | 30k-100k | 326 | 1,542 / 2,816 (n=326) | 119 / 137 (n=281) | 907 / 1,088 (n=326) | – |
-| qwen3.8-27b | >= 100k | 4 | 2,636 / 3,458 (n=4) | 105 / 110 (n=4) | 789 / 833 (n=4) | – |
+| qwen3.8-27b | >= 100k | 4 | 2,636 / – (n=4) | 105 / – (n=4) | 789 / – (n=4) | – |
+| qwen3.8-27b | no usage (stream cut at the cap) | 3 | 2,225 / – (n=3) | – | – | – |
 
 ### Per task, side by side
 
@@ -126,8 +148,7 @@ median / p90 (n). Output rate: completion tokens (reasoning included) / (termina
 
 ## How each model spends its time
 
-The coordinator asked for three things to be kept apart: time to a correct implementation, time to finish, and tokens
-spent.
+Three things are kept apart here: time to a correct implementation, time to finish, and tokens spent.
 
 | Task | flash-next: correct source by / finished at | qwen3.8-27b: correct source by / finished at | Output tokens, flash-next / qwen |
 |---|---|---|---|
@@ -139,31 +160,44 @@ spent.
 | I5 | 26.9 / 31.5 | 28.4 / cap | 76,131 / 224,801 |
 | I6 | 9.2 / 12.4 | 9.6 / 12.0 | 26,791 / 74,249 |
 
-"Correct source by" is the time of the agent's last edit to a non-test source file, in minutes from launch, for runs
-whose final patch passes the graded tests. From that moment the source was in its final, correct state, so this is an
-upper bound on the time to a correct implementation. It is read from the timestamped Codex rollout: the last shell
-command that writes a changed source file. "Finished at" is the exit time; "cap" means the run was stopped at 35 min.
-The gap between the two columns is self-checking: running tests, writing new tests, reviewing the diff and cleaning up.
+The columns:
 
-- **Almost all of the wall time is the model thinking.** Model requests took 78-99 % of each run's wall time (median
-  96 %). Tool execution (tests in docker, file reads) took 5-179 s per run. In those requests, the leading reasoning took 78-98 % of the generation
-  time on the llm-router tasks (think share in the per-run table), and less on I6 (flash-next 47 %, qwen 77 %).
-- **qwen3.8-27b thinks about twice as much, and decodes about 2.4× faster.** Over the scored runs, qwen produced
-  1,219,331 output tokens and flash-next 613,409. Single qwen turns reached 20-25k tokens: I1 had four turns of
-  18.6k-24.2k tokens, each 169-222 s. flash-next's largest turn was 14k. So the two land at similar wall times, and the
-  cap usually decides. qwen makes more turns in the same time (434 requests against 319).
-- **When each starts editing varies by task, with no consistent leader.** qwen edited first on I2 (8.2 and 7.9 min,
-  against 27.4 and 17.1), I3 (16.0; flash-next never edited the source) and I4 (9.3 against 15.1). flash-next edited first on I1 (22.0
-  against 32.3), I5 (7.6 against 14.4) and I6 (2.8 against 4.5). On I1 qwen named the bug in its first message, then spent 218k
-  reasoning tokens before its first source edit at 32.3 min.
-- **Self-checking is extensive on both.** Both write new tests and re-run the suites. flash-next restored the base
-  file on I1 to prove that its new test catches the bug. qwen on I3 built and benchmarked 12 prototype scripts. This
-  thoroughness is most of why so many runs reached the cap after the source was already correct (5 of today's
-  14 implementation runs).
-- **Context growth slows both.** flash-next's engine decode on cloud3 is ~61 tok/s under 10k prompt tokens, ~55 at
-  10k-30k and ~47 at 30k-100k. qwen's client-observed rate is ~138 at 10k-30k, ~119 at 30k-100k and ~105 above
-  100k (4 requests). Prefill is a
-  small share for both: the prompt was ~97 % prefix-cached (median), on both engines.
+- **Correct source by** is when the agent last edited a non-test source file, in minutes from launch. It is given
+  only for runs whose final patch passes the graded tests. From that edit on, the source was in its final, correct
+  state, so this is an upper bound on the time to a correct implementation. The source may have been correct earlier.
+  Measuring that would mean grading intermediate states, which was not done. The time is read from the timestamped
+  Codex rollout: the last shell command that writes one of the changed source files.
+- **Finished at** is when Codex exited. "cap" means the run was stopped at 35 min, so its time to finish is only a
+  lower bound.
+- Between the last source edit and the exit, the agents ran tests, wrote new tests, reviewed their diffs and cleaned
+  up.
+
+- **Model requests take nearly all the wall time.** In-flight model requests covered 78-99 % of each run's wall time
+  (median 96 %). Tool execution between requests (tests in docker, file reads) took 5-179 s per run.
+- **Leading reasoning dominates generation time.** Think share is the time from each request's first reasoning delta
+  to its first answer delta, summed over the run, divided by the summed time from first delta to the end of the
+  stream. It was 0.78-0.98 on the llm-router tasks. On I6 it was 0.47 for flash-next and 0.77 for qwen.
+- **qwen3.8-27b generates about twice the completion tokens, at about 2.4× the client-observed rate.**
+  - Over the scored runs qwen generated 1,219,331 completion tokens, flash-next 613,409.
+  - qwen's single turns reached 25.8k tokens. On I1 it had four turns of 18.6k-24.2k tokens, each 169-222 s.
+    flash-next's largest turn was 14.0k tokens.
+  - qwen made more requests in the same time: 434 against 319.
+- **Neither model starts editing first consistently.**
+  - qwen edited first on I2 (8.2 and 7.9 min, against 27.4 and 17.1), on I3 (16.0; flash-next never edited the source)
+    and on I4 (9.3 against 15.1).
+  - flash-next edited first on I1 (22.0 against 32.3), on I5 (7.6 against 14.4) and on I6 (2.8 against 4.5).
+  - On I1 qwen named the bug in its first message. It then generated 218k output tokens before its first source edit,
+    at 32.3 min.
+- **Both models check their own work.** Both wrote new tests and re-ran the suites. On I1, flash-next restored the base
+  file to show that its new test catches the bug. On I3, qwen built and benchmarked 12 prototype scripts. Of today's
+  14 implementation runs, 5 hit the cap with a source that was already correct. In those runs, the
+  time after the last source edit went on activities like these. That is an observation, not a measured cause.
+- **Larger prompt buckets go with lower output rates for both models.** This is an association, not a controlled
+  measurement: each model chose its own prompts.
+  - flash-next's engine decode on cloud3 was ~61 tok/s under 10k prompt tokens (4 requests), ~55 at 10k-30k and ~47 at
+    30k-100k.
+  - qwen's client-observed rate was ~138 at 10k-30k, ~119 at 30k-100k and ~105 at or above 100k (4 requests).
+  - Most of each prompt was prefix-cached on both engines (median ~97 %), so prefill was a small part of each request.
 
 ## Robustness and failure modes
 
@@ -174,7 +208,7 @@ rules apply to both models.
 |---|---|---|
 | Tool-call markup in commands or messages (`<tool_call>`, `<parameter`, `</function>`) | 0 | 0 |
 | Loops (same command 3× in a row, repeated n-grams) | 0 | 0 |
-| Garbled copied values (patches typecheck; hand review of the diffs) | none found | none found |
+| Garbled copied values (hand review of the diffs and messages) | none found | none found |
 | Calls to a tool not offered ("unsupported call: apply_patch") | 0 | 2 (I5) |
 | Commands rejected by Codex's safety policy (`rm -f …`) | 3 | 5 |
 | Early stop (final answer without the work) | 0 | 0 |
@@ -217,7 +251,8 @@ The only hits were flash-next's I3 fixture downloads above. No run read another 
   - the router pod was unchanged (`llm-router-687c467686-nvtz5`, started 14:55:11Z);
   - there was no `cloud3hold`, and flash-next was resident and `ready` before and after the pair;
   - there were no busy 429s, no HTTP errors and no admission-queue waits (no `admission.queued` events in the journal);
-  - cloud2 never ran more than one request: the benchmark's own, KV ≤ 0.28 (sampled every 30 s).
+  - in cloud2's vLLM gauges, sampled every 30 s during each pair, at most one request was running (the benchmark's
+    own) and KV use stayed ≤ 0.28. Activity between samples was not measured.
 
   Every `cancelled` trajectory in the journal ends at the moment a run hit its cap (or the dry-run cut/kill). The
   router config revision was 2221 for all scored requests.
@@ -229,18 +264,22 @@ The only hits were flash-next's I3 fixture downloads above. No run read another 
 
 - **Speed is as deployed, not like for like.** flash-next runs on 3 RTX 3090s on cloud3 (llama.cpp b12020,
   UD-Q3_K_XL MoE, 6B active). qwen3.8-27b runs on 2 RTX 3090s on cloud2 (vLLM, W4A16 AutoRound, dense, MTP). The two
-  differ in engines, quantisations and card counts. cloud2 also served other agents during the runs.
+  differ in engines, quantisations and card counts. cloud2 is shared production: it was available to other agents
+  throughout, though its 30-s samples showed no other running request during the pairs.
 - **The 27B measured is cloud2's W4A16 build, `Qwen3.8-27B-W4A16-AutoRound-fast`.** If 27B became cloud3's resident
   model, cloud3 would run that same checkpoint (cloudlab PR #54, prepared, not applied): copied with a sha256 manifest,
   TP=2 on GPU0+GPU1, cloud2's flags. Quality should carry over. Speed on cloud3's cards needs #54's qualification run
   (runbook §13i). cloud3's existing `qwen3.8-27b-fp8` entry (the uncensored FP8 variant) is a different model and not a
   candidate default.
-- **Small sample.** Today has one run per task per model, on a targeted suite: five llm-router tasks and one ailab
-  script. One run per cell cannot separate a real difference from run-to-run variance. Tomorrow's repeats address
-  that.
+- **Small sample.** Today has one run per task per model (two for I2), on a targeted suite: five llm-router tasks and
+  one ailab script. That is 7 implementation runs and 1 planning attempt per model. One run per cell cannot separate a
+  real difference from run-to-run variance. Tomorrow's repeats narrow that, without closing it.
 - **Client-observed speed for cloud2.** cloud3's decode and prefill figures are llama.cpp's own per-request timings,
   matched to the requests. vLLM reports no per-request timing, so cloud2's figures are client-observed from the
-  timing tap. On cloud3, the client-observed and engine figures agree to within ~2 tok/s, so the method is sound.
+  timing tap. On cloud3, the client-observed output rate and the engine decode agree in aggregate: median 49 for
+  both, p90 59 for both. This validates the client-side output-rate method in aggregate. It does not validate prefill:
+  the prefill proxy and llama.cpp's prompt rate differ by 4 tok/s at the median and 33 at the p90, so the prefill proxy
+  is only indicative.
 - **Codex has no catalog metadata for either model.** Both runs log "Model metadata for `<model>` not found.
   Defaulting to fallback metadata". The effect is the same for both models.
 
@@ -248,15 +287,24 @@ The only hits were flash-next's I3 fixture downloads above. No run read another 
 
 Proposed for 2026-11-04 (cloud cluster on from 08:00 local), same harness, same settings:
 
-1. **Planning, 90-min cap** (coordinator, 2026-11-03): P1, P2 and P3, one pair each, about 4.5 h with both models in
-   parallel. P2 today is not a quality result (both capped while still reading code). The judge is ready: frozen
-   checklists, two blind passes with swapped letters, `codex exec --profile review`.
-2. **Second implementation repeats**, cap 35 min, in this order: I5, I3, I1, I6, I4 (I2 already has two). They give each task two runs per
-   model, and they show whether today's split results (one model passes, the other times out) are stable.
-3. **Capped runs worth rerunning uncapped** (time to finish, with no cap): I1 and I3 on both models (both capped on I1; flash-next not yet correct on I3), I2 on flash-next, I5 on qwen3.8-27b. Suggested cap: 90 min, the same as the planning runs.
-4. If the repeats leave the decision close: a third repeat of the tasks where the two models' results differ, and
-   2-3 new tasks outside llm-router (a platform Python change, an ailab Ansible change), so the suite is less
-   router-centric.
+These rules are frozen now, before any day-2 run.
+
+1. **Planning, 90-min cap** (coordinator, 2026-11-03).
+   - Runs: P1, P2 and P3, one pair each, about 4.5 h with both models in parallel.
+   - Reporting: delivery (a plan written within the cap) is reported per model and task, separately from judged
+     quality. Today's P2 counts as 0/1 delivered for each model.
+   - Scoring: the judged mean is computed only over the tasks where both models delivered. If both delivered on fewer
+     than 2 of the 3 tasks, the planning comparison is inconclusive.
+   - Judge: two blind passes per task, letters swapped, `codex exec --profile review`, with the frozen checklists. The
+     two passes check judge noise; they do not replicate the planning run.
+2. **Second implementation repeats**, cap 35 min, matched (both models, same task, same cap), in this order: I5, I3,
+   I1, I6, I4. I2 already has two. They count toward the decision, together with today's runs.
+3. **90-min capped reruns (diagnostic only, not in the decision).** Rerun both models on I1, I2, I3 and I5, the tasks
+   where at least one model hit today's 35-min cap. They measure time to finish under a common, longer budget; a run
+   that still hits 90 min stays censored.
+4. **Not planned:** selective third repeats of divergent tasks. If the result stays close, the next round is new,
+   matched tasks outside llm-router (a platform Python change, an ailab Ansible change) for both models, decided
+   before they run.
 
 The harness needs no change: `drive2.sh` with a new order file (`CAP_MIN=90` and the run cap in `run.sh` for the
 planning pairs). `/workspace/c4/bench` on dev-worker-1 is kept overnight: task tarballs, templates, image and taps,
