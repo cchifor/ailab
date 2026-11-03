@@ -19,11 +19,11 @@ The two candidates, as deployed:
 | Router account | `lan-192.168.0.26-8080` | `lan-192.168.0.28-18020` (concurrency 4; an admission queue is being rolled out today) |
 
 **What is decided.** Which model family the estate should prefer as its local agent model, and so which one cloud3
-keeps resident. The 27B measured here is cloud2's W4A16 build. If the answer is "27b", cloud3 would host its fp8 build
-(a different quantisation, TP=2 on two cards, ~70-74 tok/s), which this benchmark does not measure (the coordinator's
-rule: no fp8 requests on cloud3 during it). cloud3's fp8 entry is also a different checkpoint
-(`Qwen3.8-27B-Uncensored-FP8`), so the conclusion is limited to the two measured deployments; a recommendation for
-27B on cloud3 would be provisional until that exact checkpoint is qualified in a later window.
+keeps resident. The 27B measured here is cloud2's W4A16 build (`Qwen3.8-27B-W4A16-AutoRound-fast`). *Corrected
+2026-11-03 (coordinator):* if the answer is "27b", cloud3 would run that same checkpoint, per cloudlab PR #54 (prepared,
+not applied): copied with a sha256 manifest, TP=2 on GPU0+GPU1, cloud2's flags. It would still be qualified on cloud3
+first (#54's script, runbook §13i). cloud3's existing `qwen3.8-27b-fp8` entry, the uncensored FP8 variant, is a
+different model and not a candidate. This plan first said the fp8 build would be used, which was wrong.
 
 flash-next's earlier agent failures past ~30k tokens of context (garbled copied values, `show show show` loops,
 tool-call markup leaking into arguments) were traced to cloud3's faulty GPU3. On three cards the deterministic probes

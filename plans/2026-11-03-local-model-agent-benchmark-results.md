@@ -31,8 +31,9 @@ Planning is half of the owner's question, so the rule says "inconclusive" for no
   for flash-next. qwen generated 1,126,111 output tokens to flash-next's 540,299, nearly all of it reasoning. On
   their own hardware the two land at similar wall times per task. Both spend most of their time thinking: over 95 % of
   wall time is model generation.
-- **Deployment.** cloud2 already serves qwen3.8-27b. A 27B on cloud3 would be the fp8 entry, a different checkpoint
-  that has not been qualified, and the estate would lose its second model family.
+- **Redundancy against diversity.** cloud2 already serves qwen3.8-27b. Making 27B cloud3's default too would give the
+  estate two copies of one model, and no second model family. This is about how the estate's capacity is spread, not
+  about checkpoint quality: cloudlab PR #54 (prepared, not applied) would install cloud2's exact checkpoint on cloud3.
 
 **What would make 27B the default:**
 
@@ -40,7 +41,7 @@ Planning is half of the owner's question, so the rule says "inconclusive" for no
 - or it finishes clearly more of the second implementation repeats;
 - or a flash-next run shows long-context corruption.
 
-Even then, a 27B on cloud3 would first need its fp8 checkpoint qualified.
+If 27B does become the default, cloud3 would run cloud2's exact checkpoint, `Qwen3.8-27B-W4A16-AutoRound-fast`, the one measured here. It would be copied with a sha256 manifest and run TP=2 on GPU0+GPU1 with cloud2's flags (cloudlab PR #54). It would still need qualifying on cloud3 first, with #54's script and runbook §13i.
 
 ## What ran
 
@@ -225,9 +226,11 @@ The only hits were flash-next's I3 fixture downloads above. No run read another 
 - **Speed is as deployed, not like for like.** flash-next runs on 3 RTX 3090s on cloud3 (llama.cpp b12020,
   UD-Q3_K_XL MoE, 6B active). qwen3.8-27b runs on 2 RTX 3090s on cloud2 (vLLM, W4A16 AutoRound, dense, MTP). The two
   differ in engines, quantisations and card counts. cloud2 also served other agents during the runs.
-- **The 27B measured is cloud2's W4A16 build.** If 27B became cloud3's resident model, cloud3 would serve its fp8
-  entry instead: a different checkpoint (`Qwen3.8-27B-Uncensored-FP8`), TP=2, ~70-74 tok/s. These results do not
-  transfer to that checkpoint without qualifying it.
+- **The 27B measured is cloud2's W4A16 build, `Qwen3.8-27B-W4A16-AutoRound-fast`.** If 27B became cloud3's resident
+  model, cloud3 would run that same checkpoint (cloudlab PR #54, prepared, not applied): copied with a sha256 manifest,
+  TP=2 on GPU0+GPU1, cloud2's flags. Quality should carry over. Speed on cloud3's cards needs #54's qualification run
+  (runbook §13i). cloud3's existing `qwen3.8-27b-fp8` entry (the uncensored FP8 variant) is a different model and not a
+  candidate default.
 - **Small sample.** Today has one run per task per model, on a targeted suite: five llm-router tasks and one ailab
   script. One run per cell cannot separate a real difference from run-to-run variance. Tomorrow's repeats address
   that.
