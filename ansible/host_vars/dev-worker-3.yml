@@ -19,8 +19,10 @@ relay_connector_host_id: 47405392-9848-4bb8-bc4d-974a589fd2d9
 relay_connector_state_file: /home/c4/.local/state/relay/relay.chifor.me/connector.json
 relay_connector_name: dev-worker-3
 relay_connector_sockets: ['']
-# Relay messaging for this worker's Claude Code agents (docs/runbooks/relay-connectors.md, "Claude
-# Code messaging"). A converge writes the user's `relay` MCP server and inbox hook, so every new
-# Claude Code session starts `relay-connector mcp` and runs `inbox-hint`. Relay enrolls an agent only
-# once an admin turns on Agent messaging for this host. Roll back with `absent`, not by deleting this.
-relay_connector_claude_messaging: present
+# Relay messaging through the connector is being retired: agents will join the bus through the
+# relay-bus skill and a key instead (docs/runbooks/relay-connectors.md, "Claude Code messaging").
+# `absent` removes the user's `relay` MCP server and `inbox-hint` hook. It must converge here before a
+# connector without those subcommands is installed: a UserPromptSubmit hook that exits 2 blocks prompts.
+# Keep this line until the role's Claude Code messaging is removed: deleting it falls back to
+# `unmanaged`, which leaves an existing hook in place.
+relay_connector_claude_messaging: absent

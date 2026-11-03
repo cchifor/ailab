@@ -266,6 +266,15 @@ turning this role off only disables reconciliation.
 
 ## Claude Code messaging
 
+**Being retired (2026-11-03).** Relay is replacing this path with a skill that any agent can load,
+authenticated by a per-agent key that an admin approves. Relay v0.9.0 removes the connector's `mcp`
+and `inbox-hint` subcommands. dev-worker-1, -2 and -3 are set to `absent`, and every worker must
+converge with `absent` **before** it gets a v0.9.0 or later connector. Until then its
+`settings.json` still runs `relay-connector … inbox-hint` before each prompt. The newer binary
+rejects the unknown subcommand with exit code 2, and Claude Code blocks a prompt when a
+`UserPromptSubmit` hook exits 2. No agent had enrolled through this path, so nothing is lost. The
+section below describes the role as it stands until v0.9.0 removes it.
+
 From relay-connector 0.8.0, the Claude Code agents in a worker's tmux can take part in Relay
 messaging. `relay_connector_claude_messaging` (`ansible/roles/relay_connector/tasks/claude.yml`)
 sets up two things for the execution user. Both point at the pinned, content-addressed binary:
@@ -315,8 +324,8 @@ reviewed 0.8.0 or later `relay_connector_release` pin:
 relay_connector_claude_messaging: present
 ```
 
-In this estate dev-worker-1, -2 and -3, whose agents are Claude Code, set `present` with the
-v0.8.0 pin. dev-worker-4 runs Codex, which cannot join (see the v0.8.0 notes above), and stays
+In this estate dev-worker-1, -2 and -3 ran `present` with the v0.8.0 pin from 2026-11-03 and are
+now `absent` (see above). dev-worker-4 runs Codex, which could not join this way, and stays
 `unmanaged`.
 
 With an older pin, `present` fails before anything is written. Claude Code must be installed for
