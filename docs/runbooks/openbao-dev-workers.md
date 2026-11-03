@@ -215,15 +215,26 @@ Secret.
   Never project it to a worker.
 
   `mc` is not installed on the workers. Fetch the release platform CI pins, with the same digest, then
-  hand the secret to `mc` as an env alias, never argv:
+  hand the secret to `mc` as an env alias, never argv. Each step runs only if the one before it
+  succeeded. A failed download or digest check never replaces an existing `mc`, because the file is
+  verified as a temp file and only then moved into place. The key is handed over only after the
+  INSTALLED binary re-verifies:
   ```sh
-  V=RELEASE.2025-08-13T08-35-41Z; mkdir -p "$HOME/.local/bin"
-  curl -fsSL -o "$HOME/.local/bin/mc" "https://github.com/minio/mc/releases/download/$V/mc.linux-amd64.$V"
-  echo "01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891  $HOME/.local/bin/mc" \
-    | sha256sum -c - && chmod +x "$HOME/.local/bin/mc"
-  ep="$(cred get common ci_s3_endpoint)" ak="$(cred get common ci_s3_access_key)" \
-    cred exec common ci_s3_secret_key CI_S3_SK -- \
-    sh -c 'MC_HOST_ci="http://${ak}:${CI_S3_SK}@${ep#http://}" exec "$HOME/.local/bin/mc" cp \
+  V=RELEASE.2025-08-13T08-35-41Z
+  MC_SHA=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+  MC="$HOME/.local/bin/mc"
+  # 1. install (skip if the existing binary already verifies)
+  echo "$MC_SHA  $MC" | sha256sum -c - >/dev/null 2>&1 || {
+    mkdir -p "$HOME/.local/bin" && tmp="$(mktemp "$HOME/.local/bin/.mc.XXXXXX")" &&
+    { curl -fsSL -o "$tmp" "https://github.com/minio/mc/releases/download/$V/mc.linux-amd64.$V" &&
+      echo "$MC_SHA  $tmp" | sha256sum -c - >/dev/null 2>&1 && chmod 0755 "$tmp" && mv -f "$tmp" "$MC" ||
+      { rm -f "$tmp"; echo "mc install FAILED" >&2; false; }; }
+  }
+  # 2. use: the secret is handed over only if the installed binary verifies
+  echo "$MC_SHA  $MC" | sha256sum -c - >/dev/null 2>&1 &&
+  ep="$(cred get common ci_s3_endpoint)" && ak="$(cred get common ci_s3_access_key)" &&
+  ep="$ep" ak="$ak" MC="$MC" cred exec common ci_s3_secret_key CI_S3_SK -- \
+    sh -c 'MC_HOST_ci="http://${ak}:${CI_S3_SK}@${ep#http://}" exec "$MC" cp \
       "ci/gha-artifacts/<run_id>-<attempt>/<name>.tar.gz" .'
   ```
   Swap `cp … .` for `ls ci/gha-artifacts/<run_id>-<attempt>/` to list one run's bundles. The endpoint
