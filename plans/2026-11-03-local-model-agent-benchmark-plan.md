@@ -273,6 +273,15 @@ Gitea and OpenBao tokens, `Authorization:` values) and any hit is redacted; the 
 header values and the private homes hold no token (the provider's key comes from `/usr/local/bin/codex-router-key` at
 run time).
 
+## Amendment after the dry run (2026-11-03 15:20Z, before any scored run)
+
+The dry run (I1, unscored) took flash-next 21.8 min and qwen3.8-27b more than 29.6 min (stopped by hand). Both
+patches passed. At that pace about 8 pairs fit before 19:45Z, not 18. With the coordinator's agreement (relaying the
+owner): **one repeat per task today**, in this priority order: I5 (long context), P2, I2, I3, P1, I6, I4, P3, I1. The
+35-min cap and the dev workers' real reasoning settings stay. What does not fit, the second repeats, and any capped run
+worth rerunning uncapped are listed for tomorrow. A run that hits the cap is recorded with its state at the cap (tests
+passing, files touched, turns, tokens) and counted as a timeout, separately from a wrong answer.
+
 ## Critical files
 
 - `plans/2026-11-03-local-model-agent-benchmark-plan.md` (this plan), `plans/2026-11-03-local-model-agent-benchmark-results.md`.
