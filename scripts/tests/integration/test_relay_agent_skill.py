@@ -183,12 +183,19 @@ class SkillRole(unittest.TestCase):
         self.assertRegex(out, r'changed=0\s')
         self.assertEqual(snapshot(self.home), before)
 
-    def test_02_placeholder_pins_and_bad_inputs_fail_before_any_write(self):
+    def test_02_empty_pins_and_bad_inputs_fail_before_any_write(self):
         before = snapshot(self.home)
-        # The role's own defaults: the TODO-at-release pins are empty, so nothing can install.
-        out = self.role(omit=['relay_agent_skill_release'], success=False)
+        # Empty pins never install anything.
+        empty = dict(version='0.9.0', sha256={'relay-bus-SKILL.md': '', 'relay-bus.py': ''})
+        out = self.role(dict(relay_agent_skill_release=empty), success=False)
         self.assertEqual(self.failed_task(out), 'Require the reviewed skill release pins')
-        self.assertIn('(TODO-at-release)', out)
+        self.assertIn('Change them only through release review', out)
+        # The role's own defaults pin the real release; this case needs the fixture's bytes to differ.
+        defaults = yaml.safe_load((ROOT / 'ansible/roles/relay_agent_skill/defaults/main.yml').read_text())
+        self.assertNotEqual(defaults['relay_agent_skill_release']['sha256'], self.pins,
+                            'the fixture now matches the release pins; use different fixture bytes')
+        out = self.role(omit=['relay_agent_skill_release'], success=False)
+        self.assertEqual(self.failed_task(out), 'Reject missing, linked or mismatched release bytes')
         mismatched = dict(version='0.9.0', sha256={**self.pins, 'relay-bus.py': 'b' * 64})
         out = self.role(dict(relay_agent_skill_release=mismatched), success=False)
         self.assertEqual(self.failed_task(out), 'Reject missing, linked or mismatched release bytes')

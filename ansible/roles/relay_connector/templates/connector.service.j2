@@ -1,15 +1,41 @@
+{# The unit the pinned release's `relay-connector service install` generates (connector/src/service.rs).
+   0.9.0 and later send READY=1 and WATCHDOG=1 (Type=notify, WatchdogSec); an older pin, as in a
+   connector rollback, never does and keeps the Type=simple unit it was qualified with. The
+   network-online ordering matches service.rs; a user manager has no such target, so it orders nothing,
+   and the connector's own reconnect backoff with Restart=always covers a network that is not up yet. #}
+{% set relay_connector_notify = relay_connector_release.version is version('0.9.0', '>=') %}
 [Unit]
 Description=Relay persistent tmux connector
+{% if relay_connector_notify %}
+After=network-online.target
+Wants=network-online.target
+{% endif %}
 
 [Service]
+{% if relay_connector_notify %}
+Type=notify
+NotifyAccess=main
+{% else %}
 Type=simple
+{% endif %}
 ExecStart={{ relay_connector_artifact_dir }}/{{ relay_connector_sha }}/relay-connector --state {{ relay_connector_state_file }} serve
+{% if relay_connector_notify %}
+Restart=always
+RestartSec=10
+WatchdogSec=60
+{% else %}
 Restart=on-failure
 RestartSec=10
+{% endif %}
 UMask=0077
 NoNewPrivileges=true
 KillMode=control-group
 TimeoutStopSec=15
+{% if relay_connector_notify %}
+MemoryMax=1G
+TasksMax=1024
+LimitNOFILE=8192
+{% endif %}
 
 [Install]
 WantedBy=default.target

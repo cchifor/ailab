@@ -30,10 +30,10 @@ relay_connector_claude_bin: "{{ relay_connector_home }}/.npm-global/bin/claude"
 # Seconds Claude Code waits for `inbox-hint` before continuing the prompt without it (it answers in
 # under 300 ms and never fails the prompt).
 relay_connector_claude_hook_timeout: 2
-# v0.8.0 release manifest observed 2026-11-03; change through release review.
+# v0.9.0 release manifest (run 120163) observed 2026-11-04; change through release review.
 relay_connector_release:
-  version: 0.8.0
-  sourceCommit: 04960c3b7267b5d9e5f82f1ad0f42451c22321b7
+  version: 0.9.0
+  sourceCommit: e71399f29c68d1a19cb6594dad4c1d125624b14e
   sha256:
-    amd64: 072fe6c4db6ff88eabb50ba27cca2c7657fb896af7601fcdc3a035a32c5126c9
-    arm64: 965d47866d48ff598f7b1444011a84d2c1a14e0c0a290fba1056b3804a3e0ae4
+    amd64: 402f8d36bfa24469c92617937b009ddbfa656aeba62bf7bfd202a31f8b0e97d1
+    arm64: d675fc3ccf1a94ee1324affefc77c5e9568ade78d193d9a160d9bd61489f532a
