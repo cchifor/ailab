@@ -10,7 +10,7 @@ relay-bus-SKILL.md and relay-bus.py, one more case installs those real assets an
 real helper accepts the directories and bus.json the role wrote.
 """
 import contextlib
-import grp
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -30,6 +31,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 HOOK = ROOT / 'ansible/roles/relay_agent_skill/files/claude_skill_hook.py'
+FILES_HELPER = ROOT / 'ansible/roles/relay_agent_skill/files/skill_files.py'
 _spec = importlib.util.spec_from_file_location('claude_skill_hook', HOOK)
 hook = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hook)
@@ -47,6 +49,7 @@ OLD_HINT = {'type': 'command', 'timeout': 2, 'command': '/opt/relay/connector/' 
 KEY_SECRET = 'rak_fixture_agent_key_never_log_or_touch'
 SKILL_MD = '---\nname: relay-bus\ndescription: fixture\n---\n\n# Relay message bus (fixture)\n\n<!-- relay-origin -->\n'
 HELPER = ('#!/usr/bin/env python3\n"""Fixture relay-bus.py: answers the hook, refuses everything else."""\n'
+          '# Not a template: {{ relay_agent_skill_user }} {% if true %}x{% endif %} {# kept #}\n'
           'import json, sys\n'
           'if sys.argv[1:] == ["inbox", "--hook"]:\n'
           '    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",'
@@ -107,6 +110,15 @@ class SkillRole(unittest.TestCase):
         cls.play = cls.root / 'play.yml'
         cls.play.write_text(yaml.safe_dump([dict(hosts='localhost', gather_facts=False,
             environment=dict(PATH='{{ test_path }}'), roles=[dict(role='relay_agent_skill')])]))
+        # The role's own validation, then a path swapped by `swap_script`, then its writes: what a
+        # change between the checks and the writes would meet.
+        cls.swap_play = cls.root / 'swap-play.yml'
+        cls.swap_play.write_text(yaml.safe_dump([dict(hosts='localhost', gather_facts=False,
+            environment=dict(PATH='{{ test_path }}'), tasks=[
+                {'ansible.builtin.include_role': {'name': 'relay_agent_skill', 'tasks_from': 'validate.yml'}},
+                {'name': 'Swap a path after validation', 'ansible.builtin.command': {'argv': ['{{ swap_script }}']}},
+                {'ansible.builtin.include_role': {'name': 'relay_agent_skill',
+                                                  'tasks_from': '{{ relay_agent_skill_state }}.yml'}}])]))
         cfg = cls.root / 'ansible.cfg'
         cfg.write_text('[defaults]\nroles_path=' + str(ROOT / 'ansible/roles') + '\nretry_files_enabled=False\n')
         cls.env = {**os.environ, 'ANSIBLE_CONFIG': str(cfg), 'ANSIBLE_NOCOLOR': '1',
@@ -138,13 +150,13 @@ class SkillRole(unittest.TestCase):
         for fake in self.bin.iterdir():
             fake.unlink()
 
-    def role(self, updates=None, success=True, check=False, omit=()):
+    def role(self, updates=None, success=True, check=False, omit=(), play=None):
         values = {**self.values, **(updates or {})}
         for key in omit:
             values.pop(key, None)
         extra = self.root / 'vars.json'
         extra.write_text(json.dumps(values))
-        command = ['ansible-playbook', '-i', 'localhost,', '-c', 'local', str(self.play),
+        command = ['ansible-playbook', '-i', 'localhost,', '-c', 'local', str(play or self.play),
                    '--diff', '-e', '@' + str(extra)] + (['--check'] if check else [])
         result = subprocess.run(command, env=self.env, text=True, capture_output=True, timeout=180)
         output = result.stdout + result.stderr
@@ -248,27 +260,45 @@ class SkillRole(unittest.TestCase):
         self.assertEqual([group for group in self.hooks() if group['hooks'] == [SKILL_ENTRY]], [{'hooks': [SKILL_ENTRY]}])
         self.assert_key_untouched()
 
-    def test_05_linked_or_foreign_directories_are_refused_before_any_write(self):
-        elsewhere = self.root / 'elsewhere'
-        shutil.rmtree(elsewhere, ignore_errors=True)
-        elsewhere.mkdir(mode=0o755)
-        relay = self.home / '.config/relay'
-        shutil.rmtree(relay)
-        relay.symlink_to(elsewhere)
+    def elsewhere(self, name='elsewhere'):
+        """A directory outside the home, mode 0755, holding one file: a link's target that must stay as it is."""
+        target = self.root / name
+        shutil.rmtree(target, ignore_errors=True)
+        (target / 'relay-bus').mkdir(parents=True)
+        (target / 'relay-bus/SKILL.md').write_text('not the role\'s')
+        (target / 'relay-bus/relay-bus.py').write_text('not the role\'s')
+        (target / 'keep.txt').write_text('keep')
+        for path in (target, target / 'relay-bus'):
+            path.chmod(0o755)
+        return target
+
+    def test_05_a_symlink_anywhere_on_the_way_is_refused_before_any_write(self):
+        for path in ['.config', '.config/relay', '.config/relay/agents', '.claude', '.claude/skills',
+                     '.claude/skills/relay-bus', '.codex', '.codex/skills', '.codex/skills/relay-bus']:
+            with self.subTest(path=path):
+                self.setUp()
+                target = self.elsewhere()
+                link = self.home / path
+                if link.exists():
+                    shutil.rmtree(link)
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+                before, outside = snapshot(self.home), snapshot(target)
+                for check in (False, True):
+                    out = self.role(success=False, check=check)
+                    self.assertEqual(self.failed_task(out), "Dry-run the skill's file changes")
+                    self.assertIn(f'~/{path} is not a directory (a symlink or a file)', out)
+                    self.assertEqual(snapshot(self.home), before)
+                    self.assertEqual((snapshot(target), target.stat().st_mode & 0o777), (outside, 0o755))
+        # Not a directory: a file where a directory goes.
+        self.setUp()
+        (self.home / '.codex/skills').mkdir(parents=True)
+        (self.home / '.codex/skills/relay-bus').write_text('not a directory')
         before = snapshot(self.home)
         out = self.role(success=False)
-        self.assertEqual(self.failed_task(out), 'Require real directories where the skill and its configuration go')
-        self.assertIn(f'{relay} exists but is not a directory', out)
+        self.assertEqual(self.failed_task(out), "Dry-run the skill's file changes")
+        self.assertIn('~/.codex/skills/relay-bus is not a directory', out)
         self.assertEqual(snapshot(self.home), before)
-        self.assertEqual((list(elsewhere.iterdir()), elsewhere.stat().st_mode & 0o777), ([], 0o755))
-        relay.unlink()
-        relay.mkdir(mode=0o700)
-        skill = self.home / '.codex/skills/relay-bus'
-        skill.parent.mkdir(parents=True)
-        skill.write_text('not a directory')
-        out = self.role(success=False)
-        self.assertEqual(self.failed_task(out), 'Require real directories where the skill and its configuration go')
-        self.assertFalse((self.home / '.claude/skills').exists())
 
     def test_06_python_older_than_3_10_or_missing_fails_before_any_write(self):
         before = snapshot(self.home)
@@ -308,8 +338,8 @@ class SkillRole(unittest.TestCase):
         self.role()
         before = snapshot(self.home)
         out = self.role(dict(relay_agent_skill_state='absent'), check=True)
-        self.assertRegex(out, r'changed=2\s')  # The hook, and the skill directories (one loop task).
-        self.assertIn('"state": "absent"', out)
+        self.assertRegex(out, r'changed=2\s')  # The hook and the skill.
+        self.assertRegex(out, r'Remove the relay-bus skill for Claude Code and Codex\] \**\nchanged')
         self.assertEqual(snapshot(self.home), before)
 
     def test_09_absent_removes_the_hook_and_the_skill_and_keeps_relay_config(self):
@@ -359,6 +389,342 @@ class SkillRole(unittest.TestCase):
         # The installed hook, exactly as Claude Code runs it: silent and 0 without a key.
         result = subprocess.run(['/bin/sh', '-c', COMMAND], env=env, text=True, capture_output=True, timeout=30)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+
+    def test_12_a_destination_that_is_not_a_regular_file_is_refused_before_any_write(self):
+        for path, kind in [('.claude/skills/relay-bus/SKILL.md', 'a directory'),
+                           ('.codex/skills/relay-bus/relay-bus.py', 'a directory'),
+                           ('.config/relay/bus.json', 'a directory'),
+                           ('.claude/skills/relay-bus/relay-bus.py', 'a symlink')]:
+            with self.subTest(path=path):
+                self.setUp()
+                destination = self.home / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                outside = self.root / 'outside.txt'
+                outside.write_text('not the role\'s')
+                if kind == 'a directory':
+                    destination.mkdir()
+                    (destination / 'inside.txt').write_text('kept')
+                else:
+                    destination.symlink_to(outside)
+                before = snapshot(self.home)
+                for check in (False, True):
+                    out = self.role(success=False, check=check)
+                    self.assertEqual(self.failed_task(out), "Dry-run the skill's file changes")
+                    self.assertIn(f'~/{path} is not a regular file', out)
+                    self.assertEqual(snapshot(self.home), before)  # Its contents too.
+                    self.assertEqual(outside.read_text(), 'not the role\'s')
+
+    def swap(self, script):
+        swap = self.root / 'swap.sh'
+        swap.write_text('#!/bin/sh\nset -e\n' + script)
+        swap.chmod(0o755)
+        return {'swap_script': str(swap)}
+
+    def test_13_a_path_swapped_for_a_symlink_after_validation_is_never_followed(self):
+        # Directories, ancestors included, and a file: the writes walk the home through no-follow
+        # descriptors, so a link that appears after validate.yml stops them before any change.
+        for path in ['.config', '.config/relay', '.claude/skills', '.codex/skills/relay-bus/SKILL.md']:
+            with self.subTest(path=path):
+                self.setUp()
+                if path.endswith('SKILL.md'):
+                    self.role()
+                target = self.elsewhere()
+                link = self.home / path
+                moved = self.root / 'moved'
+                shutil.rmtree(moved, ignore_errors=True)
+                link.parent.mkdir(parents=True, exist_ok=True)
+                to = target / 'relay-bus/SKILL.md' if path.endswith('SKILL.md') else target
+                script = (f'mv {link} {moved}\n' if link.exists() else '') + f'ln -s {to} {link}\n'
+                outside = snapshot(target)
+                out = self.role(self.swap(script), success=False, play=self.swap_play)
+                self.assertEqual(self.failed_task(out), "Install the pinned skill files, the private Relay directories and bus.json")
+                self.assertIn(f'~/{path} is not a', out)
+                self.assertIn('nothing was changed', out)
+                self.assertEqual((snapshot(target), target.stat().st_mode & 0o777), (outside, 0o755))
+                self.assertTrue(link.is_symlink())
+
+    def test_14_the_installed_files_and_directories_carry_the_users_ownership_and_modes(self):
+        # ~/.claude existing with the user's own mode keeps it; the role's directories get theirs.
+        (self.home / '.claude').chmod(0o750)
+        self.role()
+        self.assertEqual((self.home / '.claude').stat().st_mode & 0o777, 0o750)
+        for path in [*SKILL_PATHS, '.config/relay/bus.json', '.claude/skills/relay-bus', '.codex/skills/relay-bus',
+                     '.config/relay', '.config/relay/agents', '.codex', '.codex/skills']:
+            self.assertEqual((self.home / path).stat().st_uid, os.getuid(), path)
+        leftovers = [p for p in self.home.rglob('*.tmp')]
+        self.assertEqual(leftovers, [])
+
+    def test_15_absent_removes_only_the_users_regular_files_and_never_follows_a_link(self):
+        absent = dict(relay_agent_skill_state='absent')
+        # A link anywhere from ~/.claude down is refused before the hook changes, in check mode too.
+        for path in ['.claude/skills', '.claude/skills/relay-bus', '.codex', '.claude/skills/relay-bus/SKILL.md']:
+            with self.subTest(path=path):
+                self.setUp()
+                self.role()
+                target = self.elsewhere()
+                link = self.home / path
+                if link.is_dir():
+                    shutil.rmtree(link)
+                else:
+                    link.unlink()
+                link.symlink_to(target / 'relay-bus/SKILL.md' if path.endswith('SKILL.md') else target)
+                before, outside = snapshot(self.home), snapshot(target)
+                for check in (False, True):
+                    out = self.role(absent, success=False, check=check)
+                    self.assertEqual(self.failed_task(out), "Dry-run the skill's file changes")
+                    self.assertIn('the role never', out)
+                    self.assertEqual(snapshot(self.home), before)
+                    self.assertEqual(snapshot(target), outside)
+        # A link swapped in after the dry run: the hook goes, the removal refuses, the target stays.
+        self.setUp()
+        self.role()
+        target = self.elsewhere()
+        skills = self.home / '.claude/skills'
+        outside = snapshot(target)
+        out = self.role(dict(absent, **self.swap(f'mv {skills} {self.root}/moved-skills\nln -s {target} {skills}\n')),
+                        success=False, play=self.swap_play)
+        self.assertEqual(self.failed_task(out), 'Remove the relay-bus skill for Claude Code and Codex')
+        self.assertEqual(snapshot(target), outside)
+        self.assertEqual(json.loads(self.settings.read_text()), USER_SETTINGS)
+        shutil.rmtree(self.root / 'moved-skills')
+        # Anything else in the skill directory stays, and so does the directory.
+        self.setUp()
+        self.role()
+        extra = self.home / '.codex/skills/relay-bus/notes.txt'
+        extra.write_text('the user\'s')
+        self.role(absent)
+        self.assertEqual(sorted(p.name for p in extra.parent.iterdir()), ['notes.txt'])
+        self.assertFalse((self.home / '.claude/skills/relay-bus').exists())
+
+    def test_16_every_write_and_removal_runs_as_the_user_through_the_no_follow_helper(self):
+        # What a fixture without root cannot show by running: present.yml and absent.yml are each one
+        # block run as the user, and nothing in them writes but the helpers (no file or copy module).
+        tasks = ROOT / 'ansible/roles/relay_agent_skill/tasks'
+        for name in ('present.yml', 'absent.yml'):
+            with self.subTest(name=name):
+                plays = yaml.safe_load((tasks / name).read_text())
+                self.assertEqual(len(plays), 1)
+                block = plays[0]
+                self.assertEqual((block.get('become'), block.get('become_user')), (True, '{{ relay_agent_skill_user }}'))
+                for task in block['block']:
+                    self.assertFalse({'ansible.builtin.file', 'ansible.builtin.copy', 'ansible.builtin.template',
+                                      'ansible.builtin.shell'} & set(task), task['name'])
+        hook_task = yaml.safe_load((tasks / 'hook.yml').read_text())[0]
+        self.assertEqual(hook_task['become_user'], '{{ relay_agent_skill_user }}')
+
+
+def files_payload(skill=SKILL_MD, helper=HELPER, origin='https://relay.invalid'):
+    return {'origin': origin, 'files': [
+        {'name': 'SKILL.md', 'mode': '0644', 'sha256': hashlib.sha256(skill.encode()).hexdigest(), 'content': skill},
+        {'name': 'relay-bus.py', 'mode': '0755', 'sha256': hashlib.sha256(helper.encode()).hexdigest(), 'content': helper}]}
+
+
+class SkillFilesScript(unittest.TestCase):
+    """files/skill_files.py on its own, run as the role runs it: `python3 -I -c <source>`."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='skill-files-')
+        self.home = Path(self.temp.name) / 'home'
+        self.home.mkdir()
+        spec = importlib.util.spec_from_file_location('skill_files', FILES_HELPER)
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_files(self, state='present', payload=None, check=False):
+        argv = [sys.executable, '-I', '-c', FILES_HELPER.read_text(), '--home', str(self.home), '--state', state]
+        stdin = json.dumps(files_payload() if payload is None else payload) if state == 'present' else ''
+        return subprocess.run(argv + (['--check'] if check else []), input=stdin, text=True,
+                              capture_output=True, timeout=30)
+
+    def in_process(self, state='present', payload=None):
+        out, err = io.StringIO(), io.StringIO()
+        stdin = io.StringIO(json.dumps(files_payload() if payload is None else payload))
+        with mock.patch('sys.stdin', stdin), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.module.main(['--home', str(self.home), '--state', state])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_present_creates_everything_with_its_modes_and_reruns_unchanged(self):
+        before = snapshot(self.home)
+        result = self.run_files(check=True)
+        self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
+        self.assertEqual(snapshot(self.home), before)
+        result = self.run_files()
+        self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
+        modes = {'.config': 0o700, '.config/relay': 0o700, '.config/relay/agents': 0o700, '.config/relay/bus.json': 0o600,
+                 '.claude': 0o700, '.claude/skills': 0o755, '.claude/skills/relay-bus': 0o755,
+                 '.claude/skills/relay-bus/SKILL.md': 0o644, '.claude/skills/relay-bus/relay-bus.py': 0o755,
+                 '.codex': 0o700, '.codex/skills': 0o755, '.codex/skills/relay-bus': 0o755,
+                 '.codex/skills/relay-bus/SKILL.md': 0o644, '.codex/skills/relay-bus/relay-bus.py': 0o755}
+        self.assertEqual({str(p.relative_to(self.home)): p.stat().st_mode & 0o7777 for p in self.home.rglob('*')}, modes)
+        self.assertEqual((self.home / '.codex/skills/relay-bus/relay-bus.py').read_text(), HELPER)
+        self.assertEqual((self.home / '.config/relay/bus.json').read_text(), '{\n    "origin": "https://relay.invalid"\n}\n')
+        self.assertEqual(self.run_files().stdout, 'unchanged\n')
+
+    def test_a_file_that_does_not_hash_to_its_pin_is_never_written(self):
+        payload = files_payload()
+        payload['files'][1]['sha256'] = 'c' * 64
+        for check in (True, False):
+            result = self.run_files(payload=payload, check=check)
+            self.assertEqual((result.returncode, result.stdout), (1, ''))
+            self.assertIn('relay-bus.py does not hash to its pinned sha256', result.stderr)
+        self.assertEqual(list(self.home.iterdir()), [])
+        for bad in [{'origin': 'x', 'files': payload['files'][:1]},
+                    {'origin': 'x', 'files': [{**payload['files'][0], 'name': '../escape'}, payload['files'][1]]},
+                    {'origin': 'x', 'files': [{**payload['files'][0], 'mode': '0777'}, payload['files'][1]]}, []]:
+            self.assertEqual(self.run_files(payload=bad).returncode, 1, bad)
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_existing_modes_are_corrected_only_where_the_role_owns_the_directory(self):
+        (self.home / '.config/relay/agents').mkdir(parents=True, mode=0o755)
+        (self.home / '.config/relay').chmod(0o755)
+        (self.home / '.config').chmod(0o755)
+        key = self.home / '.config/relay/agents/default.key'
+        key.write_text(KEY_SECRET)
+        key.chmod(0o600)
+        (self.home / '.claude/skills').mkdir(parents=True)
+        (self.home / '.claude').chmod(0o711)
+        result = self.run_files()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({path: (self.home / path).stat().st_mode & 0o777 for path in
+                          ('.config', '.config/relay', '.config/relay/agents', '.claude')},
+                         {'.config': 0o755, '.config/relay': 0o700, '.config/relay/agents': 0o700, '.claude': 0o711})
+        self.assertEqual((key.read_text(), key.stat().st_mode & 0o777), (KEY_SECRET, 0o600))
+
+    def test_a_link_or_wrong_kind_anywhere_is_refused_and_nothing_changes(self):
+        cases = ['.config', '.config/relay/agents', '.codex/skills', '.claude/skills/relay-bus/SKILL.md',
+                 '.config/relay/bus.json']
+        for path in cases:
+            for kind in ('link', 'other'):
+                with self.subTest(path=path, kind=kind):
+                    self.tearDown()
+                    self.setUp()
+                    target = self.home.parent / 'elsewhere'
+                    target.mkdir()
+                    node = self.home / path
+                    node.parent.mkdir(parents=True, exist_ok=True)
+                    is_file = '.' in path.rsplit('/', 1)[-1].lstrip('.')
+                    if kind == 'link':
+                        node.symlink_to(target)
+                    elif is_file:
+                        node.mkdir()  # A directory where a file goes.
+                    else:
+                        node.write_text('a file where a directory goes')
+                    before = snapshot(self.home)
+                    for check in (True, False):
+                        result = self.run_files(check=check)
+                        self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                        self.assertIn(f'~/{path} is not a', result.stderr)
+                        self.assertIn('nothing was changed', result.stderr)
+                        self.assertEqual(snapshot(self.home), before)
+                        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_link_swapped_in_between_the_checks_and_the_writes_is_never_followed(self):
+        target = self.home.parent / 'elsewhere'
+        target.mkdir()
+        real = self.module.present
+
+        def swap_after_the_checks(tree, files, write):
+            if write:  # The checks passed; now the home changes under the writes.
+                (self.home / '.config').rename(self.home.parent / 'moved-config')
+                (self.home / '.config').symlink_to(target)
+            return real(tree, files, write)
+        (self.home / '.config/relay').mkdir(parents=True)
+        with mock.patch.object(self.module, 'present', swap_after_the_checks):
+            code, out, err = self.in_process()
+        self.assertEqual((code, out), (1, ''))
+        self.assertIn('~/.config is not a directory', err)
+        self.assertIn('it stopped part way', err)
+        self.assertEqual(list(target.iterdir()), [])
+        # A file swapped for a link between the passes: the write pass checks it again and refuses it.
+        self.tearDown()
+        self.setUp()
+        self.assertEqual(self.run_files().returncode, 0)
+        outside = self.home.parent / 'outside.txt'
+        outside.write_text('not the role\'s')
+        skill = self.home / '.claude/skills/relay-bus/SKILL.md'
+        real = self.module.present
+
+        def link_the_file(tree, files, write):
+            if write:
+                skill.unlink()
+                skill.symlink_to(outside)
+            return real(tree, files, write)
+        with mock.patch.object(self.module, 'present', link_the_file):
+            code, out, err = self.in_process(payload=files_payload(skill=SKILL_MD + 'next\n'))
+        self.assertEqual((code, out), (1, ''))
+        self.assertIn('~/.claude/skills/relay-bus/SKILL.md is not a regular file', err)
+        self.assertEqual(outside.read_text(), 'not the role\'s')
+        self.assertTrue(skill.is_symlink())
+        # And in the last instant, between that check and the rename: the rename replaces the link.
+        skill.unlink()
+        temporary = self.home / '.claude/skills/relay-bus/.SKILL.md.x.tmp'
+        temporary.write_text('new')
+        skill.symlink_to(outside)
+        parent = os.open(skill.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.replace(temporary.name, skill.name, src_dir_fd=parent, dst_dir_fd=parent)
+        finally:
+            os.close(parent)
+        self.assertEqual((outside.read_text(), skill.is_symlink(), skill.read_text()), ('not the role\'s', False, 'new'))
+
+    def test_another_users_path_is_refused(self):
+        self.assertEqual(self.run_files().returncode, 0)
+        for state in ('present', 'absent'):
+            with mock.patch.object(self.module.os, 'geteuid', return_value=os.geteuid() + 1):
+                code, out, err = self.in_process(state=state)
+            self.assertEqual((code, out), (1, ''))
+            self.assertIn('is owned by uid', err)
+        self.assertTrue((self.home / '.claude/skills/relay-bus/SKILL.md').exists())
+
+    def test_absent_removes_the_two_files_and_the_emptied_directories_only(self):
+        self.run_files()
+        (self.home / '.claude/skills/other-skill').mkdir()
+        before = snapshot(self.home)
+        result = self.run_files('absent', check=True)
+        self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
+        self.assertEqual(snapshot(self.home), before)
+        result = self.run_files('absent')
+        self.assertEqual((result.returncode, result.stdout), (0, 'changed\n'), result.stderr)
+        self.assertEqual(sorted(str(p.relative_to(self.home)) for p in self.home.rglob('*') if '.config' not in str(p)),
+                         ['.claude', '.claude/skills', '.claude/skills/other-skill', '.codex', '.codex/skills'])
+        self.assertTrue((self.home / '.config/relay/bus.json').exists())  # Never absent's.
+        self.assertEqual(self.run_files('absent').stdout, 'unchanged\n')
+
+    def test_absent_refuses_links_and_other_kinds_and_removes_nothing(self):
+        for path in ['.claude', '.claude/skills', '.codex/skills/relay-bus', '.codex/skills/relay-bus/SKILL.md']:
+            with self.subTest(path=path):
+                self.tearDown()
+                self.setUp()
+                self.run_files()
+                target = self.home.parent / 'elsewhere'
+                target.mkdir()
+                (target / 'SKILL.md').write_text('not the role\'s')
+                link = self.home / path
+                if link.is_dir():
+                    shutil.rmtree(link)
+                else:
+                    link.unlink()
+                link.symlink_to(target / 'SKILL.md' if path.endswith('.md') else target)
+                before = snapshot(self.home)
+                for check in (True, False):
+                    result = self.run_files('absent', check=check)
+                    self.assertEqual((result.returncode, result.stdout), (1, ''), result.stderr)
+                    self.assertIn('nothing was changed', result.stderr)
+                    self.assertEqual(snapshot(self.home), before)
+                    self.assertEqual(sorted(p.name for p in target.iterdir()), ['SKILL.md'])
+        # A directory where a file goes, in the second tree: the first is checked but not yet changed.
+        self.tearDown()
+        self.setUp()
+        self.run_files()
+        (self.home / '.codex/skills/relay-bus/SKILL.md').unlink()
+        (self.home / '.codex/skills/relay-bus/SKILL.md').mkdir()
+        result = self.run_files('absent')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('is not a regular file', result.stderr)
+        self.assertTrue((self.home / '.claude/skills/relay-bus/SKILL.md').exists())
 
 
 class ClaudeSkillHookScript(unittest.TestCase):
@@ -551,7 +917,9 @@ class ClaudeSkillHookScript(unittest.TestCase):
         self.assertEqual((code, out), (0, 'changed\n'), err)
         self.assertEqual(json.loads(self.settings.read_text()),
                          {'model': 'opus', 'theme': 'dark', 'hooks': {'UserPromptSubmit': [{'hooks': [SKILL_ENTRY]}]}})
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        # The write took the shared lock: its file stays, empty and private; no temporary file is left.
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
+        self.assertEqual(stat.S_IMODE((self.settings.parent / '.settings.json.lock').stat().st_mode), 0o600)
 
     def test_output_is_ansible_to_nice_json_so_the_status_line_task_never_rewrites_it(self):
         from ansible.plugins.filter.core import to_nice_json
@@ -560,6 +928,124 @@ class ClaudeSkillHookScript(unittest.TestCase):
         self.assertEqual(self.run_hook().stdout, 'changed\n')
         text = self.settings.read_text()
         self.assertEqual(text, to_nice_json(json.loads(text)))
+
+
+def converge_in_child(module, argv, pause, inside):
+    """A forked merger: `module.main(argv)`, sleeping `pause` s inside its rename once `inside` is set.
+
+    The pause sits between the final re-read and os.replace: the window in which two mergers that
+    both passed the re-read would each rename, the later one dropping the earlier one's change.
+    """
+    real = os.replace
+
+    def slow_replace(*args, **kwargs):
+        if inside is not None:
+            inside.set()
+            time.sleep(pause)
+        return real(*args, **kwargs)
+    module.os.replace = slow_replace  # This child's os module only.
+    with open(os.devnull, 'w') as quiet, contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+        code = module.main(argv)
+    os._exit(code)
+
+
+class SharedSettingsLock(unittest.TestCase):
+    """claude_relay_hook.py (relay_connector) and claude_skill_hook.py share one lock and protocol."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='claude-settings-lock-')
+        self.home = Path(self.temp.name)
+        self.settings = self.home / '.claude/settings.json'
+        self.settings.parent.mkdir(mode=0o700)
+        self.lock = self.settings.parent / '.settings.json.lock'
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_both_helpers_carry_the_same_lock_protocol(self):
+        import inspect
+        for name in ('LOCK_NAME', 'LOCK_WAIT'):
+            self.assertEqual(getattr(hook, name), getattr(connector_hook, name), name)
+        self.assertEqual(hook.LOCK_NAME, '.settings.json.lock')
+        for function in ('settings_lock', 'converge_locked'):
+            self.assertEqual(inspect.getsource(getattr(hook, function)),
+                             inspect.getsource(getattr(connector_hook, function)), function)
+        # main() differs only in the name its error message gives.
+        self.assertEqual(inspect.getsource(hook.main).replace('claude_skill_hook.py', 'claude_relay_hook.py'),
+                         inspect.getsource(connector_hook.main))
+
+    def overlap(self, first, second):
+        """Run `first` until it is inside its rename, start `second`, and wait for both."""
+        import multiprocessing
+        context = multiprocessing.get_context('fork')
+        inside = context.Event()
+        a = context.Process(target=converge_in_child, args=(*first, 1.5, inside))
+        a.start()
+        self.assertTrue(inside.wait(20), 'the first merger never reached its rename')
+        b = context.Process(target=converge_in_child, args=(*second, 0, None))
+        b.start()
+        for process in (a, b):
+            process.join(60)
+        self.assertEqual((a.exitcode, b.exitcode), (0, 0))
+
+    def test_overlapping_connector_absent_and_skill_present_keep_the_skill_hook_only(self):
+        user_hook = {'type': 'command', 'command': '/usr/local/bin/user-prompt-hook'}
+        connector_absent = (connector_hook, ['--settings', str(self.settings), '--state', 'absent'])
+        skill_present = (hook, ['--settings', str(self.settings), '--state', 'present', '--timeout', '3'])
+        for first, second in [(connector_absent, skill_present), (skill_present, connector_absent)]:
+            with self.subTest(first=first[0].__name__):
+                # The connector role's v0.8.0 state: the user's hook and the old inbox-hint entry.
+                self.settings.write_text(json.dumps(
+                    {'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [user_hook]}, {'hooks': [OLD_HINT]}]}}))
+                self.overlap(first, second)
+                self.assertEqual(json.loads(self.settings.read_text()),
+                                 {'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [user_hook]},
+                                                                                  {'hooks': [SKILL_ENTRY]}]}})
+                self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()),
+                                 ['.settings.json.lock', 'settings.json'])
+
+    def test_a_held_lock_holds_back_both_helpers_and_check_mode_needs_none(self):
+        self.settings.write_text(json.dumps({'hooks': {'UserPromptSubmit': [{'hooks': [OLD_HINT]}]}}))
+        before = self.settings.read_bytes()
+        holder = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            for module, argv in [(hook, ['--state', 'present', '--timeout', '3']),
+                                 (connector_hook, ['--state', 'absent'])]:
+                with self.subTest(module=module.__name__):
+                    out, err = io.StringIO(), io.StringIO()
+                    with mock.patch.object(module, 'LOCK_WAIT', 0.3), contextlib.redirect_stdout(out), \
+                            contextlib.redirect_stderr(err):
+                        code = module.main(['--settings', str(self.settings), *argv])
+                    self.assertEqual((code, out.getvalue()), (1, ''))
+                    self.assertIn('another merge has held', err.getvalue())
+                    self.assertEqual(self.settings.read_bytes(), before)
+                    # A report needs no lock.
+                    with contextlib.redirect_stdout(out):
+                        self.assertEqual(module.main(['--settings', str(self.settings), *argv, '--check']), 0)
+        finally:
+            os.close(holder)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hook.main(['--settings', str(self.settings), '--state', 'present', '--timeout', '3']), 0)
+
+    def test_the_lock_is_never_taken_through_a_symlink_or_from_another_kind_of_file(self):
+        self.settings.write_text('{}')
+        elsewhere = self.home / 'elsewhere.lock'
+        elsewhere.write_text('')
+        self.lock.symlink_to(elsewhere)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(hook.main(['--settings', str(self.settings), '--state', 'present', '--timeout', '3']), 1)
+        self.assertIn('cannot open the lock', err.getvalue())
+        self.assertEqual(self.settings.read_text(), '{}')
+        self.lock.unlink()
+        self.lock.mkdir()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(connector_hook.main(['--settings', str(self.settings), '--state', 'present',
+                                                  '--command', OLD_HINT['command'], '--timeout', '2']), 1)
+        self.assertIn('lock', err.getvalue())
+        self.assertEqual(self.settings.read_text(), '{}')
 
 
 class HookCommandFailsOpen(unittest.TestCase):

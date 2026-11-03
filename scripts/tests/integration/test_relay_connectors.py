@@ -855,7 +855,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertIn('nothing was written', result.stderr)
                 self.assertEqual(path.read_bytes(), before)
-                self.assertEqual([p.name for p in path.parent.iterdir() if p.name.startswith('.settings.json.')], [])
+                self.assertEqual([p.name for p in path.parent.iterdir() if p.name.endswith('.tmp')], [])
 
     def test_matches_only_the_exact_command_the_role_writes(self):
         for command in [RELAY_HINT, '/x/relay-connector --state /s inbox-hint']:
@@ -1075,7 +1075,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual((code, out), (1, ''))
         self.assertIn('inherits a POSIX ACL from its default ACL', err)
         self.assertEqual(self.settings.read_bytes(), before)
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_a_concurrent_chmod_forces_a_fresh_pass_that_keeps_the_new_mode(self):
         self.write({'model': 'opus'}, mode=0o644)
@@ -1102,7 +1102,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertIn('carries a POSIX ACL', err)
         self.assertEqual(self.settings.read_bytes(), before)
         self.assertIn('system.posix_acl_access', os.listxattr(self.settings))
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_a_change_this_user_cannot_write_is_refused_already_under_check(self):
         if os.geteuid() == 0:
@@ -1153,7 +1153,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         code, out, err = self.run_in_process(user_edits_once)
         self.assertEqual((code, out), (0, 'changed\n'), err)
         self.assertEqual(json.loads(self.settings.read_text())['theme'], 'dark')
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_a_file_that_keeps_changing_fails_and_keeps_the_last_edit(self):
         self.write({'model': 'opus'})
@@ -1167,7 +1167,7 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertIn('changed while being updated, 3 times in a row', err)
         self.assertIn('nothing was written', err)
         self.assertEqual(json.loads(self.settings.read_text()), {'model': 'opus', 'edit': 3})
-        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ['settings.json'])
+        self.assertEqual(sorted(p.name for p in self.settings.parent.iterdir()), ['.settings.json.lock', 'settings.json'])
 
     def test_check_reports_without_writing(self):
         result = self.run_hook(check=True)
@@ -1238,6 +1238,25 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual(self.run_hook().stdout, 'changed\n')
         text = self.settings.read_text()
         self.assertEqual(text, to_nice_json(json.loads(text)))
+
+    def test_a_write_takes_the_lock_it_shares_with_the_skill_role_and_waits_for_it(self):
+        import fcntl
+        self.write({'model': 'opus'})
+        lock = self.settings.parent / '.settings.json.lock'
+        holder = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX)  # As claude_skill_hook.py holds it while it merges.
+            out, err = io.StringIO(), io.StringIO()
+            argv = ['--settings', str(self.settings), '--state', 'present', '--command', RELAY_HINT, '--timeout', '2']
+            with mock.patch.object(hook, 'LOCK_WAIT', 0.3), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(hook.main(argv), 1)
+            self.assertIn(f'another merge has held {lock}', err.getvalue())
+            self.assertEqual(json.loads(self.settings.read_text()), {'model': 'opus'})
+            self.assertEqual(self.run_hook(check=True).stdout, 'changed\n')  # A report takes no lock.
+        finally:
+            os.close(holder)
+        self.assertEqual(self.run_hook().stdout, 'changed\n')
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
 
     def test_the_0_9_preflight_finds_only_the_old_literal_hook(self):
         # tasks/legacy_hook_preflight.yml runs `--state absent --check` and refuses on anything but

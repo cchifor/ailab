@@ -1,7 +1,7 @@
 ---
 # Fixed by the Relay release (relay packages/agent-skill/skill.ts, agentSkillFiles), not by inventory:
 # a Gitea release asset name cannot hold a directory, so SKILL.md is published as relay-bus-SKILL.md
-# and installed under its own name.
+# and installed under its own name. files/skill_files.py holds the same names and modes.
 relay_agent_skill_files:
   - { asset: relay-bus-SKILL.md, name: SKILL.md, mode: "0644" }
   - { asset: relay-bus.py, name: relay-bus.py, mode: "0755" }

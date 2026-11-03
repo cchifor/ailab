@@ -26,6 +26,13 @@ before the rename the target is read again; if anyone changed it meanwhile (cont
 device, inode, size, mtime, ctime, owner, group, mode, extended attributes), every check and the
 merge are redone from the new state, up to three times.
 
+A write happens only under the lock every estate merger of this file shares (settings_lock, the
+same in the relay_agent_skill role's files/claude_skill_hook.py): an exclusive flock on
+.settings.json.lock next to the settings path as given (~/.claude/.settings.json.lock), held from
+the read through the rename. Without it, two mergers could both pass the re-read above and then
+rename in turn, so one would drop the other's change (or put back a hook the other removed).
+--check, and a run with nothing to change, take no lock and create nothing.
+
 Errors (exit 1, nothing written, also under --check): a file that does not parse, or whose
 UserPromptSubmit hooks are not the documented shape. And, only when the merge would change the
 file: a file owned by another user, in a group this user cannot keep, or carrying a POSIX ACL; a
@@ -34,8 +41,10 @@ cannot write. A file that is already converged is left alone whatever its owner 
 blocks a run. Prints `changed` or `unchanged`; --check reports without writing.
 """
 import argparse
+import contextlib
 import copy
 import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -44,11 +53,14 @@ import shlex
 import stat
 import sys
 import tempfile
+import time
 
 EVENT = 'UserPromptSubmit'
 ATTEMPTS = 3
 ACCESS_ACL = 'system.posix_acl_access'
 DEFAULT_ACL = 'system.posix_acl_default'
+LOCK_NAME = '.settings.json.lock'
+LOCK_WAIT = 30.0
 
 
 class SettingsError(Exception):
@@ -270,6 +282,42 @@ def replace(target, found, text):
         pass
 
 
+@contextlib.contextmanager
+def settings_lock(settings):
+    """Hold the lock every estate merger of `settings` shares, from its read through its rename.
+
+    An exclusive flock on LOCK_NAME in the directory of the settings path as given (not resolved),
+    so ~/.claude/.settings.json.lock for ~/.claude/settings.json. Created 0600, never through a
+    symlink, and only a regular file of this user's counts. Waits up to LOCK_WAIT seconds.
+    Byte-identical in claude_relay_hook.py (relay_connector) and claude_skill_hook.py
+    (relay_agent_skill): one protocol, one lock.
+    """
+    directory = os.path.dirname(os.path.abspath(settings))
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    path = os.path.join(directory, LOCK_NAME)
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as error:
+        raise SettingsError(f'cannot open the lock {path} ({error.strerror})') from None
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_uid != os.geteuid():
+            raise SettingsError(f'the lock {path} is not a regular file of this user')
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SettingsError(f'another merge has held {path} for {LOCK_WAIT:g} s; '
+                                        'converge again once it is done') from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(descriptor)  # Releases the flock.
+
+
 def parse(raw):
     try:
         return json.loads(raw.decode('utf-8'))
@@ -298,8 +346,8 @@ def parse_args(argv):
     return args
 
 
-def converge_file(target, args):
-    """One read-check-merge-write pass. Returns 'changed' or 'unchanged'."""
+def converge_file(target, args, write):
+    """One read-check-merge pass, writing only with `write`. Returns 'changed' or 'unchanged'."""
     found = read(target)
     if found is None:
         if args.state == 'absent':
@@ -315,23 +363,34 @@ def converge_file(target, args):
         check_metadata(found[0], found[2])
     check_directory(os.path.dirname(target))
     check_writable(target, found)
-    if not args.check:
+    if write:
         replace(target, found, render(desired))
     return 'changed'
+
+
+def converge_locked(target, args):
+    """Every pass that writes, under settings_lock, redone from the new state on a change."""
+    with settings_lock(args.settings):
+        for _ in range(ATTEMPTS):
+            try:
+                return converge_file(target, args, write=True)
+            except ChangedMeanwhile:
+                continue  # Re-read, and re-run every check, from the new state.
+    raise SettingsError(f'it changed while being updated, {ATTEMPTS} times in a row; '
+                        'converge again once it is quiet')
 
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     target = os.path.realpath(args.settings)  # Resolved once: read and replace the same file.
     try:
-        for _ in range(ATTEMPTS):
-            try:
-                print(converge_file(target, args))
-                return 0
-            except ChangedMeanwhile:
-                continue  # Re-read, and re-run every check, from the new state.
-        raise SettingsError(f'it changed while being updated, {ATTEMPTS} times in a row; '
-                            'converge again once it is quiet')
+        # A first pass without the lock: a report (--check) or nothing to change needs no lock and
+        # creates nothing. A change is then made from a fresh read under the lock.
+        result = converge_file(target, args, write=False)
+        if result == 'changed' and not args.check:
+            result = converge_locked(target, args)
+        print(result)
+        return 0
     except (SettingsError, OSError) as error:
         print(f'claude_relay_hook.py: {args.settings}: {error}; nothing was written',
               file=sys.stderr)

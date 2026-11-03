@@ -10,7 +10,6 @@ relay_agent_skill_enabled: false
 relay_agent_skill_state: present
 relay_agent_skill_user: c4
 relay_agent_skill_home: "{{ ansible_facts['getent_passwd'][relay_agent_skill_user][4] }}"
-relay_agent_skill_group: "{{ relay_agent_skill_primary_group }}"
 # Relay's public origin (RELAY_URL in kubernetes/apps/apps/relay/relay.yaml), written to bus.json.
 relay_agent_skill_origin: https://relay.chifor.me
 # Controller-local directory holding the release's two skill assets under their release names,

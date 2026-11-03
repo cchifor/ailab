@@ -326,7 +326,11 @@ and adds back a definition this run removed) and stops with `settings.json` unch
   the user and add the previous definition back with `claude mcp add-json --scope user relay`.
 - Claude Code takes no lock on `settings.json`. The helper re-reads it just before its rename and
   redoes the merge if anything changed, but an edit that lands inside that last instant can still
-  be lost.
+  be lost. The estate's own two mergers, this helper and the relay-bus skill role's, never lose
+  each other's change. Each one writes only under an exclusive `flock` on
+  `~/.claude/.settings.json.lock` (0600, an empty file that stays), held from its read through its
+  rename. A report (`--check`) or a run with nothing to change takes no lock. The dev_worker role's
+  status-line task does not take it.
 
 **Turn it on** per worker in `ansible/host_vars/dev-worker-N.yml`, in the same change as a
 reviewed 0.8.0 or later `relay_connector_release` pin:
@@ -385,11 +389,10 @@ applied by its own playbook, `ansible/relay-agent-skill.yml` (`just relay-agent-
   `relay-bus.py` (0755), owned by the user. They are the release's two skill assets,
   `relay-bus-SKILL.md` (installed under its own name, `SKILL.md`) and `relay-bus.py`. Each sha256 is
   pinned in `relay_agent_skill_release`. The role checks the controller copy before anything on the
-  worker changes, checks the transferred bytes on the worker before they replace anything, and
-  checks the installed file once more.
+  worker changes, the helper checks the bytes it received before it writes them, and the role checks
+  the installed file once more.
 - `~/.config/relay` and `~/.config/relay/agents`, owned by the user with mode 0700. The role corrects
-  an existing mode or owner, but not recursively. `relay-bus.py` refuses either directory otherwise,
-  and refuses a symlink, so the role does too: it stops before writing anything.
+  an existing mode, but not recursively. `relay-bus.py` refuses either directory otherwise.
 - `~/.config/relay/bus.json`, mode 0600: `{"origin": "https://relay.chifor.me"}`
   (`relay_agent_skill_origin`, the hub's `RELAY_URL`).
 - One Claude Code `UserPromptSubmit` hook in `~/.claude/settings.json`, with a 3 s timeout
@@ -403,9 +406,27 @@ applied by its own playbook, `ansible/relay-agent-skill.yml` (`just relay-agent-
   exits 2 for a missing script before the helper's own guards run, hence the trailing `exit 0`.
   `inbox --hook` prints the "N unread Relay messages" context only when messages wait. Without a
   key, or on a 401, 429, timeout or an old hub's HTML 404, it prints nothing and exits 0.
-  `files/claude_skill_hook.py` merges the hook with the same rules as the connector's helper above.
-  Only an entry with exactly this command is the role's; every other hook stays. That includes an old
-  `inbox-hint` entry, which only the connector role removes.
+  `files/claude_skill_hook.py` merges the hook with the same rules as the connector's helper above,
+  under the same lock. Only an entry with exactly this command is the role's; every other hook
+  stays. That includes an old `inbox-hint` entry, which only the connector role removes.
+
+**Every write runs as the user, never as root,** and none follows a link. All of the skill's file
+changes go through one helper, `files/skill_files.py`, run as the user:
+
+- It reaches every path one component at a time from the home directory. Each directory is opened
+  with `O_NOFOLLOW` relative to its parent's descriptor, and each change is made relative to those
+  descriptors: create a directory, set a mode, write a fresh temporary file, rename it.
+- The paths are `~/.config`, `~/.config/relay`, `agents/`, `~/.claude`, `~/.claude/skills`,
+  `~/.codex`, `~/.codex/skills`, both `relay-bus` directories, both trees' skill files and
+  `bus.json`. Each must be absent, or a real directory (a regular file for the files) owned by the
+  user.
+- A symlink, a directory where a file goes, or another user's path is refused, and the run changes
+  nothing. The role does not repair ownership as root: fix such a path by hand.
+- `validate.yml` dry-runs the helper before anything changes, in check mode too. The helper itself
+  checks everything in a first pass before its first change. A link that appears later, even on an
+  ancestor, meets the same no-follow operations and stops the run instead of being followed.
+- The skill files reach the helper as JSON on its stdin, and it checks each one against its pinned
+  sha256 before writing.
 
 The role never reads or writes a key file, and it restarts nothing. Claude Code and Codex load
 skills, and Claude Code loads hooks, when a session starts, so a running agent picks the skill up in
@@ -473,8 +494,12 @@ those agents, including authorized Relay terminal control. Admin credentials nev
 cut an agent off, revoke its key in Relay. `relay-bus.py disconnect` revokes the agent's own key and
 deletes the file. Deleting a key file does not revoke the key.
 
-**Rollback.** Set `relay_agent_skill_state: absent` and converge. The role removes the hook first,
-then both `relay-bus` skill directories. It keeps `~/.config/relay`: `bus.json` is harmless, and the
+**Rollback.** Set `relay_agent_skill_state: absent` and converge. The role removes the hook first.
+Then the same helper, as the user, removes the two files it installed from each `relay-bus`
+directory, and the directory once that leaves it empty. Anything else there stays, and so does the
+directory. It walks from `~/.claude` and `~/.codex` down through no-follow directory descriptors. It
+refuses a symlink, a non-regular file or another user's path there, in its dry run before the hook
+changes and again when it removes. It keeps `~/.config/relay`: `bus.json` is harmless, and the
 keys belong to the agents and the people who approved them. Revoke them in Relay when agents should
 leave the bus. `absent` needs no pins, controller copy or Python. The hook is inert against an older
 hub: a v0.8 hub has no `/agent/v1/inbox`, and the hook stays silent on whatever it answers instead
@@ -510,10 +535,23 @@ with real Ansible against a disposable home:
 - an install beside the user's own hooks and the old `inbox-hint` entry, with the modes, owners and
   bytes checked;
 - a rerun with `changed=0`, and a new release;
-- linked or non-directory managed paths, Python older than 3.10 or broken, and unparsable settings;
-- check mode, and `absent` keeping `~/.config/relay` and the key untouched.
+- a symlink at each managed directory, from `~/.config` and `~/.claude` down, and a directory or
+  link where a skill file or `bus.json` goes, refused in apply and check mode with nothing changed
+  inside or outside the home;
+- a path swapped for a symlink after validation (`~/.config`, `~/.config/relay`,
+  `~/.claude/skills` or a skill file): the install refuses it and changes nothing, and the link's
+  target stays untouched;
+- Python older than 3.10 or broken, and unparsable settings;
+- check mode, and `absent` keeping `~/.config/relay` and the key untouched. `absent` refuses links
+  on the way (also when swapped in after its dry run) and keeps other files in a skill directory;
+- a static check that `present.yml` and `absent.yml` each run as one block as the user, and that
+  nothing in them writes but the helpers. A fixture without root cannot show that by running.
 
-Unit tests cover `claude_skill_hook.py`, and the hook command itself run through `/bin/sh` with the
-helper or `python3` missing. With `RELAY_SKILL_RELEASE_DIR` naming a directory that holds a release's
+Unit tests cover `claude_skill_hook.py` and `skill_files.py`, including a link swapped in between the
+helper's checks and its writes. They also run the hook command itself through
+`/bin/sh` with the helper or `python3` missing. Both settings helpers carry the same lock code. A
+regression starts each with a pause inside its rename and starts the other meanwhile, in both
+orders. The result keeps the skill's hook and drops the old one, and without the lock it does not.
+With `RELAY_SKILL_RELEASE_DIR` naming a directory that holds a release's
 two skill assets, one more case installs them and checks that the real `relay-bus.py` accepts what the
 role wrote. Run it once against the v0.9.0 assets before applying the role.

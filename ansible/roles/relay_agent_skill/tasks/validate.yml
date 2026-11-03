@@ -1,7 +1,8 @@
 ---
-# Read-only, and it runs to the end before present.yml or absent.yml writes anything: a wrong input,
-# release bytes that are not the pinned ones, an old Python, an unsafe managed directory or a
-# settings.json the merge could not keep fails here and leaves the worker as it was.
+# Read-only, and it runs to the end before present.yml or absent.yml writes anything, in check mode
+# too: a wrong input, release bytes that are not the pinned ones, an old Python, a symlink or another
+# user's path where the skill goes, or a settings.json the merge could not keep fails here and leaves
+# the worker as it was.
 
 - name: Require a known state and a plain account name
   ansible.builtin.assert:
@@ -47,17 +48,10 @@
     database: passwd
     key: "{{ relay_agent_skill_user }}"
 
-- name: Resolve the account's primary group by passwd GID
-  ansible.builtin.getent:
-    database: group
-    key: "{{ ansible_facts['getent_passwd'][relay_agent_skill_user][2] }}"
-  register: relay_agent_skill_group_record
-
-- name: Derive the primary group name and the interpreter for the settings merge
+- name: Derive the interpreter for the helper scripts
   ansible.builtin.set_fact:
-    relay_agent_skill_primary_group: "{{ relay_agent_skill_group_record.ansible_facts.getent_group.keys() | list | first }}"
     # The interpreter Ansible runs its own modules with on this host (an inventory path, else the
-    # discovered one): files/claude_skill_hook.py is piped to it, so nothing is left behind.
+    # discovered one): files/*.py run from stdin or -c, so nothing is left behind.
     relay_agent_skill_interpreter: >-
       {{ ansible_python_interpreter
          if (ansible_python_interpreter | default('') | string) is match('^/')
@@ -71,7 +65,7 @@
     fail_msg: The home of {{ relay_agent_skill_user }} must be a plain absolute path.
     quiet: true
 
-- name: Derive the settings.json merge
+- name: Derive the settings.json merge and the skill's file changes
   ansible.builtin.set_fact:
     relay_agent_skill_hook_argv: >-
       {{ [relay_agent_skill_interpreter | trim, '-',
@@ -79,48 +73,10 @@
           '--state', relay_agent_skill_state]
          + (['--timeout', relay_agent_skill_claude_hook_timeout | int | string]
             if relay_agent_skill_state == 'present' else []) }}
-
-# Without following links. The skill's own directories and Relay's must be real directories when
-# they exist: the file module would follow a link and change its target, and relay-bus.py refuses a
-# linked ~/.config/relay or agents/ anyway. The rest are only created when missing.
-- name: Inspect the directories the skill lives in
-  ansible.builtin.stat:
-    path: "{{ relay_agent_skill_home }}/{{ item }}"
-    follow: false
-    get_checksum: false
-  loop:
-    - .claude
-    - .claude/skills
-    - .claude/skills/relay-bus
-    - .codex
-    - .codex/skills
-    - .codex/skills/relay-bus
-    - .config/relay
-    - .config/relay/agents
-  register: relay_agent_skill_dirs
-
-- name: Index the inspected directories
-  ansible.builtin.set_fact:
-    relay_agent_skill_dir_stat: >-
-      {{ dict(relay_agent_skill_dirs.results | map(attribute='item')
-              | zip(relay_agent_skill_dirs.results | map(attribute='stat'))) }}
-
-- name: Require real directories where the skill and its configuration go
-  ansible.builtin.assert:
-    that:
-      - not found.exists or (found.isdir and not found.islnk)
-    fail_msg: >-
-      {{ relay_agent_skill_home }}/{{ item }} exists but is not a directory (a symlink or a file).
-      The role neither follows nor replaces it: move it aside, then converge again.
-    quiet: true
-  vars:
-    found: "{{ relay_agent_skill_dir_stat[item] }}"
-  loop:
-    - .claude/skills/relay-bus
-    - .codex/skills/relay-bus
-    - .config/relay
-    - .config/relay/agents
-  when: relay_agent_skill_state == 'present'
+    # files/skill_files.py as `python3 -I -c <source>`: its stdin carries the files to install.
+    relay_agent_skill_files_argv: >-
+      {{ [relay_agent_skill_interpreter | trim, '-I', '-c', lookup('ansible.builtin.file', 'skill_files.py'),
+          '--home', relay_agent_skill_home, '--state', relay_agent_skill_state] }}
 
 - name: Verify the controller's copy of each release asset
   ansible.builtin.stat:
@@ -150,6 +106,25 @@
   loop: "{{ relay_agent_skill_sources.results }}"
   loop_control:
     label: "{{ item.item.asset }}"
+  when: relay_agent_skill_state == 'present'
+
+# What files/skill_files.py installs: the verified bytes and their pins (it checks each hash again
+# before writing anything) and the origin for bus.json. Not secret, only long.
+- name: Start the list of files to install
+  ansible.builtin.set_fact:
+    relay_agent_skill_payload_files: []
+  when: relay_agent_skill_state == 'present'
+
+- name: Read the verified release assets into it
+  ansible.builtin.set_fact:
+    relay_agent_skill_payload_files: >-
+      {{ relay_agent_skill_payload_files + [{
+           'name': item.name, 'mode': item.mode, 'sha256': relay_agent_skill_release.sha256[item.asset],
+           'content': lookup('ansible.builtin.file', relay_agent_skill_source_dir ~ '/' ~ item.asset, rstrip=false)}] }}
+  loop: "{{ relay_agent_skill_files }}"
+  loop_control:
+    label: "{{ item.asset }}"
+  no_log: true
   when: relay_agent_skill_state == 'present'
 
 # The hook runs `python3` as the agent resolves it. Checked as the user, through the same PATH a
@@ -191,6 +166,23 @@
   ansible.builtin.command:
     argv: "{{ relay_agent_skill_hook_argv + ['--check'] }}"
     stdin: "{{ lookup('ansible.builtin.file', 'claude_skill_hook.py') }}"
+  become: true
+  become_user: "{{ relay_agent_skill_user }}"
+  environment:
+    HOME: "{{ relay_agent_skill_home }}"
+  check_mode: false
+  changed_when: false
+
+# Dry run of every file change, as the user, through no-follow directory descriptors: a symlink,
+# a directory where a file goes, another kind of file or another user's path anywhere on the way
+# (~/.config, ~/.config/relay, agents/, ~/.claude, ~/.codex, their skills/, both relay-bus
+# directories, the skill files, bus.json) fails here, before the hook or anything else changes.
+- name: Dry-run the skill's file changes
+  ansible.builtin.command:
+    argv: "{{ relay_agent_skill_files_argv + ['--check'] }}"
+    stdin: >-
+      {{ ({'origin': relay_agent_skill_origin, 'files': relay_agent_skill_payload_files} | to_json)
+         if relay_agent_skill_state == 'present' else '' }}
   become: true
   become_user: "{{ relay_agent_skill_user }}"
   environment:
