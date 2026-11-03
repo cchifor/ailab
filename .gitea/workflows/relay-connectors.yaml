@@ -24,8 +24,8 @@ on:
 jobs:
   relay-connectors:
     runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
-    # The relay-bus skill suite and the >= 0.9.0 preflight cases add a few minutes of real Ansible runs.
-    timeout-minutes: 20
+    # The relay-bus skill suite and the >= 0.9.0 preflight cases add about 10 minutes of real Ansible runs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate connector pins, identity preservation and service convergence, and the relay-bus skill role
