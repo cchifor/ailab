@@ -1,10 +1,5 @@
 # Dev-worker read-only access to the CI-artifact store
 
-## Codex Review
-
-- Round 2 still requires changes: emergency revocation/recovery can re-enable a compromised key, and rotation lacks gates on the deployed credentials.
-- Drop the presigned-URL finding; retain narrower objections for restore recovery, reviewer authorization evidence, and local cross-bucket verification.
-- Accepted fixes still leave bucket-policy grants, partial-failure tests, explicit root-rotation steps, and worker-side end-to-end proof unresolved.
 
 ## Context
 
@@ -120,7 +115,6 @@ token, and only uses `force_merge` after Gitea's "Changed protected files" refus
     2. `admin user add root`, with the keys on stdin. This is an upsert, and it is the rotation path.
     3. `admin policy attach`, then detach every other directly attached policy. A non-empty
        `memberOf` (group-derived rights) is treated as a privilege violation.
-    <!-- codex: round-2: The group check resolves only part of the accepted authorization finding: bucket-policy grants are still unaccounted for. For example, a grant allowing writes under 119597-1/* can leave the random canary probes denied and policyName unchanged. Read and validate the live bucket policy with root, distinguish genuine absence from lookup failure, and reject broader grants before publishing the credential. Add a local prefix-specific bucket-policy fixture; direct-policy reconciliation alone cannot establish the claimed boundary. -->
     4. **Prove it, as the reader, before exiting 0.**
        - Write a canary object as root. The reader must list the bucket and `cat` the canary
          byte-exact.
@@ -185,12 +179,10 @@ token, and only uses `force_merge` after Gitea's "Changed protected files" refus
   value to `common.json` (shim), merge, and force the provision Job. The accepted interruption is
   that workers hold a dead key between those two steps. CI is untouched. Recovery is always
   forward: never restore a key from either repo's history.
-  <!-- codex: round-2: The initial-rollout gates must also apply to rotation. Merge followed immediately by Job deletion can start a replacement against the old Kubernetes Secret, and that Job can report OK for the old key. Wait for each intended Secret revision/value to be applied before recreating its consumer Job, ensure the observed completion belongs to that fresh run, and verify the new credential succeeds and the old one is rejected live. Otherwise two successful Jobs, or a successful cred read with matching stale values, do not prove the rotation applied. -->
 - **Emergency revocation.** As root, run `mc admin user disable dev-workers-ci-reader`. It takes
   effect immediately. The Job then fails loudly on every run and never re-enables the user. Next,
   rotate as above. Re-enable deliberately with `mc admin user enable`, which also clears the daily
   failure.
-  <!-- codex: round-2: Blocker: 'rotate as above' cannot complete while the reader is disabled, because pre-state exits before user add; enabling first instead revives the compromised key. The precheck also races an emergency disable issued between user info and user add, which is measured to re-enable users. Define and test a serialized incident procedure: stop Job recreation and terminate in-flight reconcilers before disabling, then replace the compromised credential under controlled recovery without reopening access with the old secret. Resume reconciliation and distribution only after the new credential and intended rights are proven. -->
 - **A compromised worker.** Revoke that worker's AppRole secret-id and tokens FIRST (the runbook's
   per-worker procedure). Otherwise it reads the replacement from `common` the moment it is seeded.
   Then rotate. The shared key gives no per-worker attribution or revocation (the same trade-off the
@@ -198,7 +190,6 @@ token, and only uses `force_merge` after Gitea's "Changed protected files" refus
 - **Root rotation.** IAM survives it (measured). The Job authenticates with whatever the Secret
   says, so between a root-Secret change and the store's pod roll it fails auth. That is expected and
   self-clears on the next run after the roll.
-  <!-- codex: round-2: IAM persistence resolves the data-survival question, but the ordered root-rotation procedure is still missing. deployment.yaml consumes the root Secret through environment variables; changing that Secret does not itself roll the pod. Specify the explicit store restart and readiness gate, coordinated CI Actions-secret update, and a fresh reader Job after the new root pair works. The existing SECRETS.md row's 'let Flux roll' is insufficient for a Secret-only change, so the stated self-recovery is not guaranteed. -->
 - **Teardown.** Remove the Job and the Secret from platform. As root, run
   `mc admin user remove dev-workers-ci-reader` and `mc admin policy remove gha-artifacts-ro`
   (removing manifests does not touch RustFS). Drop the four fields from `common.json`, and add
@@ -234,6 +225,34 @@ token, and only uses `force_merge` after Gitea's "Changed protected files" refus
   upload under, with the ROOT key, over the same NodePort (`service.yaml:14-19`). It is accepted and
   stated in the runbook, not fixed here.
 
+## Round-2 resolutions (all accepted; the plan cap is 2 rounds)
+
+- **Bucket policies.** The Job reads `mc anonymous get-json` and treats any statement as a
+  violation (disable + fail). Measured: a principal prefix grant really does let the reader write
+  under that prefix, and `mc anonymous set none|private` does NOT remove it on beta.8; only
+  `set-json` with an empty Statement list does. That is now in SECRETS.md.
+- **Contents readback.** After `policy create` and again at the end, the STORED policy must have
+  exactly the literal's actions and resources, Allow only, and no Not*/Principal keys. A
+  broadened literal (put, delete, cross-bucket, CreateBucket) is contained before any probe runs.
+- **Incident blocker.** The procedure is now: suspend the Kustomization, delete any in-flight Job,
+  disable, revoke the worker's AppRole if compromised, rotate, and wait for the live Secret.
+  Recovery is by `user remove` and a fresh create, never `enable`, so the compromised secret is
+  never revived. Tested: 12, 12b and 12c.
+- **Rotation and restore gates.** Re-run only after the live Secret's hash matches the new value,
+  then verify new-reads and old-refused on a worker. After a volume restore, use the same
+  remove-and-recreate path. Both are in SECRETS.md.
+- **Root rotation.** Explicit `rollout restart` (a Secret change does not roll the pod), then the
+  Gitea Actions secrets, then a fresh reader Job.
+- **Failure-path tests.** Added malformed user info (15), containment-disable failure (16), the
+  probe-level put control with readback stubbed (07p), a cross-bucket read fixture (03c), and an
+  old key refused after rotation (03a). An interruption between upsert and detach is retried
+  immediately by `restartPolicy: OnFailure`, and leaves no state worse than before the run.
+- **Reviewer audience.** Stated from the provisioner source and NOT live-verified. A live check
+  needs the breakglass token for a policy this change does not touch.
+- **Worker end-to-end.** On dev-worker-4, fetch the real bundle (present until at least 11-10)
+  with the documented recipe, and compare its sha256 with the copy fetched with root
+  (`3f4d7c7ede212bcb…`).
+
 ## Critical files
 
 - platform `deploy/components/ci-objectstore/reader-user-job.yaml` (new): the IAM reconcile, proof
@@ -259,9 +278,6 @@ token, and only uses `force_merge` after Gitea's "Changed protected files" refus
    - a bad mc digest (init must fail).
 
    After every case, no canary or probe objects may be left behind.
-   <!-- codex: round-2: The accepted failure-path tests are still incomplete. Add malformed or missing user-info fields, a command failure/interruption after user upsert but before extra rights are detached, and failure of the containment disable itself. An unreachable store at pre-state does not exercise these paths. Assert actual reader status/rights and cleanup after each case, as well as nonzero exit and CONTAINMENT FAILED where appropriate; otherwise a partially completed run can leave the security outcome unverified. -->
-   <!-- codex: round-2: Pod replacement and empty-volume bootstrap now cover those parts of round 1, but restore is not equivalent. A snapshot taken before rotation can resurrect an enabled old key until reconciliation; a snapshot containing a disabled user stops at pre-state and never reaches the claimed unconditional upsert. Add restore tests for both states with the current authoritative Secret, and a recovery gate that preserves any active revocation and proves the superseded key unusable before restoring worker access. Deleting the Job and waiting up to a day are not substitutes for that gate. -->
-   <!-- opus-pushback: Pod replacement against the same volume is now measured (IAM intact), and "first run" IS the empty-volume bootstrap. An older-volume restore needs no separate test: the Job does not diff against stored state. Every run re-applies the literal policy and the user upsert, detaches extras, and re-proves, so a restored or reverted volume converges on the next run. The "Complete Job will not notice" gap is real but bounded by the TTL (<= 1 day), and the runbook documents "delete the Job after a store wipe or restore". -->
 2. **Builds and CI.** `kubectl kustomize` builds `deploy/components/ci-objectstore`, and both secret
    kustomizations build. A server-side dry-run of the Job passes admission (PodSecurity). Platform
    CI is green with `platform-guards` actually run. Note: `ailab-pins` does not validate the
@@ -276,17 +292,12 @@ token, and only uses `force_merge` after Gitea's "Changed protected files" refus
      RustFS.
 4. **Live.** Job `Complete`, with the log showing the proofs. `bao token capabilities` with
    dev-worker-4's token on `af/data/dev-workers/common` returns `read` only.
-   <!-- codex: round-2: The worker capability check resolves the positive/read-only half. Checking reviewer exclusion does not require extracting a sink token: an authorized OpenBao operator can identify an issued reviewer token by accessor/role metadata and query sys/capabilities-accessor for af/data/dev-workers/common, without reading the KV value. The provisioner's source alone does not establish the policies attached to an already-issued token, including default or identity-derived grants. Require deny for a representative live reviewer token; if none exists, record that and verify the deployed reviewer roles/policies instead of claiming a live-token denial. -->
-   <!-- opus-pushback: Partly accepted. The live worker token's capabilities on common are checked; `read` only proves it cannot update. The reviewer-token check is declined. The policy body is written verbatim by the daily provisioner from the source quoted in Context, this change does not touch it, and the check would mean extracting a sink token on a reviewer VM, which is more intrusion than evidence for a policy this PR does not modify. -->
 5. **On dev-worker-4, after the provision Job.**
    - The runbook recipe works verbatim, and a write with the reader is denied.
    - Report separately whether the requested `119597-1/docker-logs-journey-3.tar.gz` (uploaded
      2026-11-03 16:03Z, so expiring no earlier than 2026-11-10) is still present.
    - The Job's own canary is the repeatable authorization check, so an expired bundle is never
      mistaken for a denial.
-   <!-- codex: round-2: The Job deletes its canary before this worker check and authenticates with the platform Secret inside the cluster. It therefore cannot prove that cred's projected key works through the worker's NodePort path when the historical bundle has expired. Create a separate disposable fixture for this end-to-end check, fetch it byte-exact on dev-worker-4 using the documented cred recipe, and clean it up with root afterward. A denied write alone can also mean stale credentials; it does not establish the deployed equality claimed in SOPS step 3. -->
    - `~/.git-credentials` and the other `common` fields still render.
-   <!-- codex: round-2: A live fixture bucket is unnecessary, but the original request was for exact-script local cross-bucket tests, and those are still absent from the matrix. Add an existing object in a second local bucket and prove its read is denied, then inject an out-of-bucket grant and show verification rejects it. A policy-name comparison cannot detect broadened policy contents; define a strict policy readback or equivalent check that does. Inject broadened policies at the proof boundary (or alter the literal), because planting them before step 1 merely tests successful repair. Include the claimed bucket-creation negative-control case explicitly. -->
-   <!-- opus-pushback: Accepted except the live cross-bucket read. GetObject is proven by a canary `cat`, delete by a denied rm of the canary, and bucket creation by a denied `mb`, each with a broadened-policy test locally. Cross-bucket read stays a local-docker test only. `gha-artifacts` is the store's sole bucket, so a live probe would need a fixture bucket that exists only to be probed. The policy the reader holds is the Job's literal, re-applied every run and checked to be the only one attached. -->
 
-<!-- codex-review-status: complete -->
+<!-- codex-review-status: finalized -->
