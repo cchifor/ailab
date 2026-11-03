@@ -3289,7 +3289,13 @@ NFS store.
 1. cloud3's llama-swap entry, back on four cards;
 2. a qualification pass that reads the output;
 3. `qwen3.5-122b` back in the account's `allowedModels`;
-4. the ailab entries, with LiteLLM's `max_input_tokens: 98304`.
+4. the ailab entries.
+   - LiteLLM's `max_input_tokens` was 98304. That figure assumes the entry comes back with `-c 262144 --parallel 2`
+     (llama.cpp's `-c` is the total across slots: 262144 / 2 - 32768 output headroom), so recompute it if the
+     restored values differ.
+   - Regenerate Open WebUI's `model_ids` and LiteLLM's `checksum/config` with `just af-gen-litellm`; do not edit them
+     by hand.
+   - Put `qwen3.5-122b` back in dsh's `llm-router-local` seed.
 
 ## Relay access requests
 

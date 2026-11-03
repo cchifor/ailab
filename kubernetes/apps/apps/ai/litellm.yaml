@@ -57,8 +57,11 @@ data:
       # runs on three cards (cloudlab PR #49). The 122B's 71 GiB of weights do not fit in 72 GiB of
       # VRAM with room for its KV, and the CPU-offload layout was never qualified. The owner chose
       # removal over an untested half-speed model. Callers get an explicit model-not-found. The weights
-      # stay on cloud3's NFS store; the entry returns (with its old max_input_tokens 98304) when the
-      # repaired card is back. The router withdrew it from its cloud3 account the same day.
+      # stay on cloud3's NFS store; the entry returns when the repaired card is back. The router withdrew
+      # it from its cloud3 account the same day. Its old max_input_tokens was 98304 = 262144 (`-c`, the
+      # TOTAL KV across slots in llama.cpp) / 2 (`--parallel 2`) - 32768 output headroom: recompute it
+      # from the restored llama-swap entry's -c/--parallel, and regenerate the consumers with
+      # `just af-gen-litellm` (never hand-edit Open WebUI's model_ids or the checksum).
       # ---- CLOUD GPU CLUSTER (cloud3, 3x RTX 3090 = 72 GiB VRAM; GPU3 out for RMA) --------------
       # Served by llama-swap in LXC 5101 on cloud3 at 192.168.0.26:8080 — a plain LAN address, not a
       # k8s Service: the `pve` cloud cluster is a SEPARATE Proxmox cluster and these are not cluster
@@ -1155,7 +1158,7 @@ spec:
         # (ADR 0031 -- every Claude integration is withdrawn from dsh). A route is dropped, so
         # the config LiteLLM parses changes; the cost is one rolling restart of the 2-replica
         # maxUnavailable:0 Deployment.
-        checksum/config: "82c9eef97f27"
+        checksum/config: "3ed0b604e600"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
