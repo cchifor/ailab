@@ -3361,6 +3361,27 @@ fp8 is the boot preload.
   acts at boot, so cloud3 then holds nothing until a request loads a model, and the first request pays a cold load.
 - **Not changed here.** That is cloud3's llama-swap configuration, which belongs to cloudlab.
 
+## cloud3's `forwardReasoning` turned on (2026-11-03)
+
+cloud3's opt-in was deferred until its GPU investigation closed (see "Reasoning-forwarding release"). It closed the
+same morning: GPU3 was pulled, and the three remaining cards checked out.
+- **R1 for cloud3:** `forwardReasoning: true` on `lan-192.168.0.26-8080`, through the same `If-Match` PUT and
+  read-back as cloud2's. Config revision 2214 → 2215 at 12:28:47Z. The fp8 Assistant re-qualification above then took
+  the account to 2216.
+- **Every cloud3 request since then counts reasoning.** The Assistant turns of the fp8 re-test show `reasoningChars`
+  of 70-330 on both models.
+- **Live acceptance (flash-next).** On dev-worker-1, Codex 0.166.0 ran
+  `codex exec -p flash-next -c show_raw_agent_reasoning=true … </dev/null` on the same counting question as cloud2's
+  acceptance. It exited 0 with the right answer (76) in 39 s and printed the model's thinking before the answer. The
+  journal shows `af386cbe` on `lan-192.168.0.26-8080`, `complete`, `reasoningChars` 118.
+- **A harness trap, not a router fault.** Without `</dev/null`, `codex exec` over ssh, wrapped in `timeout`, waits
+  forever on "Reading additional input from stdin…". No request reaches the router, which is the tell.
+- **Afterwards.** The run had swapped flash-next in, so one direct fp8 request inside LXC 5101 put fp8 back as the
+  resident model.
+
+Both local accounts now forward reasoning: cloud2 since 11-02 (revision 2213) and cloud3 since 11-03 (revision 2215).
+To roll back, set the flag to false per account, as in the release's rollback step 1.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
