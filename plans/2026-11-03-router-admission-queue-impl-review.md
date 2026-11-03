@@ -38,7 +38,8 @@ deadline comparison from `capPassed()` (M15) or the cap check from the commit po
   `tests/admission-queue.test.ts` (38 passed) only, and the merge's own CI passed at it. No known load-flaky test
   (llm-router #129) failed in that full run, so none needed a solo rerun; an earlier full run had one failure, the new
   queued-edit test timing out under load, fixed in `61f5f2b` by removing its dependence on a router timeout. Not run:
-  the PostgreSQL auth tier and the browser (Playwright) suite, which `pnpm test` skips without them (14 skipped).
+  the browser suite (`pnpm test:browser`, Playwright, not part of `pnpm verify`); the 14 tests `pnpm test` skips (the
+  same 14 on the baseline) include the PostgreSQL auth tier, which needs a database.
 - The real Codex CLI (0.162.1 and 0.166.0) end to end, concurrency 1, a 60 s upstream, two agents at once: with
   `queue: { maxWaitMs: 120000 }` both exit 0 and the second's request waits 59-61 s for its head with no 429; with
   `maxWaitMs: 20000` the second meets two 429s with `Retry-After: 1`, rejoins 1.0 s later each time, and exits 0; on
