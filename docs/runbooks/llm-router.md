@@ -3521,6 +3521,59 @@ the plan's provisional values (point 9).
    (source `93108f5e308a7333b5f11acb8db8e48908250bed`, release `router-0.1.0-20261102-forward-reasoning`) with its two
    annotations. There is no other schema, config or secret change; `forwardReasoning` stays, since that image has it.
 
+### Results of the admission-queue release (2026-11-03)
+
+**The roll.** ailab #1584 merged at 14:53:58Z. Flux applied `56363607`, and the pod `llm-router-687c467686-nvtz5` came
+up Ready at 14:55:34Z on `sha256:fef4916c15098832398317c411cf89ec0a0c56e18c87cea30add932422d0142c`. Checks after the
+roll:
+- the pod's imageID is that digest; `/app/SOURCE_COMMIT` is `f9eea0d20fd7d308e21e13c8bf2f88f189b8cb7e`, and both
+  annotations are as rolled;
+- no error-level log lines;
+- the drain cut four streams at 14:55:10-11Z (`cancelled`), and no request was `abandoned`;
+- public `/health` 200, unauthenticated `/v1/models` 401;
+- `validate-live` **6/9**, the known baseline (`codex text`, `codex stream`, `codex tool call`: a bare
+  `model: 'codex'`, 400 `MODEL_REQUIRED`).
+
+**Q1, cloud2 only.** `queue: { maxWaitMs: 80000, maxWaiting: 4 }` on `lan-192.168.0.28-18020`: a dry run, then one
+`If-Match` PUT. Config revision **2220 → 2221** at 14:56:43Z, read back; `concurrency` (4) and `forwardReasoning`
+(true) unchanged. No other account shares the pool.
+
+**Live acceptance against cloud2** (14:56:50-14:57:31Z, 41 s from the first request to the last metrics sample after
+every request ended; the administrator, in the router pod, model `qwen3.8-27b`).
+- **Holders:** four streamed chat requests, each run to its limit: H1 600 tokens (9.2 s), H2 1200 (16.5 s), H3 1800
+  (26.2 s) and H4 2400 (28.9 s from its admission at 9.3 s; it ended 38.2 s into the run).
+- **Waiters:** streamed `/v1/responses` requests ("Reply with the single word OK.", `max_output_tokens` 400). Each
+  body was padded with JSON whitespace to 512 KiB, so it reserved the small body budget as a Codex body does, without
+  a long prompt for cloud2.
+- **External load:** a benchmark agent's qwen-27b request (dev-worker-1's key) held one slot for the whole run, so the
+  fourth holder already queued. It was the only other request on cloud2 in that time; it neither queued nor got a 429.
+
+| Request | Joined the line (`ahead`) | Outcome | Waited | Journal |
+|---|---|---|---|---|
+| H4 (chat) | 0 | admitted when H1 ended; ran to its limit | 8.0 s | `admission.queued` → `admission.dequeued` `admitted` (8037 ms) → `admission.reserved`; `complete` |
+| W1 | 1 | cancelled by its client while queued | 2.0 s | `admission.dequeued` `cancelled` (2009 ms), `client.closed`; `cancelled`, `CLIENT_CLOSED` |
+| W2 | 2 | admitted when H2 ended; `completed` | 13.6 s | `admitted` (13610 ms); `complete` |
+| W3 | 3 | admitted when W2 ended (journal: W2 `request.complete` and W3 `admission.dequeued` both at 14:57:08.665Z; W2's short answer took 0.4 s); `completed` | 13.5 s | `admitted` (13507 ms); `complete` |
+| W4 | none: the line was full (H4, W1, W2, W3) | 429 at once | 0 | `admission.queue_full`; `deferred`, `CAPACITY_UNAVAILABLE`, `QUEUE_FULL` |
+
+- **The overflow answer:** 429 with `Retry-After: 5`, `x-should-retry: true`, `error.reason: busy` and
+  `error.queue: { outcome: "full", maxWaiting: 4 }`.
+- **Order:** the line was served first come, first served (H4, then W2, then W3); when W1 left, the waiters behind it
+  moved up.
+- **No head while queued:** W2's response headers arrived when it was admitted, 13.6 s after it was sent; then it
+  streamed as usual.
+- **Metric:** `llm_router_admission_wait_seconds` for the account, its first observations since the roll: `admitted`
+  3 (sum 35.15 s), `cancelled` 1 (2.01 s), `full` 1 (0 s).
+- **Body budget:** the small pool's reserved bytes were 1.77 MB before the run, 3.34 MB with three padded waiters
+  queued, 2.82 MB right after W1's cancellation and 1.79 MB once W2 and W3 had ended.
+  - There was no body-budget 429: `llm_router_http_rejections_total{code="BUSY"}` stayed at 0, so the abort criterion
+    did not trigger.
+  - cloud2's in-flight count peaked at 4.
+- **Afterwards:** nothing waiting, cloud2 in flight 1 (the benchmark's request), no error-level log lines.
+- **Not exercised live:** an expired wait (`QUEUE_TIMEOUT`, `Retry-After: 1`). The head of the line times out only if
+  no slot frees for 80 s, so all four slots must stay occupied for the whole window; one long holder is not enough.
+  The suite and the Codex CLI run at `maxWaitMs` 20000 cover it.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
