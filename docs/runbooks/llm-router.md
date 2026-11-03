@@ -2884,7 +2884,8 @@ image content:
 - **Every key works.** An agent on each model, on each of the four workers, ran a command and wrote its file.
   - `qwen-27b` took 6-12 s.
   - `flash-next` took 12-19 s, or 220 s for the first request after `fp8` had to be swapped out on cloud3.
-  - **cloud3 holds one model at a time.** `qwen3.8-27b-fp8` (the boot preload), `qwen3.8-flash-next` and
+  - **cloud3 holds one model at a time.** `qwen3.8-27b-fp8` (the boot preload until 2026-11-03; since then
+    flash-next is the resident default, cloudlab #53), `qwen3.8-flash-next` and
     `qwen3.5-122b` cannot be co-resident, so a request for one may first wait for a swap: ~1-4 minutes, the
     longest when vLLM's fp8 has to unload. That applies to API callers pinning `local/qwen3.8-27b-fp8` while dev
     workers or the Assistant use flash-next, and the other way round.
@@ -3360,6 +3361,14 @@ fp8 is the boot preload.
 - **What emptied the host:** router traffic later swapped flash-next in, and its 1800 s TTL expired. The preload only
   acts at boot, so cloud3 then holds nothing until a request loads a model, and the first request pays a cold load.
 - **Not changed here.** That is cloud3's llama-swap configuration, which belongs to cloudlab.
+- **Fixed in cloudlab #53 (2026-11-03).**
+  - cloud3 now has a resident default model, `qwen3.8-flash-next`, named once by the
+    `cloud3_default_model` macro. It is preloaded at boot and never idle-unloaded (`ttl: 0`).
+  - fp8 is served by name with `ttl: 1800`.
+  - A keep-warm watchdog in the LXC (`llama-swap-keepwarm`, every 60 s) reloads the default
+    whenever llama-swap holds nothing, so after an fp8 session the box returns to flash-next on its
+    own.
+  - See cloudlab runbook §13h.
 
 ## cloud3's `forwardReasoning` turned on (2026-11-03)
 
