@@ -75,7 +75,11 @@ full plan is `docs/plans/2026-11-03-agent-bus-skill/plan.md` in the relay reposi
    - the pod is Ready;
    - `/agent/skill.md` answers with `text/markdown`, and `/agent/x` answers 404, not HTML.
 
-   If 056 fails, 055 stays committed. Keep the rollout stopped and rerun the unchanged migrations.
+   If 056 fails, 055 stays committed. At that point the database is at schema 55, 055 has already
+   closed the tmux sessions and revoked their principals, and the old v0.8.0 pod keeps serving a
+   schema its restore fence does not accept. Do not deploy v0.8.0 again. Either fix forward by keeping
+   the rollout stopped and rerunning the unchanged migrations under their lock, or do the full restore
+   under "A real hub rollback" below.
 3. **Smoke the v0.9 hub with the v0.8 connectors** still running: Agent pane, Full tmux view, input and uploads.
 4. **Converge the connector one worker at a time.** Start with dev-worker-1, then -2, -3 and -4. On each, check
    that `relay-connector status --json` is fresh and connected and that the host's health appears in
@@ -84,9 +88,10 @@ full plan is `docs/plans/2026-11-03-agent-bus-skill/plan.md` in the relay reposi
 
 **Rolling back.** Forward fixes are the default. v0.8.0's restore fence needs exactly schema 54, so a v0.8.0 hub
 cannot run against schema 56.
-- **Connectors** can go back to v0.8.0 on their own: repin `relay_connector_release` and converge. A v0.8
-  connector works against the v0.9 hub, as qualified in both directions. Keep
-  `relay_connector_claude_messaging: absent`.
+- **Connectors** can go back to v0.8.0 on their own: repin `relay_connector_release` and converge. The
+  unit template follows the pin, so a v0.8.0 pin gets back its `Type=simple` unit, without the watchdog or
+  the limits; v0.8.0 never sends `READY=1`. A v0.8 connector works against the v0.9 hub, as qualified in
+  both directions. Keep `relay_connector_claude_messaging: absent`.
 - **The skill hook** stays inert against an old hub. `relay_agent_skill_state: absent` removes it and the skill
   files.
 - **A real hub rollback:**
