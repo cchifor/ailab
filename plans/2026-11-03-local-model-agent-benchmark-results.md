@@ -48,11 +48,12 @@ Planning is half of the owner's question, so the rule ends at "inconclusive" for
 matched runs count toward the decision: both models, same task, same cap.
 
 1. **Implementation success** over days 1 and 2. A lead of more than one run decides.
-2. **Plans**, only if (1) ties. A gap over 1.5 points (of 25) in the judged mean decides, over the tasks where both
-   models delivered a plan.
+2. **Plans**, only if (1) ties. A gap over 1.5 points (of 25) in the mean plan score decides. The mean is taken over
+   every planning task that at least one model delivered on. A model that delivers no plan on such a task scores 5/25
+   there: 1 on every criterion, the rubric's "wrong or missing". A task that neither model delivered on is left out.
 3. **Robustness, then speed**, only if (1) and (2) tie. A long-context corruption weighs heavily.
 
-If quality and robustness point opposite ways, or plans are missing for most tasks, the answer stays inconclusive.
+If quality and robustness point opposite ways, or fewer than 2 of the 3 planning tasks have a plan from either model, the answer stays inconclusive.
 
 If 27B does become the default, cloud3 would run cloud2's exact checkpoint, `Qwen3.8-27B-W4A16-AutoRound-fast`, the one
 measured here: copied with a sha256 manifest, TP=2 on GPU0+GPU1, with cloud2's flags (cloudlab PR #54). It would still
@@ -293,8 +294,10 @@ These rules are frozen now, before any day-2 run.
    - Runs: P1, P2 and P3, one pair each, about 4.5 h with both models in parallel.
    - Reporting: delivery (a plan written within the cap) is reported per model and task, separately from judged
      quality. Today's P2 counts as 0/1 delivered for each model.
-   - Scoring: the judged mean is computed only over the tasks where both models delivered. If both delivered on fewer
-     than 2 of the 3 tasks, the planning comparison is inconclusive.
+   - Scoring (delivery-aware): each model's plan mean is taken over every task that at least one model delivered on.
+     A missing plan scores 5/25 on such a task (1 on every criterion). A task neither model delivered on is left
+     out. If fewer than 2 of the 3 tasks have a plan from either model, the planning comparison is inconclusive. So a
+     model cannot gain by failing to deliver.
    - Judge: two blind passes per task, letters swapped, `codex exec --profile review`, with the frozen checklists. The
      two passes check judge noise; they do not replicate the planning run.
 2. **Second implementation repeats**, cap 35 min, matched (both models, same task, same cap), in this order: I5, I3,
