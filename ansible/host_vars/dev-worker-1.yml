@@ -44,7 +44,8 @@ relay_connector_host_id: b3b1be1a-275c-4a2e-b515-428b39c43171
 relay_connector_state_file: /home/c4/.config/relay-connector/connector.json
 relay_connector_name: dev-worker-1
 relay_connector_sockets: ['']
-# Relay messaging for this worker's Claude Code agents: the `relay` MCP server and the inbox hook
-# (docs/runbooks/relay-connectors.md, "Claude Code messaging"). Takes effect in each agent's next
-# session, and only once an admin turns on Agent messaging for this host in Relay.
+# Relay messaging for this worker's Claude Code agents (docs/runbooks/relay-connectors.md, "Claude
+# Code messaging"). A converge writes the user's `relay` MCP server and inbox hook, so every new
+# Claude Code session starts `relay-connector mcp` and runs `inbox-hint`. Relay enrolls an agent only
+# once an admin turns on Agent messaging for this host. Roll back with `absent`, not by deleting this.
 relay_connector_claude_messaging: present

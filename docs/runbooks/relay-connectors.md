@@ -69,6 +69,20 @@ constraints. Once an agent has enrolled, first turn Agent messaging off on every
 host, which suspends the tmux principals and closes their sessions, and only then
 deploy the older image: v0.7.7 would treat an open tmux principal as a managed one.
 
+Do not roll back the whole v0.8.0 change with a plain revert. Its host_vars would
+fall back to `unmanaged`, which leaves the `relay` MCP server and the inbox hook in
+each user's Claude Code configuration, and every new session would keep starting a
+tool server for a release that is no longer the pin. Roll back in this order, so
+the hub is never older than a connector:
+
+1. Turn Agent messaging off on every host in Relay.
+2. Set `relay_connector_claude_messaging: absent` on dev-worker-1, -2 and -3 and
+   converge each one. `absent` removes the `relay` server and Relay's hook whatever
+   binary they name, and it works with any pin: the 0.8.0 check applies only to
+   `present`.
+3. Repin `relay_connector_release` to v0.7.7 and converge each worker.
+4. Revert the hub image to v0.7.7.
+
 **What v0.7.7 changed for connectors** (v0.7.4 and v0.7.5 changed only the hub
 image; v0.7.6 was tagged but never published, so v0.7.7 carries it):
 
