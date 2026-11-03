@@ -3328,8 +3328,9 @@ the response side. The owner approved a re-test, and fp8 on cloud3's Assistant l
   pointer routes"). flash-next got the total wrong every time.
 - **What changed since 10-31.** The 10-31 fp8 step ran the whole 15-minute cap without visible output and was
   cancelled at 899,993 ms. Today the cold step ends in 146 s, the load included, with 58 output tokens. This fits
-  GPU3 as the cause: same model, same flags, same request. It does not prove it, because the tensor-parallel degree
-  also changed (4 → 2), and 10-31 was one sample.
+  GPU3 as the cause, but it is not a GPU3-only comparison. The model and the router's request are the same, and so
+  are the vLLM flags except two: the tensor-parallel degree (4 → 2) and `--gpu-memory-utilization` (0.90 → 0.95).
+  10-31 was also a single sample.
 
 **Configuration.** `lan-192.168.0.26-8080` `assistantModels` `["qwen3.8-flash-next"]` →
 `["qwen3.8-flash-next", "qwen3.8-27b-fp8"]`. It was one `If-Match` PUT after a dry run: revision **2215 → 2216** at
