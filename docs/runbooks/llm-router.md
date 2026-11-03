@@ -3263,6 +3263,34 @@ With GPU3 left out, flash-next's saved 27k-token probe picks the right token at 
 meantime cloud3 moves to GPUs 0-2 through a cloudlab change. cloud3's `forwardReasoning` opt-in, and flash-next's
 agent acceptance, wait for that change.
 
+## cloud3 on three cards; `qwen3.5-122b` withdrawn (2026-11-03)
+
+cloudlab #49 put every cloud3 model on GPUs 0-2 (selected by UUID). It was applied 06:47-07:29Z:
+- fp8 runs TP=2 on GPU0+GPU1: 155k KV tokens, about 1.2 full-length requests, 70-74 tok/s;
+- flash-next keeps `-c 262144 --parallel 2 --kv-unified`, and every functional probe passed (the `rim` replay
+  p=0.999, garble 0/20, a 250k-token needle);
+- GPU3 stayed at 0 MiB.
+
+The router account `lan-192.168.0.26-8080` is unchanged except for one model.
+
+**`qwen3.5-122b` withdrawn.** Its 71 GiB of weights do not fit on three cards, and the CPU-offload layout was never
+qualified, so the owner removed it until the repaired card returns. The order was consumers first, then cloud3:
+1. **The router:** removed from the account's `allowedModels` (`If-Match` PUT, read back) at 07:54:23Z, config
+   revision 2213 → 2214. No policy, alias, `visionModels` or `assistantModels` entry named it. Since 10-31 its only
+   traffic was the bench key and the administrator.
+2. **ailab:** LiteLLM `qwen3.5-122b-cloud`, Open WebUI's model list, and dsh's `llm-router-local` seed (reconciled on
+   every dsh boot).
+3. **cloud3's llama-swap entry,** in cloudlab #49.
+
+Callers now get model-not-found instead of a cold 5-6 minute load of an untested layout. The weights stay on cloud3's
+NFS store.
+
+**To restore it,** once the repaired card is in cloud3:
+1. cloud3's llama-swap entry, back on four cards;
+2. a qualification pass that reads the output;
+3. `qwen3.5-122b` back in the account's `allowedModels`;
+4. the ailab entries, with LiteLLM's `max_input_tokens: 98304`.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
