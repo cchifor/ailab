@@ -37,6 +37,20 @@
     quiet: true
   when: relay_connector_claude_messaging == 'present'
 
+# Relay v0.9.0 removes both subcommands (only hidden no-op stubs stay, for sessions that loaded them):
+# agents join the bus through the relay-bus skill and an agent key instead (roles/relay_agent_skill).
+- name: Refuse Claude Code messaging on a connector that no longer serves it
+  ansible.builtin.assert:
+    that:
+      - relay_connector_release.version is version('0.9.0', '<')
+    fail_msg: >-
+      relay_connector_claude_messaging: present needs a relay-connector release before 0.9.0, but this
+      host pins {{ relay_connector_release.version }}, which no longer serves the mcp and inbox-hint
+      subcommands. Set relay_connector_claude_messaging: absent; agents join Relay through the
+      relay-bus skill (relay_agent_skill).
+    quiet: true
+  when: relay_connector_claude_messaging == 'present'
+
 - name: Resolve the existing execution account before deriving paths or ownership
   ansible.builtin.getent:
     database: passwd
@@ -198,6 +212,12 @@
     quiet: true
     fail_msg: Staging requires the selected connector inactive/dead with no queued job and a reachable user manager.
   when: not (relay_connector_manage_service | bool)
+
+# Still before any write, and whatever relay_connector_claude_messaging says: a 0.9.0 or later pin
+# is refused while the user's settings.json still runs the old `inbox-hint` hook.
+- name: Refuse a 0.9.0 or later connector while the old inbox-hint hook is installed
+  ansible.builtin.import_tasks: legacy_hook_preflight.yml
+  when: relay_connector_release.version is version('0.9.0', '>=')
 
 # Last, once every other input is known good, and still before any write: a malformed Claude Code
 # file, an unusable CLI or an unkeepable settings.json fails here, before the binary, the unit or

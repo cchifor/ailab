@@ -43,6 +43,11 @@ USER_SETTINGS = {
     },
 }
 USER_MCP = {'type': 'stdio', 'command': '/usr/local/bin/other-mcp', 'args': [], 'env': {}}
+# The relay_agent_skill role's hook (roles/relay_agent_skill/files/claude_skill_hook.py): the >= 0.9.0
+# preflight must never take it for the old inbox-hint one.
+SKILL_HOOK = {'type': 'command', 'timeout': 3, 'command': (
+    'command -v python3 >/dev/null 2>&1 && '
+    'python3 "$HOME/.claude/skills/relay-bus/relay-bus.py" inbox --hook 2>/dev/null; exit 0')}
 USER_CLAUDE_CONFIG = {'numStartups': 7, 'mcpServers': {'other': USER_MCP},
                       'primaryApiKey': 'fixture_claude_api_key_never_log'}
 
@@ -725,6 +730,63 @@ if failures.get('lock-claude-dir', 0) > 0:  # The hook write that follows this c
                 with contextlib.suppress(OSError):
                     os.removexattr(path, name)
 
+    def seed_hooks(self, *entries, content=None):
+        """The user's own settings plus `entries`, each in its own UserPromptSubmit group."""
+        self.seed_claude()
+        settings = json.loads(json.dumps(USER_SETTINGS))
+        settings['hooks']['UserPromptSubmit'] += [{'hooks': [entry]} for entry in entries]
+        self.settings.write_text(content if content is not None else json.dumps(settings, indent=2))
+
+    def release(self, version):
+        artifact = self.root/f'connector-bin-{version}'
+        artifact.write_text(Path(self.values['relay_connector_source']).read_text().replace('0.3.5', version))
+        artifact.chmod(0o755)
+        return artifact, self.pin(artifact, version)
+
+    def test_21_a_0_9_connector_is_refused_while_the_old_inbox_hint_hook_is_installed(self):
+        refuse = 'Refuse a connector without inbox-hint while the old hook may still run it'
+        old_hook = self.expected_hook(self.claude_artifact)  # The literal entry `present` wrote for 0.8.0.
+        nine, pin9 = self.release('0.9.0')
+        ten, pin10 = self.release('0.10.0')
+        cases = [  # (hook entries, settings text, values, reason), each refused before any write.
+            ((old_hook,), None, pin9, 'the hook is still there'),
+            ((old_hook, SKILL_HOOK), None, pin9, 'the hook is still there'),
+            ((SKILL_HOOK, old_hook), None, pin10, 'the hook is still there'),
+            # Converging `absent` in the same run as the repin is not the order either.
+            ((old_hook,), None, {**pin9, 'relay_connector_claude_messaging': 'absent'}, 'the hook is still there'),
+            ((), '{"model": "opus",', pin9, 'the file could not be checked ('),
+        ]
+        for entries, content, values, reason in cases:
+            with self.subTest(entries=len(entries), content=content, version=values['relay_connector_release']['version']):
+                self.seed_hooks(*entries, content=content)
+                before = self.snapshot()
+                out = self.role(values, success=False)
+                self.assertEqual(self.failed_task(out), refuse)
+                self.assertIn(reason, out)
+                self.assertIn('Converge this host with relay_connector_claude_messaging: absent', out)
+                self.assertEqual((self.claude_calls, self.claude_starts), ([], []))
+                self.assertEqual(self.snapshot(), before)
+                for artifact in (nine, ten):
+                    self.assertFalse(Path(self.connector_path(artifact)).parent.exists())
+        # `present` cannot ask for the hook on such a pin either.
+        self.seed_hooks()
+        out = self.role({**pin9, 'relay_connector_claude_messaging': 'present'}, success=False)
+        self.assertEqual(self.failed_task(out), 'Refuse Claude Code messaging on a connector that no longer serves it')
+        # A pre-0.9.0 pin is not refused with the old hook in place: that is the pin `absent` converges with.
+        self.seed_hooks(old_hook)
+        self.role(self.claude_values)
+        self.assertEqual(self.relay_hooks(), [old_hook])
+        # The relay-bus skill's hook alone, or no settings at all, never trips it.
+        self.seed_hooks(SKILL_HOOK)
+        settings = self.settings.read_bytes()
+        self.role(pin9)
+        self.assertTrue(Path(self.connector_path(nine)).exists())
+        self.assertEqual(self.settings.read_bytes(), settings)
+        self.settings.unlink()
+        self.role(pin10)
+        self.assertTrue(Path(self.connector_path(ten)).exists())
+        self.assertFalse(self.settings.exists())
+
 
 def set_acl(test, path, name='system.posix_acl_access'):
     """Give `path` a minimal POSIX ACL, or skip `test` where the filesystem has none."""
@@ -1176,6 +1238,33 @@ class ClaudeRelayHookScript(unittest.TestCase):
         self.assertEqual(self.run_hook().stdout, 'changed\n')
         text = self.settings.read_text()
         self.assertEqual(text, to_nice_json(json.loads(text)))
+
+    def test_the_0_9_preflight_finds_only_the_old_literal_hook(self):
+        # tasks/legacy_hook_preflight.yml runs `--state absent --check` and refuses on anything but
+        # `unchanged` with exit 0.
+        self.assertFalse(hook.is_relay_inbox_hint(SKILL_HOOK))
+        user = {'type': 'command', 'command': '/usr/local/bin/user-prompt-hook'}
+        cases = [((RELAY_ENTRY,), 'changed\n'), ((SKILL_HOOK,), 'unchanged\n'), ((RELAY_ENTRY, SKILL_HOOK), 'changed\n'),
+                 ((SKILL_HOOK, OLD_RELAY), 'changed\n'), ((user,), 'unchanged\n'), ((), 'unchanged\n')]
+        for entries, expected in cases:
+            with self.subTest(entries=entries):
+                self.write({'model': 'opus', 'hooks': {'UserPromptSubmit': [{'hooks': [user, *entries]}]}})
+                before = self.settings.read_bytes()
+                result = self.run_hook(state='absent', check=True)
+                self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+                self.assertEqual(self.settings.read_bytes(), before)
+        self.settings.unlink()
+        self.assertEqual(self.run_hook(state='absent', check=True).stdout, 'unchanged\n')
+
+    def test_the_0_9_version_gates_compare_numerically(self):
+        # The exact Jinja test validate.yml uses: `is version('0.9.0', '>=')` (and '<' for `present`).
+        from ansible.plugins.test.core import version_compare
+        for version, refused in [('0.8.0', False), ('0.8.1', False), ('0.8.9', False), ('0.8.10', False),
+                                 ('0.9.0', True), ('0.9.1', True), ('0.9.10', True), ('0.10.0', True),
+                                 ('0.09.0', True), ('1.0.0', True), ('10.0.0', True), ('0.0.9', False)]:
+            with self.subTest(version=version):
+                self.assertEqual(version_compare(version, '0.9.0', '>='), refused)
+                self.assertEqual(version_compare(version, '0.9.0', '<'), not refused)
 
 
 if __name__ == '__main__':

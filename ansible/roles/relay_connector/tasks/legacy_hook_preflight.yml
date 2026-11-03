@@ -1,0 +1,55 @@
+---
+# Imported from validate.yml for a connector pin of 0.9.0 or later, before anything on the worker
+# changes, whatever relay_connector_claude_messaging says (`unmanaged` leaves an old hook in place
+# too). Relay v0.9.0 removes the connector's Claude Code messaging, so the order in
+# docs/runbooks/relay-connectors.md ("Claude Code messaging") is enforced here: such a pin is refused
+# while the user's ~/.claude/settings.json still runs this role's `inbox-hint` hook. Converge
+# `relay_connector_claude_messaging: absent` with the current, older pin first.
+#
+# The match is files/claude_relay_hook.py's and nothing looser: only the literal
+# `/…/relay-connector --state /… inbox-hint` command this role wrote. The relay-bus skill's hook
+# (`… relay-bus.py inbox --hook …`, roles/relay_agent_skill) never trips it. `--state absent --check`
+# prints `changed` exactly when such an entry is there, and writes nothing. A file it cannot read or
+# parse is refused as well: then nobody can tell whether the hook is still in it.
+
+- name: Look for the Relay inbox-hint hook in the user's Claude Code settings
+  ansible.builtin.command:
+    argv:
+      - >-
+        {{ ansible_python_interpreter
+           if (ansible_python_interpreter | default('') | string) is match('^/')
+           else ansible_facts.discovered_interpreter_python | default('/usr/bin/python3') }}
+      - "-"
+      - --settings
+      - "{{ relay_connector_home }}/.claude/settings.json"
+      - --state
+      - absent
+      - --check
+    stdin: "{{ lookup('ansible.builtin.file', 'claude_relay_hook.py') }}"
+  become: true
+  become_user: "{{ relay_connector_user }}"
+  environment:
+    HOME: "{{ relay_connector_home }}"
+  register: relay_connector_legacy_hook
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Refuse a connector without inbox-hint while the old hook may still run it
+  ansible.builtin.assert:
+    that:
+      - relay_connector_legacy_hook.rc == 0
+      - relay_connector_legacy_hook.stdout | trim == 'unchanged'
+    fail_msg: >-
+      relay-connector {{ relay_connector_release.version }} no longer serves Claude Code messaging, and
+      this host's pin is refused while {{ relay_connector_home }}/.claude/settings.json may still run
+      `relay-connector … inbox-hint` before each prompt: {{ reason }}. Converge this host with
+      relay_connector_claude_messaging: absent and its current pre-0.9.0 release pin first, check that
+      the hook is gone, then repin.
+    quiet: true
+  vars:
+    reason: >-
+      {{ 'the hook is still there'
+         if relay_connector_legacy_hook.rc == 0
+         else 'the file could not be checked (' ~ ((relay_connector_legacy_hook.stderr | default('', true)
+              or relay_connector_legacy_hook.msg | default('')) | trim | truncate(300)) ~ ')' }}

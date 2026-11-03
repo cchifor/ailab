@@ -275,6 +275,15 @@ rejects the unknown subcommand with exit code 2, and Claude Code blocks a prompt
 `UserPromptSubmit` hook exits 2. No agent had enrolled through this path, so nothing is lost. The
 section below describes the role as it stands until v0.9.0 removes it.
 
+The role enforces that order (`tasks/legacy_hook_preflight.yml`). A `relay_connector_release` pin
+of 0.9.0 or later is refused, before anything on the worker changes and whatever
+`relay_connector_claude_messaging` says, while the user's `~/.claude/settings.json` still holds the
+old hook. It is also refused when that file cannot be read or parsed, because then nobody can tell.
+The match is the role's own: only the literal `/…/relay-connector --state /… inbox-hint` entry. The
+relay-bus skill's hook (`… relay-bus.py inbox --hook …`, [below](#the-relay-bus-skill)) never trips
+it. Converging `absent` and the repin in the same run is refused too: converge `absent` with the
+current pin first, check, then repin. `present` with a 0.9.0 or later pin fails as well.
+
 From relay-connector 0.8.0, the Claude Code agents in a worker's tmux can take part in Relay
 messaging. `relay_connector_claude_messaging` (`ansible/roles/relay_connector/tasks/claude.yml`)
 sets up two things for the execution user. Both point at the pinned, content-addressed binary:
@@ -372,5 +381,8 @@ For Claude Code messaging, a strict fake `claude` CLI on `PATH` keeps `~/.claude
 cover the 0.8.0 gate before any write, registration and the hook alongside the user's own settings,
 a repin, `absent`, check mode, unparsable files before a release change, `unmanaged`, a CLI the
 user cannot run, and failed MCP changes with their restore. Unit tests cover
-`claude_relay_hook.py` on its own. Set `TMPDIR` under `/workspace` for local runs. Real estate convergence and
-logout/reboot evidence are operator acceptance work.
+`claude_relay_hook.py` on its own. The 0.9.0 preflight cases refuse the old literal hook, alone or
+beside the skill's hook, for 0.9.0 and 0.10.0 pins, including `absent` in the same run and an
+unparsable file. They pass the skill's hook alone, no settings file, and the old hook under a 0.8.0
+pin. A unit test pins the version comparison's edge cases. Set `TMPDIR` under `/workspace` for local
+runs. Real estate convergence and logout/reboot evidence are operator acceptance work.
