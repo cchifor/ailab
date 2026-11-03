@@ -37,7 +37,7 @@ spec:
   template:
     metadata:
       annotations:
-        probe/revision: "2026-10-09.1"
+        probe/revision: "2026-11-03.sentinel-validation"
       labels:
         app.kubernetes.io/name: s2s-phase4-probe
         app.kubernetes.io/component: probe
