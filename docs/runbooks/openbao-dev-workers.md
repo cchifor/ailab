@@ -67,7 +67,8 @@ Secret.
   are `dev-worker-bot` tokens (non-admin, org team `automation`), no longer `chifor`'s — the owner
   identity must never be seeded here (s2s plan D1). Fields: `gitea_pat`, `gitea_repo_pat`,
   `gitea_package_pat`, `strive_test_user`, `strive_test_password`, `proxmox_ssh_key`, `litellm_diag_key`,
-  `litellm_diag_base`, `litellm_diag_models`, `llm_router_eval_key`.
+  `litellm_diag_base`, `litellm_diag_models`, `llm_router_eval_key`, `ci_s3_endpoint`,
+  `ci_s3_bucket`, `ci_s3_access_key`, `ci_s3_secret_key`.
 
   **Gitea tokens: shared now, per slot next** (`plans/2026-10-11-worker-identities-plan.md`). Since
   2026-10-11 every slot also has its own non-admin Gitea account `dev-worker-N-bot` (team
@@ -196,6 +197,67 @@ Secret.
   never projected to a worker. Three homes, one change on rotation: `ansible/secrets/registry.sops.yaml`
   `registry_pull_password` (zot htpasswd, `just registry`), `af/estate/registry` `pull_password`
   (estate escrow), and `common.json` here.
+
+  `ci_s3_{endpoint,bucket,access_key,secret_key}` (added 2026-11-03) is the **read-only identity of
+  the platform's CI-artifact store**, the RustFS `ci-objectstore` (platform #621, NodePort `:30900`)
+  where platform CI's `upload-s3-artifact` action puts terminal debug bundles: `docker-logs-*`,
+  Playwright reports and the like, keyed `<run_id>-<run_attempt>/<name>.tar.gz` and expired after
+  7 days. It exists because an agent debugging a CI failure had the job log (via `gitea_pat`) but no
+  way to fetch the bundle its step summary pointed at. RustFS user `dev-workers-ci-reader` holds
+  exactly the policy `gha-artifacts-ro`, which is `s3:ListBucket` + `s3:GetBucketLocation` on
+  `gha-artifacts` and `s3:GetObject` on its objects, nothing else. The platform Job
+  `ci-objectstore-reader-user` (`deploy/components/ci-objectstore/reader-user-job.yaml`) reconciles it
+  about daily and only succeeds after proving, as the reader, that write, delete and the admin API
+  are denied.
+  **It is deliberately NOT the store's root pair** (`ci-objectstore-creds`). That pair is
+  admin over the store AND the key CI uploads with, so a worker holding it could plant or replace a
+  bundle that another agent later trusts as evidence, and revoking it would break CI uploads.
+  Never project it to a worker.
+
+  `mc` is not installed on the workers. Fetch the release platform CI pins, with the same digest, then
+  hand the secret to `mc` as an env alias, never argv:
+  ```sh
+  V=RELEASE.2025-08-13T08-35-41Z; mkdir -p "$HOME/.local/bin"
+  curl -fsSL -o "$HOME/.local/bin/mc" "https://github.com/minio/mc/releases/download/$V/mc.linux-amd64.$V"
+  echo "01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891  $HOME/.local/bin/mc" \
+    | sha256sum -c - && chmod +x "$HOME/.local/bin/mc"
+  ep="$(cred get common ci_s3_endpoint)" ak="$(cred get common ci_s3_access_key)" \
+    cred exec common ci_s3_secret_key CI_S3_SK -- \
+    sh -c 'MC_HOST_ci="http://${ak}:${CI_S3_SK}@${ep#http://}" exec "$HOME/.local/bin/mc" cp \
+      "ci/gha-artifacts/<run_id>-<attempt>/<name>.tar.gz" .'
+  ```
+  Swap `cp … .` for `ls ci/gha-artifacts/<run_id>-<attempt>/` to list one run's bundles. The endpoint
+  is talos-cp1's NodePort. If `.41` is down, use `.42` or `.43`; the API VIP `.40` does not serve
+  NodePorts. Without `mc`, curl works too, with the key on stdin through `-K -` and never in argv
+  (`printf` is a shell builtin):
+  `printf 'user = "%s:%s"\n' "$ak" "$CI_S3_SK" | curl -sfK - --aws-sigv4 "aws:amz:us-east-1:s3" -o out.tar.gz "$ep/gha-artifacts/<key>"`
+  (inside the same `cred exec … sh -c '…'`). Never add `-v`, because it prints the signed request.
+
+  **Audience.** The four dev-worker policies grant `read` on `common`, and nothing can write it. The
+  reviewer VMs read only `codex-auth`. Anything that can use a worker's sink token (root, and the
+  worker user `cred` runs as) can therefore read this key. `cred` is a delivery helper, not a
+  boundary.
+
+  **Residual risk, accepted.** The bucket holds more than `docker compose logs` of CI stacks: it also
+  holds Playwright results and reports, coverage, airlock e2e results, and **`live-ailab-e2e-traces`**.
+  Those are Playwright traces of the LIVE platform, which can carry the e2e persona's session
+  cookies and bearer tokens (short-lived) and the password it types. That password is already in
+  `common` as `strive_test_password`. Everything that has been uploaded and not yet swept is readable:
+  the daily sweep deletes objects older than 7 days, so objects can reach ~8 days, or more if a sweep
+  fails. The key itself never expires. Transport is plain HTTP on the mgmt LAN: SigV4 authenticates
+  requests but gives no confidentiality. That is the same LAN-trust model the runners already upload
+  under, with the store's ROOT key.
+
+  **Two homes.** Platform `deploy/secrets/ailab/ci-objectstore-reader-creds.enc.yaml` is
+  authoritative (it is what RustFS holds), and `common.json` here is the copy `cred` serves. Rotation,
+  emergency revocation (`mc admin user disable`, which the reconcile Job never undoes), the Job's
+  self-disable on a privilege violation, and teardown are in platform `deploy/secrets/ailab/SECRETS.md`
+  § "The CI-artifact reader". The order: platform first; wait for the Job's `reader-user: OK`; then
+  this seed; then force the provision Job (*Rotation* step 4).
+
+  **A compromised worker.** First revoke that worker's AppRole secret-id and tokens. Only then
+  rotate, because the replacement lands in `common`, which every worker reads. The shared key gives
+  no per-worker attribution or revocation, the same trade-off recorded for `proxmox_ssh_key` below.
 
   `proxmox_ssh_key` is an Ed25519 PRIVATE key (comment `agent@dev-workers`) whose public half is in
   `/root/.ssh/authorized_keys` on cloud1/cloud2/cloud3. It exists because an agent had no way to
