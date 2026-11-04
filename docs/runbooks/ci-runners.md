@@ -591,6 +591,23 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     `sudo systemctl start gitea-act-runner`. The persistent `dsh-conductor-image-pin` container on
     ci-runner-1 is `unless-stopped` and comes back with dockerd. Cost: the runner's warm images and
     cache (ci-runner-1 on 10-07: 43 GB images + 9.4 GB cache), re-pulled from the registry mirror.
+- **Every job that uses one action (e.g. `actions/setup-node@v5`) fails in 1-2 s on ONE runner with
+  `Unable to resolve v5: reference not found`, right after `git clone '…' # ref=v5`** (other jobs pass
+  there, and the same job passes on a rerun that lands elsewhere): that runner's cached clone of the
+  action is corrupt. act_runner keeps one go-git clone per action under `host.workdir_parent`
+  (`work/<64-hex>/.git`), and a host that loses power while one is being fetched can leave an empty
+  `pack-*.pack` + `.idx` pair. go-git then reads no refs at all. Seen on ci-runner-10 after the
+  2026-11-04 power cut (all three ai-nodes, about 07:38:56 UTC): 4.5 h of failures, and a reboot does not
+  fix it.
+  - *Self-heal:* the reclaim drops such a clone when act_runner starts (its ExecStartPre; the journal shows
+    `dropped corrupt action clone <hash> (<url>): <reason>`), and act re-clones it on the next job. A
+    runner that is still failing has not restarted since the damage: `sudo systemctl restart
+    gitea-act-runner` (drains a live job).
+  - *Confirm by hand:* as `runner`, `git -C work/<hash> for-each-ref` lists nothing on the broken clone,
+    and `sudo find /home/runner/act-runner/work -maxdepth 5 -path '*/.git/objects/pack/*' -size 0` names
+    the empty files. `remote.origin.url` in the clone's `.git/config` says which action it is.
+    The reclaim also catches a pack that is non-empty but cut short: a pack's last 20 bytes must equal the
+    20 bytes before the last 20 of its `.idx`.
 - **Jobs that install system packages fail at once on ONE runner with `E: dpkg was interrupted, you must
   manually run 'sudo dpkg --configure -a' to correct the problem`** (e.g. `npx playwright install --with-deps`;
   the same job passes on a rerun that lands elsewhere): an unattended-upgrade on that guest was cut off
