@@ -206,6 +206,13 @@ if command -v git >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
     sz=$(stat -c %s "$p"); chmod u+w "$p"
     dd if=/dev/zero of="$p" bs=1 seek=$((sz - 20)) count=20 conv=notrunc status=none
   done
+  # Both tails zero-filled in the same writeback window: the two trailers then compare EQUAL.
+  H_ZERO2="$WSROOT/$(hexid zerotails)"; mk_clone "$H_ZERO2"
+  for p in "$H_ZERO2"/.git/objects/pack/pack-*.pack; do
+    x="${p%.pack}.idx"; chmod u+w "$p" "$x"
+    dd if=/dev/zero of="$p" bs=1 seek=$(( $(stat -c %s "$p") - 20 )) count=20 conv=notrunc status=none
+    dd if=/dev/zero of="$x" bs=1 seek=$(( $(stat -c %s "$x") - 40 )) count=40 conv=notrunc status=none
+  done
   H_REF="$WSROOT/$(hexid emptyref)"; mk_clone "$H_REF"; : > "$H_REF/.git/refs/tags/v5"
   H_OBJ="$WSROOT/$(hexid emptyobj)"; mk_clone "$H_OBJ"
   mkdir -p "$H_OBJ/.git/objects/ab"; : > "$H_OBJ/.git/objects/ab/cdef0123456789abcdef0123456789abcdef01"
@@ -229,11 +236,14 @@ if command -v git >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
   grep -q "logger .*dropped corrupt action clone $(hexid incident) ($H_URL): truncated pack-1325e63f" "$CALLS" \
     && ok "H: the drop is logged with the action URL and the reason" || bad "H: no drop log line naming URL and reason"
   for c in "$H_NOIDX:pack without index" "$H_SHORT:pack cut short, idx intact" "$H_ZERO:pack trailer zero-filled" \
-           "$H_REF:empty ref" "$H_OBJ:empty loose object" "$H_HEAD:empty HEAD"; do
+           "$H_ZERO2:pack AND idx tails zero-filled" "$H_REF:empty ref" "$H_OBJ:empty loose object" \
+           "$H_HEAD:empty HEAD"; do
     [ ! -e "${c%%:*}" ] && ok "H: dropped (${c#*:})" || bad "H: not dropped (${c#*:})"
   done
   grep -q "pack checksum does not match its index" "$CALLS" \
     && ok "H: a short pack is named as a checksum mismatch" || bad "H: no checksum-mismatch log line"
+  grep -q "dropped corrupt action clone $(hexid zerotails) .*pack trailer zero-filled" "$CALLS" \
+    && ok "H: equal all-zero trailers are caught by the zero guard" || bad "H: equal all-zero trailers not named"
   # Only the 64-hex children of the workdir are action clones: the drop never names the job's copy.
   grep -q "dropped corrupt action clone $(hexid jobcopy)" "$CALLS" \
     && bad "H: dropped a job workspace's private action copy" || ok "H: a job workspace's private action copy is not dropped"

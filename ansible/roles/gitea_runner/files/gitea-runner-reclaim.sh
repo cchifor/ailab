@@ -223,7 +223,7 @@ apply_cache_purges() {
 # Root deletes here as it does in reclaim_ws: a symlinked clone dir or .git is skipped, and rm never
 # follows a symlink inside the tree.
 action_clone_fault() {   # <clone dir> -> prints the first fault and returns 0; returns 1 when healthy
-  local g="$1/.git" f i hl=20
+  local g="$1/.git" f i t hl=20
   [ -s "$g/HEAD" ] || { echo "HEAD missing or empty"; return 0; }
   [ ! -e "$g/index" ] || [ -s "$g/index" ] || { echo "empty index"; return 0; }
   # The smallest valid files: a v1 .idx of an empty pack is 1064 bytes (v2: 1072), a .pack 32.
@@ -238,8 +238,11 @@ action_clone_fault() {   # <clone dir> -> prints the first fault and returns 0; 
     [ -e "$f" ] || continue
     i="${f%.pack}.idx"
     [ -e "$i" ] || { echo "pack without index: $(basename -- "$f")"; return 0; }
-    [ "$(tail -c "$hl" -- "$f" 2>/dev/null | od -An -v -tx1 | tr -d ' \n')" \
-      = "$(tail -c $((2 * hl)) -- "$i" 2>/dev/null | head -c "$hl" | od -An -v -tx1 | tr -d ' \n')" ] \
+    t="$(tail -c "$hl" -- "$f" 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+    # A real checksum is never all zeros: this catches BOTH tails zero-filled in the same writeback
+    # window, which the equality test below would pass. An empty read (I/O error) is a fault too.
+    [[ "$t" =~ ^0*$ ]] && { echo "pack trailer zero-filled or unreadable: $(basename -- "$f")"; return 0; }
+    [ "$t" = "$(tail -c $((2 * hl)) -- "$i" 2>/dev/null | head -c "$hl" | od -An -v -tx1 | tr -d ' \n')" ] \
       || { echo "pack checksum does not match its index: $(basename -- "$f")"; return 0; }
   done
   for f in "$g"/objects/pack/pack-*.idx; do
