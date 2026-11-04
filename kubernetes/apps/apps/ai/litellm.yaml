@@ -1205,8 +1205,9 @@ spec:
           # v1.108.0 (measured 2026-11-04, ailab#1592) reads a stream's FIRST chunk inside
           # Router.acompletion. A stall before that chunk now fails the request before any SSE byte is
           # sent, with the handler's own Timeout, instead of a started stream that then errors. It is
-          # still one upstream request, the same deadline, and the transport closed; the handler
-          # contract accepts both raise sites.
+          # still one upstream request, the same deadline, and the transport closed. The handler
+          # contract's c-stall-first case pins which site raises for the installed version, and
+          # c-stall-mid pins a stall after the first chunk to the iteration on every version.
           image: ghcr.io/berriai/litellm:v1.106.6@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
