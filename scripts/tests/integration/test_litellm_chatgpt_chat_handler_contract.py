@@ -94,6 +94,7 @@ from unittest import mock
 
 import httpx
 import litellm
+import litellm.router as litellm_router
 import yaml
 from litellm import Router
 from litellm.integrations.custom_logger import CustomLogger
@@ -345,11 +346,24 @@ class _ByteStream(httpx.AsyncByteStream):
         self._closed.append("transport")
 
 
+def _end_of_first_delta(payload):
+    """Byte offset just past the first response.output_text.delta event. A stall there lands after
+    the bridge can emit a text chunk: a stall in the middle of the stream, not before its first chunk."""
+    start = payload.index(b"event: response.output_text.delta")
+    return payload.index(b"\n\n", start) + 2
+
+
+# Where a stall surfaces in the stream: 256 bytes is inside response.created, before the first chunk
+# is complete; "stall-mid" waits until the first text delta has been sent.
+STALL_AFTER = {"stall-first": lambda payload: 256, "stall-mid": _end_of_first_delta}
+
+
 def _mock_post(sent, outcome, closed):
     """Stand in for AsyncHTTPHandler.post, the one seam the Responses path uses. Records the wire
     request and answers like the real method: a 2xx Response is returned (a streaming body), a
     non-2xx raises httpx.HTTPStatusError as raise_for_status() would. `outcome` is a body kind or a
-    status code; "stall" hangs before any response, "stall-mid" hangs inside the body."""
+    status code; "stall" hangs before any response, "stall-first" inside the body before its first
+    chunk is complete, and "stall-mid" inside the body after the first text delta (STALL_AFTER)."""
     loads = json.loads
 
     async def post(_self, url, data=None, json=None, params=None, headers=None,
@@ -360,10 +374,10 @@ def _mock_post(sent, outcome, closed):
         request = httpx.Request("POST", url)
         if kind == "stall":
             await asyncio.sleep(3600)
-        if kind in ("success", "stall-mid", "truncated", "incomplete", "incomplete-nousage", "refusal", *USAGE_SHAPES):
+        if kind in ("success", *STALL_AFTER, "truncated", "incomplete", "incomplete-nousage", "refusal", *USAGE_SHAPES):
             payload = {
                 "success": lambda: chatgpt_stream(model=body["model"]),
-                "stall-mid": lambda: chatgpt_stream(model=body["model"]),
+                **{stall: (lambda: chatgpt_stream(model=body["model"])) for stall in STALL_AFTER},
                 "truncated": lambda: chatgpt_stream(model=body["model"], terminal="truncated"),
                 "incomplete": lambda: chatgpt_stream(model=body["model"], terminal="incomplete"),
                 "incomplete-nousage": lambda: chatgpt_stream(model=body["model"], terminal="incomplete", usage=OMIT),
@@ -372,7 +386,8 @@ def _mock_post(sent, outcome, closed):
                    for shape, usage in USAGE_SHAPES.items()},
             }[kind]()
 
-            return httpx.Response(200, stream=_ByteStream(payload, closed, stall_after=256 if kind == "stall-mid" else None),
+            stall_after = STALL_AFTER[kind](payload) if kind in STALL_AFTER else None
+            return httpx.Response(200, stream=_ByteStream(payload, closed, stall_after=stall_after),
                                   headers={"content-type": "text/event-stream"}, request=request)
         if kind == "403html":
             response = httpx.Response(403, content=CLOUDFLARE_HTML.encode(),
@@ -644,45 +659,64 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         print(json.dumps({"case": "c", "chunks": len(chunks), "finish": finishes}))
 
     async def _case_c_streaming_cancellation(self, kind):
-        """Streaming, abandoned: (abandon) the consumer stops after two chunks and closes the outer
-        stream -- the proxy's path on a client disconnect -- and the upstream transport must be closed
-        promptly; (stall-mid) the upstream hangs between two chunks and the consumer's next read must
-        hit the handler's deadline, with the transport closed, not hang or cancel elsewhere."""
+        """Streaming, abandoned or stalled. All three end with the upstream transport closed, not a
+        hang or a cancellation elsewhere:
+        - abandon: the consumer stops after two chunks and closes the outer stream, which is the
+          proxy's path on a client disconnect.
+        - stall-mid: the upstream hangs after the first text delta. The consumer's next read must hit
+          the handler's deadline, in the iteration, on every LiteLLM version.
+        - stall-first: the upstream hangs before the first chunk is complete. Up to 1.106.6 the Router
+          returns the stream at once and the deadline surfaces from the first iteration. 1.108.0 reads
+          a stream's first chunk inside Router.acompletion (litellm.router._aread_first_chunk), so the
+          SAME handler Timeout surfaces from that await, before any byte reaches the client. The
+          expected site follows the installed version, so a move in either direction fails here."""
         _use_token_dir(f"c-{kind}")
         sent, closed = [], []
-        outcome = "stall-mid" if kind == "stall-mid" else "success"
+        outcome = kind if kind in STALL_AFTER else "success"
         started = time.monotonic()
         with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, outcome, closed)):
             router = self._router()
             litellm.callbacks = [self.logger]
             try:
-                stream = await asyncio.wait_for(
-                    router.acompletion(**copy.deepcopy(PLATFORM_REQUEST), stream=True, timeout=2), timeout=25)
-                got, error = [], None
+                got, error, stream, raised_in = [], None, None, None
                 try:
-                    async for chunk in stream:
-                        got.append(chunk)
-                        if kind == "abandon" and len(got) == 2:
-                            break
-                except Exception as exc:  # noqa: BLE001
-                    error = exc
-                await stream.aclose()
+                    stream = await asyncio.wait_for(
+                        router.acompletion(**copy.deepcopy(PLATFORM_REQUEST), stream=True, timeout=2), timeout=25)
+                except Exception as exc:  # noqa: BLE001 - judged below; repr(error) is in every message
+                    error, raised_in = exc, "acompletion"
+                if stream is not None:
+                    try:
+                        async for chunk in stream:
+                            got.append(chunk)
+                            if kind == "abandon" and len(got) == 2:
+                                break
+                    except Exception as exc:  # noqa: BLE001
+                        error, raised_in = exc, "iteration"
+                    await stream.aclose()
                 await asyncio.sleep(0.05)
             finally:
                 await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
                 router.reset()
         elapsed = time.monotonic() - started
+        label = f"c-{kind}: {error!r} raised in {raised_in}"
         self.assertEqual(NETWORK_ATTEMPTS, [])
-        self.assertEqual(len(sent), 1, f"c-{kind}: one upstream request")
+        self.assertEqual(len(sent), 1, f"{label}: one upstream request")
         if kind == "abandon":
-            self.assertIsNone(error)
-            self.assertEqual(len(got), 2)
+            self.assertIsNone(error, label)
+            self.assertEqual(len(got), 2, label)
         else:
-            self.assertEqual(type(error).__name__, "Timeout", f"c-stall-mid: {error!r}")
-            self.assertLess(elapsed, 15, "c-stall-mid: the handler's deadline, delivered to the consumer's read")
-        self.assertEqual(closed, ["transport"], f"c-{kind}: the upstream transport is closed on abandonment")
+            self.assertEqual(type(error).__name__, "Timeout", label)
+            self.assertLess(elapsed, 15, f"{label}: the handler's deadline, delivered to the consumer's read")
+            if kind == "stall-mid":
+                self.assertGreaterEqual(len(got), 1, f"{label}: the stall comes after a chunk")
+                self.assertEqual(raised_in, "iteration", label)
+            else:
+                self.assertEqual(len(got), 0, f"{label}: the stall comes before the first chunk")
+                first_chunk_read = hasattr(litellm_router, "_aread_first_chunk")
+                self.assertEqual(raised_in, "acompletion" if first_chunk_read else "iteration", label)
+        self.assertEqual(closed, ["transport"], f"{label}: the upstream transport is closed")
         print(json.dumps({"case": f"c-{kind}", "chunks": len(got), "error": type(error).__name__ if error else None,
-                          "closed": closed, "elapsed_s": round(elapsed, 2)}))
+                          "raised_in": raised_in, "closed": closed, "elapsed_s": round(elapsed, 2)}))
 
     # (d) -------------------------------------------------------------------------------------
     async def _case_d_upstream_rejection(self, status, error_name):
@@ -827,7 +861,7 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
                     await self._case_b_codex_output_schema()
                 with self.subTest(case="c"):
                     await self._case_c_streaming()
-                for kind in ("abandon", "stall-mid"):
+                for kind in ("abandon", "stall-mid", "stall-first"):
                     with self.subTest(case=f"c-{kind}"):
                         await self._case_c_streaming_cancellation(kind)
                 for status, error_name in (("401", "AuthenticationError"), ("429", "RateLimitError"),

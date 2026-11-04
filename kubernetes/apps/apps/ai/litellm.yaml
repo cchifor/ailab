@@ -1199,7 +1199,15 @@ spec:
           # the chatgpt/ authenticator REFUSES the device-code login inside an event loop (#39585; see
           # the chatgpt-auth volume below), and a NON-streaming caller of a provider that forces SSE
           # now gets the aggregated response instead of the events (dsh streams, so it is unaffected).
-          # Both contracts were re-measured in the same pull request.
+          # Both contracts were re-measured in that pull request. They are pinned by
+          # test_litellm_chatgpt_route_contract.py (cases a and c), so litellm-route-contract
+          # re-measures them on every bump, against the image the bump pins.
+          # v1.108.0 (measured 2026-11-04, ailab#1592) reads a stream's FIRST chunk inside
+          # Router.acompletion. A stall before that chunk now fails the request before any SSE byte is
+          # sent, with the handler's own Timeout, instead of a started stream that then errors. It is
+          # still one upstream request, the same deadline, and the transport closed. The handler
+          # contract's c-stall-first case pins which site raises for the installed version, and
+          # c-stall-mid pins a stall after the first chunk to the iteration on every version.
           image: ghcr.io/berriai/litellm:v1.106.6@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
