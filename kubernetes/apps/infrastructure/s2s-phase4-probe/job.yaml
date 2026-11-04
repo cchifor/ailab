@@ -37,7 +37,9 @@ spec:
   template:
     metadata:
       annotations:
-        probe/revision: "2026-10-09.1"
+        # Job metadata above enables kustomize.toolkit.fluxcd.io/force, so
+        # this immutable-template change is replaced; test_job_shape pins it.
+        probe/revision: "2026-11-03.1"
       labels:
         app.kubernetes.io/name: s2s-phase4-probe
         app.kubernetes.io/component: probe
