@@ -52,8 +52,9 @@ it.
 
 If flash-next then delivers comparable plans, the decision falls to robustness and speed:
 
-- **flash-next:** about half the completion tokens, and no long-context corruption up to 115k tokens. Against that, a
-  runaway test it left running exhausted dev-worker-1's memory.
+- **flash-next:** about half the completion tokens, and no long-context corruption up to 115k tokens. Against that,
+  a runaway test it left running in I6-r2 exhausted dev-worker-1's memory. qwen most likely did the same once in
+  that pair.
 - **qwen3.8-27b:** 2.5-2.8× faster decode, and a median of 17.0 min to a finished, correct change against flash-next's
   26.5.
 
@@ -88,16 +89,19 @@ The pattern is the same in every run:
   markup leaks, loops, garbled values, refusals or context errors, and Codex's stderr is clean. The runs ended at the
   cap (`timeout` exit 124, or 137 where the kill came after the grace) or, for P3-d2b, at the owner-directed abort.
 - **Context and speed.** Prompts reached 98k-115k tokens. At that size, cloud3's engine decode was ~35 tok/s (about 30
-  in the P3 run that overlapped the two-lane phase and the worker's memory exhaustion). flash-next's turns were 12k-16k
-  tokens each, mostly reasoning. One turn therefore took 6-8 minutes, and a 90-min run fitted only 42-52 requests.
-  qwen3.8-27b made 60-83 requests in 25-43 min.
+  in the P3 run that overlapped the two-lane phase and the worker's memory exhaustion). flash-next's turns averaged
+  3.7k-4.6k output tokens in the valid P1 and P2 runs (2.2k-3.2k in the others), mostly reasoning: about 1.7-2.1 min
+  per request over a 90-min run. Its largest turns
+  were 12k-16k tokens and took 6-8 minutes each. A 90-min run fitted 42-52 requests; qwen3.8-27b made 60-83 requests
+  in 25-43 min.
 - **Same thoroughness, much slower turns.** Both models spend most of their tokens thinking, and both re-verify
   citations. qwen ran the same "final checks" at ~2.5-2.8× flash-next's decode rate, and finished. That speed is the
   reason is a hypothesis, not a finding (see the decision section).
 - **Consistent with the investigation's hypothesis.** Each turn's prompt grows only by the tool output, not by the
   3k-6k reasoning tokens the previous turn produced. So the reasoning behind the design is gone at the next turn, and
-  the model may be re-deriving it. A plausible but untested reading: at 6-8 minutes a turn flash-next cannot make that
-  up within the cap, and qwen at 2-3 minutes a turn can.
+  the model may be re-deriving it. A plausible but untested reading: at ~2 minutes a typical turn, and up to 6-8
+  minutes for its largest turns, flash-next cannot make that up within the cap; qwen, at well under a minute for a
+  typical turn, can.
 - **Not yet known:** whether it is that, the forced effort, or the model itself. That is what the probe and the rerun
   after the fix will show.
 
@@ -175,7 +179,7 @@ The pattern is the same in every run:
 | Pair | Reason | flash-next | qwen3.8-27b |
 |---|---|---|---|
 | P3-d2 | dev-worker-1 memory exhaustion 15:15-15:48Z | no plan; 90.7 min | plan delivered; 25.5 min; judged 14.0/25 |
-| I4-r2 | dev-worker-1 memory exhaustion 15:15-15:48Z (stopped at ~19.5 min) | stopped at 19.0 min (28/29 at the stop) | stopped at 19.0 min (28/29 at the stop) |
+| I4-r2 | dev-worker-1 memory exhaustion 15:15-15:48Z (stopped at 19.0 min) | stopped at 19.0 min (28/29 at the stop) | stopped at 19.0 min (28/29 at the stop) |
 | P3-d2b | aborted on owner direction at 16:38Z: configuration fix in progress | no plan; 45.7 min | plan delivered; 25.8 min; judged 13.5/25 |
 
 ### Speed per request (solo runs only: day 1 and day 2 before the two-lane phase; HTTP 200)
@@ -245,13 +249,14 @@ Over all valid implementation runs that finished correct (7 per model, both days
 | Planning runs without a plan within the cap | 5 of 5 (incl. the invalid and aborted P3s, and day 1's 35-min P2) | 1 of 5 (day 1's 35-min P2) |
 | Implementation runs never edited the source by the cap | 2 (I3, both days) | 0 |
 | Implementation runs left with a broken source at the cap | 0 | 1 (I3-r2: undefined names, typecheck fails) |
-| Runaway process left behind | 1 (I6-r2: an orphaned test grew to 14.9 GB, twice OOM-killed) | 0 |
+| Runaway test left behind (OOM-killed) | 1 (I6-r2, killed 15:48Z) | 1, most likely (I6-r2, killed 15:15Z; interrupted with Ctrl-C, then always `timeout 60`) |
 
 Notable failures:
 
-- **flash-next, every planning run:** explores until the cap; see the next section.
-- **flash-next, I6-r2:** a test command that never returned was left running, and its `pkill` clean-up killed itself.
-  The orphan exhausted dev-worker-1's memory (see "Invalid or uncounted runs"). Its final patch still passed.
+- **flash-next, every planning run:** explores until the cap; see "flash-next planning non-delivery".
+- **I6-r2, both models:** an intermediate patch made a test run forever. qwen interrupted its own with Ctrl-C;
+  flash-next's `pkill` clean-up killed only itself. The orphaned tests exhausted dev-worker-1's memory (see "Invalid or
+  uncounted runs"). Both final patches passed.
 - **flash-next, I3 (both days):** it spent the whole 35 min on probes of zlib and PNG behaviour and never edited
   `images.ts`.
 - **qwen3.8-27b, I3-r2:** hit the cap mid-edit. Its source referenced names it had not defined yet (`offset0`,
@@ -266,30 +271,40 @@ Notable failures:
 | 15:15:25Z | python3 | 14.9 GB |
 | 15:48:32Z | python3 | 14.8 GB |
 
-Between ~15:35Z and 15:48:44Z SSH timed out in the banner exchange. Proxmox showed the VM at 16.6 of 17.2 GB memory,
-reading swap heavily.
+Between ~15:35Z and 15:48:44Z SSH timed out during the banner exchange. Proxmox showed the VM at 16.6 of 17.2 GB
+memory, reading swap heavily.
 
-Both processes came from flash-next's I6-r2 run:
+Both kills fit runaway test processes from the two models' I6-r2 runs. In I6 the agent bounds a paging loop
+(`runs_since`), and an intermediate version that loops forever under the tests' mocks grows without limit.
 
-- Its intermediate `runs_since` code loops forever under the tests' mocks. One test command (15:22:23Z) never
-  returned, and Codex left it running in the background.
-- Its clean-up, `pkill -f "unittest discover -s scripts/tests"` (15:23:42Z), matched its own shell and killed only
-  itself (exit 143).
-- The orphaned test kept growing after the run ended.
+- **15:48Z kill: flash-next (I6-r2).**
+  - A test command at 15:22:23Z never returned, and Codex moved it into a background session.
+  - flash-next's clean-up at 15:23:42Z, `pkill -f "unittest discover -s scripts/tests"`, matched its own shell and
+    killed only itself (exit 143).
+  - The orphaned test kept growing after the run ended.
+- **15:15Z kill: most likely qwen3.8-27b (I6-r2).**
+  - At 15:09:32Z qwen started a `python3 -m unittest … | tail -40` without a timeout. It was still running after
+    10 s, so Codex backgrounded it.
+  - qwen sent Ctrl-C at 15:09:48Z; the session reported exit 130. It then wrapped every later test run in
+    `timeout 60`.
+  - No other benchmark run started a long-running python3 before 15:15Z. But the kernel log names only "python3", so
+    the attribution to this process is inferred, not proven.
 
-flash-next's final I6 patch still passed. qwen3.8-27b ran its tests under `timeout 60` and never hit this.
+Both models' final I6 patches passed.
 
 Consequences, under the predeclared "independently evidenced outage" rule:
 
-- **P3-d2** overlapped the exhaustion and is invalid. Both observations are kept: qwen3.8-27b delivered in 25.5 min
-  (14:28Z, before the exhaustion), judged 14.0/25; flash-next hit the cap with no plan. The rerun, P3-d2b, was then aborted on the owner's direction
-  (qwen had delivered in 25.8 min, judged 13.5/25; flash-next had no plan at 45.7 min).
-- **I4-r2** overlapped it and is invalid. It was stopped at ~19 min, when both runs were at 28/29. Its rerun, I4-r2b,
+- **P3-d2** overlapped the exhaustion and is invalid. Both observations are kept:
+  - qwen3.8-27b delivered in 25.5 min (14:28Z, before the exhaustion), judged 14.0/25; flash-next hit the cap with no
+    plan.
+  - Its rerun, P3-d2b, was then aborted on the owner's direction. qwen had delivered in 25.8 min (judged 13.5/25);
+    flash-next had no plan at 45.7 min.
+- **I4-r2** overlapped it and is invalid. It was stopped at 19.0 min, when both runs were at 28/29. Its rerun, I4-r2b,
   was not run (owner-directed stop).
-- **I6-r2** is valid. The outage came from that run itself, so it counts as a robustness and hygiene finding against
-  flash-next, not as an external outage. Both models passed.
+- **I6-r2** is valid. The outage came from that pair's own runs, so it is a robustness and hygiene finding against
+  both models, not an external outage. Both models passed.
 - **What the two-lane phase contributed:** two lanes doubled the load on the 16 GB worker, which made the runaway
-  test's effect worse.
+  tests' effect worse.
 
 **Other checks:**
 
@@ -299,7 +314,8 @@ Consequences, under the predeclared "independently evidenced outage" rule:
   two-lane phase, and llama.cpp logged no KV-cache or context errors.
 - cloud2: no busy 429s and no admission-queue waits.
 - The router's admin API rate-limited the journal collector once (`RATE_LIMITED`). The collector was made to back off
-  and re-run, with no errors the second time. The analysis rests on the timing tap's per-request records, which are complete.
+  and re-run, with no errors the second time. The analysis rests on the timing tap's per-request records, which are
+  complete.
 
 ## Caveats
 
