@@ -18,15 +18,15 @@ relay_agent_skill_origin: https://relay.chifor.me
 # and WSL has no internet: fetch on Windows, as for the connector binary). Never committed. Workers
 # never download or build the skill.
 relay_agent_skill_source_dir: ""
-# The v0.9.0 release's skill assets (run 120163, source e71399f, observed 2026-11-04): each sha256 is
+# The v0.9.1 release's skill assets (run 120886, source a53a3ee, observed 2026-11-04): each sha256 is
 # the release manifest's agentSkill.files[].sha256, keyed here by its `asset`, checked against
 # SHA256SUMS, the downloaded bytes and the tagged packages/agent-skill sources. Change only through
 # release review.
 relay_agent_skill_release:
-  version: 0.9.0
+  version: 0.9.1
   sha256:
-    relay-bus-SKILL.md: a515392d9352a1bf82a46981b1b4ab52a0b788a1033178862a9f37c0e93f0fe2
-    relay-bus.py: e86983b9a879e425a6cc6cf56f895d4bf71bf14b6edb8606122582c318cd3986
+    relay-bus-SKILL.md: 9994513bbeb50f28ff4bd7b5688a003499bc17c59c941b1fbaeaf51e676a90d3
+    relay-bus.py: 7f570a08c892c67a84f3e94f9f01be6252ba2128d8da36aa6d3ccb65bc73b89d
 # Seconds Claude Code waits for the hook before continuing the prompt without it. `relay-bus.py
 # inbox --hook` keeps to its own shorter deadline and always exits 0, and the hook command exits 0
 # even without python3 or the helper (files/claude_skill_hook.py).
