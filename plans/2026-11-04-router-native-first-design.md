@@ -715,8 +715,8 @@ wire?: Array<{
 // Qualification manifest (versioned with the golden suite; one entry per path a target can take)
 interface Qualification {
   path: 'native' | 'translated'; protocol: 'responses' | 'chat';
-  backend: string;                   // e.g. 'llama.cpp b12020' / 'vllm 0.28.0' (read from /props, /version)
-  model: string; templateDigest: string;     // sha256 of the template the server reports
+  backend: string;                   // e.g. 'llama.cpp b12020' / 'vllm 0.28.0', as declared in cloudlab IaC
+  model: string; templateDigest: string;     // sha256 of the deployed template file, as declared in cloudlab IaC
   translator?: string;               // translated path: contract version + account settings (replayReasoning, ...)
   supports: string[];                // features that passed: item and tool kinds, text.format, reasoning shapes, non-streaming
   losses: string[];                  // features known to be dropped or degraded (e.g. 'tool:namespace', 'text.format')
@@ -742,6 +742,24 @@ Otherwise the target is skipped with a named reason: `unqualified`, `feature_uns
 `protocol_unavailable` or `translation_unsupported:<field>`. Each new reason joins `PERMANENT` and `REQUESTED` in
 `compat/index.ts:95` (`origin/main` `247b19f`), so that when no target remains, the engine returns the loud 400 and not
 a capacity error. A backend or template change (a new digest) unqualifies the wire until Step 5 re-runs.
+
+**How the router learns the live backend and template: never by causing a load.** On cloud3 the only path to a
+model's `/props` is through llama-swap, which loads the model and may evict the other one. vLLM has `/version` but no
+endpoint that returns its template. So a startup or periodic probe is ruled out.
+- **The declared values come from IaC.** cloudlab declares, per model, the backend build and the template file it
+  deploys (`--chat-template-file` / `--chat-template`). The manifest entry records those values. Routing compares
+  the manifest against the declared values, which costs nothing at request time.
+- **The router verifies lazily, only on a resident model.**
+  - **llama.cpp behind llama-swap:** after a request has been served, the router checks llama-swap's `/running`.
+    If the model is resident, it reads `/upstream/<model>/props` (`build_info`, `chat_template`) at most once per
+    load, and never for a model that is not resident.
+  - **vLLM:** the router reads `/version` for the build; the template digest is the IaC-declared one, with no live
+    check.
+- **On a mismatch,** the wire is marked unqualified for that model and the journal records
+  `wire.unqualified {declared, observed}`. Later requests skip it (`unqualified`, permanent and request-caused), and
+  with no other target left they get a loud 400. The attempt that revealed the mismatch has already been served
+  and is journaled as served by an unqualified target. The wire comes back only when IaC and the manifest agree
+  again: a new Step 5 run.
 
 The existing Codex mechanism (`RoutePolicy.native: ['codex-responses']`, `ProviderSupport.native`) becomes one case of
 this: the codex provider declares `wire: [{models:['*'], protocol:'responses'}]` implicitly, with its own manifest
@@ -844,17 +862,19 @@ It never writes. The only permitted differences between upstream bytes and clien
      events, in order, while nothing has been flushed.
    - **When the hold ends:**
      - on the first other event, which is today's Codex rule and the only rule on the `codex` wire;
-     - or, on a wire that declares `holdMs`, when the hold has lasted `holdMs`.
+     - or, on a wire that declares `holdMs`, `holdMs` after **the first held lifecycle event arrived**. The clock
+       starts then, not at send.
 
      The llama.cpp responses wire declares `holdMs: 30000`. That is below Codex's 300 s idle timer with ample room,
      and it is how `return_progress`'s prefill events reach Codex during a long prefill.
+   - **A cold load holds nothing.** While llama-swap loads a model (minutes on cloud3), no event has arrived, so no
+     hold clock runs and nothing is committed. The engine's own wait timer bounds that phase, as today.
    - **When the hold ends,** the held events are flushed in order, and every later event, `in_progress` included,
      is forwarded as it comes.
-   - **The flush is the failover boundary:** once anything reached the client, the attempt is committed and is no
-     longer failed over (§9.1).
-
-   A failure before output on llama.cpp is almost always an HTTP error before any event (a refused connection, a
-   loading 503, a template 400/500), so the 30 s window still covers the failovers that matter.
+   - **The commit boundary is the first byte flushed to the client** (§9.1). Before it, any failure can fail over,
+     whenever it comes: an HTTP error, a loading 503, a template 400/500, or a stream that ends with only held
+     events. After it, the attempt is committed. A hold that expires flushes the events it holds, and that flush
+     is what commits the attempt.
 3. a router-originated terminal event when the router itself ends the stream (timeout, budget, client gone), or
    after an upstream error that is not a protocol event (llama.cpp's untyped `data: {"error":…}`, §5.1), and only
    when the upstream sent no terminal event;
@@ -933,8 +953,9 @@ Golden tests (§11, Step 1) pin each line of the contract.
    llama-swap presets), owned in cloudlab IaC. The router forwards.
    - **One measured exception: how much past reasoning is replayed.** In an agent session every assistant turn comes
      after the last user message, so the template's `preserve_thinking=false` strips nothing. Replaying every block
-     overflows cloud3's pool (§12.1). The bound therefore lives in the router, as the declared, per-account,
-     journaled `reasoning-window` mutation.
+     overflows cloud3's pool (§12.1). On the translated path the bound therefore lives in the router, as the
+     declared, per-account, journaled `reasoning-window` mutation. On native paths the router does not bound replay
+     (§7.2 allows only single-field patches); there the bound is the client's compaction (§12).
 6. **The invariant is testable.** `upstreamBody == applyDeclared(clientBody, mutations)`, where `mutations` is the
    attempt's journaled list (rule 2), is checked in the golden suite. In production the journal can store both digests
    (`sha256` of the client and upstream bodies). They verify that the invariant held for a request, but they cannot
@@ -949,7 +970,7 @@ Golden tests (§11, Step 1) pin each line of the contract.
 | `cache-key-salt` | req | salt `prompt_cache_key` after overloads | wire default: codex (listed only when it salts) | Codex re-key |
 | `stream-usage` | req+resp | add `stream_options.include_usage: true`; remove the usage-only chunk from the client stream if the client did not ask | wire default: native chat | budgets (§9.3) |
 | `set:return_progress` | req | add `return_progress: true` (llama.cpp prompt-progress events) | wire default: llama.cpp responses | Codex idle timer during a long prefill, from the upstream's own events (§9.4) |
-| `reasoning-window` | req | replay only the last N turns' reasoning: the stopgap's `replayReasoning: {lastTurns: N}` on translated wires; on a native Responses wire, the reasoning items of older turns are left out of `input` | opt-in, per account | context bound (§8.1 rule 5 exception, §12) |
+| `reasoning-window` | req | replay only the last N turns' reasoning: the stopgap's `replayReasoning: {lastTurns: N}` | opt-in, per account; **translated wires only**. Deleting `input` items from a native body is a structural rewrite, which §7.2 does not allow. | context bound (§8.1 rule 5 exception, §12) |
 | `drop-replayed-reasoning` | req | today's behaviour (`replayReasoning` unset or false) | opt-in, per account | a template that breaks on replayed reasoning |
 | `developer-as-system` | req | `developer` → `system` | opt-in, per account (translated) | template compatibility |
 | `drop:<param>` | req | today's `params.drop` | opt-in, per account | a server that chokes on a control |
@@ -1063,9 +1084,9 @@ reservation at all. B specifies:
   - (b) A router wire mutation `set:return_progress` on the `responses` wire only, journaled. **Recommend (b),**
     validated with the real Codex CLI on a ≥ 100k-token prompt (the K=46 probe's prefill was 94 s).
 
-  These progress events reach Codex only through the hold rule's `holdMs` (§7.3, rule 2). The hold covers the
-  first 30 s. After that, the held events and every later `in_progress` event are forwarded, and the attempt is
-  committed (§9.1).
+  These progress events reach Codex only through the hold rule's `holdMs` (§7.3, rule 2). The hold covers 30 s
+  from the first held event. After that, the held events and every later `in_progress` event are forwarded, and the
+  attempt is committed (§9.1).
 - **During a cold model load or a queue wait: nobody sends anything.**
   - SSE comments do not reset Codex's timer [infer, §5.3]. That covers the router's 5 s `: keepalive` and
     llama.cpp's 30 s `:` pings alike.
@@ -1417,8 +1438,8 @@ template digest match it.
     - Set the advertised window **and** `model_auto_compact_token_limit` against **concurrent** capacity: at most
       half the pool per session, minus output headroom.
     - Qualify automatic compaction and continuation **with both slots occupied**.
-    - Until that passes, translated replay stays bounded (`lastTurns`). Native waits, or runs with
-      `reasoning-window`;
+    - Until that passes, translated replay stays bounded (`lastTurns`) and native waits. The router has no
+      native-side bound (§8.2);
   - **the rollback-safety fix** (Step 3 d2) and its bidirectional tests (§10.4);
   - **an explicit decision on Codex's `namespace` tools** (§9.6): `allowLoss: ['tool:namespace', 'tool:web_search']`
     on this wire (today's behaviour, made explicit), or wait for llama.cpp #31568;
@@ -1519,11 +1540,13 @@ the bridge; after that it is the translated path's permanent behaviour.
    - **The template cannot bound it.** `preserve_thinking=false` keeps the reasoning of every assistant turn after
      the last user message (`chat_template.jinja:119`, `loop.index0 > ns.last_query_index`). In a Codex agent
      session, every assistant turn comes after that message, so it strips nothing.
-   - **So the router owns the bound,** as the declared `reasoning-window` mutation (§8.1 rule 5's one exception).
+   - **So, on the translated path, the router owns the bound,** as the declared `reasoning-window` mutation (§8.1
+     rule 5's one exception).
      Start at `lastTurns: 1`, the measured arm. Larger N is unmeasured; raise it only with a probe arm.
    - **Native wires need their own bound.** llama.cpp's `/v1/responses` replays every block, which is the same
-     growth. There, Codex auto-compaction against concurrent capacity comes first; `reasoning-window` on the native
-     wire is the fallback (Step 6).
+     growth. There, the bound is Codex auto-compaction against concurrent capacity (Step 6). The router does not
+     delete items from a native body (§7.2, §8.2). If compaction cannot be qualified, that model stays translated
+     with `lastTurns`.
    - **The context gate is a blocker** (codex review, §14).
      - The dev workers advertise 262,144 tokens for flash-next (`ansible/roles/dev_worker/defaults/main.yml:150`).
        That is the whole two-slot pool, so two sessions at ~135k overflow it.
@@ -1591,7 +1614,7 @@ What it shows:
   (48.7k vs 192.5k), for a finished task against an unfinished one.
 - **Replaying everything still grows the context** (135k peak with one slot). Native on cloud3 therefore needs the
   context gate in Step 6: the advertised window and compaction set against concurrent capacity and qualified with
-  both slots busy, else `reasoning-window`.
+  both slots busy. Otherwise the model stays translated, with `lastTurns`.
 
 ---
 
@@ -1614,7 +1637,8 @@ What it shows:
     - the dev workers' advertised window and auto-compaction threshold are set against concurrent capacity (today
       262,144 is advertised, the whole two-slot pool);
     - compaction qualifies with both slots occupied;
-    - `reasoning-window` is the fallback.
+    - there is no router-side bound on native paths. If compaction does not qualify, the model stays translated
+      with `lastTurns`.
 
     This is a **rollout blocker** (codex review).
   - The template's `preserve_thinking` is not the bound (it strips nothing in agent sessions), and effort is not the
@@ -1641,6 +1665,11 @@ What it shows:
 | 8 | vLLM: `response.completed` with `status: incomplete`; vLLM does merge function calls | Important | §5.2, §5.4, §7.3 tap, §10.1, Step 5 |
 | 9 | Capture is bounded and redacted, not replayable | Important | §8.1 rule 6, §9.5 (completeness label, separate encrypted diagnostic mode) |
 | 10 | Critical path: settled items, a short-test gate, a shorter-timeout idle test, plan artifact, continuation and clean retries; a thin native path first | Important | §11 (settled, critical path, short-test gate), Step 6 items and pass criteria |
+
+**reviewer-claude, round 2 on PR #1599** (three findings, all addressed):
+- the live qualification check never triggers a model load (§7.1);
+- `reasoning-window` is restricted to translated wires (§8.1 rule 5, §8.2, §12, §13 D6, Step 6);
+- the `holdMs` clock and the commit boundary are defined (§7.3 rule 2, §9.4).
 
 **Not independently verified by the review**, and still open:
 - the deployed template behaviour;
