@@ -37,8 +37,11 @@ flash-next delivering:
 The investigation's working files are in `scratchpad\flashnext-plan-investigation\` under the e658dfd6a74824ef temp
 root. A replay probe straight against llama-swap is testing the hypothesis now.
 
-qwen3.8-27b shows the same pattern: "verify the citations, then write the plan", several times per run. It gets out of
-the loop only because its decode is 2.5-2.8× faster (below).
+qwen3.8-27b shows the same pattern: "verify the citations, then write the plan", several times per run. It still
+delivers. **One hypothesis is that it escapes because its turns are 2.5-2.8× faster** (below). These runs do not show
+that. The two models chose their own prompts and reasoning paths, so speed is not isolated as the cause, and nothing
+here shows that a faster flash-next would deliver. The controlled probe and the reruns after the fix are what test
+it.
 
 **Recommendation:**
 
@@ -89,11 +92,12 @@ The pattern is the same in every run:
   tokens each, mostly reasoning. One turn therefore took 6-8 minutes, and a 90-min run fitted only 42-52 requests.
   qwen3.8-27b made 60-83 requests in 25-43 min.
 - **Same thoroughness, much slower turns.** Both models spend most of their tokens thinking, and both re-verify
-  citations. qwen ran the same "final checks" at ~2.5-2.8× flash-next's decode rate, so it finished.
-- **Consistent with the hypothesis.** Each turn's prompt grows only by the tool output, not by the 3k-6k reasoning
-  tokens the previous turn produced. So the reasoning behind the design is gone at the next turn, and the model
-  re-derives it. A model that takes 6-8 minutes a turn cannot recover from that within the cap; qwen at 2-3 min a turn
-  can.
+  citations. qwen ran the same "final checks" at ~2.5-2.8× flash-next's decode rate, and finished. That speed is the
+  reason is a hypothesis, not a finding (see the decision section).
+- **Consistent with the investigation's hypothesis.** Each turn's prompt grows only by the tool output, not by the
+  3k-6k reasoning tokens the previous turn produced. So the reasoning behind the design is gone at the next turn, and
+  the model may be re-deriving it. A plausible but untested reading: at 6-8 minutes a turn flash-next cannot make that
+  up within the cap, and qwen at 2-3 minutes a turn can.
 - **Not yet known:** whether it is that, the forced effort, or the model itself. That is what the probe and the rerun
   after the fix will show.
 
