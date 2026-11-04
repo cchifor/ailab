@@ -604,8 +604,10 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     runner that is still failing has not restarted since the damage: `sudo systemctl restart
     gitea-act-runner` (drains a live job).
   - *Confirm by hand:* as `runner`, `git -C work/<hash> for-each-ref` lists nothing on the broken clone,
-    and `sudo find /home/runner/act-runner/work -maxdepth 4 -path '*/.git/objects/pack/*' -size 0` names
+    and `sudo find /home/runner/act-runner/work -maxdepth 5 -path '*/.git/objects/pack/*' -size 0` names
     the empty files. `remote.origin.url` in the clone's `.git/config` says which action it is.
+    The reclaim also catches a pack that is non-empty but cut short: a pack's last 20 bytes must equal the
+    20 bytes before the last 20 of its `.idx`.
 - **Jobs that install system packages fail at once on ONE runner with `E: dpkg was interrupted, you must
   manually run 'sudo dpkg --configure -a' to correct the problem`** (e.g. `npx playwright install --with-deps`;
   the same job passes on a rerun that lands elsewhere): an unattended-upgrade on that guest was cut off

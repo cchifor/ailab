@@ -217,20 +217,30 @@ apply_cache_purges() {
 # failed in 1-2 s with "Unable to resolve v5: reference not found". Every other job passed, and the
 # other runners' copies were fine. A reboot or service restart does not fix it; deleting the clone
 # does, because act re-clones a missing action on its next use.
-# The checks are file sizes only: no git, no network. They would flag a clone that a LIVE job is
+# The checks are file sizes plus each pack's 20-byte trailer against its .idx: no git, no network.
+# They would flag a clone that a LIVE job is
 # fetching (its files are legitimately short mid-write), which is why the timer tick never runs this.
 # Root deletes here as it does in reclaim_ws: a symlinked clone dir or .git is skipped, and rm never
 # follows a symlink inside the tree.
 action_clone_fault() {   # <clone dir> -> prints the first fault and returns 0; returns 1 when healthy
-  local g="$1/.git" f
+  local g="$1/.git" f i hl=20
   [ -s "$g/HEAD" ] || { echo "HEAD missing or empty"; return 0; }
   [ ! -e "$g/index" ] || [ -s "$g/index" ] || { echo "empty index"; return 0; }
   # The smallest valid files: a v1 .idx of an empty pack is 1064 bytes (v2: 1072), a .pack 32.
   f="$(find "$g/objects/pack" -maxdepth 1 -type f \( \( -name 'pack-*.idx' -size -1064c \) \
         -o \( -name 'pack-*.pack' -size -32c \) \) -print -quit 2>/dev/null)"
   [ -z "$f" ] || { echo "truncated $(basename -- "$f") ($(stat -c %s -- "$f" 2>/dev/null) bytes)"; return 0; }
+  # A pack ENDS with its own checksum, and its .idx stores that same checksum just before the idx's
+  # own one (both index versions). A pack or idx cut short or zero-filled at the end by a partial
+  # writeback no longer agrees: 2 x 20 bytes read per pair. A sha256 repo has 32-byte checksums.
+  grep -qiE '^[[:space:]]*objectformat[[:space:]]*=[[:space:]]*sha256' "$g/config" 2>/dev/null && hl=32
   for f in "$g"/objects/pack/pack-*.pack; do
-    [ -e "$f" ] && [ ! -e "${f%.pack}.idx" ] && { echo "pack without index: $(basename -- "$f")"; return 0; }
+    [ -e "$f" ] || continue
+    i="${f%.pack}.idx"
+    [ -e "$i" ] || { echo "pack without index: $(basename -- "$f")"; return 0; }
+    [ "$(tail -c "$hl" -- "$f" 2>/dev/null | od -An -v -tx1 | tr -d ' \n')" \
+      = "$(tail -c $((2 * hl)) -- "$i" 2>/dev/null | head -c "$hl" | od -An -v -tx1 | tr -d ' \n')" ] \
+      || { echo "pack checksum does not match its index: $(basename -- "$f")"; return 0; }
   done
   for f in "$g"/objects/pack/pack-*.idx; do
     [ -e "$f" ] && [ ! -e "${f%.idx}.pack" ] && { echo "index without pack: $(basename -- "$f")"; return 0; }

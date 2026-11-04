@@ -196,6 +196,16 @@ if command -v git >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
   : > "$H_INC/.git/objects/pack/pack-1325e63fb086dde836fd9f643e127e0f5109a3f8.idx"
   H_NOIDX="$WSROOT/$(hexid noidx)"; mk_clone "$H_NOIDX"
   rm -f "$H_NOIDX"/.git/objects/pack/pack-*.idx
+  # A partial writeback: the pack is non-empty but cut short (its idx intact), or its tail zero-filled.
+  H_SHORT="$WSROOT/$(hexid shortpack)"; mk_clone "$H_SHORT"
+  for p in "$H_SHORT"/.git/objects/pack/pack-*.pack; do
+    sz=$(stat -c %s "$p"); chmod u+w "$p"; truncate -s $((sz / 2 > 32 ? sz / 2 : 32)) "$p"
+  done
+  H_ZERO="$WSROOT/$(hexid zerotail)"; mk_clone "$H_ZERO"
+  for p in "$H_ZERO"/.git/objects/pack/pack-*.pack; do
+    sz=$(stat -c %s "$p"); chmod u+w "$p"
+    dd if=/dev/zero of="$p" bs=1 seek=$((sz - 20)) count=20 conv=notrunc status=none
+  done
   H_REF="$WSROOT/$(hexid emptyref)"; mk_clone "$H_REF"; : > "$H_REF/.git/refs/tags/v5"
   H_OBJ="$WSROOT/$(hexid emptyobj)"; mk_clone "$H_OBJ"
   mkdir -p "$H_OBJ/.git/objects/ab"; : > "$H_OBJ/.git/objects/ab/cdef0123456789abcdef0123456789abcdef01"
@@ -218,10 +228,15 @@ if command -v git >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
   [ ! -e "$H_INC" ] && ok "H: the incident clone (empty pack + idx) is dropped" || bad "H: the incident clone survived"
   grep -q "logger .*dropped corrupt action clone $(hexid incident) ($H_URL): truncated pack-1325e63f" "$CALLS" \
     && ok "H: the drop is logged with the action URL and the reason" || bad "H: no drop log line naming URL and reason"
-  for c in "$H_NOIDX:pack without index" "$H_REF:empty ref" "$H_OBJ:empty loose object" "$H_HEAD:empty HEAD"; do
+  for c in "$H_NOIDX:pack without index" "$H_SHORT:pack cut short, idx intact" "$H_ZERO:pack trailer zero-filled" \
+           "$H_REF:empty ref" "$H_OBJ:empty loose object" "$H_HEAD:empty HEAD"; do
     [ ! -e "${c%%:*}" ] && ok "H: dropped (${c#*:})" || bad "H: not dropped (${c#*:})"
   done
-  [ -d "$H_JOB/.git" ] && ok "H: a job workspace's private action copy is not touched" || bad "H: walked into a job workspace"
+  grep -q "pack checksum does not match its index" "$CALLS" \
+    && ok "H: a short pack is named as a checksum mismatch" || bad "H: no checksum-mismatch log line"
+  # Only the 64-hex children of the workdir are action clones: the drop never names the job's copy.
+  grep -q "dropped corrupt action clone $(hexid jobcopy)" "$CALLS" \
+    && bad "H: dropped a job workspace's private action copy" || ok "H: a job workspace's private action copy is not dropped"
   [ -L "$H_LNK" ] && [ -d "$H_TGT/.git" ] && ok "H: a symlinked clone dir is skipped, its target untouched" \
     || bad "H: followed a symlinked clone dir"
   rm -rf "$H_OK" "$H_JOB" "$H_TGT" "$H_LNK" "$WSROOT/b00895e93c932aa8"
