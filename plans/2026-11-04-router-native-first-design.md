@@ -57,7 +57,22 @@ A further finding changes the picture: **llama.cpp b12020's own `/v1/responses` 
 translator gets wrong.** They map replayed reasoning items to `reasoning_content`, `reasoning.effort` to the
 template, and stream reasoning as Responses events (§5).
 
-**What changes first.** The changes are small and reversible, in this order (§11):
+**It is measured.** On P1, Codex 0.166 straight to llama.cpp's `/v1/responses` delivered the plan at 15.4 min. Through
+the router it delivered nothing in 90 min. Native works. Because llama.cpp replays every reasoning block, the
+context still grows, so native on cloud3 needs a context bound (§12.1).
+
+**The owner decided D1-D6 on 2026-11-04** (§13): adopt this design; forward unknown fields; return the served model
+name; translate only through qualified translators on agent routes; fix the template instead of merging system
+messages; bound reasoning replay at the router.
+
+**Codex cross-validation: adopt with changes** (§14). The rollout is gated on three things:
+- context capacity: the advertised window is today the whole two-slot pool;
+- enforced, not descriptive, qualification;
+- a rollback that resumed sessions survive.
+
+A thin native Responses path comes first (§11, critical path).
+
+**What changes.** The changes are small and reversible (§11, which also gives the shorter critical path):
 1. a golden round-trip suite that pins today's behaviour;
 2. a mutation registry and journal event;
 3. stopping today's silent drops;
@@ -66,10 +81,11 @@ template, and stream reasoning as Responses events (§5).
    is qualified;
 6. chat-client pass-through.
 
-**The in-flight stopgap** (`Account.replayReasoning` plus `Account.reasoningEffort`) fits this direction. Keep it, with
-two adaptations, as the translator's fix for replayed reasoning and effort:
-- `pass` becomes the default for local accounts;
-- the context-growth risk is handled at the server template, not in the router (§12).
+**The stopgap** (llm-router #135/#136, merged, not yet released) fits this direction. It adds
+`replayReasoning: boolean | {lastTurns: N | 'all'}` and `reasoningEffort`. Keep it as the translator's fix (§12):
+- **Replay bounded by `lastTurns`.** The template cannot bound replay in an agent session, and replaying every block
+  overflows cloud3's pool.
+- **Effort is not used for this.** `medium` did not change the outcome.
 
 It is not the end state for Codex on llama.cpp: the native path replaces it there.
 
@@ -99,15 +115,14 @@ The flash-next evidence for #2 is in `scratchpad/flashnext-plan-investigation/`:
   reports `supports_preserve_reasoning: true` for this template (`props.json`). When the router drops the reasoning,
   the model therefore does not merely lose its earlier reasoning. It sees **an empty `<think></think>` on every past
   turn**, which is a strong in-context signal in its own right. That rendering is a side effect no one chose.
-- **Probe.** The replay A/B probe (`out/results.jsonl`) completed phase A at 17:04Z. These are its results at the
-  decision point K=46; other phases are still running:
+- **Probe.** These are the replay A/B probe's results at the decision point K=46:
 
   | Arm | Committed the plan | Reasoning before acting |
   |---|---|---|
   | `asis` (reasoning dropped, as the router sends it) | 1/6 | 48-233 s |
-  | `last1` (last block restored) | 5/6 | 1.2-3.2 s |
+  | `last1` (last block restored) | **6/6** | 1.2-3.2 s |
 
-  The arms' thinking times do not overlap at all. Details and caveats are in §12.1.
+  The arms' thinking times do not overlap at all. Details, caveats and the direct-path run are in §12.1.
 
 ---
 
@@ -123,11 +138,11 @@ These are the router's own jobs. None of them requires changing what the model s
 | Failover before first output | upstream events (read) | No. It holds back lifecycle events (`codex.ts:439-446`), a timing change, not a content change. |
 | Admission queue, concurrency, busy 429 | nothing | No |
 | Budgets, quota windows, usage | `usage` in the response (read) | Chat streams need `stream_options.include_usage` upstream (§9.3). |
-| Output-limit enforcement (Codex only) | visible output (read) | Truncates the stream; declared (`x-router-output-limit`) |
+| Output-limit enforcement (only for the `codex` **provider**, whose API has no output limit) | visible output (read) | Truncates the stream; declared (`x-router-output-limit`; §8.2 `output-limit-cut`) |
 | Journal, telemetry, `explain_request` | everything (read) | No |
 | Vision / tools / Assistant / image-model gates | facts about the request: images, tools, agent id (read) | No |
 | Progress keepalives (#131) | nothing | Adds events to the stream (§9.4) |
-| Drain | nothing | Cuts the stream without a terminal event (deliberate: Codex reconnects) |
+| Drain | nothing | Cuts the stream without a terminal event (deliberate: Codex reconnects; §8.2 `drain-cut`) |
 
 The only body change routing **requires** is the model name. Everything else the router does to a body today is a
 translation choice, a compatibility workaround, or a bug.
@@ -186,7 +201,7 @@ and the route is not Codex-native.
 | **"Neutral" values dropped, never disclosed:** `top_p: 1`, penalties `0`, `parallel_tool_calls: true`, `tool_choice: "auto"` | `:109-118`, `:148` | **no** | **R.** "Neutral" means OpenAI's default, not the upstream's: llama.cpp's default `top_p` is 0.95 (README; cloud3's flash-next runs `--top-p 0.95`), so a client's explicit `top_p: 1` silently becomes 0.95. `parallel_tool_calls` has no documented llama.cpp default (it is verified against the template), so dropping `true` is not provably neutral. P. |
 | `reasoning_effort` dropped for `local` | `:54`, `:153` | `x-router-ignored-params` + journal | **R: bug #3.** The table is stale: llama.cpp documents `reasoning_effort` ("the value is made available to the jinja template"), and the template lists `reasoning_effort_levels: [low, medium, xhigh]`. P. |
 | Account `params.drop` / `params.reject` | `:144-149` | journal + header | **N: the right model** (explicit, per account, opt-in, disclosed) |
-| `systemMessages: merge` folds every system/developer message, in order, into one leading system message, moving mid-conversation text to the head | `:182-189`, `:200` | `x-router-adapted: system-messages-merged` | N for the current GGUF template, but lossy (position changes meaning). Better fixed at the server's template (§10.3). |
+| `systemMessages: merge` folds every system/developer message, in order, into one leading system message, moving mid-conversation text to the head | `:182-189`, `:200` | `x-router-adapted: system-messages-merged` | Needed only for the current GGUF template, and lossy (position changes meaning). **D5: retired** once the cloudlab template fix lands (§10.3). |
 | `tool_choice` / `parallel_tool_calls` removed without tools | `:122-126` | no | N (they mean nothing without tools) |
 
 **Chat adapter.** `chatcompletions.ts`, with `common.ts` for message conversion.
@@ -206,7 +221,7 @@ and the route is not Codex-native.
 | Mutation | Where | Disclosed? | Class |
 |---|---|---|---|
 | Only reasoning (opt-in), content, refusal, tool_calls, finish and usage are read; everything else is dropped (llama.cpp `timings`, `prompt_progress`, annotations, logprobs, vendor fields) | `:251-268`, `:296-312` | no | P |
-| **Unknown `finish_reason` → `"stop"`** | `:99-113` | no | **R** (silent; an `error`/`abort` would read as a normal stop) |
+| **Unknown `finish_reason` → `"stop"`** | `:99-113` | no | **R** (silent, and the raw value is lost; an `error`/`abort` would read as a normal stop) |
 | Upstream error bodies hidden; three template sentences recognised | `:181-204` | router sentence | N for the journal; P for the client (it is the client's own conversation) |
 
 **Responses synthesis.** `api-openai/index.ts`.
@@ -571,7 +586,11 @@ That gives the operator a server-side, declared place for per-model request defa
 **Stream and state [src].**
 - `response.created`, `in_progress`, `output_item.*`, `content_part.*`, `output_text.*`,
   `function_call_arguments.delta/done` and `response.completed` with usage and `sequence_number`.
-- **The terminal event is always `response.completed`, even when the status is `incomplete`.**
+- **The terminal event is always `response.completed`, even when the status is `incomplete`.** On length exhaustion
+  the enclosed `response.status` is `incomplete`. A tap that reads only the event type, as today's Codex tap does,
+  records a `stop`; the tap must read the payload's status and `incomplete_details` (codex review, §14).
+- **A reply's function calls merge into the preceding assistant message:** confirmed in source by the codex review.
+  The real-template render check stays.
 - **The final response re-parses the output, so its item ids differ from the streamed ones.** PR #56285 (open)
   reports the Codex conformance suite failing 11/26 cases on another model's path [issue].
 - `store` is forced to false unless `VLLM_ENABLE_RESPONSES_API_STORE=1` (an in-memory store that is never
@@ -629,17 +648,17 @@ PR #57522 is documenting this for Codex [issue].
   particular:
   - reasoning replay into `reasoning_content` (bug #2);
   - effort → template kwargs (bug #3);
-  - merging contiguous assistant items (bug #4): verified for llama.cpp (#19773, `merge_prev`). **Not verified for
-    vLLM 0.28.** Bug #4 was measured on cloud2's vLLM. If vLLM's Responses converter emits a `message` item and its
-    `function_call` items as two assistant messages, native vLLM would bring the early stops back. Step 5 must
-    render-check it;
+  - merging contiguous assistant items (bug #4): llama.cpp (#19773, `merge_prev`); vLLM 0.28 merges function calls
+    into the preceding assistant message too (confirmed in source by the codex review). Step 5 still render-checks it
+    with the real template;
   - reasoning streamed as Responses events (bug #1).
 - **What neither does well:**
   1. `namespace` / `custom` / `web_search` tools: silently dropped (llama.cpp; vLLM 0.28 custom), a 400 (vLLM 0.32
      grammar custom), or supported (vLLM namespaces).
   2. Foreign item types, `additional_tools` and encrypted or content-less reasoning: 400s.
   3. Mid-conversation system/developer messages under Qwen templates: a template raise.
-  4. No `response.incomplete`; truncation reported as `completed`.
+  4. No `response.incomplete`. llama.cpp reports truncation as `completed`. vLLM sends `response.completed` with
+     `status: incomplete`, so its payload says so.
   5. llama.cpp: `text.format` ignored; untyped mid-stream errors.
 - **None of these needs the router to rewrite the body for the common case.** They need the router to **know**
   them:
@@ -656,8 +675,8 @@ PR #57522 is documenting this for Codex [issue].
 | Option | What it is | For | Against | Verdict |
 |---|---|---|---|---|
 | **A. Normaliser (today)** | One canonical request type (`InferenceRequest`). Every client protocol is parsed into it, and every adapter rebuilds its wire body from it (LiteLLM's unified API, Portkey, OpenRouter). | One engine; any client can reach any target; heterogeneous failover is trivial. | Every field the canonical type lacks is dropped or refused. Every client feature needs code. The bug class of §1 and §3 is structural: the router changes the prompt the model sees. The research (§4) shows the same failures in mature normalisers. | Reject as the primary path; keep as the fallback |
-| **B. Native-first, translate as fallback** | Forward the client's body verbatim when the target speaks its protocol; translate only otherwise, under a fidelity contract | Zero translation where it matters most (Codex → llama.cpp/vLLM Responses; chat clients → chat servers). Routing jobs unaffected. New upstream features reach clients with no router change. Same shape as the existing Codex-native path. | Two paths to maintain. Gates must read native bodies. Failover is limited to targets of the same protocol, or to a qualified translator. Upstream converters (llama.cpp's Responses → chat) have their own gaps. | **Recommended** |
-| **C. Pure pass-through, never translate** | Helicone- or Cloudflare-style: a route is pinned to one protocol; a mismatch is a 400 | No mutation at all; simplest | The Assistant and internal callers speak the canonical type; there is no Codex on an upstream without a usable Responses API (vLLM's non-harmony path may be one, §5.2); no heterogeneous fallback | Reject; but B must be able to run in C's mode per route (`translate: never`) |
+| **B. Native-first, translate as fallback** | Forward the client's body verbatim when the target speaks its protocol; translate only otherwise, under a fidelity contract | Zero translation where it matters most (Codex → llama.cpp/vLLM Responses; chat clients → chat servers). Routing jobs unaffected. New upstream features reach clients with no router change. Same shape as the existing Codex-native path. | Two paths to maintain. Gates must read native bodies. Failover is limited to targets of the same protocol, or to a qualified translator. Upstream converters (llama.cpp's Responses → chat) have their own gaps. | **Recommended; adopted (D1)** |
+| **C. Pure pass-through, never translate** | Helicone- or Cloudflare-style: a route is pinned to one protocol; a mismatch is a 400 | No mutation at all; simplest | The Assistant and internal callers speak the canonical type; there is no Codex on an upstream without a usable Responses API (vLLM's non-harmony path may be one, §5.2); no heterogeneous fallback | Reject; but B must be able to run in C's mode per route (`translate: 'never'`) |
 | **D. Put a translating proxy (LiteLLM) in front of the local servers** | The router stays a pure router; LiteLLM does Responses → chat | Moves code out of the router | The translation bugs move with it (§4.1: LiteLLM's bridge split choices and dropped `additional_tools` in earlier releases, and #27276 on tool names and tool types is open); an extra hop, extra config and an extra failure domain; the router can no longer see or gate the content | Reject |
 | **E. Let the upstream translate** (a variant of B) | Forward Responses to llama.cpp's own `/v1/responses`, which converts to chat internally, next to its template, reasoning parser and tool parser | The converter is maintained by the people who own the template machinery, and maps reasoning input items to the template's `reasoning_content` (§5.1) | Its fidelity is version-dependent (b12020 vs latest), and its gaps are now the router's problem to detect | **Adopt within B** for llama.cpp, gated by the same golden suite as any translator |
 
@@ -669,8 +688,8 @@ what has no native path. Today that is the Assistant and internal callers (canon
 upstream whose Responses API fails the golden suite.
 
 **Why B over C.** C would break the Assistant (canonical request type), and Codex on vLLM if vLLM's Responses path
-does not qualify for Qwen tool calling. B with `translate: never` on a route gives C's guarantee where the owner wants
-it.
+does not qualify for Qwen tool calling. B with `translate: 'never'` on a route gives C's guarantee where the owner
+wants it. `translate: 'qualified'` (D4, for the dev-worker agent routes) allows only qualified translators.
 
 ---
 
@@ -687,16 +706,46 @@ wire?: Array<{
   models: string[];                  // which of the account's models this applies to ('*' allowed)
   protocol: 'responses' | 'chat';    // a protocol the upstream speaks natively
   path?: string;                     // default '/responses' or '/chat/completions' under baseUrl
-  mutations?: DeclaredMutation[];    // the ONLY changes allowed besides `model` (see §8.2)
-  qualified?: string;                // the golden-suite run that qualified it (journal id / date), for audit
+  mutations?: DeclaredMutation[];    // OPT-IN mutations, beyond the wire kind's defaults (§8.1 rule 2, §8.2)
+  holdMs?: number;                   // the hold rule's window (§7.3 rule 2); absent = hold until the first other event
+  allowReserved?: string[];          // operator-reserved fields this wire lets through (§7.2)
+  allowLoss?: string[];              // known losses this wire may serve anyway, each named (e.g. 'tool:namespace')
+  qualification: QualificationRef;   // REQUIRED: the manifest entry below; a wire without a matching one is inert
 }>;
+// Qualification manifest (versioned with the golden suite; one entry per path a target can take)
+interface Qualification {
+  path: 'native' | 'translated'; protocol: 'responses' | 'chat';
+  backend: string;                   // e.g. 'llama.cpp b12020' / 'vllm 0.28.0' (read from /props, /version)
+  model: string; templateDigest: string;     // sha256 of the template the server reports
+  translator?: string;               // translated path: contract version + account settings (replayReasoning, ...)
+  supports: string[];                // features that passed: item and tool kinds, text.format, reasoning shapes, non-streaming
+  losses: string[];                  // features known to be dropped or degraded (e.g. 'tool:namespace', 'text.format')
+  run: string;                       // the qualifying run (journal id, date)
+}
 // RoutePolicy (new, optional)
-translate?: 'allow' | 'never';       // never: a target whose wire lacks the client's protocol is skipped (C's guarantee)
+translate?: 'any' | 'qualified' | 'never';
+  // any (today's behaviour, the default during migration): any translator;
+  // qualified (D4: the dev-worker agent routes): only a translator with a matching manifest entry; a target needing an
+  //   unqualified one is skipped, and with none left the request is refused loudly (400, naming the pair);
+  // never: a target whose wire lacks the client's protocol is skipped (C's guarantee)
+nativeWires?: boolean;               // route-scoped activation (canary isolation): an account's `wire` entries take
+                                     // effect only on routes that set this; absent = translated, as today
 ```
 
+**Qualification is enforced, not descriptive.** A target is eligible for a request only when all three hold:
+- a manifest entry matches the target's live backend, model and template digest (and, translated, the translator
+  configuration);
+- every feature the request's facts name (§9.6) is in `supports`;
+- no feature it names is in `losses`, unless the wire's `allowLoss` names that exact loss.
+
+Otherwise the target is skipped with a named reason: `unqualified`, `feature_unsupported:<kind>`,
+`protocol_unavailable` or `translation_unsupported:<field>`. Each new reason joins `PERMANENT` and `REQUESTED` in
+`compat/index.ts:95` (`origin/main` `247b19f`), so that when no target remains, the engine returns the loud 400 and not
+a capacity error. A backend or template change (a new digest) unqualifies the wire until Step 5 re-runs.
+
 The existing Codex mechanism (`RoutePolicy.native: ['codex-responses']`, `ProviderSupport.native`) becomes one case of
-this: the codex provider declares `wire: [{models:['*'], protocol:'responses'}]` implicitly. The route-level `native`
-setting stays as a compatibility alias during migration.
+this: the codex provider declares `wire: [{models:['*'], protocol:'responses'}]` implicitly, with its own manifest
+entry. The route-level `native` setting stays as a compatibility alias during migration.
 
 ### 7.2 Request flow
 
@@ -729,31 +778,106 @@ Three properties matter:
   - `n` (1; budgets);
   - `store` and `previous_response_id` / `conversation` / `background` (no server-side state, as
     `parseNativeResponses` does today);
-  - body size.
+  - body size;
+  - **operator-reserved fields** (below).
 
-  Anything else goes through untouched, and the upstream validates it.
+  Anything else goes through untouched, and the upstream validates it (D2).
+
+  **Operator-reserved fields.** Forwarding unknown fields (D2) would also let a caller set fields that steer the
+  server's own state, its scheduling or the response shape the tap reads. Each wire kind therefore has a default
+  denylist. A request carrying any of these fields is refused by name (400). They are not stripped; an operator may
+  allow one per wire.
+  - **llama.cpp** (server README, `/completion` options, which the chat and Responses paths share):
+    - slot and cache state: `id_slot`, `cache_prompt`, `n_cache_reuse`, `n_keep`;
+    - adapters: `lora`;
+    - extra or unbounded work: `n_cmpl`, `ignore_eos`, `t_max_predict_ms`;
+    - response shape and diagnostics: `n_probs`, `post_sampling_probs`, `return_tokens`, `response_fields`,
+      `timings_per_token`, `sse_ping_interval`;
+    - out-of-band control: `reasoning_control`, which arms `/v1/chat/completions/control`.
+
+    The same keys are denied inside `extra_params` (b12110) as well. On b12020 any top-level key reaches llama
+    params (§5.1).
+  - **vLLM** (its documented extra request parameters; verify the list against 0.28 in Step 5):
+    - scheduling and caching: `priority`, `request_id`, `cache_salt`, `kv_transfer_params`, `vllm_xargs`;
+    - **template replacement and render controls**, which D5 makes server policy: `chat_template`,
+      `add_generation_prompt`, `continue_final_message`, `add_special_tokens`, `echo`;
+    - response shape: `return_token_ids`, `return_tokens_as_token_ids`, `prompt_logprobs`;
+    - custom processors: `logits_processors`.
+  - **Not reserved by default:** sampling controls (`top_k`, `min_p`, `repeat_penalty`, …), `grammar` /
+    `json_schema`, `chat_template_kwargs` and `reasoning_effort`. These are the client features pass-through exists
+    for. An operator who wants a fixed thinking policy reserves `chat_template_kwargs` on that wire.
+
+  The router itself sets `return_progress` (§9.4), so it is not reserved: a client value is the same request.
+- **The upstream body is the client's bytes, patched.** Today the Codex adapter parses the body and re-serialises it
+  with `JSON.stringify` (`codex.ts:471`), and that does not preserve the bytes. The native adapter instead:
+  - keeps the bounded original request buffer;
+  - applies each declared request mutation as a byte-level patch of that one field (`model`, `return_progress`),
+    as Envoy does with `sjson` (§4.5);
+  - leaves every other byte as received.
+
+  The parsed object serves facts and routing only. `RouterHttp.preserveRawBody` today refuses registrations above
+  2 MiB (`kernel/http.ts:99-101`), so it must take native-sized bodies, bounded by §9.2's reservations.
+- **Body size and admission are specified, not inherited** (§9.2).
 
 ### 7.3 Response flow: verbatim stream, observing tap
 
-The upstream's bytes go to the client as they come. A tap parses the SSE events in parallel (the Codex path already
-does this: `codex.ts:489-521`) and extracts what the router needs:
-- usage: `response.completed.usage`, or the chat usage chunk;
-- the finish reason;
-- first output: the first output item or delta, which is the failover boundary;
-- error codes;
-- reasoning/text/tool character counts for the journal.
+**Streaming.** The upstream's bytes go to the client as they come.
+- **One read loop, governed by downstream backpressure.** The loop reads an upstream chunk, passes it through the
+  tap, writes it, and awaits drain before it reads again. There is no parallel tap and no unbounded buffer.
+- **Frames are forwarded as received.** The tap delimits SSE frames over the raw bytes, with bounded per-frame
+  buffers, and parses a copy. Unlike today's `sendRaw` (`api-openai:485`), which rebuilds each frame from the parsed
+  event and loses the original framing and fields such as SSE `id:`, the frame goes out as received.
+- **The tap extracts what the router needs:**
+  - usage: `response.completed.usage`, or the chat usage chunk;
+  - the finish reason, **read from the terminal payload's `status` / `incomplete_details`, not only its event type**
+    (vLLM sends `response.completed` with `status: incomplete`, §5.2). A finish that cannot be trusted
+    (llama.cpp's hardcoded `completed`) is journaled as uncertain;
+  - first output: the first output item or delta, which is the failover boundary;
+  - error codes;
+  - reasoning/text/tool character counts for the journal.
 
 It never writes. The only permitted differences between upstream bytes and client bytes are:
 1. SSE comments (`: ok`, `: keepalive`), which every SSE parser ignores;
-2. holding lifecycle events (`response.created`/`in_progress`/`queued`) until the first other event, so a failure
-   before output can fail over (a timing change, as today);
+2. holding the upstream's lifecycle events at the start of the stream, so a failure before anything reached the
+   client can fail over (a timing change). This is the **hold rule**, defined once here and used by §9.1 and §9.4:
+   - **What is held:** the stream's leading `response.created`, `response.queued` and `response.in_progress`
+     events, in order, while nothing has been flushed.
+   - **When the hold ends:**
+     - on the first other event, which is today's Codex rule and the only rule on the `codex` wire;
+     - or, on a wire that declares `holdMs`, when the hold has lasted `holdMs`.
+
+     The llama.cpp responses wire declares `holdMs: 30000`. That is below Codex's 300 s idle timer with ample room,
+     and it is how `return_progress`'s prefill events reach Codex during a long prefill.
+   - **When the hold ends,** the held events are flushed in order, and every later event, `in_progress` included,
+     is forwarded as it comes.
+   - **The flush is the failover boundary:** once anything reached the client, the attempt is committed and is no
+     longer failed over (§9.1).
+
+   A failure before output on llama.cpp is almost always an HTTP error before any event (a refused connection, a
+   loading 503, a template 400/500), so the 30 s window still covers the failovers that matter.
 3. a router-originated terminal event when the router itself ends the stream (timeout, budget, client gone), or
    after an upstream error that is not a protocol event (llama.cpp's untyped `data: {"error":…}`, §5.1), and only
    when the upstream sent no terminal event;
-4. declared response mutations (§8.2), each opt-in, e.g. `overload-code` (today's `server_is_overloaded` rewrite).
+4. the declared response mutations of §8.2 that apply to the wire, e.g. `overload-code` (today's
+   `server_is_overloaded` rewrite), `output-limit-cut` and `drain-cut`.
 
 A test asserts this per protocol: strip comments and the declared mutations from the client stream, and the result
-must equal the upstream stream byte for byte.
+must equal the upstream stream byte for byte. The same suite covers:
+- fragmented UTF-8 across chunks;
+- multiline `data:` frames and frames with `id:` / `retry:`;
+- a slow reader (backpressure holds the upstream read);
+- a client disconnect;
+- shutdown and drain cleanup.
+
+**Non-streaming** (`stream: false`, both protocols). Today the router always synthesises a new response object, with
+the requested alias as `model` (`api-openai:445`), which conflicts with D3. On a native wire instead:
+- the upstream's status code, `content-type` and JSON body go to the client as received;
+- the body is bounded by today's 8 MiB non-streaming cap, beyond which the router returns 502;
+- the tap reads `usage` and the finish (`choices[].finish_reason`, or Responses `status` / `incomplete_details`) from
+  a parsed copy.
+
+The chat and Responses non-streaming cases are in the golden suite, and must pass before a wire serves
+`stream: false`. Until then, a wire refuses `stream: false` (`feature_unsupported:non_streaming`).
 
 ### 7.4 Translation, only as a fallback, with a fidelity contract
 
@@ -781,40 +905,60 @@ Golden tests (§11, Step 1) pin each line of the contract.
 
 1. **Nothing changes that routing does not require.** On a native path, by default, the upstream body is the client's
    body with `model` replaced. Auth is a header.
-2. **Every other change is a declared mutation.** It is:
-   - named, from a fixed registry;
-   - configured per account (or per route), opt-in;
-   - journaled per attempt (`request.wire.mutations`, names only, never values);
+2. **Every other change is a declared mutation.** It is named, from a fixed registry, and is one of two kinds:
+   - a **wire default**, part of a wire kind's definition, applied without configuration. Examples: `store-false`
+     and `overload-code` on the codex wire; `stream-usage` on chat wires. The registry says which wires;
+   - **opt-in**, configured per account (or per route).
+
+   Either way, every mutation an attempt applies is:
+   - **listed by name** in that attempt's `request.wire.mutations` (names only, never values; wire defaults are not
+     implied);
    - disclosed to the client in one header (`x-router-mutations`; it replaces `x-router-adapted` and
      `x-router-ignored-params`, which stay during migration).
-3. **No silent drops.** An unknown field is forwarded (native) or refused by name (translated). A known field the target
+
+   A wire default that did not act on a request (for example `cache-key-salt` before any overload) is not listed.
+3. **No silent drops.** An unknown field is forwarded (native, D2) or refused by name (translated). On native wires,
+   operator-reserved fields (§7.2) are refused by name, never stripped. A known field the target
    cannot take is refused by name, unless the account declares the drop. "Neutral" drops are allowed only for a value
    that equals **the target's** documented default; a target that supports the control always gets the client's value.
-4. **No silent rewrites of meaning.** Mapping a value (finish reasons, roles, effort levels) is a translation and lives in
-   the contract. An unmappable value is an error, not a default (no `?? 'stop'`).
-5. **Policy about what the model sees belongs at the server, not the router.** Examples: preserving past thinking,
-   where system text goes, sampling defaults. These are template and server settings (`--chat-template-file`,
-   `--chat-template-kwargs`, `--reasoning-preserve`, llama-swap presets), owned in cloudlab IaC. The router forwards.
-6. **The invariant is testable.** `upstreamBody == applyDeclared(clientBody, mutations)` is checked in the golden suite.
-   With diagnostic capture on, the journal can store both digests (`sha256` of client and upstream bodies) so any request
-   can be audited after the fact.
+4. **No silent rewrites of meaning.** Mapping a value (finish reasons, roles, effort levels) is a translation and lives
+   in the contract. **The raw value is always kept.** Following OpenRouter's `native_finish_reason`, the journal
+   records `upstream_finish_reason`, and a translated response may carry it as an extra field.
+   - **An unknown `finish_reason`:** mapped to `stop`, with the raw value kept. It is an error only when the value
+     says the output is incomplete or failed (`error`, `abort`, `cancelled`, or anything with `error` in it), and
+     then the stream ends with the router's failure event in place of the finish.
+   - **Native paths:** the client gets the value verbatim; the journal keeps it too.
+5. **Policy about what the model sees belongs at the server, not the router.** Examples: where system text goes (D5)
+   and sampling defaults. These are template and server settings (`--chat-template-file`, `--chat-template-kwargs`,
+   llama-swap presets), owned in cloudlab IaC. The router forwards.
+   - **One measured exception: how much past reasoning is replayed.** In an agent session every assistant turn comes
+     after the last user message, so the template's `preserve_thinking=false` strips nothing. Replaying every block
+     overflows cloud3's pool (§12.1). The bound therefore lives in the router, as the declared, per-account,
+     journaled `reasoning-window` mutation.
+6. **The invariant is testable.** `upstreamBody == applyDeclared(clientBody, mutations)`, where `mutations` is the
+   attempt's journaled list (rule 2), is checked in the golden suite. In production the journal can store both digests
+   (`sha256` of the client and upstream bodies). They verify that the invariant held for a request, but they cannot
+   reconstruct it (§9.5).
 
 ### 8.2 The mutation registry (initial)
 
-| Name | Direction | What | Default | Why it exists |
+| Name | Direction | What | Kind (rule 2) | Why it exists |
 |---|---|---|---|---|
-| `model` | req | replace `model` with the deployment model | always | routing |
-| `store-false` | req | force `store: false` (Codex backend) | codex wire | no server-side state |
-| `cache-key-salt` | req | salt `prompt_cache_key` after overloads | codex wire | Codex re-key |
-| `stream-usage` | req+resp | add `stream_options.include_usage: true`; remove the usage-only chunk from the client stream if the client did not ask | chat wire | budgets (§9.3) |
-| `system-merge` | req | today's `systemMessages: merge` | off | template workaround; prefer a template fix |
-| `developer-as-system` | req | `developer` → `system` | off (translated: per account) | template compatibility |
-| `drop:<param>` | req | today's `params.drop` | off | a server that chokes on a control |
-| `effort:<level>` | req | fixed reasoning effort (the stopgap's level form) | off | operator policy |
-| `overload-code` | resp | `server_is_overloaded` → `server_error` after output | codex wire | Codex retry behaviour |
-| `progress-events` | resp | `response.in_progress` while the upstream thinks (#131) | translated only | Codex idle timer |
-| `set:return_progress` | req | add `return_progress: true` (llama.cpp prompt-progress events) | off; on for the llama.cpp responses wire | Codex idle timer during a long prefill, from the upstream's own events |
-| `drop-replayed-reasoning` | req | today's behaviour, kept as an explicit opt-in for a template that breaks on it | off | compatibility |
+| `model` | req | replace `model` with the deployment model | wire default: every wire | routing |
+| `store-false` | req | force `store: false` (Codex backend) | wire default: codex | no server-side state |
+| `cache-key-salt` | req | salt `prompt_cache_key` after overloads | wire default: codex (listed only when it salts) | Codex re-key |
+| `stream-usage` | req+resp | add `stream_options.include_usage: true`; remove the usage-only chunk from the client stream if the client did not ask | wire default: native chat | budgets (§9.3) |
+| `set:return_progress` | req | add `return_progress: true` (llama.cpp prompt-progress events) | wire default: llama.cpp responses | Codex idle timer during a long prefill, from the upstream's own events (§9.4) |
+| `reasoning-window` | req | replay only the last N turns' reasoning: the stopgap's `replayReasoning: {lastTurns: N}` on translated wires; on a native Responses wire, the reasoning items of older turns are left out of `input` | opt-in, per account | context bound (§8.1 rule 5 exception, §12) |
+| `drop-replayed-reasoning` | req | today's behaviour (`replayReasoning` unset or false) | opt-in, per account | a template that breaks on replayed reasoning |
+| `developer-as-system` | req | `developer` → `system` | opt-in, per account (translated) | template compatibility |
+| `drop:<param>` | req | today's `params.drop` | opt-in, per account | a server that chokes on a control |
+| `effort:<level>` | req | fixed reasoning effort (the stopgap's level form) | opt-in, per account | operator policy. Not a fix for plan delivery: `medium` did not help (§12.1). |
+| `system-merge` | req | today's `systemMessages: merge` | opt-in; **retired by D5** once the template fix is live | template workaround |
+| `overload-code` | resp | `server_is_overloaded` → `server_error` after output | wire default: codex | Codex retry behaviour |
+| `progress-events` | resp | `response.in_progress` while the upstream thinks (#131) | wire default: translated Responses | Codex idle timer |
+| `output-limit-cut` | resp | the router's `OutputLimiter` ends the stream at the client's output limit, with finish `length` and estimated usage | wire default: codex (the provider, `routerOutputLimit`), for any client; never on local wires | the codex API has no output limit |
+| `drain-cut` | resp | during drain, a stream with no terminal event yet is cut without one (Codex reconnects to the next process) | every wire | drain (§9.2) |
 
 ### 8.3 What happens to each of today's mutations
 
@@ -822,15 +966,15 @@ Golden tests (§11, Step 1) pin each line of the contract.
 |---|---|
 | Codex adapter drops (hints, `include`, non-function tools, reasoning items) | **Native:** none happen; the body goes as sent. **Translated:** hints (`prompt_cache_key`, `client_metadata`, `text.verbosity`, `reasoning.summary`, encrypted-only `include`) become contract line items, "mapped: ignored by chat servers", because they carry no instruction to the model. Reasoning items: mapped (the stopgap). `namespace` tools: flattened, then re-wrapped, or refused. `web_search` / `custom` tools: refused by name unless the account declares `drop:tool:<type>`. |
 | Subset allowlist (unknown keys → 400) | Native: forwarded. Translated: stays a 400 (loud is right). |
-| Chat `reasoning_content` dropped on replay | Native chat: forwarded (llama.cpp and vLLM take it). Translated: mapped. |
+| Chat `reasoning_content` dropped on replay | Native chat: forwarded (llama.cpp and vLLM take it). Translated: mapped (`replayReasoning`, merged in #135/#136), bounded by `reasoning-window` where the account sets one. |
 | Neutral-value drops | Removed for targets that support the control. Kept only where the target lacks the control and the value is its default. |
 | `reasoning_effort` dropped for local | Native: forwarded. Translated: forwarded (the provider table says `true` for local). An account may declare `effort:<level>` or `drop:reasoning_effort`. |
-| `systemMessages: merge` | Kept as `system-merge`, opt-in; recommend a template fix instead (§10.3) |
+| `systemMessages: merge` | **D5:** retired. The router stops merging once cloudlab's patched template is live on each account that sets it (§10.3); until then, `system-merge` on the translated path only. |
 | `developer` → `system` | Native: forwarded. Translated: `developer-as-system`, per account |
 | `content: null` → `''` | Translated: send `null` (the OpenAI shape); change per account only if a template needs it |
-| Unknown `finish_reason` → `stop` | Native: verbatim. Translated: the contract maps the known values; unknown → `INCOMPLETE_STREAM` / `UPSTREAM_MALFORMED` |
+| Unknown `finish_reason` → `stop` | Native: verbatim. Translated: mapped, with the raw value in the journal (`upstream_finish_reason`); an error only for a value that means incomplete or failed (§8.1 rule 4) |
 | Upstream error text hidden | Native: the upstream's error JSON goes to the caller as sent (it is the caller's own conversation). The journal still keeps only the classification and code. |
-| Response ids, `model` alias, usage shape | Native: verbatim, **including the upstream `model`**. This is a decision point (§13 D3): mask the alias as a declared `model-alias` response mutation, or show the served model. |
+| Response ids, `model` alias, usage shape | Native: verbatim, **including the served `model` name (D3)**. There is no alias masking. |
 | Reasoning after visible output not forwarded | Native: verbatim. Translated: contract line (multiple reasoning items in order) |
 | Progress events, keepalive comments | §9.4 |
 | Codex-native mutations (`model`, `store`, headers, salt, overload code) | Unchanged, now registry entries |
@@ -841,9 +985,13 @@ Golden tests (§11, Step 1) pin each line of the contract.
 
 ### 9.1 Failover
 
-- **Before first output: both modes, as today.** The boundary is the first output item or delta the tap sees.
-  Lifecycle events are held until then (today's Codex rule, generalised). Reasoning counts as output once forwarded,
-  as #132 decided.
+- **Before anything reached the client: both modes, as today.** The boundary is the **first flush to the client**
+  under the hold rule (§7.3, rule 2):
+  - on the codex wire, the first output item or delta (lifecycle events are held until then);
+  - on a wire with `holdMs`, that, or the end of the hold window, whichever comes first.
+
+  Once a prefill progress event has been forwarded, the attempt is committed exactly as if output had begun.
+  Reasoning counts as output once forwarded, as #132 decided.
 - **After first output: never,** in both modes. That is today's rule (`inference/index.ts:851`, "emitted"), and the
   research (§4.9) shows it is the industry norm. A mid-stream failover would splice two models' outputs into one
   response.
@@ -853,14 +1001,36 @@ Golden tests (§11, Step 1) pin each line of the contract.
   model. The translator refuses it (today's `replayedReasoning` already returns false for non-null
   `encrypted_content`); native local targets must refuse it too, and the facts extractor flags it
   (`reasoning.encrypted`), so routing skips those targets instead of letting the upstream fail. Conversation
-  placement already keeps a conversation on one account, which makes this rare.
+  placement keeps a conversation on one account most of the time. It still spills busy turns and moves unavailable
+  conversations (`placement/index.ts:6`), so cross-path continuation is a tested case (§10.4), not a rare one.
 
 ### 9.2 Admission queue, concurrency, drain
 
-Unchanged in both modes: they act before the body is sent, and on the connection, not the payload. The queue (#133)
-holds the request with its body budget reservation, as today. Drain cuts a stream with no terminal event (deliberate,
-so Codex reconnects). On a native stream that already carries the upstream's terminal event, it ends normally, as
-today (`api-openai:557-562`).
+The queue (#133) and concurrency act before the body is sent, and on the connection, not the payload. They are
+unchanged.
+
+Drain cuts a stream with no terminal event (deliberate, so Codex reconnects). It is the registry's `drain-cut`,
+journaled on the attempts it cuts. On a native stream that already carries the upstream's terminal event, it ends
+normally, as today (`api-openai:557-562`).
+
+**Body admission is not unchanged.** Today a large (> 2 MiB, up to `codexNativeMaxBodyMiB`) `/v1/responses` body is
+eligible only when a route the principal may use is Codex-native, decided from route-level configuration **before the
+body is read** (`api-openai:650`, `nativeCaller`). Local `wire` entries would not inherit that, and chat has no such
+reservation at all. B specifies:
+- **Pre-read eligibility.** A principal is large-body eligible on an endpoint when any route it may use has a target
+  that can take that protocol natively. That means a codex route, or an active local `wire` (`nativeWires` routes
+  only, §7.1). It is computed from configuration, before reading, as today.
+- **Per-principal reservations.** Today's pools hold: a small-body floor, plus one principal may take at most half
+  of the large pool. Native chat gets the same reservations on `/v1/chat/completions` before any chat wire is enabled.
+- **Translated candidates and size.** A body over the 2 MiB subset limit can go only to native targets. A translated
+  candidate is skipped (`body_too_large_for_translation`, permanent and request-caused). With none left, the
+  answer is 413, not a capacity error.
+- **Reservation lifetime.** The reservation is held from admission until the handler settles: through the queue
+  wait, every failover attempt and drain, as `RouterHttp.hold` does today. Its size accounts for what is actually
+  retained: the raw bytes (kept for patching, §7.2), the parsed object (facts), and at most one patched upstream
+  copy per attempt. A translated attempt's serialised body counts too.
+- **Tests:** chunked bodies (no `content-length`, provisioned at the cap and shrunk on end); queue saturation with
+  large bodies waiting; failover holding one reservation; drain releasing it.
 
 ### 9.3 Budgets, usage, limits
 
@@ -876,7 +1046,9 @@ today (`api-openai:557-562`).
   It is the one response mutation a native chat path needs. Alternative: estimate usage from the tokenizer and mark
   it `estimated` (no mutation, worse numbers); the owner can choose per account.
 - **Output limit.** Native: the client's own `max_output_tokens` / `max_tokens` is forwarded and the upstream enforces
-  it. Router enforcement (`OutputLimiter`) stays Codex-only.
+  it. Router enforcement (`OutputLimiter`, the registry's `output-limit-cut`) stays as today. It applies to targets
+  of the **`codex` provider** only, because its API has no output limit (`routerOutputLimit` in the provider table),
+  whichever client sent the request. It never applies on local wires.
 
 ### 9.4 Progress events: still needed when the upstream streams reasoning natively?
 
@@ -890,6 +1062,10 @@ today (`api-openai:557-562`).
     But llama-swap filters are per model, not per endpoint, so chat requests would get `prompt_progress` fields too.
   - (b) A router wire mutation `set:return_progress` on the `responses` wire only, journaled. **Recommend (b),**
     validated with the real Codex CLI on a ≥ 100k-token prompt (the K=46 probe's prefill was 94 s).
+
+  These progress events reach Codex only through the hold rule's `holdMs` (§7.3, rule 2). The hold covers the
+  first 30 s. After that, the held events and every later `in_progress` event are forwarded, and the attempt is
+  committed (§9.1).
 - **During a cold model load or a queue wait: nobody sends anything.**
   - SSE comments do not reset Codex's timer [infer, §5.3]. That covers the router's 5 s `: keepalive` and
     llama.cpp's 30 s `:` pings alike.
@@ -909,10 +1085,15 @@ today (`api-openai:557-562`).
   - optional body digests.
 - **Kept:** `request.parameters_adjusted`, for one release, then folded in.
 - **The tap feeds** `attempt.completed` as today: finish, `textChars`, `toolCalls`, `tools`, `reasoningChars`.
-- **Content capture:** as today (`capture.level`). On a native path the captured request is the client body, which
-  is now also exactly what the upstream saw, minus the listed mutations. That is a debugging win: a journal entry
-  replays straight to the upstream with no router in between, which is how the #130 and flash-next investigations
-  had to work by hand.
+- **Content capture: today's contract stays, bounded and redacted.** The recorder redacts the captured request, and
+  bounds it: strings are sliced at 16,384 characters, collections at 200 entries, and an oversized capture becomes a
+  `{truncated, bytes}` marker (`trajectory/index.ts:32`, `observability/index.ts:3`).
+  - Native reasoning histories hit those limits at once, so a capture is **not** a replayable copy of the request.
+  - Each captured request gets an explicit completeness label (`replayable: true` only when nothing was redacted or
+    truncated). Digests (§8.1 rule 6) verify, but they cannot reconstruct.
+  - **Exact-body capture is a separate diagnostic mode:** encrypted at rest, short-lived, opt-in per account and
+    time-boxed like `capture.expiresAt`. It exists so that a request can be replayed straight to the upstream, which
+    the #130 and flash-next investigations had to reconstruct by hand.
 
 ### 9.6 Capability gates
 
@@ -927,11 +1108,23 @@ They run on **facts** (§7.2), extracted read-only from either protocol:
 | structured output | `responseFormat` | `text.format` / `response_format` |
 | encrypted reasoning | `reasoning.encrypted` | `reasoning` items with `encrypted_content` |
 
-Some targets cannot handle a kind the request uses. llama.cpp silently drops `custom` and `namespace` tools (§5.1);
-vLLM 0.32 refuses grammar tools (§5.2). When the target's `wire` qualification records that, the router either skips
-the target before the network, with the reason named, or forwards and journals the upstream's drop. It never sends a
-request that will 400, and never lets a drop go unrecorded. Which of the two is per wire configuration: D2's
-default is to forward and journal.
+Some targets cannot handle a kind the request uses. llama.cpp silently drops `custom` and `namespace` tools (§5.1),
+and vLLM 0.32 refuses grammar tools (§5.2). The facts are checked against the target's qualification manifest
+(§7.1):
+- **A known loss skips the target** before the network, with the reason named (`feature_unsupported:tool:namespace`).
+- **The exception is a wire whose `allowLoss` names that exact loss.** Then the request is forwarded and the loss
+  is journaled.
+- **D2 forwards unknown *fields*. It does not extend to known *losses*:** journaling a dropped `namespace` group
+  does not make an agent route work.
+- **The skip reasons are permanent and request-caused** (§7.1), so with no target left the client gets a 400 naming
+  the feature, not a capacity error.
+
+For the canary this is a real choice (§11, Step 6):
+- Codex sends its multi-agent tools as a `namespace` group, and both today's translator and llama.cpp b12020 drop
+  them.
+- So either the dev-worker wire declares `allowLoss: ['tool:namespace', 'tool:web_search']`, which makes today's
+  behaviour explicit,
+- or the canary waits for llama.cpp's namespace flattening (#31568).
 
 ---
 
@@ -941,16 +1134,16 @@ default is to forward and journal.
 
 | Gap | llama.cpp b12020 | vLLM 0.28 | Router response in B |
 |---|---|---|---|
-| Truncation reported as `completed` | yes (#30773) | yes (always `response.completed`) | Tap: an output-token count at the client's limit is journaled as `finish: length (upstream says completed)`; no rewrite. Codex sends no output limit, so truncation is mostly context exhaustion. |
+| Truncation | reported as `completed` (#30773) | `response.completed` event, but `response.status: incomplete` | Tap reads the terminal **payload's** status and `incomplete_details`, not only the event type. vLLM: `length` when the payload says incomplete. llama.cpp: the status cannot be trusted, so the journal records `finish: uncertain` when the output may have hit a limit. Token-count equality is not proof. No rewrite. |
 | Mid-stream error | untyped `data: {"error":…}`; Codex skips it, then retries on "stream closed" | — | Tap recognises it: forward the bytes, then end with the router's own `response.failed` (rule 3, §7.3), so Codex sees an error instead of a mystery retry |
-| `namespace` / `web_search` / `custom` tools | silently dropped (server log only) | namespace OK; `custom` dropped (0.28) or 400 (0.32, grammar) | Facts: `toolKinds`. The wire's qualification lists what the upstream drops; routing either refuses or journals it as an **upstream drop** (`upstream-drops: tool:namespace`), never hidden |
+| `namespace` / `web_search` / `custom` tools | silently dropped (server log only) | namespace OK; `custom` dropped (0.28) or 400 (0.32, grammar) | Facts: `toolKinds`, checked against the qualification manifest (§7.1). A known loss **skips the target**, unless the wire explicitly allows that specific loss (`allowLoss: ['tool:namespace']`). An allowed loss is journaled. D2 does not cover known losses. |
 | `text.format` (structured output) | silently ignored | mapped | Facts: `responseFormat`; a llama.cpp native wire refuses it (or the request is translated for that target, where `response_format` works) |
 | Foreign items (`additional_tools`, `custom_tool_call`, `web_search_call`, `item_reference`) | 400 | 400 in 0.32; passed through raw in 0.28 (may break the renderer) | Facts: refuse before the network with the item named (saves a prefill), or skip the target |
 | Reasoning items: encrypted, content-less, `summary: null` | 400 | 400 if encrypted | Facts: `reasoning.encrypted` / `reasoning.contentless`; skip local targets; placement keeps GPT conversations on GPT accounts |
-| Mid-conversation system/developer | template raise (Qwen) | template raise (Qwen) | Template fix in cloudlab (§10.3); `system-merge` stays available as a declared mutation on the translated path |
+| Mid-conversation system/developer | template raise (Qwen) | template raise (Qwen) | Template fix in cloudlab (D5, §10.3); the router stops merging once it is live |
 | `previous_response_id` / `store: true` | 400 | 404 / store off | The router already refuses (`parseNativeResponses`) |
 | Stream item ids differ from the final response | no | **yes** (re-parse) | Qualify with the real Codex CLI (it builds items from `output_item.done`) |
-| Text + calls of one reply rendered as one assistant turn (bug #4) | yes (`merge_prev`) | **unverified** | Step 5 render check with the four 11-01 stop turns. If it splits, vLLM stays translated (the translator has the #130 fix). |
+| Text + calls of one reply rendered as one assistant turn (bug #4) | yes (`merge_prev`) | yes (confirmed in source, codex review) | Step 5 render check with the four 11-01 stop turns, against the real template |
 | Non-standard events | — | `response.reasoning_part.*` (0.28) | Verbatim; Codex ignores unknown types [infer]; qualify |
 
 **Version drift is the standing risk.** Each upstream upgrade re-runs the qualification (Step 5) before the `wire`
@@ -964,7 +1157,7 @@ Sources: §5.1-5.3. Codex 0.166 for a model outside its catalog, which is what t
 | Codex sends | Native → llama.cpp b12020 | Native → vLLM 0.28 | Translated (today + stopgap) |
 |---|---|---|---|
 | Leading `developer` message (base instructions) | → system; fine | → template; fine as the first message | → system |
-| Mid-conversation `developer` | **template raise** | **template raise** | `system-merge` (lossy) |
+| Mid-conversation `developer` | **template raise** (until the D5 template fix) | **template raise** (until the D5 template fix) | `system-merge` (lossy; retired by D5) |
 | `function` tools, `function_call(_output)` | mapped | mapped | mapped |
 | `namespace` (MCP / multi-agent) | **silently dropped** | flattened and restored | dropped (journaled) |
 | `web_search` | silently dropped | dropped (no tool server) | dropped (journaled) |
@@ -978,13 +1171,14 @@ Sources: §5.1-5.3. Codex 0.166 for a model outside its catalog, which is what t
 | Needs back: `output_item.done`, `response.completed` with `id` | yes | yes (ids re-parsed) | synthesised |
 
 For the dev workers' plain local sessions, three rows decide the canary: mid-conversation `developer`, `namespace`
-tools, and replayed reasoning. The first needs the template fix. The second is today's behaviour as well (the router
-already drops them), so it is not a regression; it becomes a journaled upstream drop. The third is the point of the
-change.
+tools, and replayed reasoning.
+- **The first needs the template fix.**
+- **The second is today's behaviour as well** (the router already drops them), so it is not a regression. But under
+  §9.6 it skips the target unless the wire explicitly allows that loss (`allowLoss`).
+- **The third is the point of the change.**
 
-The facts extractor knows these kinds. Per wire, a kind the target cannot handle either skips the target before the
-network, with the reason named, or is forwarded with the upstream's drop journaled (§9.6). A request is never sent
-just to fail.
+The facts extractor knows these kinds. A kind the target's manifest lists as a loss skips the target, unless the wire
+explicitly allows that loss (§9.6). A request is never sent just to fail, and a loss is never left implicit.
 
 ### 10.3 Mid-conversation system messages
 
@@ -993,10 +1187,13 @@ just to fail.
   run (`:45-56`).
 - **The router's options are all lossy.** Merge everything into the head (today, `system-merge`), or turn the message
   into a user message. Each changes what the model sees, in the router, where nobody looks.
-- **Recommended.** Fix it where the template lives. A cloudlab-owned `--chat-template-file` (llama.cpp) /
+- **Decided (D5): fix it where the template lives.** A cloudlab-owned `--chat-template-file` (llama.cpp) /
   `--chat-template` (vLLM) that renders a mid-conversation system/developer message as its own `<|im_start|>system`
-  block is a one-line template change, versioned with the server, and testable against the golden corpus. Until
-  then, keep `system-merge` as a declared mutation on the accounts that need it.
+  block is a one-line template change, versioned with the server, and testable against the golden corpus.
+  - **Order.** The template ships and passes the render checks first. Then the router stops merging: `system-merge`
+    is removed from each account in the same change that confirms its template.
+  - **Until then,** `system-merge` stays on the translated path only, journaled. A native wire is not enabled on a
+    model whose template still raises (a Step 6 prerequisite).
 - **On the native path,** llama.cpp's Responses converter decides what `developer` items become. That is one more
   reason the golden suite runs against the real upstream.
 
@@ -1004,16 +1201,43 @@ just to fail.
 
 A route chain mixing native and translated targets serves the same request two different ways. The journal says
 which (`request.wire.path`); the golden suite qualifies both. Rules:
-- Same conversation: placement keeps it on one account.
+- **Same conversation: placement usually keeps it on one account, but not always.** A busy bound account spills one
+  turn elsewhere, and an unavailable one moves the conversation (`placement/index.ts:6`, `SPILL_REASONS`). So a
+  session *can* cross between native and translated targets mid-conversation, which is the resumed-session case
+  below.
 - A fallback that cannot take the body is skipped, not "adapted harder".
-- `translate: never` on a route forbids the mixed case outright. Use it for agent routes if the owner prefers
-  predictability to availability.
+- **D4:** the dev-worker agent routes use `translate: 'qualified'`. A chain may mix native and translated targets
+  only through translators that passed the golden suite for that pair. Otherwise the target is skipped, and with
+  none left the request is refused loudly. `translate: 'never'` forbids the mix outright where that is wanted.
+- **A session resumed across the flip.** One Codex session goes through both paths, in either direction, when:
+  - a native wire is turned on or off mid-conversation;
+  - placement spills or moves it (above).
+
+  Each direction must accept the other path's items.
+  - **Translated → native.** A session started translated replays the router's synthesised reasoning items:
+    `rs_<id>`, `summary: []`, `content: [{type: reasoning_text, text}]`, no `encrypted_content`
+    (`api-openai/index.ts:255`). llama.cpp's converter needs exactly an array `summary` and a string
+    `content[0].text` (§5.1), so by source reading the shape is accepted. vLLM reads `content[0].text` too.
+  - **Native → translated** (a rollback, a spill or a move). llama.cpp's items carry `encrypted_content: ""`
+    (`server-task.cpp:572` @b12020). The translator's `replayedReasoning` accepts only an absent or `null`
+    `encrypted_content`, and refuses any key outside `type/id/status/summary/content/encrypted_content`. That is
+    `protocol/index.ts:65` at `origin/main` `247b19f`, where the merged #136 still rejects the empty string (the
+    codex review confirms it). **Today a rollback would refuse every resumed native session.** Before the canary:
+    - accept an empty `encrypted_content` alongside the supported plaintext shapes, and keep rejecting non-empty
+      ciphertext;
+    - pin llama.cpp's exact item keys.
+  - **Tests, both directions:**
+    - continuation after one turn, and **rollback after several native turns** (reasoning, tool calls, an image
+      output);
+    - each in Step 1's corpus, and again live in Step 6.
+
+    Until they pass, **removing the `wire` entry is not a validated rollback.**
 
 ### 10.5 Chat clients: dsh, Open WebUI, the Assistant
 
 - **Open WebUI and dsh** speak Chat Completions to local models. On a native chat wire they get exactly what vLLM or
   llama.cpp would give them directly. That is the goal, but it is also a behaviour change in four ways:
-  - the response `model` field becomes the served name (§13 D3);
+  - the response `model` field becomes the served name, verbatim (D3);
   - `reasoning_content` arrives as the server sends it (the same as `forwardReasoning: true`, live on both local
     accounts since 11-02/11-03);
   - parameters the router refused (`top_k`, `min_p`, `chat_template_kwargs`) now take effect;
@@ -1039,15 +1263,17 @@ which (`request.wire.path`); the golden suite qualifies both. Rules:
 
 ### 10.6 Other edge cases
 
-- **Upstream `model` in responses.** llama-swap's `useModelName` and vLLM's served name both appear (§13 D3).
-- **Body size.** Native Codex bodies use the large native budget (`codexNativeMaxBodyMiB`). Native local Responses
-  inherit it; the 2 MiB subset limit stays for translated requests.
+- **Upstream `model` in responses.** Per D3, the client sees the served name: llama-swap's `useModelName` or vLLM's
+  `--served-model-name`, not the alias it asked for. Chat UIs that label by the response's `model` show the served
+  name.
+- **Body size.** Native local wires do not inherit the Codex large-body budget automatically. §9.2 specifies the
+  eligibility, the reservations, and the 413 for a large body that only translated targets could serve.
 - **Security of forwarding upstream errors.** A llama.cpp template exception embeds an excerpt of the prompt
   (`templateRefusal` matches it). Returning it to the same principal leaks nothing new. Journaling it would, so the
   journal stays code-only.
-- **Extra fields from clients reach the server.** `chat_template_kwargs` lets a caller override `enable_thinking`,
-  `preserve_thinking` or `reasoning_effort`. That is the point of pass-through, but an operator who wants a fixed
-  policy must declare it (`drop:chat_template_kwargs`, or an `effort:` mutation).
+- **Extra fields from clients reach the server (D2).** Server-state and render-control fields are reserved by default
+  (§7.2). `chat_template_kwargs` is not reserved, so a caller can override `enable_thinking`, `preserve_thinking` or
+  `reasoning_effort`. That is the point of pass-through; an operator who wants a fixed policy reserves it on that wire.
 - **The 8 MiB / 256 MiB stream budgets** apply per path, as today.
 
 ---
@@ -1057,12 +1283,43 @@ which (`request.wire.path`); the golden suite qualifies both. Rules:
 Every step ships behind configuration, is off by default, and is rolled back by a config write or an image revert.
 Each has its tests. Codex review of the plan and of each implementation follows the owner's standing rule.
 
+**Settled:**
+- D1-D6 (§13);
+- the stopgap (#135/#136, merged; release pending);
+- the probe and direct-path results (§12.1).
+
+**Critical path: a thin native Responses path first.**
+1. Step 1, limited to the Responses-native, resumed-session and non-streaming cases.
+2. Step 3 (d2), the rollback-safety fix.
+3. The context gate (Step 6 prerequisites).
+4. Step 4, limited to:
+   - native Responses;
+   - the manifest and the route-scoped `nativeWires` switch;
+   - byte-patching transport;
+   - admission (§9.2).
+5. Step 5 for llama.cpp.
+6. Step 6.
+
+Off the critical path: Step 2's full registry, Step 3's broad translator cleanup (a-c, e, f), Steps 7-8, and the
+unused translation directions.
+
+**The short-test gate, before any long run or the 48 h watch:**
+1. **Deterministic protocol and render tests** (Step 1) pass in docker.
+2. **Idle survival is proven with a deliberately shorter client timeout and a longer prefill.** A 90 s prefill cannot
+   show survival past a 300 s idle timeout. Example: Codex `stream_idle_timeout_ms` 20 000 against a prefill of 60 s
+   or more, the pattern #131/#132 used.
+3. **~15-minute real-CLI task checks** pass on the canary route.
+
+Only then come P1-length runs and the watch.
+
 **Step 1: golden round-trip suite (no behaviour change).**
 - **Corpus.** Real captured requests, redacted:
   - Codex 0.166 Responses turns: text, tool loop, parallel calls, images in tool output, reasoning echo, the
     `namespace` and `web_search` tools, mid-conversation developer messages;
   - Open WebUI and dsh chat turns, with and without `reasoning_content`;
-  - Assistant canonical requests.
+  - Assistant canonical requests;
+  - **resumed sessions** (§10.4): a translated-path history carrying the router's `rs_…` items sent native, and a
+    native history carrying llama.cpp's items (`encrypted_content: ""`) sent translated.
 - **What it records, per (corpus item, target kind):**
   1. the exact upstream body the router produces today: a snapshot, **diffed against the client body**;
   2. the client-visible stream produced from a recorded upstream stream: a snapshot, plus the verbatim-modulo-declared
@@ -1080,26 +1337,44 @@ Each has its tests. Codex review of the plan and of each implementation follows 
 name. `x-router-mutations` is added beside the old headers. The test is the §8.1 rule 6 invariant, over the corpus.
 
 **Step 3: stop the silent drops (small behaviour changes, each its own PR).**
-- (a) The stopgap: `replayReasoning`, plus `reasoningEffort: 'pass'` (§12).
+- (a) The stopgap (merged as #135/#136; release pending): `replayReasoning: {lastTurns: N}` on the local accounts
+  (§12). `reasoningEffort: 'pass'` too, so the client's value is not silently dropped, but not as a fix for plan
+  delivery.
 - (b) `local: { reasoningEffort: true }` in the provider table, once (a) has shown each local template's accepted
   levels. For a template that does not take a level, an upstream 400 is the honest answer; the account can declare
   `effort:<level>`.
 - (c) Neutral-drop only for unsupported controls.
-- (d) Unknown `finish_reason` becomes an error.
+- (d) Unknown `finish_reason`: mapped, with the raw value journaled (`upstream_finish_reason`). An error only for
+  values that mean incomplete or failed (§8.1 rule 4).
+- (d2) **On the critical path.** The translator accepts llama.cpp's reasoning-item shape (`encrypted_content: ""`;
+  merged #136 still rejects it, `protocol/index.ts:65`) and keeps rejecting non-empty ciphertext. Then neither a
+  rollback nor a placement spill or move breaks resumed sessions (§10.4). The bidirectional continuation tests ship
+  with the fix.
 - (e) `content: null` sent as `null`.
 - (f) The Codex adapter's tool drops become refusals, unless the account declares `drop:tool:web_search` and
   similar. Declare them on today's local accounts in the same config write, so nothing breaks.
 
 **Step 4: per-account `wire` declaration and late body binding (no behaviour change until configured).**
-- Implement §7.1-7.3, generalising `parseNativeResponses` / `runNative` (codex) into a protocol-generic native adapter
-  for `local`: Responses and chat.
+- Implement §7.1-7.3 as a protocol-generic native adapter for `local`. Native Responses comes first (the critical
+  path); chat follows.
+  - `parseNativeResponses` / `runNative` (codex) are a starting point for the flow, not for the transport. They
+    re-serialise the request and rebuild SSE frames, so they are **not** byte-preserving (§7.2, §7.3).
+  - The new adapter patches the original bytes and forwards frames as received, in one backpressured read loop.
 - Implement the facts extractor and gate parity tests: every gate gives the same answer on the translated and native
   forms of each corpus item.
-- Engine: per-attempt wire plan; the `protocol_unavailable` and `translation_unsupported:<field>` reasons.
+- Engine:
+  - the per-attempt wire plan;
+  - the manifest check (§7.1);
+  - the route-scoped `nativeWires` switch;
+  - the new skip reasons, registered as permanent and request-caused;
+  - admission per §9.2.
 - Tests:
   - the golden suite in native mode against **recorded** upstream streams from llama.cpp b12020 and vLLM 0.28;
+  - the transport cases of §7.3: fragmented UTF-8, multiline SSE, a slow reader, a disconnect, shutdown;
+  - non-streaming JSON on both protocols;
+  - admission with chunked bodies and a saturated queue;
   - the real-CLI harness in docker: Codex 0.166 → in-process router → a fake upstream that replays recorded
-    `/v1/responses` streams. The pattern is the one #131/#132 used.
+    `/v1/responses` streams. The pattern is the one #131/#132 used, and includes the gate's short-idle-timeout case.
 
 **Step 5: qualify each upstream's Responses API (read-only probes, scheduled when the models are free).** For
 llama.cpp b12020 (flash-next) and vLLM 0.28 (fp8, cloud2's 27b), replay the golden corpus straight at the upstream's
@@ -1111,7 +1386,10 @@ llama.cpp b12020 (flash-next) and vLLM 0.28 (fp8, cloud2's 27b), replay the gold
 A wire entry's `qualified` field points at that run.
 
 Also run the Open Responses server compliance suite (§4.11) against each upstream. It is an existing, independent
-check of the same surface, and saves writing those cases ourselves. Fold in tonight's fast-path test (§12.1).
+check of the same surface, and saves writing those cases ourselves.
+
+Tonight's direct-path run (§12.1) is the first real-CLI evidence for llama.cpp. Codex 0.166 straight to `/v1/responses`
+completed P1 end to end. It does not replace the corpus run, which covers the shapes that P1 did not exercise.
 
 The expected outcome, from §5: llama.cpp qualifies for plain sessions, with these known drops and refusals:
 - `namespace`, `web_search` and `custom` tools are dropped;
@@ -1119,39 +1397,68 @@ The expected outcome, from §5: llama.cpp qualifies for plain sessions, with the
 - foreign items are refused;
 - truncation is reported as `completed`.
 
-vLLM 0.28 needs two checks:
+vLLM 0.28 needs:
 - the real CLI, for its re-parsed ids and non-standard reasoning events;
-- **a render check that one reply's text and calls stay one assistant turn.** Replay the four 11-01 early-stop
-  turns, as #130 did. Without it, native vLLM risks bringing bug #4 back.
+- the terminal-status check (a `length` run must journal `length`, §7.3);
+- the render check of the four 11-01 early-stop turns. Source confirms vLLM merges the calls into the preceding
+  message (§5.2); the check confirms it against the deployed template.
+
+Each passing run writes the manifest entry (§7.1). A wire is eligible only when the live backend, model and
+template digest match it.
 
 **Step 6: canary on cloud3 (flash-next only).**
-- **Prerequisites (cloudlab):** a patched Qwen template that renders mid-conversation system/developer messages in
-  place, loaded with `--chat-template-file` and passing the golden render checks (§10.3); and the `preserve_thinking`
-  decision (§12, D6).
-- **Config.** `wire: [{models:['qwen3.8-flash-next'], protocol:'responses', mutations:['set:return_progress']}]` on
-  `lan-192.168.0.26-8080`. fp8 (vLLM behind the same llama-swap) stays translated.
-- **Who.** One dev worker's key first, via a route that only it uses; then the four.
+- **Prerequisites:**
+  - **cloudlab:** a patched Qwen template that renders mid-conversation system/developer messages in place, loaded
+    with `--chat-template-file` and passing the golden render checks (D5, §10.3);
+  - **the context gate (blocker; D6, §12).**
+    - The dev-worker configuration advertises **262,144** tokens for flash-next
+      (`ansible/roles/dev_worker/defaults/main.yml:150`). That is the whole two-slot shared pool, and two sessions
+      at the observed ~135k already overflow it.
+    - Set the advertised window **and** `model_auto_compact_token_limit` against **concurrent** capacity: at most
+      half the pool per session, minus output headroom.
+    - Qualify automatic compaction and continuation **with both slots occupied**.
+    - Until that passes, translated replay stays bounded (`lastTurns`). Native waits, or runs with
+      `reasoning-window`;
+  - **the rollback-safety fix** (Step 3 d2) and its bidirectional tests (§10.4);
+  - **an explicit decision on Codex's `namespace` tools** (§9.6): `allowLoss: ['tool:namespace', 'tool:web_search']`
+    on this wire (today's behaviour, made explicit), or wait for llama.cpp #31568;
+  - **the short-test gate** above.
+- **Config.**
+  - `wire: [{models:['qwen3.8-flash-next'], protocol:'responses', holdMs: 30000, allowLoss: […], qualification: …}]` on
+    `lan-192.168.0.26-8080`. Its wire defaults are `model` and `set:return_progress`.
+  - **Isolation: `nativeWires: true` only on the canary route.** Every other route using this account stays
+    translated. Verify that in the journal (`request.wire.path: translated` on the other workers' routes) before
+    starting.
+  - fp8 (vLLM behind the same llama-swap) stays translated.
+- **Who.** One dev worker's key first, on its own canary route; then the four.
 - **Validation with the real Codex CLI** on a dev worker (`codex exec -p flash-next -c show_raw_agent_reasoning=true
   … </dev/null`):
   1. a text turn;
   2. a tool loop (exec_command → output → answer);
   3. parallel calls;
   4. an image tool output;
-  5. a turn with ≥ 100k tokens of context (a prefill of ≥ 90 s: the `return_progress` check);
-  6. the plan-writing task that never delivered (P1-d2-fn), run to completion.
-- **Pass, each turn:**
-  - exit 0;
+  5. a long prefill under a **shorter** client idle timeout (the gate's idle test, live), then a ≥ 100k-token turn
+     with the default timeout;
+  6. after the ~15-min checks: the plan-writing task that never delivered (P1-d2-fn), run to completion. The direct
+     run delivered the plan at 15.4 min and finished at 23.5 min;
+  7. two P1-length sessions **at once** (both slots), through compaction;
+  8. a session resumed across the flip, in each direction, including rollback after several native turns (§10.4).
+- **Pass, beyond exit 0:**
+  - the plan artifact exists and is complete;
+  - compaction and continuation succeed with both slots busy;
+  - retries are clean: no "stream closed" retry loops and no resent identical requests;
   - the journal shows `request.wire.path: native` and `mutations: [model, set:return_progress]`;
   - the upstream body digest equals `applyDeclared(clientBody)`;
-  - Codex displays the thinking, with `show_raw_agent_reasoning`;
-  - no `CLIENT_CLOSED` at 300 s on the ≥ 100k-token turn.
-- **Watch for 48 h:** early-stop candidates, `CLIENT_CLOSED` at 300 s, and template 500s.
-- **Rollback:** remove the `wire` entry (one `If-Match` PUT).
+  - Codex displays the thinking, with `show_raw_agent_reasoning`.
+- **Watch for 48 h,** only after all of the above: early-stop candidates, `CLIENT_CLOSED` at 300 s, template 500s
+  and context-size errors.
+- **Rollback:** turn `nativeWires` off on the canary route. It counts as validated only once item 8 has passed.
 
 **Step 7: cloud2 (vLLM) and fp8.** Only if Step 5 qualifies vLLM's Responses path for Qwen tool calling and reasoning
 items (§5.2). Otherwise these stay translated, on the now-lossless translator.
 
-**Step 8: native chat for chat clients.** `wire: [{models:['*'], protocol:'chat', mutations:['stream-usage']}]`.
+**Step 8: native chat for chat clients.** `wire: [{models:['*'], protocol:'chat'}]`. Its wire defaults are `model` and
+`stream-usage`.
 - **Order:** the platform eval key first, then dsh, then Open WebUI. Each one is checked for reasoning replay and the
   `model` field.
 - **Rollback:** per account.
@@ -1161,12 +1468,14 @@ items (§5.2). Otherwise these stay translated, on the now-lossless translator.
 | Change | Where |
 |---|---|
 | Mutation registry (names, directions, defaults); `applyDeclared(body, mutations)`; the invariant test helper | new `packages/modules/wire/` (pure) |
-| `Account.wire`, `RoutePolicy.translate`; config schema; validator: a `wire` entry's models ⊆ `allowedModels`; `native` routes keep their Codex check | `contracts/index.ts`, `runtime/config.ts`, `api-openai` validator (`index.ts:292-315`) |
+| `Account.wire`, the qualification manifest, `RoutePolicy.translate` / `nativeWires`; config schema; validator: a `wire` entry's models ⊆ `allowedModels`, and its manifest entry exists; `native` routes keep their Codex check | `contracts/index.ts`, `runtime/config.ts`, `api-openai` validator (`index.ts:292-315`) |
+| New skip reasons in `PERMANENT` / `REQUESTED` | `compat/index.ts:95` (`247b19f`) |
+| Large-body eligibility for local wires and chat; reservation lifetime; translated-candidate size skip | `api-openai/index.ts:650` (`nativeCaller`, body budget), `kernel/http.ts:99-101` (`preserveRawBody` refuses `maxBytes` above 2 MiB) |
 | Envelope + facts extraction for both protocols (read-only) | `modules/protocol/index.ts` (new `factsOf(body, protocol)`, beside `conversationOf`) |
 | Gates on facts | `modules/routing/index.ts:288-305`, `compat/index.ts:206-215` (`requiresTools`, `implementationReasons`) |
 | Late binding: carry `{protocol, rawBody, facts}` on `InferenceRequest`; parse to the subset lazily per target; a per-attempt wire plan | `api-openai/index.ts:398-428`, `inference/index.ts` around `:715` (where `adaptRequest` runs today) |
-| Protocol-generic native adapter: held lifecycle events, terminal and usage tap, failover boundary (lift from `codex.ts:448-529`); chat variant with the `stream-usage` tap | `adapters/providers/native.ts` (new); `chatcompletions.ts` picks it per wire |
-| Client side of native: write upstream SSE frames as they come (exists: `sendRaw`, `api-openai:485`, `:512-514`); no router `response.created` | `api-openai/index.ts:509-539` |
+| Protocol-generic native adapter: byte-patched request, the hold rule, the terminal-status / usage tap in the single read loop, the failover boundary. The flow comes from `codex.ts:448-529`, but not its `JSON.stringify` transport (`:471`). A chat variant with the `stream-usage` tap; non-streaming JSON forwarding | `adapters/providers/native.ts` (new); `chatcompletions.ts` picks it per wire |
+| Client side of native: write the upstream's frames as received, under backpressure. This replaces `sendRaw`'s frame rebuild (`api-openai:485`); no router `response.created` | `api-openai/index.ts:509-539` |
 | `request.wire` journal event; `x-router-mutations` header | `inference/index.ts:715-724`, `api-openai:442` |
 
 **Step 9: retire.** Once native carries the Codex and chat traffic for a release, delete:
@@ -1178,13 +1487,13 @@ Keep the translator for canonical callers and unqualified pairs, under its contr
 
 ---
 
-## 12. The stopgap: keep it, with two adaptations
+## 12. The stopgap: keep it, bounded
 
-**What is in flight.** It is the uncommitted work in the `wt-llmr-replay` worktree, read 2026-11-04 ~18:50; it was
-not reviewed here as a PR.
-- `Account.replayReasoning?: boolean`: the parser keeps replayed reasoning, from a Responses `reasoning` item of the
-  router's own shape or a chat `reasoning_content`/`reasoning`, as `Message.reasoning` on the assistant message it
-  belongs to.
+**What it is.** Merged as llm-router #135/#136 (2026-11-04), not yet released. It was first read here as uncommitted
+work in `wt-llmr-replay` at ~18:50; the merged form adds the bound.
+- `Account.replayReasoning?: boolean | {lastTurns: N | 'all'}`: the parser keeps replayed reasoning, from a Responses
+  `reasoning` item of the router's own shape or a chat `reasoning_content`/`reasoning`, as `Message.reasoning` on
+  the assistant message it belongs to. `lastTurns` keeps it only on the last N assistant turns.
   - `adaptRequest` keeps it only for an attempt on an account that sets the flag, and journals
     `input:reasoning_replayed`. Every other attempt gets it removed (`input:reasoning`).
   - The chat adapter sends it as `reasoning_content`.
@@ -1204,33 +1513,31 @@ Codex on flash-next, the native path (Step 6) supersedes it, with the same mappi
 the bridge; after that it is the translated path's permanent behaviour.
 
 **Adaptations.**
-1. **Invert the defaults once qualified.** Under §8.1 the lossless behaviour (replay; pass the effort) is the default,
-   and the drop is the declared mutation (`drop-replayed-reasoning`, `drop:reasoning_effort`, `effort:<level>`).
-   Ship the stopgap opt-in as written. After Step 1's render checks and a week on cloud3, flip the provider-table
-   default for `local` and keep the flags as overrides. Track it as a follow-up issue so the opt-in does not become
-   permanent.
-2. **Context growth is decided at the template, not by a router window.**
-   - **The risk.** Codex resends every reasoning item each turn, and Qwen3.8's template renders all of them
-     (`preserve_thinking` defaults to true). At K=46 the `asis` prompt was already 105,608 tokens. flash-next's
-     slots share 262,144 tokens (`-c 262144 --parallel 2 --kv-unified`), and fp8 has `--max-model-len 131072`.
-     Restoring every past think block can multiply the prompt.
-   - **Why not a window in the router.** That would be a new mutation, and what the model sees is server policy
-     (§8.1 rule 5). The template already has the switch: `preserve_thinking: false` keeps reasoning only after the
-     last user query (`chat_template.jinja:119`).
-     - That matches OpenAI's minimum guidance, "since the last user message".
-     - GPT-5.6's default `reasoning.context: all_turns` keeps every turn (§4.10).
-     - So both settings have vendor precedent, and the choice is per model.
-     - In a Codex agent task, "since the last user message" is usually the whole task, so `false` limits growth
-       only across tasks.
-   - **Two decisions per model:**
-     - the `preserve_thinking` default, set in cloudlab: `--chat-template-kwargs '{"preserve_thinking": …}'` or
-       `--reasoning-preserve` / `--no-reasoning-preserve` on llama.cpp (both in the server README, current master);
-       on vLLM, a `--chat-template` file with that default (a server-wide kwargs flag was not verified for 0.28);
-     - Codex's `model_auto_compact_token_limit` in the local-model profiles.
-
-     Add an `all` arm and a `preserve_thinking=false` arm to `probe_replay.py` before turning replay on for
-     flash-next. The probe's arms restore only the last one or three blocks (`last1`, `last3`, plus effort and
-     sampling variants). Neither the router nor llama.cpp produces those.
+1. **Bound the replay at the router: `lastTurns`, not `'all'`.** This is D6, decided by the evidence in §12.1.
+   - **`'all'` does not fit.** At K=46 it makes a 253,468-token prompt. That leaves under 9k tokens of cloud3's
+     262,144-token pool for output, and nothing for the second slot that shares the pool.
+   - **The template cannot bound it.** `preserve_thinking=false` keeps the reasoning of every assistant turn after
+     the last user message (`chat_template.jinja:119`, `loop.index0 > ns.last_query_index`). In a Codex agent
+     session, every assistant turn comes after that message, so it strips nothing.
+   - **So the router owns the bound,** as the declared `reasoning-window` mutation (§8.1 rule 5's one exception).
+     Start at `lastTurns: 1`, the measured arm. Larger N is unmeasured; raise it only with a probe arm.
+   - **Native wires need their own bound.** llama.cpp's `/v1/responses` replays every block, which is the same
+     growth. There, Codex auto-compaction against concurrent capacity comes first; `reasoning-window` on the native
+     wire is the fallback (Step 6).
+   - **The context gate is a blocker** (codex review, §14).
+     - The dev workers advertise 262,144 tokens for flash-next (`ansible/roles/dev_worker/defaults/main.yml:150`).
+       That is the whole two-slot pool, so two sessions at ~135k overflow it.
+     - The advertised window and the compaction threshold must match concurrent capacity, and compaction must
+       qualify with both slots occupied.
+     - Until then, the bounded translated replay stays as it is.
+2. **Effort is not the lever.** `medium` did not improve plan delivery (§12.1), so `reasoningEffort` is set to
+   `'pass'` only, to end the silent drop. It is not set to a level to make the model act.
+3. **Per account, not a blanket default.** Under §8.1 the lossless behaviour is the target state, and the drop is the
+   declared mutation (`drop-replayed-reasoning`, `drop:reasoning_effort`).
+   - **Do not invert the replay default across all local accounts** (codex review). Replay is turned on per account:
+     only on an account whose context gate and qualification have passed, with that account's own `lastTurns`.
+   - The provider-table default for `local` stays "drop" until every local account has done this.
+   - Track it as a follow-up issue so the opt-in does not become permanent.
 
 **Smaller points for its review.**
 - **Same mapping as llama.cpp's.** The stopgap attaches an item's text to the assistant message its output becomes.
@@ -1251,54 +1558,96 @@ the bridge; after that it is the translated path's permanent behaviour.
 
 ### 12.1 Tonight's evidence: the fast path and the replay probe
 
-**The fast-path test** (Codex straight at llama.cpp `/v1/responses`) had written no result to
-`flashnext-plan-investigation/out/` at 17:06Z. That folder holds only the replay A/B probe. Step 5 must therefore start
-from the source reading in §5.1, not from a measured run. When the result lands, it slots into Step 5's
-classification. What to read in it:
-1. Did any turn get a 400 "Cannot determine type of 'item'", or a template raise?
-2. Did Codex show the reasoning and survive long thinking with no reconnects?
-3. Did the plan get written?
+**The replay A/B probe at K=46** (`flashnext-plan-investigation/out/`):
+- **Setup.** Straight to cloud3's llama-swap chat endpoint, bypassing the router; flash-next's own sampling.
 
-**The replay A/B probe**, phase A, complete at 17:04Z (`out/results.jsonl`):
-- **Setup.** Straight to cloud3's llama-swap chat endpoint, bypassing the router; decision point K=46; flash-next's
-  own sampling. Phases B (effort `medium`) and later were still running, deadline 19:40Z, and are not folded in here.
-
-| Arm | Samples | Committed the plan | Thinking before the first call |
+| Arm | Samples | Committed the plan | Notes |
 |---|---|---|---|
-| `asis` (reasoning dropped, as the router sends it today) | 6 | **1** | 48-233 s, 5,357-33,315 reasoning chars |
-| `last1` (the last turn's reasoning restored as `reasoning_content`) | 6 | **5** | 1.2-3.2 s, 131-431 chars |
+| `asis` (reasoning dropped, as the router sends it today) | 6 | **1** | 48-233 s of thinking before the first call, 5,357-33,315 reasoning chars |
+| `last1` (the last turn's reasoning restored as `reasoning_content`) | 6 | **6** | 1.2-3.2 s of thinking. 3 wrote to `plans/` directly; 3 drafted the plan to `/tmp` first, counted as commits. |
+| `asis-medium` | 2 | 1 | `medium` effort does not rescue the drop |
+| `last1-medium` | 2 | 2 | 9 reasoning tokens each: the replay does the work, not the effort |
+| `all` (every block restored) | — | — | **253,468 prompt tokens**: does not fit the shared pool |
 
-- **Commit rate.** 5/6 vs 1/6: one-sided Fisher p ≈ 0.04, a small sample. The one `last1` DEFER was writing the
-  plan body to `/tmp` with a heredoc, arguably the same intent.
-- **Thinking time.** This effect is the large one: the two arms do not overlap at all (Mann-Whitney one-sided
-  p ≈ 0.001 at n=6 each).
-  - With its own last reasoning restored, the model does not re-derive its decision. It thinks for about 2 s and
-    acts.
-  - With the reasoning dropped, it spends minutes re-deriving, and usually ends up checking something again instead
-    of acting.
+- **Commit rate.** 6/6 vs 1/6: one-sided Fisher p ≈ 0.008.
+- **Thinking time.** The two arms do not overlap at all (Mann-Whitney one-sided p ≈ 0.001 at n=6 each). With its own
+  last reasoning restored, the model does not re-derive its decision; it thinks for about 2 s and acts. That is the
+  mechanism of bug #2, measured.
+- **Effort.** `medium` helps neither arm in a way that matters, so it is not used for this (§12, adaptation 2).
+- **`preserve_thinking=false`** cannot bound `all` in an agent session (§12, adaptation 1).
 
-  That is the mechanism of bug #2, measured.
-- **What it does not test.** Neither the stopgap nor llama.cpp's native converter sends only the last block. Both
-  send every block, and the template renders all of them under `preserve_thinking`'s default. The `all` and
-  `preserve_thinking=false` arms (§12, adaptation 2) are still needed before replay is turned on, both for the plan
-  outcome and for context size.
+**The direct-path end-to-end run (P1).** This is the "fast path": Codex 0.166 straight to llama.cpp b12020's
+`/v1/responses`, which replays every reasoning block.
+
+| Path | Plan delivered | Run ended | Tokens | Peak context |
+|---|---|---|---|---|
+| Direct to llama.cpp `/v1/responses` | **15.4 min** | 23.5 min | 48.7k output | 135k |
+| Through the router (translated, reasoning dropped) | no plan in 90 min | — | 192.5k output | — |
+
+What it shows:
+- **Native works for a real Codex session,** with no 400s from foreign items: §5.1's source reading, confirmed end to
+  end for P1's shapes.
+- **With its reasoning visible to it, the model thinks far less per turn:** about a quarter of the output tokens
+  (48.7k vs 192.5k), for a finished task against an unfinished one.
+- **Replaying everything still grows the context** (135k peak with one slot). Native on cloud3 therefore needs the
+  context gate in Step 6: the advertised window and compaction set against concurrent capacity and qualified with
+  both slots busy, else `reasoning-window`.
 
 ---
 
-## 13. Decisions for the owner
+## 13. Decisions (owner, 2026-11-04)
 
-- **D1. Adopt B (native-first)** and the mutation policy (§8.1) as the router's stated contract, in an ADR in
-  `docs/decisions/`.
-- **D2. The default for unknown fields on native paths:** forward. The alternative is reject-unless-allowlisted per
-  wire. Recommend forward: the upstream validates, and the router keeps only its invariant guards (§7.2).
-- **D3. The response `model` field on native paths:**
-  - **verbatim** (the served name; honest; recommended for agents);
-  - or masked to the requested alias, a declared `model-alias` response mutation (keeps chat UIs' labels stable).
-- **D4. `translate: never` on the dev-worker agent routes** (predictability over availability), or `allow` with
-  qualified translators.
-- **D5. Mid-conversation system messages:** a cloudlab template change (recommended) vs keeping `system-merge`.
-- **D6. `preserve_thinking` and compaction per local model** (§12), decided with the probe's `all` and
-  `preserve_thinking=false` arms.
+- **D1. Decided: adopt B (native-first) and the mutation policy (§8.1).** An ADR in `docs/decisions/` follows.
+- **D2. Decided: unknown fields on native paths are forwarded.** The router keeps only its invariant guards and the
+  per-wire operator-reserved denylist (§7.2). D2 covers unknown *fields*, not known *losses*: a feature the manifest
+  lists as lost skips the target unless that loss is explicitly allowed (§9.6).
+- **D3. Decided: the response `model` field on native paths is the served name, verbatim.** There is no alias mutation
+  (§8.3, §10.6).
+- **D4. Decided: dev-worker agent routes translate only through qualified translators,** and otherwise refuse loudly
+  (`translate: 'qualified'`, enforced through the qualification manifest, §7.1, §10.4).
+- **D5. Decided: fix the template in cloudlab, and the router stops merging system messages.** `system-merge` is
+  removed per account once its template is confirmed (§10.3).
+- **D6. Decided by evidence (§12.1): replay reasoning, bounded at the router.**
+  - Translated: `replayReasoning: {lastTurns: N}`, per account, starting at N=1, the measured arm. Not a blanket
+    `local` default.
+  - Native on cloud3:
+    - the dev workers' advertised window and auto-compaction threshold are set against concurrent capacity (today
+      262,144 is advertised, the whole two-slot pool);
+    - compaction qualifies with both slots occupied;
+    - `reasoning-window` is the fallback.
+
+    This is a **rollout blocker** (codex review).
+  - The template's `preserve_thinking` is not the bound (it strips nothing in agent sessions), and effort is not the
+    lever.
+
+---
+
+## 14. Codex cross-validation (2026-11-04)
+
+- **Who:** gpt-6-astra, `codex exec --profile plan-review`, reading the source at llm-router `origin/main` `247b19f`
+  (#136) and the PR copy. The full text is `scratchpad/codex-design-review/review.md`.
+- **Verdict: adopt with changes.** Native-first is right and D1-D5 are retained. Rollout is blocked on context
+  capacity, enforced qualification and a replay-compatible rollback. Deliver a thin native Responses path first.
+
+| # | Finding | Severity | Where addressed |
+|---|---|---|---|
+| 1 | Context control: 262,144 advertised is the whole two-slot pool; compaction is unqualified with two slots | Blocker | §12 adaptations 1 and 3, §13 D6, Step 6 prerequisites and items 7-8 |
+| 2 | Native → translated replay rejects llama.cpp's `encrypted_content: ""`; placement spill and moves make it reachable; removing `wire` is not a validated rollback | Blocker | §10.4, Step 3 (d2), Step 1 corpus, Step 6 item 8 and rollback |
+| 3 | Qualification is descriptive; D2 must not cover known tool losses; the new reasons must be permanent and request-caused | Blocker | §7.1 (manifest, enforced eligibility, reasons), §9.6, §10.1, §10.2, Step 5, Step 6 (`allowLoss` decision) |
+| 4 | Admission is not "unchanged": pre-read eligibility, reservations, translated-candidate size, lifetime, tests | Important | §9.2, §10.6, Step 4, code map |
+| 5 | The canary is not isolated on a shared account | Important | §7.1 `nativeWires`, Step 6 isolation |
+| 6 | The native adapter is not byte-preserving (`JSON.stringify`, SSE rebuild); the tap needs a backpressure contract | Important | §7.2 (byte patching), §7.3 (one read loop, frames as received, transport tests), Step 4, code map |
+| 7 | Non-streaming native responses are missing; today's synthesis conflicts with D3 | Important | §7.3 (non-streaming), Step 4 tests |
+| 8 | vLLM: `response.completed` with `status: incomplete`; vLLM does merge function calls | Important | §5.2, §5.4, §7.3 tap, §10.1, Step 5 |
+| 9 | Capture is bounded and redacted, not replayable | Important | §8.1 rule 6, §9.5 (completeness label, separate encrypted diagnostic mode) |
+| 10 | Critical path: settled items, a short-test gate, a shorter-timeout idle test, plan artifact, continuation and clean retries; a thin native path first | Important | §11 (settled, critical path, short-test gate), Step 6 items and pass criteria |
+
+**Not independently verified by the review**, and still open:
+- the deployed template behaviour;
+- vLLM's effort-to-template wiring;
+- Codex 0.166 compaction on these deployments;
+- dsh and Open WebUI replay;
+- the new transport's live backpressure and drain behaviour.
 
 ---
 
@@ -1397,6 +1746,22 @@ All accessed 2026-11-04 unless dated.
 - **Gemini** thought signatures: <https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures>
 - **Open Responses** (2026-01-15): <https://simonwillison.net/2026/Jan/15/open-responses/>
 - **Open WebUI** reasoning models: <https://docs.openwebui.com/features/chat-conversations/chat-features/reasoning-models>
+
+**Codex cross-validation (§14).**
+- The review: `scratchpad/codex-design-review/review.md`.
+- Its source references, at llm-router `origin/main` `247b19f`:
+  - `packages/modules/protocol/index.ts:65`;
+  - `packages/modules/compat/index.ts:95`, `:205`;
+  - `packages/modules/placement/index.ts:6`;
+  - `packages/modules/trajectory/index.ts:32`, `packages/modules/observability/index.ts:3`;
+  - `packages/plugins/api-openai/index.ts:445`, `:485`, `:650`;
+  - `packages/adapters/providers/codex.ts:471`;
+  - `packages/kernel/http.ts:99-101` (checked here).
+- Also: ailab `ansible/roles/dev_worker/defaults/main.yml:150`, and llama.cpp b12020
+  `tools/server/server-task.cpp:572`.
+
+The lines checked here against `247b19f`: `protocol:60-65`, `compat:93-98`, `placement:1-14`, `trajectory:28-36`,
+`kernel/http.ts:93-106`.
 
 **Not verified here.**
 - llm-d EPP body rewrites;
