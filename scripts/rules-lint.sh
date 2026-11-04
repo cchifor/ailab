@@ -58,6 +58,30 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 PROMETHEUS_IMAGE="quay.io/prometheus/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996"
+
+# PULL with a bounded retry, before any check. A runner's dockerd sometimes loses a pull's containerd
+# lease mid-extract ("failed to commit snapshot ...: NotFound: lease does not exist: not found"), and
+# the implicit pull of `docker run` then failed this gate on a PR that changed no rule: ailab#1045
+# (2026-10-03) and #1573 (2026-11-02, red for two days until a rerun). That is a transport flake, not
+# a verdict, so only the PULL is retried; every check below still fails closed. An image already
+# present (same digest) is used as is.
+if ! docker image inspect "$PROMETHEUS_IMAGE" >/dev/null 2>&1; then
+  pulled=0
+  for attempt in 1 2 3; do
+    if docker pull -q "$PROMETHEUS_IMAGE" >/dev/null; then
+      pulled=1
+      break
+    fi
+    echo "docker pull of the promtool image failed (attempt $attempt/3)" >&2
+    if [ "$attempt" -lt 3 ]; then
+      sleep $((attempt * 10))
+    fi
+  done
+  if [ "$pulled" -ne 1 ]; then
+    echo "could not pull $PROMETHEUS_IMAGE after 3 attempts; failing closed" >&2
+    exit 1
+  fi
+fi
 # DISCOVERY IS BY CONTENT, REPO-WIDE, not by a directory plus a filename glob.
 # 2026-09-10, codex pre-merge review: the gate used to scan only
 # kubernetes/apps/infrastructure/monitoring/*-rules.yaml, and a CRITICAL alert added at
