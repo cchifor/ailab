@@ -3679,12 +3679,14 @@ it in the workflow's concurrency group and published in about a minute. This Git
   6912 (1.2 s for both turns).
 - **cloud3, Responses, `flash-next`:** turn 1 returned a reasoning item and a `function_call`; turn 2 sent both back
   with the `function_call_output`. Trajectory `08847765` on `lan-192.168.0.26-8080` journals
-  `["input:reasoning_replayed:1"]`, and the answer was 6912 (7.9 s).
+  `["input:reasoning_replayed:1"]`, and the answer was 6912 (7.9 s for both turns, as the 1.2 s above).
 - **Before the roll,** the same chat smoke on the old image journaled no adjustment and sent no reasoning back, as
   expected.
 
-**Acceptance:** a 15-minute synthetic agent probe through the router, run by the investigation that found the
-problem; its result is recorded with that investigation.
+**Acceptance:** a 15-minute synthetic agent probe through the router, run by the flash-next planning investigation:
+`plans/2026-11-04-local-model-agent-benchmark-results.md` (ailab #1597), whose day-2 reruns wait on this fix. The
+replay probe that chose `lastTurns: 1` is in llm-router #136's description. The probe's result goes with that
+investigation's results, not in this section.
 
 ## Relay access requests
 
