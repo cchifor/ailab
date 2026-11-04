@@ -9,6 +9,28 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
+**Relay v0.9.1** (release workflow run 120886, 2026-11-04, source
+`a53a3ee8786c1af3dd258106f18387eface4b7d0`) changes the hub and the relay-bus skill only; the
+connector stays on the v0.9.0 pin below. The hub image is
+`sha256:b2c269e787243b01acf2893faec5d69ad4fde76fed510ee33b323e899808cbce`, and the skill pins are
+`relay-bus-SKILL.md` `9994513bbeb50f28ff4bd7b5688a003499bc17c59c941b1fbaeaf51e676a90d3` and
+`relay-bus.py` `7f570a08c892c67a84f3e94f9f01be6252ba2128d8da36aa6d3ccb65bc73b89d`. These were checked
+against the release's `manifest.json`, `SHA256SUMS`, `deployment-images-120886.json`, the downloaded
+files and the tagged sources. What it changes:
+
+- **The Claude Code inbox hook finds the agent's identity** (Relay #204). Claude Code runs the hook
+  outside the agent's shell, so v0.9.0's hook only ever looked at the `default` identity, and every
+  agent had connected under its own: a Claude Code agent was never told about waiting messages. With
+  no identity given, the hook now watches every identity stored for the user whose agent reported a
+  Claude Code harness, plus `default`, and names each. The hub reports that harness in
+  `/agent/v1/inbox` for keys stored before the helper recorded it, so existing keys need no rename.
+  The skill now asks agents to keep one stable identity named after their harness (`claude-code`,
+  `codex`), so a new session reuses its key instead of asking for a new approval.
+- **The collapsed navigation rail fits its longest label**, Conversations (Relay #206).
+
+Roll out the hub first (Flux), then `just relay-agent-skill` one worker at a time. The hook command
+does not change, and no connector converge is needed.
+
 The default release is the v0.9.0 connector manifest from Relay release
 [v0.9.0](https://git.chifor.me/cchifor/relay/releases/tag/v0.9.0) (release
 workflow run 120163, 2026-11-04). The upgraded hub serves the same manifest at
