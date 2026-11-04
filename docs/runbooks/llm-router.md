@@ -3645,6 +3645,47 @@ pod with its admin bearer. `reasoningEffort` stays unset on both.
    (source `f9eea0d20fd7d308e21e13c8bf2f88f189b8cb7e`, release `router-0.1.0-20261103-admission-queue`) with its two
    annotations. No other schema, config or secret change; cloud2's `queue` and both accounts' `forwardReasoning` stay.
 
+### Results of the reasoning-replay release (2026-11-04)
+
+**The roll.** ailab #1600 merged at 18:28:35Z. Flux applied `afaf447b`, and the pod `llm-router-8f4b7466d-ktxjc` came
+up Ready at 18:30:11Z on `sha256:78915e249631945fbf15ed7034e3085b60fa86680e926db73502c0956174a2d2`. Checks after the
+roll:
+- the pod's imageID is that digest; `/app/SOURCE_COMMIT` is `247b19f0adb84efcf6a49e239c257bec08ef6c45`, and both
+  annotations are as rolled;
+- no error-level log lines;
+- around the roll, no request was `abandoned`; the drain cut one stream (`cancelled`, 18:29:51Z);
+- public `/health` 200, unauthenticated `/v1/models` 401;
+- `validate-live` **6/9**, the known baseline (`codex text`, `codex stream`, `codex tool call`: a bare
+  `model: 'codex'`, 400 `MODEL_REQUIRED`).
+
+**The image took two dispatches.** Run 121047 (ci-runner-1) downloaded the Relay archive from git.chifor.me at a few
+KB/s on one connection with hundreds of TCP retransmits, while the same host fetched from Cloudflare at 65 MB/s. It
+failed with `IncompleteRead` before publishing anything. The second dispatch, run 121050 (ci-runner-3), waited behind
+it in the workflow's concurrency group and published in about a minute. This Gitea has no run-cancel API (404).
+
+**Configuration**, each a dry run, then one `If-Match` PUT and a read-back:
+
+| Account | Setting | Revision | Time |
+|---|---|---|---|
+| cloud3 `lan-192.168.0.26-8080` | `replayReasoning: { lastTurns: 1 }` | 2225 → 2226 | 18:31:21Z |
+| cloud2 `lan-192.168.0.28-18020` | `replayReasoning: { lastTurns: 1 }` | 2226 → 2227 | 18:31:28Z |
+
+`reasoningEffort` stays unset on both, and cloud2's `queue` and both accounts' `forwardReasoning` are unchanged.
+
+**Smoke and journal checks**, in the router pod as the administrator. Each is a 2-turn tool loop: "What is
+1234 + 5678? Call the add tool…", then the tool result.
+- **cloud2, chat, `qwen3.8-27b`:** turn 1 called `add` (151 reasoning characters); turn 2 sent that turn back with its
+  `reasoning_content`. Trajectory `731f06cf` journals `changes: ["input:reasoning_replayed:1"]`, and the answer was
+  6912 (1.2 s for both turns).
+- **cloud3, Responses, `flash-next`:** turn 1 returned a reasoning item and a `function_call`; turn 2 sent both back
+  with the `function_call_output`. Trajectory `08847765` on `lan-192.168.0.26-8080` journals
+  `["input:reasoning_replayed:1"]`, and the answer was 6912 (7.9 s).
+- **Before the roll,** the same chat smoke on the old image journaled no adjustment and sent no reasoning back, as
+  expected.
+
+**Acceptance:** a 15-minute synthetic agent probe through the router, run by the investigation that found the
+problem; its result is recorded with that investigation.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
