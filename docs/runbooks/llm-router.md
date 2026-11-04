@@ -3574,6 +3574,77 @@ every request ended; the administrator, in the router pod, model `qwen3.8-27b`).
   no slot frees for 80 s, so all four slots must stay occupied for the whole window; one long holder is not enough.
   The suite and the Codex CLI run at `maxWaitMs` 20000 cover it.
 
+## Reasoning-replay release: a local model sees its own reasoning again, for accounts that opt in (2026-11-04, llm-router#135, #136)
+
+`router-0.1.0-20261104-reasoning-replay` deploys llm-router main `247b19f0adb84efcf6a49e239c257bec08ef6c45`
+([#135](https://git.chifor.me/cchifor/llm-router/pulls/135), [#136](https://git.chifor.me/cchifor/llm-router/pulls/136)).
+It is the interim fix: a native pass-through design for upstreams that speak Responses is under evaluation, and this is
+the translated path's opt-in stopgap until it lands.
+
+**Why.** Since #132 the router accepts a replayed reasoning item (the Codex CLI echoes one every turn) and then drops
+it, and it strips chat `reasoning_content` the same way. The model never sees its earlier reasoning, so on agentic
+planning tasks it re-derives its design every turn and never commits to writing the plan.
+- **The probe** (P1's real request at the decision turn, sent straight to cloud3's llama-swap, 6 samples per arm):
+  with only the previous assistant turn's reasoning restored, the model committed to writing the plan 6/6 (median 69
+  reasoning tokens, ~34 s); with it dropped, as today, 1/6 (median 5,363, 198 s).
+- **Context:** Codex echoes every earlier turn's reasoning (about 106k reasoning tokens over 13 turns in P1). Replaying
+  all of it can fill cloud3's context, so the bound is the account's.
+
+**What changes.**
+- **`Account.replayReasoning?: boolean | { lastTurns: number | 'all' }`** (chat-completions accounts only: local,
+  openai, deepseek; any value on another provider is refused with 422).
+  - `true` or `{ lastTurns: 'all' }`: every turn's reasoning goes back to the server as `reasoning_content`.
+  - `{ lastTurns: N }` (1-1000): only the last N assistant messages after the last user message (the turn in progress,
+    as Qwen's template counts it). A new user message starts the count again, so N serves agentic tool loops.
+  - Unset or `false`: nothing is replayed, as before.
+- **`Account.reasoningEffort?: 'pass' | 'none' | 'low' | 'medium' | 'high' | 'xhigh'`**: passes or sets
+  `reasoning_effort` for a local server, which the provider table otherwise drops. Not set on any account by this
+  release (medium effort did not help in the probe).
+- **Per attempt:** the account an attempt goes to decides; a failover sends each account what it takes, and the shared
+  request is never mutated.
+- **Journal** (`request.parameters_adjusted` changes): `input:reasoning_replayed:<n>` (n turns sent), `input:reasoning`
+  (some dropped), `input:reasoning_orphan` (reasoning no output followed), `reasoning_effort:passed` /
+  `reasoning_effort:overridden`.
+- **Unchanged** for an account that sets neither key.
+
+**Verified before release.**
+- **CI:** llm-router main's push run on `247b19f` passed, and so did #136's PR head `e8f224c`.
+- **The deployed commit is the tested tree.** `247b19f` is Gitea's merge of #136: first parent `c8288ce` (the merge of
+  #135), second parent `e8f224c`, and its tree is byte-identical to `e8f224c`'s
+  (`e7a30f63aa6344ab57ed432663501ff967f18c56`).
+- **Reviews:** reviewer-codex and reviewer-claude approved #135 (at `fc02ece`) and #136 (at `e8f224c`).
+
+**Image.**
+- Archive `router-0.1.0-20261104-reasoning-replay.tar.gz`, SHA-256 `191a7c4a1e029650f17a22d99754c6874d077eac35121c2178a36b6e1a7c78b7` (relay v0.2.0 assets 481/482).
+- Relay branch `release/router-0.1.0-20261104-reasoning-replay-image`,
+  [run 121050](https://git.chifor.me/cchifor/relay/actions/runs/121050), receipt `deployment-images-121050.json`
+  (asset 483). The first dispatch, run 121047 on ci-runner-1, failed before publishing anything: its download of
+  the Relay archive from git.chifor.me crawled at a few KB/s on one degraded connection and ended in `IncompleteRead`.
+- `registry.chifor.me/llm-router/router@sha256:78915e249631945fbf15ed7034e3085b60fa86680e926db73502c0956174a2d2`, tag `parity-a3878b19c21f-121050`. Every blob (index, amd64 manifest, config, 9 layers,
+  attestation) was pulled anonymously and verified, and `/app/SOURCE_COMMIT` = `247b19f0adb84efcf6a49e239c257bec08ef6c45`.
+
+**Before the roll:**
+- backup `/data/backups/pre-reasoning-replay-20261104`: integrity ok, 38,302 trajectories, 250.0 MB, SHA-256
+  `0bc8d4ba1add52f298ec4011e1ccb9c071d6153c8c8d96075f7239ea38dea101`, key 600;
+- `validate-live` 6/9 (18:05Z), the known baseline (`codex text`, `codex stream`, `codex tool call`: a bare
+  `model: 'codex'`, 400 `MODEL_REQUIRED`).
+
+**After the roll:** `replayReasoning: { lastTurns: 1 }` (the probe's value) on cloud3 `lan-192.168.0.26-8080`, then on
+cloud2 `lan-192.168.0.28-18020`, each through `PUT /admin/v1/config` with `If-Match` and a read-back, run in the router
+pod with its admin bearer. `reasoningEffort` stays unset on both.
+- cloud2 gets one smoke request first: a 2-turn tool-call conversation to `qwen3.8-27b`, whose second turn must show
+  `input:reasoning_replayed:1` and the right answer; on any failure the key comes off cloud2 again.
+- A 2-turn Responses request to `flash-next` must show `input:reasoning_replayed:1`.
+- The acceptance is a 15-minute synthetic agent probe through the router, run separately.
+
+**Rollback, in this order.**
+1. Remove `replayReasoning` from both accounts (`If-Match`, read-back). The old image's account schema is not strict:
+   it ignores the field and drops it only at its next validated config write, so a later roll-forward would replay
+   reasoning again silently.
+2. Revert to `registry.chifor.me/llm-router/router@sha256:fef4916c15098832398317c411cf89ec0a0c56e18c87cea30add932422d0142c`
+   (source `f9eea0d20fd7d308e21e13c8bf2f88f189b8cb7e`, release `router-0.1.0-20261103-admission-queue`) with its two
+   annotations. No other schema, config or secret change; cloud2's `queue` and both accounts' `forwardReasoning` stay.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
