@@ -647,7 +647,15 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
         """Streaming, abandoned: (abandon) the consumer stops after two chunks and closes the outer
         stream -- the proxy's path on a client disconnect -- and the upstream transport must be closed
         promptly; (stall-mid) the upstream hangs between two chunks and the consumer's next read must
-        hit the handler's deadline, with the transport closed, not hang or cancel elsewhere."""
+        hit the handler's deadline, with the transport closed, not hang or cancel elsewhere.
+
+        Where that read happens depends on the LiteLLM version. The fixture stalls before the first
+        chunk is complete (0 chunks on 1.106.6). Up to 1.106.6 the Router returns the stream at once,
+        and the deadline surfaces from the consumer's first iteration. 1.108.0 reads a stream's first
+        chunk inside Router.acompletion itself (Router._aread_first_chunk), so the SAME handler
+        Timeout surfaces from that await. Either way, this is the handler's deadline reaching the
+        caller, with one upstream request and the transport closed, so both raise sites count. The
+        print records which one it was."""
         _use_token_dir(f"c-{kind}")
         sent, closed = [], []
         outcome = "stall-mid" if kind == "stall-mid" else "success"
@@ -656,17 +664,21 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
             router = self._router()
             litellm.callbacks = [self.logger]
             try:
-                stream = await asyncio.wait_for(
-                    router.acompletion(**copy.deepcopy(PLATFORM_REQUEST), stream=True, timeout=2), timeout=25)
-                got, error = [], None
+                got, error, stream, raised_in = [], None, None, None
                 try:
-                    async for chunk in stream:
-                        got.append(chunk)
-                        if kind == "abandon" and len(got) == 2:
-                            break
-                except Exception as exc:  # noqa: BLE001
-                    error = exc
-                await stream.aclose()
+                    stream = await asyncio.wait_for(
+                        router.acompletion(**copy.deepcopy(PLATFORM_REQUEST), stream=True, timeout=2), timeout=25)
+                except Exception as exc:  # noqa: BLE001 - the first-chunk read (1.108.0+), see above
+                    error, raised_in = exc, "acompletion"
+                if stream is not None:
+                    try:
+                        async for chunk in stream:
+                            got.append(chunk)
+                            if kind == "abandon" and len(got) == 2:
+                                break
+                    except Exception as exc:  # noqa: BLE001
+                        error, raised_in = exc, "iteration"
+                    await stream.aclose()
                 await asyncio.sleep(0.05)
             finally:
                 await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
@@ -682,7 +694,7 @@ class ChatGPTChatHandlerContract(unittest.TestCase):
             self.assertLess(elapsed, 15, "c-stall-mid: the handler's deadline, delivered to the consumer's read")
         self.assertEqual(closed, ["transport"], f"c-{kind}: the upstream transport is closed on abandonment")
         print(json.dumps({"case": f"c-{kind}", "chunks": len(got), "error": type(error).__name__ if error else None,
-                          "closed": closed, "elapsed_s": round(elapsed, 2)}))
+                          "raised_in": raised_in, "closed": closed, "elapsed_s": round(elapsed, 2)}))
 
     # (d) -------------------------------------------------------------------------------------
     async def _case_d_upstream_rejection(self, status, error_name):
