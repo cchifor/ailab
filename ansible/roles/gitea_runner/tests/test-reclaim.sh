@@ -33,7 +33,7 @@ EOF
 printf '#!/usr/bin/env bash\necho "${MOCK_MAINPID:-0}"\n' >"$BIN/systemctl"
 # docker ps -q -> no containers (no bind-mount busy paths).
 printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/docker"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/logger"
+printf '#!/usr/bin/env bash\necho "logger $*" >> "%s"\n' "$CALLS" >"$BIN/logger"
 # The job-boundary reaper: a recording mock. The runner VMs this suite runs on have the REAL reaper at
 # /usr/local/bin/gitea-runner-reap.py, so every run_reclaim must point GITEA_REAP_BIN here.
 printf '#!/usr/bin/env bash\necho "reap $*" >> "%s"\n' "$CALLS" >"$BIN/reap-mock"
@@ -174,6 +174,60 @@ mkdir -p "$WORK/tf4"; : > "$WORK/tf4/runner_health.prom"; : > "$WORK/fake-github
 [ ! -e "$WORK/tf4/gitea_runner_docker_config.prom" ] && [ -e "$WORK/tf4/runner_health.prom" ] \
   && ok "G: agent still present -> no duplicate gauge file, its runner_health.prom kept" \
   || bad "G: wrote a duplicate runner_docker_config_root_owned while the agent's file exists"
+
+echo "[H] corrupt cached action clones are dropped at act_runner's start, never on a timer tick  (2026-11-04)"
+# A cached action clone as act_runner leaves it: <workdir>/<64-hex>/.git, a real repo with a pack and a tag.
+H_URL=https://github.com/actions/setup-node
+mk_clone() {
+  rm -rf "$1"; mkdir -p "$1"
+  git -c init.defaultBranch=main -C "$1" init -q
+  git -C "$1" config remote.origin.url "$H_URL"
+  echo "name: x" > "$1/action.yml"
+  git -C "$1" add action.yml
+  git -C "$1" -c user.name=t -c user.email=t@t commit -q -m x
+  git -C "$1" tag v5
+  git -C "$1" repack -adq
+}
+hexid() { printf '%s' "$1" | sha256sum | cut -c1-64; }
+if command -v git >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
+  H_OK="$WSROOT/$(hexid ok)"; mk_clone "$H_OK"
+  H_INC="$WSROOT/$(hexid incident)"; mk_clone "$H_INC"   # the 2026-11-04 shape: an EMPTY pack + idx pair
+  : > "$H_INC/.git/objects/pack/pack-1325e63fb086dde836fd9f643e127e0f5109a3f8.pack"
+  : > "$H_INC/.git/objects/pack/pack-1325e63fb086dde836fd9f643e127e0f5109a3f8.idx"
+  H_NOIDX="$WSROOT/$(hexid noidx)"; mk_clone "$H_NOIDX"
+  rm -f "$H_NOIDX"/.git/objects/pack/pack-*.idx
+  H_REF="$WSROOT/$(hexid emptyref)"; mk_clone "$H_REF"; : > "$H_REF/.git/refs/tags/v5"
+  H_OBJ="$WSROOT/$(hexid emptyobj)"; mk_clone "$H_OBJ"
+  mkdir -p "$H_OBJ/.git/objects/ab"; : > "$H_OBJ/.git/objects/ab/cdef0123456789abcdef0123456789abcdef01"
+  H_HEAD="$WSROOT/$(hexid emptyhead)"; mk_clone "$H_HEAD"; : > "$H_HEAD/.git/HEAD"
+  # Out of scope, left alone: a job's private copy (<16-hex>/act/actions/<64-hex>) and a symlinked clone dir.
+  H_JOB="$WSROOT/b00895e93c932aa8/act/actions/$(hexid jobcopy)"; mk_clone "$H_JOB"; : > "$H_JOB/.git/refs/tags/v5"
+  H_TGT="$WORK/elsewhere-clone"; mk_clone "$H_TGT"; : > "$H_TGT/.git/HEAD"
+  H_LNK="$WSROOT/$(hexid link)"; ln -s "$H_TGT" "$H_LNK"
+
+  # Timer tick: even with the daemon down, nothing is dropped (a live fetch looks exactly like this).
+  : > "$CALLS"; CGROUP_OVERRIDE="$WORK/cg.timer" run_reclaim
+  [ -d "$H_INC/.git" ] && ok "H: timer tick leaves a corrupt clone alone" || bad "H: the timer tick dropped a clone"
+  # Inside the start, but the daemon already has a MainPID: not a start transaction, nothing dropped.
+  : > "$CALLS"; MOCK_MAINPID=1 CGROUP_OVERRIDE="$WORK/cg.start" run_reclaim
+  [ -d "$H_INC/.git" ] && ok "H: daemon running -> nothing dropped" || bad "H: dropped while the daemon runs"
+
+  : > "$CALLS"; CGROUP_OVERRIDE="$WORK/cg.start" run_reclaim
+  [ -d "$H_OK/.git" ] && git -C "$H_OK" rev-parse -q --verify refs/tags/v5 >/dev/null \
+    && ok "H: a healthy clone (real git pack) is kept" || bad "H: a healthy clone was dropped"
+  [ ! -e "$H_INC" ] && ok "H: the incident clone (empty pack + idx) is dropped" || bad "H: the incident clone survived"
+  grep -q "logger .*dropped corrupt action clone $(hexid incident) ($H_URL): truncated pack-1325e63f" "$CALLS" \
+    && ok "H: the drop is logged with the action URL and the reason" || bad "H: no drop log line naming URL and reason"
+  for c in "$H_NOIDX:pack without index" "$H_REF:empty ref" "$H_OBJ:empty loose object" "$H_HEAD:empty HEAD"; do
+    [ ! -e "${c%%:*}" ] && ok "H: dropped (${c#*:})" || bad "H: not dropped (${c#*:})"
+  done
+  [ -d "$H_JOB/.git" ] && ok "H: a job workspace's private action copy is not touched" || bad "H: walked into a job workspace"
+  [ -L "$H_LNK" ] && [ -d "$H_TGT/.git" ] && ok "H: a symlinked clone dir is skipped, its target untouched" \
+    || bad "H: followed a symlinked clone dir"
+  rm -rf "$H_OK" "$H_JOB" "$H_TGT" "$H_LNK" "$WSROOT/b00895e93c932aa8"
+else
+  echo "  SKIP: git or sha256sum not available (both are on the runner VMs)"
+fi
 
 echo "[F] act_runner's start budget covers the reclaim's worst case at ExecStartPre"
 UNIT_T="$(dirname "$SCRIPT")/../templates/gitea-act-runner.service.j2"
