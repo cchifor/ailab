@@ -26,7 +26,7 @@
 # Pinning a route inside a preset is not something dsh-agent-presets does.
 #
 # SO SELECTING THIS TEAM IS HALF THE JOB: also select `gpt-6-astra` for the session. The
-# deployment default is `agent-default-model: llm-router-local/qwen3.8-flash-next` and is
+# deployment default is `agent-default-model: llm-router-local/qwen3.8-27b` and is
 # deliberately left there (gpt-6-astra spends the Codex subscriptions' weekly windows, and it would
 # otherwise become the default for every session), so a Conductor session left on the default is
 # qwen conducting qwen -- the team's topology without its point. That is not a hypothetical: it is

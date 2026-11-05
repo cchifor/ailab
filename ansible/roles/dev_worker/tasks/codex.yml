@@ -368,17 +368,14 @@
     block: |
       ## Local models through the router
 
-      Besides your default model, this worker's router key reaches two local models. They use no subscription
-      quota: {% for p in dev_worker_codex_local_profiles %}`{{ p.model }}`{{ ', ' if not loop.last else '.' }}{% endfor %}
+      Besides your default model, this worker's router key reaches the estate's local model. It uses no
+      subscription quota: {% for p in dev_worker_codex_local_profiles %}`{{ p.model }}`{{ ', ' if not loop.last else '.' }}{% endfor %}
 
-      - `qwen-27b`: Qwen3.8-27B on cloud2 (vLLM), ~116 tok/s, 262k context, sees images. The better local choice
-        for coding sub-tasks.
-      - `flash-next`: Qwen3.8-Flash-Next on cloud3 (llama.cpp), ~60 tok/s, 262k context, sees images. It copies
-        exact values from tool output unreliably (times, numbers, paths): check what it reports. cloud3 serves
-        one model at a time, so its first request after another cloud3 model waits for the swap.
+      - `qwen-27b`: Qwen3.8-27B on vLLM, served by two machines (cloud2 and cloud3, the same checkpoint); the
+        router keeps each conversation on one of them. ~116 tok/s, 262k context, sees images.
 
-      When the user asks for an agent (or sub-agent) on one of them, do NOT use `spawn_agent`: it accepts only the
-      models of your built-in catalog and refuses these names. Run the agent as a shell command instead, one per
+      When the user asks for an agent (or sub-agent) on it, do NOT use `spawn_agent`: it accepts only the
+      models of your built-in catalog and refuses this name. Run the agent as a shell command instead, one per
       agent (several can run in parallel):
       `local-agent <name> -C <dir> "<self-contained task>"`. It prints the agent's final message (its
       transcript path goes to stderr). The agent works only in <dir> and sees only the task text, not this
@@ -399,8 +396,8 @@
     block: |
       ## Agents on the local models
 
-      This worker's router key reaches two local models, `qwen-27b` (cloud2, the better one for code) and
-      `flash-next` (cloud3); both see images. Your own sub-agents (the Task tool) run on Claude models only. When
+      This worker's router key reaches the estate's local model, `qwen-27b` (Qwen3.8-27B on cloud2 and cloud3);
+      it sees images. Your own sub-agents (the Task tool) run on Claude models only. When
       the user asks for an agent on a local model, use the `local-model-agent` skill: it runs the task as a
       background `local-agent <model> -C <dir> "<task>"` and reads its answer.
   when: dev_worker_codex_local_models_on | bool

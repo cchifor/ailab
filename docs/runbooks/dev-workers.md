@@ -409,19 +409,22 @@ the host's own ChatGPT login. Revoke the keys on the router if they are no longe
 | `400 UNSUPPORTED_PARAMETER: include` | the request reached a route without `native: ["codex-responses"]` (subset parser): check where `dw-N` points |
 | `429 ... busy` | every account in `pool-codex` is at its concurrency: wait, or raise an account's `concurrency` |
 
-#### Local models: agents on `qwen-27b` and `flash-next` (since 2026-11-01)
+#### Local models: agents on `qwen-27b` (since 2026-11-01)
 
-Each worker's router key also reaches two local models. They use no subscription quota.
+Each worker's router key also reaches the estate's local model. It uses no subscription quota.
 
 | name (route) | serves | speed | context | notes |
 |---|---|---|---|---|
-| `qwen-27b` → route `qwen3.8-27b` | cloud2, vLLM, Qwen3.8-27B | ~116 tok/s output | 262k | the better local choice for code |
-| `flash-next` → route `qwen3.8-flash-next` | cloud3, llama.cpp, Qwen3.8-Flash-Next | ~60 tok/s output | 131k per session, compacts at 114,688 (below) | copies exact values from tool output unreliably (cloudlab runbook 13e); cloud3 serves one model at a time, so its first request after another cloud3 model waits for the swap |
+| `qwen-27b` → route `qwen3.8-27b` | cloud2 and cloud3 (since 2026-11-05), vLLM, Qwen3.8-27B W4A16, the same checkpoint and flags on both | ~116 tok/s output | 262k | the router puts each new conversation on the less busy box and keeps it there (`llm-router.md` § "flash-next retired") |
+
+`flash-next` (route `qwen3.8-flash-next`, cloud3's llama.cpp) was **retired on 2026-11-05** by the owner: its
+profile, its pointer and its place on the worker keys are gone, and `local-agent flash-next` says so. Use
+`-p qwen-27b`.
 
 **How a request gets there.**
-- `qwen-27b` and `flash-next` are router pointers, and the worker's key allows them besides its `dw-N`.
-- A request that names one is route mode on that pointer, while Codex's default model still takes `dw-N` → `pool-codex`.
-- Both targets are chat-backed (OpenAI-compatible servers), so the router brings the Codex CLI's own Responses
+- `qwen-27b` is a router pointer, and the worker's key allows it besides its `dw-N`.
+- A request that names it is route mode on that pointer, while Codex's default model still takes `dw-N` → `pool-codex`.
+- The targets are chat-backed (OpenAI-compatible servers), so the router brings the Codex CLI's own Responses
   request into its Responses subset. It drops what a chat server cannot use: `prompt_cache_key`, `client_metadata`,
   reasoning summaries, the `web_search` and multi-agent tool groups. It also drops `reasoning_effort`, as a
   disclosed lenient-route control. The response carries `x-router-adapted: codex-responses` (llm-router#127,
@@ -438,7 +441,7 @@ prints the agent's final message. The transcript path goes to stderr. Each run g
 - **What it leaves:** the private `CODEX_HOME` (copied config, Codex's session files) is deleted when the run ends.
   The answer and transcript stay in `$TMPDIR/local-agent-*` for 3 days, then the next run prunes them.
 
-**From Codex.** Ask for an agent on `qwen-27b` or `flash-next`. The managed block in `~/.codex/AGENTS.md` tells Codex
+**From Codex.** Ask for an agent on `qwen-27b`. The managed block in `~/.codex/AGENTS.md` tells Codex
 to run `local-agent`, because neither of Codex's own ways works:
 - **It refuses the model:** codex 0.166 checks its `model` override against the built-in catalog ("Unknown model
   `qwen-27b` for spawn_agent").
@@ -450,20 +453,13 @@ to run `local-agent`, because neither of Codex's own ways works:
 `local-agent` handles all three. A `model_catalog_json` file with local entries would make `spawn_agent` accept the
 names (tested 2026-11-01), but it freezes the GPT models' metadata on every worker. It is not used.
 
-**By hand, a whole session on a local model:** `codex -p qwen-27b` (or `-p flash-next`). The profile files
-`~/.codex/<name>.config.toml` set the model, the context window one session may use and, for flash-next, Codex's
+**By hand, a whole session on a local model:** `codex -p qwen-27b`. The profile file
+`~/.codex/<name>.config.toml` sets the model, the context window one session may use and, optionally, Codex's
 compaction threshold (`model_auto_compact_token_limit`).
-- **flash-next's window is half the pool (2026-11-05).** cloud3's llama.cpp serves it with `-c 262144 --parallel 2
-  --kv-unified`: 262,144 tokens is one KV pool that both slots share. The profile used to advertise all of it, so one
-  session could grow to about 236k before Codex compacted (90 % of the window when no limit is set) and leave the
-  second slot nothing. It now advertises 131,072 and compacts at 114,688, leaving 16,384 for one turn's output (the
-  largest measured on the planning benchmark was 14,179). Two sessions fit at once; a long session compacts earlier
-  than before. The router's append-only reasoning replay (`lastTurns: "all"`) relies on this client-side bound.
-  The bound is approximate: Codex checks the limit between requests, so a request can also carry the tool outputs
-  added since the last check (each truncated to 10,000 bytes, about 2.5k tokens), and the compaction request runs on
-  the whole pre-compaction context. With `--kv-unified` such an overshoot borrows from the shared pool, and fails only
-  if both sessions peak at the same moment.
-- **qwen-27b** keeps 262,144, cloud2's vLLM `max_model_len`.
+- **qwen-27b** keeps 262,144, the vLLM `max_model_len` of both boxes, with no compaction limit (Codex compacts at
+  90 %). vLLM gives each sequence up to that length from a per-box paged KV pool and preempts rather than fails when
+  the pool runs short. (flash-next, retired, had 131,072 and a limit of 114,688, because llama.cpp's `--kv-unified`
+  pool was shared by its two slots; ailab #1605.)
 
 **From Claude Code.** Claude's own sub-agents (the Task tool) run on Claude models only: Claude Code sends them to
 Anthropic, and the router has no Anthropic endpoint (llm-router#128 is the plan for one). The `local-model-agent`
@@ -472,7 +468,7 @@ skill (each user's `~/.claude/skills/`) and a block in `~/.claude/CLAUDE.md` tel
 
 **Managed by** role `dev_worker`, `tasks/codex.yml`, while `dev_worker_codex_router_enabled` and
 `dev_worker_codex_local_models_enabled` are both true:
-- the two profile files;
+- the profile file;
 - the AGENTS.md and CLAUDE.md blocks (marker `local models`);
 - the skill;
 - `/usr/local/bin/local-agent` (`files/local-agent`).
@@ -494,9 +490,10 @@ from it is removed too. Apply with `ansible-playbook dev-workers.yml -t codex`.
 
 | symptom | cause / fix |
 |---|---|
-| `403 ROUTE_NOT_ALLOWED` naming `qwen-27b` / `flash-next` | the key lacks the pointer: `PATCH /admin/v1/keys/<id>` with `routes: [dw-N, qwen-27b, flash-next]` |
+| `403 ROUTE_NOT_ALLOWED` naming `qwen-27b` | the key lacks the pointer: `PATCH /admin/v1/keys/<id>` with `routes: [dw-N, qwen-27b]` |
+| `403 ROUTE_NOT_ALLOWED` or `404` naming `flash-next` | retired 2026-11-05: use `qwen-27b` (`codex -p qwen-27b`, `local-agent qwen-27b`) |
 | `400 UNSUPPORTED_INPUT: custom_tool_call …` | the conversation started on a GPT model with custom tools; start a new one on the local model |
-| a timeout on `flash-next` right after another cloud3 model | the swap (unload + load); retry once |
+| `429 ... busy` on `qwen-27b` | both boxes are at their concurrency (4 each); with one box down, its sibling's queue holds the request up to 80 s first. Retry later |
 | `413 PAYLOAD_TOO_LARGE … Responses subset` | the 2 MiB cap; start a fresh session (or `/compact`) |
 
 ### Optional: sandboxed separate agent account

@@ -442,7 +442,7 @@
   name: '@deepseek-ai/dsh-agent-default-model'
   config:
     provider: llm-router-local
-    model: qwen3.8-flash-next
+    model: qwen3.8-27b
 
 # Host-only initialized-service observer. No model calls, coordinator or appExit.
 # Missing conductor remains a pending injection, not a missing top-level import.
