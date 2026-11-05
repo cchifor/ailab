@@ -1609,6 +1609,7 @@ the bridge; after that it is the translated path's permanent behaviour.
 |---|---|---|---|---|
 | Direct to llama.cpp `/v1/responses` | **19.3 min** (first successful write; an attempt at 15.4 min failed) | 23.5 min | 48.7k output | 135k |
 | Through the router (translated, reasoning dropped) | no plan in 90 min | — | 192.5k output | — |
+| Through the router (fixed: reasoning replayed append-only, rev 2228) | **20.1 min** (first successful write) | 21.2 min | 46.6k output | 124k |
 
 What it shows:
 - **Native works for a real Codex session,** with no 400s from foreign items: §5.1's source reading, confirmed end to
