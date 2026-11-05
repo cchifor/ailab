@@ -136,7 +136,8 @@ dev_worker_codex_router_key_field: "llm_router_codex_key"
 dev_worker_codex_router_stream_max_retries: 8
 dev_worker_codex_router_request_max_retries: 6
 # The estate's local models for agents on the workers. Each `model` is a router pointer on the worker's key besides
-# `dw-N` (qwen-27b -> route qwen3.8-27b, cloud2 vLLM; flash-next -> route qwen3.8-flash-next, cloud3 llama-swap), so
+# `dw-N` (qwen-27b -> route qwen3.8-27b: the same Qwen3.8-27B W4A16 checkpoint on cloud2's and cloud3's vLLM since
+# 2026-11-05, the router placing each conversation on one of them), so
 # the router serves it in route mode on a chat-backed route and adapts the CLI's request (llm-router#127; runbook
 # dev-workers.md § "Local models"). Used three ways: Codex's own sub-agents (`spawn_agent` with `model`, told in
 # ~/.codex/AGENTS.md), Claude Code's `local-model-agent` skill (a background `codex exec -p <name>`), and
@@ -145,21 +146,14 @@ dev_worker_codex_router_request_max_retries: 6
 # codex 0.166 refuses `-p qwen3.8-27b`. All of it is written only while the router AND
 # `dev_worker_codex_local_models_enabled` are on, and removed otherwise: false retires only the local models (profiles,
 # notes, skill) and keeps the router and `dw-N`.
-# - qwen-27b: cloud2's vLLM `max_model_len` (262144).
-# - flash-next (2026-11-05): cloud3's llama.cpp runs `-c 262144 --parallel 2 --kv-unified`, so 262,144 tokens is ONE
-#   pool that both slots share, not a window per slot. Advertising the whole pool let one Codex session grow to
-#   ~236k (Codex compacts at 90 % of the window when no limit is set) and starve a second one. Each session now gets
-#   half the pool (131,072) and compacts at 114,688 = 131,072 - 16,384 of headroom for one turn's output (the largest
-#   measured on P1-P3 was 14,179 tokens). Codex 0.166 caps the limit at 90 % of the window anyway
-#   (`ModelInfo::auto_compact_token_limit`); the explicit value is the lower one. The bound is approximate, not strict:
-#   Codex checks the limit between requests, so a request can still carry the tool outputs added since the last check
-#   (each truncated to 10,000 bytes, about 2.5k tokens, for these models), and the compaction request itself runs on the
-#   whole pre-compaction context. With `--kv-unified` such an overshoot borrows from the shared pool; it only fails if
-#   both sessions peak at the same moment. Runbook dev-workers.md § "Local models".
+# - qwen-27b: the vLLM `max_model_len` of both backends (262144, the same flags on cloud2 and cloud3). vLLM gives each
+#   sequence up to that length out of a per-box paged KV pool and preempts (recomputes) rather than fails when the
+#   pool runs short, so no compaction limit is set: Codex compacts at 90 % of the window.
+# - flash-next: RETIRED 2026-11-05 (owner decision; runbook llm-router.md § "flash-next retired"). Its profile left
+#   this list, so the tasks below delete ~/.codex/flash-next.config.toml on the next apply; use `-p qwen-27b`.
 dev_worker_codex_local_models_enabled: true
 dev_worker_codex_local_profiles:
   - { name: qwen-27b, model: qwen-27b, context_window: 262144 }
-  - { name: flash-next, model: flash-next, context_window: 131072, auto_compact_token_limit: 114688 }
 
 # ---- feature toggles ----
 dev_worker_install_docker: true

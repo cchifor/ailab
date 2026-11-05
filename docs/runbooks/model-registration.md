@@ -153,10 +153,10 @@ not from a dev-worker.
   selection time — a 404 for a served name the backend does not know, a connection error or
   timeout for a backend that is down, or a silent fallback if one is configured. The probe in
   step 4 is what catches that before a user does.
-- **cloud3 holds one model at a time.** Every cloud3 route (`qwen3.5-122b-cloud`,
-  `qwen3.8-flash-next-cloud`, `qwen3.8-27b-fp8-cloud` and its `-fp8-unc-cloud` alias;
-  `qwen3.8-flash-next-q6-cloud` left with its llama-swap entry on 2026-09-21, `qwen3-coder-30b-a3b-cloud` was removed
-  2026-10-31) shares one llama-swap; a request for a different one swaps the whole model (60–330 s
+- **cloud3 holds one model at a time.** Every cloud3 route (`qwen3.8-27b-fp8-cloud` and its `-fp8-unc-cloud`
+  alias; `qwen3.8-flash-next-q6-cloud` left with its llama-swap entry on 2026-09-21, `qwen3-coder-30b-a3b-cloud` was
+  removed 2026-10-31, `qwen3.5-122b-cloud` withdrawn 2026-11-03, `qwen3.8-flash-next-cloud` retired 2026-11-05) shares
+  one llama-swap with cloud3's resident `qwen3.8-27b`, which the llm-router also routes to; a request for a different one swaps the whole model (60–330 s
   measured 2026-10-31, the 122B from NFS the slowest). Do not fan an agent team across two cloud3
   routes.
 - **`--parallel 1` routes and abandoned requests.** The pinned LiteLLM (1.91.0) does not propagate a

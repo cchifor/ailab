@@ -1,7 +1,7 @@
 #!/bin/bash
 # local-agent: run a task as an agent on one of the estate's local models, through the LLM router.
 #
-#   local-agent <model> [-C <dir>] "<task>"      model: qwen-27b | flash-next
+#   local-agent <model> [-C <dir>] "<task>"      model: qwen-27b (flash-next was retired 2026-11-05)
 #
 # The agent is a `codex exec` on that model's profile (~/.codex/<model>.config.toml, managed by the dev_worker role):
 # Codex is the harness that runs the model's tool calls (shell, file edits) in <dir> (default: the current directory).
@@ -15,10 +15,14 @@
 # spawn_agent"). Managed by ansible (dev_worker role); runbook docs/runbooks/dev-workers.md § "Local models".
 set -uo pipefail
 
-usage() { echo "usage: local-agent <qwen-27b|flash-next> [-C <dir>] \"<task>\"" >&2; exit 2; }
+usage() { echo "usage: local-agent qwen-27b [-C <dir>] \"<task>\"" >&2; exit 2; }
 [ $# -ge 2 ] || usage
 model=$1; shift
-case "$model" in qwen-27b|flash-next) ;; *) echo "local-agent: unknown model '$model' (qwen-27b or flash-next)" >&2; exit 2 ;; esac
+case "$model" in
+  qwen-27b) ;;
+  flash-next) echo "local-agent: flash-next was retired on 2026-11-05; use qwen-27b" >&2; exit 2 ;;
+  *) echo "local-agent: unknown model '$model' (qwen-27b)" >&2; exit 2 ;;
+esac
 dir=$PWD
 if [ "${1:-}" = "-C" ]; then [ $# -ge 3 ] || usage; dir=$2; shift 2; fi
 [ -d "$dir" ] || { echo "local-agent: no such directory: $dir" >&2; exit 2; }
