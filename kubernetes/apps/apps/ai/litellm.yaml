@@ -262,11 +262,20 @@ data:
       # VISION: images work (host VISION=1). Verified with distinct-image probe 2026-09-07 --
       # red/blue/green -> RED/Blue/Green, 3/3 distinct AND correct. VIDEO IS UNTESTED: this
       # INT4 export ships no video_preprocessor_config.json, so do not advertise video.
-      # CLOUD3'S DEPLOYMENT REMOVED 2026-10-31: its w4a16 engine answered HTTP 200 with degenerate
-      # text (one token repeated, 8/8 replies, after two cold starts) while the same checkpoint on
-      # cloud2 answered correctly, and the owner retired the model (plans/2026-10-31-local-models-improvement-plan.md).
-      # This name is cloud2-only from then on; the fallback chain below still applies. The two-box
-      # history that follows is kept as the record of why the pool existed.
+      # CLOUD3 IS BACK IN THE PAIR SINCE 2026-11-05 (owner decision: flash-next retired, the same
+      # qwen3.8-27b on both cloud machines). Its deployment had been REMOVED 2026-10-31: its w4a16
+      # engine answered HTTP 200 with degenerate text (one token repeated, 8/8 replies, after two cold
+      # starts) while the same checkpoint on cloud2 answered correctly. The cause was cloud3's GPU3,
+      # which has a hard VRAM fault (out for RMA): that engine ran TP=4 across it. The entry that
+      # returns is cloudlab #54's: TP=2 on GPU0+GPU1 by UUID (never GPU3), cloud2's live flags
+      # (--max-model-len 262144, --max-num-seqs 8, 0.93, MTP k=4, the image limits), served name
+      # `qwen3.8-27b` as on cloud2, and cloud3's DEFAULT model (ttl 0, preloaded, kept warm by
+      # llama-swap-keepwarm). Its qualification (cloudlab runbook 13i: identity, degeneracy, tool
+      # round trip, stream, ~100k/~250k needles, concurrency, MTP acceptance) passed before this
+      # entry merged. The llm-router serves the same two boxes on its `qwen3.8-27b` route
+      # (runbook llm-router.md, "flash-next retired"). The 2026-09-21 record below applies again,
+      # except that cloud3 is now TP=2 and, once flash-next and fp8 leave its llama-swap (cloudlab
+      # stage B), no other cloud3 model exists to evict this one: the swap costs below are history.
       # TWO BOXES, ONE CHECKPOINT, since 2026-09-21: the entry below is cloud2's persistent vLLM unit
       # (:18020, TP=2 while its 03:00.0 slot is empty -- cloudlab runbook section 11), and the one
       # after it is cloud3's `qwen3.8-27b-w4a16` llama-swap entry -- the SAME
@@ -345,6 +354,20 @@ data:
         litellm_params:
           model: openai/qwen3.8-27b
           api_base: http://192.168.0.28:18020/v1
+          api_key: "sk-noauth"
+          temperature: 1.0
+          top_p: 0.95
+          extra_body:
+            top_k: 20
+            chat_template_kwargs: { reasoning_effort: xhigh }
+        model_info: { supports_vision: true, max_input_tokens: 212992 }
+      # cloud3's deployment of the same name (see "CLOUD3 IS BACK" above). Identical to the entry
+      # above in everything but api_base: the same served name, sampling, extra_body and
+      # model_info (the generator de-duplicates first-wins, so cloud2's block is what consumers see).
+      - model_name: qwen3.8-27b-vllm-cloud
+        litellm_params:
+          model: openai/qwen3.8-27b
+          api_base: http://192.168.0.26:8080/v1
           api_key: "sk-noauth"
           temperature: 1.0
           top_p: 0.95
@@ -1082,7 +1105,8 @@ spec:
         # BUMPED 2026-11-05: qwen3.8-flash-next-cloud, qwen3.8-27b-fp8-cloud and qwen3.8-27b-fp8-unc-cloud
         # are REMOVED (flash-next and the FP8 checkpoint retired by the owner). Routes are dropped, so the
         # config LiteLLM parses changes; one rolling restart.
-        checksum/config: "3eed1d002dec"
+        # BUMPED 2026-11-05 again: cloud3 rejoins qwen3.8-27b-vllm-cloud as its second deployment.
+        checksum/config: "6469ae3ccf74"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an
