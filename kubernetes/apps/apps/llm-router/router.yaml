@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 247b19f0adb84efcf6a49e239c257bec08ef6c45
-        chifor.me/release: router-0.1.0-20261104-reasoning-replay
+        chifor.me/source-commit: 922bafdf199a6a42be75baffd3bb93d70f8d8ffc
+        chifor.me/release: router-0.1.0-20261105-provider-onboarding
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -119,13 +119,35 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
+      # Removed after rollout acceptance; the verified recovery generation stays on the data PVC.
+      initContainers:
+        - name: backup-before-provider-onboarding
+          image: registry.chifor.me/llm-router/router@sha256:4323425201461f3fe349da86638ad83da232cd4f2d0f05a1a16dec2d5cb324c6
+          command: [node, --input-type=module, -e]
+          args:
+            - |
+              import { readFile, writeFile } from 'node:fs/promises';
+              const source = await readFile('/app/deploy/backup-router.mjs', 'utf8');
+              const marker = "const label = 'pre-relay-api-20261002';";
+              if (!source.includes(marker)) throw new Error('Unexpected backup helper version');
+              await writeFile('/tmp/provider-onboarding-backup.mjs',
+                source.replace(marker, "const label = 'pre-provider-onboarding-20261105';"), { mode: 0o600 });
+              await import('file:///tmp/provider-onboarding-backup.mjs');
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
       containers:
         - name: router
-          # Source 247b19f0adb84efcf6a49e239c257bec08ef6c45 (llm-router #135, #136: an earlier turn's reasoning replayed to a
-          # local server, for accounts that set replayReasoning); parity-a3878b19c21f-121050 image, all blobs pulled
-          # anonymously and verified, /app/SOURCE_COMMIT 247b19f0 confirmed; Relay run 121050,
-          # archive sha256:191a7c4a1e029650f17a22d99754c6874d077eac35121c2178a36b6e1a7c78b7.
-          image: registry.chifor.me/llm-router/router@sha256:78915e249631945fbf15ed7034e3085b60fa86680e926db73502c0956174a2d2
+          # Source 922bafdf199a6a42be75baffd3bb93d70f8d8ffc (llm-router #137, #138: replay compatibility and API-key onboarding).
+          # Relay run 121742; archive sha256:522808d88705d9f17daabf65e5b7727bc5f19ff5cd341c61a1c1c3a4020e37a2.
+          image: registry.chifor.me/llm-router/router@sha256:4323425201461f3fe349da86638ad83da232cd4f2d0f05a1a16dec2d5cb324c6
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

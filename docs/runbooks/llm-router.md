@@ -3789,3 +3789,50 @@ removed from the current deployment tree. No trust Secret or signing keys
 should be provisioned. Any future implementation needs a new design review and
 explicit owner authorization before touching the shared live router. See
 [Relay's integration gate](relay.md#managed-router-access--pending-public-approval-integration).
+
+## API-key provider onboarding release (2026-11-05, llm-router #138)
+
+Deploys merged source `922bafdf199a6a42be75baffd3bb93d70f8d8ffc`. A saved Anthropic API key can now be used directly
+with `setup_provider`: it discovers an accessible model and proposes the account and route. `probe_provider`
+checks a new connection without an account id; malformed existing-account lookups return recovery instructions
+without contacting the provider. Discovery failures stop setup, bounded catalogs retain the selected model,
+and empty supplied lists are distinguished from an upstream empty result. Anthropic API keys use `anthropic`;
+`claude` remains the subscription provider. The release also includes #137's empty-encrypted-content replay fix.
+
+**Provenance and validation.**
+- Source [PR #138](https://git.chifor.me/cchifor/llm-router/pulls/138) was approved by both reviewers and merged by
+  `reviewer-codex`. [Main CI run 121735](https://git.chifor.me/cchifor/llm-router/actions/runs/121735) passed.
+- A clean release checkout passed `pnpm verify`: 2,128 tests passed, 14 skipped locally because PostgreSQL was not
+  configured; typecheck and build passed. CI supplies PostgreSQL. The frozen production archive passed its smoke.
+- Archive `router-0.1.0-20261105-provider-onboarding.tar.gz`, SHA-256
+  `522808d88705d9f17daabf65e5b7727bc5f19ff5cd341c61a1c1c3a4020e37a2`, Relay v0.2.0 assets 484/485, read back and verified.
+- Packaging commit `e4c8b3a4e255aa90797633c4a9ef620de6087aed` on Relay branch
+  `release/router-20261105-provider-onboarding-image`; [image run 121742](https://git.chifor.me/cchifor/relay/actions/runs/121742)
+  passed the production smoke and backup tests under the exact non-root, read-only runtime image.
+- [Receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-121742.json), asset 486:
+  `registry.chifor.me/llm-router/router@sha256:4323425201461f3fe349da86638ad83da232cd4f2d0f05a1a16dec2d5cb324c6`.
+  The Node runtime digest remains `sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
+- The image was pulled anonymously. Its source marker and compiled tool registration, account-free probe schema,
+  invalid-account recovery and empty-list recovery passed with networking disabled. The exact init command passed
+  the live-WAL backup, repeat verification, corruption rejection and unchanged-source fixtures under the same
+  non-root/read-only container constraints. All 31 manifest paths validated: 526 resources valid, 68 CRDs skipped,
+  none invalid; the 12 rollout-checker tests passed.
+
+**Rollout.** The Recreate deployment stops the old router before `backup-before-provider-onboarding` runs.
+It uses the packaged backup helper with a checked replacement of its historical fixed label, and creates
+`/data/backups/pre-provider-onboarding-20261105`. SQLite integrity and checksums for the database, encryption key
+and plugin composition are verified; an existing completed generation is verified again, never overwritten.
+Failure blocks startup. No account, route, credential, authentication setting or database schema is changed.
+
+The existing Router rollout acceptance workflow requires a fresh Ready pod on this exact digest, successful
+completion of the backup init container, public health/readiness, and refusal of unauthenticated management
+requests. After acceptance, remove the dated init container in a reviewed cleanup PR and verify that rollout too.
+Keep the backup on the PVC as recovery material; it is not an offsite backup. Live acceptance results follow here
+once Flux has applied the deployment.
+
+**Rollback.** Revert the image and both annotations together to:
+- image `registry.chifor.me/llm-router/router@sha256:78915e249631945fbf15ed7034e3085b60fa86680e926db73502c0956174a2d2`;
+- source `247b19f0adb84efcf6a49e239c257bec08ef6c45`, release `router-0.1.0-20261104-reasoning-replay`.
+Remove the dated init container when reverting. This update has no schema migration, so image rollback does not
+require restoring the database or changing the existing reasoning-replay settings. Preserve the backup if a
+separate data recovery is needed.
