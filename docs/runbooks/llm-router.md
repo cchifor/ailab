@@ -3852,3 +3852,41 @@ backup has not completed, keep the protection in place and resolve the backup fa
 rollback; do not bypass it. This update has no schema migration, so image rollback does not
 require restoring the database or changing the existing reasoning-replay settings. Preserve the backup if a
 separate data recovery is needed.
+
+
+## Provider endpoint argument recovery (2026-11-05, llm-router #139)
+
+Deploys [llm-router #139](https://git.chifor.me/cchifor/llm-router/pulls/139), source
+`b03fc3827418e2b9555d3fb1c8a2bed7ba857a36`. The assistant could stop after saving an Anthropic API key because it
+supplied an invalid optional `baseUrl`. Null and blank values now use the built-in endpoint; explicit addresses are
+trimmed and validated before discovery or proposal creation. Invalid/unsafe URLs return actionable
+`INVALID_BASE_URL` recovery without provider calls. Custom endpoints remain explicit, and local servers still
+require an address. Existing-account URL overrides are validated and refused without changing the account.
+The assistant is instructed to omit hosted-provider endpoints unless the user supplied a custom address.
+
+**Provenance and validation.**
+- Both reviewers approved #139; reviewer-codex merged it after [CI 121816](https://git.chifor.me/cchifor/llm-router/actions/runs/121816)
+  passed, including PostgreSQL, pinned Claude SDK, production smoke and browser checks. Final local `pnpm verify`:
+  2,142 passed, 14 PostgreSQL-dependent skips; typecheck/build passed.
+- Frozen production archive `router-0.1.0-20261105-base-url-recovery.tar.gz`, SHA-256
+  `189098d9262c9692bd2bea976ee08358869f121552cb3cb7a1c84a820ccf032b`, Relay v0.2.0 assets 488/489; uploaded and read back
+  with matching checksums. Its compiled production smoke passed.
+- Packaging commit `0f17489cf542e1c59bd4193747707523310f7a83` on Relay
+  `release/router-20261105-base-url-recovery-image`; [publisher 121847](https://git.chifor.me/cchifor/relay/actions/runs/121847)
+  passed production smoke and backup-helper tests. [Receipt asset 490](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-121847.json)
+  pins `registry.chifor.me/llm-router/router@sha256:6e49d8cc298a0c024db8770dbae6fdb22299c62c954c8aa5a7b954a2080503fc`.
+  The Node runtime digest remains `sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
+- The anonymously pulled image is checked without networking, as uid 1000 with a read-only root filesystem:
+  source marker, null/blank defaults, unsafe URL refusal, model-backed chat recovery through proposal and approval,
+  and refusal of unsafe existing-account overrides. Fixtures use synthetic credentials only.
+
+**Rollout and rollback.** This is a tool/prompt change with no storage migration, dependency update or live
+configuration mutation. The verified `pre-provider-onboarding-20261105` backup from the earlier rollout remains
+on the PVC. No new init container or restore is required. The normal acceptance workflow checks one fresh Ready
+pod on this exact digest, no init containers, public health/readiness and unauthenticated admin HTTP 401.
+Live acceptance is recorded in the deployment PR after Flux applies the change.
+
+Rollback through a reviewed PR by reverting the image and both annotations to:
+- image `registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803`;
+- source `922bafdf199a6a42be75baffd3bb93d70f8d8ffc`, release `router-0.1.0-20261105-provider-onboarding`.
+No database restore is needed for this code rollback; preserve current accounts, routes and saved keys.
