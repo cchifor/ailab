@@ -1,7 +1,8 @@
 <!-- status: proposed (design only; no llm-router code or config changed) -->
 # llm-router: one standard for every protocol and every upstream
 
-**Date:** 2026-11-04 · **Scope:** the whole `cchifor/llm-router` request path: every client protocol it serves and
+**Date:** 2026-11-04, revised 2026-11-05 (the owner's decisions, §13; reviewer-claude's findings on PR #1602
+`ff2bbe36`; the night's validation runs, §4.7) · **Scope:** the whole `cchifor/llm-router` request path: every client protocol it serves and
 every upstream it routes to. The code is `origin/main` `247b19f` (#136). **Extends:** the adopted native-first design
 (ailab PR #1599, `plans/2026-11-04-router-native-first-design.md`, decisions D1-D5, and D6 there), which is
 local-model-centric. Its sections are cited as "native-first §n". **Audience:** the owner, and whoever implements it.
@@ -33,7 +34,8 @@ compliance suite is 17 server-side smoke tests (§2.1).
 
 **Recommendation: native per protocol, plus one lossless internal model for translation, plus state domains.**
 1. **Three front doors, each native-first (D1).** `/v1/responses` and `/v1/chat/completions` as native-first already
-   specifies, and **a native-first `/v1/messages`**, which replaces #128's translate-everything plan. A request whose
+   specifies, and **a native-first `/v1/messages` for the local routes only** (owner, §13), which replaces #128's
+   translate-everything plan. A request whose
    protocol the target speaks is forwarded as bytes, with `model` patched and declared mutations only. Every production
    gateway that serves several protocols does exactly this: Envoy/Agent Router, agentgateway, LiteLLM (§2.7, §2.9).
 2. **When the protocols differ, translate through one IR shaped like Open Responses items** (messages, reasoning, tool
@@ -48,7 +50,8 @@ compliance suite is 17 server-side smoke tests (§2.1).
    and Anthropic silently ignore state they cannot read. State is replayable where the compatibility key matches
    (producer, model family, credential scope from configuration, format: e.g. the Pro ChatGPT seats, on the 2026-10-12
    measurement). It is returned unchanged and never converted. Across keys, or when its origin is unknown, the router
-   fails loudly (agent routes) or strips it as a declared mutation (opt-in routes); it never invents a signature and
+   pins agent routes to the seat (queue, then fail loudly) and lets chat routes move and strip it as a declared
+   mutation (owner, §13); it never invents a signature and
    never passes one model's reasoning off as another's (§4.3, §6).
 4. **When a translated attempt produces opaque state in a format the client's slot does not hold, it reaches the
    client through that protocol's own opaque slot:** a versioned, key-identified, MAC'd router envelope in Responses
@@ -86,12 +89,13 @@ None of these needs a new format; each needs the router to forward, and to know 
 - **D5:** holds wherever the router owns the template. **One argued extension:** for a third-party API, mid-conversation
   system text is an encoder contract line, and that line is **in place** (Responses `developer` items; Anthropic
   inline `system` messages), never a hoist (§3, §6 R10).
-- **D6, amended (§4.7):** D6 put a router-side bound (`lastTurns: N`, starting at N=1) on translated local paths. The
+- **D6, amended and confirmed by the owner (§4.7, §13):** D6 put a router-side bound (`lastTurns: N`, starting at N=1) on translated local paths. The
   2026-11-04 production measurement shows that a sliding bound defeats the upstream prompt cache. So replay is
   append-only (`lastTurns: "all"`, or llama.cpp's native `/v1/responses`) or off, fixed for the life of a conversation,
   and the context is bounded by client compaction (Codex `model_auto_compact_token_limit`, set against concurrent
   capacity: native-first's context gate, now for both paths). The live config already does this (rev 2228: cloud3
-  `{lastTurns: "all"}`, cloud2 replay removed). Native paths keep D6's "no router-side bound".
+  `{lastTurns: "all"}`, cloud2 replay removed), and it passed the night's validation: P1 delivered its plan in about
+  20 min with 67k uncached prompt tokens (§4.7). Native paths keep D6's "no router-side bound".
 
 **What it finds in today's code beyond the local bugs** (§1.2):
 - **The codex translated path neither asks for, keeps nor replays encrypted reasoning.** Chat and Assistant callers on GPT seats therefore
@@ -118,8 +122,9 @@ None of these needs a new format; each needs the router to forward, and to know 
    journal, the scope declarations.
 2. **R3b**, the pin, per route: the first behaviour change.
 3. **R4**, the codex encoder: reasoning kept across turns, system text in place, images as parts. No envelope needed.
-4. **R6a-R6c**, `/v1/messages`, split along #128's prerequisites.
-5. **Unscheduled until needed:** R5 and R7 (the API-key providers), translated Messages pairs, Gemini.
+4. **R6a-R6c**, `/v1/messages` for the local routes, split along #128's prerequisites.
+5. **Unscheduled:** R5 and R7 (no OpenAI or Anthropic API-key account is planned, owner §13), translated Messages pairs,
+   Gemini.
 
 **Tests** (§9):
 - the golden pairs, with round-trip properties for every lossless line;
@@ -127,6 +132,9 @@ None of these needs a new format; each needs the router to forward, and to know 
 - the Open Responses suite and llm-comply as cheap first checks;
 - then ≤ 15-minute real-client checks (Codex CLI, Claude Code, Open WebUI);
 - then long runs.
+
+**Owner decisions** (§13, 2026-11-04): the D6 amendment confirmed; agent routes pin a conversation's state to its
+seat, chat routes may move and strip (declared); no API-key accounts planned; `/v1/messages` for local routes only.
 
 **Codex cross-validation** (§12): two rounds on the workstation (`gpt-6-astra`). Round 1: adopt with changes, three
 blockers (provenance, envelope dispatch, Anthropic block order). Round 2, which also reviewed the cache-stability
@@ -754,8 +762,16 @@ incompatible reasoning silently, Anthropic drops unreadable blocks, llama.cpp an
 "the first target that accepts it" proves nothing. The router establishes provenance in two ways:
 - **The provenance ledger** (new, small, in the router's store): when a native tap or a translated encoder sees a
   reasoning item or block leave an upstream, it records `sha256(value or text) → {domain, scope, producer, accountId,
-  modelFamily, format}`, keyed by conversation, with the placement's idle lifetime (24 h by default,
-  `placement/index.ts:4`). Digests only: no content enters the ledger. It survives restarts, as bindings do.
+  modelFamily, format}`, keyed by conversation. Digests only: no content enters the ledger. It survives restarts.
+- **Retention follows the conversation's replay lifetime, not placement's.** Placement forgets a conversation after
+  24 idle hours (`placement/index.ts:4`); a Codex session resumed after a day off (`codex resume`) still replays every
+  item. So a ledger entry is refreshed whenever a replayed item hits it, and expires only after the conversation has
+  been idle for `ledgerRetentionDays` (default 30; a few hundred digest rows per conversation). A resumed conversation
+  whose placement expired is **re-bound from the ledger** to the seat that produced its state, and on an agent route it
+  is pinned there (§6 R5). Only beyond retention is the state unknown-origin: an agent route then refuses with
+  `reasoning_unknown_origin` and names the remedy (`/compact` in Codex, which replaces the replayed history [infer], or a
+  new session) until the client takes it; a chat route strips once and increments the epoch. With a 30-day default
+  that is the rare case, not a session resumed after a day off.
 - **The envelope** (§4.5), for state the router itself translated: its provenance is inside the MAC.
 - **What is digested, and when.** On a native Responses stream the tap hashes each `response.output_item.done`
   reasoning item's `encrypted_content` (or, when empty, its `content[].text`); on a native Messages stream, each
@@ -806,7 +822,7 @@ account and model, a qualification manifest entry, `allowLoss`, `holdMs`, route-
 | `codex` | native (today) | — | — |
 | `openai` | **add** (native) | native | — |
 | `anthropic` | — | — (the compatibility layer is not a target, §2.3) | native |
-| `deepseek` | native (stateless; §2.3 lists the silently ignored parameters) | native | native (`/anthropic`, §2.8) |
+| `deepseek` | native (stateless; §2.3 lists the silently ignored parameters) | native | — (it has `/anthropic`, §2.8, but Messages is for local routes only, owner §13) |
 | `claude` (Claude Code CLI) | — | — | — : a **translated-only** target with a narrow contract (§5.5) |
 
 ### 4.5 Opaque state through a client protocol that has a slot for it
@@ -871,9 +887,10 @@ clients. It does not show that every client preserves the slot.
 ### 4.6 `/v1/messages`: native-first, replacing #128's translator plan
 
 #128 planned a Messages front door that translates everything to chat and drops thinking blocks. Under D1 it becomes:
-- **native** to Messages-speaking targets: llama.cpp `/v1/messages`, vLLM `/v1/messages` (both convert to their chat path
-  next to the template, as their `/v1/responses` do), DeepSeek `/anthropic`, and the Anthropic API if an API account is
-  ever added (#128 keeps the subscription direct; nothing here changes that);
+- **native** to the local Messages-speaking targets only (owner, §13): llama.cpp `/v1/messages` and vLLM `/v1/messages`
+  (both convert to their chat path next to the template, as their `/v1/responses` do), each after its quirks below are
+  qualified. Not DeepSeek's `/anthropic`, and not the Anthropic API (no API account is planned, and #128 keeps the
+  subscription direct);
 - **translated** through the IR only to qualified pairs, and refused on agent routes otherwise (D4);
 - **not** to the `claude` (Claude Code CLI) provider, by estate policy: #128 keeps Claude Code on the subscription
   directly, so a Claude Code process routed back into a Claude Code CLI run would only add a lossy hop (a second
@@ -926,6 +943,16 @@ turn: **777,850 uncached prompt tokens over 43 requests, against about 85k** wit
 A 15-minute agent task then failed its cap. Append-only history (`lastTurns: "all"`, or llama.cpp's native
 `/v1/responses`) kept the cache and passed. Live config rev 2228 now runs cloud3 with `{lastTurns: "all"}` and cloud2
 with replay removed.
+
+**Validated the same night, on that config** (coordinator's report):
+- **P1 through the production router**, append-only replay on cloud3: the plan was delivered at about 20 min and the
+  session ended at 21.2 min. 37 requests, 46.6k output tokens, 124k peak context, **67k uncached prompt tokens**. (Earlier
+  that day, through the router with replay dropped, it delivered no plan in 90 min; native-first §12.1.)
+- **The journal shows `input:reasoning_replayed:1` through `:36`:** every turn's reasoning replayed, none dropped.
+- **The 12-file non-regression task passed in 10.1 min.** Its append-only baseline is 75k uncached tokens over 51
+  requests, only 2 of them over 3k.
+- **One failed `apply_patch` write:** the first attempt lacked `*** End Patch`, and the model recovered on the next turn.
+  That is a model slip handled by the client's tool loop, not a router effect.
 
 **The invariant.** For consecutive requests of one conversation to one upstream, under a fixed encoding and replay
 policy ("the policy epoch", below), the upstream request for turn N+1 contains the upstream request for turn N as a
@@ -997,7 +1024,7 @@ prefix:
 | `cache-key-salt` kept only in memory | `inference:180`, `:228` | a router restart, expiry or eviction drops the salt and changes `prompt_cache_key` back: an undeclared reset | persist the salt with the conversation, or journal its loss as a reset |
 | neutral-value drops, `developer→system`, `content: null → ''` | `compat`, `common` | satisfy (per item, every turn) | as native-first §8.3 decides |
 | `cache-key-salt` after overloads | `inference:110-116` | a declared reset, by design; provider-specific (OpenAI's `prompt_cache_key` role is model-dependent and guarantees no residency) | kept, journaled, codex only |
-| `thinking-off-in-tool-loop` (this design, §5.2) | design | would violate if switched per turn | chosen once per conversation, before its first tool turn |
+| `thinking-off-in-tool-loop` (this design, §5.2) | design | would violate if switched mid-conversation | fixed on the conversation's **first request**, from whether that request carries `tools`, and never changed (chat clients send `tools` on every request) |
 | Anthropic `cache_control` | encoder | the encoder places breakpoints by a fixed rule (end of `system`, end of the latest message), within Anthropic's limits (at most 4 breakpoints; a hit is searched about 20 blocks back from a breakpoint), as its automatic caching does; it never moves content, and markers are excluded from the prefix comparison | R5 |
 | the native hold rule (native-first §7.3) | transport | compatible: it changes timing only, never content or order | kept; the failover boundary is the first flush |
 
@@ -1032,7 +1059,7 @@ where it differs. Every N and T cell is *eligible only after qualification* (nat
 | vLLM 0.28 | **N** `/v1/responses` | as llama.cpp, plus `namespace` tools (flattened and restored upstream), `text.format` | `custom` tools (dropped in 0.28), stream ids differ from the final response | non-empty `encrypted_content`, `previous_response_id` |
 | codex (ChatGPT) | **N** (today) | everything; `encrypted_content` round-trips within the account | `store-false` (validated, so a no-op), `cache-key-salt`, `overload-code`, `output-limit-cut` (no output limit upstream) | `store:true`, `previous_response_id`; opaque state from outside the account's `stateScope` (§4.3, §6 R4) |
 | OpenAI API | **N** (add a `responses` wire; today T via chat, losing all reasoning state) | everything incl. `encrypted_content` with `include` | none known | another org's encrypted state |
-| Anthropic API | **T** (Responses → IR → Messages) | messages, images, function tools ↔ `tool_use`, parallel calls, tool-result images, `is_error`; Anthropic thinking **round-trips through the envelope** (§4.5) | `reasoning.summary` (Anthropic has none), effort level mapping (§6 R9), `developer` mid-conversation (§6 R11), `namespace` flattened with a reverse map | `custom` grammar tools, hosted tools (`web_search` is Anthropic's own server tool, a different contract), foreign opaque state |
+| Anthropic API | **T** (Responses → IR → Messages) | messages, images, function tools ↔ `tool_use`, parallel calls, tool-result images, `is_error`; Anthropic thinking **round-trips through the envelope** (§4.5) | `reasoning.summary` (Anthropic has none), effort level mapping (§6 R9), `developer` mid-conversation (§6 R10), `namespace` flattened with a reverse map | `custom` grammar tools, hosted tools (`web_search` is Anthropic's own server tool, a different contract), foreign opaque state |
 | `claude` seat (Claude Code CLI) | **T**, narrow | text turns, function tools (MCP bridge) | everything about reasoning: no thinking is returned or replayable | images, schemas, `temperature`, forced `tool_choice` (the pinned adapter's restrictions, §1.2), `custom`/hosted tools; **agent routes: not eligible** (it does not carry the session's reasoning state) |
 | DeepSeek | **N** `/v1/responses` (stateless, §2.3), after qualification, **with `developer` → `user` as a known loss** ("`developer` is treated as `user`", [DeepSeek](https://api-docs.deepseek.com/guides/responses_api/)): material for Codex's instructions, so an agent route needs it explicitly allowed or refuses; **T** (Responses → IR → chat) only for what the native wire does not qualify | messages, function tools, `custom` limited to `apply_patch`, reasoning items with text (merged into the assistant message upstream; DeepSeek needs **all** of them whenever tools are present, which append-only replay gives, §4.7), effort | parameters DeepSeek silently ignores (`include`, `truncation`, `service_tier`, …) are listed as qualification losses; no summaries | `encrypted_content`, `previous_response_id`, `store:true`, hosted tools other than `web_search` on `deepseek-v4-pro` |
 | image | — | | | `image_generation` tool: refused (images are their own endpoint) |
@@ -1045,7 +1072,7 @@ where it differs. Every N and T cell is *eligible only after qualification* (nat
 | OpenAI API | **N** | everything | `stream-usage` | — (GPT reasoning has no chat slot: a property of the protocol). **Tools on GPT-6 Astra / GPT-6.1 Sol are not available on Chat Completions** (§2.3): such a request goes to the account's `responses` wire, translated (R7 of §10), or is refused |
 | DeepSeek | **N** | everything incl. `reasoning_content` | `stream-usage` | — . With tools, DeepSeek 400s unless every earlier `reasoning_content` comes back (§2.3), so a client that drops it (Open WebUI on *Default*) fails there whatever the router does: qualify per client |
 | codex (ChatGPT) | **T** (chat → IR → Responses) | messages; mid-conversation system/developer **in place** as `developer` input items (today: folded into `instructions`); tool-output images as `input_image` parts (today: JSON-stringified); `reasoning_effort` | GPT reasoning: returned as `reasoning_details` (opt-in) for clients that replay the message object; otherwise lost between turns, as today, but declared | `n>1`, `logprobs`, `audio` |
-| Anthropic API | **T** (chat → IR → Messages) | messages, images, tools, tool-result images; thinking text as `reasoning_content` | signed thinking: carried only via `reasoning_details` (opt-in). **Thinking with tool use needs the signed blocks back** (§2.3), and current models think by default. For a client that cannot carry them, the route either turns thinking off *before* the tool turn, declared as `thinking-off-in-tool-loop`, **only on models that accept `disabled` at that effort** (Opus 5, Haiku 5.5 at `high` or below), or refuses. Opus 5.5, Fable 5.1 and Sonnet 5.5 cannot turn thinking off (`between_tools` still thinks), so there it is a refusal. Never a silent switch | `n>1`, `logprobs`, `seed` (no such parameter), `response_format` unless the target model supports structured output |
+| Anthropic API | **T** (chat → IR → Messages) | messages, images, tools, tool-result images; thinking text as `reasoning_content` | signed thinking: carried only via `reasoning_details` (opt-in). **Thinking with tool use needs the signed blocks back** (§2.3), and current models think by default. For a client that cannot carry them, the route either turns thinking off from the conversation's **first request** (decided by whether it carries `tools`), declared as `thinking-off-in-tool-loop`, **only on models that accept `disabled` at that effort** (Opus 5, Haiku 5.5 at `high` or below), or refuses. Opus 5.5, Fable 5.1 and Sonnet 5.5 cannot turn thinking off (`between_tools` still thinks), so there it is a refusal. Never a silent switch | `n>1`, `logprobs`, `seed` (no such parameter), `response_format` unless the target model supports structured output |
 | `claude` seat | **T**, narrow | text, function tools | reasoning | images, schemas, `temperature`, forced `tool_choice` |
 | image | — | | | chat on an image model (`not_image_model`, today) |
 
@@ -1055,8 +1082,8 @@ where it differs. Every N and T cell is *eligible only after qualification* (nat
 |---|---|---|---|---|
 | llama.cpp b12020 | **N** `/v1/messages` | text, images, `tool_use`/`tool_result` (incl. images), plaintext thinking both ways (signature `""`), `count_tokens` | upstream gaps (§4.6): adaptive thinking, effort and `thinking: disabled` ignored, tool-result/text order, named `tool_choice` → `required`, `is_error` ignored, system-block separator. **Request-sensitive:** `tool_choice: none`, `disable_parallel_tool_use` and `strict` are not read, so a request that uses one is not eligible | `mcp_servers`, `container`, server tools (`web_search_*`, `code_execution_*`): they would become plain function tools upstream; foreign opaque state |
 | vLLM 0.28 | **N** `/v1/messages` | as above; effort → `reasoning_effort`; `count_tokens` | inline system merged upstream when the template needs it (D5 says fix the template instead), tool-result images moved to a separate user message, `is_error` ignored, thinking signatures are random hex | as above |
-| DeepSeek | **N** `/anthropic` | thinking blocks (must be returned inside a tool loop), `tool_use`, images (model-dependent) | `any` → `auto`, `is_error` and `cache_control` ignored (DeepSeek's table) | `redacted_thinking`, `document`/`mcp_tool_*` blocks |
-| Anthropic API | **N** (only if an API account is added) | everything, including betas and `cache_control` (Claude Code's gateway contract, §2.3) | — | Sonnet/Haiku 5.5 thinking from an unlinked account (state scope) |
+| DeepSeek | **—** (owner, §13: Messages is for local routes only; the facts are kept for reference) `/anthropic` | thinking blocks (must be returned inside a tool loop), `tool_use`, images (model-dependent) | `any` → `auto`, `is_error` and `cache_control` ignored (DeepSeek's table) | `redacted_thinking`, `document`/`mcp_tool_*` blocks |
+| Anthropic API | **—** (no API account is planned, §13) | everything, including betas and `cache_control` (Claude Code's gateway contract, §2.3) | — | Sonnet/Haiku 5.5 thinking from an unlinked account (state scope) |
 | codex / OpenAI | **T** (Messages → IR → Responses) | text, images, tools, tool-result images | `cache_control` (OpenAI caches automatically: a dropped hint), Anthropic beta features | thinking blocks with real signatures (foreign), server tools, `mcp_servers`; not recommended: Claude Code is tuned for Claude |
 | `claude` seat | — | | | estate policy (§4.6): Claude Code uses the seat directly |
 
@@ -1116,19 +1143,22 @@ the server's concurrent capacity (native-first's context gate, now for both path
 **R4. A conversation that holds reasoning state is pinned to its domain.** When a request carries reasoning state
 whose provenance the ledger or an envelope establishes (§4.3), only targets with a matching compatibility key are
 eligible, for the first attempt, for spills and moves, and for
-failover. The scope is the accounts' declared `stateScope` (§4.3): for the ChatGPT seats, the Pro seats together
+failover. On agent routes the pin is narrower: the seat that produced the state (R5). The scope is the accounts' declared `stateScope` (§4.3): for the ChatGPT seats, the Pro seats together
 (measured portable on 2026-10-12; the `dw-gpt-*` routes still run `maxAttempts: 1`, from before that measurement); for
 the OpenAI API, the org; for Anthropic, the platform, except Sonnet/Haiku 5.5, which bind to the producing (or a
 linked) account. Plaintext reasoning is scoped by the declared reasoning family (§4.3); the two local accounts share a
 scope only if the owner declares one.
 
-**R5. When the pinned domain cannot serve.** In order:
-1. wait: the admission queue (#133), as today;
-2. **fail loudly** with the reason (`reasoning_foreign:<domain>`, or `reasoning_unknown_origin`), which is the default
-   and the only answer on agent routes. This extends D4 from translators to state, deliberately: an agent that silently loses its reasoning mid-task
-   is the failure this week was about (native-first §1, bug #2);
-3. only on a route that declares it, **`strip-foreign-state`**: remove the opaque state the target cannot take, journal
-   it and disclose it in `x-router-mutations`. That is a degraded continuation, as LiteLLM's fallback does, but declared.
+**R5. When the pinned target cannot serve** (owner decision, 2026-11-04, §13):
+- **Agent routes pin a conversation that holds provider state to its seat** (the account that produced it, not merely
+  its scope): it **waits** in the admission queue (#133), then **fails loudly** (`reasoning_foreign:<domain>`,
+  `reasoning_unknown_origin`, or the seat's own busy or unavailable reason). It is never moved and never stripped. This
+  extends D4 from translators to state, deliberately: an agent that silently loses its reasoning mid-task is the failure
+  this week was about (native-first §1, bug #2).
+- **Chat routes may move it** to another seat. Within the same `stateScope` the state travels as is; outside it, the
+  router applies **`strip-foreign-state`**: it removes the state the target cannot take, journals it and discloses it in
+  `x-router-mutations`. That is a degraded continuation, as LiteLLM's fallback does, but declared, and it is a declared
+  reset under the cache-stability invariant (§4.7).
 
 Never: converting another provider's reasoning into visible assistant text, presenting it as the new model's own
 reasoning, inventing a signature, or sending an envelope or ciphertext to a target that cannot read it. (Gemini's
@@ -1152,7 +1182,7 @@ these decide what a user sees. A summary is never replayed as plaintext reasonin
 |---|---|---|---|---|
 | a level the target lists | sent | sent (the template decides; llama.cpp and vLLM map it to `chat_template_kwargs.reasoning_effort`) | sent | sent if in `low…max` |
 | a level it does not list | **refused** by name, or the account's declared `effort:<level>` | upstream 400 is the honest answer; or declared `effort:<level>` | refused / declared | refused (today) |
-| `none` / thinking off | sent | `enable_thinking=false` (llama.cpp maps `none`) | `thinking: disabled` **only where the model accepts it at that effort** (Opus 5, Haiku 5.5 at `high` or below); Sonnet 5.5's lowest is `between_tools`; Opus 5.5 / Fable 5.1 / Mythos 5.1: refused (§2.3). The mode is chosen once per conversation, before its first tool turn: switching it later re-caches the prompt and breaks the invariant (§4.7) | refused unless Claude Code takes it |
+| `none` / thinking off | sent | `enable_thinking=false` (llama.cpp maps `none`) | `thinking: disabled` **only where the model accepts it at that effort** (Opus 5, Haiku 5.5 at `high` or below); Sonnet 5.5's lowest is `between_tools`; Opus 5.5 / Fable 5.1 / Mythos 5.1: refused (§2.3). The mode is fixed on the conversation's **first request**, from whether that request carries `tools` (chat clients send `tools` on every request), and never changed: switching it re-caches the prompt and breaks the invariant (§4.7) | refused unless Claude Code takes it |
 
 No rounding to the nearest level and no silent removal: LiteLLM drops undeclared levels (native-first §4.1), and the
 router's own `local: { reasoningEffort: false }` did the same (bug #3).
@@ -1182,7 +1212,7 @@ separate diagnostic mode). Envelopes and opaque payloads are never journaled, on
 | `strict` schemas | `strict` | `strict` | `strict: true` on the tool (§2.3) | mapped where the target supports it, **refused** where not (never dropped). Today's `anthropic` adapter refuses `strict` (`common.ts:321`); R5 of §10 maps it |
 | Parallel calls | items | `tool_calls[]` | several `tool_use` blocks | **lossless**, grouped by call id (Anthropic: every `tool_result` in the next user message, before any text; chat: tool messages right after the assistant message) |
 | `tool_choice` auto/none/required/named | yes | yes | `auto`/`none`/`any`/`tool` | **lossless**; `disable_parallel_tool_use` ↔ `parallel_tool_calls: false`. Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject a forced `tool_choice` with a 400 (§2.3): refused before the network for those models |
-| Tool results with images | `input_image` parts in `function_call_output` | text only in OpenAI's chat spec; llama.cpp's chat path takes image parts in tool messages | image blocks in `tool_result` | **lossless** Responses ↔ Messages ↔ llama.cpp chat; **lossy** to a chat target that takes text only: images moved to a following user message (`tool-images-to-user`, declared), never replaced by invented text |
+| Tool results with images | `input_image` parts in `function_call_output` | text only in OpenAI's chat spec; llama.cpp's chat path takes image parts in tool messages | image blocks in `tool_result` | **lossless** Responses ↔ Messages ↔ llama.cpp chat; **lossy** to a chat target that takes text only: `tool-images-to-user` (declared) puts the images of a run of tool results into **one user message placed immediately after the complete run** (the tool messages answering one assistant message), never between tool messages (OpenAI-style chat requires the tool messages to follow their assistant message directly), never replaced by invented text. It is prefix-stable because a run is placed only when it is complete, and a complete run never changes on a later turn; a request that submits a **partial** run (some calls of that assistant message unanswered) with images is refused for such a target. This is the difference from `adaptCodexResponses` today, which places images after whatever part of a run has arrived (§4.7) |
 | `is_error` | — | — | `tool_result.is_error` | **lossy** outside Messages: declared `tool-error-as-text` |
 | Call ids | `call_id` + item `id` | `id` | `id` | **lossless**: call ids are never regenerated. The IR keeps client ids and provider-issued ids apart: an item id the router derives (from the call id, when the client protocol has none) is a router id, never sent upstream as if the provider had minted it (the Responses API 404s on ids it did not mint, §2.5) |
 | Namespaces (Codex MCP and multi-agent groups) | `namespace` | — | — | **lossless for the client, visible to the model, under conditions:** flatten to `<namespace>__<name>`, keep the reverse map, re-wrap calls on output (`namespace-flatten`, declared). The mapping is not injective by itself, so the encoder **refuses** a request where two flattened names collide, or collide with a plain function name, or exceed the target's length limit; it never renames to resolve a collision. vLLM flattens too; llama.cpp b12020 drops namespaces (#31568 open) |
@@ -1298,7 +1328,9 @@ goes to a cloud model while the probe and the release run (and in CI never: clou
    lifetime; a retired key gives `envelope_key_retired`); **tampering** (`envelope_tampered`, never stripped);
    **cross-principal and cross-conversation replay** of a valid envelope (foreign), and a **route change** to a
    compatible target (restored) and to an incompatible one (refused or stripped); **mixed state** (OpenAI and plaintext items
-   in one history); **rollback** (envelope emission off, reading on: in-flight sessions continue); an envelope arriving
+   in one history); **rollback** (envelope emission off, reading on: in-flight sessions continue); a **resumed session** after placement
+   expired (re-bound from the ledger to its seat) and after ledger retention (agent route: a refusal naming the
+   remedy; chat route: one strip and an epoch increment); an envelope arriving
    on a native path (restored by `restore-envelope`, never forwarded).
 3. **Terminal and usage tables** (§8 S3, S4), each row a test, per protocol, native and translated.
 4. **Streaming transport** (native-first §7.3): fragmented UTF-8, multiline frames, slow readers, disconnects, drain,
@@ -1340,7 +1372,7 @@ local upstreams. Each check is a short task with a checkable artifact (a file wr
 
 | Client | Check |
 |---|---|
-| Codex CLI 0.166 (`codex exec`) | **the prompt-cache check: a ~15-minute agent task on each local wire, passing only if uncached prompt tokens stay near one reply per turn** (`usage.cachedInputTokens` against `inputTokens` in the journal; tonight's failing arm was 777,850 uncached tokens over 43 requests, the passing one about 85k); a text turn; a tool loop; parallel calls; an image tool output; a resumed session across a native ↔ translated flip in both directions (native-first §10.4); **an envelope round-trip** (translated Anthropic fake → Codex replays → the fake receives the exact signature); a deliberately short `stream_idle_timeout_ms` against a long prefill |
+| Codex CLI 0.166 (`codex exec`) | **the prompt-cache check: the 12-file task (~10-15 min) on each local wire**, from the journal's `usage.inputTokens` and `cachedInputTokens`. It passes when (a) **no request's uncached prompt tokens exceed the growth of its prompt since the previous request plus 3k**, except a request that follows a declared reset, and (b) **the task's total uncached prompt tokens stay within 1.5× its append-only baseline** (about 75-85k: `lastTurns: "all"` gave 75k over 51 requests, only 2 over 3k; P1 gave 67k over 36, 7 over 3k because of large tool outputs, which (a) allows). The failing sliding-window arm was 777,850 over 43; a text turn; a tool loop; parallel calls; an image tool output; a resumed session across a native ↔ translated flip in both directions (native-first §10.4); **an envelope round-trip** (translated Anthropic fake → Codex replays → the fake receives the exact signature); a deliberately short `stream_idle_timeout_ms` against a long prefill |
 | Claude Code 2.1.x (`claude -p`, `ANTHROPIC_BASE_URL` = router) | a `Bash` + `Read` + `Edit` task; an image; a sub-agent; `/compact`; thinking blocks replayed; every model-selection override (#128 finding 20); unknown betas |
 | Open WebUI (docker) | a chat with reasoning on each provider setting (*Default* and *llama.cpp*), proving what it replays; a tool call |
 | dsh, the Assistant | their existing suites, on IR v2 |
@@ -1376,12 +1408,12 @@ reversible by a config write or an image revert, has its tests, and gets a codex
 | **R1** | IR v2 types beside v1, **only the decoders active callers need** (Responses and chat first; Messages with R6), and an `IRv2 → v1` shim, so every adapter keeps running unchanged. The golden suite pins that v1 behaviour is identical through the shim | none | revert |
 | **R2** | The provenance ledger (digests only) and state facts in the journal (`request.state {formats, provenance, wouldRefuse}`) | none (journal and store only) | revert |
 | **R3a** | Declare `stateScope` and model families from today's evidence (the Pro `codex-*` seats share one scope); R2's `wouldRefuse` shows which spills the pin would stop | none | config |
-| **R3b** | **Enforce** the pin in placement and failover (§6 R4-R5), per route, no earlier than one placement lifetime after R2 shipped (§4.3, ledger misses); `strip-foreign-state` as a declared, per-route mutation | **yes**: conversations holding reasoning state no longer spill or fail over outside their compatibility key | per-route flag |
-| **R4** | **codex encoder on IR v2** (translated path): `include: ["reasoning.encrypted_content"]`, reasoning items replayed in place, mid-conversation system/developer as `developer` items in place (not folded into `instructions`; the backend refuses `system` items, §2.3), `phase` kept, tool-output images as `input_image` parts. **No envelope needed:** the state is already in the format of the Responses slot, and the ledger gives its provenance; chat clients get `reasoning_details` if the route opts in | chat and Assistant callers on GPT seats keep their reasoning across turns | per account flag |
+| **R3b** | **Enforce** the pin in placement and failover (§6 R4-R5), per route: agent routes pin to the seat, chat routes may move and strip (owner, §13). A route is enforced when §4.3's **measured readiness** holds: its replayed opaque items hit the ledger ≥ 99 % over a day of its traffic, or its legacy sessions have been drained or compacted. Until then the route may run in the per-route legacy mode (`legacyState: 'allow'`, journaled as weaker assurance). `strip-foreign-state` is a declared, per-route mutation (chat routes only) | **yes**: agent-route conversations holding reasoning state no longer spill (they queue, then fail); chat-route moves outside the scope strip, declared | per-route flag |
+| **R4** | **codex encoder on IR v2** (translated path): `include: ["reasoning.encrypted_content"]`, reasoning items replayed in place, mid-conversation system/developer as `developer` items in place (not folded into `instructions`; the backend refuses `system` items, §2.3), `phase` kept, tool-output images as `input_image` parts. **No envelope needed:** the state is already in the format of the Responses slot, and the ledger gives its provenance; chat clients get `reasoning_details` if the route opts in. **Depends on R3b being enforced on the same routes** (encrypted state must stay on its seat) | **narrower than it sounds:** Responses clients on a translated route keep their GPT reasoning across turns (they replay `encrypted_content`); chat clients only where the route opts into `reasoning_details` *and* the client replays message objects, which Open WebUI (*Default*) and dsh do not (§5.2, §11); the Assistant once it stores reasoning items in its conversations (IR v2) | per account flag |
 | **R5** | **anthropic encoder on IR v2**, only once an API account exists. **All envelope machinery is deferred to here** (R4 and R6c need none): R5a the envelope **verifier**; R5b thinking per model (§6 R9), signatures and `redacted_thinking` in their positions, inline `system` in place, the full `stop_reason` table, and the envelope **writer** for Responses clients | an Anthropic API account gets thinking | per account; writer off = rollback, verifier stays |
 | **R6a** | `/v1/messages` kernel prerequisites (#128 findings 14-18, 26): the `x-api-key` authenticator, the Messages body cap and admission budget, the Anthropic error serializer, the telemetry protocol union | none until a route opts in | revert |
 | **R6b** | Configuration: `protocols` on RoutePolicy, with migration, pointer and fallback validation, and subscription providers forbidden on Messages routes (#128 findings 19, 22, 23) | none until a route opts in | config |
-| **R6c** | Native Messages wires to llama.cpp and vLLM (then DeepSeek), each after qualification (§4.6), route opt-in | new endpoint for the opted-in routes | per route |
+| **R6c** | Native Messages wires to llama.cpp and vLLM only (owner, §13), each after its quirks are qualified (§4.6), route opt-in | new endpoint for the opted-in routes | per route |
 | **R6d** | Translated Messages pairs, only if a qualified need appears | per route | per route |
 | **R7** | `openai` provider: a `responses` wire (native for Responses clients; chat clients translated to Responses, required for tools on GPT-6 Astra / 6.1 Sol) | only if an OpenAI API account is configured | config |
 | **R8** | Encoders for chat targets on IR v2 (local, DeepSeek): the stopgap's mapping becomes the IR's normal case, append-only; reasoning after visible output is forwarded on translated streams, so clients can replay it (§4.7, both directions) | **yes**: clients now receive (and will replay) reasoning that was suppressed, which changes their history and context use; golden, render and cache-stability checks gate it | per account; rollback stops forwarding but keeps decoding what clients already hold |
@@ -1394,7 +1426,7 @@ reversible by a config write or an image revert, has its tests, and gets a codex
 | `runNative` / `parseNativeResponses` (codex native) | **kept**, as the first instance of the generic native transport (native-first §7.2-7.3); its `JSON.stringify` transport is rewritten to byte patching |
 | `chatcompletions.ts` | **kept** as the chat encoder + chat tap; `toChatMessages` rewritten on IR v2 (R8) |
 | `codex.ts` translated `run()` | **rewritten** (R4): `deriveInstructions` folding and `toResponsesInput`'s `JSON.stringify` of tool parts **retired** |
-| `anthropic.ts` | **rewritten** (R5): `toAnthropicInput`'s system folding replaced by §6 R11; thinking added |
+| `anthropic.ts` | **rewritten** (R5): `toAnthropicInput`'s system folding replaced by §6 R10; thinking added |
 | `adaptCodexResponses` | **retired** once native carries Codex traffic (native-first Step 9); until then its drops become refusals (native-first Step 3 f). Its invented tool-image sentence ("The tool returned an image, shown after the tool results.") goes with it |
 | `parseRequest` subset | **rewritten** as the Responses and chat decoders (R1); the allowlist stays as the translated path's refusal list |
 | `Message.reasoning` + `replayReasoning` (#135/#136) | **kept** until R8, then subsumed: plaintext reasoning items are the IR's normal case, replayed append-only. **The numeric `lastTurns` is retired now** (R0b): it violates the cache-stability invariant |
@@ -1412,7 +1444,7 @@ routing restriction), switched on per route after R2's journal has shown what it
 remote-side change and the cheapest large win (chat and Assistant callers on GPT seats lose their reasoning every turn
 today); it is tested against recorded streams, then given one live acceptance check (§9.3). R6a-R6c wait for the native
 Responses canary (native-first Step 6), so that the transport is proven once before a second protocol uses it. **Not
-scheduled until there is a need:** R5 and R7 (no API account exists), R6d, and anything Gemini. Each envelope writer
+scheduled:** R5 and R7 (no OpenAI or Anthropic API-key account is planned, owner §13), R6d, and anything Gemini. Each envelope writer
 ships after its verifier, and its rollback is to stop writing, never to stop reading.
 
 ---
@@ -1429,14 +1461,17 @@ ships after its verifier, and its rollback is to stop writing, never to stop rea
   wires are therefore at the estate's own risk, qualified by the real-CLI matrix (§9.3), and documented as such. Claude
   Code's betas change fast; a native front door forwards them (Anthropic's rule), and a local upstream ignores what it
   does not know, so a beta whose semantics a local server cannot honour is a qualification finding, not a router rule.
-- **Envelope keys.** The MAC key is a router secret (OpenBao, like the others). Verification keeps every key younger
-  than the envelope lifetime (§4.5 rule 5); a retired key's envelopes cannot be restored, and since clients keep
-  replaying old items, the affected sessions lose that state for the rest of their life (declared strip, or a refusal
-  that says to compact or restart). Rotate on a schedule longer than the lifetime, or accept that cost on a compromise.
+- **Envelope keys.** The MAC key is a router secret (OpenBao, like the others). As §4.5 rule 5 says, a key stays
+  verifiable until every conversation holding its envelopes has been idle past the replay lifetime, **measured from last
+  use**, not from the key's age, so routine rotation strands nothing. Only retiring a compromised key early loses state:
+  that is one declared reset per affected conversation (a refusal that says to compact or restart, or one strip on a
+  chat route), not a loss on every turn. (Envelopes are deferred to R5, so none exist until then.)
 - **Account-bound state and pools.** Sonnet/Haiku 5.5 thinking and OpenAI encrypted reasoning are account- or org-bound
-  (§2.3). Smart pools that spread one conversation over several seats lose that state on every move. R3's pin makes the
-  trade-off explicit: either stay on the seat (and wait or fail when it is busy) or move and strip (declared). Which one a
-  pool does is a per-route decision for the owner.
+  (§2.3). Smart pools that spread one conversation over several seats lose that state on every move. **Decided (§13):**
+  agent routes stay on the seat (queue, then fail); chat routes may move and strip. The cost is that dev-worker Codex
+  conversations on `pool-codex` stop spilling to a warm seat when theirs is busy (spills were 2.5 % of turns after the
+  2026-10-12 concurrency change); R3a's `wouldRefuse` journal shows how often they would queue or fail before R3b is
+  switched on.
 - **Chat clients cannot carry opaque state.** Open WebUI (*Default*), dsh and most chat UIs drop unknown message fields.
   For them, GPT and Claude reasoning is lost between turns whatever the router does; `reasoning_details` helps only
   clients that replay message objects. Stateful storage in the router (keyed by tool-call id) would close the gap but
@@ -1446,12 +1481,7 @@ ships after its verifier, and its rollback is to stop writing, never to stop rea
 - **Client compaction is now load-bearing.** With no router-side bound, a client that does not compact (or whose
   threshold exceeds the server's concurrent capacity) fills the shared KV pool. The context gate must hold on every
   local route, translated or native, and the dev-worker profiles must set the threshold explicitly.
-- **Open questions for the owner:**
-  0. **Confirm the D6 amendment** (§4.7): no router-side reasoning window on any path; append-only or off; client
-     compaction against concurrent capacity. The live config (rev 2228) already follows it.
-  1. Should smart pools (`pool-codex`, `pool-claude`) pin conversations to one seat (wait/fail) or move and strip?
-  2. Is an `openai` or `anthropic` API account planned? If not, R5 and R7 stay unscheduled.
-  3. For `/v1/messages`, which routes: only the local ones (#128's scope), or DeepSeek too?
+- **Open questions:** none left for the owner; the four were decided on 2026-11-04 (§13).
 
 ---
 
@@ -1547,6 +1577,32 @@ persistence (`:345`); the memory-only salt (`:180`, `:228`); llama.cpp's token-p
 full-prefill fallbacks (`server-context.cpp` L4105, L4252, L4292); the local Messages losses; and the vendor caching and
 thinking rules (OpenAI and Anthropic prompt caching, preserved thinking, thinking controls, DeepSeek Responses). It did
 not verify live acceptance or envelope interoperability with the deployed clients.
+
+---
+
+## 13. Owner decisions (2026-11-04)
+
+1. **D6 amendment: confirmed.** The cache-stability invariant (§4.7) is part of the standard: no router-side reasoning
+   window anywhere; replay is append-only or off; context is bounded by client compaction. R0b implements it.
+2. **Pinning.** Agent routes pin a conversation that holds provider state to its seat: it waits in the queue, then fails
+   loudly. Chat routes may move it to another seat and strip the state as a declared, journaled mutation (§6 R5, §10
+   R3b).
+3. **No OpenAI or Anthropic API-key accounts are planned.** R5 (the anthropic encoder and with it all envelope
+   machinery) and R7 (the OpenAI `responses` wire) stay unscheduled.
+4. **`/v1/messages` serves local routes only** (#128's scope), each after its quirks are qualified (§4.6). Not DeepSeek.
+
+### 13.1 reviewer-claude's findings on PR #1602 (`ff2bbe36`), and what changed
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | R3b still gated on time | §10 R3b: measured readiness (≥ 99 % ledger hits over a day, or legacy sessions drained or compacted), the per-route legacy mode |
+| 2 | `tool-images-to-user` relocation could violate contract 1 | §7: one user message after the **complete** run, never between tool messages; partial runs with images refused; why that is prefix-stable |
+| 3 | The envelope-key risk still described retention by key age | §11 rewritten to match §4.5 rule 5 (retention from last use) |
+| 4 | The prompt-cache check used the withdrawn "one reply per turn" bound | §9.3: a per-request bound (uncached ≤ prompt growth + 3k) and a task total within 1.5× the measured append-only baseline (75-85k) |
+| 5 | R4 overstated who keeps reasoning, and did not depend on R3b | §10 R4: narrowed to Responses clients, opted-in chat clients that replay message objects, and the Assistant once it stores reasoning items; depends on R3b on the same routes |
+| 6 | Ledger expiry at 24 h would make a resumed Codex session fail every turn | §4.3: retention follows the conversation's replay lifetime (`ledgerRetentionDays`, default 30, refreshed on use); re-binding to the producing seat; beyond retention, a refusal naming the remedy (agent routes) or one declared strip (chat routes) |
+| 7 | The thinking mode could still switch before the first tool turn | §4.7, §5.2, §6 R9: fixed on the conversation's first request, from whether it carries `tools` |
+| 8 | "§6 R11" should be R10 | §5.1 and §10 fixed |
 
 ---
 
