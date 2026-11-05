@@ -3819,28 +3819,36 @@ and empty supplied lists are distinguished from an upstream empty result. Anthro
   non-root/read-only container constraints. All 31 manifest paths validated: 526 resources valid, 68 CRDs skipped,
   none invalid; the 12 rollout-checker tests passed.
 
-**Rollout.** The Recreate deployment stops the old router before `backup-before-provider-onboarding` runs.
-It invokes the packaged backup helper directly, using the validated `ROUTER_BACKUP_LABEL` setting added in
-[Relay #208](https://git.chifor.me/cchifor/relay/pulls/208), and creates
+**Initial rollout.** [AILab #1611](https://git.chifor.me/cchifor/ailab/pulls/1611) used a Recreate deployment to stop
+the old router before `backup-before-provider-onboarding` ran. It invoked the packaged backup helper directly,
+using the validated `ROUTER_BACKUP_LABEL` setting added in
+[Relay #208](https://git.chifor.me/cchifor/relay/pulls/208), and created
 `/data/backups/pre-provider-onboarding-20261105`. The explicit `ROUTER_DATA_DIR=/data` matches the router's
 `ROUTER_DATABASE=/data/router.sqlite`, encryption key `/data/router.secrets.key`, and optional plugin composition
 `/data/plugins.yml`; this deployment has no key-file or plugin-file path override. SQLite integrity and checksums for the database, encryption key
 and plugin composition are verified; an existing completed generation is verified again, never overwritten.
 Failure blocks startup. No account, route, credential, authentication setting or database schema is changed.
 
-The existing Router rollout acceptance workflow requires a fresh Ready pod on this exact digest, successful
-completion of the backup init container, public health/readiness, and refusal of unauthenticated management
-requests. After acceptance, remove the dated init container in a reviewed cleanup PR and verify that rollout too.
-Keep the backup on the PVC as recovery material; it is not an offsite backup. Live acceptance results follow here
-once Flux has applied the deployment.
+**Live acceptance and cleanup.** [Acceptance run 121771](https://git.chifor.me/cchifor/ailab/actions/runs/121771)
+passed on pod `llm-router-6f59fdc98-t24tn`: one fresh Ready pod on the expected digest, successful backup init,
+public `/health` and `/ready`, and HTTP 401 for unauthenticated `/admin/v1/config`. The independent read-only
+checker passed too. Loki recorded `Router SQLite backup and associated files verified: pre-provider-onboarding-20261105`
+from that pod at **2026-11-05 14:48:14 UTC**. This confirms the dated generation was created and verified before
+startup, not just that the new application became ready.
+
+With that acceptance complete, the temporary init is removed from the manifest. The cleanup rollout must pass
+the same checker with no init containers, retaining the exact application digest and annotations. The verified
+backup remains on the data PVC as recovery material; it is not an offsite backup. Cleanup acceptance is recorded
+in the cleanup PR after Flux applies it.
 
 **Rollback.** Revert the image and both annotations together to:
 - image `registry.chifor.me/llm-router/router@sha256:78915e249631945fbf15ed7034e3085b60fa86680e926db73502c0956174a2d2`;
 - source `247b19f0adb84efcf6a49e239c257bec08ef6c45`, release `router-0.1.0-20261104-reasoning-replay`.
-Remove the dated init container only after confirming its successful completion and the verified generation at
+After cleanup, rollback changes only the image and both annotations; there is no init container to remove.
+For the historical pre-cleanup manifest from #1611 only, remove its dated init container together with the image
+rollback after confirming successful init completion and the verified generation at
 `/data/backups/pre-provider-onboarding-20261105` (helper verification log plus successful init completion). If the
 backup has not completed, keep the protection in place and resolve the backup failure before proceeding with
-rollback; do not bypass it. Revert the image and remove the init together once verified, keeping the manifest's
-single-image constraint. This update has no schema migration, so image rollback does not
+rollback; do not bypass it. This update has no schema migration, so image rollback does not
 require restoring the database or changing the existing reasoning-replay settings. Preserve the backup if a
 separate data recovery is needed.
