@@ -59,7 +59,8 @@ template, and stream reasoning as Responses events (§5).
 
 **It is measured.** On P1, Codex 0.166 straight to llama.cpp's `/v1/responses` delivered the plan: its first SUCCESSFUL
 write came at 19.3 min (an attempt at 15.4 min failed on patch syntax). Through the router, with reasoning dropped, it
-delivered nothing in 90 min. Native works. Because llama.cpp replays every reasoning block, the
+delivered nothing in 90 min. (The fixed router, with reasoning replayed, later delivered at 20.1 min; see the standard
+design §9.7.) Native works. Because llama.cpp replays every reasoning block, the
 context still grows, so native on cloud3 needs a context bound (§12.1).
 
 **The owner decided D1-D6 on 2026-11-04** (§13): adopt this design; forward unknown fields; return the served model
