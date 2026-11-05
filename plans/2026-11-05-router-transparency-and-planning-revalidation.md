@@ -14,7 +14,13 @@ The method is the design's §9.6 (router transparency A/B) and §9.7 (planning r
 
 ## Summary
 
-**The router does not degrade response quality for any provider measured.** Every case where the router arm did worse traces to something outside the router: a configuration, the client, or the model.
+**The router did not degrade response quality in any configuration that passed:** the Codex seat, the Claude seat (text and function tools), qwen3.8-27b with replay `"all"`, and the image route. No router implementation defect was found for any provider.
+
+Two results are not passes:
+- **qwen3.8-27b with replay off failed.** That was a router configuration, and it is now changed (rev 2229).
+- **flash-next planning is inconclusive.** One routed P1 run did not deliver.
+  - The early stop did not reproduce in 6 samples. That does not exclude the router's declared 2-token prompt difference changing how likely it is.
+  - The runs that would have balanced the comparison were cancelled when flash-next was retired.
 
 | Provider | Layer (a): what the model sees, same body both ways | Layer (b): short tasks, direct vs router | Verdict (§9.6) |
 |---|---|---|---|
@@ -31,7 +37,7 @@ The method is the design's §9.6 (router transparency A/B) and §9.7 (planning r
 **Other results:**
 - **flash-next context fix** (ailab #1605): 131,072-token window and compaction at 114,688 on all four dev workers (§2.1).
 - **The "1.3x" flash-next P1 gap** in the design's §9.7 was a measurement artifact. The direct run's "15.4 min" was a failed `apply_patch`. On successful writes the pair was 19.3 vs 20.1 min, and wall time 23.5 vs 21.2 (§3.4).
-- **One flash-next early stop** (a reasoning-only response) was the model, not the router (§3.4).
+- **One flash-next early stop** (a reasoning-only response): no router defect was found and it did not reproduce, but its rate per arm is unmeasured (§3.4).
 - **The decision:** flash-next is retired, and qwen3.8-27b goes to both cloud machines (§4).
 
 ## How it was measured
@@ -381,7 +387,9 @@ All times are in minutes.
   - the router's prompt for that request is 95,422 tokens against llama.cpp's own 95,420: the declared 2-token `system-messages-merged` difference;
   - replaying it 3x each way with production sampling, no call stopped. All six went on to a tool call; one direct call hit the 1,500-token cap while still reasoning.
 - Across every run since the morning, both models and both arms, no other session ended this way. Earlier router-era benchmark runs did, in 3 of 33 (`I2-r1-fn`, `I3-r2-fn`, `I1-r1-qw`).
-- It counts as a flash-next model failure. One more P1 pair (router, then direct) was run so that the arms stay balanced.
+- Classified as the model's: no router defect was found, and the stop did not reproduce.
+- Six non-reproducing samples cannot rule out that the declared 2-token `system-messages-merged` difference changes the stop's probability. Its rate in each arm is unmeasured.
+- The balancing P1 pair (router, then direct) was queued and then cancelled by the retirement (§4).
 
 ## 4. Decision: flash-next retired (2026-11-05)
 
