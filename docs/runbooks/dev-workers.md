@@ -459,6 +459,10 @@ compaction threshold (`model_auto_compact_token_limit`).
   second slot nothing. It now advertises 131,072 and compacts at 114,688, leaving 16,384 for one turn's output (the
   largest measured on the planning benchmark was 14,179). Two sessions fit at once; a long session compacts earlier
   than before. The router's append-only reasoning replay (`lastTurns: "all"`) relies on this client-side bound.
+  The bound is approximate: Codex checks the limit between requests, so a request can also carry the tool outputs
+  added since the last check (each truncated to 10,000 bytes, about 2.5k tokens), and the compaction request runs on
+  the whole pre-compaction context. With `--kv-unified` such an overshoot borrows from the shared pool, and fails only
+  if both sessions peak at the same moment.
 - **qwen-27b** keeps 262,144, cloud2's vLLM `max_model_len`.
 
 **From Claude Code.** Claude's own sub-agents (the Task tool) run on Claude models only: Claude Code sends them to
