@@ -2,7 +2,8 @@
 // No raw tool result, credential, model reply, or private conversation is logged.
 import { pathToFileURL } from 'node:url';
 
-function requireThat(ok, message) { if (!ok) throw new Error(message); }
+class AcceptanceError extends Error {}
+function requireThat(ok, message) { if (!ok) throw new AcceptanceError(message); }
 const alias = 'claude-api';
 
 export function checkSetup(result, before, secretRef, models) {
@@ -31,7 +32,9 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
       body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }),
     });
     requireThat(response.ok, `MCP HTTP ${response.status}`);
-    const body = await response.json();
+    let body;
+    try { body = await response.json(); }
+    catch { throw new AcceptanceError('MCP response was not valid JSON'); }
     requireThat(!body.error, 'MCP protocol error');
     return body.result;
   };
@@ -50,7 +53,7 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
     for (;;) {
       try { init = await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'gitops-mcp-acceptance', version: '1' } }); break; }
       catch (error) {
-        if (Date.now() >= deadline || !(error instanceof TypeError || /^MCP HTTP (404|502|503|504)$/.test(error.message))) throw error;
+        if (Date.now() >= deadline || !(error instanceof TypeError || (error instanceof AcceptanceError && /^MCP HTTP (404|502|503|504)$/.test(error.message)))) throw error;
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
@@ -109,8 +112,9 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
     await call('router_close_session');
     emit('mcp.acceptance_passed', { accountId, model, trajectoryId });
   } catch (error) {
-    // Error messages above are fixed local strings/status numbers, never upstream payloads.
-    emit('mcp.acceptance_failed', { stage, sessionId, reason: error instanceof Error && !['TypeError', 'TimeoutError'].includes(error.name) ? error.message : 'Transport failure' });
+    // Only explicitly tagged local messages can be logged. Parser/transport/library errors
+    // may quote upstream payloads, credentials or URLs in their message.
+    emit('mcp.acceptance_failed', { stage, sessionId, reason: error instanceof AcceptanceError ? error.message : 'Transport or response failure' });
     throw new Error('MCP acceptance failed; see the safe stage summary and durable session');
   }
 }

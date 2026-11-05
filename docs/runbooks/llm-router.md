@@ -3857,7 +3857,9 @@ separate data recovery is needed.
 
 This deployment depends on [source PR #140](https://git.chifor.me/cchifor/llm-router/pulls/140)
 through Gitea's issue dependency. Source and deployment reviews can proceed in parallel;
-the source must merge through both reviewers before this rollout. It includes #139's provider argument validation and adds the optional
+the source must merge before this rollout. The owner authorized a manual merge with current-head Codex
+approval during the Claude quota outage; the worker's normal merge API request was refused by Gitea
+(`405 User not allowed to merge PR`), so that exception still requires an owner permitted by branch protection. It includes #139's provider argument validation and adds the optional
 management MCP plugin at `https://router.chifor.me/admin/mcp`. Existing management bearer credentials and
 session/CSRF checks apply; inference API keys receive 403. No new credential issuer or OAuth flow is added.
 See [the MCP guide](https://git.chifor.me/cchifor/llm-router/src/commit/cdd12f364d35e962860e3dfc4e51d120a7758b49/docs/guides/mcp.md)
@@ -3900,7 +3902,7 @@ failure, inspect the safe Loki phase summary and durable session first, then rev
 The repository-required Flux force annotation permits recreation after a reviewed template change; normal
 reconciliation does not restart a completed Job. Remove the temporary Job promptly after acceptance.
 The acceptance script passed locally through the real compiled MCP server with an Anthropic HTTP/SSE fixture:
-new setup, existing-route reuse, inference and journal inspection. Its 13 standalone guard/error tests pass
+new setup, existing-route reuse, inference and journal inspection. Its 15 standalone guard/error tests pass
 with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.
 These fixtures establish test coverage, not live Anthropic success.
 

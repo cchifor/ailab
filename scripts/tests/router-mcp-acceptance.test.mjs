@@ -52,3 +52,20 @@ test('does not log upstream errors or retry a failed tool', async t => {
   assert(!log.join('').includes('fixture-token-never-log'));
   assert(log.join('').includes('router_open_session'));
 });
+
+
+test('malformed successful JSON never leaks its response snippet', async t => {
+  const log = [];
+  t.mock.method(globalThis, 'fetch', async () => new Response('{"credential":"sensitive-malformed-json-marker", broken', { status: 200 }));
+  await assert.rejects(runAcceptance({ url: 'http://fixture.invalid/admin/mcp', token: 'fixture-token', log: x => log.push(x) }), /MCP acceptance failed/);
+  assert(!log.join('').includes('sensitive-malformed-json-marker'));
+  assert(log.join('').includes('MCP response was not valid JSON'));
+});
+
+test('unexpected library errors never contribute their message to logs', async t => {
+  const log = [];
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('sensitive-library-error-marker'); });
+  await assert.rejects(runAcceptance({ url: 'http://fixture.invalid/admin/mcp', token: 'fixture-token', log: x => log.push(x) }), /MCP acceptance failed/);
+  assert(!log.join('').includes('sensitive-library-error-marker'));
+  assert(log.join('').includes('Transport or response failure'));
+});
