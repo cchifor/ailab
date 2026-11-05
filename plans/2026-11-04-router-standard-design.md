@@ -782,9 +782,31 @@ incompatible reasoning silently, Anthropic drops unreadable blocks, llama.cpp an
   observation of an upstream's output (the native tap, non-streaming JSON included; for native chat, the
   `reasoning_content` of the assistant message; on translated paths, the encoder), or read from a verified envelope.
   A binding never stands in for it: a client can append imported ciphertext to a conversation that has always used one
-  key, and no placement history can tell. **Write ordering:** the entry commits before the reply's terminal event
-  reaches the client (the tap holds only that terminal event for the write), so no client can replay state whose
-  provenance is not yet recorded.
+  key, and no placement history can tell.
+- **Write ordering: durable per item, before the item becomes replayable.** A client can keep a state item as soon as
+  the event that completes it arrives, long before the terminal event, so committing at the terminal event is too late:
+  a disconnect or crash in between would leave replayable state the ledger lacks. The tap (or, on a translated path, the
+  encoder) therefore commits each item's digest durably (one store transaction) **before releasing the event that
+  completes it**, and holds only that event (and, for signed state, the final fragment) while it writes:
+  - **opaque state:** Responses `response.output_item.done` carrying `encrypted_content`; Anthropic `signature_delta`
+    and the `content_block_stop` after it; a `redacted_thinking` block, which arrives whole in its `content_block_start`;
+  - **plaintext reasoning:** deltas flow as they come; the completing event (`response.output_item.done`, Anthropic
+    `content_block_stop`, the chat chunk carrying `finish_reason`) is held until the digest of the full text is durable.
+    An **open-item row** (conversation, seat, the item id where the protocol has one) is written before the item's
+    first event is released, so a fragment a client kept from an interrupted stream is attributed to its seat
+    (`provenance: interrupted`, journaled), not left unknown.
+
+  **Held, never rewritten:** a held event is released byte for byte as received; only its timing changes. Native-first
+  §7.3 permits timing-only differences for the start-of-stream hold; this per-item hold is a second one, added to the
+  same list, and the verbatim-modulo-declared stream test covers it. **If the write fails,** the held event is never
+  released: the stream ends with the protocol's error event (`response.failed`, Anthropic `event: error`, a chat error frame), journaled as
+  `ledger_write_failed`, before the item became replayable. **Crash consistency:** a crash after the commit and before the
+  release leaves a row for state the client never received (harmless; it expires with retention); a crash before the
+  commit releases no completing event (an open-item row covers any plaintext fragment), so the client sees a broken stream and retries the turn (Codex: "stream closed before
+  response.completed"). **The hold rule and the failover boundary** (native-first §7.3, §9.1): releasing a held
+  completing event is a flush like any other. If it is the attempt's first, the attempt commits there; a write failure
+  before the first flush has delivered nothing, so the attempt may still fail over, and one after it ends the stream.
+  The cost is one local store write per state item, a few milliseconds.
 - **Legacy state** (forwarded before the ledger existed: every Codex session in flight the day R2 ships) is a ledger
   miss. It is not promoted. During R2-R3a it is journaled as `provenance: legacy`; R3b treats it as unknown-origin,
   except on routes the owner lists for a bounded transition as `legacyState: 'allow'`, journaled as weaker assurance.
@@ -1331,7 +1353,12 @@ goes to a cloud model while the probe and the release run (and in CI never: clou
    in one history); **rollback** (envelope emission off, reading on: in-flight sessions continue); a **resumed session** after placement
    expired (re-bound from the ledger to its seat) and after ledger retention (agent route: a refusal naming the
    remedy; chat route: one strip and an epoch increment); an envelope arriving
-   on a native path (restored by `restore-envelope`, never forwarded).
+   on a native path (restored by `restore-envelope`, never forwarded); **interrupted delivery:** cut the stream (a client
+   disconnect, and a killed router process) right after each state-completing event (`output_item.done`,
+   `signature_delta` / `content_block_stop`, the chat finish chunk), then continue the conversation, and show that the
+   ledger already holds the item; force a ledger write failure and show that the completing event is never delivered
+   and the stream ends with the protocol's error event; and show that a plaintext fragment kept from a cut stream is
+   attributed through its open-item row.
 3. **Terminal and usage tables** (§8 S3, S4), each row a test, per protocol, native and translated.
 4. **Streaming transport** (native-first §7.3): fragmented UTF-8, multiline frames, slow readers, disconnects, drain,
    plus Anthropic `ping`/`error` events and chat error frames.
@@ -1591,7 +1618,9 @@ not verify live acceptance or envelope interoperability with the deployed client
    machinery) and R7 (the OpenAI `responses` wire) stay unscheduled.
 4. **`/v1/messages` serves local routes only** (#128's scope), each after its quirks are qualified (§4.6). Not DeepSeek.
 
-### 13.1 reviewer-claude's findings on PR #1602 (`ff2bbe36`), and what changed
+### 13.1 The reviewers' findings on PR #1602, and what changed
+
+Findings 1-8 are reviewer-claude's on `ff2bbe36`; finding 9 is reviewer-codex's on `ff2bbe3` and `dbb318f4`.
 
 | # | Finding | Change |
 |---|---|---|
@@ -1603,6 +1632,7 @@ not verify live acceptance or envelope interoperability with the deployed client
 | 6 | Ledger expiry at 24 h would make a resumed Codex session fail every turn | §4.3: retention follows the conversation's replay lifetime (`ledgerRetentionDays`, default 30, refreshed on use); re-binding to the producing seat; beyond retention, a refusal naming the remedy (agent routes) or one declared strip (chat routes) |
 | 7 | The thinking mode could still switch before the first tool turn | §4.7, §5.2, §6 R9: fixed on the conversation's first request, from whether it carries `tools` |
 | 8 | "§6 R11" should be R10 | §5.1 and §10 fixed |
+| 9 | Provenance was committed only before the terminal event, but earlier events (`output_item.done`, a signed `content_block_stop`) already make state replayable; a disconnect or crash in between left unrecorded state, and agent routes would then refuse with `reasoning_unknown_origin` | §4.3: a durable commit per item before the event that completes it; buffering rules for signatures and plaintext; open-item rows; a write failure ends the stream before the state is replayable; crash consistency; the interaction with the hold rule and the failover boundary; held events are never rewritten. §9.1: an interrupted-delivery test |
 
 ---
 
