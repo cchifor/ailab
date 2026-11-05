@@ -1,0 +1,88 @@
+# One-shot authenticated MCP acceptance using the existing in-cluster admin token.
+# No Kubernetes API token, persistent volume, shell, or secret-value logging.
+# Creates only the user-requested claude-api route/account after validating the
+# additive proposal, then sends one short approved Anthropic inference request.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: router-mcp-acceptance-20261105
+  namespace: llm-router
+spec:
+  backoffLimit: 0 # never replay an approval or paid request automatically
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: router-mcp-acceptance
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      tolerations:
+        - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: acceptance
+          image: registry.chifor.me/llm-router/router@sha256:62a7b326b79935873bd6c7aa040953fe7d7036430e04c1fa07ec0d8334e709e8
+          command: [node, /checks/mcp-acceptance.mjs]
+          env:
+            - name: ROUTER_MCP_ACCEPTANCE_TOKEN
+              valueFrom:
+                secretKeyRef: {name: llm-router-auth, key: admin-token}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {cpu: '1', memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: checks, mountPath: /checks, readOnly: true}
+      volumes:
+        - name: checks
+          configMap: {name: router-mcp-acceptance-script}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: router-mcp-acceptance
+  namespace: llm-router
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: router-mcp-acceptance}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels: {app: llm-router}
+      ports:
+        - {protocol: TCP, port: 8787}
+---
+# Additive ingress: only this acceptance pod reaches the router's existing port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-router-mcp-acceptance
+  namespace: llm-router
+spec:
+  podSelector:
+    matchLabels: {app: llm-router}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: router-mcp-acceptance}
+      ports:
+        - {protocol: TCP, port: 8787}

@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 922bafdf199a6a42be75baffd3bb93d70f8d8ffc
-        chifor.me/release: router-0.1.0-20261105-provider-onboarding
+        chifor.me/source-commit: cdd12f364d35e962860e3dfc4e51d120a7758b49
+        chifor.me/release: router-0.1.0-20261105-mcp
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,9 +121,9 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 922bafdf199a6a42be75baffd3bb93d70f8d8ffc (llm-router #137, #138: replay compatibility and API-key onboarding).
-          # Relay run 121756; archive sha256:522808d88705d9f17daabf65e5b7727bc5f19ff5cd341c61a1c1c3a4020e37a2.
-          image: registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803
+          # Source cdd12f364d35e962860e3dfc4e51d120a7758b49 (llm-router #139, #140: provider setup and management MCP).
+          # Relay run 121922; archive sha256:2f8d73aacae80ad8600e917a727b890f5125cb4a5c1f968773bf8661708fd07f.
+          image: registry.chifor.me/llm-router/router@sha256:62a7b326b79935873bd6c7aa040953fe7d7036430e04c1fa07ec0d8334e709e8
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

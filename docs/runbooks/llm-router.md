@@ -3852,3 +3852,65 @@ backup has not completed, keep the protection in place and resolve the backup fa
 rollback; do not bypass it. This update has no schema migration, so image rollback does not
 require restoring the database or changing the existing reasoning-replay settings. Preserve the backup if a
 separate data recovery is needed.
+
+## Management MCP release (2026-11-05, llm-router #140)
+
+This deployment is held in draft until [source PR #140](https://git.chifor.me/cchifor/llm-router/pulls/140)
+has merged through both reviewers. It includes #139's provider argument validation and adds the optional
+management MCP plugin at `https://router.chifor.me/admin/mcp`. Existing management bearer credentials and
+session/CSRF checks apply; inference API keys receive 403. No new credential issuer or OAuth flow is added.
+See [the MCP guide](https://git.chifor.me/cchifor/llm-router/src/commit/cdd12f364d35e962860e3dfc4e51d120a7758b49/docs/guides/mcp.md)
+for tools, connection settings, roles, proposal approvals, cancellation and limits.
+
+**Provenance.** Source `cdd12f364d35e962860e3dfc4e51d120a7758b49`; source CI run 121917 passed and the
+Codex reviewer approved that head after the hard-timeout correction. Local `pnpm verify` passed 2,160 tests
+with 14 PostgreSQL-dependent skips, typecheck and build; CI supplies PostgreSQL. Both the compiled app and
+frozen production archive passed the MCP production smoke. Archive `router-0.1.0-20261105-mcp.tar.gz`, SHA-256
+`2f8d73aacae80ad8600e917a727b890f5125cb4a5c1f968773bf8661708fd07f`, is Relay v0.2.0 asset 493 (checksum 494).
+Packaging commit `990f339804a38cc5e8ce26cfdb32443eb3762a96`, branch `release/router-20261105-mcp-image`,
+[run 121922](https://git.chifor.me/cchifor/relay/actions/runs/121922) passed the exact non-root/read-only image's
+production smoke and backup checks. Its [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-121922.json)
+pins `registry.chifor.me/llm-router/router@sha256:62a7b326b79935873bd6c7aa040953fe7d7036430e04c1fa07ec0d8334e709e8`.
+The Node runtime digest is unchanged. This cumulative release supersedes the #139-only deployment in #1615.
+
+**Live acceptance.** The one-shot Job `router-mcp-acceptance-20261105` uses the same image and talks to the
+router's MCP endpoint through the internal Service. Its management token is injected from the existing
+`llm-router-auth/admin-token`; it never leaves the pod. The Job has no Kubernetes API token, persistent
+volume, shell, public egress or inbound network access. Its only egress is cluster DNS and the router on 8787;
+a temporary additive policy admits only its labelled pod to the router. No secret value, raw tool response,
+model reply or private conversation is logged. Logs contain phases and the created account/model/request IDs.
+
+The user authorized adding the saved Anthropic key and testing the route. The acceptance script:
+- Initializes MCP, lists tools and reads status, request metadata and audit entries.
+- Selects exactly one unused key explicitly labelled Anthropic/Claude; ambiguous or missing selection stops.
+  Credential values never enter the Job. It probes `provider: anthropic` using the saved `secretRef` and no `baseUrl`.
+- Requests `setup_provider`, `mode: new`, alias `claude-api`. Before approving, validates a complete proposal
+  with exactly two additions: one new hosted Anthropic API account using that reference and one route to a
+  discovered model. Any removal, existing edit, different alias/provider/credential/address or truncated result stops.
+  A refreshed proposal stops for another review; it is never blindly approved.
+- Reads the created route back, approves exactly one short `test_route` request, and verifies its completed
+  journal selected the expected account. A correct pre-existing `claude-api` route is probed and tested without
+  creating another account. An incompatible existing route stops for investigation.
+- Inspects and deletes its own successful investigation session. Failed sessions stay available for diagnosis.
+
+Only read-only MCP initialization is retried while the singleton rolls. Job `backoffLimit: 0` and the script's
+lack of tool retries prevent automatic replay after an ambiguous mutation or paid request. To rerun after a
+failure, inspect the safe Loki phase summary and durable session first, then review a newly named Job.
+The acceptance script passed locally through the real compiled MCP server with an Anthropic HTTP/SSE fixture:
+new setup, existing-route reuse, inference and journal inspection. Its 13 standalone guard/error tests pass
+with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.
+These fixtures establish test coverage, not live Anthropic success.
+
+The existing rollout checker requires one fresh Ready pod on the exact image, the successful canary Job,
+public health/readiness and unauthenticated management refusal. Once that passes, record the safe canary
+outcome and remove the temporary Job, ConfigMap/script and two NetworkPolicies in a cleanup PR. The live
+Anthropic account and `claude-api` route are the requested result and remain configured.
+
+**Backup and rollback.** No schema migration is introduced. Preserve the verified
+`/data/backups/pre-provider-onboarding-20261105` generation (verified 14:48:14 UTC); no new backup init is needed.
+If rolling back to the release observed before this work, restore image
+`registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803`,
+source annotation `922bafdf199a6a42be75baffd3bb93d70f8d8ffc` and release `router-0.1.0-20261105-provider-onboarding`
+together, and remove the temporary canary resources. That version understands the Anthropic account/route;
+image rollback does not delete them or restore the database. Any separate configuration undo needs its own
+review through the normal configuration proposal/history flow.
