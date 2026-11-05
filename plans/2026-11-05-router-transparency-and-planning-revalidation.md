@@ -26,7 +26,7 @@ Two results are not passes:
 |---|---|---|---|
 | Codex (ChatGPT seat), native path | identical input tokens (14,012; 14,872), identical item types; the journal shows no adjustments | 9/9 vs 9/9 pairs; reasoning continuity 3/3 both; TTFT -1.2 to +0.2 s | **pass** (a) |
 | Claude seat (Claude Code 2.1.281) | same Messages body as direct `claude -p` except the working-directory path (replica of the router launch); tool names hashed (declared) | 15/15 vs 15/15; identical tool arguments | **pass** (text and function tools; thinking not carried, declared) |
-| qwen3.8-27b (cloud2 vLLM) | byte-identical prompt and greedy output; with replay on, 24,691 = 24,691 tokens | S1 3/3 vs 3/3 with replay on; planning P1-P3: router mean 15.8 vs direct 13.5 | **pass with replay `"all"`** (TTFT exactly on the +2 s margin, from the trajectory mix, §2.2); FAILED with replay off (b) |
+| qwen3.8-27b (cloud2 vLLM) | byte-identical prompt and greedy output; with replay on, 24,691 = 24,691 tokens | S1 3/3 vs 3/3 with replay on; planning P1-P3: router mean 15.8 vs direct 13.5 | **pass with replay `"all"`, provisional on TTFT**: +2.0 s, exactly on the margin; §9.6's 3 extra pairs were not run (§5). FAILED with replay off (b) |
 | flash-next (cloud3 llama.cpp) | 2 tokens longer via the router (declared system-message merge) | S1 3/3 vs 3/3, wall 1.09x; delivered P1 plans 13.5 vs 13.75 | short tests pass; planning inconclusive. **Retired 2026-11-05** (§4) |
 | qwen-image (cloud2) | byte-identical PNG with a fixed seed | - | **pass** |
 
@@ -297,7 +297,10 @@ The same recorded mid-run Codex body was sent both ways, greedy (temperature 0) 
   - qwen with replay `"all"` 2.67 vs 4.67 s: +2.0 s, exactly on the margin.
   - By §9.6 that calls for 3 more pairs, which were not run.
 - **TTFT on comparable requests** (under 3k uncached prompt tokens): flash-next 2.02 vs 1.84 s, qwen 2.10 vs 1.54 s. The qwen difference is the trajectory mix (§2.2), not the router.
-- **Verdict:** both models pass every other §9.6 margin through the router, qwen once its replay is on. The long runs started only after this.
+- **Verdict:**
+  - Both models pass every other §9.6 margin through the router, qwen once its replay is on.
+  - qwen's TTFT result is provisional until its 3 extra pairs run (§5).
+  - The long runs started only after this.
 
 ### 3.4 Planning re-validation (§9.7): P1-P3, 90-min cap
 
@@ -426,6 +429,7 @@ All times are in minutes.
 - **Claude seat, agentic coding:** not comparable, as §9.6 says. Only text and function-tool tasks were run.
 - **Claude seat, what Anthropic receives from the live router:** not recorded, because that needs a production change. A source-faithful replica was recorded instead (§1.2).
 - **flash-next planning:** P2 direct and P3 (both arms) were not run, and the balance P1 pair was not run (§4).
+- **qwen TTFT:** the 3 extra S1 pairs that §9.6 requires at the margin were not run (§3.3). qwen's short-test pass is provisional on that one metric.
 - **qwen planning:** one pair per task (P1-P3). The router arm scored better on all three, so no extra pairs were needed to decide the margin.
 
 ## 6. Follow-ups
