@@ -3896,6 +3896,8 @@ The user authorized adding the saved Anthropic key and testing the route. The ac
 Only read-only MCP initialization is retried while the singleton rolls. Job `backoffLimit: 0` and the script's
 lack of tool retries prevent automatic replay after an ambiguous mutation or paid request. To rerun after a
 failure, inspect the safe Loki phase summary and durable session first, then review a newly named Job.
+The repository-required Flux force annotation permits recreation after a reviewed template change; normal
+reconciliation does not restart a completed Job. Remove the temporary Job promptly after acceptance.
 The acceptance script passed locally through the real compiled MCP server with an Anthropic HTTP/SSE fixture:
 new setup, existing-route reuse, inference and journal inspection. Its 13 standalone guard/error tests pass
 with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.

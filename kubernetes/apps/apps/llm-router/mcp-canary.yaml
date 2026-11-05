@@ -7,6 +7,8 @@ kind: Job
 metadata:
   name: router-mcp-acceptance-20261105
   namespace: llm-router
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled" # required for Flux-managed immutable Job templates
 spec:
   backoffLimit: 0 # never replay an approval or paid request automatically
   activeDeadlineSeconds: 600
