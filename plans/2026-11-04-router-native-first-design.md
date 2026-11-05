@@ -57,8 +57,9 @@ A further finding changes the picture: **llama.cpp b12020's own `/v1/responses` 
 translator gets wrong.** They map replayed reasoning items to `reasoning_content`, `reasoning.effort` to the
 template, and stream reasoning as Responses events (§5).
 
-**It is measured.** On P1, Codex 0.166 straight to llama.cpp's `/v1/responses` delivered the plan at 15.4 min. Through
-the router it delivered nothing in 90 min. Native works. Because llama.cpp replays every reasoning block, the
+**It is measured.** On P1, Codex 0.166 straight to llama.cpp's `/v1/responses` delivered the plan: its first SUCCESSFUL
+write came at 19.3 min (an attempt at 15.4 min failed on patch syntax). Through the router, with reasoning dropped, it
+delivered nothing in 90 min. Native works. Because llama.cpp replays every reasoning block, the
 context still grows, so native on cloud3 needs a context bound (§12.1).
 
 **The owner decided D1-D6 on 2026-11-04** (§13): adopt this design; forward unknown fields; return the served model
@@ -1461,7 +1462,8 @@ template digest match it.
   5. a long prefill under a **shorter** client idle timeout (the gate's idle test, live), then a ≥ 100k-token turn
      with the default timeout;
   6. after the ~15-min checks: the plan-writing task that never delivered (P1-d2-fn), run to completion. The direct
-     run delivered the plan at 15.4 min and finished at 23.5 min;
+     run's first successful plan write came at 19.3 min (an attempt at 15.4 min failed on patch syntax), and it finished
+     at 23.5 min;
   7. two P1-length sessions **at once** (both slots), through compaction;
   8. a session resumed across the flip, in each direction, including rollback after several native turns (§10.4).
 - **Pass, beyond exit 0:**
@@ -1604,7 +1606,7 @@ the bridge; after that it is the translated path's permanent behaviour.
 
 | Path | Plan delivered | Run ended | Tokens | Peak context |
 |---|---|---|---|---|
-| Direct to llama.cpp `/v1/responses` | **15.4 min** | 23.5 min | 48.7k output | 135k |
+| Direct to llama.cpp `/v1/responses` | **19.3 min** (first successful write; an attempt at 15.4 min failed) | 23.5 min | 48.7k output | 135k |
 | Through the router (translated, reasoning dropped) | no plan in 90 min | — | 192.5k output | — |
 
 What it shows:
