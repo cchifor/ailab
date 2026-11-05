@@ -3855,8 +3855,9 @@ separate data recovery is needed.
 
 ## Management MCP release (2026-11-05, llm-router #140)
 
-This deployment is held in draft until [source PR #140](https://git.chifor.me/cchifor/llm-router/pulls/140)
-has merged through both reviewers. It includes #139's provider argument validation and adds the optional
+This deployment depends on [source PR #140](https://git.chifor.me/cchifor/llm-router/pulls/140)
+through Gitea's issue dependency. Source and deployment reviews can proceed in parallel;
+the source must merge through both reviewers before this rollout. It includes #139's provider argument validation and adds the optional
 management MCP plugin at `https://router.chifor.me/admin/mcp`. Existing management bearer credentials and
 session/CSRF checks apply; inference API keys receive 403. No new credential issuer or OAuth flow is added.
 See [the MCP guide](https://git.chifor.me/cchifor/llm-router/src/commit/cdd12f364d35e962860e3dfc4e51d120a7758b49/docs/guides/mcp.md)
