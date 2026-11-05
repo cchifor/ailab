@@ -49,9 +49,10 @@ compliance suite is 17 server-side smoke tests (§2.1).
    because neither the bytes nor an upstream's acceptance prove it: local servers emit look-alike signatures, and OpenAI
    and Anthropic silently ignore state they cannot read. State is replayable where the compatibility key matches
    (producer, model family, credential scope from configuration, format: e.g. the Pro ChatGPT seats, on the 2026-10-12
-   measurement). It is returned unchanged and never converted. Across keys, or when its origin is unknown, the router
-   pins agent routes to the seat (queue, then fail loudly) and lets chat routes move and strip it as a declared
-   mutation (owner, §13); it never invents a signature and
+   measurement). It is returned unchanged and never converted. **Agent routes always pin a conversation that holds
+   such state to the seat that produced it, whatever the scope** (queue, then fail loudly). **Chat routes** may spill
+   it to a seat with a matching key, where it travels as is, or move it anywhere else and strip it as a declared
+   mutation (owner, §13). State of unknown origin is refused on agent routes. The router never invents a signature and
    never passes one model's reasoning off as another's (§4.3, §6).
 4. **When a translated attempt produces opaque state in a format the client's slot does not hold, it reaches the
    client through that protocol's own opaque slot:** a versioned, key-identified, MAC'd router envelope in Responses
@@ -753,8 +754,10 @@ during the migration (§10, Step R1).
 | `anthropic` | `thinking` + `signature`, `redacted_thinking.data` | the Anthropic API. (DeepSeek's `/anthropic` thinking blocks are **DeepSeek plaintext state**, not Anthropic state: their signatures are undocumented and they are not valid at Anthropic, §2.8) | the Anthropic API, Bedrock and Google Cloud alike (signatures are portable across platforms); a model that cannot read a block drops it silently; Sonnet/Haiku 5.5 blocks only in the producing or a linked account (§2.3) | Messages blocks with a signature, on a conversation bound to an Anthropic-family target |
 | `gemini` | thought signatures on parts | Gemini | Gemini | (no provider today) |
 
-**A scope is configuration, set on evidence.** Each account declares `stateScope` (default: its own id). Accounts with
-the same scope may exchange opaque state, so a smart pool can spill within it. Today's evidence would put the Pro
+**A scope is configuration, set on evidence.** Each account declares `stateScope` (default: its own id). It says
+where a seat's state is valid. **Only chat routes use it to move state:** there, accounts with the same scope may
+exchange opaque state, so a chat route's pool can spill within it. **Agent routes never move state, whatever the
+scope.** They pin a state-holding conversation to the seat that produced it (§6 R5, owner §13). Today's evidence would put the Pro
 `codex-*` seats in one scope and leave the Pro Lite seats (`codex-3`, `codex-4`) in their own until measured; each
 Anthropic API account serving Sonnet/Haiku 5.5 is its own scope (§2.3). Widening a scope is an owner decision backed by a
 measurement, like the 2026-10-12 one.
@@ -1082,7 +1085,7 @@ where it differs. Every N and T cell is *eligible only after qualification* (nat
 |---|---|---|---|---|
 | llama.cpp b12020 | **N** `/v1/responses` | messages, leading `developer`, function tools/calls, parallel calls, tool-output images, reasoning items with text (→ `reasoning_content`), `reasoning.effort` (→ template), streaming events | `namespace`/`custom`/`web_search` tools (upstream drops them: skip unless `allowLoss`), `text.format` (ignored upstream), truncation reported `completed`. **No router-side reasoning bound on this native path (D6):** the context gate (advertised window and compaction against concurrent capacity) applies, and if it does not qualify the model stays translated with append-only replay (`lastTurns: "all"`), bounded by the same client compaction (§4.7) | encrypted or content-less reasoning (foreign domain), `additional_tools`, `previous_response_id`, `store:true` |
 | vLLM 0.28 | **N** `/v1/responses` | as llama.cpp, plus `namespace` tools (flattened and restored upstream), `text.format` | `custom` tools (dropped in 0.28), stream ids differ from the final response | non-empty `encrypted_content`, `previous_response_id` |
-| codex (ChatGPT) | **N** (today) | everything; `encrypted_content` round-trips within the account | `store-false` (validated, so a no-op), `cache-key-salt`, `overload-code`, `output-limit-cut` (no output limit upstream) | `store:true`, `previous_response_id`; opaque state from outside the account's `stateScope` (§4.3, §6 R4) |
+| codex (ChatGPT) | **N** (today) | everything; `encrypted_content` round-trips within the account | `store-false` (validated, so a no-op), `cache-key-salt`, `overload-code`, `output-limit-cut` (no output limit upstream) | `store:true`, `previous_response_id`; opaque state from outside the account's `stateScope` (§4.3, §6 R4); on agent routes, state from any seat but this one (pinned, §6 R5) |
 | OpenAI API | **N** (add a `responses` wire; today T via chat, losing all reasoning state) | everything incl. `encrypted_content` with `include` | none known | another org's encrypted state |
 | Anthropic API | **T** (Responses → IR → Messages) | messages, images, function tools ↔ `tool_use`, parallel calls, tool-result images, `is_error`; Anthropic thinking **round-trips through the envelope** (§4.5) | `reasoning.summary` (Anthropic has none), effort level mapping (§6 R9), `developer` mid-conversation (§6 R10), `namespace` flattened with a reverse map | `custom` grammar tools, hosted tools (`web_search` is Anthropic's own server tool, a different contract), foreign opaque state |
 | `claude` seat (Claude Code CLI) | **T**, narrow | text turns, function tools (MCP bridge) | everything about reasoning: no thinking is returned or replayable | images, schemas, `temperature`, forced `tool_choice` (the pinned adapter's restrictions, §1.2), `custom`/hosted tools; **agent routes: not eligible** (it does not carry the session's reasoning state) |
@@ -1166,9 +1169,12 @@ violates the cache-stability invariant (§4.7), as measured. Replay on a transla
 the server's concurrent capacity (native-first's context gate, now for both paths).
 
 **R4. A conversation that holds reasoning state is pinned to its domain.** When a request carries reasoning state
-whose provenance the ledger or an envelope establishes (§4.3), only targets with a matching compatibility key are
-eligible, for the first attempt, for spills and moves, and for
-failover. On agent routes the pin is narrower: the seat that produced the state (R5). The scope is the accounts' declared `stateScope` (§4.3): for the ChatGPT seats, the Pro seats together
+whose provenance the ledger or an envelope establishes (§4.3), the eligible targets depend on the route kind (R5):
+- **agent routes:** only the seat that produced the state, whatever the scope, for every attempt, including failover;
+- **chat routes:** targets with a matching compatibility key take the state as is, for spills, moves and failover;
+  any other target only with a declared `strip-foreign-state`.
+
+The scope is the accounts' declared `stateScope` (§4.3): for the ChatGPT seats, the Pro seats together
 (measured portable on 2026-10-12; the `dw-gpt-*` routes still run `maxAttempts: 1`, from before that measurement); for
 the OpenAI API, the org; for Anthropic, the platform, except Sonnet/Haiku 5.5, which bind to the producing (or a
 linked) account. Plaintext reasoning is scoped by the declared reasoning family (§4.3); the two local accounts share a
@@ -1402,7 +1408,7 @@ local upstreams. Each check is a short task with a checkable artifact (a file wr
 
 | Client | Check |
 |---|---|
-| Codex CLI 0.166 (`codex exec`) | **the prompt-cache check: the 12-file task (~10-15 min) on each local wire**, from the journal's `usage.inputTokens` and `cachedInputTokens`. It passes when (a) **no request's uncached prompt tokens exceed the growth of its prompt since the previous request plus 3k**, except a request that follows a declared reset, and (b) **the task's total uncached prompt tokens stay within 1.5× its append-only baseline** (about 75-85k: `lastTurns: "all"` gave 75k over 51 requests, only 2 over 3k; P1 gave 67k over 36, 7 over 3k because of large tool outputs, which (a) allows). The failing sliding-window arm was 777,850 over 43; a text turn; a tool loop; parallel calls; an image tool output; a resumed session across a native ↔ translated flip in both directions (native-first §10.4); **an envelope round-trip** (translated Anthropic fake → Codex replays → the fake receives the exact signature); a deliberately short `stream_idle_timeout_ms` against a long prefill |
+| Codex CLI 0.166 (`codex exec`) | **the prompt-cache check: the 12-file task (~10-15 min) on each local wire**, from the journal's `usage.inputTokens` and `cachedInputTokens`. It passes when (a) **on append-only wires** (append-only replay, and native wires, where the client replays everything), **no request's uncached prompt tokens exceed the growth of its prompt since the previous request plus 3k**, except a request that follows a declared reset, and (b) **on every wire, the task's total uncached prompt tokens stay within 1.5× its append-only baseline** (about 75-85k: `lastTurns: "all"` gave 75k over 51 requests, only 2 over 3k; P1 gave 67k over 36, 7 over 3k because of large tool outputs, which (a) allows). **On replay-off wires to recurrent models** (flash-next, qwen3.8; cloud2 runs this way at rev 2228), criterion (a) does not apply. By design, a reply re-rendered without its reasoning can force a restore from an earlier checkpoint (§4.7, contract 3), so per-request outliers are expected there. They are recorded and reported, and the wire is judged on (b) alone. A replay-off wire that fails (b) fails the check; that is the measurement §9.7 uses to choose qwen3.8-27b's replay setting. The failing sliding-window arm was 777,850 over 43; a text turn; a tool loop; parallel calls; an image tool output; a resumed session across a native ↔ translated flip in both directions (native-first §10.4); **an envelope round-trip** (translated Anthropic fake → Codex replays → the fake receives the exact signature); a deliberately short `stream_idle_timeout_ms` against a long prefill |
 | Claude Code 2.1.x (`claude -p`, `ANTHROPIC_BASE_URL` = router) | a `Bash` + `Read` + `Edit` task; an image; a sub-agent; `/compact`; thinking blocks replayed; every model-selection override (#128 finding 20); unknown betas |
 | Open WebUI (docker) | a chat with reasoning on each provider setting (*Default* and *llama.cpp*), proving what it replays; a tool call |
 | dsh, the Assistant | their existing suites, on IR v2 |
@@ -1451,7 +1457,7 @@ benchmark does, because both arms share the two-slot pool.
 | Task success | the 12-file non-regression task, short benchmark implementation tasks, a structured-output task; tests pass, artefact delivered | at most 1 paired failure more than direct in 6 pairs |
 | Tool-call validity | invalid or rejected tool calls per run | ≤ direct + 2 percentage points |
 | Reasoning continuity | the decision-turn probe (native-first §12.1: commit at the decision turn), local models | commit rate within 1 of 6 |
-| Tokens and cache | input, output, uncached prompt tokens (journal and upstream usage) | uncached total ≤ 1.2× direct, and §9.3's per-request bound |
+| Tokens and cache | input, output, uncached prompt tokens (journal and upstream usage) | uncached total ≤ 1.2× direct; on append-only wires also §9.3's per-request bound (criterion (a)) |
 | Latency | time to first token, time to the artefact, wall time | TTFT median ≤ direct + 2 s; wall time median ≤ 1.25× |
 | Errors and retries | router-originated errors, client retries, `stream closed` loops | no router-originated error; retries ≤ direct |
 
@@ -1482,7 +1488,9 @@ issues, directly without llm-router and validate the results."*
   window) sized for the shared 262,144-token pool: at most half of it per session, minus output headroom (native-first's
   context gate).
 - **qwen3.8-27b on cloud2:** its replay setting (append-only or off), decided on measurements. Run the decision-turn probe
-  and the §9.3 cache check on both settings; choose by quality first, then by cache.
+  and the §9.3 cache check on both settings. Criterion (a) applies to the append-only setting only; the replay-off
+  setting is judged on the task total (criterion (b)), with its per-request outliers reported. Choose by quality first,
+  then by cache.
 - **Templates:** any D5 template fix the render checks require.
 
 **Runs.**
@@ -1501,7 +1509,7 @@ issues, directly without llm-router and validate the results."*
 **Pass, per model:**
 - the routed plan mean is within 2 points (of 25) of direct;
 - a plan is delivered within the cap via the router whenever it was delivered direct;
-- every run passes §9.3's cache check.
+- every run passes §9.3's cache check, as scoped there for the model's replay setting.
 
 **Today's evidence:** flash-next delivered P1 direct at 15.4 min and through the fixed router at about 20 min (one run
 each). That gap, about 1.3×, is outside §9.6's wall-time margin, so it is the first thing the A/B has to explain, with
@@ -1523,7 +1531,7 @@ reversible by a config write or an image revert, has its tests, and gets a codex
 | **R0b** | The config validator refuses a numeric `replayReasoning.lastTurns` (keeps `true`/`"all"` and off); the `reasoning-window` registry entry is withdrawn from the native-first plan; client compaction thresholds are set against concurrent capacity for translated local routes too | refuses a config that would defeat the cache (none is live: rev 2228) | revert | layer (a) on the local accounts: no difference |
 | **R1** | IR v2 types beside v1, **only the decoders active callers need** (Responses and chat first; Messages with R6), and an `IRv2 → v1` shim, so every adapter keeps running unchanged. The golden suite pins that v1 behaviour is identical through the shim | none | revert | layer (a) on every provider: no difference (the shim reproduces v1) |
 | **R2** | The provenance ledger (digests only) and state facts in the journal (`request.state {formats, provenance, wouldRefuse}`) | none (journal and store only) | revert | layer (a): no difference |
-| **R3a** | Declare `stateScope` and model families from today's evidence (the Pro `codex-*` seats share one scope); R2's `wouldRefuse` shows which spills the pin would stop | none | config | layer (a): no difference |
+| **R3a** | Declare `stateScope` and model families from today's evidence (the Pro `codex-*` seats share one scope). Scopes decide validity, and spills on chat routes only; agent routes pin to the seat. R2's `wouldRefuse` shows which spills the pin would stop | none | config | layer (a): no difference |
 | **R3b** | **Enforce** the pin in placement and failover (§6 R4-R5), per route: agent routes pin to the seat, chat routes may move and strip (owner, §13). A route is enforced when §4.3's **measured readiness** holds: its replayed opaque items hit the ledger ≥ 99 % over a day of its traffic, or its legacy sessions have been drained or compacted. Until then the route may run in the per-route legacy mode (`legacyState: 'allow'`, journaled as weaker assurance). `strip-foreign-state` is a declared, per-route mutation (chat routes only) | **yes**: agent-route conversations holding reasoning state no longer spill (they queue, then fail); chat-route moves outside the scope strip, declared | per-route flag | A/B on the codex seats (`pool-codex`) and both local accounts |
 | **R4** | **codex encoder on IR v2** (translated path): `include: ["reasoning.encrypted_content"]`, reasoning items replayed in place, mid-conversation system/developer as `developer` items in place (not folded into `instructions`; the backend refuses `system` items, §2.3), `phase` kept, tool-output images as `input_image` parts. **No envelope needed:** the state is already in the format of the Responses slot, and the ledger gives its provenance; chat clients get `reasoning_details` if the route opts in. **Depends on R3b being enforced on the same routes** (encrypted state must stay on its seat) | **narrower than it sounds:** Responses clients on a translated route keep their GPT reasoning across turns (they replay `encrypted_content`); chat clients only where the route opts into `reasoning_details` *and* the client replays message objects, which Open WebUI (*Default*) and dsh do not (§5.2, §11); the Assistant once it stores reasoning items in its conversations (IR v2) | per account flag | A/B on the codex seat: Codex CLI direct as the reference; the translated callers (chat clients, the Assistant) via the router |
 | **R5** | **anthropic encoder on IR v2**, only once an API account exists. **All envelope machinery is deferred to here** (R4 and R6c need none): R5a the envelope **verifier**; R5b thinking per model (§6 R9), signatures and `redacted_thinking` in their positions, inline `system` in place, the full `stop_reason` table, and the envelope **writer** for Responses clients | an Anthropic API account gets thinking | per account; writer off = rollback, verifier stays | A/B against the Anthropic API direct (needs an account first) |
@@ -1584,7 +1592,8 @@ ships after its verifier, and its rollback is to stop writing, never to stop rea
   chat route), not a loss on every turn. (Envelopes are deferred to R5, so none exist until then.)
 - **Account-bound state and pools.** Sonnet/Haiku 5.5 thinking and OpenAI encrypted reasoning are account- or org-bound
   (§2.3). Smart pools that spread one conversation over several seats lose that state on every move. **Decided (§13):**
-  agent routes stay on the seat (queue, then fail); chat routes may move and strip. The cost is that dev-worker Codex
+  agent routes stay on the seat that produced the state, whatever the scope (queue, then fail); chat routes may spill
+  within the scope, or move and strip. The cost is that dev-worker Codex
   conversations on `pool-codex` stop spilling to a warm seat when theirs is busy (spills were 2.5 % of turns after the
   2026-10-12 concurrency change); R3a's `wouldRefuse` journal shows how often they would queue or fail before R3b is
   switched on.
