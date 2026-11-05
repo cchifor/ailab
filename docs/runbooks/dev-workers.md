@@ -416,7 +416,7 @@ Each worker's router key also reaches two local models. They use no subscription
 | name (route) | serves | speed | context | notes |
 |---|---|---|---|---|
 | `qwen-27b` → route `qwen3.8-27b` | cloud2, vLLM, Qwen3.8-27B | ~116 tok/s output | 262k | the better local choice for code |
-| `flash-next` → route `qwen3.8-flash-next` | cloud3, llama.cpp, Qwen3.8-Flash-Next | ~60 tok/s output | 262k | copies exact values from tool output unreliably (cloudlab runbook 13e); cloud3 serves one model at a time, so its first request after another cloud3 model waits for the swap |
+| `flash-next` → route `qwen3.8-flash-next` | cloud3, llama.cpp, Qwen3.8-Flash-Next | ~60 tok/s output | 131k per session, compacts at 114,688 (below) | copies exact values from tool output unreliably (cloudlab runbook 13e); cloud3 serves one model at a time, so its first request after another cloud3 model waits for the swap |
 
 **How a request gets there.**
 - `qwen-27b` and `flash-next` are router pointers, and the worker's key allows them besides its `dw-N`.
@@ -451,7 +451,15 @@ to run `local-agent`, because neither of Codex's own ways works:
 names (tested 2026-11-01), but it freezes the GPT models' metadata on every worker. It is not used.
 
 **By hand, a whole session on a local model:** `codex -p qwen-27b` (or `-p flash-next`). The profile files
-`~/.codex/<name>.config.toml` set the model and its real context window.
+`~/.codex/<name>.config.toml` set the model, the context window one session may use and, for flash-next, Codex's
+compaction threshold (`model_auto_compact_token_limit`).
+- **flash-next's window is half the pool (2026-11-05).** cloud3's llama.cpp serves it with `-c 262144 --parallel 2
+  --kv-unified`: 262,144 tokens is one KV pool that both slots share. The profile used to advertise all of it, so one
+  session could grow to about 236k before Codex compacted (90 % of the window when no limit is set) and leave the
+  second slot nothing. It now advertises 131,072 and compacts at 114,688, leaving 16,384 for one turn's output (the
+  largest measured on the planning benchmark was 14,179). Two sessions fit at once; a long session compacts earlier
+  than before. The router's append-only reasoning replay (`lastTurns: "all"`) relies on this client-side bound.
+- **qwen-27b** keeps 262,144, cloud2's vLLM `max_model_len`.
 
 **From Claude Code.** Claude's own sub-agents (the Task tool) run on Claude models only: Claude Code sends them to
 Anthropic, and the router has no Anthropic endpoint (llm-router#128 is the plan for one). The `local-model-agent`
