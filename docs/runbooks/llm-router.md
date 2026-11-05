@@ -3844,11 +3844,11 @@ in the cleanup PR after Flux applies it.
 **Rollback.** Revert the image and both annotations together to:
 - image `registry.chifor.me/llm-router/router@sha256:78915e249631945fbf15ed7034e3085b60fa86680e926db73502c0956174a2d2`;
 - source `247b19f0adb84efcf6a49e239c257bec08ef6c45`, release `router-0.1.0-20261104-reasoning-replay`.
-If reverting the initial rollout manifest before cleanup, remove its dated init container only after confirming
-its successful completion and the verified generation at
+After cleanup, rollback changes only the image and both annotations; there is no init container to remove.
+For the historical pre-cleanup manifest from #1611 only, remove its dated init container together with the image
+rollback after confirming successful init completion and the verified generation at
 `/data/backups/pre-provider-onboarding-20261105` (helper verification log plus successful init completion). If the
 backup has not completed, keep the protection in place and resolve the backup failure before proceeding with
-rollback; do not bypass it. Revert the image and remove the init together once verified, keeping the manifest's
-single-image constraint. This update has no schema migration, so image rollback does not
+rollback; do not bypass it. This update has no schema migration, so image rollback does not
 require restoring the database or changing the existing reasoning-replay settings. Preserve the backup if a
 separate data recovery is needed.
