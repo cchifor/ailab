@@ -3806,21 +3806,25 @@ and empty supplied lists are distinguished from an upstream empty result. Anthro
   configured; typecheck and build passed. CI supplies PostgreSQL. The frozen production archive passed its smoke.
 - Archive `router-0.1.0-20261105-provider-onboarding.tar.gz`, SHA-256
   `522808d88705d9f17daabf65e5b7727bc5f19ff5cd341c61a1c1c3a4020e37a2`, Relay v0.2.0 assets 484/485, read back and verified.
-- Packaging commit `e4c8b3a4e255aa90797633c4a9ef620de6087aed` on Relay branch
-  `release/router-20261105-provider-onboarding-image`; [image run 121742](https://git.chifor.me/cchifor/relay/actions/runs/121742)
+- Packaging commit `c960ee19ed70fcbcdaabf98ec22d024db02caf72` on Relay branch
+  `release/router-20261105-provider-onboarding-image`; [image run 121756](https://git.chifor.me/cchifor/relay/actions/runs/121756)
   passed the production smoke and backup tests under the exact non-root, read-only runtime image.
-- [Receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-121742.json), asset 486:
-  `registry.chifor.me/llm-router/router@sha256:4323425201461f3fe349da86638ad83da232cd4f2d0f05a1a16dec2d5cb324c6`.
+- [Receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-121756.json), asset 487:
+  `registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803`.
   The Node runtime digest remains `sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
 - The image was pulled anonymously. Its source marker and compiled tool registration, account-free probe schema,
-  invalid-account recovery and empty-list recovery passed with networking disabled. The exact init command passed
-  the live-WAL backup, repeat verification, corruption rejection and unchanged-source fixtures under the same
+  invalid-account recovery and empty-list recovery passed with networking disabled. The packaged init helper passed
+  live-WAL backup, independent generations, accepted 128-character/rejected 129-character labels, repeat verification,
+  corruption rejection and unchanged-source fixtures under the same
   non-root/read-only container constraints. All 31 manifest paths validated: 526 resources valid, 68 CRDs skipped,
   none invalid; the 12 rollout-checker tests passed.
 
 **Rollout.** The Recreate deployment stops the old router before `backup-before-provider-onboarding` runs.
-It uses the packaged backup helper with a checked replacement of its historical fixed label, and creates
-`/data/backups/pre-provider-onboarding-20261105`. SQLite integrity and checksums for the database, encryption key
+It invokes the packaged backup helper directly, using the validated `ROUTER_BACKUP_LABEL` setting added in
+[Relay #208](https://git.chifor.me/cchifor/relay/pulls/208), and creates
+`/data/backups/pre-provider-onboarding-20261105`. The explicit `ROUTER_DATA_DIR=/data` matches the router's
+`ROUTER_DATABASE=/data/router.sqlite`, encryption key `/data/router.secrets.key`, and optional plugin composition
+`/data/plugins.yml`; this deployment has no key-file or plugin-file path override. SQLite integrity and checksums for the database, encryption key
 and plugin composition are verified; an existing completed generation is verified again, never overwritten.
 Failure blocks startup. No account, route, credential, authentication setting or database schema is changed.
 
@@ -3833,6 +3837,10 @@ once Flux has applied the deployment.
 **Rollback.** Revert the image and both annotations together to:
 - image `registry.chifor.me/llm-router/router@sha256:78915e249631945fbf15ed7034e3085b60fa86680e926db73502c0956174a2d2`;
 - source `247b19f0adb84efcf6a49e239c257bec08ef6c45`, release `router-0.1.0-20261104-reasoning-replay`.
-Remove the dated init container when reverting. This update has no schema migration, so image rollback does not
+Remove the dated init container only after confirming its successful completion and the verified generation at
+`/data/backups/pre-provider-onboarding-20261105` (helper verification log plus successful init completion). If the
+backup has not completed, keep the protection in place and resolve the backup failure before proceeding with
+rollback; do not bypass it. Revert the image and remove the init together once verified, keeping the manifest's
+single-image constraint. This update has no schema migration, so image rollback does not
 require restoring the database or changing the existing reasoning-replay settings. Preserve the backup if a
 separate data recovery is needed.

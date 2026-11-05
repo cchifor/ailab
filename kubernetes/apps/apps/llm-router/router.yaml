@@ -119,20 +119,16 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
-      # Removed after rollout acceptance; the verified recovery generation stays on the data PVC.
+      # TEMPORARY: remove after rollout acceptance (runbook 2026-11-05 entry); keep the verified backup on the PVC.
       initContainers:
         - name: backup-before-provider-onboarding
-          image: registry.chifor.me/llm-router/router@sha256:4323425201461f3fe349da86638ad83da232cd4f2d0f05a1a16dec2d5cb324c6
-          command: [node, --input-type=module, -e]
-          args:
-            - |
-              import { readFile, writeFile } from 'node:fs/promises';
-              const source = await readFile('/app/deploy/backup-router.mjs', 'utf8');
-              const marker = "const label = 'pre-relay-api-20261002';";
-              if (!source.includes(marker)) throw new Error('Unexpected backup helper version');
-              await writeFile('/tmp/provider-onboarding-backup.mjs',
-                source.replace(marker, "const label = 'pre-provider-onboarding-20261105';"), { mode: 0o600 });
-              await import('file:///tmp/provider-onboarding-backup.mjs');
+          image: registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803
+          command: [node, /app/deploy/backup-router.mjs]
+          env:
+            - name: ROUTER_DATA_DIR
+              value: /data
+            - name: ROUTER_BACKUP_LABEL
+              value: pre-provider-onboarding-20261105
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits: { cpu: "1", memory: 512Mi }
@@ -146,8 +142,8 @@ spec:
       containers:
         - name: router
           # Source 922bafdf199a6a42be75baffd3bb93d70f8d8ffc (llm-router #137, #138: replay compatibility and API-key onboarding).
-          # Relay run 121742; archive sha256:522808d88705d9f17daabf65e5b7727bc5f19ff5cd341c61a1c1c3a4020e37a2.
-          image: registry.chifor.me/llm-router/router@sha256:4323425201461f3fe349da86638ad83da232cd4f2d0f05a1a16dec2d5cb324c6
+          # Relay run 121756; archive sha256:522808d88705d9f17daabf65e5b7727bc5f19ff5cd341c61a1c1c3a4020e37a2.
+          image: registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
