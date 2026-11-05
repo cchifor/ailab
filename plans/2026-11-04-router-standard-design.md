@@ -1508,12 +1508,20 @@ issues, directly without llm-router and validate the results."*
 
 **Pass, per model:**
 - the routed plan mean is within 2 points (of 25) of direct;
-- a plan is delivered within the cap via the router whenever it was delivered direct;
+- a plan is delivered within the cap via the router whenever it was delivered direct. **Delivered** means the first
+  SUCCESSFUL write of the plan file, judged by the tool's exit code or "Success.", never by when a write is attempted.
+  Each failed write is logged separately, with its time and error;
 - every run passes §9.3's cache check, as scoped there for the model's replay setting.
 
-**Today's evidence:** flash-next delivered P1 direct at 15.4 min and through the fixed router at about 20 min (one run
-each). That gap, about 1.3×, is outside §9.6's wall-time margin, so it is the first thing the A/B has to explain, with
-paired runs, before the routed arm counts as non-inferior.
+**Evidence, corrected 2026-11-05.** The "1.3× gap" (direct 15.4 min against the router's ~20 min) was a measurement
+error. 15.4 min was when the direct run ATTEMPTED its first write, an `apply_patch` that failed ("the last line of the
+patch must be '*** End Patch'"). The router run made the same failed attempt at 16.6 min. Timed by successful writes
+(the tool's exit code or "Success."):
+- **first successful write:** direct 19.3 min, router 20.1 min (1.04×);
+- **last write:** direct 23.0 min, router 20.8 min (0.90×), so the router arm finished the plan earlier;
+- **wall time:** direct 23.5 min, router 21.2 min (0.90×).
+
+So there is no router gap. The pass criteria above define delivery that way.
 
 ---
 
