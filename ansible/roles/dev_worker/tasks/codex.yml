@@ -324,6 +324,9 @@
       # Managed by ansible (dev_worker role, local model). `codex -p {{ item.1.name }}`: {{ item.1.model }} through the router.
       model = "{{ item.1.model }}"
       model_context_window = {{ item.1.context_window }}
+      {% if item.1.auto_compact_token_limit is defined %}
+      model_auto_compact_token_limit = {{ item.1.auto_compact_token_limit }}
+      {% endif %}
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
     mode: "0600"
