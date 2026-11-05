@@ -13,7 +13,8 @@ subscription route and of the native `openai-codex` provider (seat b). **Relates
 > **Amendment 2026-11-05:** the owner retired `qwen3.8-flash-next`, and cloud3 serves `qwen3.8-27b` beside cloud2
 > (the router's `qwen3.8-27b` route spreads new conversations over the two). The seed's default
 > (`agent-default-model`, and the composition row in `cordis.patch.yml`) and the Conductor's reviewer route are
-> `llm-router-local/qwen3.8-27b` since; `qwen3.8-flash-next` left the `llm-router-local` model list. The live
+> `llm-router-local/qwen3.8-27b` since; `qwen3.8-flash-next` and `qwen3.8-27b-fp8` (retired the same day) left the
+> `llm-router-local` model list. The live
 > volume's saved default (`llm-router-claude/opus` that day) was not touched: `reconcile-default-model.js`
 > repoints only a default that names a retired PROVIDER. Runbook `llm-router.md`, "flash-next retired".
 

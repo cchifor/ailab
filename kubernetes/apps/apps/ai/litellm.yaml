@@ -276,8 +276,8 @@ data:
       # plans/2026-09-21-cloud3-qwen38-default-litellm-pool-plan.md and runbook section 13a).
       # Same checkpoint + identical request-shaping params below is what makes pooling them under
       # one model_name honest (runbook model-registration.md section 2, the same-checkpoint
-      # carve-out); the FP8 uncensored entry further down stays under its OWN name for the same
-      # reason in reverse.
+      # carve-out); the FP8 uncensored entry (removed 2026-11-05) stayed under its OWN name for the
+      # same reason in reverse.
       #
       # HOW THE ROUTER SPREADS THEM. routing_strategy least-busy picks the deployment with fewer
       # in-flight requests, per proxy replica (two replicas, two counters; no Redis here, so they
@@ -384,78 +384,16 @@ data:
         # Same engine, same window: 262144 - 49152 = 212992 since 2026-09-23 (the thinking-off
         # alias keeps the route's headroom figure rather than inventing a second one).
         model_info: { max_input_tokens: 212992 }
-      # ---- cloud3 vLLM: qwen3.8-27b-fp8 — the UNCENSORED FP8 checkpoint (TP=2 on GPU0+GPU1 since 2026-11-03, cloudlab #49; TP=4 before) ---
-      # orcarouter/Qwen3.8-27B-Uncensored-FP8 at HF 0f3cdb83, served by vLLM 0.28.0 (cu129 wheel: cloud3
-      # chosen when cloud3 ran driver 550 / CUDA 12.4, kept on NVIDIA's runfile 580.178.04 since 2026-09-14 under
-      # CUDA minor-version compatibility) UNDER llama-swap on
-      # 192.168.0.26:8080 as a swap target, beside the llama.cpp entries below; preloaded at boot
-      # 2026-10-31 -> 11-03, served BY NAME since (ttl 1800 s): cloud3's resident default model is
-      # kept loaded by a keep-warm watchdog (cloudlab #53, runbook 13h) -- qwen3.8-flash-next until
-      # 2026-11-05, qwen3.8-27b since (cloudlab #54) -- so a request here may first wait for a ~3 min
-      # swap, and it EVICTS that default, which the llm-router also sends qwen3.8-27b traffic to. That host has had NO `default` alias since 2026-10-31 (a request for `default` answers
-      # 404 there); fp8 carried it 2026-09-11 -> 09-14, w4a16 from then until its retirement (cloudlab
-      # issue #7, PR #11, runbook §13). NOT the same engine as qwen3.8-27b-vllm-cloud on cloud2, and
-      # kept under its own model_name for the same reason that entry gives: different checkpoint,
-      # different box, a THIRD of the throughput, and a swap host -- pooling would hide which answered.
-      #
-      # FP8 on Ampere is WEIGHT-ONLY (Marlin W8A16): the memory of an 8-bit checkpoint, bf16 compute,
-      # no FP8 speedup. MEASURED 2026-09-11 on this checkpoint, CUDA graphs on, no MTP: 66.8 tok/s
-      # single stream, 149.6 tok/s aggregate at 4 streams (gate checkpoint, same config), KV pool
-      # 775,637 tokens. Cold start through llama-swap ~100 s (173 s the first time a checkpoint
-      # compiles); request_timeout below covers it, and every request may pay it after the 7200 s TTL
-      # or after another cloud3 model has been swapped in -- cloud3 holds ONE model at a time.
-      #
-      # CONTEXT: host --max-model-len 131072 (raised from the 65536 the gates ran at, same pool, 5.9x
-      # concurrency at full length). max_input_tokens = 131072 - 49152 = 81920, the same output
-      # headroom as cloud2's route: xhigh reasoning measured 16-39k tokens per answer there, and an
-      # under-budgeted reasoning model returns finish_reason=length with EMPTY content.
-      # SAMPLING as on the cloud2 route -- Qwen3.8's thinking-mode recipe; the template of this
-      # checkpoint accepts reasoning_effort (checked in its chat_template.jinja). Thinking termination,
-      # tool calls and streaming through THIS proxy have not yet been exercised end to end from a
-      # dev-worker (ClusterIP-only); the direct-to-backend probes are in cloudlab runbook §13.
-      # VISION: the checkpoint keeps its vision tower (882 unconverted modules) and vLLM loads it, but
-      # no image probe was run here -- supports_vision is deliberately NOT claimed. No fallbacks yet:
-      # a fallback chain for this route is a routing decision for the operator, not a default.
-      #
-      # TWO NAMES, ONE BACKEND, since 2026-09-11. The route first shipped as `qwen3.8-27b-fp8-cloud`,
-      # named after the weight format; in the dsh picker that said nothing about what makes this
-      # checkpoint different, and the operator asked for the name to say "uncensored". A route is
-      # not renamed (runbook model-registration.md §5: Open WebUI stores the model id per chat and
-      # has no alias layer, so a rename strands every chat on the old id). Instead the ORIGINAL
-      # name is kept as a hidden alias -- `model_info.hidden: true` drops it from the dsh picker
-      # and from Open WebUI's Local group, while LiteLLM keeps answering to it (the runbook's
-      # documented hide; note it is PARTIAL: Open WebUI's External connection discovers every
-      # name from /v1/models, so the old id still shows there, as open-webui.yaml says) -- and
-      # the name the generated consumers advertise is the entry below. The two entries MUST keep
-      # identical litellm_params: they are one deployment under two names, and a drift between
-      # them would make "which name did you use" a behavioural question. The `alias_of` key on
-      # the new entry is what scripts/tests/test_litellm_aliases.py checks that invariant from;
-      # it is free-form model_info to LiteLLM and ignored by the consumer generator.
-      - model_name: qwen3.8-27b-fp8-cloud
-        litellm_params:
-          model: openai/qwen3.8-27b-fp8
-          api_base: http://192.168.0.26:8080/v1
-          api_key: "sk-noauth"
-          temperature: 1.0
-          top_p: 0.95
-          extra_body:
-            top_k: 20
-            chat_template_kwargs: { reasoning_effort: xhigh }
-        model_info: { max_input_tokens: 81920, hidden: true }
-      # The advertised name for the same deployment (see the note above). `-fp8` stays in the
-      # name because the format is the operational fact (weight-only on Ampere, the memory
-      # saving, the cold start); `-unc` (uncensored) is what the checkpoint IS.
-      - model_name: qwen3.8-27b-fp8-unc-cloud
-        litellm_params:
-          model: openai/qwen3.8-27b-fp8
-          api_base: http://192.168.0.26:8080/v1
-          api_key: "sk-noauth"
-          temperature: 1.0
-          top_p: 0.95
-          extra_body:
-            top_k: 20
-            chat_template_kwargs: { reasoning_effort: xhigh }
-        model_info: { max_input_tokens: 81920, alias_of: qwen3.8-27b-fp8-cloud }
+      # ---- cloud3 vLLM: qwen3.8-27b-fp8 (uncensored FP8) REMOVED 2026-11-05 ---------------------------
+      # qwen3.8-27b-fp8-unc-cloud and its hidden original name qwen3.8-27b-fp8-cloud are gone: the owner
+      # retired the FP8 checkpoint with flash-next, so cloud3's llama-swap serves qwen3.8-27b alone (the
+      # same W4A16 checkpoint as cloud2) and nothing evicts it. Callers get an explicit model-not-found;
+      # an Open WebUI chat stored on either id picks another model. It was orcarouter/Qwen3.8-27B-
+      # Uncensored-FP8 at HF 0f3cdb83 on vLLM 0.28.0, weight-only FP8 on Ampere (Marlin W8A16), TP=2 on
+      # GPU0+GPU1 since 2026-11-03, --max-model-len 131072, max_input_tokens 81920, served by name
+      # (ttl 1800) from 2026-11-03; 66.8 tok/s single stream, KV pool 775,637 tokens (2026-09-11). Its
+      # two-names-one-backend pair (2026-09-11, runbook model-registration.md section 5) was the only
+      # alias_of pair in this file; scripts/tests/test_litellm_aliases.py keeps the invariant for the next.
       # ---- COGNITIVE TIER: cloud3 ---------------------------------------------------------------
       # qwen3-coder-30b-a3b-cloud REMOVED 2026-10-31: the owner retired it from cloud3 as older and
       # weaker than the models that stay (plans/2026-10-31-local-models-improvement-plan.md).
@@ -1141,9 +1079,10 @@ spec:
         # resident default is flash-next and fp8 is served by name, cloudlab #53). The config LiteLLM
         # parses is unchanged in effect; the cost is one rolling restart, taken because the
         # annotation tracks the ConfigMap, per the rule above.
-        # BUMPED 2026-11-05: qwen3.8-flash-next-cloud is REMOVED (flash-next retired by the owner).
-        # A route is dropped, so the config LiteLLM parses changes; one rolling restart.
-        checksum/config: "f864d993d121"
+        # BUMPED 2026-11-05: qwen3.8-flash-next-cloud, qwen3.8-27b-fp8-cloud and qwen3.8-27b-fp8-unc-cloud
+        # are REMOVED (flash-next and the FP8 checkpoint retired by the owner). Routes are dropped, so the
+        # config LiteLLM parses changes; one rolling restart.
+        checksum/config: "3eed1d002dec"
         # Rolls the pod when chatgpt_chat.py changes. That file is merged into the litellm-config
         # ConfigMap by kustomization.yaml (kustomize configMapGenerator, behavior: merge, no name
         # hash), so like config.yaml it updates IN PLACE and nothing else rolls the Deployment on an

@@ -45,48 +45,65 @@ def _model_list():
     return config["model_list"]
 
 
+def _alias_problems(entries):
+    """Every way an `alias_of` pair in `entries` breaks the two-names-one-backend invariant (empty: none)."""
+    by_name = {}
+    for e in entries:
+        by_name.setdefault(e["model_name"], []).append(e)
+    problems = []
+    strip = lambda d: {k: v for k, v in (d or {}).items() if k not in ("hidden", "alias_of")}
+    for alias in (e for e in entries if (e.get("model_info") or {}).get("alias_of")):
+        info, name = alias["model_info"], alias["model_name"]
+        original_name = info["alias_of"]
+        originals = by_name.get(original_name)
+        if not originals:
+            problems.append(f"{name}: alias_of names {original_name}, which is not in model_list")
+            continue
+        if len(originals) != 1:
+            problems.append(f"{name}: an alias must point at exactly one deployment")
+            continue
+        original = originals[0]
+        if alias["litellm_params"] != original["litellm_params"]:
+            problems.append(f"{name}: alias and original are one deployment; their litellm_params must be identical")
+        if (original.get("model_info") or {}).get("hidden") is not True:
+            problems.append(f"{name}: the original must be hidden, or both names show up in the pickers")
+        if info.get("hidden") is True:
+            problems.append(f"{name}: the alias is the advertised name; it must not be hidden")
+        # Everything in model_info except the two alias-mechanics keys must agree too:
+        # max_input_tokens and supports_vision describe the one deployment both names reach.
+        if strip(info) != strip(original.get("model_info")):
+            problems.append(f"{name}: model_info must agree apart from hidden/alias_of")
+        if (original.get("model_info") or {}).get("alias_of"):
+            problems.append(f"{name}: no alias chains: point every alias at the deployment's original name")
+    return problems
+
+
+def _entry(name, temperature=1.0, **info):
+    return {"model_name": name, "litellm_params": {"model": "openai/m", "api_base": "http://10.0.0.1/v1", "temperature": temperature},
+            "model_info": {"max_input_tokens": 1000, **info}}
+
+
 class AliasPairs(unittest.TestCase):
-    def setUp(self):
-        self.entries = _model_list()
-        self.by_name = {}
-        for e in self.entries:
-            self.by_name.setdefault(e["model_name"], []).append(e)
-
     def test_every_alias_matches_its_original_and_the_original_is_hidden(self):
-        aliases = [e for e in self.entries if (e.get("model_info") or {}).get("alias_of")]
-        self.assertGreaterEqual(len(aliases), 1, "expected at least the qwen3.8-27b-fp8 alias pair")
-        for alias in aliases:
-            info = alias["model_info"]
-            original_name = info["alias_of"]
-            with self.subTest(alias=alias["model_name"], original=original_name):
-                originals = self.by_name.get(original_name)
-                self.assertIsNotNone(originals, f"alias_of names {original_name}, which is not in model_list")
-                self.assertEqual(len(originals), 1, "an alias must point at exactly one deployment")
-                original = originals[0]
-                self.assertEqual(
-                    alias["litellm_params"],
-                    original["litellm_params"],
-                    "alias and original are one deployment; their litellm_params must be identical",
-                )
-                self.assertIs(
-                    (original.get("model_info") or {}).get("hidden"),
-                    True,
-                    "the original must be hidden, or both names show up in the pickers",
-                )
-                self.assertIsNot(info.get("hidden"), True, "the alias is the advertised name; it must not be hidden")
-                # Everything in model_info except the two alias-mechanics keys must agree too:
-                # max_input_tokens and supports_vision describe the one deployment both names reach.
-                strip = lambda d: {k: v for k, v in (d or {}).items() if k not in ("hidden", "alias_of")}
-                self.assertEqual(strip(info), strip(original.get("model_info")), "model_info must agree apart from hidden/alias_of")
+        # Since 2026-11-05 the file may hold no pair at all (the qwen3.8-27b-fp8 pair, the only one, was retired);
+        # the checker's own test below keeps this from passing vacuously.
+        self.assertEqual(_alias_problems(_model_list()), [])
 
-    def test_alias_names_are_not_themselves_aliased(self):
-        for e in self.entries:
-            target = (e.get("model_info") or {}).get("alias_of")
-            if target:
-                self.assertIsNone(
-                    (self.by_name[target][0].get("model_info") or {}).get("alias_of"),
-                    "no alias chains: point every alias at the deployment's original name",
-                )
+    def test_the_checker_finds_each_kind_of_broken_pair(self):
+        good = [_entry("old", hidden=True), _entry("new", alias_of="old")]
+        self.assertEqual(_alias_problems(good), [])
+        cases = {
+            "drifted params": [_entry("old", hidden=True), _entry("new", temperature=0.7, alias_of="old")],
+            "original not hidden": [_entry("old"), _entry("new", alias_of="old")],
+            "alias hidden": [_entry("old", hidden=True), _entry("new", hidden=True, alias_of="old")],
+            "model_info drift": [_entry("old", hidden=True), {**_entry("new", alias_of="old"), "model_info": {"max_input_tokens": 2000, "alias_of": "old"}}],
+            "missing original": [_entry("new", alias_of="gone")],
+            "two originals": [_entry("old", hidden=True), _entry("old", hidden=True), _entry("new", alias_of="old")],
+            "chain": [_entry("a", hidden=True), _entry("old", hidden=True, alias_of="a"), _entry("new", alias_of="old")],
+        }
+        for label, entries in cases.items():
+            with self.subTest(case=label):
+                self.assertNotEqual(_alias_problems(entries), [])
 
 
 if __name__ == "__main__":

@@ -135,8 +135,8 @@ not from a dev-worker.
   `litellm_params` and `model_info.alias_of: <old name>`, then `just af-gen-litellm`. Open WebUI's
   Local group shows only the new name (the hide is partial: the old id still surfaces under
   Open WebUI's External group, see above); the old one keeps answering for every chat and session
-  pinned to it. Done for `qwen3.8-27b-fp8-cloud` → `qwen3.8-27b-fp8-unc-cloud` on 2026-09-11 (the
-  comment on those entries says why). The two `litellm_params` blocks must stay identical: they
+  pinned to it. Done for `qwen3.8-27b-fp8-cloud` → `qwen3.8-27b-fp8-unc-cloud` on 2026-09-11 (both retired 2026-11-05;
+  the removal note in `litellm.yaml` keeps the record). The two `litellm_params` blocks must stay identical: they
   are one deployment, and any drift makes "which name did you use" a behavioural question --
   `scripts/tests/test_litellm_aliases.py` diffs every `alias_of` pair, so a drift fails CI.
 
@@ -153,11 +153,12 @@ not from a dev-worker.
   selection time — a 404 for a served name the backend does not know, a connection error or
   timeout for a backend that is down, or a silent fallback if one is configured. The probe in
   step 4 is what catches that before a user does.
-- **cloud3 holds one model at a time.** Every cloud3 route (`qwen3.8-27b-fp8-cloud` and its `-fp8-unc-cloud`
-  alias; `qwen3.8-flash-next-q6-cloud` left with its llama-swap entry on 2026-09-21, `qwen3-coder-30b-a3b-cloud` was
-  removed 2026-10-31, `qwen3.5-122b-cloud` withdrawn 2026-11-03, `qwen3.8-flash-next-cloud` retired 2026-11-05) shares
-  one llama-swap with cloud3's resident `qwen3.8-27b`, which the llm-router also routes to; a request for a different one swaps the whole model (60–330 s
-  measured 2026-10-31, the 122B from NFS the slowest). Do not fan an agent team across two cloud3
+- **cloud3 holds one model at a time.** Since 2026-11-05 that is `qwen3.8-27b` alone, which the llm-router also
+  routes to (`qwen3.8-flash-next-q6-cloud` left with its llama-swap entry on 2026-09-21, `qwen3-coder-30b-a3b-cloud`
+  was removed 2026-10-31, `qwen3.5-122b-cloud` withdrawn 2026-11-03, `qwen3.8-flash-next-cloud` and
+  `qwen3.8-27b-fp8-cloud` with its `-fp8-unc-cloud` alias retired 2026-11-05). A route for another cloud3 model would
+  swap the whole model on every request for it (60–330 s measured 2026-10-31, the 122B from NFS the slowest) and evict
+  `qwen3.8-27b` from both proxies; price that before adding one, and do not fan an agent team across two cloud3
   routes.
 - **`--parallel 1` routes and abandoned requests.** The pinned LiteLLM (1.91.0) does not propagate a
   client's disconnect to the backend (`litellm.yaml`'s own note, measured 2026-08 in
