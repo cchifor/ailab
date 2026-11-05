@@ -2,7 +2,7 @@
 # llm-router: one standard for every protocol and every upstream
 
 **Date:** 2026-11-04, revised 2026-11-05 (the owner's decisions, §13; reviewer-claude's findings on PR #1602
-`ff2bbe36`; the night's validation runs, §4.7) · **Scope:** the whole `cchifor/llm-router` request path: every client protocol it serves and
+`ff2bbe36`; the night's validation runs, §4.7; the owner's validation requirements, §9.6-9.7) · **Scope:** the whole `cchifor/llm-router` request path: every client protocol it serves and
 every upstream it routes to. The code is `origin/main` `247b19f` (#136). **Extends:** the adopted native-first design
 (ailab PR #1599, `plans/2026-11-04-router-native-first-design.md`, decisions D1-D5, and D6 there), which is
 local-model-centric. Its sections are cited as "native-first §n". **Audience:** the owner, and whoever implements it.
@@ -131,6 +131,9 @@ None of these needs a new format; each needs the router to forward, and to know 
 - render checks through the real template;
 - the Open Responses suite and llm-comply as cheap first checks;
 - then ≤ 15-minute real-client checks (Codex CLI, Claude Code, Open WebUI);
+- **a direct-vs-router A/B for every provider** (deterministic diff plus a quality comparison against a predeclared
+  margin), which gates every behaviour-changing step and canary, and a direct and routed re-run of the planning tasks
+  on both local models (§9.6, §9.7);
 - then long runs.
 
 **Owner decisions** (§13, 2026-11-04): the D6 amendment confirmed; agent routes pin a conversation's state to its
@@ -1419,32 +1422,118 @@ as native-first §11 Step 6 sets out.
 For every local target, one test per release renders a captured real request through the served template and diffs it
 against the previous release's render. A change in the rendered prompt that no mutation explains is a failure.
 
+### 9.6 Router transparency A/B, for every provider (owner requirement, 2026-11-05)
+
+The owner, verbatim: *"For all providers (e.g. codex, anthropic, qwen) implement and run short tests directly, without
+llm-router and with llm-router, then compare the results. We must validate that the router does not negatively affect
+the quality of responses."*
+
+**Design.** The same short tasks run **DIRECT** (client to the provider or upstream) and **VIA** the router, with the same
+client and version, the same settings and, where possible, the same seat or account. The arms are paired per task and
+interleaved in time (A, B, B, A, …), so load and time of day hit both. Local models run one arm at a time, as the
+benchmark does, because both arms share the two-slot pool.
+
+**Layer (a): deterministic transparency (cheap, decisive, one run per case).**
+- **Record both arms:** what the upstream receives (a recording proxy in front of the upstream, or the router's exact-body
+  diagnostic capture, native-first §9.5) and what the client receives (the stream as the client sees it).
+- **Normalise only volatile fields** (ids, timestamps, session and `client_metadata` values, a re-keyed
+  `prompt_cache_key`), then diff:
+  - native paths: only the declared mutations of that wire may differ (`model`, `return_progress`, `stream-usage`, …);
+  - translated paths: only the declared, qualified mapping of that pair;
+  - the responses: events, fields, terminal status and usage, by the same rule.
+- **Handling:** recordings are conversation content. They are encrypted at rest and short-lived, like the diagnostic
+  capture. Credentials and `Authorization`/`x-api-key` headers are never recorded.
+
+**Layer (b): quality A/B (short tasks first, about 15 minutes each, the standing rule).**
+
+| Metric | How | Non-inferiority margin (predeclared: the router arm is not worse than direct by more than this) |
+|---|---|---|
+| Task success | the 12-file non-regression task, short benchmark implementation tasks, a structured-output task; tests pass, artefact delivered | at most 1 paired failure more than direct in 6 pairs |
+| Tool-call validity | invalid or rejected tool calls per run | ≤ direct + 2 percentage points |
+| Reasoning continuity | the decision-turn probe (native-first §12.1: commit at the decision turn), local models | commit rate within 1 of 6 |
+| Tokens and cache | input, output, uncached prompt tokens (journal and upstream usage) | uncached total ≤ 1.2× direct, and §9.3's per-request bound |
+| Latency | time to first token, time to the artefact, wall time | TTFT median ≤ direct + 2 s; wall time median ≤ 1.25× |
+| Errors and retries | router-originated errors, client retries, `stream closed` loops | no router-originated error; retries ≤ direct |
+
+- **Sample size.** Start with 3 pairs per task. A metric outside its margin, or within half a margin of it, takes 3 more
+  pairs, and the decision uses all 6. The margins are written into the run's plan file before the first run and not
+  changed after it.
+- **When the router arm fails:** layer (a) says where. Either the diff shows an undeclared difference (a router defect,
+  §9.2), or there is no difference, which points at load, a queue or a cold cache (re-run, then look at the journal).
+
+**Direct-path setup, per provider:**
+
+| Provider | Direct arm | Via-router arm | Comparable? |
+|---|---|---|---|
+| codex (ChatGPT seat) | Codex CLI logged in with the seat itself | Codex CLI on the seat's `dw-*` / pool route (native) | yes, same seat and model. Each run costs that seat's quota |
+| Claude seat (`claude` provider) | Claude Code (`claude -p`) logged in with the seat | the router's `claude` transport, which runs Claude Code itself, reached through a chat or canonical caller | **layer (a) yes**: a recording proxy on `ANTHROPIC_BASE_URL` in both arms shows what Anthropic receives, and the router's synthetic transcript and MCP bridge are its declared translation. **Layer (b) only for text and function-tool tasks.** Agentic coding tasks are not comparable: no client can drive Claude Code's own tool loop through the router, because Messages to the Claude seat is out of scope (owner, §13) |
+| qwen3.8-27b (vLLM, cloud2) | Codex → vLLM's own `/v1/responses`; chat clients → its `/v1/chat/completions` | Codex and chat clients via the router (translated today; native after native-first Step 7) | yes |
+| flash-next (llama.cpp, cloud3) | Codex → llama.cpp's own `/v1/responses` (through llama-swap); chat clients → `/v1/chat/completions`; Claude Code → `/v1/messages` (for R6c) | the same clients via the router | yes |
+| image models | `POST /v1/images/generations` to the local image server | the same via the router | yes. With a fixed seed, the same image bytes are expected: a byte or hash comparison is layer (a) |
+| Anthropic API, OpenAI API, DeepSeek | the vendor SDK direct | via the router | **not applicable today:** no such account exists or is planned (§13). Required before R5 or R7 is scheduled |
+
+### 9.7 Planning re-validation on qwen3.8-27b and flash-next (owner requirement, 2026-11-05)
+
+The owner, verbatim: *"Run the planning test on qwen3.8-27 and flash-next again, after you fix the models configuration
+issues, directly without llm-router and validate the results."*
+
+**Preconditions: the model configuration fixes.**
+- **flash-next:** append-only replay (done, rev 2228), plus a Codex `model_auto_compact_token_limit` (and advertised
+  window) sized for the shared 262,144-token pool: at most half of it per session, minus output headroom (native-first's
+  context gate).
+- **qwen3.8-27b on cloud2:** its replay setting (append-only or off), decided on measurements. Run the decision-turn probe
+  and the §9.3 cache check on both settings; choose by quality first, then by cache.
+- **Templates:** any D5 template fix the render checks require.
+
+**Runs.**
+- **Tasks:** the planning tasks P1-P3 of the local-model benchmark (ailab
+  `plans/2026-11-03-local-model-agent-benchmark-plan.md`), at their base commits, with their frozen task texts,
+  checklists, settings and caps.
+- **Arms:** each run both **DIRECT** (Codex 0.166 to the model's own `/v1/responses`) and **VIA** the router (translated
+  with append-only replay; native once its canary passes).
+- **Order:** the short checks come first, about 15 minutes each: the 12-file task and the decision-turn probe on each
+  model.
+- **Judge:** the benchmark's blind judge, unchanged: `codex exec --profile review`, gpt-6-astra, xhigh, read-only. It
+  scores the rubric 1-5 (correctness, completeness, feasibility, verification, grounding) in two passes with different
+  letter orders. Direct and routed plans are blinded together, so the judge does not know the arm.
+- **Scoring:** the benchmark's day-2 delivery-aware rule.
+
+**Pass, per model:**
+- the routed plan mean is within 2 points (of 25) of direct;
+- a plan is delivered within the cap via the router whenever it was delivered direct;
+- every run passes §9.3's cache check.
+
+**Today's evidence:** flash-next delivered P1 direct at 15.4 min and through the fixed router at about 20 min (one run
+each). That gap, about 1.3×, is outside §9.6's wall-time margin, so it is the first thing the A/B has to explain, with
+paired runs, before the routed arm counts as non-inferior.
+
 ---
 
 ## 10. Migration plan
 
 The native-first critical path (native-first §11: Step 1, Step 3 d2, the context gate, Step 4, Step 5, Step 6) stays
-first, **amended by R0b:** wherever native-first falls back or rolls back to a translated path "with `lastTurns`", that
+first, **gated by the §9.6 A/B on the local models for each canary (native-first Steps 6-8) and by the §9.7 re-run,
+and amended by R0b:** wherever native-first falls back or rolls back to a translated path "with `lastTurns`", that
 now means append-only replay (`"all"`) or off, with the client's compaction as the bound. The steps below are for the rest of the router. Each is behind configuration, off by default,
 reversible by a config write or an image revert, has its tests, and gets a codex review of its plan and implementation.
 
-| Step | What | Behaviour change | Rollback |
-|---|---|---|---|
-| **R0** | Record this standard as an ADR beside D1-D5 (the IR, provenance and state domains, the three front doors, the cache-stability invariant), with D6 amended (§4.7) | none | — |
-| **R0b** | The config validator refuses a numeric `replayReasoning.lastTurns` (keeps `true`/`"all"` and off); the `reasoning-window` registry entry is withdrawn from the native-first plan; client compaction thresholds are set against concurrent capacity for translated local routes too | refuses a config that would defeat the cache (none is live: rev 2228) | revert |
-| **R1** | IR v2 types beside v1, **only the decoders active callers need** (Responses and chat first; Messages with R6), and an `IRv2 → v1` shim, so every adapter keeps running unchanged. The golden suite pins that v1 behaviour is identical through the shim | none | revert |
-| **R2** | The provenance ledger (digests only) and state facts in the journal (`request.state {formats, provenance, wouldRefuse}`) | none (journal and store only) | revert |
-| **R3a** | Declare `stateScope` and model families from today's evidence (the Pro `codex-*` seats share one scope); R2's `wouldRefuse` shows which spills the pin would stop | none | config |
-| **R3b** | **Enforce** the pin in placement and failover (§6 R4-R5), per route: agent routes pin to the seat, chat routes may move and strip (owner, §13). A route is enforced when §4.3's **measured readiness** holds: its replayed opaque items hit the ledger ≥ 99 % over a day of its traffic, or its legacy sessions have been drained or compacted. Until then the route may run in the per-route legacy mode (`legacyState: 'allow'`, journaled as weaker assurance). `strip-foreign-state` is a declared, per-route mutation (chat routes only) | **yes**: agent-route conversations holding reasoning state no longer spill (they queue, then fail); chat-route moves outside the scope strip, declared | per-route flag |
-| **R4** | **codex encoder on IR v2** (translated path): `include: ["reasoning.encrypted_content"]`, reasoning items replayed in place, mid-conversation system/developer as `developer` items in place (not folded into `instructions`; the backend refuses `system` items, §2.3), `phase` kept, tool-output images as `input_image` parts. **No envelope needed:** the state is already in the format of the Responses slot, and the ledger gives its provenance; chat clients get `reasoning_details` if the route opts in. **Depends on R3b being enforced on the same routes** (encrypted state must stay on its seat) | **narrower than it sounds:** Responses clients on a translated route keep their GPT reasoning across turns (they replay `encrypted_content`); chat clients only where the route opts into `reasoning_details` *and* the client replays message objects, which Open WebUI (*Default*) and dsh do not (§5.2, §11); the Assistant once it stores reasoning items in its conversations (IR v2) | per account flag |
-| **R5** | **anthropic encoder on IR v2**, only once an API account exists. **All envelope machinery is deferred to here** (R4 and R6c need none): R5a the envelope **verifier**; R5b thinking per model (§6 R9), signatures and `redacted_thinking` in their positions, inline `system` in place, the full `stop_reason` table, and the envelope **writer** for Responses clients | an Anthropic API account gets thinking | per account; writer off = rollback, verifier stays |
-| **R6a** | `/v1/messages` kernel prerequisites (#128 findings 14-18, 26): the `x-api-key` authenticator, the Messages body cap and admission budget, the Anthropic error serializer, the telemetry protocol union | none until a route opts in | revert |
-| **R6b** | Configuration: `protocols` on RoutePolicy, with migration, pointer and fallback validation, and subscription providers forbidden on Messages routes (#128 findings 19, 22, 23) | none until a route opts in | config |
-| **R6c** | Native Messages wires to llama.cpp and vLLM only (owner, §13), each after its quirks are qualified (§4.6), route opt-in | new endpoint for the opted-in routes | per route |
-| **R6d** | Translated Messages pairs, only if a qualified need appears | per route | per route |
-| **R7** | `openai` provider: a `responses` wire (native for Responses clients; chat clients translated to Responses, required for tools on GPT-6 Astra / 6.1 Sol) | only if an OpenAI API account is configured | config |
-| **R8** | Encoders for chat targets on IR v2 (local, DeepSeek): the stopgap's mapping becomes the IR's normal case, append-only; reasoning after visible output is forwarded on translated streams, so clients can replay it (§4.7, both directions) | **yes**: clients now receive (and will replay) reasoning that was suppressed, which changes their history and context use; golden, render and cache-stability checks gate it | per account; rollback stops forwarding but keeps decoding what clients already hold |
-| **R9** | Retire | — | — |
+| Step | What | Behaviour change | Rollback | Gate (§9.6 A/B, §9.7) |
+|---|---|---|---|---|
+| **R0** | Record this standard as an ADR beside D1-D5 (the IR, provenance and state domains, the three front doors, the cache-stability invariant), with D6 amended (§4.7) | none | — | — |
+| **R0b** | The config validator refuses a numeric `replayReasoning.lastTurns` (keeps `true`/`"all"` and off); the `reasoning-window` registry entry is withdrawn from the native-first plan; client compaction thresholds are set against concurrent capacity for translated local routes too | refuses a config that would defeat the cache (none is live: rev 2228) | revert | layer (a) on the local accounts: no difference |
+| **R1** | IR v2 types beside v1, **only the decoders active callers need** (Responses and chat first; Messages with R6), and an `IRv2 → v1` shim, so every adapter keeps running unchanged. The golden suite pins that v1 behaviour is identical through the shim | none | revert | layer (a) on every provider: no difference (the shim reproduces v1) |
+| **R2** | The provenance ledger (digests only) and state facts in the journal (`request.state {formats, provenance, wouldRefuse}`) | none (journal and store only) | revert | layer (a): no difference |
+| **R3a** | Declare `stateScope` and model families from today's evidence (the Pro `codex-*` seats share one scope); R2's `wouldRefuse` shows which spills the pin would stop | none | config | layer (a): no difference |
+| **R3b** | **Enforce** the pin in placement and failover (§6 R4-R5), per route: agent routes pin to the seat, chat routes may move and strip (owner, §13). A route is enforced when §4.3's **measured readiness** holds: its replayed opaque items hit the ledger ≥ 99 % over a day of its traffic, or its legacy sessions have been drained or compacted. Until then the route may run in the per-route legacy mode (`legacyState: 'allow'`, journaled as weaker assurance). `strip-foreign-state` is a declared, per-route mutation (chat routes only) | **yes**: agent-route conversations holding reasoning state no longer spill (they queue, then fail); chat-route moves outside the scope strip, declared | per-route flag | A/B on the codex seats (`pool-codex`) and both local accounts |
+| **R4** | **codex encoder on IR v2** (translated path): `include: ["reasoning.encrypted_content"]`, reasoning items replayed in place, mid-conversation system/developer as `developer` items in place (not folded into `instructions`; the backend refuses `system` items, §2.3), `phase` kept, tool-output images as `input_image` parts. **No envelope needed:** the state is already in the format of the Responses slot, and the ledger gives its provenance; chat clients get `reasoning_details` if the route opts in. **Depends on R3b being enforced on the same routes** (encrypted state must stay on its seat) | **narrower than it sounds:** Responses clients on a translated route keep their GPT reasoning across turns (they replay `encrypted_content`); chat clients only where the route opts into `reasoning_details` *and* the client replays message objects, which Open WebUI (*Default*) and dsh do not (§5.2, §11); the Assistant once it stores reasoning items in its conversations (IR v2) | per account flag | A/B on the codex seat: Codex CLI direct as the reference; the translated callers (chat clients, the Assistant) via the router |
+| **R5** | **anthropic encoder on IR v2**, only once an API account exists. **All envelope machinery is deferred to here** (R4 and R6c need none): R5a the envelope **verifier**; R5b thinking per model (§6 R9), signatures and `redacted_thinking` in their positions, inline `system` in place, the full `stop_reason` table, and the envelope **writer** for Responses clients | an Anthropic API account gets thinking | per account; writer off = rollback, verifier stays | A/B against the Anthropic API direct (needs an account first) |
+| **R6a** | `/v1/messages` kernel prerequisites (#128 findings 14-18, 26): the `x-api-key` authenticator, the Messages body cap and admission budget, the Anthropic error serializer, the telemetry protocol union | none until a route opts in | revert | layer (a): no difference on existing endpoints |
+| **R6b** | Configuration: `protocols` on RoutePolicy, with migration, pointer and fallback validation, and subscription providers forbidden on Messages routes (#128 findings 19, 22, 23) | none until a route opts in | config | layer (a): no difference on existing routes |
+| **R6c** | Native Messages wires to llama.cpp and vLLM only (owner, §13), each after its quirks are qualified (§4.6), route opt-in | new endpoint for the opted-in routes | per route | A/B: Claude Code direct to llama.cpp and vLLM `/v1/messages` vs via the router |
+| **R6d** | Translated Messages pairs, only if a qualified need appears | per route | per route | A/B per pair, when scheduled |
+| **R7** | `openai` provider: a `responses` wire (native for Responses clients; chat clients translated to Responses, required for tools on GPT-6 Astra / 6.1 Sol) | only if an OpenAI API account is configured | config | A/B against the OpenAI API direct (needs an account first) |
+| **R8** | Encoders for chat targets on IR v2 (local, DeepSeek): the stopgap's mapping becomes the IR's normal case, append-only; reasoning after visible output is forwarded on translated streams, so clients can replay it (§4.7, both directions) | **yes**: clients now receive (and will replay) reasoning that was suppressed, which changes their history and context use; golden, render and cache-stability checks gate it | per account; rollback stops forwarding but keeps decoding what clients already hold | A/B on both local accounts with chat clients, plus §9.7 re-run on both models |
+| **R9** | Retire | — | — | the A/B of the step that replaced the code |
 
 **Kept, rewritten, retired.**
 
@@ -1633,6 +1722,13 @@ Findings 1-8 are reviewer-claude's on `ff2bbe36`; finding 9 is reviewer-codex's 
 | 7 | The thinking mode could still switch before the first tool turn | §4.7, §5.2, §6 R9: fixed on the conversation's first request, from whether it carries `tools` |
 | 8 | "§6 R11" should be R10 | §5.1 and §10 fixed |
 | 9 | Provenance was committed only before the terminal event, but earlier events (`output_item.done`, a signed `content_block_stop`) already make state replayable; a disconnect or crash in between left unrecorded state, and agent routes would then refuse with `reasoning_unknown_origin` | §4.3: a durable commit per item before the event that completes it; buffering rules for signatures and plaintext; open-item rows; a write failure ends the stream before the state is replayable; crash consistency; the interaction with the hold rule and the failover boundary; held events are never rewritten. §9.1: an interrupted-delivery test |
+
+### 13.2 The owner's validation requirements (2026-11-05)
+
+| Requirement (verbatim in §9.6, §9.7) | Where |
+|---|---|
+| "For all providers … run short tests directly, without llm-router and with llm-router, then compare the results … the router does not negatively affect the quality of responses." | §9.6: a deterministic layer (a), a quality A/B (b) with predeclared non-inferiority margins, a direct-path setup per provider, and the comparisons that are impossible today (agentic tasks on the Claude seat; the API-key providers, which have no account); §10: a gate column on every step |
+| "Run the planning test on qwen3.8-27 and flash-next again, after you fix the models configuration issues, directly without llm-router and validate the results." | §9.7: the configuration fixes as preconditions, P1-P3 direct and via the router, the benchmark's blind judge and rubric, short checks first, a pass rule per model; §10: the native-first canaries are gated on it |
 
 ---
 
