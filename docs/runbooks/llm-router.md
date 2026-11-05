@@ -3746,6 +3746,34 @@ for local and remote models).
 - cloud2 needs nothing; it already has replay off.
 - The image rollback is as in the release section above.
 
+## cloud2's `replayReasoning` turned on: append-only (2026-11-05, rev 2229)
+
+**Why.** With replay off, qwen3.8-27b on cloud2 degenerates on long agentic turns.
+- In the router transparency A/B (ailab `plans/2026-11-05-router-transparency-and-planning-revalidation.md` §2.2), a
+  12-file Codex task through the router timed out. Its last request streamed 24,035 reasoning deltas of `!` for 764 s
+  at HTTP 200: deltas kept flowing, so no timeout fired.
+- The same 71,860-token prompt sent straight to vLLM with every reasoning item removed (what the router sent with
+  replay off) degenerated in 8 of 10 sends.
+- With ANY earlier reasoning kept, even only the last turn's (71,884 tokens), it degenerated in 0 of 14.
+- vLLM's own `/v1/responses` replays reasoning natively, and passed the same task 3/3.
+
+**Change.** One `If-Match` PUT and a read-back, revision 2228 → 2229, about 08:51Z:
+- cloud2 `lan-192.168.0.28-18020`: `replayReasoning: { lastTurns: "all" }`, the same as cloud3 since rev 2228;
+- `queue` (`maxWaitMs` 80000, `maxWaiting` 4) and `forwardReasoning: true` unchanged.
+- The owner approved it on the condition that the short A/B passed.
+
+**Acceptance.**
+- **Same recorded body, greedy:** router 24,691 input tokens = vLLM's native 24,691, the journal shows
+  `input:reasoning_replayed:9`, and the output hash matches.
+- **The 12-file task via the router:** 3/3 pass (5.1, 7.0, 9.1 min; direct 5.8, 13.4, 7.7), 0.84x direct's uncached
+  prompt tokens, and no request over the per-request cache bound.
+
+**Rollback:** remove `replayReasoning` from cloud2 (`If-Match`, read-back). That brings the degeneration back on long
+turns.
+
+**Follow-up (llm-router):** a degenerate upstream stream passes every timeout. A repetition or degeneracy guard for
+local accounts would cut it.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
