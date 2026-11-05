@@ -264,15 +264,15 @@ The last-item-only prompt is 24 tokens longer than the degenerate one and never 
 
 ### 3.2 Layer (a): what the model receives
 
-The same recorded mid-run Codex body was sent both ways, greedy (temperature 0) with 160 output tokens, 2× each way, alternating.
+Each row is one recorded mid-run Codex body (S1, request 10), sent both ways, greedy (temperature 0) with 160 output tokens, 2× each way, alternating. The qwen rows share one body. The two flash-next rows use different bodies, so their sizes are not comparable with each other.
 
 | Model | Body | Direct input tokens | Router input tokens | Greedy output |
 |---|---|---|---|---|
 | qwen3.8-27b (vLLM) | reasoning items stripped | 24,081 | 24,081 | byte-identical |
 | qwen3.8-27b | with 9 reasoning items, replay off (rev 2228) | 24,691 | 24,081 | differs: the router dropped the reasoning |
 | qwen3.8-27b | the same, replay `"all"` (rev 2229) | 24,691 | 24,691 | identical, except one cold-cache direct call |
-| flash-next (llama.cpp) | with 7 reasoning items, replay `"all"` | 24,212 | 24,214 | close, not identical |
-| flash-next | reasoning items stripped | 24,378 | 24,380 | close, not identical |
+| flash-next (llama.cpp) | body from the router arm (S1-fn-2), with 7 reasoning items, replay `"all"` | 24,212 | 24,214 | close, not identical |
+| flash-next | a different body, from the direct arm (S1-fn-1), with its reasoning items stripped | 24,378 | 24,380 | close, not identical |
 
 **qwen (vLLM).** The translation (Responses → chat, `system-messages-merged`, `reasoning_effort` ignored) gives the model exactly the prompt that vLLM's own Responses endpoint builds.
 
