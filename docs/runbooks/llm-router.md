@@ -3688,6 +3688,64 @@ it in the workflow's concurrency group and published in about a minute. This Git
 replay probe that chose `lastTurns: 1` is in llm-router #136's description. The probe's result goes with that
 investigation's results, not in this section.
 
+### `lastTurns: 1` defeats the prompt cache; cloud3 replays all, cloud2 replay off (2026-11-04, rev 2228)
+
+**What the acceptance found.** On `lastTurns: 1`, the 15-minute 12-file agent task through the router hit its cap
+without writing NOTES.md. Per-turn reasoning was small, so the time went into prefill:
+
+| Run (12-file task, flash-next, 15-min cap) | Result | Uncached prompt tokens, all requests | Requests after the first with >3k uncached |
+|---|---|---|---|
+| router, `lastTurns: 1` | **cap, no NOTES.md** | **777,850** (43 requests) | 36 of 42 |
+| router, no replay | pass, 10.5 min | 88,967 (42) | 1 of 41 |
+| llama.cpp `/v1/responses` direct (replays every turn) | pass, 12.7 min | 82,161 (45) | 0 of 44 |
+| router, `lastTurns: "all"` | pass, 10.1 min | 83,739 (52) | 2 of 51 |
+
+From each run's Codex session (`token_count`: `input_tokens` minus `cached_input_tokens`). The first request is always a
+full cold prefill (about 9-11k), so the right-hand column leaves it out.
+
+**Why.** A sliding window takes the previous turn's reasoning out of the prompt on every request, so the prompt
+changes partway through each turn. flash-next (and qwen3.8) are hybrid models with recurrent layers, so llama.cpp
+cannot reuse its cache past the first changed token. It re-prefilled 50-80k tokens per turn. Append-only history keeps
+the cache.
+
+**Rule from this.** The router never deletes, reorders or rewrites earlier turns. Replay is append-only (`"all"`) or
+off, and the context is bounded by the client's compaction (Codex `model_auto_compact_token_limit`), not by router
+trimming. The config still ACCEPTS a numeric `lastTurns` (llm-router #135/#136), but **do not set one**: any number is a
+sliding window and defeats the cache. Rejecting it in the schema is a follow-up. The owner confirmed this on 2026-11-04. The designs are ailab #1599 (native-first) and #1602 (the standard
+for local and remote models).
+
+**Change** (one `If-Match` PUT, read back, revision 2227 → 2228 at 18:56:32Z):
+- cloud3 `lan-192.168.0.26-8080`: `replayReasoning: { lastTurns: "all" }`;
+- cloud2 `lan-192.168.0.28-18020`: `replayReasoning` removed. This is the pre-release behaviour. qwen3.8-27b delivered
+  its plans without replay, and a window would cost cloud2's production agents the same re-prefill. cloud2 is
+  re-evaluated with measurements later. Its `queue` is unchanged.
+
+**Acceptance on `"all"`:**
+- **The decision-turn probe** (P1's request at the turn after flash-next thought "Write it.", sent through
+  `router.chifor.me` with dev-worker-1's key): it committed to writing the plan 2/2, with 9-48 reasoning tokens. The
+  stripped control deferred (7,334 tokens), as before the fix.
+- **P1 end to end through the production router** (Codex 0.166, the normal `flash-next` profile, xhigh): the plan was
+  delivered at about 20 min, and the session ended on its own at 21.2 min. 37 requests, 46.6k output tokens, 123,662
+  peak prompt tokens.
+  - The first request is the cold start: 10,713 uncached tokens, and no earlier reasoning to replay.
+  - The 36 after it carry `input:reasoning_replayed:1` through `:36`, one more per turn, with no drops. Together they
+    had 67,150 uncached tokens; 7 were over 3k, all of them large tool outputs. The run's total is 77,863.
+  - The same task before the fix: no plan in 90 min, 192.5k output tokens.
+  - qwen3.8-27b on cloud2: plan at 39 min, 223.5k output tokens.
+- **One write failed and recovered:** flash-next's first `apply_patch` (at 16.6 min) lacked the final
+  `*** End Patch` line and was rejected. It rewrote it on the next turn.
+
+**Still open:**
+- **Context capacity.** Codex is told flash-next has 262,144 tokens, which is the whole pool its two slots share. Two
+  long sessions at about 124-135k can overflow it. Set a flash-next auto-compaction limit in the dev-worker IaC.
+- **cloud2 with append-only replay:** unmeasured.
+- **The benchmark's P1-P3 reruns for both models,** before cloud3's default model is decided.
+
+**Rollback:** do NOT revert to revision 2227; that brings back `lastTurns: 1` on both hosts.
+- Remove `replayReasoning` from cloud3 (`If-Match`, read back), which means replay off, the pre-release behaviour.
+- cloud2 needs nothing; it already has replay off.
+- The image rollback is as in the release section above.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
