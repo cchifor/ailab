@@ -3752,9 +3752,9 @@ for local and remote models).
 - In the router transparency A/B (ailab `plans/2026-11-05-router-transparency-and-planning-revalidation.md` §2.2), a
   12-file Codex task through the router timed out. Its last request streamed 24,035 reasoning deltas of `!` for 764 s
   at HTTP 200: deltas kept flowing, so no timeout fired.
-- The same 71,860-token prompt sent straight to vLLM with every reasoning item removed (what the router sent with
-  replay off) degenerated in 8 of 10 sends.
-- With ANY earlier reasoning kept, even only the last turn's (71,884 tokens), it degenerated in 0 of 14.
+- The same 71,860-token prompt with every reasoning item removed (what the router sent with replay off) degenerated
+  in 7 of 8 sends straight to vLLM, and in 1 of 2 through the router (8 of 10 in all).
+- With ANY earlier reasoning kept, even only the last turn's (71,884 tokens), it degenerated in 0 of 10.
 - vLLM's own `/v1/responses` replays reasoning natively, and passed the same task 3/3.
 
 **Change.** One `If-Match` PUT and a read-back, revision 2228 → 2229, about 08:51Z:
@@ -3763,8 +3763,10 @@ for local and remote models).
 - The owner approved it on the condition that the short A/B passed.
 
 **Acceptance.**
-- **Same recorded body, greedy:** router 24,691 input tokens = vLLM's native 24,691, the journal shows
-  `input:reasoning_replayed:9`, and the output hash matches.
+- **Same recorded body, greedy:** router 24,691 input tokens = vLLM's native 24,691, and the journal shows
+  `input:reasoning_replayed:9`. The output hash matched both router calls and the warm-cache direct call; the
+  cold-cache direct call differed, because a fresh prefill and a cached one differ numerically under greedy decoding.
+  Warm the cache with one call before comparing hashes.
 - **The 12-file task via the router:** 3/3 pass (5.1, 7.0, 9.1 min; direct 5.8, 13.4, 7.7), 0.84x direct's uncached
   prompt tokens, and no request over the per-request cache bound.
 

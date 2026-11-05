@@ -26,7 +26,7 @@ Two results are not passes:
 |---|---|---|---|
 | Codex (ChatGPT seat), native path | identical input tokens (14,012; 14,872), identical item types; the journal shows no adjustments | 9/9 vs 9/9 pairs; reasoning continuity 3/3 both; TTFT -1.2 to +0.2 s | **pass** (a) |
 | Claude seat (Claude Code 2.1.281) | same Messages body as direct `claude -p` except the working-directory path (replica of the router launch); tool names hashed (declared) | 15/15 vs 15/15; identical tool arguments | **pass** (text and function tools; thinking not carried, declared) |
-| qwen3.8-27b (cloud2 vLLM) | byte-identical prompt and greedy output; with replay on, 24,691 = 24,691 tokens | S1 3/3 vs 3/3 with replay on; planning P1-P3: router mean 15.8 vs direct 13.5 | **pass with replay `"all"`**; FAILED with replay off (b) |
+| qwen3.8-27b (cloud2 vLLM) | byte-identical prompt and greedy output; with replay on, 24,691 = 24,691 tokens | S1 3/3 vs 3/3 with replay on; planning P1-P3: router mean 15.8 vs direct 13.5 | **pass with replay `"all"`** (TTFT exactly on the +2 s margin, from the trajectory mix, §2.2); FAILED with replay off (b) |
 | flash-next (cloud3 llama.cpp) | 2 tokens longer via the router (declared system-message merge) | S1 3/3 vs 3/3, wall 1.09x; delivered P1 plans 13.5 vs 13.75 | short tests pass; planning inconclusive. **Retired 2026-11-05** (§4) |
 | qwen-image (cloud2) | byte-identical PNG with a fixed seed | - | **pass** |
 
@@ -224,7 +224,9 @@ The last-item-only prompt is 24 tokens longer than the degenerate one and never 
 | router, replay off (rev 2228) | 3 | **2/3** | timeout ("!"), 7.0, 9.3 | 331k | 0 violations |
 | router, replay `"all"` (rev 2229) | 3 | 3/3 | 5.1, 7.0, 9.1 (median 7.0) | 294k (0.84x) | 0 violations |
 
-- TTFT: the per-run medians are 2.6 s direct and 4.5 s with replay `"all"`, because the router arm's agents made fewer, larger requests (14-27 per run vs 31-54). On comparable requests (under 3k uncached tokens) the router is not slower: 1.54 vs 2.10 s.
+- TTFT, the median over all requests: 2.55 s direct vs 4.54 s with replay `"all"` (the medians of the per-run medians are 2.67 vs 4.67 s). That is +2.0 s, exactly on the §9.6 margin.
+  - The cause is the trajectory mix: the router arm's agents made fewer, larger requests (14-27 per run vs 31-54), so more of their requests carried a large uncached prefill.
+  - On comparable requests (under 3k uncached tokens) the router is not slower: 1.54 vs 2.10 s. The same-body Layer (a) calls took the same time both ways (§3.2).
 - Append-only replay keeps every prompt a prefix of the next, and vLLM reported the cache hits: there was no re-prefill on any run, in either arm.
 
 **Decision: cloud2 replays reasoning append-only.**
@@ -290,8 +292,12 @@ The same recorded mid-run Codex body was sent both ways, greedy (temperature 0) 
 | qwen3.8-27b | router, replay off | 2/3 | timeout, 7.0, 9.3 | 9.3 | 331k | 0 | the "!" stream |
 | qwen3.8-27b | router, replay `"all"` | 3/3 | 5.1, 7.0, 9.1 | 7.0 (0.91x) | 294k (0.84x) | 0 | 0 |
 
-- **TTFT** on comparable requests (under 3k uncached prompt tokens): flash-next 2.02 s direct vs 1.84 s router; qwen 2.10 vs 1.54.
-- **Verdict:** both models pass every §9.6 margin through the router, qwen once its replay is on. The long runs started only after this.
+- **TTFT on the design's metric** (median per run, then the median of the runs):
+  - flash-next 2.03 s direct vs 1.92 s router: pass;
+  - qwen with replay `"all"` 2.67 vs 4.67 s: +2.0 s, exactly on the margin.
+  - By §9.6 that calls for 3 more pairs, which were not run.
+- **TTFT on comparable requests** (under 3k uncached prompt tokens): flash-next 2.02 vs 1.84 s, qwen 2.10 vs 1.54 s. The qwen difference is the trajectory mix (§2.2), not the router.
+- **Verdict:** both models pass every other §9.6 margin through the router, qwen once its replay is on. The long runs started only after this.
 
 ### 3.4 Planning re-validation (§9.7): P1-P3, 90-min cap
 
@@ -362,7 +368,7 @@ All times are in minutes.
 - **qwen3.8-27b: PASS.**
   - Routed minus direct: P1 +6.0, P2 +0.5, P3 +0.5; mean 15.8 vs 13.5.
   - 3/3 delivered in both arms.
-  - The router was faster to the plan on P1 and P3 (8.2 vs 14.1, 8.6 vs 10.7 min) and slower on P2 (11.9 vs 13.2 first write, 16.2 vs 13.8 wall).
+  - The router was faster to the plan on P1 and P3 (8.2 vs 14.1, 8.6 vs 10.7 min). On P2 it was faster to the first write (11.9 vs 13.2) but slower to finish (last write 16.0 vs 13.5, wall time 16.2 vs 13.8).
   - No cache flags.
   - The old-router day-2 plans (replay off) scored at or below today's routed plans on every task, worst on P2 (8.0).
 - **flash-next: INCONCLUSIVE, retired** (§4).
@@ -385,7 +391,7 @@ All times are in minutes.
 - Router-side checks, all clean:
   - the journal records `input:reasoning_replayed:28` (every reasoning item), and the history is in order;
   - the router's prompt for that request is 95,422 tokens against llama.cpp's own 95,420: the declared 2-token `system-messages-merged` difference;
-  - replaying it 3x each way with production sampling, no call stopped. All six went on to a tool call; one direct call hit the 1,500-token cap while still reasoning.
+  - replaying it 3x each way with production sampling: 5 of 6 calls reached a tool call (3 router, 2 direct), 1 of 6 (direct) was cut at the 1,500-token cap while still reasoning, and 0 of 6 ended on reasoning only with `stop`.
 - Across every run since the morning, both models and both arms, no other session ended this way. Earlier router-era benchmark runs did, in 3 of 33 (`I2-r1-fn`, `I3-r2-fn`, `I1-r1-qw`).
 - Classified as the model's: no router defect was found, and the stop did not reproduce.
 - Six non-reproducing samples cannot rule out that the declared 2-token `system-messages-merged` difference changes the stop's probability. Its rate in each arm is unmeasured.
