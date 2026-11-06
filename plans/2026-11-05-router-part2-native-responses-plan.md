@@ -263,14 +263,13 @@ placement across the change.
   or a retryable 503 when only the identity is missing.
 - **Identity** (codex round 1, finding 10; shapes aligned in round 3, finding 4): `BackendIdentity = { fingerprint: { engine,
   version, model, checkpoint, maxModelLen, templateDigest, parsers, generationConfig }, generation, observedAt }`. The
-  manifest key **is** the fingerprint. `generation` is not in the key: it is freshness only, and invalidates the cache.
-  - **Observed, never declared** (codex round 2, finding 3): an identity is the observed values of two readers. The
-    vLLM API reader reads `/version` and `/v1/models` (engine, version, served model, checkpoint root,
-    `max_model_len`). The **deployment-metadata reader** reads the document cloudlab publishes per backend (§1.4 gate 1:
-    parsers, template digest, generation-config limits, and a generation counter bumped on every restart or
-    reconfiguration). Every key field of the manifest entry must be observed; a field only declared, or a document that
+  manifest key **is** the fingerprint. `generation` is not in the key: it is freshness only, for telling a restart apart. A read replaces the cached entry and re-matches its fingerprint; nothing else about it depends on `generation`.
+  - **Observed, never declared** (codex round 2, finding 3): one reader per engine composes two reads. It reads `/version`
+    and `/v1/models` (engine, version, served model, checkpoint root, `max_model_len`), and the document cloudlab
+    publishes per backend (§1.4 gate 1: parsers, template digest, generation-config limits, and a generation counter
+    bumped on every restart or reconfiguration). Every key field of the manifest entry must be observed; a field only declared, or a document that
     cannot be read, makes the identity `unknown` and the wire ineligible. A checklist is not a substitute.
-  - A restart or reconfiguration changes `generation`, seen at the next read, so within the 60-second cache below. Until
+  - A restart or reconfiguration is seen at the next read, so within the 60-second cache below. Until
     then a cached identity is stale by at most that window, or less when the restart fails a connection, which invalidates
     it at once. That window is accepted: a new read with an **unchanged fingerprint** stays eligible, and a changed one is
     ineligible until a re-qualification run writes its manifest entry.
@@ -434,7 +433,9 @@ Responses request schema in the qualification run. A request carrying one is ski
   sends 200 and an upstream rejection reaches the client as the router's `response.failed` (`router-terminal`, journaled),
   the convention of the Codex native path, declared as the slice's one deviation from verbatim. **The first flush is the
   first upstream frame written to the client,** never the HTTP head, `: ok` or a frame still held, so a failure before it
-  can still fail over, with the client having seen only the 200 head. **Its effect on Codex:** Codex retries a `response.failed`
+  can still fail over, with the client having seen only the 200 head. **A hold-timer release is a first flush:** it writes
+  lifecycle frames to the client, so it commits the attempt. That is the trade `holdMs` sets, progress for the client after
+  that long against failover after it, and a wire that wants failover through a long load sets it longer. **Its effect on Codex:** Codex retries a `response.failed`
   whose code it does not know (`responses_error.rs:101`), so an upstream rejection that is not retryable over HTTP
   can be retried by Codex after the conversion; §1.4 gate 4 records the behaviour, and no code is rewritten to hide it.
 - **One read loop, governed by downstream backpressure:** read a chunk, split frames (bounded: one frame at most 4 MiB,
@@ -520,15 +521,18 @@ limiter never on local wires; stream inspectors on the tap's observations.
   (`patchTopLevel` works on bytes), never as a string. Attempts can overlap, because the engine moves on after a close timeout
   while the old iterator may live on. The factors are validated on node 24 with adversarial shapes before release.
 - **Reservation:** the whole ceiling is reserved at admission, before any of it is allocated, so no attempt can fail for
-  budget halfway through a request. The per-attempt term is small beside the shared one, so the cost in admitted concurrency
-  is small too. A request whose charge does not fit is refused at admission, as today.
+  budget halfway through a request. At that point the body has not been read, so the ceiling comes from `Content-Length` when
+  it is present, else the route's maximum native body size, with `nodes` at the structural limit. Once the pre-scan has run,
+  the reservation shrinks to the measured `raw` and `nodes`. The per-attempt term is small beside the shared one, so the cost
+  in admitted concurrency is small too. A request whose charge does not fit is refused at admission, as today.
 - **Accounting:** that charge goes against the existing body budget, from admission through the queue wait, the attempt, the
-  bounded close and drain, as `RouterHttp.hold` does. **An iterator that outlives its attempt keeps its bytes charged:** each
-  attempt's `patched` share belongs to its iterator, and teardown releases only the rest. It goes back when that iterator
-  settles, so abandoned bodies cannot accumulate uncharged across requests.
+  bounded close and drain, as `RouterHttp.hold` does. **An iterator that outlives its attempt keeps the request charged:** the
+  reservation is reference-counted, one reference per attempt's iterator and one for the request, because an iterator can
+  retain the shared body through its invocation as well as its own copy. The whole charge goes back when the last reference
+  does, so abandoned bodies cannot accumulate uncharged across requests.
 - **Translated limit:** a body over 2 MiB on a translated route is a 413, as today (the rollback envelope of §4).
 - **Tests:** chunked bodies, a saturated queue with large bodies waiting, drain releasing the reservation, a close timeout
-  with attempts overlapping, an abandoned iterator keeping its share past teardown until it settles, and the measured heap for a 16 MiB body against its charge, a mostly-ASCII two-byte string included.
+  with attempts overlapping, an abandoned iterator keeping the whole charge past teardown until it settles, a chunked body with no `Content-Length`, and the measured heap for a 16 MiB body against its charge, a mostly-ASCII two-byte string included.
 
 ## 6. Capture
 
