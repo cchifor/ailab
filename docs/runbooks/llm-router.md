@@ -3776,6 +3776,48 @@ turns.
 **Follow-up (llm-router):** a degenerate upstream stream passes every timeout. A repetition or degeneracy guard for
 local accounts would cut it.
 
+## Release gate (router-ab): after every image roll, before every route config change
+
+`scripts/router-ab/` is the release gate. Its README covers the architecture, the providers, the tasks and the safety
+rules. For each provider (Codex seat, Claude seat, qwen3.8-27b on cloud2) it runs:
+- **Layer (a):** what the model receives, the same request direct and via the router;
+- **Layer (b):** short tasks in ABBA pairs, against the §9.6 margins of the router standard.
+
+**When to run it.**
+- **After every router image roll,** once the pod is Ready: the whole gate, about 20 min.
+- **Before a config change that touches a route or an account:** the providers that route serves, on the live config.
+  Run it again after the change, and compare.
+- **For a change to the Claude seat transport:** also `--tasks textkit-agentic --pairs 6` with
+  `RAB_CLAUDE_MODEL=fable`, on a seat with headroom. That is the acceptance test of the Claude real-session continuity
+  design.
+- **Mind the Claude seats.** Both Claude arms run on the same Max seat. Check its weekly use first (`/admin/v1/usage`,
+  `limits.windows`). Close to the limit, run the Claude chat tasks only (`--tasks math,tool-choice,recall` plus the
+  other providers' tasks), as the 2026-11-05 baseline did at 98 %.
+
+**How.** From the operator workstation, with `kubectl --context admin@ai` and ssh to dev-worker-1:
+
+```sh
+node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
+```
+
+**Reading the verdict.**
+
+| Verdict | Meaning | Action |
+|---|---|---|
+| PASS (exit 0) | Every Layer (a) check and every margin passed | Record the report with the release |
+| PASS (known deviation) (exit 0) | A margin is outside §9.6 but inside the looser bound of a known deviation in the task registry (the report prints the mechanism) | As PASS. If the report says the deviation no longer shows, retire the entry |
+| RERUN (exit 3) | Under 6 pairs, a metric is outside its margin (OUT) or within half a margin of it (NEAR). §9.6 takes 3 more pairs and decides on all 6 | Rerun that provider and task with `--providers p --tasks t --pairs 6`. The 6-pair run decides |
+| INCOMPLETE (exit 3) | A run was invalid: a seat throttled (429), the router failed over between accounts mid-run (the pairing is broken), the pairing could not be verified, or a harness error | Rerun later; never read it as a router result |
+| FAIL (exit 1) | A Layer (a) check failed, a router error occurred, or at 6 pairs a metric is outside its margin | The diff names the mechanism. Treat it as a router defect until shown otherwise, and roll back |
+
+**Safety.**
+- It creates no credential and prints none.
+- The worker's logins are used in place. The router admin bearer stays in the pod, or in one docker child's environment.
+- Recordings live only in the run's temp directories, which teardown deletes.
+
+**Baseline:** the router image of 2026-11-06 (`sha256:5749d8a8…`), Codex and qwen. Claude was last measured on 2026-11-05
+(`sha256:78915e24…`): its seats were at their weekly limit on 2026-11-06. The reports are in the PR that added the gate.
+
 ## Relay access requests
 
 Relay uses the existing public `/agent/v1/access-requests` and one-time redeem
