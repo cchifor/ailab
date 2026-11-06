@@ -4150,3 +4150,48 @@ codex-control --tasks code-edit --pairs 6`. Success is uncached tokens at most 1
 - image `registry.chifor.me/llm-router/router@sha256:9e141215271a01522c664492e214a677a8880dcd5f7182b39ad85f2d24a51145`;
 - source `5f6151e9c2f672d5018c31eaa7f03156e45914a0`, release `router-0.1.0-20261106-provider-billing`.
 A token sealed by the new image then reaches the upstream unopened for the rest of that turn, which ends it.
+
+## Restore shared API-key usage cards (2026-11-06)
+
+At the user's request, release `router-0.1.0-20261106-billing-rollback` reverts
+[llm-router #144](https://git.chifor.me/cchifor/llm-router/pulls/144) through
+[source #146](https://git.chifor.me/cchifor/llm-router/pulls/146). API-key accounts use the same
+Usage card as subscriptions: request history, daily tokens, seven-day totals and error rate.
+The separate spending/budget panel, provider-billing plugin, HTTP routes and Assistant/MCP billing
+tools are removed. The later #145 native response-head fixes, provider onboarding and management MCP
+remain included. Deploy only after source #146 merges; the deployment PR has an enforced dependency.
+
+Provenance:
+- Source `14eb63598a6b078fe1337af1fe5ac5fb0b6eafe1`; archive `router-0.1.0-20261106-billing-rollback.tar.gz`.
+- Archive SHA-256 `4b1b59500b9d8597ff779562865de4a146cb6c6e5f96ddca678ca5ab3c305a5b`.
+- Packaging `8ea55516089355e1a2b6c0d8cafbdc9c607d5386`; [image CI 122760](https://git.chifor.me/cchifor/relay/actions/runs/122760)
+  and [immutable receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-122760.json).
+- Image `registry.chifor.me/llm-router/router@sha256:78c8fba3803294db5eea7f4a90789579b6b74692f17c9944da2ef5a6644acae3`. Runtime base unchanged.
+
+Validation: `pnpm verify` passes (2,290 tests, 14 local PostgreSQL skips; CI covers PostgreSQL).
+All 24 browser checks outside the existing #80 quarantine pass; an ambiguous setup assertion was
+scoped to the approval-card heading. Desktop/mobile fixture checks confirm matching API/subscription
+card layout and height, both charts and totals, no billing polling and no horizontal overflow.
+A clean production build and frozen production-dependency smoke pass. A compiled-runtime restart
+with the removed plugin in persisted composition and billing KV settings also passes: the normal
+composition loader drops the unknown entry, the dormant KV settings remain, billing HTTP is 404,
+and billing MCP tools disappear while management and provider setup remain available.
+
+No schema migration, database restore, credential deletion, inference or live configuration change is
+part of this release. Existing billing-only saved credentials remain encrypted but are no longer
+marked in use by billing. Preserve the existing verified backup; do not delete credentials as part of
+this roll. Old billing proposals cannot execute because their tools no longer exist.
+
+After merge, run `python3 scripts/check-router-rollout.py` to verify one Ready pod on the exact image,
+public health/readiness and unauthenticated management refusal. Verify the public HTML selects these
+bundles and their served SHA-256 matches the tested build:
+- `/assets/index-CYzhH4BZ.css`: `dff42fb8e0c29d1f4846f51d71162b0c2045807acef64e39324b3fbe1e89f672`.
+- `/assets/index-DJ6IalHH.js`: `3d0a05d111075cc4eeca5fdba918145fa3a68a50e4b99936a5dc0d134c2feeec`.
+
+To undo this rollback through a reviewed GitOps PR, restore the preceding native-head image and both
+annotations together:
+- Image `registry.chifor.me/llm-router/router@sha256:225bb804acc8cab0ebc65bdc6ec32186a432712c09434a50595f372e6f971ab0`.
+- Source `02cb559df5eedbf379e2266da2f1a82608985103`, release `router-0.1.0-20261106-native-head`.
+
+That image restores billing. Its catalog re-adds the removed plugin enabled; retained billing settings
+can resume reporting if their credentials remain valid. No database restore is needed.
