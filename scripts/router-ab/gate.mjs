@@ -49,7 +49,7 @@ try {
     const r = ctx.push(from, to);
     if (r.status !== 0) throw new Error(`could not deploy to the worker: ${(r.stderr || '').slice(-160)}`);
   }
-  const tap = ctx.ssh(`mkdir -p -m 700 ${ctx.remote}/kit/rec ${ctx.remote}/kit/runs && (setsid nohup node ${ctx.remote}/kit/tap.mjs ${ctx.tapPort} ${ctx.remote}/kit/rec > ${ctx.remote}/tap.log 2>&1 < /dev/null &) && for i in 1 2 3 4 5 6 7 8 9 10; do grep -q 'abtap on' ${ctx.remote}/tap.log && break; sleep 0.5; done; cat ${ctx.remote}/tap.log`);
+  const tap = ctx.ssh(`mkdir -p -m 700 ${ctx.remote}/kit/rec ${ctx.remote}/kit/runs && (TAP_FWD=${plan.some((x) => x.p.forwarder) ? 1 : 0} setsid nohup node ${ctx.remote}/kit/tap.mjs ${ctx.tapPort} ${ctx.remote}/kit/rec > ${ctx.remote}/tap.log 2>&1 < /dev/null &) && for i in 1 2 3 4 5 6 7 8 9 10; do grep -q 'abtap on' ${ctx.remote}/tap.log && break; sleep 0.5; done; cat ${ctx.remote}/tap.log`);
   if (!/abtap on/.test(tap.stdout ?? '')) throw new Error(`the tap did not start: ${(tap.stdout ?? '').slice(-160)}`);
   for (const { p, tasks } of plan) {
     let layerA = { checks: [], verdict: 'n/a' };

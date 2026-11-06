@@ -52,6 +52,19 @@ export function runCodexTask(ctx, task, arm, runId, env = {}) {
     uncached_tokens: m.uncached_tokens, output_tokens: m.output_tokens, requests: m.requests, router_errors: arm.target === 'router' ? m.transport_errors : 0, retries: m.retries ?? 0 };
 }
 
+/** runCodexTask, run again while the router places it elsewhere than arm.account. Placement is decided before the model
+ * says anything, so discarding by placement cannot favour either arm. It costs one session each time. */
+export function runPlaced(ctx, task, arm, runId, env, tries = 8) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return runCodexTask(ctx, task, arm, attempt === 1 ? runId : `${runId}-p${attempt}`, env);
+    } catch (e) {
+      if (!(e instanceof Misplaced) || attempt === tries) throw e;
+      ctx.log(`${runId}: ${e.message}: discarded, running it again`);
+    }
+  }
+}
+
 /** Layer (a): capture a Codex request (a 2-turn smoke session through the tap, at the effort the provider's tasks use),
  * then send that body both ways (kit/same_body.py). `target` is the path captured on; with target 'router' the body holds
  * the items the router relayed, and `direct` names the direct path. `run` names the capture: it must be unique in a gate

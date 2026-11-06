@@ -44,6 +44,7 @@ core/                          shared, provider-agnostic
 providers/                     one module per provider; discovered, never named by the core
   index.mjs                    discovery and the interface check
   codex.mjs                    ChatGPT seat via the Codex CLI (direct: own login; router: dw-N key, native pass-through)
+  codex-control.mjs            the same seat with the client held constant (direct: API mode through a plain forwarder)
   claude.mjs                   Claude seat via Claude Code (direct: own login; router: claude/<model>, sdk-resume)
   qwen.mjs, qwen-cloud3.mjs     qwen3.8-27b, one provider per backend of the route (direct: its /v1/responses; router: pointer qwen-27b)
   lib/codex-session.mjs        shared by Codex-CLI providers: one session through the tap, metrics, the same-body check
@@ -109,6 +110,7 @@ export default {
 | Provider | Tasks |
 |---|---|
 | codex | code-edit (3 bugs, unittest), secret-continuity (reasoning across a resumed turn) |
+| codex-control | code-edit |
 | claude | math, tool-choice, recall (2 turns), stock-agentic (a multi-file fix, hidden tests) |
 | qwen, qwen-cloud3 | code-edit |
 
@@ -125,10 +127,19 @@ router-originated error is decisive at any sample size.
 | wall-time median | at most 1.25× direct, judged per 1k output tokens where the provider reports them (below) |
 | router errors and retries | none; retries at most direct |
 
+**Two Codex comparisons.** Codex builds a different request for an API provider than for its own login, so `codex`'s arms
+differ in the client as well as in the router. `codex-control` holds the client constant: both arms are the same Codex CLI
+on the same provider entry and seat, and its direct arm goes through the tap's `fwd` target, which relays to the ChatGPT
+backend with the host login and does only what the router's codex adapter does to a native request. The model catalogue
+still comes from the router. **`codex-control` answers "what does the router cost"; `codex` answers "what does a client
+see compared with its own login".**
+
 **Wall time is judged per unit of model work.** The margin exists to catch time the router adds, but an agent session's
 raw wall time is mostly model work, and that is sampled. At qwen's temperature 1.0 one request ran from 214 to 3,335
 output tokens on the same body, so two sessions of one task differ 2x with no router involved. Codex-CLI providers report
-output tokens, so the same 1.25× bound applies to wall time per 1k output tokens. Raw wall stays in the row. The `work`
+output tokens, so the same 1.25× bound applies to wall time per 1k output tokens, from a median of 200 output tokens up.
+Below that the ratio is mostly its denominator (171 vs 221 s per 1k tokens on a 30-token session the router ran faster), so
+raw wall is judged. Raw wall stays in the row. The `work`
 row reports output tokens and requests, and says WATCH above 1.25×: same input and more work is sampling, and Layer (a)
 says which it is. Claude reports no output tokens, so its raw wall is judged: its overhead is a fixed cost per call,
 which a per-token figure would dilute.

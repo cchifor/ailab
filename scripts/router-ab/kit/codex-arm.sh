@@ -3,6 +3,7 @@
 # worker, through the recording tap (kit/tap.mjs on $TAP_PORT). TARGET picks the arm:
 #   chatgpt  the host's own ChatGPT login (built-in openai provider, base URL overridden to the tap)
 #   router   the llm-router provider (the worker key, auth command codex-router-key)
+#   fwd      the same provider entry, to the tap's plain forwarder (the control arm; the key stops at the tap)
 #   vllm     the model server's own /v1/responses (provider `server`, no credential)
 # HOME_MODE: `user` = the real ~/.codex (the login is used in place, never copied); `kit` = $KIT/codex-home (generated
 # config, no login). Env: MODEL, EFFORT, CAP (minutes), TAP_PORT, SERVER_URL (vllm). With PROMPT2_FILE the session is
@@ -16,6 +17,7 @@ base="http://127.0.0.1:${TAP_PORT}"
 case $target in
   chatgpt) ov=(-c 'model_provider="openai"' -c "openai_base_url=\"$base/t/chatgpt/$run/backend-api/codex\"");;
   router)  ov=(-c 'model_provider="llm-router"' -c "model_providers.llm-router.base_url=\"$base/t/router/$run/v1\"");;
+  fwd)     ov=(-c 'model_provider="llm-router"' -c "model_providers.llm-router.base_url=\"$base/t/fwd/$run/v1\"");;
   vllm)    ov=(-c 'model_provider="server"' -c "model_providers.server.base_url=\"$base/t/vllm/$run/v1\"");;
   llama)   ov=(-c 'model_provider="server"' -c "model_providers.server.base_url=\"$base/t/llama/$run/v1\"");;
   *) echo "bad target" >&2; exit 2;;

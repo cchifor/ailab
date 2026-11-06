@@ -79,6 +79,13 @@ test('the unittest grader reads unittest\'s own exit status: failing tests fail,
   assert.doesNotMatch(cmd, /\|/);
 });
 
+test('below the minimum output raw wall is judged: a tiny denominator neither fails nor excuses a session', () => {
+  const m = (wall_s, output_tokens) => ({ wall_s, output_tokens, requests: 2 });
+  assert.equal(row(evaluate(six(m(7.7, 45), m(7.1, 30))), 'wall').status, 'PASS');
+  assert.equal(row(evaluate(six(m(10, 40), m(15, 60))), 'wall').status, 'FAIL');
+  assert.equal(row(evaluate(six(m(10, 300), m(15, 40))), 'wall').status, 'FAIL'); // one arm tiny: raw, so no excuse
+});
+
 test('Layer (a) needs every check to pass, and no checks is n/a', () => {
   assert.equal(evaluateLayerA([{ name: 'a', pass: true }, { name: 'b', pass: false }]).verdict, 'FAIL');
   assert.equal(evaluateLayerA([]).verdict, 'n/a');
