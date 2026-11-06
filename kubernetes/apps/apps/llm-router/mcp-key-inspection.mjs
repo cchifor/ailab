@@ -4,8 +4,9 @@ const sessionId = '7a57f124-a8f5-49c3-84df-0f1ddc30b25f';
 const token = process.env.ROUTER_MCP_ACCEPTANCE_TOKEN;
 let id = 0;
 class InspectionError extends Error {
-  constructor(reason, status) { super(reason); this.status = status; }
+  constructor(reason, status, rpcCode, toolCode) { super(reason); this.status = status; this.rpcCode = rpcCode; this.toolCode = toolCode; }
 }
+const TOOL_CODES = new Set(['CONVERSATION_NOT_FOUND', 'INTERACTION_PENDING', 'FORBIDDEN', 'INVALID_REQUEST', 'HISTORY_FULL', 'CANCELLED', 'TOOL_FAILED']);
 let stage = 'initialize';
 async function rpc(method, params) {
   const response = await fetch('http://llm-router.llm-router.svc.cluster.local/admin/mcp', {
@@ -17,7 +18,11 @@ async function rpc(method, params) {
   if (!response.headers.get('content-type')?.includes('application/json')) throw new InspectionError('Expected JSON response');
   let result;
   try { result = await response.json(); } catch { throw new InspectionError('Invalid JSON response'); }
-  if (result.error || result.result?.isError) throw new InspectionError('MCP failure');
+  if (result.error) throw new InspectionError('MCP failure', undefined, Number.isSafeInteger(result.error.code) ? result.error.code : undefined);
+  if (result.result?.isError) {
+    const code = result.result.structuredContent?.code;
+    throw new InspectionError('Tool failure', undefined, undefined, TOOL_CODES.has(code) ? code : 'unknown');
+  }
   return result.result;
 }
 try {
@@ -33,6 +38,6 @@ try {
     candidates: candidates.map(s => ({ ref: s.ref, label: s.label, createdAt: s.createdAt, lastUsedAt: s.lastUsedAt })) }));
 } catch (error) {
   console.log(JSON.stringify({ event: 'mcp.key_inspection_failed', sessionId, stage, reason: error instanceof InspectionError ? error.message : 'transport',
-    ...(error instanceof InspectionError && error.status !== undefined ? { httpStatus: error.status } : {}) }));
+    ...(error instanceof InspectionError ? { httpStatus: error.status, rpcCode: error.rpcCode, toolCode: error.toolCode } : {}) }));
   process.exitCode = 1;
 }

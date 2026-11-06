@@ -39,10 +39,13 @@ test('inspection never logs raw transport failures', () => {
   assert.equal(result.stderr, '');
 });
 
-for (const [response, reason, httpStatus] of [
+for (const [response, reason, httpStatus, rpcCode, toolCode] of [
   ['new Response("sensitive", { status: 401 })', 'HTTP failure', 401],
   ['new Response("sensitive", { headers: { "content-type": "text/event-stream" } })', 'Expected JSON response', undefined],
   ['new Response("sensitive", { headers: { "content-type": "application/json" } })', 'Invalid JSON response', undefined],
+  ['Response.json({ error: { code: -32602, message: "sensitive" } })', 'MCP failure', undefined, -32602],
+  ['Response.json({ result: { isError: true, structuredContent: { code: "CONVERSATION_NOT_FOUND", error: "sensitive" } } })', 'Tool failure', undefined, undefined, 'CONVERSATION_NOT_FOUND'],
+  ['Response.json({ result: { isError: true, structuredContent: { code: "sensitive", error: "sensitive" } } })', 'Tool failure', undefined, undefined, 'unknown'],
 ]) test(`inspection reports the safe ${reason} guard`, () => {
   const preload = `globalThis.fetch = async () => ${response};`;
   const result = spawnSync(process.execPath, ['--import', `data:text/javascript;base64,${Buffer.from(preload).toString('base64')}`, fileURLToPath(new URL('../../kubernetes/apps/apps/llm-router/mcp-key-inspection.mjs', import.meta.url))], {
@@ -53,5 +56,7 @@ for (const [response, reason, httpStatus] of [
   const event = JSON.parse(result.stdout);
   assert.equal(event.reason, reason);
   assert.equal(event.httpStatus, httpStatus);
+  assert.equal(event.rpcCode, rpcCode);
+  assert.equal(event.toolCode, toolCode);
   assert(!result.stdout.includes('sensitive'));
 });
