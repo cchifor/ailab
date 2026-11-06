@@ -314,8 +314,8 @@ apply its card, or use Edit routes on the console's API keys page. `PATCH /admin
 list is the API form. All three change the same key in place: its token, id and expiry stay, the next request uses the
 new routes, and nothing changes on the worker. Do not rotate a key for this.
 
-Besides `dw-N` and `qwen-27b`, dev-worker-1 also holds `pool-claude-api` (2026-11-06). That pool is Anthropic API
-accounts, and keys have no spend limit, so grant it deliberately.
+Besides `dw-N` and `qwen-27b`, dev-worker-1 also holds `pool-claude-api`, added with that `PATCH` on 2026-11-06 at 17:48Z.
+That pool is Anthropic API accounts, and keys have no spend limit, so grant it deliberately.
 
 **Previous keys, revoked on 2026-10-11.** These keys and the six `dw-gpt-*` routes they were limited to are gone (see
 `llm-router.md` § "Claude tools and route cleanup (2026-10-11)"). They were:
