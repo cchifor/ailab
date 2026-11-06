@@ -214,7 +214,7 @@ in `contracts/journal.ts`, a contract kit per extension point).
 | `runtime/backend-identity-registry.ts` | runtime (implementation registry) | identity readers by engine; a cache with freshness | `register(reader) → dispose`, `identity(account, model) → BackendIdentity \| unknown`, `invalidate(accountId)` | contracts |
 | `plugins/wires/` (required) | registry plugin | provides `routerWires` (both registries and the planner's inputs); validates `Account.wire` and the route keys; invalidates identities on config change and disposal | service | runtime registries |
 | `plugins/qualification-vllm/` | implementation | registers the vLLM manifest entries (data in the repository) and the vLLM identity reader | none | `routerWires` |
-| `adapters/backend/vllm.ts` | adapter | composes the two reads into one identity: `/version` and `/v1/models` (never a request that can load a model), and the published deployment metadata | `BackendIdentityReader` | contracts |
+| `adapters/backend/vllm.ts` | adapter | **the one owner of the composition:** one reader per engine, which makes both reads (`/version` and `/v1/models`, never a request that can load a model, and the published deployment metadata) and answers one identity whose `observedAt` is the older of the two | `BackendIdentityReader` | contracts |
 | `adapters/providers/native-responses.ts` | adapter | the native transport | an `InferenceProvider` path, typed outcomes (§3.4) | contracts, `modules/wire`, `modules/responses-tap` |
 | `plugins/provider-local/` (changed) | provider plugin | `support.native: ['openai-responses']`; opens the native transport for a native plan | descriptor | adapters |
 | `plugins/api-openai/` (changed) | front door | the native envelope for a native-only route; raw bytes kept only for such routes; the writer for `native-frames` output | HTTP | engine, `routerHttp` |
@@ -270,8 +270,10 @@ placement across the change.
     parsers, template digest, generation-config limits, and a generation counter bumped on every restart or
     reconfiguration). Every key field of the manifest entry must be observed; a field only declared, or a document that
     cannot be read, makes the identity `unknown` and the wire ineligible. A checklist is not a substitute.
-  - A restart or reconfiguration changes `generation`, which drops the cached identity. A new read with an **unchanged
-    fingerprint** stays eligible; a changed one is ineligible until a re-qualification run writes its manifest entry.
+  - A restart or reconfiguration changes `generation`, seen at the next read, so within the 60-second cache below. Until
+    then a cached identity is stale by at most that window, or less when the restart fails a connection, which invalidates
+    it at once. That window is accepted: a new read with an **unchanged fingerprint** stays eligible, and a changed one is
+    ineligible until a re-qualification run writes its manifest entry.
     Each backend has its own observed identity: cloud3 sharing the model name qualifies nothing.
   - The cache holds an identity for at most 60 seconds (a cheap read; the generation counter makes staleness
     detectable), and is invalidated on an account's `baseUrl` change, on a connection failure to it, and on the plugin's
@@ -316,7 +318,8 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    or timed-out check, a stale verdict, no check yet, the plugin disabled or the probe kind not registered. **The core
    engine enforces this itself:** an account with `availability` and no callback wired is excluded. This inverts the
    convention for an inspector, whose missing plugin attaches nothing: an inspector only reads, a probe gates. Accounts
-   without `availability` are untouched, which is the default-off claim. cloud1 is extra capacity, so doubt costs
+   without `availability` are never excluded by it, which is the default-off claim for exclusion; the capacity rule of
+   point 3 is the one declared exception. cloud1 is extra capacity, so doubt costs
    throughput, never correctness, and the drain cannot be lost to a probe fault. The cost to watch: a route whose
    targets all opted in goes unserved while the probe is down, hence the alerts (`unknown` over 5 minutes by day,
    `model_not_resident` over 20 minutes by day).
@@ -343,7 +346,9 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    it follows. **Waiters:** admission wakes on slots and queue changes, and its pump needs capacity in the queued pool, so a
    transition to available is a new input to it: `routerAvailability` calls one engine hook that re-evaluates the whole chain
    of each waiter, one queued on another pool included. **This rule corrects a route with no `availability` too** (offline +
-   full today is a non-retryable 429), so that part is an intentional capacity correction, declared and tested, not default-off.
+   full today is a non-retryable 429), so that part is an intentional capacity correction, declared, not default-off. Its
+   regression test pins the client-visible change: a route with a target offline and the rest full now answers the retryable
+   429, and a Codex or Claude route with no target offline answers exactly as before.
    Each row is a test:
 
    | Targets | Answer |
@@ -428,7 +433,8 @@ Responses request schema in the qualification run. A request carrying one is ski
   and `TurnStateSeal` applies to any token a wire relays. Upstream HTTP statuses are still not passed through: the writer
   sends 200 and an upstream rejection reaches the client as the router's `response.failed` (`router-terminal`, journaled),
   the convention of the Codex native path, declared as the slice's one deviation from verbatim. **The first flush is the
-  first upstream SSE frame,** never the HTTP head or `: ok`, so a failure before it can still fail over. **Its effect on Codex:** Codex retries a `response.failed`
+  first upstream frame written to the client,** never the HTTP head, `: ok` or a frame still held, so a failure before it
+  can still fail over, with the client having seen only the 200 head. **Its effect on Codex:** Codex retries a `response.failed`
   whose code it does not know (`responses_error.rs:101`), so an upstream rejection that is not retryable over HTTP
   can be retried by Codex after the conversion; §1.4 gate 4 records the behaviour, and no code is rewritten to hide it.
 - **One read loop, governed by downstream backpressure:** read a chunk, split frames (bounded: one frame at most 4 MiB,
@@ -451,6 +457,9 @@ Responses request schema in the qualification run. A request carrying one is ski
     gets `response.failed`. Both qwen accounts are in `observe` today, so this slice promises no automatic recovery.
   - **Commitment and timer phase separate.** The engine's one `emitted` flag today means both "no failover" and "use the idle
     timer". This slice splits it into the first flush (commitment) and the first model output (phase), as the next point says.
+    Only a native wire can make them differ: every other attempt sets both at the point `emitted` is set today, the same
+    failover cutoff and the same idle-timer start. A regression test pins that for the translated, Codex-native and Claude
+    paths (`tests/engine-commitment.test.ts`, in PR 2).
 - **The hold rule and the timers** (finding 8): `response.created`, `queued` and `in_progress` frames are held until the
   first other frame or `holdMs` after the first held frame (canary: 30 s), whichever comes first; held frames are
   bounded (64 KiB). The hold timer races the pending upstream read, so it fires while the read waits. **Three moments are
@@ -505,16 +514,21 @@ limiter never on local wires; stream inspectors on the tap's observations.
   refused with 413 by name.
 - **The allocation model** (codex round 3, finding 3): the earlier `nodes × 96 bytes + raw bytes` was not a bound. A long
   mostly-ASCII string with one non-Latin-1 character costs two bytes per character, which codex measured as about 16 MiB of
-  parsed heap for an 8 MiB body, and the kernel decodes the body before parsing. So the model is, per request:
-  `raw + decoded (2 × raw) + parsed (nodes × 96 + 2 × raw) + patched (raw) × overlapping attempts`. Attempts can overlap,
-  because the engine moves on after a close timeout while the old iterator may live on, so `overlapping attempts` is
-  `maxAttempts`, not one. The factors are validated on node 24 with adversarial shapes before release, and the charge is
-  reserved **before** the allocation it covers.
+  parsed heap for an 8 MiB body, and the kernel decodes the body before parsing. So, per request:
+  `charge = (raw + decoded + parsed) + patched × maxAttempts`, with `decoded = 2 × raw`, `parsed = nodes × 96 + 2 × raw` and
+  `patched = raw`. The first group is shared by the attempts. `patched` is one copy per attempt, held as serialized bytes
+  (`patchTopLevel` works on bytes), never as a string. Attempts can overlap, because the engine moves on after a close timeout
+  while the old iterator may live on. The factors are validated on node 24 with adversarial shapes before release.
+- **Reservation:** the whole ceiling is reserved at admission, before any of it is allocated, so no attempt can fail for
+  budget halfway through a request. The per-attempt term is small beside the shared one, so the cost in admitted concurrency
+  is small too. A request whose charge does not fit is refused at admission, as today.
 - **Accounting:** that charge goes against the existing body budget, from admission through the queue wait, the attempt, the
-  bounded close and drain, as `RouterHttp.hold` does.
+  bounded close and drain, as `RouterHttp.hold` does. **An iterator that outlives its attempt keeps its bytes charged:** each
+  attempt's `patched` share belongs to its iterator, and teardown releases only the rest. It goes back when that iterator
+  settles, so abandoned bodies cannot accumulate uncharged across requests.
 - **Translated limit:** a body over 2 MiB on a translated route is a 413, as today (the rollback envelope of §4).
 - **Tests:** chunked bodies, a saturated queue with large bodies waiting, drain releasing the reservation, a close timeout
-  with attempts overlapping, and the measured heap for a 16 MiB body against its charge, a mostly-ASCII two-byte string included.
+  with attempts overlapping, an abandoned iterator keeping its share past teardown until it settles, and the measured heap for a 16 MiB body against its charge, a mostly-ASCII two-byte string included.
 
 ## 6. Capture
 
