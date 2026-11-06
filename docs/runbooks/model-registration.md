@@ -65,7 +65,8 @@ Conventions the comments around the existing entries enforce, and the generator 
   never sees, such as tensor-parallel width. That is a router-balanced HA/capacity pool, not two
   engines — `qwen3.8-27b-ailab` (node2 + node3, 2026-09-16, identical `model` too) is the one such
   pool today; `qwen3.8-27b-vllm-cloud` (cloud2 + cloud3, 2026-09-21) was the other until 2026-10-31,
-  when cloud3's w4a16 copy was found answering with degenerate text and retired. The comments on those entries
+  when cloud3's w4a16 copy was found answering with degenerate text (its TP=4 ran across the faulty GPU3) and
+  retired, and is again since 2026-11-06 (cloud3 at TP=2 on GPU0+GPU2, flash-next retired). The comments on those entries
   carry the invariants: `model_info` byte-identical (the consumer generator de-duplicates
   first-wins), the first-listed deployment wins least-busy ties, and each deployment's vision claim
   was probed on *that* box before the shared `supports_vision` was allowed to stand. Per-request
