@@ -3907,6 +3907,16 @@ new setup, existing-route reuse, inference and journal inspection. Its 17 standa
 with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.
 These fixtures establish test coverage, not live Anthropic success.
 
+**Live inspection (2026-11-06).** The rollout reached source `aec9198`; MCP initialized and
+listed 48 tools. Acceptance stopped at `list_secrets` because two unused Anthropic/Claude-labelled
+keys matched. No account, route or inference was created by that run. Its session is
+`7a57f124-a8f5-49c3-84df-0f1ddc30b25f`. The separate one-shot
+`router-mcp-key-inspection-20261106` reads only `list_secrets` in that session and projects the
+matching references, labels and timestamps for selection. It never calls discovery, proposal
+resolution or inference. It reuses the restricted acceptance network policy and credential
+injection, with its own ConfigMap; the failed acceptance Job is not replayed. Remove both
+temporary Jobs and their script ConfigMaps after the investigation and acceptance are complete.
+
 The existing rollout checker requires one fresh Ready pod on the exact image, the successful canary Job,
 public health/readiness and unauthenticated management refusal. Once that passes, record the safe canary
 outcome and remove the temporary Job, ConfigMap/script and two NetworkPolicies in a cleanup PR. The live

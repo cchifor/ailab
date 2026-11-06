@@ -11,6 +11,7 @@ kind: Kustomization
 resources:
   - router.yaml
   - mcp-canary.yaml
+  - mcp-key-inspection.yaml
   - edge.yaml
   - podmonitor.yaml # Prometheus scrape of the router's metrics port (rules: infrastructure/monitoring/llm-router-rules.yaml)
   - llm-router-oidc.sops.yaml # SOPS: Keycloak client secret, router_auth DB URL, break-glass token (llm-router#121)
@@ -21,3 +22,7 @@ configMapGenerator:
     namespace: llm-router
     files:
       - mcp-acceptance.mjs
+  - name: router-mcp-key-inspection-script
+    namespace: llm-router
+    files:
+      - mcp-key-inspection.mjs
