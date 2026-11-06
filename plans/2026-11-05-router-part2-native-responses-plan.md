@@ -261,6 +261,8 @@ placement across the change.
   **permanent and request-caused** (`compat`'s `PERMANENT`/`REQUESTED`), except `wire:identity_unknown`, which is
   transient (the identity may be read on the next try), so with no target left the client gets a 400 naming the feature,
   or a retryable 503 when only the identity is missing.
+  **As built (#151):** a native route names its models and is reached by its alias, so a config write refuses `models` and a
+  `*` target on it: identities are read per model, before selection.
 - **Identity** (codex round 1, finding 10; shapes aligned in round 3, finding 4): `BackendIdentity = { fingerprint: { engine,
   version, model, checkpoint, maxModelLen, templateDigest, parsers, generationConfig }, generation, observedAt }`. The
   manifest key **is** the fingerprint. `generation` is not in the key: it is freshness only, for telling a restart apart. A read replaces the cached entry and re-matches its fingerprint; nothing else about it depends on `generation`.
@@ -274,6 +276,10 @@ placement across the change.
     it at once. That window is accepted: a new read with an **unchanged fingerprint** stays eligible, and a changed one is
     ineligible until a re-qualification run writes its manifest entry.
     Each backend has its own observed identity: cloud3 sharing the model name qualifies nothing.
+  - **As built (#151):** the 60 seconds below is when the next request reads the identity again, not how long one can use
+    it. A request in flight keeps the identity it started with for up to 660 seconds (the 60-second cache plus the longest
+    `queue.maxWaitMs`, 600 seconds), so a long wait in a queue does not refuse a qualified backend. For a request that has
+    already started, that is a longer window than the one this section accepts. Whether it is accepted is open, for the owner.
   - The cache holds an identity for at most 60 seconds (a cheap read; the generation counter makes staleness
     detectable), and is invalidated on an account's `baseUrl` change, on a connection failure to it, and on the plugin's
     disposal. An unreadable identity is `unknown`, never assumed.
@@ -307,6 +313,7 @@ llama-swap truth table, the tests. This section says how it fits the registries 
 |---|---|---|
 | `contracts/availability.ts` | contracts | the types, one file per extension point (Part 1 §2.1), so the closure pins name it; `Account.availability?` |
 | `runtime/availability-registry.ts` | implementation registry | `register(probe)` with a disposer, `available(kind)`, `validator()`: a new or changed account names a registered probe and passes its schema; an unchanged one is tolerated while the plugin is off |
+| `plugins/availability-probes/` (as built, #153) | required plugin | hosts the registry above, which stands as written, as `ctx.routerAvailabilityProbes`. Being required, it keeps the validator on while the optional `availability` plugin is off, which is what "while the plugin is off" in that row means. The registry also holds the set of checks in flight, so a check outlives a restart of `availability` |
 | `modules/availability/` | pure | the scheduler and cache: one check in flight, deadline and abort, staleness, hysteresis, the policy |
 | `plugins/availability/` | service plugin | `ctx.routerAvailability`: drives the scheduler, wires the engine, wakes waiters, the admin route, metrics, telemetry, the Assistant read tool |
 | `plugins/availability-llama-swap/`, `adapters/availability/llama-swap.ts` | implementation, adapter | kind `llama-swap`; the HTTP reads, with absolute deadlines and bounded bodies |
@@ -329,6 +336,12 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    generation is dropped. Hysteresis: to excluded at once, back only after 2 consecutive completed `available` checks, per model. So
    exclusion takes effect within `intervalMs` + the deadline (3 s + 2 s) after llama-swap lists the pending request, plus
    the requests already past selection.
+   **As built (#153):** one check in flight holds across a job's replacement and a plugin restart, so a probe that never
+   settles after its abort keeps its account excluded until it does, which can be for good. That is the intended default, not
+   an open issue: such a probe broke its contract, and excluded is the safe outcome. `maxAgeMs` below `intervalMs` is accepted, as the
+   contract has it, though such an account can never recover; starting it logs `availability.unrecoverable`. Whether to
+   refuse it at write time is open. A model on its way back keeps its previous reported state until it is eligible, so a
+   recovery is one `availability.changed`.
 3. **The capacity rule** (replacing this section's earlier 503 `MODEL_UNAVAILABLE` and its matrix). Today a route with
    any reason outside `BUSY` falls through to a non-retryable 429 `CAPACITY_UNAVAILABLE` (`inference:671`), so a
    saturated route with cloud1 excluded would stop being retryable. The capacity decision classes each target:
@@ -348,6 +361,13 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    full today is a non-retryable 429), so that part is an intentional capacity correction, declared, not default-off. Its
    regression test pins the client-visible change: a route with a target offline and the rest full now answers the retryable
    429, and a Codex or Claude route with no target offline answers exactly as before.
+   **As built (#153):** this point says both that any occupied or temporarily unavailable target makes the answer retryable,
+   and that a route with no target offline answers exactly as before. Those disagree for a target cooling down or disabled
+   beside a full one on a route that never opted in. The second was implemented: the rule acts only where a target is offline
+   or an account on the route has `availability`, so those two cases keep today's final 429. Dropping that condition would make
+   them retryable too. Where the full target's pool has a `queue`, the request waits in that line under the one-pool rule and
+   gets the retryable 429 only if the wait expires; the regression test above is the route without a queue. Joining the line is
+   also what makes a waiter on another pool reachable, and that case has an engine test.
    Each row is a test:
 
    | Targets | Answer |
