@@ -4042,3 +4042,68 @@ validated write. Skipping this step can't stop the router starting: the older ac
 ignored at load, never rejected. Then revert the image and both annotations together to:
 - image `registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3`;
 - source `aec919824f112d5f2cf5f6830a8f896b921c7045`, release `router-0.1.0-20261106-mcp-fix`.
+
+## Provider billing release (2026-11-06)
+
+Release `router-0.1.0-20261106-provider-billing` ships source
+`5f6151e9c2f672d5018c31eaa7f03156e45914a0` ([llm-router #144](https://git.chifor.me/cchifor/llm-router/pulls/144)).
+Source PR #144 merged as `88254474e64aef1f66b4a1b454e03ebbfbe4049c`; the packaged commit
+is its second parent and has the identical tree (normal merge, no squash/rebase rewrite).
+It adds Anthropic provider-reported month/seven-day spending, a user-selected monthly tracking budget,
+percentage consumed and remaining/over-budget amounts to Status. Administrators can configure, report
+and disconnect billing through the Assistant or authenticated MCP; configuration still requires a proposal.
+
+Provenance: archive `router-0.1.0-20261106-provider-billing.tar.gz`, SHA-256
+`2b79fcfd5a3397acc7162f0ef0315b9a7c6b9a86b895d7775bc6a7f12a0b16fd`; packaging commit
+`a7bf11c32c79c610f7b24a3f6b86e1158daf59a6`; [image CI 122647](https://git.chifor.me/cchifor/relay/actions/runs/122647)
+and its [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-122647.json).
+Image: `registry.chifor.me/llm-router/router@sha256:9e141215271a01522c664492e214a677a8880dcd5f7182b39ad85f2d24a51145`.
+The Node runtime base is unchanged. No database migration or backup generation is introduced; preserve
+the verified `pre-degeneracy-guard-20261106` backup described above.
+
+Billing starts disconnected. Connect a separate Anthropic Admin API credential through the secure key
+field and select the inference API key ID; inference credentials must already be saved in the encrypted
+store. Anthropic's Analytics API reports costs after discounts and before credits, normally delayed by
+hours. Prepaid balance remains in Anthropic Console. A tracking budget is a reporting target and never
+stops requests. Rotating/re-encrypting the stored inference credential requires reconnecting billing.
+This rollout does not add credentials, select a key ID, set a budget, change routes, or send inference.
+
+Acceptance: run `python3 scripts/check-router-rollout.py` after Flux reconciliation. It verifies the
+expected digest on one Ready pod, expected init composition, public health/readiness and refusal of
+unauthenticated management. The source suite and desktop/mobile browser coverage pass; the packaged
+runtime's MCP proposal/approval/report path is verified with a local Analytics schema fixture and
+production dependencies. That fixture does not establish live Anthropic billing access. A real cost
+read requires an administrator to connect their Admin API credential through Status → Connect billing.
+
+Also verify the public HTML selects this release's JavaScript and CSS and that the bytes served through
+the production edge match the tested bundles:
+
+```sh
+python3 - <<'PY'
+import hashlib, json, urllib.request
+base = 'https://router.chifor.me'
+def fetch(path):
+    request = urllib.request.Request(base + path, headers={'User-Agent': 'router-billing-acceptance/1.0 (dev-worker-3)'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read()
+html = fetch('/').decode()
+assets = {
+    '/assets/index-BzuHOYpN.js': '4391796fe4b3ff27ea70e06778beaf9146f0d4029522a09f785b59bb7e5cbe4c',
+    '/assets/index-CjNGhj14.css': '46fb99b752c03235044b7e28da6a6b75e9c12d756ae23abdb08dc1c79d2df186',
+}
+for path, expected in assets.items():
+    assert path in html, f'Production HTML does not select {path}'
+    assert hashlib.sha256(fetch(path)).hexdigest() == expected, f'Unexpected bundle: {path}'
+print(json.dumps({'status': 'passed', 'publicBundles': list(assets)}))
+PY
+```
+
+Rollback through a reviewed PR by restoring all three values together:
+
+- Image `registry.chifor.me/llm-router/router@sha256:4914ccb5c01c8fbe3293bb1739009f36e6d9a37099e25a144a8a0694708a124f`.
+- Source `2e6615b2c7fc734da35a8dd587d21338bb6c6c97`.
+- Release `router-0.1.0-20261106-degeneracy-guard`.
+
+The previous version ignores billing settings retained in SQLite; no database restore is needed.
+Keep saved billing credentials until the reporting connection is deliberately disconnected on a version
+that understands those references. Existing inference accounts and the degeneracy guard remain intact.
