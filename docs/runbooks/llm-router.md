@@ -3834,8 +3834,8 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 and the per-backend qwen providers.
 
 **Open (2026-11-06, image `4914ccb5`): the router halves Codex's second-turn prompt-cache hits.** The same two requests, a
-new `prompt_cache_key` per conversation, on one account: turn 2 hit the cache in 44 of 50 conversations direct and 35 of 70
-via the router. It is not the client (both arms are API mode), the seat, the egress IP or a timing race (a 1 s gap changes
+new `prompt_cache_key` per conversation, on one account: turn 2 hit the cache in 44 of 50 conversations through the control
+forwarder (API mode, no router) and 35 of 70 via the router. It is not the client (both arms are API mode), the seat, the egress IP or a timing race (a 1 s gap changes
 nothing). The mechanism is not known. Expect `codex` and `codex-control` `code-edit` to FAIL on uncached tokens until it
 is fixed, and do not read that FAIL as noise.
 

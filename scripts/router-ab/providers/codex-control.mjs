@@ -14,6 +14,7 @@ export default {
   name: 'codex-control',
   describe: `ChatGPT seat via Codex CLI 0.166 in API-provider mode in both arms (direct: plain forwarder on the host login; router: pool-codex, runs placed on ${SEAT})`,
   kinds: ['codex-exec'],
+  forwarder: true, // the tap's `fwd` target stays off unless a selected provider asks for it
   async layerA(ctx) {
     const r = sameBody(ctx, { target: 'fwd', direct: 'chatgpt', run: 'layer-a-capture-codex-control', home: 'user', model: MODEL, directModel: MODEL, routerModel: MODEL, greedy: false, n: 2 });
     if (r.error) return [{ name: 'same body both ways', pass: false, detail: r.error }];

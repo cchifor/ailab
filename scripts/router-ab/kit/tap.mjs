@@ -7,6 +7,7 @@
 //            It does what the router's codex adapter does to a native request and nothing else: the same header allow-list,
 //            originator, authorization, ChatGPT-Account-Id. The client's own bearer (the router key) is dropped here.
 //            Everything else (the model catalogue) goes to the router, so the client sees what it sees in the router arm.
+//            Off unless TAP_FWD=1: the gate sets it only when a provider declares `forwarder`. The tap binds loopback only.
 // Forwards method, headers and body unchanged (accept-encoding removed so SSE is readable), streams the response back
 // unchanged. Per request it writes RECDIR/<run>/<seq>.req (raw body bytes), <seq>.meta.json (method, path, status,
 // timings, request content-encoding, trajectory id, usage) and <seq>.sse (raw response bytes). It NEVER writes header
@@ -31,7 +32,10 @@ const TARGETS = {
 const NATIVE_HEADERS = new Set(['accept', 'originator', 'user-agent', 'version', 'openai-beta', 'session_id', 'session-id', 'conversation_id', 'thread-id', 'x-client-request-id']);
 const NATIVE_PREFIXES = ['x-codex-', 'x-openai-internal-codex-'];
 function loginHeaders(req) {
+  if (process.env.TAP_FWD !== '1') throw new Error('the forwarder is off');
   const { access_token: token, account_id: account } = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'auth.json'), 'utf8')).tokens;
+  const { exp } = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+  if (exp * 1000 < Date.now()) throw new Error('the host login has expired'); // never refreshed here: a harness failure
   const kept = Object.fromEntries(Object.entries(req.headers).filter(([k]) => NATIVE_HEADERS.has(k) || NATIVE_PREFIXES.some((p) => k.startsWith(p))));
   const body = Object.fromEntries(['content-length', 'content-encoding'].filter((k) => req.headers[k]).map((k) => [k, req.headers[k]]));
   return { originator: 'codex_cli_rs', ...kept, ...body, host: 'chatgpt.com', 'content-type': 'application/json', accept: 'text/event-stream', authorization: `Bearer ${token}`, 'ChatGPT-Account-Id': account };
@@ -55,7 +59,7 @@ const server = http.createServer((req, res) => {
   const seq = String((seqs[run] = (seqs[run] ?? 0) + 1)).padStart(4, '0');
   const base = path.join(dir, seq);
   delete headers['accept-encoding'];
-  const meta = { run, target: tname, method: req.method, path: upath.replace(/\?.*$/, ''), tSent, reqEncoding: req.headers['content-encoding'] ?? null,
+  const meta = { run, target: tname, upstream: t.host, method: req.method, path: upath.replace(/\?.*$/, ''), tSent, reqEncoding: req.headers['content-encoding'] ?? null,
     reqBytes: 0, status: null, tHead: null, tFirstDelta: null, tFirstOutput: null, tCompleted: null, tEnd: null, terminal: null,
     usage: null, trajectory: null, routerHeaders: {}, counts: {}, bytes: 0, error: null };
   const reqChunks = [];
