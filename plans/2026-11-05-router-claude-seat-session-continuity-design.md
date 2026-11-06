@@ -336,7 +336,7 @@ that pass change. Part 3a is A/B-gated like any release: it changes what Anthrop
 | Situation | Agent route | Chat route |
 |---|---|---|
 | no session yet, history without assistant turns | new session | new session |
-| no session yet, history with assistant turns | **refused**, unless the route explicitly allows imports (`claudeSession.importHistory: true`): a missing ledger record is not proof that no state existed (a deleted row, an expired tombstone, a restored backup) | declared import |
+| no session yet, history with assistant turns | **refused**, unless the account explicitly allows imports (`claudeSession.importHistory: true`): a missing ledger record is not proof that no state existed (a deleted row, an expired tombstone, a restored backup) | declared import |
 | the session is lost or unsafe (CLOSED-UNSAFE, evicted with a tombstone, a failed resume, a seat change) | **refused**, `CLAUDE_SESSION_LOST`, naming the remedy (start a new session; Codex: a new `thread-id`) | declared import (`claude.session.rebuilt {reason}`), disclosed in `x-router-mutations` |
 | a divergence (§4.2) | refused, `CLAUDE_SESSION_DIVERGED`, naming what diverged | declared import |
 | its seat is unavailable | waits in the seat's queue, then fails loudly (the standard's pin) | may move and import |
@@ -408,7 +408,7 @@ the session path is a transport of `provider-claude`.
 | Unit | Kind | Single responsibility | Public interface | Depends on |
 |---|---|---|---|---|
 | `contracts/claude-session.ts` | contracts | the shapes the engine and the store see | `SessionKey`, `SessionRecord`, `DeliveryState`, `SessionLedgerPort` (transactional: `get`, `compareAndSet(revision)`, `tombstone`, `list(expiredBefore)`), `ContinuityPort` (`decide(key, route) → ContinuityDecision`: `new { claim }`, `pinned { accountId, transport, revision, epoch }` or `refused { reason }`, §5.2; an unavailable service is `refused`) | contracts |
-| `contracts/index.ts` (changed) | contracts | `BoundInvocation.scope?: { principalId, namespace, conversation? }`, set by the engine only | | |
+| `contracts/index.ts` (changed) | contracts | `BoundInvocation.scope?: { principalId, namespace, conversation?, routeKind, decision }` (`routeKind`: `RoutePolicy.kind`; `decision`: the `ContinuityDecision`, §5.2), set by the engine only | | |
 | `modules/claude-sessions/` | pure | the state machine; the canonical encoding (hashing injected); verification and the delta; the §7 decisions | `encode(history)`, `verify(record, chain, history) → { delta } \| { diverged }`, `next(state, event)`, `decide(route, situation)` | contracts |
 | `adapters/sqlite` (changed) | adapter | the ledger tables and migration, behind `SessionLedgerPort` | | |
 | `plugins/claude-sessions/` (new) | service plugin | the session coordinator: the ledger port, claims, continuity decisions, reconciliation, retention through the maintenance port; stays active when `provider-claude` is disabled | provides `ContinuityPort` | the ports, `modules/claude-sessions` |
@@ -523,14 +523,14 @@ change, not the architecture.
 conversation with an explicit id, the router keeps one real Claude Code session, pinned to its seat: Claude Code runs its
 own loop and keeps its own signed thinking, tool ids and reminders; the router delivers the client's tool results through
 its MCP bridge and new messages on stdin. A conversation without an id stays on the per-request transport and never gets
-a session. One first seen with assistant history is refused, unless the account allows imports
-(`claudeSession.importHistory: true`), and an import is a declared mutation. It is not a byte pass-through and cannot be one: the seat's token is used only by
+a session. A conversation with an id first seen with assistant history is refused on agent routes unless the account
+allows imports (`claudeSession.importHistory: true`); a chat route imports it, declared. It is not a byte pass-through and cannot be one: the seat's token is used only by
 Claude Code. Images and schemas stay refused until qualified.*
 **§4.3**, added: the `anthropic` domain includes **server-held** state: the state inside a seat's Claude Code session,
 which the client never replays. Pinning applies to it even when a request carries no reasoning payload, which is the
 exception to the standard's client-replayed-state assumption.
 **§6 R5**, added: on agent routes a lost, expired or diverged session is refused with a remedy, never stripped by a
-rebuild, a transport rollback or a retention expiry; an initial import is a separately authorized route setting.
+rebuild, a transport rollback or a retention expiry; an initial import is a separately authorized account setting (`claudeSession.importHistory`).
 **§5.5's prohibition is kept:** the Claude seat is never a failover target for a conversation holding another domain's
 state, judged on the request's facts before any lossy adaptation; persistent sessions (opt-in, with a `thread-id`) are
 distinguished from disposable per-request runs (everything else).
