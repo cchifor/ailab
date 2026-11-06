@@ -4135,6 +4135,17 @@ token reaches the client sealed for the seat that issued it, under a key that la
 journaled as `native:turn_state_stripped` in `request.parameters_adjusted`; `response.head_relayed` names what went out. No
 account, route, credential, schema or configuration changes.
 
+**Checked before the roll.**
+- Replicas: `llm-router` runs one replica with the `Recreate` strategy, so the per-process seal key is shared by every
+  request. A restart strips only the tokens of turns in flight across it, and the next response issues a new one.
+- The 30 s head wait: the edge Caddy sets no response or read timeout (`edge.yaml`), and Cloudflare's limit is about
+  100 s. Codex's `stream_idle_timeout` counts events and is 300 s. Each is above 30 s.
+- Drain: a stream waiting for its head at drain is treated like any other stream in flight: `ROUTER_DRAIN_MS` is 20 s, so one
+  still waiting then is cut and Codex resends it, as a long stream already is. The grace period is unchanged.
+
+**How the effect is measured.** After the roll, with the gate's control arm: `node scripts/router-ab/gate.mjs --providers
+codex-control --tasks code-edit --pairs 6`. Success is uncached tokens at most 1.2x the control. The result goes in this section.
+
 **Rollback.** Revert the image and both annotations together to:
 - image `registry.chifor.me/llm-router/router@sha256:9e141215271a01522c664492e214a677a8880dcd5f7182b39ad85f2d24a51145`;
 - source `5f6151e9c2f672d5018c31eaa7f03156e45914a0`, release `router-0.1.0-20261106-provider-billing`.
