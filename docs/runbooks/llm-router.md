@@ -4203,3 +4203,33 @@ source/release annotations and the corresponding source/run/archive comments tog
 
 That image restores billing. Its catalog re-adds the removed plugin enabled; retained billing settings
 can resume reporting if their credentials remain valid. No database restore is needed.
+
+## Account failing every attempt
+
+`LlmRouterAccountFailing` fires when a hosted account has failed at least 3 attempts in 30 minutes and completed none.
+Cancelled requests and rate limits do not count, and neither do local servers. The Status page can still say `ready`:
+a 404 is not retried, so a pool keeps sending the account its share.
+
+**What to do.**
+1. Read the failure: the Activity page, or the request's `attempt.failed` event in
+   `GET /admin/v1/trajectories/<id>`, which carries the upstream `status`.
+2. Prove it is one account. Each Anthropic account has its own route, `claude-api-1` to `claude-api-4`, for `anthropic`
+   to `anthropic-4`. Send each one a tiny request.
+3. Find the cause:
+   - **A 404 within about 200 ms:** the account's base URL or model. Compare `baseUrl` with the sibling accounts in
+     `GET /admin/v1/config`. `POST https://api.anthropic.com/messages` answers 404 even without a key, and
+     `/v1/messages` answers 401.
+   - **A 401:** the key. See "API-key provider onboarding release".
+4. Fix the account, repeat step 2, then send enough requests through the pool to reach every account: three rounds of
+   the pool's size is enough. Check the serving account of each in the journal.
+
+**2026-11-06, `anthropic-2`.** `baseUrl` was `https://api.anthropic.com`, without `/v1`, so the adapter posted to
+`/messages`.
+- **Effect:** every request on that account failed, plain and streaming: 404 `anthropic upstream error (HTTP 404)`, or
+  `upstream` on a stream. `pool-claude-api` failed one request in four (3 of 12, all on `anthropic-2`), because it has
+  `maxAttempts: 1` and a 404 is not retried. A client that simply tried again usually landed on another account, so the
+  fault looked like a bad request.
+- **Fix:** config revision 2273 removed the override, the only change to the config. All four accounts then answered
+  plain and streaming requests, and the pool served 12 of 12, 3 per account.
+- **So it does not return:** `llm-router#149` resolves a hosted provider's bare host to its API root, however the value
+  reached the configuration. This alert covers every other cause.

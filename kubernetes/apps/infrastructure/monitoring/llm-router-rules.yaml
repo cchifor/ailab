@@ -209,6 +209,33 @@ spec:
               The provider reports account {{ $labels.account }} ({{ $labels.provider }}) at 100 % of
               a limit window: the router skips it (quota_exhausted) until the reset the Status page
               shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
+        # One account failing every attempt while its siblings serve. The route rule cannot see it: on
+        # 2026-11-06 anthropic-2 carried a base URL without /v1 and answered 404 to everything, so
+        # pool-claude-api (four accounts, maxAttempts 1, a 404 is not retried) failed one request in
+        # four while the account kept status ready. That rule needs 10 requests per 15 minutes, which
+        # a little-used pool never reaches. The read that gives it away is "failed, and never
+        # completed". 3 is a floor against one stray failure.
+        # Left out, in any case, because both spellings occur: cancelled requests (the client went away),
+        # rate_limited (the limit rules own it) and provider local (powered off at night on purpose;
+        # upstream-health skips those). An account the router skips, for a limit or a cooldown, starts no
+        # attempt, so it adds nothing to this counter: quota_exhausted is a routing reason, not a code here.
+        # Backtested on 2026-10-30..11-06 (2 or 3 in 30m, 3 or 5 in 1h, every 5 minutes): anthropic-2
+        # on 2026-11-06 was the only match.
+        - alert: LlmRouterAccountFailing
+          expr: |
+            sum by (account, provider) (increase(llm_router_attempts_total{job="llm-router",provider!="local",outcome="failed",code!~"(?i)cancell?ed|rate_limited"}[30m])) >= 3
+            unless on (account, provider)
+            sum by (account, provider) (increase(llm_router_attempts_total{job="llm-router",provider!="local",outcome="complete"}[30m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router account {{ $labels.account }} is failing every attempt"
+            description: >-
+              Account {{ $labels.account }} ({{ $labels.provider }}) has failed at least 3 attempts in 30 minutes and
+              completed none. Its Status page entry can still say ready, and a pool that holds it
+              keeps sending it its share. Read the code on the Activity page: an upstream 404 is
+              the account's base URL or model, a 401 its key. Runbook:
+              docs/runbooks/llm-router.md § Account failing every attempt.
         # The Claude POOL running out of room: fewer than two Claude accounts below 90 % of their weekly
         # window, so the next wall leaves pool-claude on one account or none - every Fable/Opus review
         # and every other pool-claude caller then queues on it. `or vector(0)`: no account below 90 %
