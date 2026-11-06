@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: router-mcp-key-removal-20261106
+  namespace: llm-router
+  annotations:
+    # Recreated runs fail closed on absent targets; prune this Job before any image/script change.
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600 # eight RPCs at most 60s each, plus 120s scheduling/process margin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: router-mcp-acceptance
+        app.kubernetes.io/component: key-removal
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      tolerations:
+        - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: removal
+          image: registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3
+          command: [node, /checks/mcp-key-removal.mjs]
+          env:
+            - name: ROUTER_MCP_ACCEPTANCE_TOKEN
+              valueFrom:
+                secretKeyRef: {name: llm-router-auth, key: admin-token}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {cpu: '1', memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: checks, mountPath: /checks, readOnly: true}
+      volumes:
+        - name: checks
+          configMap: {name: router-mcp-key-removal-script}

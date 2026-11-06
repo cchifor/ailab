@@ -3917,10 +3917,11 @@ resolution or inference. It reuses the restricted acceptance network policy and 
 injection, with its own ConfigMap; the failed acceptance Job is not replayed. Remove both
 temporary Jobs and their script ConfigMaps after the investigation and acceptance are complete.
 
-The existing rollout checker requires one fresh Ready pod on the exact image, the successful canary Job,
-public health/readiness and unauthenticated management refusal. Once that passes, record the safe canary
-outcome and remove the temporary Job, ConfigMap/script and two NetworkPolicies in a cleanup PR. The live
-Anthropic account and `claude-api` route are the requested result and remain configured.
+While the original acceptance Job is declared, the rollout checker requires its success in addition to
+a fresh Ready pod on the exact image, public health/readiness and unauthenticated management refusal.
+That acceptance was cancelled by the user after ambiguous key selection; no Anthropic account, route
+or inference resulted. Verify the requested removal separately, then remove all temporary resources
+and rerun the steady-state rollout checker.
 
 **Backup and rollback.** No schema migration is introduced. Preserve the verified
 `/data/backups/pre-provider-onboarding-20261105` generation (verified 14:48:14 UTC); no new backup init is needed.
@@ -3930,3 +3931,25 @@ source annotation `922bafdf199a6a42be75baffd3bb93d70f8d8ffc` and release `router
 together, and remove the temporary canary resources. That version understands the Anthropic account/route;
 image rollback does not delete them or restore the database. Any separate configuration undo needs its own
 review through the normal configuration proposal/history flow.
+
+
+**User-requested credential removal (2026-11-06).** After the metadata inspection, the user explicitly
+requested removing both unused saved credentials and adding a fresh one through the router UI. The
+pending acceptance rerun PR #1628 was closed before merge; it was never deployed. The one-shot Job
+`router-mcp-key-removal-20261106` targets only `store:sec_ebc130865c32ef3c` (`claude subscription token`)
+and `store:sec_18cd60c0c91260f3` (`anthropic`). It checks both labels and unused status before any proposal,
+then uses `remove_secret` and the normal exact-proposal approval flow. Each proposal must contain exactly
+one matching secret deletion. Refreshed proposals stop, and no call is automatically retried. A final
+`list_secrets` read must show both references absent. New or unrelated keys, accounts and routes are
+untouched; no provider discovery or inference runs. The management token stays in the pod, logs contain
+only safe phases/references, and the durable session plus `secret.deleted` audits remain available.
+Removal is irreversible and was explicitly requested; the user will enter a new key through the UI.
+Clean up all three temporary Jobs, script ConfigMaps and their two network policies after verified removal.
+
+A partial run deliberately fails closed on replay: an absent target is not assumed to be a successful
+delete by this Job. Inspect the durable session, deletion audits and current saved-key metadata first;
+if exactly one deletion completed, use a newly reviewed recovery Job scoped to the remaining authorized
+reference. Do not replay approvals or edit this Job in place. The eight RPCs each have a 60-second timeout
+(480 seconds total), below the 600-second pod deadline. Flux force is required by repository policy;
+a recreated Job refuses missing targets. Land cleanup before any image or script change. The real
+compiled MCP fixture confirmed `remove_secret` returns approval-kind proposals for both saved keys.
