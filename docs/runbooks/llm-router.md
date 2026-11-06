@@ -3920,4 +3920,3 @@ source annotation `922bafdf199a6a42be75baffd3bb93d70f8d8ffc` and release `router
 together, and remove the temporary canary resources. That version understands the Anthropic account/route;
 image rollback does not delete them or restore the database. Any separate configuration undo needs its own
 review through the normal configuration proposal/history flow.
-
