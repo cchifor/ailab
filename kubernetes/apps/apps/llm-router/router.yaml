@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 2e6615b2c7fc734da35a8dd587d21338bb6c6c97
-        chifor.me/release: router-0.1.0-20261106-degeneracy-guard
+        chifor.me/source-commit: 5f6151e9c2f672d5018c31eaa7f03156e45914a0
+        chifor.me/release: router-0.1.0-20261106-provider-billing
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,9 +121,9 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 2e6615b2c7fc734da35a8dd587d21338bb6c6c97 (llm-router #142, #143: stream inspectors, the degeneracy guard, append-only replay for new settings).
-          # Relay run 122576; archive sha256:605f9f6f46d1280976d748fbd8905ed0f680e984bb7e672e85b0ae9b68ec720c.
-          image: registry.chifor.me/llm-router/router@sha256:4914ccb5c01c8fbe3293bb1739009f36e6d9a37099e25a144a8a0694708a124f
+          # Source 5f6151e9c2f672d5018c31eaa7f03156e45914a0 (llm-router #144: Anthropic API spending, tracking budgets and MCP billing tools).
+          # Relay run 122647; archive sha256:2b79fcfd5a3397acc7162f0ef0315b9a7c6b9a86b895d7775bc6a7f12a0b16fd.
+          image: registry.chifor.me/llm-router/router@sha256:9e141215271a01522c664492e214a677a8880dcd5f7182b39ad85f2d24a51145
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
