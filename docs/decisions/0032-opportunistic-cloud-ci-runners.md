@@ -206,10 +206,13 @@ session 1 power-on; nothing changes before it.
    12 GiB runners. Expect some heavy platform jobs ~15 % slower (up to ~40 %) and more swap at peaks.
 2. **cloud-ci-6 stays.** It has been back in service since its 2026-10-12 rebuild (runner 99: 1,229 tasks in the
    7 days to 2026-11-05, as many as any cloud1 runner). "Quarantined" in the 2026-10-04 amendment is history.
-3. **All five cloud1 runners are pinned to CPUs `4-15,20-31`;** CPUs `0-3,16-19` serve models.
+3. **All five cloud1 runners are pinned to CPUs `4-15,20-31`;** CPUs `0-3,16-19` serve models. Their 30 vCPU
+   are 1.25x oversubscribed on those 24 threads.
 
 **Gate caveat.** cloud1's CI demand at p99 is ~19 threads: ~79 % of the 24 pinned threads, above this ADR's
 75 % gate, accepted knowingly. **Watch for one week after session 1** against the baseline of the 7 days to
 2026-11-05 (cloud1 runners: queue wait p50 45 s / p95 1,105 s, job duration p50 30 s / p95 920 s). **Revisit**
 (move a runner off cloud1, or give CI CPUs back) if for two days running: queue-wait p95 > 1,400 s, duration
-p95 > 1,100 s, host CPU p99 > 85 %, or the serving decode-under-CI ratio < 95 %.
+p95 > 1,300 s (+40 %, above the slowdown expected in point 1), or host CPU p99 > 85 %; or if the serving
+ratio falls below 95 %: single-stream decode tok/s with CI busy over the same probe with CI idle, taken at the
+plan's gate T7, which is its baseline.
