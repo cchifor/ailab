@@ -22,6 +22,29 @@ test('exact saved-key selection distinguishes an API key from a subscription tok
   assert.throws(() => selectSavedKey([{ ref: 'store:sec_api', label: 'anthropic' }], 'store:sec_api'), /^Error: Invalid saved-key metadata$/);
 });
 
+test('an existing route cannot silently replace the selected API key', async t => {
+  const calls = [], log = [];
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    const request = JSON.parse(options.body);
+    let result;
+    if (request.method === 'initialize') result = { serverInfo: { name: 'llm-router' } };
+    else if (request.method === 'tools/list') result = { tools: ['setup_provider', 'probe_provider', 'router_resolve_proposal', 'router_request', 'audit_log'].map(name => ({ name })) };
+    else {
+      const name = request.params.name; calls.push(name);
+      const data = name === 'router_open_session' ? { sessionId: 'fixture' }
+        : name === 'list_routes' ? { data: { routes: [{ alias: 'claude-api', deployments: [{ enabled: true, account: 'anthropic', model: 'fixture' }] }] } }
+        : name === 'inspect_account' ? { data: { provider: 'anthropic', access: 'api', secretRef: 'store:sec_different' } } : {};
+      result = { structuredContent: data };
+    }
+    return Response.json({ result });
+  });
+  await assert.rejects(runAcceptance({ url: 'http://fixture.invalid', token: 'fixture', selectedSecretRef: 'store:sec_selected', log: x => log.push(x) }));
+  assert(log.join('').includes('Existing route uses a different saved key'));
+  assert(!calls.includes('probe_provider'));
+  assert(!calls.includes('router_resolve_proposal'));
+  assert(!calls.includes('test_route'));
+});
+
 test('a ConfigMap-shaped symlink executes acceptance and cannot silently exit successfully', () => {
   const dir = mkdtempSync(join(tmpdir(), 'router-mcp-configmap-'));
   try {

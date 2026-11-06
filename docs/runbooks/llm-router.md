@@ -3903,7 +3903,7 @@ failure, inspect the safe Loki phase summary and durable session first, then rev
 The repository-required Flux force annotation permits recreation after a reviewed template change; normal
 reconciliation does not restart a completed Job. Remove the temporary Job promptly after acceptance.
 The acceptance script passed locally through the real compiled MCP server with an Anthropic HTTP/SSE fixture:
-new setup, existing-route reuse, inference and journal inspection. Its 18 standalone guard/error tests pass
+new setup, existing-route reuse, inference and journal inspection. Its 19 standalone guard/error tests pass
 with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.
 These fixtures establish test coverage, not live Anthropic success.
 
@@ -3922,7 +3922,8 @@ The metadata inspection completed through live MCP: the two candidates were `cla
 so the separately versioned acceptance Job `router-mcp-acceptance-20261106` pins the latter's reference,
 `store:sec_18cd60c0c91260f3`, through `ROUTER_MCP_ACCEPTANCE_SECRET_REF`. This is non-secret metadata,
 not a credential value. Selection still requires that exact key to exist, remain unused and match the
-Anthropic/Claude label predicate. The original run stopped before discovery, setup or spending, so no
+Anthropic/Claude label predicate. A concurrently created route must use that same reference before it
+can be probed or tested. The original run stopped before discovery, setup or spending, so no
 mutation is being replayed. All additive-proposal and spend-review checks still apply. The saved
 subscription token is left untouched. Live Anthropic discovery/setup/inference remain pending this rerun.
 

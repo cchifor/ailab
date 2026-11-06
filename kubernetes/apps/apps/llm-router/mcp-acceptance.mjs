@@ -90,6 +90,7 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
       accountId = existing.deployments[0].account; model = existing.deployments[0].model;
       const account = (await call('inspect_account', { account: accountId })).data;
       requireThat(account.provider === 'anthropic' && account.access === 'api' && !account.baseUrl, 'Existing route is not the hosted Anthropic API');
+      requireThat(selectedSecretRef === undefined || account.secretRef === selectedSecretRef, 'Existing route uses a different saved key');
       await call('probe_provider', { provider: 'anthropic', secretRef: account.secretRef });
       emit('anthropic.existing_route_verified', { accountId, model });
     } else {
