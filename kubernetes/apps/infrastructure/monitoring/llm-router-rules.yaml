@@ -215,13 +215,15 @@ spec:
         # four while the account kept status ready. That rule needs 10 requests per 15 minutes, which
         # a little-used pool never reaches. The read that gives it away is "failed, and never
         # completed". 3 is a floor against one stray failure.
-        # Left out: CANCELLED (the client went away), RATE_LIMITED and rate_limited (the limit rules
-        # own them) and provider local (powered off at night on purpose; upstream-health skips those).
+        # Left out, in any case, because both spellings occur: cancelled requests (the client went away),
+        # rate_limited (the limit rules own it) and provider local (powered off at night on purpose;
+        # upstream-health skips those). An account the router skips, for a limit or a cooldown, starts no
+        # attempt, so it adds nothing to this counter: quota_exhausted is a routing reason, not a code here.
         # Backtested on 2026-10-30..11-06 (2 or 3 in 30m, 3 or 5 in 1h, every 5 minutes): anthropic-2
         # on 2026-11-06 was the only match.
         - alert: LlmRouterAccountFailing
           expr: |
-            sum by (account, provider) (increase(llm_router_attempts_total{job="llm-router",provider!="local",outcome="failed",code!~"CANCELLED|RATE_LIMITED|rate_limited"}[30m])) >= 3
+            sum by (account, provider) (increase(llm_router_attempts_total{job="llm-router",provider!="local",outcome="failed",code!~"(?i)cancell?ed|rate_limited"}[30m])) >= 3
             unless on (account, provider)
             sum by (account, provider) (increase(llm_router_attempts_total{job="llm-router",provider!="local",outcome="complete"}[30m])) > 0
           for: 5m
