@@ -18,6 +18,8 @@ import { SYSTEM as AGENT_SYSTEM, PROMPT as AGENT_PROMPT } from '../kit/tools.mjs
 // model the agentic consumers use
 const MODEL = process.env.RAB_CLAUDE_MODEL ?? 'sonnet';
 const CC_VERSION = '2.1.281';
+// the router's name for the seat the worker's own login is on: both arms must run on it
+const ACCOUNT = process.env.RAB_CLAUDE_ACCOUNT ?? 'claude-2';
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64');
 const parseStream = (text) => {
   const texts = [], calls = []; let durationMs = 0, msgIds = new Set();
@@ -100,6 +102,8 @@ export default {
       const span = steps.find((s) => s.kind === 'span');
       wall = span ? span.ms / 1000 : (Date.now() - t0) / 1000;
       const t = steps.filter((s) => s.kind === 'tool'); tools = t.length; rejected = t.filter((s) => !s.ok).length;
+      const client = steps.find((s) => s.kind === 'client-error');
+      if (client) throw new Error(`the harness could not reach the router: ${client.error}`);
       routerStatuses = steps.filter((s) => s.kind === 'model').map((s) => s.status);
       errors = routerStatuses.filter((s) => s !== 200).length;
       agenticTrajectories = steps.filter((s) => s.kind === 'model' && s.trajectory).map((s) => s.trajectory);
@@ -111,6 +115,7 @@ export default {
       const ids = task.kind === 'chat' ? (lastPod?.trajectories ?? []) : agenticTrajectories;
       const seats = seatsOf(ctx, ids);
       if (seats.moved) throw new Error(seats.error ? `seat pairing not verified: ${seats.error}` : `the router moved this run between accounts (${seats.accounts.join(', ')}): the pairing is broken`);
+      if (seats.accounts[0] !== ACCOUNT) throw new Error(`the router ran this on ${seats.accounts[0]}, the direct arm is on ${ACCOUNT}: not paired`);
       seatNote = ` [${seats.accounts.join(',')}]`;
     }
     const g = grade(task, { texts, calls, workspace, ctx, fixtures });

@@ -116,7 +116,7 @@ export function evaluate(runs, known = {}) {
     const k = known[m.id];
     if (k && m.bound !== undefined) {
       if (status === 'PASS') notes.push(`known deviation on ${m.label.toLowerCase()} no longer shows: retire it from the registry (${k.reason})`);
-      else if (m.check(dv, rv, pairs, k.bound) !== 'FAIL') { status = 'KNOWN'; notes.push(`KNOWN, ${m.label.toLowerCase()}: ${k.reason}`); }
+      else if (status === 'FAIL' && m.check(dv, rv, pairs, k.bound) !== 'FAIL') { status = 'KNOWN'; notes.push(`KNOWN, ${m.label.toLowerCase()}: ${k.reason}`); }
     }
     if (status === 'FAIL' && pairs < DECISION_PAIRS && !m.decisive) status = 'OUT';
     if (status === 'WATCH') notes.push(`WATCH, ${m.label.toLowerCase()}: more model work via the router; read it with Layer (a)`);

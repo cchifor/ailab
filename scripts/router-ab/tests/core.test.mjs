@@ -70,6 +70,15 @@ test('wall time is judged per output token where reported: more work is WATCH, a
   assert.equal(row(evaluate(six({ wall_s: 10 }, { wall_s: 15 })), 'work').status, 'n/a');
 });
 
+test('the unittest grader reads unittest\'s own exit status: failing tests fail, and no pipeline can mask them', () => {
+  let cmd;
+  const g = (status, clean = true) => GRADERS['python-unittest']({ module: 'test_calc', protect: [] },
+    { workspace: '/w', clean: () => clean, run: (_d, _i, c) => { cmd = c; return { status, stdout: status ? 'FAILED (failures=3)\n' : 'OK\n' }; } });
+  assert.equal(g(1).pass, false); assert.equal(g(1).detail, 'FAILED (failures=3)');
+  assert.equal(g(0).pass, true); assert.equal(g(0, false).pass, false);
+  assert.doesNotMatch(cmd, /\|/);
+});
+
 test('Layer (a) needs every check to pass, and no checks is n/a', () => {
   assert.equal(evaluateLayerA([{ name: 'a', pass: true }, { name: 'b', pass: false }]).verdict, 'FAIL');
   assert.equal(evaluateLayerA([]).verdict, 'n/a');
@@ -124,6 +133,7 @@ test('a known deviation is judged against its own bound, and says when it no lon
   const k = evaluate(runs(13), known);
   assert.equal(row(k, 'wall').status, 'KNOWN'); assert.equal(k.verdict, 'PASS (known deviation)'); assert.match(k.notes[0], /per-request/);
   assert.equal(row(evaluate(runs(16), known), 'wall').status, 'OUT');
+  assert.equal(row(evaluate(runs(12), known), 'wall').status, 'NEAR'); // inside §9.6: not a deviation
   const gone = evaluate(runs(10), known);
   assert.equal(gone.verdict, 'PASS'); assert.match(gone.notes[0], /no longer shows/);
   assert.equal(render({ image: 'x', startedAt: 't', providers: [{ name: 'p', layerA: { verdict: 'PASS', checks: [] }, tasks: [{ id: 't', pairs: 1, ...k }] }] }).overall, 'PASS');

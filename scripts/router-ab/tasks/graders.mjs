@@ -28,10 +28,10 @@ export const GRADERS = {
     const num = n?.[1];
     return { pass: !!(s && num && num !== 'UNKNOWN' && [...num].reduce((a, d) => a + Number(d), 0) === Number(s[1])), detail: `${s?.[1]}/${num}` };
   },
-  'python-unittest': ({ module, protect }, { workspace }) => {
-    const r = docker(winPath(workspace), 'python:3.12-slim', `python -m unittest -q ${module} 2>&1 | tail -3`);
-    const ok = r.status === 0 && untouched(workspace, protect);
-    return { pass: ok, detail: (r.stdout || '').trim().split('\n').at(-1) };
+  // no pipeline here: the shell's status must be unittest's own. `run` and `clean` are seams for the unit tests.
+  'python-unittest': ({ module, protect }, { workspace, run = docker, clean = untouched }) => {
+    const r = run(winPath(workspace), 'python:3.12-slim', `python -m unittest -q ${module} 2>&1`);
+    return { pass: r.status === 0 && clean(workspace, protect), detail: (r.stdout || '').trim().split('\n').at(-1) };
   },
   'node-hidden-tests': ({ protect }, { workspace, task, fixtures }) => {
     const copy = fs.mkdtempSync(path.join(path.dirname(workspace), 'grade-'));

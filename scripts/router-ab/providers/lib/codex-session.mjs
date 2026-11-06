@@ -18,7 +18,12 @@ export function runCodexTask(ctx, task, arm, runId, env = {}) {
   ctx.ssh(`mkdir -p ${ws} ${ctx.remote}/prompts && ${fx} && echo ${b64(task.prompt)} | base64 -d > ${p1}` + (task.turns ? ` && echo ${b64(task.turns[0])} | base64 -d > ${p2}` : ''));
   const envs = Object.entries({ TAP_PORT: ctx.tapPort, MODEL: arm.model, EFFORT: arm.effort ?? 'medium', CAP: task.cap_min ?? 10, ...env }).map(([a, b]) => `${a}=${b}`).join(' ');
   ctx.ssh(`${envs} bash ${k}/codex-arm.sh ${k} ${runId} ${arm.target} ${arm.home} ${ws} ${p1} ${task.turns ? p2 : ''}`, { timeout: ((task.cap_min ?? 10) * 2 + 2) * 60_000 });
-  const m = JSON.parse(ctx.ssh(`python3 ${k}/summarize.py ${k} ${runId}`).stdout || '{}');
+  const sum = ctx.ssh(`python3 ${k}/summarize.py ${k} ${runId}`);
+  let m;
+  try { m = JSON.parse(sum.stdout); } catch { throw new Error(`no run summary: ${(sum.stderr || '').slice(-160)}`); }
+  if (typeof m.wall_s !== 'number') throw new Error('the run summary has no wall time');
+  // a seat limit in either arm says nothing about the router (and must not count as a router error)
+  if (m.throttled) throw new Error('seat throttled (429): rerun later');
   // a pooled route may place a new conversation on any seat; moving between seats within the run breaks the pairing
   let seatNote = '';
   if (arm.target === 'router') {

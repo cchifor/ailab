@@ -22,6 +22,7 @@ Exit codes:
 |---|---|
 | 0 | PASS |
 | 1 | FAIL |
+| 2 | Refused: unknown provider or task, bad `--pairs`, or nothing selected. Nothing ran |
 | 3 | RERUN (under 6 pairs a metric is outside its margin, or within half a margin of it: §9.6 takes 3 more pairs and decides on all 6, so rerun with `--pairs 6`) or INCOMPLETE (a run was invalid: a seat limit, a failover, a harness error) |
 
 **Where it runs.**
@@ -143,11 +144,15 @@ which a per-token figure would dilute.
 **What makes a run invalid.** These say nothing about the router. Such a task's verdict is INVALID, and the run is
 repeated:
 - a seat throttled (429), in either arm;
-- the router failed over between accounts mid-run, which breaks the pairing;
+- the router failed over between accounts mid-run, which breaks the pairing, or ran a Claude run on another seat than the
+  worker's login (`RAB_CLAUDE_ACCOUNT`, default `claude-2`);
 - the pairing cannot be verified: the run recorded no trajectory ids, or the router journal does not have them (the
   guard fails closed);
 - a route with several backends placed the run on another server than the direct arm's (qwen);
 - a harness error.
+
+Codex is the one route that cannot be held to the direct seat: the pool places each session on any seat. The guard holds
+each run to one seat and prints it, and the seats serve the same model.
 
 **Known deviations** (the registry's `known` entries):
 

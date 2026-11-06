@@ -16,13 +16,20 @@ import { createContext, HERE } from './core/context.mjs';
 import { evaluate, evaluateLayerA } from './core/margins.mjs';
 import { render } from './core/report.mjs';
 import { loadProviders } from './providers/index.mjs';
-import { tasksFor } from './tasks/registry.mjs';
+import { TASKS, tasksFor } from './tasks/registry.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, x, i, all) => (x.startsWith('--') ? [...a, [x.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : true]] : a), []));
 const list = (v) => (typeof v === 'string' ? v.split(',') : undefined);
-const providers = (await loadProviders()).filter((p) => !list(args.providers) || list(args.providers).includes(p.name));
+const usage = (msg) => { console.error(`gate: ${msg}`); process.exit(2); };
+const known = await loadProviders();
+const providers = known.filter((p) => !list(args.providers) || list(args.providers).includes(p.name));
 const pairs = Number(args.pairs ?? 3);
-const plan = providers.map((p) => ({ p, tasks: tasksFor(p, { only: list(args.tasks), all: !!args.all }) }));
+// a typo must not certify an untested release: refuse anything that would quietly run less than was asked for
+if (!Number.isInteger(pairs) || pairs < 1) usage(`--pairs must be a positive integer, got ${args.pairs}`);
+for (const n of list(args.providers) ?? []) if (!known.some((p) => p.name === n)) usage(`unknown provider ${n}`);
+for (const n of list(args.tasks) ?? []) if (!TASKS.some((t) => t.id === n)) usage(`unknown task ${n}`);
+const plan = providers.map((p) => ({ p, tasks: tasksFor(p, { only: list(args.tasks), all: !!args.all }) })).filter((x) => x.tasks.length);
+if (!plan.length) usage('nothing selected: no provider runs these tasks');
 
 if (args.plan) {
   for (const { p, tasks } of plan) console.log(`${p.name}: Layer (a), then ${tasks.map((t) => t.id).join(', ') || '(no tasks)'} x ${pairs} pairs ABBA`);
@@ -40,28 +47,39 @@ try {
   ctx.push(path.join(HERE, 'tasks', 'fixtures'), `${ctx.remote}/fixtures`);
   ctx.ssh(`mkdir -p -m 700 ${ctx.remote}/kit/rec ${ctx.remote}/kit/runs && (setsid nohup node ${ctx.remote}/kit/tap.mjs ${ctx.tapPort} ${ctx.remote}/kit/rec > ${ctx.remote}/tap.log 2>&1 < /dev/null &) && sleep 1 && cat ${ctx.remote}/tap.log`);
   for (const { p, tasks } of plan) {
-    ctx.log(`${p.name}: setup`); await p.setup?.(ctx);
-    ctx.log(`${p.name}: Layer (a)`);
-    const layerA = evaluateLayerA(await p.layerA(ctx));
+    let layerA = { checks: [], verdict: 'n/a' };
     const taskResults = [];
-    for (const task of tasks) {
-      const runs = [];
-      for (const { pair, arm } of abba(pairs)) {
-        const runId = `${p.name}-${task.id}-${pair}-${arm}`;
-        ctx.log(`${runId}: start`);
-        let metrics;
-        try { metrics = await p.run(ctx, task, arm, runId); } catch (e) { metrics = { pass: false, invalid: true, detail: `harness error: ${e.message}`, wall_s: null, router_errors: 0, retries: 0 }; }
-        ctx.log(`${runId}: ${metrics.pass ? 'pass' : 'FAIL'} ${metrics.detail ?? ''} (${metrics.wall_s} s)`);
-        runs.push({ pair, arm, metrics });
+    // a provider that cannot run says nothing about the router: INVALID, and the report is still written
+    try {
+      ctx.log(`${p.name}: setup`); await p.setup?.(ctx);
+      ctx.log(`${p.name}: Layer (a)`);
+      layerA = evaluateLayerA(await p.layerA(ctx));
+      let throttled = false;
+      for (const task of tasks) {
+        if (throttled) { taskResults.push({ id: task.id, rows: [], pairs: 0, verdict: 'INVALID (seat, failover or harness; rerun)', notes: ['skipped: the seat is throttled'] }); continue; }
+        const runs = [];
+        for (const { pair, arm } of abba(pairs)) {
+          const runId = `${p.name}-${task.id}-${pair}-${arm}`;
+          ctx.log(`${runId}: start`);
+          let metrics;
+          try { metrics = await p.run(ctx, task, arm, runId); } catch (e) { metrics = { pass: false, invalid: true, detail: `harness error: ${e.message}`, wall_s: null, router_errors: 0, retries: 0 }; }
+          ctx.log(`${runId}: ${metrics.pass ? 'pass' : 'FAIL'} ${metrics.detail ?? ''} (${metrics.wall_s} s)`);
+          runs.push({ pair, arm, metrics });
+          // the task is already INVALID: stop spending the seat on it
+          if (metrics.invalid) { throttled = /seat throttled/.test(metrics.detail); break; }
+        }
+        const v = evaluate(runs, task.known);
+        // a run that could not be compared (a seat limit, a failover between accounts, a harness error) says nothing about
+        // the router
+        if (runs.some((r) => r.metrics.invalid)) v.verdict = 'INVALID (seat, failover or harness; rerun)';
+        taskResults.push({ id: task.id, ...v, notes: [...v.notes, ...runs.filter((r) => !r.metrics.pass).map((r) => `${r.arm} pair ${r.pair} failed: ${r.metrics.detail ?? ''}`)] });
       }
-      const v = evaluate(runs, task.known);
-      // a run that could not be compared (a seat limit, a failover between accounts, a harness error) says nothing about
-      // the router
-      if (runs.some((r) => r.metrics.invalid)) v.verdict = 'INVALID (seat, failover or harness; rerun)';
-      taskResults.push({ id: task.id, ...v, notes: [...v.notes, ...runs.filter((r) => !r.metrics.pass).map((r) => `${r.arm} pair ${r.pair} failed: ${r.metrics.detail ?? ''}`)] });
+    } catch (e) {
+      ctx.log(`${p.name}: harness error: ${e.message}`);
+      taskResults.push({ id: '(provider stopped)', rows: [], pairs: 0, verdict: 'INVALID (seat, failover or harness; rerun)', notes: [`harness error: ${String(e.message).slice(0, 200)}`] });
     }
     results.push({ name: p.name, describe: p.describe, layerA, tasks: taskResults });
-    await p.teardown?.(ctx);
+    try { await p.teardown?.(ctx); } catch (e) { ctx.log(`${p.name}: teardown: ${e.message}`); }
   }
   const report = render({ image: ctx.image(), startedAt, providers: results });
   console.log(report.text);

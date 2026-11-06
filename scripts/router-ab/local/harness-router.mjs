@@ -22,7 +22,8 @@ for (let step = 1; step <= Number(maxSteps); step++) {
     txt = await r.text();
     j = JSON.parse(txt);
   } catch (e) {
-    w({ kind: 'model', step, status: r?.status ?? 0, error: String(e).slice(0, 200), body: txt.slice(0, 300) });
+    // no response at all is the harness's problem, not a router error; a response that does not parse is the router's
+    w(r ? { kind: 'model', step, status: r.status === 200 ? 502 : r.status, error: String(e).slice(0, 200), body: txt.slice(0, 300) } : { kind: 'client-error', step, error: String(e).slice(0, 200) });
     break;
   }
   const msg = j.choices?.[0]?.message ?? {};
