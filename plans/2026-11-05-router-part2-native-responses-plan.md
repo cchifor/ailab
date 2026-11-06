@@ -1,4 +1,4 @@
-<!-- status: proposed (plan, revised after codex rounds 1 and 2; no llm-router code changed yet) -->
+<!-- status: proposed (plan, revised after codex rounds 1-3; no llm-router code for it merged yet) -->
 # llm-router Part 2: native Responses pass-through for `qwen3.8-27b` on cloud2 (native-first step 1, the thin slice)
 
 **Date:** 2026-11-05 · **Scope:** `cchifor/llm-router` at `origin/main` `247b19f`, after Part 1
@@ -139,6 +139,22 @@ the streamed `output_item.done` items Codex consumes for every supported row; `p
 `tool_choice`; `text.format` schema enforcement (checked against the schema, not a 200); image understanding,
 reproducibly, with the result logged.
 
+**Merge against activation** (codex round 3, finding 6). These gates are all before the **canary**, not before a merge. A
+default-off first merge needs the deterministic coverage, the node 24 memory checks, fail-closed activation and the
+regressions for the existing Codex and Claude paths, and claims no live support.
+
+| Gate | In docker, with fixtures | Needs the real deployment |
+|---|---|---|
+| 1. Published identity | Reader, matching and fail-closed tests | Publishing and verifying cloud2's document (cloudlab), no inference |
+| 2. Byte fidelity | Replay and assertions | The first recordings from cloud2, and Codex's replay bodies |
+| 3. Render equality | All of it: pinned vLLM preprocessing, tokenizer, template, no weights | Only the separate cache measurement |
+| 4. Transport and session | Synthetic 400/429/503, exhaustion, truncation, timers, router cancellation | Backend cleanup, generation-config behaviour |
+| 5. Concurrent compaction | Scripted client mechanics | Semantic and resource qualification |
+| Feature qualification | Parsing and replay | Schema enforcement, forced choice, image understanding |
+
+Live gates run on an **isolated qualification route**, created for them and removed after: the canary route exists only once
+every gate has passed (§7.3).
+
 ### 1.5 The manifest entry
 
 ```jsonc
@@ -198,7 +214,7 @@ in `contracts/journal.ts`, a contract kit per extension point).
 | `runtime/backend-identity-registry.ts` | runtime (implementation registry) | identity readers by engine; a cache with freshness | `register(reader) → dispose`, `identity(account, model) → BackendIdentity \| unknown`, `invalidate(accountId)` | contracts |
 | `plugins/wires/` (required) | registry plugin | provides `routerWires` (both registries and the planner's inputs); validates `Account.wire` and the route keys; invalidates identities on config change and disposal | service | runtime registries |
 | `plugins/qualification-vllm/` | implementation | registers the vLLM manifest entries (data in the repository) and the vLLM identity reader | none | `routerWires` |
-| `adapters/backend/vllm.ts` | adapter | reads `/version` and `/v1/models` (never a request that can load a model) | `BackendIdentityReader` | contracts |
+| `adapters/backend/vllm.ts` | adapter | composes the two reads into one identity: `/version` and `/v1/models` (never a request that can load a model), and the published deployment metadata | `BackendIdentityReader` | contracts |
 | `adapters/providers/native-responses.ts` | adapter | the native transport | an `InferenceProvider` path, typed outcomes (§3.4) | contracts, `modules/wire`, `modules/responses-tap` |
 | `plugins/provider-local/` (changed) | provider plugin | `support.native: ['openai-responses']`; opens the native transport for a native plan | descriptor | adapters |
 | `plugins/api-openai/` (changed) | front door | the native envelope for a native-only route; raw bytes kept only for such routes; the writer for `native-frames` output | HTTP | engine, `routerHttp` |
@@ -245,17 +261,18 @@ placement across the change.
   **permanent and request-caused** (`compat`'s `PERMANENT`/`REQUESTED`), except `wire:identity_unknown`, which is
   transient (the identity may be read on the next try), so with no target left the client gets a 400 naming the feature,
   or a retryable 503 when only the identity is missing.
-- **Identity** (codex round 1, finding 10): `BackendIdentity = { engine, version, model, checkpoint, maxModelLen,
-  templateDigest?, parsers?, observedAt, source: 'api' | 'host-metadata', generation }`.
+- **Identity** (codex round 1, finding 10; shapes aligned in round 3, finding 4): `BackendIdentity = { fingerprint: { engine,
+  version, model, checkpoint, maxModelLen, templateDigest, parsers, generationConfig }, generation, observedAt }`. The
+  manifest key **is** the fingerprint. `generation` is not in the key: it is freshness only, and invalidates the cache.
   - **Observed, never declared** (codex round 2, finding 3): an identity is the observed values of two readers. The
     vLLM API reader reads `/version` and `/v1/models` (engine, version, served model, checkpoint root,
     `max_model_len`). The **deployment-metadata reader** reads the document cloudlab publishes per backend (§1.4 gate 1:
     parsers, template digest, generation-config limits, and a generation counter bumped on every restart or
     reconfiguration). Every key field of the manifest entry must be observed; a field only declared, or a document that
     cannot be read, makes the identity `unknown` and the wire ineligible. A checklist is not a substitute.
-  - The generation counter is part of the key: a restart or reconfiguration changes it, and the wire stays ineligible
-    until the re-qualification run writes a manifest entry for the new generation (or the deployment's fingerprint shows
-    that nothing qualified changed).
+  - A restart or reconfiguration changes `generation`, which drops the cached identity. A new read with an **unchanged
+    fingerprint** stays eligible; a changed one is ineligible until a re-qualification run writes its manifest entry.
+    Each backend has its own observed identity: cloud3 sharing the model name qualifies nothing.
   - The cache holds an identity for at most 60 seconds (a cheap read; the generation counter makes staleness
     detectable), and is invalidated on an account's `baseUrl` change, on a connection failure to it, and on the plugin's
     disposal. An unreadable identity is `unknown`, never assumed.
@@ -301,12 +318,13 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    convention for an inspector, whose missing plugin attaches nothing: an inspector only reads, a probe gates. Accounts
    without `availability` are untouched, which is the default-off claim. cloud1 is extra capacity, so doubt costs
    throughput, never correctness, and the drain cannot be lost to a probe fault. The cost to watch: a route whose
-   targets all opted in goes unserved while the probe is down, hence the alert (`unknown` over 5 minutes by day).
+   targets all opted in goes unserved while the probe is down, hence the alerts (`unknown` over 5 minutes by day,
+   `model_not_resident` over 20 minutes by day).
 2. **The scheduler enforces the contract, not the probe.** Fixed-rate ticks, skipped while a check runs; a deadline
    below the interval, with abort; a throw, a timeout or a malformed observation is `unknown` (`probe_failed`); a model
    absent from an observation is `unknown`; the scheduler owns the timestamps; a verdict older than `maxAgeMs`
    (default 3 × `intervalMs`) is `unknown` (`stale`); a late result from an older configuration or registration
-   generation is dropped. Hysteresis: to excluded at once, back only after 2 distinct completed checks, per model. So
+   generation is dropped. Hysteresis: to excluded at once, back only after 2 consecutive completed `available` checks, per model. So
    exclusion takes effect within `intervalMs` + the deadline (3 s + 2 s) after llama-swap lists the pending request, plus
    the requests already past selection.
 3. **The capacity rule** (replacing this section's earlier 503 `MODEL_UNAVAILABLE` and its matrix). Today a route with
@@ -315,10 +333,18 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    **occupied** (`concurrency_exhausted`), **temporarily unavailable** (the availability reasons,
    `availability_unknown`, what `BUSY` already holds) or **out** (offline, disabled, a permanent request refusal). When no
    target is eligible and at least one is occupied or temporarily unavailable, the answer is the **retryable** busy 429.
-   **A target is classed by its worst reason:** `evaluate()` keeps the permanent checks ahead of availability, so a
-   target that would refuse the request anyway is out, and the 400 naming the refusal stands when no target could ever
-   serve it. The queue keeps its one-pool rule, a strict binding keeps its own answer, `already_attempted` counts as busy
-   for the failover it follows, and a transition to available wakes the pool's waiters. Each row is a test:
+   **A target is classed over its complete reason set** (`evaluate()` accumulates them, so check order decides nothing; codex
+   round 3, finding 5): any permanent, request-caused, offline or disabled reason makes it **out**; otherwise any availability
+   reason makes it **temporarily unavailable**, even with a full slot, because a free slot alone cannot restore it; otherwise
+   `concurrency_exhausted` makes it **occupied**. So `tools_unsupported + swap_pending + concurrency_exhausted` is out,
+   `offline + concurrency_exhausted` is out, and `swap_pending + concurrency_exhausted` is temporarily unavailable. The 400
+   naming a refusal stands when no target could ever serve the request. The queue keeps its one-pool rule, a strict binding
+   keeps its own answer, the last retryable fault keeps its precedence, and `already_attempted` counts as busy for the failover
+   it follows. **Waiters:** admission wakes on slots and queue changes, and its pump needs capacity in the queued pool, so a
+   transition to available is a new input to it: `routerAvailability` calls one engine hook that re-evaluates the whole chain
+   of each waiter, one queued on another pool included. **This rule corrects a route with no `availability` too** (offline +
+   full today is a non-retryable 429), so that part is an intentional capacity correction, declared and tested, not default-off.
+   Each row is a test:
 
    | Targets | Answer |
    |---|---|
@@ -395,11 +421,14 @@ Responses request schema in the qualification run. A request carrying one is ski
   error module. A stream yields `NativeFrame`s and ends with exactly one `NativeTerminal`: `completed` or `incomplete`
   becomes the attempt's finish (with the raw status kept), `failed` becomes a fault with the upstream's code, **never a
   finish** (`inference:760` treats a finish as success). Nothing broadens the retry policy.
-- **The HTTP head:** as today, the front door sends the 200 head and `: ok` when the attempt is selected, before the
-  upstream answers. An upstream HTTP error then reaches the client as the router's `response.failed` with the upstream's
-  status and code (`router-terminal`, journaled), the convention the codex native path uses today. Verbatim upstream
-  status codes would need the head to wait for the upstream's, a change to the writer for every protocol: deferred, and
-  declared here as the slice's one deviation from verbatim. **Its effect on Codex:** Codex retries a `response.failed`
+- **The HTTP head, as llm-router #145 made it** (codex round 3, finding 1): the adapter yields the existing `head` event as
+  soon as the upstream accepts, ahead of its lifecycle hold and with `{}` when no header qualifies, and the front door's
+  head waits for `Execution.head`, the first event or failure, or 30 s. There is no second writer. This wire declares its own
+  response-header policy through the same allowlist helper (vLLM sends none of the Codex headers today, so it relays none),
+  and `TurnStateSeal` applies to any token a wire relays. Upstream HTTP statuses are still not passed through: the writer
+  sends 200 and an upstream rejection reaches the client as the router's `response.failed` (`router-terminal`, journaled),
+  the convention of the Codex native path, declared as the slice's one deviation from verbatim. **The first flush is the
+  first upstream SSE frame,** never the HTTP head or `: ok`, so a failure before it can still fail over. **Its effect on Codex:** Codex retries a `response.failed`
   whose code it does not know (`responses_error.rs:101`), so an upstream rejection that is not retryable over HTTP
   can be retried by Codex after the conversion; §1.4 gate 4 records the behaviour, and no code is rewritten to hide it.
 - **One read loop, governed by downstream backpressure:** read a chunk, split frames (bounded: one frame at most 4 MiB,
@@ -412,7 +441,16 @@ Responses request schema in the qualification run. A request carrying one is ski
   `native` events itself, so nothing is counted twice (rounds 1-2, finding 12/5). **This extends Part 1's contract**,
   which reports only what the adapter does not yield and has the engine stamp `delivered: false`: with this slice the
   adapter states `delivered` and the engine stops stamping it, `BoundInvocation.observe`'s comment loses "never output",
-  and `Observation` gains the item id (`contracts/stream.ts`, PR 1 here).
+  and `Observation` gains the item id (`contracts/stream.ts`, PR 1 here). Three more consequences of llm-router #142 and #143
+  (codex round 3, finding 2):
+  - **The guard attaches to tapped protocols only.** It declines every `scope.native` today. The new protocol is allowed by
+    name; untapped Codex-native attempts stay excluded.
+  - **The reasoning hold does not apply to native attempts.** `holdReasoningChars` buffers `reasoning` and `usage` events, and
+    a native frame releases it, so it protects nothing here and the engine ignores it on a native attempt. The short window
+    still detects. So a native loop cannot fail over once a frame has gone out: `enforce` ends that attempt, and the client
+    gets `response.failed`. Both qwen accounts are in `observe` today, so this slice promises no automatic recovery.
+  - **Commitment and timer phase separate.** The engine's one `emitted` flag today means both "no failover" and "use the idle
+    timer". This slice splits it into the first flush (commitment) and the first model output (phase), as the next point says.
 - **The hold rule and the timers** (finding 8): `response.created`, `queued` and `in_progress` frames are held until the
   first other frame or `holdMs` after the first held frame (canary: 30 s), whichever comes first; held frames are
   bounded (64 KiB). The hold timer races the pending upstream read, so it fires while the read waits. **Three moments are
@@ -464,14 +502,19 @@ limiter never on local wires; stream inspectors on the tap's observations.
   (an array of empty objects parsed at about 21× its size in codex's probe). So the pre-scan `scanTopLevel` (one pass
   over the raw bytes, no allocation per node) counts the body's nodes and depth before it is parsed, and a native body
   over the structural limits (at most 262,144 nodes and depth 64, sized from the recorded Codex bodies with a margin) is
-  refused with 413 by name. With the node count bounded, the parsed heap is bounded by `nodes × 96 bytes + raw bytes`
-  (each limit measured on node 24 with adversarial shapes before release).
-- **Accounting:** a native request is charged `raw + parsedBound + patchedCopy` (the raw bytes kept for patching, the
-  bound above, one patched copy per attempt; a retry's copy replaces the previous one) against the existing body
-  budget, from admission through the queue wait, the attempt, the bounded close and drain, as `RouterHttp.hold` does.
+  refused with 413 by name.
+- **The allocation model** (codex round 3, finding 3): the earlier `nodes × 96 bytes + raw bytes` was not a bound. A long
+  mostly-ASCII string with one non-Latin-1 character costs two bytes per character, which codex measured as about 16 MiB of
+  parsed heap for an 8 MiB body, and the kernel decodes the body before parsing. So the model is, per request:
+  `raw + decoded (2 × raw) + parsed (nodes × 96 + 2 × raw) + patched (raw) × overlapping attempts`. Attempts can overlap,
+  because the engine moves on after a close timeout while the old iterator may live on, so `overlapping attempts` is
+  `maxAttempts`, not one. The factors are validated on node 24 with adversarial shapes before release, and the charge is
+  reserved **before** the allocation it covers.
+- **Accounting:** that charge goes against the existing body budget, from admission through the queue wait, the attempt, the
+  bounded close and drain, as `RouterHttp.hold` does.
 - **Translated limit:** a body over 2 MiB on a translated route is a 413, as today (the rollback envelope of §4).
-- **Tests:** chunked bodies, a saturated queue with large bodies waiting, drain releasing the reservation, and the
-  measured heap for a 16 MiB body against its charge.
+- **Tests:** chunked bodies, a saturated queue with large bodies waiting, drain releasing the reservation, a close timeout
+  with attempts overlapping, and the measured heap for a 16 MiB body against its charge, a mostly-ASCII two-byte string included.
 
 ## 6. Capture
 
@@ -516,17 +559,18 @@ Then the long runs and the 48-hour watch (native-first §11).
 
 ## 8. Delivery
 
+Three PRs (codex round 3, finding 7), each with its fixtures and tests, extending the existing `InferenceProvider`,
+`InferenceEvent`, `Execution.head` and error handling rather than a parallel transport framework:
+
 | PR | Contents | Behaviour change |
 |---|---|---|
-| 1 | contracts (`wire.ts`, `qualification.ts`, `backend.ts`, `mutation.ts`), `modules/wire`, `modules/qualification`, `modules/responses-tap`, facts | none (pure modules and tests) |
-| 2 | the registries and `plugins/wires`, `plugins/qualification-vllm`, the vLLM identity reader, config keys and validators, the engine's planner calls and skip reasons, `request.wire` | none until a route sets `nativeWires` |
-| 3 | the native transport, provider-local's native path, the front door's envelope and writer, admission | none until configured |
-| 4 | §1.4's fixtures, the real-client docker tests, the golden suite | none |
-| 5 (own PR, after Part 1) | the availability registry, scheduler and service, the capacity rule, the llama-swap probe (§2.6) | none until an account sets `availability` |
+| 1 | Foundations: the contracts, the scanner and patcher, facts, qualification matching (an internal file of `modules/wire`, no module of its own), the responses tap | none (pure modules and tests) |
+| 2 | One default-off integration: registries and readers, validation, the transport in `provider-local`, the engine's planner calls and split commitment, the raw writer and admission, the guard's attachment, the head and seal regressions, the real-client docker tests | none until a route sets `nativeWires` |
+| 3 (independent, own PR) | Availability: registry, scheduler, service, the llama-swap probe, capacity classification, waiter re-evaluation | the capacity correction of §2.6 for every route; the rest none until an account sets `availability` |
 
-One release for PRs 1-4 (5 may follow), through the runbook's flow up to the ailab roll PR, then the gate (Codex, Claude
-and qwen: Layer (a) plus short Layer (b)): nothing changes for any route at the roll. The canary config only on the
-owner's go, after the gate and §1.4.
+One release for PRs 1-2 (3 may go first), through the runbook's flow up to the ailab roll PR, then the gate (Codex, Claude
+and qwen: Layer (a) plus short Layer (b)). Deployment metadata and the qualification evidence are collected alongside; the
+canary configuration only on the owner's go, after the gate and every §1.4 gate.
 
 ## 9. Codex cross-validation
 
@@ -586,4 +630,16 @@ The 200-head convention's effect on Codex retries is recorded (§3.4) and tested
 answers above: the 503 mapping of round 1's finding 11 and the exclusion-result matrix of round 2's finding 9 give way to
 the capacity rule, and `unknown` is now fail-closed.
 
-**Round 3:** on this revision.
+### 9.4 Round 3 on the revision: approve with changes, 3 high, 3 medium, 1 low
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | §3.4 predates llm-router #145's head | The wire yields the existing `head` event; `Execution.head`; the first flush defined; no second writer (§3.4) |
+| 2 | #142 and #143: guard attachment, the hold, split `emitted` | Attach by protocol; no reasoning hold on native attempts; commitment and phase split (§3.4) |
+| 3 | The memory formula is not a bound | An allocation model with string width, decoding and overlapping attempts, reserved before allocating (§5) |
+| 4 | Identity shapes disagree | The manifest key is the fingerprint; `generation` is freshness only; reader composition; per-backend identity (§2.4) |
+| 5 | "Worst reason" needs precedence and wakeups; default-off claim | Classification over the reason set; an engine hook re-evaluates waiters; the capacity correction declared (§2.6) |
+| 6 | Merge gates against deployment gates | A table per gate; an isolated qualification route (§1.4) |
+| 7 | Fewer PRs | Three PRs (§8) |
+
+**Round 4:** not planned unless the implementation finds something high; each PR has its own review.
