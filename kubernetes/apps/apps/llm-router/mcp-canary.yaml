@@ -28,7 +28,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: acceptance
-          image: registry.chifor.me/llm-router/router@sha256:62a7b326b79935873bd6c7aa040953fe7d7036430e04c1fa07ec0d8334e709e8
+          image: registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3
           command: [node, /checks/mcp-acceptance.mjs]
           env:
             - name: ROUTER_MCP_ACCEPTANCE_TOKEN

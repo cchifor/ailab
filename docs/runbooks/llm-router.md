@@ -3853,27 +3853,24 @@ rollback; do not bypass it. This update has no schema migration, so image rollba
 require restoring the database or changing the existing reasoning-replay settings. Preserve the backup if a
 separate data recovery is needed.
 
-## Management MCP release (2026-11-05, llm-router #140)
+## Management MCP release (2026-11-06, llm-router #140 and #141)
 
-This deployment depends on [source PR #140](https://git.chifor.me/cchifor/llm-router/pulls/140)
-through Gitea's issue dependency. Source and deployment reviews can proceed in parallel;
-the source must merge before this rollout. The owner authorized a manual merge with current-head Codex
-approval during the Claude quota outage; the worker's normal merge API request was refused by Gitea
-(`405 User not allowed to merge PR`), so that exception still requires an owner permitted by branch protection. It includes #139's provider argument validation and adds the optional
-management MCP plugin at `https://router.chifor.me/admin/mcp`. Existing management bearer credentials and
-session/CSRF checks apply; inference API keys receive 403. No new credential issuer or OAuth flow is added.
-See [the MCP guide](https://git.chifor.me/cchifor/llm-router/src/commit/cdd12f364d35e962860e3dfc4e51d120a7758b49/docs/guides/mcp.md)
-for tools, connection settings, roles, proposal approvals, cancellation and limits.
+Adds the management MCP plugin at `https://router.chifor.me/admin/mcp`, with the saved-key onboarding
+improvements from #139 and the request-lifecycle review fixes from #141. Existing management bearer
+credentials and browser CSRF/role/namespace checks apply; inference keys are refused. Changes and paid
+tests require reviewed proposals. No model translates MCP arguments, so the hosted Anthropic connection
+passes a saved `secretRef` with `baseUrl` omitted. See [the MCP guide](https://git.chifor.me/cchifor/llm-router/src/commit/aec919824f112d5f2cf5f6830a8f896b921c7045/docs/guides/mcp.md).
 
-**Provenance.** Source `cdd12f364d35e962860e3dfc4e51d120a7758b49`; source CI run 121917 passed and the
-Codex reviewer approved that head after the hard-timeout correction. Local `pnpm verify` passed 2,160 tests
-with 14 PostgreSQL-dependent skips, typecheck and build; CI supplies PostgreSQL. Both the compiled app and
-frozen production archive passed the MCP production smoke. Archive `router-0.1.0-20261105-mcp.tar.gz`, SHA-256
-`2f8d73aacae80ad8600e917a727b890f5125cb4a5c1f968773bf8661708fd07f`, is Relay v0.2.0 asset 493 (checksum 494).
-Packaging commit `990f339804a38cc5e8ce26cfdb32443eb3762a96`, branch `release/router-20261105-mcp-image`,
-[run 121922](https://git.chifor.me/cchifor/relay/actions/runs/121922) passed the exact non-root/read-only image's
-production smoke and backup checks. Its [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-121922.json)
-pins `registry.chifor.me/llm-router/router@sha256:62a7b326b79935873bd6c7aa040953fe7d7036430e04c1fa07ec0d8334e709e8`.
+**Provenance.** Source `aec919824f112d5f2cf5f6830a8f896b921c7045`, reviewed by both Codex and Claude in
+llm-router #141. Local `pnpm verify` passed 2168 tests (14 PostgreSQL-dependent local skips), production
+smoke and the compiled MCP acceptance fixture. Source CI run 122318 remains a pre-merge gate; its initial
+attempt hit the runner's disk-reserve limit in existing image tests and was rerun without code changes.
+Archive `router-0.1.0-20261106-mcp-fix.tar.gz`, SHA-256
+`508f35da061c455322d567ffd1b831abae5cf4f5b552a2f2d6164782ba12f976`, is Relay v0.2.0 asset 496 (checksum 497).
+Packaging commit `d866bbbaee1cd92d3c8f43c3d6a835e6d474e690`, branch `release/router-20261106-mcp-fix`,
+[run 122319](https://git.chifor.me/cchifor/relay/actions/runs/122319) passed the exact non-root/read-only image's
+production smoke and backup checks. Its [receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-122319.json)
+pins `registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3`.
 The Node runtime digest is unchanged. This cumulative release supersedes the #139-only deployment in #1615.
 
 **Live acceptance.** The one-shot Job `router-mcp-acceptance-20261105` uses the same image and talks to the
