@@ -4,10 +4,11 @@ metadata:
   name: router-mcp-key-removal-20261106
   namespace: llm-router
   annotations:
+    # Recreated runs fail closed on absent targets; prune this Job before any image/script change.
     kustomize.toolkit.fluxcd.io/force: "enabled"
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 600
+  activeDeadlineSeconds: 600 # eight RPCs at most 60s each, plus 120s scheduling/process margin
   template:
     metadata:
       labels:

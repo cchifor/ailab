@@ -24,7 +24,7 @@ export async function runRemoval({ url, token, targets = TARGETS, log = console.
   const emit = (event, fields = {}) => log(JSON.stringify({ event, sessionId, ...fields }));
   const rpc = async (method, params) => {
     const response = await fetch(url, {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(95_000),
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60_000),
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-03-26' },
       body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }),
     });
@@ -60,13 +60,13 @@ export async function runRemoval({ url, token, targets = TARGETS, log = console.
     }
     for (const target of targets) {
       targetRef = target.ref;
-      const id = target.ref.slice('store:'.length);
-      const proposed = await call('remove_secret', { id });
+      const secretId = target.ref.slice('store:'.length);
+      const proposed = await call('remove_secret', { id: secretId });
       const proposalId = checkRemoval(proposed, target);
       emit('mcp.key_removal_proposal_verified', { ref: target.ref, proposalId });
       const applied = await call('router_resolve_proposal', { proposalId, decision: 'approve' });
       requireThat(applied.outcome === 'approved', 'Removal requires another review; inspect the durable session');
-      requireThat(applied.result?.data?.id === id, 'Unexpected removal result');
+      requireThat(applied.result?.data?.id === secretId, 'Unexpected removal result');
       emit('mcp.key_removed', { ref: target.ref });
     }
     targetRef = undefined;

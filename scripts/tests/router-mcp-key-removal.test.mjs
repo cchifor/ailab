@@ -12,6 +12,7 @@ test('approves only the complete exact single-key removal diff', () => {
   assert.equal(checkRemoval(proposal(targets[0]), targets[0]), 'fixture-proposal');
   for (const change of [
     p => { p.truncated = true; },
+    p => { p.proposal.kind = 'applied'; },
     p => { p.proposal.diff.push({ op: '-', text: 'account unrelated' }); },
     p => { p.proposal.diff[0].op = '+'; },
     p => { p.proposal.diff[0].text = 'secret sec_other (anthropic)'; },
@@ -22,7 +23,7 @@ test('approves only the complete exact single-key removal diff', () => {
   }
 });
 
-function mockRouter(t, { used = false, refreshed = false, transportFailure = false } = {}) {
+function mockRouter(t, { used = false, refreshed = false, transportFailure = false, failSecondApproval = false } = {}) {
   const calls = [], remaining = [...targets, { ref: 'store:sec_unrelated', label: 'new key' }];
   let current;
   t.mock.method(globalThis, 'fetch', async (_url, options) => {
@@ -37,6 +38,7 @@ function mockRouter(t, { used = false, refreshed = false, transportFailure = fal
     else if (name === 'remove_secret') { current = targets.find(s => s.ref === `store:${args.id}`); assert(current); result = proposal(current); }
     else if (name === 'router_resolve_proposal') {
       assert.equal(args.decision, 'approve'); assert.equal(args.proposalId, 'fixture-proposal');
+      if (failSecondApproval && current.ref === targets[1].ref) return Response.json({ result: { isError: true } });
       if (refreshed) result = { outcome: 'review_required', proposal: { proposalId: 'refreshed' } };
       else { remaining.splice(remaining.findIndex(s => s.ref === current.ref), 1); result = { outcome: 'approved', result: { data: { id: current.ref.slice(6) } } }; }
     } else assert.fail(`Unexpected tool ${name}`);
@@ -77,4 +79,15 @@ test('transport failures never expose their text or the management credential', 
   assert(!log.join('').includes('sensitive-transport-detail'));
   assert(!log.join('').includes('fixture-management-token-never-log'));
   assert.equal(JSON.parse(log.at(-1)).reason, 'Transport or response failure');
+});
+
+// Never infer that a missing target was deleted by this run or replay a partial approval.
+test('a partial failure preserves the remaining key and an accidental rerun refuses before mutation', async t => {
+  const { calls, remaining } = mockRouter(t, { failSecondApproval: true }), log = [];
+  await assert.rejects(runRemoval(options(log)));
+  assert.deepEqual(remaining.map(s => s.ref), [targets[1].ref, 'store:sec_unrelated']);
+  const previousCalls = calls.length;
+  await assert.rejects(runRemoval(options(log)));
+  assert.deepEqual(calls.slice(previousCalls), ['router_open_session', 'list_secrets']);
+  assert.equal(JSON.parse(log.at(-1)).reason, 'Expected saved key is missing or duplicated');
 });

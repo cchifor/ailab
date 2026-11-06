@@ -3945,3 +3945,11 @@ untouched; no provider discovery or inference runs. The management token stays i
 only safe phases/references, and the durable session plus `secret.deleted` audits remain available.
 Removal is irreversible and was explicitly requested; the user will enter a new key through the UI.
 Clean up all three temporary Jobs, script ConfigMaps and their two network policies after verified removal.
+
+A partial run deliberately fails closed on replay: an absent target is not assumed to be a successful
+delete by this Job. Inspect the durable session, deletion audits and current saved-key metadata first;
+if exactly one deletion completed, use a newly reviewed recovery Job scoped to the remaining authorized
+reference. Do not replay approvals or edit this Job in place. The eight RPCs each have a 60-second timeout
+(480 seconds total), below the 600-second pod deadline. Flux force is required by repository policy;
+a recreated Job refuses missing targets. Land cleanup before any image or script change. The real
+compiled MCP fixture confirmed `remove_secret` returns approval-kind proposals for both saved keys.
