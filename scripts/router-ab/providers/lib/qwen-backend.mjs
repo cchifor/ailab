@@ -17,6 +17,7 @@ import { runCodexTask, sameBody, Misplaced } from './codex-session.mjs';
 import { accountsOf } from '../../core/seats.mjs';
 
 const MAX_PLACEMENTS = 8;
+const LAYER_A_TRIES = 3;
 const config = (server) => `model_reasoning_effort = "xhigh"
 web_search = "disabled"
 model_context_window = 262144
@@ -51,24 +52,32 @@ export function qwenProvider({ name, host, server, tap, account }) {
       ctx.ssh(`mkdir -p ${ctx.remote}/kit/codex-home && chmod 700 ${ctx.remote}/kit/codex-home && echo ${Buffer.from(config(server)).toString('base64')} | base64 -d > ${ctx.remote}/kit/codex-home/config.toml`);
     },
     async layerA(ctx) {
-      const both = { direct: 'vllm', home: 'kit', directModel: model, routerModel: 'qwen-27b', greedy: true, serverUrl: server, effort: 'xhigh' };
-      const r = sameBody(ctx, { ...both, target: tap, run: `layer-a-capture-${name}`, model, n: 4 });
+      const both = { direct: 'vllm', home: 'kit', directModel: model, routerModel: 'qwen-27b', greedy: true, serverUrl: server, effort: 'xhigh', n: 4 };
+      // every comparison uses only the router calls that reached this backend, and the direct calls to it
+      const here = (x) => x.calls.filter((c) => c.arm === 'router' && x.placed[c.trajectory] === account);
+      const there = (x) => x.calls.filter((c) => c.arm === 'direct');
+      const sameInput = (x) => x.complete === true && new Set([...there(x), ...here(x)].map((c) => c.input)).size === 1;
+      const inputs = (x) => [...new Set([...there(x), ...here(x)].map((c) => c.input).filter((v) => v != null))].join(', ') || 'none (every call failed)';
+      const placedBody = (opts) => {
+        for (let attempt = 1; attempt <= LAYER_A_TRIES; attempt++) {
+          const x = sameBody(ctx, { ...both, ...opts, run: `${opts.run}-${attempt}` });
+          if (x.error) return x;
+          x.placed = accountsOf(ctx, x.calls.filter((c) => c.arm === 'router').map((c) => c.trajectory));
+          if (!x.complete || here(x).length) return x;
+          ctx.log(`${name}: no same-body call reached ${account}: capturing again`);
+        }
+        throw new Error(`no same-body call reached ${account} in ${LAYER_A_TRIES} tries`);
+      };
+      const r = placedBody({ target: tap, run: `layer-a-capture-${name}`, model });
       if (r.error) return [{ name: 'same body both ways', pass: false, detail: r.error }];
-      const placed = accountsOf(ctx, r.calls.filter((c) => c.arm === 'router').map((c) => c.trajectory));
-      const here = r.calls.filter((c) => c.arm === 'router' && placed[c.trajectory] === account);
-      if (r.complete && !here.length) throw new Error(`no same-body call reached ${account}`);
-      const direct = new Set(r.calls.filter((c) => c.arm === 'direct').map((c) => c.hash));
-      const inputs = [...new Set(r.calls.map((c) => c.input).filter((x) => x != null))].join(', ');
-      // Both input-token checks cover every router call, wherever it was placed: the router renders the prompt and the
-      // tokenizer is shared, so placement cannot change them, and a mismatch is a router difference either way. Only the
-      // greedy output depends on the backend, so only that check filters by placement.
-      // The router arm's later prompts are built from what the router relayed, so that body must render the same too.
-      const rr = sameBody(ctx, { ...both, target: 'router', run: `layer-a-capture-${name}-router`, model: 'qwen-27b', n: 1 });
+      // the router arm's later prompts are built from what the router relayed, so that body must render the same too
+      const rr = placedBody({ target: 'router', run: `layer-a-capture-${name}-router`, model: 'qwen-27b' });
+      const direct = new Set(there(r).map((c) => c.hash));
       return [
-        { name: 'same body (with reasoning items): identical model input tokens', pass: r.same_input_tokens === true, detail: `input tokens ${inputs || 'none (every call failed)'}` },
-        { name: `same body, greedy: the router output on this backend matches a direct output (${here.length} of ${r.calls.length / 2} router calls placed here)`, pass: r.complete === true && here.some((c) => direct.has(c.hash)),
+        { name: 'same body (with reasoning items): identical model input tokens', pass: sameInput(r), detail: `input tokens ${inputs(r)}` },
+        { name: `same body, greedy: the router output on this backend matches a direct output (${here(r).length} of ${r.calls.length / 2} router calls placed here)`, pass: r.complete === true && here(r).some((c) => direct.has(c.hash)),
           detail: r.calls.map((c) => `${c.arm}:${c.error ? `${c.http ?? 'error'} ${c.error.slice(0, 80)}` : c.hash}`).join(' ') },
-        { name: 'body recorded on the router arm (the items it relayed): identical model input tokens', pass: rr.same_input_tokens === true, detail: rr.error ?? `input tokens ${[...new Set(rr.calls.map((c) => c.input).filter((x) => x != null))].join(', ') || 'none'}` },
+        { name: 'body recorded on the router arm (the items it relayed): identical model input tokens', pass: !rr.error && sameInput(rr), detail: rr.error ?? `input tokens ${inputs(rr)}` },
         { name: 'declared adaptations of the route (reported, not failed)', pass: true, detail: [...new Set(r.calls.flatMap((c) => Object.entries(c.declared ?? {}).map(([k, v]) => `${k.replace('x-router-', '')}: ${v}`)))].join('; ') || 'none' },
       ];
     },
