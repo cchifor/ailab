@@ -681,3 +681,76 @@ tests:
       - eval_time: 4m
         alertname: LlmRouterProviderExhausted
         exp_alerts: []
+
+  # ------------------------------------------------------------ an account failing every attempt
+  - interval: 1m
+    name: an account failing every attempt pages after 5m; a flaky one, a limited one, cancelled streams, a local server and one stray failure do not
+    input_series:
+      # The 2026-11-06 shape: every attempt on one account fails, and none completes.
+      - series: 'llm_router_attempts_total{job="llm-router",account="anthropic-2",provider="anthropic",outcome="failed",code="upstream"}'
+        values: "0+1x40"
+      # Failing often, and serving too: LlmRouterFailureRatioHigh's business.
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex-2",provider="codex",outcome="failed",code="upstream"}'
+        values: "0+1x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex-2",provider="codex",outcome="complete"}'
+        values: "0+1x40"
+      # At its limit: LlmRouterAccountLimited's business, in either spelling of the code.
+      - series: 'llm_router_attempts_total{job="llm-router",account="claude-5",provider="claude",outcome="failed",code="RATE_LIMITED"}'
+        values: "0+1x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex-3",provider="codex",outcome="failed",code="rate_limited"}'
+        values: "0+1x40"
+      # The client went away: says nothing about the account.
+      - series: 'llm_router_attempts_total{job="llm-router",account="codex",provider="codex",outcome="failed",code="CANCELLED"}'
+        values: "0+1x40"
+      # A model server powered off at night, by design: upstream-health skips it.
+      - series: 'llm_router_attempts_total{job="llm-router",account="lan-192.168.0.26-8080",provider="local",outcome="failed",code="unavailable"}'
+        values: "0+1x40"
+      # Two failures on a quiet account: under the floor.
+      - series: 'llm_router_attempts_total{job="llm-router",account="anthropic-3",provider="anthropic",outcome="failed",code="upstream"}'
+        values: "0 0 0 1 2 2x36"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LlmRouterAccountFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LlmRouterAccountFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              account: anthropic-2
+              provider: anthropic
+            exp_annotations:
+              summary: "llm-router account anthropic-2 is failing every attempt"
+              description: >-
+                Account anthropic-2 (anthropic) has failed at least 3 attempts in 30 minutes and
+                completed none. Its Status page entry can still say ready, and a pool that holds it
+                keeps sending it its share. Read the code on the Activity page: an upstream 404 is
+                the account's base URL or model, a 401 its key. Runbook:
+                docs/runbooks/llm-router.md § Account failing every attempt.
+
+  - interval: 1m
+    name: an account that serves again stops paging
+    input_series:
+      - series: 'llm_router_attempts_total{job="llm-router",account="anthropic-2",provider="anthropic",outcome="failed",code="upstream"}'
+        values: "0+1x10 10x40"
+      - series: 'llm_router_attempts_total{job="llm-router",account="anthropic-2",provider="anthropic",outcome="complete"}'
+        values: "0x12 0+1x38"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: LlmRouterAccountFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              account: anthropic-2
+              provider: anthropic
+            exp_annotations:
+              summary: "llm-router account anthropic-2 is failing every attempt"
+              description: >-
+                Account anthropic-2 (anthropic) has failed at least 3 attempts in 30 minutes and
+                completed none. Its Status page entry can still say ready, and a pool that holds it
+                keeps sending it its share. Read the code on the Activity page: an upstream 404 is
+                the account's base URL or model, a 401 its key. Runbook:
+                docs/runbooks/llm-router.md § Account failing every attempt.
+      - eval_time: 20m
+        alertname: LlmRouterAccountFailing
+        exp_alerts: []
