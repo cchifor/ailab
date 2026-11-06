@@ -277,8 +277,9 @@ placement across the change.
     ineligible until a re-qualification run writes its manifest entry.
     Each backend has its own observed identity: cloud3 sharing the model name qualifies nothing.
   - **As built (#151):** the 60 seconds below is when the next request reads the identity again, not how long one can use
-    it. A request in flight keeps the identity it started with for up to 660 seconds, so a long wait in a queue does not
-    refuse a qualified backend. For a request that has already started, that is a longer window than the one this section accepts.
+    it. A request in flight keeps the identity it started with for up to 660 seconds (the 60-second cache plus the longest
+    `queue.maxWaitMs`, 600 seconds), so a long wait in a queue does not refuse a qualified backend. For a request that has
+    already started, that is a longer window than the one this section accepts. Whether it is accepted is open, for the owner.
   - The cache holds an identity for at most 60 seconds (a cheap read; the generation counter makes staleness
     detectable), and is invalidated on an account's `baseUrl` change, on a connection failure to it, and on the plugin's
     disposal. An unreadable identity is `unknown`, never assumed.
@@ -312,7 +313,7 @@ llama-swap truth table, the tests. This section says how it fits the registries 
 |---|---|---|
 | `contracts/availability.ts` | contracts | the types, one file per extension point (Part 1 §2.1), so the closure pins name it; `Account.availability?` |
 | `runtime/availability-registry.ts` | implementation registry | `register(probe)` with a disposer, `available(kind)`, `validator()`: a new or changed account names a registered probe and passes its schema; an unchanged one is tolerated while the plugin is off |
-| `plugins/availability-probes/` (as built, #153) | required plugin | `ctx.routerAvailabilityProbes`: the registry and its validator, on while `availability` is off, so only an unchanged account is tolerated then. It also holds the set of checks in flight, so a check outlives a restart of `availability` |
+| `plugins/availability-probes/` (as built, #153) | required plugin | hosts the registry above, which stands as written, as `ctx.routerAvailabilityProbes`. Being required, it keeps the validator on while the optional `availability` plugin is off, which is what "while the plugin is off" in that row means. The registry also holds the set of checks in flight, so a check outlives a restart of `availability` |
 | `modules/availability/` | pure | the scheduler and cache: one check in flight, deadline and abort, staleness, hysteresis, the policy |
 | `plugins/availability/` | service plugin | `ctx.routerAvailability`: drives the scheduler, wires the engine, wakes waiters, the admin route, metrics, telemetry, the Assistant read tool |
 | `plugins/availability-llama-swap/`, `adapters/availability/llama-swap.ts` | implementation, adapter | kind `llama-swap`; the HTTP reads, with absolute deadlines and bounded bodies |
@@ -336,7 +337,8 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    exclusion takes effect within `intervalMs` + the deadline (3 s + 2 s) after llama-swap lists the pending request, plus
    the requests already past selection.
    **As built (#153):** one check in flight holds across a job's replacement and a plugin restart, so a probe that never
-   settles after its abort keeps its account excluded until it does. `maxAgeMs` below `intervalMs` is accepted, as the
+   settles after its abort keeps its account excluded until it does, which can be for good. That is the intended default, not
+   an open issue: such a probe broke its contract, and excluded is the safe outcome. `maxAgeMs` below `intervalMs` is accepted, as the
    contract has it, though such an account can never recover; starting it logs `availability.unrecoverable`. Whether to
    refuse it at write time is open. A model on its way back keeps its previous reported state until it is eligible, so a
    recovery is one `availability.changed`.
@@ -359,11 +361,13 @@ llama-swap truth table, the tests. This section says how it fits the registries 
    full today is a non-retryable 429), so that part is an intentional capacity correction, declared, not default-off. Its
    regression test pins the client-visible change: a route with a target offline and the rest full now answers the retryable
    429, and a Codex or Claude route with no target offline answers exactly as before.
-   **As built (#153):** those two statements disagree for a target cooling down or disabled beside a full one on a route that
-   never opted in, and the second one won. The rule acts only where a target is offline or an account opted in, so those two
-   cases keep today's final 429; widening it is one condition. An occupied target's `queue` holds the request under the
-   one-pool rule, so a route with one target offline and the rest full waits in the line if it has one. That is also what
-   makes a waiter on another pool reachable, and the case has an engine test.
+   **As built (#153):** this point says both that any occupied or temporarily unavailable target makes the answer retryable,
+   and that a route with no target offline answers exactly as before. Those disagree for a target cooling down or disabled
+   beside a full one on a route that never opted in. The second was implemented: the rule acts only where a target is offline
+   or an account on the route has `availability`, so those two cases keep today's final 429. Dropping that condition would make
+   them retryable too. Where the full target's pool has a `queue`, the request waits in that line under the one-pool rule and
+   gets the retryable 429 only if the wait expires; the regression test above is the route without a queue. Joining the line is
+   also what makes a waiter on another pool reachable, and that case has an engine test.
    Each row is a test:
 
    | Targets | Answer |
