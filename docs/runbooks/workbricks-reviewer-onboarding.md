@@ -60,7 +60,8 @@ request must add the same template workflow, because the `main` rule below alrea
    approvals whitelisted to the two reviewers; merge whitelist the two reviewers and the owner
    `chifor` (added 2026-10-31, `relay-reviewer-onboarding.md` § "The owner in the merge
    whitelist"); stale approvals
-   dismissed on push; merge blocked on an outdated branch; admin override blocked; required
+   dismissed on push; merge blocked on an outdated branch; admin override open for the owner since 2026-11-06
+   (`owner-credentials.md` § "The owner's merge override"); required
    status context `CI / verify (pull_request)`. Do not grant the implementation worker a merge
    override. An empty repository needs a `main` first, or its first pull request has no base
    (an empty root commit is enough).
@@ -92,7 +93,7 @@ and the token answered 401 after deletion.
 | Stale approvals | dismissed on push | dismissed on push |
 | Rejected reviews | block the merge | block the merge |
 | Outdated branch | merge blocked (`block_on_outdated_branch`) | merge blocked |
-| Admin merge override | blocked | blocked |
+| Admin merge override | open for the owner since 2026-11-06 | same |
 | Required status context | `CI / verify (pull_request)` | `CI / verify (pull_request)` |
 
 - `cchifor/workbricks-apps` was empty. `main` was seeded with an empty root commit (`6624cd7`, as

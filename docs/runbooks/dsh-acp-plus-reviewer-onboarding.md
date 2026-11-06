@@ -16,7 +16,8 @@ stale-approval dismissal, rejection blocking, and required checks
 since 2026-10-31 the owner `chifor` is in the merge whitelist too
 (`relay-reviewer-onboarding.md` section "The owner in the merge whitelist").
 Both reviewers have scoped repository write access. Direct and force pushes are
-disabled and administrator merge override is blocked. This confirmation precedes
+disabled. The administrator merge override was blocked until 2026-11-06 and is now open
+for the owner (`owner-credentials.md` § "The owner's merge override"). This confirmation precedes
 allowlist activation; recheck the same settings before any later convergence.
 The verification endpoints are
 `GET /api/v1/repos/cchifor/dsh-acp-plus/branch_protections/main` and
