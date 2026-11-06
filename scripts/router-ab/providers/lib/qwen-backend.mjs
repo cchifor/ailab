@@ -13,10 +13,9 @@
 // reached this backend). The capture runs at the tasks' effort, xhigh: the route ignores `reasoning_effort` (declared in
 // X-Router-Ignored-Params) and the template's default is xhigh, so a body at another effort renders differently via the
 // router (+38 tokens at medium, 2026-11-05).
-import { runCodexTask, sameBody, Misplaced } from './codex-session.mjs';
+import { runCodexTask, runPlaced, sameBody } from './codex-session.mjs';
 import { accountsOf } from '../../core/seats.mjs';
 
-const MAX_PLACEMENTS = 8;
 const LAYER_A_TRIES = 3;
 const config = (server) => `model_reasoning_effort = "xhigh"
 web_search = "disabled"
@@ -84,14 +83,7 @@ export function qwenProvider({ name, host, server, tap, account }) {
     async run(ctx, task, arm, runId) {
       const env = { SERVER_URL: server };
       if (arm === 'direct') return runCodexTask(ctx, task, { target: tap, home: 'kit', model, effort: 'xhigh' }, runId, env);
-      for (let attempt = 1; ; attempt++) {
-        try {
-          return runCodexTask(ctx, task, { target: 'router', home: 'kit', model: 'qwen-27b', effort: 'xhigh', account }, attempt === 1 ? runId : `${runId}-p${attempt}`, env);
-        } catch (e) {
-          if (!(e instanceof Misplaced) || attempt === MAX_PLACEMENTS) throw e;
-          ctx.log(`${runId}: ${e.message}: discarded, running it again`);
-        }
-      }
+      return runPlaced(ctx, task, { target: 'router', home: 'kit', model: 'qwen-27b', effort: 'xhigh', account }, runId, env);
     },
   };
 }

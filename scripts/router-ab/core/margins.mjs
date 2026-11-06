@@ -14,6 +14,9 @@ const median = (xs) => { const s = xs.filter((x) => typeof x === 'number' && !Nu
 const sum = (xs) => xs.reduce((n, x) => n + (typeof x === 'number' ? x : 0), 0);
 const has = (runs, k) => runs.some((r) => typeof r[k] === 'number');
 
+/** Below this median output, a session's time per token says nothing: raw wall is judged instead. */
+const MIN_WORK_TOKENS = 200;
+
 /** Status of a value against an upper bound: FAIL above it, NEAR within half a margin of it. */
 function against(value, bound, halfMargin) {
   if (value === null || bound === null) return 'n/a';
@@ -62,11 +65,14 @@ export const MARGINS = [
     // that is sampled: at qwen's temperature 1.0 one request ran from 214 to 3,335 output tokens on the same body
     // (2026-11-06), so two sessions of one task differ 2x with no router involved. So when a provider reports output
     // tokens, the same 1.25x bound is judged on wall time per 1k output tokens. Raw wall stays in the row, and the work
-    // itself is the next row, so more work via the router stays visible. Without output tokens, raw wall is judged.
-    id: 'wall', label: 'Wall time median', margin: 'at most 1.25x direct, per 1k output tokens where reported',
+    // itself is the next row, so more work via the router stays visible. Without output tokens, raw wall is judged, and
+    // so it is below MIN_WORK_TOKENS: on a 30-token session the ratio is mostly the denominator (2026-11-06: 171 vs 221 s
+    // per 1k tokens on a session the router ran faster, 7.7 vs 7.1 s).
+    id: 'wall', label: 'Wall time median', margin: `at most 1.25x direct, per 1k output tokens from ${MIN_WORK_TOKENS} tokens up`,
     value: (runs) => {
       const timed = runs.filter((r) => typeof r.wall_s === 'number');
-      return { raw: median(timed.map((r) => r.wall_s)), perK: timed.length && timed.every((r) => r.output_tokens > 0) ? median(timed.map((r) => (r.wall_s / r.output_tokens) * 1000)) : null };
+      const enough = timed.length && timed.every((r) => r.output_tokens > 0) && median(timed.map((r) => r.output_tokens)) >= MIN_WORK_TOKENS;
+      return { raw: median(timed.map((r) => r.wall_s)), perK: enough ? median(timed.map((r) => (r.wall_s / r.output_tokens) * 1000)) : null };
     },
     bound: 1.25,
     check: (d, r, _p, b) => {

@@ -3833,6 +3833,12 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 (`sha256:78915e24…`): its seats were at their weekly limit on 2026-11-06. The reports are in the PRs that added the gate
 and the per-backend qwen providers.
 
+**Open (2026-11-06, image `4914ccb5`): the router halves Codex's second-turn prompt-cache hits.** The same two requests, a
+new `prompt_cache_key` per conversation, on one account: turn 2 hit the cache in 44 of 50 conversations direct and 35 of 70
+via the router. It is not the client (both arms are API mode), the seat, the egress IP or a timing race (a 1 s gap changes
+nothing). The mechanism is not known. Expect `codex` and `codex-control` `code-edit` to FAIL on uncached tokens until it
+is fixed, and do not read that FAIL as noise.
+
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
 clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
 body sampled direct (n = 25) and via the router on cloud3 (n = 12), output length did not shift (median 946 vs 797, z =
