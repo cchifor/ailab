@@ -14,10 +14,10 @@ migration, router quality, the hardware faults on cloud1 and cloud3, and the mov
 | Router guard | Live in `observe` on both qwen accounts. It logs only, so a `!` stream can still stall an agent |
 | Router, token fix | Merged and deployed: `x-codex-turn-state` is relayed. Its effect on the cache is unproven |
 | cloud3 memory | Hardware fault. 236 GiB test clean on 11-06. Rebooted with `memmap=64K$0x295aad0000`; healthy so far, and one boot proves little |
-| cloud1 memory | 116 GiB test FAILED: 391 errors, all in `0x7f9850000`-`0x7f9857fff`, byte lane 5. 16 pages retired by soft-offline; no boot-time exclusion yet |
-| cloud1 provisioning | Fixed in cloudlab #57: it no longer installs NVIDIA 550 packages over the runfile driver. Stale package purged |
-| Router Part 2 | Plan in review (ailab #1645); foundations PR in review (llm-router #148); no behaviour change yet |
-| Router Part 3 | On hold, not implemented. The plan is in llm-router `docs/plans/2026-11-06-claude-live-sessions.md` |
+| cloud1 memory | 116 GiB test FAILED: 391 errors, all in `0x7f9850000`-`0x7f9857fff` (8 pages), byte lane 5. With the known block `0x153f6c0000`-`0x153f6c7fff`, 16 pages in two 32 KiB blocks are retired by soft-offline; no boot-time exclusion yet |
+| cloud1 provisioning | Fixed in cloudlab #57 (merged): it no longer installs NVIDIA 550 packages over the runfile driver. Stale package purged |
+| Router Part 2 | Plan merged (ailab #1645); foundations merged (llm-router #148); native wire in review (llm-router #151). Default-off, no behaviour change yet |
+| Router Part 3 | On hold, not implemented. The plan is in the llm-router repository: `docs/plans/2026-11-06-claude-live-sessions.md` |
 
 ### Validation, on image `225bb804`, 6 pairs
 
@@ -31,11 +31,11 @@ migration, router quality, the hardware faults on cloud1 and cloud3, and the mov
 The router's code is cleared for the cache dip: the same image on the host login matched the control (90 % vs 93 %). The
 live router scored 60 %, then 96 % minutes later. Concurrent router traffic is a lead, from one pair of windows.
 
-## Tomorrow, in priority order
+## 2026-11-07, in priority order
 
 ### 1. Start of day (about 15 min)
-- Owner: merge cloudlab #54, then #55 (retargeted to `main`), then #57. **Not #56:** it merges on the day of the card move.
-- Check cloud3's unattended 06:00Z boot: `memmap` in `/proc/cmdline`, no `Caught <` in the journal.
+- Owner: merge cloudlab #58, which carries #55's cloud1 work to `main`. #54 and #57 are merged. **Not #56:** it merges on the day of the card move.
+- Check cloud3's unattended boot at 06:00Z on 2026-11-07: `memmap` in `/proc/cmdline`, no `Caught <` in the journal.
 - Read the guard's `observe` data. Router traffic to qwen has been light, so this needs real load to mean anything.
 
 ### 2. Stop the `!` stalls: guard to `enforce`
@@ -43,9 +43,9 @@ live router scored 60 %, then 96 % minutes later. Concurrent router traffic is a
 - Owner decision, on the `observe` data. False positives on reasoning text are unmeasured; one costs a retry.
 - Then run the release gate for Codex and qwen.
 
-### 3. Hardware session 1: the card move (needs the owner at the machines, after 06:00Z)
-Ready once item 1 and the steps below are done. It needs over 2 h of soak before the 20:00Z power-off, so start early.
-- Mine, before: add cloud1 to `host/memmap-hosts` for its two blocks, so the owner is present at its first `memmap` boot.
+### 3. Hardware session 1: the card move (needs the owner at the machines, after 06:00Z on 2026-11-07)
+Ready once item 1 and the steps below are done. It needs over 2 h of soak before the 20:00Z power-off that day, so start early.
+- Agent, before: add cloud1 to `host/memmap-hosts` for its two blocks, so the owner is present at its first `memmap` boot.
 - Owner: Gen4 x16 risers on `PCIEX16_1` and `PCIEX16_2` plus a spare; two separate 8-pin cables per card; monitor and keyboard.
 - Move `GPU-ab0457e9` (cloud3 `23:00.0`) into cloud1 `PCIEX16_1`, after a fan-pulse check.
 - Leave the DIMMs alone. A change voids the retired-page tables.
@@ -58,13 +58,17 @@ Ready once item 1 and the steps below are done. It needs over 2 h of soak before
 - If it clears the 1.25x limit, decide which workloads move, starting with Codex on Fable on dev-worker-4.
 
 ### 5. Router Part 2: native pass-through to vLLM
-- Finish #1645 and #148, then the native wire, default-off, then a one-route canary. Each roll needs the owner's go.
-- Dependency: gate 1 needs cloudlab to publish deployment metadata for cloud2.
+- Finish #151 and the availability probe, then a one-route canary. Each roll needs the owner's go.
+- Dependency: gate 1 needs cloudlab to publish deployment metadata for cloud2; a native route serves nothing without it.
+- Before any canary: larger-body accounting, because this PR caps bodies at 2 MiB and a long Codex session would get a 413.
+- During a canary: review the journaled unmeasured fields before widening traffic. Unknown fields stay forwarded (D2).
 
 ### 6. Find the `!` cause
 - Blind runs cannot show a cause at 0.2 %, and 0 of 31 attempts reproduced it. Capture first: have the router keep a request's
-  body, encrypted and short-lived, when the guard trips. Then test prefix caching, speculative decoding and the fp16 state on
-  a real trigger.
+  body when the guard trips. Then test prefix caching, speculative decoding and the fp16 state on a real trigger.
+- **Owner decision before this is built:** a captured body holds user prompts and possibly secrets. Proposed: local qwen accounts
+  only, never seat or pool accounts; encrypted at rest with a key the router alone holds; retained 7 days, then deleted; read only
+  by the owner, for this diagnosis.
 
 ### 7. Codex cache dip
 - The live router with and without concurrent load, at a fixed time, with nothing else running. Do not run gates in parallel
