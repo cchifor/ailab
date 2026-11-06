@@ -3863,8 +3863,9 @@ passes a saved `secretRef` with `baseUrl` omitted. See [the MCP guide](https://g
 
 **Provenance.** Source `aec919824f112d5f2cf5f6830a8f896b921c7045`, reviewed by both Codex and Claude in
 llm-router #141. Local `pnpm verify` passed 2168 tests (14 PostgreSQL-dependent local skips), production
-smoke and the compiled MCP acceptance fixture. Source CI run 122318 remains a pre-merge gate; its initial
-attempt hit the runner's disk-reserve limit in existing image tests and was rerun without code changes.
+smoke and the compiled MCP acceptance fixture. Source CI run 122318 passed on its second attempt with
+PostgreSQL and browser coverage; the first attempt hit the runner's disk-reserve limit in existing image
+tests. The rerun used the unchanged commit on a runner with sufficient disk space.
 Archive `router-0.1.0-20261106-mcp-fix.tar.gz`, SHA-256
 `508f35da061c455322d567ffd1b831abae5cf4f5b552a2f2d6164782ba12f976`, is Relay v0.2.0 asset 496 (checksum 497).
 Packaging commit `d866bbbaee1cd92d3c8f43c3d6a835e6d474e690`, branch `release/router-20261106-mcp-fix`,
