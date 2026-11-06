@@ -36,8 +36,12 @@ token. The API equivalent is `"force_merge": true`. A plain merge still obeys th
 
 Gitea has no per-user bypass. It checks two things, in this order: the merge whitelist, if the rule has one, and then
 repository admin with `block_admin_merge_override: false`. The whitelist is what keeps the override to the owner: a
-repository admin outside it is refused, and `isUserAllowedToMergeInRepoBranch` has no site-admin path, so that covers
-`gitea_admin` too.
+repository admin outside it is refused. That also covers the site admin `gitea_admin`, though no test ran as that
+account. In Gitea 1.26.1, `CheckPullMergeable` (`services/pull/check.go`) calls `IsUserAllowedToMerge` before it
+considers `force_merge`. That goes through `isUserAllowedToMergeInRepoBranch` (`services/pull/merge.go`) to
+`IsUserMergeWhitelisted` (`models/git/protected_branch.go`), and none of the three has a site-admin path. The owner, also
+a site admin, was refused the same way on 2026-10-31 until it joined the whitelist (`relay-reviewer-onboarding.md`
+§ "The owner in the merge whitelist").
 
 | Repositories | `block_admin_merge_override` | Who can override |
 | --- | --- | --- |
