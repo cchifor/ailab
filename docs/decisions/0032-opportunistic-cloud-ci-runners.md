@@ -193,3 +193,23 @@ cloud1's was 72.6 GiB.
 - no segfault or EXT4 error on the cloud1 runners.
 
 Roll back one runner with `started = false`.
+
+## Amendment 2026-11-06: cloud1 shares its host with a serving LXC; cloud-ci-1/2 shrink
+
+cloud1 takes two RTX 3090s and serves `qwen3.8-27b` and Qwen-Image from LXC 5102 (cloudlab
+`plans/2026-11-05-cloud1-flex-host-plan.md`). Owner decision (D4, 2026-11-05), effective at that plan's
+session 1 power-on; nothing changes before it.
+
+1. **cloud-ci-1/2 go from 8 vCPU / 24 GiB to 6 vCPU / 12 GiB,** matching cloud-ci-6/14/15. Host MemAvailable's
+   7-day low was 21.1 GiB; the serving LXC needs ~12 GiB steady and up to ~20 GiB at an image load. No job
+   is pinned to them (one label, `self-hosted-hv`, capacity 1), and the same heavy jobs already run on the
+   12 GiB runners. Expect some heavy platform jobs ~15 % slower (up to ~40 %) and more swap at peaks.
+2. **cloud-ci-6 stays.** It has been back in service since its 2026-10-12 rebuild (runner 99: 1,229 tasks in the
+   7 days to 2026-11-05, as many as any cloud1 runner). "Quarantined" in the 2026-10-04 amendment is history.
+3. **All five cloud1 runners are pinned to CPUs `4-15,20-31`;** CPUs `0-3,16-19` serve models.
+
+**Gate caveat.** cloud1's CI demand at p99 is ~19 threads: ~79 % of the 24 pinned threads, above this ADR's
+75 % gate, accepted knowingly. **Watch for one week after session 1** against the baseline of the 7 days to
+2026-11-05 (cloud1 runners: queue wait p50 45 s / p95 1,105 s, job duration p50 30 s / p95 920 s). **Revisit**
+(move a runner off cloud1, or give CI CPUs back) if for two days running: queue-wait p95 > 1,400 s, duration
+p95 > 1,100 s, host CPU p99 > 85 %, or the serving decode-under-CI ratio < 95 %.
