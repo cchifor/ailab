@@ -121,8 +121,8 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source aec919824f112d5f2cf5f6830a8f896b921c7045 (llm-router #139, #140: provider setup and management MCP).
-          # Relay run 121922; archive sha256:2f8d73aacae80ad8600e917a727b890f5125cb4a5c1f968773bf8661708fd07f.
+          # Source aec919824f112d5f2cf5f6830a8f896b921c7045 (llm-router #139, #140, #141: provider setup and reviewed management MCP).
+          # Relay run 122319; archive sha256:508f35da061c455322d567ffd1b831abae5cf4f5b552a2f2d6164782ba12f976.
           image: registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3
           imagePullPolicy: IfNotPresent
           workingDir: /app
