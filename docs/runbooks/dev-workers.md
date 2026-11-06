@@ -309,6 +309,14 @@ subscription, Codex-native, conversation placement). To roll the workers back, r
 It is a plain `usage` route over all five Codex accounts (`*` targets, Codex-native, conversation placement) and does
 not need the `smart-pools` plugin. See `llm-router.md` § "Codex fallback route (2026-10-11)".
 
+**Change what a worker's key can reach.** Ask the router's Assistant ("add pool-claude-api to dev-worker-1's key") and
+apply its card, or use Edit routes on the console's API keys page. `PATCH /admin/v1/keys/<id>` with the whole `routes`
+list is the API form. All three change the same key in place: its token, id and expiry stay, the next request uses the
+new routes, and nothing changes on the worker. Do not rotate a key for this.
+
+Besides `dw-N` and `qwen-27b`, dev-worker-1 also holds `pool-claude-api` (2026-11-06). That pool is Anthropic API
+accounts, and keys have no spend limit, so grant it deliberately.
+
 **Previous keys, revoked on 2026-10-11.** These keys and the six `dw-gpt-*` routes they were limited to are gone (see
 `llm-router.md` § "Claude tools and route cleanup (2026-10-11)"). They were:
 - `key_aa2543746716` (`lrk_w7bR`)
@@ -388,12 +396,19 @@ the router.
 
 **Rotate a worker's key.**
 
-1. Mint the new key (router admin API `POST /admin/v1/keys` with name, the six `dw-*` routes and
-   `expiresInDays`).
+Only when the token itself must change, for example after a leak. To change what a key can reach, see "Change what a
+worker's key can reach".
+
+1. Mint the new key: router admin API `POST /admin/v1/keys` with the old key's `name`, `routes` and
+   `defaultRoute` (read them from `GET /admin/v1/keys`) and `expiresInDays`, then read the value once
+   with `POST /admin/v1/keys/reveal/<revealId>`. The agent access flow (`/agent/skill.md`) cannot do
+   this: an approved request sets no `defaultRoute`, and `dw-N` needs one.
 2. Re-encrypt it into `devworker-seeds.sops.yaml` (decrypt, edit, `sops -e --filename-override`,
    every leaf `ENC[`).
 3. Merge, then delete Job `openbao-devworker-provision` so Flux re-runs it.
-4. The helper picks the new value up on its next call. Revoke the old key.
+4. The helper picks the new value up on its next call. Once the journal shows the worker on the new
+   key, revoke the old one: `DELETE /admin/v1/keys/<id>`. Revoking first would answer 401 until the
+   vault has the new value.
 
 **Turn it off** (all workers, or one host in `host_vars`): `dev_worker_codex_router_enabled: false`
 → `ansible-playbook dev-workers.yml -t codex`, then `codex app-server daemon restart` per user. The
