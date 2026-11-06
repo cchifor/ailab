@@ -4113,3 +4113,40 @@ Rollback through a reviewed PR by restoring all three values together:
 The previous version ignores billing settings retained in SQLite; no database restore is needed.
 Keep saved billing credentials until the reporting connection is deliberately disconnected on a version
 that understands those references. Existing inference accounts and the degeneracy guard remain intact.
+
+## Native response head release (2026-11-06)
+
+Release `router-0.1.0-20261106-native-head`: source `02cb559df5eedbf379e2266da2f1a82608985103` (llm-router #145), archive `router-0.1.0-20261106-native-head.tar.gz`, SHA-256
+`9de41d2a2cc0c7293c4aad7c5561df7ab3a6342fd62d90ca4ad9a7fd6fc4b4c2`, branch `release/router-20261106-native-head-image`,
+[Relay run 122705](https://git.chifor.me/cchifor/relay/actions/runs/122705), image
+`registry.chifor.me/llm-router/router@sha256:225bb804acc8cab0ebc65bdc6ec32186a432712c09434a50595f372e6f971ab0`.
+An anonymous pull of the index, both manifests and all 12 blobs verified their digests.
+
+**What it fixes.** The Codex-native path dropped every upstream response header, so the client never received its
+sticky-routing token `x-codex-turn-state`. It now gets the headers Codex 0.166 reads, from a declared allowlist; a seat's
+rate limits, credits and plan headers stay private. This fixes the dropped header. It is not claimed to close the router's
+cache gap: echoing the token made no measurable difference in the validation lead's two-request probe, and the effect is
+to be measured after the roll.
+
+**What changes at the roll, on every Codex-native stream.** The response head waits for the upstream's answer, at most 30 s,
+where it used to go out at selection, so `: ok` and keepalives come later. The lifecycle hold and failover are unchanged. The
+token reaches the client sealed for the seat that issued it, under a key that lasts for the process
+(`ROUTER_TURN_STATE_KEY` is unset). A request that lands on another seat, or echoes a token from before a restart, loses it,
+journaled as `native:turn_state_stripped` in `request.parameters_adjusted`; `response.head_relayed` names what went out. No
+account, route, credential, schema or configuration changes.
+
+**Checked before the roll.**
+- Replicas: `llm-router` runs one replica with the `Recreate` strategy, so the per-process seal key is shared by every
+  request. A restart strips only the tokens of turns in flight across it, and the next response issues a new one.
+- The 30 s head wait: the edge Caddy sets no response or read timeout (`edge.yaml`), and Cloudflare's limit is about
+  100 s. Codex's `stream_idle_timeout` counts events and is 300 s. Each is above 30 s.
+- Drain: a stream waiting for its head at drain is treated like any other stream in flight: `ROUTER_DRAIN_MS` is 20 s, so one
+  still waiting then is cut and Codex resends it, as a long stream already is. The grace period is unchanged.
+
+**How the effect is measured.** After the roll, with the gate's control arm: `node scripts/router-ab/gate.mjs --providers
+codex-control --tasks code-edit --pairs 6`. Success is uncached tokens at most 1.2x the control. The result goes in this section.
+
+**Rollback.** Revert the image and both annotations together to:
+- image `registry.chifor.me/llm-router/router@sha256:9e141215271a01522c664492e214a677a8880dcd5f7182b39ad85f2d24a51145`;
+- source `5f6151e9c2f672d5018c31eaa7f03156e45914a0`, release `router-0.1.0-20261106-provider-billing`.
+A token sealed by the new image then reaches the upstream unopened for the rest of that turn, which ends it.
