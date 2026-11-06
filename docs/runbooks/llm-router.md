@@ -4047,6 +4047,8 @@ ignored at load, never rejected. Then revert the image and both annotations toge
 
 Release `router-0.1.0-20261106-provider-billing` ships source
 `5f6151e9c2f672d5018c31eaa7f03156e45914a0` ([llm-router #144](https://git.chifor.me/cchifor/llm-router/pulls/144)).
+Source PR #144 merged as `88254474e64aef1f66b4a1b454e03ebbfbe4049c`; the packaged commit
+is its second parent and has the identical tree (normal merge, no squash/rebase rewrite).
 It adds Anthropic provider-reported month/seven-day spending, a user-selected monthly tracking budget,
 percentage consumed and remaining/over-budget amounts to Status. Administrators can configure, report
 and disconnect billing through the Assistant or authenticated MCP; configuration still requires a proposal.
@@ -4072,6 +4074,29 @@ unauthenticated management. The source suite and desktop/mobile browser coverage
 runtime's MCP proposal/approval/report path is verified with a local Analytics schema fixture and
 production dependencies. That fixture does not establish live Anthropic billing access. A real cost
 read requires an administrator to connect their Admin API credential through Status → Connect billing.
+
+Also verify the public HTML selects this release's JavaScript and CSS and that the bytes served through
+the production edge match the tested bundles:
+
+```sh
+python3 - <<'PY'
+import hashlib, json, urllib.request
+base = 'https://router.chifor.me'
+def fetch(path):
+    request = urllib.request.Request(base + path, headers={'User-Agent': 'router-billing-acceptance/1.0 (dev-worker-3)'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read()
+html = fetch('/').decode()
+assets = {
+    '/assets/index-BzuHOYpN.js': '4391796fe4b3ff27ea70e06778beaf9146f0d4029522a09f785b59bb7e5cbe4c',
+    '/assets/index-CjNGhj14.css': '46fb99b752c03235044b7e28da6a6b75e9c12d756ae23abdb08dc1c79d2df186',
+}
+for path, expected in assets.items():
+    assert path in html, f'Production HTML does not select {path}'
+    assert hashlib.sha256(fetch(path)).hexdigest() == expected, f'Unexpected bundle: {path}'
+print(json.dumps({'status': 'passed', 'publicBundles': list(assets)}))
+PY
+```
 
 Rollback through a reviewed PR by restoring all three values together:
 
