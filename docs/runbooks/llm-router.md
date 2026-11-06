@@ -1504,7 +1504,7 @@ seats").
   - The request names a model of `pool-codex`'s allowlist (`gpt-6-astra`) and selects the route with
     `X-Router-Route: codex-reviewer`, or through a key whose `defaultRoute` it is.
   - The reviewbot sends no header, and the old key (`key_d7adf31fb93e`) may use only `codex`, with no default route.
-    Keys cannot be edited.
+    Keys could not be edited then (`PATCH /admin/v1/keys/:id` came on 2026-11-01).
   - So reviewer-codex has a new key, `key_4fdbe2b833fe`: `{routes: ["codex-reviewer"], defaultRoute: "codex-reviewer"}`,
     365 days, escrowed as `reviewbot_codex_router_key`.
   - Its seat has no `models` map and sends the tier name, `gpt-6-astra`.
@@ -1523,7 +1523,7 @@ nothing.
 2. **reviewer-codex,** if it was switched:
    - **While the old key still exists** (`key_d7adf31fb93e`, `codex` only): restore it as `reviewbot_codex_router_key`
      (revert that SOPS change), restore the seat's `models: { gpt-6-astra: codex }`, and deploy both in one run.
-   - **Once it has been revoked:** keys cannot be edited, so first issue a replacement in the old shape:
+   - **Once it has been revoked:** a revoked key cannot come back, so first issue a replacement in the old shape:
      `{routes: ["codex"]}`, with no `defaultRoute`. Seed it into the seat and restore the mapping to `codex`. Check that
      reviews are served (journal rows of that key with `model: codex`).
    - Then revoke the `codex-reviewer` key.
@@ -1899,7 +1899,7 @@ Pro accounts burning toward it) alone.
     Until then nobody could reach the model through the router: the platform's catalog routes its
     `local` group (including `openai:qwen3.8-27b`) here, and the covenant demo key sent it 11 times
     in the window for `ROUTE_NOT_ALLOWED`. Smoke: `POST /v1/chat/completions` 200 on both routes.
-  - **The covenant app's key was re-issued** (a key's routes cannot be changed after creation). The
+  - **The covenant app's key was re-issued** (a key's routes could not be changed then). The
     app is a workbricks (platform) app, so the key follows the `workbricks-app-<app>` naming:
     `key_b62258d8a42c` (`workbricks-app-covenant`, routes `[gpt-6-luna, qwen3.8-27b]`, expires
     2027-01-12), created 11:58 UTC with `POST /admin/v1/keys` and revealed once with
@@ -4233,3 +4233,42 @@ a 404 is not retried, so a pool keeps sending the account its share.
   plain and streaming requests, and the pool served 12 of 12, 3 per account.
 - **So it does not return:** `llm-router#149` resolves a hosted provider's bare host to its API root, however the value
   reached the configuration. This alert covers every other cause.
+
+## Key editing and provider address release (2026-11-06)
+
+Release `router-0.1.0-20261106-key-edit`: source `d5217887867f84ad4ab5d6b88ba4cb0f0edf7982`, archive
+`router-0.1.0-20261106-key-edit.tar.gz`, SHA-256 `f9cae4614d6bffed3b3a72e5a8841aaa33a1542a538e1001f6115acbd8ea71a3`, branch
+`release/router-20261106-key-edit` in both `cchifor/llm-router` and `cchifor/relay`,
+[Relay run 122989](https://git.chifor.me/cchifor/relay/actions/runs/122989), packaging commit
+`f53f6a21908a69f2be8760ee834ca8de1604dd22`, image
+`registry.chifor.me/llm-router/router@sha256:3715a86c3b110fd66f1071deb83028cbceadb48fbe4aaad8d37e5362f5fde5d9`.
+An anonymous pull of the index, both manifests and all 12 blobs verified their digests.
+
+**A narrow release, on purpose.** The source is the live commit `d1b537a2` plus the commits of
+[llm-router #149](https://git.chifor.me/cchifor/llm-router/pulls/149),
+[#150](https://git.chifor.me/cchifor/llm-router/pulls/150) and the test-only
+[#152](https://git.chifor.me/cchifor/llm-router/pulls/152), cherry-picked, so it is not a commit of `main`. `main` also holds
+the native wires (#148, #151), which are not released here and ship under their own release and gate. Every touched file
+is identical to `main` except `README.md`, which there also documents the wires. The next release from `main` includes
+all of this.
+
+**What it adds.**
+- **A key's routes from inside the router.** The Assistant's `update_api_key` takes the routes to add and remove, and shows
+  a card you apply, even with "apply automatically" on. The console's API keys page has Edit routes. Both make the same
+  in-place change as `PATCH /admin/v1/keys/:id`.
+- **A bare provider host cannot break an account again.** Entering `https://api.anthropic.com` for a hosted provider is
+  refused with `INVALID_BASE_URL`, naming the address to use. A value already stored still reaches the API.
+
+No account, route, credential, schema or contract changes. The Assistant's system prompt gains the tool.
+
+**Before the roll.** `validate-live` 6/9 at 19:28Z, the known baseline (`codex text`, `codex stream`, `codex tool call`: a
+bare `model: 'codex'`). No storage, migration or contract file changed between `d1b537a2` and `d5217887`, so rolling the
+image back needs no restore, and no new backup was taken. `/data` had 1.8 GB free. Verified on the release tree: Node 24,
+2,327 tests passed and 14 skipped, `tsc --noEmit` clean, `check:architecture` only the known
+`packages/modules/inference/index.ts` line. The production smoke passed in the pinned Node 26.10.0 image.
+
+**Rollback.** Revert the image and both annotations together to:
+- image `registry.chifor.me/llm-router/router@sha256:aed7162dc14724f04e700449fd49f15e39013f1be6042409b4cf84acf9cf5f61`;
+- source `d1b537a2fb98a6266e08d8965fc0aa173c304328`, release `router-0.1.0-20261106-billing-rollback-r2`.
+
+The old image has no `update_api_key`, and a card already shown then fails. Keys changed through it keep their routes.
