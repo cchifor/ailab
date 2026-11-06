@@ -5,7 +5,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: router-mcp-acceptance-20261105
+  name: router-mcp-acceptance-20261106
   namespace: llm-router
   annotations:
     kustomize.toolkit.fluxcd.io/force: "enabled" # required for Flux-managed immutable Job templates
@@ -31,6 +31,10 @@ spec:
           image: registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3
           command: [node, /checks/mcp-acceptance.mjs]
           env:
+            # Metadata inspection identifies this as "anthropic"; the other candidate
+            # is "claude subscription token". This is a reference, never a key value.
+            - name: ROUTER_MCP_ACCEPTANCE_SECRET_REF
+              value: store:sec_18cd60c0c91260f3
             - name: ROUTER_MCP_ACCEPTANCE_TOKEN
               valueFrom:
                 secretKeyRef: {name: llm-router-auth, key: admin-token}

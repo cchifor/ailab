@@ -4,9 +4,22 @@ import { mkdtempSync, mkdirSync, copyFileSync, symlinkSync, writeFileSync, rmSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checkSetup, runAcceptance } from '../../kubernetes/apps/apps/llm-router/mcp-acceptance.mjs';
+import { checkSetup, runAcceptance, selectSavedKey } from '../../kubernetes/apps/apps/llm-router/mcp-acceptance.mjs';
 
 const before = { accounts: [{ id: 'existing' }], routes: [{ alias: 'existing' }] };
+
+test('exact saved-key selection distinguishes an API key from a subscription token', () => {
+  const keys = [
+    { ref: 'store:sec_subscription', label: 'claude subscription token', usedBy: [] },
+    { ref: 'store:sec_api', label: 'anthropic', usedBy: [] },
+  ];
+  assert.throws(() => selectSavedKey(keys), /unambiguous/);
+  assert.equal(selectSavedKey(keys, 'store:sec_api').label, 'anthropic');
+  assert.throws(() => selectSavedKey(keys, 'store:sec_missing'), /missing/);
+  assert.throws(() => selectSavedKey(keys, 'raw-key-value'), /Invalid selected/);
+  assert.throws(() => selectSavedKey([{ ...keys[1], usedBy: ['existing'] }], 'store:sec_api'), /already used/);
+  assert.throws(() => selectSavedKey([{ ...keys[1], label: 'Unrelated' }], 'store:sec_api'), /not labelled/);
+});
 
 test('a ConfigMap-shaped symlink executes acceptance and cannot silently exit successfully', () => {
   const dir = mkdtempSync(join(tmpdir(), 'router-mcp-configmap-'));

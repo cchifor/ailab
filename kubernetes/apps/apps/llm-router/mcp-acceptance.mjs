@@ -7,6 +7,18 @@ class AcceptanceError extends Error {}
 function requireThat(ok, message) { if (!ok) throw new AcceptanceError(message); }
 const alias = 'claude-api';
 
+export function selectSavedKey(secrets, selectedRef) {
+  const candidates = secrets.filter(s => !s.usedBy.length && /anthropic|claude/i.test(s.label ?? ''));
+  if (selectedRef !== undefined) {
+    requireThat(/^store:sec_[a-z0-9]+$/.test(selectedRef), 'Invalid selected saved-key reference');
+    const selected = candidates.filter(s => s.ref === selectedRef);
+    requireThat(selected.length === 1, 'Selected key is missing, already used, or not labelled Anthropic/Claude');
+    return selected[0];
+  }
+  requireThat(candidates.length === 1, 'Need one unambiguous unused Anthropic/Claude labelled key');
+  return candidates[0];
+}
+
 export function checkSetup(result, before, secretRef, models) {
   const p = result.data?.proposed, proposal = result.proposal;
   requireThat(p?.alias === alias && p.provider === 'anthropic' && p.mode === 'new', 'Unexpected provider or alias in proposal');
@@ -23,7 +35,7 @@ export function checkSetup(result, before, secretRef, models) {
   return p;
 }
 
-export async function runAcceptance({ url, token, log = console.log, waitForEndpointMs = 0 }) {
+export async function runAcceptance({ url, token, log = console.log, waitForEndpointMs = 0, selectedSecretRef }) {
   let id = 0, sessionId, stage = 'initialize';
   const emit = (event, fields = {}) => log(JSON.stringify({ event, ...fields }));
   const rpc = async (method, params = {}) => {
@@ -82,8 +94,7 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
       // Never probe unrelated saved credentials or guess from credential values.
       const candidates = secrets.filter(s => !s.usedBy.length && /anthropic|claude/i.test(s.label ?? ''));
       emit('anthropic.saved_key_candidates', { count: candidates.length });
-      requireThat(candidates.length === 1, 'Need one unambiguous unused Anthropic/Claude labelled key');
-      const secretRef = candidates[0].ref;
+      const secretRef = selectSavedKey(secrets, selectedSecretRef).ref;
       const connection = { provider: 'anthropic', secretRef }; // Hosted API: baseUrl is absent.
       const discovery = (await call('probe_provider', connection)).data;
       requireThat(discovery.listed && discovery.models?.length, 'Anthropic discovery returned no models');
@@ -123,5 +134,6 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const token = process.env.ROUTER_MCP_ACCEPTANCE_TOKEN;
   requireThat(token && token.length >= 24, 'Missing management credential');
-  await runAcceptance({ url: 'http://llm-router.llm-router.svc.cluster.local/admin/mcp', token, waitForEndpointMs: 240_000 });
+  await runAcceptance({ url: 'http://llm-router.llm-router.svc.cluster.local/admin/mcp', token, waitForEndpointMs: 240_000,
+    selectedSecretRef: process.env.ROUTER_MCP_ACCEPTANCE_SECRET_REF });
 }

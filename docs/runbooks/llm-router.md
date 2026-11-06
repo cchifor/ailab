@@ -3874,7 +3874,7 @@ production smoke and backup checks. Its [receipt](https://git.chifor.me/cchifor/
 pins `registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3`.
 The Node runtime digest is unchanged. This cumulative release supersedes the #139-only deployment in #1615.
 
-**Live acceptance.** The one-shot Job `router-mcp-acceptance-20261105` uses the same image and talks to the
+**Live acceptance.** The one-shot Job `router-mcp-acceptance-20261106` uses the same image and talks to the
 router's MCP endpoint through the internal Service. Its management token is injected from the existing
 `llm-router-auth/admin-token`; it never leaves the pod. The Job has no Kubernetes API token, persistent
 volume, shell, public egress or inbound network access. Its only egress is cluster DNS and the router on 8787;
@@ -3903,7 +3903,7 @@ failure, inspect the safe Loki phase summary and durable session first, then rev
 The repository-required Flux force annotation permits recreation after a reviewed template change; normal
 reconciliation does not restart a completed Job. Remove the temporary Job promptly after acceptance.
 The acceptance script passed locally through the real compiled MCP server with an Anthropic HTTP/SSE fixture:
-new setup, existing-route reuse, inference and journal inspection. Its 17 standalone guard/error tests pass
+new setup, existing-route reuse, inference and journal inspection. Its 18 standalone guard/error tests pass
 with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.
 These fixtures establish test coverage, not live Anthropic success.
 
@@ -3916,6 +3916,15 @@ matching references, labels and timestamps for selection. It never calls discove
 resolution or inference. It reuses the restricted acceptance network policy and credential
 injection, with its own ConfigMap; the failed acceptance Job is not replayed. Remove both
 temporary Jobs and their script ConfigMaps after the investigation and acceptance are complete.
+
+The metadata inspection completed through live MCP: the two candidates were `claude subscription token`
+(created 2026-10-07) and `anthropic` (created 2026-11-05). The user's request is for an Anthropic API key,
+so the separately versioned acceptance Job `router-mcp-acceptance-20261106` pins the latter's reference,
+`store:sec_18cd60c0c91260f3`, through `ROUTER_MCP_ACCEPTANCE_SECRET_REF`. This is non-secret metadata,
+not a credential value. Selection still requires that exact key to exist, remain unused and match the
+Anthropic/Claude label predicate. The original run stopped before discovery, setup or spending, so no
+mutation is being replayed. All additive-proposal and spend-review checks still apply. The saved
+subscription token is left untouched. Live Anthropic discovery/setup/inference remain pending this rerun.
 
 The existing rollout checker requires one fresh Ready pod on the exact image, the successful canary Job,
 public health/readiness and unauthenticated management refusal. Once that passes, record the safe canary
