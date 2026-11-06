@@ -35,7 +35,9 @@ Since 2026-11-06 the owner can merge a PR that branch protection is holding, at 
 token. The API equivalent is `"force_merge": true`. A plain merge still obeys the rule, and so does everyone else.
 
 Gitea has no per-user bypass. It checks two things, in this order: the merge whitelist, if the rule has one, and then
-repository admin with `block_admin_merge_override: false`. The whitelist is what keeps the override to the owner.
+repository admin with `block_admin_merge_override: false`. The whitelist is what keeps the override to the owner: a
+repository admin outside it is refused, and `isUserAllowedToMergeInRepoBranch` has no site-admin path, so that covers
+`gitea_admin` too.
 
 | Repositories | `block_admin_merge_override` | Who can override |
 | --- | --- | --- |
@@ -51,15 +53,23 @@ read-only.
 The override skips branch protection only. Gitea still refuses a PR with conflicts, a `WIP:` title or an open
 dependency.
 
-A newly protected repository needs the same two settings: `chifor` in the merge whitelist and
-`block_admin_merge_override: false`.
+The override stays with the owner only while all three of these hold. Recheck them when protecting a new repository,
+and before giving any account admin on a repository that has this rule:
+
+- `chifor` is in the merge whitelist.
+- `block_admin_merge_override` is `false`.
+- No other account in the merge whitelist holds repository admin. Making a reviewer an admin, or adding an admin to
+  the whitelist, gives that account the override too.
 
 How it was applied (2026-11-06 07:54Z): one run with one one-shot `chifor` token (`write:repository,write:user`). It
 first tested a throwaway private repository with the rule shape of `relay`. With the flag on, the owner's `force_merge`
 got 405. With it off, a whitelisted non-admin's `force_merge`, a non-whitelisted writer's `force_merge` and the
-owner's plain merge each got 405, and the owner's `force_merge` got 200. The run then sent seven `PATCH`es holding only
+owner's plain merge each got 405, and the owner's `force_merge` got 200. A second fixture the same day tested the check
+order: a repository admin outside the whitelist got 405 on `force_merge`, and with only the whitelist changed the same
+admin got 200. The first run then sent seven `PATCH`es holding only
 `block_admin_merge_override` and read every rule back: nothing else had changed. The fixture was deleted, and the token
-was deleted and then answered 401. Snapshots of all 14 repositories' rules, before and after, are in
+was deleted and then answered 401. Snapshots of the rules of all 14 repositories that have any (the 11 above and the
+archived `agentforge`, `agentforge-platform` and `agentforge-playground`), before and after, are in
 `kubernetes/infra/_out/gitea-protection-20261106/` (gitignored, on the workstation only). To undo it on one repository,
 `PATCH` `{"block_admin_merge_override": true}` to `branch_protections/main` with a one-shot token.
 

@@ -105,7 +105,8 @@ required approvals, the required context, the outdated-branch block and
 `block_admin_merge_override: true`, so the owner can merge only a PR that already meets the
 rule; the web UI's Merge button is enough, with no token.
 
-**Superseded 2026-11-06:** `block_admin_merge_override` is now `false` on these seven repositories, so the owner can
+**Superseded 2026-11-06:** `block_admin_merge_override` is now `false` on those seven reviewer-protected repositories
+(`agentforge-playground` is archived and was not changed), so the owner can
 also merge a PR that does not meet the rule (`owner-credentials.md` § "The owner's merge override").
 
 How it was applied (2026-10-31 09:02Z): two runs, `agentforge-playground` alone as a canary and
@@ -122,14 +123,14 @@ still has write access, or the read-back will show a name missing.
 
 ## Break-glass: when the protection stops every merge
 
+Since 2026-11-06 the override is already open on these repositories, so the owner can merge from the web UI without
+this section (`owner-credentials.md` § "The owner's merge override"). It still applies to a headless merge. The script restores the value it read, so it leaves the flag `false`.
+
 With exactly two whitelisted approvers, two required approvals and one required context,
 one reviewer-host outage or a renamed CI context stops every merge on these repositories:
 the reviewbot merges only on both personas' clean verdicts. Since 2026-10-31 `chifor` is in
 the merge whitelist (section above), so the owner can recover. Use the **least permissive**
 option that works; each keeps more of the protection than the next:
-
-Since 2026-11-06 the override is already open on these repositories, so the owner can merge from the web UI without
-this section (`owner-credentials.md` § "The owner's merge override"). It still applies to a headless merge. The script restores the value it read, so it leaves the flag `false`.
 
 - **A renamed CI context:** `PATCH` `status_check_contexts` to the new name under the token
   discipline below, and read it back. Merges then flow again, the reviewbot's included.
