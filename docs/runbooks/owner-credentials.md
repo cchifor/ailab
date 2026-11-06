@@ -20,14 +20,48 @@ any re-accumulation. Until B6 (below) the old credentials still exist and four a
 | `release-bot` | The forge repo's release publisher. Team `release` (`cchifor/forge` only). | Token `forge-release-20261006` as the forge repo secret `FORGE_RELEASE_TOKEN`. | Read code and releases, write packages, in `cchifor/forge`. |
 | `renovate-bot` | Renovate. | Gitea PAT (`write:repository,write:issue,read:user`) as `RENOVATE_TOKEN` in Secret `renovate/renovate-credentials` (SOPS). | Open PRs; a merge author, same gate as everyone. |
 | `gitea_admin` | **Break-glass** site admin. | Password login. The password is in Secret `gitea/gitea-admin` (`kubernetes/apps/apps/gitea/gitea-admin.sops.yaml`). One allowlisted token, held by automation: `flux-ailab-read` (`read:repository`). It holds no other token (checked 2026-10-31, when `af-ci-scaler-2941` was deleted with AgentForge, ADR 0041). | Everything. |
-| `chifor` | **The owner**, site admin. Web login at git.chifor.me through Authelia. | **No standing token** (target). Owner operations use a token minted for one operation (next section). Until B6 it still has `cc-admin-20260913` and a Git Credential Manager OAuth grant. | Everything; the only merger of owner-protected files. Since 2026-10-31 also in the `main` merge whitelist of every reviewer-protected repository, so it merges a PR that already meets the rule from the web UI with no token (`relay-reviewer-onboarding.md` § "The owner in the merge whitelist"). |
+| `chifor` | **The owner**, site admin. Web login at git.chifor.me through Authelia. | **No standing token** (target). Owner operations use a token minted for one operation (next section). Until B6 it still has `cc-admin-20260913` and a Git Credential Manager OAuth grant. | Everything; the only merger of owner-protected files. Since 2026-10-31 also in the `main` merge whitelist of every reviewer-protected repository, so it merges a PR that already meets the rule from the web UI with no token (`relay-reviewer-onboarding.md` § "The owner in the merge whitelist"). Since 2026-11-06 it can also override branch protection (§ "The owner's merge override"). |
 | `cchifor` | The organization account (a converted user, uid 2). | Should hold **nothing**. Holds 26 tokens until B6, and stays in `pr_reviewer_merge_authors` until B7. | Acts with the org's identity. |
 
-**`dsh-acp-plus`: the slot bots deliberately do not copy `dev-worker-bot`'s grant there.** `dev-worker-bot` is an
+**`dsh-acp-plus`: the slot bots deliberately do not copy `dev-worker-bot`'s grant there.** `dev-worker-bot` was an
 explicit collaborator on `cchifor/dsh-acp-plus` with mode 3 (**admin**). The worker-identities plan said to copy
 that grant to each slot bot; it was not copied (2026-10-11), because a repository admin can edit that repository's
-reviewer-only branch protection, and team `automation` already gives the slot bots write there. Follow-up, still
-open: remove `dev-worker-bot`'s admin collaboration on `dsh-acp-plus`; write through the team is enough.
+reviewer-only branch protection, and team `automation` already gives the slot bots write there. That follow-up
+is done: `dev-worker-bot` is no longer a collaborator on `dsh-acp-plus` (checked 2026-11-06).
+
+## The owner's merge override
+
+Since 2026-11-06 the owner can merge a PR that branch protection is holding, at any time, from the web UI, with no
+token. The API equivalent is `"force_merge": true`. A plain merge still obeys the rule, and so does everyone else.
+
+Gitea has no per-user bypass. It checks two things, in this order: the merge whitelist, if the rule has one, and then
+repository admin with `block_admin_merge_override: false`. The whitelist is what keeps the override to the owner.
+
+| Repositories | `block_admin_merge_override` | Who can override |
+| --- | --- | --- |
+| `relay`, `llm-router`, `dsh-acp-plus`, `forge`, `workbricks`, `workbricks-apps`, `workbricks-old` | `false` since 2026-11-06 | `chifor` only. The whitelist is `chifor` and the two reviewers, and the reviewers have write, not admin. |
+| `trueswarm-admin` | `false` | `chifor` only: it is the whole whitelist. |
+| `ailab`, `platform` | `false`, with no merge whitelist | Every repository admin: `chifor`, `gitea_admin` and `org-ops-bot` (Owners team). This predates the change. `org-ops-bot` holds no token with `write:repository`. |
+| `dsh-team-conductor` | `true`, on purpose | Nobody. `verifyProtection` in that repository's `src/protection.ts` refuses to start or publish unless this is `true`, and `conductor.runtime.json` points the conductor here. Clear it only together with a conductor change. |
+| `forge`, branch `quality/probe-base` | `true`, on purpose | Nobody. A leftover probe branch with no merge whitelist, so clearing the flag would open the override to every repository admin. |
+
+The ten other active repositories have no protection rule, so any writer can merge there. The six archived ones are
+read-only.
+
+The override skips branch protection only. Gitea still refuses a PR with conflicts, a `WIP:` title or an open
+dependency.
+
+A newly protected repository needs the same two settings: `chifor` in the merge whitelist and
+`block_admin_merge_override: false`.
+
+How it was applied (2026-11-06 07:54Z): one run with one one-shot `chifor` token (`write:repository,write:user`). It
+first tested a throwaway private repository with the rule shape of `relay`. With the flag on, the owner's `force_merge`
+got 405. With it off, a whitelisted non-admin's `force_merge`, a non-whitelisted writer's `force_merge` and the
+owner's plain merge each got 405, and the owner's `force_merge` got 200. The run then sent seven `PATCH`es holding only
+`block_admin_merge_override` and read every rule back: nothing else had changed. The fixture was deleted, and the token
+was deleted and then answered 401. Snapshots of all 14 repositories' rules, before and after, are in
+`kubernetes/infra/_out/gitea-protection-20261106/` (gitignored, on the workstation only). To undo it on one repository,
+`PATCH` `{"block_admin_merge_override": true}` to `branch_protections/main` with a one-shot token.
 
 ## Owner operations are automated (ruling R13)
 
