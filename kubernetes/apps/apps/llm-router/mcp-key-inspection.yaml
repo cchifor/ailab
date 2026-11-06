@@ -12,6 +12,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: router-mcp-acceptance
+        app.kubernetes.io/component: key-inspection
     spec:
       automountServiceAccountToken: false
       restartPolicy: Never
