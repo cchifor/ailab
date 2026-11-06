@@ -3874,82 +3874,70 @@ production smoke and backup checks. Its [receipt](https://git.chifor.me/cchifor/
 pins `registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3`.
 The Node runtime digest is unchanged. This cumulative release supersedes the #139-only deployment in #1615.
 
-**Live acceptance.** The one-shot Job `router-mcp-acceptance-20261105` uses the same image and talks to the
-router's MCP endpoint through the internal Service. Its management token is injected from the existing
-`llm-router-auth/admin-token`; it never leaves the pod. The Job has no Kubernetes API token, persistent
-volume, shell, public egress or inbound network access. Its only egress is cluster DNS and the router on 8787;
-a temporary additive policy admits only its labelled pod to the router. No secret value, raw tool response,
-model reply or private conversation is logged. Logs contain phases and the created account/model/request IDs.
+**Live verification and user-requested removal (2026-11-06).** Deployment PR #1616 reached
+source `aec9198` on the pinned image above. Authenticated MCP initialized and listed 48 tools;
+public health/readiness returned 200 and unauthenticated `/admin/mcp` returned 401.
+The original acceptance Job stopped at `list_secrets`: two unused Anthropic/Claude-labelled keys
+matched. It created no account or route and sent no discovery or inference. Failed session
+`7a57f124-a8f5-49c3-84df-0f1ddc30b25f` remains available. Read-only inspection #1627 identified
+the two saved references. The user then explicitly requested deleting both keys and adding a
+fresh one through the router UI; the pending acceptance rerun #1628 was closed before merge
+and was never deployed. Live Anthropic inference was therefore **not** verified.
 
-The user authorized adding the saved Anthropic key and testing the route. The acceptance script:
-- Initializes MCP, lists tools and reads status, request metadata and audit entries.
-- Selects exactly one unused key explicitly labelled Anthropic/Claude; ambiguous or missing selection stops.
-  Credential values never enter the Job. It probes `provider: anthropic` using the saved `secretRef` and no `baseUrl`.
-- Requests `setup_provider`, `mode: new`, alias `claude-api`. Before approving, validates a complete proposal
-  with exactly two additions: one new hosted Anthropic API account using that reference and one route to a
-  discovered model. Any removal, existing edit, different alias/provider/credential/address or truncated result stops.
-  A refreshed proposal stops for another review; it is never blindly approved.
-- Reads the created route back, approves exactly one short `test_route` request, and verifies its completed
-  journal selected the expected account. A correct pre-existing `claude-api` route is probed and tested without
-  creating another account. An incompatible existing route stops for investigation.
-- Inspects and deletes its own successful investigation session. Failed sessions stay available for diagnosis.
+Removal PR #1629 was approved by both reviewers and merged with all six CI checks green
+(`b4b17350a5d87ad8604e58e1a73ed853acc140ca`). At **2026-11-06 09:49:50 UTC**, the live Job
+`router-mcp-key-removal-20261106` completed the normal MCP proposal/approval flow for:
 
-Only read-only MCP initialization is retried while the singleton rolls, including network timeouts within
-the endpoint wait window. The entry check resolves the ConfigMap symlink so Node executes the checks;
-a subprocess regression verifies a projected-volume layout emits an acceptance outcome instead of
-silently exiting successfully. Job `backoffLimit: 0` and the script's
-lack of tool retries prevent automatic replay after an ambiguous mutation or paid request. To rerun after a
-failure, inspect the safe Loki phase summary and durable session first, then review a newly named Job.
-The repository-required Flux force annotation permits recreation after a reviewed template change; normal
-reconciliation does not restart a completed Job. Remove the temporary Job promptly after acceptance.
-The acceptance script passed locally through the real compiled MCP server with an Anthropic HTTP/SSE fixture:
-new setup, existing-route reuse, inference and journal inspection. Its 17 standalone guard/error tests pass
-with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.
-These fixtures establish test coverage, not live Anthropic success.
+- `store:sec_ebc130865c32ef3c` (`claude subscription token`), proposal `p_c8017ed7-c`.
+- `store:sec_18cd60c0c91260f3` (`anthropic`), proposal `p_c2c1f16a-2`.
 
-**Live inspection (2026-11-06).** The rollout reached source `aec9198`; MCP initialized and
-listed 48 tools. Acceptance stopped at `list_secrets` because two unused Anthropic/Claude-labelled
-keys matched. No account, route or inference was created by that run. Its session is
-`7a57f124-a8f5-49c3-84df-0f1ddc30b25f`. The separate one-shot
-`router-mcp-key-inspection-20261106` reads only `list_secrets` in that session and projects the
-matching references, labels and timestamps for selection. It never calls discovery, proposal
-resolution or inference. It reuses the restricted acceptance network policy and credential
-injection, with its own ConfigMap; the failed acceptance Job is not replayed. Remove both
-temporary Jobs and their script ConfigMaps after the investigation and acceptance are complete.
+Its durable session is `a371f994-4621-4c17-a52f-274491cc4b0b`. Safe logs contain two
+`mcp.key_removed` events and final `mcp.key_removal_passed` after `list_secrets` confirmed both
+references absent; Prometheus recorded Job success `1`. No provider discovery or inference ran.
+Both exact labels and unused status were checked before either proposal, each approved diff
+contained only the corresponding deletion, and no call was retried. Credential values never
+entered the logs. The successful session and normal deletion audits remain in the router.
 
-While the original acceptance Job is declared, the rollout checker requires its success in addition to
-a fresh Ready pod on the exact image, public health/readiness and unauthenticated management refusal.
-That acceptance was cancelled by the user after ambiguous key selection; no Anthropic account, route
-or inference resulted. Verify the requested removal separately, then remove all temporary resources
-and rerun the steady-state rollout checker.
+The removal script passed six guard/error tests and a real compiled MCP fixture verifying two
+deletion audits, an unrelated key preserved, unchanged configuration revision and zero inference.
+These fixtures verify the control flow; they do not establish live Anthropic connectivity.
+
+All three temporary Jobs (acceptance, inspection, removal), their script ConfigMaps and sources,
+their dedicated tests, and the two temporary NetworkPolicies are now removed from desired state.
+The runtime image/configuration, unrelated/new saved keys, accounts/routes, backup and investigation
+sessions remain intact. This prevents later image/script edits from recreating the deletion Job.
+The steady-state `python3 scripts/check-router-rollout.py` checks the exact Ready image,
+init-container composition, public health/readiness and unauthenticated management refusal.
+The checker discovers canaries by globbing `kubernetes/apps/apps/llm-router/*-canary.yaml`;
+removing `mcp-canary.yaml` selects the no-canary path automatically, without a checker change.
+
+The owning Kustomization is `flux-system/apps`, declared with `prune: true` in
+`kubernetes/apps/clusters/ai/apps.yaml`. With an operator's cluster read access, verify its
+Ready status and applied revision include this cleanup merge, then check all temporary objects:
+
+```sh
+flux get kustomizations apps -n flux-system
+set -o pipefail
+kubectl -n llm-router get jobs,networkpolicies,configmaps -o json | python3 -c '
+import json, sys
+remaining = [i["kind"] + "/" + i["metadata"]["name"] for i in json.load(sys.stdin)["items"]
+             if "router-mcp-" in i["metadata"]["name"]]
+if remaining:
+    sys.exit("Temporary MCP resources remain: " + ", ".join(remaining))
+print("No temporary MCP Jobs, policies or ConfigMaps remain")'
+python3 scripts/check-router-rollout.py
+```
+
+The resource check must exit zero with no matching objects. A failed Kubernetes read fails the
+pipeline; it is not evidence of absence. The rollout checker independently verifies service health.
+The removed scripts and their tests remain available in the #1629 merge commit for investigation;
+do not restore or rerun them. Any further management action requires its own explicit scope.
 
 **Backup and rollback.** No schema migration is introduced. Preserve the verified
 `/data/backups/pre-provider-onboarding-20261105` generation (verified 14:48:14 UTC); no new backup init is needed.
 If rolling back to the release observed before this work, restore image
 `registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803`,
 source annotation `922bafdf199a6a42be75baffd3bb93d70f8d8ffc` and release `router-0.1.0-20261105-provider-onboarding`
-together, and remove the temporary canary resources. That version understands the Anthropic account/route;
-image rollback does not delete them or restore the database. Any separate configuration undo needs its own
-review through the normal configuration proposal/history flow.
-
-
-**User-requested credential removal (2026-11-06).** After the metadata inspection, the user explicitly
-requested removing both unused saved credentials and adding a fresh one through the router UI. The
-pending acceptance rerun PR #1628 was closed before merge; it was never deployed. The one-shot Job
-`router-mcp-key-removal-20261106` targets only `store:sec_ebc130865c32ef3c` (`claude subscription token`)
-and `store:sec_18cd60c0c91260f3` (`anthropic`). It checks both labels and unused status before any proposal,
-then uses `remove_secret` and the normal exact-proposal approval flow. Each proposal must contain exactly
-one matching secret deletion. Refreshed proposals stop, and no call is automatically retried. A final
-`list_secrets` read must show both references absent. New or unrelated keys, accounts and routes are
-untouched; no provider discovery or inference runs. The management token stays in the pod, logs contain
-only safe phases/references, and the durable session plus `secret.deleted` audits remain available.
-Removal is irreversible and was explicitly requested; the user will enter a new key through the UI.
-Clean up all three temporary Jobs, script ConfigMaps and their two network policies after verified removal.
-
-A partial run deliberately fails closed on replay: an absent target is not assumed to be a successful
-delete by this Job. Inspect the durable session, deletion audits and current saved-key metadata first;
-if exactly one deletion completed, use a newly reviewed recovery Job scoped to the remaining authorized
-reference. Do not replay approvals or edit this Job in place. The eight RPCs each have a 60-second timeout
-(480 seconds total), below the 600-second pod deadline. Flux force is required by repository policy;
-a recreated Job refuses missing targets. Land cleanup before any image or script change. The real
-compiled MCP fixture confirmed `remove_secret` returns approval-kind proposals for both saved keys.
+together, while keeping the already-removed temporary Jobs, ConfigMaps and policies absent.
+Image rollback does not restore the database or the deleted saved credentials. Any separate
+configuration undo needs its own review through the normal configuration proposal/history flow.
