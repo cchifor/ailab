@@ -3834,8 +3834,10 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 and the per-backend qwen providers.
 
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
-clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. The cause
-is not established, so treat the next cloud3 FAIL as this one until it is.
+clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
+body sampled direct (n = 25) and via the router on cloud3 (n = 12), output length did not shift (median 946 vs 797, z =
+-0.5), so a single request is not the cause. This is not a known deviation: the session-level gap is unexplained, and the
+FAIL stands until it is.
 
 ## Relay access requests
 

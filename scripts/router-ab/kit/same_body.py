@@ -55,7 +55,7 @@ def call(arm):
         return {'arm': arm, 'http': e.code, 'error': e.read()[:200].decode('utf-8', 'replace')}
     except Exception as e:  # noqa: BLE001 - reported, and the verdict fields fail closed
         return {'arm': arm, 'error': str(e)[:200]}
-    return {'arm': arm, 'input': usage.get('input_tokens'), 'items': items, 'hash': hashlib.sha256(gen.encode()).hexdigest()[:12], 's': round(time.time() - t0, 1), **({'declared': declared, 'trajectory': trajectory} if declared else {})}
+    return {'arm': arm, 'input': usage.get('input_tokens'), 'items': items, 'hash': hashlib.sha256(gen.encode()).hexdigest()[:12], 's': round(time.time() - t0, 1), 'trajectory': trajectory, **({'declared': declared} if declared else {})}
 
 calls = []
 for i in range(n):

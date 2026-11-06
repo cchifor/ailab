@@ -59,7 +59,10 @@ export function qwenProvider({ name, host, server, tap, account }) {
       if (r.complete && !here.length) throw new Error(`no same-body call reached ${account}`);
       const direct = new Set(r.calls.filter((c) => c.arm === 'direct').map((c) => c.hash));
       const inputs = [...new Set(r.calls.map((c) => c.input).filter((x) => x != null))].join(', ');
-      // the router arm's later prompts are built from what the router relayed, so that body must render the same too
+      // Both input-token checks cover every router call, wherever it was placed: the router renders the prompt and the
+      // tokenizer is shared, so placement cannot change them, and a mismatch is a router difference either way. Only the
+      // greedy output depends on the backend, so only that check filters by placement.
+      // The router arm's later prompts are built from what the router relayed, so that body must render the same too.
       const rr = sameBody(ctx, { ...both, target: 'router', run: `layer-a-capture-${name}-router`, model: 'qwen-27b', n: 1 });
       return [
         { name: 'same body (with reasoning items): identical model input tokens', pass: r.same_input_tokens === true, detail: `input tokens ${inputs || 'none (every call failed)'}` },
