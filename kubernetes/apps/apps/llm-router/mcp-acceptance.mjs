@@ -1,6 +1,7 @@
 // One-shot GitOps acceptance. The management token stays in this pod's environment.
 // No raw tool result, credential, model reply, or private conversation is logged.
 import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 class AcceptanceError extends Error {}
 function requireThat(ok, message) { if (!ok) throw new AcceptanceError(message); }
@@ -53,7 +54,7 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
     for (;;) {
       try { init = await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'gitops-mcp-acceptance', version: '1' } }); break; }
       catch (error) {
-        if (Date.now() >= deadline || !(error instanceof TypeError || (error instanceof AcceptanceError && /^MCP HTTP (404|502|503|504)$/.test(error.message)))) throw error;
+        if (Date.now() >= deadline || !(error instanceof TypeError || (error instanceof DOMException && error.name === 'TimeoutError') || (error instanceof AcceptanceError && /^MCP HTTP (404|502|503|504)$/.test(error.message)))) throw error;
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
@@ -119,7 +120,7 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const token = process.env.ROUTER_MCP_ACCEPTANCE_TOKEN;
   requireThat(token && token.length >= 24, 'Missing management credential');
   await runAcceptance({ url: 'http://llm-router.llm-router.svc.cluster.local/admin/mcp', token, waitForEndpointMs: 240_000 });

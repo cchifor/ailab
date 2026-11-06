@@ -1,8 +1,53 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, copyFileSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { checkSetup, runAcceptance } from '../../kubernetes/apps/apps/llm-router/mcp-acceptance.mjs';
 
 const before = { accounts: [{ id: 'existing' }], routes: [{ alias: 'existing' }] };
+
+test('a ConfigMap-shaped symlink executes acceptance and cannot silently exit successfully', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'router-mcp-configmap-'));
+  try {
+    mkdirSync(join(dir, '..2026_fixture'));
+    copyFileSync(new URL('../../kubernetes/apps/apps/llm-router/mcp-acceptance.mjs', import.meta.url), join(dir, '..2026_fixture/mcp-acceptance.mjs'));
+    symlinkSync('..2026_fixture', join(dir, '..data'));
+    symlinkSync('..data/mcp-acceptance.mjs', join(dir, 'mcp-acceptance.mjs'));
+    // A deterministic authentication refusal proves the actual entry ran without network access.
+    writeFileSync(join(dir, 'preload.mjs'), 'globalThis.fetch = async () => new Response(null, { status: 401 });');
+    const result = spawnSync(process.execPath, ['--import', join(dir, 'preload.mjs'), join(dir, 'mcp-acceptance.mjs')], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, ROUTER_MCP_ACCEPTANCE_TOKEN: 'fixture-management-token-never-log' },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    const event = JSON.parse(result.stdout.trim());
+    assert.equal(event.event, 'mcp.acceptance_failed');
+    assert.equal(event.stage, 'initialize');
+    assert.equal(event.reason, 'MCP HTTP 401');
+    assert(!result.stdout.includes('fixture-management-token-never-log'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('retries initialization TimeoutError only within the endpoint wait window', async t => {
+  let calls = 0;
+  const log = [];
+  t.mock.method(globalThis, 'setTimeout', callback => { queueMicrotask(callback); return 0; });
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    if (calls === 1) throw new DOMException('sensitive-timeout-detail', 'TimeoutError');
+    return new Response(null, { status: 401 });
+  });
+  await assert.rejects(runAcceptance({ url: 'http://fixture.invalid', token: 'fixture', waitForEndpointMs: 1000, log: x => log.push(x) }));
+  assert.equal(calls, 2);
+  assert(log.join('').includes('MCP HTTP 401'));
+  assert(!log.join('').includes('sensitive-timeout-detail'));
+  calls = 0;
+  await assert.rejects(runAcceptance({ url: 'http://fixture.invalid', token: 'fixture', log: x => log.push(x) }));
+  assert.equal(calls, 1);
+});
 const secretRef = 'store:sec_fixture';
 const valid = () => ({
   data: { proposed: { alias: 'claude-api', provider: 'anthropic', mode: 'new', account: 'anthropic', model: 'claude-fixture' } },

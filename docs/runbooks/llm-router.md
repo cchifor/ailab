@@ -3896,13 +3896,16 @@ The user authorized adding the saved Anthropic key and testing the route. The ac
   creating another account. An incompatible existing route stops for investigation.
 - Inspects and deletes its own successful investigation session. Failed sessions stay available for diagnosis.
 
-Only read-only MCP initialization is retried while the singleton rolls. Job `backoffLimit: 0` and the script's
+Only read-only MCP initialization is retried while the singleton rolls, including network timeouts within
+the endpoint wait window. The entry check resolves the ConfigMap symlink so Node executes the checks;
+a subprocess regression verifies a projected-volume layout emits an acceptance outcome instead of
+silently exiting successfully. Job `backoffLimit: 0` and the script's
 lack of tool retries prevent automatic replay after an ambiguous mutation or paid request. To rerun after a
 failure, inspect the safe Loki phase summary and durable session first, then review a newly named Job.
 The repository-required Flux force annotation permits recreation after a reviewed template change; normal
 reconciliation does not restart a completed Job. Remove the temporary Job promptly after acceptance.
 The acceptance script passed locally through the real compiled MCP server with an Anthropic HTTP/SSE fixture:
-new setup, existing-route reuse, inference and journal inspection. Its 15 standalone guard/error tests pass
+new setup, existing-route reuse, inference and journal inspection. Its 17 standalone guard/error tests pass
 with `node --test scripts/tests/router-mcp-acceptance.test.mjs`; the 12 rollout-checker tests also pass.
 These fixtures establish test coverage, not live Anthropic success.
 
