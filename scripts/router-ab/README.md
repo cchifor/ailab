@@ -45,8 +45,9 @@ providers/                     one module per provider; discovered, never named 
   index.mjs                    discovery and the interface check
   codex.mjs                    ChatGPT seat via the Codex CLI (direct: own login; router: dw-N key, native pass-through)
   claude.mjs                   Claude seat via Claude Code (direct: own login; router: claude/<model>, sdk-resume)
-  qwen.mjs                     qwen3.8-27b on cloud2 (direct: vLLM /v1/responses; router: pointer qwen-27b)
+  qwen.mjs, qwen-cloud3.mjs     qwen3.8-27b, one provider per backend of the route (direct: its /v1/responses; router: pointer qwen-27b)
   lib/codex-session.mjs        shared by Codex-CLI providers: one session through the tap, metrics, the same-body check
+  lib/qwen-backend.mjs         the qwen provider, parameterised by backend
 tasks/
   registry.mjs                 tasks as data: id, kind, providers, fixture, prompt or turns, grader, cap, gate on/off
   graders.mjs                  graders by name (tests run in docker)
@@ -109,7 +110,7 @@ export default {
 |---|---|
 | codex | code-edit (3 bugs, unittest), secret-continuity (reasoning across a resumed turn) |
 | claude | math, tool-choice, recall (2 turns), stock-agentic (a multi-file fix, hidden tests) |
-| qwen | code-edit |
+| qwen, qwen-cloud3 | code-edit |
 
 The margins, and §9.6's sample-size rule: 3 pairs first; a metric outside its margin, or within half a margin of it,
 takes 3 more pairs, and the decision uses all 6. Below 6 pairs a metric outside its margin is OUT, not yet FAIL. A
@@ -148,11 +149,16 @@ repeated:
   worker's login (`RAB_CLAUDE_ACCOUNT`, default `claude-2`);
 - the pairing cannot be verified: the run recorded no trajectory ids, or the router journal does not have them (the
   guard fails closed);
-- a route with several backends placed the run on another server than the direct arm's (qwen);
+- a route with several backends kept placing the run on another server than the direct arm's (qwen, after 8 tries);
 - a harness error.
 
 Codex is the one route that cannot be held to the direct seat: the pool places each session on any seat. The guard holds
 each run to one seat and prints it, and the seats serve the same model.
+
+**A route with several backends.** The router balances new conversations, and a client cannot pick the backend, so each
+qwen backend has its own provider. A router run placed on the other backend is discarded and run again. Placement is
+decided before the model says anything, so this cannot favour either arm. `same_body` compares only the router calls that
+reached that backend. To add a backend: one provider file, and the task's `providers` entry.
 
 **Known deviations** (the registry's `known` entries):
 

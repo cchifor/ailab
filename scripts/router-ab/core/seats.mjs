@@ -5,6 +5,15 @@
 import path from 'node:path';
 import { HERE } from './context.mjs';
 
+/** The last account each trajectory reached: { id: account }. Unknown ids are absent; a broken journal throws, so it is
+ * never read as a placement outcome. */
+export function accountsOf(ctx, ids) {
+  const known = ids.filter(Boolean);
+  if (!known.length) return {};
+  const j = JSON.parse(ctx.inPod(path.join(HERE, 'local', 'journal-seats.mjs'), known).stdout);
+  return Object.fromEntries(known.filter((id) => j[id]?.accounts?.length).map((id) => [id, j[id].accounts.at(-1)]));
+}
+
 export function seatsOf(ctx, ids) {
   // one entry per router request: a request with no id is unverified, and one unverified request breaks the proof
   if (!ids?.length) return { accounts: [], moved: true, error: 'the run recorded no trajectory ids' };

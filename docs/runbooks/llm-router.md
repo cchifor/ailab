@@ -3748,6 +3748,20 @@ for local and remote models).
 
 ## cloud2's `replayReasoning` turned on: append-only (2026-11-05, rev 2229)
 
+**Correction (2026-11-06).** Replay reduces qwen's `!` stream on long prompts. It does not eliminate it.
+- **Measured with replay on,** straight to the backends, no router: a `!` stream from the first token in 1 of 574 requests
+  across cloud2 and cloud3 (about 0.2 %; one hit, so the rate is loose; 7.7k-token prompt). The hit was on cloud2, with 2
+  conversations in flight; its twin finished normally.
+- **Live:** a request on cloud3 hung for 268 s on 2026-11-06 at 10:12Z with the same vLLM signature. Its text was not
+  captured.
+- **Signature:** `SpecDecoding metrics` in the vLLM log with mean acceptance 1.00 and accepted 0 tok/s, sustained, while
+  drafted stays above 40 tok/s. The stream runs at about 42 tok/s. The same windows are in cloud2's log on 2026-11-05 and
+  2026-09-10.
+- **Cause: unknown.** It is not the router, and not one backend. Model-level and a concurrency or prefix-cache race are
+  both still open. Root-cause tests wait for the owner's go.
+- **Until a guard ships:** an agent that hangs on qwen with HTTP 200 is this stream. No timeout fires, because deltas keep
+  flowing. Keep replay on: the rest of this section still holds for long prompts.
+
 **Why.** With replay off, qwen3.8-27b on cloud2 degenerates on long agentic turns.
 - In the router transparency A/B (ailab `plans/2026-11-05-router-transparency-and-planning-revalidation.md` §2.2), a
   12-file Codex task through the router timed out. Its last request streamed 24,035 reasoning deltas of `!` for 764 s
@@ -3779,7 +3793,7 @@ local accounts would cut it.
 ## Release gate (router-ab): after every image roll, before every route config change
 
 `scripts/router-ab/` is the release gate. Its README covers the architecture, the providers, the tasks and the safety
-rules. For each provider (Codex seat, Claude seat, qwen3.8-27b on cloud2) it runs:
+rules. For each provider (Codex seat, Claude seat, each qwen3.8-27b backend) it runs:
 - **Layer (a):** what the model receives, the same request direct and via the router;
 - **Layer (b):** short tasks in ABBA pairs, against the §9.6 margins of the router standard.
 
@@ -3816,7 +3830,14 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 - Recordings live only in the run's temp directories, which teardown deletes.
 
 **Baseline:** the router image of 2026-11-06 (`sha256:5749d8a8…`), Codex and qwen. Claude was last measured on 2026-11-05
-(`sha256:78915e24…`): its seats were at their weekly limit on 2026-11-06. The reports are in the PR that added the gate.
+(`sha256:78915e24…`): its seats were at their weekly limit on 2026-11-06. The reports are in the PRs that added the gate
+and the per-backend qwen providers.
+
+**Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
+clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
+body sampled direct (n = 25) and via the router on cloud3 (n = 12), output length did not shift (median 946 vs 797, z =
+-0.5), so a single request is not the cause. This is not a known deviation: the session-level gap is unexplained, and the
+FAIL stands until it is.
 
 ## Relay access requests
 

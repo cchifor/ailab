@@ -31,6 +31,7 @@ for (const n of list(args.tasks) ?? []) if (!TASKS.some((t) => t.id === n)) usag
 const plan = providers.map((p) => ({ p, tasks: tasksFor(p, { only: list(args.tasks), all: !!args.all }) })).filter((x) => x.tasks.length);
 if (!plan.length) usage('nothing selected: no provider runs these tasks');
 for (const n of list(args.tasks) ?? []) if (!plan.some((x) => x.tasks.some((t) => t.id === n))) usage(`no selected provider runs task ${n}`);
+for (const n of list(args.providers) ?? []) if (!plan.some((x) => x.p.name === n)) usage(`provider ${n} runs none of the selected tasks`);
 
 if (args.plan) {
   for (const { p, tasks } of plan) console.log(`${p.name}: Layer (a), then ${tasks.map((t) => t.id).join(', ') || '(no tasks)'} x ${pairs} pairs ABBA`);
@@ -48,7 +49,7 @@ try {
     const r = ctx.push(from, to);
     if (r.status !== 0) throw new Error(`could not deploy to the worker: ${(r.stderr || '').slice(-160)}`);
   }
-  const tap = ctx.ssh(`mkdir -p -m 700 ${ctx.remote}/kit/rec ${ctx.remote}/kit/runs && (setsid nohup node ${ctx.remote}/kit/tap.mjs ${ctx.tapPort} ${ctx.remote}/kit/rec > ${ctx.remote}/tap.log 2>&1 < /dev/null &) && sleep 1 && cat ${ctx.remote}/tap.log`);
+  const tap = ctx.ssh(`mkdir -p -m 700 ${ctx.remote}/kit/rec ${ctx.remote}/kit/runs && (setsid nohup node ${ctx.remote}/kit/tap.mjs ${ctx.tapPort} ${ctx.remote}/kit/rec > ${ctx.remote}/tap.log 2>&1 < /dev/null &) && for i in 1 2 3 4 5 6 7 8 9 10; do grep -q 'abtap on' ${ctx.remote}/tap.log && break; sleep 0.5; done; cat ${ctx.remote}/tap.log`);
   if (!/abtap on/.test(tap.stdout ?? '')) throw new Error(`the tap did not start: ${(tap.stdout ?? '').slice(-160)}`);
   for (const { p, tasks } of plan) {
     let layerA = { checks: [], verdict: 'n/a' };
