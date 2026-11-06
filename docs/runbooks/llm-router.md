@@ -4219,7 +4219,7 @@ a 404 is not retried, so a pool keeps sending the account its share.
    - **A 404 within about 200 ms:** the account's base URL or model. Compare `baseUrl` with the sibling accounts in
      `GET /admin/v1/config`. `POST https://api.anthropic.com/messages` answers 404 even without a key, and
      `/v1/messages` answers 401.
-   - **A 401:** the key. See "Provider onboarding".
+   - **A 401:** the key. See "API-key provider onboarding release".
 4. Fix the account, repeat step 2, then send enough requests through the pool to reach every account: three rounds of
    the pool's size is enough. Check the serving account of each in the journal.
 
