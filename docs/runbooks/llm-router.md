@@ -4285,7 +4285,8 @@ pod.
   gives a card. It was rejected, and the key did not change.
 - `PUT /admin/v1/config` with `https://api.anthropic.com` on `anthropic-2` answered 422 `INVALID_BASE_URL` and wrote nothing.
 
-**Release gate.** `codex`, `codex-control` and both qwen backends; the reports are on the PR that added this section.
+**Release gate.** `codex`, `codex-control` and both qwen backends. Both reports are in a comment on
+[ailab #1653](https://git.chifor.me/cchifor/ailab/pulls/1653).
 
 | Provider | Layer (a) | Task | Verdict |
 |---|---|---|---|
@@ -4293,16 +4294,16 @@ pod.
 | `codex` | | `secret-continuity`, 3 pairs | PASS |
 | `codex-control` | PASS | `code-edit`, 6 pairs | PASS |
 | `qwen-cloud3` | PASS | `code-edit`, 3 pairs | PASS |
-| `qwen` (cloud2) | PASS in the first run | `code-edit` | **Not decided** |
+| `qwen` (cloud2) | PASS in the first run; FAIL in the rerun, hosts off | `code-edit`, 3 pairs, then 6: neither finished | **Not decided** |
 | `claude` | not run | not run | **Not run** |
 
-- **`code-edit` at 3 pairs was RERUN for both Codex providers** (uncached tokens 1.28x and 1.22x, wall time about 1.3x), and
-  passed at 6 pairs, as Section 9.6 decides.
+- **`code-edit` at 3 pairs was RERUN for both Codex providers** (uncached tokens: `codex` 1.28x, `codex-control` 1.22x; wall
+  time about 1.3x on each), and passed at 6 pairs, as Section 9.6 decides.
 - **`qwen` (cloud2) is not decided.** The cloud hosts power off at night, and all of them went offline at 20:02Z. The first
   run reached this provider around then, and its direct arm failed too (16 retries, 360 s). The 6-pair rerun then failed
   Layer (a) with `No route to host` on the direct arm, so the overall report says FAIL. That is the power-off, not the
-  router: nothing reached a backend. Run it once the hosts are up:
-  `node scripts/router-ab/gate.mjs --providers qwen --tasks code-edit --pairs 3`.
+  router: nothing reached a backend. Run it once the hosts are up, as a fresh first pass (Section 9.6 takes 3 more pairs if
+  it needs them): `node scripts/router-ab/gate.mjs --providers qwen --tasks code-edit --pairs 3`.
 - **`claude` was not run.** `claude`, `claude-2` and `claude-3` were at 100 % of their weekly window, and the gate's Claude
   arm uses `claude-2`.
 
