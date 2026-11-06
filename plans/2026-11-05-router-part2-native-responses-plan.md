@@ -50,8 +50,8 @@ equality across a flip, and the real-Codex transport and session gates.
 **Architecture** (§2): Part 1's three kinds of extension point. A **manifest registry** of qualification entries; an
 **implementation registry** of backend identity readers; a **static catalog** of request mutations; a pure **planner**
 that the engine calls per candidate before selection; a **native transport** with typed outcomes; a pure **Responses
-tap** that feeds the stream inspectors. The availability probe (the cloud1 design) is its own PR with the contract
-changes of §2.6.
+tap** that feeds the stream inspectors. The availability probe (the cloud1 design) is its own PR, as §2.6 fits it into
+the same registries.
 
 ---
 
@@ -277,40 +277,71 @@ application to the `codex-responses` protocol explicitly, and tests a local nati
 across a route flip (codex round 2, finding 8). **Digests:** `request.wire` records
 `clientSha256` and `upstreamSha256`, and the invariant is `upstreamSha256 == sha256(applyDeclared(client, planned))`.
 
-### 2.6 Availability probes (the cloud1 design): its own PR, and the contract changes
+### 2.6 Availability probes (the cloud1 design): its own PR
 
-Adopted from the cloud1 agent's design (cloudlab `feat/cloud1-flex-host` `4c3ef04`, plan §6) as an implementation
-registry, default-off, its own PR after Part 1, cloud1 joining the route only after it ships and passes the A/B gate.
-Changes to its contract, to relay to the cloud1 agent:
-1. **Reasons prefixed and classed:** `availability:swap_pending`, `availability:model_not_resident`,
-   `availability:model_loading`, `availability:model_unloading`: transient and configuration-caused, never spill
-   reasons (a bound conversation moves).
-2. **The engine's answer when they exclude everything is explicit:** today an exhausted route falls through to a 429
-   `CAPACITY_UNAVAILABLE`, not retryable (`inference:671`), and new reason names do not change that. The PR adds the
-   mapping: only availability (and offline) reasons left → 503 `MODEL_UNAVAILABLE`, retryable, `Retry-After` = the
-   probe interval.
-3. **The registry enforces the probe contract:** an absolute deadline around `check()` (a probe that hangs is
-   `unknown`), validation of the returned verdict's shape (invalid = `unknown`), and **expiry**: a verdict older than two
-   intervals is `unknown`. `unknown` adds no reason (fail-open), which is safe only because cloud1's host invariant
-   (a fast retryable 503 `model_swapped_out`, never an eviction) holds without the router.
-4. **The partial-read rule changes:** `/running` readable but the in-flight snapshot unreadable gives `unknown` for
-   `swap_pending`, not `available` (a pending swap must not be missed).
-5. **No identity through the probe:** `/upstream/<model>/version` can load a model (§2.4); the probe stays on
-   `/running` and `/api/events`. A model's identity on a llama-swap host comes from host-published metadata.
-6. **Journal and cache:** `availability.changed` and `availability.check_failed` are runtime events; a move caused by
-   an availability reason is journaled with its placement outcome `moved` and `cache.reset:moved`; a backend reload
-   seen by the probe (a model's process restarted) invalidates its identity (§2.4).
-7. **The exclusion-result matrix** (codex round 2, finding 9), when no candidate remains, by precedence: a strict binding
-   keeps its own answer (as today); any candidate refused only as busy → the busy path (the admission queue, else the
-   429 with `Retry-After`), as today; otherwise any permanent, request-caused reason → 400 naming it; otherwise only
-   transient reasons (availability, offline, cooldown, identity unknown) → 503 `MODEL_UNAVAILABLE`, retryable,
-   `Retry-After` = the shortest probe interval among them; `already_attempted` counts as busy for the failover it
-   follows. Each row is a test, including cloud1 loading while cloud2 is busy.
-8. **Reloads:** `/running` exposes no process generation (`internal/server/api.go:313` at v250), so polling can miss a
-   restart between two checks. The verdict carries a per-model `generation` when the host publishes one (the deployment
-   metadata of §2.4); without it, a reload is undetectable and the contract says so. Late results after a configuration
-   change or disposal are discarded; after `unknown`, recovery needs two consecutive `available` verdicts (the design's
-   hysteresis).
+Adopted from the cloud1 plan (cloudlab PR #55, head `4c2b71f`, `plans/2026-11-05-cloud1-flex-host-plan.md` §6, which
+replaces the `4c3ef04` version) as an implementation registry, default-off, its own PR after Part 1, cloud1 joining the
+route only after it ships and passes the A/B gate. **That section is the contract, and its names are used here:** the
+types (`AccountAvailability`, `ModelAvailability`, `AvailabilityObservation`, `AvailabilityProbe<S>`, `Eligibility`), the
+llama-swap truth table, the tests. This section says how it fits the registries and the engine, and where it differs.
+
+| Unit | Kind | Owns |
+|---|---|---|
+| `contracts/availability.ts` | contracts | the types, one file per extension point (Part 1 §2.1), so the closure pins name it; `Account.availability?` |
+| `runtime/availability-registry.ts` | implementation registry | `register(probe)` with a disposer, `available(kind)`, `validator()`: a new or changed account names a registered probe and passes its schema; an unchanged one is tolerated while the plugin is off |
+| `modules/availability/` | pure | the scheduler and cache: one check in flight, deadline and abort, staleness, hysteresis, the policy |
+| `plugins/availability/` | service plugin | `ctx.routerAvailability`: drives the scheduler, wires the engine, wakes waiters, the admin route, metrics, telemetry, the Assistant read tool |
+| `plugins/availability-llama-swap/`, `adapters/availability/llama-swap.ts` | implementation, adapter | kind `llama-swap`; the HTTP reads, with absolute deadlines and bounded bodies |
+| `modules/inference/`, `modules/routing/` (changed) | pure | engine option `availability?: (account, model) => Eligibility`; the reason joins `evaluate()`'s reasons; the capacity rule |
+
+1. **Fail closed for accounts that opt in** (replacing the fail-open `unknown` of the earlier version). `available`
+   is eligible; `unavailable` is excluded with its reason; `unknown` is excluded with `availability_unknown`: a failed
+   or timed-out check, a stale verdict, no check yet, the plugin disabled or the probe kind not registered. **The core
+   engine enforces this itself:** an account with `availability` and no callback wired is excluded. This inverts the
+   convention for an inspector, whose missing plugin attaches nothing: an inspector only reads, a probe gates. Accounts
+   without `availability` are untouched, which is the default-off claim. cloud1 is extra capacity, so doubt costs
+   throughput, never correctness, and the drain cannot be lost to a probe fault. The cost to watch: a route whose
+   targets all opted in goes unserved while the probe is down, hence the alert (`unknown` over 5 minutes by day).
+2. **The scheduler enforces the contract, not the probe.** Fixed-rate ticks, skipped while a check runs; a deadline
+   below the interval, with abort; a throw, a timeout or a malformed observation is `unknown` (`probe_failed`); a model
+   absent from an observation is `unknown`; the scheduler owns the timestamps; a verdict older than `maxAgeMs`
+   (default 3 × `intervalMs`) is `unknown` (`stale`); a late result from an older configuration or registration
+   generation is dropped. Hysteresis: to excluded at once, back only after 2 distinct completed checks, per model. So
+   exclusion takes effect within `intervalMs` + the deadline (3 s + 2 s) after llama-swap lists the pending request, plus
+   the requests already past selection.
+3. **The capacity rule** (replacing this section's earlier 503 `MODEL_UNAVAILABLE` and its matrix). Today a route with
+   any reason outside `BUSY` falls through to a non-retryable 429 `CAPACITY_UNAVAILABLE` (`inference:671`), so a
+   saturated route with cloud1 excluded would stop being retryable. The capacity decision classes each target:
+   **occupied** (`concurrency_exhausted`), **temporarily unavailable** (the availability reasons,
+   `availability_unknown`, what `BUSY` already holds) or **out** (offline, disabled, a permanent request refusal). When no
+   target is eligible and at least one is occupied or temporarily unavailable, the answer is the **retryable** busy 429.
+   **A target is classed by its worst reason:** `evaluate()` keeps the permanent checks ahead of availability, so a
+   target that would refuse the request anyway is out, and the 400 naming the refusal stands when no target could ever
+   serve it. The queue keeps its one-pool rule, a strict binding keeps its own answer, `already_attempted` counts as busy
+   for the failover it follows, and a transition to available wakes the pool's waiters. Each row is a test:
+
+   | Targets | Answer |
+   |---|---|
+   | cloud1 swapping, cloud2 and cloud3 full | retryable 429, `Retry-After: 5` |
+   | cloud1 swapping, cloud2 offline, cloud3 full | retryable 429, `Retry-After: 5` |
+   | cloud1 swapping, cloud2 and cloud3 offline | retryable 429, `Retry-After: 30` (the swap is the only way back) |
+   | all offline | as today |
+   | every target refuses the request itself | 400, as today |
+
+4. **Reasons:** `swap_pending`, `model_not_resident`, `model_loading`, `model_unloading`, `availability_unknown`, as the
+   cloud1 plan names them (the `availability:` prefix of the earlier version is dropped); one set in `modules/compat`,
+   beside `BUSY`, classes them. None is a spill reason: a bound conversation is `moved`, journaled with `cache.reset:moved`,
+   and not moved back when cloud1 recovers.
+5. **The llama-swap probe:** `/running`, then the first in-flight snapshot of `/api/events`, both under the deadline;
+   `/running` alone never decides, so an unreadable snapshot is `unknown`. **No identity through the probe:**
+   `/upstream/<model>/…` can load a model (§2.4). `/running` exposes no process generation
+   (`internal/server/api.go:313` at v250) and `AvailabilityObservation` carries none, so a reload between two checks is
+   undetectable here and the probe invalidates no identity; a llama-swap host gets a manifest entry only with
+   host-published metadata (§2.4).
+6. **Observability:** per request, the existing events with new values (`routing.evaluated`, the placement outcome
+   `moved`); runtime `availability.changed` in the catalog (Part 1 §2.6); the three `llm_router_availability*` metrics;
+   `GET /admin/v1/availability` and an Assistant read tool `server_availability`.
+7. **The route** needs what the cloud1 plan's §6.9 lists, notably `maxAttempts` of at least 2, so a race's 503 is retried.
 
 ---
 
@@ -378,7 +409,10 @@ Responses request schema in the qualification run. A request carrying one is ski
   (`delivered: true`: the frame reaches the client) **before** it yields the frame: reasoning, text, refusal and
   tool-argument deltas, each with its item id, and `call` = the output index for a function call; an item whose text
   arrives only in its `output_item.done` (or the terminal response) is observed there, once. The engine does not observe
-  `native` events itself, so nothing is counted twice (rounds 1-2, finding 12/5).
+  `native` events itself, so nothing is counted twice (rounds 1-2, finding 12/5). **This extends Part 1's contract**,
+  which reports only what the adapter does not yield and has the engine stamp `delivered: false`: with this slice the
+  adapter states `delivered` and the engine stops stamping it, `BoundInvocation.observe`'s comment loses "never output",
+  and `Observation` gains the item id (`contracts/stream.ts`, PR 1 here).
 - **The hold rule and the timers** (finding 8): `response.created`, `queued` and `in_progress` frames are held until the
   first other frame or `holdMs` after the first held frame (canary: 30 s), whichever comes first; held frames are
   bounded (64 KiB). The hold timer races the pending upstream read, so it fires while the read waits. **Three moments are
@@ -488,7 +522,7 @@ Then the long runs and the 48-hour watch (native-first §11).
 | 2 | the registries and `plugins/wires`, `plugins/qualification-vllm`, the vLLM identity reader, config keys and validators, the engine's planner calls and skip reasons, `request.wire` | none until a route sets `nativeWires` |
 | 3 | the native transport, provider-local's native path, the front door's envelope and writer, admission | none until configured |
 | 4 | §1.4's fixtures, the real-client docker tests, the golden suite | none |
-| 5 (own PR, after Part 1) | the availability registry and the llama-swap probe, with §2.6's changes | none until an account sets `availability` |
+| 5 (own PR, after Part 1) | the availability registry, scheduler and service, the capacity rule, the llama-swap probe (§2.6) | none until an account sets `availability` |
 
 One release for PRs 1-4 (5 may follow), through the runbook's flow up to the ailab roll PR, then the gate (Codex, Claude
 and qwen: Layer (a) plus short Layer (b)): nothing changes for any route at the roll. The canary config only on the
@@ -547,5 +581,9 @@ owner's go, after the gate and §1.4.
 | 9 | Availability: mixed exclusions; reload detection | The exclusion-result matrix; a per-model generation when the host publishes one, else declared undetectable; late results; recovery (§2.6) |
 
 The 200-head convention's effect on Codex retries is recorded (§3.4) and tested (§1.4 gate 4).
+
+**2026-11-06:** §2.6 was rewritten on the cloud1 plan's current version (cloudlab PR #55, `4c2b71f`). That withdraws two
+answers above: the 503 mapping of round 1's finding 11 and the exclusion-result matrix of round 2's finding 9 give way to
+the capacity rule, and `unknown` is now fail-closed.
 
 **Round 3:** on this revision.

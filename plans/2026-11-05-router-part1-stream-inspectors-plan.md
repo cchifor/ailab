@@ -131,10 +131,10 @@ Shared by all three:
 | `contracts/degeneracy.ts` (new) | contracts | the guard's setting shape | `DegeneracySetting` (§2.5) | none |
 | `contracts/journal.ts` (new, PR 1) | contracts (static catalog) | the persisted journal's event names, by owner | `JOURNAL_EVENTS`, `JournalEventType` (§2.6) | none |
 | `modules/degeneracy/` (new) | pure | detect an exact repetition loop per channel; resolve and validate the setting | `LoopDetector`, `ChannelMonitor`, `resolveDegeneracy`, `degeneracyIssues`, `degenerateOutput` | contracts |
-| `modules/inference/` (changed) | pure | the engine: builds each attempt's observations, runs its inspectors, acts on their decisions | option `inspectors?: { attach(scope): InspectorInstance[] }` | contracts |
-| `modules/compat/` (changed) | pure | the replay setting rule (new or changed settings append-only) | `replaySettingIssues(next, previous)` | contracts |
+| `modules/inference/` (changed) | pure | the engine: builds each attempt's observations, runs its inspectors, acts on their decisions | option `inspectors?: { attach(config, account, scope): InspectorInstance[]; yieldNow(): Promise<void> }` (§2.3: the request's configuration snapshot and its account) | contracts |
+| `modules/compat/` (changed) | pure | the replay setting rule (new or changed settings append-only) | `replaySettingIssue(next, previous)` | contracts |
 | `modules/protocol/` (changed) | pure | `replayedReasoning` accepts `encrypted_content: ''` | unchanged exports | contracts |
-| `runtime/stream-inspector-registry.ts` (new) | runtime (implementation registry) | holds inspectors; attaches them per attempt in id order; validates their settings | `StreamInspectorRegistry`: `register`, `list`, `attach`, `validator()` | contracts |
+| `runtime/stream-inspector-registry.ts` (new) | runtime (implementation registry) | holds inspectors; attaches them per attempt in id order; validates their settings | `StreamInspectorRegistry`: `register`, `list`, `attach(config, account, scope)`, `validator()` | contracts |
 | `runtime/config.ts` (changed) | runtime | the structural schema; the replay rule with `previous` | `validateConfig(value, validators, previous)` (unchanged signature) | `modules/compat`, zod |
 | `plugins/stream-inspectors/` (new, **required**) | registry plugin | provides `routerStreamInspectors`; registers its validator; reports configured-but-inactive inspectors | service | runtime registry |
 | `plugins/degeneracy-guard/` (new, enabled in the catalog, inert until an account opts in) | implementation | registers the `degeneracy-guard` inspector, its zod parser and its support rule | none | `modules/degeneracy`, `routerStreamInspectors` |
@@ -189,8 +189,9 @@ export type InspectorDecision = { action: 'pass' } | { action: 'mark'; marker: I
 export interface InspectorMarker { type: JournalEventType; data: Readonly<Record<string, string | number | boolean>> }
 
 // contracts/index.ts, BoundInvocation (beside onActivity):
-/** The adapter reports upstream output it does not yield (reasoning an account does not forward). Never output. */
-observe?: (o: Observation) => void;
+/** The adapter reports upstream output it does not yield (reasoning an account does not forward). Never output.
+ *  When it answers a promise, the adapter waits for it before it reads on. (Part 2 §3.4 declares an extension of this.) */
+observe?: (o: Observation) => void | Promise<void>;
 ```
 
 - **The registry** erases `S` only internally. `attach(config, account, scope)` receives **the configuration snapshot
@@ -215,7 +216,12 @@ observe?: (o: Observation) => void;
   the same with `delivered: false`. `finish`, `usage`, `image` and `native` events are not observed (Part 2's native
   tap observes inside its frames). Then:
   - `pass`: nothing;
-  - `mark`: the marker is journaled; the stream continues;
+  - `mark`: the marker is journaled; the stream continues. A marker from `observe` is written at once, so a runaway
+    shows in the journal while it runs, and it is not waited for inside the read (the journal's time is not the
+    upstream's silence). One shared writer serves every caller, and every terminal path waits for what is queued or in
+    flight, so nothing overtakes a marker. A marker is a journal event like any other: a journal that rejects one
+    fails the request, whenever that happens and whatever else failed, is not retried, and the markers behind it are
+    still tried;
   - `fail`: the engine **latches** the fault in the attempt's watchdog (`Watchdog.fail`, beside `trip`): it aborts the
     attempt **and wakes a pending read**, exactly as a timeout does (`inference:155`); a fault latched before a read is
     armed settles that read at once. The engine checks the latch right after every read settles, before handling the
@@ -225,8 +231,11 @@ observe?: (o: Observation) => void;
     attempt's read has ended are ignored (codex round 3, finding 2: aborting the controller alone left a never-settling
     read pending).
   - **Large observations** (over 64 KiB, e.g. a non-streaming reply) are inspected in 64 KiB pieces with a yield to the
-    event loop between them (an injected `yieldNow`), so one event cannot hold the loop for long; an `observe` callback
-    with such a text is queued and inspected by the loop the same way.
+    event loop between them (`yieldNow`, required with `inspectors`), so one event cannot hold the loop for long. Nothing
+    is queued: an `observe` callback with such a text answers a promise the adapter waits for, inside the read, so it
+    needs no result of that read, order holds, and only that one observation is held. The silence timer stands still
+    meanwhile (`Watchdog.hold`); the request's `maxDurationMs` does not. After every await the pieces stop, and nothing
+    is forwarded, once the attempt was cancelled, the consumer left, or it failed or timed out.
 - **Nothing an inspector does changes what is emitted, counted, timed or failed over,** except a `fail`, which ends the
   attempt like any other failure.
 
@@ -354,7 +363,14 @@ enough at the default reasoning window). So:
 - **classifying marks:** a `stream.degenerate` mark carries counts and the period only, and the baseline journal keeps no
   content, so a mark is classified by asking the client's owner (the dev workers keep their Codex rollouts) or by a
   time-boxed content capture of that account (the existing `capture` setting); legitimate cases found become fixtures
-  of the unit tests (a case that must not fire), before enforcement.
+  of the unit tests (a case that must not fire), before enforcement;
+- **the second real stream (2026-11-06, cloud3, replay on):** 268 s and 2.47 MB with no `stream.first_content`, usage
+  `{}`, and no router timeout before the client gave up (the route's `timeoutMs` is 300 s), with vLLM's MTP acceptance
+  at 1.00 throughout. So the guard reads reasoning deltas before any content and does not depend on
+  `stream.first_content` (a test has this shape). **Only `enforce` frees the admission slot:** under `observe` a runaway
+  keeps it until the stream ends, times out or the client goes. A loop unit longer than W/32 (64 characters at the
+  default window), or a repetition that is not exact, is not seen: the captured stream, when it comes, is a fixture and
+  decides whether the default window holds.
 
 ### 3.3 What happens on detection
 
@@ -527,4 +543,12 @@ channel, the dependency direction, and the `encrypted_content` fix.
 | 6 | `attach` must use the request's configuration snapshot | The engine's snapshot and its account, cached per snapshot (§2.3, implemented) |
 | 7 | The architecture exemption still permits new violations | Only the 11 known occurrences exempted; the full rule on the rest (§6) |
 
-**Round 4:** on this revision and the implementation (both reviewed together).
+### 9.4 The implementation (`feat/router-followups-guard`)
+
+| Round | Verdict | Findings | Disposition |
+|---|---|---|---|
+| 1 | rework, 2 high, 4 medium, 1 low | A deferred hidden observation stalled inspection and reordered the channel; pieces ignored cancellation and deadlines; hidden marks lost on a finish; a queued health write failed the replay rule; malformed markers accepted; a "non-streaming" test that was not; reports once per process | No queue: `observe` answers a promise the adapter waits for; a check after every await; flushed before a read's result; a stale revision is a conflict before validation; catalog and shape validation; real tests; reports reset on change |
+| 2 | rework, 2 medium, 2 low | Router work charged to the upstream's silence timer; concurrent flushes overtook writes in flight; report cleanup; non-record marker data | The write is not awaited in the read and `Watchdog.hold` stops the timer; one shared writer and `settleMarks`; reconciliation; plain records only |
+| 3 | rework, 2 medium, 2 low | A marker stranded between the drain's end and its cleanup; a rejected write abandoned the queue and gave timing-dependent outcomes; report cleanup; a test whose assertion path crashed | The writer clears itself inside its loop; a rejection fails the attempt, whenever it happens, and the queue is still tried; reconciliation before the early return; the journal passed in |
+| 4 | rework, 2 medium | A rejected marker could still be retried away; a marker could arrive after the final settle | `recordingFault` is latched apart, wins, and is not retryable; the settle moved to the end of the read's `finally`, after observations stop |
+| 5 | approve with changes, 1 medium | A provider whose close throws synchronously skipped the settle | A nested `finally`, with a test. The coordinator capped the review here: no codex round has read this last fix; the reviewer bots are the next check |

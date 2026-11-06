@@ -201,9 +201,13 @@ A divergence never edits the session. What follows it is §7.
 One row per session, in the router's SQLite store behind a narrow port implemented by `adapters/sqlite`:
 `{ sessionId, key (namespace, principal, conversation), seat: { accountId, identity, credentialOwner,
 credentialGeneration }, model, cliVersion, formatVersion, settingsFingerprint, toolMapFingerprint, cwd, epoch, revision,
-tip, emittedCalls, state, attempt: { id, expectedRevision, delivery: 'pending' | 'delivered' | 'uncertain' },
+tip, emittedCalls, state, attempt: { id, expectedRevision, delivery: DeliveryState },
 lastCliMessageUuid, createdAt, lastUsedAt }` plus the tip chain. Digests and ids only; the content is in Claude Code's
 session file (§9).
+- **`DeliveryState`** (`contracts/claude-session.ts`), the one type for this field, kept per stdin message and per MCP
+  answer, and for the attempt as the worst of them: `none` (nothing reached the process), `partial` (some of it did, or
+  a write's result is unknown), `complete` (all of it did). Only `none` permits a replay (§5.1); `complete` permits the
+  next step of §5.3; `partial` is CLOSED-UNSAFE.
 - **The seat binding:** a credential rotation for the same identity keeps the session but stops its parked process
   (a running process cannot take the new credential; the session resumes on the next request with it); a different
   identity on the same account id (a re-sign-in to another subscription) makes it unusable
@@ -271,7 +275,7 @@ closes first (it resumes cleanly); a PARKED-TOOLS session is closed only at its 
 
 **The recovery protocol** (round 2, finding 9, blocker), in order for every delivery:
 1. durable **intent** (attempt id, expected revision, what will be delivered) before anything reaches the process;
-2. **delivery tracking** per stdin message and per MCP answer (`none`, `partial`, `complete`);
+2. **delivery tracking** per stdin message and per MCP answer (`DeliveryState`, §4.3);
 3. a **verified completed boundary**: after the model call ends, the router reads the session file's tail and checks it
    holds exactly the turn it streamed (message ids, tool-use ids, the stop), not just a uuid;
 4. an atomic **successor checkpoint** (revision + 1, the new tip) in the ledger;
@@ -403,16 +407,17 @@ the session path is a transport of `provider-claude`.
 
 | Unit | Kind | Single responsibility | Public interface | Depends on |
 |---|---|---|---|---|
-| `contracts/claude-session.ts` | contracts | the shapes the engine and the store see | `SessionKey`, `SessionRecord`, `SessionLedgerPort` (transactional: `get`, `compareAndSet(revision)`, `tombstone`, `list(expiredBefore)`), `ContinuityPort` (`heldBy(key) → accountId \| undefined`) | contracts |
+| `contracts/claude-session.ts` | contracts | the shapes the engine and the store see | `SessionKey`, `SessionRecord`, `DeliveryState`, `SessionLedgerPort` (transactional: `get`, `compareAndSet(revision)`, `tombstone`, `list(expiredBefore)`), `ContinuityPort` (`decide(key, route) → ContinuityDecision`: `new { claim }`, `pinned { accountId, transport, revision, epoch }` or `refused { reason }`, §5.2; an unavailable service is `refused`) | contracts |
 | `contracts/index.ts` (changed) | contracts | `BoundInvocation.scope?: { principalId, namespace, conversation? }`, set by the engine only | | |
 | `modules/claude-sessions/` | pure | the state machine; the canonical encoding (hashing injected); verification and the delta; the §7 decisions | `encode(history)`, `verify(record, chain, history) → { delta } \| { diverged }`, `next(state, event)`, `decide(route, situation)` | contracts |
 | `adapters/sqlite` (changed) | adapter | the ledger tables and migration, behind `SessionLedgerPort` | | |
-| `adapters/claude-code/session-controller.ts` | adapter | owns one session: the runner, the bridge, imports, locks, lifetimes, reconciliation; provides `ContinuityPort` | `SessionController` | the leaves below, the ports |
+| `plugins/claude-sessions/` (new) | service plugin | the session coordinator: the ledger port, claims, continuity decisions, reconciliation, retention through the maintenance port; stays active when `provider-claude` is disabled | provides `ContinuityPort` | the ports, `modules/claude-sessions` |
+| `adapters/claude-code/session-controller.ts` | adapter | owns one session: the runner, the bridge, imports, locks, lifetimes; acts on the `ContinuityDecision` in the trusted scope, and refuses without one | `SessionController` | the leaves below, the ports |
 | `adapters/claude-code/cli-runner.ts` | adapter (leaf) | a long-lived Claude Code process: spawn, stdin, `stream-json` events, stop and confirm | internal | |
 | `adapters/claude-code/tool-bridge.ts` | adapter (leaf) | the loopback MCP server: names, order, correlation, parked requests | internal | |
 | `adapters/claude-code/transcript-writer.ts` | adapter (leaf) | imports only (Part 3a's construction) | internal | |
-| `plugins/provider-claude/` (changed) | provider plugin | the `session` transport, account opt-in, account-aware capability | descriptor | the controller |
-| `modules/inference/` (changed) | pure | consults `ContinuityPort` before selection; passes the trusted scope | engine option `continuity?` | contracts |
+| `plugins/provider-claude/` (changed) | provider plugin | the `session` transport, account opt-in, account-aware capability; passes the decision to the controller | descriptor | the controller |
+| `modules/inference/` (changed) | pure | asks `ContinuityPort` before selection and enforces its `ContinuityDecision` on every attempt and fallback (`refused` fails, `pinned` selects only that account); passes the trusted scope with the decision | engine option `continuity?` | contracts |
 | `plugins/retention/` (changed) | plugin | expiry and deletion through the maintenance port | | the ledger port |
 
 **Config** (round 2, finding 12): per account `claudeSession?: { enabled: boolean, importHistory?, liveUserTtlMs?,
@@ -517,8 +522,9 @@ change, not the architecture.
 **§5.5**, replaced: *The Claude seat is used through the Claude Code CLI, the sanctioned client for a subscription. For a
 conversation with an explicit id, the router keeps one real Claude Code session, pinned to its seat: Claude Code runs its
 own loop and keeps its own signed thinking, tool ids and reminders; the router delivers the client's tool results through
-its MCP bridge and new messages on stdin. A conversation without an id, or one first seen with history, is imported into
-a session as a declared mutation. It is not a byte pass-through and cannot be one: the seat's token is used only by
+its MCP bridge and new messages on stdin. A conversation without an id stays on the per-request transport and never gets
+a session. One first seen with assistant history is refused, unless the account allows imports
+(`claudeSession.importHistory: true`), and an import is a declared mutation. It is not a byte pass-through and cannot be one: the seat's token is used only by
 Claude Code. Images and schemas stay refused until qualified.*
 **§4.3**, added: the `anthropic` domain includes **server-held** state: the state inside a seat's Claude Code session,
 which the client never replays. Pinning applies to it even when a request carries no reasoning payload, which is the
@@ -573,7 +579,7 @@ yet safe as specified; no policy violation.
 
 1. **M14 or the weaker guarantee** (§3.1): a pre-dispatch barrier for early finishes, or the owner's acceptance of "at
    most one undelivered further call, then CLOSED-UNSAFE".
-2. **M1, M2, M6, M7, M9, M10** on both pins (§12), M2 on files from real parked-process shutdown.
+2. **M1, M2, M5, M6, M7, M9, M10** on both pins (§12), M2 on files from real parked-process shutdown.
 3. **The owner's storage decision** (§9).
 4. **The route kind** (`RoutePolicy.kind`) and account-aware capability resolution, as their own small changes.
 
