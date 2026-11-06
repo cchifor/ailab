@@ -4272,3 +4272,39 @@ image back needs no restore, and no new backup was taken. `/data` had 1.8 GB fre
 - source `d1b537a2fb98a6266e08d8965fc0aa173c304328`, release `router-0.1.0-20261106-billing-rollback-r2`.
 
 The old image has no `update_api_key`, and a card already shown then fails. Keys changed through it keep their routes.
+
+**Rolled.** 2026-11-06 19:45:35Z ([ailab #1649](https://git.chifor.me/cchifor/ailab/pulls/1649)), about 20 s without a ready
+pod.
+
+**Checked after the roll, on the new image.**
+- `validate-live` 6/9, the same three known failures as before the roll.
+- Each `anthropic` account answered plain, streaming and repeated requests, and `pool-claude-api` served 12 of 12, 3 per
+  account.
+- Through the live Assistant, on the unused key `key_135428e61ec8`: a route added and removed, each a card and then Apply,
+  with its token, expiry and default route kept. The request that failed before this release, on `key_056782fff988`, now
+  gives a card. It was rejected, and the key did not change.
+- `PUT /admin/v1/config` with `https://api.anthropic.com` on `anthropic-2` answered 422 `INVALID_BASE_URL` and wrote nothing.
+
+**Release gate.** `codex`, `codex-control` and both qwen backends; the reports are on the PR that added this section.
+
+| Provider | Layer (a) | Task | Verdict |
+|---|---|---|---|
+| `codex` | PASS | `code-edit`, 6 pairs | PASS |
+| `codex` | | `secret-continuity`, 3 pairs | PASS |
+| `codex-control` | PASS | `code-edit`, 6 pairs | PASS |
+| `qwen-cloud3` | PASS | `code-edit`, 3 pairs | PASS |
+| `qwen` (cloud2) | PASS in the first run | `code-edit` | **Not decided** |
+| `claude` | not run | not run | **Not run** |
+
+- **`code-edit` at 3 pairs was RERUN for both Codex providers** (uncached tokens 1.28x and 1.22x, wall time about 1.3x), and
+  passed at 6 pairs, as Section 9.6 decides.
+- **`qwen` (cloud2) is not decided.** The cloud hosts power off at night, and all of them went offline at 20:02Z. The first
+  run reached this provider around then, and its direct arm failed too (16 retries, 360 s). The 6-pair rerun then failed
+  Layer (a) with `No route to host` on the direct arm, so the overall report says FAIL. That is the power-off, not the
+  router: nothing reached a backend. Run it once the hosts are up:
+  `node scripts/router-ab/gate.mjs --providers qwen --tasks code-edit --pairs 3`.
+- **`claude` was not run.** `claude`, `claude-2` and `claude-3` were at 100 % of their weekly window, and the gate's Claude
+  arm uses `claude-2`.
+
+This release does not change how requests are forwarded, so neither gap is expected to show a difference. They are still
+gaps: run them.
