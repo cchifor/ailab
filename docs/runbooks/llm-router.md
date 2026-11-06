@@ -3908,7 +3908,28 @@ The runtime image/configuration, unrelated/new saved keys, accounts/routes, back
 sessions remain intact. This prevents later image/script edits from recreating the deletion Job.
 The steady-state `python3 scripts/check-router-rollout.py` checks the exact Ready image,
 init-container composition, public health/readiness and unauthenticated management refusal.
-Verify Flux has pruned all three Jobs and their temporary policies after this cleanup reconciles.
+The checker discovers canaries by globbing `kubernetes/apps/apps/llm-router/*-canary.yaml`;
+removing `mcp-canary.yaml` selects the no-canary path automatically, without a checker change.
+
+The owning Kustomization is `flux-system/apps`, declared with `prune: true` in
+`kubernetes/apps/clusters/ai/apps.yaml`. With an operator's cluster read access, verify its
+Ready status and applied revision include this cleanup merge, then check all temporary objects:
+
+```sh
+flux get kustomizations apps -n flux-system
+set -o pipefail
+kubectl -n llm-router get jobs,networkpolicies,configmaps -o json | python3 -c '
+import json, sys
+remaining = [i["kind"] + "/" + i["metadata"]["name"] for i in json.load(sys.stdin)["items"]
+             if "router-mcp-" in i["metadata"]["name"]]
+if remaining:
+    sys.exit("Temporary MCP resources remain: " + ", ".join(remaining))
+print("No temporary MCP Jobs, policies or ConfigMaps remain")'
+python3 scripts/check-router-rollout.py
+```
+
+The resource check must exit zero with no matching objects. A failed Kubernetes read fails the
+pipeline; it is not evidence of absence. The rollout checker independently verifies service health.
 The removed scripts and their tests remain available in the #1629 merge commit for investigation;
 do not restore or rerun them. Any further management action requires its own explicit scope.
 
@@ -3917,6 +3938,6 @@ do not restore or rerun them. Any further management action requires its own exp
 If rolling back to the release observed before this work, restore image
 `registry.chifor.me/llm-router/router@sha256:4a530b6c632044f16bc6537f1c5f9c6b70bd19ee1a4cc38d2419477d46cc5803`,
 source annotation `922bafdf199a6a42be75baffd3bb93d70f8d8ffc` and release `router-0.1.0-20261105-provider-onboarding`
-together, and remove the temporary canary resources. That version understands the Anthropic account/route;
-image rollback does not delete them or restore the database. Any separate configuration undo needs its own
-review through the normal configuration proposal/history flow.
+together, while keeping the already-removed temporary Jobs, ConfigMaps and policies absent.
+Image rollback does not restore the database or the deleted saved credentials. Any separate
+configuration undo needs its own review through the normal configuration proposal/history flow.
