@@ -30,11 +30,12 @@ def call(arm):
         h.update({'authorization': 'Bearer ' + tok['access_token'], 'chatgpt-account-id': tok['account_id']})
     else:
         url = os.environ['SERVER_URL'].rstrip('/') + '/responses'; b['model'] = dmodel
-    items, gen, usage, t0, declared = [], '', {}, time.time(), {}
+    items, gen, usage, t0, declared, trajectory = [], '', {}, time.time(), {}, None
     try:
         with urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(b).encode(), headers=h), timeout=600) as r:
             # the router's own declarations of what it adapted or ignored (no secrets in these headers)
             declared = {k.lower(): v for k, v in r.headers.items() if k.lower() in ('x-router-adapted', 'x-router-ignored-params')}
+            trajectory = r.headers.get('x-trajectory-id')
             for line in r:
                 line = line.decode('utf-8', 'replace').strip()
                 if not line.startswith('data:'):
@@ -54,7 +55,7 @@ def call(arm):
         return {'arm': arm, 'http': e.code, 'error': e.read()[:200].decode('utf-8', 'replace')}
     except Exception as e:  # noqa: BLE001 - reported, and the verdict fields fail closed
         return {'arm': arm, 'error': str(e)[:200]}
-    return {'arm': arm, 'input': usage.get('input_tokens'), 'items': items, 'hash': hashlib.sha256(gen.encode()).hexdigest()[:12], 's': round(time.time() - t0, 1), **({'declared': declared} if declared else {})}
+    return {'arm': arm, 'input': usage.get('input_tokens'), 'items': items, 'hash': hashlib.sha256(gen.encode()).hexdigest()[:12], 's': round(time.time() - t0, 1), **({'declared': declared, 'trajectory': trajectory} if declared else {})}
 
 calls = []
 for i in range(n):

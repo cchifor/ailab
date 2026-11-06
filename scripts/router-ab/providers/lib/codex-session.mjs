@@ -8,6 +8,9 @@ import { HERE } from '../../core/context.mjs';
 import { grade } from '../../tasks/graders.mjs';
 import { seatsOf } from '../../core/seats.mjs';
 
+/** The router placed a run on another backend than the direct arm's: the provider may run it again. */
+export class Misplaced extends Error {}
+
 /** Writes the task's prompts on the worker and runs one session. arm: { target, home, model } from the provider. */
 export function runCodexTask(ctx, task, arm, runId, env = {}) {
   const k = ctx.remote + '/kit';
@@ -30,7 +33,7 @@ export function runCodexTask(ctx, task, arm, runId, env = {}) {
     const seats = seatsOf(ctx, m.trajectories ?? []);
     if (seats.moved) throw new Error(seats.error ? `seat pairing not verified: ${seats.error}` : `the router moved this run between accounts (${seats.accounts.join(', ')}): the pairing is broken`);
     // a route with several backends may place the run on another server than the direct arm's
-    if (arm.account && seats.accounts[0] !== arm.account) throw new Error(`the router placed this run on ${seats.accounts[0]}, the direct arm is on ${arm.account}: not paired`);
+    if (arm.account && seats.accounts[0] !== arm.account) throw new Misplaced(`placed on ${seats.accounts[0]}, the direct arm is on ${arm.account}`);
     seatNote = ` [${seats.accounts.join(',')}]`;
   }
   // answers and workspace back to the workstation, for the grader

@@ -1,5 +1,16 @@
 # Router transparency A/B and the planning re-validation (2026-11-05)
 
+> **Correction, 2026-11-06.** This document reads as if replay removes qwen's `!` stream. Replay reduces it on long
+> prompts, but does not eliminate it.
+> - **What stands:** the §2.2 measurement. On one 71,860-token turn, 8 of 10 sends with no reasoning degenerated, and 0 of
+>   10 with any.
+> - **What does not:** the conclusion that replay removes the trigger.
+> - **New evidence, replay on:** a `!` stream from the first token reproduced straight to cloud2's vLLM, with no router: 1
+>   of 574 requests across cloud2 and cloud3 (about 0.2 %; one hit, so the rate is loose; a 7.7k-token prompt). A live hang
+>   on cloud3 at 10:12Z the same day had the same vLLM signature, but its text was not captured.
+> - **The cause is unknown,** and neither backend is implicated alone. The text below is left as written. The runbook
+>   (`docs/runbooks/llm-router.md`) has the current state.
+
 The owner, verbatim:
 - *"For all providers (e.g. codex, anthropic, qwen) implement and run short tests directly, without llm-router and with llm-router, then compare the results. We must validate that the router does not negatively affect the quality of responses."*
 - *"Run the planning test on qwen3.8-27 and flash-next again, after you fix the models configuration issues, directly without llm-router and validate the results."*
@@ -170,6 +181,8 @@ Two results are not passes:
   - `codex exec -p flash-next` answers.
 
 ### 2.2 qwen3.8-27b on cloud2: replay the reasoning, append-only
+
+> See the correction at the top (2026-11-06): replay reduces the `!` stream but does not eliminate it.
 
 **Question.** cloud2's account (`lan-192.168.0.28-18020`) had replay off: every reasoning item that Codex echoes back is dropped (journal: `input:reasoning`). Should it replay append-only (`"all"`, like cloud3), or stay off? The comparison was made without touching the production account: the router path (replay off) against vLLM's own `/v1/responses`, which replays reasoning items natively.
 
