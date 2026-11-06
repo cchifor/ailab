@@ -48,8 +48,17 @@ a site admin, was refused the same way on 2026-10-31 until it joined the whiteli
 | `relay`, `llm-router`, `dsh-acp-plus`, `forge`, `workbricks`, `workbricks-apps`, `workbricks-old` | `false` since 2026-11-06 | `chifor` only. The whitelist is `chifor` and the two reviewers, and the reviewers have write, not admin. |
 | `trueswarm-admin` | `false` | `chifor` only: it is the whole whitelist. |
 | `ailab`, `platform` | `false`, with no merge whitelist | Every repository admin: `chifor`, `gitea_admin` and `org-ops-bot` (Owners team). This predates the change. `org-ops-bot` holds no token with `write:repository`. |
-| `dsh-team-conductor` | `true`, on purpose | Nobody. `verifyProtection` in that repository's `src/protection.ts` refuses to start or publish unless this is `true`, and `conductor.runtime.json` points the conductor here. Clear it only together with a conductor change. |
+| `dsh-team-conductor` | `false` since 2026-11-06 | `chifor` only. `dsh` is a repository admin here but is outside the whitelist. See the note below the table. |
 | `forge`, branch `quality/probe-base` | `true`, on purpose | Nobody. A leftover probe branch with no merge whitelist, so clearing the flag would open the override to every repository admin. |
+
+**Before re-activating the conductor, put this flag back or change its check.** `verifyProtection` in `dsh-team-conductor`'s
+`src/protection.ts` refuses to start or publish with the flag off, and `conductor.runtime.json` points the conductor at that
+repository. The owner accepted this on 2026-11-06. The conductor was not running then: the service opens its database in the
+constructor and holds it until disposal, the live `dsh` process had no handle on it, and its files were last written on
+2026-10-19. So a plain restart should not reach the preflight, but that rests on this evidence, not on a restart test.
+Whether a failed preflight at init would stop `dsh` from booting is also untested: `assertEntriesActivated` makes a failed
+entry fatal, but the conductor mounts as a nested plugin under one. If `dsh` fails to boot on any restart, restoring the
+flag is the first thing to try.
 
 The ten other active repositories have no protection rule, so any writer can merge there. The six archived ones are
 read-only.
@@ -71,10 +80,12 @@ got 405. With it off, a whitelisted non-admin's `force_merge`, a non-whitelisted
 owner's plain merge each got 405, and the owner's `force_merge` got 200. A second fixture the same day tested the check
 order: a repository admin outside the whitelist got 405 on `force_merge`, and with only the whitelist changed the same
 admin got 200. The first run then sent seven `PATCH`es holding only
-`block_admin_merge_override` and read every rule back: nothing else had changed. The fixture was deleted, and the token
+`block_admin_merge_override` and read every rule back: nothing else had changed. `dsh-team-conductor` followed at 08:28Z with one more `PATCH`.
+That run read back that repository's rule alone, and only the flag had changed. The fixture was deleted, and the token
 was deleted and then answered 401. Snapshots of the rules of all 14 repositories that have any (the 11 above and the
 archived `agentforge`, `agentforge-platform` and `agentforge-playground`), before and after, are in
-`kubernetes/infra/_out/gitea-protection-20261106/` (gitignored, on the workstation only). To undo it on one repository,
+`kubernetes/infra/_out/gitea-protection-20261106/` (gitignored, on the workstation only). The `after` file for `dsh-team-conductor` is
+from 08:28Z, with the flag off. To undo it on one repository,
 `PATCH` `{"block_admin_merge_override": true}` to `branch_protections/main` with a one-shot token.
 
 ## Owner operations are automated (ruling R13)
