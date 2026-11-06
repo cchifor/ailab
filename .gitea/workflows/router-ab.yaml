@@ -1,0 +1,39 @@
+# router-ab: the router release gate's own unit tests (scripts/router-ab/tests/core.test.mjs).
+#
+# They cover the gate's pure core and its registries: the ABBA order, the §9.6 margins and the known-deviation
+# bounds, the verdict table, the seat-pairing guard, and that every registered task has a grader, a provider and its
+# fixture. No network, no hosts, no credentials; seconds to run. The gate itself is run by hand
+# (docs/runbooks/llm-router.md, § "Release gate (router-ab)").
+#
+# FAIL CLOSED, as the repo's other script workflows: ONE job, no `needs:`, no matrix, no `continue-on-error`, no
+# `|| true`; a missing node fails the job.
+name: router-ab
+
+on:
+  pull_request:
+    paths:
+      - "scripts/router-ab/**"
+      - ".gitea/workflows/router-ab.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/router-ab/**"
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests:
+    name: router-ab core tests
+    runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: router-ab core tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v node
+          node --version
+          node --test scripts/router-ab/tests/core.test.mjs
