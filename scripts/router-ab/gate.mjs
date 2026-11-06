@@ -30,6 +30,7 @@ for (const n of list(args.providers) ?? []) if (!known.some((p) => p.name === n)
 for (const n of list(args.tasks) ?? []) if (!TASKS.some((t) => t.id === n)) usage(`unknown task ${n}`);
 const plan = providers.map((p) => ({ p, tasks: tasksFor(p, { only: list(args.tasks), all: !!args.all }) })).filter((x) => x.tasks.length);
 if (!plan.length) usage('nothing selected: no provider runs these tasks');
+for (const n of list(args.tasks) ?? []) if (!plan.some((x) => x.tasks.some((t) => t.id === n))) usage(`no selected provider runs task ${n}`);
 
 if (args.plan) {
   for (const { p, tasks } of plan) console.log(`${p.name}: Layer (a), then ${tasks.map((t) => t.id).join(', ') || '(no tasks)'} x ${pairs} pairs ABBA`);
@@ -40,12 +41,15 @@ const ctx = createContext({ worker: args.worker, kubeContext: args['kube-context
 ctx.tapPort = Number(args['tap-port'] ?? 18610);
 const startedAt = new Date().toISOString();
 const results = [];
-let exitCode = 1;
+let exitCode = 3; // until a report says otherwise: a gate that could not run has judged nothing
 try {
   ctx.log(`gate ${ctx.id}: deploying the kit to ${ctx.worker}:${ctx.remote}`);
-  ctx.push(path.join(HERE, 'kit'), `${ctx.remote}/kit`);
-  ctx.push(path.join(HERE, 'tasks', 'fixtures'), `${ctx.remote}/fixtures`);
-  ctx.ssh(`mkdir -p -m 700 ${ctx.remote}/kit/rec ${ctx.remote}/kit/runs && (setsid nohup node ${ctx.remote}/kit/tap.mjs ${ctx.tapPort} ${ctx.remote}/kit/rec > ${ctx.remote}/tap.log 2>&1 < /dev/null &) && sleep 1 && cat ${ctx.remote}/tap.log`);
+  for (const [from, to] of [[path.join(HERE, 'kit'), `${ctx.remote}/kit`], [path.join(HERE, 'tasks', 'fixtures'), `${ctx.remote}/fixtures`]]) {
+    const r = ctx.push(from, to);
+    if (r.status !== 0) throw new Error(`could not deploy to the worker: ${(r.stderr || '').slice(-160)}`);
+  }
+  const tap = ctx.ssh(`mkdir -p -m 700 ${ctx.remote}/kit/rec ${ctx.remote}/kit/runs && (setsid nohup node ${ctx.remote}/kit/tap.mjs ${ctx.tapPort} ${ctx.remote}/kit/rec > ${ctx.remote}/tap.log 2>&1 < /dev/null &) && sleep 1 && cat ${ctx.remote}/tap.log`);
+  if (!/abtap on/.test(tap.stdout ?? '')) throw new Error(`the tap did not start: ${(tap.stdout ?? '').slice(-160)}`);
   for (const { p, tasks } of plan) {
     let layerA = { checks: [], verdict: 'n/a' };
     const taskResults = [];
@@ -85,6 +89,8 @@ try {
   console.log(report.text);
   if (typeof args.out === 'string') fs.writeFileSync(args.out, report.text + '\n');
   exitCode = report.overall === 'PASS' ? 0 : report.overall === 'FAIL' ? 1 : 3; // 3: RERUN (6 pairs decide) or INCOMPLETE
+} catch (e) {
+  ctx.log(`INCOMPLETE: the gate could not run: ${e.message}`);
 } finally {
   if (args.keep) ctx.log(`--keep: left ${ctx.worker}:${ctx.remote} and ${ctx.local} (recordings included): delete them`);
   else { ctx.log(`teardown: deleting ${ctx.worker}:${ctx.remote} (recordings included) and ${ctx.local}`); ctx.teardown(); }

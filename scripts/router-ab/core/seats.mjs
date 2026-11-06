@@ -6,8 +6,9 @@ import path from 'node:path';
 import { HERE } from './context.mjs';
 
 export function seatsOf(ctx, ids) {
-  ids = (ids ?? []).filter(Boolean);
-  if (!ids.length) return { accounts: [], moved: true, error: 'the run recorded no trajectory ids' };
+  // one entry per router request: a request with no id is unverified, and one unverified request breaks the proof
+  if (!ids?.length) return { accounts: [], moved: true, error: 'the run recorded no trajectory ids' };
+  if (ids.some((id) => !id)) return { accounts: [], moved: true, error: `${ids.filter((id) => !id).length} of ${ids.length} requests have no trajectory id` };
   const r = ctx.inPod(path.join(HERE, 'local', 'journal-seats.mjs'), ids);
   // fail closed: a run whose seats cannot be read is not known to be paired
   let j;

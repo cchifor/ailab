@@ -106,7 +106,7 @@ export default {
       if (client) throw new Error(`the harness could not reach the router: ${client.error}`);
       routerStatuses = steps.filter((s) => s.kind === 'model').map((s) => s.status);
       errors = routerStatuses.filter((s) => s !== 200).length;
-      agenticTrajectories = steps.filter((s) => s.kind === 'model' && s.trajectory).map((s) => s.trajectory);
+      agenticTrajectories = steps.filter((s) => s.kind === 'model').map((s) => s.trajectory ?? null);
     }
     let seatNote = '';
     if (arm === 'router') {

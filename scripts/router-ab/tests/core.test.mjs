@@ -120,7 +120,7 @@ test('the seat guard: one account passes, a second account or an unreadable jour
   assert.deepEqual(seatsOf(ctx({ a: { accounts: ['claude-2'] }, b: { accounts: ['claude-2', 'claude-2'] } }), ['a', 'b']), { accounts: ['claude-2'], moved: false });
   assert.equal(seatsOf(ctx({ a: { accounts: ['claude-2'] }, b: { accounts: ['claude-3'] } }), ['a', 'b']).moved, true);
   assert.equal(seatsOf(ctx({ a: { accounts: ['claude-2', 'claude-3'] } }), ['a']).moved, true);
-  for (const [out, ids] of [['not json', ['a']], [{ a: { error: 404 } }, ['a']], [{}, []], [{}, [null]]]) {
+  for (const [out, ids] of [['not json', ['a']], [{ a: { error: 404 } }, ['a']], [{}, []], [{}, [null]], [{ a: { accounts: ['claude-2'] } }, ['a', null]]]) {
     const r = seatsOf(ctx(out), ids);
     assert.equal(r.moved, true); assert.ok(r.error);
   }

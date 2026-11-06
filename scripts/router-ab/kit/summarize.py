@@ -7,16 +7,17 @@ stream(s): tool items, failed non-command tool items (rejected calls), reconnect
 import glob, json, os, statistics, sys
 
 kit, run = sys.argv[1:3]
-ttft, errors, spans, reqs, trajectories, output_tokens, throttled = [], 0, [], [], [], 0, 0
+ttft, errors, spans, reqs, trajectories, output_tokens, throttled, closed = [], 0, [], [], [], 0, 0, 0
 for f in sorted(glob.glob(f'{kit}/rec/{run}/*.meta.json')):
     m = json.load(open(f))
     if m['method'] != 'POST' or not m['path'].endswith('/responses'):
         continue
     spans.append((m['tSent'], m['tEnd'] or m['tSent']))
-    if m.get('trajectory'):
-        trajectories.append(m['trajectory'])
+    trajectories.append(m.get('trajectory'))  # None included: core/seats.mjs fails closed on a request with no id
     if m['status'] == 429:
         throttled += 1
+    elif m.get('error') == 'client closed':
+        closed += 1  # the client left (the task cap, its own idle timeout): the run's outcome, not a router error
     elif m['status'] != 200 or m.get('terminal') not in ('response.completed', 'response.incomplete'):
         errors += 1
     if m.get('tFirstDelta'):
@@ -60,4 +61,4 @@ unc = sum(x for i, (_, x) in enumerate(reqs) if i not in firsts)
 unc_first = sum(x for i, (_, x) in enumerate(reqs) if i in firsts)
 print(json.dumps({'wall_s': round(wall if wall is not None else t['end'] - t['start'], 1), 'process_wall_s': round(t['end'] - t['start'], 1), 'rc': t['rc'], 'tool_calls': tools, 'rejected': rejected,
                   'ttft_s': round(statistics.median(ttft), 2) if ttft else None, 'uncached_tokens': unc, 'uncached_first_requests': unc_first,
-                  'requests': len(ttft), 'output_tokens': output_tokens, 'trajectories': trajectories, 'transport_errors': errors, 'throttled': throttled, 'retries': retries}))
+                  'requests': len(ttft), 'output_tokens': output_tokens, 'trajectories': trajectories, 'transport_errors': errors, 'throttled': throttled, 'client_closed': closed, 'retries': retries}))
