@@ -8,15 +8,19 @@ function requireThat(ok, message) { if (!ok) throw new AcceptanceError(message);
 const alias = 'claude-api';
 
 export function selectSavedKey(secrets, selectedRef) {
+  requireThat(Array.isArray(secrets) && secrets.every(s => s && typeof s.ref === 'string' && Array.isArray(s.usedBy)), 'Invalid saved-key metadata');
   const candidates = secrets.filter(s => !s.usedBy.length && /anthropic|claude/i.test(s.label ?? ''));
   if (selectedRef !== undefined) {
     requireThat(/^store:sec_[a-z0-9]+$/.test(selectedRef), 'Invalid selected saved-key reference');
-    const selected = candidates.filter(s => s.ref === selectedRef);
-    requireThat(selected.length === 1, 'Selected key is missing, already used, or not labelled Anthropic/Claude');
-    return selected[0];
+    const selected = secrets.filter(s => s.ref === selectedRef);
+    requireThat(selected.length > 0, 'Selected key is missing');
+    requireThat(selected.length === 1, 'Selected key reference is duplicated');
+    requireThat(selected[0].usedBy.length === 0, 'Selected key is already used');
+    requireThat(/anthropic|claude/i.test(selected[0].label ?? ''), 'Selected key is not labelled Anthropic/Claude');
+    return { secret: selected[0], candidateCount: candidates.length };
   }
   requireThat(candidates.length === 1, 'Need one unambiguous unused Anthropic/Claude labelled key');
-  return candidates[0];
+  return { secret: candidates[0], candidateCount: candidates.length };
 }
 
 export function checkSetup(result, before, secretRef, models) {
@@ -92,9 +96,10 @@ export async function runAcceptance({ url, token, log = console.log, waitForEndp
       const secrets = (await call('list_secrets')).data.secrets;
       // Use only one unambiguous, unused, explicitly labelled Anthropic/Claude key.
       // Never probe unrelated saved credentials or guess from credential values.
-      const candidates = secrets.filter(s => !s.usedBy.length && /anthropic|claude/i.test(s.label ?? ''));
-      emit('anthropic.saved_key_candidates', { count: candidates.length });
-      const secretRef = selectSavedKey(secrets, selectedSecretRef).ref;
+      const { secret, candidateCount } = selectSavedKey(secrets, selectedSecretRef);
+      emit('anthropic.saved_key_candidates', { count: candidateCount });
+      const secretRef = secret.ref;
+      emit('anthropic.saved_key_selected', { ref: secretRef, label: secret.label });
       const connection = { provider: 'anthropic', secretRef }; // Hosted API: baseUrl is absent.
       const discovery = (await call('probe_provider', connection)).data;
       requireThat(discovery.listed && discovery.models?.length, 'Anthropic discovery returned no models');

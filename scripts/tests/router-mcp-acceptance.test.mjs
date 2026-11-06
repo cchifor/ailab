@@ -14,11 +14,12 @@ test('exact saved-key selection distinguishes an API key from a subscription tok
     { ref: 'store:sec_api', label: 'anthropic', usedBy: [] },
   ];
   assert.throws(() => selectSavedKey(keys), /unambiguous/);
-  assert.equal(selectSavedKey(keys, 'store:sec_api').label, 'anthropic');
-  assert.throws(() => selectSavedKey(keys, 'store:sec_missing'), /missing/);
+  assert.deepEqual(selectSavedKey(keys, 'store:sec_api'), { secret: keys[1], candidateCount: 2 });
+  assert.throws(() => selectSavedKey(keys, 'store:sec_missing'), /^Error: Selected key is missing$/);
   assert.throws(() => selectSavedKey(keys, 'raw-key-value'), /Invalid selected/);
-  assert.throws(() => selectSavedKey([{ ...keys[1], usedBy: ['existing'] }], 'store:sec_api'), /already used/);
-  assert.throws(() => selectSavedKey([{ ...keys[1], label: 'Unrelated' }], 'store:sec_api'), /not labelled/);
+  assert.throws(() => selectSavedKey([{ ...keys[1], usedBy: ['existing'] }], 'store:sec_api'), /^Error: Selected key is already used$/);
+  assert.throws(() => selectSavedKey([{ ...keys[1], label: 'Unrelated' }], 'store:sec_api'), /^Error: Selected key is not labelled Anthropic\/Claude$/);
+  assert.throws(() => selectSavedKey([{ ref: 'store:sec_api', label: 'anthropic' }], 'store:sec_api'), /^Error: Invalid saved-key metadata$/);
 });
 
 test('a ConfigMap-shaped symlink executes acceptance and cannot silently exit successfully', () => {
