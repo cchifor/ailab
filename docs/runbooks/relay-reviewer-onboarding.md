@@ -68,7 +68,7 @@ protection as `cchifor/forge`:
 | Merge whitelist | `reviewer-claude`, `reviewer-codex`; `chifor` since 2026-10-31 | same |
 | Stale approvals | dismissed on push | dismissed on push |
 | Outdated branch | merge blocked (`block_on_outdated_branch`) | merge blocked |
-| Admin merge override | blocked | blocked |
+| Admin merge override | open for the owner since 2026-11-06 | same |
 | Required status context | `Verify / verify (pull_request)` | `CI / verify (pull_request)` |
 
 - `reviewer-claude` and `reviewer-codex` are write collaborators on both repositories.
@@ -105,6 +105,10 @@ required approvals, the required context, the outdated-branch block and
 `block_admin_merge_override: true`, so the owner can merge only a PR that already meets the
 rule; the web UI's Merge button is enough, with no token.
 
+**Superseded 2026-11-06:** `block_admin_merge_override` is now `false` on those seven reviewer-protected repositories
+(`agentforge-playground` is archived and was not changed), so the owner can
+also merge a PR that does not meet the rule (`owner-credentials.md` § "The owner's merge override").
+
 How it was applied (2026-10-31 09:02Z): two runs, `agentforge-playground` alone as a canary and
 then the other seven, each with one one-shot `chifor` token (`write:repository,read:user`,
 `owner-credentials.md`) minted for the whole run. Per repository the run read the rule, sent a
@@ -118,6 +122,9 @@ re-checks every listed user and silently drops one without write access to the r
 still has write access, or the read-back will show a name missing.
 
 ## Break-glass: when the protection stops every merge
+
+Since 2026-11-06 the override is already open on these repositories, so the owner can merge from the web UI without
+this section (`owner-credentials.md` § "The owner's merge override"). It still applies to a headless merge. The script restores the value it read, so it leaves the flag `false`.
 
 With exactly two whitelisted approvers, two required approvals and one required context,
 one reviewer-host outage or a renamed CI context stops every merge on these repositories:

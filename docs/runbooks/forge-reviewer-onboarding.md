@@ -21,7 +21,9 @@ retain both personas, author allowlists and all CI/current-head requirements.
    session if earlier. Do not leave an offline temporary registration behind.
 3. Main protection requires `forge-quality / forge-quality (pull_request)`, an
    up-to-date branch, two reviewer approvals and stale-approval dismissal. Direct
-   push, force push and administrator merge override are disabled. Only the reviewer
+   push and force push are disabled. The administrator merge override was disabled too until
+   2026-11-06 and is now open for the owner (`owner-credentials.md` § "The owner's merge override").
+   Only the reviewer
    identities are in the approval allowlist; the merge allowlist also holds the owner
    `chifor` since 2026-10-31 (`relay-reviewer-onboarding.md` § "The owner in the merge
    whitelist"). Preserve these settings.
