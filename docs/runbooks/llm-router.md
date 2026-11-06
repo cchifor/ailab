@@ -3983,3 +3983,31 @@ source annotation `922bafdf199a6a42be75baffd3bb93d70f8d8ffc` and release `router
 together, while keeping the already-removed temporary Jobs, ConfigMaps and policies absent.
 Image rollback does not restore the database or the deleted saved credentials. Any separate
 configuration undo needs its own review through the normal configuration proposal/history flow.
+
+## Degeneracy guard release (2026-11-06)
+
+Release `router-0.1.0-20261106-degeneracy-guard`: source `2e6615b2c7fc734da35a8dd587d21338bb6c6c97` (llm-router #142, #143),
+archive `router-0.1.0-20261106-degeneracy-guard.tar.gz`, SHA-256
+`605f9f6f46d1280976d748fbd8905ed0f680e984bb7e672e85b0ae9b68ec720c`, branch
+`release/router-20261106-degeneracy-guard-image`, [Relay run 122576](https://git.chifor.me/cchifor/relay/actions/runs/122576),
+image `registry.chifor.me/llm-router/router@sha256:4914ccb5c01c8fbe3293bb1739009f36e6d9a37099e25a144a8a0694708a124f`.
+An anonymous pull of the index, both manifests and all 12 blobs verified their digests.
+
+**What it adds.** A stream-inspector extension point with the degeneracy guard as its first entry, and a refusal of a numeric
+`replayReasoning.lastTurns` on a new or changed setting (a saved one is tolerated while unchanged). No account names the
+guard, so nothing changes at the roll apart from the declared corrections: a non-streaming local reply with several tool
+calls returns all of them, and a stale write of an invalid configuration answers 409 rather than 422.
+
+**Turning the guard on (owner's decision, per account, with `PUT /admin/v1/config`).**
+`streamInspectors: { "degeneracy-guard": true }` only journals (`stream.degenerate`, metric
+`llm_router_stream_inspector_marks_total`). `{ "degeneracy-guard": { "reasoning": "enforce" } }` stops a loop: a unit of at
+most 8 characters at 256 characters of reasoning (6 s of the captured one-character stream), or a unit up to 1/32 of
+`reasoningChars` at that window. Under `enforce` the first 256 characters of forwarded reasoning are held back, so a loop
+from the first token, or any other failure in that span, fails over to the route's next target and the client sees
+nothing of it; this needs `maxAttempts` of at least 2 and a second target, which `qwen3.8-27b` has. A loop after the hold
+reaches the client as `response.failed` `DEGENERATE_OUTPUT`, and the Codex CLI reconnects and resends the turn.
+
+**Rollback.** Remove `streamInspectors` from the accounts first: the older image drops an unknown key only at its next
+validated write. Then revert the image and both annotations together to:
+- image `registry.chifor.me/llm-router/router@sha256:5749d8a8ba1b6912efda3db939f3b82f9bf4416f54886dab0150b3b59e6f78a3`;
+- source `aec919824f112d5f2cf5f6830a8f896b921c7045`, release `router-0.1.0-20261106-mcp-fix`.
