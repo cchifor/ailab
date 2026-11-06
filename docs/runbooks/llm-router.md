@@ -4150,3 +4150,56 @@ codex-control --tasks code-edit --pairs 6`. Success is uncached tokens at most 1
 - image `registry.chifor.me/llm-router/router@sha256:9e141215271a01522c664492e214a677a8880dcd5f7182b39ad85f2d24a51145`;
 - source `5f6151e9c2f672d5018c31eaa7f03156e45914a0`, release `router-0.1.0-20261106-provider-billing`.
 A token sealed by the new image then reaches the upstream unopened for the rest of that turn, which ends it.
+
+## Restore shared API-key usage cards (2026-11-06)
+
+At the user's request, release `router-0.1.0-20261106-billing-rollback-r2` reverts
+[llm-router #144](https://git.chifor.me/cchifor/llm-router/pulls/144) through
+[source #146](https://git.chifor.me/cchifor/llm-router/pulls/146). API-key accounts use the same
+Usage card as subscriptions: request history, daily tokens, seven-day totals and error rate.
+The separate spending/budget panel, provider-billing plugin, HTTP routes and Assistant/MCP billing
+tools are removed. The later #145 native response-head fixes, provider onboarding and management MCP
+remain included. Deploy only after source #146 merges; the deployment PR has an enforced dependency.
+Reviewer automation (`ansible/roles/pr_reviewer/files/reviewbot.py`, `maybe_merge`) uses
+`Do: merge` with `head_commit_id`, preserving the packaged source SHA as a merge parent.
+Confirm its ancestry and identical tree after source merge; rebuild if the actual merge rewrites it.
+
+Provenance:
+- Source `d1b537a2fb98a6266e08d8965fc0aa173c304328`; archive `router-0.1.0-20261106-billing-rollback-r2.tar.gz`.
+- Archive SHA-256 `788df6b2a042917a407ad1188948e96abaac1f0f4e7843713e7600546e6fba0e`.
+- Packaging `c4439e48dcfdeecb58861071f5d5f60dc62b805e`; [image CI 122782](https://git.chifor.me/cchifor/relay/actions/runs/122782)
+  and [immutable receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-122782.json).
+- Image `registry.chifor.me/llm-router/router@sha256:aed7162dc14724f04e700449fd49f15e39013f1be6042409b4cf84acf9cf5f61`. Runtime base unchanged.
+
+Validation: `pnpm verify` passes (2,290 tests, 14 local PostgreSQL skips; CI covers PostgreSQL).
+All 24 browser checks outside the existing #80 quarantine pass; an ambiguous setup assertion was
+scoped to the approval-card heading. Desktop/mobile fixture checks confirm matching API/subscription
+card layout and height, both charts and totals, no billing polling and no horizontal overflow.
+A clean production build and frozen production-dependency smoke pass. A compiled-runtime restart
+with the removed plugin in persisted composition and billing KV settings also passes: the normal
+composition loader drops the unknown entry, the dormant KV settings remain, billing HTTP is 404,
+and billing MCP tools disappear while management and provider setup remain available.
+
+No schema migration, database restore, credential deletion, inference or live configuration change is
+part of this release. Existing billing-only saved credentials remain encrypted but are no longer
+marked in use by billing. Preserve the existing verified backup; do not delete credentials as part of
+this roll. Old billing proposals cannot execute because their tools no longer exist.
+
+After merge, run `python3 scripts/check-router-rollout.py` to verify one Ready pod on the exact image,
+public health/readiness and unauthenticated management refusal. Verify the public HTML selects these
+bundles and their served SHA-256 matches the tested build:
+- `/assets/index-CYzhH4BZ.css`: `dff42fb8e0c29d1f4846f51d71162b0c2045807acef64e39324b3fbe1e89f672`.
+- `/assets/index-DJ6IalHH.js`: `3d0a05d111075cc4eeca5fdba918145fa3a68a50e4b99936a5dc0d134c2feeec`.
+
+To undo this rollback through a reviewed GitOps PR, restore the preceding native-head image and both
+annotations together:
+- Image `registry.chifor.me/llm-router/router@sha256:225bb804acc8cab0ebc65bdc6ec32186a432712c09434a50595f372e6f971ab0`.
+- Source `02cb559df5eedbf379e2266da2f1a82608985103`, release `router-0.1.0-20261106-native-head`.
+
+The recovery archive is `router-0.1.0-20261106-native-head.tar.gz`, SHA-256
+`9de41d2a2cc0c7293c4aad7c5561df7ab3a6342fd62d90ca4ad9a7fd6fc4b4c2`, from
+[Relay run 122705](https://git.chifor.me/cchifor/relay/actions/runs/122705). Restore the
+source/release annotations and the corresponding source/run/archive comments together with the image.
+
+That image restores billing. Its catalog re-adds the removed plugin enabled; retained billing settings
+can resume reporting if their credentials remain valid. No database restore is needed.
