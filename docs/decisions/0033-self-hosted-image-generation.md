@@ -92,4 +92,7 @@ is requested, on one of cloud1's two cards. Its default model is qwen3.8-27b, an
 swaps it out until the image idle-unloads after 600 s
 (cloudlab plan `plans/2026-11-05-cloud1-flex-host-plan.md`, runbook §16). The two LiteLLM routes keep
 their names and point at cloud1; Decision 2 and the non-commercial scope are unchanged. Decision 1's
-location (LXC 5103, `192.168.0.28:8190`) holds for 2026-09-29 to 2026-11-07.
+location (LXC 5103, `192.168.0.28:8190`) holds for 2026-09-29 to 2026-11-07, and so do the first two
+Consequences: there is no image card on cloud2 left to conflict with TP=4, `ImageApiFailing` /
+`ImageApiDown` were retired with the move (cloudlab now scrapes cloud1's llama-swap, `CloudLlamaSwapDown`),
+and the unit-based rollback no longer applies. Current operations are cloudlab runbook §16.
