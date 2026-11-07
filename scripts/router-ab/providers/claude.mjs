@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HERE } from '../core/context.mjs';
+import { loginProblem } from './lib/claude-login.mjs';
 import { CATALOG, CHAT_SYSTEM } from '../tasks/registry.mjs';
 import { grade } from '../tasks/graders.mjs';
 import { seatsOf } from '../core/seats.mjs';
@@ -41,6 +42,10 @@ export default {
   describe: `Claude seat via Claude Code ${CC_VERSION}, model ${MODEL} (direct: own login; router: claude/${MODEL}, sdk-resume)`,
   kinds: ['chat', 'claude-agentic'],
   async setup(ctx) {
+    // the direct arm reads the worker's access token and cannot refresh it (only that worker's own CLI may)
+    const login = ctx.ssh(`python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.claude/.credentials.json")))["claudeAiOauth"]["expiresAt"])'`);
+    const problem = loginProblem(Number((login.stdout || '').trim()));
+    if (problem) throw new Error(problem);
     // the router's validated Claude Code, installed once per worker in a cache (no credential in it)
     const cc = `$HOME/.cache/router-ab/claude-code-${CC_VERSION}`;
     ctx.ssh(`test -x ${cc}/node_modules/@anthropic-ai/claude-code-linux-x64/claude || (mkdir -p ${cc} && docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e npm_config_cache=/tmp/npmc -v ${cc}:/opt/cc node:22-slim npm i --silent --prefix /opt/cc @anthropic-ai/claude-code@${CC_VERSION})`, { timeout: 600_000 });

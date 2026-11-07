@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { abba } from '../core/abba.mjs';
-import { evaluate, evaluateLayerA, MARGINS } from '../core/margins.mjs';
+import { evaluate, evaluateLayerA, MARGINS, NO_BASELINE } from '../core/margins.mjs';
+import { LOGIN_MARGIN_MS, loginProblem } from '../providers/lib/claude-login.mjs';
 import { render } from '../core/report.mjs';
 import { loadProviders, validate } from '../providers/index.mjs';
 import { TASKS } from '../tasks/registry.mjs';
@@ -89,6 +90,36 @@ test('below the minimum output raw wall is judged: a tiny denominator neither fa
 test('Layer (a) needs every check to pass, and no checks is n/a', () => {
   assert.equal(evaluateLayerA([{ name: 'a', pass: true }, { name: 'b', pass: false }]).verdict, 'FAIL');
   assert.equal(evaluateLayerA([]).verdict, 'n/a');
+});
+
+test('a task with no direct baseline cannot pass, fail or ask for a rerun', () => {
+  const arm = (name, pass, wall_s) => [1, 2, 3].map((p) => run(name, p, { pass, wall_s }));
+  // 2026-11-07: an expired login. Direct 0/3 in 2.5 s, router 3/3.
+  const v = evaluate([...arm('direct', false, 2.5), ...arm('router', true, 4.9)]);
+  assert.equal(v.verdict, NO_BASELINE);
+  assert.match(v.notes.join(' '), /no direct run passed/);
+  assert.equal(evaluate([...arm('direct', false, 2.5), ...arm('router', false, 4.9)]).verdict, NO_BASELINE);
+  const r = render({ image: 'sha256:x', startedAt: 'now', providers: [{ name: 'claude', layerA: evaluateLayerA([{ name: 'a', pass: true }]), tasks: [{ id: 'recall', ...v }] }] });
+  assert.equal(r.overall, 'INCOMPLETE');
+  assert.match(r.text, /\| claude \| recall \| INVALID \(no direct baseline; rerun\) \|/);
+});
+
+test('a task with no direct runs at all has no baseline either', () => {
+  assert.equal(evaluate([run('router', 1, {}), run('router', 2, {})]).verdict, NO_BASELINE);
+});
+
+test('one direct run passing is still a baseline', () => {
+  const runs = [run('direct', 1, {}), run('direct', 2, { pass: false }), run('router', 1, {}), run('router', 2, {})];
+  assert.notEqual(evaluate(runs).verdict, NO_BASELINE);
+});
+
+test('a Claude login must outlive the run', () => {
+  const now = Date.parse('2026-11-07T08:00:00Z');
+  assert.equal(loginProblem(now + LOGIN_MARGIN_MS, now), undefined);
+  assert.match(loginProblem(now + LOGIN_MARGIN_MS - 1, now), /expires at/);
+  assert.match(loginProblem(now - 1000, now), /expired at 2026-11-07T07:59:59/);
+  assert.match(loginProblem(Number.NaN, now), /no readable Claude login/);
+  assert.match(loginProblem(0, now), /no readable Claude login/);
 });
 
 test('the report renders an overall verdict', () => {
