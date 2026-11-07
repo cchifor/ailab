@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: d5217887867f84ad4ab5d6b88ba4cb0f0edf7982
-        chifor.me/release: router-0.1.0-20261106-key-edit
+        chifor.me/source-commit: 92c7c28a744e33963882a2dfea4b6fdc99d58a8c
+        chifor.me/release: router-0.1.0-20261107-availability
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,9 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source d5217887867f84ad4ab5d6b88ba4cb0f0edf7982 (live d1b537a2 plus llm-router #149, #150, test-only #152: update_api_key and a bare provider host refused).
-          # Relay run 122989; archive sha256:f9cae4614d6bffed3b3a72e5a8841aaa33a1542a538e1001f6115acbd8ea71a3.
-          image: registry.chifor.me/llm-router/router@sha256:3715a86c3b110fd66f1071deb83028cbceadb48fbe4aaad8d37e5362f5fde5d9
+          # Source 92c7c28a744e33963882a2dfea4b6fdc99d58a8c, llm-router main: the live release plus the native wires (#148, #151)
+          # and the availability probes (#153, #154, #155), all default-off.
+          # Relay run 123636; archive sha256:88fa5726536f6af974ea51d2572d3e7d389d4cdace162407a4b84f239b153bdd.
+          image: registry.chifor.me/llm-router/router@sha256:55ee00f0521046baffa0b0e8809e2b42526710abd2f05b4b0e1a23777cd7dc5c
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -218,7 +219,7 @@ spec:
             # Model servers on the LAN (cchifor/llm-router discovery-network): the only network the router may
             # scan is the mgmt LAN, on the model-server ports below (the same list as the egress rule), and
             # these known servers are checked on every full scan: cloudlab vLLM (.28:18020) and llama-swap
-            # (.26:8080), the AI LXCs' llama-swap (.45/.46:8082). Nothing becomes an account without an
+            # (.26:8080, .27:8080), the AI LXCs' llama-swap (.45/.46:8082). Nothing becomes an account without an
             # administrator's approval. What a scan does to a host: a TCP connect on these ports, then (if open) an
             # unauthenticated GET /v1/models and GET /api/tags, no redirects, bounded body; admin-only, audited,
             # on demand (no schedule). It reads model lists, nothing else, so an admin service on one of these
@@ -245,7 +246,7 @@ spec:
             - name: ROUTER_PLUGIN_CONFIG
               value: >-
                 {"discovery-network":{"networks":["192.168.0.0/24"],"ports":[8080,8081,8082,18020,11434,1234,8000],
-                "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
+                "servers":["http://192.168.0.28:18020","http://192.168.0.26:8080","http://192.168.0.27:8080","http://192.168.0.45:8082","http://192.168.0.46:8082"]},
                 "server-registration":{"clientAddressHeader":"cf-connecting-ip"},
                 "api-keys":{"publicUrl":"https://router.chifor.me","clientAddressHeader":"cf-connecting-ip"},
                 "api-openai":{"imageProxy":{"header":"cf-ray","deadlineMs":90000}}}

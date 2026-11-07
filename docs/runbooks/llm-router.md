@@ -4355,8 +4355,8 @@ while the image model is pending or resident.
   llama-swap, and was back 6.1 s after qwen reloaded (llm-router #155).
 
 **The pieces.**
-- The probe: llm-router #153, #154 and #155, all default-off. None is released yet: the next release from `main` carries
-  all three.
+- The probe: llm-router #153, #154 and #155, all default-off, in release `router-0.1.0-20261107-availability` (§ Availability
+  release, below).
 - The account: `lan-192.168.0.27-8080`, a copy of cloud2's account (the same vLLM build and checkpoint). It has
   concurrency 4, cloud2's queue, the degeneracy guard `{reasoning: "enforce"}`, `replayReasoning {lastTurns: "all"}` and
   `forwardReasoning`; its models are `qwen3.8-27b` only; and it has the probe above. It joins as a deployment that starts
@@ -4397,3 +4397,54 @@ the deployment.
 - Each check reads about 230 KB, because llama-swap replays its log histories before the snapshot.
 - Names that bypass routes (`local/qwen3.8-27b`, the Assistant's direct model choice) can reach the enabled account even
   while its deployment is off. They do so only while the probe says `available`.
+
+## Availability release (2026-11-07)
+
+Release `router-0.1.0-20261107-availability`: source `92c7c28a744e33963882a2dfea4b6fdc99d58a8c` (llm-router `main`),
+archive `router-0.1.0-20261107-availability.tar.gz`, SHA-256
+`88fa5726536f6af974ea51d2572d3e7d389d4cdace162407a4b84f239b153bdd`, Relay branch `release/router-20261107-availability`,
+[Relay run 123636](https://git.chifor.me/cchifor/relay/actions/runs/123636), packaging commit
+`391cb5104f0031bcc94b8f90fd9f89bf1b07c2ff`, image
+`registry.chifor.me/llm-router/router@sha256:55ee00f0521046baffa0b0e8809e2b42526710abd2f05b4b0e1a23777cd7dc5c`.
+An anonymous pull of the index, both manifests and all 12 blobs verified their digests.
+
+**What it adds to the live release** (`d5217887`). The live release's #149, #150 and #152 are on `main` too.
+- **Availability probes** ([#153](https://git.chifor.me/cchifor/llm-router/pulls/153),
+  [#154](https://git.chifor.me/cchifor/llm-router/pulls/154), [#155](https://git.chifor.me/cchifor/llm-router/pulls/155)).
+  An account opts in with `availability`. No account does, so no target is excluded. One answer changes for every route:
+  a route with a target offline and the rest full now answers a retryable 429 (`CAPACITY_UNAVAILABLE`, Retry-After)
+  instead of a non-retryable one. A route with no target offline answers as before.
+- **Native wires** ([#148](https://git.chifor.me/cchifor/llm-router/pulls/148),
+  [#151](https://git.chifor.me/cchifor/llm-router/pulls/151)). Default-off: no route sets `nativeWires`, so no request
+  takes a native wire.
+- New plugins, enabled on upgrade and inert until configured: `availability-probes`, `availability`,
+  `availability-llama-swap`, `wires`.
+- Docs only: #147, a plan, on hold.
+- The env change in the same roll: the discovery-network `servers` list gains `http://192.168.0.27:8080` (cloud1). That list
+  only names hosts a full scan always checks; nothing becomes an account from it.
+
+No storage, migration or KV file changed between `d5217887` and `92c7c28a`, so a rollback needs no restore, and no backup
+is needed.
+
+**Verified on the release tree.**
+- On Node 24: `pnpm verify` passed (typecheck, 2,504 tests with 14 skipped, build). `check:architecture` reports only the
+  known `packages/modules/inference/index.ts` line.
+- The production smoke passed in the pinned Node 26.10.0 image.
+- The archive has the live archive's layout: the same top-level entries, owner 1000:1000, and 18,194 entries against
+  18,140.
+
+**Rollback.** Revert the image, both annotations and the `servers` line together, to:
+- image `registry.chifor.me/llm-router/router@sha256:3715a86c3b110fd66f1071deb83028cbceadb48fbe4aaad8d37e5362f5fde5d9`;
+- source `d5217887867f84ad4ab5d6b88ba4cb0f0edf7982`, release `router-0.1.0-20261106-key-edit`.
+
+The old image's account schema drops `availability` without an error. So before rolling back with cloud1 on the route,
+remove cloud1 (`STEP=disable`, then `STEP=remove`). Otherwise cloud1 stays on the route with no probe, and the image model
+can then evict qwen under live traffic.
+
+**At the roll.** One replica with `Recreate`: the router restarts, and streams in flight are cut, as at every release.
+
+**After the roll,** in order (§ cloud1 as the third qwen3.8-27b backend):
+1. `validate-live`: 6/9 is the known baseline.
+2. The router-ab gate with cloud1 not on the route: `--providers qwen,qwen-cloud3,codex --pairs 6`, plus `claude` if a
+   seat has headroom.
+3. The cloud1 steps of that section.
