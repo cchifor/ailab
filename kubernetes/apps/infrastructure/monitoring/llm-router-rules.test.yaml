@@ -756,3 +756,112 @@ tests:
       - eval_time: 20m
         alertname: LlmRouterAccountFailing
         exp_alerts: []
+
+  # ------------------------------------------------------------ availability probes (cloud1)
+  - interval: 1m
+    name: an opted-in account without a verdict pages after 5m by day
+    input_series:
+      - series: 'llm_router_availability{job="llm-router",namespace="llm-router",pod="llm-router-a",account="lan-192.168.0.27-8080",model="qwen3.8-27b",probe="llama-swap",state="unknown"}'
+        values: "1x30"
+      - series: 'llm_router_availability{job="llm-router",namespace="llm-router",pod="llm-router-a",account="lan-192.168.0.27-8080",model="qwen3.8-27b",probe="llama-swap",state="available"}'
+        values: "0x30"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1x30"
+      - series: 'up{job="cloud-node", nodename="cloud2", instance="192.168.0.21:9100"}'
+        values: "1x30"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LlmRouterAvailabilityUnknown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: LlmRouterAvailabilityUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              account: lan-192.168.0.27-8080
+              model: qwen3.8-27b
+              probe: llama-swap
+            exp_annotations:
+              summary: "llm-router: no availability verdict for lan-192.168.0.27-8080 / qwen3.8-27b for 5m"
+              description: >-
+                The llama-swap check of lan-192.168.0.27-8080 has given no verdict on
+                qwen3.8-27b for 5m while the cloud hosts are up, so the account is out of
+                rotation and the route's other backends carry its share. GET /admin/v1/availability
+                names the cause (probe_failed, stale, not_checked, probe_missing). For llama-swap, read
+                the host's /running and /api/events; never /upstream/..., which loads a model. Runbook:
+                docs/runbooks/llm-router.md § cloud1 as the third qwen3.8-27b backend.
+
+  - interval: 1m
+    name: the nightly power-off (every cloud host down) pages for neither rule
+    input_series:
+      - series: 'llm_router_availability{job="llm-router",account="lan-192.168.0.27-8080",model="qwen3.8-27b",probe="llama-swap",state="unknown"}'
+        values: "1x30"
+      - series: 'llm_router_availability{job="llm-router",account="lan-192.168.0.98-8080",model="qwen3.8-27b",probe="llama-swap",state="model_not_resident"}'
+        values: "1x30"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "0x30"
+      - series: 'up{job="cloud-node", nodename="cloud2", instance="192.168.0.21:9100"}'
+        values: "0x30"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: LlmRouterAvailabilityUnknown
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LlmRouterModelNotResident
+        exp_alerts: []
+
+  - interval: 1m
+    name: a verdict that comes back within 5m does not page
+    input_series:
+      - series: 'llm_router_availability{job="llm-router",account="lan-192.168.0.27-8080",model="qwen3.8-27b",probe="llama-swap",state="unknown"}'
+        values: "1x3 0x26"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1x30"
+      - series: 'up{job="cloud-node", nodename="cloud2", instance="192.168.0.21:9100"}'
+        values: "1x30"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LlmRouterAvailabilityUnknown
+        exp_alerts: []
+
+  - interval: 1m
+    name: the default model gone for 20m pages; an image's 10-minute stay does not
+    input_series:
+      - series: 'llm_router_availability{job="llm-router",account="lan-192.168.0.27-8080",model="qwen3.8-27b",probe="llama-swap",state="model_not_resident"}'
+        values: "1x40"
+      - series: 'llm_router_availability{job="llm-router",account="lan-192.168.0.99-8080",model="qwen3.8-27b",probe="llama-swap",state="model_not_resident"}'
+        values: "1x13 0x27"
+      - series: 'up{job="cloud-node", nodename="cloud1", instance="192.168.0.20:9100"}'
+        values: "1x40"
+      - series: 'up{job="cloud-node", nodename="cloud2", instance="192.168.0.21:9100"}'
+        values: "1x40"
+      - series: 'up{job="cloud-node", nodename="cloud3", instance="192.168.0.22:9100"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: LlmRouterModelNotResident
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: LlmRouterModelNotResident
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              account: lan-192.168.0.27-8080
+              model: qwen3.8-27b
+              probe: llama-swap
+            exp_annotations:
+              summary: "llm-router: qwen3.8-27b not resident on lan-192.168.0.27-8080 for 20m"
+              description: >-
+                lan-192.168.0.27-8080 has not had qwen3.8-27b loaded for 20m while the cloud hosts
+                are up, so it is out of rotation for that model. On cloud1 the image model's TTL is 10
+                minutes and keep-warm reloads qwen within about 4 more, so this is either 20 minutes of
+                image work in a row, or the default model not coming back: a failing engine start or a
+                stuck keep-warm. Read llama-swap's /running and the keep-warm journal on the host
+                (`pct exec 5102 -- journalctl -u llama-swap-keepwarm`). Runbook:
+                docs/runbooks/llm-router.md § cloud1 as the third qwen3.8-27b backend.

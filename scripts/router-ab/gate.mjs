@@ -15,14 +15,14 @@ import { abba } from './core/abba.mjs';
 import { createContext, HERE } from './core/context.mjs';
 import { evaluate, evaluateLayerA } from './core/margins.mjs';
 import { render } from './core/report.mjs';
-import { loadProviders } from './providers/index.mjs';
+import { loadProviders, selectProviders } from './providers/index.mjs';
 import { TASKS, tasksFor } from './tasks/registry.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, x, i, all) => (x.startsWith('--') ? [...a, [x.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : true]] : a), []));
 const list = (v) => (typeof v === 'string' ? v.split(',') : undefined);
 const usage = (msg) => { console.error(`gate: ${msg}`); process.exit(2); };
 const known = await loadProviders();
-const providers = known.filter((p) => !list(args.providers) || list(args.providers).includes(p.name));
+const providers = selectProviders(known, list(args.providers));
 const pairs = Number(args.pairs ?? 3);
 // a typo must not certify an untested release: refuse anything that would quietly run less than was asked for
 if (!Number.isInteger(pairs) || pairs < 1) usage(`--pairs must be a positive integer, got ${args.pairs}`);
@@ -35,6 +35,7 @@ for (const n of list(args.providers) ?? []) if (!plan.some((x) => x.p.name === n
 
 if (args.plan) {
   for (const { p, tasks } of plan) console.log(`${p.name}: Layer (a), then ${tasks.map((t) => t.id).join(', ') || '(no tasks)'} x ${pairs} pairs ABBA`);
+  for (const p of known.filter((x) => !providers.includes(x))) if (p.optIn) console.log(`${p.name}: opt-in, not run (name it in --providers)`);
   process.exit(0);
 }
 

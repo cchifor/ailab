@@ -305,3 +305,41 @@ spec:
               account has them) until the earliest reset. The dev workers' Codex CLI cannot fall
               back to another provider through the router. Runbook: docs/runbooks/llm-router.md
               § Overload handling.
+        # Availability probes (llm-router #153; cloudlab plans/2026-11-05-cloud1-flex-host-plan.md §6.4).
+        # An account that opts in (cloud1, `lan-192.168.0.27-8080`, the only one) is kept out of rotation
+        # on ANY doubt: a failed or stale check is `unknown`, and `unknown` excludes. That costs capacity,
+        # never correctness, so nothing else would notice. These two say when the doubt, or the
+        # host's missing default model, lasts. The gauge is 1 on the target's current state.
+        # THE NIGHT GUARD is cloudlab's VLLMEngineDown's, verbatim: every cloud-node target present AND
+        # down is the nightly power-off, when every probe fails; a partial inventory fails open.
+        - alert: LlmRouterAvailabilityUnknown
+          expr: |
+            (max by (account, model, probe) (llm_router_availability{job="llm-router",state="unknown"}) == 1)
+            unless on () (sum(up{job="cloud-node"}) == 0 and count(up{job="cloud-node"}) >= 3)
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router: no availability verdict for {{ $labels.account }} / {{ $labels.model }} for 5m"
+            description: >-
+              The {{ $labels.probe }} check of {{ $labels.account }} has given no verdict on
+              {{ $labels.model }} for 5m while the cloud hosts are up, so the account is out of
+              rotation and the route's other backends carry its share. GET /admin/v1/availability
+              names the cause (probe_failed, stale, not_checked, probe_missing). For llama-swap, read
+              the host's /running and /api/events; never /upstream/..., which loads a model. Runbook:
+              docs/runbooks/llm-router.md § cloud1 as the third qwen3.8-27b backend.
+        - alert: LlmRouterModelNotResident
+          expr: |
+            (max by (account, model, probe) (llm_router_availability{job="llm-router",state="model_not_resident"}) == 1)
+            unless on () (sum(up{job="cloud-node"}) == 0 and count(up{job="cloud-node"}) >= 3)
+          for: 20m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router: {{ $labels.model }} not resident on {{ $labels.account }} for 20m"
+            description: >-
+              {{ $labels.account }} has not had {{ $labels.model }} loaded for 20m while the cloud hosts
+              are up, so it is out of rotation for that model. On cloud1 the image model's TTL is 10
+              minutes and keep-warm reloads qwen within about 4 more, so this is either 20 minutes of
+              image work in a row, or the default model not coming back: a failing engine start or a
+              stuck keep-warm. Read llama-swap's /running and the keep-warm journal on the host
+              (`pct exec 5102 -- journalctl -u llama-swap-keepwarm`). Runbook:
+              docs/runbooks/llm-router.md § cloud1 as the third qwen3.8-27b backend.

@@ -13,7 +13,7 @@
 //   claude-agentic  an agent loop over the shared workspace tools (kit/tools.mjs) in a copy of `fixture`
 export const TASKS = [
   {
-    id: 'code-edit', kind: 'codex-exec', providers: ['codex', 'codex-control', 'qwen', 'qwen-cloud3'], gate: true, fixture: 'calc', cap_min: 8,
+    id: 'code-edit', kind: 'codex-exec', providers: ['codex', 'codex-control', 'qwen', 'qwen-cloud3', 'qwen-cloud1'], gate: true, fixture: 'calc', cap_min: 8,
     prompt: 'The unit tests in `test_calc.py` fail. Find the bugs in `calc.py` and fix them so that `python3 -m unittest -q test_calc` passes. Do not modify `test_calc.py`. Run the tests to confirm, then reply with one line per bug you fixed.',
     grader: { name: 'python-unittest', module: 'test_calc', protect: ['test_calc.py'] },
   },
