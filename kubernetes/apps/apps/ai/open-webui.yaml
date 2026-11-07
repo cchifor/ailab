@@ -206,9 +206,10 @@ spec:
             # labels All/Local/External/Direct but nothing defaults the filter. The nearest
             # honest equivalent is landing on a local model, so new chats start there.
             - { name: DEFAULT_MODELS, value: "qwen3.8-27b-vllm-cloud" }
-            # IMAGE GENERATION + EDITING -> Qwen-Image-2.1 on cloud2 (ADR 0033), through LiteLLM's
-            # qwen-image-2.1-cloud route (litellm.yaml "IMAGE GENERATION"), i.e. the QUALITY workflow
-            # (40 steps, ~22 s at 1024²; edits 25 steps, ~25 s). Agents use the -fast route directly.
+            # IMAGE GENERATION + EDITING -> Qwen-Image-2.1 on cloud1 (since 2026-11-07; cloud2 before,
+            # ADR 0033), through LiteLLM's qwen-image-2.1-cloud route (litellm.yaml "IMAGE GENERATION"),
+            # i.e. the QUALITY workflow (40 steps, ~22 s at 1024²; edits 25 steps, ~25 s). Agents use the
+            # -fast route directly.
             # Engine "openai", NOT Open WebUI's native "comfyui": ComfyUI is loopback-only on the box,
             # and the native engine would need the workflow JSON + node map in env here (env is
             # authoritative, ENABLE_PERSISTENT_CONFIG=false) -- duplicating what the cloudlab API owns.
@@ -219,7 +220,8 @@ spec:
             # IMAGE_EDIT_SIZE unset on purpose: the edit then follows the uploaded image's aspect at ~1 MP.
             # Image prompt rewriting (ENABLE_IMAGE_PROMPT_GENERATION, default on) runs on
             # TASK_MODEL_EXTERNAL above -- that is the prompt enhancer; the box's own PE models are not loaded.
-            # DAY-ONLY: cloud2 powers off nightly, so the image button errors overnight.
+            # DAY-ONLY: cloud1 powers off nightly with the rest of the pve cluster (cloudlab
+            # scripts/cluster-power.sh), so the image button errors overnight.
             - { name: ENABLE_IMAGE_GENERATION, value: "true" }
             - { name: IMAGE_GENERATION_ENGINE, value: "openai" }
             - { name: IMAGE_GENERATION_MODEL, value: "qwen-image-2.1-cloud" }
