@@ -3833,11 +3833,14 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 (`sha256:78915e24…`): its seats were at their weekly limit on 2026-11-06. The reports are in the PRs that added the gate
 and the per-backend qwen providers.
 
-**Open (2026-11-06, image `4914ccb5`): the router halves Codex's second-turn prompt-cache hits.** The same two requests, a
-new `prompt_cache_key` per conversation, on one account: turn 2 hit the cache in 44 of 50 conversations through the control
-forwarder (API mode, no router) and 35 of 70 via the router. It is not the client (both arms are API mode), the seat, the egress IP or a timing race (a 1 s gap changes
-nothing). The mechanism is not known. Expect `codex` and `codex-control` `code-edit` to FAIL on uncached tokens until it
-is fixed, and do not read that FAIL as noise.
+**Open (corrected 2026-11-07): Codex's second-turn prompt-cache hits dip, intermittently, on the live router.** The first
+reading, on image `4914ccb5`, was 44 of 50 conversations hitting the cache on turn 2 through the control forwarder (API mode,
+no router) against 35 of 70 via the router. That looked like a flat halving, and it is not one: a later pair of windows read
+147 of 156 against 85 of 134, the live router scored 60 % and then 96 % minutes later, and `code-edit` passed at 6 pairs on
+`3715a86c`. The router's code is cleared: the same image on the host login matched the control (90 % vs 93 %). It is not the
+client (both arms are API mode), the seat, the egress IP or a timing race (a 1 s gap changes nothing). Concurrent router
+traffic is a lead, from one pair of windows; the mechanism is not known. So `codex` and `codex-control` `code-edit` can FAIL
+on uncached tokens some of the time: read such a FAIL against this note, and do not call it noise.
 
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
 clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
@@ -4297,14 +4300,31 @@ pod.
 | `qwen` (cloud2) | PASS in the first run; FAIL in the rerun, hosts off | `code-edit`, 3 pairs, then 6: neither finished | **Not decided** |
 | `claude` | not run | not run | **Not run** |
 
+**Closed 2026-11-07, on the same image,** with every host up and `claude` on `claude-4`, Sonnet, at 6 pairs:
+
+| Provider | Layer (a) | Task | Direct | Router | Verdict |
+|---|---|---|---|---|---|
+| `qwen` (cloud2) | PASS | `code-edit` | 6/6, 14.0 s | 6/6, 12.7 s | PASS |
+| `claude` | PASS | `math` | 6/6, 2.5 s | 6/6, 2.8 s | PASS |
+| `claude` | | `tool-choice` | 6/6, 2.5 s | 6/6, 2.9 s | PASS |
+| `claude` | | `stock-agentic` | 6/6, 22.9 s | 6/6, 30.6 s | PASS (known deviation) |
+| `claude` | | `recall` | 6/6, 4.0 s | 6/6, 5.0 s | **FAIL**, wall time at the 1.25x limit |
+
+The overall report reads FAIL on that one line. Quality is unchanged, 24 of 24 in both arms. `recall`'s extra second is the
+cost `stock-agentic` already records as known, one Claude Code start per model call, and it is not new in this release. It
+is not registered as known, because that would loosen the gate, and that decision is the owner's.
+
+The first run that morning, at 3 pairs, is void: dev-worker-1's access token had expired, so every direct run failed with
+a 401 in 2.5 s, and the gate still printed PASS for `recall`. ailab #1659 makes that case INVALID.
+
 - **`code-edit` at 3 pairs was RERUN for both Codex providers** (uncached tokens: `codex` 1.28x, `codex-control` 1.22x; wall
   time about 1.3x on each), and passed at 6 pairs, as Section 9.6 decides.
-- **`qwen` (cloud2) is not decided.** The cloud hosts power off at night, and all of them went offline at 20:02Z. The first
+- **`qwen` (cloud2) was not decided that night.** The cloud hosts power off at night, and all of them went offline at 20:02Z. The first
   run reached this provider around then, and its direct arm failed too (16 retries, 360 s). The 6-pair rerun then failed
   Layer (a) with `No route to host` on the direct arm, so the overall report says FAIL. That is the power-off, not the
   router: nothing reached a backend. Run it once the hosts are up, as a fresh first pass (Section 9.6 takes 3 more pairs if
   it needs them): `node scripts/router-ab/gate.mjs --providers qwen --tasks code-edit --pairs 3`.
-- **`claude` was not run.** `claude`, `claude-2` and `claude-3` were at 100 % of their weekly window, and the gate's Claude
+- **`claude` was not run that night.** `claude`, `claude-2` and `claude-3` were at 100 % of their weekly window, and the gate's Claude
   arm uses `claude-2`.
 
 This release does not change how requests are forwarded, so neither gap is expected to show a difference. They are still
