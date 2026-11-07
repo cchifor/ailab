@@ -20,6 +20,7 @@ case $target in
   fwd)     ov=(-c 'model_provider="llm-router"' -c "model_providers.llm-router.base_url=\"$base/t/fwd/$run/v1\"");;
   vllm)    ov=(-c 'model_provider="server"' -c "model_providers.server.base_url=\"$base/t/vllm/$run/v1\"");;
   llama)   ov=(-c 'model_provider="server"' -c "model_providers.server.base_url=\"$base/t/llama/$run/v1\"");;
+  flex)    ov=(-c 'model_provider="server"' -c "model_providers.server.base_url=\"$base/t/flex/$run/v1\"");;
   *) echo "bad target" >&2; exit 2;;
 esac
 common=(--skip-git-repo-check --json -c "model=\"$MODEL\"" -c "model_reasoning_effort=\"${EFFORT:-medium}\"" "${ov[@]}")
