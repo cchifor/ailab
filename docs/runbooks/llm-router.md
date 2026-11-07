@@ -4423,8 +4423,10 @@ An anonymous pull of the index, both manifests and all 12 blobs verified their d
 - The env change in the same roll: the discovery-network `servers` list gains `http://192.168.0.27:8080` (cloud1). That list
   only names hosts a full scan always checks; nothing becomes an account from it.
 
-No storage, migration or KV file changed between `d5217887` and `92c7c28a`, so a rollback needs no restore, and no backup
-is needed.
+No storage, migration or KV file changed between `d5217887` and `92c7c28a`, and none of the four new plugins writes to the
+store, so a rollback needs no restore. The one file on the data volume the upgrade changes is `plugins.yml`, which gains the
+new plugins' entries. The old image's loader drops entries for plugins it does not have (`compose`,
+`packages/kernel/index.ts`). By the recipe, no backup is taken in this case; one is cheap if wanted.
 
 **Verified on the release tree.**
 - On Node 24: `pnpm verify` passed (typecheck, 2,504 tests with 14 skipped, build). `check:architecture` reports only the
@@ -4432,8 +4434,12 @@ is needed.
 - The production smoke passed in the pinned Node 26.10.0 image.
 - The archive has the live archive's layout: the same top-level entries, owner 1000:1000, and 18,194 entries against
   18,140.
+- The rollback note below was checked against the live image's own code. In the `d5217887` archive, `validateConfig`
+  accepted an account with `availability` and returned it without the key. The config store loads and saves through
+  `validateConfig`.
 
-**Rollback.** Revert the image, both annotations and the `servers` line together, to:
+**Rollback.** Revert these together: the image and the three-line comment above it, both annotations, and the `servers`
+line. Revert them to:
 - image `registry.chifor.me/llm-router/router@sha256:3715a86c3b110fd66f1071deb83028cbceadb48fbe4aaad8d37e5362f5fde5d9`;
 - source `d5217887867f84ad4ab5d6b88ba4cb0f0edf7982`, release `router-0.1.0-20261106-key-edit`.
 
