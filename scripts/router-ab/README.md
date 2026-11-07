@@ -67,7 +67,8 @@ local/                         runs on the workstation or inside the router pod
   claude-chat-pod.mjs          Claude router arm for chat tasks (in the pod, its own admin bearer)
   harness-router.mjs           Claude router arm for agentic tasks (docker on the workstation)
   journal-seats.mjs            which accounts a run's router requests reached (failover detection)
-  route-targets.mjs            the accounts of a route's enabled deployments (the qwen providers' setup check)
+  route-targets.mjs            the route an alias names (a pointer followed) and its enabled deployments' accounts
+                               (the qwen providers' setup check)
 tests/core.test.mjs            the core and the registries (node --test; no network)
 ```
 

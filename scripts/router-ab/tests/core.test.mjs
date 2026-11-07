@@ -166,10 +166,12 @@ test('a qwen backend the route does not use is refused at setup, before any run'
   const p = (await loadProviders(path.join(HERE, 'providers'))).find((x) => x.name === 'qwen-cloud1');
   const sent = [];
   const ctx = (stdout, stderr = '') => ({ remote: '/tmp/x', inPod: (script, args) => { sent.push([path.basename(script), ...args]); return { status: stdout ? 0 : 1, stdout, stderr }; }, ssh: () => ({ status: 0, stdout: '', stderr: '' }) });
-  await assert.rejects(p.setup(ctx('["lan-192.168.0.28-18020","lan-192.168.0.26-8080"]')), /lan-192.168.0.27-8080 is not an enabled deployment of route qwen3.8-27b/);
-  await assert.rejects(p.setup(ctx('', 'no route default/qwen3.8-27b')), /cannot read route qwen3.8-27b: no route/);
-  await p.setup(ctx('["lan-192.168.0.28-18020","lan-192.168.0.27-8080"]'));
-  assert.deepEqual(sent[0], ['route-targets.mjs', 'default', 'qwen3.8-27b']);
+  const routed = (accounts) => JSON.stringify({ route: 'qwen3.8-27b', via: 'qwen-27b', accounts });
+  await assert.rejects(p.setup(ctx(routed(['lan-192.168.0.28-18020', 'lan-192.168.0.26-8080']))), /lan-192\.168\.0\.27-8080 is not an enabled deployment of route qwen3\.8-27b \(via qwen-27b\)/);
+  await assert.rejects(p.setup(ctx('', 'no route default/qwen-27b')), /cannot read route qwen-27b: no route/);
+  await assert.rejects(p.setup(ctx('{"error":"x"}')), /cannot read route qwen-27b/); // valid JSON of another shape
+  await p.setup(ctx(routed(['lan-192.168.0.28-18020', 'lan-192.168.0.27-8080'])));
+  assert.deepEqual(sent[0], ['route-targets.mjs', 'default', 'qwen-27b']);
 });
 
 test('the seat guard: one account passes, a second account or an unreadable journal is a broken pairing', () => {

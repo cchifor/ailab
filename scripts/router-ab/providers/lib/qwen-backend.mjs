@@ -20,7 +20,7 @@ import { accountsOf } from '../../core/seats.mjs';
 import { HERE } from '../../core/context.mjs';
 
 const LAYER_A_TRIES = 3;
-const ROUTE = 'qwen3.8-27b'; // what pointer qwen-27b names
+const ALIAS = 'qwen-27b'; // the router arm's model: a pointer, followed by local/route-targets.mjs as the router does
 const config = (server) => `model_reasoning_effort = "xhigh"
 web_search = "disabled"
 model_context_window = 262144
@@ -52,10 +52,12 @@ export function qwenProvider({ name, host, server, tap, account, optIn = false }
     describe: `qwen3.8-27b on ${host} via Codex CLI 0.166 (direct: its own /v1/responses; router: pointer qwen-27b, runs placed on ${account})`,
     kinds: ['codex-exec'],
     async setup(ctx) {
-      const r = ctx.inPod(path.join(HERE, 'local', 'route-targets.mjs'), ['default', ROUTE]);
-      let on;
-      try { on = JSON.parse(r.stdout); } catch { throw new Error(`cannot read route ${ROUTE}: ${(r.stderr || r.stdout || '').slice(-160)}`); }
-      if (!on.includes(account)) throw new Error(`${account} is not an enabled deployment of route ${ROUTE} (enabled: ${on.join(', ') || 'none'}): no router run can be placed on it`);
+      const r = await ctx.inPod(path.join(HERE, 'local', 'route-targets.mjs'), ['default', ALIAS]);
+      let out;
+      try { out = JSON.parse(r.stdout); } catch { /* reported below */ }
+      if (!Array.isArray(out?.accounts)) throw new Error(`cannot read route ${ALIAS}: ${(r.stderr || r.stdout || '').slice(-160)}`);
+      const route = `${out.route}${out.via ? ` (via ${out.via})` : ''}`;
+      if (!out.accounts.includes(account)) throw new Error(`${account} is not an enabled deployment of route ${route} (enabled: ${out.accounts.join(', ') || 'none'}): no router run can be placed on it`);
       ctx.ssh(`mkdir -p ${ctx.remote}/kit/codex-home && chmod 700 ${ctx.remote}/kit/codex-home && echo ${Buffer.from(config(server)).toString('base64')} | base64 -d > ${ctx.remote}/kit/codex-home/config.toml`);
     },
     async layerA(ctx) {

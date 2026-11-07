@@ -35,7 +35,7 @@ for (const n of list(args.providers) ?? []) if (!plan.some((x) => x.p.name === n
 
 if (args.plan) {
   for (const { p, tasks } of plan) console.log(`${p.name}: Layer (a), then ${tasks.map((t) => t.id).join(', ') || '(no tasks)'} x ${pairs} pairs ABBA`);
-  for (const p of known.filter((x) => !providers.includes(x))) if (p.optIn) console.log(`${p.name}: opt-in, not run (name it in --providers)`);
+  if (!list(args.providers)) for (const p of known.filter((x) => x.optIn)) console.log(`${p.name}: opt-in, not run (name it in --providers)`);
   process.exit(0);
 }
 
