@@ -220,7 +220,8 @@ spec:
             # IMAGE_EDIT_SIZE unset on purpose: the edit then follows the uploaded image's aspect at ~1 MP.
             # Image prompt rewriting (ENABLE_IMAGE_PROMPT_GENERATION, default on) runs on
             # TASK_MODEL_EXTERNAL above -- that is the prompt enhancer; the box's own PE models are not loaded.
-            # DAY-ONLY: cloud1 powers off nightly, so the image button errors overnight.
+            # DAY-ONLY: cloud1 powers off nightly with the rest of the pve cluster (cloudlab
+            # scripts/cluster-power.sh), so the image button errors overnight.
             - { name: ENABLE_IMAGE_GENERATION, value: "true" }
             - { name: IMAGE_GENERATION_ENGINE, value: "openai" }
             - { name: IMAGE_GENERATION_MODEL, value: "qwen-image-2.1-cloud" }
