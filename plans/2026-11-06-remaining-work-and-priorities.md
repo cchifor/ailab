@@ -40,7 +40,7 @@ known start-up cost, not on anything new.
 |---|---|---|---|
 | qwen (cloud2) `code-edit` | 6/6, 14.0 s | 6/6, 12.7 s | PASS, identical model input |
 | Claude, 4 tasks, quality | 24/24 | 24/24 | PASS |
-| Claude `recall`, wall time | 4.0 s | 5.0 s | **FAIL** at the 1.25x limit |
+| Claude `recall`, wall time | 3.95 s | 5.0 s | **FAIL**, 1.27x, limit 1.25x |
 | Claude `stock-agentic`, wall time | 22.9 s | 30.6 s | Known deviation |
 
 ## 2026-11-07, in priority order
@@ -51,7 +51,8 @@ known start-up cost, not on anything new.
 - Owner: merge cloudlab #58 (#55's cloud1 work) and #59 (the moved-map guard, item 3). **Not #56:** it merges on the day of the card move.
 
 ### 2. Stop the `!` stalls: guard to `enforce`
-- It is the only protection against the known hang. It trips in about 6 s, and a retry on the other machine is invisible.
+- It is the only protection against the known hang. On that fault it trips in about 6 s, inside the 256 characters held back, so
+  the retry on the other machine is invisible. A later trip is not: see below.
 - **False positives, measured 2026-11-07:** the real detector over fresh streams from both backends, 248 requests, the
   first 3,000 tokens of each. Normal agent-style prompts: **0 trips in 200** (1.9M reasoning characters; with the journal's 163,
   0 in 363, so at most about 0.8 % at 95 %). Prompts that need a long exact repetition: **9 trips in 48**, led by a
@@ -66,10 +67,10 @@ known start-up cost, not on anything new.
 ### 3. Hardware session 1: the card move (needs the owner at the machines, after 06:00Z on 2026-11-07)
 Ready once item 1 and the steps below are done. It needs over 2 h of soak before the 20:00Z power-off that day, so start early.
 - **Changed 2026-11-07: cloud1 opts in to `memmap` LAST, not first.** A table line is a physical address, and the firmware moves all
-  RAM above 4 GiB when its PCI hole changes size. cloud1's did on 2026-09-04: 1 GiB, same DIMMs, with the card count. It has
-  `Above 4G Decoding` off today, and this session turns it on, so its map is likely to move. On a moved map every bad-page check
+  RAM above 4 GiB when its PCI hole changes size. On 2026-09-04 cloud1's memory map shifted by 1 GiB when its card count changed,
+  with the same DIMMs installed. It has `Above 4G Decoding` off today, and this session turns it on, so its map is likely to move. On a moved map every bad-page check
   passes while the bad frames are in service. cloud3's map has not moved in 74 boots, through the GPU3 pull.
-- Agent, before: merge #59, then provision cloud1 and cloud3 so both publish the check. Expect `map_moved=0` on each.
+- Before: the owner merges #59, then the agent provisions cloud1 and cloud3 so both publish the check. Expect `map_moved=0` on each.
 - Agent, after the first boot with the card and BIOS: read `map_checked` and `map_moved`. If it moved, stop the guests, then a host
   `stressapptest` must show the fault at the translated addresses before the table changes (runbook section 15). That is up
   to 2 h, and it can share the soak window. Only on the final map: add cloud1 to `host/memmap-hosts`, provision, reboot.

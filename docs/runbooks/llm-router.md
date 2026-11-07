@@ -4300,7 +4300,8 @@ pod.
 | `qwen` (cloud2) | PASS in the first run; FAIL in the rerun, hosts off | `code-edit`, 3 pairs, then 6: neither finished | **Not decided** |
 | `claude` | not run | not run | **Not run** |
 
-**Closed 2026-11-07, on the same image,** with every host up and `claude` on `claude-4`, Sonnet, at 6 pairs:
+**Closed 2026-11-07, on the same image, `3715a86c`,** with every host up, at 6 pairs. `claude` ran on `claude-4`, Sonnet, by
+`RAB_CLAUDE_ACCOUNT=claude-4` (the gate's default is `claude-2`):
 
 | Provider | Layer (a) | Task | Direct | Router | Verdict |
 |---|---|---|---|---|---|
@@ -4308,7 +4309,7 @@ pod.
 | `claude` | PASS | `math` | 6/6, 2.5 s | 6/6, 2.8 s | PASS |
 | `claude` | | `tool-choice` | 6/6, 2.5 s | 6/6, 2.9 s | PASS |
 | `claude` | | `stock-agentic` | 6/6, 22.9 s | 6/6, 30.6 s | PASS (known deviation) |
-| `claude` | | `recall` | 6/6, 4.0 s | 6/6, 5.0 s | **FAIL**, wall time at the 1.25x limit |
+| `claude` | | `recall` | 6/6, 3.95 s | 6/6, 5.0 s | **FAIL**, wall time 1.27x, limit 1.25x |
 
 The overall report reads FAIL on that one line. Quality is unchanged, 24 of 24 in both arms. `recall`'s extra second is the
 cost `stock-agentic` already records as known, one Claude Code start per model call, and it is not new in this release. It
@@ -4322,8 +4323,7 @@ a 401 in 2.5 s, and the gate still printed PASS for `recall`. ailab #1659 makes 
 - **`qwen` (cloud2) was not decided that night.** The cloud hosts power off at night, and all of them went offline at 20:02Z. The first
   run reached this provider around then, and its direct arm failed too (16 retries, 360 s). The 6-pair rerun then failed
   Layer (a) with `No route to host` on the direct arm, so the overall report says FAIL. That is the power-off, not the
-  router: nothing reached a backend. Run it once the hosts are up, as a fresh first pass (Section 9.6 takes 3 more pairs if
-  it needs them): `node scripts/router-ab/gate.mjs --providers qwen --tasks code-edit --pairs 3`.
+  router: nothing reached a backend. It ran the next morning, in the table above.
 - **`claude` was not run that night.** `claude`, `claude-2` and `claude-3` were at 100 % of their weekly window, and the gate's Claude
   arm uses `claude-2`.
 
