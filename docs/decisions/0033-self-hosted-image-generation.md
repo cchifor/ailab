@@ -85,9 +85,11 @@ model garbled one line of the same 5-line menu, which is why it is not Open WebU
 ## Amendment 2026-11-07: the service moves to cloud1, on demand
 
 The card move of 2026-11-07 put `GPU-db1d635e` into cloud2's qwen pair, so cloud2's `comfyui` and
-`qwen-image-api` are disabled there. The same API and workflows now run in cloud1's LXC 5102, started by
-its llama-swap (`192.168.0.27:8080`) when an image is requested, on one of cloud1's two cards. Its
-default model is qwen3.8-27b, and an image request swaps it out until the image idle-unloads after 600 s
+`qwen-image-api` were disabled there, and the cloud2 cleanup removes them (cloudlab #63, plan section
+10; the router NetworkPolicy's egress rule for `192.168.0.28:8190` goes with them). The same API and
+workflows now run in cloud1's LXC 5102, started by its llama-swap (`192.168.0.27:8080`) when an image
+is requested, on one of cloud1's two cards. Its default model is qwen3.8-27b, and an image request
+swaps it out until the image idle-unloads after 600 s
 (cloudlab plan `plans/2026-11-05-cloud1-flex-host-plan.md`, runbook §16). The two LiteLLM routes keep
 their names and point at cloud1; Decision 2 and the non-commercial scope are unchanged. Decision 1's
 location (LXC 5103, `192.168.0.28:8190`) holds for 2026-09-29 to 2026-11-07.

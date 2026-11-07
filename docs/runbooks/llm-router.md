@@ -56,7 +56,7 @@ For the current Gitea CI image flow, see the Relay Assistant API image release b
    - Exit code 0 means all checks passed. Compare the output with the baseline from step 7.
    - **If the run is interrupted** (the exec is killed, or the pod restarts) before it prints its summary, the temporary `visionModels` setting may still be in place. Check `codex-2`'s `visionModels` in `GET /admin/v1/config`. If it differs from before the run, put it back with `update_account` in the chat, or revert that config change from the history (`config_history`, then `revert_config`).
    - **Never run it on the staging pod:** Codex logins must be used by one router only.
-   - **cloud2 is off at night** (Qwen-Image is day-only, ADR 0033). An unreachable image server FAILS the image check: a firewall, route or deployment fault looks the same. When the server is off on purpose, say so: `--skip-images "cloud2 powered off (night)"` reports the check as skipped, with that reason.
+   - **cloud1 is off at night** (Qwen-Image is day-only, ADR 0033; on cloud1's llama-swap since 2026-11-07, on cloud2 before). An unreachable image server FAILS the image check: a firewall, route or deployment fault looks the same. When the server is off on purpose, say so: `--skip-images "cloud1 powered off (night)"` reports the check as skipped, with that reason. On cloud1 the image check loads the image model, which swaps out cloud1's resident qwen until the image idle-unloads (600 s).
 
 ### Why a staged release rather than a new OCI image?
 

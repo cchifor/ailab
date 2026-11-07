@@ -393,6 +393,8 @@ spec:
     # Model servers on the mgmt LAN (vLLM, llama-server, llama-swap, Ollama): inference to approved
     # local accounts, the upstream-health checks, and the discovery-network scan. One rule: this /24 AND
     # only these ports (keep in step with ROUTER_PLUGIN_CONFIG above); every other LAN port stays blocked.
+    # The qwen-image account (Qwen-Image-2.1, ADR 0033) is cloud1's llama-swap on 192.168.0.27:8080 since
+    # 2026-11-07, so 8080 covers it; cloud2's own rule for 192.168.0.28:8190 went with that service.
     - to:
         - ipBlock:
             cidr: 192.168.0.0/24
@@ -404,14 +406,6 @@ spec:
         - {protocol: TCP, port: 11434}
         - {protocol: TCP, port: 1234}
         - {protocol: TCP, port: 8000}
-    # cloud2 qwen-image-api (Qwen-Image-2.1, ADR 0033), one host and one port: the router's image routes
-    # (OpenAI-shaped POST /v1/images/generations). Deliberately NOT in the discovery scan above: the
-    # router's image account is configured by hand, and /v1/models there carries no modality.
-    - to:
-        - ipBlock:
-            cidr: 192.168.0.28/32
-      ports:
-        - {protocol: TCP, port: 8190}
     # The browser-auth store (llm-router#121): the `router_auth` database on CNPG infra-pg. Only the
     # Keycloak (OIDC) mode uses it; bearer API keys never touch it. Keycloak itself is reached over the
     # public HTTPS rule above (https://id.chifor.me, through Cloudflare), not in-cluster.
