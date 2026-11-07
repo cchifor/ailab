@@ -4327,5 +4327,9 @@ a 401 in 2.5 s, and the gate still printed PASS for `recall`. ailab #1659 makes 
 - **`claude` was not run that night.** `claude`, `claude-2` and `claude-3` were at 100 % of their weekly window, and the gate's Claude
   arm uses `claude-2`.
 
-This release does not change how requests are forwarded, so neither gap is expected to show a difference. They are still
-gaps: run them.
+This release does not change how requests are forwarded, and the closing run bore that out: quality was the same in both
+arms on every row. The one FAIL is `recall`'s wall time, a cost that predates this release.
+
+**After the guard went to `enforce` and the card move, 2026-11-07 13:39Z, same image, 6 pairs:** `codex` `code-edit` and
+`secret-continuity`, and `qwen` `code-edit` (both backends on the route, re-pinned to their new cards), all PASS, 6/6 in
+both arms. qwen's greedy output via the router matched the direct output byte for byte.

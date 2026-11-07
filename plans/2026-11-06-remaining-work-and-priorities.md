@@ -9,12 +9,12 @@ migration, router quality, the hardware faults on cloud1 and cloud3, and the mov
 | Area | State |
 |---|---|
 | flash-next, fp8 | Retired from every consumer, the router and cloud3 |
-| qwen3.8-27b | Serving on cloud2 and cloud3 through the router (rev 2277, `key-edit` release) and LiteLLM |
+| qwen3.8-27b | Serving on cloud2 and cloud3 through the router and LiteLLM. Since the 2026-11-07 card move on new card pairs (cloudlab #60), router rev 2280 |
 | `!` degenerate stream | About 0.2 % of requests in the lab, on both machines, direct to vLLM, not the router. Cause unknown |
-| Router guard | Live in `observe` on both qwen accounts. It logs only, so a `!` stream can still stall an agent |
+| Router guard | `enforce` on both qwen accounts since 2026-11-07 (rev 2278); the gate after it passed (item 2) |
 | Router, token fix | Merged and deployed: `x-codex-turn-state` is relayed. Its effect on the cache is unproven |
 | cloud3 memory | Hardware fault. 236 GiB test clean on 11-06. `memmap=64K$0x295aad0000` held through a clean power-off and the unattended 06:00Z boot on 11-07: no `Caught <`, 16 frames reserved. Two boots prove little |
-| cloud1 memory | 116 GiB test FAILED: 391 errors, all in `0x7f9850000`-`0x7f9857fff` (8 pages), byte lane 5. With the known block `0x153f6c0000`-`0x153f6c7fff`, 16 pages in two 32 KiB blocks are retired by soft-offline; no boot-time exclusion yet |
+| cloud1 memory | 116 GiB test FAILED: 391 errors, all in `0x7f9850000`-`0x7f9857fff` (8 pages), byte lane 5. With the known block `0x153f6c0000`-`0x153f6c7fff`, 16 pages in two 32 KiB blocks are retired by soft-offline; no boot-time exclusion yet. After the card move the memory map is the one the table was written on (item 3a) |
 | cloud1 provisioning | Fixed in cloudlab #57 (merged): it no longer installs NVIDIA 550 packages over the runfile driver. Stale package purged |
 | Router Part 2 | Foundations, native wire and availability probes merged (llm-router #148, #151, #153), all default-off and none released. No native route serves traffic |
 | Router Part 3 | On hold, not implemented. The plan is in the llm-router repository: `docs/plans/2026-11-06-claude-live-sessions.md` |
@@ -48,7 +48,7 @@ known start-up cost, not on anything new.
 ### 1. Start of day
 - **Done:** cloud3's unattended 06:00Z boot was clean, and its 20:01Z power-off finished. All three hosts up, qwen ready on both.
 - **Done:** the guard's journal since it went live: 163 qwen requests, 0 marks. At a 0.2 % fault rate that says nothing, so see item 2.
-- Owner: merge cloudlab #58 (#55's cloud1 work) and #59 (the moved-map guard, item 3). **Not #56:** it merges on the day of the card move.
+- **Done:** the owner merged cloudlab #58 (#55's cloud1 work) and #59 (the moved-map guard, item 3).
 
 ### 2. Stop the `!` stalls: guard to `enforce`
 - It is the only protection against the known hang. On that fault it trips in about 6 s, inside the 256 characters held back, so
@@ -63,6 +63,9 @@ known start-up cost, not on anything new.
 - **Owner decision.** Recommended: turn `enforce` on now, since it is one config edit and one to undo, then run the gate for Codex and
   qwen. Next release: an option that enforces only a loop at the very start of reasoning, which covers the known fault and every
   false positive measured here, at the cost of not stopping a loop that starts later.
+
+- **Done 2026-11-07:** `enforce` on both qwen accounts (rev 2278). After the card move, the gate for Codex and qwen
+  passed at 6 pairs: `codex` `code-edit` and `secret-continuity`, `qwen` `code-edit`, 6/6 in both arms, no router errors.
 
 ### 3. Hardware session 1: the card move (needs the owner at the machines, after 06:00Z on 2026-11-07)
 Ready once item 1 and the steps below are done. It needs over 2 h of soak before the 20:00Z power-off that day, so start early.
@@ -80,6 +83,35 @@ Ready once item 1 and the steps below are done. It needs over 2 h of soak before
 - cloud3's shutdown can hang: check for a crash first, stop guests first, hold the power button if it is still on after 3 minutes.
 - Merge #56 and apply on the day. CI on `cloud-ci-1/2` then runs about 15 % slower on heavy jobs, up to about 40 %.
 - Then: soak, the on-demand image path, and move images to cloud1.
+
+### 3a. The card move, as it happened (2026-11-07)
+Both cards went to cloud1 in one visit, so there is no second hardware session. They were not the cards the plan named:
+
+| Host | Slot | Card | Link |
+|---|---|---|---|
+| cloud1 | `0E:00.0` (minor 0) | `GPU-173df0cd`, from cloud2's `4b:00.0` | 16GT/s x8 under load |
+| cloud1 | `0F:00.0` (minor 1) | `GPU-e0309514`, from cloud3's `01:00.0` | 16GT/s x8 under load |
+| cloud3 | `01:00.0` | `GPU-ab0457e9`, moved from `23:00.0` (now empty) | x16 Gen4 |
+| cloud3 | `4C:00.0` | `GPU-49aedacf` | x16 Gen4 |
+| cloud2 | `21:00.0` | `GPU-aca3fd5d` | x16 Gen4 |
+| cloud2 | `4a:00.0` | `GPU-db1d635e`, x16 now that `4b:00.0` is empty | x16 Gen4 |
+
+- **cloud2 and cloud3:** every card passed a 15-minute fp16 burn at 250 W, each result compared bit for bit with the first:
+  0 errors, no Xid, no AER. qwen re-pinned to the cards in the slots (cloudlab #60, installed from the branch after the
+  live files matched `main`), qualified on each host by reading every reply (identity, text, tool, stream, a 42k-token
+  agent step), and back on the route at 13:37Z. `GPU-db1d635e` is the card of the 09-06 Xid 79 at idle (fixed by a riser
+  reseat); it is a TP rank now, so watch it. cloud2's image service stays disabled: its card serves qwen.
+- **cloud1 BIOS:** the first boot still had the cards' BARs below 4 GiB with `Above 4G Decoding` on, because CSM overrides
+  it (runbook section 9). With `CSM` Disabled the BARs are above 4 GiB (`0x28.l` = `0x7f`), and the memory map's top is
+  `0x202f2fffff`, exactly the value the table was written on. So the table holds, `map_moved` is 0 on cloud1 and cloud3
+  (both provisioned with #59), and no memory test or table change was needed. The CSM-on boot in between had moved it by
+  512 MiB. DRAM stays at 3000 MT/s.
+- **cloud1 now:** LXC 5102's device list is canonical for two cards; `tofu plan` shows no device change on 5101, 5102 or
+  5103. The soak runs as host units (`soakrun`, `soakwatch`, `soaksample`) and ends about 17:15Z. The patched llama-swap
+  rebuilt to the recorded sha256 and passes the simulation with the real card names (#56).
+- **Next, in order:** the owner merges #60 and #56; apply executor-lxc and ci-runners (cloud1's CI VMs come back);
+  after the soak, phase 2 (qwen default, image on demand) with its gates, then the images-route move (plan section 10).
+  cloud1's `memmap` opt-in waits for a reboot with the owner at hand.
 
 ### 4. Claude speed: measure the API path
 - A small, capped test of `pool-claude-api` against the seat path: wall time and quality on the same gate tasks. It costs real money.
@@ -106,7 +138,7 @@ Ready once item 1 and the steps below are done. It needs over 2 h of soak before
 - cloud3's gate exception: uncached tokens 1.20-1.29x, quality 6/6. Recommended: keep it on the route.
 - D9, the patched llama-swap for cloud1. Treated as yes; correct it if not.
 - Whether to lower cloud1's RAM speed. The errors are local, not scattered, so it looks like a chip defect and the speed is
-  not the likely cause. Recommended: leave it, and replace the DIMM eventually.
+  not the likely cause. Recommended: leave it, and replace the DIMM eventually. It still runs at 3000 MT/s after the visit.
 - Whether cloud1's and cloud3's DIMMs get replaced.
 
 ### 9. Housekeeping
@@ -117,4 +149,5 @@ Ready once item 1 and the steps below are done. It needs over 2 h of soak before
 - `codex-4` seat re-auth; cloud2 GPU2 temperature; the Phoenix serial; remove temporary worktrees.
 
 ### After that
-Hardware session 2 (cloud2's image card to cloud1), then the availability probe, then cloud1 joins the route as the third backend.
+The availability probe, then cloud1 joins the route as the third backend. (Hardware session 2 is not needed: both cards moved
+on 2026-11-07.)
