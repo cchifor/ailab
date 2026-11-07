@@ -1,6 +1,7 @@
 // kit/tap.mjs PORT RECDIR - the gate's recording tap (worker side; RECDIR is deleted at teardown).
 // Base URL for a client: http://127.0.0.1:PORT/t/<target>/<run-id>/<upstream path prefix...>
 //   targets: router -> https://router.chifor.me   vllm -> http://192.168.0.28:18020   llama -> http://192.168.0.26:8080
+//            flex -> http://192.168.0.27:8080 (cloud1's llama-swap)
 //            chatgpt -> https://chatgpt.com
 //            fwd -> the control arm (providers/codex-control.mjs): POST .../responses goes to the ChatGPT backend with the
 //            host login, read from ~/.codex/auth.json per request, in memory only, never refreshed, written or logged.
@@ -24,6 +25,7 @@ const TARGETS = {
   router: { mod: https, host: 'router.chifor.me', port: 443 },
   vllm: { mod: http, host: '192.168.0.28', port: 18020 },
   llama: { mod: http, host: '192.168.0.26', port: 8080 },
+  flex: { mod: http, host: '192.168.0.27', port: 8080 },
   chatgpt: { mod: https, host: 'chatgpt.com', port: 443 },
   anthropic: { mod: https, host: 'api.anthropic.com', port: 443 },
   fwd: { mod: https, host: 'router.chifor.me', port: 443 },

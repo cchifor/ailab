@@ -4333,3 +4333,67 @@ arms on every row. The one FAIL is `recall`'s wall time, a cost that predates th
 **After the guard went to `enforce` and the card move, 2026-11-07 13:39Z, same image, 6 pairs:** `codex` `code-edit` and
 `secret-continuity`, and `qwen` `code-edit` (both backends on the route, re-pinned to their new cards), all PASS, 6/6 in
 both arms. qwen's greedy output via the router matched the direct output byte for byte.
+
+## cloud1 as the third qwen3.8-27b backend (prepared 2026-11-07, not applied)
+
+cloud1 (LXC 5102, `192.168.0.27:8080`) runs `qwen3.8-27b` as its default model, behind llama-swap. Qwen-Image loads there
+on demand and evicts qwen (cloudlab runbook §16). The design is cloudlab `plans/2026-11-05-cloud1-flex-host-plan.md` §6
+and D6: cloud1 joins route `default/qwen3.8-27b` only through an **availability probe**, so that no qwen work reaches it
+while the image model is pending or resident.
+
+**How the router keeps cloud1 out while the image is in use.** The account opts in with
+`availability: {probe: "llama-swap", intervalMs: 3000, maxAgeMs: 9000, settings: {models: {"qwen3.8-27b": "qwen3.8-27b"}}}`.
+- Every 3 s the router reads llama-swap's `/running` and the first in-flight snapshot of `/api/events`. Neither read can
+  load a model.
+- An image request queued or running gives `swap_pending`; the image resident, or an empty box, gives
+  `model_not_resident`; loading gives `model_loading`.
+- Each of these excludes cloud1, and a conversation bound to it moves to cloud2 or cloud3.
+- A failed or stale check also excludes cloud1 (`availability_unknown`): the probe fails closed. cloud1 is back after two
+  good checks in a row.
+- `GET /admin/v1/availability`, the Assistant's `server_availability` and `llm_router_availability` show the state.
+- Offline, in docker, with the real cloud1 llama-swap build: cloud1 was excluded 3.0 s after an image request reached
+  llama-swap, and was back 6.1 s after qwen reloaded (llm-router #155).
+
+**The pieces.**
+- The probe: llm-router #153, #154 and #155, all default-off. None is released yet: the next release from `main` carries
+  all three.
+- The account: `lan-192.168.0.27-8080`, a copy of cloud2's account (the same vLLM build and checkpoint). It has
+  concurrency 4, cloud2's queue, the degeneracy guard `{reasoning: "enforce"}`, `replayReasoning {lastTurns: "all"}` and
+  `forwardReasoning`; its models are `qwen3.8-27b` only; and it has the probe above. It joins as a deployment that starts
+  **disabled**.
+- The config change: a script run in the router pod. `STEP=add` adds the account and the deployment, `enable`, `disable`
+  and `remove` follow; `DRY=1` validates with the release's own `validateConfig` and the probe's own settings schema, and
+  sends nothing. It refuses to run on an image without the probe, because an older account schema drops `availability`
+  silently. `enable` also raises `maxAttempts` to 3, so a race `503 model_start_failed` is retried on the other two
+  backends, and refuses while cloud1 is not eligible.
+- The gate: provider `qwen-cloud1` (`scripts/router-ab`), **opt-in**. A run without `--providers` leaves it out, so the
+  full gate is unchanged until cloud1 is in service. Named before `STEP=enable`, it is refused at setup, in seconds, like any
+  qwen provider whose backend is not an enabled deployment of the route. Once cloud1 has passed its gate, drop `optIn` from
+  `providers/qwen-cloud1.mjs` so the full gate includes it.
+- The alerts: `LlmRouterAvailabilityUnknown` (no verdict for 5 min) and `LlmRouterModelNotResident` (20 min). Both are
+  silent at night, when every cloud host is off.
+
+**Order** (each router roll and each route change waits for the owner's go):
+1. Roll the release. Then run the gate with cloud1 not on the route: `--providers qwen,qwen-cloud3,codex --pairs 6`, plus
+   `claude` if a seat has headroom.
+2. `STEP=add`: `DRY=1 PROBE=1` first (one real probe check), then apply. Read `GET /admin/v1/availability` until cloud1
+   shows `available`, eligible.
+3. Watch the probe before cloud1 carries any routed traffic. Send one image request through route
+   `qwen-image-2.1-fast-cloud`. Expect `swap_pending` within about 5 s, then `model_not_resident`, then `available` again
+   after the 600 s TTL and keep-warm's reload.
+4. `STEP=enable`, then gate cloud1: `--providers qwen-cloud1,qwen,qwen-cloud3 --pairs 6`. Never run this while an image is
+   in use on cloud1: its direct arm would get `503 model_start_failed`.
+5. Steering, the plan's T5: three agents on the route and one image request to cloud1. Within about 5 s no new
+   `qwen3.8-27b` attempt starts on `lan-192.168.0.27-8080` (journal by account), and cloud1's conversations are `moved`.
+   The image is served once cloud1 has drained, and qwen does not reload before the TTL.
+6. T6: six concurrent agents across the three backends. Then, with cloud1 excluded and cloud2 and cloud3 full, a new
+   request is a retryable 429.
+
+**Rollback.** `STEP=disable` takes cloud1 out at once, and its conversations move. `STEP=remove` deletes the account and
+the deployment.
+
+**Costs.**
+- Each probe read is logged by llama-swap (two lines every 3 s in cloud1's journal).
+- Each check reads about 230 KB, because llama-swap replays its log histories before the snapshot.
+- Names that bypass routes (`local/qwen3.8-27b`, the Assistant's direct model choice) can reach the enabled account even
+  while its deployment is off. They do so only while the probe says `available`.

@@ -46,7 +46,8 @@ providers/                     one module per provider; discovered, never named 
   codex.mjs                    ChatGPT seat via the Codex CLI (direct: own login; router: dw-N key, native pass-through)
   codex-control.mjs            the same seat with the client held constant (direct: API mode through a plain forwarder)
   claude.mjs                   Claude seat via Claude Code (direct: own login; router: claude/<model>, sdk-resume)
-  qwen.mjs, qwen-cloud3.mjs     qwen3.8-27b, one provider per backend of the route (direct: its /v1/responses; router: pointer qwen-27b)
+  qwen.mjs, qwen-cloud3.mjs,   qwen3.8-27b, one provider per backend of the route (direct: its /v1/responses; router: pointer qwen-27b);
+  qwen-cloud1.mjs              a backend that is not an enabled deployment of the route is refused at setup
   lib/codex-session.mjs        shared by Codex-CLI providers: one session through the tap, metrics, the same-body check
   lib/qwen-backend.mjs         the qwen provider, parameterised by backend
 tasks/
@@ -66,6 +67,8 @@ local/                         runs on the workstation or inside the router pod
   claude-chat-pod.mjs          Claude router arm for chat tasks (in the pod, its own admin bearer)
   harness-router.mjs           Claude router arm for agentic tasks (docker on the workstation)
   journal-seats.mjs            which accounts a run's router requests reached (failover detection)
+  route-targets.mjs            the route an alias names (a pointer followed) and its enabled deployments' accounts
+                               (the qwen providers' setup check)
 tests/core.test.mjs            the core and the registries (node --test; no network)
 ```
 
@@ -80,11 +83,13 @@ export default {
     return { pass, detail, wall_s, tool_calls, rejected, ttft_s, uncached_tokens, router_errors, retries };
   },
   async teardown(ctx) {},                                          // optional
+  optIn: true,                                                     // optional: run only when named in --providers
 };
 ```
 
 - **To add a provider:** add one file in `providers/`. Nothing in `core/` or `gate.mjs` changes. A Codex-CLI provider
-  reuses `providers/lib/codex-session.mjs`, as `qwen.mjs` does.
+  reuses `providers/lib/codex-session.mjs`, as `qwen.mjs` does. A provider for a backend that is not in service yet sets
+  `optIn: true`: a run without `--providers` leaves it out, and `--plan` lists it as opt-in.
 - **To add a task:** add one entry in `tasks/registry.mjs`, plus its fixture if it needs a workspace. Use an existing
   grader, or add one in `tasks/graders.mjs`. `gate: false` keeps a long task out of the default run (`--tasks <id>`).
 - **To add a metric:** add one entry in `core/margins.mjs`. Providers that report the field get it judged; the others
@@ -112,7 +117,7 @@ export default {
 | codex | code-edit (3 bugs, unittest), secret-continuity (reasoning across a resumed turn) |
 | codex-control | code-edit |
 | claude | math, tool-choice, recall (2 turns), stock-agentic (a multi-file fix, hidden tests) |
-| qwen, qwen-cloud3 | code-edit |
+| qwen, qwen-cloud3, qwen-cloud1 (opt-in) | code-edit |
 
 The margins, and §9.6's sample-size rule: 3 pairs first; a metric outside its margin, or within half a margin of it,
 takes 3 more pairs, and the decision uses all 6. Below 6 pairs a metric outside its margin is OUT, not yet FAIL. A
