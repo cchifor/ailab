@@ -106,6 +106,7 @@ export const MARGINS = [
  * and passes. A `decisive` margin fails at any sample size.
  */
 export const DECISION_PAIRS = 6;
+export const NO_BASELINE = 'INVALID (no direct baseline; rerun)';
 
 /**
  * Evaluates one task's runs: [{ arm: 'direct'|'router', pair, metrics }], with the task's known deviations (see the
@@ -129,6 +130,11 @@ export function evaluate(runs, known = {}) {
     return { id: m.id, label: m.label, margin: m.margin, direct: m.show(dv, d), router: m.show(rv, r), status };
   });
   const statuses = rows.map((x) => x.status);
+  // Non-inferiority needs something to be inferior to. If every direct run failed, the arm's figures describe the
+  // failure (2026-11-07: an expired login, 401 in 2.5 s), and any comparison with them passes or fails by accident.
+  if (d.length && d.every((x) => !x.pass)) {
+    return { rows, verdict: NO_BASELINE, pairs, notes: [...notes, `every direct run failed, so nothing was compared: read the direct arm's error first`] };
+  }
   const verdict = statuses.includes('FAIL') ? 'FAIL'
     : pairs < DECISION_PAIRS && (statuses.includes('OUT') || statuses.includes('NEAR')) ? 'RERUN (6 pairs decide, §9.6)'
     : statuses.includes('KNOWN') ? 'PASS (known deviation)' : 'PASS';
