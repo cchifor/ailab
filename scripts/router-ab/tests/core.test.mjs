@@ -97,11 +97,15 @@ test('a task with no direct baseline cannot pass, fail or ask for a rerun', () =
   // 2026-11-07: an expired login. Direct 0/3 in 2.5 s, router 3/3.
   const v = evaluate([...arm('direct', false, 2.5), ...arm('router', true, 4.9)]);
   assert.equal(v.verdict, NO_BASELINE);
-  assert.match(v.notes.join(' '), /every direct run failed/);
+  assert.match(v.notes.join(' '), /no direct run passed/);
   assert.equal(evaluate([...arm('direct', false, 2.5), ...arm('router', false, 4.9)]).verdict, NO_BASELINE);
   const r = render({ image: 'sha256:x', startedAt: 'now', providers: [{ name: 'claude', layerA: evaluateLayerA([{ name: 'a', pass: true }]), tasks: [{ id: 'recall', ...v }] }] });
   assert.equal(r.overall, 'INCOMPLETE');
   assert.match(r.text, /\| claude \| recall \| INVALID \(no direct baseline; rerun\) \|/);
+});
+
+test('a task with no direct runs at all has no baseline either', () => {
+  assert.equal(evaluate([run('router', 1, {}), run('router', 2, {})]).verdict, NO_BASELINE);
 });
 
 test('one direct run passing is still a baseline', () => {

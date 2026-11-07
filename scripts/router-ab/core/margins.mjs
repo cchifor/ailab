@@ -132,8 +132,8 @@ export function evaluate(runs, known = {}) {
   const statuses = rows.map((x) => x.status);
   // Non-inferiority needs something to be inferior to. If every direct run failed, the arm's figures describe the
   // failure (2026-11-07: an expired login, 401 in 2.5 s), and any comparison with them passes or fails by accident.
-  if (d.length && d.every((x) => !x.pass)) {
-    return { rows, verdict: NO_BASELINE, pairs, notes: [...notes, `every direct run failed, so nothing was compared: read the direct arm's error first`] };
+  if (d.every((x) => !x.pass)) {   // true for no direct runs at all, which is no baseline either
+    return { rows, verdict: NO_BASELINE, pairs, notes: [...notes, `no direct run passed, so nothing was compared: read the direct arm's error first`] };
   }
   const verdict = statuses.includes('FAIL') ? 'FAIL'
     : pairs < DECISION_PAIRS && (statuses.includes('OUT') || statuses.includes('NEAR')) ? 'RERUN (6 pairs decide, §9.6)'

@@ -43,7 +43,7 @@ export default {
   kinds: ['chat', 'claude-agentic'],
   async setup(ctx) {
     // the direct arm reads the worker's access token and cannot refresh it (only that worker's own CLI may)
-    const login = ctx.ssh(`python3 -c 'import json;print(json.load(open("/home/c4/.claude/.credentials.json"))["claudeAiOauth"]["expiresAt"])'`);
+    const login = ctx.ssh(`python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.claude/.credentials.json")))["claudeAiOauth"]["expiresAt"])'`);
     const problem = loginProblem(Number((login.stdout || '').trim()));
     if (problem) throw new Error(problem);
     // the router's validated Claude Code, installed once per worker in a cache (no credential in it)
