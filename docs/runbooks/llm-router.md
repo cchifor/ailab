@@ -4425,8 +4425,8 @@ An anonymous pull of the index, both manifests and all 12 blobs verified their d
 
 No storage, migration or KV file changed between `d5217887` and `92c7c28a`, and none of the four new plugins writes to the
 store, so a rollback needs no restore. The one file on the data volume the upgrade changes is `plugins.yml`, which gains the
-new plugins' entries. The old image's loader drops entries for plugins it does not have (`compose`,
-`packages/kernel/index.ts`). By the recipe, no backup is taken in this case; one is cheap if wanted.
+new plugins' entries; the old image drops them (rehearsed below). By the recipe, no backup is taken in this case; one is
+cheap if wanted.
 
 **Verified on the release tree.**
 - On Node 24: `pnpm verify` passed (typecheck, 2,504 tests with 14 skipped, build). `check:architecture` reports only the
@@ -4434,18 +4434,24 @@ new plugins' entries. The old image's loader drops entries for plugins it does n
 - The production smoke passed in the pinned Node 26.10.0 image.
 - The archive has the live archive's layout: the same top-level entries, owner 1000:1000, and 18,194 entries against
   18,140.
-- The rollback note below was checked against the live image's own code. In the `d5217887` archive, `validateConfig`
-  accepted an account with `availability` and returned it without the key. The config store loads and saves through
-  `validateConfig`.
+- **A rollback, rehearsed** in the pinned runtime with both archives on one data directory:
+  1. This release added an account with `availability` and its deployment, enabled, and wrote the four new plugins into
+     `plugins.yml`.
+  2. The live release (`d5217887`) then started on that directory: `/ready` 200, 47 plugins, none failed. It dropped the
+     four entries from `plugins.yml`.
+  3. It kept the account, the enabled deployment and the stored `availability` key. It never reads that key (no code in
+     `d5217887` does), and a config write there would strip it.
+  4. Rolling forward again found `availability` intact.
 
 **Rollback.** Revert these together: the image and the three-line comment above it, both annotations, and the `servers`
 line. Revert them to:
 - image `registry.chifor.me/llm-router/router@sha256:3715a86c3b110fd66f1071deb83028cbceadb48fbe4aaad8d37e5362f5fde5d9`;
 - source `d5217887867f84ad4ab5d6b88ba4cb0f0edf7982`, release `router-0.1.0-20261106-key-edit`.
 
-The old image's account schema drops `availability` without an error. So before rolling back with cloud1 on the route,
-remove cloud1 (`STEP=disable`, then `STEP=remove`). Otherwise cloud1 stays on the route with no probe, and the image model
-can then evict qwen under live traffic.
+The old image does not know `availability`. It neither refuses nor enforces the key: it keeps a stored one and ignores it,
+and strips it on a config write. So before rolling back with cloud1 on the route, remove cloud1 (`STEP=disable`, then
+`STEP=remove`). Otherwise cloud1 stays on the route with no probe, and the image model can then evict qwen under live
+traffic.
 
 **At the roll.** One replica with `Recreate`: the router restarts, and streams in flight are cut, as at every release.
 
