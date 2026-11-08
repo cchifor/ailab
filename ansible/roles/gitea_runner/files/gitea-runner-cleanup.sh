@@ -1018,7 +1018,15 @@ fi
 #      part of one of those trees corrupts it, and nothing would notice until a build failed.
 #    * Cargo rebuilds a unit whose files are missing (an rlib or rmeta, a test binary, a fingerprint, or
 #      every file at once: verified on 1.86), so a file no build has READ for the keep window costs at most
-#      a rebuild if it is needed again. atime on the relatime root fs lags a read by up to 24h, so a file
+#      a rebuild if it is needed again. EXCEPT a build script's OUT_DIR: Cargo reads it only when the unit
+#      compiles, and a missing file there does not make the build-script run stale, so the crate that
+#      include!s it fails at every build until the target is cleaned (found by workbricks #199, reproduced
+#      2026-11-08). An atime sweep of the whole tree also takes the build-script binary, which is never
+#      more recently read than its outputs, and Cargo then reruns the script; but that ordering is all that
+#      would stand between a sweep and a poisoned target. So nothing under a `build/` dir is ever touched,
+#      nor under `incremental/` (rustc's own state, per session). They are a few percent of a target:
+#      0.6-0.8 GB of 20 GB on ci-runner-6.
+#      atime on the relatime root fs lags a read by up to 24h, so a file
 #      read within the last (keep window - 24h) is never removed: 48h at the default. The window is
 #      clamped to at least 24h.
 #    * .rustc_info.json and CACHEDIR.TAG are always kept. The tag is written once and never read again, so
@@ -1051,12 +1059,16 @@ cargo_target_dirs() {
     done < <(find "$root" -xdev -maxdepth "$TARGET_MAXDEPTH" -type f -name .rustc_info.json -print0 2>/dev/null)
   done
 }
-# The files in <dir> that no build has read for <minutes>, never its two markers.
+# The files in <dir> that no build has read for <minutes>: never its two markers, and nothing under a build/
+# or incremental/ dir (see above).
+# -name and constant -path patterns only: a pattern built from $d breaks on a [, * or ? in the path. And NOT
+# -prune: -delete implies -depth, under which find ignores -prune, so a pruned tree would be deleted anyway.
+# '*/build/*' matches a whole path component, never "rebuild/". Sparing every marker by name also keeps
+# those of nested target dirs, which is right.
 target_stale_find() { # <dir> <minutes> <find action...>
   local d="$1" m="$2"; shift 2
-  # -name, not -path: a -path pattern built from $d breaks on a [, * or ? in the path. Sparing every
-  # marker by name also keeps those of nested target dirs, which is right.
-  find "$d" -xdev -type f -amin +"$m" ! -name CACHEDIR.TAG ! -name .rustc_info.json "$@" 2>/dev/null
+  find "$d" -xdev -type f -amin +"$m" ! -name CACHEDIR.TAG ! -name .rustc_info.json \
+    ! -path '*/build/*' ! -path '*/incremental/*' "$@" 2>/dev/null
 }
 # Bytes they hold, each inode once (read-only). printf %.0f, not print: an older mawk (1.3.3) prints a sum
 # past 2^31 as %.6g (2.86331e+10), which is_num rejects, and the biggest dirs would then count for nothing.
@@ -1066,7 +1078,9 @@ target_sweep_dir() {
   local b0 b1
   b0="$(du -sx --block-size=1 "$1" 2>/dev/null | cut -f1)"
   target_stale_find "$1" "$2" -delete
-  find "$1" -xdev -mindepth 1 -type d -empty -mmin +"$2" -delete 2>/dev/null || true
+  # An empty OUT_DIR is a build script's output too: the same exclusions.
+  find "$1" -xdev -mindepth 1 -type d -empty -mmin +"$2" ! -name build ! -name incremental \
+    ! -path '*/build/*' ! -path '*/incremental/*' -delete 2>/dev/null || true
   b1="$(du -sx --block-size=1 "$1" 2>/dev/null | cut -f1)"
   if is_num "$b0" && is_num "$b1" && [ "$b0" -ge "$b1" ]; then printf '%s' $(( b0 - b1 )); else printf 0; fi
 }

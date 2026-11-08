@@ -1221,5 +1221,25 @@ kept "$G/CACHEDIR.TAG" "T15: ...and its CACHEDIR.TAG is kept"
 kept "$G/.rustc_info.json" "T15: ...and its .rustc_info.json is kept"
 rm -rf "$TR"
 
+# T16: nothing under a build/ or incremental/ dir is touched, however old (a build script's OUT_DIR file
+# alone missing poisons the crate that include!s it: workbricks #199). The rest of the target is swept.
+rm -rf "$TR"; K="$TR/repo-ci/push/target"
+mkdir -p "$K"; echo '{}' > "$K/.rustc_info.json"
+mb "$K/debug/build/g-1/out/gen.rs"; mb "$K/debug/build/g-1/output" 0; mb "$K/debug/build/g-2/build-script-build"
+mkdir -p "$K/debug/build/g-3/out"; touch -d '5 days ago' "$K/debug/build/g-3/out" # an empty OUT_DIR
+mb "$K/debug/incremental/h-1/s-old/dep-graph.bin"
+mb "$K/x86_64-unknown-linux-gnu/debug/build/k-1/out/k.rs" # a target-triple profile dir
+mb "$K/debug/deps/libold-1.rlib"
+find "$K" -type f -exec touch -a -d '9 days ago' {} +
+TROOTS="$TR" TMINFREE=1 run_case 0 95
+gone "$K/debug/deps/libold-1.rlib" "T16: the rest of the target is swept (deps)"
+kept "$K/debug/build/g-1/out/gen.rs" "T16: an OUT_DIR file is never deleted"
+kept "$K/debug/build/g-1/output" "T16: a build-script run's output is never deleted"
+kept "$K/debug/build/g-2/build-script-build" "T16: a build-script binary is never deleted"
+kept "$K/debug/build/g-3/out" "T16: an empty OUT_DIR is never removed"
+kept "$K/debug/incremental/h-1/s-old/dep-graph.bin" "T16: incremental state is never deleted"
+kept "$K/x86_64-unknown-linux-gnu/debug/build/k-1/out/k.rs" "T16: ...under a target-triple profile too"
+rm -rf "$TR"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

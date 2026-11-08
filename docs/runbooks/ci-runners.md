@@ -188,7 +188,10 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       2026-11-08).
   - **What goes.** At **≥75%** disk, the files no build has read for **72h**; at **≥92%**, for **24h**.
     Then empty dirs older than the same window. Cargo rebuilds whatever is missing (verified on 1.86), so
-    the cost is a rebuild. atime lags a read by up to 24h on these relatime disks, so a file read in the
+    the cost is a rebuild. The exception is a build script's `OUT_DIR`. Deleting one of its files alone
+    makes the crate that `include!`s it fail at every build, because the build-script run stays fresh
+    (workbricks #199). So nothing under `build/` or `incremental/` is ever touched; they are a few
+    percent of a target. atime lags a read by up to 24h on these relatime disks, so a file read in the
     last 48h is never removed at the default.
   - **Why it is race-free.** It runs only in a confirmed gap, never on the mid-job path, and only when at
     least 1 GB would go. The runner is held the way the heal holds it: `runner_held` is written first,
