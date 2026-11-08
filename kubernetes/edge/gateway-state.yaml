@@ -5,7 +5,7 @@ controller:
   site: default
   url: https://192.168.1.152
 dhcp_network:
-  id: 6584469af81ca8458f9a6af1
+  id: c7406446-259e-48df-9f99-06a0d833fe8a
   name: Home
 intents: []
 port_forward:

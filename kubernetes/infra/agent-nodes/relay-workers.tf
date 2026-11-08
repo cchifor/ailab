@@ -95,6 +95,13 @@ resource "talos_machine_configuration_apply" "relay_worker" {
   node                        = each.value.ip
   config_patches              = [local.relay_worker_patches[each.key]]
   depends_on                  = [proxmox_virtual_environment_vm.relay_worker]
+  lifecycle {
+    # A replaced VM boots the staged image fresh, in maintenance mode, while this resource's inputs are
+    # unchanged: without a trigger it would never re-apply and the node would never join (depends_on
+    # only orders; the provider's Read cannot see a lost config). The VM's id is unknown during a
+    # replacement and unchanged by an in-place update, so only a rebuild re-applies.
+    replace_triggered_by = [proxmox_virtual_environment_vm.relay_worker[each.key].id]
+  }
 }
 
 # Talos alone owns labels and taints through machine.nodeLabels/nodeTaints.

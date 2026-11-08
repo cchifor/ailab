@@ -1,5 +1,7 @@
 # Operator-only opt-in; see docs/runbooks/relay-worker-capacity.md first.
-# Do not rename to .auto.tfvars: an ordinary agent-pool apply must remain unchanged.
+# Before a rollout, pass it explicitly (-var-file) so an ordinary agent-pool apply cannot provision it.
+# Once the node exists, the operator's copy is relay-workers.auto.tfvars (gitignored) so EVERY
+# plan/apply loads it; without it a plan would destroy the node (prevent_destroy refuses).
 relay_worker_nodes = {
   relay-worker-1 = {
     node_name  = "ai-node3"

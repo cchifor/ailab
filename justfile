@@ -111,6 +111,9 @@ relay-agent-skill *args:
 # infra/ must have run once to expose the machine_secrets/client_configuration outputs FIRST. Run
 # from Windows in practice (the talos provider is windows_amd64) — these are the WSL mirrors.
 # Requires the Talos nocloud image staged on each node (scripts/stage-talos-image.sh) FIRST.
+# relay-worker-1 (relay-workers.tf) is declared in the gitignored relay-workers.auto.tfvars beside
+# terraform.tfvars, which OpenTofu loads on EVERY plan/apply here and from a direct Windows tofu.exe.
+# Without it a plan would destroy that node, which prevent_destroy refuses (fail closed).
 agent-nodes-plan:
     tofu -chdir=kubernetes/infra/agent-nodes plan
 # Depends on nested-virt-verify (Stage-2 gate): never provision the Kata pool against a host lacking nested=Y.
