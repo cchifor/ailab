@@ -1067,6 +1067,9 @@ cargo_target_dirs() {
 # -delete implies -depth, under which find ignores -prune, so a pruned tree would be deleted anyway.
 # '*/build/*' matches a whole path component, never "rebuild/". Sparing every marker by name also keeps
 # those of nested target dirs, which is right.
+# CONTRACT: paths it prints are relative to <dir> (./debug/...), so a caller may only pass actions that use
+# no path afterwards. Today: -printf '%i %s' (the estimate) and -delete (the sweep). A caller that needs the
+# paths must prefix <dir> itself.
 target_stale_find() { # <dir> <minutes> <find action...>
   local d="$1" m="$2"; shift 2
   (cd "$d" 2>/dev/null && find . -xdev -type f -amin +"$m" ! -name CACHEDIR.TAG ! -name .rustc_info.json \
