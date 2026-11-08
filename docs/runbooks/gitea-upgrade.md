@@ -42,6 +42,12 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
    - Merge the PR. Check the merge SHA on the GitHub mirror and on `GitRepository` `flux-system`.
    - Check that the live HelmRelease still names the OLD chart and image, and that `spec.suspend` is still `true`.
 5. **Write freeze and backups.**
+   - **Running CI jobs fail.** Stopping Gitea fails every Actions job that is running at the time. The runners
+     keep going, but Gitea marks those jobs failed as it comes back (2026-11-08: 18 jobs, 10 s after the start).
+     Note them first, on the primary, database `gitea`: `select r.repo_id, r.index, r.id from action_run_job j
+     join action_run r on r.id = j.run_id where j.status = 6`. After step 7, re-run the newest run of each
+     branch: `scripts/gitea-api.sh POST /repos/<owner>/<repo>/actions/runs/<run id>/rerun` (1.27). A run that a
+     newer run of the same branch superseded needs no re-run.
    - Run `kubectl -n gitea scale deploy/gitea --replicas=0`, then wait for `kubectl -n gitea get pods -l
      app.kubernetes.io/name=gitea` to list nothing. Gitea is the only writer to its database and volumes.
    - **Database.** Dump to the workstation and require both exit statuses to be 0:
@@ -52,6 +58,9 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
      `velero-daily` template, restricted to `includedNamespaces: [gitea]`, with `defaultVolumesToFsBackup: true` and
      `ttl: 720h`. Wait for `Completed`, and for both `PodVolumeBackup`s (`-l velero.io/backup-name=gitea-pre-<version>`)
      to be `Completed`. Then delete the holder pod and wait until it is gone.
+   - Name the kinds in full: `kubectl -n velero get backups.velero.io gitea-pre-<version>`. The short name
+     `backup` resolves to CNPG's `Backup` kind first, so a wait on it answers NotFound until it times out
+     (2026-11-08: it cost 9 of the 14 minutes of outage).
 6. **Upgrade.**
    - Remove the annotation (`kubectl -n gitea annotate hr gitea kustomize.toolkit.fluxcd.io/reconcile-`) and
      reconcile the `apps` Kustomization. Check that the live HelmRelease now names the NEW chart and image, and that
@@ -61,7 +70,8 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
    - Watch the `configure-gitea` init container (it runs `gitea migrate`), the pod and the HelmRelease. Never roll back
      mid-migration.
 7. **Verify.** Do not stop at the login page:
-   - `/api/v1/version`, and `select version from version` equal to the rehearsal value;
+   - the version (`scripts/gitea-api.sh GET /version`: this forge answers `/api/v1/version` only to a signed-in
+     caller), and `select version from version` equal to the rehearsal value;
    - the merge SHA is applied: `GitRepository` `flux-system` and Kustomization `apps` report it, and the HelmRelease is
      Ready for its current generation (HelmRelease revisions name charts, not Git commits);
    - `scripts/gitea-api.sh GET /user`;
@@ -104,3 +114,24 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
    - Only then remove the annotation, and check that the live HelmRelease names the OLD chart and image with
      `replicaCount: 1`.
    - Unsuspend with `--field-manager=flux-client-side-apply`.
+
+## Record
+
+- **2026-11-08: 1.26.1 → 1.27.3** (chart 12.6.0 → 12.7.0; PR #1679, merge `b81ba53b`; plan
+  `plans/2026-11-08-gitea-1-27-upgrade-plan.md`).
+  - **Outage:** 19:36:26 → 19:50:33 UTC, 14 minutes. Without the `backup` short-name wait it would have been
+    about 5.
+  - **Dump:** 1.05 GB in 2 min 18 s; `pg_restore -f /dev/null` exited 0. It is kept on the workstation as
+    `gitea-pre-1.27.3-20261108T193632Z.dump` (sha256 `0a519a4b…4ee4895`).
+  - **Volumes:** Velero `gitea-pre-1273`, 143/143 items, completed in 62 s (incremental fs-backup: `data`
+    12.5 GB, `actions-storage` 10.8 GB).
+  - **Migrations:** 331 → 343 in about 2 s, in the `configure-gitea` init container; 343 matches the rehearsal.
+    The HelmRelease is Ready at its generation 25 (Helm revision 20).
+  - **Verified:**
+    - `gitea-api.sh GET /user` and `GET /version` (1.27.3);
+    - a branch push with its CI, and re-run jobs going green;
+    - a reviewer-bot review on PR #1678;
+    - the ailab push mirror syncing to GitHub;
+    - the `cnpg_gitea_*` credential metrics, with no Gitea alert firing.
+  - **Cost:** the restart failed 18 running jobs (relay, ailab, workbricks). The newest run of each branch or
+    pull request was re-run through the API (17 runs).
