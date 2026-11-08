@@ -1,9 +1,10 @@
 # Dedicated Relay worker capacity rollout
 
-Status: owner approved capacity/address allocation and the temporary Qwen stop for S7/S8 on
-2026-11-08 in the implementation session. Operator lease/edge checks and apply remain pending.
-No node, DHCP change, KubeVirt deployment or runtime
-qualification has been applied. The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
+Status: **capacity provisioned on 2026-11-08** by the operator. `relay-worker-1` is Ready; the DHCP
+pool starts at `.53`; both preflight gates pass. Evidence is in
+[Operator rollout record](#operator-rollout-record-2026-11-08). The owner approved the capacity,
+the address and the temporary Qwen stop for S7/S8. KubeVirt is **not** installed (that is spike
+step S1), and no runtime is qualified. The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
 measured the capacity and confirmed nested KVM; the [feasibility runbook](relay-worker-kubevirt-feasibility.md)
 remains the acceptance gate.
 
@@ -108,15 +109,84 @@ Remove only this task's temporary files afterwards. Stage it as `local:import`; 
 `local` datastore must allow the `import` content type. No image is downloaded into git or a
 worker's OS disk.
 
+## Pool rule: no workload before an egress policy
+
+Before the first workload on the pool (spike step S2 included), its namespace carries a default-deny
+egress `CiliumNetworkPolicy` that allows only DNS and the approved endpoints. The node has no other
+isolation from:
+- **The LAN**, `192.168.0.0/23`.
+- **Every node address.**
+- **`cloud-power`.** Leaving `.52` out of its `ALLOW_FROM` does not isolate workers: that list also
+  admits the pod CIDR `10.244.0.0/16`, and Cilium does not masquerade pod traffic to cluster nodes. A
+  worker pod can therefore reach the `hostNetwork` WoL listener (`:8127` on every node, plus its
+  Service). It only serves `POST /api/wake`, so it can power the GPU cluster **on**, never off; the
+  power-off API sits behind its own NetworkPolicy.
+- **The NAS storage IP `10.55.0.254`.** This node carries the storage-fabric `/32` route like the
+  agent nodes, although the binding forbids NAS storage classes here.
+
+S5 proves the policy: the WoL path must be refused both through the Service and through a node
+address, and `10.55.0.254` must be unreachable.
+
 ## Rollback and evidence
 
-Before a VM exists, rollback can remove the opt-in configuration. Keep `.52` excluded from edge
-trust while any worker still uses it. After provisioning, stop admissions and confirm no worker,
-VM, PVC or local-path data remains before intentionally retiring the node through a reviewed
-OpenTofu removal. Only return `.52` to DHCP after verifying the node no longer uses it and updating
-IPAM, desired gateway range and live controller together. Never remove a bound PVC or finalizer
-just to make a teardown pass.
+Before a VM exists, rollback can remove the opt-in configuration. Keep `.52` excluded from edge trust
+while any worker still uses it.
+
+**Retiring the node**, one step at a time:
+1. **Cleanup while the node still exists.** Stop admissions. S9 (the K5 owner): the worker
+   namespaces are deleted, and no VM, VMI, PV, `virt-launcher` pod or `local-path` directory remains.
+   The `local-path` cleanup helpers need the node. Never remove a bound PVC or finalizer just to make
+   a teardown pass.
+2. `kubectl --context admin@ai drain relay-worker-1 --ignore-daemonsets`.
+3. **A reviewed OpenTofu removal.** It drops `prevent_destroy` and empties the opt-in map. It deletes
+   the VM and drops the config-apply record, but it neither resets Talos nor deletes the Kubernetes
+   Node.
+4. `kubectl --context admin@ai delete node relay-worker-1`. Confirm that its `CiliumNode` is gone and
+   that nothing still targets it.
+5. Only then return `.52` to DHCP, updating IPAM, the desired gateway range and the live controller
+   together.
+
+**Rebuilding the VM:** `talos_machine_configuration_apply.relay_worker` is `replace_triggered_by` its
+VM's id, so a replaced VM gets its config re-applied and joins again. A plan-only test on
+2026-11-08, with `prevent_destroy` lifted in a scratch copy, showed it replaced "due to changes in
+replace_triggered_by". Delete the old Node object first (step 4); `prevent_destroy` must be lifted
+by a reviewed change for any rebuild.
 
 Record applied commit, reviewed plan summary, gateway range, node identity, extension IDs,
 allocatable resources and preflight report hashes. Update this document's pending status only
 from that evidence. The existing spike's S1–S9 receipts remain a separate requirement.
+
+## Operator rollout record, 2026-11-08
+
+Every step above ran on 2026-11-08 from the operator workstation. Raw evidence lives outside git in
+`C:\Users\chifo\work\home\evidence\relay-worker-kubevirt\`.
+
+| Step | Result |
+|---|---|
+| 2 Edge | Flux at `main@8c82fa1a`, and the `edge-proxy` rollout is complete. The mounted Caddyfile has `.53/32 .54/31` in both `@not_lan` and `@not_admin`; `.52` is in neither. |
+| 3 DHCP | The live client list showed **no client on `.52`** (by DHCP or fixed IP); `.53` holds a DHCP client that stays in the pool. **The controller had re-IDed all its objects to UUIDs since 2026-10-27**, so `Home` became `c7406446-259e-48df-9f99-06a0d833fe8a`. `gateway.yaml` was corrected, then plan `1255431b5b8215b942fc` (forget, adopt and update Home, `.52` → `.53`) was applied. The read-back plan reports no changes. The owned forward and static-DNS IDs are still stale. |
+| 4 Host | ai-node3: MemAvailable 37.9 GiB, `kvm_amd` nested=1, `local-lvm` 1.14 TiB free, GTT 0. |
+| 5 Image | The Image Factory confirmed that the schematic definition (gvisor + qemu-guest-agent) hashes to `8e8827b5…`. Download `.raw.xz`: sha256 `300fd28886bdc6f8b9d5ac13fdc3ac34de2c984b94d85d69d5298466f09a0db7`, 341 045 040 bytes. Image `.raw`: sha256 `dac67c75c1c3fb8f704105d0510ae24a22a886a5bfa01dd7f747536bf636fb12`, 4 453 302 272 bytes. Staged under the unique filename via a temp dir and an atomic rename. |
+| 6 Plan/apply | `main@b81ba53b`, with `-var-file=relay-workers.tfvars`: **3 to add, 0 to change, 0 to destroy** (the VM, its config apply, RuntimeClass `relay-gvisor`). The saved plan was applied as reviewed, and the VM was created in 17 s. |
+| 7 Verify | `relay-worker-1` was Ready about 30 s after the apply (v1.35.9, Talos v1.14.2). See the identity check below. |
+
+Identity check on `relay-worker-1`:
+- **Labels and taint:** `ailab.io/relay-worker-pool=true` and `ailab.io/runtime-gvisor=true`, with no
+  `agent-pool`. The only taint is `dedicated=relay-worker:NoSchedule`. Talos owns both.
+- **Schematic:** `8e8827b5…`, with only gvisor 20260831.0 and qemu-guest-agent 11.1.1.
+- **KVM:** `/dev/kvm` and `/dev/vhost-net` are present; `kvm_amd` is loaded with Nested Paging, and
+  SVM is visible.
+- **Kernel and disk:** `user.max_user_namespaces=11255`; disk 215 GB.
+- **Allocatable:** 11.95 CPU, 22.98 GiB, 176 GiB ephemeral.
+- **DaemonSets running:** cilium, cilium-envoy, csi-nfs-node, node-exporter, trident iscsi-recovery-tmo
+  and trident-node-linux. Trident logged only one-time startup warnings (no iSCSI initiator, NVMe or
+  SMB on a schematic without `iscsi-tools`) and no errors, and its plugin registered.
+- **Not running here:** `alloy` and velero's node-agent, which do not tolerate the taint.
+- **Protected workloads:** no `relay` or `llm-router` pod is on the node.
+
+Preflight after the rollout (`relay-worker-preflight-20261108T181637Z.json`, sha256 `56ca1b55…68e1`;
+report sha256 `6a7e126a…b77c`):
+- `lightweight_canary_prerequisites`: **pass**.
+- `kubevirt_spike_prerequisites`: **pass**.
+- `kubevirt.installed` fails until S1 installs it, and `kubevirt.kvm_device` stays unknown until
+  KubeVirt's device plugin runs.

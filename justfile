@@ -111,11 +111,14 @@ relay-agent-skill *args:
 # infra/ must have run once to expose the machine_secrets/client_configuration outputs FIRST. Run
 # from Windows in practice (the talos provider is windows_amd64) — these are the WSL mirrors.
 # Requires the Talos nocloud image staged on each node (scripts/stage-talos-image.sh) FIRST.
+# relay-workers.tfvars (gitignored, beside terraform.tfvars) declares relay-worker-1 (relay-workers.tf). It
+# must be on EVERY agent-nodes plan/apply since 2026-11-08: without it the plan would destroy that node,
+# which prevent_destroy refuses. A checkout without the file fails here instead of planning anything.
 agent-nodes-plan:
-    tofu -chdir=kubernetes/infra/agent-nodes plan
+    tofu -chdir=kubernetes/infra/agent-nodes plan -var-file=relay-workers.tfvars
 # Depends on nested-virt-verify (Stage-2 gate): never provision the Kata pool against a host lacking nested=Y.
 agent-nodes-apply: nested-virt-verify
-    tofu -chdir=kubernetes/infra/agent-nodes apply
+    tofu -chdir=kubernetes/infra/agent-nodes apply -var-file=relay-workers.tfvars
 
 # OpenTofu: plan/apply ONLY the Zot registry LXC (separate state from runners/dev-workers/Talos).
 registry-plan:

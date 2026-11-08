@@ -17,10 +17,9 @@ Keep them in sync.
 `ipconfig0`/`net0`, plus an ARP/ping sweep of the segment). Allocate from the `free` rows ONLY, and
 update this table in the SAME change that allocates the address.
 
-Static reservations are `.2`–`.52`; the **desired DHCP start is `.53`**
-(`192.168.0.53`–`192.168.1.254`). The operator last observed `.52` as the live start on
-2026-11-08: **the `.52` reservation is pending controller lease check and apply**.
-See [Relay worker capacity rollout](runbooks/relay-worker-capacity.md) before using it.
+Static reservations are `.2`–`.52`; the **router DHCP pool starts at `.53`** (`192.168.0.53`–`192.168.1.254`).
+It was applied on 2026-11-08 (`gateway.py` plan `1255431b5b8215b942fc`); the live lease check found no client
+on `.52`. `.52` is `relay-worker-1`; see [Relay worker capacity rollout](runbooks/relay-worker-capacity.md).
 Until 2026-10-27 the controller's pool actually started at `.50` (this file said `.51`), so it could
 lease cloud-ci-11's static `.50`; the edge work moved it to `.52` and took `.51` for the edge VIP
 (ADR 0040). From that work's phase P3 the pool start is asserted by `kubernetes/edge/gateway.yaml`
@@ -70,19 +69,21 @@ lease cloud-ci-11's static `.50`; the edge work moved it to `.52` and took `.51`
 | `.47 / .48 / .49` | Talos agent-node VMs `agent-node-1/2/3` (ADR 0019) | 4301–4303 | `kubernetes/infra/agent-nodes/variables.tf` |
 | `.50` | 🔒 **cloudlab** CI runner VM `cloud-ci-11` (cloud2, third; 2026-10-04, disk on `local-nvme`) | 6111 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.51` | **Edge ingress VIP** — reserved 2026-10-27 for MetalLB pool `edge`, the `edge-proxy` front door for `*.chifor.me` (ADR 0040; deployed in its P2, and the gateway's WAN 443 forward points here from P3) | — | `kubernetes/apps/infrastructure/metallb-config/`, `kubernetes/edge/hostnames.yaml` |
-| `.52` | **Reserved for Relay worker-1, owner approved; pending lease check and DHCP apply; not provisioned** | 4304 | `kubernetes/infra/agent-nodes/relay-workers.tfvars.example` |
-| `.53`–`.1.254` | desired router DHCP pool (see the warning above: it also holds unreserved non-lab devices) | — | UniFi controller (`kubernetes/edge/gateway.yaml` from P3) |
+| `.52` | Talos relay-worker node `relay-worker-1` (ai-node3; the dedicated Relay worker pool, #1676). Provisioned 2026-11-08 after the DHCP pool start moved to `.53`. Its pod and VM egress is SNATed to this address, so it is in `kubernetes/edge/hostnames.yaml` `trusted_sources.exclude` like every Talos node | 4304 | `kubernetes/infra/agent-nodes/relay-workers.tf` (opt-in, gitignored `relay-workers.tfvars`) |
+| `.53`–`.1.254` | router DHCP pool (see the warning above: it also holds unreserved non-lab devices) | — | UniFi controller (`kubernetes/edge/gateway.yaml` from P3) |
 
 **Free static space: NONE** since 2026-10-12, when `.37`/`.39` went to the cloud1 CI runners
 `cloud-ci-14`/`15` (they had been released 2026-10-10 with the test-env pool, ADR 0037). Before
 that there was none since 2026-10-04, when the last five — `.7`, `.12`, `.13`, `.44`, `.50` — went to the
 cloudlab CI runner VMs `cloud-ci-9..13`; `.29`, `.30` and `.32`–`.35` went to cloud runners on
 2026-09-23, `.5`/`.6` on 2026-09-30, and `.38` to the cloudlab Windows VM `constantin-win-01` on
-2026-09-30. The next static address needs either a release (a retired guest's row
-going back to free) or a deliberate shrink of the router's DHCP pool — never an address from `.52`+
-while the router can still lease it.
+2026-09-30. `.52` came from a pool shrink on 2026-11-08 (`relay-worker-1`). The next static address
+needs either a release (a retired guest's row going back to free) or another deliberate shrink of the
+router's DHCP pool — never an address from `.53`+ while the router can still lease it. A Kubernetes
+node's address also goes into `kubernetes/edge/hostnames.yaml` `trusted_sources.exclude` in the same
+change: above `.51` the edge would otherwise treat its pods as an admin source.
 
-> **Keep all lab static IPs inside `.2`–`.52`.** After the recorded operator apply the DHCP pool starts at `.53`, so anything `.53`+
+> **Keep all lab static IPs inside `.2`–`.52`.** The DHCP pool starts at `.53` (applied 2026-11-08), so anything `.53`+
 > can be leased to a random client — exactly the collision that pushed the AI LXCs off `.51`–`.53`
 > into the static block (`kubernetes/infra/ai-lxc/variables.tf`).
 
