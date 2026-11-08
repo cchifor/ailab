@@ -70,7 +70,7 @@ lease cloud-ci-11's static `.50`; the edge work moved it to `.52` and took `.51`
 | `.47 / .48 / .49` | Talos agent-node VMs `agent-node-1/2/3` (ADR 0019) | 4301–4303 | `kubernetes/infra/agent-nodes/variables.tf` |
 | `.50` | 🔒 **cloudlab** CI runner VM `cloud-ci-11` (cloud2, third; 2026-10-04, disk on `local-nvme`) | 6111 | `../cloudlab/kubernetes/infra/ci-runners/variables.tf` |
 | `.51` | **Edge ingress VIP** — reserved 2026-10-27 for MetalLB pool `edge`, the `edge-proxy` front door for `*.chifor.me` (ADR 0040; deployed in its P2, and the gateway's WAN 443 forward points here from P3) | — | `kubernetes/apps/infrastructure/metallb-config/`, `kubernetes/edge/hostnames.yaml` |
-| `.52` | **Reserved for Relay worker-1, pending owner approval, lease check and DHCP apply; not provisioned** | 4304 | `kubernetes/infra/agent-nodes/relay-workers.tfvars.example` |
+| `.52` | **Reserved for Relay worker-1, owner approved; pending lease check and DHCP apply; not provisioned** | 4304 | `kubernetes/infra/agent-nodes/relay-workers.tfvars.example` |
 | `.53`–`.1.254` | desired router DHCP pool (see the warning above: it also holds unreserved non-lab devices) | — | UniFi controller (`kubernetes/edge/gateway.yaml` from P3) |
 
 **Free static space: NONE** since 2026-10-12, when `.37`/`.39` went to the cloud1 CI runners

@@ -1,6 +1,8 @@
 # Dedicated Relay worker capacity rollout
 
-Status: concrete proposal for owner review. No node, DHCP change, KubeVirt deployment or runtime
+Status: owner approved capacity/address allocation and the temporary Qwen stop for S7/S8 on
+2026-11-08 in the implementation session. Operator lease/edge checks and apply remain pending.
+No node, DHCP change, KubeVirt deployment or runtime
 qualification has been applied. The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
 measured the capacity and confirmed nested KVM; the [feasibility runbook](relay-worker-kubevirt-feasibility.md)
 remains the acceptance gate.
@@ -17,14 +19,15 @@ the worker. Intentional retirement requires its own reviewed removal of that gua
 
 ## Approval and ordering
 
-The owner decides whether to allocate this capacity and remove `.52` from DHCP. The operator must
+The owner approved this capacity and removing `.52` from DHCP. The operator must
 check the UniFi lease/client inventory first; ping/ARP silence is not sufficient. Moving DHCP
 start to `.53` does not revoke an existing lease. If `.52` is occupied, stop and resolve the
 conflict before changing either side. Do not reuse another static address.
 
-1. Obtain approval for the capacity/address proposal. Record the cleanup owner and the external
-   evidence directory for the spike. For S7/S8 separately confirm the planned temporary stop and
-   restoration of `llama-swap-qwen38` on LXC 5003; the node allocation does not authorize that stop.
+1. Record the cleanup owner and external evidence directory for the spike. The owner also
+   approved the temporary stop of `llama-swap-qwen38` on LXC 5003 for S7/S8, with the operator
+   responsible for restoring it afterwards. Record the stop and restoration times and service
+   health. This approval does not authorize a permanent model-service change.
 2. Merge the reviewed edge exclusion, then verify the deployed edge rejects worker-source traffic
    from `.52` to private/admin hosts. `trusted_sources.exclude` removes the node from both LAN and
    admin trust, including its SNATed pod/VM egress. This must precede node admission.
