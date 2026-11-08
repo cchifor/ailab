@@ -2,8 +2,9 @@
 #   scripts/gitea-owner-op.sh scripts/owner-ops/renovate-onboard.ops --var REPO=<repository>             # dry run
 #   scripts/gitea-owner-op.sh scripts/owner-ops/renovate-onboard.ops --var REPO=<repository> --execute
 # Both endpoints need repository admin, which the routine identities do not hold: an owner operation.
-# Renovate itself still has to be pointed at the repository: it ships a renovate.json, and an ailab PR adds
-# cchifor/<repository> to `repositories` in kubernetes/apps/apps/renovate/config-configmap.yaml.
+# Renovate discovers repositories by the `renovate` topic (kubernetes/apps/apps/renovate/config-configmap.yaml),
+# so these two calls are the whole onboarding for a repository that ships a renovate.json. A repository generated
+# from cchifor/repository-template already has the topic (generation copies topics); setting it again is harmless.
 # scopes: write:repository
 PUT /repos/cchifor/${REPO}/collaborators/renovate-bot renovate-onboard-collaborator.json 204
 PUT /repos/cchifor/${REPO}/topics/renovate - 204

@@ -247,7 +247,7 @@ them. Never mint a token by hand for a call an ops file can make.
 
 | Preset in `scripts/owner-ops/` | What it does | Scopes |
 | --- | --- | --- |
-| `renovate-onboard.ops`, with `--var REPO=<repository>` | **Onboards a repository for Renovate**: `renovate-bot` becomes a `write` collaborator (204), and the repository gets the `renovate` topic (204). Both need repository admin. Renovate still needs a `renovate.json` in the repository, and the repository in `repositories` in `kubernetes/apps/apps/renovate/config-configmap.yaml` (an ailab PR). | `write:repository` |
+| `renovate-onboard.ops`, with `--var REPO=<repository>` | **Onboards a repository for Renovate**: `renovate-bot` becomes a `write` collaborator (204), and the repository gets the `renovate` topic (204). Both need repository admin. With the repository's own `renovate.json`, that is the whole onboarding: Renovate discovers repositories by the `renovate` topic (`kubernetes/apps/apps/renovate/config-configmap.yaml`), and a repository generated from `cchifor/repository-template` already carries it. | `write:repository` |
 | `repository-template-settings.ops` | The IaC record of `cchifor/repository-template`'s settings as applied on 2026-11-08: a public template, squash merges only, the branch deleted after the merge. One `PATCH` (200); re-run it to restore them. Its branch protection is recorded in that repository's `.gitea/branch-protection.json`, not here. | `write:repository` |
 
 The re-apply in `s2s-identity.md` § "Re-apply procedure" is not an ops file yet: it reads the live rule and
