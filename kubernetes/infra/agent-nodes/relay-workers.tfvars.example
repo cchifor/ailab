@@ -1,0 +1,13 @@
+# Operator-only opt-in; see docs/runbooks/relay-worker-capacity.md first.
+# Do not rename to .auto.tfvars: an ordinary agent-pool apply must remain unchanged.
+relay_worker_nodes = {
+  relay-worker-1 = {
+    node_name  = "ai-node3"
+    vm_id      = 4304
+    ip         = "192.168.0.52"
+    host_ip    = "192.168.0.4"
+    cores      = 12
+    memory_mib = 24576
+    disk_gb    = 200
+  }
+}

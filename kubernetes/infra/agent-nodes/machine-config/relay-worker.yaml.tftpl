@@ -1,0 +1,36 @@
+# Dedicated Relay pool, independent of the protected agent-node template.
+machine:
+  nodeLabels:
+    ailab.io/relay-worker-pool: "true"
+    ailab.io/runtime-gvisor: "true"
+  nodeTaints:
+    dedicated: relay-worker:NoSchedule
+  install:
+    disk: /dev/sda
+    image: ${install_image}
+  network:
+    hostname: ${hostname}
+    nameservers: ${nameservers}
+    interfaces:
+      - deviceSelector:
+          driver: virtio_net
+        dhcp: false
+        addresses:
+          - ${node_ip}/${prefix}
+        routes:
+          - network: 0.0.0.0/0
+            gateway: ${gateway}
+          - network: ${storage_service_ip}/32
+            gateway: ${host_ip}
+  registries:
+    mirrors:
+      docker.io:
+        endpoints:
+          - https://mirror.gcr.io
+  # Required by the gVisor gofer; ordinary pods retain RuntimeDefault seccomp.
+  sysctls:
+    user.max_user_namespaces: "11255"
+  kernel:
+    modules:
+      - name: kvm_amd
+      - name: vhost_net

@@ -464,6 +464,8 @@ class Rendering(unittest.TestCase):
             ("192.168.0.51", True, False),    # the VIP itself
             ("192.168.0.1", False, False),    # the gateway (NAT loopback)
             ("192.168.0.41", False, False),   # talos-cp1
+            ("192.168.0.52", False, False),   # Relay worker SNAT source
+            ("192.168.0.53", True, True),     # first remaining DHCP address
             ("192.168.2.10", False, False),   # Lab VLAN
             ("192.168.60.10", False, False),  # Guest VLAN
             ("8.8.8.8", False, False),
