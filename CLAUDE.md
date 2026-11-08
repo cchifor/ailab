@@ -66,7 +66,7 @@ Free static space: **none**. `.37`/`.39` went to the cloud1 CI runners cloud-ci-
 | AI LLM LXCs (node2/node3; ai-llm-1 .44/5001 destroyed 2026-10-02) | .45 / .46 | 5002–5003 |
 | registry LXC (node1) | .36 | 5004 |
 | Edge ingress VIP (MetalLB pool `edge`, Caddy `edge-proxy`; reserved 2026-10-27, deployed from ADR 0040's P2, WAN 443 forwarded here from P3; `docs/standards/edge-ingress.md`) | .51 | — |
-| Cloud CI runner VMs (`cloud-ci-1..15` on **cloudlab** cloud1 ×5 / cloud2 ×3 / cloud3 ×7, all in service, `cloud-ci-6` included; on cloud1, 6-vCPU / 12-GiB runners except `cloud-ci-1/2`, 8 vCPU / 24 GiB until they shrink to match, ADR 0032 amendment 2026-11-06; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .29 / .37 / .39 (cloud1) · .13 / .44 / .50 (cloud2) · .34 / .35 / .30 / .5 / .6 / .7 / .12 (cloud3) | 6101–6115 |
+| Cloud CI runner VMs (`cloud-ci-1..15` on **cloudlab** cloud1 ×5 / cloud2 ×3 / cloud3 ×7, all in service, `cloud-ci-6` included; on cloud1 all five are 6 vCPU / 12 GiB since 2026-11-07, when `cloud-ci-1/2` shrank from 8 vCPU / 24 GiB, ADR 0032 amendment 2026-11-06; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .29 / .37 / .39 (cloud1) · .13 / .44 / .50 (cloud2) · .34 / .35 / .30 / .5 / .6 / .7 / .12 (cloud3) | 6101–6115 |
 | Cloud Windows 11 Pro VM `constantin-win-01` (**cloudlab** cloud3; RDP as `c4` with the `af/estate/cloudlab-win11` password, key-only SSH `ssh c4@192.168.0.38`; `../cloudlab/kubernetes/infra/windows-vm`) | .38 | 6201 |
 
 > **Renumbering a guest takes THREE edits**: the guest (netplan), the tofu variable, AND the Proxmox
