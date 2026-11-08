@@ -119,6 +119,17 @@ class Positive(unittest.TestCase):
 
 
 class Negative(unittest.TestCase):
+    def test_extra_blocking_taints_keep_dedicated_nodes_unusable(self):
+        for effect in ("NoSchedule", "NoExecute"):
+            s = with_pool(SNAP)
+            s["queries"]["nodes"]["data"]["items"][-1]["spec"]["taints"].append({
+                "key": "node.kubernetes.io/disk-pressure", "effect": effect,
+            })
+            r = rwp.evaluate(s, pinned(BIND))
+            self.assertEqual(status(r, "placement.dedicated_pool"), "fail")
+            for gate in r["gates"].values():
+                self.assertEqual(gate["status"], "fail")
+
     def test_wrong_cluster(self):
         s = copy.deepcopy(SNAP)
         s["api_server"] = "https://192.168.0.99:6443"

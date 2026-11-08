@@ -13,7 +13,7 @@ Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea 
 
 | Check | Who | Tool | Today |
 |---|---|---|---|
-| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (49 tests) |
+| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (50 tests) |
 | Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; gVisor pinned to the Relay/router agent pool; KubeVirt absent and unpinned; cluster UID unpinned |
 | Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **not run** |
 | Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **not run** |
@@ -106,7 +106,18 @@ same pins.
 
 **Bounds:**
 - **Guest:** 4 vCPU and 8 GiB memory. The guest must not be overcommitted.
-- **Workspace:** one PVC of at most 20 Gi on `local-path`, attached as a virtio block disk.
+- **Workspace:** one RWO PVC requesting at most 20 Gi on `local-path`, with
+  **`volumeMode: Filesystem`**, exposed to the guest as a **virtio disk**. This is not a
+  Kubernetes raw Block-mode PVC: `rancher.io/local-path` provisions directories and cannot
+  supply raw block volumes. The PVC root must contain a raw disk image named `disk.img`.
+  Prepare a bounded sparse raw image (initial maximum virtual size **18 GiB**, leaving space
+  for filesystem overhead) with an operator-owned, digest-pinned preparation Job scheduled
+  on the dedicated node. Verify its raw format, virtual size, and read/write ownership for
+  the pinned KubeVirt launcher UID before removing the preparation Job and attaching the VM.
+  Record the preparation image digest, `qemu-img info` result and effective launcher UID in
+  evidence. `local-path` capacity requests do not enforce filesystem quotas: verify both
+  guest virtual-disk bounds and actual node disk use during S3. If raw Block-mode storage
+  becomes necessary, select and qualify a different CSI provisioner in a separate change.
 - **Docker cache:** an `emptyDisk` of 20 Gi.
 - **Root disk:** a `containerDisk` with a digest-pinned image.
 - **Network:** pod network with `masquerade` only.

@@ -396,6 +396,13 @@ def dedicated_nodes(nodes: list[dict], pl: dict) -> tuple[list[dict], list[str]]
                              and t.get("effect") == taint.get("effect")
                              for t in n["spec"].get("taints", [])):
             why.append("missing dedicated taint")
+        # The spike tolerates only the explicitly approved dedicated taint.
+        # Ready alone does not make a disk-pressure/quarantined node schedulable.
+        for t in n["spec"].get("taints", []):
+            if t.get("effect") not in ("NoSchedule", "NoExecute"):
+                continue
+            if not taint or any(t.get(k) != taint.get(k) for k in ("key", "value", "effect")):
+                why.append(f"untolerated blocking taint {t.get('key')}:{t.get('effect')}")
         if n["spec"].get("unschedulable"):
             why.append("cordoned")
         if not _node_ready(n):
