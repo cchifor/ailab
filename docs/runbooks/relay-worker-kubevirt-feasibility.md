@@ -327,6 +327,11 @@ their own evidence.
    - From inside the guest, verify that the allowed connection succeeds and that the denied ones
      fail, by both IP and name.
    - Verify that an inbound connection from another namespace is denied.
+   - From the guest, verify the `cloud-power` WoL Service, a node address, and
+     NAS `10.55.0.254` are all refused. The dedicated node has the NAS route and
+     the WoL listener admits pod CIDRs, so network reachability alone is unsafe.
+     These destinations must already be denied before S2 boots: the bundle
+     applies default-deny and Cilium rules before the halted VM is started.
 6. **S6, stop/delete.**
    - Stop, then delete the VM.
    - Record the time until both the launcher pod and the VMI are gone.

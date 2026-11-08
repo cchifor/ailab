@@ -62,7 +62,7 @@ def render(ev: dict, launcher_image: str, cloud_init: str, egress: tuple[str, ..
          "spec": {"endpointSelector": {"matchLabels": {"kubevirt.io": "virt-launcher"}},
                   # Deny wins over allow: an FQDN that resolves into the estate LAN/tailnet stays blocked.
                   # (Cluster 10.x pod/service ranges are NOT denied here: kube-dns lives there.)
-                  "egressDeny": [{"toCIDR": ["192.168.0.0/23", "172.16.0.0/12", "100.64.0.0/10"]}],
+                  "egressDeny": [{"toCIDR": ["192.168.0.0/23", "172.16.0.0/12", "100.64.0.0/10", "10.55.0.254/32"]}],
                   "egress": [
                       {"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system",
                                                         "k8s-app": "kube-dns"}}],
