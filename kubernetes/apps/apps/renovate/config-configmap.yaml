@@ -18,7 +18,10 @@ data:
       // mirror push.
       platform: 'gitea',
       endpoint: 'https://git.chifor.me/api/v1/',
-      repositories: ['cchifor/ailab'],
+      // cchifor/repository-template (2026-11-08): the native Gitea template. It ships its own renovate.json;
+      // renovate-bot holds write there. Its pins (actions, upstream hooks, mise tools) sit in owner-protected files,
+      // so those PRs merge through the owner path. Repositories generated from it are added here one by one.
+      repositories: ['cchifor/ailab', 'cchifor/repository-template'],
       onboarding: false,        // the repo already ships renovate.json — no onboarding PR
       requireConfig: 'required',
       // Matches the dedicated Gitea identity minted for this bot (user id 50, collaborator with
