@@ -1048,8 +1048,9 @@ target_stale_find() { # <dir> <minutes> <find action...>
   local d="$1" m="$2"; shift 2
   find "$d" -xdev -type f -amin +"$m" ! -path "$d/CACHEDIR.TAG" ! -path "$d/.rustc_info.json" "$@" 2>/dev/null
 }
-# Bytes they hold, each inode once (read-only).
-target_stale_bytes() { target_stale_find "$1" "$2" -printf '%i %s\n' | sort -u | awk '{s+=$2} END{print s+0}'; }
+# Bytes they hold, each inode once (read-only). printf %.0f, not print: an older mawk (1.3.3) prints a sum
+# past 2^31 as %.6g (2.86331e+10), which is_num rejects, and the biggest dirs would then count for nothing.
+target_stale_bytes() { target_stale_find "$1" "$2" -printf '%i %s\n' | sort -u | awk '{s+=$2} END{printf "%.0f\n", s}'; }
 # Delete them, then the empty dirs older than the window; print the bytes freed (du before and after).
 target_sweep_dir() {
   local b0 b1

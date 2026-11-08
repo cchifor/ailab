@@ -1179,5 +1179,13 @@ fb="$(beacon_field target_freed_bytes)"
 if [ "${fb:-0}" -ge 4194304 ] 2>/dev/null && [ "${fb:-0}" -lt 6291456 ]; then ok "T11: target_freed_bytes counts a hard-linked file once (${fb}B)"; else bad "T11: target_freed_bytes (got '${fb}', want 4-6 MiB)"; fi
 rm -rf "$TR" "$BKF"
 
+# T12: a stale total past 2^31 bytes still counts (codex, #1669): an older mawk prints such a sum as %.6g,
+# which is_num rejects. A sparse 3 GiB file is the only stale file, and the gate is 1 GB.
+mkdir -p "$TR/big/target/debug/deps"; echo '{}' > "$TR/big/target/.rustc_info.json"
+truncate -s 3G "$TR/big/target/debug/deps/libhuge-1.rlib"; age "$TR/big/target/debug/deps/libhuge-1.rlib" '5 days ago'
+TROOTS="$TR" TMINFREE=1024 run_case 0 85
+gone "$TR/big/target/debug/deps/libhuge-1.rlib" "T12: a 3 GiB stale total passes the 1 GB gate and is swept"
+rm -rf "$TR"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
