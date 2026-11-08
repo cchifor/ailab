@@ -108,6 +108,9 @@ class FakeUnifi:
 class Base(unittest.TestCase):
     def setUp(self):
         self.g = gateway.load_gateway()
+        # Keep the existing scenarios against the measured 2026-10-27 baseline;
+        # the new committed desired-state transition is tested separately below.
+        self.g["lan"]["dhcp_start"] = "192.168.0.52"
         self.reg = render.load()
         for h in self.reg["hosts"].values():
             h["lan_dns"] = False
@@ -138,7 +141,7 @@ class Base(unittest.TestCase):
 
 
 class Planning(Base):
-    def test_committed_desired_state_matches_the_controller(self):
+    def test_historical_desired_state_matches_the_controller(self):
         plan = self.plan()
         self.assertEqual(plan["errors"], [])
         self.assertEqual(plan["ops"], [])
@@ -547,6 +550,18 @@ class Forward(Base):
 
 
 class Dhcp(Base):
+    def test_relay_reservation_moves_only_the_dhcp_start(self):
+        self.g = gateway.load_gateway()
+        self.g["port_forward"]["enabled"] = False
+        plan = self.plan(adopt=["Home"])
+        self.assertEqual(plan["errors"], [])
+        self.assertEqual(self.ops(plan), [("adopt", "dhcp", "Home"), ("update", "dhcp", "Home")])
+        before = copy.deepcopy(self.api.inv["networkconf"][0])
+        gateway.BACKUPS = pathlib.Path(self.tmp.name) / "backups"
+        self.apply(plan)
+        after = self.api.inv["networkconf"][0]
+        self.assertEqual(after, {**before, "dhcpd_start": "192.168.0.53"})
+
     def test_drift_is_corrected_preserving_every_other_field(self):
         home = self.api.inv["networkconf"][0]
         home["dhcpd_start"] = "192.168.0.50"

@@ -9,3 +9,8 @@
 # qemu-guest-agent + iscsi-tools + util-linux-tools + kata-containers + gvisor.
 # Runs on agent-node-3 (since AgentForge P2); env-node-1 ran it too until its retirement (ADR 0037).
 kata_gvisor: 0839748ecac818fa6db9bc8bad2cc054eed752a32cd83226e18aa382a3a384f7
+
+# Dedicated Relay pilot: only gvisor + qemu-guest-agent, no Kata or storage extensions.
+# Factory definition and v1.14.2 extension pins: docs/relay-workers/runtime-pins.json.
+# This is a candidate boot image, not live or runtime-qualified yet.
+relay_workers: 8e8827b5b91420728f8415f3dc200fbf23b425ec07bf27cdc92a676367ee9edf

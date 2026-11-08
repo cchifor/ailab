@@ -100,7 +100,7 @@ class RepoDerivedState(unittest.TestCase):
 
     def test_kubevirt_absent_and_unpinned(self):
         self.assertEqual(status(self.r, "kubevirt.installed"), "fail")
-        self.assertEqual(status(self.r, "kubevirt.pin"), "unknown")
+        self.assertEqual(status(self.r, "kubevirt.pin"), "pass")
 
     def test_capabilities_come_only_from_binding(self):
         self.assertTrue(all(v["status"] in ("pending", "unsupported") for v in self.r["capabilities"].values()))
@@ -239,7 +239,7 @@ class Unknown(unittest.TestCase):
         s = {"schema": rwp.SNAPSHOT_SCHEMA, "context": "admin@ai", "context_exists": False,
              "api_server": None, "queries": {}}
         r = rwp.evaluate(s, BIND)
-        self.assertNotIn("pass", {c["status"] for c in r["checks"]})
+        self.assertNotIn("pass", {c["status"] for c in r["checks"] if c["id"] != "kubevirt.pin"})
         self.assertEqual(status(r, "placement.dedicated_pool"), "unknown")
         self.assertEqual(status(r, "kubevirt.installed"), "unknown")
 
@@ -331,7 +331,9 @@ class BindingExample(unittest.TestCase):
         self.assertNotIn("qualified", {v["status"] for v in BIND["capabilities"].values()})
         self.assertNotIn("agentforge", json.dumps(BIND).lower())
         self.assertNotIn("colocated_gvisor_qualified", BIND["placement"])
-        self.assertIsNone(BIND["pins"]["kubevirt_operator_digest"])
+        self.assertRegex(BIND["pins"]["kubevirt_operator_digest"], r"^sha256:[a-f0-9]{64}$")
+        unpinned = pinned(BIND, kubevirt_version=None, kubevirt_operator_digest=None)
+        self.assertEqual(status(rwp.evaluate(SNAP, unpinned), "kubevirt.pin"), "unknown")
 
 
 def add_pod(snap, node, ns="x", phase="Running", containers=(), pod_requests=None, overhead=None):
@@ -361,7 +363,7 @@ class ReviewRegressions(unittest.TestCase):
             snap = rwp.collect("admin@ai", run=boom)
             self.assertFalse(snap["context_exists"])
             self.assertEqual(snap["queries"], {})
-            self.assertNotIn("pass", {c["status"] for c in rwp.evaluate(snap, BIND)["checks"]})
+            self.assertNotIn("pass", {c["status"] for c in rwp.evaluate(snap, BIND)["checks"] if c["id"] != "kubevirt.pin"})
 
     def test_non_url_server_output_dropped(self):
         class R(FakeRun):

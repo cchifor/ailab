@@ -1,0 +1,46 @@
+{
+  "schema": "ailab.relay-runtime-pins/v1alpha1",
+  "status": "selected-for-spike-not-qualified",
+  "checked_at": "2026-11-08",
+  "kubevirt": {
+    "version": "v1.9.1",
+    "support_matrix": "https://github.com/kubevirt/sig-release/blob/main/releases/k8s-support-matrix.md",
+    "kubernetes_minor": "1.35",
+    "operator_image": "quay.io/kubevirt/virt-operator@sha256:a8adf7b772e9ce0bf7e2ce889910fc41ebadf552c9dbe843e9b86641e34f5df9",
+    "upstream_manifests": {
+      "kubevirt-operator.yaml": "9ac45a436c49d32e6fc21d542bcb7600b970705297b9e6752f3ef9b0a1d292da",
+      "kubevirt-cr.yaml": "43106136dbce3312bdbfdeae612aacafc6c12da518d233f90645b4685d84a2af"
+    }
+  },
+  "talos": {
+    "version": "v1.14.2",
+    "guide": "https://docs.siderolabs.com/talos/v1.14/advanced-guides/install-kubevirt",
+    "schematic_id": "8e8827b5b91420728f8415f3dc200fbf23b425ec07bf27cdc92a676367ee9edf",
+    "schematic": {
+      "customization": {
+        "systemExtensions": {
+          "officialExtensions": [
+            "siderolabs/gvisor",
+            "siderolabs/qemu-guest-agent"
+          ]
+        }
+      }
+    },
+    "extensions": [
+      {
+        "name": "siderolabs/gvisor",
+        "ref": "ghcr.io/siderolabs/gvisor:20260831.0",
+        "digest": "sha256:3e6ca367f2af50dcdfa6a904bafc5b9ef1e42320d99097cfdc55e2949c04b3da",
+        "author": "Sidero Labs",
+        "description": "[core] This system extension provides gVisor using containerd's runtime handler.\n"
+      },
+      {
+        "name": "siderolabs/qemu-guest-agent",
+        "ref": "ghcr.io/siderolabs/qemu-guest-agent:11.1.1",
+        "digest": "sha256:ee1e2803c27c2ecc23dda01af29f7efbd7493637e216b70110b9f29d0c284725",
+        "author": "Markus Reiter",
+        "description": "[extra] This system extension provides the QEMU Guest Agent service.\n"
+      }
+    ]
+  }
+}

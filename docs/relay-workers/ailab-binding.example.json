@@ -11,8 +11,8 @@
     "kubernetes_version": "v1.35.9",
     "talos_version": "v1.14.2",
     "cilium_version": "1.19.8",
-    "kubevirt_version": null,
-    "kubevirt_operator_digest": null
+    "kubevirt_version": "v1.9.1",
+    "kubevirt_operator_digest": "sha256:a8adf7b772e9ce0bf7e2ce889910fc41ebadf552c9dbe843e9b86641e34f5df9"
   },
   "placement": {
     "node_selector": {"ailab.io/relay-worker-pool": "true"},
@@ -34,7 +34,7 @@
     "workspace_binding_mode": "WaitForFirstConsumer",
     "forbidden_storage_classes": ["qnap-iscsi"]
   },
-  "runtime_classes": {"gvisor": "gvisor"},
+  "runtime_classes": {"gvisor": "relay-gvisor"},
   "capabilities": {
     "pod.restricted": {"status": "pending"},
     "pod.gvisor": {"status": "pending"},

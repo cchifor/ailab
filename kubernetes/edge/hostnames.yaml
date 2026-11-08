@@ -50,10 +50,11 @@ trusted_sources:
     - 192.168.0.47/32  # talos-agent-node-1
     - 192.168.0.48/32  # talos-agent-node-2
     - 192.168.0.49/32  # talos-agent-node-3
+    - 192.168.0.52/32  # relay-worker-1: block SNATed worker/VM traffic before provisioning
 admin_sources:
   # The lab statics block .0-.51 (docs/network-plan.md) is infrastructure and automation: dev-workers,
   # CI runners, reviewers and cloudlab runners run agent- and PR-written code, so none of it reaches
-  # admin surfaces. People's devices take DHCP addresses (.52 and up) or sit on the Trusted/Mgmt VLANs.
+  # admin surfaces. People's devices take DHCP addresses (.53 and up after the Relay worker reservation) or sit on the Trusted/Mgmt VLANs.
   exclude:
     - 192.168.0.0/27   # .0-.31
     - 192.168.0.32/28  # .32-.47
