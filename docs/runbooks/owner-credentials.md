@@ -232,7 +232,9 @@ Body files are JSON, relative to the ops file's directory.
   that is not valid JSON after the substitution.
 - With `--execute` it mints one token (`owner-op-<ops file>-<var values>-<utc>-<8 random hex>`; the random part
   keeps two runs in one second from sharing a name) in the Gitea pod and sends each call with the token only on
-  curl's stdin. Each call is bounded (10 s to connect, 60 s in all), so a stalled server cannot hold the token. It
+  curl's stdin. Each call is bounded (10 s to connect, 60 s in all), so a stalled server cannot hold the token, and
+  every kubectl call runs under coreutils `timeout` (60 s; it refuses to mint without a working one). A mint that
+  times out has an unknown outcome: the token is deleted by name and the run exits 5, so check the delete. It
   stops at the first status the line does not expect, prints that status and the first 300 bytes of the body
   (never the token), and makes no further call. Responses stay in a private temp directory that is removed on exit.
 - Revocation is the same trap as in `gitea-owner-merge.sh`: delete by name on the infra-pg primary (looked up

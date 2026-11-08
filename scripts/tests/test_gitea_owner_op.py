@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -91,6 +92,10 @@ FAKE_KUBECTL = textwrap.dedent("""\
     stdin=""
     case " $* " in *" -i "*) stdin=$(cat);; esac
     printf '%s' "$stdin" | FAKE_ARGS="$*" "$FAKE_PY" "$FAKE_DIR/kube.py"
+    rc=$?
+    # 99: kube.py did its side effects and the call now STALLS (an exec stream that never closes)
+    [ "$rc" = 99 ] && exec sleep 60
+    exit "$rc"
     """)
 
 STATE_HELPERS = textwrap.dedent("""\
@@ -160,8 +165,12 @@ KUBE_PY = STATE_HELPERS + textwrap.dedent("""\
         tok = ("c0ffee%02d" % (len(ST["minted"]) + 1)).ljust(40, "e")
         ST["minted"][name] = tok
         save()
+        # stall_mint: the token IS created in the pod, then the exec stream stalls, before or after the value
+        if SC.get("stall_mint") == "before_output":
+            sys.exit(99)
         print(tok)
-        sys.exit(0)
+        sys.stdout.flush()
+        sys.exit(99 if SC.get("stall_mint") == "after_output" else 0)
     if "psql" in args:
         pod = re.search(r"exec -i (\\S+)", args).group(1)
         if SC.get("failover") and pod == "infra-pg-6":
@@ -172,6 +181,8 @@ KUBE_PY = STATE_HELPERS + textwrap.dedent("""\
             event(f"DELETE {name}")
             event(f"DELETE-ON {pod}")
             event(f"SQL {stdin.strip()}")
+            if SC.get("stall_delete"):  # the exec stream stalls before the delete reaches the database
+                sys.exit(99)
             # revocation_ineffective: the row stays. api_still_accepts: the row goes, but the API still takes the
             # token (a cache), so only the 401 probe can tell.
             # stale_listing: the API refuses the token at once, but the listing still shows it.
@@ -281,9 +292,10 @@ class GiteaOwnerOpTest(unittest.TestCase):
             if got == "<none>" or os.path.normcase(os.path.normpath(os.path.dirname(got))) != want:
                 raise FakesNotFirst(f"{t} resolves to {got}, not the fake in {self.bin}: refusing to run the script")
 
-    def run_script(self, ops, *args, execute=True):
+    def run_script(self, ops, *args, execute=True, env_extra=None):
         """Run the script on OPS; every run must leave the cwd and the temp dir empty."""
         e = self.env()
+        e.update(env_extra or {})
         self.assert_fakes_first(e)
         argv = [ops.replace("\\", "/"), *args] + (["--execute"] if execute else [])
         r = subprocess.run([BASH, SCRIPT, *argv], capture_output=True, text=True, env=e, cwd=self.cwd, timeout=300)
@@ -591,6 +603,67 @@ class GiteaOwnerOpTest(unittest.TestCase):
         self.assertIn("DELETE-ON infra-pg-7", self.events())
         self.assertEqual(self.deletes(), [self.mints()[0][0]])
         self.assertIn("chifor tokens now: cc-admin-20260913", r.stdout)
+
+    # -- stalled kubectl: every exec is bounded; an unknown mint outcome is never reported as a clean revocation --
+    STALL_ENV = {"OWNER_OP_KUBECTL_TIMEOUT": "2"}
+
+    def timed_run(self, *args):
+        t0 = time.monotonic()
+        r = self.run_script(*args, env_extra=self.STALL_ENV)
+        return r, time.monotonic() - t0
+
+    def test_a_mint_that_stalls_before_the_value_is_deleted_and_not_confirmed(self):
+        self.scenario(stall_mint="before_output")
+        r, elapsed = self.timed_run(RENOVATE, "--var", "REPO=relay")
+        self.assertLess(elapsed, 45, "the stalled mint was not cut off")
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertIn("the mint timed out after 2s", r.stderr)
+        self.assertIn("REVOCATION NOT CONFIRMED", r.stderr)
+        self.assertIn("may still complete in the pod", r.stderr)
+        self.assertEqual(self.deletes(), [self.mints()[0][0]], "the token the pod created is deleted by name")
+        self.assertEqual(self.owner_calls(), [])
+        self.assertEqual(self.read("argv.curl"), [], "no value arrived: no call and no 401 probe")
+        self.assert_no_token_in_argv_or_output(r)
+
+    def test_a_mint_that_stalls_after_the_value_still_gets_the_401_probe(self):
+        self.scenario(stall_mint="after_output")
+        r, elapsed = self.timed_run(RENOVATE, "--var", "REPO=relay")
+        self.assertLess(elapsed, 45)
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertEqual(self.owner_calls(), [], "an uncertain mint makes no call")
+        self.assertEqual(self.deletes(), [self.mints()[0][0]])
+        self.assertIn("next use -> HTTP 401", r.stdout)
+        self.assertIn("may still complete in the pod", r.stderr)
+        self.assert_no_token_in_argv_or_output(r)
+
+    def test_a_delete_that_stalls_is_cut_off_and_not_confirmed(self):
+        self.scenario(stall_delete=True)
+        r, elapsed = self.timed_run(RENOVATE, "--var", "REPO=relay")
+        self.assertLess(elapsed, 45, "the stalled delete was not cut off")
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertIn("REVOCATION NOT CONFIRMED", r.stderr)
+        self.assertIn("the database still lists it", r.stderr)
+        self.assertIn("delete from access_token where", r.stderr)
+        self.assert_no_token_in_argv_or_output(r)
+
+    def test_without_a_working_timeout_nothing_is_minted(self):
+        # Windows' timeout.exe, or none at all: refuse before the mint rather than run kubectl unbounded
+        p = os.path.join(self.bin, "timeout")
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write("#!/usr/bin/env bash\necho 'ERROR: Invalid syntax.' >&2\nexit 1\n")
+        os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
+        r = self.run_script(RENOVATE, "--var", "REPO=relay")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("needs coreutils timeout", r.stderr)
+        self.assertEqual(self.mints(), [])
+        self.assertEqual(self.read("argv.kubectl"), [])
+
+    def test_a_bad_kubectl_timeout_is_refused(self):
+        for bad in ("0", "abc", "1000", "-1"):
+            with self.subTest(bad):
+                r = self.run_script(RENOVATE, "--var", "REPO=relay", env_extra={"OWNER_OP_KUBECTL_TIMEOUT": bad})
+                self.assert_nothing_called(r)
+                self.assertIn("OWNER_OP_KUBECTL_TIMEOUT", r.stderr)
 
     def test_a_failed_mint_is_deleted_by_name_and_nothing_is_called(self):
         self.scenario(mint_fail=True)

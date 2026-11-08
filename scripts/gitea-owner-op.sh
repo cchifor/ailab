@@ -29,8 +29,12 @@
 #     BEFORE the mint, so the trap deletes the token by name even if the mint is interrupted or answers something
 #     that is not a token. The value lives in a shell variable and reaches the fixed origin only on curl's STDIN
 #     (`-q ... -H @-`): never an argument, never printed;
-#   - every call is bounded (10 s to connect, 60 s in all), so a server that stops answering cannot hold the
+#   - every API call is bounded (10 s to connect, 60 s in all), so a server that stops answering cannot hold the
 #     token past the deadline: the call counts as failed (HTTP 000) and the token is deleted;
+#   - every kubectl call (pod lookups, the mint, the delete and the listing) runs under coreutils `timeout`
+#     (OWNER_OP_KUBECTL_TIMEOUT seconds, default 60), so a stalled exec stream cannot hang the run either. A mint
+#     that times out has an UNKNOWN outcome (the command may still finish in the pod after kubectl is killed): the
+#     token is deleted by name, and the run exits 5 so the delete is checked again;
 #   - the calls run in order and STOP at the first status outside EXPECTED_CODES: its status and the first 300
 #     bytes of its body are printed, the remaining calls are not made;
 #   - responses go to a private temp dir that is removed on exit (nothing is written to the current directory);
@@ -77,7 +81,12 @@ done
 [ -n "$PY" ] || stop 2 "no working python3 or python"
 py() { "$PY" "$@" | tr -d '\r'; } # Windows Python ends lines with CRLF
 
-kube() { kubectl --context "$KCTX" "$@"; }
+# Bounded: a stalled API server or exec stream ends at the deadline (exit 124, or 137 after the -k grace).
+# coreutils timeout signals the child's whole process group, and the child does not inherit the trap's ignored
+# TERM (timeout installs its own handler before it forks), so this holds inside the revocation trap too.
+KUBE_TIMEOUT=${OWNER_OP_KUBECTL_TIMEOUT:-60}
+[[ "$KUBE_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]] || stop 2 "OWNER_OP_KUBECTL_TIMEOUT must be 1..999 seconds"
+kube() { timeout -k 5 "$KUBE_TIMEOUT" kubectl --context "$KCTX" "$@"; }
 
 # owner_call METHOD PATH BODY_FILE|"" OUT: the HTTP status on stdout ("000" on a transport failure), the body in
 # OUT. Same transport rules as gitea-api.sh: -q FIRST (no ~/.curlrc can add tracing or URLs), https only, no
@@ -123,6 +132,7 @@ revoke() {
   fi
   NAME=""; TOKEN=""
   case ",$left," in *",$name,"*|",<unreadable>,") bad="${bad:+$bad; }the database still lists it (or could not be read)" ;; esac
+  [ -z "$MINT_UNCERTAIN" ] || bad="${bad:+$bad; }the mint timed out, so it may still complete in the pod after this delete"
   log "owner token $name deleted: next use -> HTTP $code; $OWNER tokens now: ${left:-none}"
   if [ -n "$bad" ]; then
     {
@@ -140,10 +150,12 @@ WORK=$(mktemp -d) || stop 2 "mktemp failed"
 chmod 700 "$WORK"
 NAME=""   # the live owner token's name, set BEFORE the mint so the trap can always delete it
 TOKEN=""  # its value: never printed, never an argument
+MINT_UNCERTAIN="" # set when the mint timed out: its outcome is unknown, so the revocation is never "confirmed"
 DB_POD=""
 on_exit() {
   local rc=$?
-  # A second INT/TERM/HUP must not abort the revocation (its kubectl children inherit the ignore).
+  # A second INT/TERM/HUP must not abort the revocation. Its kubectl calls are still bounded: timeout installs
+  # its own TERM handler, so the ignore does not shield the child it kills (tested in Git Bash and on Linux).
   trap '' INT TERM HUP
   revoke || rc=5
   rm -rf "$WORK"
@@ -371,6 +383,8 @@ if [ -z "$EXECUTE" ]; then
   exit 0
 fi
 
+# Windows' own timeout.exe (a pause command) would answer an error here, as would a system without one.
+timeout -k 1 5 true >/dev/null 2>&1 || stop 4 "needs coreutils timeout (every kubectl call is bounded); nothing minted"
 GITEA_POD=$(gitea_pod)
 DB_POD=$(db_primary)
 [ -n "$GITEA_POD" ] && [ -n "$DB_POD" ] || stop 4 "cannot find the Gitea pod or the infra-pg primary; nothing minted"
@@ -381,7 +395,14 @@ RAND=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
 [[ "$RAND" =~ ^[0-9a-f]{8}$ ]] || stop 4 "cannot read 4 random bytes for the token name; nothing minted"
 NAME="$PREFIX-$(date -u +%Y%m%d%H%M%S)-$RAND"
 TOKEN=$(kube -n gitea exec "$GITEA_POD" -c gitea -- gitea admin user generate-access-token --username "$OWNER" \
-  --token-name "$NAME" --scopes "$SCOPES" --raw 2>/dev/null | tr -d '\r\n')
+  --token-name "$NAME" --scopes "$SCOPES" --raw 2>/dev/null)
+rc=$?
+TOKEN=${TOKEN//[$'\r\n']/}
+if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+  [[ "$TOKEN" =~ ^[0-9a-f]{40}$ ]] || TOKEN="" # a value that did arrive whole still gets the 401 probe
+  MINT_UNCERTAIN=1
+  stop 4 "owner token $NAME: the mint timed out after ${KUBE_TIMEOUT}s; whether it was created is unknown"
+fi
 if ! [[ "$TOKEN" =~ ^[0-9a-f]{40}$ ]]; then
   TOKEN=""
   stop 4 "owner token $NAME: the mint did not return a token"
