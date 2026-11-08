@@ -183,6 +183,9 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       workbricks' `target-verify` is made with `mkdir -p` first, so it has none.
     - Never a toolchain, `CARGO_HOME`, or a module or package cache.
     - Both marker files are always kept.
+    - Only on a mount that keeps atime. A root on a `noatime` mount, or one whose options cannot be read,
+      is skipped and logged: there, every old file looks unread. All runners are `relatime` (checked
+      2026-11-08).
   - **What goes.** At **≥75%** disk, the files no build has read for **72h**; at **≥92%**, for **24h**.
     Then empty dirs older than the same window. Cargo rebuilds whatever is missing (verified on 1.86), so
     the cost is a rebuild. atime lags a read by up to 24h on these relatime disks, so a file read in the
@@ -191,8 +194,10 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     least 1 GB would go. The runner is held the way the heal holds it: `runner_held` is written first,
     then the runner is stopped with its drain, then the files are deleted, then it is started again.
     `CIRunnerBuildkitHealRunnerHeld` covers a start that never comes.
-  - **What it reports.** The beacon's `target_dirs` and `target_freed_bytes`, and
-    `journalctl -t gitea-runner-cleanup | grep 'target sweep'`.
+  - **What it reports.**
+    - `target_dirs`, counted on every tick, so a new persistent cache shows before it fills a disk.
+    - `target_freed_bytes`.
+    - `journalctl -t gitea-runner-cleanup | grep 'target sweep'`.
   - **Tunables:** `gitea_runner_cleanup_target_*`.
   - The repo should still bound its own cache. This keeps a runner alive when one does not.
 - **Bounded /tmp** (ailab#1284; live on a runner only once rolled out, see below): all jobs share one `/tmp`,

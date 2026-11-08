@@ -190,6 +190,14 @@ cat >"$BIN/sort" <<EOF
 exec "$REAL_SORT" "\$@"
 EOF
 
+# findmnt -no OPTIONS --target <root>: the mount options section 6 checks for atime. MOCK_MNT_OPTS
+# (default rw,relatime); MOCK_MNT_FAIL=1 = the read fails with no output.
+cat >"$BIN/findmnt" <<EOF
+#!/usr/bin/env bash
+[ "\${MOCK_MNT_FAIL:-0}" = 1 ] && exit 1
+echo "\${MOCK_MNT_OPTS:-rw,relatime}"
+EOF
+
 # logger: keep the script's log lines (the last argument) in $WORK/logger.log, so a case can assert WHICH
 # record a heal acted on, not only that one ran.
 # Shared-cache purge applier: records "cacheverify <args>" into the same call log.
@@ -241,6 +249,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_TARGET_ROOTS="${TROOTS-/nonexistent/targets}" GITEA_CLEANUP_TARGET_MAXDEPTH="${TDEPTH:-4}" \
     GITEA_CLEANUP_TARGET_KEEP_H="${TKEEP:-72}" GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H="${TKEEPCRIT:-24}" \
     GITEA_CLEANUP_TARGET_MIN_FREE_MB="${TMINFREE:-1024}" GITEA_CLEANUP_BUILDKIT_DB="${BKDB:-/nonexistent/cache.db}" \
+    MOCK_MNT_OPTS="${MOCK_MNT_OPTS:-rw,relatime}" MOCK_MNT_FAIL="${MOCK_MNT_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
   # TERM_AT_HANG: SIGTERM the script once the mock reports it is inside the heal (case N10) — what
@@ -1074,7 +1083,8 @@ unset QUEUEFILE
 echo "[T] Cargo target sweep (section 6): stale files in Cargo target dirs only, under pressure, runner held"
 # A job that keeps CARGO_TARGET_DIR in the runner's home (workbricks, 61-84 GB per runner on 2026-11-08) is
 # never pruned by anything docker-side. Section 6 deletes files no build has READ for the keep window, only
-# in dirs Cargo itself marked (CACHEDIR.TAG + .rustc_info.json), and only with the runner stopped.
+# in dirs with a .rustc_info.json at the root (Cargo writes one into every target dir it uses; CACHEDIR.TAG
+# is not required), only on an atime-keeping mount, and only with the runner stopped.
 TR="$WORK/troot"
 mb() { mkdir -p "$(dirname "$1")"; head -c $(( ${2:-2} * 1048576 )) /dev/zero > "$1"; }
 age() { touch -a -d "$2" "$1"; } # atime only: what the sweep reads
@@ -1185,6 +1195,30 @@ mkdir -p "$TR/big/target/debug/deps"; echo '{}' > "$TR/big/target/.rustc_info.js
 truncate -s 3G "$TR/big/target/debug/deps/libhuge-1.rlib"; age "$TR/big/target/debug/deps/libhuge-1.rlib" '5 days ago'
 TROOTS="$TR" TMINFREE=1024 run_case 0 85
 gone "$TR/big/target/debug/deps/libhuge-1.rlib" "T12: a 3 GiB stale total passes the 1 GB gate and is swept"
+rm -rf "$TR"
+
+# T13: a noatime mount, or mount options that cannot be read: atime says nothing about use, so nothing goes.
+mk_targets; MOCK_MNT_OPTS="rw,noatime,errors=remount-ro" TROOTS="$TR" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T13: a noatime root is skipped"
+mk_targets; MOCK_MNT_FAIL=1 TROOTS="$TR" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T13: a root whose mount options cannot be read is skipped"
+mk_targets; MOCK_MNT_OPTS="rw,strictatime" TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T13: a strictatime root is swept"
+
+# T14: target_dirs is published below pressure too, so a new persistent cache shows before it fills a disk.
+mk_targets; rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" TROOTS="$TR" TMINFREE=1 run_case 0 50
+[ "$(beacon_field target_dirs)" = 2 ] && ok "T14: target_dirs is 2 at 50% disk" || bad "T14: target_dirs below pressure (got '$(beacon_field target_dirs)')"
+kept "$T/debug/deps/libold-1.rlib" "T14: ...and nothing is deleted below pressure"
+
+# T15: a target dir whose path holds glob characters keeps its markers (-name, not a -path pattern).
+rm -rf "$TR"; G="$TR/br[a]ck*?/target"
+mkdir -p "$G/debug"; echo '{}' > "$G/.rustc_info.json"; mb "$G/CACHEDIR.TAG" 0
+age "$G/CACHEDIR.TAG" '30 days ago'; age "$G/.rustc_info.json" '30 days ago'
+mb "$G/debug/old.rlib"; age "$G/debug/old.rlib" '5 days ago'
+TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$G/debug/old.rlib" "T15: a stale file under a path with [ * ? is swept"
+kept "$G/CACHEDIR.TAG" "T15: ...and its CACHEDIR.TAG is kept"
+kept "$G/.rustc_info.json" "T15: ...and its .rustc_info.json is kept"
 rm -rf "$TR"
 
 echo

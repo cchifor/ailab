@@ -1033,10 +1033,18 @@ fi
 #      every tick for nothing.
 # Cargo target dirs under TARGET_ROOTS, NUL-separated: each dir holding a .rustc_info.json.
 cargo_target_dirs() {
-  local root info d
+  local root info d opts
   for root in $TARGET_ROOTS; do
     case "$root" in /*/*) ;; *) log "target sweep: implausible root '$root' -> skipped"; continue ;; esac
     [ -d "$root" ] && [ ! -L "$root" ] || continue
+    # "Unread for N hours" means something only where atime is kept (relatime or strictatime). Under
+    # noatime every file older than the window looks unread, however often builds read it. An unreadable
+    # answer is treated as noatime.
+    opts="$(findmnt -no OPTIONS --target "$root" 2>/dev/null)"
+    case ",$opts," in
+      ,,) log "target sweep: cannot read the mount options of '$root' -> skipped"; continue ;;
+      *,noatime,*) log "target sweep: '$root' is mounted noatime, so atime says nothing about use -> skipped"; continue ;;
+    esac
     while IFS= read -r -d '' info; do
       d="${info%/.rustc_info.json}"
       [ -d "$d" ] && [ ! -L "$d" ] && printf '%s\0' "$d"
@@ -1046,7 +1054,9 @@ cargo_target_dirs() {
 # The files in <dir> that no build has read for <minutes>, never its two markers.
 target_stale_find() { # <dir> <minutes> <find action...>
   local d="$1" m="$2"; shift 2
-  find "$d" -xdev -type f -amin +"$m" ! -path "$d/CACHEDIR.TAG" ! -path "$d/.rustc_info.json" "$@" 2>/dev/null
+  # -name, not -path: a -path pattern built from $d breaks on a [, * or ? in the path. Sparing every
+  # marker by name also keeps those of nested target dirs, which is right.
+  find "$d" -xdev -type f -amin +"$m" ! -name CACHEDIR.TAG ! -name .rustc_info.json "$@" 2>/dev/null
 }
 # Bytes they hold, each inode once (read-only). printf %.0f, not print: an older mawk (1.3.3) prints a sum
 # past 2^31 as %.6g (2.86331e+10), which is_num rejects, and the biggest dirs would then count for nothing.
@@ -1060,12 +1070,20 @@ target_sweep_dir() {
   b1="$(du -sx --block-size=1 "$1" 2>/dev/null | cut -f1)"
   if is_num "$b0" && is_num "$b1" && [ "$b0" -ge "$b1" ]; then printf '%s' $(( b0 - b1 )); else printf 0; fi
 }
-tg_dirs=0; tg_freed=0
-if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] && [ -n "$TARGET_ROOTS" ]; then
+tg_dirs=0; tg_freed=0; tdirs=()
+# Enumerated on every tick, under pressure or not, so target_dirs shows a new persistent cache before it
+# fills a disk. Cheap: a find of TARGET_MAXDEPTH levels per root.
+if is_num "$TARGET_MAXDEPTH" && [ -n "$TARGET_ROOTS" ]; then
+  while IFS= read -r -d '' d; do tdirs+=("$d"); done < <(cargo_target_dirs)
+  tg_dirs=${#tdirs[@]}
+elif [ -n "$TARGET_ROOTS" ]; then
+  log "target sweep: TARGET_MAXDEPTH='$TARGET_MAXDEPTH' is not a number -> no sweep"
+fi
+if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] && [ "$tg_dirs" -gt 0 ]; then
   pct_tg="$(disk_pct)"; is_num "$pct_tg" || pct_tg=0
   if [ "$pct_tg" -ge "$PRESSURE_PCT" ]; then
-    if ! is_num "$TARGET_MAXDEPTH" || ! is_num "$TARGET_MIN_FREE_MB"; then
-      log "target sweep: TARGET_MAXDEPTH='$TARGET_MAXDEPTH' or TARGET_MIN_FREE_MB='$TARGET_MIN_FREE_MB' is not a number -> skipped"
+    if ! is_num "$TARGET_MIN_FREE_MB"; then
+      log "target sweep: TARGET_MIN_FREE_MB='$TARGET_MIN_FREE_MB' is not a number -> skipped"
     else
       keep_h="$TARGET_KEEP_H"
       if [ "$pct_tg" -ge "$CRITICAL_PCT" ] && is_num "$TARGET_KEEP_CRITICAL_H" && [ "$TARGET_KEEP_CRITICAL_H" -lt "$keep_h" ]; then
@@ -1075,13 +1093,9 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
         log "target sweep: keep window ${keep_h}h is below the 24h atime granularity -> 24h"; keep_h=24
       fi
       tg_min=$(( keep_h * 60 ))
-      tdirs=(); while IFS= read -r -d '' d; do tdirs+=("$d"); done < <(cargo_target_dirs)
-      tg_dirs=${#tdirs[@]}
       stale=0
       for d in "${tdirs[@]}"; do b="$(target_stale_bytes "$d" "$tg_min")"; is_num "$b" && stale=$(( stale + b )); done
-      if [ "$tg_dirs" -eq 0 ]; then
-        :
-      elif [ "$stale" -lt $(( TARGET_MIN_FREE_MB * 1048576 )) ]; then
+      if [ "$stale" -lt $(( TARGET_MIN_FREE_MB * 1048576 )) ]; then
         log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${TARGET_MIN_FREE_MB}MB -> runner not held"
       elif [ "$(state_get runner_held)" = 1 ]; then
         log "target sweep: an earlier runner recovery is still pending -> not this tick"
