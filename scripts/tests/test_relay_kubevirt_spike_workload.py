@@ -89,6 +89,9 @@ class WorkloadTests(unittest.TestCase):
         files = self.render()
         self.assertEqual(files, self.render())
         docs = list(yaml.safe_load_all(files["30-workload.yaml"]))
+        # Masquerade's generated launcher requires NET_ADMIN, which baseline PSA rejects.
+        self.assertEqual(docs[0]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"], "privileged")
+        self.assertEqual(docs[0]["metadata"]["labels"]["pod-security.kubernetes.io/audit"], "restricted")
         kinds = [d["kind"] for d in docs]
         self.assertEqual(kinds, ["Namespace", "ResourceQuota", "NetworkPolicy", "CiliumNetworkPolicy",
                                  "PersistentVolumeClaim", "Job", "VirtualMachine"])
@@ -107,6 +110,13 @@ class WorkloadTests(unittest.TestCase):
         cnp = docs[3]["spec"]
         self.assertIn("192.168.0.0/23", cnp["egressDeny"][0]["toCIDR"])
         self.assertEqual(json.loads(files["workload-metadata.json"])["status"], "rendered-not-applied-not-qualified")
+
+    def test_guest_restart_preserves_readiness_workload(self):
+        config = yaml.safe_load(guest.cloud_init(BUNDLE["compose_smoke_image"]["image"]))
+        compose = yaml.safe_load(next(f["content"] for f in config["write_files"] if f["path"].endswith("compose.yaml")))
+        # Docker must restart the container on an in-guest reboot: cloud-init runcmd is once-per-instance.
+        self.assertEqual(compose["services"]["smoke"]["restart"], "unless-stopped")
+        self.assertIn("while :", compose["services"]["smoke"]["command"][-1])
 
     def test_forbidden_vm_features_refused(self):
         base = vm_of(workload.render(evidence(), LAUNCHER, "#cloud-config\n"))

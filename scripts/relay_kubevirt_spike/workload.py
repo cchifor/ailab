@@ -47,7 +47,11 @@ def render(ev: dict, launcher_image: str, cloud_init: str, egress: tuple[str, ..
     prep_res = {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "64Mi"}
     docs = [
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NS, "labels": dict(SPIKE_LABEL) | {
-            "pod-security.kubernetes.io/enforce": "baseline", "pod-security.kubernetes.io/warn": "restricted"}}},
+            # KubeVirt masquerade needs NET_ADMIN in virt-launcher, forbidden by baseline.
+            # This exception is scoped to the disposable spike namespace and dedicated pool.
+            "pod-security.kubernetes.io/enforce": "privileged",
+            "pod-security.kubernetes.io/warn": "restricted",
+            "pod-security.kubernetes.io/audit": "restricted"}}},
         {"apiVersion": "v1", "kind": "ResourceQuota", "metadata": _meta("kv-spike-quota"), "spec": {"hard": {
             "requests.cpu": "6", "requests.memory": "12Gi", "limits.memory": "12Gi",
             "requests.storage": "20Gi", "persistentvolumeclaims": "1",

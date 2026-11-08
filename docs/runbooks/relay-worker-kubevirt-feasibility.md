@@ -242,6 +242,41 @@ estate LAN `192.168.0.0/23`, RFC 1918 172.16/12 and the tailnet CGNAT range stay
 through those FQDNs. If the packages cannot install, readiness never passes, and S2 records
 `fail`, not success. A NetworkPolicy also denies all ingress and all other egress for the namespace.
 
+`relay-kv-spike` explicitly enforces PSA `privileged`: KubeVirt's generated masquerade
+launcher needs `NET_ADMIN`, which baseline PSA rejects. Audit and warning policies remain
+`restricted`. This exception applies only to this disposable spike namespace on the dedicated
+node; it does not change the Relay pod tier or any existing namespace. Do not grant worker
+identities access to this namespace. S2 must capture the actual generated launcher Pod,
+its security context/capabilities, and admission events. An admission refusal is a failed S2,
+not a reason to widen policy elsewhere. While the VM is stopped and its launcher removed,
+server-dry-run the captured Pod to validate admission independently of KubeVirt:
+
+```bash
+# Capture before stopping; use the actual launcher name from get pods, never another namespace.
+kubectl --context admin@ai -n relay-kv-spike get pod "$LAUNCHER_POD" -o json > "$EVIDENCE_DIR/s2-launcher-pod.json"
+virtctl --context admin@ai -n relay-kv-spike stop kv-spike-1
+kubectl --context admin@ai -n relay-kv-spike wait --for=delete pod/"$LAUNCHER_POD" --timeout=300s
+# Strip server-owned metadata and status; retain the complete generated spec for admission.
+python3 - "$EVIDENCE_DIR/s2-launcher-pod.json" "$EVIDENCE_DIR/s2-launcher-admission.json" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))
+assert p['kind'] == 'Pod' and p['metadata']['namespace'] == 'relay-kv-spike'
+assert p['metadata']['labels'].get('kubevirt.io') == 'virt-launcher'
+p.pop('status', None)
+p['metadata'] = {k: v for k, v in p['metadata'].items() if k in ('name', 'namespace', 'labels', 'annotations')}
+json.dump(p, open(sys.argv[2], 'w'))
+PY
+kubectl --context admin@ai create --dry-run=server -f "$EVIDENCE_DIR/s2-launcher-admission.json" -o json > "$EVIDENCE_DIR/s2-launcher-admitted.json"
+virtctl --context admin@ai -n relay-kv-spike start kv-spike-1
+```
+
+The smoke container uses `restart: unless-stopped`, so Docker restores it after an in-guest
+reboot even though cloud-init `runcmd` runs once. S2 also requires one operator-triggered
+in-guest reboot through the guest agent, recording changed boot ID, mounted disks, Docker
+restart and the recovered exec readiness probe. Stop/start into a fresh VMI is a separate
+test and does not substitute for this guest reboot. The offline tests validate this configuration;
+the reboot/admission evidence remains pending until the operator runs these checks.
+
 Evidence paths, all under `$EVIDENCE_DIR`, with SHA-256 recorded:
 - `kv-spike-bundle/*`
 - `guest-evidence.json`

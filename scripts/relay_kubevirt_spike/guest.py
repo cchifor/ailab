@@ -27,6 +27,7 @@ write_files:
       services:
         smoke:
           image: {smoke_image}
+          restart: unless-stopped
           command: ["sh", "-c", "echo relay-spike-ok > /out/ok && while :; do sleep 3600; done"]
           volumes: ["/workspace/relay-spike:/out"]
   - path: /usr/local/sbin/relay-spike-ready
