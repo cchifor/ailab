@@ -50,10 +50,16 @@ trusted_sources:
     - 192.168.0.47/32  # talos-agent-node-1
     - 192.168.0.48/32  # talos-agent-node-2
     - 192.168.0.49/32  # talos-agent-node-3
+    # talos-relay-worker-1 (kubernetes/infra/relay-workers). It runs agent-written code (Relay worker
+    # pods and KubeVirt developer VMs) whose egress is SNATed to this address. It sits just above the
+    # .0-.51 block that admin_sources.exclude covers, so without this line it would be ADMIN-trusted.
+    - 192.168.0.52/32  # talos-relay-worker-1
 admin_sources:
-  # The lab statics block .0-.51 (docs/network-plan.md) is infrastructure and automation: dev-workers,
-  # CI runners, reviewers and cloudlab runners run agent- and PR-written code, so none of it reaches
-  # admin surfaces. People's devices take DHCP addresses (.52 and up) or sit on the Trusted/Mgmt VLANs.
+  # The lab statics block .0-.52 (docs/network-plan.md) is infrastructure and automation: dev-workers,
+  # CI runners, reviewers, cloudlab runners and relay workers run agent- and PR-written code, so none of
+  # it reaches admin surfaces. .52 (talos-relay-worker-1) is outside the LAN tier altogether
+  # (trusted_sources.exclude above), so it needs no line here. People's devices take DHCP addresses
+  # (.53 and up) or sit on the Trusted/Mgmt VLANs.
   exclude:
     - 192.168.0.0/27   # .0-.31
     - 192.168.0.32/28  # .32-.47

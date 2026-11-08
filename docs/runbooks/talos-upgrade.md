@@ -18,6 +18,11 @@ Where the cluster can go next, and what blocks it: issue #1197 ("Kubernetes 1.36
   - allows only a patch step or the next minor;
   - for a control plane, requires every other CP to answer and etcd to be 3/3 healthy with the
     target NOT leading, and upgrades through a survivor endpoint.
+- **A relay-worker node's OS upgrade stops its KubeVirt VMs.** There is no live migration, so every
+  developer VM on `talos-relay-worker-*` stops with the reboot, and its node-affine `local-path`
+  workspace waits for the node. Upgrade it when no Relay worker or spike step is running there
+  (`docs/runbooks/relay-worker-kubevirt-feasibility.md`). A kubelet-only restart (step 6 below) leaves
+  running VMs alone.
 - **Adjacent minors only**, for Talos and for Kubernetes (`talosctl upgrade-k8s`, one minor per run,
   exactly one `-n <cp>`). Check the support matrix first: Talos 1.14 supports Kubernetes 1.33+.
 - **One control plane at a time.** Between CPs: etcd 3/3 (`talosctl etcd status`) and every CNPG
@@ -82,7 +87,7 @@ gated on application health (`talosctl upgrade-k8s` alone patches all kubelets i
    - Wait for `TridentOrchestrator` `Installed` **and** 5 quiet minutes in each trident-node log before
      starting the kubelet roll. The roll's pre-gate stops on any trident error in the last 5 min, and
      it did stop once in the 1.35 hop until the window passed.
-6. **Kubelets, one node at a time:** agent-node-1/2/3, then cp1, cp2, cp3. Each restart
+6. **Kubelets, one node at a time:** agent-node-1/2/3, relay-worker-1, then cp1, cp2, cp3. Each restart
    takes 7-19 s to Ready.
    - **Pre-gate:**
      - all CNPG clusters writable;
@@ -201,8 +206,8 @@ needs a separate owner decision. It restores control-plane metadata only.
 
 ## Tofu after an upgrade (never apply blindly)
 
-- `talos_version` / `kubernetes_version` = what runs. Bump `talos_version` in **both** modules (infra,
-  agent-nodes) in the same change as a Talos upgrade, and `kubernetes_version` right after each
+- `talos_version` / `kubernetes_version` = what runs. Bump `talos_version` in **all three** modules (infra,
+  agent-nodes, relay-workers) in the same change as a Talos upgrade, and `kubernetes_version` right after each
   `upgrade-k8s` hop. `machine.install.image` (the reinstall/reset image) is derived from `talos_version` plus
   each node's schematic (`image.tf` for the CPs, `talos-schematics.yaml` for kata/gvisor), so a lagging
   variable would make a reset install an older Talos. A node whose extensions change needs its schematic

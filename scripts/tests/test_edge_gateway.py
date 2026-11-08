@@ -29,7 +29,7 @@ def base_inventory():
         ],
         "networkconf": [
             {"_id": HOME, "name": "Home", "purpose": "corporate", "ip_subnet": "192.168.0.1/23",
-             "dhcpd_enabled": True, "dhcpd_start": "192.168.0.52", "dhcpd_stop": "192.168.1.254", "vlan": 1,
+             "dhcpd_enabled": True, "dhcpd_start": "192.168.0.53", "dhcpd_stop": "192.168.1.254", "vlan": 1,
              "domain_name": "", "x_something": "secret"},
             {"_id": "net-lab", "name": "Lab", "purpose": "corporate", "ip_subnet": "192.168.2.1/24"},
         ],
@@ -279,7 +279,7 @@ class Planning(Base):
         self.g["port_forward"]["enabled"] = False
         self.lan_dns("router", on=False)
         self.lan_dns("git")
-        self.g["lan"]["dhcp_start"] = "192.168.0.53"
+        self.g["lan"]["dhcp_start"] = "192.168.0.54"  # one past the committed start, so the range really moves
         self.assertEqual(self.ops(self.plan()), [("delete", "forward", "ailab-edge-https"),
                                                  ("delete", "dns", "router.chifor.me"),
                                                  ("update", "dhcp", "Home"),
@@ -556,7 +556,7 @@ class Dhcp(Base):
         gateway.BACKUPS = pathlib.Path(self.tmp.name) / "backups"
         self.apply(plan)
         after = self.api.inv["networkconf"][0]
-        self.assertEqual(after["dhcpd_start"], "192.168.0.52")
+        self.assertEqual(after["dhcpd_start"], "192.168.0.53")
         for k, v in before.items():
             if k != "dhcpd_start":
                 self.assertEqual(after[k], v, k)

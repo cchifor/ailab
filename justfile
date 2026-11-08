@@ -117,6 +117,16 @@ agent-nodes-plan:
 agent-nodes-apply: nested-virt-verify
     tofu -chdir=kubernetes/infra/agent-nodes apply
 
+# OpenTofu: plan/apply ONLY the Talos RELAY-WORKER pool (kubernetes/infra/relay-workers; its own state,
+# so an apply here cannot touch the agent nodes that run Relay and the router). Same prerequisites as
+# the agent pool: infra/ state readable, the Talos image staged on the target host
+# (TALOS_VER=<talos_version> NODES=<host> scripts/stage-talos-image.sh), and nested virt on every host.
+# Build order and checks: docs/runbooks/relay-worker-kubevirt-feasibility.md, K0.
+relay-workers-plan:
+    tofu -chdir=kubernetes/infra/relay-workers plan
+relay-workers-apply: nested-virt-verify
+    tofu -chdir=kubernetes/infra/relay-workers apply
+
 # OpenTofu: plan/apply ONLY the Zot registry LXC (separate state from runners/dev-workers/Talos).
 registry-plan:
     tofu -chdir=kubernetes/infra/registry-lxc plan

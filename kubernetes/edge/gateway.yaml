@@ -25,7 +25,7 @@ lan:
   network_name: Home
   network_id: 6584469af81ca8458f9a6af1
   subnet: 192.168.0.1/23
-  dhcp_start: 192.168.0.52 # .2-.51 are lab statics (.51 = the edge VIP); docs/network-plan.md
+  dhcp_start: 192.168.0.53 # .2-.52 are lab statics (.51 = the edge VIP, .52 = talos-relay-worker-1); docs/network-plan.md
   dhcp_stop: 192.168.1.254
 
 # WAN TCP 443 -> the VIP. Created only once the VIP answers (the reconciler checks it), and only while

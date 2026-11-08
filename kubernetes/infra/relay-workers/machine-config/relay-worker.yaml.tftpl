@@ -1,0 +1,39 @@
+machine:
+  # Relay-worker pool identity. The label is what the Relay binding's placement selects
+  # (docs/relay-workers/ailab-binding.example.json); the taint keeps everything else off, and Relay and
+  # llm-router pods (they tolerate only dedicated=agent) in particular. Talos 1.14 registers the kubelet
+  # with this taint (registerWithTaints) and owns both on the Node object. Never add
+  # ailab.io/agent-pool here: the binding rejects a node that carries it, and the kata/gvisor
+  # RuntimeClasses select it.
+  nodeLabels:
+    ailab.io/relay-worker-pool: "true"
+  nodeTaints:
+    dedicated: relay-worker:NoSchedule
+  install:
+    disk: /dev/sda # matches the CP and agent-node templates
+    image: ${install_image}
+  network:
+    nameservers: ${nameservers}
+    interfaces:
+      - deviceSelector:
+          driver: virtio_net
+        dhcp: false
+        addresses:
+          - ${node_ip}/${prefix}
+        routes:
+          - network: 0.0.0.0/0
+            gateway: ${gateway}
+        # Deliberately NO storage-fabric /32 route (the CPs and agent nodes have one, via their Proxmox
+        # host to the QNAP service IP, ADR 0011). Relay workers must not use qnap-iscsi or nfs-csi (the
+        # binding forbids both), and pod and VM egress here is SNATed to this node, so the route would
+        # only give worker code a path to the NAS storage plane. Without it, a NAS volume scheduled
+        # here by mistake fails at mount instead of working.
+        # NO vip: the control-plane VIP is CP-only.
+  registries:
+    mirrors:
+      # docker.io through Google's anonymous pull-through cache (Docker Hub rate limits), as the CPs
+      # and agent nodes do.
+      docker.io:
+        endpoints:
+          - https://mirror.gcr.io
+# NO cluster: stanza: a worker has no etcd/controllerManager/scheduler.

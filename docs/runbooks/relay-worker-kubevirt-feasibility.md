@@ -84,10 +84,10 @@ sha256sum "$SNAP" "$SNAP.report.json"
 
 | ID | Prerequisite | Notes |
 |---|---|---|
-| K0 | **Dedicated capacity.** A new Talos worker for Relay workers, labelled `ailab.io/relay-worker-pool=true` and tainted `dedicated=relay-worker:NoSchedule`. | Operator proposal: `relay-worker-1`, vmid 4304 on ai-node3, **12 vCPU / 24 GiB fixed / 200 GiB local-lvm**, `cpu.type=host`. Not provisioned or approved. A 32 GiB allocation needs RAM freed first. Use a separate OpenTofu map so existing agent-pool labels never apply. Proposed `.52` needs a UniFi lease check and owner-approved DHCP start move `.52` → `.53`, reflected in `kubernetes/edge/gateway.yaml` and `docs/network-plan.md`. **Add the new node's `/32` to `kubernetes/edge/hostnames.yaml` `trusted_sources.exclude` before admitting workloads**: SNAT must not give worker code admin-device access. See measured capacity and S7/S8 prerequisite below. |
+| K0 | **Dedicated capacity.** A new Talos worker for Relay workers, labelled `ailab.io/relay-worker-pool=true` and tainted `dedicated=relay-worker:NoSchedule`. | **Owner-approved 2026-11-08 and declared** in `kubernetes/infra/relay-workers` (its own state, so no apply there can touch the agent nodes): `talos-relay-worker-1`, vmid 4304 on ai-node3, **12 vCPU / 24 GiB fixed / 200 GiB local-lvm**, `cpu.type=host`, at `.52` (DHCP pool start moved `.52` → `.53` in `kubernetes/edge/gateway.yaml`; `.52` excluded in `kubernetes/edge/hostnames.yaml` `trusted_sources.exclude`). Build order and checks: [Building K0](#building-k0) below. A 32 GiB allocation needs RAM freed first. Further pool nodes (one per host) wait for the owner's approval of the dev-worker replacement. |
 | K1 | **Version selection.** Choose one KubeVirt release whose published support matrix lists Kubernetes **1.35** (live `v1.35.9`, `kubernetes/infra/agent-nodes/variables.tf`). Check it against the Talos v1.14 KubeVirt guide (docs.siderolabs.com/talos/v1.14/advanced-guides/install-kubevirt). | Record the release tag, the `virt-operator` image **digest** and the SHA-256 of `kubevirt-operator.yaml` / `kubevirt-cr.yaml`. Put the tag and digest into the binding (`pins.kubevirt_version`, `pins.kubevirt_operator_digest`). Until then the collector reports `kubevirt.pin: unknown`. No version is chosen here: none was verified against this cluster. |
 | K2 | **Nested virtualization** on the Proxmox host of the K0 node. | Operator confirmed `kvm_amd=1` on all three hosts on 2026-11-08 (`check-nested-virt.py`: PASS); no enablement change is needed. Recheck before provisioning. Enabling it is the Ansible `pve_base` path in `docs/runbooks/agent-nodes.md`. |
-| K3 | **Talos schematic** for the K0 node. | Follow the Talos guide's KubeVirt requirements, including the kernel modules and any extensions it lists for 1.14. If the schematic changes, record a new entry in `kubernetes/infra/talos-schematics.yaml` and use the upgrade wrapper. Do not touch agent-node-3's `kata_gvisor` schematic. The dedicated pool also needs its own gVisor RuntimeClass and matching schematic before `pod.gvisor` can qualify; the existing `gvisor` class deliberately selects the protected agent pool. |
+| K3 | **Talos schematic** for the K0 node. | **Resolved 2026-11-08:** the Talos 1.14 KubeVirt guide lists no extension, kernel module or machine-config patch (KVM is in the Talos kernel; only nested virtualization and `local-path`, both present, are prerequisites). The node therefore runs the plain schematic `53513e54…` (infra `schematic_id`, the one agent-node-1/2 run), and `talos-schematics.yaml` is unchanged. agent-node-3's `kata_gvisor` schematic is untouched. The dedicated pool still needs its own gVisor RuntimeClass and a gVisor-capable schematic before `pod.gvisor` can qualify; the existing `gvisor` class deliberately selects the protected agent pool. |
 | K4 | **Pin the cluster UID.** Copy `kubectl --context admin@ai get ns kube-system -o jsonpath='{.metadata.uid}'` into `cluster.expected_kube_system_uid`. | Pinned from the operator report to `faf3a521-bd08-4d6d-ba5c-9dc7da903819`; this is the identity check that keeps the collector off the wrong cluster. |
 | K5 | **Cleanup owner** named in the spike record (person and date). | Owns the S9 teardown, and any stuck VM, PVC or launcher pod, until the inventory below is clean. |
 | K6 | **Evidence store** outside git, plus the SHA-256 of each artifact. | The operator names the path explicitly as `EVIDENCE_DIR`; `/tmp` does not count. On a dev-worker, retained evidence goes under `/workspace/archive/`. Raw logs and metrics stay outside the repo. Only the digests come back into a binding as `receipt_sha256`. |
@@ -109,7 +109,7 @@ Evidence lives on the workstation at `C:\Users\chifo\work\home\evidence\relay-wo
 Host 7-day minimum MemAvailable was 2.5 GiB / 10.4 GiB / 33.6 GiB on ai-node1/2/3.
 Only ai-node3 can accommodate the proposed 24 GiB fixed worker; 32 GiB would leave only
 about 1.6 GiB at the observed low point. All existing agent nodes host protected Relay/router
-workloads and cannot be repurposed. This is a capacity proposal, not an allocation.
+workloads and cannot be repurposed. The owner approved the 24 GiB node on 2026-11-08 (K0).
 
 **Before S7/S8:** the operator recommends temporarily stopping `llama-swap-qwen38` on
 LXC 5003, subject to owner approval, because its lazy model can otherwise consume another
@@ -117,6 +117,52 @@ LXC 5003, subject to owner approval, because its lazy model can otherwise consum
 those steps until this impact is agreed. No existing model service is changed by this PR.
 
 Re-run the live preflight after K0–K4. `kubevirt_spike_prerequisites` must be `pass` before S1.
+
+### Building K0
+
+Each step must succeed before the next. The edge exclusion goes live before anything holds `.52`.
+
+1. **Merge, then confirm the edge is live.** Flux deploys the re-rendered Caddyfile as a new
+   hash-suffixed `edge-proxy-caddy-*` ConfigMap, which rolls the `edge-proxy` DaemonSet. The ConfigMap
+   the running pods mount must list `192.168.0.53/32 192.168.0.54/31` where it used to list
+   `192.168.0.52/30`, in both the `@not_lan` and `@not_admin` matchers, and the rollout must be complete.
+2. **Move the DHCP pool start.** `just edge-gateway-plan --only dhcp` must show exactly one op, the
+   `dhcp` update of `Home` from `192.168.0.52-192.168.1.254` to `192.168.0.53-192.168.1.254`, and no error. The
+   reconciler refuses to take back an address an active client holds; do not acknowledge such a
+   conflict, find the client instead. Then `just edge-gateway-apply --plan-hash <hash> --only dhcp`,
+   and commit `kubernetes/edge/gateway-state.yaml` if it changed.
+3. **Stage the image on ai-node3:** `TALOS_VER=v1.14.2 NODES=192.168.0.4 bash scripts/stage-talos-image.sh`.
+   Its default `SCHEMATIC` is the plain one, which is what `talos.tf` installs.
+4. **Plan and apply.** Run tofu on Windows, from the main checkout (it reads `../terraform.tfstate`).
+   `terraform.tfvars` is gitignored; it takes the same values as `agent-nodes/terraform.tfvars`.
+   `just relay-workers-plan` must show exactly 2 to add (the VM and its machine-config apply),
+   0 to change and 0 to destroy. Then `just relay-workers-apply` (it runs `nested-virt-verify` first).
+5. **Verify.**
+   - `talos-relay-worker-1` is Ready.
+   - Its labels include `ailab.io/relay-worker-pool=true` and not `ailab.io/agent-pool`.
+   - Its only taint is `dedicated=relay-worker:NoSchedule`.
+   - No `relay` or `llm-router` pod runs on it.
+   - `talosctl -n 192.168.0.52 ls /dev/kvm` shows the device.
+   - Re-run the preflight: `placement.dedicated_pool`, `placement.protected_workloads_absent` and
+     both `headroom.*` checks pass. `kubevirt_spike_prerequisites` then fails or is unknown only on
+     `kubevirt.pin` (K1).
+
+**Deliberate differences from the agent nodes:**
+- No storage-fabric `/32` route. Relay workers must not mount QNAP storage, and the route would give
+  SNATed worker egress a path to the NAS storage plane.
+- `cloud-power`'s `ALLOW_FROM` does not list `.52`. Worker code must not reach the power controller.
+
+**Known gaps:** `monitoring/alloy` (logs) and `velero/node-agent` do not tolerate the taint, so the
+pool's pod logs are not in Loki and its volumes are not backed up. Spike evidence goes to `EVIDENCE_DIR`
+(K6). Adding either is a separate change.
+
+**Talos upgrades** reboot the node, and with no live migration every KubeVirt VM on it stops. It is
+in the kubelet roll of `docs/runbooks/talos-upgrade.md`; schedule OS upgrades when no spike step is
+running.
+
+**Teardown** runs in reverse: `tofu destroy` in `kubernetes/infra/relay-workers`. Then, in one change,
+return `.52` to the pool (`dhcp_start: 192.168.0.52`), remove the `/32` from `trusted_sources.exclude`
+and update `docs/network-plan.md`.
 
 ## Spike procedure (operator-owned; all objects in a throwaway namespace)
 
