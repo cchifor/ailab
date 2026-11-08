@@ -22,7 +22,8 @@ Where the cluster can go next, and what blocks it: issue #1197 ("Kubernetes 1.36
   developer VM on `relay-worker-*` stops with the reboot, and its node-affine `local-path` workspace
   waits for the node. Upgrade it when no Relay worker or spike step runs there
   (`docs/runbooks/relay-worker-capacity.md`). A kubelet-only restart (step 6) leaves running VMs alone.
-  It runs its own schematic (`relay_workers` in `talos-schematics.yaml`), which the wrapper reads live.
+  The wrapper upgrades it with its own LIVE schematic (`talosctl get extensions`), which
+  `talos-schematics.yaml` records as `relay_workers` (`8e8827b5…`, gvisor + qemu-guest-agent).
 - **Adjacent minors only**, for Talos and for Kubernetes (`talosctl upgrade-k8s`, one minor per run,
   exactly one `-n <cp>`). Check the support matrix first: Talos 1.14 supports Kubernetes 1.33+.
 - **One control plane at a time.** Between CPs: etcd 3/3 (`talosctl etcd status`) and every CNPG

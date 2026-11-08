@@ -13,8 +13,11 @@ The proposal allocates **vmid 4304, `relay-worker-1`, 192.168.0.52** on **ai-nod
 OpenTofu map, Talos patch and `relay-gvisor` RuntimeClass. No resource iterates or changes the
 existing agent-node map. The new pool never carries `ailab.io/agent-pool`.
 
-The map defaults to empty. After approval, the operator must preserve the explicit variable file
-with the module's other persistent input files and pass it on every subsequent plan/apply.
+The map defaults to empty. Since the 2026-11-08 rollout, the operator's copy is the gitignored
+`relay-workers.auto.tfvars` beside `terraform.tfvars`. OpenTofu loads it on every plan and apply,
+through `just` or a direct `tofu.exe`, so no invocation can leave it out. Before a rollout,
+keep it explicit (`-var-file`), as step 6 shows, so that an ordinary agent-pool apply cannot
+provision it by accident.
 The VM has `prevent_destroy` so omitting it later fails the plan instead of silently destroying
 the worker. Intentional retirement requires its own reviewed removal of that guard.
 
@@ -163,11 +166,11 @@ Every step above ran on 2026-11-08 from the operator workstation. Raw evidence l
 
 | Step | Result |
 |---|---|
-| 2 Edge | Flux at `main@8c82fa1a`, and the `edge-proxy` rollout is complete. The mounted Caddyfile has `.53/32 .54/31` in both `@not_lan` and `@not_admin`; `.52` is in neither. |
+| 2 Edge | Flux at `main@8c82fa1a`, and the `edge-proxy` rollout is complete. The mounted Caddyfile's trusted ranges (`@not_lan`/`@not_admin` are `not remote_ip <trusted>`) list `.53/32 .54/31` where they used to list `.52/30`. `.52` is therefore **excluded** from the LAN and admin tiers, from `hostnames.yaml` `trusted_sources.exclude` `192.168.0.52/32` (#1676). |
 | 3 DHCP | The live client list showed **no client on `.52`** (by DHCP or fixed IP); `.53` holds a DHCP client that stays in the pool. **The controller had re-IDed all its objects to UUIDs since 2026-10-27**, so `Home` became `c7406446-259e-48df-9f99-06a0d833fe8a`. `gateway.yaml` was corrected, then plan `1255431b5b8215b942fc` (forget, adopt and update Home, `.52` → `.53`) was applied. The read-back plan reports no changes. The owned forward and static-DNS IDs are still stale. |
 | 4 Host | ai-node3: MemAvailable 37.9 GiB, `kvm_amd` nested=1, `local-lvm` 1.14 TiB free, GTT 0. |
 | 5 Image | The Image Factory confirmed that the schematic definition (gvisor + qemu-guest-agent) hashes to `8e8827b5…`. Download `.raw.xz`: sha256 `300fd28886bdc6f8b9d5ac13fdc3ac34de2c984b94d85d69d5298466f09a0db7`, 341 045 040 bytes. Image `.raw`: sha256 `dac67c75c1c3fb8f704105d0510ae24a22a886a5bfa01dd7f747536bf636fb12`, 4 453 302 272 bytes. Staged under the unique filename via a temp dir and an atomic rename. |
-| 6 Plan/apply | `main@b81ba53b`, with `-var-file=relay-workers.tfvars`: **3 to add, 0 to change, 0 to destroy** (the VM, its config apply, RuntimeClass `relay-gvisor`). The saved plan was applied as reviewed, and the VM was created in 17 s. |
+| 6 Plan/apply | `main@b81ba53b`, with `-var-file=relay-workers.tfvars` (renamed to `relay-workers.auto.tfvars` after the apply): **3 to add, 0 to change, 0 to destroy** (the VM, its config apply, RuntimeClass `relay-gvisor`). The saved plan was applied as reviewed, and the VM was created in 17 s. |
 | 7 Verify | `relay-worker-1` was Ready about 30 s after the apply (v1.35.9, Talos v1.14.2). See the identity check below. |
 
 Identity check on `relay-worker-1`:
