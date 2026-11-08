@@ -164,3 +164,26 @@ tests:
               summary: CI runner 192.168.0.15:9100 read different bytes from an intact uv cache file
               description: 'The last nightly cache verify on 192.168.0.15:9100 hashed a uv file wrong, then right on a fresh re-read: the file is intact and the READ was corrupted in memory. Jobs on this
                 runner crash at random (segfaults in python, libc, rustc). Pause the runner in Gitea and investigate its host: docs/runbooks/ci-runners.md "A runner that corrupts memory".'
+  - interval: 1m
+    name: a BuildKit cache.db over 8 GB for 6h warns; one under it, or over it for less, does not
+    input_series:
+      - series: gitea_runner_cleanup_buildkit_db_bytes{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 24586000000+0x480
+      - series: gitea_runner_cleanup_buildkit_db_bytes{job="ci-runner-node", instance="192.168.0.18:9100"}
+        values: 2523000000+0x480
+      - series: gitea_runner_cleanup_buildkit_db_bytes{job="ci-runner-node", instance="192.168.0.16:9100"}
+        values: 9000000000+0x200 1000000000+0x280
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: CIRunnerBuildkitDbLarge
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: CIRunnerBuildkitDbLarge
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.15:9100
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.15:9100 BuildKit cache.db is 22.9GiB
+              description: 'BuildKit''s solver cache-key index on 192.168.0.15:9100 has grown past 8 GB. It never gives space back on its own and `docker system df` does not count it. Reset it in a drained window: docs/runbooks/ci-runners.md, Troubleshooting, "BuildKit cache.db".'

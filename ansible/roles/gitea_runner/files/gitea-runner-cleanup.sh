@@ -129,6 +129,14 @@ CACHE_PURGE_STAMP="${GITEA_CLEANUP_CACHE_PURGE_STAMP:-$(dirname "$HEAL_STATE")/c
 CACHE_PURGE_RESTART_MIN_SEC="${GITEA_CLEANUP_CACHE_PURGE_RESTART_MIN_SEC:-21600}"
 BEACON="${GITEA_CLEANUP_BEACON:-1}"
 TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
+# Cargo target sweep (section 6). Roots searched for Cargo target directories, space-separated; each must be
+# an absolute path of at least two components. TARGET_KEEP_H=0 disables the sweep.
+TARGET_ROOTS="${GITEA_CLEANUP_TARGET_ROOTS:-/home/runner/.cache}"
+TARGET_MAXDEPTH="${GITEA_CLEANUP_TARGET_MAXDEPTH:-4}"          # how deep under a root a target dir may sit
+TARGET_KEEP_H="${GITEA_CLEANUP_TARGET_KEEP_H:-72}"             # at/over PRESSURE_PCT: files unread this long go
+TARGET_KEEP_CRITICAL_H="${GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H:-24}" # at/over CRITICAL_PCT
+TARGET_MIN_FREE_MB="${GITEA_CLEANUP_TARGET_MIN_FREE_MB:-1024}" # below this much to gain, the runner is not held
+BUILDKIT_DB="${GITEA_CLEANUP_BUILDKIT_DB:-/var/lib/docker/buildkit/cache.db}" # its size goes in the beacon
 
 # (No docker CLI -> exit 0 happens at the start of section 0, AFTER the runner recovery, which needs
 # only systemctl: a heal that left the runner stopped must still be recovered without docker.)
@@ -929,7 +937,7 @@ if [ "$midjob" -eq 0 ] && [ "$pct_cap" -ge "$FULL_PRUNE_PCT" ]; then
     after_fp="$(disk_pct)"; is_num "$after_fp" || after_fp="$pct_cap"
     log "full image prune done: disk ${pct_cap}% -> ${after_fp}%"
     if [ $(( pct_cap - after_fp )) -lt 2 ]; then
-      log "WARNING: full image prune freed <2% — bytes are in containerd state docker cannot reach (moby_history leases, orphaned snapshots)"
+      log "WARNING: full image prune freed <2% — the bytes are outside the image store: BuildKit's cache.db (bbolt never shrinks; beacon buildkit_db_bytes), containerd state docker cannot reach (moby_history leases, orphaned snapshots), or caches in the runner's home (section 6)"
     fi
   fi
 fi
@@ -998,6 +1006,123 @@ if is_num "$WS_PRUNE_AGE_H" && [ "$WS_PRUNE_AGE_H" -gt 0 ] && [ -d "$WORKDIR_PAR
   esac
 fi
 
+# 6. Cargo target directories that CI jobs keep in the runner's home (2026-11-08). A job that persists
+#    CARGO_TARGET_DIR between runs (workbricks: ~/.cache/workbricks-ci/<event>/target and target-verify)
+#    and never prunes it grows without bound: every lockfile change and feature lane adds artifact
+#    variants. By 2026-11-08 that was 61-84 GB on every runner, over half of it unread for 3 days. The repo
+#    should bound its own cache; this is the backstop that keeps a runner alive when one does not.
+#    * ONLY Cargo target dirs: a dir with a .rustc_info.json at its root, which Cargo writes into every
+#      target dir it uses and nothing else writes. Not CACHEDIR.TAG: uv and others write one too, and Cargo
+#      writes it only into a dir it CREATED, so a target dir a job made with `mkdir -p` first has none
+#      (workbricks' target-verify). Never a toolchain, CARGO_HOME, or a module or package cache: deleting
+#      part of one of those trees corrupts it, and nothing would notice until a build failed.
+#    * Cargo rebuilds a unit whose files are missing (an rlib or rmeta, a test binary, a fingerprint, or
+#      every file at once: verified on 1.86), so a file no build has READ for the keep window costs at most
+#      a rebuild if it is needed again. atime on the relatime root fs lags a read by up to 24h, so a file
+#      read within the last (keep window - 24h) is never removed: 48h at the default. The window is
+#      clamped to at least 24h.
+#    * .rustc_info.json and CACHEDIR.TAG are always kept. The tag is written once and never read again, so
+#      its atime is always old, and deleting the marker would stop the next sweep recognising the dir.
+#    * Cargo hard-links artifacts (deps/libx-<hash>.rlib and the uplifted debug/libx.rlib are one inode),
+#      so the estimate counts each inode once and the freed space is read from du, before and after.
+#    * Disk-gated (TARGET_KEEP_H at PRESSURE_PCT, TARGET_KEEP_CRITICAL_H at CRITICAL_PCT) and NEVER on the
+#      mid-job path. Race-free by construction, like the heal in section 0: in a confirmed gap the runner is
+#      HELD (runner_held is persisted first, so a killed run is recovered by the next tick or ExecStopPost),
+#      stopped with its drain, the files deleted, and the runner started again. It is held only when at
+#      least TARGET_MIN_FREE_MB would go, so a runner full of something else is not taken out of the pool
+#      every tick for nothing.
+# Cargo target dirs under TARGET_ROOTS, NUL-separated: each dir holding a .rustc_info.json.
+cargo_target_dirs() {
+  local root info d
+  for root in $TARGET_ROOTS; do
+    case "$root" in /*/*) ;; *) log "target sweep: implausible root '$root' -> skipped"; continue ;; esac
+    [ -d "$root" ] && [ ! -L "$root" ] || continue
+    while IFS= read -r -d '' info; do
+      d="${info%/.rustc_info.json}"
+      [ -d "$d" ] && [ ! -L "$d" ] && printf '%s\0' "$d"
+    done < <(find "$root" -xdev -maxdepth "$TARGET_MAXDEPTH" -type f -name .rustc_info.json -print0 2>/dev/null)
+  done
+}
+# The files in <dir> that no build has read for <minutes>, never its two markers.
+target_stale_find() { # <dir> <minutes> <find action...>
+  local d="$1" m="$2"; shift 2
+  find "$d" -xdev -type f -amin +"$m" ! -path "$d/CACHEDIR.TAG" ! -path "$d/.rustc_info.json" "$@" 2>/dev/null
+}
+# Bytes they hold, each inode once (read-only).
+target_stale_bytes() { target_stale_find "$1" "$2" -printf '%i %s\n' | sort -u | awk '{s+=$2} END{print s+0}'; }
+# Delete them, then the empty dirs older than the window; print the bytes freed (du before and after).
+target_sweep_dir() {
+  local b0 b1
+  b0="$(du -sx --block-size=1 "$1" 2>/dev/null | cut -f1)"
+  target_stale_find "$1" "$2" -delete
+  find "$1" -xdev -mindepth 1 -type d -empty -mmin +"$2" -delete 2>/dev/null || true
+  b1="$(du -sx --block-size=1 "$1" 2>/dev/null | cut -f1)"
+  if is_num "$b0" && is_num "$b1" && [ "$b0" -ge "$b1" ]; then printf '%s' $(( b0 - b1 )); else printf 0; fi
+}
+tg_dirs=0; tg_freed=0
+if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] && [ -n "$TARGET_ROOTS" ]; then
+  pct_tg="$(disk_pct)"; is_num "$pct_tg" || pct_tg=0
+  if [ "$pct_tg" -ge "$PRESSURE_PCT" ]; then
+    if ! is_num "$TARGET_MAXDEPTH" || ! is_num "$TARGET_MIN_FREE_MB"; then
+      log "target sweep: TARGET_MAXDEPTH='$TARGET_MAXDEPTH' or TARGET_MIN_FREE_MB='$TARGET_MIN_FREE_MB' is not a number -> skipped"
+    else
+      keep_h="$TARGET_KEEP_H"
+      if [ "$pct_tg" -ge "$CRITICAL_PCT" ] && is_num "$TARGET_KEEP_CRITICAL_H" && [ "$TARGET_KEEP_CRITICAL_H" -lt "$keep_h" ]; then
+        keep_h="$TARGET_KEEP_CRITICAL_H"
+      fi
+      if [ "$keep_h" -lt 24 ]; then
+        log "target sweep: keep window ${keep_h}h is below the 24h atime granularity -> 24h"; keep_h=24
+      fi
+      tg_min=$(( keep_h * 60 ))
+      tdirs=(); while IFS= read -r -d '' d; do tdirs+=("$d"); done < <(cargo_target_dirs)
+      tg_dirs=${#tdirs[@]}
+      stale=0
+      for d in "${tdirs[@]}"; do b="$(target_stale_bytes "$d" "$tg_min")"; is_num "$b" && stale=$(( stale + b )); done
+      if [ "$tg_dirs" -eq 0 ]; then
+        :
+      elif [ "$stale" -lt $(( TARGET_MIN_FREE_MB * 1048576 )) ]; then
+        log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${TARGET_MIN_FREE_MB}MB -> runner not held"
+      elif [ "$(state_get runner_held)" = 1 ]; then
+        log "target sweep: an earlier runner recovery is still pending -> not this tick"
+      elif ! idle_confirmed; then
+        log "target sweep: ${stale}B to free but a job is running -> next tick"
+      else
+        st="$(systemctl is-active "$SERVICE" 2>/dev/null)"; held=1
+        case "$st" in
+          active) heal_owned=1 ;;
+          inactive | failed) heal_owned=0 ;; # stopped by someone else: sweep, and leave it stopped
+          *) log "target sweep: $SERVICE is '${st:-unreadable}' -> not this tick"; held=0 ;;
+        esac
+        if [ "$held" -eq 1 ] && ! state_set runner_held "$heal_owned"; then
+          log "target sweep: cannot persist runner_held to $HEAL_STATE -> not holding the runner"; heal_owned=0; held=0
+        fi
+        if [ "$held" -eq 1 ]; then
+          trap heal_start_runner EXIT
+          trap 'exit 143' TERM INT
+          if [ "$heal_owned" -eq 1 ]; then
+            # The same drain as the heal's: a job that slipped in after the idle read finishes first.
+            timeout -k 10 700 systemctl stop "$SERVICE" >/dev/null 2>&1
+            st="$(systemctl is-active "$SERVICE" 2>/dev/null)"
+            case "$st" in
+              inactive | failed) : ;;
+              *) log "target sweep: $SERVICE is '${st:-unreadable}' after the stop -> nothing deleted"; held=0 ;;
+            esac
+          fi
+          if [ "$held" -eq 1 ]; then
+            log "target sweep: disk ${pct_tg}%, ${stale}B in ${tg_dirs} Cargo target dir(s) unread for ${keep_h}h, runner held -> deleting"
+            for d in "${tdirs[@]}"; do
+              b="$(target_sweep_dir "$d" "$tg_min")"; is_num "$b" || b=0
+              tg_freed=$(( tg_freed + b ))
+              log "target sweep: $d freed ${b}B"
+            done
+          fi
+          heal_release_runner
+        fi
+      fi
+    fi
+  fi
+fi
+
 after="$(disk_pct)"; is_num "$after" || after=0
 freed=$(( before - after )); [ "$freed" -lt 0 ] && freed=0
 # Post-cleanup docker resource sizes for the beacon (build cache is the dominant accumulator). Docker's
@@ -1005,11 +1130,15 @@ freed=$(( before - after )); [ "$freed" -lt 0 ] && freed=0
 dfsize() { docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'|' -v t="$1" '$1==t{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null; }
 bc_bytes="$(dfsize 'Build Cache')"; is_num "$bc_bytes" || bc_bytes=0
 img_bytes="$(dfsize 'Images')"; is_num "$img_bytes" || img_bytes=0
-log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B"
+# BuildKit's bbolt metadata file never shrinks: 24.6 GB on ci-runner-2 on 2026-11-08 against 0.2-2.5 GB on
+# the rest, invisible to `docker system df`. Its size is published so that is seen (CIRunnerBuildkitDbLarge).
+bk_db_bytes="$(stat -c %s "$BUILDKIT_DB" 2>/dev/null)"; is_num "$bk_db_bytes" || bk_db_bytes=0
+log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B, cargo targets freed ${tg_freed}B"
 # pressure_defer 0: reaching here means the sweep RAN. That includes the mid-job critical path, which
 # is recorded separately by midjob_prune — starved means "could not sweep", not "swept riskily".
 write_beacon "busy_skip 0" "pressure_defer 0" "midjob_prune ${midjob}" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
   "disk_freed_percent ${freed}" "reaped_containers ${reaped}" \
   "workspaces ${ws_count}" "workspaces_pruned ${ws_pruned}" \
-  "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}"
+  "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}" \
+  "target_dirs ${tg_dirs}" "target_freed_bytes ${tg_freed}" "buildkit_db_bytes ${bk_db_bytes}"
 exit 0

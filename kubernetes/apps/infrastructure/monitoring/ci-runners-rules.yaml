@@ -53,9 +53,10 @@ spec:
             description: >-
               The 6h trend for runner {{ $labels.instance }} projects the root filesystem reaching 0
               free within 4h — early warning before jobs fail on ENOSPC. Check `docker system df` and
-              whether gitea-runner-cleanup.sh is keeping up (its escalation tightens the retention
-              window to 6h at 75% disk and to a 1h window + actcache trim at 92%; when a job is in
-              flight it waits for the between-jobs gap rather than pruning through it).
+              whether gitea-runner-cleanup.sh is keeping up (its retention window is 24h, 6h at 75%
+              disk and 4h at 92% with an actcache trim; at 75% it also sweeps Cargo target dirs in the
+              runner's home; when a job is in flight it waits for the between-jobs gap rather than
+              pruning through it).
         # A runner this close to full is about to fail EVERY job at actions/checkout with ENOSPC
         # (`copy_file_range: no space left on device`) and become a job-blackhole reding whole runs —
         # the exact fleet-wide outage of 2026-07-11. CRITICAL (paging), unlike the 12% warning above,
@@ -173,6 +174,19 @@ spec:
         # still lists outlives that for an hour: no job gap, the runner in transition, the cooldown, or
         # a heal that left it in place (that record is then never retried automatically). A failed
         # journal/BuildKit read keeps the beacon's last value, so it neither raises nor clears this.
+        # BuildKit's solver cache-key index (/var/lib/docker/buildkit/cache.db, bbolt) never shrinks, and nothing
+        # docker reports counts it: on 2026-11-08 it was 24.6 GB on ci-runner-2 against 0.2-2.5 GB on the
+        # rest, the space the cleanup's "full image prune freed <2%" warning could not find.
+        - alert: CIRunnerBuildkitDbLarge
+          expr: gitea_runner_cleanup_buildkit_db_bytes{job="ci-runner-node"} > 8e9
+          for: 6h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} BuildKit cache.db is {{ $value | humanize1024 }}B"
+            description: >-
+              BuildKit's solver cache-key index on {{ $labels.instance }} has grown past 8 GB. It never
+              gives space back on its own and `docker system df` does not count it. Reset it in a drained
+              window: docs/runbooks/ci-runners.md, Troubleshooting, "BuildKit cache.db".
         - alert: CIRunnerBuildkitDanglingRecord
           expr: gitea_runner_buildkit_dangling_record{job="ci-runner-node"} == 1
           for: 1h
