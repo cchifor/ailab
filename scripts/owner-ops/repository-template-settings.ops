@@ -1,0 +1,9 @@
+# repository-template-settings: the settings of cchifor/repository-template as applied on 2026-11-08, kept here as
+# their IaC record: a public Gitea template repository that merges by squash only and deletes the branch after the
+# merge. Re-running it restores them (the PATCH sets these fields and leaves every other one alone).
+#   scripts/gitea-owner-op.sh scripts/owner-ops/repository-template-settings.ops             # dry run
+#   scripts/gitea-owner-op.sh scripts/owner-ops/repository-template-settings.ops --execute
+# The branch protection of its main is NOT here: that repository records it in its own
+# .gitea/branch-protection.json. Do not duplicate it in this file.
+# scopes: write:repository
+PATCH /repos/cchifor/repository-template repository-template-settings.json 200
