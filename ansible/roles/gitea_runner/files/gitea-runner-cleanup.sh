@@ -177,11 +177,18 @@ clamp_win() {
   printf '%ss' "$s"
 }
 
+# Every write also carries buildkit_db_bytes, the size of BuildKit's bbolt metadata file, which never shrinks
+# (24.6 GB on ci-runner-2 on 2026-11-08 against 0.2-2.5 GB on the rest; `docker system df` does not count
+# it). In EVERY write, not just a completed sweep's: the busy early exits rewrite this file too, and a
+# series that vanishes on those ticks would reset CIRunnerBuildkitDbLarge's `for` on any busy runner.
+# A stat; callers must not pass the field themselves (a duplicate line breaks the whole file's parse).
 write_beacon() {
   [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
-  local f="$TEXTFILE_DIR/gitea_runner_cleanup.prom" tmp
+  local f="$TEXTFILE_DIR/gitea_runner_cleanup.prom" tmp bk
   tmp="$(mktemp "$f.XXXX" 2>/dev/null)" || return 0
-  for kv in "$@"; do printf 'gitea_runner_cleanup_%s %s\n' "${kv%% *}" "${kv#* }"; done > "$tmp"
+  bk="$(stat -c %s "$BUILDKIT_DB" 2>/dev/null)"; is_num "$bk" || bk=0
+  { for kv in "$@"; do printf 'gitea_runner_cleanup_%s %s\n' "${kv%% *}" "${kv#* }"; done
+    printf 'gitea_runner_cleanup_buildkit_db_bytes %s\n' "$bk"; } > "$tmp"
   chmod 0644 "$tmp" 2>/dev/null || true # mktemp is 0600; node_exporter (non-root) must be able to read it
   mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
 }
@@ -1164,9 +1171,6 @@ freed=$(( before - after )); [ "$freed" -lt 0 ] && freed=0
 dfsize() { docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'|' -v t="$1" '$1==t{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null; }
 bc_bytes="$(dfsize 'Build Cache')"; is_num "$bc_bytes" || bc_bytes=0
 img_bytes="$(dfsize 'Images')"; is_num "$img_bytes" || img_bytes=0
-# BuildKit's bbolt metadata file never shrinks: 24.6 GB on ci-runner-2 on 2026-11-08 against 0.2-2.5 GB on
-# the rest, invisible to `docker system df`. Its size is published so that is seen (CIRunnerBuildkitDbLarge).
-bk_db_bytes="$(stat -c %s "$BUILDKIT_DB" 2>/dev/null)"; is_num "$bk_db_bytes" || bk_db_bytes=0
 log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B, cargo targets freed ${tg_freed}B"
 # pressure_defer 0: reaching here means the sweep RAN. That includes the mid-job critical path, which
 # is recorded separately by midjob_prune — starved means "could not sweep", not "swept riskily".
@@ -1174,5 +1178,5 @@ write_beacon "busy_skip 0" "pressure_defer 0" "midjob_prune ${midjob}" "last_run
   "disk_freed_percent ${freed}" "reaped_containers ${reaped}" \
   "workspaces ${ws_count}" "workspaces_pruned ${ws_pruned}" \
   "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}" \
-  "target_dirs ${tg_dirs}" "target_freed_bytes ${tg_freed}" "buildkit_db_bytes ${bk_db_bytes}"
+  "target_dirs ${tg_dirs}" "target_freed_bytes ${tg_freed}" # buildkit_db_bytes: added by write_beacon
 exit 0
