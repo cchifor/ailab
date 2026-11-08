@@ -57,6 +57,19 @@ class Quantities(unittest.TestCase):
                     rwp._reduce(name, response)
             self.assertEqual(rwp._reduce(name, {"items": []}), {"items": []})
 
+    def test_null_requests_are_empty_and_malformed_snapshots_stay_unknown(self):
+        reduced = rwp._reduce("pods", {"items": [{
+            "metadata": {"namespace": "fixture"},
+            "spec": {"nodeName": "relay-worker-1", "resources": {"requests": None},
+                     "containers": [{"resources": {"requests": None}}]},
+            "status": {"phase": "Running"},
+        }]})
+        self.assertEqual(rwp.pod_request(reduced["items"][0], "memory"), 0)
+        s = with_pool(SNAP)
+        reduced["items"][0]["spec"]["containers"][0]["requests"] = None
+        s["queries"]["pods"]["data"] = reduced
+        self.assertEqual(status(rwp.evaluate(s, pinned(BIND)), "headroom.lightweight"), "unknown")
+
     def test_parse(self):
         self.assertEqual(rwp.quantity("500m"), 0.5)
         self.assertEqual(rwp.quantity("2Gi"), 2 * 2**30)

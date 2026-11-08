@@ -14,7 +14,7 @@ Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea 
 
 | Check | Who | Tool | Today |
 |---|---|---|---|
-| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (51 tests) |
+| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (52 tests) |
 | Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; gVisor pinned to the Relay/router agent pool; KubeVirt absent and unpinned; synthetic cluster UID differs from the live pin |
 | Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **collected 2026-11-08; gates fail** (evidence below) |
 | Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **not run** |
@@ -184,8 +184,12 @@ same pins.
    - Write 1 GiB to the workspace disk, then stop and start the VM. The data must still be there.
    - Fill the Docker cache disk to its bound. The guest must get ENOSPC; measure node use
      against the launcher limit. Capture the actual launcher request/limit and kubelet eviction
-     events. Exercise a bounded temporary storage overrun to verify kubelet eviction at the pod
-     limit, then recreate the VM and verify the workspace survives. Quota is admission accounting,
+     events. The 20 Gi cache alone cannot exceed the 30 Gi launcher limit. For the eviction test,
+     the operator resolves the launcher's disk-backed emptyDir mount from its Pod spec and writes
+     a separate disposable file there (outside `disk.img`, never on the workspace PVC). Bound
+     that file so total measured pod use can exceed the limit by at most 1 Gi; monitor node free
+     space and abort before the node's eviction reserve is reached. Record the chosen path,
+     byte bound and observed eviction. Then recreate the VM and verify the workspace survives. Quota is admission accounting,
      not a filesystem quota: if kubelet does not account for the disk or enforce the pod limit,
      S3 fails. Do not claim a hard byte ceiling from quota alone.
    - Note that the PV is node-affine; that is expected.

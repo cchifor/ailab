@@ -138,12 +138,12 @@ def _reduce(name: str, data: dict) -> dict:
             for key in ("initContainers", "containers"):
                 for c in spec.get(key, []) or []:
                     reqs.append({"kind": key, "restartPolicy": c.get("restartPolicy"),
-                                 "requests": (c.get("resources") or {}).get("requests", {})})
+                                 "requests": ((c.get("resources") or {}).get("requests") or {})})
             items.append({"metadata": {"namespace": p["metadata"].get("namespace")},
                           "spec": {"nodeName": spec.get("nodeName"), "containers": reqs,
                                    "overhead": spec.get("overhead") or {},
                                    "resources": {"requests":
-                                                 (spec.get("resources") or {}).get("requests", {})}},
+                                                 ((spec.get("resources") or {}).get("requests") or {})}},
                           "status": {"phase": p.get("status", {}).get("phase")}})
         return {"items": items}
     if name == "storageclasses":
@@ -453,7 +453,7 @@ def pod_request(pod: dict, res: str) -> float:
     """
     spec = pod["spec"]
     overhead = quantity(spec.get("overhead", {}).get(res, 0))
-    pod_level = (spec.get("resources") or {}).get("requests", {})
+    pod_level = ((spec.get("resources") or {}).get("requests") or {})
     if res in pod_level:
         return quantity(pod_level[res]) + overhead
     sidecars, init_peak, app = 0.0, 0.0, 0.0
@@ -481,7 +481,7 @@ def node_free(node: dict, pods: list[dict]) -> dict:
                        if p["spec"].get("nodeName") == name
                        and p["status"].get("phase") not in ("Succeeded", "Failed"))
             free[key] = quantity(alloc[res]) - used if res in alloc else None
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, AttributeError):
             free[key] = None
     return free
 
