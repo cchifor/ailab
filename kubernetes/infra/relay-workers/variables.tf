@@ -113,7 +113,6 @@ variable "relay_worker_nodes" {
     node_name  = string
     vm_id      = number
     ip         = string
-    hostname   = string
     cores      = number
     memory_mib = number
     disk_gb    = number
@@ -123,7 +122,6 @@ variable "relay_worker_nodes" {
       node_name  = "ai-node3"
       vm_id      = 4304
       ip         = "192.168.0.52"
-      hostname   = "relay-worker-1"
       cores      = 12
       memory_mib = 24576
       disk_gb    = 200
@@ -134,8 +132,8 @@ variable "relay_worker_nodes" {
     error_message = "relay-worker vm_ids live in the 4304-4306 band (docs/network-plan.md, CLAUDE.md inventory)."
   }
   validation {
-    condition     = alltrue([for k, v in var.relay_worker_nodes : k == v.hostname && startswith(k, "relay-worker-")])
-    error_message = "Each map key must equal its hostname and start with relay-worker- (never a retired testpool/env-node/agentforge name)."
+    condition     = alltrue([for k in keys(var.relay_worker_nodes) : can(regex("^relay-worker-[1-9][0-9]*$", k))])
+    error_message = "Map keys are relay-worker-<n> (never a retired testpool/env-node/agentforge name). The key names the VM, talos-<key>, which Proxmox's cloud-init metadata makes the Talos hostname and Kubernetes node name."
   }
   validation {
     condition     = length(distinct([for v in values(var.relay_worker_nodes) : v.node_name])) == length(var.relay_worker_nodes)

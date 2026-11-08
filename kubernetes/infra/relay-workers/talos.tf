@@ -43,5 +43,13 @@ resource "talos_machine_configuration_apply" "worker" {
   node                        = each.value.ip
   config_patches              = [local.worker_patches[each.key]]
 
+  lifecycle {
+    # A replaced VM boots the staged image fresh, in maintenance mode, and this resource's inputs have
+    # not changed, so without a trigger it would never re-apply and the node would never join
+    # (depends_on only orders; the provider's Read cannot see a lost config). The VM's id is unknown
+    # while it is being replaced and unchanged by an in-place update, so only a rebuild re-applies.
+    replace_triggered_by = [proxmox_virtual_environment_vm.relay_worker[each.key].id]
+  }
+
   depends_on = [proxmox_virtual_environment_vm.relay_worker]
 }

@@ -132,7 +132,10 @@ Each step must succeed before the next. The edge exclusion goes live before anyt
    conflict, find the client instead. Then `just edge-gateway-apply --plan-hash <hash> --only dhcp`,
    and commit `kubernetes/edge/gateway-state.yaml` if it changed.
 3. **Stage the image on ai-node3:** `TALOS_VER=v1.14.2 NODES=192.168.0.4 bash scripts/stage-talos-image.sh`.
-   Its default `SCHEMATIC` is the plain one, which is what `talos.tf` installs.
+   Its default `SCHEMATIC` is the plain one, which is what `talos.tf` installs. The file name does not
+   encode the schematic, and the script keeps an existing file ("present in import"), so only a fresh
+   download proves which schematic was staged. It was fresh on 2026-11-08: the plain schematic
+   `53513e54…`, 4 453 302 272 bytes. Step 5 confirms it on the booted node.
 4. **Plan and apply.** Run tofu on Windows, from the main checkout (it reads `../terraform.tfstate`).
    `terraform.tfvars` is gitignored; it takes the same values as `agent-nodes/terraform.tfvars`.
    `just relay-workers-plan` must show exactly 2 to add (the VM and its machine-config apply),
@@ -143,6 +146,10 @@ Each step must succeed before the next. The edge exclusion goes live before anyt
    - Its only taint is `dedicated=relay-worker:NoSchedule`.
    - No `relay` or `llm-router` pod runs on it.
    - `talosctl -n 192.168.0.52 ls /dev/kvm` shows the device.
+   - `talosctl -n 192.168.0.52 get extensions` reports schematic `53513e54…` with exactly
+     qemu-guest-agent, iscsi-tools and util-linux-tools, the same as agent-node-1. A different schematic
+     means the staged image was not the plain one. Destroy and rebuild from a freshly staged image
+     before any spike step: the first upgrade would otherwise change the node's extensions.
    - Re-run the preflight: `placement.dedicated_pool`, `placement.protected_workloads_absent` and
      both `headroom.*` checks pass. `kubevirt_spike_prerequisites` then fails or is unknown only on
      `kubevirt.pin` (K1).
@@ -150,7 +157,18 @@ Each step must succeed before the next. The edge exclusion goes live before anyt
 **Deliberate differences from the agent nodes:**
 - No storage-fabric `/32` route. Relay workers must not mount QNAP storage, and the route would give
   SNATed worker egress a path to the NAS storage plane.
-- `cloud-power`'s `ALLOW_FROM` does not list `.52`. Worker code must not reach the power controller.
+- `cloud-power`'s `ALLOW_FROM` does not list `.52`. That alone does **not** keep worker code away
+  from it: the list also admits the whole pod CIDR (`10.244.0.0/16`), and Cilium does not masquerade
+  pod traffic to cluster nodes. A worker pod can therefore reach the `hostNetwork` WoL listener (`:8127`
+  on every node, plus its Service). That listener only serves `POST /api/wake`, so it can power the GPU
+  cluster **on**, never off; the power-off API sits behind its own NetworkPolicy. The pool rule below
+  closes the gap.
+
+**Pool rule: no workload before an egress policy.** Before the first workload on the pool (S2 for the
+spike), its namespace carries a default-deny egress `CiliumNetworkPolicy` that allows only DNS and the
+approved endpoints. That denies the LAN `192.168.0.0/23`, every node address (and with them the WoL
+listener) and the `cloud-power` Services. S5 then proves it: the WoL path must be refused both through
+the Service and through a node address.
 
 **Known gaps:** `monitoring/alloy` (logs) and `velero/node-agent` do not tolerate the taint, so the
 pool's pod logs are not in Loki and its volumes are not backed up. Spike evidence goes to `EVIDENCE_DIR`
@@ -160,9 +178,21 @@ pool's pod logs are not in Loki and its volumes are not backed up. Spike evidenc
 in the kubelet roll of `docs/runbooks/talos-upgrade.md`; schedule OS upgrades when no spike step is
 running.
 
-**Teardown** runs in reverse: `tofu destroy` in `kubernetes/infra/relay-workers`. Then, in one change,
-return `.52` to the pool (`dhcp_start: 192.168.0.52`), remove the `/32` from `trusted_sources.exclude`
-and update `docs/network-plan.md`.
+**Teardown** runs in reverse, one step at a time:
+1. **Cleanup while the node still exists.** S9 (the K5 owner): the worker namespaces are deleted, and
+   no VM, VMI, PV, `virt-launcher` pod or `local-path` directory remains. The `local-path` cleanup
+   helpers need the node.
+2. `kubectl --context admin@ai drain talos-relay-worker-1 --ignore-daemonsets`.
+3. `tofu destroy` in `kubernetes/infra/relay-workers`. It deletes the VM and drops the config-apply
+   record. It does **not** reset Talos and does **not** delete the Kubernetes Node.
+4. `kubectl --context admin@ai delete node talos-relay-worker-1`. Confirm that its `CiliumNode` is gone
+   and that nothing still targets it.
+5. Only then, in one change: return `.52` to the pool (`dhcp_start: 192.168.0.52`), remove the `/32`
+   from `trusted_sources.exclude`, and update `docs/network-plan.md`.
+
+**Rebuild:** `talos_machine_configuration_apply` is `replace_triggered_by` its VM, so a replaced VM gets
+its config re-applied and joins again. Delete the old Node object first (step 4), or the new kubelet
+registers over a stale one.
 
 ## Spike procedure (operator-owned; all objects in a throwaway namespace)
 
