@@ -1241,5 +1241,19 @@ kept "$K/debug/incremental/h-1/s-old/dep-graph.bin" "T16: incremental state is n
 kept "$K/x86_64-unknown-linux-gnu/debug/build/k-1/out/k.rs" "T16: ...under a target-triple profile too"
 rm -rf "$TR"
 
+# T17: the exclusions see only the target's own path. A target under an ancestor named build or incremental
+# is still swept; empty build/ and incremental/ dirs themselves are kept by the empty-dir pass.
+for anc in build incremental; do
+  rm -rf "$TR"; K="$TR/$anc/repo-ci/target"
+  mkdir -p "$K/debug/deps" "$K/release/build" "$K/release/incremental"; echo '{}' > "$K/.rustc_info.json"
+  mb "$K/debug/deps/libold-1.rlib"; age "$K/debug/deps/libold-1.rlib" '9 days ago'
+  touch -d '9 days ago' "$K/release/build" "$K/release/incremental"
+  TROOTS="$TR" TMINFREE=1 run_case 0 85
+  gone "$K/debug/deps/libold-1.rlib" "T17: a target under an ancestor named $anc is swept"
+  kept "$K/release/build" "T17: an empty build/ dir is kept ($anc ancestor)"
+  kept "$K/release/incremental" "T17: an empty incremental/ dir is kept ($anc ancestor)"
+done
+rm -rf "$TR"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

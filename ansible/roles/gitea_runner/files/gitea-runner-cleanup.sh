@@ -1061,14 +1061,16 @@ cargo_target_dirs() {
 }
 # The files in <dir> that no build has read for <minutes>: never its two markers, and nothing under a build/
 # or incremental/ dir (see above).
-# -name and constant -path patterns only: a pattern built from $d breaks on a [, * or ? in the path. And NOT
-# -prune: -delete implies -depth, under which find ignores -prune, so a pruned tree would be deleted anyway.
+# -name and constant -path patterns only: a pattern built from $d breaks on a [, * or ? in the path. Run
+# from INSIDE the target (paths as ./debug/...), so the patterns see only the target's own components: an
+# ancestor of the target named build or incremental must not exempt the whole target. And NOT -prune:
+# -delete implies -depth, under which find ignores -prune, so a pruned tree would be deleted anyway.
 # '*/build/*' matches a whole path component, never "rebuild/". Sparing every marker by name also keeps
 # those of nested target dirs, which is right.
 target_stale_find() { # <dir> <minutes> <find action...>
   local d="$1" m="$2"; shift 2
-  find "$d" -xdev -type f -amin +"$m" ! -name CACHEDIR.TAG ! -name .rustc_info.json \
-    ! -path '*/build/*' ! -path '*/incremental/*' "$@" 2>/dev/null
+  (cd "$d" 2>/dev/null && find . -xdev -type f -amin +"$m" ! -name CACHEDIR.TAG ! -name .rustc_info.json \
+    ! -path '*/build/*' ! -path '*/incremental/*' "$@" 2>/dev/null)
 }
 # Bytes they hold, each inode once (read-only). printf %.0f, not print: an older mawk (1.3.3) prints a sum
 # past 2^31 as %.6g (2.86331e+10), which is_num rejects, and the biggest dirs would then count for nothing.
@@ -1078,9 +1080,9 @@ target_sweep_dir() {
   local b0 b1
   b0="$(du -sx --block-size=1 "$1" 2>/dev/null | cut -f1)"
   target_stale_find "$1" "$2" -delete
-  # An empty OUT_DIR is a build script's output too: the same exclusions.
-  find "$1" -xdev -mindepth 1 -type d -empty -mmin +"$2" ! -name build ! -name incremental \
-    ! -path '*/build/*' ! -path '*/incremental/*' -delete 2>/dev/null || true
+  # An empty OUT_DIR is a build script's output too: the same exclusions, from inside the target as well.
+  (cd "$1" 2>/dev/null && find . -xdev -mindepth 1 -type d -empty -mmin +"$2" ! -name build ! -name incremental \
+    ! -path '*/build/*' ! -path '*/incremental/*' -delete 2>/dev/null) || true
   b1="$(du -sx --block-size=1 "$1" 2>/dev/null | cut -f1)"
   if is_num "$b0" && is_num "$b1" && [ "$b0" -ge "$b1" ]; then printf '%s' $(( b0 - b1 )); else printf 0; fi
 }
