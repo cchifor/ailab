@@ -1,0 +1,48 @@
+{
+  "schema": "ailab.relay-worker-binding/v1alpha1",
+  "_comment": "EXAMPLE, NOT APPLIED. Nothing reads this outside scripts/relay-worker-preflight.py. Every capability is unqualified: live preflight exists, but no runtime qualification exists yet (docs/runbooks/relay-worker-kubevirt-feasibility.md). Values marked null are unresolved operator decisions, which the collector reports as unknown.",
+  "installation": "ailab-relay-workers-pilot",
+  "cluster": {
+    "expected_context": "admin@ai",
+    "expected_api_server": "https://192.168.0.40:6443",
+    "expected_kube_system_uid": "faf3a521-bd08-4d6d-ba5c-9dc7da903819"
+  },
+  "pins": {
+    "kubernetes_version": "v1.35.9",
+    "talos_version": "v1.14.2",
+    "cilium_version": "1.19.8",
+    "kubevirt_version": null,
+    "kubevirt_operator_digest": null
+  },
+  "placement": {
+    "node_selector": {"ailab.io/relay-worker-pool": "true"},
+    "required_taint": {"key": "dedicated", "value": "relay-worker", "effect": "NoSchedule"},
+    "forbidden_node_labels": ["ailab.io/agent-pool", "node-role.kubernetes.io/control-plane"],
+    "min_nodes": 1,
+    "architecture": "amd64",
+    "protected_namespaces": ["relay", "llm-router"],
+    "_comment": "Dedicated-pool only. relay (incl. relay-postgres, staging) and llm-router (incl. llm-router-edge) are the namespaces kubernetes/apps/apps/{relay,llm-router} deploy to; none may run on the worker pool."
+  },
+  "headroom": {
+    "lightweight": {"cpu": "2", "memory": "4Gi", "ephemeral_storage": "10Gi"},
+    "developer_vm": {"cpu": "5", "memory": "10Gi", "ephemeral_storage": "30Gi",
+      "_comment": "4 vCPU / 8 GiB guest plus an UNMEASURED virt-launcher overhead allowance (1 CPU / 2 GiB) and a 20 GiB emptyDisk cache plus image; replace with measured values from the spike"}
+  },
+  "storage": {
+    "workspace_storage_class": "local-path",
+    "workspace_provisioner": "rancher.io/local-path",
+    "workspace_binding_mode": "WaitForFirstConsumer",
+    "forbidden_storage_classes": ["qnap-iscsi"]
+  },
+  "runtime_classes": {"gvisor": "gvisor"},
+  "capabilities": {
+    "pod.restricted": {"status": "pending"},
+    "pod.gvisor": {"status": "pending"},
+    "workspace.ephemeral": {"status": "pending"},
+    "workspace.retained": {"status": "pending"},
+    "vm.kubevirt": {"status": "pending"},
+    "vm.compose": {"status": "pending"},
+    "network.cilium-egress-policy": {"status": "pending"},
+    "repository.push": {"status": "unsupported", "_comment": "no expiry-enforcing forge broker yet (plan: no push in the Kubernetes pilot)"}
+  }
+}

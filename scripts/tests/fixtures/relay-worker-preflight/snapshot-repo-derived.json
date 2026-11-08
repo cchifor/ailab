@@ -1,0 +1,354 @@
+{
+  "_comment": "SYNTHETIC fixture derived from repo manifests at 6881689b (CLAUDE.md inventory, agent-nodes module, runtimeclasses.yaml, storage manifests, cilium-values.yaml). NOT collected from a live cluster.",
+  "api_server": "https://192.168.0.40:6443",
+  "collected_at": "2026-11-08T00:00:00Z",
+  "context": "admin@ai",
+  "context_exists": true,
+  "queries": {
+    "cilium_ds": {
+      "data": {
+        "images": [
+          "quay.io/cilium/cilium:v1.19.8@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "status": "ok"
+    },
+    "kube_system_ns": {
+      "data": {
+        "metadata": {
+          "uid": "00000000-0000-4000-8000-000000000001"
+        }
+      },
+      "status": "ok"
+    },
+    "kubevirt_cr": {
+      "detail": "the server doesn't have a resource type \"kubevirts\"",
+      "status": "notfound"
+    },
+    "kubevirt_crd": {
+      "detail": "Error from server (NotFound)",
+      "status": "notfound"
+    },
+    "nodes": {
+      "data": {
+        "items": [
+          {
+            "metadata": {
+              "labels": {
+                "kubernetes.io/arch": "amd64",
+                "node-role.kubernetes.io/control-plane": ""
+              },
+              "name": "talos-cp-1"
+            },
+            "spec": {
+              "taints": [
+                {
+                  "effect": "NoSchedule",
+                  "key": "node-role.kubernetes.io/control-plane"
+                }
+              ],
+              "unschedulable": false
+            },
+            "status": {
+              "allocatable": {
+                "cpu": "8",
+                "ephemeral-storage": "50Gi",
+                "memory": "22Gi",
+                "pods": "110"
+              },
+              "conditions": [
+                {
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "nodeInfo": {
+                "architecture": "amd64"
+              }
+            }
+          },
+          {
+            "metadata": {
+              "labels": {
+                "kubernetes.io/arch": "amd64",
+                "node-role.kubernetes.io/control-plane": ""
+              },
+              "name": "talos-cp-2"
+            },
+            "spec": {
+              "taints": [
+                {
+                  "effect": "NoSchedule",
+                  "key": "node-role.kubernetes.io/control-plane"
+                }
+              ],
+              "unschedulable": false
+            },
+            "status": {
+              "allocatable": {
+                "cpu": "8",
+                "ephemeral-storage": "50Gi",
+                "memory": "22Gi",
+                "pods": "110"
+              },
+              "conditions": [
+                {
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "nodeInfo": {
+                "architecture": "amd64"
+              }
+            }
+          },
+          {
+            "metadata": {
+              "labels": {
+                "kubernetes.io/arch": "amd64",
+                "node-role.kubernetes.io/control-plane": ""
+              },
+              "name": "talos-cp-3"
+            },
+            "spec": {
+              "taints": [
+                {
+                  "effect": "NoSchedule",
+                  "key": "node-role.kubernetes.io/control-plane"
+                }
+              ],
+              "unschedulable": false
+            },
+            "status": {
+              "allocatable": {
+                "cpu": "8",
+                "ephemeral-storage": "50Gi",
+                "memory": "22Gi",
+                "pods": "110"
+              },
+              "conditions": [
+                {
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "nodeInfo": {
+                "architecture": "amd64"
+              }
+            }
+          },
+          {
+            "metadata": {
+              "labels": {
+                "ailab.io/agent-pool": "true",
+                "kubernetes.io/arch": "amd64"
+              },
+              "name": "agent-node-1"
+            },
+            "spec": {
+              "taints": [
+                {
+                  "effect": "NoSchedule",
+                  "key": "dedicated",
+                  "value": "agent"
+                }
+              ],
+              "unschedulable": false
+            },
+            "status": {
+              "allocatable": {
+                "cpu": "8",
+                "ephemeral-storage": "50Gi",
+                "memory": "15Gi",
+                "pods": "110"
+              },
+              "conditions": [
+                {
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "nodeInfo": {
+                "architecture": "amd64"
+              }
+            }
+          },
+          {
+            "metadata": {
+              "labels": {
+                "ailab.io/agent-pool": "true",
+                "kubernetes.io/arch": "amd64"
+              },
+              "name": "agent-node-2"
+            },
+            "spec": {
+              "taints": [
+                {
+                  "effect": "NoSchedule",
+                  "key": "dedicated",
+                  "value": "agent"
+                }
+              ],
+              "unschedulable": false
+            },
+            "status": {
+              "allocatable": {
+                "cpu": "8",
+                "ephemeral-storage": "50Gi",
+                "memory": "15Gi",
+                "pods": "110"
+              },
+              "conditions": [
+                {
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "nodeInfo": {
+                "architecture": "amd64"
+              }
+            }
+          },
+          {
+            "metadata": {
+              "labels": {
+                "ailab.io/agent-pool": "true",
+                "ailab.io/runtime-gvisor": "true",
+                "ailab.io/runtime-kata": "true",
+                "kubernetes.io/arch": "amd64"
+              },
+              "name": "agent-node-3"
+            },
+            "spec": {
+              "taints": [
+                {
+                  "effect": "NoSchedule",
+                  "key": "dedicated",
+                  "value": "agent"
+                }
+              ],
+              "unschedulable": false
+            },
+            "status": {
+              "allocatable": {
+                "cpu": "8",
+                "ephemeral-storage": "50Gi",
+                "memory": "15Gi",
+                "pods": "110"
+              },
+              "conditions": [
+                {
+                  "status": "True",
+                  "type": "Ready"
+                }
+              ],
+              "nodeInfo": {
+                "architecture": "amd64"
+              }
+            }
+          }
+        ]
+      },
+      "status": "ok"
+    },
+    "pods": {
+      "data": {
+        "items": [
+          {
+            "metadata": {
+              "namespace": "relay"
+            },
+            "spec": {
+              "containers": [
+                {
+                  "kind": "containers",
+                  "requests": {
+                    "cpu": "500m",
+                    "memory": "1Gi"
+                  }
+                }
+              ],
+              "nodeName": "agent-node-1",
+              "overhead": {}
+            },
+            "status": {
+              "phase": "Running"
+            }
+          }
+        ]
+      },
+      "status": "ok"
+    },
+    "runtimeclasses": {
+      "data": {
+        "items": [
+          {
+            "handler": "kata",
+            "metadata": {
+              "name": "kata"
+            },
+            "scheduling": {
+              "nodeSelector": {
+                "ailab.io/agent-pool": "true",
+                "ailab.io/runtime-kata": "true"
+              }
+            }
+          },
+          {
+            "handler": "runsc",
+            "metadata": {
+              "name": "gvisor"
+            },
+            "scheduling": {
+              "nodeSelector": {
+                "ailab.io/agent-pool": "true",
+                "ailab.io/runtime-gvisor": "true"
+              }
+            }
+          }
+        ]
+      },
+      "status": "ok"
+    },
+    "storageclasses": {
+      "data": {
+        "items": [
+          {
+            "metadata": {
+              "name": "local-path"
+            },
+            "provisioner": "rancher.io/local-path",
+            "reclaimPolicy": "Delete",
+            "volumeBindingMode": "WaitForFirstConsumer"
+          },
+          {
+            "metadata": {
+              "name": "nfs-csi"
+            },
+            "provisioner": "nfs.csi.k8s.io",
+            "reclaimPolicy": "Delete",
+            "volumeBindingMode": "Immediate"
+          },
+          {
+            "metadata": {
+              "name": "qnap-iscsi"
+            },
+            "provisioner": "csi.trident.qnap.io",
+            "reclaimPolicy": "Retain",
+            "volumeBindingMode": "Immediate"
+          }
+        ]
+      },
+      "status": "ok"
+    },
+    "version": {
+      "data": {
+        "serverVersion": {
+          "gitVersion": "v1.35.9"
+        }
+      },
+      "status": "ok"
+    }
+  },
+  "schema": "ailab.relay-worker-preflight-snapshot/v1"
+}
