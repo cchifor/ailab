@@ -198,8 +198,11 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     then the runner is stopped with its drain, then the files are deleted, then it is started again.
     `CIRunnerBuildkitHealRunnerHeld` covers a start that never comes.
   - **What it reports.**
-    - `target_dirs`, counted on every tick, so a new persistent cache shows before it fills a disk.
+    - `target_dirs`, counted whenever a tick runs its sweep, under pressure or not, so a new persistent
+      cache shows before it fills a disk. A busy early exit writes only the gate's fields.
     - `target_freed_bytes`.
+    - `buildkit_db_bytes` is in every write, the early exits included, so `CIRunnerBuildkitDbLarge`'s
+      6h `for` never resets on a busy runner.
     - `journalctl -t gitea-runner-cleanup | grep 'target sweep'`.
   - **Tunables:** `gitea_runner_cleanup_target_*`.
   - The repo should still bound its own cache. This keeps a runner alive when one does not.

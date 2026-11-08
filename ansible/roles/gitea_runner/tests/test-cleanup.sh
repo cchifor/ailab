@@ -1182,6 +1182,8 @@ kept "$T/debug/deps/libold-1.rlib" "T10: a root of '/' is refused"
 mk_targets; BKF="$WORK/cache.db"; head -c 12345 /dev/zero > "$BKF"
 rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BKDB="$BKF" BEACON=1 TEXTDIR="$BEACONDIR" TROOTS="$TR" TMINFREE=1 run_case 0 85
 [ "$(beacon_field buildkit_db_bytes)" = 12345 ] && ok "T11: buildkit_db_bytes is the file's size" || bad "T11: buildkit_db_bytes (got '$(beacon_field buildkit_db_bytes)')"
+n="$(grep -c '^gitea_runner_cleanup_buildkit_db_bytes ' "$BEACONDIR/gitea_runner_cleanup.prom")"
+[ "$n" = 1 ] && ok "T11: buildkit_db_bytes is written once (a duplicate breaks the file's parse)" || bad "T11: buildkit_db_bytes written $n times"
 [ "$(beacon_field target_dirs)" = 2 ] && ok "T11: target_dirs counts the two Cargo target dirs in reach" || bad "T11: target_dirs (got '$(beacon_field target_dirs)')"
 # 2 MiB in target (one inode under two names) + 2 MiB in target-verify: 4 MiB, plus at most a few dir
 # blocks. Summing file sizes would say 6 MiB.
@@ -1254,6 +1256,19 @@ for anc in build incremental; do
   kept "$K/release/incremental" "T17: an empty incremental/ dir is kept ($anc ancestor)"
 done
 rm -rf "$TR"
+
+# T18: buildkit_db_bytes is in EVERY beacon write, the busy early exits included: the series must not vanish
+# on those ticks, or CIRunnerBuildkitDbLarge's `for: 6h` resets on any busy runner and never fires.
+BKF="$WORK/cache.db"; head -c 4321 /dev/zero > "$BKF"
+rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BKDB="$BKF" BEACON=1 TEXTDIR="$BEACONDIR" run_case 1 50
+[ "$(beacon_field busy_skip)" = 1 ] && [ "$(beacon_field buildkit_db_bytes)" = 4321 ] \
+  && ok "T18: the healthy busy skip carries buildkit_db_bytes" || bad "T18: busy skip (busy_skip '$(beacon_field busy_skip)', buildkit_db_bytes '$(beacon_field buildkit_db_bytes)')"
+rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; IDLEWAIT=2 BKDB="$BKF" BEACON=1 TEXTDIR="$BEACONDIR" run_case 1 85
+[ "$(beacon_field pressure_defer)" = 1 ] && [ "$(beacon_field buildkit_db_bytes)" = 4321 ] \
+  && ok "T18: the pressure deferral carries buildkit_db_bytes" || bad "T18: deferral (pressure_defer '$(beacon_field pressure_defer)', buildkit_db_bytes '$(beacon_field buildkit_db_bytes)')"
+rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" run_case 1 50
+[ "$(beacon_field buildkit_db_bytes)" = 0 ] && ok "T18: no cache.db -> 0, not a missing line" || bad "T18: no cache.db (got '$(beacon_field buildkit_db_bytes)')"
+rm -f "$BKF"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi
