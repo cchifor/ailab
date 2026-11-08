@@ -25,16 +25,20 @@ metadata:
 spec:
   interval: 1h
   timeout: 15m
-  # Auto-retry a failed upgrade instead of wedging in UpgradeFailed (which also drags `apps` Ready=False
-  # via its health check). Added after a failed migration cutover left the release stuck until a manual
-  # generation bump (2026-07-22).
+  # Retry a failed upgrade, never roll it back. Every Gitea version bump runs forward-only database migrations,
+  # and a rolled-back (older) Gitea refuses to start on a migrated database ("Your database ... is for a newer
+  # Gitea"), so the default RemediateOnFailure (rollback) would turn a slow or failed upgrade into a down forge.
+  # RetryOnFailure re-runs the upgrade on retryInterval, which also avoids the 2026-07-22 wedge in UpgradeFailed
+  # that `remediation.retries` was added for. Recovery from a bad version is fix-forward, or the documented DB
+  # restore in docs/runbooks/gitea-upgrade.md (2026-11-08, Gitea 1.27.3).
   upgrade:
-    remediation:
-      retries: 3
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 10m
   chart:
     spec:
       chart: gitea
-      version: "12.6.0"
+      version: "12.7.0"
       sourceRef:
         kind: HelmRepository
         name: gitea
@@ -48,6 +52,9 @@ spec:
       type: Recreate
     image:
       rootless: true
+      # Pinned above the chart's appVersion (12.7.0 ships 1.27.0, which has GHSA-rcr6-4jqh-j84m; fixed in 1.27.1).
+      # The chart appends "-rootless". 1.27.3 fixes GHSA-w5pg-649r-p6gg (stale approvals across PR retargeting).
+      tag: "1.27.3"
     # Lean single-instance: no HA subcharts. Gitea falls back to its own defaults (memory cache/
     # session, leveldb queue) set explicitly under gitea.config below.
     postgresql-ha: { enabled: false }
