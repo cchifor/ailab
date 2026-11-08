@@ -10,6 +10,158 @@
     "upstream_manifests": {
       "kubevirt-operator.yaml": "9ac45a436c49d32e6fc21d542bcb7600b970705297b9e6752f3ef9b0a1d292da",
       "kubevirt-cr.yaml": "43106136dbce3312bdbfdeae612aacafc6c12da518d233f90645b4685d84a2af"
+    },
+    "spike_bundle": {
+      "_comment": "Inputs for scripts/relay-kubevirt-spike.py. Tag->index digests were read anonymously from quay.io on 2026-11-08 (tag API, and for virt-operator also the registry Docker-Content-Digest header plus the body SHA-256); `verify-image-pins` re-checks every tag/digest pair. A tag is never trusted as immutable: only the digest is rendered. Selection only, not qualification.",
+      "checked_at": "2026-11-08",
+      "sources": [
+        {
+          "file": "kubevirt-operator-v1.9.1.yaml",
+          "url": "https://github.com/kubevirt/kubevirt/releases/download/v1.9.1/kubevirt-operator.yaml",
+          "sha256": "9ac45a436c49d32e6fc21d542bcb7600b970705297b9e6752f3ef9b0a1d292da"
+        },
+        {
+          "file": "kubevirt-cr-v1.9.1.yaml",
+          "url": "https://github.com/kubevirt/kubevirt/releases/download/v1.9.1/kubevirt-cr.yaml",
+          "sha256": "43106136dbce3312bdbfdeae612aacafc6c12da518d233f90645b4685d84a2af"
+        },
+        {
+          "file": "kubevirt-config.go",
+          "url": "https://raw.githubusercontent.com/kubevirt/kubevirt/v1.9.1/pkg/virt-operator/util/config.go",
+          "sha256": "72eb70ca147f7c0219a1defe07278358008b5189da0cfab2017b23053dee889f"
+        },
+        {
+          "file": "kubevirt-deployments.go",
+          "url": "https://raw.githubusercontent.com/kubevirt/kubevirt/v1.9.1/pkg/virt-operator/resource/generate/components/deployments.go",
+          "sha256": "8e90a211574f9d245cfbe4b6517037bce8fada857b2837acb298df07ffdf5c9d"
+        },
+        {
+          "file": "kubevirt-daemonsets.go",
+          "url": "https://raw.githubusercontent.com/kubevirt/kubevirt/v1.9.1/pkg/virt-operator/resource/generate/components/daemonsets.go",
+          "sha256": "5ce53993713f2e980aa297a30671e346479cf6a6b68b56fc89fd2a075e9ae196"
+        }
+      ],
+      "source_facts": {
+        "_comment": "Facts read from v1.9.1 source at the tag (hashes of the files read). They justify render choices; they are not runtime evidence.",
+        "virt_template_bundle": {
+          "url": "https://raw.githubusercontent.com/kubevirt/kubevirt/v1.9.1/pkg/virt-operator/resource/generate/components/data/virt-template/install-virt-operator.yaml",
+          "sha256": "b752d20e00ed0f8d85693cb9f136a6cfb509fc869d4ff56a3e524e96ecebe4a2",
+          "images_tag": "v0.2.3"
+        },
+        "feature_gates": {
+          "url": "https://raw.githubusercontent.com/kubevirt/kubevirt/v1.9.1/pkg/virt-config/featuregate/active.go",
+          "sha256": "1e4b3dec840c86b29df562f7c831fec5d09dee1dcf38534038d43f4867c4a335",
+          "note": "Template, Snapshot, ImageVolume and DeclarativeHotplugVolumes are Beta (on by default, feature-gates.go IsEnabled); the spike CR disables them explicitly."
+        },
+        "non_root_uid": {
+          "url": "https://raw.githubusercontent.com/kubevirt/kubevirt/v1.9.1/pkg/util/util.go",
+          "sha256": "32483b81cb395d0fcdd9432957f8b97f2358348eafc21a1d588d4af574521399",
+          "value": 107
+        },
+        "launcher_base_rpms": {
+          "url": "https://raw.githubusercontent.com/kubevirt/kubevirt/v1.9.1/rpm/BUILD.bazel",
+          "sha256": "fdd19eb10272428cbc19941e203cc4dbbfed819ce8805ac602f983ce20148828",
+          "note": "launcherbase_x86_64 (cs9 and cs10) includes qemu-img, bash and coreutils-single; the prep Job reuses the pinned launcher image for qemu-img."
+        }
+      },
+      "components": [
+        {
+          "env": "VIRT_OPERATOR_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-operator:v1.9.1",
+          "image": "quay.io/kubevirt/virt-operator@sha256:a8adf7b772e9ce0bf7e2ce889910fc41ebadf552c9dbe843e9b86641e34f5df9"
+        },
+        {
+          "env": "VIRT_API_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-api:v1.9.1",
+          "image": "quay.io/kubevirt/virt-api@sha256:d341c751dbe632d183989cce78203a888293e0e2a32719f32461bd6273322485"
+        },
+        {
+          "env": "VIRT_CONTROLLER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-controller:v1.9.1",
+          "image": "quay.io/kubevirt/virt-controller@sha256:75c94c787eec15458729848e00fe0b421ca8998c6219de8c2d3cae72ff0bd287"
+        },
+        {
+          "env": "VIRT_HANDLER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-handler:v1.9.1",
+          "image": "quay.io/kubevirt/virt-handler@sha256:c23b635ea4aff7f0779c6c061c431da0469c7796255e6de90a5970236b5ea61b"
+        },
+        {
+          "env": "VIRT_LAUNCHER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-launcher:v1.9.1",
+          "image": "quay.io/kubevirt/virt-launcher@sha256:53e6d12197761cda653201f82e295ac6098d689a58bc2c68df0970c248d61fa6"
+        },
+        {
+          "env": "VIRT_EXPORTPROXY_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-exportproxy:v1.9.1",
+          "image": "quay.io/kubevirt/virt-exportproxy@sha256:fe9a0a297e7b407c3a322c6f5fccba5313c668907c30cb0b80b8c51bcdea640a"
+        },
+        {
+          "env": "VIRT_EXPORTSERVER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-exportserver:v1.9.1",
+          "image": "quay.io/kubevirt/virt-exportserver@sha256:76c01dca74921eb5fd74d00b82e77a60d58e8213c72d84cc66a3bc92679690b8"
+        },
+        {
+          "env": "VIRT_SYNCHRONIZATIONCONTROLLER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-synchronization-controller:v1.9.1",
+          "image": "quay.io/kubevirt/virt-synchronization-controller@sha256:5f3da789a7b7a4febb1ece9f4a085ceb73aabcd468af84563ea7b6809341eb10"
+        },
+        {
+          "env": "GS_IMAGE",
+          "tag_checked": "quay.io/kubevirt/libguestfs-tools:v1.9.1",
+          "image": "quay.io/kubevirt/libguestfs-tools@sha256:08df144de2a77ad8259f93df3dca7e13e73669651ce8fbe63f58c23e4fdd6427"
+        },
+        {
+          "env": "PR_HELPER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/pr-helper:v1.9.1",
+          "image": "quay.io/kubevirt/pr-helper@sha256:c7724681efa3297091d0ce0edf4fda52c062455fb83b76484499a46ae261f61d"
+        },
+        {
+          "env": "SIDECAR_SHIM_IMAGE",
+          "tag_checked": "quay.io/kubevirt/sidecar-shim:v1.9.1",
+          "image": "quay.io/kubevirt/sidecar-shim@sha256:d48c6af64305c28de7e9a5509a11737b115cc0193f57f2a0f42faff85bebe5cd"
+        },
+        {
+          "env": "VIRT_TEMPLATE_APISERVER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-template-apiserver:v0.2.3",
+          "image": "quay.io/kubevirt/virt-template-apiserver@sha256:27defde24b4a4705d6096a86d134df0dc324243b56be8f0c057e1882c6da338b"
+        },
+        {
+          "env": "VIRT_TEMPLATE_CONTROLLER_IMAGE",
+          "tag_checked": "quay.io/kubevirt/virt-template-controller:v0.2.3",
+          "image": "quay.io/kubevirt/virt-template-controller@sha256:b45ac55de5fc9dbbee14974b45718c41eaed4d4979f92677dab3500598e33d22"
+        }
+      ],
+      "launcher_amd64": {
+        "manifest_digest": "sha256:807e2c479294be3b042c4b1d4246884119197c229204df24c0253d50273640bd",
+        "config_digest": "sha256:07ca9ca5751c3e6840d1338e61d518c269145f524e89baf3acc0b9f122818398",
+        "config_user": "107",
+        "compressed_layers_bytes": 547358850
+      },
+      "operator_amd64_manifest_digest": "sha256:fd4494766f0bde747c4dc6b208eac27119d81f7d94fa0612e0d365f6dca0fc53",
+      "virtctl": {
+        "linux-amd64": {
+          "url": "https://github.com/kubevirt/kubevirt/releases/download/v1.9.1/virtctl-v1.9.1-linux-amd64",
+          "sha256": "c289393c8186a258653594605f5199b4c171a3131e6e409ed204a96b491b782a"
+        },
+        "windows-amd64": {
+          "url": "https://github.com/kubevirt/kubevirt/releases/download/v1.9.1/virtctl-v1.9.1-windows-amd64.exe",
+          "sha256": "61b4973367501bb92f9832385bdb725bc603e58630772c4eba3a5fa92a31f4c8"
+        }
+      },
+      "guest_candidate": {
+        "_comment": "CANDIDATE root containerDisk. Expanded size and virtual size are NOT recorded here: the operator measures them with `measure-guest-image` and the workload render refuses without that evidence.",
+        "image": "quay.io/containerdisks/ubuntu@sha256:ea164c514b308286bdc179b403298efd2d8ae549af518a82a029e1bbb027f3a4",
+        "tag_checked": "quay.io/containerdisks/ubuntu:24.04",
+        "amd64_manifest_digest": "sha256:2b5ff51129962719239c359bf721bfe99757cb49884447f1b49b2e585d9e6ddf",
+        "amd64_layer": {
+          "digest": "sha256:73778055eb35b7e82968fd27238f2b500124c5b076f428cb192777f4a0fb440f",
+          "compressed_bytes": 619459050
+        }
+      },
+      "compose_smoke_image": {
+        "image": "quay.io/prometheus/busybox@sha256:c78ea71d5da0a24559fdc3a5eb49c04223e28dd6c6570c754395326f66d50728",
+        "tag_checked": "quay.io/prometheus/busybox:glibc"
+      }
     }
   },
   "talos": {

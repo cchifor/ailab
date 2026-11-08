@@ -165,6 +165,96 @@ same pins.
   - live migration
   - console or VNC as a readiness signal
 
+### Spike bundle: dry render vs apply
+
+`scripts/relay-kubevirt-spike.py` (package `scripts/relay_kubevirt_spike/`, tests
+`scripts/tests/test_relay_kubevirt_spike_*.py`) renders the operator-run spike artifacts from the
+pins in `docs/relay-workers/runtime-pins.json` (`kubevirt.spike_bundle`). It is a **dry renderer
+only**: it never contacts the cluster and is not the Relay production KubeVirt renderer, which stays
+unbuilt until S1–S9 pass. Every `kubectl` below is an operator action on `admin@ai` and is **pending**.
+
+**Render (anyone; no credentials).** Keep upstream downloads outside git, under
+`$EVIDENCE_DIR/public-pins/` (the local test cache `.data/public-pins/` is not tracked).
+Re-fetch them from the URLs in `spike_bundle.sources` if they are missing. The render refuses any
+SHA-256 change, any resource outside the reviewed list, any tag-only component and any placement
+outside the dedicated pool.
+
+```bash
+: "${EVIDENCE_DIR:?}"; B="$EVIDENCE_DIR/kv-spike-bundle"
+python3 scripts/relay-kubevirt-spike.py verify-image-pins           # read-only HTTPS; exit 1 if any tag moved
+python3 scripts/relay-kubevirt-spike.py render-operator --source-dir "$EVIDENCE_DIR/public-pins" --out-dir "$B"
+```
+
+What the render changes, all recorded in `bundle-metadata.json`:
+- The virt-operator image **and** `VIRT_OPERATOR_IMAGE` are pinned by digest. So is every child
+  image env that v1.9.1 `util/config.go` reads: api, controller, handler, launcher, exportproxy,
+  exportserver, synchronization-controller, libguestfs, pr-helper, sidecar-shim and the two
+  virt-template images. Unset envs would make the operator derive mutable `:v1.9.1` tags.
+- The operator pod and KubeVirt `spec.infra`/`spec.workloads` select
+  `ailab.io/relay-worker-pool=true`, tolerate only `dedicated=relay-worker:NoSchedule`, and require
+  `DoesNotExist` on agent-pool/control-plane/master labels.
+- Replicas go from 2 to 1, operator and infra alike, because there is a single dedicated node.
+- The Beta gates `Template`, `Snapshot`, `ImageVolume` and `DeclarativeHotplugVolumes` are
+  disabled, and `evictionStrategy: None` is set.
+- The upstream CRD, PriorityClass, ClusterRoles and ClusterRoleBinding are kept **unchanged**.
+  virt-operator manages cluster-scoped CRDs, webhooks, APIServices and component RBAC, so this
+  is **not** a namespaced install. Review those rights as upstream ships them. The `kubevirt`
+  namespace keeps upstream's PSA `privileged` label, because virt-handler is privileged.
+
+**Guest evidence before S2 (operator).** `render-workload` refuses without nonsecret evidence that
+is fresh (≤14 days), not in the future, and names the pinned guest and launcher images and a
+non-root launcher UID. The copied base image plus the root disk's full virtual size
+must fit in 30 GiB − 20 GiB cache − 1 GiB reserve; both can occupy disk concurrently.
+1. `python3 scripts/relay-kubevirt-spike.py evidence-template > "$EVIDENCE_DIR/guest-evidence.json"`.
+2. On the operator workstation, outside git and never on a dev-worker's OS disk, download the
+   single amd64 layer blob named in `guest_candidate.amd64_layer` (about 620 MB). Then run
+   `measure-guest-layer --blob <file>`. It checks the blob's SHA-256 and reports the expanded tar
+   bytes and the qcow2 virtual size from the header. Copy those values into the evidence and
+   delete the blob.
+3. `launcher_uid`: the launcher's OCI config `User` is `107` (`spike_bundle.launcher_amd64`,
+   matching `NonRootUID` in `pkg/util/util.go`). Record it with source `oci-config-user`, then
+   confirm it against the first launcher pod's `securityContext` in S2.
+
+**Workload render, then apply (operator).**
+```bash
+python3 scripts/relay-kubevirt-spike.py render-workload --evidence "$EVIDENCE_DIR/guest-evidence.json" --out-dir "$B"
+sha256sum "$B"/*                                                   # record in the evidence record
+# --- APPLY BOUNDARY: everything below writes to admin@ai ---
+kubectl --context admin@ai apply --server-side -f "$B/10-operator.yaml"
+kubectl --context admin@ai -n kubevirt rollout status deploy/virt-operator --timeout=300s
+kubectl --context admin@ai apply --server-side -f "$B/20-kubevirt-cr.yaml"
+kubectl --context admin@ai -n kubevirt wait kv/kubevirt --for=condition=Available --timeout=900s   # S1
+kubectl --context admin@ai -n kubevirt get pods -o wide             # every pod on relay-worker-1 only
+kubectl --context admin@ai apply --server-side -f "$B/30-workload.yaml"
+kubectl --context admin@ai -n relay-kv-spike wait job/kv-spike-1-prep --for=condition=Complete --timeout=600s
+kubectl --context admin@ai -n relay-kv-spike logs job/kv-spike-1-prep > "$EVIDENCE_DIR/s2-prep.log"  # qemu-img info + uid
+kubectl --context admin@ai -n relay-kv-spike delete job/kv-spike-1-prep --wait=true
+virtctl --context admin@ai -n relay-kv-spike start kv-spike-1      # virtctl v1.9.1, SHA-256 in spike_bundle.virtctl
+kubectl --context admin@ai -n relay-kv-spike wait vmi/kv-spike-1 --for=condition=Ready --timeout=1200s
+```
+The VM starts `Halted`. VMI `Ready` comes from the in-guest exec probe
+(`/usr/local/sbin/relay-spike-ready`), which needs qemu-guest-agent and also checks that both
+virtio disks are mounted, that `docker compose` is running the pinned smoke container, and that it
+wrote to the workspace. `Running` alone is not readiness. The guest recipe (cloud-init) installs
+`qemu-guest-agent`, `docker.io` and `docker-compose-v2` from Ubuntu archives at first boot. That is
+why the reviewed egress allows only the Ubuntu archives and quay.io on 80/443, plus kube-dns. The
+estate LAN `192.168.0.0/23`, RFC 1918 172.16/12 and the tailnet CGNAT range stay denied, even
+through those FQDNs. If the packages cannot install, readiness never passes, and S2 records
+`fail`, not success. A NetworkPolicy also denies all ingress and all other egress for the namespace.
+
+Evidence paths, all under `$EVIDENCE_DIR`, with SHA-256 recorded:
+- `kv-spike-bundle/*`
+- `guest-evidence.json`
+- `s1-*`, `s2-prep.log`, `s2-launcher-pod.json`, then `s3-*` through `s9-*`, one per step
+- `qwen-stop-restore.txt`: stop/restore times and health for LXC 5003 `llama-swap-qwen38`, S7/S8
+
+Cleanup is the K5 owner's job, per S9 below. Delete in reverse order, and do not remove finalizers:
+`kubectl --context admin@ai delete -f "$B/30-workload.yaml" --wait=true`. Keep KubeVirt for a
+reviewed Flux adoption, or remove it by deleting `20-kubevirt-cr.yaml`, waiting until the
+`kubevirt` namespace pods are gone, and then deleting `10-operator.yaml`. This bundle runs none of
+the S3–S9 measurements, the eight-hour soak or headroom checks. Those remain operator steps with
+their own evidence.
+
 **Steps.** Record each step's outcome as `pass`, `fail` or `not-run`, with timestamps.
 
 1. **S1, install.** Apply the K1 manifests by digest. Wait for the KubeVirt CR to reach `Deployed`.
