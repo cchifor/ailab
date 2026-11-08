@@ -104,6 +104,8 @@ is minted, the token lives for seconds, and `GiteaOwnerTokenStanding` fires if a
 - **Posting `approve-pin <head sha>`** on a platform PR whose `CI / owner-ack` check is red, then re-running it.
   `dev-worker-bot` may also acknowledge (see the identities table); the owner automation does it when the
   owner-ack rules in platform `docs/runbooks/owner-ack.md` say the worker must hold.
+- **Other owner-only calls**: repository settings, collaborators (Renovate onboarding), topics, branch
+  protection. They run from an ops file through `scripts/gitea-owner-op.sh` (§ "Other owner operations" below).
 
 ### The procedure: `scripts/gitea-owner-merge.sh`
 
@@ -207,9 +209,53 @@ and the controller verifies AG1a itself). Changes made because of it:
 - the tests prove that `kubectl`, `curl` and `git` resolve to fakes before every run, and abort otherwise;
 - the rule above: the script is never "tested" against the live forge.
 
-**Other owner operations** (branch-protection edits, the re-apply in `s2s-identity.md` § "Re-apply
-procedure") follow the same pattern: gate first, then mint, use once, delete, and prove the 401. That block
-still reads `$OWNER_TOKEN` from the environment; rewriting it onto this pattern is open B8 work.
+### Other owner operations: `scripts/gitea-owner-op.sh`
+
+Owner-only calls that are not a merge (repository settings, collaborators, topics, branch-protection edits) run
+from an ops file, on the same pattern: validate first, then mint, use once, delete, and prove the 401.
+
+```bash
+scripts/gitea-owner-op.sh scripts/owner-ops/renovate-onboard.ops --var REPO=relay             # dry run
+scripts/gitea-owner-op.sh scripts/owner-ops/renovate-onboard.ops --var REPO=relay --execute
+```
+
+An ops file holds one call per line, `METHOD PATH BODY_FILE|- EXPECTED_CODES` (a comma list), run in order, with
+`#` comments. A `# scopes: write:repository[,...]` line before the first call is required and sets the token's
+scopes: Gitea's scope names, the smallest set (`all`, a duplicate, and `read:X` next to `write:X` are refused).
+`${NAME}` in a path or a body file is filled from `--var NAME=VALUE`, and `VALUE` must match `^[A-Za-z0-9._-]+$`.
+Body files are JSON, relative to the ops file's directory.
+
+- **It is a dry run unless `--execute` is given.** The dry run validates everything and prints the plan: each
+  call, its body file and top-level keys, the token's name and scopes. It never calls kubectl or curl.
+- Bad input exits 2 before any call: an unknown method, a path outside `gitea-api.sh`'s character set or with
+  `//` or `..`, an unreplaced `${NAME}`, an unused `--var` or a bad value, a missing or unknown scope, or a body
+  that is not valid JSON after the substitution.
+- With `--execute` it mints one token (`owner-op-<ops file>-<var values>-<utc>-<8 random hex>`; the random part
+  keeps two runs in one second from sharing a name) in the Gitea pod and sends each call with the token only on
+  curl's stdin. Each call is bounded (10 s to connect, 60 s in all), so a stalled server cannot hold the token, and
+  every kubectl call runs under coreutils `timeout` (60 s; it refuses to mint without a working one). A mint that
+  times out has an unknown outcome: the token is deleted by name and the run exits 5, so check the delete. It
+  stops at the first status the line does not expect, prints that status and the first 300 bytes of the body
+  (never the token), and makes no further call. Responses stay in a private temp directory that is removed on exit.
+- Revocation is the same trap as in `gitea-owner-merge.sh`: delete by name on the infra-pg primary (looked up
+  again at revocation, in case of a failover), prove the 401, and list the tokens `chifor` still holds.
+
+Exit 0: every call answered as expected (in a dry run: the ops file is valid). 2: bad input, nothing called. 4:
+the mint or a call failed, and the token was deleted. 5: the deletion was not confirmed. The script prints the
+exact `delete from access_token ...` statement: run it on the infra-pg primary now, as for `gitea-owner-merge.sh`.
+
+The rules above apply here too. Never run it against the live forge to test it:
+`scripts/tests/test_gitea_owner_op.py` runs it against fakes and aborts unless `kubectl` and `curl` resolve to
+them. Never mint a token by hand for a call an ops file can make.
+
+| Preset in `scripts/owner-ops/` | What it does | Scopes |
+| --- | --- | --- |
+| `renovate-onboard.ops`, with `--var REPO=<repository>` | **Onboards a repository for Renovate**: `renovate-bot` becomes a `write` collaborator (204), and the repository gets the `renovate` topic (204). Both need repository admin. With the repository's own `renovate.json`, that is the whole onboarding: Renovate discovers repositories by the `renovate` topic (`kubernetes/apps/apps/renovate/config-configmap.yaml`), and a repository generated from `cchifor/repository-template` already carries it. | `write:repository` |
+| `repository-template-settings.ops` | The IaC record of `cchifor/repository-template`'s settings as applied on 2026-11-08: a public template, squash merges only, the branch deleted after the merge. One `PATCH` (200); re-run it to restore them. Its branch protection is recorded in that repository's `.gitea/branch-protection.json`, not here. | `write:repository` |
+
+The re-apply in `s2s-identity.md` § "Re-apply procedure" is not an ops file yet: it reads the live rule and
+merges the documented patterns into it, which a fixed body cannot do. That block still reads `$OWNER_TOKEN` from
+the environment; moving it onto this pattern is open B8 work.
 
 ## Break-glass (B0)
 

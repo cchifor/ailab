@@ -1,0 +1,11 @@
+{
+  "template": true,
+  "private": false,
+  "default_merge_style": "squash",
+  "allow_merge_commits": false,
+  "allow_rebase": false,
+  "allow_rebase_explicit": false,
+  "allow_fast_forward_only_merge": false,
+  "allow_squash_merge": true,
+  "default_delete_branch_after_merge": true
+}
