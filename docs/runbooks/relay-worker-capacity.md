@@ -50,16 +50,31 @@ conflict before changing either side. Do not reuse another static address.
    tofu -chdir=kubernetes/infra/agent-nodes show relay-worker.tfplan
    ```
 
-   The plan must add only the Relay VM, its machine-config apply, label/taint and RuntimeClass.
+   The plan must add only the Relay VM, its machine-config apply and RuntimeClass.
+   Talos owns the Node labels and taint; there are no competing Kubernetes Node PATCH resources.
    No existing VM, machine config, PKI, pool or node is changed or removed. A dev-worker cannot
    validate this against live state. After reviewing the nonsecret summary, the operator applies
    the saved plan. Keep plan/state files outside git; they contain sensitive configuration.
-7. Verify the actual hostname is `relay-worker-1`, the dedicated label/taint are present and
+7. Wait for initial registration and readiness with a bounded operator check:
+   `kubectl wait --for=condition=Ready node/relay-worker-1 --timeout=300s`. If the Node is not yet
+   registered, retry this read-only check within a total five-minute registration window; stop
+   and inspect Talos if either bound expires. The RuntimeClass can exist before registration
+   because its selector admits no node without the exact dedicated labels.
+   Verify the actual hostname is `relay-worker-1`, the dedicated label/taint are present and
    no agent-pool label exists. Verify qemu-guest-agent and gVisor extensions, KVM availability,
    `user.max_user_namespaces`, disk size, Cilium readiness, and absence of protected workloads.
    Run the collector with the updated binding. Any mismatch stops the rollout.
 8. Execute the separately bounded KubeVirt spike and pod qualification. A Ready Talos node or a
    created RuntimeClass does not qualify a runtime. No Relay worker admission is enabled here.
+
+The gateway reconciler is a manual operator CLI: repository search found only the `justfile`
+recipes and documentation, with no scheduled task, Ansible hook, Flux object or CI invocation
+that applies it (CI runs offline tests). A merge changes desired state, not the controller.
+Until the lease and edge checks above are recorded, unrelated gateway work must explicitly
+use `--only dns` or `--only forward`; an unfiltered plan includes the pending DHCP transition.
+Apply always requires the recomputed exact plan hash, and live active-client checks run both
+when planning and immediately before the DHCP write. Do not use `--ack-dhcp-leases` for this
+reservation. Record the lease and edge evidence in this PR before the dedicated DHCP apply.
 
 ## Image and version selection
 

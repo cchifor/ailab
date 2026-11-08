@@ -109,7 +109,10 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.g = gateway.load_gateway()
         # Keep the existing scenarios against the measured 2026-10-27 baseline;
-        # the new committed desired-state transition is tested separately below.
+        # these historical ownership scenarios intentionally keep the then-desired
+        # range aligned with base_inventory(), regardless of future reservations.
+        # test_relay_reservation_moves_only_the_dhcp_start separately loads the
+        # committed desired state and verifies its transition from this baseline.
         self.g["lan"]["dhcp_start"] = "192.168.0.52"
         self.reg = render.load()
         for h in self.reg["hosts"].values():

@@ -98,7 +98,7 @@ class RepoDerivedState(unittest.TestCase):
     def test_gvisor_on_agent_pool_rejected(self):
         self.assertEqual(status(self.r, "runtimeclass.gvisor"), "fail")
 
-    def test_kubevirt_absent_and_unpinned(self):
+    def test_kubevirt_absent_with_selected_candidate_pin(self):
         self.assertEqual(status(self.r, "kubevirt.installed"), "fail")
         self.assertEqual(status(self.r, "kubevirt.pin"), "pass")
 
@@ -239,7 +239,7 @@ class Unknown(unittest.TestCase):
         s = {"schema": rwp.SNAPSHOT_SCHEMA, "context": "admin@ai", "context_exists": False,
              "api_server": None, "queries": {}}
         r = rwp.evaluate(s, BIND)
-        self.assertNotIn("pass", {c["status"] for c in r["checks"] if c["id"] != "kubevirt.pin"})
+        self.assertTrue(all(c["source"] == "binding" for c in r["checks"] if c["status"] == "pass"))
         self.assertEqual(status(r, "placement.dedicated_pool"), "unknown")
         self.assertEqual(status(r, "kubevirt.installed"), "unknown")
 
@@ -363,7 +363,7 @@ class ReviewRegressions(unittest.TestCase):
             snap = rwp.collect("admin@ai", run=boom)
             self.assertFalse(snap["context_exists"])
             self.assertEqual(snap["queries"], {})
-            self.assertNotIn("pass", {c["status"] for c in rwp.evaluate(snap, BIND)["checks"] if c["id"] != "kubevirt.pin"})
+            self.assertTrue(all(c["source"] == "binding" for c in rwp.evaluate(snap, BIND)["checks"] if c["status"] == "pass"))
 
     def test_non_url_server_output_dropped(self):
         class R(FakeRun):

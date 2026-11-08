@@ -97,30 +97,10 @@ resource "talos_machine_configuration_apply" "relay_worker" {
   depends_on                  = [proxmox_virtual_environment_vm.relay_worker]
 }
 
-resource "kubernetes_labels" "relay_worker_pool" {
-  for_each    = var.relay_worker_nodes
-  api_version = "v1"
-  kind        = "Node"
-  metadata { name = each.key }
-  labels = {
-    "ailab.io/relay-worker-pool" = "true"
-    "ailab.io/runtime-gvisor"    = "true"
-  }
-  depends_on = [talos_machine_configuration_apply.relay_worker]
-}
-
-resource "kubernetes_node_taint" "relay_worker" {
-  for_each = var.relay_worker_nodes
-  metadata { name = each.key }
-  taint {
-    key    = "dedicated"
-    value  = "relay-worker"
-    effect = "NoSchedule"
-  }
-  field_manager = "relay-workers-tofu"
-  force         = true
-  depends_on    = [talos_machine_configuration_apply.relay_worker]
-}
+# Talos alone owns labels and taints through machine.nodeLabels/nodeTaints.
+# Its config apply can finish before Kubernetes Node registration. Do not add
+# Node PATCH resources here: they race initial registration and duplicate
+# ownership. Readiness and exact placement are verified in the rollout runbook.
 
 output "relay_worker_vms" {
   description = "Dedicated Relay worker capacity; runtime qualification is independent."
@@ -156,5 +136,5 @@ resource "kubernetes_manifest" "relay_gvisor" {
       }]
     }
   }
-  depends_on = [kubernetes_labels.relay_worker_pool, kubernetes_node_taint.relay_worker]
+  depends_on = [talos_machine_configuration_apply.relay_worker]
 }

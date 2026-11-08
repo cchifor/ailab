@@ -1,7 +1,7 @@
 {
   "_generated": "by scripts/edge/render.py from kubernetes/edge/hostnames.yaml; do not edit, run `just edge-render`",
-  "registry_sha256": "a2d75155f4694d56f9bcf5a609ecad329f40a352089b61db32c1f7b733179e5d",
-  "binding_sha256": "dd8c67a5856c737f83bb2f734be2a744478d548d54556edcd34848e095dfc897",
+  "registry_sha256": "f88e4324236077f0f55134a41ebc94bf55d31d8c5b099ac8021e230e59daf0c1",
+  "binding_sha256": "a87754ee62b6bcba2855afafa6f94b7e772d48b08ae4b4c3413fcadb3eb1900e",
   "zone": "chifor.me",
   "tunnel_id": "f93d9a6a-5172-43d3-8bef-13460ea7607b",
   "vip": "192.168.0.51",

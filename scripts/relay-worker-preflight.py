@@ -224,8 +224,8 @@ def collect(context: str, kubeconfig: str | None = None, run=_run) -> dict:
 
 
 # ---------------------------------------------------------------------------- evaluation
-def _check(cid: str, status: str, detail: str, **extra) -> dict:
-    return {"id": cid, "status": status, "detail": detail, **extra}
+def _check(cid: str, status: str, detail: str, source: str = "cluster", **extra) -> dict:
+    return {"id": cid, "status": status, "detail": detail, "source": source, **extra}
 
 
 def _q(snap: dict, name: str):
@@ -594,9 +594,9 @@ def check_kubevirt(snap: dict, b: dict, chosen: list[dict]) -> list[dict]:
     if not pins.get("kubevirt_version") or not SHA256_DIGEST.fullmatch(
             str(pins.get("kubevirt_operator_digest") or "")):
         out.append(_check("kubevirt.pin", UNKNOWN, "no KubeVirt version + operator digest selected "
-                          "(operator prerequisite K1 in the feasibility runbook)"))
+                          "(operator prerequisite K1 in the feasibility runbook)", source="binding"))
     else:
-        out.append(_check("kubevirt.pin", PASS, pins["kubevirt_version"]))
+        out.append(_check("kubevirt.pin", PASS, pins["kubevirt_version"], source="binding"))
     st, _ = _q(snap, "kubevirt_crd")
     if st == "notfound":
         out.append(_check("kubevirt.installed", FAIL, "virtualmachines.kubevirt.io CRD absent"))
