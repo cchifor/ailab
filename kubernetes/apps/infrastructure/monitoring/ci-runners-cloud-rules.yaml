@@ -103,6 +103,17 @@ spec:
             description: >-
               Builds on {{ $labels.nodename }} that reuse the record fail at finalize, whatever the PR.
               See CIRunnerBuildkitDanglingRecord and docs/runbooks/ci-runners.md, Troubleshooting.
+        # Same rule as CIRunnerBuildkitDbLarge. No host gate: the series only exists while the runner
+        # is scraped.
+        - alert: CloudCIRunnerBuildkitDbLarge
+          expr: gitea_runner_cleanup_buildkit_db_bytes{job="ci-runner-cloud"} > 8e9
+          for: 6h
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} BuildKit cache.db is {{ $value | humanize1024 }}B"
+            description: >-
+              See CIRunnerBuildkitDbLarge and docs/runbooks/ci-runners.md, Troubleshooting, "BuildKit
+              cache.db".
         - alert: CloudCIRunnerBuildkitHealRunnerHeld
           expr: gitea_runner_buildkit_runner_held{job="ci-runner-cloud"} == 1
           for: 30m

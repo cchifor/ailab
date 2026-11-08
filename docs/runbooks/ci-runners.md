@@ -172,6 +172,34 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   failed. The routine windowed prunes take one busy read, so a false idle between steps can still let them
   run during a job. Tunables: `defaults/main.yml` `gitea_runner_cleanup_*` (the source of truth for every
   number above).
+- **Cargo target sweep** (section 6 of the same script, 2026-11-08). workbricks CI keeps
+  `CARGO_TARGET_DIR` in the runner's home (`~/.cache/workbricks-ci/<event>/target` and `target-verify`) and
+  nothing pruned it. By 2026-11-08 that was 61-84 GB on every runner, over half of it unread for 3 days,
+  and the disk-pressure alerts fired on five runners.
+  - **What it touches.** Only Cargo target dirs, at most 4 levels below `/home/runner/.cache`.
+    - A Cargo target dir is one with a `.rustc_info.json` at its root: Cargo writes one into every
+      target dir it uses.
+    - Not `CACHEDIR.TAG`: uv writes one too, and Cargo writes it only into a dir it created itself.
+      workbricks' `target-verify` is made with `mkdir -p` first, so it has none.
+    - Never a toolchain, `CARGO_HOME`, or a module or package cache.
+    - Both marker files are always kept.
+    - Only on a mount that keeps atime. A root on a `noatime` mount, or one whose options cannot be read,
+      is skipped and logged: there, every old file looks unread. All runners are `relatime` (checked
+      2026-11-08).
+  - **What goes.** At **≥75%** disk, the files no build has read for **72h**; at **≥92%**, for **24h**.
+    Then empty dirs older than the same window. Cargo rebuilds whatever is missing (verified on 1.86), so
+    the cost is a rebuild. atime lags a read by up to 24h on these relatime disks, so a file read in the
+    last 48h is never removed at the default.
+  - **Why it is race-free.** It runs only in a confirmed gap, never on the mid-job path, and only when at
+    least 1 GB would go. The runner is held the way the heal holds it: `runner_held` is written first,
+    then the runner is stopped with its drain, then the files are deleted, then it is started again.
+    `CIRunnerBuildkitHealRunnerHeld` covers a start that never comes.
+  - **What it reports.**
+    - `target_dirs`, counted on every tick, so a new persistent cache shows before it fills a disk.
+    - `target_freed_bytes`.
+    - `journalctl -t gitea-runner-cleanup | grep 'target sweep'`.
+  - **Tunables:** `gitea_runner_cleanup_target_*`.
+  - The repo should still bound its own cache. This keeps a runner alive when one does not.
 - **Bounded /tmp** (ailab#1284; live on a runner only once rolled out, see below): all jobs share one `/tmp`,
   and Ubuntu ages it only after **30 days**
   (`/usr/lib/tmpfiles.d/tmp.conf`). It reached 9-22 GB per runner (`pytest-of-runner`, `node-compile-cache`).
@@ -566,6 +594,32 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
   GitHub UI.
 
 ## Troubleshooting
+- **BuildKit cache.db** (`CIRunnerBuildkitDbLarge`, or a disk the image prunes cannot move).
+  - **What it is.** `/var/lib/docker/buildkit/cache.db` is BuildKit's solver cache-key index, a bbolt file
+    with four buckets: `_links`, `_backlinks`, `_result` and `_byresult`.
+  - **What it is not.** It does not hold the cache records. Those, and the containerd leases that keep
+    their snapshots, belong to BuildKit's cache manager, and `docker builder du` and the prunes work on
+    them.
+  - **Why it grows.** The index keeps growing, never gives space back, and `docker system df` does not
+    count it. On 2026-11-08 it was 24.6 GB on ci-runner-2 (.15), against 0.2-2.5 GB on the other runners.
+  - **Reset it in a drained window.** BuildKit creates an empty one at start. Without the index the old
+    records can no longer be matched, so the next builds are cold, but nothing is orphaned: the records
+    are still pruned as usual.
+  - **Don't compact it.** `bbolt compact` copies every link: on .15 it had written 7.6 GB after 22 minutes,
+    with docker down.
+
+  1. Wait for an idle gap. Then stop the runner with `sudo systemctl stop gitea-act-runner` (it drains), and
+     stop `gitea-runner-cleanup.timer` too. Wait for a running cleanup to end.
+  2. `sudo docker builder prune -af`. The build cache is cold after the reset anyway.
+  3. `sudo systemctl stop docker.socket docker.service`, then
+     `sudo mv /var/lib/docker/buildkit/cache.db /var/lib/docker/buildkit/cache.db.old`.
+  4. Start docker and check that BuildKit works:
+     - `docker info` and `docker builder du` answer;
+     - a two-line build (`FROM scratch` + `COPY x /x`) run twice reports `CACHED` the second time.
+  5. Delete `cache.db.old`, then start the timer and the runner.
+
+  If a check fails: stop docker, move the old file back, and start it again. On .15 the reset took 8 s,
+  and the new file was 64 KB.
 - **Every docker build on ONE runner fails at finalize with `failed to commit <id> to <id2> during
   finalize: failed to stat active key during commit: snapshot <id> does not exist: not found`, whatever
   the PR** (same job passes on a rerun that lands elsewhere): a build lost its client while BuildKit was

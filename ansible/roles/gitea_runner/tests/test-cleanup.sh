@@ -190,6 +190,14 @@ cat >"$BIN/sort" <<EOF
 exec "$REAL_SORT" "\$@"
 EOF
 
+# findmnt -no OPTIONS --target <root>: the mount options section 6 checks for atime. MOCK_MNT_OPTS
+# (default rw,relatime); MOCK_MNT_FAIL=1 = the read fails with no output.
+cat >"$BIN/findmnt" <<EOF
+#!/usr/bin/env bash
+[ "\${MOCK_MNT_FAIL:-0}" = 1 ] && exit 1
+echo "\${MOCK_MNT_OPTS:-rw,relatime}"
+EOF
+
 # logger: keep the script's log lines (the last argument) in $WORK/logger.log, so a case can assert WHICH
 # record a heal acted on, not only that one ran.
 # Shared-cache purge applier: records "cacheverify <args>" into the same call log.
@@ -238,6 +246,10 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     MOCK_PEER_BUSY_FROM="${MOCK_PEER_BUSY_FROM:-}" MOCK_MV_FAIL="${MOCK_MV_FAIL:-0}" \
     MOCK_SORT_FAIL="${MOCK_SORT_FAIL:-0}" MOCK_CACHE_AFTER="${MOCK_CACHE_AFTER:-}" \
     GITEA_CLEANUP_HEAL_STUCK_TICKS="${STUCKTICKS:-3}" \
+    GITEA_CLEANUP_TARGET_ROOTS="${TROOTS-/nonexistent/targets}" GITEA_CLEANUP_TARGET_MAXDEPTH="${TDEPTH:-4}" \
+    GITEA_CLEANUP_TARGET_KEEP_H="${TKEEP:-72}" GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H="${TKEEPCRIT:-24}" \
+    GITEA_CLEANUP_TARGET_MIN_FREE_MB="${TMINFREE:-1024}" GITEA_CLEANUP_BUILDKIT_DB="${BKDB:-/nonexistent/cache.db}" \
+    MOCK_MNT_OPTS="${MOCK_MNT_OPTS:-rw,relatime}" MOCK_MNT_FAIL="${MOCK_MNT_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
   # TERM_AT_HANG: SIGTERM the script once the mock reports it is inside the heal (case N10) — what
@@ -1067,6 +1079,147 @@ MOCK_RUNNER_STATE=inactive QUEUEFILE="$QUEUEFILE" run_case 0 50
 if grep -q 'restart --no-block gitea-act-runner' "$CALLS"; then bad "R6: a STOPPED runner must not be started for a purge"; else ok "R6: a stopped (quarantined) runner is never started for a purge"; fi
 rm -f "$QUEUEFILE"
 unset QUEUEFILE
+
+echo "[T] Cargo target sweep (section 6): stale files in Cargo target dirs only, under pressure, runner held"
+# A job that keeps CARGO_TARGET_DIR in the runner's home (workbricks, 61-84 GB per runner on 2026-11-08) is
+# never pruned by anything docker-side. Section 6 deletes files no build has READ for the keep window, only
+# in dirs with a .rustc_info.json at the root (Cargo writes one into every target dir it uses; CACHEDIR.TAG
+# is not required), only on an atime-keeping mount, and only with the runner stopped.
+TR="$WORK/troot"
+mb() { mkdir -p "$(dirname "$1")"; head -c $(( ${2:-2} * 1048576 )) /dev/zero > "$1"; }
+age() { touch -a -d "$2" "$1"; } # atime only: what the sweep reads
+mk_targets() {
+  rm -rf "$TR"
+  local t="$TR/repo-ci/pull_request/target"
+  mb "$t/CACHEDIR.TAG" 0; echo '{}' > "$t/.rustc_info.json"; age "$t/CACHEDIR.TAG" '30 days ago'
+  mb "$t/debug/deps/libold-1.rlib"; age "$t/debug/deps/libold-1.rlib" '5 days ago'
+  ln "$t/debug/deps/libold-1.rlib" "$t/debug/libold.rlib" # Cargo's uplifted copy: one inode, two names
+  # a target dir a job made with `mkdir -p` before cargo ran: no CACHEDIR.TAG, still a Cargo target dir
+  local v="$TR/repo-ci/pull_request/target-verify"
+  mkdir -p "$v"; echo '{}' > "$v/.rustc_info.json"; age "$v/.rustc_info.json" '30 days ago'
+  mb "$v/debug/deps/libv-9.rlib"; age "$v/debug/deps/libv-9.rlib" '5 days ago'
+  mb "$t/debug/deps/libfresh-2.rlib"
+  mb "$t/debug/deps/libday-3.rlib"; age "$t/debug/deps/libday-3.rlib" '30 hours ago'
+  mb "$t/debug/deps/libhalf-4.rlib"; age "$t/debug/deps/libhalf-4.rlib" '10 hours ago'
+  mkdir -p "$t/debug/emptyold" "$t/debug/emptynew"; touch -d '5 days ago' "$t/debug/emptyold"
+  # uv writes a CACHEDIR.TAG too: no .rustc_info.json, so never a target dir
+  mb "$TR/uv/CACHEDIR.TAG" 0; mb "$TR/uv/archive-v0/old.whl"; age "$TR/uv/archive-v0/old.whl" '9 days ago'
+  # a toolchain tree with no tag at all
+  mb "$TR/repo-ci/pull_request/rustup/toolchains/x/lib/old.so"; age "$TR/repo-ci/pull_request/rustup/toolchains/x/lib/old.so" '9 days ago'
+  # a target dir deeper than TARGET_MAXDEPTH (4 below the root)
+  local deep="$TR/a/b/c/d/target"
+  mb "$deep/CACHEDIR.TAG" 0; echo '{}' > "$deep/.rustc_info.json"; mb "$deep/debug/old.rlib"; age "$deep/debug/old.rlib" '9 days ago'
+}
+T="$TR/repo-ci/pull_request/target"
+gone() { [ ! -e "$1" ] && ok "$2" || bad "$2"; }
+kept() { [ -e "$1" ] && ok "$2" || bad "$2"; }
+
+# T1: idle + pressure: the stale files go, everything else stays, and the runner is stopped and started.
+mk_targets; TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T1: a file unread for 5 days is deleted"
+kept "$T/debug/deps/libfresh-2.rlib" "T1: a fresh file is kept"
+kept "$T/debug/deps/libday-3.rlib" "T1: a file unread for 30h is kept at pressure (72h window)"
+kept "$T/CACHEDIR.TAG" "T1: CACHEDIR.TAG is kept although its atime is 30 days old"
+gone "$T/debug/libold.rlib" "T1: ...and its hard-linked uplifted copy with it"
+gone "$TR/repo-ci/pull_request/target-verify/debug/deps/libv-9.rlib" "T1: a target dir with no CACHEDIR.TAG (made by mkdir -p) is swept"
+kept "$TR/repo-ci/pull_request/target-verify/.rustc_info.json" "T1: .rustc_info.json is kept although its atime is 30 days old"
+kept "$TR/uv/archive-v0/old.whl" "T1: a CACHEDIR.TAG dir without .rustc_info.json (uv) is untouched"
+kept "$TR/repo-ci/pull_request/rustup/toolchains/x/lib/old.so" "T1: a toolchain tree is untouched"
+kept "$TR/a/b/c/d/target/debug/old.rlib" "T1: a target dir deeper than TARGET_MAXDEPTH is untouched"
+gone "$T/debug/emptyold" "T1: an empty dir older than the window is removed"
+kept "$T/debug/emptynew" "T1: a fresh empty dir is kept"
+assert_has "systemctl stop gitea-act-runner" "T1: the runner is stopped before anything is deleted"
+assert_has "systemctl start" "T1: ...and started again"
+[ "$(cat "$WORK/runner.state")" = active ] && ok "T1: the runner ends active" || bad "T1: the runner ends active (got $(cat "$WORK/runner.state"))"
+[ "$(sed -n 's/^runner_held=//p' "$WORK/heal.state" | tail -1)" = 0 ] && ok "T1: runner_held is released" || bad "T1: runner_held is released"
+
+# T2: below pressure: nothing is read for deletion, the runner is not touched.
+mk_targets; TROOTS="$TR" TMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T2: below pressure nothing is deleted"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T2: below pressure the runner must not be stopped"; else ok "T2: below pressure the runner is not stopped"; fi
+
+# T3: critical + idle: the window narrows to 24h, so the 30h file goes too; the 10h one stays.
+mk_targets; TROOTS="$TR" TMINFREE=1 run_case 0 95
+gone "$T/debug/deps/libday-3.rlib" "T3: at critical a file unread for 30h is deleted (24h window)"
+kept "$T/debug/deps/libhalf-4.rlib" "T3: at critical a file unread for 10h is kept"
+
+# T4: the mid-job critical path (busy, no gap) never runs the sweep.
+mk_targets; TROOTS="$TR" TMINFREE=1 run_case 1 95
+kept "$T/debug/deps/libold-1.rlib" "T4: the mid-job path never deletes Cargo targets"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T4: the mid-job path must not stop the runner"; else ok "T4: the mid-job path does not stop the runner"; fi
+
+# T5: less to gain than TARGET_MIN_FREE_MB: the runner is not held for it.
+mk_targets; TROOTS="$TR" TMINFREE=1024 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T5: under TARGET_MIN_FREE_MB nothing is deleted"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T5: under TARGET_MIN_FREE_MB the runner must not be stopped"; else ok "T5: under TARGET_MIN_FREE_MB the runner is not stopped"; fi
+
+# T6: the stop does not take: nothing is deleted.
+mk_targets; MOCK_STOP_FAIL=1 TROOTS="$TR" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T6: a runner that did not stop -> nothing deleted"
+
+# T7: a runner an operator stopped is swept and left stopped.
+mk_targets; MOCK_RUNNER_STATE=inactive TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T7: an operator-stopped runner is swept"
+if grep -q "start gitea-act-runner" "$CALLS"; then bad "T7: an operator-stopped runner must not be started"; else ok "T7: an operator-stopped runner is left stopped"; fi
+
+# T8: an earlier recovery still pending (runner_held=1): not this tick.
+mk_targets; echo "runner_held=1" > "$WORK/heal.state"; MOCK_RUNNER_STATE=activating TROOTS="$TR" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T8: a pending runner recovery -> nothing deleted"
+rm -f "$WORK/heal.state"
+
+# T9: a keep window below the 24h atime granularity is clamped up to 24h.
+mk_targets; TKEEP=6 TROOTS="$TR" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libhalf-4.rlib" "T9: TARGET_KEEP_H=6 is clamped to 24h (a 10h file stays)"
+gone "$T/debug/deps/libday-3.rlib" "T9: ...and the 30h file goes"
+
+# T10: TARGET_KEEP_H=0 disables the sweep; a bad root is refused.
+mk_targets; TKEEP=0 TROOTS="$TR" TMINFREE=1 run_case 0 95
+kept "$T/debug/deps/libold-1.rlib" "T10: TARGET_KEEP_H=0 disables the sweep"
+mk_targets; TROOTS="/" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T10: a root of '/' is refused"
+
+# T11: the beacon publishes what was freed and BuildKit's metadata size.
+mk_targets; BKF="$WORK/cache.db"; head -c 12345 /dev/zero > "$BKF"
+rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BKDB="$BKF" BEACON=1 TEXTDIR="$BEACONDIR" TROOTS="$TR" TMINFREE=1 run_case 0 85
+[ "$(beacon_field buildkit_db_bytes)" = 12345 ] && ok "T11: buildkit_db_bytes is the file's size" || bad "T11: buildkit_db_bytes (got '$(beacon_field buildkit_db_bytes)')"
+[ "$(beacon_field target_dirs)" = 2 ] && ok "T11: target_dirs counts the two Cargo target dirs in reach" || bad "T11: target_dirs (got '$(beacon_field target_dirs)')"
+# 2 MiB in target (one inode under two names) + 2 MiB in target-verify: 4 MiB, plus at most a few dir
+# blocks. Summing file sizes would say 6 MiB.
+fb="$(beacon_field target_freed_bytes)"
+if [ "${fb:-0}" -ge 4194304 ] 2>/dev/null && [ "${fb:-0}" -lt 6291456 ]; then ok "T11: target_freed_bytes counts a hard-linked file once (${fb}B)"; else bad "T11: target_freed_bytes (got '${fb}', want 4-6 MiB)"; fi
+rm -rf "$TR" "$BKF"
+
+# T12: a stale total past 2^31 bytes still counts (codex, #1669): an older mawk prints such a sum as %.6g,
+# which is_num rejects. A sparse 3 GiB file is the only stale file, and the gate is 1 GB.
+mkdir -p "$TR/big/target/debug/deps"; echo '{}' > "$TR/big/target/.rustc_info.json"
+truncate -s 3G "$TR/big/target/debug/deps/libhuge-1.rlib"; age "$TR/big/target/debug/deps/libhuge-1.rlib" '5 days ago'
+TROOTS="$TR" TMINFREE=1024 run_case 0 85
+gone "$TR/big/target/debug/deps/libhuge-1.rlib" "T12: a 3 GiB stale total passes the 1 GB gate and is swept"
+rm -rf "$TR"
+
+# T13: a noatime mount, or mount options that cannot be read: atime says nothing about use, so nothing goes.
+mk_targets; MOCK_MNT_OPTS="rw,noatime,errors=remount-ro" TROOTS="$TR" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T13: a noatime root is skipped"
+mk_targets; MOCK_MNT_FAIL=1 TROOTS="$TR" TMINFREE=1 run_case 0 85
+kept "$T/debug/deps/libold-1.rlib" "T13: a root whose mount options cannot be read is skipped"
+mk_targets; MOCK_MNT_OPTS="rw,strictatime" TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T13: a strictatime root is swept"
+
+# T14: target_dirs is published below pressure too, so a new persistent cache shows before it fills a disk.
+mk_targets; rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" TROOTS="$TR" TMINFREE=1 run_case 0 50
+[ "$(beacon_field target_dirs)" = 2 ] && ok "T14: target_dirs is 2 at 50% disk" || bad "T14: target_dirs below pressure (got '$(beacon_field target_dirs)')"
+kept "$T/debug/deps/libold-1.rlib" "T14: ...and nothing is deleted below pressure"
+
+# T15: a target dir whose path holds glob characters keeps its markers (-name, not a -path pattern).
+rm -rf "$TR"; G="$TR/br[a]ck*?/target"
+mkdir -p "$G/debug"; echo '{}' > "$G/.rustc_info.json"; mb "$G/CACHEDIR.TAG" 0
+age "$G/CACHEDIR.TAG" '30 days ago'; age "$G/.rustc_info.json" '30 days ago'
+mb "$G/debug/old.rlib"; age "$G/debug/old.rlib" '5 days ago'
+TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$G/debug/old.rlib" "T15: a stale file under a path with [ * ? is swept"
+kept "$G/CACHEDIR.TAG" "T15: ...and its CACHEDIR.TAG is kept"
+kept "$G/.rustc_info.json" "T15: ...and its .rustc_info.json is kept"
+rm -rf "$TR"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

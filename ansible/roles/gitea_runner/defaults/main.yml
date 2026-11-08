@@ -314,6 +314,21 @@ gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache a
 # daemon's start-pre budget and took ALL 5 runners offline. 48h >> the 3h job timeout, so a live or
 # recent workspace always has a fresh mtime and is never touched.
 gitea_runner_cleanup_ws_prune_age_h: 48
+# Cargo target sweep (section 6 of the script, 2026-11-08). Under disk pressure, in a confirmed gap and with
+# the runner held stopped, delete the files in Cargo target dirs under these roots that no build has read
+# for *_keep_h hours (*_keep_critical_h at the critical threshold). A Cargo target dir is a dir with a
+# .rustc_info.json at its root (Cargo writes one into every target dir it uses), at most *_maxdepth levels
+# below a root; nothing else is touched.
+# Cargo rebuilds what is missing, so the cost is a rebuild. The runner is held only when at least
+# *_min_free_mb would go. keep_h 0 disables. Must be a literal (no Jinja): test-cleanup.sh [M] compares it
+# with the script's own default.
+gitea_runner_cleanup_target_roots: "/home/runner/.cache"
+gitea_runner_cleanup_target_maxdepth: 4
+gitea_runner_cleanup_target_keep_h: 72
+gitea_runner_cleanup_target_keep_critical_h: 24
+gitea_runner_cleanup_target_min_free_mb: 1024
+# BuildKit's bbolt metadata file, whose size the beacon publishes (buildkit_db_bytes): it never shrinks.
+gitea_runner_cleanup_buildkit_db: /var/lib/docker/buildkit/cache.db
 # Reap RUNNING containers older than this (seconds). MUST exceed the job timeout (gitea_runner_job_timeout
 # 3h) so a live job's containers are never touched — only crashed/timed-out leftovers. 4h default.
 gitea_runner_cleanup_reap_age_sec: 14400

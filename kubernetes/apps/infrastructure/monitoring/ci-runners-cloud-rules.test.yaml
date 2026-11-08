@@ -495,3 +495,30 @@ tests:
             exp_annotations:
               summary: cloud CI runner cloud-ci-1 read different bytes from an intact npm cache file
               description: 'See CIRunnerCacheReadFlaps. cloud-ci-1 on cloud1 corrupts data in memory: pause it in Gitea and look at cloud1 (memory pressure, ballooning).'
+
+  # ---------------------------------------- BuildKit's metadata file has grown past 8 GB
+  - interval: 1m
+    name: a cloud runner's BuildKit cache.db over 8 GB for 6h warns; one under it does not
+    input_series:
+      - series: 'gitea_runner_cleanup_buildkit_db_bytes{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-9", instance="192.168.0.34:9100"}'
+        values: "9000000000+0x480"
+      - series: 'gitea_runner_cleanup_buildkit_db_bytes{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-10", instance="192.168.0.35:9100"}'
+        values: "700000000+0x480"
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: CloudCIRunnerBuildkitDbLarge
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: CloudCIRunnerBuildkitDbLarge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-cloud
+              cloud_host: cloud3
+              nodename: cloud-ci-9
+              instance: 192.168.0.34:9100
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-9 BuildKit cache.db is 8.382GiB"
+              description: >-
+                See CIRunnerBuildkitDbLarge and docs/runbooks/ci-runners.md, Troubleshooting, "BuildKit
+                cache.db".
