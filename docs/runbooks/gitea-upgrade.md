@@ -44,10 +44,17 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
 5. **Write freeze and backups.**
    - **Running CI jobs fail.** Stopping Gitea fails every Actions job that is running at the time. The runners
      keep going, but Gitea marks those jobs failed as it comes back (2026-11-08: 18 jobs, 10 s after the start).
-     Note them first, on the primary, database `gitea`: `select r.repo_id, r.index, r.id from action_run_job j
-     join action_run r on r.id = j.run_id where j.status = 6`. After step 7, re-run the newest run of each
-     branch: `scripts/gitea-api.sh POST /repos/<owner>/<repo>/actions/runs/<run id>/rerun` (1.27). A run that a
-     newer run of the same branch superseded needs no re-run.
+     Note them first, on the primary, database `gitea` (job status 6 is running, 5 waiting):
+
+     ```sql
+     select p.owner_name || '/' || p.name as repo, r.ref, r.index, r.id as run_id
+     from action_run_job j join action_run r on r.id = j.run_id join repository p on p.id = r.repo_id
+     where j.status = 6 order by repo, r.ref, r.index;
+     ```
+
+     After step 7, re-run the newest run of each ref:
+     `scripts/gitea-api.sh POST /repos/<repo>/actions/runs/<run_id>/rerun` (1.27). A run that a newer run of the
+     same ref superseded needs no re-run.
    - Run `kubectl -n gitea scale deploy/gitea --replicas=0`, then wait for `kubectl -n gitea get pods -l
      app.kubernetes.io/name=gitea` to list nothing. Gitea is the only writer to its database and volumes.
    - **Database.** Dump to the workstation and require both exit statuses to be 0:
@@ -122,7 +129,8 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
   - **Outage:** 19:36:26 → 19:50:33 UTC, 14 minutes. Without the `backup` short-name wait it would have been
     about 5.
   - **Dump:** 1.05 GB in 2 min 18 s; `pg_restore -f /dev/null` exited 0. It is kept on the workstation as
-    `gitea-pre-1.27.3-20261108T193632Z.dump` (sha256 `0a519a4b…4ee4895`).
+    `gitea-pre-1.27.3-20261108T193632Z.dump`, sha256
+    `0a519a4b382e8b0c250eb7a5db27b253e8ced2114e5e3c49c030c56835ee4895`.
   - **Volumes:** Velero `gitea-pre-1273`, 143/143 items, completed in 62 s (incremental fs-backup: `data`
     12.5 GB, `actions-storage` 10.8 GB).
   - **Migrations:** 331 → 343 in about 2 s, in the `configure-gitea` init container; 343 matches the rehearsal.
@@ -133,5 +141,6 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
     - a reviewer-bot review on PR #1678;
     - the ailab push mirror syncing to GitHub;
     - the `cnpg_gitea_*` credential metrics, with no Gitea alert firing.
+  - **Not yet verified:** the owner's OIDC login through Authelia (the owner's check; update this line when done).
   - **Cost:** the restart failed 18 running jobs (relay, ailab, workbricks). The newest run of each branch or
     pull request was re-run through the API (17 runs).
