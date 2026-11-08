@@ -18,10 +18,15 @@ data:
       // mirror push.
       platform: 'gitea',
       endpoint: 'https://git.chifor.me/api/v1/',
-      // cchifor/repository-template (2026-11-08): the native Gitea template. It ships its own renovate.json;
-      // renovate-bot holds write there. Its pins (actions, upstream hooks, mise tools) sit in owner-protected files,
-      // so those PRs merge through the owner path. Repositories generated from it are added here one by one.
-      repositories: ['cchifor/ailab', 'cchifor/repository-template'],
+      // Which repositories: every repository renovate-bot can see that carries the topic `renovate`
+      // (2026-11-08). cchifor/ailab and cchifor/repository-template carry it; repositories generated from the
+      // template inherit it (generation copies topics). Onboarding a repository is therefore one owner operation
+      // that grants renovate-bot write and sets the topic: scripts/gitea-owner-op.sh
+      // scripts/owner-ops/renovate-onboard.ops --var REPO=<name> --execute. A repository without renovate.json is
+      // skipped (requireConfig below). Pins in owner-protected files merge through the owner path.
+      autodiscover: true,
+      autodiscoverTopics: ['renovate'],
+      autodiscoverFilter: ['cchifor/*'],
       onboarding: false,        // the repo already ships renovate.json — no onboarding PR
       requireConfig: 'required',
       // Matches the dedicated Gitea identity minted for this bot (user id 50, collaborator with
