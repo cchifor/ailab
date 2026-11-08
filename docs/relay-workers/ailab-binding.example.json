@@ -1,11 +1,11 @@
 {
   "schema": "ailab.relay-worker-binding/v1alpha1",
-  "_comment": "EXAMPLE, NOT APPLIED. Nothing reads this outside scripts/relay-worker-preflight.py. Every capability is unqualified: no live evidence exists yet (docs/runbooks/relay-worker-kubevirt-feasibility.md). Values marked null are unresolved operator decisions, which the collector reports as unknown.",
+  "_comment": "EXAMPLE, NOT APPLIED. Nothing reads this outside scripts/relay-worker-preflight.py. Every capability is unqualified: live preflight exists, but no runtime qualification exists yet (docs/runbooks/relay-worker-kubevirt-feasibility.md). Values marked null are unresolved operator decisions, which the collector reports as unknown.",
   "installation": "ailab-relay-workers-pilot",
   "cluster": {
     "expected_context": "admin@ai",
     "expected_api_server": "https://192.168.0.40:6443",
-    "expected_kube_system_uid": null
+    "expected_kube_system_uid": "faf3a521-bd08-4d6d-ba5c-9dc7da903819"
   },
   "pins": {
     "kubernetes_version": "v1.35.9",

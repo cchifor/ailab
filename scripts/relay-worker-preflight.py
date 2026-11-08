@@ -369,10 +369,15 @@ def check_versions(snap: dict, b: dict) -> list[dict]:
         out.append(_unavailable("version.cilium", snap, "cilium_ds"))
     else:
         exp = pins.get("cilium_version")
-        tags = [re.split(r"[:@]", i.split("/")[-1])[1] if ":" in i.split("/")[-1] else ""
-                for i in data.get("images", []) if i]
+        # Strip the digest before parsing the final path component: a digest-only
+        # reference has no version tag, and registry ports are not image tags.
+        refs = [i.split("@", 1)[0].rsplit("/", 1)[-1] for i in data.get("images", []) if i]
+        tags = [i.rsplit(":", 1)[1] for i in refs if ":" in i]
         ok = bool(exp) and any(t.lstrip("v") == exp.lstrip("v") for t in tags)
-        out.append(_check("version.cilium", PASS if ok else FAIL, f"agent tags {tags}, pinned {exp}"))
+        state = PASS if ok else FAIL if tags else UNKNOWN
+        out.append(_check("version.cilium", state,
+                          f"agent tags {tags}, pinned {exp}" if tags else
+                          "agent images have no version tag; digest alone does not establish the pinned version"))
     return out
 
 

@@ -173,6 +173,18 @@ class Negative(unittest.TestCase):
         self.assertEqual(status(r, "version.kubernetes"), "fail")
         self.assertEqual(status(r, "version.cilium"), "fail")
 
+    def test_cilium_digest_only_is_unknown_and_tag_digest_is_recognized(self):
+        for image, expected in (
+            ("quay.io/cilium/cilium@" + DIGEST, "unknown"),
+            ("registry.example:5000/cilium/cilium@" + DIGEST, "unknown"),
+            ("quay.io/cilium/cilium:v1.19.8@" + DIGEST, "pass"),
+            ("quay.io/cilium/cilium:v1.18.14@" + DIGEST, "fail"),
+        ):
+            with self.subTest(image=image):
+                s = copy.deepcopy(SNAP)
+                s["queries"]["cilium_ds"]["data"]["images"] = [image]
+                self.assertEqual(status(rwp.evaluate(s, BIND), "version.cilium"), expected)
+
     def test_forbidden_storage_class(self):
         b = copy.deepcopy(BIND)
         b["storage"]["workspace_storage_class"] = "qnap-iscsi"

@@ -1,7 +1,8 @@
 # Runbook: KubeVirt feasibility spike for Relay developer workers (operator-run, NOT yet run)
 
-**Status: live evidence PENDING.** Nothing in this runbook has been executed against ailab. Nothing
-here installs KubeVirt through Flux. The Relay KubeVirt renderer stays unbuilt until this spike
+**Status: read-only preflight collected; runtime spike PENDING.** The operator ran the preflight
+on 2026-11-08; both gates failed because the dedicated pool does not exist. S1–S9 remain not run.
+Nothing here installs KubeVirt through Flux. The Relay KubeVirt renderer stays unbuilt until this spike
 produces a passing evidence record (Relay plan `docs/plans/2026-11-08-infrastructure-workers/plan.md`,
 phases 1 and 5).
 
@@ -13,9 +14,9 @@ Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea 
 
 | Check | Who | Tool | Today |
 |---|---|---|---|
-| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (50 tests) |
-| Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; gVisor pinned to the Relay/router agent pool; KubeVirt absent and unpinned; cluster UID unpinned |
-| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **not run** |
+| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (51 tests) |
+| Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; gVisor pinned to the Relay/router agent pool; KubeVirt absent and unpinned; synthetic cluster UID differs from the live pin |
+| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **collected 2026-11-08; gates fail** (evidence below) |
 | Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **not run** |
 
 A dev-worker cannot run the live collector. Its `platform` identity is namespaced, cannot list
@@ -83,13 +84,37 @@ sha256sum "$SNAP" "$SNAP.report.json"
 
 | ID | Prerequisite | Notes |
 |---|---|---|
-| K0 | **Dedicated capacity.** A new Talos worker for Relay workers, labelled `ailab.io/relay-worker-pool=true` and tainted `dedicated=relay-worker:NoSchedule`. | Needs a reviewed OpenTofu change, a vmid and a **network address**. The registry `docs/network-plan.md` (at `6881689b`) records "Free static space: NONE" in `.2`–`.51`, and allocation follows its procedure (a release or a deliberate DHCP-pool shrink). This runbook has not re-verified the segment; the operator does that at allocation time. Size it from the RAM budget in `docs/runbooks/dev-workers.md`. The suggested floor is 12 vCPU / 32 GiB fixed / 200 GiB local disk, which allows one developer VM plus overhead. The binding's headroom block takes the final figure. `cpu.type=host` is required. |
+| K0 | **Dedicated capacity.** A new Talos worker for Relay workers, labelled `ailab.io/relay-worker-pool=true` and tainted `dedicated=relay-worker:NoSchedule`. | Operator proposal: `relay-worker-1`, vmid 4304 on ai-node3, **12 vCPU / 24 GiB fixed / 200 GiB local-lvm**, `cpu.type=host`. Not provisioned or approved. A 32 GiB allocation needs RAM freed first. Use a separate OpenTofu map so existing agent-pool labels never apply. Proposed `.52` needs a UniFi lease check and owner-approved DHCP start move `.52` → `.53`, reflected in `kubernetes/edge/gateway.yaml` and `docs/network-plan.md`. **Add the new node's `/32` to `kubernetes/edge/hostnames.yaml` `trusted_sources.exclude` before admitting workloads**: SNAT must not give worker code admin-device access. See measured capacity and S7/S8 prerequisite below. |
 | K1 | **Version selection.** Choose one KubeVirt release whose published support matrix lists Kubernetes **1.35** (live `v1.35.9`, `kubernetes/infra/agent-nodes/variables.tf`). Check it against the Talos v1.14 KubeVirt guide (docs.siderolabs.com/talos/v1.14/advanced-guides/install-kubevirt). | Record the release tag, the `virt-operator` image **digest** and the SHA-256 of `kubevirt-operator.yaml` / `kubevirt-cr.yaml`. Put the tag and digest into the binding (`pins.kubevirt_version`, `pins.kubevirt_operator_digest`). Until then the collector reports `kubevirt.pin: unknown`. No version is chosen here: none was verified against this cluster. |
-| K2 | **Nested virtualization** on the Proxmox host of the K0 node. | `python scripts/check-nested-virt.py <host>` must exit 0. Enabling it is the Ansible `pve_base` path in `docs/runbooks/agent-nodes.md`. |
-| K3 | **Talos schematic** for the K0 node. | Follow the Talos guide's KubeVirt requirements, including the kernel modules and any extensions it lists for 1.14. If the schematic changes, record a new entry in `kubernetes/infra/talos-schematics.yaml` and use the upgrade wrapper. Do not touch agent-node-3's `kata_gvisor` schematic. |
-| K4 | **Pin the cluster UID.** Copy `kubectl --context admin@ai get ns kube-system -o jsonpath='{.metadata.uid}'` into `cluster.expected_kube_system_uid`. | This is the identity check that keeps the collector off the wrong cluster. |
+| K2 | **Nested virtualization** on the Proxmox host of the K0 node. | Operator confirmed `kvm_amd=1` on all three hosts on 2026-11-08 (`check-nested-virt.py`: PASS); no enablement change is needed. Recheck before provisioning. Enabling it is the Ansible `pve_base` path in `docs/runbooks/agent-nodes.md`. |
+| K3 | **Talos schematic** for the K0 node. | Follow the Talos guide's KubeVirt requirements, including the kernel modules and any extensions it lists for 1.14. If the schematic changes, record a new entry in `kubernetes/infra/talos-schematics.yaml` and use the upgrade wrapper. Do not touch agent-node-3's `kata_gvisor` schematic. The dedicated pool also needs its own gVisor RuntimeClass and matching schematic before `pod.gvisor` can qualify; the existing `gvisor` class deliberately selects the protected agent pool. |
+| K4 | **Pin the cluster UID.** Copy `kubectl --context admin@ai get ns kube-system -o jsonpath='{.metadata.uid}'` into `cluster.expected_kube_system_uid`. | Pinned from the operator report to `faf3a521-bd08-4d6d-ba5c-9dc7da903819`; this is the identity check that keeps the collector off the wrong cluster. |
 | K5 | **Cleanup owner** named in the spike record (person and date). | Owns the S9 teardown, and any stuck VM, PVC or launcher pod, until the inventory below is clean. |
 | K6 | **Evidence store** outside git, plus the SHA-256 of each artifact. | The operator names the path explicitly as `EVIDENCE_DIR`; `/tmp` does not count. On a dev-worker, retained evidence goes under `/workspace/archive/`. Raw logs and metrics stay outside the repo. Only the digests come back into a binding as `receipt_sha256`. |
+
+### Operator evidence, 2026-11-08
+
+[Operator report on PR #1675](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
+was collected from head `25b391de`: all nine queries succeeded; both gates failed. Kubernetes
+v1.35.9, Cilium v1.19.8 and local-path/WaitForFirstConsumer matched; KubeVirt is absent.
+The report predates the cluster-UID pin in this revision and is not a qualification receipt.
+
+Evidence lives on the workstation at `C:\Users\chifo\work\home\evidence\relay-worker-kubevirt\`:
+
+| Artifact | SHA-256 |
+|---|---|
+| `relay-worker-preflight-20261108T164446Z.json` | `674d3fe392b4ceb6b2b9737bd1ae26e6ee1e0545efce31188317cc7a7d9ee7c2` |
+| `relay-worker-preflight-20261108T164446Z.json.report.json` | `7b477044793542229211fa0fe065463caf3987bceae45cc437490f400e349900` |
+
+Host 7-day minimum MemAvailable was 2.5 GiB / 10.4 GiB / 33.6 GiB on ai-node1/2/3.
+Only ai-node3 can accommodate the proposed 24 GiB fixed worker; 32 GiB would leave only
+about 1.6 GiB at the observed low point. All existing agent nodes host protected Relay/router
+workloads and cannot be repurposed. This is a capacity proposal, not an allocation.
+
+**Before S7/S8:** the operator recommends temporarily stopping `llama-swap-qwen38` on
+LXC 5003, subject to owner approval, because its lazy model can otherwise consume another
+23.5 GiB of GTT. Record approval, stop/restore owner and restoration evidence; do not start
+those steps until this impact is agreed. No existing model service is changed by this PR.
 
 Re-run the live preflight after K0–K4. `kubevirt_spike_prerequisites` must be `pass` before S1.
 
@@ -105,7 +130,11 @@ manifests, not by Flux. If it is kept after the spike, a separate reviewed Flux 
 same pins.
 
 **Bounds:**
-- **Guest:** 4 vCPU and 8 GiB memory. The guest must not be overcommitted.
+- **Guest:** 4 vCPU and 8 GiB memory. The guest must not be overcommitted. Set
+  `spec.domain.memory.guest: 8Gi`, `spec.domain.resources.requests.memory: 8Gi` and
+  `spec.domain.resources.limits.memory: 8Gi` explicitly. KubeVirt adds launcher overhead;
+  do not copy guest limits directly onto the launcher. S2 must verify the resulting pod
+  requests and limits are present and fit the namespace quota before proceeding.
 - **Workspace:** one RWO PVC requesting at most 20 Gi on `local-path`, with
   **`volumeMode: Filesystem`**, exposed to the guest as a **virtio disk**. This is not a
   Kubernetes raw Block-mode PVC: `rancher.io/local-path` provisions directories and cannot
@@ -118,13 +147,18 @@ same pins.
   evidence. `local-path` capacity requests do not enforce filesystem quotas: verify both
   guest virtual-disk bounds and actual node disk use during S3. If raw Block-mode storage
   becomes necessary, select and qualify a different CSI provisioner in a separate change.
-- **Docker cache:** an `emptyDisk` of 20 Gi.
+- **Docker cache:** an `emptyDisk` of 20 Gi. Set VMI
+  `spec.domain.resources.requests.ephemeral-storage: 30Gi` and
+  `spec.domain.resources.limits.ephemeral-storage: 30Gi` explicitly, covering the 20 Gi
+  cache, containerDisk copy and logs. Pin a root image whose expanded size fits the remaining
+  allowance. Verify the rendered launcher request/limit and actual node headroom before boot;
+  namespace quota alone does not cap writes, and sparse images can grow to their full size.
 - **Root disk:** a `containerDisk` with a digest-pinned image.
 - **Network:** pod network with `masquerade` only.
 - **ResourceQuota on `relay-kv-spike`:**
   - `requests.cpu: 6`, `requests.memory: 12Gi`, `limits.memory: 12Gi`
   - `requests.storage: 20Gi`, `persistentvolumeclaims: 1`
-  - `requests.ephemeral-storage: 30Gi`
+  - `requests.ephemeral-storage: 32Gi`, `limits.ephemeral-storage: 32Gi` (includes preparation/launcher overhead; verify the final launcher fits)
 - **Forbidden:**
   - `hostDisk`, `filesystems`/virtiofs, host devices, PCI or GPU passthrough
   - Multus or bridge networking
@@ -148,8 +182,12 @@ same pins.
      - the pod's QoS class.
 3. **S3, storage.**
    - Write 1 GiB to the workspace disk, then stop and start the VM. The data must still be there.
-   - Fill the Docker cache disk to its bound. The guest must get an ENOSPC error, and node
-     ephemeral storage must stay inside quota.
+   - Fill the Docker cache disk to its bound. The guest must get ENOSPC; measure node use
+     against the launcher limit. Capture the actual launcher request/limit and kubelet eviction
+     events. Exercise a bounded temporary storage overrun to verify kubelet eviction at the pod
+     limit, then recreate the VM and verify the workspace survives. Quota is admission accounting,
+     not a filesystem quota: if kubelet does not account for the disk or enforce the pod limit,
+     S3 fails. Do not claim a hard byte ceiling from quota alone.
    - Note that the PV is node-affine; that is expected.
 4. **S4, Compose.**
    - Run one representative Compose stack in the guest, with no more than one stack per worker
