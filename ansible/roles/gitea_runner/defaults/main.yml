@@ -319,7 +319,8 @@ gitea_runner_cleanup_ws_prune_age_h: 48
 # for *_keep_h hours (*_keep_critical_h at the critical threshold). A Cargo target dir is a dir with a
 # .rustc_info.json at its root (Cargo writes one into every target dir it uses), at most *_maxdepth levels
 # below a root; nothing else is touched.
-# Cargo rebuilds what is missing, so the cost is a rebuild. The runner is held only when at least
+# Cargo rebuilds what is missing, so the cost is a rebuild; build/ (build scripts' OUT_DIR) and incremental/
+# are never touched. The runner is held only when at least
 # *_min_free_mb would go. keep_h 0 disables. Must be a literal (no Jinja): test-cleanup.sh [M] compares it
 # with the script's own default.
 gitea_runner_cleanup_target_roots: "/home/runner/.cache"
