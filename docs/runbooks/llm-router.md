@@ -4368,8 +4368,10 @@ while the image model is pending or resident.
   backends, and refuses while cloud1 is not eligible.
 - The gate: provider `qwen-cloud1` (`scripts/router-ab`). It was opt-in until cloud1 passed its gate; since 2026-11-08
   the full gate (no `--providers`) runs it with `qwen` and `qwen-cloud3`. With cloud1 off the route (`STEP=disable`), it is
-  refused at setup, in seconds, like any qwen provider whose backend is not an enabled deployment of the route: leave it out
-  with `--providers` then.
+  refused at setup, in seconds, like any qwen provider whose backend is not an enabled deployment of the route. The run
+  goes on: the report marks `qwen-cloud1` INVALID, the other providers are judged as usual, and the overall verdict is
+  not PASS. So while cloud1 is off the route, name the rest of the full gate:
+  `--providers claude,codex,codex-control,qwen,qwen-cloud3`.
 - The alerts: `LlmRouterAvailabilityUnknown` (no verdict for 5 min) and `LlmRouterModelNotResident` (20 min). Both are
   silent at night, when every cloud host is off.
 

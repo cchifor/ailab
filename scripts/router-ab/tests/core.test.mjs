@@ -157,7 +157,7 @@ test('a provider missing part of the interface is refused', () => {
 test('an opt-in provider runs only when named', () => {
   const known = [{ name: 'a' }, { name: 'b', optIn: true }, { name: 'c', optIn: false }];
   const names = (sel) => sel.map((p) => p.name);
-  assert.deepEqual(names(selectProviders(known, undefined)), ['a', 'c']);
+  assert.deepEqual(names(selectProviders(known, undefined)).sort(), ['a', 'c']);
   assert.deepEqual(names(selectProviders(known, ['b', 'a'])).sort(), ['a', 'b']);
 });
 
