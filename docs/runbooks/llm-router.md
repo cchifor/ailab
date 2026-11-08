@@ -4334,7 +4334,7 @@ arms on every row. The one FAIL is `recall`'s wall time, a cost that predates th
 `secret-continuity`, and `qwen` `code-edit` (both backends on the route, re-pinned to their new cards), all PASS, 6/6 in
 both arms. qwen's greedy output via the router matched the direct output byte for byte.
 
-## cloud1 as the third qwen3.8-27b backend (prepared 2026-11-07, not applied)
+## cloud1 as the third qwen3.8-27b backend (in service since 2026-11-07)
 
 cloud1 (LXC 5102, `192.168.0.27:8080`) runs `qwen3.8-27b` as its default model, behind llama-swap. Qwen-Image loads there
 on demand and evicts qwen (cloudlab runbook §16). The design is cloudlab `plans/2026-11-05-cloud1-flex-host-plan.md` §6
@@ -4366,10 +4366,10 @@ while the image model is pending or resident.
   sends nothing. It refuses to run on an image without the probe, because an older account schema drops `availability`
   silently. `enable` also raises `maxAttempts` to 3, so a race `503 model_start_failed` is retried on the other two
   backends, and refuses while cloud1 is not eligible.
-- The gate: provider `qwen-cloud1` (`scripts/router-ab`), **opt-in**. A run without `--providers` leaves it out, so the
-  full gate is unchanged until cloud1 is in service. Named before `STEP=enable`, it is refused at setup, in seconds, like any
-  qwen provider whose backend is not an enabled deployment of the route. Once cloud1 has passed its gate, drop `optIn` from
-  `providers/qwen-cloud1.mjs` so the full gate includes it.
+- The gate: provider `qwen-cloud1` (`scripts/router-ab`). It was opt-in until cloud1 passed its gate; since 2026-11-08
+  the full gate (no `--providers`) runs it with `qwen` and `qwen-cloud3`. With cloud1 off the route (`STEP=disable`), it is
+  refused at setup, in seconds, like any qwen provider whose backend is not an enabled deployment of the route: leave it out
+  with `--providers` then.
 - The alerts: `LlmRouterAvailabilityUnknown` (no verdict for 5 min) and `LlmRouterModelNotResident` (20 min). Both are
   silent at night, when every cloud host is off.
 
@@ -4397,6 +4397,27 @@ the deployment.
 - Each check reads about 230 KB, because llama-swap replays its log histories before the snapshot.
 - Names that bypass routes (`local/qwen3.8-27b`, the Assistant's direct model choice) can reach the enabled account even
   while its deployment is off. They do so only while the probe says `available`.
+
+**Applied, 2026-11-07.**
+- Steps 1-2: the release rolled at 16:34Z and `validate-live` gave 6/9, the baseline. The gate with cloud1 not on the route
+  passed: `codex` `code-edit` and `secret-continuity`, `qwen` and `qwen-cloud3` `code-edit`, 6 pairs each, Layer (a) on all
+  three. `STEP=add` took config revision 2284.
+- Step 3, the probe watch:
+  - qwen's natural reload: `model_loading` at 16:46:16Z, `available` at 16:47:55Z, eligible at 16:47:58Z (the second good
+    check).
+  - One image request: cloud1 was excluded within about 1 s (`model_unloading` at 16:48:19Z, then `model_not_resident`).
+    The image was served. qwen reloaded, and cloud1 was eligible again at 16:51:50Z.
+- Step 4: `STEP=enable` took revision 2285 at 16:56:40Z (`maxAttempts` 3). The first cloud1 gate was INVALID, because the
+  kit's arm script had no `flex` target (ailab #1665). The rerun at 16:58Z passed: `code-edit` 6/6 in both arms; Layer
+  (a) with identical model input tokens (6948), and greedy output on cloud1 matching direct; wall time median 12.0 s in
+  both arms.
+- Load through the route, 17:11-17:19Z, from dev-worker-1's own key: 12 concurrent decode-sized requests ran 4/4/4 across
+  the three backends, with nothing queued. That gave 771 output tok/s, against 791 tok/s for the same requests sent
+  direct, 4 per backend. 12 concurrent agent-sized prompts (about 34k tokens, distinct) ran 3 per backend with 3 queued.
+  There were 0 errors in 273 requests.
+- Not run yet: step 5 (T5 steering), and step 6's retryable-429 check with cloud1 excluded.
+- Overnight: when the cloud hosts power off at 20:00Z, the probe reads `probe_failed` and cloud1 is `unknown`, so it is
+  excluded. After the morning boot: `model_loading` at 06:01Z, `available` at 06:03Z.
 
 ## Availability release (2026-11-07)
 

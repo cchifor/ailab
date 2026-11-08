@@ -154,12 +154,17 @@ test('a provider missing part of the interface is refused', () => {
   assert.throws(() => validate({ name: 'x', describe: 'y', kinds: [], layerA() {}, run() {}, optIn: 'yes' }, 'x.mjs'), /optIn/);
 });
 
-test('an opt-in provider runs only when named', async () => {
-  const known = await loadProviders(path.join(HERE, 'providers'));
+test('an opt-in provider runs only when named', () => {
+  const known = [{ name: 'a' }, { name: 'b', optIn: true }, { name: 'c', optIn: false }];
   const names = (sel) => sel.map((p) => p.name);
-  assert.ok(!names(selectProviders(known, undefined)).includes('qwen-cloud1'));
-  assert.ok(names(selectProviders(known, undefined)).includes('qwen-cloud3'));
-  assert.deepEqual(names(selectProviders(known, ['qwen-cloud1', 'qwen'])).sort(), ['qwen', 'qwen-cloud1']);
+  assert.deepEqual(names(selectProviders(known, undefined)), ['a', 'c']);
+  assert.deepEqual(names(selectProviders(known, ['b', 'a'])).sort(), ['a', 'b']);
+});
+
+test('the full gate runs all three qwen backends of the route', async () => {
+  const known = await loadProviders(path.join(HERE, 'providers'));
+  const names = selectProviders(known, undefined).map((p) => p.name);
+  for (const n of ['qwen', 'qwen-cloud3', 'qwen-cloud1']) assert.ok(names.includes(n), n);
 });
 
 test('a qwen backend the route does not use is refused at setup, before any run', async () => {

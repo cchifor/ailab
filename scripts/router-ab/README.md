@@ -117,7 +117,7 @@ export default {
 | codex | code-edit (3 bugs, unittest), secret-continuity (reasoning across a resumed turn) |
 | codex-control | code-edit |
 | claude | math, tool-choice, recall (2 turns), stock-agentic (a multi-file fix, hidden tests) |
-| qwen, qwen-cloud3, qwen-cloud1 (opt-in) | code-edit |
+| qwen, qwen-cloud3, qwen-cloud1 | code-edit |
 
 The margins, and §9.6's sample-size rule: 3 pairs first; a metric outside its margin, or within half a margin of it,
 takes 3 more pairs, and the decision uses all 6. Below 6 pairs a metric outside its margin is OUT, not yet FAIL. A
