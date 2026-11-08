@@ -112,5 +112,8 @@ if client postgres verify-full -c 'SELECT 1' > "$test_dir/denied.log" 2>&1; then
 if client relay_budget_router verify-full -c 'SELECT * FROM worker_budget.allocations' > "$test_dir/denied.log" 2>&1; then exit 1; fi
 if client relay_budget_allocator verify-full -c "SET ROLE relay_budget_owner" > "$test_dir/denied.log" 2>&1; then exit 1; fi
 if client relay_budget_allocator verify-full -c "SELECT worker_budget.current_epoch('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002',repeat('a',64))" > "$test_dir/denied.log" 2>&1; then exit 1; fi
-docker stop --signal SIGINT --timeout 90 "$test_name" >/dev/null
+# The pinned official image declares SIGINT, so older Docker engines also use
+# PostgreSQL's fast shutdown without requiring Docker 25's stop --signal option.
+[ "$(docker inspect --format '{{.Config.StopSignal}}' "$test_name")" = SIGINT ] || exit 1
+docker stop --timeout 90 "$test_name" >/dev/null
 echo 'PASS: empty/recovery refusal, one-time schema initialization, projected-key TLS, durability settings, narrow roles, unseeded gate'

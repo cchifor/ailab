@@ -35,6 +35,10 @@ nothing, creates no credentials or policy, and enables no worker.
   labels. The database has no outgoing network permission. The optional operator
   client gets only database and kube-dns access. Namespace/pod creation privileges
   remain an operator boundary; the label itself grants no database privilege.
+  The two application egress policies are additive only when the application pods
+  already have their reviewed egress policies. Selecting previously unisolated
+  pods would instead restrict their egress to the ledger. Installation on a
+  different policy baseline must stop until that baseline is reviewed.
 - Runtime pods receive separate allocation/reader DSNs only. They never receive
   the schema owner role, administrator credentials, Kubernetes API token, or
   database PVC. No SQL, app credentials, policy or recovery witness is embedded
@@ -57,7 +61,17 @@ Do not enable application consumers until every gate below is satisfied.
 
 1. Confirm reviewer-merged Relay/router releases, the exact ledger schema, resource
    capacity, `qnap-iscsi` retention, CA readiness, and actual app pod labels. Inspect
-   all Flux and backup selections. In a separate activation PR, exclude
+   the live `relay/relay` and `llm-router/llm-router` NetworkPolicies and prove they
+   already select the production `app=relay` and `app=llm-router` pods with
+   `policyTypes: Egress` and the required DNS, own-database, upstream and other
+   application rules. Compare against `kubernetes/apps/apps/relay/network-policy.yaml`
+   and `kubernetes/apps/apps/llm-router/router.yaml` at the reviewed ailab commit.
+   Capture the current selectors/rules and successful application connectivity
+   before applying this optional directory; repeat after application. A missing,
+   changed or nonselecting baseline is a **stop**, not permission to install an
+   isolated ledger-only policy. The activation overlay must first preserve or
+   explicitly supply each application's full reviewed egress baseline.
+   Inspect all Flux and backup selections. In a separate activation PR, exclude
    `relay-budget-authority` from **both** Velero daily/weekly schedules before
    installing it. This directory applies `velero.io/exclude-from-backup=true` to
    every resource/pod and to cert-manager's generated TLS Secret, and excludes the

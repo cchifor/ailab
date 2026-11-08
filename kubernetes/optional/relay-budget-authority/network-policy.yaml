@@ -40,6 +40,8 @@ metadata:
   name: relay-independent-budget
   namespace: relay
 spec:
+  # Activation requires existing reviewed app egress rules; see runbook preflight.
+  # This policy would isolate a previously unisolated app to only the ledger.
   podSelector:
     matchLabels: {app: relay}
   policyTypes: [Egress]
@@ -58,6 +60,7 @@ metadata:
   name: router-independent-budget
   namespace: llm-router
 spec:
+  # Same mandatory baseline preflight as relay-independent-budget above.
   podSelector:
     matchLabels: {app: llm-router}
   policyTypes: [Egress]
