@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: relay-budget-initialize-once
+  namespace: relay-budget-authority
+spec:
+  suspend: true # Operator explicitly unsuspends after every preflight gate is satisfied.
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      annotations:
+        backup.velero.io/backup-volumes-excludes: database
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      tolerations:
+      - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: initialize
+        image: docker.io/library/postgres:17.11-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+        command: [/bin/sh, /initialize/initialize.sh]
+        env:
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        resources:
+          requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 64Mi}
+          limits: {cpu: '1', memory: 512Mi, ephemeral-storage: 128Mi}
+        volumeMounts:
+        - {name: database, mountPath: /var/lib/postgresql/data}
+        - {name: scripts, mountPath: /initialize, readOnly: true}
+        - {name: schema, mountPath: /schema, readOnly: true}
+        - {name: run, mountPath: /var/run/postgresql}
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - name: database
+        persistentVolumeClaim: {claimName: relay-budget-postgres-data}
+      - name: scripts
+        configMap: {name: relay-budget-initialize, defaultMode: 292}
+      - name: schema
+        configMap:
+          name: relay-budget-reviewed-schema-once # Created by owner from reviewed Relay commit.
+          defaultMode: 292
+          items:
+          - {key: 001-authority.sql, path: 001-authority.sql}
+      - name: run
+        emptyDir: {medium: Memory, sizeLimit: 16Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 32Mi}

@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-budget-postgres
+  namespace: relay-budget-authority
+spec:
+  selector:
+    app: relay-budget-postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: relay-budget-postgres
+  namespace: relay-budget-authority
+spec:
+  serviceName: relay-budget-postgres
+  # Reviewable and inactive even if this optional directory is applied.
+  # Operator sets one replica only AFTER the one-time initialization Job succeeds.
+  replicas: 0
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app: relay-budget-postgres
+  template:
+    metadata:
+      labels:
+        app: relay-budget-postgres
+      annotations:
+        backup.velero.io/backup-volumes-excludes: database
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      tolerations:
+      - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: postgres
+        # Same reviewed PG17 image as apps/relay/postgres.yaml.
+        image: docker.io/library/postgres:17.11-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+        command: [/bin/sh, /etc/relay-budget/start.sh]
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        ports:
+        - {name: postgres, containerPort: 5432}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        resources:
+          requests: {cpu: 250m, memory: 1Gi, ephemeral-storage: 64Mi}
+          limits: {cpu: '1', memory: 1Gi, ephemeral-storage: 128Mi}
+        startupProbe:
+          exec:
+            command: [pg_isready, -h, /var/run/postgresql, -U, postgres, -d, relay_budget]
+          periodSeconds: 3
+          failureThreshold: 80
+        readinessProbe:
+          exec:
+            command: [pg_isready, -h, /var/run/postgresql, -U, postgres, -d, relay_budget]
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command: [pg_isready, -h, /var/run/postgresql, -U, postgres, -d, relay_budget]
+          periodSeconds: 10
+          failureThreshold: 6
+        lifecycle:
+          preStop:
+            exec:
+              command: [pg_ctl, -D, /var/lib/postgresql/data/pgdata, -m, fast, -w, -t, '90', stop]
+        volumeMounts:
+        - {name: database, mountPath: /var/lib/postgresql/data}
+        - {name: config, mountPath: /etc/relay-budget, readOnly: true}
+        # No subPath: cert-manager renewal becomes visible; operator reloads PostgreSQL.
+        - {name: tls, mountPath: /run/tls, readOnly: true}
+        - {name: run, mountPath: /var/run/postgresql}
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - name: database
+        persistentVolumeClaim: {claimName: relay-budget-postgres-data}
+      - name: config
+        configMap: {name: relay-budget-postgres, defaultMode: 292}
+      - name: tls
+        secret:
+          secretName: relay-budget-postgres-tls
+          defaultMode: 288 # root:70 0440 after fsGroup; accepted root-owned PG TLS key.
+      - name: run
+        emptyDir: {medium: Memory, sizeLimit: 16Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 32Mi}

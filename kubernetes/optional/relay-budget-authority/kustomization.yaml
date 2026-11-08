@@ -1,0 +1,21 @@
+# Deliberately absent from every live Flux resource list. See the activation runbook.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- namespace.yaml
+- storage.yaml
+- certificate.yaml
+- postgres.yaml
+- network-policy.yaml
+configMapGenerator:
+- name: relay-budget-postgres
+  namespace: relay-budget-authority
+  files:
+  - start.sh
+  - pg_hba.conf
+labels:
+- pairs:
+    app.kubernetes.io/part-of: relay-budget-authority
+    velero.io/exclude-from-backup: "true"
+  includeSelectors: false
+  includeTemplates: true

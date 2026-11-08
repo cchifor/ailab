@@ -1,0 +1,15 @@
+# Operator creates this separately, once. It is never an initContainer or Flux hook.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- job.yaml
+configMapGenerator:
+- name: relay-budget-initialize
+  namespace: relay-budget-authority
+  files: [initialize.sh]
+labels:
+- pairs:
+    app.kubernetes.io/part-of: relay-budget-authority
+    velero.io/exclude-from-backup: "true"
+  includeSelectors: false
+  includeTemplates: true

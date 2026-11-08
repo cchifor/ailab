@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: relay-budget-postgres-tls
+  namespace: relay-budget-authority
+spec:
+  secretName: relay-budget-postgres-tls
+  secretTemplate:
+    labels:
+      velero.io/exclude-from-backup: "true"
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+  - relay-budget-postgres.relay-budget-authority.svc
+  - relay-budget-postgres.relay-budget-authority.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature]
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
