@@ -43,6 +43,18 @@ def fixture_operator():
                                      "env": [{"name": "VIRT_OPERATOR_IMAGE", "value": "quay.io/kubevirt/virt-operator:v1.9.1"},
                                              {"name": "WATCH_NAMESPACE", "value": ""},
                                              {"name": "KUBEVIRT_VERSION", "value": "v1.9.1"}]}]}}}})
+    # Reduced structural schema for the fixture; the pinned-source test below
+    # exercises the actual upstream CRD with its verified download hash.
+    def schema(value):
+        if isinstance(value, dict):
+            return {"type": "object", "properties": {k: schema(v) for k, v in value.items()}}
+        if isinstance(value, list):
+            return {"type": "array", "items": schema(value[0]) if value else {"type": "string"}}
+        return {"type": "integer" if type(value) is int else "string"}
+    spec = ob.render_cr(yaml.safe_dump(CR))["spec"]
+    crd = next(d for d in docs if d["kind"] == "CustomResourceDefinition")
+    crd["spec"] = {"versions": [{"name": "v1", "served": True,
+        "schema": {"openAPIV3Schema": {"type": "object", "properties": {"spec": schema(spec)}}}}]}
     return docs
 
 
@@ -126,6 +138,24 @@ class OperatorBundleTests(unittest.TestCase):
         self.assertEqual(cr["spec"]["infra"]["replicas"], 1)
         self.assertIn("Template", cr["spec"]["configuration"]["developerConfiguration"]["disabledFeatureGates"])
         self.assertEqual(Fixture().render(), files)  # deterministic
+
+    def test_unknown_cr_paths_and_missing_schema_refused(self):
+        files = Fixture().render()
+        docs = list(yaml.safe_load_all(files["10-operator.yaml"]))
+        cr = yaml.safe_load(files["20-kubevirt-cr.yaml"])
+        cr["spec"]["configuration"]["developerConfiguration"]["inventedGate"] = []
+        with self.assertRaisesRegex(ob.BundleError, "inventedGate.*unknown field"):
+            ob.check_rendered(docs, cr)
+        cr.pop("spec")
+        cr["spec"] = yaml.safe_load(files["20-kubevirt-cr.yaml"])["spec"]
+        crd = next(d for d in docs if d["kind"] == "CustomResourceDefinition")
+        props = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+        del props["configuration"]["properties"]["developerConfiguration"]["properties"]["disabledFeatureGates"]
+        with self.assertRaisesRegex(ob.BundleError, "disabledFeatureGates.*unknown field"):
+            ob.check_rendered(docs, cr)
+        crd.pop("spec")
+        with self.assertRaisesRegex(ob.BundleError, "no served spec schema"):
+            ob.check_rendered(docs, cr)
 
     def test_hash_substitution_refused(self):
         f = Fixture()

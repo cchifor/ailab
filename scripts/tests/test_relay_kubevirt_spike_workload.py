@@ -111,6 +111,13 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("192.168.0.0/23", cnp["egressDeny"][0]["toCIDR"])
         self.assertEqual(json.loads(files["workload-metadata.json"])["status"], "rendered-not-applied-not-qualified")
 
+    def test_cloud_init_inline_byte_limit(self):
+        text = guest.cloud_init(BUNDLE["compose_smoke_image"]["image"])
+        self.assertLessEqual(len(text.encode()), 2048)
+        image = "registry.example/" + "x" * 2200 + "@sha256:" + "a" * 64
+        with self.assertRaisesRegex(BundleError, "2048-byte"):
+            guest.cloud_init(image)
+
     def test_guest_restart_preserves_readiness_workload(self):
         config = yaml.safe_load(guest.cloud_init(BUNDLE["compose_smoke_image"]["image"]))
         compose = yaml.safe_load(next(f["content"] for f in config["write_files"] if f["path"].endswith("compose.yaml")))

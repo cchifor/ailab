@@ -16,7 +16,7 @@ def cloud_init(smoke_image: str) -> str:
     """Readiness = qemu-guest-agent + docker compose actually ran a pinned container, not VM Running."""
     if not DIGEST_IMAGE.match(smoke_image):
         raise BundleError("compose smoke image must be digest-pinned")
-    return f"""#cloud-config
+    text = f"""#cloud-config
 package_update: true
 packages: [qemu-guest-agent, docker.io, docker-compose-v2]
 write_files:
@@ -49,6 +49,9 @@ runcmd:
   - [systemctl, restart, docker]
   - [sh, -c, 'rm -f /workspace/relay-spike/ok; docker compose -f /opt/relay-spike/compose.yaml up -d']
 """
+    if len(text.encode("utf-8")) > 2048:
+        raise BundleError("cloud-init inline userData exceeds KubeVirt's 2048-byte limit")
+    return text
 
 
 def measure_layer(blob: pathlib.Path, expected_digest: str) -> dict:

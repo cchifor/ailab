@@ -144,6 +144,7 @@ def check_pod_placement(where: str, pod: dict) -> None:
 
 
 def check_rendered(operator_docs: list[dict], cr: dict) -> None:
+    check_cr_schema(operator_docs, cr)
     for d in operator_docs:
         if d["kind"] == "Deployment":
             pod = d["spec"]["template"]["spec"]
@@ -152,3 +153,52 @@ def check_rendered(operator_docs: list[dict], cr: dict) -> None:
                 raise BundleError("virt-operator container image is not digest-pinned")
     for part in ("infra", "workloads"):
         check_pod_placement(f"KubeVirt spec.{part}", cr["spec"][part]["nodePlacement"])
+
+
+def check_schema_paths(value, schema: dict, path: str) -> None:
+    """Reject unknown rendered paths using the pinned structural CRD schema.
+
+    This checks fields/types, not Kubernetes admission/CEL/defaulting. Arbitrary
+    maps and preserve-unknown subtrees retain their declared CRD semantics.
+    """
+    if schema.get("x-kubernetes-preserve-unknown-fields"):
+        return
+    if isinstance(value, dict):
+        if schema.get("type") != "object":
+            raise BundleError(f"{path}: object not declared in KubeVirt CRD")
+        props = schema.get("properties", {})
+        extra = schema.get("additionalProperties", False)
+        for key, child in value.items():
+            rule = props.get(key, extra)
+            if rule is True:
+                continue
+            if not isinstance(rule, dict):
+                raise BundleError(f"{path}.{key}: unknown field in KubeVirt CRD")
+            check_schema_paths(child, rule, f"{path}.{key}")
+    elif isinstance(value, list):
+        if schema.get("type") != "array" or not isinstance(schema.get("items"), dict):
+            raise BundleError(f"{path}: array not declared in KubeVirt CRD")
+        for index, child in enumerate(value):
+            check_schema_paths(child, schema["items"], f"{path}[{index}]")
+    else:
+        kind = schema.get("type")
+        valid = {"string": isinstance(value, str), "boolean": isinstance(value, bool),
+                 "integer": type(value) is int, "number": type(value) in (int, float)}
+        if schema.get("x-kubernetes-int-or-string") and type(value) in (int, str):
+            return
+        if not valid.get(kind, False):
+            raise BundleError(f"{path}: value type differs from KubeVirt CRD")
+        if "enum" in schema and value not in schema["enum"]:
+            raise BundleError(f"{path}: value not allowed by KubeVirt CRD")
+
+
+def check_cr_schema(operator_docs: list[dict], cr: dict) -> None:
+    crd = next((d for d in operator_docs if d.get("kind") == "CustomResourceDefinition"
+                and d.get("metadata", {}).get("name") == "kubevirts.kubevirt.io"), {})
+    version = cr.get("apiVersion", "").split("/")[-1]
+    schemas = [v.get("schema", {}).get("openAPIV3Schema", {})
+               for v in crd.get("spec", {}).get("versions", [])
+               if v.get("name") == version and v.get("served")]
+    if len(schemas) != 1 or "spec" not in schemas[0].get("properties", {}):
+        raise BundleError("pinned KubeVirt CRD has no served spec schema")
+    check_schema_paths(cr["spec"], schemas[0]["properties"]["spec"], "KubeVirt.spec")
