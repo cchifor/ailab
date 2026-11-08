@@ -27,6 +27,11 @@ data:
       autodiscover: true,
       autodiscoverTopics: ['renovate'],
       autodiscoverFilter: ['cchifor/*'],
+      // The floor, so a broken discovery is never a silent zero. Renovate 44.150.1 (dist/workers/global/
+      // autodiscover.js) keeps this list when the topic search finds nothing or nothing passes the filter; when
+      // discovery finds some repositories but not one of these, it logs "Configured repository is in not in
+      // autodiscover list" at warn and runs the discovered ones. Only these two: new repositories come by topic.
+      repositories: ['cchifor/ailab', 'cchifor/repository-template'],
       onboarding: false,        // the repo already ships renovate.json — no onboarding PR
       requireConfig: 'required',
       // Matches the dedicated Gitea identity minted for this bot (user id 50, collaborator with

@@ -42,6 +42,18 @@ class GlobalConfigTest(unittest.TestCase):
             config_js(),
             r"\{\s*matchHost:\s*'registry\.chifor\.me',\s*hostType:\s*'docker',\s*allowInternal:\s*true\s*\}")
 
+    def test_topic_discovery_keeps_a_repository_floor(self):
+        # Discovery by topic alone fails silently: a broken topic search or a lost grant makes Renovate run zero
+        # repositories and exit 0. With `repositories` next to it, an empty discovery keeps that list instead.
+        js = config_js()
+        self.assertRegex(js, r"(?m)^\s*autodiscover:\s*true,")
+        self.assertRegex(js, r"(?m)^\s*autodiscoverTopics:\s*\['renovate'\],")
+        m = re.search(r"(?m)^\s*repositories:\s*\[([^\]]*)\],", js)
+        self.assertIsNotNone(m, 'config.js must keep a repositories floor next to autodiscover')
+        self.assertIn("'cchifor/ailab'", m.group(1))
+        for key in ('autodiscover', 'repositories'):
+            self.assertEqual(len(re.findall(r"(?m)^\s*%s:" % key, js)), 1, key)
+
 
 class RepoConfigTest(unittest.TestCase):
     def setUp(self):

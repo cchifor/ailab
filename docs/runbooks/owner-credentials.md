@@ -230,12 +230,13 @@ Body files are JSON, relative to the ops file's directory.
 - Bad input exits 2 before any call: an unknown method, a path outside `gitea-api.sh`'s character set or with
   `//` or `..`, an unreplaced `${NAME}`, an unused `--var` or a bad value, a missing or unknown scope, or a body
   that is not valid JSON after the substitution.
-- With `--execute` it mints one token (`owner-op-<ops file>-<var values>-<utc>`) in the Gitea pod and sends each
-  call with the token only on curl's stdin. It stops at the first status the line does not expect, prints that
-  status and the first 300 bytes of the body (never the token), and makes no further call. Responses stay in a
-  private temp directory that is removed on exit.
-- Revocation is the same trap as in `gitea-owner-merge.sh`: delete by name on the infra-pg primary, prove the
-  401, and list the tokens `chifor` still holds.
+- With `--execute` it mints one token (`owner-op-<ops file>-<var values>-<utc>-<8 random hex>`; the random part
+  keeps two runs in one second from sharing a name) in the Gitea pod and sends each call with the token only on
+  curl's stdin. Each call is bounded (10 s to connect, 60 s in all), so a stalled server cannot hold the token. It
+  stops at the first status the line does not expect, prints that status and the first 300 bytes of the body
+  (never the token), and makes no further call. Responses stay in a private temp directory that is removed on exit.
+- Revocation is the same trap as in `gitea-owner-merge.sh`: delete by name on the infra-pg primary (looked up
+  again at revocation, in case of a failover), prove the 401, and list the tokens `chifor` still holds.
 
 Exit 0: every call answered as expected (in a dry run: the ops file is valid). 2: bad input, nothing called. 4:
 the mint or a call failed, and the token was deleted. 5: the deletion was not confirmed. The script prints the

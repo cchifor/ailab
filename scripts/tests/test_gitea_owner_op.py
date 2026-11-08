@@ -34,7 +34,7 @@ RENOVATE = os.path.join(PRESETS, "renovate-onboard.ops")
 TEMPLATE = os.path.join(PRESETS, "repository-template-settings.ops")
 BASH = shutil.which("bash")
 ORIGIN = "https://git.chifor.me/api/v1"
-TOKEN_NAME_TAIL = r"-\d{14}"
+TOKEN_NAME_TAIL = r"-\d{14}-[0-9a-f]{8}"
 TEMPLATE_SETTINGS = {
     "template": True,
     "private": False,
@@ -53,9 +53,10 @@ TEMPLATE_SETTINGS = {
 FAKE_CURL = textwrap.dedent("""\
     #!/usr/bin/env bash
     printf '%s\\n' "$*" >> "$FAKE_DIR/argv.curl"
-    out=""; wfmt=""; method=GET; data=""; url=""; hdr_stdin=0
+    out=""; wfmt=""; method=GET; data=""; url=""; hdr_stdin=0; maxtime=""
     while [ $# -gt 0 ]; do
       case "$1" in
+        --max-time) maxtime=$2; shift 2;;
         -o) out=$2; shift 2;;
         -w) wfmt=$2; shift 2;;
         -X) method=$2; shift 2;;
@@ -73,6 +74,12 @@ FAKE_CURL = textwrap.dedent("""\
     code=${resp%%$'\\n'*}
     case "$resp" in *$'\\n'*) rbody=${resp#*$'\\n'};; *) rbody="";; esac
     case "$code" in EXIT*) echo "curl: (7) Failed to connect" >&2; printf '000'; exit "${code#EXIT}";; esac
+    # STALL: a server that accepted the connection and never answers. Real curl gives up at --max-time (exit 28);
+    # a call without that bound would hang for ever, so the fake records it and fails loudly instead of hanging.
+    if [ "$code" = STALL ]; then
+      if [ -z "$maxtime" ]; then echo "UNBOUNDED $method $url" >> "$FAKE_DIR/events"; exit 99; fi
+      echo "curl: (28) Operation timed out after ${maxtime}000 milliseconds" >&2; printf '000'; exit 28
+    fi
     if [ -n "$out" ]; then printf '%s' "$rbody" > "$out"; else printf '%s' "$rbody"; fi
     [ -n "$wfmt" ] && printf '%s' "${wfmt//'%{http_code}'/$code}"
     exit 0
@@ -136,7 +143,10 @@ KUBE_PY = STATE_HELPERS + textwrap.dedent("""\
         if SC.get("pods_missing"):
             sys.exit(0)
         if "cnpg.io/cluster=infra-pg" in args:
-            print("pod/infra-pg-6")
+            # failover: the primary is infra-pg-6 at the first lookup and infra-pg-7 from the second on
+            ST["pg_lookups"] = ST.get("pg_lookups", 0) + 1
+            save()
+            print("pod/infra-pg-7" if SC.get("failover") and ST["pg_lookups"] > 1 else "pod/infra-pg-6")
         elif "app.kubernetes.io/name=gitea" in args:
             print("pod/gitea-86f5679868-586wg")
         sys.exit(0)
@@ -153,9 +163,14 @@ KUBE_PY = STATE_HELPERS + textwrap.dedent("""\
         print(tok)
         sys.exit(0)
     if "psql" in args:
+        pod = re.search(r"exec -i (\\S+)", args).group(1)
+        if SC.get("failover") and pod == "infra-pg-6":
+            print("ERROR:  cannot execute DELETE in a read-only transaction", file=sys.stderr)
+            sys.exit(1)
         if stdin.lower().startswith("delete"):
             name = re.search(r"and name='([^']+)'", stdin).group(1)
             event(f"DELETE {name}")
+            event(f"DELETE-ON {pod}")
             event(f"SQL {stdin.strip()}")
             # revocation_ineffective: the row stays. api_still_accepts: the row goes, but the API still takes the
             # token (a cache), so only the 401 probe can tell.
@@ -344,7 +359,7 @@ class GiteaOwnerOpTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DRY RUN", r.stdout)
         self.assertIn("PUT /repos/cchifor/relay/collaborators/renovate-bot", r.stdout)
-        self.assertIn("owner-op-renovate-onboard-relay-<utc>, scopes write:repository", r.stdout)
+        self.assertIn("owner-op-renovate-onboard-relay-<utc>-<random>, scopes write:repository", r.stdout)
         self.assert_nothing_called(r, code=0)
 
     def test_explicit_dry_run_flag_is_the_same(self):
@@ -374,7 +389,7 @@ class GiteaOwnerOpTest(unittest.TestCase):
                 r = self.run_script(ops, *args, execute=False)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertIn(f"{len(lines)} call(s)", r.stdout)
-                self.assertIn(f"{name}-<utc>, scopes write:repository", r.stdout)
+                self.assertIn(f"{name}-<utc>-<random>, scopes write:repository", r.stdout)
                 plan = [m.group(1) for l in r.stdout.splitlines()
                         for m in [re.match(r"\[[^]]*\]\s+(\d+\. .*)$", l)] if m]
                 self.assertEqual(plan, lines)
@@ -430,6 +445,8 @@ class GiteaOwnerOpTest(unittest.TestCase):
                       "--username chifor --token-name owner-op-renovate-onboard-relay-", mint[0])
         self.assertTrue(mint[0].endswith(" --scopes write:repository --raw"), mint[0])
         self.assertTrue(any("-n databases exec -i infra-pg-6 -c postgres -- psql" in a for a in argv), argv)
+        lookups = [a for a in argv if " get pod " in a]
+        self.assertTrue(lookups and all("--field-selector=status.phase=Running" in a for a in lookups), lookups)
 
     def test_execute_mints_with_exactly_the_declared_scopes(self):
         ops = self.ops_file("""\
@@ -525,6 +542,55 @@ class GiteaOwnerOpTest(unittest.TestCase):
         self.assertEqual([p for _, p, _ in self.owner_calls()], ["/repos/cchifor/relay/collaborators/renovate-bot"],
                          "the topic call is never made")
         self.assert_no_token_in_argv_or_output(r)
+
+    def test_every_curl_call_is_bounded(self):
+        r = self.run_script(RENOVATE, "--var", "REPO=relay")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        argv = self.read("argv.curl")
+        self.assertEqual(len(argv), 3)  # two calls and the post-revocation proof
+        for a in argv:
+            self.assertIn("--connect-timeout 10", a)
+            self.assertIn("--max-time 60", a)
+
+    def test_a_stalled_call_ends_at_its_bound_and_the_token_is_deleted(self):
+        # the server accepts the connection and never answers: the call must end at its deadline (curl exit 28)
+        # instead of holding the live token, and the trap must then delete it
+        self.scenario(responses={"PUT /repos/cchifor/relay/collaborators/renovate-bot": ["STALL", ""]})
+        r = self.run_script(RENOVATE, "--var", "REPO=relay")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertFalse([e for e in self.events() if e.startswith("UNBOUNDED ")], "a call without --max-time")
+        self.assertIn("HTTP 000", r.stderr)
+        self.assertEqual([p for _, p, _ in self.owner_calls()], ["/repos/cchifor/relay/collaborators/renovate-bot"])
+        self.assertEqual(self.deletes(), [self.mints()[0][0]])
+        self.assertIn("next use -> HTTP 401", r.stdout)
+        self.assert_no_token_in_argv_or_output(r)
+
+    def test_two_runs_in_the_same_second_never_share_a_token_name(self):
+        # A frozen clock: both runs read the same second, so only the random part keeps the names apart. With a
+        # shared name, one run's delete-by-name would revoke the other run's live token.
+        p = os.path.join(self.bin, "date")
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write('#!/usr/bin/env bash\ncase "$*" in *%Y%m%d%H%M%S*) echo 20261108120000;; *) echo 12:00:00Z;; esac\n')
+        os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
+        for _ in range(2):
+            r = self.run_script(RENOVATE, "--var", "REPO=relay")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        names = [n for n, _ in self.mints()]
+        self.assertEqual(len(names), 2)
+        for n in names:
+            self.assertRegex(n, r"^owner-op-renovate-onboard-relay-20261108120000-[0-9a-f]{8}$")
+        self.assertNotEqual(names[0], names[1])
+        self.assertEqual(self.deletes(), names, "each run deletes its own token, and only it")
+
+    def test_revocation_follows_a_primary_failover(self):
+        # the primary moves between the mint and the revocation (the old one now refuses writes): the delete and
+        # the listing must go to the new primary, so the run still confirms the revocation
+        self.scenario(failover=True)
+        r = self.run_script(RENOVATE, "--var", "REPO=relay")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("DELETE-ON infra-pg-7", self.events())
+        self.assertEqual(self.deletes(), [self.mints()[0][0]])
+        self.assertIn("chifor tokens now: cc-admin-20260913", r.stdout)
 
     def test_a_failed_mint_is_deleted_by_name_and_nothing_is_called(self):
         self.scenario(mint_fail=True)
@@ -673,11 +739,19 @@ class GiteaOwnerOpTest(unittest.TestCase):
         for args in ((ops, "--dry-run"),            # --execute is appended: the two exclude each other
                      (ops, "--force"),
                      (ops, ops),
-                     (ops, "--var"),
                      (os.path.join(self.ops, "missing.ops"),)):
             with self.subTest(args=args[1:] or args):
                 r = self.run_script(*args)
                 self.assert_nothing_called(r)
+        # --var without a value: the PARSER refuses it, last on the line or followed by another option (which it
+        # must not swallow as the value). Built by hand, without the appended --execute, so this is that branch.
+        for args in ((ops, "--var"), (ops, "--var", "--execute"), (ops, "--var", "--dry-run")):
+            with self.subTest(args=args[1:]):
+                for f in ("argv.curl", "argv.kubectl", "events"):
+                    open(os.path.join(self.dir, f), "w").close()
+                r = self.run_script(*args, execute=False)
+                self.assert_nothing_called(r)
+                self.assertIn("--var needs NAME=VALUE", r.stderr)
         r = subprocess.run([BASH, SCRIPT, "--execute"], capture_output=True, text=True, env=self.env(),
                            cwd=self.cwd, timeout=60)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)

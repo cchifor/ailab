@@ -24,10 +24,13 @@
 # refused (exit 2) before anything else happens. Presets: scripts/owner-ops/*.ops.
 #
 # With --execute:
-#   - the token is named `owner-op-<ops file name>-<--var values, by NAME>-<utc>`. The name is set BEFORE the
-#     mint, so the trap deletes the token by name even if the mint is interrupted or answers something that is
-#     not a token. The value lives in a shell variable and reaches the fixed origin only on curl's STDIN
+#   - the token is named `owner-op-<ops file name>-<--var values, by NAME>-<utc>-<8 random hex>`. The random part
+#     keeps two runs in the same second apart, so a run never deletes another run's token. The name is set
+#     BEFORE the mint, so the trap deletes the token by name even if the mint is interrupted or answers something
+#     that is not a token. The value lives in a shell variable and reaches the fixed origin only on curl's STDIN
 #     (`-q ... -H @-`): never an argument, never printed;
+#   - every call is bounded (10 s to connect, 60 s in all), so a server that stops answering cannot hold the
+#     token past the deadline: the call counts as failed (HTTP 000) and the token is deleted;
 #   - the calls run in order and STOP at the first status outside EXPECTED_CODES: its status and the first 300
 #     bytes of its body are printed, the remaining calls are not made;
 #   - responses go to a private temp dir that is removed on exit (nothing is written to the current directory);
@@ -56,7 +59,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --execute) EXECUTE=1 ;;
     --dry-run) DRY=1 ;;
-    --var) [ $# -ge 2 ] || stop 2 "--var needs NAME=VALUE; $USAGE"; VARS+=("$2"); shift ;;
+    --var) { [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; } || stop 2 "--var needs NAME=VALUE; $USAGE"; VARS+=("$2"); shift ;;
     --var=*) VARS+=("${1#--var=}") ;;
     -*) stop 2 "unknown option $1; $USAGE" ;;
     *) OPS=$1; NOPS=$((NOPS + 1)) ;;
@@ -78,9 +81,11 @@ kube() { kubectl --context "$KCTX" "$@"; }
 
 # owner_call METHOD PATH BODY_FILE|"" OUT: the HTTP status on stdout ("000" on a transport failure), the body in
 # OUT. Same transport rules as gitea-api.sh: -q FIRST (no ~/.curlrc can add tracing or URLs), https only, no
-# redirects, the header on stdin.
+# redirects, the header on stdin. Bounded: a stalled server ends the call (curl exit 28 -> 000) instead of
+# holding the live token, and the revocation probe below uses the same bound.
 owner_call() {
-  local code args=(-q --proto =https --max-redirs 0 -sS -o "$4" -w '%{http_code}' -X "$1" -H @-)
+  local code args=(-q --proto '=https' --max-redirs 0 --connect-timeout 10 --max-time 60 -sS -o "$4"
+    -w '%{http_code}' -X "$1" -H @-)
   [ -n "$EXECUTE" ] || stop 4 "internal error: owner call without --execute"
   [ -n "$3" ] && args+=(-H 'Content-Type: application/json' --data-binary "@$3")
   : > "$4"
@@ -90,11 +95,24 @@ owner_call() {
 
 psql_gitea() { kube -n databases exec -i "$DB_POD" -c postgres -- psql -U postgres -d gitea -tA -v ON_ERROR_STOP=1 -f -; }
 
+# The pods are looked up by label, not by name, and only Running ones count (a failover moves the primary).
+gitea_pod() {
+  kube -n gitea get pod -l app.kubernetes.io/name=gitea,app.kubernetes.io/instance=gitea \
+    --field-selector=status.phase=Running -o name 2>/dev/null | head -1 | sed 's|^pod/||'
+}
+db_primary() {
+  kube -n databases get pod -l cnpg.io/cluster=infra-pg,cnpg.io/instanceRole=primary \
+    --field-selector=status.phase=Running -o name 2>/dev/null | head -1 | sed 's|^pod/||'
+}
+
 # revoke: delete the live owner token by NAME, then prove it dead: the database no longer lists it and (when the
 # value is known) its next use answers 401. Returns 1, loudly, with the delete to run, when either proof fails.
+# The primary is looked up again first: a failover since the mint must not send the delete to a replica.
 revoke() {
   [ -n "$NAME" ] || return 0
-  local name=$NAME code="(no token value)" left bad="" sql
+  local name=$NAME code="(no token value)" left bad="" sql primary
+  primary=$(db_primary)
+  [ -z "$primary" ] || DB_POD=$primary
   sql="delete from access_token where uid=(select id from \"user\" where name='$OWNER') and name='$name';"
   printf '%s\n' "$sql" | psql_gitea >/dev/null 2>&1
   left=$(printf "select coalesce(string_agg(name, ',' order by id), '') from access_token where uid=(select id from \"user\" where name='%s');\n" \
@@ -324,7 +342,10 @@ PY
 PLAN=$(py "$WORK/plan.py" "$WORK" "$OPS" ${VARS[@]+"${VARS[@]}"})
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  printf '%s\n' "$PLAN" | sed -n 's/^ERROR\t/  /p' >&2
+  tab=$'\t' # not sed's \t: BSD sed reads it as a plain t and would drop every line
+  while IFS= read -r line; do
+    case $line in "ERROR$tab"*) printf '  %s\n' "${line#"ERROR$tab"}" >&2 ;; esac
+  done <<< "$PLAN"
   stop 2 "$OPS: invalid ops file or --var values (validator exit $rc); nothing called"
 fi
 
@@ -341,7 +362,7 @@ N=${#M[@]}
 
 if [ -n "$EXECUTE" ]; then RUNKIND="EXECUTE"; else RUNKIND="DRY RUN"; fi
 log "$RUNKIND: $OPS${VARS[*]+ (${VARS[*]})}: $N call(s) to $ORIGIN with ONE owner token" \
-  "$PREFIX-<utc>, scopes $SCOPES"
+  "$PREFIX-<utc>-<random>, scopes $SCOPES"
 for ((i = 0; i < N; i++)); do
   log "  $((i + 1)). ${M[$i]} ${P[$i]}  ${D[$i]}  expect ${X[$i]}"
 done
@@ -350,15 +371,15 @@ if [ -z "$EXECUTE" ]; then
   exit 0
 fi
 
-# The pods are looked up by label, not by name (failover).
-GITEA_POD=$(kube -n gitea get pod -l app.kubernetes.io/name=gitea,app.kubernetes.io/instance=gitea \
-  --field-selector=status.phase=Running -o name 2>/dev/null | head -1)
-DB_POD=$(kube -n databases get pod -l cnpg.io/cluster=infra-pg,cnpg.io/instanceRole=primary -o name 2>/dev/null \
-  | head -1)
-GITEA_POD=${GITEA_POD#pod/}; DB_POD=${DB_POD#pod/}
+GITEA_POD=$(gitea_pod)
+DB_POD=$(db_primary)
 [ -n "$GITEA_POD" ] && [ -n "$DB_POD" ] || stop 4 "cannot find the Gitea pod or the infra-pg primary; nothing minted"
 
-NAME="$PREFIX-$(date -u +%Y%m%d%H%M%S)"
+# 8 random hex characters: unique per run (two runs in the same second must not share a name, or one run's
+# delete-by-name would revoke the other's token) and safe inside the SQL string literal of the delete.
+RAND=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+[[ "$RAND" =~ ^[0-9a-f]{8}$ ]] || stop 4 "cannot read 4 random bytes for the token name; nothing minted"
+NAME="$PREFIX-$(date -u +%Y%m%d%H%M%S)-$RAND"
 TOKEN=$(kube -n gitea exec "$GITEA_POD" -c gitea -- gitea admin user generate-access-token --username "$OWNER" \
   --token-name "$NAME" --scopes "$SCOPES" --raw 2>/dev/null | tr -d '\r\n')
 if ! [[ "$TOKEN" =~ ^[0-9a-f]{40}$ ]]; then
