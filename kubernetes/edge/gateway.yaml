@@ -23,7 +23,7 @@ controller:
 # and refuses an apply that would put it back in.
 lan:
   network_name: Home
-  network_id: 6584469af81ca8458f9a6af1
+  network_id: c7406446-259e-48df-9f99-06a0d833fe8a # re-IDed by the controller after 2026-10-27 (was 6584469af81ca8458f9a6af1); UniFi now answers UUIDs
   subnet: 192.168.0.1/23
   dhcp_start: 192.168.0.53 # desired: .52 reserved for relay-worker-1; operator lease check/apply still required
   dhcp_stop: 192.168.1.254

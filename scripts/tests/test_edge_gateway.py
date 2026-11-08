@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "edge"))
 import gateway  # noqa: E402
 import render  # noqa: E402
 
-HOME = "6584469af81ca8458f9a6af1"
+HOME = "c7406446-259e-48df-9f99-06a0d833fe8a"  # the live Home network id (UUID since the controller re-IDed its objects)
 
 
 def base_inventory():
