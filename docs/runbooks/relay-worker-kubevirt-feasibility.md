@@ -253,9 +253,12 @@ must fit in 30 GiB − 20 GiB cache − 1 GiB reserve; both can occupy disk conc
 ```bash
 python3 scripts/relay-kubevirt-spike.py render-workload --evidence "$EVIDENCE_DIR/guest-evidence.json" --out-dir "$B"
 sha256sum "$B"/*                                                   # record in the evidence record
-# The pinned kube-dns ClusterIP the egress policy allows must be the live one, or guest DNS fails silently:
-test "$(kubectl --context admin@ai -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')" = \
-     "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kube_dns_cluster_ip"])' "$B/workload-metadata.json")"
+# The pinned kube-dns ClusterIP the egress policy allows must be the live one, or guest DNS fails silently.
+# Prints both values; on a mismatch it says STOP and returns non-zero. Do not continue past a STOP.
+live=$(kubectl --context admin@ai -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')
+pinned=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kube_dns_cluster_ip"])' "$B/workload-metadata.json")
+echo "kube-dns ClusterIP: live=${live:-<none>} pinned=${pinned:-<none>}"
+[ -n "$live" ] && [ "$live" = "$pinned" ] || { echo 'STOP: the kube-dns ClusterIP pin does not match the live Service' >&2; false; }
 # --- APPLY BOUNDARY: everything below writes to admin@ai ---
 kubectl --context admin@ai apply --server-side -f "$B/10-operator.yaml"
 kubectl --context admin@ai -n kubevirt rollout status deploy/virt-operator --timeout=300s
