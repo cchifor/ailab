@@ -1,10 +1,12 @@
 # Relay worker and independent authority monitoring
 
 These components are opt-in; this PR selects none in a live Kustomization.
-Use the matching reviewed Relay implementation described in its
-[worker operations monitoring](https://git.chifor.me/cchifor/relay/src/branch/main/docs/worker-operations-monitoring.md).
-Complete its release/migration, installation, authority and runtime acceptance
-gates separately. Metrics never grant authority or qualify a runtime.
+Activate only after the matching Relay collector implementation and its full
+migration set are reviewer-merged and deployed. [Relay #277](https://git.chifor.me/cchifor/relay/issues/277)
+tracks that delivery. The [Relay operations runbook](https://git.chifor.me/cchifor/relay/src/branch/main/docs/worker-operations-monitoring.md)
+becomes available on main when that source merges; until then, keep these
+components unselected. Complete installation, authority and runtime acceptance
+separately. Metrics never grant authority or qualify a runtime.
 
 ## Hub worker alerts
 
@@ -116,3 +118,9 @@ unconfigured authority, idle journal roles, resource rendering and sample budget
 Actual installation, collection/rotation, alert routing, independent recovery and
 runtime qualification remain named operator acceptance evidence. Record results
 and nonsecret hashes in the rollout PR; this source change performs no live write.
+
+The existing rules-lint workflow discovers every `kind: PrometheusRule` under
+`kubernetes/` and tests each sibling `<rule>.test.yaml`, including opt-in
+components. No separate workflow entry is needed for a new sibling fixture.
+Record run-specific evidence in the rollout PR; these source checks do not
+establish live activation.
