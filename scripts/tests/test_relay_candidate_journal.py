@@ -105,6 +105,13 @@ class JournalBundle(unittest.TestCase):
                 if mutation == 'extra': config['operatorPassword'] = 'synthetic-not-accepted'
                 with self.assertRaises((ValueError, KeyError)): render.service(config)
 
+    def test_protocol_listener_requires_integer_port(self):
+        config, service, _ = self.fixture()
+        service['listen']['port'] = 8443.0
+        config['config'] = self.pin('config.json', service)
+        with self.assertRaisesRegex(render.Refusal, 'public-binding-mismatch'):
+            render.service(config)
+
     def test_pinned_file_rejects_symlink_hardlink_writable_and_wrong_hash(self):
         for mutation in ['symlink', 'hardlink', 'writable', 'hash']:
             with self.subTest(mutation=mutation):

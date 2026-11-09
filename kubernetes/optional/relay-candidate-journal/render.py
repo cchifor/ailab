@@ -240,7 +240,7 @@ def service(config):
     fields(c, ['version', 'run', 'witness', 'trustedIssuerKeys', 'journal', 'replyPrivateKeyFile', 'tls', 'listen', 'database'], ['metrics'])
     if ('metrics' in config) != ('metrics' in c):
         refuse('metrics-opt-in-mismatch')
-    if c['version'] != 1 or c['listen'] != {'host': '0.0.0.0', 'port': 8443}:
+    if c['version'] != 1 or c['listen'] != {'host': '0.0.0.0', 'port': 8443} or type(c['listen']['port']) is not int:
         refuse()
     keys = c['trustedIssuerKeys']
     if not isinstance(keys, dict) or not 1 <= len(keys) <= 8 or any(
