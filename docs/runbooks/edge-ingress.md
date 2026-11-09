@@ -210,6 +210,14 @@ just edge-gateway-apply --only dhcp --plan-hash <hash>
 - **An owned ID with another identity aborts**: a record whose key, a forward whose name, or a
   network whose name no longer matches the state (renamed, or the ID reused). Inspect it in the UI;
   `--forget <recorded name>` drops it, then `--adopt` if it is in fact ours.
+- **Every owned object "gone from the controller", each with an unowned twin under the same key or
+  name**: the controller re-IDed its objects. Between 2026-10-27 and 2026-11-08 a UniFi Network update
+  replaced every ID with a UUID; names and contents were unchanged. Check `gateway.yaml`
+  `lan.network_id` against the live network first. Then plan with `--forget <key> --adopt <key>` for
+  every owned key, and apply only if the plan holds nothing but `forget` and `adopt`: those two are
+  bookkeeping, while an `update` means the live content differs, so inspect it first. Re-planned on
+  2026-11-08 for `Home` (`1255431b5b8215b942fc`) and on 2026-11-09 for the 17 records and the forward
+  (`6e2e483d71bb8c436aed`); after both, an unfiltered plan reports no changes.
 - **"collision" abort**: an unowned object has a key the registry wants. Inspect it in the UniFi UI;
   if it should be managed, run `--adopt <key>`. A second record with our key, a second forward with
   our name, or any other enabled forward on WAN 443 aborts even when ours exists, and every check runs

@@ -9,24 +9,24 @@ dhcp_network:
   name: Home
 intents: []
 port_forward:
-  id: 6ae0e947ca11f9b8900a2901
+  id: cb10b43a-8a6f-40d2-8d12-664e528a8fd2
   name: ailab-edge-https
 static_dns:
-  api.chifor.me: 6ae0e56bca11f9b8900a2500
-  chat.chifor.me: 6ae0e56bca11f9b8900a2503
-  edge-canary.chifor.me: 6ae0bc77ca11f9b8900a091a
-  edge-vip.lan: 6ae0bc76ca11f9b8900a0917
-  git.chifor.me: 6ae0e56cca11f9b8900a2505
-  grafana.chifor.me: 6ae0e56dca11f9b8900a2509
-  home.chifor.me: 6ae0e56dca11f9b8900a250c
-  id.chifor.me: 6ae0e56eca11f9b8900a250f
-  muse.chifor.me: 6ae0e56eca11f9b8900a2512
-  ntfy.chifor.me: 6ae0e56fca11f9b8900a2515
-  relay.chifor.me: 6ae0e56fca11f9b8900a2518
-  router.chifor.me: 6ae0d196ca11f9b8900a1607
-  search.chifor.me: 6ae0e570ca11f9b8900a251b
-  sso.chifor.me: 6ae0e570ca11f9b8900a251e
-  status.chifor.me: 6ae0e571ca11f9b8900a2521
-  trueswarm.chifor.me: 6ae0e571ca11f9b8900a2524
-  vault.chifor.me: 6ae0e572ca11f9b8900a2527
+  api.chifor.me: 8c17c6d1-b4e9-49fe-82be-3e5622d631d2
+  chat.chifor.me: eef7e3a4-1141-4846-8fdc-4e7dc974fe27
+  edge-canary.chifor.me: 832b510d-6bf0-4868-ab36-8d529a2d1e2b
+  edge-vip.lan: d7d2eeb6-020e-4cb4-a39c-69399e998fe2
+  git.chifor.me: 91f6cbe4-b797-4b96-afdd-da2b7d775e04
+  grafana.chifor.me: ee6172b5-4412-4f59-b2cd-3e493d075e92
+  home.chifor.me: abf93e6a-71db-4ed8-9d30-2283d596266d
+  id.chifor.me: 94ae2d3a-5dd3-4470-a216-b1dafa50b8f5
+  muse.chifor.me: ca3575c3-4832-4955-a62f-dd64fd5438e7
+  ntfy.chifor.me: f400a8ad-a828-47fe-851e-d8144ffd6ff3
+  relay.chifor.me: 726b1140-ac35-4b54-85b3-1ebe5d11fdab
+  router.chifor.me: c2b98e89-c5cd-4217-a75a-280fc017f37f
+  search.chifor.me: e3acdd0e-a9ea-4f08-b9d9-30f18fa56ebd
+  sso.chifor.me: 51935107-998e-4fc0-9a5b-79eb1c5d5eb9
+  status.chifor.me: b109dabb-6f72-479e-a543-7d2e3336a326
+  trueswarm.chifor.me: 9de88115-7052-4c6b-a937-e3476d593b9f
+  vault.chifor.me: c89f3912-39fd-45d7-a52f-3fb3d2e2ea29
 version: 1
