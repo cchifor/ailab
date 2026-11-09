@@ -94,6 +94,38 @@ class RolloutTest(unittest.TestCase):
             (folder / 'other-canary.yaml').write_text('')
             with self.assertRaisesRegex(ValueError, 'at most one'): rollout.expectation(root)
 
+    def test_init_expectation_excludes_nested_names_and_later_volumes(self):
+        init = '''      initContainers:
+        - name: backup-before-worker-budgets
+          image: IMAGE
+          env:
+            - name: ROUTER_DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+'''.replace('IMAGE', IMAGE)
+        containers = '      containers:\n        - name: router\n          image: ' + IMAGE + '\n'
+        volumes = '      volumes:\n        - name: data\n          emptyDir: {}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            folder = root / 'kubernetes/apps/apps/llm-router'
+            folder.mkdir(parents=True)
+            for blocks in (init + containers + volumes, containers + init + volumes):
+                with self.subTest(init_before_containers=blocks.startswith(init)):
+                    (folder / 'router.yaml').write_text(blocks)
+                    self.assertEqual(rollout.expectation(root), (IMAGE, ['backup-before-worker-budgets'], None))
+
+    def test_unpinned_init_image_is_not_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            folder = root / 'kubernetes/apps/apps/llm-router'
+            folder.mkdir(parents=True)
+            (folder / 'router.yaml').write_text('image: ' + IMAGE + '\nimage: VERIFIED_ROUTER_IMAGE_AT_SHA256\n')
+            with self.assertRaisesRegex(ValueError, 'digest-pinned router image'): rollout.expectation(root)
+
     def test_public_check_requires_authentication_refusal(self):
         for refused in (True, False):
             def fetch(request, **kwargs):

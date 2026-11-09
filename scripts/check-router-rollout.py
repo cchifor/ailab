@@ -24,11 +24,13 @@ class Pending(Exception):
 def expectation(root=ROOT):
     folder = root / 'kubernetes/apps/apps/llm-router'
     manifest = (folder / 'router.yaml').read_text()
-    images = set(re.findall(r'image: (registry\.chifor\.me/llm-router/router@sha256:[a-f0-9]{64})', manifest))
-    if len(images) != 1:
+    images = set(re.findall(r'(?m)^\s*image: (\S+)\s*$', manifest))
+    if len(images) != 1 or not re.fullmatch(r'registry\.chifor\.me/llm-router/router@sha256:[a-f0-9]{64}', next(iter(images), '')):
         raise ValueError('Expected one consistent, digest-pinned router image')
-    init = manifest.split('      initContainers:\n', 1)
-    names = re.findall(r'        - name: ([-a-z0-9]+)', init[1].split('      containers:\n')[0]) if len(init) == 2 else []
+    # Only direct children of this pod field are containers. Nested env/mount
+    # names and later pod volumes must not become expected init containers.
+    init = re.search(r'(?m)^      initContainers:\n((?: {8}.*(?:\n|$)|[ \t]*\n)*)', manifest)
+    names = re.findall(r'(?m)^        - name: ([-a-z0-9]+)[ \t]*$', init[1]) if init else []
     canaries = list(folder.glob('*-canary.yaml'))
     if len(canaries) > 1:
         raise ValueError('Expected at most one rollout canary')
