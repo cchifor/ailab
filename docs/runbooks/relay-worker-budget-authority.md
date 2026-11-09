@@ -89,9 +89,14 @@ Do not enable application consumers until every gate below is satisfied.
    ConfigMap `relay-budget-reviewed-schema-once` in the ledger namespace with
    exactly the key `001-authority.sql`, labelled
    `velero.io/exclude-from-backup=true`. This contains schema only, no credentials,
-   authority row or witness. Render/apply `.../initialize/` separately; confirm
+   authority row or witness. Render/apply `.../initialize/` separately to create
+   only the script ConfigMap. The Job is deliberately outside every Kustomization
+   inventory: inspect `.../initialize/job.yaml`, then explicitly create it once
+   with `kubectl --context admin@ai create -f
+   kubernetes/optional/relay-budget-authority/initialize/job.yaml`. Confirm
    `suspend=true`, `backoffLimit=0`, and no running database or initializer holds
-   the claim. Explicitly unsuspend the Job once. It creates the empty database,
+   the claim. Never add a Flux force/recreation annotation or use a reconciliation
+   loop for this Job. Explicitly unsuspend it once. It creates the empty database,
    applies the reviewed schema and creates the two logins below without passwords.
    Any failed/interrupted initialization requires owner investigation; do not
    erase markers/data or automatically rerun it.
