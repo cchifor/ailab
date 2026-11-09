@@ -11,6 +11,7 @@ source_dir="$repo/kubernetes/optional/relay-budget-authority"
 image=$(awk '/image:/ {print $2; exit}' "$source_dir/postgres.yaml")
 [[ "$image" == *@sha256:* ]] || exit 65
 [ "$(awk '/image:/ {print $2; exit}' "$source_dir/initialize/job.yaml")" = "$image" ] || exit 65
+[ "$(awk '/image:/ {print $2; exit}' "$source_dir/initialize/upgrade-job.yaml")" = "$image" ] || exit 65
 test_dir=$(mktemp -d "$repo/.budget-postgres-test.XXXXXX")
 # Public bundle projections must be traversable by the image's UID70, just like
 # the read-only ConfigMap mount. Keep fixture TLS private even inside this tree.

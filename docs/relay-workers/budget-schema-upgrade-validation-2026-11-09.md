@@ -75,3 +75,9 @@ so a long ALTER is not automatically killed at ten minutes. Init of an empty
 database retains its deadline. The runbook pins the retained version-1 wrapper
 for the documented recovery path and keeps consumers/authority disabled. These
 changes do not establish live recovery or remove the interrupted-attempt gate.
+
+A second repository review also made the shutdown wait explicit (3600 seconds
+in both Jobs) and added equality checks for the server, initializer and upgrade
+image pins in both the Python boundary suite and real Docker harness. The five
+focused checks and complete disposable PostgreSQL harness passed again. This
+wait does not extend Kubernetes termination grace or establish storage durability.

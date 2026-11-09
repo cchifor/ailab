@@ -18,7 +18,7 @@ legacy=$(sha256sum /schema/001-authority.sql)
 # Interrupted migrations require inspection. A SQL preflight refusal does
 # not consume this marker; create it durably immediately before the first SQL.
 [ ! -e "$PGDATA/relay-budget-upgrade-started" ] || exit 78
-stop() { pg_ctl -D "$PGDATA" -m fast -w stop; }
+stop() { pg_ctl -D "$PGDATA" -m fast -w -t 3600 stop; }
 pg_ctl -D "$PGDATA" -w start -o "-c listen_addresses='' -c unix_socket_directories=/var/run/postgresql -c fsync=on -c full_page_writes=on -c synchronous_commit=on"
 trap stop EXIT
 trap 'exit 1' INT TERM

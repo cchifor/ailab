@@ -243,6 +243,9 @@ under the new wrapper.
    an automatic SIGKILL during a large retained-table ALTER. Monitor progress until
    clean shutdown. Operator cancellation, node failure or the 120-second Pod
    termination grace can still interrupt it and requires the same inspection.
+   Both Jobs explicitly allow up to 3600 seconds for `pg_ctl` fast shutdown
+   instead of its implicit 60-second wait. Exceeding that wait still fails without
+   recording version 4; the operator must investigate before retry or recovery.
 4. Confirm the same allocation IDs, token ceilings, original deadlines, outbox
    operations, receipts, witness and withdrawn authority. Ordinary old allocations
    gain NULL request-scope columns; they must not become new allocations. Confirm

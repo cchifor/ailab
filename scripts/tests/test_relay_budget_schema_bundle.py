@@ -81,6 +81,8 @@ class SchemaBundle(unittest.TestCase):
     def test_jobs_stay_suspended_standalone_and_require_independent_pins(self):
         directory = ROOT / 'kubernetes/optional/relay-budget-authority/initialize'
         base = yaml.safe_load((directory.parent / 'kustomization.yaml').read_text())
+        server = next(doc for doc in yaml.safe_load_all((directory.parent / 'postgres.yaml').read_text()) if doc['kind'] == 'StatefulSet')
+        server_image = server['spec']['template']['spec']['containers'][0]['image']
         scripts = yaml.safe_load((directory / 'kustomization.yaml').read_text())
         self.assertNotIn('initialize', base['resources'])
         self.assertEqual(scripts.get('resources', []), [])
@@ -92,6 +94,7 @@ class SchemaBundle(unittest.TestCase):
             self.assertFalse(spec['automountServiceAccountToken'])
             self.assertEqual(spec['restartPolicy'], 'Never')
             container = spec['containers'][0]
+            self.assertEqual(container['image'], server_image)
             self.assertEqual(container['command'], ['/bin/sh', '/initialize/' + command])
             env = {item['name']: item['value'] for item in container['env']}
             self.assertEqual(env['RELAY_BUDGET_SCHEMA_MANIFEST_SHA256'], '')

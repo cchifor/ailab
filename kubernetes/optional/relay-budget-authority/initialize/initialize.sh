@@ -9,7 +9,7 @@ verify_schema || { echo 'Reviewed schema bundle does not match its independent p
 [ ! -e "$PGDATA" ] || { echo 'Budget data already exists; refusing initialization' >&2; exit 78; }
 mkdir "$data_root/.initialization-started" || exit 78
 initdb -D "$PGDATA" --username=postgres --auth-local=peer --auth-host=scram-sha-256 --data-checksums
-stop() { pg_ctl -D "$PGDATA" -m fast -w stop; }
+stop() { pg_ctl -D "$PGDATA" -m fast -w -t 3600 stop; }
 pg_ctl -D "$PGDATA" -w start -o "-c listen_addresses='' -c unix_socket_directories=/var/run/postgresql -c fsync=on -c full_page_writes=on -c synchronous_commit=on -c password_encryption=scram-sha-256"
 trap stop EXIT
 trap 'exit 1' INT TERM
