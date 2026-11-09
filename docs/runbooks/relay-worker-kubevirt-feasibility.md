@@ -1,6 +1,6 @@
 # Runbook: KubeVirt feasibility spike for Relay developer workers (operator-run, NOT yet run)
 
-**Status as of 2026-11-09: dedicated node ready; both preflight gates pass; runtime spike PENDING.**
+**Status as of 2026-11-09: dedicated node ready; operator-reported preflight pass (collector revision pending confirmation); runtime spike PENDING.**
 The operator provisioned `relay-worker-1` at `192.168.0.52` on ai-node3 with
 12 vCPU, 24 GiB memory and 200 GiB disk; DHCP now starts at `.53`, and existing dev workers
 are unchanged. The [rollout record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)
