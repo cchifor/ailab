@@ -101,7 +101,7 @@ def render_workload_bundle(pins_path: pathlib.Path, evidence: dict, now: dt.date
 def _write(out_dir: pathlib.Path, files: dict[str, str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
-        (out_dir / name).write_text(text)
+        (out_dir / name).write_bytes(text.encode())  # LF on every OS: the printed SHA-256 is the file's
         print(f"{hashlib.sha256(text.encode()).hexdigest()}  {out_dir / name}")
 
 

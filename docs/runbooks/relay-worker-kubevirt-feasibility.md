@@ -228,6 +228,12 @@ What the render changes, all recorded in `bundle-metadata.json`:
   virt-operator manages cluster-scoped CRDs, webhooks, APIServices and component RBAC, so this
   is **not** a namespaced install. Review those rights as upstream ships them. The `kubevirt`
   namespace keeps upstream's PSA `privileged` label, because virt-handler is privileged.
+- **Cluster-wide blast radius (measured 2026-11-09).** virt-api registers two `pods/eviction`
+  webhooks (`virt-launcher-eviction-interceptor`, `hotplug-pod-eviction-interceptor`) with
+  `failurePolicy: Fail` and **no** namespace or object selector. Its only replica runs on the
+  dedicated node, so while that node is down, every eviction-API call in the cluster fails,
+  `kubectl drain` and the Talos upgrade drains included. Running pods are unaffected. Do not
+  drain any other node while the dedicated node is down (S7) or KubeVirt is unhealthy.
 
 **Guest evidence before S2 (operator).** `render-workload` refuses without nonsecret evidence that
 is fresh (≤14 days), not in the future, and names the pinned guest and launcher images and a
@@ -264,16 +270,25 @@ The VM starts `Halted`. VMI `Ready` comes from the in-guest exec probe
 (`/usr/local/sbin/relay-spike-ready`), which needs qemu-guest-agent and also checks that both
 virtio disks are mounted, that `docker compose` is running the pinned smoke container, and that it
 wrote to the workspace. `Running` alone is not readiness. The guest recipe (cloud-init) installs
-`qemu-guest-agent`, `docker.io` and `docker-compose-v2` from Ubuntu archives at first boot. That is
-why the reviewed egress allows only the Ubuntu archives and quay.io on 80/443, plus kube-dns. The
+`qemu-guest-agent`, `docker.io` and `docker-compose-v2` from Ubuntu archives at first boot. Docker
+29 defaults to the containerd image store, which keeps image content on the root partition (about
+2.4 GiB, under 100 MiB free after the install): the recipe turns it off
+(`features.containerd-snapshotter: false`) so images live under `data-root` on the cache disk.
+The probe's 60 × 30 s failure budget covers the first boot; it also means VMI `Ready` does not
+drop during an in-guest reboot or a short guest outage. That is
+why the reviewed egress allows only the Ubuntu archives and quay.io on 80/443, plus kube-dns. Guest
+DNS reaches Cilium as the **untranslated** kube-dns ClusterIP (masquerade NAT; kube-proxy
+replacement with `bpf-lb-sock=false`), so the `toEndpoints` kube-dns rule alone never matches VM
+traffic: the bundle also allows DNS to `10.96.0.10/32` (measured 2026-11-09). The
 estate LAN `192.168.0.0/23`, RFC 1918 172.16/12 and the tailnet CGNAT range stay denied, even
 through those FQDNs. If the packages cannot install, readiness never passes, and S2 records
 `fail`, not success. A NetworkPolicy also denies all ingress and all other egress for the namespace.
 
-`relay-kv-spike` explicitly enforces PSA `privileged`: KubeVirt's generated masquerade
-launcher needs `NET_ADMIN`, which baseline PSA rejects. Audit and warning policies remain
-`restricted`. This exception applies only to this disposable spike namespace on the dedicated
-node; it does not change the Relay pod tier or any existing namespace. Do not grant worker
+`relay-kv-spike` enforces PSA `baseline`, and audit and warning stay `restricted`. The v1.9.1
+masquerade launcher runs non-root (UID 107), drops ALL capabilities and adds only
+`NET_BIND_SERVICE`; there is **no** `NET_ADMIN`. The live launcher passed `baseline` and failed
+`restricted` only on `seccompProfile` (server dry run, 2026-11-09). An earlier revision enforced
+`privileged` on the assumption that the launcher needed `NET_ADMIN`. Do not grant worker
 identities access to this namespace. S2 must capture the actual generated launcher Pod,
 its security context/capabilities, and admission events. An admission refusal is a failed S2,
 not a reason to widen policy elsewhere. While the VM is stopped and its launcher removed,
@@ -338,13 +353,21 @@ their own evidence.
      against the launcher limit. Capture the actual launcher request/limit and kubelet eviction
      events. The 20 Gi cache alone cannot exceed the 30 Gi launcher limit. For the eviction test,
      the operator resolves the launcher's disk-backed emptyDir mount from its Pod spec and writes
-     a separate disposable file there (outside `disk.img`, never on the workspace PVC). Bound
+     a separate disposable file there (outside `disk.img`, never on the workspace PVC) with
+     **direct I/O** (`dd ... oflag=direct`). A buffered write inside the launcher fills its memory
+     cgroup with page cache, and the kernel then OOM-kills `qemu-kvm`: the launcher's memory limit
+     is the 8 GiB guest plus about 486 MiB, and `memory.oom.group` takes the whole compute
+     container (observed 2026-11-09). Bound
      that file so total measured pod use can exceed the limit by at most 1 Gi; monitor node free
      space and abort before the node's eviction reserve is reached. Record the chosen path,
      byte bound and observed eviction. Then recreate the VM and verify the workspace survives. Quota is admission accounting,
      not a filesystem quota: if kubelet does not account for the disk or enforce the pod limit,
      S3 fails. Do not claim a hard byte ceiling from quota alone.
    - Note that the PV is node-affine; that is expected.
+   - KubeVirt grows `disk.img` to the PVC capacity minus its 5.5 % filesystem overhead
+     (20,293,091,328 bytes for 20 Gi) on the first start. The workspace bound is therefore the
+     PVC size, not the prep Job's 18 GiB, and re-running the prep Job afterwards fails its size
+     check: it is a first-boot step only.
 4. **S4, Compose.**
    - Run one representative Compose stack in the guest, with no more than one stack per worker
      (ADR 0037).
@@ -413,6 +436,10 @@ Stop the spike and run the cleanup if any of these happens:
 - etcd not at 3/3;
 - the NAS reports iSCSI or NFS errors;
 - a teardown is stuck for more than 15 minutes.
+
+While the dedicated node is down, KubeVirt's control plane is down with it (virt-api,
+virt-controller and virt-operator run only there): VMI status stays stale until the node
+returns, and cluster-wide evictions fail (see the blast-radius note under the spike bundle).
 
 Recover a wedged node the way ADR 0037 describes: a `qm reset` of that node only. Do not run
 `talosctl reboot` on it.

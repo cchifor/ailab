@@ -89,8 +89,8 @@ class WorkloadTests(unittest.TestCase):
         files = self.render()
         self.assertEqual(files, self.render())
         docs = list(yaml.safe_load_all(files["30-workload.yaml"]))
-        # Masquerade's generated launcher requires NET_ADMIN, which baseline PSA rejects.
-        self.assertEqual(docs[0]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"], "privileged")
+        # The v1.9.1 masquerade launcher passed baseline live (no NET_ADMIN); restricted fails on seccomp.
+        self.assertEqual(docs[0]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"], "baseline")
         self.assertEqual(docs[0]["metadata"]["labels"]["pod-security.kubernetes.io/audit"], "restricted")
         kinds = [d["kind"] for d in docs]
         self.assertEqual(kinds, ["Namespace", "ResourceQuota", "NetworkPolicy", "CiliumNetworkPolicy",
@@ -109,6 +109,11 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("docker compose", vm["volumes"][3]["cloudInitNoCloud"]["userData"])
         cnp = docs[3]["spec"]
         self.assertIn("192.168.0.0/23", cnp["egressDeny"][0]["toCIDR"])
+        # Guest DNS reaches Cilium as the untranslated kube-dns ClusterIP: only a /32 toCIDR rule, DNS
+        # port and DNS-proxy rules only, admits it.
+        dns_cidr = [r for r in cnp["egress"] if "toCIDR" in r]
+        self.assertEqual(dns_cidr, [{"toCIDR": ["10.96.0.10/32"], "toPorts": [
+            {"ports": [{"port": "53", "protocol": "ANY"}], "rules": {"dns": [{"matchPattern": "*"}]}}]}])
         self.assertEqual(json.loads(files["workload-metadata.json"])["status"], "rendered-not-applied-not-qualified")
 
     def test_cloud_init_inline_byte_limit(self):
@@ -123,6 +128,10 @@ class WorkloadTests(unittest.TestCase):
         compose = yaml.safe_load(next(f["content"] for f in config["write_files"] if f["path"].endswith("compose.yaml")))
         # Docker must restart the container on an in-guest reboot: cloud-init runcmd is once-per-instance.
         self.assertEqual(compose["services"]["smoke"]["restart"], "unless-stopped")
+        # Images must land on the cache disk, not in containerd's store on the small root partition.
+        daemon = json.loads(next(f["content"] for f in config["write_files"] if f["path"] == "/etc/docker/daemon.json"))
+        self.assertEqual(daemon, {"data-root": "/var/lib/docker-cache/docker",
+                                  "features": {"containerd-snapshotter": False}})
         self.assertIn("while :", compose["services"]["smoke"]["command"][-1])
 
     def test_forbidden_vm_features_refused(self):
