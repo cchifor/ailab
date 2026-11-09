@@ -35,10 +35,29 @@ spec:
           or inspecting a synthetic launch.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
     - alert: RelayCandidateMetricSchemaIncomplete
-      expr: up{job="relay-candidate-journal"} == 1 unless on(job, instance) ((count by(job, instance) (relay_candidate_journal_observed{job="relay-candidate-journal"})
-        == 2) and (count by(job, instance) (relay_candidate_journal_observation_timestamp_seconds{job="relay-candidate-journal"})
-        == 2) and (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal"}) == 6) and
-        (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal"}) == 6))
+      expr: |
+        up{job="relay-candidate-journal"} == 1 unless on(job, instance) (
+          (count by(job, instance) (relay_candidate_journal_observed{job="relay-candidate-journal"}) == 2)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_observed{job="relay-candidate-journal",role="agent"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_observed{job="relay-candidate-journal",role="holder"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_observation_timestamp_seconds{job="relay-candidate-journal"}) == 2)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_observation_timestamp_seconds{job="relay-candidate-journal",role="agent"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_observation_timestamp_seconds{job="relay-candidate-journal",role="holder"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal"}) == 6)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal",role="agent",outcome="ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal",role="agent",outcome="not_ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal",role="agent",outcome="interrupted"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal",role="holder",outcome="ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal",role="holder",outcome="not_ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal",role="holder",outcome="interrupted"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal"}) == 6)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal",role="agent",outcome="ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal",role="agent",outcome="not_ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal",role="agent",outcome="interrupted"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal",role="holder",outcome="ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal",role="holder",outcome="not_ok"}) == 1)
+          and on(job, instance) (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal",role="holder",outcome="interrupted"}) == 1)
+        )
       for: 5m
       labels:
         severity: warning
