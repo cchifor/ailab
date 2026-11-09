@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
     - 'kubernetes/components/relay-control-monitoring/**'
+    - 'kubernetes/components/relay-worker-monitoring/**'
+    - 'kubernetes/components/relay-candidate-monitoring/**'
     - 'kubernetes/components/relay-recovery-monitoring/**'
     - 'kubernetes/components/relay-restore-fencing/**'
     - 'kubernetes/components/relay-recovery-monitoring-schema43/**'
@@ -15,6 +17,8 @@ on:
     branches: [main]
     paths:
     - 'kubernetes/components/relay-control-monitoring/**'
+    - 'kubernetes/components/relay-worker-monitoring/**'
+    - 'kubernetes/components/relay-candidate-monitoring/**'
     - 'kubernetes/components/relay-recovery-monitoring/**'
     - 'kubernetes/components/relay-restore-fencing/**'
     - 'kubernetes/components/relay-recovery-monitoring-schema43/**'
