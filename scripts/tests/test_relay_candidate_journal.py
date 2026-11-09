@@ -211,5 +211,146 @@ class TlsLifecycle(unittest.TestCase):
         self.assertEqual(result.stdout,'')
 
 
+class MetricsComposition(unittest.TestCase):
+    setUp = JournalBundle.setUp
+    pin = JournalBundle.pin
+    fixture = JournalBundle.fixture
+
+    @classmethod
+    def setUpClass(cls):
+        # Public synthetic trust material; the generated private key never
+        # enters the renderer, fixture files, test output or rendered objects.
+        cls.certificate, _ = TlsLifecycle.pair(cls)
+
+    def enable(self, config, service, run, port=None):
+        ca = self.pin('metrics-ca.pem', self.certificate.decode())
+        run['payload']['ledger']['caSha256'] = ca['sha256']
+        config['run'] = self.pin('run.json', run)
+        service['run']['sha256'] = config['run']['sha256']
+        service['journal']['caSha256'] = ca['sha256']
+        service['metrics'] = {'listen': {'host': '0.0.0.0', 'port': port or render.METRICS_PORT},
+                              'tokenSha256': '7' * 64, 'expiresAt': '2099-01-01T00:00:00Z'}
+        config['metrics'] = {'ca': ca, 'serverName': render.NAME + '.' + render.SERVICE_NS + '.svc',
+                             'collectorSecret': {'name': render.METRICS_NAME + '-fixture', 'key': 'token'}}
+        if port is not None:
+            config['metrics']['port'] = port
+        config['config'] = self.pin('config.json', service)
+
+    def test_default_off_has_no_metrics_resources_or_port(self):
+        config, _, _ = self.fixture()
+        objects = render.service(config)
+        self.assertEqual([o['kind'] for o in objects], ['ConfigMap', 'Service', 'Deployment', 'NetworkPolicy'])
+        self.assertTrue(all(o['metadata']['namespace'] == render.SERVICE_NS for o in objects))
+        pod = objects[2]['spec']['template']['spec']
+        self.assertEqual(pod['containers'][0]['ports'], [{'name': 'https', 'containerPort': 8443}])
+        self.assertNotIn('metrics', objects[0]['data']['config.json'])
+
+    def test_opt_in_preserves_protocol_and_isolates_collector_for_default_and_custom_ports(self):
+        for port in [None, 10444]:
+            with self.subTest(port=port):
+                config, service, run = self.fixture()
+                before = render.service(config)
+                self.enable(config, service, run, port)
+                objects = render.service(config)
+                def get(kind, name):
+                    return next(o for o in objects if o['kind'] == kind and o['metadata']['name'] == name)
+                self.assertEqual(get('Service', render.NAME), before[1])
+                self.assertEqual(get('NetworkPolicy', 'journal-clients-and-database'), before[3])
+                deployment = get('Deployment', render.NAME)
+                self.assertEqual(deployment['spec']['replicas'], 0)
+                pod = deployment['spec']['template']['spec']
+                self.assertEqual(pod['containers'][0]['ports'], [{'name': 'https', 'containerPort': 8443},
+                                                                  {'name': 'metrics', 'containerPort': port or 9444}])
+                self.assertEqual(pod['containers'][0]['volumeMounts'], before[2]['spec']['template']['spec']['containers'][0]['volumeMounts'])
+                self.assertNotIn(config['metrics']['collectorSecret']['name'], json.dumps(pod))
+                metric_service = get('Service', render.METRICS_NAME)
+                self.assertEqual(metric_service['spec']['selector'], {'app': render.NAME})
+                self.assertEqual(metric_service['spec']['ports'], [{'name': 'metrics', 'port': port or 9444, 'targetPort': 'metrics'}])
+                policy = get('NetworkPolicy', 'journal-metrics-collector')['spec']
+                self.assertEqual(policy['policyTypes'], ['Ingress'])
+                self.assertEqual(policy['ingress'], [{'from': [
+                    {'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'monitoring'}},
+                     'podSelector': {'matchLabels': render.PROMETHEUS_LABELS}}],
+                    'ports': [{'protocol': 'TCP', 'port': port or 9444}]}])
+                monitor = get('ServiceMonitor', render.METRICS_NAME)
+                self.assertEqual(monitor['metadata']['namespace'], 'monitoring')
+                self.assertEqual(monitor['metadata']['labels']['release'], 'kube-prometheus-stack')
+                self.assertEqual(monitor['spec']['namespaceSelector'], {'matchNames': [render.SERVICE_NS]})
+                self.assertEqual(monitor['spec']['selector']['matchLabels'], {'relay-candidate-metrics': 'true'})
+                self.assertEqual(monitor['spec']['sampleLimit'], 32)
+                endpoint = monitor['spec']['endpoints'][0]
+                self.assertEqual(endpoint, {'port': 'metrics', 'path': '/metrics/candidate-journal', 'scheme': 'https',
+                    'interval': '30s', 'scrapeTimeout': '10s', 'followRedirects': False, 'honorLabels': False,
+                    'authorization': {'type': 'Bearer', 'credentials': config['metrics']['collectorSecret']},
+                    'tlsConfig': {'ca': endpoint['tlsConfig']['ca'], 'serverName': config['metrics']['serverName'], 'insecureSkipVerify': False},
+                    'relabelings': [{'targetLabel': 'job', 'replacement': 'relay-candidate-journal'}]})
+                ca_ref = endpoint['tlsConfig']['ca']['configMap']
+                ca_map = get('ConfigMap', ca_ref['name'])
+                self.assertEqual(ca_map['metadata']['namespace'], 'monitoring')
+                self.assertTrue(ca_map['immutable'])
+                self.assertEqual(hashlib.sha256(ca_map['data'][ca_ref['key']].encode()).hexdigest(), run['payload']['ledger']['caSha256'])
+                self.assertFalse(any(o['kind'] == 'Secret' for o in objects))
+
+    def test_incomplete_or_unsafe_metrics_configuration_is_refused(self):
+        mutations = ['outer-only', 'inner-only', 'null', 'protocol-port', 'port-range', 'boolean-port', 'port-mismatch',
+                     'loopback-host', 'missing-verifier', 'zero-verifier', 'raw-token', 'expired', 'invalid-date',
+                     'invalid-expiry-shape', 'unrelated-ca', 'invalid-ca', 'private-ca', 'wrong-server-name',
+                     'runtime-secret', 'wrong-secret-key', 'selector-override', 'namespace-overlap']
+        reasons = {
+            'metrics-opt-in-mismatch': ['outer-only', 'inner-only'],
+            'configuration-field-set-invalid': ['null', 'missing-verifier', 'raw-token', 'selector-override'],
+            'metrics-port-invalid': ['protocol-port', 'port-range', 'boolean-port'],
+            'metrics-listener-mismatch': ['port-mismatch', 'loopback-host'],
+            'metrics-verifier-invalid': ['zero-verifier'],
+            'metrics-credential-expired': ['expired'],
+            'metrics-expiry-invalid': ['invalid-date', 'invalid-expiry-shape'],
+            'metrics-ca-binding-mismatch': ['unrelated-ca'],
+            'metrics-ca-invalid': ['invalid-ca', 'private-ca'],
+            'metrics-tls-name-invalid': ['wrong-server-name'],
+            'metrics-collector-reference-invalid': ['runtime-secret', 'wrong-secret-key'],
+            'metrics-namespace-overlap': ['namespace-overlap'],
+        }
+        expected = {mutation: reason for reason, cases in reasons.items() for mutation in cases}
+        self.assertEqual(set(expected), set(mutations))
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                config, service, run = self.fixture()
+                self.enable(config, service, run)
+                settings, metrics = config['metrics'], service['metrics']
+                if mutation == 'outer-only': del service['metrics']
+                if mutation == 'inner-only': del config['metrics']
+                if mutation == 'null': config['metrics'] = None
+                if mutation == 'protocol-port': settings['port'] = metrics['listen']['port'] = 8443
+                if mutation == 'port-range': settings['port'] = metrics['listen']['port'] = 65536
+                if mutation == 'boolean-port': settings['port'] = metrics['listen']['port'] = True
+                if mutation == 'port-mismatch': metrics['listen']['port'] = 10444
+                if mutation == 'loopback-host': metrics['listen']['host'] = '127.0.0.1'
+                if mutation == 'missing-verifier': del metrics['tokenSha256']
+                if mutation == 'zero-verifier': metrics['tokenSha256'] = '0' * 64
+                if mutation == 'raw-token': metrics['token'] = 'synthetic-must-not-be-rendered'
+                if mutation == 'expired': metrics['expiresAt'] = '2020-01-01T00:00:00Z'
+                if mutation == 'invalid-date': metrics['expiresAt'] = '2099-02-30T00:00:00Z'
+                if mutation == 'invalid-expiry-shape': metrics['expiresAt'] = 1
+                if mutation == 'unrelated-ca':
+                    settings['ca'] = self.pin('unrelated-ca.pem', self.certificate.decode() + '\n')
+                if mutation in ['invalid-ca', 'private-ca']:
+                    raw = 'not a certificate' if mutation == 'invalid-ca' else self.certificate.decode() + '\n-----BEGIN PRIVATE KEY-----\n'
+                    settings['ca'] = self.pin('invalid-ca.pem', raw)
+                    run['payload']['ledger']['caSha256'] = settings['ca']['sha256']
+                    service['journal']['caSha256'] = settings['ca']['sha256']
+                    config['run'] = self.pin('run.json', run)
+                    service['run']['sha256'] = config['run']['sha256']
+                if mutation == 'wrong-server-name': settings['serverName'] = 'unrelated.example'
+                if mutation == 'runtime-secret': settings['collectorSecret']['name'] = render.NAME + '-runtime'
+                if mutation == 'wrong-secret-key': settings['collectorSecret']['key'] = 'agent-dsn'
+                if mutation == 'selector-override': settings['prometheusSelector'] = {}
+                if mutation == 'namespace-overlap':
+                    run['payload']['namespaces'][0]['name'] = 'monitoring'
+                    config['run'] = self.pin('run.json', run)
+                    service['run']['sha256'] = config['run']['sha256']
+                config['config'] = self.pin('config.json', service)
+                with self.assertRaisesRegex(render.Refusal, '^' + expected[mutation] + '$'): render.service(config)
+
+
 if __name__ == '__main__':
     unittest.main()

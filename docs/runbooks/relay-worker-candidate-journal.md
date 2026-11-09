@@ -234,6 +234,103 @@ python3 -B kubernetes/optional/relay-candidate-journal/render.py \
   service /operator/service-render.json <config-sha256> > /operator/service-rendered.json
 ```
 
+### Optional private metrics collector
+
+Metrics are off by default: omitting `metrics` from both renderer input and
+service config preserves the original four objects and protocol port 8443.
+The matching Relay release must contain the optional authenticated metrics
+listener in `scripts/candidate-journal-service.ts`. Enabling the collector does
+not change the signed run, admit a worker or make the journal authoritative.
+
+Add this public `metrics` object to the renderer input:
+
+```json
+{
+  "ca": {"path": "/operator/journal-ca.pem", "sha256": "<reviewed ledger caSha256>"},
+  "serverName": "relay-candidate-journal.relay-candidate-journal.svc",
+  "collectorSecret": {"name": "relay-candidate-journal-metrics-v1", "key": "token"}
+}
+```
+
+Also add `metrics` to the separately pinned service config, then update its
+renderer input SHA256:
+
+```json
+{
+  "listen": {"host": "0.0.0.0", "port": 9444},
+  "tokenSha256": "<SHA256 of the independently provisioned collector token>",
+  "expiresAt": "<reviewed future UTC ISO timestamp ending in Z>"
+}
+```
+
+These are input shapes, not live values. One-sided opt-in is refused. Port 9444
+is the renderer default; optional renderer `metrics.port` may select another
+nonprivileged port, except 8443, only when the service config matches exactly.
+Loopback-only listeners, missing/invalid verifiers and expired/invalid timestamps
+are refused. The current time is checked during preparation; the service enforces
+expiry on every request after deployment.
+
+The CA is a public pinned PEM certificate bundle whose SHA256 must match the
+signed run's journal `caSha256`. It is rendered as an immutable, content-addressed
+ConfigMap in `monitoring`. The renderer checks PEM parsing and binding, not that
+the service's leaf certificate is signed by this CA or currently served. Both
+listeners use the same reviewed immutable TLS pair. `serverName` must be one of
+the two DNS SAN names declared by `journal-certificate.yaml` (the name above or
+its `.cluster.local` form); the operator still verifies the actual certificate
+chain, hostname, validity and served fingerprint before activation.
+
+The operator provisions a **separate** collector Secret in `monitoring`, with
+key `token` and name `relay-candidate-journal-metrics` or that name plus a bounded
+DNS-label suffix. This namespace-local reference cannot select the journal's
+runtime credentials. Use an independent random base64url token of 43–128
+characters, with no newline or whitespace; hash those exact token bytes for the
+service verifier. Never reuse the
+agent/holder, reply-key or database credentials. The renderer accepts only the
+Secret reference and verifier; it does not create/read the Secret or prove its
+contents match. The token is mounted by Prometheus, never by the journal or a
+worker. Verify matching-token success and wrong/expired-token rejection through
+the authorized collector path; do not copy a token into a command argument, log
+or PR. Rotate the Secret, service config/verifier/expiry and its digest pin with
+the coordinated service restart, then verify old-token rejection.
+
+Opt-in adds a separate metrics container port, ClusterIP Service
+`relay-candidate-journal-metrics` and ingress-only NetworkPolicy in
+`relay-candidate-journal`. The existing protocol Service, client ingress and
+database/DNS egress remain unchanged. The new policy admits only pods with both
+`app.kubernetes.io/name=prometheus` and
+`app.kubernetes.io/instance=kube-prometheus-stack-prometheus` in namespace
+`monitoring`, to the selected metrics port. Namespace and pod selectors share
+one peer and are an AND, not alternative allowances. A candidate control or
+execution namespace named `monitoring` is refused when metrics are selected.
+Neither candidate namespace gains metrics access. Keep the default-deny baseline and inspect additive policies
+in the destination; this source cannot negate an unrelated broad allow rule.
+
+The generated ServiceMonitor lives in `monitoring`, carries
+`release=kube-prometheus-stack`, and selects only the metrics-labelled Service in
+`relay-candidate-journal`. It uses HTTPS, the explicit CA/server name and collector
+Secret, `/metrics/candidate-journal`, 30s interval, 10s timeout, sampleLimit 32,
+redirects disabled, `honorLabels: false`, and fixed job
+`relay-candidate-journal`. Cross-namespace CA/credential lookup is not used: the
+CA ConfigMap and collector Secret are in the ServiceMonitor's own namespace.
+Deployment replicas remain zero; no live overlay selects these objects.
+The unchanged service stops if its metrics listener cannot bind or later fails;
+the existing readiness probe checks only the protocol listener. Include listener
+startup/error behavior in the operator check, and inspect the separate scrape
+for metrics availability rather than treating protocol readiness as proof.
+
+Include the generated resources in the reviewed rollout that selects
+`kubernetes/components/relay-candidate-monitoring`, after the
+[monitoring runbook](relay-worker-monitoring.md) checks pass. Confirm the protocol
+listener rejects `/metrics/candidate-journal`, the worker network cannot reach
+the metrics listener, Prometheus sees all sixteen samples, and the actual alert
+receiver observes firing/recovery. Remove the ServiceMonitor and absence rules
+together on deactivation. Re-render without both metrics inputs to remove the
+listener and dedicated network/Service/CA resources; retire its separate Secret
+through the normal owner. Do not alter journal history or issue synthetic work
+to refresh observations.
+
+### Runtime Secret and TLS delivery
+
 The operator separately provisions `relay-candidate-journal-runtime` with exactly
 `reply-key.pem`, `agent-dsn`, and `holder-dsn`. The TLS key comes from the versioned immutable Secret
 `relay-candidate-journal-tls-<first 32 hex characters of certificate SHA256>`,

@@ -45,10 +45,14 @@ standby or treated as a pure lock-free health query.
 
 ## Candidate journal collector and alerts
 
-`kubernetes/components/relay-candidate-monitoring` contains **rules only**. No
-candidate journal placement, metrics TLS server name or CA has yet been selected
-in this repository. Do not add these absence/schema rules until a reviewed
-collector has the following concrete operator-verified configuration:
+`kubernetes/components/relay-candidate-monitoring` contains **rules only**. The
+optional journal [service renderer](relay-worker-candidate-journal.md#optional-private-metrics-collector)
+can now compose the separate listener, Service, ServiceMonitor, CA ConfigMap and
+Prometheus-only ingress. Both metrics inputs must be explicitly supplied; they
+remain off by default and its Deployment remains at zero replicas. No actual
+collector token, trust input or running endpoint is supplied. Do not add these
+absence/schema rules until the reviewed collector has the following concrete
+operator-verified configuration:
 
 - The signed run's actual journal service has Relay's optional metrics listener
   configured on a distinct private port, for example 9444. The worker-reachable
@@ -73,9 +77,10 @@ collector has the following concrete operator-verified configuration:
   unobserved with zero timestamp/outcomes. Exported labels contain only role
   and outcome, never run/worker/deployment identifiers.
 
-This is an explicit collector handoff, not an executable deployment claim.
-Render and validate those concrete resources in the same rollout PR that selects
-the candidate rules. The private listener shares the journal service's verified
+The optional renderer implements this source composition; successful rendering
+does not establish the actual Secret contents, TLS chain, network enforcement or
+collection. Render and validate those concrete resources in the same rollout PR
+that selects the candidate rules. The private listener shares the journal service's verified
 TLS certificate but has independent bearer authentication. Worker collection and
 candidate collection remain separate jobs/credentials/ports.
 

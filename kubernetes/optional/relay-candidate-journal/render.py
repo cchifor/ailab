@@ -5,13 +5,20 @@ import json
 import os
 from pathlib import Path
 import re
+import ssl
 import stat
 import sys
+from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parent
 DB_NS = 'relay-candidate-journal-db'
 SERVICE_NS = 'relay-candidate-journal'
 NAME = 'relay-candidate-journal'
+MONITORING_NS = 'monitoring'
+METRICS_NAME = NAME + '-metrics'
+METRICS_PORT = 9444
+PROMETHEUS_LABELS = {'app.kubernetes.io/name': 'prometheus',
+                     'app.kubernetes.io/instance': 'kube-prometheus-stack-prometheus'}
 PG_IMAGE = 'docker.io/library/postgres:17.11-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac'
 PUBLIC = '/run/relay-journal/'
 ORIGIN = 'https://relay-candidate-journal.relay-candidate-journal.svc:8443'
@@ -37,8 +44,8 @@ def refuse(code='public-binding-mismatch'):
     raise Refusal(code)
 
 
-def fields(value, keys):
-    if not isinstance(value, dict) or set(value) != set(keys):
+def fields(value, keys, optional=()):
+    if not isinstance(value, dict) or not set(keys) <= set(value) or set(value) - set(keys) - set(optional):
         refuse('configuration-field-set-invalid')
 
 
@@ -154,8 +161,74 @@ def initialize(config):
             configmap(script_name, DB_NS, {'initialize.sh': script}, annotations), job]
 
 
+def metrics_objects(settings, metrics, ledger):
+    """Optional public collector wiring. No token, Secret read or network call."""
+    fields(settings, ['ca', 'serverName', 'collectorSecret'], ['port'])
+    fields(metrics, ['listen', 'tokenSha256', 'expiresAt'])
+    fields(metrics['listen'], ['host', 'port'])
+    port = settings.get('port', METRICS_PORT)
+    if type(port) is not int or not 1024 <= port <= 65535 or port == 8443:
+        refuse('metrics-port-invalid')
+    if metrics['listen'] != {'host': '0.0.0.0', 'port': port} or type(metrics['listen']['port']) is not int:
+        refuse('metrics-listener-mismatch')
+    token_hash = metrics['tokenSha256']
+    if not isinstance(token_hash, str) or not re.fullmatch('[a-f0-9]{64}', token_hash) or token_hash == '0' * 64:
+        refuse('metrics-verifier-invalid')
+    expiry = metrics['expiresAt']
+    if not isinstance(expiry, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z', expiry):
+        refuse('metrics-expiry-invalid')
+    try:
+        expires = datetime.fromisoformat(expiry.replace('Z', '+00:00'))
+    except ValueError:
+        refuse('metrics-expiry-invalid')
+    if expires <= datetime.now(timezone.utc):
+        refuse('metrics-credential-expired')
+    # The same immutable service certificate serves both HTTPS listeners. These
+    # are the SANs declared by this bundle, not a caller-selected remote target.
+    if settings['serverName'] not in [NAME + '.' + SERVICE_NS + '.svc', NAME + '.' + SERVICE_NS + '.svc.cluster.local']:
+        refuse('metrics-tls-name-invalid')
+    secret = settings['collectorSecret']
+    fields(secret, ['name', 'key'])
+    if (not isinstance(secret['name'], str) or len(secret['name']) > 63 or
+            not re.fullmatch(METRICS_NAME + r'(?:-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?', secret['name']) or secret['key'] != 'token'):
+        refuse('metrics-collector-reference-invalid')
+    ca = pinned(settings['ca'])
+    if settings['ca']['sha256'] != ledger['caSha256']:
+        refuse('metrics-ca-binding-mismatch')
+    if not re.fullmatch(r'(?:\s*-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----\s*)+', ca, re.ASCII):
+        refuse('metrics-ca-invalid')
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=ca)
+    except (ssl.SSLError, ValueError):
+        refuse('metrics-ca-invalid')
+    ca_name = METRICS_NAME + '-ca-' + settings['ca']['sha256'][:24]
+    ca_map = configmap(ca_name, MONITORING_NS, {'ca.crt': ca})
+    service_meta = metadata(METRICS_NAME, SERVICE_NS)
+    service_meta['labels']['relay-candidate-metrics'] = 'true'
+    service = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': service_meta,
+               'spec': {'selector': {'app': NAME}, 'ports': [{'name': 'metrics', 'port': port, 'targetPort': 'metrics'}]}}
+    monitor_meta = metadata(METRICS_NAME, MONITORING_NS)
+    monitor_meta['labels']['release'] = 'kube-prometheus-stack'
+    monitor = {'apiVersion': 'monitoring.coreos.com/v1', 'kind': 'ServiceMonitor', 'metadata': monitor_meta,
+               'spec': {'namespaceSelector': {'matchNames': [SERVICE_NS]},
+                        'selector': {'matchLabels': {'relay-candidate-metrics': 'true'}}, 'sampleLimit': 32,
+                        'endpoints': [{'port': 'metrics', 'path': '/metrics/candidate-journal', 'scheme': 'https',
+                                       'interval': '30s', 'scrapeTimeout': '10s', 'followRedirects': False, 'honorLabels': False,
+                                       'tlsConfig': {'ca': {'configMap': {'name': ca_name, 'key': 'ca.crt'}},
+                                                     'serverName': settings['serverName'], 'insecureSkipVerify': False},
+                                       'authorization': {'type': 'Bearer', 'credentials': secret},
+                                       'relabelings': [{'targetLabel': 'job', 'replacement': NAME}]}]}}
+    policy = {'apiVersion': 'networking.k8s.io/v1', 'kind': 'NetworkPolicy',
+              'metadata': metadata('journal-metrics-collector', SERVICE_NS),
+              'spec': {'podSelector': {'matchLabels': {'app': NAME}}, 'policyTypes': ['Ingress'],
+                       'ingress': [{'from': [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': MONITORING_NS}},
+                                             'podSelector': {'matchLabels': dict(PROMETHEUS_LABELS)}}],
+                                    'ports': [{'protocol': 'TCP', 'port': port}]}]}}
+    return port, [ca_map, service, monitor, policy]
+
+
 def service(config):
-    fields(config, ['version', 'relaySourceCommit', 'relayImage', 'config', 'run', 'witness', 'databaseCa', 'tlsCertificate'])
+    fields(config, ['version', 'relaySourceCommit', 'relayImage', 'config', 'run', 'witness', 'databaseCa', 'tlsCertificate'], ['metrics'])
     annotations = source(config)
     image = config['relayImage']
     if not isinstance(image, str) or not re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}', image) or image.endswith('0' * 64):
@@ -164,7 +237,9 @@ def service(config):
         ('config.json', 'config'), ('run.json', 'run'), ('witness.json', 'witness'),
         ('db-ca.pem', 'databaseCa'), ('tls.crt', 'tlsCertificate')]}
     c, run, witness = parse(raw['config.json']), parse(raw['run.json']), parse(raw['witness.json'])
-    fields(c, ['version', 'run', 'witness', 'trustedIssuerKeys', 'journal', 'replyPrivateKeyFile', 'tls', 'listen', 'database'])
+    fields(c, ['version', 'run', 'witness', 'trustedIssuerKeys', 'journal', 'replyPrivateKeyFile', 'tls', 'listen', 'database'], ['metrics'])
+    if ('metrics' in config) != ('metrics' in c):
+        refuse('metrics-opt-in-mismatch')
     if c['version'] != 1 or c['listen'] != {'host': '0.0.0.0', 'port': 8443}:
         refuse()
     keys = c['trustedIssuerKeys']
@@ -241,7 +316,14 @@ def service(config):
                         'ports': [{'protocol': 'UDP', 'port': 53}, {'protocol': 'TCP', 'port': 53}]}]}}
     svc = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': metadata(NAME, SERVICE_NS),
            'spec': {'selector': {'app': NAME}, 'ports': [{'name': 'https', 'port': 8443, 'targetPort': 'https'}]}}
-    return [configmap(cm_name, SERVICE_NS, raw, annotations), svc, deployment, policy]
+    objects = [configmap(cm_name, SERVICE_NS, raw, annotations), svc, deployment, policy]
+    if 'metrics' in config:
+        if any(n['name'] == MONITORING_NS for n in namespaces):
+            refuse('metrics-namespace-overlap')
+        port, collection = metrics_objects(config['metrics'], c['metrics'], p['ledger'])
+        deployment['spec']['template']['spec']['containers'][0]['ports'].append({'name': 'metrics', 'containerPort': port})
+        objects += collection
+    return objects
 
 
 def main(args):
