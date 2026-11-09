@@ -3,9 +3,14 @@
 This is the rollout record for upgrading the ailab router from source
 `92c7c28a744e33963882a2dfea4b6fdc99d58a8c` to reviewer-merged source
 `737d447bb5238fbe6ede0383e135641b7cda7cb6` ([llm-router #161](https://git.chifor.me/cchifor/llm-router/pulls/161)).
-The published image and desired deployment change are recorded below. Live
-acceptance is pending; no deployment or worker admission is claimed. Only the
-operator performs cluster inspection or Kubernetes writes;
+The published image, initial rollout and final composition are recorded below.
+Source preparation is not live acceptance evidence: retain the operator's backup
+verification and acceptance results in the rollout and cleanup PR records.
+The final checked-in composition omits the temporary backup init; initial live
+acceptance and the cleanup publication gates below precede its deployment.
+Cleanup live acceptance then verifies the replacement pod; the operator
+reconfirms the retained backup.
+Only the operator performs cluster inspection or Kubernetes writes;
 the dev-worker's platform credential has no access to this namespace.
 
 ## Publication and activation gates
@@ -85,16 +90,20 @@ Disabling the `relay-keys` management plugin or removing its trust-file variable
 does not disable inference with already issued bearer keys. An unchanged SQL
 schema therefore does not make an active-worker downgrade safe.
 
-## Backup before startup
+## Initial rollout: backup before startup
 
 Use the existing single-replica `Recreate` strategy and retained RWO data PVC.
 After the old process exits, a temporary init container runs the publisher's
 packaged `/app/deploy/backup-router.mjs` before the new router starts. The init
 must use the same verified image digest as the application, inherit the pod's
 non-root uid/gid 1000 and RuntimeDefault seccomp, and receive no credentials or
-Kubernetes token. The checked-in pod spec uses the verified image digest in both
-containers and the following init configuration. The 256 MiB/one
-CPU limit below is a bounded proposal, not a measured live backup resource need;
+Kubernetes token. The initial rollout in
+[ailab #1697](https://git.chifor.me/cchifor/ailab/pulls/1697) uses the verified
+image digest in both containers and the following temporary init configuration.
+Retain this specification as the initial-rollout and recovery reference; the final
+composition removes it only after initial acceptance and the cleanup publication
+gates below. The 256 MiB/one CPU limit below is a bounded proposal, not a
+measured live backup resource need;
 an OOMKill blocks startup and requires the recovery decision below:
 
 ```yaml
@@ -123,14 +132,15 @@ an OOMKill blocks startup and requires the recovery decision below:
               mountPath: /tmp
 ```
 
-Update the application image, source annotation, release annotation
-(`router-0.1.0-20261109-workers-quota`) and provenance comment together. Render and
-validate the manifest before merge; the acceptance parser rejects a placeholder,
+For the initial rollout, update the application image, source annotation,
+release annotation (`router-0.1.0-20261109-workers-quota`) and provenance comment
+together. Render and validate the manifest before merge; the acceptance parser
+rejects a placeholder,
 unpinned image or mismatched init/application pins. Leave the current environment,
 resource limits, storage,
-NetworkPolicies, authentication and model configuration intact. The init is the
-only additional pod behavior. It does not launch router/provider plugins or
-access the network.
+NetworkPolicies, authentication and model configuration intact. In that initial
+rollout, the init is the only additional pod behavior. It does not launch
+router/provider plugins or access the network.
 
 The init reuses the existing `tmp` volume, an `emptyDir` under
 `spec.template.spec.volumes` ([router.yaml at the reviewed deployment head,
@@ -147,16 +157,19 @@ evidence. A reviewed revert to the prior composition is available if the new
 application has never started, as specified below. The helper requires at least
 twice the main database size plus 64 MiB
 free before capture; the operator must also preserve the application's separate
-free-space requirements after capture. Before merging, check actual PVC usage
-and confirm `/data/router.sqlite` and the required `/data/router.secrets.key` are
-present and readable by uid 1000, without copying or logging the key's contents.
+free-space requirements after capture. Before merging the initial rollout, check
+actual PVC usage and confirm `/data/router.sqlite` and the required
+`/data/router.secrets.key` are present and readable by uid 1000, without copying
+or logging the key's contents.
 This is local recovery material, not evidence of an offsite restore drill.
 
 ## Acceptance and cleanup
 
-The main-only **Router rollout acceptance** workflow already discovers the exact
-image and init names from `router.yaml`. Require its passing result: one fresh
-Ready router on the pinned digest, exactly the expected init composition with
+The main-only **Router rollout acceptance** workflow discovers the exact
+image and init names from `router.yaml` at its checked-out commit. For the initial
+rollout, require its passing result against the merged initial-rollout composition:
+one fresh Ready router on the pinned digest, exactly the expected init
+composition with
 successful completion, public health/readiness, and unauthenticated management
 refusal. The reusable local observer is `python3 scripts/check-router-rollout.py`;
 it is read-only. Record the reviewed ailab commit, workflow run, pod identity,
@@ -178,23 +191,33 @@ remains disabled; health alone cannot prove that. Do not create workers or make
 paid inference calls as an implicit acceptance step. This rollout does not prove
 live budget enforcement, twelve-probe isolation or KubeVirt qualification.
 
-Prepare the cleanup PR during the rollout and submit it for review immediately
-after public acceptance. Assign its owner and target the same maintenance window;
-if review or acceptance delays it, record the next window and explicit owner
-instead of leaving the temporary init indefinitely. Remove only the temporary
-init through that reviewed PR, preserve the verified backup and exact application
-pin, and require acceptance again. The checker verifies the init composition is
-absent, preventing
-the old Ready pod on the same image from satisfying cleanup prematurely. Retain
-the backup until a newer consistent generation and retention decision exist.
+Prepare the cleanup PR during the rollout. Submit it for review only after
+ailab #1697 is reviewer-merged, the operator has supplied the original COMPLETE
+hash and first-capture `createdAt` with verified backup evidence, and the initial
+live acceptance above has passed. Link that evidence in the cleanup PR; source
+checks alone do not satisfy these publication gates. Assign its owner and target
+the same maintenance window; if review or acceptance delays it, record the next
+window and explicit owner instead of leaving the temporary init indefinitely.
+Remove only the temporary init through that reviewed PR, preserve the verified
+backup and exact application
+pin, and require acceptance again at the merged cleanup commit. Its final
+composition expects `init=[]` and no canary Job: the checker rejects the old Ready
+pod retaining the init even when it has the same image. The removal does not
+delete or rewrite `/data/backups/pre-worker-budgets-20261109` or its data PVC.
+Have the operator confirm the original COMPLETE hash and `createdAt` still match
+after cleanup. Retain the backup until a newer consistent generation and retention
+decision exist. Worker authority remains disabled throughout both compositions.
 
-### Backup verification failure after the new application has run
+### Backup verification failure after application startup, before cleanup
 
-A later pod restart can fail when the retained generation's COMPLETE marker,
+While the initial rollout's temporary init remains, a later pod restart can fail
+when the retained generation's COMPLETE marker,
 checksums or SQLite integrity no longer verify. The never-started revert below
 does not apply. Keep the current verified application image and current data;
 do not downgrade, restore the pre-upgrade database, delete the failed generation,
-edit COMPLETE, or remove the init merely because it failed.
+edit COMPLETE, or remove the init merely because it failed. After cleanup, the
+final composition no longer verifies that backup on pod startup; discovering
+backup corruption still requires investigation and a reviewed recovery decision.
 
 The operator and recovery reviewer use this incident-specific procedure:
 
@@ -298,8 +321,9 @@ and both annotations together to the prior source/release/image:
 - Release: `router-0.1.0-20261107-availability`.
 - Image: `registry.chifor.me/llm-router/router@sha256:55ee00f0521046baffa0b0e8809e2b42526710abd2f05b4b0e1a23777cd7dc5c`.
 
-If backup init failed and the new application has **never started**, restore
-availability through a reviewed revert to the exact prior image, annotations
+During the initial rollout, if backup init failed and the new application has
+**never started**, restore availability through a reviewed revert to the exact
+prior image, annotations
 and composition, removing the new init as part of that revert. First have the
 operator prove from pod/container status and rollout history (including replaced
 pods) that no new-release application container ran and no new application state
@@ -308,10 +332,11 @@ restores the previous composition rather than starting the new image without its
 backup. Preserve failed backup evidence. If history is missing or any new
 application container started, this exception does not apply.
 
-After the new application has run, preserve a completed backup and remove its
-dated init in the same reviewed rollback commit as the application pin, only
-after capture and the authority gates
-above are verified. A downgrade still requires acceptance and preserved ordinary
+After the new application has run, preserve a completed backup. If its dated init
+is still present, remove it in the same reviewed rollback commit as the application
+pin, only after capture and the authority gates above are verified. If cleanup has
+already removed the init, keep it absent; the same backup and authority gates still
+apply. A downgrade still requires acceptance and preserved ordinary
 route behavior. This source audit is not a live downgrade rehearsal.
 
 Once managed worker authority exists, **do not restore the old snapshot or serve
@@ -356,8 +381,9 @@ authority and SQLite adapter diff. Opus review
 bug and missing downgrade/revert details; those were corrected. Closure review
 `f809613d-9047-46e3-a55d-f05d946dc20d` aligned with no remaining blockers.
 
-All 17 acceptance-checker tests passed with the real image pin, including
-nested mount names, init placement before/after application containers, and
+For the initial rollout, all 17 acceptance-checker tests passed with the real
+image pin, including nested mount names, init placement before/after application
+containers, and
 commented/quoted image values and keys, unpinned/mismatched init refusal and
 canary masking regressions. The previous digest-pinned manifest validation built all
 31 paths: 526 resources valid, zero invalid/errors and 68 skipped under the
@@ -365,8 +391,8 @@ existing schema policy. A parsed-YAML comparison against ailab main
 `86481778c3cd5b3b3064d1ad027c0252f81ea5cf` confirmed only the application image,
 source/release annotations and one reviewed backup init changed. All other
 resources and existing application configuration match that base. The documented
-init equals the actual manifest; the checker expects exactly this image and
-`backup-before-worker-budgets` with no canary Job.
+init equals that initial-rollout manifest; its checker expectation is exactly this
+image and `backup-before-worker-budgets` with no canary Job.
 
 Final Opus review `9082a64a-b0df-48ab-bcf9-b61691a91728` aligned on the concrete
 manifest, source/digest/receipt/image-file evidence and complete rollout delta.
@@ -381,3 +407,16 @@ container; a different helper image requires an explicitly reviewed checker chan
 The earlier dry-compose used an explicitly synthetic test digest; none was
 written to the deployment manifest. No live upgrade, downgrade, storage
 measurement, worker-budget activation or runtime qualification is claimed.
+
+For cleanup, all 17 acceptance-checker tests also pass with the final composition.
+A parsed-YAML comparison against the reviewed initial-rollout PR head
+`2390357511e649d79d5a31df007baca098f3356d` confirms the only manifest change is
+removing `backup-before-worker-budgets`; every remaining field and resource,
+including the exact application pin, annotations, configuration and data PVC,
+is identical. The checker expects that pin with `init=[]` and no canary Job.
+A synthetic Ready pod retaining the old init is rejected; the equivalent Ready
+pod without init is accepted. These local checks do not replace the operator's
+backup continuity evidence or either composition's live acceptance. The router
+Kustomization renders with the repository's pinned validation tools; scoped
+kubeconform reports 12 valid resources, zero invalid/errors and one Secret skipped
+under the existing policy.

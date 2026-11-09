@@ -119,29 +119,6 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
-      initContainers:
-        - name: backup-before-worker-budgets
-          image: registry.chifor.me/llm-router/router@sha256:61100143a90c66219d1e2acb1d7b6cd484dfea3c9622a779c92c8229599b1bb7
-          imagePullPolicy: IfNotPresent
-          workingDir: /app
-          command: [node, /app/deploy/backup-router.mjs]
-          env:
-            - name: ROUTER_DATA_DIR
-              value: /data
-            - name: ROUTER_BACKUP_LABEL
-              value: pre-worker-budgets-20261109
-          resources:
-            requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: "1", memory: 256Mi}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
-          volumeMounts:
-            - name: data
-              mountPath: /data
-            - name: tmp
-              mountPath: /tmp
       containers:
         - name: router
           # Source 737d447bb5238fbe6ede0383e135641b7cda7cb6: lifetime accounting,
