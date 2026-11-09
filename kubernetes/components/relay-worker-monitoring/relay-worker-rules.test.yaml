@@ -279,6 +279,9 @@ tests:
         description: Check the selected Relay release and full migration set. A successful scrape with missing worker or budget
           series cannot be interpreted as zero backlog or healthy authority.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 6m
+    alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts: []
   - eval_time: 7m
     alertname: RelayWorkerMetricSchemaIncomplete
     exp_alerts: []
