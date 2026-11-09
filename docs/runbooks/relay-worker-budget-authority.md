@@ -44,10 +44,11 @@ nothing, creates no credentials or policy, and enables no worker.
   database PVC. No SQL, app credentials, policy or recovery witness is embedded
   in these manifests.
 
-The schema source is Relay's `deploy/worker-budget-ledger/001-authority.sql`
-([initial review commit](https://git.chifor.me/cchifor/relay/src/commit/22dac084442cc18f180aba7b1fc08eafd7181afa/deploy/worker-budget-ledger/001-authority.sql)).
-Use the final reviewer-merged commit, record its SHA256 in the operator evidence,
-and apply it once. Do not copy it into ailab or run it as a Relay app migration.
+The schema source is Relay's `deploy/worker-budget-ledger/` at a single final
+reviewer-merged commit: `001-authority.sql`, `002-preflight.sql`,
+`003-scoped-requests.sql`, and `004-preflight-errors.sql`, applied in that order.
+The initializer requires all four; a version-1 database needs the offline upgrade
+below. Do not vendor the SQL into ailab or run it as a Relay app migration.
 The authoritative role/recovery design is the adjacent Relay README;
 [llm-router #158](https://git.chifor.me/cchifor/llm-router/pulls/158) provides the
 default-disabled runtime plugin and qualification-policy schema.
@@ -84,22 +85,32 @@ Do not enable application consumers until every gate below is satisfied.
    QNAP LUN identity, Retain policy, image digest and issued certificate SANs.
    The backing PV is not created by this repo, so its exclusion is an operator
    gate. Do not delete or replace an existing claim to make initialization pass.
-3. Obtain `001-authority.sql` from the final approved Relay commit into a private
-   operator workspace; compare its recorded SHA256. Create an **immutable**
-   ConfigMap `relay-budget-reviewed-schema-once` in the ledger namespace with
-   exactly the key `001-authority.sql`, labelled
-   `velero.io/exclude-from-backup=true`. This contains schema only, no credentials,
-   authority row or witness. Render/apply `.../initialize/` separately to create
-   only the script ConfigMap. The Job is deliberately outside every Kustomization
-   inventory: inspect `.../initialize/job.yaml`, then explicitly create it once
-   with `kubectl --context admin@ai create -f
-   kubernetes/optional/relay-budget-authority/initialize/job.yaml`. Confirm
-   `suspend=true`, `backoffLimit=0`, and no running database or initializer holds
-   the claim. Never add a Flux force/recreation annotation or use a reconciliation
-   loop for this Job. Explicitly unsuspend it once. It creates the empty database,
-   applies the reviewed schema and creates the two logins below without passwords.
-   Any failed/interrupted initialization requires owner investigation; do not
-   erase markers/data or automatically rerun it.
+3. Export the four files from one **reviewer-merged full Relay commit SHA** using
+   the local-only bundle renderer. It reads committed objects, not working-tree
+   files, and refuses an existing output directory:
+
+   ```sh
+   python3 scripts/relay-budget-schema-bundle.py /path/to/relay \
+     "$REVIEWED_RELAY_COMMIT" /private/operator/relay-budget-schema
+   ```
+
+   Review the source commit and every SQL change. Record the returned
+   `manifestSha256` independently in the operator evidence and in
+   `RELAY_BUDGET_SCHEMA_MANIFEST_SHA256` of a local copy of `initialize/job.yaml`.
+   Do not derive this pin from an unreviewed live ConfigMap. The bundle includes
+   source identity, ordered `SHA256SUMS`, four SQL files, and an **immutable**
+   `configmap.json` named `relay-budget-reviewed-schema-once`, excluded from
+   backup. It contains no credentials, authority row or witness. Apply that
+   ConfigMap and render/apply the script-only `initialize/` Kustomization.
+   Create the reviewed standalone Job explicitly, verify the mounted bundle and
+   pin, then unsuspend it once. The Job is outside all Flux inventories, has no
+   automatic retry, and uses only a local Unix socket. Missing/changed files or
+   a mismatched pin refuse before creating the initialization-attempt marker.
+   A failed attempt after that point requires owner investigation; do not delete
+   the marker or data and retry. Successful initialization leaves both application
+   passwords NULL and no authority/witness/qualification rows. Record version `4`,
+   the copied source/manifest receipt in PGDATA, and the completed Job identity.
+   Preserve the retained database and initialization marker.
 4. After Job success and its Pod termination, delete the completed Job and its
    temporary schema/script ConfigMaps. Scale the StatefulSet to **one** replica
    in the operator's reviewed activation overlay. Never use more than one. No
@@ -122,7 +133,7 @@ Do not enable application consumers until every gate below is satisfied.
 
    | LOGIN | Granted NOLOGIN role | Purpose |
    | --- | --- | --- |
-   | `relay_budget_allocator` | `relay_budget_client` | Relay prepare/inspect/ack/current_epoch |
+   | `relay_budget_allocator` | `relay_budget_client` | Relay prepare/inspect/ack/current_epoch/preflight/scope |
    | `relay_budget_router` | `relay_budget_reader` | Router runtime_snapshot/current_epoch |
 
    Neither login has table privileges, owner membership, superuser, role creation,
@@ -168,6 +179,92 @@ the readers' ownership/mode checks: regular files, no hardlinks, symlinks or
 group/world writes. Use read-only `subPath` files; changing the external witness
 requires a deliberate consumer rollout. Do not add the witness to app ConfigMaps,
 Secrets or other resources selected by app/ledger backup.
+
+## Offline upgrade of a retained version-1 database
+
+This is an operator-owned schema upgrade, not initialization or history recovery.
+It applies only `002`–`004` and retains authority identity, debits, original
+lifetimes, outbox requests and receipts. It never changes `ready=false` to true,
+seeds request scopes, refunds allocations, rotates witnesses, or alters login
+passwords. The server wrapper now requires marker `4`: coordinate the config
+rollout with this maintenance window rather than restarting a version-1 server
+under the new wrapper.
+
+1. Verify independently retained ledger recovery evidence under its dedicated
+   policy (never the application backup set). Record the database/PVC/PV identity,
+   schema version, external witness and existing debit/outbox/receipt evidence.
+   Compare a schema-only catalog dump against the original reviewed version-1
+   definition, accounting for the documented login roles; unexpected DDL/function
+   drift requires a separate review. The legacy SQL digest pins source evidence,
+   not the live catalog. No live version-1 ledger is established by this repository
+   or by the local fixture tests.
+   Disable new worker admissions and stop both ledger consumers. Withdraw ledger
+   authority with the operator role (`UPDATE worker_budget.authority SET ready=false`)
+   and verify it is withdrawn before cleanly scaling the StatefulSet to zero.
+   Confirm no Pod still mounts the claim; `ReadWriteOnce` alone does not prove this.
+2. Render/review a fresh pinned bundle as above. Compare its `001-authority.sql`
+   checksum to the **original initialization evidence**, then set both
+   `RELAY_BUDGET_SCHEMA_MANIFEST_SHA256` and `RELAY_BUDGET_LEGACY_SCHEMA_SHA256`
+   in a local copy of `initialize/upgrade-job.yaml`. The original initializer
+   retained no source receipt. Unknown original SQL, or a changed `001`, is a
+   stop requiring a separately reviewed upgrade; a checksum computed only from
+   the new bundle cannot substitute for the original evidence.
+3. Verify PostgreSQL major `17`, marker `1`, no recovery/standby signal, no live
+   postmaster/PID file and no previous `relay-budget-upgrade-started` directory.
+   A stale PID after a crash is a recovery case: keep consumers disabled, verify
+   no live process owns the data, and use the existing reviewed recovery procedure
+   and the retained version-1 wrapper to establish a clean shutdown before returning
+   here. The original wrapper is `kubernetes/optional/relay-budget-authority/start.sh`
+   at ailab commit `03b207f342ea542d8ec4eacbc250f71db3f5670f` (verify this full
+   commit against the original deployment evidence) and uses the same pinned
+   PostgreSQL 17.11 image in this directory. Extract it from that committed object
+   into the reviewed recovery configuration; do not alter its version check.
+   Keep all consumers/authority disabled even if earlier migrations committed.
+   Do not delete the PID file or replace the schema marker to force this upgrade.
+   Apply the immutable schema ConfigMap and script-only Kustomization, create the
+   suspended standalone upgrade Job, review its image/pins and unsuspend once.
+   It checks withdrawn authority and the absence of already applied `002`/`003`
+   before creating the durable attempt marker. A refusal in those SQL checks
+   cleanly stops PostgreSQL and leaves no migration-attempt marker; correct the
+   prerequisite and review a fresh standalone Job. The preflight changes no ledger
+   rows or schema, but normal PostgreSQL startup/shutdown still writes WAL and
+   checkpoints. Once checks pass, it records
+   the attempt, runs migrations in order, and writes marker `4` only after all
+   commits, clean PostgreSQL shutdown and source receipts complete. The current
+   reviewed Relay SQL files contain their own `BEGIN`/`COMMIT`; the script trusts
+   those pinned bytes and does not impose transaction boundaries. Verify those
+   boundaries for every source update. If a future reviewed file uses autocommit
+   or commits mid-file, an error can leave even that file partly applied. Always
+   inspect the actual catalog and retained history, not only a file number.
+   An error can leave earlier migrations committed: the persistent attempt directory
+   prevents automatic replay. Keep consumers and normal startup disabled; inspect
+   committed schema and history with the operator before preparing any repair.
+   The upgrade Job is operator-attended and has no hard active deadline, avoiding
+   an automatic SIGKILL during a large retained-table ALTER. Monitor progress until
+   clean shutdown. Operator cancellation, node failure or the 120-second Pod
+   termination grace can still interrupt it and requires the same inspection.
+   Both Jobs explicitly allow up to 3600 seconds for `pg_ctl` fast shutdown
+   instead of its implicit 60-second wait. Exceeding that wait still fails without
+   recording version 4; the operator must investigate before retry or recovery.
+4. Confirm the same allocation IDs, token ceilings, original deadlines, outbox
+   operations, receipts, witness and withdrawn authority. Ordinary old allocations
+   gain NULL request-scope columns; they must not become new allocations. Confirm
+   client execution on `prepare_token_only` is revoked and the new mediating
+   `prepare` entry point is available. Ordinary token-only allocations remain
+   intentionally supported through that wrapper; signed candidate requests must
+   supply both scope and request allowance. `clients.max_requests` remains NULL
+   until the independent operator ceremony enables request-limited allocations. Do not manually set marker `4` as a repair.
+5. Start the pinned server at version `4`, check TLS/durability and narrow roles,
+   and complete the documented qualification/recovery checks before restoring
+   authority or consumers. Archive the public source/manifest, Job UID/result and
+   before/after retained-history comparison. Remove only the completed standalone
+   Job and temporary ConfigMaps. Keep the attempt directory as history. Rollback
+   never restores an older ledger or replays `001`; application rollback must
+   preserve retained history and requires its own compatibility review.
+
+Neither standalone Job appears in a Flux inventory. The blank digest fields in
+source intentionally refuse execution. Bundle publication and these local tests
+are not proof of live ledger storage durability or worker qualification.
 
 ## Durability, maintenance and recovery gates
 
@@ -222,10 +319,15 @@ The focused script exercises the actual pinned PostgreSQL image using disposable
 local volumes and the approved schema supplied explicitly:
 
 ```sh
-bash scripts/tests/test-relay-budget-postgres.sh /path/to/reviewed/001-authority.sql
+bash scripts/tests/test-relay-budget-postgres.sh /private/operator/relay-budget-schema
 ```
 
-It refuses empty/wrong-major/recovery startup, initializes only once, starts with
-a root-owned 0440 TLS key as projected by kubelet, checks enforced durability,
-TLS/plaintext boundaries and role isolation, and removes all test containers,
-volumes and synthetic certificates. It makes no Kubernetes calls.
+It refuses empty/wrong-major/recovery/legacy startup and altered/missing schema
+files, initializes only once, and starts with a root-owned 0440 TLS key. It checks
+enforced durability, TLS/plaintext boundaries, role isolation, retained version-1
+upgrade, authority refusal and partial-migration replay refusal, then removes all
+test containers, volumes and synthetic certificates. It makes no Kubernetes calls.
+Docker does not exercise kubelet fsGroup/CSI behavior: the operator must inspect
+actual PVC ownership and PGDATA mode (0700 or 0750) after mounting. A recursive
+fsGroup rewrite can make PGDATA group-writable and cause PostgreSQL refusal;
+resolve mount ownership under the storage owner before running either Job.
