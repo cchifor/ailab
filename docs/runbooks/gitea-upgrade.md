@@ -140,7 +140,7 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
     - a branch push with its CI, and re-run jobs going green;
     - a reviewer-bot review on PR #1678;
     - the ailab push mirror syncing to GitHub;
-    - the `cnpg_gitea_*` credential metrics, with no Gitea alert firing.
-  - **Not yet verified:** the owner's OIDC login through Authelia (the owner's check; update this line when done).
+    - the `cnpg_gitea_*` credential metrics, with no Gitea alert firing;
+    - the owner's OIDC login through Authelia (the owner, 2026-11-09).
   - **Cost:** the restart failed 18 running jobs (relay, ailab, workbricks). The newest run of each branch or
     pull request was re-run through the API (17 runs).
