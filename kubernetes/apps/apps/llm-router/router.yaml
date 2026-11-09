@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 92c7c28a744e33963882a2dfea4b6fdc99d58a8c
-        chifor.me/release: router-0.1.0-20261107-availability
+        chifor.me/source-commit: 737d447bb5238fbe6ede0383e135641b7cda7cb6
+        chifor.me/release: router-0.1.0-20261109-workers-quota
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -119,12 +119,35 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
+      initContainers:
+        - name: backup-before-worker-budgets
+          image: registry.chifor.me/llm-router/router@sha256:61100143a90c66219d1e2acb1d7b6cd484dfea3c9622a779c92c8229599b1bb7
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [node, /app/deploy/backup-router.mjs]
+          env:
+            - name: ROUTER_DATA_DIR
+              value: /data
+            - name: ROUTER_BACKUP_LABEL
+              value: pre-worker-budgets-20261109
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: router
-          # Source 92c7c28a744e33963882a2dfea4b6fdc99d58a8c, llm-router main: the live release plus the native wires (#148, #151)
-          # and the availability probes (#153, #154, #155), all default-off.
-          # Relay run 123636; archive sha256:88fa5726536f6af974ea51d2572d3e7d389d4cdace162407a4b84f239b153bdd.
-          image: registry.chifor.me/llm-router/router@sha256:55ee00f0521046baffa0b0e8809e2b42526710abd2f05b4b0e1a23777cd7dc5c
+          # Source 737d447bb5238fbe6ede0383e135641b7cda7cb6: lifetime accounting,
+          # worker-budget enforcement and isolated readiness quota. Worker authority stays disabled.
+          # Relay run 126503; archive sha256:dfa2ee16e1fb20685f88127a48766bdb68aaf7e4d4d486d3660823c754957b0d.
+          image: registry.chifor.me/llm-router/router@sha256:61100143a90c66219d1e2acb1d7b6cd484dfea3c9622a779c92c8229599b1bb7
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

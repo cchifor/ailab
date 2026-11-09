@@ -1,11 +1,11 @@
 # Router worker-budget release: rollout and recovery
 
-This is the preparation record for upgrading the ailab router from source
+This is the rollout record for upgrading the ailab router from source
 `92c7c28a744e33963882a2dfea4b6fdc99d58a8c` to reviewer-merged source
 `737d447bb5238fbe6ede0383e135641b7cda7cb6` ([llm-router #161](https://git.chifor.me/cchifor/llm-router/pulls/161)).
-It does not record a deployment or enable worker admission. The new image digest,
-publication receipt and live acceptance must be recorded before changing the
-Deployment. Only the operator performs live inspection or Kubernetes writes;
+The published image and desired deployment change are recorded below. Live
+acceptance is pending; no deployment or worker admission is claimed. Only the
+operator performs cluster inspection or Kubernetes writes;
 the dev-worker's platform credential has no access to this namespace.
 
 ## Publication and activation gates
@@ -13,21 +13,38 @@ the dev-worker's platform credential has no access to this namespace.
 The release archive is `router-0.1.0-20261109-workers-quota.tar.gz`, directory
 `router-0.1.0-20261109-workers-quota`, SHA-256
 `dfa2ee16e1fb20685f88127a48766bdb68aaf7e4d4d486d3660823c754957b0d`.
-[Relay #280](https://git.chifor.me/cchifor/relay/pulls/280) pins that source archive
-for publication. The earlier `c5943026` archive is superseded.
+[Relay #280](https://git.chifor.me/cchifor/relay/pulls/280) reviewer-merged at
+`c7b78ae969950384f67f7a8f8711216f02a39701` and pins that source archive for
+publication. The earlier `c5943026` archive is superseded.
 
-Before the ailab deployment PR, record the successful publication run, its exact
-reviewer-merged packaging commit and `deployment-images-<runId>.json` receipt.
-Retain its bytes and SHA-256 independently; release assets can be deleted.
-Verify the receipt's `images.router.source`, `archive`, `directory` and
-`sha256` against the values above, and its `packagingCommit` and `runId` against
-the intended dispatch. Pull/inspect the resulting registry digest and verify
-the OCI revision label and `/app/SOURCE_COMMIT`. Also compare the packaged
-`/app/deploy/backup-router.mjs` hash with `deploy/ci/backup-router.mjs` at the exact
-packaging commit. Record the production smoke and packaged backup-helper checks
-against that same artifact. An archive checksum
-or successful source test alone is not an image pin. The publisher also builds
-Relay; this rollout changes only the router image, not the Relay deployment.
+[Publication run 126503](https://git.chifor.me/cchifor/relay/actions/runs/126503)
+passed at that exact packaging commit. Its
+[receipt, asset 522](https://git.chifor.me/cchifor/relay/releases/download/v0.2.0/deployment-images-126503.json)
+has SHA-256 `d84700ba2969a25184977540cbb85adba30a277cf9492993709637ae1c68dacc`.
+The downloaded receipt's source, archive, directory, archive checksum, run and
+packaging commit match the reviewed inputs. Retain its bytes and hash independently;
+release assets can be deleted.
+
+The router pin is
+`registry.chifor.me/llm-router/router@sha256:61100143a90c66219d1e2acb1d7b6cd484dfea3c9622a779c92c8229599b1bb7`.
+Independent registry reads verified the index, linux/amd64 manifest
+`sha256:f0a64b4219da363e83ebc5d7d3a02c256aa635d7c4c127905b223b4c73112b79`
+and config `sha256:604c2cdbc70dfaa027993b848104e280fca16a77c22d081867e2df1f7d2c616d`
+against their bytes, including the OCI source label, uid/gid `1000:1000` and
+working directory `/app`. The runtime base remains
+`docker.io/library/node@sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
+The publisher passed its production smoke and backup-helper checks. A subsequent
+exact-digest pull and disposable container with networking disabled, a read-only
+root filesystem and uid/gid 1000 verified `/app/SOURCE_COMMIT` equals
+`737d447bb5238fbe6ede0383e135641b7cda7cb6`. Its packaged backup-helper SHA-256 is
+`63be6a39b3ce7e58a0206aff443ee8bd3a042fb254989730974d127588bfbd58`, identical to
+`deploy/ci/backup-router.mjs` at packaging commit `c7b78ae969950384f67f7a8f8711216f02a39701`.
+That container and the locally pulled image were removed after verification.
+The [durable publication and pulled-image verification record](https://git.chifor.me/cchifor/relay/pulls/280#issuecomment-109782)
+ties these checks to the receipt and exact image pin.
+The publisher also built Relay; this change pins only the router, leaving the
+Relay deployment unchanged. No source test or archive checksum is used as an
+image digest.
 
 Deploy this router correction before the Relay readiness composition. It reserves
 twelve unexpired diagnostic assertions separately from the 120 worker-management
@@ -75,15 +92,15 @@ After the old process exits, a temporary init container runs the publisher's
 packaged `/app/deploy/backup-router.mjs` before the new router starts. The init
 must use the same verified image digest as the application, inherit the pod's
 non-root uid/gid 1000 and RuntimeDefault seccomp, and receive no credentials or
-Kubernetes token. Insert this template under the pod spec only after replacing
-the explanatory image value with the verified registry digest. The 256 MiB/one
+Kubernetes token. The checked-in pod spec uses the verified image digest in both
+containers and the following init configuration. The 256 MiB/one
 CPU limit below is a bounded proposal, not a measured live backup resource need;
 an OOMKill blocks startup and requires the recovery decision below:
 
 ```yaml
       initContainers:
         - name: backup-before-worker-budgets
-          image: VERIFIED_ROUTER_IMAGE_AT_SHA256
+          image: registry.chifor.me/llm-router/router@sha256:61100143a90c66219d1e2acb1d7b6cd484dfea3c9622a779c92c8229599b1bb7
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, /app/deploy/backup-router.mjs]
@@ -125,7 +142,9 @@ evidence. A reviewed revert to the prior composition is available if the new
 application has never started, as specified below. The helper requires at least
 twice the main database size plus 64 MiB
 free before capture; the operator must also preserve the application's separate
-free-space requirements after capture. Check actual PVC usage before merging.
+free-space requirements after capture. Before merging, check actual PVC usage
+and confirm `/data/router.sqlite` and the required `/data/router.secrets.key` are
+present and readable by uid 1000, without copying or logging the key's contents.
 This is local recovery material, not evidence of an offsite restore drill.
 
 ## Acceptance and cleanup
@@ -136,7 +155,9 @@ Ready router on the pinned digest, exactly the expected init composition with
 successful completion, public health/readiness, and unauthenticated management
 refusal. The reusable local observer is `python3 scripts/check-router-rollout.py`;
 it is read-only. Record the reviewed ailab commit, workflow run, pod identity,
-observed image, and the init's bounded verification log. On first capture it names
+observed image, backup COMPLETE file hash and first-capture `createdAt`, and the
+init's bounded verification log. Preserve that initial timestamp to detect any
+later regeneration under the same pre-upgrade label. On first capture the log names
 the backup label; a retry reports `Previously completed router backup verified`.
 For a retry, pair that message with the exact init environment and the operator's
 verified COMPLETE manifest for this label.
@@ -239,10 +260,19 @@ authority and SQLite adapter diff. Opus review
 bug and missing downgrade/revert details; those were corrected. Closure review
 `f809613d-9047-46e3-a55d-f05d946dc20d` aligned with no remaining blockers.
 
-All 14 acceptance-checker tests passed, including nested mount names, init
-placement before/after application containers, and refusal of an unpinned init
-image. The exact documented init template was dry-composed into the current full
-manifest using an explicitly synthetic test digest: YAML parsing and expectation
-derivation returned the intended single init. No synthetic digest was written
-to the deployment manifest. No live upgrade, downgrade, storage measurement,
-worker-budget activation or runtime qualification is claimed by these checks.
+All 14 acceptance-checker tests passed again with the real image pin, including
+nested mount names, init placement before/after application containers, and
+refusal of an unpinned init image. Digest-pinned manifest validation built all
+31 paths: 526 resources valid, zero invalid/errors and 68 skipped under the
+existing schema policy. A parsed-YAML comparison against ailab main
+`86481778c3cd5b3b3064d1ad027c0252f81ea5cf` confirmed only the application image,
+source/release annotations and one reviewed backup init changed. All other
+resources and existing application configuration match that base. The documented
+init equals the actual manifest; the checker expects exactly this image and
+`backup-before-worker-budgets` with no canary Job.
+
+Final Opus review `9082a64a-b0df-48ab-bcf9-b61691a91728` aligned on the concrete
+manifest, source/digest/receipt/image-file evidence and complete rollout delta.
+The earlier dry-compose used an explicitly synthetic test digest; none was
+written to the deployment manifest. No live upgrade, downgrade, storage
+measurement, worker-budget activation or runtime qualification is claimed.
