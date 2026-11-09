@@ -78,7 +78,9 @@ TLS certificate but has independent bearer authentication. Worker collection and
 candidate collection remain separate jobs/credentials/ports.
 
 The candidate alerts cover collector reachability, incomplete metric schema,
-and a retained driver-interruption observation. A last interruption can be an
+and an informational retained driver-interruption observation. This event stays
+visible until a real operation or restart; route it as information, not an outage
+page, and do not manufacture activity to clear it. A last interruption can be an
 idle pool disconnect and does not assert authority failure. A `not_ok` outcome
 includes legitimate denials, so it is available for diagnosis without a generic
 outage alert. Idle unobserved/stale roles do not alert. There is no idle SQL

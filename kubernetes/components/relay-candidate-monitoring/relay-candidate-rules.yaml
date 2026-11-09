@@ -26,7 +26,7 @@ spec:
       expr: relay_candidate_journal_last_outcome{job="relay-candidate-journal",outcome="interrupted"} == 1
       for: 2m
       labels:
-        severity: warning
+        severity: info
         service: relay
       annotations:
         summary: Relay candidate journal adapter last observed an interruption

@@ -160,7 +160,7 @@ tests:
   - eval_time: 5m
     alertname: RelayWorkerBudgetCheckFailed
     exp_alerts: []
-- name: RelayWorkerBudgetCheckFailed threshold and recovery
+- name: Unconfigured budget authority has no failed-check alert
   interval: 1m
   input_series:
   - series: relay_control_worker_budget_authority_started{job="relay-control-plane",instance="relay:80"}
@@ -229,4 +229,29 @@ tests:
   alert_rule_test:
   - eval_time: 6m
     alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts: []
+- name: Unsettled expired bootstrap Secret cleanup threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_worker_bootstrap_secrets_cleanup_oldest_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0 1000+0x6 0+0x3
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: RelayWorkerCleanupDelayed
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayWorkerCleanupDelayed
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay worker cleanup evidence is delayed
+        description: Reconcile stop, destroy, credential revocation or expired bootstrap Secret attempts through the authorized
+          operator path. Intentionally retained storage and active Secrets are not cleanup failures.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 8m
+    alertname: RelayWorkerCleanupDelayed
     exp_alerts: []

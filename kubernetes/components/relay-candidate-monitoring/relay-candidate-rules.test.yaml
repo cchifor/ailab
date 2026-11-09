@@ -16,7 +16,7 @@ tests:
         service: relay
         job: relay-candidate-journal
         instance: relay:80
-      exp_annotations:
+      exp_annotations: &id001
         summary: Relay candidate journal collector is unavailable
         description: Check the separate private TLS metrics listener, dedicated collector expiry, actual namespace pins and
           network policy. This is endpoint reachability, not journal authority readiness.
@@ -34,7 +34,7 @@ tests:
     alertname: RelayCandidateAdapterInterrupted
     exp_alerts:
     - exp_labels:
-        severity: warning
+        severity: info
         service: relay
         job: relay-candidate-journal
         instance: relay:80
@@ -115,3 +115,15 @@ tests:
         description: Check the matching journal service release and fixed role/outcome catalog. Both idle roles must export
           unobserved zeroes; missing series are not an idle or successful check.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+- name: absent candidate target is explicit after collector opt-in
+  interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: RelayCandidateCollectorUnavailable
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-candidate-journal
+      exp_annotations: *id001
