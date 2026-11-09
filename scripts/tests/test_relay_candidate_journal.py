@@ -109,7 +109,7 @@ class JournalBundle(unittest.TestCase):
         config, service, _ = self.fixture()
         service['listen']['port'] = 8443.0
         config['config'] = self.pin('config.json', service)
-        with self.assertRaisesRegex(render.Refusal, 'public-binding-mismatch'):
+        with self.assertRaisesRegex(render.Refusal, '^public-binding-mismatch$'):
             render.service(config)
 
     def test_pinned_file_rejects_symlink_hardlink_writable_and_wrong_hash(self):
