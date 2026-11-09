@@ -173,7 +173,7 @@ tests:
   - eval_time: 5m
     alertname: RelayWorkerBudgetCheckFailed
     exp_alerts: []
-- name: RelayWorkerMetricSchemaIncomplete threshold and recovery
+- name: Absent worker schema on a successful scrape fires after five minutes
   interval: 1m
   input_series:
   - series: up{job="relay-control-plane",instance="relay:80"}
@@ -195,7 +195,7 @@ tests:
         description: Check the selected Relay release and full migration set. A successful scrape with missing worker or budget
           series cannot be interpreted as zero backlog or healthy authority.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
-- name: RelayWorkerMetricSchemaIncomplete threshold and recovery
+- name: Complete thirteen-metric worker schema does not alert
   interval: 1m
   input_series:
   - series: up{job="relay-control-plane",instance="relay:80"}
@@ -228,6 +228,58 @@ tests:
     values: 0+0x8
   alert_rule_test:
   - eval_time: 6m
+    alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts: []
+- name: Twelve-metric worker schema fires and recovers when the missing gauge returns
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_installations_ready{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_installations_oldest_pending_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_operations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_operations_oldest_unknown_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_operations_oldest_queued_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_cleanup_operations_oldest_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_bootstrap_secrets_cleanup_oldest_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_authority_unconfigured{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_authority_started{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_observer_started{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_check_succeeded{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  # The first six scrapes export only twelve of the thirteen required gauges.
+  - series: relay_control_worker_budget_check_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: _ _ _ _ _ _ 360+60x2
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay worker metric schema is incomplete
+        description: Check the selected Relay release and full migration set. A successful scrape with missing worker or budget
+          series cannot be interpreted as zero backlog or healthy authority.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 7m
     alertname: RelayWorkerMetricSchemaIncomplete
     exp_alerts: []
 - name: Unsettled expired bootstrap Secret cleanup threshold and recovery
