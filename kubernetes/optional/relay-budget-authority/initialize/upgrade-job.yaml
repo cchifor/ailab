@@ -10,7 +10,8 @@ metadata:
 spec:
   suspend: true # Operator explicitly unsuspends after every preflight gate is satisfied.
   backoffLimit: 0
-  activeDeadlineSeconds: 600
+  # Operator-attended retained DDL: no hard Job deadline may kill a long ALTER.
+  # A cancelled/interrupted migration still requires explicit history inspection.
   template:
     metadata:
       labels:

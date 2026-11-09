@@ -61,3 +61,17 @@ synthetic fixture; it cannot prove an existing database's provenance. A manifest
 or version marker cannot prove that restored ledger history is current.
 
 Follow [the activation and upgrade runbook](../runbooks/relay-worker-budget-authority.md).
+
+## Repository review follow-up
+
+The independent repository reviewer noted that transaction atomicity belongs to
+the pinned external SQL, not `psql -f`. The runbook now explicitly states that
+contract and the possible partly applied file if future SQL changes it. Adding
+`--single-transaction` around files containing their own COMMIT would not enforce
+the claimed boundary. Every source update must review its actual transactions.
+
+The retained upgrade Job is now operator-attended with no hard active deadline,
+so a long ALTER is not automatically killed at ten minutes. Init of an empty
+database retains its deadline. The runbook pins the retained version-1 wrapper
+for the documented recovery path and keeps consumers/authority disabled. These
+changes do not establish live recovery or remove the interrupted-attempt gate.

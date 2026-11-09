@@ -213,22 +213,36 @@ under the new wrapper.
    postmaster/PID file and no previous `relay-budget-upgrade-started` directory.
    A stale PID after a crash is a recovery case: keep consumers disabled, verify
    no live process owns the data, and use the existing reviewed recovery procedure
-   and version-1 wrapper to establish a clean shutdown before returning here.
+   and the retained version-1 wrapper to establish a clean shutdown before returning
+   here. The original wrapper is `kubernetes/optional/relay-budget-authority/start.sh`
+   at ailab commit `03b207f342ea542d8ec4eacbc250f71db3f5670f` (verify this full
+   commit against the original deployment evidence) and uses the same pinned
+   PostgreSQL 17.11 image in this directory. Extract it from that committed object
+   into the reviewed recovery configuration; do not alter its version check.
+   Keep all consumers/authority disabled even if earlier migrations committed.
    Do not delete the PID file or replace the schema marker to force this upgrade.
    Apply the immutable schema ConfigMap and script-only Kustomization, create the
    suspended standalone upgrade Job, review its image/pins and unsuspend once.
-   It checks withdrawn authority and the absence of already applied `002`/`003`,
+   It checks withdrawn authority and the absence of already applied `002`/`003`
    before creating the durable attempt marker. A refusal in those SQL checks
    cleanly stops PostgreSQL and leaves no migration-attempt marker; correct the
    prerequisite and review a fresh standalone Job. The preflight changes no ledger
    rows or schema, but normal PostgreSQL startup/shutdown still writes WAL and
    checkpoints. Once checks pass, it records
    the attempt, runs migrations in order, and writes marker `4` only after all
-   commits, clean PostgreSQL shutdown and source receipts complete. Each SQL file
-   has its own transaction. An error
-   can leave earlier migrations committed: the persistent attempt directory
+   commits, clean PostgreSQL shutdown and source receipts complete. The current
+   reviewed Relay SQL files contain their own `BEGIN`/`COMMIT`; the script trusts
+   those pinned bytes and does not impose transaction boundaries. Verify those
+   boundaries for every source update. If a future reviewed file uses autocommit
+   or commits mid-file, an error can leave even that file partly applied. Always
+   inspect the actual catalog and retained history, not only a file number.
+   An error can leave earlier migrations committed: the persistent attempt directory
    prevents automatic replay. Keep consumers and normal startup disabled; inspect
    committed schema and history with the operator before preparing any repair.
+   The upgrade Job is operator-attended and has no hard active deadline, avoiding
+   an automatic SIGKILL during a large retained-table ALTER. Monitor progress until
+   clean shutdown. Operator cancellation, node failure or the 120-second Pod
+   termination grace can still interrupt it and requires the same inspection.
 4. Confirm the same allocation IDs, token ceilings, original deadlines, outbox
    operations, receipts, witness and withdrawn authority. Ordinary old allocations
    gain NULL request-scope columns; they must not become new allocations. Confirm

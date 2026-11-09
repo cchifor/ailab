@@ -96,6 +96,7 @@ class SchemaBundle(unittest.TestCase):
             env = {item['name']: item['value'] for item in container['env']}
             self.assertEqual(env['RELAY_BUDGET_SCHEMA_MANIFEST_SHA256'], '')
             if command == 'upgrade.sh':
+                self.assertNotIn('activeDeadlineSeconds', job['spec'])
                 self.assertEqual(env['RELAY_BUDGET_LEGACY_SCHEMA_SHA256'], '')
             self.assertTrue(container['securityContext']['readOnlyRootFilesystem'])
             projection = next(v['configMap'] for v in spec['volumes'] if v['name'] == 'schema')
