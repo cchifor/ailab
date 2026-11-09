@@ -21,11 +21,30 @@ class Pending(Exception):
     pass
 
 
+def pinned_images(document):
+    # Discover keys before validating values: selecting only already-valid
+    # image lines would silently drop unpinned or mismatched commented images.
+    key = re.compile(r'''^[ \t]*(?:-[ \t]+)?(?:image|"image"|'image')[ \t]*:[ \t]*(.*)$''')
+    value = re.compile(r'''(?P<quote>["']?)(?P<image>registry\.chifor\.me/llm-router/router@sha256:[a-f0-9]{64})(?P=quote)(?:[ \t]+\#[^\r\n]*)?[ \t]*''')
+    images = set()
+    for line in document.splitlines():
+        found = key.match(line)
+        if not found:
+            continue
+        parsed = value.fullmatch(found[1])
+        if not parsed:
+            raise ValueError('Expected one consistent, digest-pinned router image')
+        images.add(parsed['image'])
+    if not images:
+        raise ValueError('Expected one consistent, digest-pinned router image')
+    return images
+
+
 def expectation(root=ROOT):
     folder = root / 'kubernetes/apps/apps/llm-router'
     manifest = (folder / 'router.yaml').read_text()
-    images = set(re.findall(r'(?m)^\s*image: (\S+)\s*$', manifest))
-    if len(images) != 1 or not re.fullmatch(r'registry\.chifor\.me/llm-router/router@sha256:[a-f0-9]{64}', next(iter(images), '')):
+    images = pinned_images(manifest)
+    if len(images) != 1:
         raise ValueError('Expected one consistent, digest-pinned router image')
     # Only direct children of this pod field are containers. Nested env/mount
     # names and later pod volumes must not become expected init containers.
@@ -41,7 +60,11 @@ def expectation(root=ROOT):
         if not match:
             raise ValueError('Canary must declare a versioned router Job')
         job = match.group(1)
-        if not re.search(r'image: ' + re.escape(next(iter(images))) + r'\s', contents):
+        try:
+            canary_images = pinned_images(contents)
+        except ValueError as error:
+            raise ValueError('Canary must use the same pinned release as the router') from error
+        if canary_images != images:
             raise ValueError('Canary must use the same pinned release as the router')
     return images.pop(), names, job
 

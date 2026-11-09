@@ -132,6 +132,11 @@ NetworkPolicies, authentication and model configuration intact. The init is the
 only additional pod behavior. It does not launch router/provider plugins or
 access the network.
 
+The init reuses the existing `tmp` volume, an `emptyDir` under
+`spec.template.spec.volumes` ([router.yaml at the reviewed deployment head,
+lines 336–337](https://git.chifor.me/cchifor/ailab/src/commit/29a5adaf33bb2c6c424d10e9ae49ce8163174e82/kubernetes/apps/apps/llm-router/router.yaml#L336)).
+Both the application and init mount it at `/tmp`; no additional volume is needed.
+
 The helper uses `VACUUM INTO`, copies the encryption key and optional plugin file,
 checks SQLite integrity and per-file SHA-256, then atomically publishes
 `/data/backups/pre-worker-budgets-20261109/COMPLETE`. Repeated startup verifies an
@@ -161,6 +166,10 @@ later regeneration under the same pre-upgrade label. On first capture the log na
 the backup label; a retry reports `Previously completed router backup verified`.
 For a retry, pair that message with the exact init environment and the operator's
 verified COMPLETE manifest for this label.
+Before cleanup, and after any unexplained init restart, compare COMPLETE's hash
+and `createdAt` with the originally accepted values. The pinned helper can create
+a new generation if the old directory is missing or empty; successful init exit
+alone cannot prove that the original pre-upgrade generation survived.
 Do not substitute generic `/ready` success for backup evidence.
 
 Have the operator confirm ordinary routes, account/plugin state and existing
@@ -169,11 +178,97 @@ remains disabled; health alone cannot prove that. Do not create workers or make
 paid inference calls as an implicit acceptance step. This rollout does not prove
 live budget enforcement, twelve-probe isolation or KubeVirt qualification.
 
-After public acceptance, remove only the temporary init through a reviewed
-cleanup PR, preserve the verified backup and exact application pin, and require
-acceptance again. The checker verifies the init composition is absent, preventing
+Prepare the cleanup PR during the rollout and submit it for review immediately
+after public acceptance. Assign its owner and target the same maintenance window;
+if review or acceptance delays it, record the next window and explicit owner
+instead of leaving the temporary init indefinitely. Remove only the temporary
+init through that reviewed PR, preserve the verified backup and exact application
+pin, and require acceptance again. The checker verifies the init composition is
+absent, preventing
 the old Ready pod on the same image from satisfying cleanup prematurely. Retain
 the backup until a newer consistent generation and retention decision exist.
+
+### Backup verification failure after the new application has run
+
+A later pod restart can fail when the retained generation's COMPLETE marker,
+checksums or SQLite integrity no longer verify. The never-started revert below
+does not apply. Keep the current verified application image and current data;
+do not downgrade, restore the pre-upgrade database, delete the failed generation,
+edit COMPLETE, or remove the init merely because it failed.
+
+The operator and recovery reviewer use this incident-specific procedure:
+
+1. Record the failed init log, pod/image and prior-start history, failed generation
+   label, original accepted COMPLETE hash/`createdAt`, current observed hashes,
+   and PVC health, usage and uid-1000 permissions. Preserve failed-generation
+   bytes in protected recovery storage; never attach encryption keys or secret
+   files to the PR. Distinguish a damaged backup copy from damaged or rolled-back
+   live data. A green SQLite integrity check alone cannot establish authority
+   continuity. Uncertain live data, key material, ledger/witness history or
+   revocations require the independent recovery ceremony below, not this path.
+2. Prepare a reviewed recovery change that keeps only this Deployment quiesced
+   at zero replicas during repair/capture and coordinates its GitOps desired
+   state. Do not suspend the shared apps Kustomization. Preserve the current PVC,
+   application pin and configuration. Repair the diagnosed storage/permission
+   cause first, and recheck writable capacity; no application may open SQLite
+   while the maintenance backup work owns that volume. Confirm zero router pods
+   before creating any maintenance Job. Record this intentional unavailable
+   interval: the normal one-Ready-pod acceptance cannot pass while replicas are
+   zero, and only passing acceptance for the restore commit closes the incident.
+3. If an independently retained, known-good replica of the **same original
+   generation** exists, verify it against the originally accepted COMPLETE hash,
+   creation time, file checksums and SQLite integrity. After preserving the failed
+   copy, the reviewed procedure may repair only that backup directory from the
+   verified replica. It must not copy the backup database over the live database.
+   Before any helper run and before scaling the Deployment back up, require the
+   complete directory and
+   every listed file, owned by uid 1000, with directory mode 0700 and file mode
+   0600. Run the same packaged helper against that repaired label. Success means
+   **only** `Previously completed router backup verified`, with the post-run
+   COMPLETE hash and `createdAt` identical to the originally accepted values.
+   A first-capture message or changed hash/time is a failed repair: preserve it
+   as evidence and never call it pre-upgrade material. This explicitly detects
+   the helper's ENOENT fallback, which otherwise can recapture current data under
+   an absent or empty original label. An exact verified repair permits the init
+   to verify on restart without erasing newer writes or changing the recovery epoch.
+4. If no exact original replica is available but current application data and
+   authority continuity are independently trusted, take a **fresh post-upgrade
+   backup** under a new incident label, for example
+   `post-worker-budgets-20261110-incident1`. The reviewed maintenance change must
+   include a one-shot Job using the same digest-pinned image/helper, non-root
+   security, `/data` PVC and writable `/tmp` as this init, with
+   `ROUTER_DATA_DIR=/data` and the new `ROUTER_BACKUP_LABEL`, `restartPolicy: Never`
+   and `backoffLimit: 0`. A standalone Job must set its own pod security:
+   `runAsUser: 1000`, `runAsGroup: 1000`, `fsGroup: 1000`, `runAsNonRoot: true`,
+   RuntimeDefault seccomp and `automountServiceAccountToken: false`. Its container
+   keeps the init's read-only root, no privilege escalation and dropped ALL
+   capabilities. Put its manifest outside the router's `*-canary.yaml`
+   pattern; it is maintenance work, not a rollout canary. The incident label must
+   not exist before the first attempt. Run no router or provider plugins. Require
+   the first-capture message naming that label, and verify its completed
+   generation's hash/creation time, per-file checksums and SQLite integrity.
+   A reviewed rerun that reports `Previously completed` must match the first
+   attempt's accepted COMPLETE hash and `createdAt`. An OOMKill or interrupted
+   attempt can leave `.label-*` temporary directories: record their identities
+   and space usage as failed evidence; do not delete them ad hoc. Record the
+   original generation's loss explicitly. The fresh backup is not pre-upgrade
+   evidence and never resets the live database or independent authority.
+5. Attach the diagnosed cause, current-state continuity evidence and the successful
+   repair or fresh-capture evidence to the recovery PR. Only after those checks
+   may the reviewed recovery change restore one replica on the **same current
+   application image/data**. For a repaired original generation, require again
+   the `Previously completed` message and exact original COMPLETE hash/`createdAt`
+   when the init runs; the prompt cleanup above follows. With a verified fresh
+   post-upgrade generation, the recovery PR explicitly removes the obsolete
+   dated init and records why that particular generation satisfies the current
+   backup requirement. This is a reviewed recovery decision, not automatic
+   removal on failure. Remove the finished maintenance Job after preserving its
+   evidence, and require normal image/health/management-refusal acceptance again.
+
+If neither branch can prove a trustworthy complete recovery generation and
+current authority continuity, keep the workload and managed traffic fenced and
+escalate through the independent recovery procedure. Availability does not justify
+resuming from unverifiable state.
 
 ## Rollback and restore decision
 
@@ -214,7 +309,8 @@ backup. Preserve failed backup evidence. If history is missing or any new
 application container started, this exception does not apply.
 
 After the new application has run, preserve a completed backup and remove its
-dated init in the same reviewed rollback commit as the application pin, only after capture and the authority gates
+dated init in the same reviewed rollback commit as the application pin, only
+after capture and the authority gates
 above are verified. A downgrade still requires acceptance and preserved ordinary
 route behavior. This source audit is not a live downgrade rehearsal.
 
@@ -260,9 +356,10 @@ authority and SQLite adapter diff. Opus review
 bug and missing downgrade/revert details; those were corrected. Closure review
 `f809613d-9047-46e3-a55d-f05d946dc20d` aligned with no remaining blockers.
 
-All 14 acceptance-checker tests passed again with the real image pin, including
+All 17 acceptance-checker tests passed with the real image pin, including
 nested mount names, init placement before/after application containers, and
-refusal of an unpinned init image. Digest-pinned manifest validation built all
+commented/quoted image values and keys, unpinned/mismatched init refusal and
+canary masking regressions. The previous digest-pinned manifest validation built all
 31 paths: 526 resources valid, zero invalid/errors and 68 skipped under the
 existing schema policy. A parsed-YAML comparison against ailab main
 `86481778c3cd5b3b3064d1ad027c0252f81ea5cf` confirmed only the application image,
@@ -273,6 +370,14 @@ init equals the actual manifest; the checker expects exactly this image and
 
 Final Opus review `9082a64a-b0df-48ab-bcf9-b61691a91728` aligned on the concrete
 manifest, source/digest/receipt/image-file evidence and complete rollout delta.
+The subsequent reviewer follow-up changes only the checker, its tests and this
+runbook; the deployment manifest is byte-unchanged, so the full manifest suite
+was not repeated. Delta review `156bafc0-aed4-4c03-b43b-1220f109ed14` confirmed the
+comment parsing and tmp proof, and required the stricter original-generation and
+fresh-capture success criteria now specified above.
+Closure review `4d50203f-9b49-4e3d-a50b-d92706022f76` aligned with no remaining
+blockers. A future rollout canary must use this same pinned router image for every
+container; a different helper image requires an explicitly reviewed checker change.
 The earlier dry-compose used an explicitly synthetic test digest; none was
 written to the deployment manifest. No live upgrade, downgrade, storage
 measurement, worker-budget activation or runtime qualification is claimed.
