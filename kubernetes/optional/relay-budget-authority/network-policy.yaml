@@ -1,0 +1,98 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: relay-budget-authority
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-clients
+  namespace: relay-budget-authority
+spec:
+  podSelector:
+    matchLabels: {app: relay-budget-postgres}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    # Each namespace + pod pair is one AND selector, never an entire namespace.
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: relay}
+      podSelector:
+        matchLabels: {app: relay}
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: llm-router}
+      podSelector:
+        matchLabels: {app: llm-router}
+    - podSelector:
+        matchLabels: {relay.chifor.me/budget-operator-client: "true"}
+    ports:
+    - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-independent-budget
+  namespace: relay
+spec:
+  # Activation requires existing reviewed app egress rules; see runbook preflight.
+  # This policy would isolate a previously unisolated app to only the ledger.
+  podSelector:
+    matchLabels: {app: relay}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: relay-budget-authority}
+      podSelector:
+        matchLabels: {app: relay-budget-postgres}
+    ports:
+    - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: router-independent-budget
+  namespace: llm-router
+spec:
+  # Same mandatory baseline preflight as relay-independent-budget above.
+  podSelector:
+    matchLabels: {app: llm-router}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: relay-budget-authority}
+      podSelector:
+        matchLabels: {app: relay-budget-postgres}
+    ports:
+    - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator-client
+  namespace: relay-budget-authority
+spec:
+  podSelector:
+    matchLabels: {relay.chifor.me/budget-operator-client: "true"}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels: {app: relay-budget-postgres}
+    ports:
+    - {protocol: TCP, port: 5432}
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+    ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
