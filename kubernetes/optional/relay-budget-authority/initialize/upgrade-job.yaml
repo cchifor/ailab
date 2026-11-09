@@ -1,0 +1,76 @@
+# Offline retained-database upgrade; never include this Job in a Flux inventory.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: relay-budget-upgrade-once
+  namespace: relay-budget-authority
+  labels:
+    app.kubernetes.io/part-of: relay-budget-authority
+    velero.io/exclude-from-backup: "true"
+spec:
+  suspend: true # Operator explicitly unsuspends after every preflight gate is satisfied.
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: relay-budget-authority
+        velero.io/exclude-from-backup: "true"
+      annotations:
+        backup.velero.io/backup-volumes-excludes: database
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      tolerations:
+      - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: upgrade
+        image: docker.io/library/postgres:17.11-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+        command: [/bin/sh, /initialize/upgrade.sh]
+        env:
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+        # Required independent pin from the reviewed bundle receipt; empty refuses.
+        - {name: RELAY_BUDGET_SCHEMA_MANIFEST_SHA256, value: ''}
+        # From the original initialization evidence, independently of this bundle.
+        - {name: RELAY_BUDGET_LEGACY_SCHEMA_SHA256, value: ''}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        resources:
+          requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 64Mi}
+          limits: {cpu: '1', memory: 512Mi, ephemeral-storage: 128Mi}
+        volumeMounts:
+        - {name: database, mountPath: /var/lib/postgresql/data}
+        - {name: scripts, mountPath: /initialize, readOnly: true}
+        - {name: schema, mountPath: /schema, readOnly: true}
+        - {name: run, mountPath: /var/run/postgresql}
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - name: database
+        persistentVolumeClaim: {claimName: relay-budget-postgres-data}
+      - name: scripts
+        configMap: {name: relay-budget-initialize, defaultMode: 292}
+      - name: schema
+        configMap:
+          name: relay-budget-reviewed-schema-once # Created by owner from reviewed Relay commit.
+          defaultMode: 292
+          items:
+          - {key: source-commit, path: source-commit}
+          - {key: SHA256SUMS, path: SHA256SUMS}
+          - {key: 001-authority.sql, path: 001-authority.sql}
+          - {key: 002-preflight.sql, path: 002-preflight.sql}
+          - {key: 003-scoped-requests.sql, path: 003-scoped-requests.sql}
+          - {key: 004-preflight-errors.sql, path: 004-preflight-errors.sql}
+      - name: run
+        emptyDir: {medium: Memory, sizeLimit: 16Mi}
+      - name: tmp
+        emptyDir: {sizeLimit: 32Mi}

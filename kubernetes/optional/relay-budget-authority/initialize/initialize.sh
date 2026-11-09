@@ -3,7 +3,8 @@ set -eu
 umask 077
 data_root=/var/lib/postgresql/data
 [ "$PGDATA" = "$data_root/pgdata" ] || exit 78
-[ -s /schema/001-authority.sql ] || exit 78
+. "$(dirname "$0")/verify-schema.sh"
+verify_schema || { echo 'Reviewed schema bundle does not match its independent pin' >&2; exit 78; }
 # An interrupted first attempt also needs owner investigation; never reseed on retry.
 [ ! -e "$PGDATA" ] || { echo 'Budget data already exists; refusing initialization' >&2; exit 78; }
 mkdir "$data_root/.initialization-started" || exit 78
@@ -16,7 +17,9 @@ psql -X -h /var/run/postgresql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL
 CREATE DATABASE relay_budget;
 REVOKE ALL ON DATABASE relay_budget FROM PUBLIC;
 SQL
-psql -X -h /var/run/postgresql -U postgres -d relay_budget -v ON_ERROR_STOP=1 -f /schema/001-authority.sql
+for schema in 001-authority.sql 002-preflight.sql 003-scoped-requests.sql 004-preflight-errors.sql; do
+  psql -X -h /var/run/postgresql -U postgres -d relay_budget -v ON_ERROR_STOP=1 -f "/schema/$schema"
+done
 psql -X -h /var/run/postgresql -U postgres -d relay_budget -v ON_ERROR_STOP=1 <<'SQL'
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 CREATE ROLE relay_budget_allocator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -27,5 +30,6 @@ GRANT CONNECT ON DATABASE relay_budget TO relay_budget_allocator,relay_budget_ro
 -- Passwords remain NULL. Operator sets them interactively via \password after startup.
 -- No authority, clients, readers, qualifications, allocations or witness is seeded here.
 SQL
-printf '1\n' > "$PGDATA/relay-budget-schema-version"
-sync
+stop
+trap - EXIT
+record_schema

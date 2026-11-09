@@ -36,6 +36,8 @@ spec:
         command: [/bin/sh, /initialize/initialize.sh]
         env:
         - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+        # Required independent pin from the reviewed bundle receipt; empty refuses.
+        - {name: RELAY_BUDGET_SCHEMA_MANIFEST_SHA256, value: ''}
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -59,7 +61,12 @@ spec:
           name: relay-budget-reviewed-schema-once # Created by owner from reviewed Relay commit.
           defaultMode: 292
           items:
+          - {key: source-commit, path: source-commit}
+          - {key: SHA256SUMS, path: SHA256SUMS}
           - {key: 001-authority.sql, path: 001-authority.sql}
+          - {key: 002-preflight.sql, path: 002-preflight.sql}
+          - {key: 003-scoped-requests.sql, path: 003-scoped-requests.sql}
+          - {key: 004-preflight-errors.sql, path: 004-preflight-errors.sql}
       - name: run
         emptyDir: {medium: Memory, sizeLimit: 16Mi}
       - name: tmp
