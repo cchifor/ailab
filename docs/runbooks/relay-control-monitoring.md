@@ -1,9 +1,9 @@
 # Relay control-plane monitoring
 
-`kubernetes/components/relay-control-monitoring` is an opt-in component for the
-Relay release containing [Relay #90](https://git.chifor.me/cchifor/relay/pulls/90)
-and [#91](https://git.chifor.me/cchifor/relay/pulls/91). It is not included in a
-live Kustomization. The deployed v0.3.5 service cannot serve this endpoint.
+`kubernetes/components/relay-control-monitoring` is opt-in and is not selected
+by the application Kustomization. Activate it only with a reviewed Relay release
+containing the complete control/worker metric catalog and that release's full
+migration set. This document does not assert the currently deployed image.
 
 ## Credential and network boundaries
 
@@ -33,7 +33,7 @@ or collector token. Invalid input prevents startup without printing values.
 The ServiceMonitor lives in `monitoring`, reads its separate token Secret there,
 and selects only the labelled Relay Service in namespace `relay`. It scrapes
 `/metrics/agent-control-plane` every 30 seconds with a 10-second timeout and a
-100-sample ceiling. Redirects are disabled. A fixed `job="relay-control-plane"`
+200-sample ceiling. Redirects are disabled. A fixed `job="relay-control-plane"`
 label connects the scrape and rules. No tenant or agent labels come from Relay.
 Exceeding the sample ceiling rejects the entire scrape and fires
 `RelayControlCollectorUnavailable`, rather than the incomplete-schema alert.
@@ -49,8 +49,8 @@ grant Relay API authority; the collector credential works only at the metrics pa
 ## Activation and verification
 
 1. Complete Relay's new-release, database/artifact backup, restore and OIDC gates.
-   Select a reviewed image containing migrations through 037 and the collector
-   endpoint, and explicitly enable its agent-control-plane feature in that rollout.
+   Select a reviewed image containing the complete current metric catalog and all
+   of that release's migrations, and explicitly enable its agent-control-plane feature in that rollout.
    This component does not change the image or enable agent launches.
 2. Provision both Secrets and validate their relationship without exposing values.
    Check Prometheus discovery/RBAC for ServiceMonitors and Secrets in `monitoring`.
@@ -77,7 +77,7 @@ grant Relay API authority; the collector credential works only at the metrics pa
    This establishes scheduling visibility only. Verify a named artifact/database
    restore separately; successful jobs do not prove recoverability.
 
-The 12 rules cover collector failure, stale/missing observations, an incomplete
+The rules cover collector failure, stale/missing observations, an incomplete
 critical metric schema, missing holder
 measurements, journal history gaps and quota pressure, unknown delivery, router
 revocation/escrow cleanup, queued controls, old unacknowledged messages, collector
@@ -142,3 +142,12 @@ never delete an uncertain journal or replay work in response to an alert.
 
 This change adds no secret or live activation. The existing operator rollout
 request still owns actual scrape, rotation, alert delivery and recovery evidence.
+
+## Worker and independent-authority observations
+
+See [worker monitoring operations](relay-worker-monitoring.md) for the optional
+worker alert component, budget diagnostic semantics and separate candidate-journal
+collector. The hub now exports 126 samples including all histogram buckets, with
+a tested ceiling of 160 under the 200-sample limit. A successful application
+database/artifact restore metric excludes independent budget ledger and candidate
+journal recovery; each needs separate operator recovery evidence.
