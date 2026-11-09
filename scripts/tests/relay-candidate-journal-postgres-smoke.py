@@ -23,6 +23,8 @@ args = ['docker', 'run', '--name', container_name, '--rm', '--pull', 'never', '-
 for key, name in [('SCHEMA_001_SHA256', '001-journal.sql'), ('SCHEMA_002_SHA256', '002-signed-clients.sql')]:
     args += ['-e', key + '=' + hashlib.sha256((schema / name).read_bytes()).hexdigest()]
 script = r'''set -eu
+# Match the setgid root produced by a kubelet fsGroup ownership pass.
+chmod 2770 /var/lib/postgresql/data
 # Bad source is refused before even the initialization-attempt marker exists.
 if SCHEMA_001_SHA256=$(printf '%064d' 0) /bin/sh /bundle/initialize/initialize.sh 2>/dev/null; then exit 1; fi
 [ ! -e /var/lib/postgresql/data/.initialization-started ]
@@ -31,6 +33,21 @@ if /bin/sh /bundle/start.sh 2>/dev/null; then exit 1; fi
 /bin/sh /bundle/initialize/initialize.sh
 [ "$(cat "$PGDATA/relay-candidate-journal-schema-version")" = 2 ]
 if pg_ctl -D "$PGDATA" status; then exit 1; fi
+[ "$(stat -c '%a' "$PGDATA")" = 2700 ]
+# The permission guard must accept inherited setgid. Full runtime startup then
+# fails on deliberately absent production config/TLS files, not mode exit78.
+set +e
+/bin/sh /bundle/start.sh >/tmp/start-check.log 2>&1
+start_code=$?
+set -e
+[ "$start_code" != 78 ] && [ "$start_code" != 0 ]
+grep -Eq 'FATAL:.*(/run/tls/tls\.(crt|key)|/etc/relay-candidate-journal/pg_hba\.conf)' /tmp/start-check.log
+if grep -q 'PGDATA requires UID' /tmp/start-check.log; then exit 1; fi
+# Simulate kubelet fsGroup making the retained data directory group-writable.
+chmod 0770 "$PGDATA"
+if /bin/sh /bundle/start.sh 2>/dev/null; then exit 1; fi
+[ "$(cat "$PGDATA/relay-candidate-journal-schema-version")" = 2 ]
+chmod 2700 "$PGDATA"
 # An exact retry is refused without recreating state.
 if /bin/sh /bundle/initialize/initialize.sh 2>/dev/null; then exit 1; fi
 pg_ctl -D "$PGDATA" -w start -o "-c listen_addresses='' -c unix_socket_directories=/var/run/postgresql"

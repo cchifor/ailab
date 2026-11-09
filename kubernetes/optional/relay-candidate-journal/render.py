@@ -29,13 +29,17 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def refuse():
-    raise ValueError('journal-render-input-refused')
+class Refusal(ValueError):
+    pass
+
+
+def refuse(code='public-binding-mismatch'):
+    raise Refusal(code)
 
 
 def fields(value, keys):
     if not isinstance(value, dict) or set(value) != set(keys):
-        refuse()
+        refuse('configuration-field-set-invalid')
 
 
 def parse(raw):
@@ -43,30 +47,41 @@ def parse(raw):
         obj = {}
         for key, value in values:
             if key in obj:
-                refuse()
+                refuse('duplicate-json-key')
             obj[key] = value
         return obj
-    return json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: refuse())
+    try:
+        return json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: refuse('nonfinite-json-number'))
+    except json.JSONDecodeError:
+        refuse('invalid-json')
 
 
 def pinned(pin):
     fields(pin, ['path', 'sha256'])
     path, expected = pin['path'], pin['sha256']
     if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path or not re.fullmatch('[a-f0-9]{64}', expected):
-        refuse()
+        refuse('file-path-or-pin-invalid')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid not in [0, os.getuid()] or st.st_mode & 0o022 or st.st_size > 65536 or os.path.realpath('/proc/self/fd/' + str(fd)) != path:
-            refuse()
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            refuse('file-type-or-link-count-refused')
+        if st.st_uid not in [0, os.getuid()] or st.st_mode & 0o022:
+            refuse('file-owner-or-mode-refused')
+        if st.st_size > 65536:
+            refuse('file-too-large')
+        if os.path.realpath('/proc/self/fd/' + str(fd)) != path:
+            refuse('file-path-not-canonical')
         raw = b''
         while len(raw) <= st.st_size:
             part = os.read(fd, st.st_size + 1 - len(raw))
             if not part:
                 break
             raw += part
-        if len(raw) != st.st_size or digest(raw) != expected:
-            refuse()
+        if len(raw) != st.st_size:
+            refuse('file-size-changed')
+        if digest(raw) != expected:
+            refuse('file-sha256-mismatch')
         return raw.decode('utf-8', errors='strict')
     finally:
         os.close(fd)
@@ -181,12 +196,15 @@ def service(config):
     if len({n['name'] for n in namespaces}) != 2 or any(n['name'] in [SERVICE_NS, DB_NS, 'kube-system'] for n in namespaces):
         refuse()
     annotations['relay.chifor.me/config-sha256'] = config['config']['sha256']
+    annotations['relay.chifor.me/tls-certificate-sha256'] = config['tlsCertificate']['sha256']
+    tls_secret = NAME + '-tls-' + config['tlsCertificate']['sha256'][:32]
     cm_name = NAME + '-public-' + config['config']['sha256'][:16]
     mounts = [{'name': 'public', 'mountPath': PUBLIC + filename, 'subPath': filename, 'readOnly': True} for filename in raw]
     mounts += [{'name': 'runtime', 'mountPath': PUBLIC + key, 'subPath': key, 'readOnly': True}
                for key in ['reply-key.pem', 'agent-dsn', 'holder-dsn']]
     mounts += [{'name': 'tls', 'mountPath': PUBLIC + 'tls-key.pem', 'subPath': 'tls.key', 'readOnly': True}]
     app_labels = {**LABELS, 'app': NAME}
+    listener_probe = ['node', '-e', "const s=require('node:net').connect({host:'127.0.0.1',port:8443});s.setTimeout(2000);s.on('connect',()=>{s.destroy();process.exit(0)});s.on('timeout',()=>process.exit(1));s.on('error',()=>process.exit(1));"]
     deployment = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': metadata(NAME, SERVICE_NS, annotations),
         'spec': {'replicas': 0, 'strategy': {'type': 'Recreate'}, 'selector': {'matchLabels': {'app': NAME}},
             'template': {'metadata': {'labels': app_labels, 'annotations': annotations}, 'spec': {
@@ -200,14 +218,14 @@ def service(config):
                     'securityContext': SECURITY, 'ports': [{'name': 'https', 'containerPort': 8443}],
                     'resources': {'requests': {'cpu': '100m', 'memory': '128Mi', 'ephemeral-storage': '16Mi'},
                                   'limits': {'cpu': '500m', 'memory': '256Mi', 'ephemeral-storage': '32Mi'}},
-                    'readinessProbe': {'tcpSocket': {'port': 'https'}, 'periodSeconds': 5},
-                    'livenessProbe': {'tcpSocket': {'port': 'https'}, 'initialDelaySeconds': 15, 'periodSeconds': 10},
+                    'readinessProbe': {'exec': {'command': listener_probe}, 'timeoutSeconds': 3, 'periodSeconds': 5},
+                    'livenessProbe': {'exec': {'command': listener_probe}, 'timeoutSeconds': 3, 'initialDelaySeconds': 15, 'periodSeconds': 10},
                     'volumeMounts': mounts}],
                 'volumes': [
                     {'name': 'public', 'configMap': {'name': cm_name, 'defaultMode': 0o444}},
                     {'name': 'runtime', 'secret': {'secretName': NAME + '-runtime', 'defaultMode': 0o400,
                         'items': [{'key': key, 'path': key} for key in ['reply-key.pem', 'agent-dsn', 'holder-dsn']]}},
-                    {'name': 'tls', 'secret': {'secretName': NAME + '-tls', 'defaultMode': 0o400,
+                    {'name': 'tls', 'secret': {'secretName': tls_secret, 'defaultMode': 0o400,
                         'items': [{'key': 'tls.key', 'path': 'tls.key'}]}},
                 ]}}}}
     ingress = [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': n['name']}},
@@ -237,6 +255,13 @@ def main(args):
 if __name__ == '__main__':
     try:
         main(sys.argv[1:])
-    except Exception:
-        print('Candidate journal rendering refused; check reviewed public pins and fixed deployment paths. No cluster changes performed.', file=sys.stderr)
+    except Exception as error:
+        # Known bounded codes are actionable; arbitrary exceptions may embed
+        # misclassified private input, so never print str(error) generically.
+        code = str(error) if isinstance(error, Refusal) else {
+            'FileNotFoundError': 'file-not-found', 'PermissionError': 'file-access-denied',
+            'OSError': 'file-unavailable', 'UnicodeDecodeError': 'file-utf8-invalid',
+            'KeyError': 'required-field-missing', 'TypeError': 'input-type-invalid',
+        }.get(type(error).__name__, 'input-processing-failed')
+        print('Candidate journal rendering refused (' + code + '); no cluster changes performed.', file=sys.stderr)
         sys.exit(1)

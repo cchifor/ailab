@@ -92,19 +92,80 @@ transactions, not one transaction spanning both files; `psql -f` and
 ON_ERROR_STOP do not make arbitrary SQL atomic. Every source update requires
 transaction-boundary review. An interruption during either phase leaves no
 success marker and requires operator inspection, not deletion or rerunning init.
+A PGDATA directory plus `.initialization-started` but no
+`relay-candidate-journal-schema-version` is the expected interrupted signature,
+including interruption between initdb and server-start trap installation; it is
+not by itself evidence of data corruption.
+An earlier interruption can leave `.initialization-started` with no PGDATA at
+all; that is also a refused attempt requiring inspection, not permission to retry.
+If the operator independently proves this volume was never activated and held no
+authority, history or workloads, replacing that failed empty initialization
+volume is an owner-approved recovery option. Otherwise preserve it and design
+recovery; do not discard an unknown or previously active volume.
 The 600-second deadline is for an empty database ceremony, not a retained-state
 upgrade. No retained-state upgrade or stale-PID repair is automated here.
 
-After successful initialization, the operator may explicitly start one database
-replica. `start.sh` bypasses the image's normal auto-initializing entrypoint and
+After successful initialization, require the Job to be terminal and its Pod to
+be gone before explicitly starting one database replica. ReadWriteOnce does not
+fence two Pods using the same volume on one node. Do not overlap initialization
+and runtime, and do not assume ReadWriteOncePod support without validating the
+qnap CSI driver. `start.sh` bypasses the image's normal auto-initializing entrypoint and
 refuses missing/wrong PG_VERSION, missing/wrong schema marker or recovery/standby
 signals. A missing volume must remain unavailable, never become fresh history.
-Normal runtime startup never applies SQL. The operator provisions passwords through
+Normal runtime startup never applies SQL. It also checks that PGDATA is owned by
+UID 70 with permission bits 0700 or 0750; an inherited setgid bit (2700/2750)
+is accepted, matching PostgreSQL. Do not chown/chmod the retained volume root during
+inspection: a root ownership mismatch can trigger kubelet fsGroup recursion and
+make PGDATA group-writable, which PostgreSQL rejects. The wrapper refuses this
+state with a bounded permission diagnostic and performs no automatic repair.
+Record the existing ownership/mode and PV identity before an operator-reviewed
+recovery; the tmpfs smoke does not establish actual kubelet fsGroup behavior. The operator provisions passwords through
 a protected channel and retains the operator login outside the journal service.
 Only `relay_candidate_agent_service` and `relay_candidate_holder_service` DSNs go
 to the service; their group roles cannot install runs or modify journal tables.
 The operator login is allowed through TLS only from the isolated operator-client
 path. Local PostgreSQL administration remains peer-authenticated as OS postgres.
+
+## Independent authority ceremony
+
+Schema initialization intentionally leaves `worker_candidate.authority` empty.
+The group `relay_candidate_operator` may install/withdraw signed runs, but cannot
+insert or enable this root authority row. A database administrator must separately
+review the retained database identity, independent gate ID, external epoch and
+witness SHA256, establish the matching witness outside app restore inventories,
+and use local peer authentication as OS postgres (UID 70) in the dedicated
+PostgreSQL Pod. Only the authorized cluster operator has that exec/administration
+path; the dev-worker platform credential and journal service do not.
+
+In a reviewed operator-attended `psql -X -v ON_ERROR_STOP=1` session on
+`relay_candidate`, first verify there are no unexpected authority/history rows.
+If this is the independently approved first authority creation, supply the four
+reviewed nonsecret pins as psql variables and insert exactly one disabled row:
+
+```sql
+INSERT INTO worker_candidate.authority
+  (singleton, database_identity, gate_id, external_epoch, witness_sha256, ready)
+VALUES (true, :'database_identity'::uuid, :'gate_id'::uuid,
+        :'external_epoch'::uuid, :'witness_sha256', false);
+```
+
+Only after comparing those exact pins to the independently retained witness and
+reviewing database readiness may the administrator explicitly set that same row
+ready. Require the exact four pins and `ready=false` in the update predicate,
+check that exactly one row changes, and record nonsecret evidence. Never use an
+upsert, create a replacement epoch to recover consumed slots, or seed authority
+from a restored application backup. Then the narrow operator login can use
+Relay's signed-run verifier/install command. The manifests and runtime contain
+no implementation of this authority-enabling ceremony.
+
+The database's cert-manager Secret uses a normal directory mount so a renewed
+matching certificate/key pair becomes visible. PostgreSQL still retains the
+previous TLS pair in memory until reload or restart. Before its leaf expires,
+the authorized operator verifies the renewed pair and CA chain, uses local
+`pg_ctl reload` (or an attended clean restart), then checks a new TLS connection
+and served certificate expiry. `OnDelete` does not automate reload. Any CA change
+also requires new pinned service inputs and coordinated restart. Never disable
+TLS verification to cover a missed renewal.
 
 ## Candidate-capable service release and public configuration
 
@@ -134,7 +195,10 @@ The pure `service` renderer requires:
 
 All input files must be canonical absolute regular files, single-linked, root or
 operator owned, not group/other writable, at most 64 KiB and exactly SHA256 pinned.
-No private key, DSN, password or bootstrap token is a renderer input. It refuses
+No private key, DSN, password or bootstrap token is a renderer input. Refusals
+include bounded reason codes for bad hashes, file ownership/modes, duplicate JSON,
+missing fields and other input categories; arbitrary input or exception strings
+are never echoed. It refuses
 missing release pins, mismatched fixed paths, wrong public run/service bindings,
 unsafe file sources and extra configuration keys. Its JSON output is valid
 Kubernetes input; the renderer never calls kubectl. It validates public wiring,
@@ -160,6 +224,8 @@ The actual service config follows Relay's
 Every public file pin must match the corresponding operator input; issuer keys,
 journal CA/reply key, run ledger and witness must be independently established.
 The signed run's hub image must equal the supplied candidate-capable Relay image.
+This equality is deliberate deployment policy: every hub image change requires
+a new signed run and reviewed re-render of the journal inputs.
 The renderer outputs an immutable ConfigMap containing only these public files,
 a ClusterIP Service, network policy and a Deployment with zero replicas.
 
@@ -169,12 +235,39 @@ python3 -B kubernetes/optional/relay-candidate-journal/render.py \
 ```
 
 The operator separately provisions `relay-candidate-journal-runtime` with exactly
-`reply-key.pem`, `agent-dsn`, and `holder-dsn`. The TLS key comes only from the
-independent `relay-candidate-journal-tls` Secret. No operator DB credential is
+`reply-key.pem`, `agent-dsn`, and `holder-dsn`. The TLS key comes from the versioned immutable Secret
+`relay-candidate-journal-tls-<first 32 hex characters of certificate SHA256>`,
+never directly from the mutable cert-manager issuance Secret. No operator DB credential is
 mounted. Secret files use root-only 0400 mode; public files use 0444. Every file
 mount uses its exact `subPath`, without fsGroup or a directory projection symlink,
 to satisfy Relay's root-owned/canonical-file reader. No secret values enter git,
-rendered output or logs.
+public rendered output or logs.
+
+Before activation, snapshot the reviewed matching TLS pair from cert-manager's
+issuance Secret. The following command is an operator-only secret-to-secret pipe;
+never enable shell tracing, use tee, redirect it to a file, or run the snapshot
+tool with an unconnected terminal as stdout. The tool refuses terminal or regular-file
+stdout and requires a consumer pipe:
+
+```sh
+kubectl --context=admin@ai -n relay-candidate-journal get secret relay-candidate-journal-tls -o json | \
+  python3 -B kubernetes/optional/relay-candidate-journal/snapshot-tls.py <reviewed-certificate-sha256> | \
+  kubectl --context=admin@ai create -f -
+```
+
+The helper checks the exact certificate hash and uses OpenSSL to prove its public
+key matches the private key, emits only the versioned immutable Secret to the
+consumer, and never echoes raw input or subprocess errors. Creation must fail if
+that version already exists; verify the existing immutable version rather than
+overwriting it. The rendered Deployment references this fingerprint-specific
+version. Automatic cert-manager renewal may replace the issuance Secret, but
+recreating a Pod still uses the old reviewed matching pair. Before that pair
+expires, review the renewed certificate, create its new immutable snapshot,
+re-render public pins and coordinate the service restart. No renewal activation
+is automatic. Snapshot Secrets have no automatic garbage collector: after
+re-pinning and proving no Pod or retained run still references an old version,
+the operator may explicitly remove that old Secret. Never delete the active
+version or infer disuse from age alone.
 
 The witness ConfigMap is outside ordinary app restore inventories, not a live
 freshness feed. Immutable subPath projections deliberately do not update in place.
@@ -187,10 +280,16 @@ history. Do not reset them from an app backup or copy a newly initialized witnes
 into a failed installation.
 
 Activate one service replica only after storage, source/image, file-mode, schema,
-TLS/CA, scoped-login and external-authority evidence is reviewed. A TCP readiness
+TLS/CA, scoped-login and external-authority evidence is reviewed. Readiness/liveness use
+a bounded loopback connection inside the container, so they require no kubelet
+host-ingress exception in the default-deny policy; actual CNI behavior still
+requires operator validation. An in-container loopback TCP readiness
 probe proves only that the HTTPS listener exists; it does not prove database
 readiness, run installation, valid witness, workload qualification or provider
-admission. Install the exact signed run using Relay's operator verifier only after
+admission. Each exec probe starts an additional Node process inside the service's
+256 MiB memory limit; measure probe/startup headroom and record it in the live
+prerequisite evidence before activation. Local tests do not establish that margin.
+Install the exact signed run using Relay's operator verifier only after
 those independent authority prerequisites are ready. Retain run tombstones and
 reconcile original UID-bound workload cleanup before withdrawing run credentials.
 
@@ -215,8 +314,21 @@ shutdown before marker 2, empty authority/history, NULL-password narrow login
 roles, denial of runtime table writes/operator membership, and no automatic reseed.
 A separate local Node22 Docker check executed Relay's compiled candidate-file
 reader: root-owned regular files were accepted; wrong owner/mode/hash and symlink
-paths were refused. The tests used synthetic public data and no credentials.
+paths were refused. TLS lifecycle tests generate local synthetic certificate/key
+pairs, reject mismatches and prove Pod rendering retains the fingerprint-specific
+Secret reference after the mutable issuance Secret rotates. The tests used synthetic public data and no credentials.
 They did not execute a published candidate hub image or establish Kubernetes
 subPath/fsGroup behavior, live TLS reachability, storage durability, restore
 safety, provider execution or worker qualification. Those remain operator evidence
 requirements before any activation.
+
+The requested Opus route reviewed the 2026-11-09 source snapshot and returned
+ALIGNED without blockers (request `83cbe844-2136-47fc-970c-ba15cff69aad`). Its review
+snapshot SHA256 is `3fa1e785a811238004fa05190aa1e32d23ccae66a7e530b855d9e651f39b9c7a`.
+The review
+covered deployment/rendering, TLS snapshots, local validation and the included
+Relay service/file/signature contracts. It did not include the full supporting
+`candidate-journal-protocol.ts`, `candidate-journal.ts` and `primitives.ts` modules,
+and did not validate a published image or live cluster. The follow-up strengthens
+the smoke's positive startup assertion and records the RWO fencing, image-update,
+interruption and probe-headroom advisories above; it claims no new runtime proof.

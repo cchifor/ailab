@@ -9,6 +9,15 @@ if [ ! -f "$PGDATA/PG_VERSION" ] || [ "$(cat "$PGDATA/PG_VERSION")" != 17 ] ||
   echo 'Independent candidate journal database requires operator initialization or recovery review' >&2
   exit 78
 fi
+# Kubelet fsGroup repair must not silently make PGDATA group-writable.
+# Refuse and preserve retained state; never chmod/chown it automatically.
+owner=$(stat -c '%u' "$PGDATA")
+mode=$(stat -c '%a' "$PGDATA")
+case "$mode" in 700|750|2700|2750) mode_allowed=true;; *) mode_allowed=false;; esac
+if [ "$owner" != 70 ] || [ "$mode_allowed" != true ]; then
+  echo 'Independent candidate journal PGDATA requires UID 70 and mode 0700/0750 (optional inherited setgid); inspect fsGroup/root ownership without changing retained state' >&2
+  exit 78
+fi
 exec postgres -D "$PGDATA" \
   -c listen_addresses='*' \
   -c unix_socket_directories=/var/run/postgresql \
