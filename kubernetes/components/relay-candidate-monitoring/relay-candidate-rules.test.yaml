@@ -1,0 +1,117 @@
+rule_files:
+  - relay-candidate-rules.yaml
+evaluation_interval: 1m
+tests:
+- name: candidate collector failure and recovery
+  interval: 1m
+  input_series:
+  - series: up{job="relay-candidate-journal",instance="relay:80"}
+    values: 0+0x3 1+0x4
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: RelayCandidateCollectorUnavailable
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-candidate-journal
+        instance: relay:80
+      exp_annotations:
+        summary: Relay candidate journal collector is unavailable
+        description: Check the separate private TLS metrics listener, dedicated collector expiry, actual namespace pins and
+          network policy. This is endpoint reachability, not journal authority readiness.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 5m
+    alertname: RelayCandidateCollectorUnavailable
+    exp_alerts: []
+- name: retained driver interruption is distinguished from unobserved idle role
+  interval: 1m
+  input_series:
+  - series: relay_candidate_journal_last_outcome{job="relay-candidate-journal",instance="relay:80",role="agent",outcome="interrupted"}
+    values: 1+0x3 0+0x4
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: RelayCandidateAdapterInterrupted
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-candidate-journal
+        instance: relay:80
+        role: agent
+        outcome: interrupted
+      exp_annotations:
+        summary: Relay candidate journal adapter last observed an interruption
+        description: Inspect the named fixed adapter role and its already-authorized operation. This retained observation
+          is not current readiness. Preserve signed run, operation identity and one-use tombstones; never probe by admitting
+          or inspecting a synthetic launch.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 5m
+    alertname: RelayCandidateAdapterInterrupted
+    exp_alerts: []
+- name: idle complete schema does not claim failure
+  interval: 1m
+  input_series:
+  - series: up{job="relay-candidate-journal",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_candidate_journal_observed{job="relay-candidate-journal",instance="relay:80",role="agent"}
+    values: 0+0x8
+  - series: relay_candidate_journal_observation_timestamp_seconds{job="relay-candidate-journal",instance="relay:80",role="agent"}
+    values: 0+0x8
+  - series: relay_candidate_journal_observed{job="relay-candidate-journal",instance="relay:80",role="holder"}
+    values: 0+0x8
+  - series: relay_candidate_journal_observation_timestamp_seconds{job="relay-candidate-journal",instance="relay:80",role="holder"}
+    values: 0+0x8
+  - series: relay_candidate_journal_last_outcome{job="relay-candidate-journal",instance="relay:80",role="agent",outcome="ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_last_outcome{job="relay-candidate-journal",instance="relay:80",role="agent",outcome="not_ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_last_outcome{job="relay-candidate-journal",instance="relay:80",role="agent",outcome="interrupted"}
+    values: 0+0x8
+  - series: relay_candidate_journal_outcomes_total{job="relay-candidate-journal",instance="relay:80",role="agent",outcome="ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_outcomes_total{job="relay-candidate-journal",instance="relay:80",role="agent",outcome="not_ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_outcomes_total{job="relay-candidate-journal",instance="relay:80",role="agent",outcome="interrupted"}
+    values: 0+0x8
+  - series: relay_candidate_journal_last_outcome{job="relay-candidate-journal",instance="relay:80",role="holder",outcome="ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_last_outcome{job="relay-candidate-journal",instance="relay:80",role="holder",outcome="not_ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_last_outcome{job="relay-candidate-journal",instance="relay:80",role="holder",outcome="interrupted"}
+    values: 0+0x8
+  - series: relay_candidate_journal_outcomes_total{job="relay-candidate-journal",instance="relay:80",role="holder",outcome="ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_outcomes_total{job="relay-candidate-journal",instance="relay:80",role="holder",outcome="not_ok"}
+    values: 0+0x8
+  - series: relay_candidate_journal_outcomes_total{job="relay-candidate-journal",instance="relay:80",role="holder",outcome="interrupted"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayCandidateCollectorUnavailable
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayCandidateAdapterInterrupted
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayCandidateMetricSchemaIncomplete
+    exp_alerts: []
+- name: healthy HTTP with missing candidate metrics fails schema gate
+  interval: 1m
+  input_series:
+  - series: up{job="relay-candidate-journal",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayCandidateMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-candidate-journal
+        instance: relay:80
+      exp_annotations:
+        summary: Relay candidate journal metric schema is incomplete
+        description: Check the matching journal service release and fixed role/outcome catalog. Both idle roles must export
+          unobserved zeroes; missing series are not an idle or successful check.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md

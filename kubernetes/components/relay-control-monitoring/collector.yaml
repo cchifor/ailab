@@ -11,7 +11,7 @@ spec:
   selector:
     matchLabels:
       relay-control-metrics: 'true'
-  sampleLimit: 100
+  sampleLimit: 200
   endpoints:
   - port: http
     path: /metrics/agent-control-plane

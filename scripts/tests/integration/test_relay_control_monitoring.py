@@ -36,6 +36,8 @@ class Monitoring(unittest.TestCase):
             'apiVersion': 'kustomize.config.k8s.io/v1beta1', 'kind': 'Kustomization',
             'resources': [os.path.relpath(base, wrapper)],
             'components': [os.path.relpath(COMPONENT, wrapper),
+                           os.path.relpath(ROOT / 'kubernetes/components/relay-worker-monitoring', wrapper),
+                           os.path.relpath(ROOT / 'kubernetes/components/relay-candidate-monitoring', wrapper),
                            os.path.relpath(ROOT / 'kubernetes/components/relay-notifications/relay', wrapper)],
         }))
         raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
@@ -196,11 +198,22 @@ class Monitoring(unittest.TestCase):
         (self.root / 'input/tenant-id').mkdir()
         self.run_setup(False)
 
+    def test_worker_and_candidate_rules_are_opt_in_and_do_not_invent_a_journal_target(self):
+        self.assertEqual(len(named(self.docs, 'PrometheusRule', 'relay-worker-operations')['spec']['groups'][0]['rules']), 7)
+        self.assertEqual(len(named(self.docs, 'PrometheusRule', 'relay-candidate-journal')['spec']['groups'][0]['rules']), 3)
+        self.assertEqual([d['metadata']['name'] for d in self.docs if d['kind'] == 'ServiceMonitor'], ['relay-control-plane'])
+        for component in ['relay-worker-monitoring', 'relay-candidate-monitoring']:
+            for path in ['kubernetes/apps/apps/relay/kustomization.yaml', 'kubernetes/apps/infrastructure/monitoring/kustomization.yaml']:
+                self.assertNotIn(component, (ROOT / path).read_text())
+
     def test_collector_has_separate_authority_and_fixed_placement(self):
         monitor = named(self.docs, 'ServiceMonitor', 'relay-control-plane')
         self.assertEqual(monitor['metadata']['namespace'], 'monitoring')
         self.assertEqual(monitor['metadata']['labels']['release'], 'kube-prometheus-stack')
         self.assertEqual(monitor['spec']['namespaceSelector'], {'matchNames': ['relay']})
+        self.assertEqual(monitor['spec']['sampleLimit'], 200)
+        # Relay's maximal render is 126 samples; reserve at least 20 percent.
+        self.assertLessEqual(126, monitor['spec']['sampleLimit'] * 0.8)
         endpoint = monitor['spec']['endpoints'][0]
         self.assertEqual(endpoint['path'], '/metrics/agent-control-plane')
         self.assertFalse(endpoint['followRedirects'])

@@ -1,0 +1,232 @@
+rule_files:
+  - relay-worker-rules.yaml
+evaluation_interval: 1m
+tests:
+- name: RelayWorkerInstallationPending threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_installations_oldest_pending_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0 1000+0x6 0+0x3
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: RelayWorkerInstallationPending
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayWorkerInstallationPending
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay installation enrollment or fence receipt is delayed
+        description: Inspect the approved installation and fence exchange. Recorded ready state is not an agent heartbeat;
+          never replace its identity solely to silence this alert.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 8m
+    alertname: RelayWorkerInstallationPending
+    exp_alerts: []
+- name: RelayWorkerQueueDelayed threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_worker_operations_oldest_queued_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0 1000+0x6 0+0x3
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: RelayWorkerQueueDelayed
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayWorkerQueueDelayed
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay worker lifecycle delivery is delayed
+        description: Inspect agent connectivity, installation fence and pending operation ownership. A replacement grant must
+          not bypass retained lifecycle evidence.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 8m
+    alertname: RelayWorkerQueueDelayed
+    exp_alerts: []
+- name: RelayWorkerCleanupDelayed threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_worker_cleanup_operations_oldest_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0 1000+0x6 0+0x3
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: RelayWorkerCleanupDelayed
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RelayWorkerCleanupDelayed
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay worker cleanup evidence is delayed
+        description: Reconcile stop, destroy, credential revocation or expired bootstrap Secret attempts through the authorized
+          operator path. Intentionally retained storage and active Secrets are not cleanup failures.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 8m
+    alertname: RelayWorkerCleanupDelayed
+    exp_alerts: []
+- name: RelayWorkerOperationUnknown threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_worker_operations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x7 0+0x3
+  - series: relay_control_worker_operations_oldest_unknown_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 1000+0x7 0+0x3
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: RelayWorkerOperationUnknown
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: RelayWorkerOperationUnknown
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay worker operation outcome remains unknown
+        description: Inspect exact operation and resource UID evidence across current and older environments. Preserve original
+          identity and reservations; no automatic retry, prompt replay or timeout-based settlement.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 9m
+    alertname: RelayWorkerOperationUnknown
+    exp_alerts: []
+- name: RelayWorkerBudgetStartupFailed threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x3 0+0x4
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: RelayWorkerBudgetStartupFailed
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: RelayWorkerBudgetStartupFailed
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay independent budget authority did not start
+        description: Check configured profile, router deployment and ledger settings. This startup result is not a diagnosis
+          of database availability; monitoring must not grant or seed authority.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 5m
+    alertname: RelayWorkerBudgetStartupFailed
+    exp_alerts: []
+- name: RelayWorkerBudgetCheckFailed threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_worker_budget_authority_started{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_worker_budget_observer_started{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_worker_budget_check_succeeded{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x3 1+0x4
+  - series: relay_control_worker_budget_check_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+60x8
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: RelayWorkerBudgetCheckFailed
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: RelayWorkerBudgetCheckFailed
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay independent budget check failed or is unobserved
+        description: Inspect witness, scoped login, primary routing, recovery-lock contention and connectivity. This diagnostic
+          cannot distinguish refusal from database failure and never grants runtime or model qualification.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+  - eval_time: 5m
+    alertname: RelayWorkerBudgetCheckFailed
+    exp_alerts: []
+- name: RelayWorkerBudgetCheckFailed threshold and recovery
+  interval: 1m
+  input_series:
+  - series: relay_control_worker_budget_authority_started{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_observer_started{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_check_succeeded{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: RelayWorkerBudgetCheckFailed
+    exp_alerts: []
+- name: RelayWorkerMetricSchemaIncomplete threshold and recovery
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+      exp_annotations:
+        summary: Relay worker metric schema is incomplete
+        description: Check the selected Relay release and full migration set. A successful scrape with missing worker or budget
+          series cannot be interpreted as zero backlog or healthy authority.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+- name: RelayWorkerMetricSchemaIncomplete threshold and recovery
+  interval: 1m
+  input_series:
+  - series: up{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x8
+  - series: relay_control_installations_ready{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_installations_oldest_pending_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_operations_unknown{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_operations_oldest_unknown_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_operations_oldest_queued_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_cleanup_operations_oldest_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_bootstrap_secrets_cleanup_oldest_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_authority_unconfigured{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_authority_started{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_observer_started{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_check_succeeded{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  - series: relay_control_worker_budget_check_timestamp_seconds{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayWorkerMetricSchemaIncomplete
+    exp_alerts: []

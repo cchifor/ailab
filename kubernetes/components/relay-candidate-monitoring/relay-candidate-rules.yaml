@@ -1,0 +1,50 @@
+# Opt-in only after a separate private candidate collector has been configured.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: relay-candidate-journal
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: relay-candidate-journal
+    interval: 30s
+    rules:
+    - alert: RelayCandidateCollectorUnavailable
+      expr: up{job="relay-candidate-journal"} == 0 or absent(up{job="relay-candidate-journal"})
+      for: 2m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay candidate journal collector is unavailable
+        description: Check the separate private TLS metrics listener, dedicated collector expiry, actual namespace pins and
+          network policy. This is endpoint reachability, not journal authority readiness.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayCandidateAdapterInterrupted
+      expr: relay_candidate_journal_last_outcome{job="relay-candidate-journal",outcome="interrupted"} == 1
+      for: 2m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay candidate journal adapter last observed an interruption
+        description: Inspect the named fixed adapter role and its already-authorized operation. This retained observation
+          is not current readiness. Preserve signed run, operation identity and one-use tombstones; never probe by admitting
+          or inspecting a synthetic launch.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayCandidateMetricSchemaIncomplete
+      expr: up{job="relay-candidate-journal"} == 1 unless on(job, instance) ((count by(job, instance) (relay_candidate_journal_observed{job="relay-candidate-journal"})
+        == 2) and (count by(job, instance) (relay_candidate_journal_observation_timestamp_seconds{job="relay-candidate-journal"})
+        == 2) and (count by(job, instance) (relay_candidate_journal_last_outcome{job="relay-candidate-journal"}) == 6) and
+        (count by(job, instance) (relay_candidate_journal_outcomes_total{job="relay-candidate-journal"}) == 6))
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay candidate journal metric schema is incomplete
+        description: Check the matching journal service release and fixed role/outcome catalog. Both idle roles must export
+          unobserved zeroes; missing series are not an idle or successful check.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md

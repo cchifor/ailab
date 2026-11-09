@@ -1,0 +1,96 @@
+# Opt-in only alongside relay-control-monitoring and the matching Relay release.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: relay-worker-operations
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: relay-worker-operations
+    interval: 30s
+    rules:
+    - alert: RelayWorkerInstallationPending
+      expr: relay_control_installations_oldest_pending_seconds{job="relay-control-plane"} > 300
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay installation enrollment or fence receipt is delayed
+        description: Inspect the approved installation and fence exchange. Recorded ready state is not an agent heartbeat;
+          never replace its identity solely to silence this alert.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayWorkerOperationUnknown
+      expr: relay_control_worker_operations_unknown{job="relay-control-plane"} > 0 and relay_control_worker_operations_oldest_unknown_seconds{job="relay-control-plane"}
+        > 120
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay worker operation outcome remains unknown
+        description: Inspect exact operation and resource UID evidence across current and older environments. Preserve original
+          identity and reservations; no automatic retry, prompt replay or timeout-based settlement.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayWorkerQueueDelayed
+      expr: relay_control_worker_operations_oldest_queued_seconds{job="relay-control-plane"} > 120
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay worker lifecycle delivery is delayed
+        description: Inspect agent connectivity, installation fence and pending operation ownership. A replacement grant must
+          not bypass retained lifecycle evidence.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayWorkerCleanupDelayed
+      expr: relay_control_worker_cleanup_operations_oldest_seconds{job="relay-control-plane"} > 600 or relay_control_worker_bootstrap_secrets_cleanup_oldest_seconds{job="relay-control-plane"}
+        > 600
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay worker cleanup evidence is delayed
+        description: Reconcile stop, destroy, credential revocation or expired bootstrap Secret attempts through the authorized
+          operator path. Intentionally retained storage and active Secrets are not cleanup failures.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayWorkerBudgetStartupFailed
+      expr: relay_control_worker_budget_authority_start_failed{job="relay-control-plane"} == 1
+      for: 2m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay independent budget authority did not start
+        description: Check configured profile, router deployment and ledger settings. This startup result is not a diagnosis
+          of database availability; monitoring must not grant or seed authority.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayWorkerBudgetCheckFailed
+      expr: relay_control_worker_budget_authority_started{job="relay-control-plane"} == 1 and (relay_control_worker_budget_observer_started{job="relay-control-plane"}
+        == 0 or relay_control_worker_budget_check_succeeded{job="relay-control-plane"} == 0 or time() - relay_control_worker_budget_check_timestamp_seconds{job="relay-control-plane"}
+        > 90)
+      for: 2m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay independent budget check failed or is unobserved
+        description: Inspect witness, scoped login, primary routing, recovery-lock contention and connectivity. This diagnostic
+          cannot distinguish refusal from database failure and never grants runtime or model qualification.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    - alert: RelayWorkerMetricSchemaIncomplete
+      expr: up{job="relay-control-plane"} == 1 unless on(job, instance) (count by(job, instance) (count by(__name__, job,
+        instance) ({__name__=~"relay_control_(installations_ready|installations_oldest_pending_seconds|worker_operations_unknown|worker_operations_oldest_unknown_seconds|worker_operations_oldest_queued_seconds|worker_cleanup_operations_oldest_seconds|worker_bootstrap_secrets_cleanup_oldest_seconds|worker_budget_authority_unconfigured|worker_budget_authority_start_failed|worker_budget_authority_started|worker_budget_observer_started|worker_budget_check_succeeded|worker_budget_check_timestamp_seconds)",job="relay-control-plane"}))
+        == 13)
+      for: 5m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay worker metric schema is incomplete
+        description: Check the selected Relay release and full migration set. A successful scrape with missing worker or budget
+          series cannot be interpreted as zero backlog or healthy authority.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
