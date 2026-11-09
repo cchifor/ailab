@@ -1,7 +1,13 @@
 # Runbook: KubeVirt feasibility spike for Relay developer workers (operator-run, NOT yet run)
 
-**Status: read-only preflight collected; runtime spike PENDING.** The operator ran the preflight
-on 2026-11-08; both gates failed because the dedicated pool does not exist. S1–S9 remain not run.
+**Status as of 2026-11-09: dedicated node ready; both preflight gates pass; runtime spike PENDING.**
+The operator provisioned `relay-worker-1` at `192.168.0.52` on ai-node3 with
+12 vCPU, 24 GiB memory and 200 GiB disk; DHCP now starts at `.53`, and existing dev workers
+are unchanged. The [rollout record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)
+supersedes the initial failed preflight retained below. Capacity PRs #1675, #1676 and #1681
+are merged; #1677 was closed as a duplicate of #1676. **S1 (KubeVirt installation) is next;
+S1–S9 and the eight-hour soak have no passing live evidence yet.** The operator owns the spike.
+Install and verify the prescribed namespace egress policy **before the first workload or VM**.
 Nothing here installs KubeVirt through Flux. The Relay KubeVirt renderer stays unbuilt until this spike
 produces a passing evidence record (Relay plan `docs/plans/2026-11-08-infrastructure-workers/plan.md`,
 phases 1 and 5).
@@ -16,7 +22,7 @@ Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea 
 |---|---|---|---|
 | Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (52 tests) |
 | Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; dedicated gVisor RuntimeClass absent; KubeVirt absent (candidate pinned separately); synthetic cluster UID differs from the live pin |
-| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **collected 2026-11-08; gates fail** (evidence below) |
+| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **both gates pass after dedicated-node rollout** ([record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)); initial failed report retained below |
 | Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **not run** |
 
 A dev-worker cannot run the live collector. Its `platform` identity is namespaced, cannot list
@@ -92,12 +98,13 @@ sha256sum "$SNAP" "$SNAP.report.json"
 | K5 | **Cleanup owner** named in the spike record (person and date). | Owns the S9 teardown, and any stuck VM, PVC or launcher pod, until the inventory below is clean. |
 | K6 | **Evidence store** outside git, plus the SHA-256 of each artifact. | The operator names the path explicitly as `EVIDENCE_DIR`; `/tmp` does not count. On a dev-worker, retained evidence goes under `/workspace/archive/`. Raw logs and metrics stay outside the repo. Only the digests come back into a binding as `receipt_sha256`. |
 
-### Operator evidence, 2026-11-08
+### Initial operator evidence, 2026-11-08 (before capacity rollout)
 
 [Operator report on PR #1675](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
 was collected from head `25b391de`: all nine queries succeeded; both gates failed. Kubernetes
 v1.35.9, Cilium v1.19.8 and local-path/WaitForFirstConsumer matched; KubeVirt is absent.
-The report predates the cluster-UID pin in this revision and is not a qualification receipt.
+The report predates the cluster-UID pin and dedicated-node rollout; it describes the earlier
+state, not the current passing prerequisites, and is not a qualification receipt.
 
 Evidence lives on the workstation at `C:\Users\chifo\work\home\evidence\relay-worker-kubevirt\`:
 
@@ -109,13 +116,16 @@ Evidence lives on the workstation at `C:\Users\chifo\work\home\evidence\relay-wo
 Host 7-day minimum MemAvailable was 2.5 GiB / 10.4 GiB / 33.6 GiB on ai-node1/2/3.
 Only ai-node3 can accommodate the proposed 24 GiB fixed worker; 32 GiB would leave only
 about 1.6 GiB at the observed low point. All existing agent nodes host protected Relay/router
-workloads and cannot be repurposed. This is a capacity proposal, not an allocation.
+workloads and cannot be repurposed. These measurements supported the subsequent owner-approved
+24 GiB allocation recorded above; they are not runtime qualification evidence.
 
 **Before S7/S8:** the operator recommends temporarily stopping `llama-swap-qwen38` on
 LXC 5003, approved by the owner on 2026-11-08 with operator restoration afterwards, because its lazy model can otherwise consume another
 23.5 GiB of GTT. Record the stop/restore owner and restoration evidence before closing S7/S8. No existing model service is changed by this PR.
 
-Re-run the live preflight after K0–K4. `kubevirt_spike_prerequisites` must be `pass` before S1.
+The operator re-ran the live preflight after K0–K4 and both gates passed. Confirm that the
+current report still matches the pinned cluster and dedicated pool before S1; a prerequisite
+pass permits the spike to start and does not qualify KubeVirt.
 
 ## Spike procedure (operator-owned; all objects in a throwaway namespace)
 
