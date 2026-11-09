@@ -22,7 +22,7 @@ Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea 
 |---|---|---|---|
 | Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (52 tests) |
 | Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; dedicated gVisor RuntimeClass absent; KubeVirt absent (candidate pinned separately); synthetic cluster UID differs from the live pin |
-| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **both gates pass after dedicated-node rollout** ([record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)); initial failed report retained below |
+| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **operator-reported pass, collected 2026-11-08 at 18:16:37 UTC** ([receipt](#passing-operator-evidence-2026-11-08)); collector head awaiting confirmation |
 | Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **not run** |
 
 A dev-worker cannot run the live collector. Its `platform` identity is namespaced, cannot list
@@ -126,6 +126,24 @@ LXC 5003, approved by the owner on 2026-11-08 with operator restoration afterwar
 The operator re-ran the live preflight after K0–K4 and both gates passed. Confirm that the
 current report still matches the pinned cluster and dedicated pool before S1; a prerequisite
 pass permits the spike to start and does not qualify KubeVirt.
+
+### Passing operator evidence, 2026-11-08
+
+[Operator rollout comment #106617](https://git.chifor.me/cchifor/ailab/pulls/1676#issuecomment-106617)
+records both prerequisite gates passing after the dedicated-node rollout. The collection
+was on **2026-11-08 at 18:16:37 UTC**, not the 2026-11-09 status-update date above.
+The evidence directory is `C:\Users\chifo\work\home\evidence\relay-worker-kubevirt\`.
+
+| Artifact | SHA-256 / provenance |
+|---|---|
+| `relay-worker-preflight-20261108T181637Z.json` | `56ca1b550d8d8ca7d0275c716be65f34c12999d130e8afab6faac77e1be468e1`, published in the operator comment |
+| Corresponding report | The capacity rollout record retains only `6a7e126a…b77c`; the full digest and exact report filename still need operator confirmation from the evidence store. |
+| Collector revision | Not attested in the retained comment. `main@b81ba53b` identifies the saved capacity plan/apply, and must not be assumed to identify the collector. |
+
+The full report digest and collector revision are evidence gaps, not values to reconstruct
+from abbreviations. Before S1, the operator must record them or collect a fresh report with
+its exact revision and full artifact hashes using the command above. The documented pass
+is the operator's prerequisite report; it is not a runtime qualification receipt.
 
 ## Spike procedure (operator-owned; all objects in a throwaway namespace)
 
