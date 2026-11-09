@@ -135,7 +135,7 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("while :", compose["services"]["smoke"]["command"][-1])
 
     def test_forbidden_vm_features_refused(self):
-        base = vm_of(workload.render(evidence(), LAUNCHER, "#cloud-config\n"))
+        base = vm_of(workload.render(evidence(), LAUNCHER, "#cloud-config\n", "10.96.0.10"))
         mutations = [
             ("hostDisk", lambda s: s["volumes"].append({"name": "h", "hostDisk": {"path": "/x"}})),
             ("dataVolume", lambda s: s["volumes"].append({"name": "d", "dataVolume": {"name": "x"}})),
@@ -160,7 +160,23 @@ class WorkloadTests(unittest.TestCase):
     def test_estate_egress_destination_refused(self):
         for host in ("git.chifor.me", "192.168.0.40", "nas.local"):
             with self.subTest(host), self.assertRaises(BundleError):
-                workload.render(evidence(), LAUNCHER, "#cloud-config\n", egress=(host,))
+                workload.render(evidence(), LAUNCHER, "#cloud-config\n", "10.96.0.10", egress=(host,))
+
+    def test_kube_dns_cluster_ip_pinned_and_checked(self):
+        meta = json.loads(self.render()["workload-metadata.json"])
+        self.assertEqual(meta["kube_dns_cluster_ip"], BUNDLE["cluster_dns"]["cluster_ip"])
+        # A wrong or estate address must never become a DNS allow rule.
+        for bad in ("not-an-ip", "8.8.8.8", "192.168.0.1", "100.100.100.100", None):
+            with self.subTest(bad), self.assertRaisesRegex(BundleError, "cluster_ip"):
+                workload.render(evidence(), LAUNCHER, "#cloud-config\n", bad)
+        # Pins without the value refuse to render instead of shipping a rule that never matches.
+        pins = json.loads(PINS_PATH.read_text())
+        del pins["kubevirt"]["spike_bundle"]["cluster_dns"]
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "pins.json"
+            path.write_bytes(json.dumps(pins).encode())
+            with self.assertRaisesRegex(BundleError, "cluster_dns"):
+                rks.render_workload_bundle(path, evidence(), NOW)
 
     def test_unpinned_smoke_image_and_guest_mismatch_refused(self):
         with self.assertRaisesRegex(BundleError, "digest"):

@@ -253,6 +253,9 @@ must fit in 30 GiB − 20 GiB cache − 1 GiB reserve; both can occupy disk conc
 ```bash
 python3 scripts/relay-kubevirt-spike.py render-workload --evidence "$EVIDENCE_DIR/guest-evidence.json" --out-dir "$B"
 sha256sum "$B"/*                                                   # record in the evidence record
+# The pinned kube-dns ClusterIP the egress policy allows must be the live one, or guest DNS fails silently:
+test "$(kubectl --context admin@ai -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')" = \
+     "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kube_dns_cluster_ip"])' "$B/workload-metadata.json")"
 # --- APPLY BOUNDARY: everything below writes to admin@ai ---
 kubectl --context admin@ai apply --server-side -f "$B/10-operator.yaml"
 kubectl --context admin@ai -n kubevirt rollout status deploy/virt-operator --timeout=300s
@@ -270,24 +273,28 @@ The VM starts `Halted`. VMI `Ready` comes from the in-guest exec probe
 (`/usr/local/sbin/relay-spike-ready`), which needs qemu-guest-agent and also checks that both
 virtio disks are mounted, that `docker compose` is running the pinned smoke container, and that it
 wrote to the workspace. `Running` alone is not readiness. The guest recipe (cloud-init) installs
-`qemu-guest-agent`, `docker.io` and `docker-compose-v2` from Ubuntu archives at first boot. Docker
-29 defaults to the containerd image store, which keeps image content on the root partition (about
-2.4 GiB, under 100 MiB free after the install): the recipe turns it off
-(`features.containerd-snapshotter: false`) so images live under `data-root` on the cache disk.
-The probe's 60 × 30 s failure budget covers the first boot; it also means VMI `Ready` does not
-drop during an in-guest reboot or a short guest outage. That is
+`qemu-guest-agent`, `docker.io` and `docker-compose-v2` from Ubuntu archives at first boot. That is
 why the reviewed egress allows only the Ubuntu archives and quay.io on 80/443, plus kube-dns. Guest
 DNS reaches Cilium as the **untranslated** kube-dns ClusterIP (masquerade NAT; kube-proxy
 replacement with `bpf-lb-sock=false`), so the `toEndpoints` kube-dns rule alone never matches VM
-traffic: the bundle also allows DNS to `10.96.0.10/32` (measured 2026-11-09). The
+traffic: the bundle also allows DNS to that ClusterIP as a `/32` (measured 2026-11-09). The value
+is pinned in `runtime-pins.json` (`kubevirt.spike_bundle.cluster_dns.cluster_ip`), recorded in
+`workload-metadata.json`, and checked against the live Service before the apply below. The
 estate LAN `192.168.0.0/23`, RFC 1918 172.16/12 and the tailnet CGNAT range stay denied, even
 through those FQDNs. If the packages cannot install, readiness never passes, and S2 records
 `fail`, not success. A NetworkPolicy also denies all ingress and all other egress for the namespace.
 
+Docker 29 defaults to the containerd image store, which keeps image content on the root partition
+(about 2.4 GiB, under 100 MiB free after the install): the recipe turns it off
+(`features.containerd-snapshotter: false`) so images live under `data-root` on the cache disk. The
+readiness probe's 60 × 30 s failure budget covers the first boot; it also means VMI `Ready` does not
+drop during an in-guest reboot or a short guest outage.
+
 `relay-kv-spike` enforces PSA `baseline`, and audit and warning stay `restricted`. The v1.9.1
 masquerade launcher runs non-root (UID 107), drops ALL capabilities and adds only
 `NET_BIND_SERVICE`; there is **no** `NET_ADMIN`. The live launcher passed `baseline` and failed
-`restricted` only on `seccompProfile` (server dry run, 2026-11-09). An earlier revision enforced
+`restricted` only on `seccompProfile` (server dry run, 2026-11-09); the prep Job's Pod template
+passes both (server dry run under the live `baseline` label). An earlier revision enforced
 `privileged` on the assumption that the launcher needed `NET_ADMIN`. Do not grant worker
 identities access to this namespace. S2 must capture the actual generated launcher Pod,
 its security context/capabilities, and admission events. An admission refusal is a failed S2,
