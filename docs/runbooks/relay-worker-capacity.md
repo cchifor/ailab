@@ -49,9 +49,13 @@ or artifact pins:
   Keep it outside the dedicated execution pool. The operator's network checks confirmed that
   CoreDNS forwards to the Talos public resolvers and both public hostnames resolve through
   Cloudflare from Relay. No DNS change is needed. Pin the complete Mozilla CA bundle from
-  `https://curl.se/ca/cacert.pem`, SHA-256
-  `427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285`; do not pin only the
-  currently served GTS root.
+  the mutable endpoint `https://curl.se/ca/cacert.pem`. The operator report records the Mozilla
+  data snapshot as of 2026-11-05 04:12:01 GMT and SHA-256
+  `427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285`. This hash pins the
+  observed bytes; it does not promise that a future request to the endpoint returns them. Before
+  use, verify the download against this hash and stop for fresh review if it differs. Any published
+  image must vendor the exact verified bytes under its immutable source/image digest. Do not pin
+  only the currently served GTS root.
 
 Keep the implementation gated in this order. Record reviewed source commits and artifact digests
 when they exist; do not fill in or infer pins from the feasibility spike:
@@ -73,11 +77,10 @@ when they exist; do not fill in or infer pins from the feasibility spike:
    ordinary worker activation as separate later decisions, each gated on its own prerequisites and
    qualification evidence.
 
-The current user request covers preparing the implementation and deployment outcome. Separately,
-the operator's bus-205 boundary requires direct owner confirmation to the operator's session for
-the exact privileged rollout. That confirmation is **pending** until the reviewed source, artifact
-pins and concrete apply/enrollment plan are ready. Obtain it before the first privileged write; the
-existing capacity and spike approvals do not substitute for it.
+Before any privileged write, obtain direct owner confirmation in the operator's session for the
+exact reviewed rollout, with the source and artifact pins and concrete apply/enrollment plan ready.
+This confirmation is **pending**. The existing capacity and spike approvals do not substitute for
+it.
 
 The proposal allocates **vmid 4304, `relay-worker-1`, 192.168.0.52** on **ai-node3** with
 **12 vCPU, 24 GiB fixed RAM, 200 GiB local-lvm** and host CPU passthrough. It adds an independent
