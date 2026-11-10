@@ -19,6 +19,7 @@ SNAP = json.loads((ROOT / "scripts/tests/fixtures/relay-worker-preflight/snapsho
 BIND = json.loads((ROOT / "docs/relay-workers/ailab-binding.example.json").read_text())
 UID = "00000000-0000-4000-8000-000000000001"
 DIGEST = "sha256:" + "a" * 64
+SPIKE_RECEIPT = "341ed1442af5eca864f5c075bea77e54f3a97b5ec341bac4dc219a59d5edfa18"  # SHA256SUMS of the evidence
 
 
 def status(report, cid):
@@ -40,6 +41,15 @@ def with_pool(snap, mem="30Gi", cpu="12", kvm=None, ready=True, taint=True, extr
         "status": {"allocatable": alloc, "conditions": [{"type": "Ready", "status": "True" if ready else "False"}],
                    "nodeInfo": {"architecture": "amd64"}}})
     return s
+
+
+def unqualified(binding):
+    """The binding with every qualified capability set back to pending, for tests that change pins."""
+    b = copy.deepcopy(binding)
+    for k, v in b["capabilities"].items():
+        if v.get("status") == "qualified":
+            b["capabilities"][k] = {"status": "pending"}
+    return b
 
 
 def pinned(binding, **pins):
@@ -103,13 +113,15 @@ class RepoDerivedState(unittest.TestCase):
         self.assertEqual(status(self.r, "kubevirt.pin"), "pass")
 
     def test_capabilities_come_only_from_binding(self):
-        self.assertTrue(all(v["status"] in ("pending", "unsupported") for v in self.r["capabilities"].values()))
+        self.assertEqual({k: v["status"] for k, v in self.r["capabilities"].items()},
+                         {k: v["status"] for k, v in BIND["capabilities"].items()})
+        self.assertTrue(all(v["source"] == "binding" for v in self.r["capabilities"].values()))
 
 
 class Positive(unittest.TestCase):
     def test_dedicated_pool_with_headroom_opens_spike_gate_only(self):
         s = with_pool(SNAP)
-        r = rwp.evaluate(s, pinned(BIND, kubevirt_version="v1.0.0-example", kubevirt_operator_digest=DIGEST))
+        r = rwp.evaluate(s, pinned(unqualified(BIND), kubevirt_version="v1.0.0-example", kubevirt_operator_digest=DIGEST))
         for cid in ("context.cluster_uid", "placement.dedicated_pool", "headroom.lightweight",
                     "headroom.developer_vm", "kubevirt.pin"):
             self.assertEqual(status(r, cid), "pass", cid)
@@ -125,10 +137,20 @@ class Positive(unittest.TestCase):
         s["queries"]["kubevirt_cr"] = {"status": "ok", "data": {"items": [
             {"metadata": {"name": "kubevirt", "namespace": "kubevirt"},
              "status": {"phase": "Deployed", "observedKubeVirtVersion": "v1.0.0-example"}}]}}
-        r = rwp.evaluate(s, pinned(BIND, kubevirt_version="v1.0.0-example", kubevirt_operator_digest=DIGEST))
+        r = rwp.evaluate(s, pinned(unqualified(BIND), kubevirt_version="v1.0.0-example", kubevirt_operator_digest=DIGEST))
         self.assertEqual(status(r, "kubevirt.installed"), "pass")
         self.assertEqual(status(r, "kubevirt.kvm_device"), "pass")
         self.assertEqual(r["capabilities"]["vm.kubevirt"]["status"], "pending")
+
+    def test_report_carries_the_binding_receipt(self):
+        r = rwp.evaluate(with_pool(SNAP), pinned(BIND))
+        self.assertEqual(r["capabilities"]["vm.kubevirt"],
+                         {"status": "qualified", "source": "binding", "receipt_sha256": SPIKE_RECEIPT})
+        self.assertEqual(r["capabilities"]["pod.gvisor"], {"status": "pending", "source": "binding"})
+        self.assertEqual(r["qualification"], "not-established-by-preflight")
+        self.assertNotIn("qualified", json.dumps(r["gates"]))
+        # the qualification is not a prerequisite: KubeVirt is still absent from the cluster
+        self.assertEqual(status(r, "kubevirt.installed"), "fail")
 
 
 class Negative(unittest.TestCase):
@@ -203,6 +225,33 @@ class Negative(unittest.TestCase):
         b["storage"]["workspace_storage_class"] = "qnap-iscsi"
         self.assertEqual(status(rwp.evaluate(SNAP, b), "storage.workspace_class"), "fail")
 
+    def test_qualified_vm_capability_bound_to_its_pins(self):
+        for change in ({"kubevirt_version": "v1.9.2"}, {"kubevirt_operator_digest": DIGEST},
+                       {"kubevirt_version": None, "kubevirt_operator_digest": None}):
+            with self.subTest(change=change):
+                r = rwp.evaluate(SNAP, pinned(BIND, **change))
+                self.assertEqual(r["result"], "fail")
+                self.assertEqual(r["capabilities"], {})
+                for cap in ("vm.kubevirt", "vm.compose"):
+                    self.assertTrue(any(e.startswith(f"capability {cap}: qualified_pins.")
+                                        and "new qualification" in e for e in r["binding_errors"]), cap)
+
+    def test_qualified_vm_capability_without_pins_rejected(self):
+        for qp in (None, "v1.9.1", []):
+            with self.subTest(qualified_pins=qp):
+                b = copy.deepcopy(BIND)
+                if qp is None:
+                    del b["capabilities"]["vm.kubevirt"]["qualified_pins"]
+                else:
+                    b["capabilities"]["vm.kubevirt"]["qualified_pins"] = qp
+                errs = rwp.validate_binding(b)
+                self.assertTrue(any(e.startswith("capability vm.kubevirt: 'qualified' requires qualified_pins")
+                                    for e in errs), errs)
+                self.assertFalse(any(e.startswith("capability vm.compose") for e in errs), errs)
+
+    def test_pending_vm_capability_needs_no_pins(self):
+        self.assertEqual(rwp.validate_binding(pinned(unqualified(BIND), kubevirt_version="v1.9.2")), [])
+
     def test_qualified_without_receipt_rejected(self):
         b = copy.deepcopy(BIND)
         b["capabilities"]["vm.compose"] = {"status": "qualified"}
@@ -227,7 +276,7 @@ class Unknown(unittest.TestCase):
         for q in ("pods", "storageclasses", "runtimeclasses", "kube_system_ns", "version", "cilium_ds",
                   "kubevirt_crd", "kubevirt_cr"):
             s["queries"][q] = {"status": "forbidden", "detail": "Error from server (Forbidden)"}
-        r = rwp.evaluate(s, pinned(BIND, kubevirt_version="v1", kubevirt_operator_digest=DIGEST))
+        r = rwp.evaluate(s, pinned(unqualified(BIND), kubevirt_version="v1", kubevirt_operator_digest=DIGEST))
         for cid in ("headroom.lightweight", "storage.workspace_class", "runtimeclass.gvisor",
                     "context.cluster_uid", "version.kubernetes", "version.cilium"):
             self.assertEqual(status(r, cid), "unknown", cid)
@@ -328,11 +377,17 @@ class Collector(unittest.TestCase):
 class BindingExample(unittest.TestCase):
     def test_example_is_valid_and_conservative(self):
         self.assertEqual(rwp.validate_binding(BIND), [])
-        self.assertNotIn("qualified", {v["status"] for v in BIND["capabilities"].values()})
+        qualified = {k: v for k, v in BIND["capabilities"].items() if v["status"] == "qualified"}
+        # Only the capabilities the 2026-11-09/10 KubeVirt spike qualified, bound to its evidence and pins.
+        self.assertEqual(sorted(qualified), ["vm.compose", "vm.kubevirt"])
+        for v in qualified.values():
+            self.assertEqual(v["receipt_sha256"], SPIKE_RECEIPT)
+            self.assertEqual(v["qualified_pins"], {k: BIND["pins"][k] for k in rwp.QUALIFICATION_PINS["vm.kubevirt"]})
+        self.assertIn(SPIKE_RECEIPT, (ROOT / "docs/relay-workers/kubevirt-spike-record-2026-11-09.md").read_text())
         self.assertNotIn("agentforge", json.dumps(BIND).lower())
         self.assertNotIn("colocated_gvisor_qualified", BIND["placement"])
         self.assertRegex(BIND["pins"]["kubevirt_operator_digest"], r"^sha256:[a-f0-9]{64}$")
-        unpinned = pinned(BIND, kubevirt_version=None, kubevirt_operator_digest=None)
+        unpinned = pinned(unqualified(BIND), kubevirt_version=None, kubevirt_operator_digest=None)
         self.assertEqual(status(rwp.evaluate(SNAP, unpinned), "kubevirt.pin"), "unknown")
 
 
@@ -442,7 +497,7 @@ class ReviewRegressions(unittest.TestCase):
     def test_protected_workload_on_dedicated_pool_fails(self):
         s = add_pod(with_pool(SNAP), "relay-worker-1", ns="relay",
                     containers=[{"kind": "containers", "requests": {}}])
-        r = rwp.evaluate(s, pinned(BIND, kubevirt_version="v1", kubevirt_operator_digest=DIGEST))
+        r = rwp.evaluate(s, pinned(unqualified(BIND), kubevirt_version="v1", kubevirt_operator_digest=DIGEST))
         self.assertEqual(status(r, "placement.protected_workloads_absent"), "fail")
         self.assertEqual(r["gates"]["lightweight_canary_prerequisites"]["status"], "fail")
         self.assertEqual(r["gates"]["kubevirt_spike_prerequisites"]["status"], "fail")
@@ -468,7 +523,7 @@ class ReviewRegressions(unittest.TestCase):
     # (7) digest shape, lightweight gate needs cilium
     def test_operator_digest_shape_enforced(self):
         for bad in ("latest", "sha256:abc", "sha256:" + "A" * 64, "x" * 64):
-            r = rwp.evaluate(SNAP, pinned(BIND, kubevirt_version="v1", kubevirt_operator_digest=bad))
+            r = rwp.evaluate(SNAP, pinned(unqualified(BIND), kubevirt_version="v1", kubevirt_operator_digest=bad))
             self.assertTrue(any("kubevirt_operator_digest" in e for e in r["binding_errors"]), bad)
 
     def test_lightweight_gate_requires_cilium(self):

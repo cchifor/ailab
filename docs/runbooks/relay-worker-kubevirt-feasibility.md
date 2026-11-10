@@ -12,11 +12,18 @@
     evidence of both (record D5).
 - **Afterwards:** KubeVirt was removed after S9. The node's labels and preflight match the pre-S1
   state again.
-- **Next:** moving `vm.kubevirt` and `vm.compose` to `qualified` with `receipt_sha256` is a
-  separate binding PR. Fix cert-manager's cainjector headroom (record F15) before any KubeVirt
-  install. Nothing here installs KubeVirt through Flux. The Relay plan gates its KubeVirt
-  renderer on this evidence (`docs/plans/2026-11-08-infrastructure-workers/plan.md`, phases 1
-  and 5).
+- **Binding:** the [example binding](../relay-workers/ailab-binding.example.json) now marks
+  `vm.kubevirt` and `vm.compose` `qualified`:
+  - The `receipt_sha256` is the digest of the evidence set's `SHA256SUMS` (`341ed144…fa18`).
+  - Both are bound to the KubeVirt pins in `qualified_pins` (v1.9.1 and the virt-operator digest).
+    The collector rejects the binding if those pins drift.
+  - The `developer_vm` headroom tier now covers the measured launcher request (ephemeral
+    storage 30 Gi to 31 Gi).
+  - Every other capability stays `pending` or `unsupported`.
+- **Before any KubeVirt install:** check cert-manager's cainjector headroom (record F15). #1701
+  raised its limit from 128 Mi to 256 Mi. Record F12 (disk I/O shared with cp3) is still open.
+  Nothing here installs KubeVirt through Flux. The Relay plan gates its KubeVirt renderer on this
+  evidence (`docs/plans/2026-11-08-infrastructure-workers/plan.md`, phases 1 and 5).
 - **History:** the [rollout record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)
   supersedes the initial failed preflight retained below. Capacity PRs #1675, #1676 and #1681 are
   merged; #1677 was closed as a duplicate of #1676.
@@ -31,7 +38,7 @@ Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea 
 
 | Check | Who | Tool | Today |
 |---|---|---|---|
-| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (52 tests) |
+| Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (56 tests) |
 | Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; dedicated gVisor RuntimeClass absent; KubeVirt absent (candidate pinned separately); synthetic cluster UID differs from the live pin |
 | Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **operator-reported pass, collected 2026-11-08 at 18:16:37 UTC** ([receipt](#passing-operator-evidence-2026-11-08)). The latest run was on 2026-11-10 at 07:14:55 UTC, after KubeVirt was removed, with collector `main@f569080d`: both gates pass ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md#results)). |
 | Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **run 2026-11-09 to 11-10: pass with deviation D5** ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md)) |
@@ -68,7 +75,9 @@ sha256sum "$SNAP" "$SNAP.report.json"
 - **What `pass` means:** a prerequisite is visible. The report always says `qualification:
   not-established-by-preflight`. Capability status comes only from the binding. A binding that
   marks a capability `qualified` without a 64-hex `receipt_sha256` of the live evidence record is
-  rejected.
+  rejected. So is a qualified `vm.kubevirt` or `vm.compose` whose `qualified_pins` do not equal the
+  binding's `kubevirt_version` and `kubevirt_operator_digest`: a pin change needs a new
+  qualification. The report copies each qualified capability's `receipt_sha256`.
 - **Headroom:** this is the scheduler's view, allocatable minus the effective requests of
   non-terminal pods. Pod-level `spec.resources` and restartable init sidecars are accounted for.
   A malformed request makes the result `unknown`. It is not a measurement of load.
@@ -360,8 +369,8 @@ their own evidence.
 **Steps.** Record each step's outcome as `pass`, `fail` or `not-run`, with timestamps.
 
 1. **S1, install.** Before the apply, check `cert-manager-cainjector`'s memory headroom. It watches
-   CRDs, and KubeVirt's CRDs OOM-killed it at its 128 Mi limit on both install and removal
-   (record F15). Apply the K1 manifests by digest. Wait for the KubeVirt CR to reach `Deployed`.
+   CRDs, and KubeVirt's CRDs OOM-killed it at its old 128 Mi limit on both install and removal
+   (record F15). #1701 raised the limit to 256 Mi; its RSS peaked at about 103 MiB on install. Apply the K1 manifests by digest. Wait for the KubeVirt CR to reach `Deployed`.
    Re-run the collector:
    - `kubevirt.installed` must be `pass`;
    - `kubevirt.kvm_device` must be `pass` on the K0 node only;
@@ -460,7 +469,8 @@ their own evidence.
 - The spike passes only if S1–S9 all pass.
 - If it passes, write an evidence record with the pins, timings and high-water marks, and the
   digests of the raw artifacts. Then a binding PR may move `vm.kubevirt`, and only if S4 passed
-  `vm.compose`, to `qualified` with `receipt_sha256`.
+  `vm.compose`, to `qualified` with `receipt_sha256` and the `qualified_pins` the run used. The
+  2026-11-09 to 11-10 run did this.
 - Any `fail` or `not-run` keeps the capability `pending`, and the developer template stays
   unavailable.
 

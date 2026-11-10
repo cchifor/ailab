@@ -1,6 +1,6 @@
 {
   "schema": "ailab.relay-worker-binding/v1alpha1",
-  "_comment": "EXAMPLE, NOT APPLIED. Nothing reads this outside scripts/relay-worker-preflight.py. Every capability is unqualified: live preflight exists, but no runtime qualification exists yet (docs/runbooks/relay-worker-kubevirt-feasibility.md). Values marked null are unresolved operator decisions, which the collector reports as unknown.",
+  "_comment": "EXAMPLE, NOT APPLIED. Nothing reads this outside scripts/relay-worker-preflight.py. vm.kubevirt and vm.compose are qualified by the KubeVirt spike of 2026-11-09 to 11-10, for the KubeVirt pins below only (docs/relay-workers/kubevirt-spike-record-2026-11-09.md). Every other capability is unqualified. Values marked null are unresolved operator decisions, which the collector reports as unknown.",
   "installation": "ailab-relay-workers-pilot",
   "cluster": {
     "expected_context": "admin@ai",
@@ -25,8 +25,8 @@
   },
   "headroom": {
     "lightweight": {"cpu": "2", "memory": "4Gi", "ephemeral_storage": "10Gi"},
-    "developer_vm": {"cpu": "5", "memory": "10Gi", "ephemeral_storage": "30Gi",
-      "_comment": "4 vCPU / 8 GiB guest plus an UNMEASURED virt-launcher overhead allowance (1 CPU / 2 GiB) and a 20 GiB emptyDisk cache plus image; replace with measured values from the spike"}
+    "developer_vm": {"cpu": "5", "memory": "10Gi", "ephemeral_storage": "31Gi",
+      "_comment": "One 4 vCPU / 8 GiB developer VM with a 20 GiB cache disk. Measured in the spike (S2, s2-launcher-pod.json): the virt-launcher pod's effective scheduler request is 4.025 CPU, 8.57 GiB memory (8 GiB guest, 486 Mi KubeVirt overhead, 100 M of helper containers) and 30.09 GiB ephemeral storage. cpu and memory keep about 1 CPU and 1.4 GiB of margin; ephemeral storage is the measured request rounded up."}
   },
   "storage": {
     "workspace_storage_class": "local-path",
@@ -40,8 +40,16 @@
     "pod.gvisor": {"status": "pending"},
     "workspace.ephemeral": {"status": "pending"},
     "workspace.retained": {"status": "pending"},
-    "vm.kubevirt": {"status": "pending"},
-    "vm.compose": {"status": "pending"},
+    "vm.kubevirt": {"status": "qualified",
+      "receipt_sha256": "341ed1442af5eca864f5c075bea77e54f3a97b5ec341bac4dc219a59d5edfa18",
+      "qualified_pins": {"kubevirt_version": "v1.9.1",
+        "kubevirt_operator_digest": "sha256:a8adf7b772e9ce0bf7e2ce889910fc41ebadf552c9dbe843e9b86641e34f5df9"},
+      "_comment": "Spike S1-S3 and S5-S9 on relay-worker-1, 2026-11-09 to 11-10. receipt_sha256 is the digest of the evidence set's SHA256SUMS. S8 passed with deviation D5, accepted by the owner: neither soak run reached 8 hours. Before any install, check cert-manager's cainjector headroom (F15; its limit is raised in #1701). Open: F12 (the worker's disk I/O shares a control-plane node's NVMe). A change to either KubeVirt pin needs a new qualification."},
+    "vm.compose": {"status": "qualified",
+      "receipt_sha256": "341ed1442af5eca864f5c075bea77e54f3a97b5ec341bac4dc219a59d5edfa18",
+      "qualified_pins": {"kubevirt_version": "v1.9.1",
+        "kubevirt_operator_digest": "sha256:a8adf7b772e9ce0bf7e2ce889910fc41ebadf552c9dbe843e9b86641e34f5df9"},
+      "_comment": "Spike S4 (one Compose stack with Postgres, Redis, an app and load generators, inside the VM) and the 20 S8 cycles, same evidence set. Same conditions as vm.kubevirt."},
     "network.cilium-egress-policy": {"status": "pending"},
     "repository.push": {"status": "unsupported", "_comment": "no expiry-enforcing forge broker yet (plan: no push in the Kubernetes pilot)"}
   }
