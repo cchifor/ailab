@@ -45,7 +45,13 @@ hand, no edit folded into the merge, no other commit. Every other gate still app
 personas clean, CI green, no `no-automerge`, and no **Request changes** from an approver since.
 Workbricks' `main` protection dismisses stale approvals, so Gitea dismisses the owner's approval on
 the push of the merge; the reviewbot still counts it for this rule when the PR timeline shows
-Gitea's own automatic dismissal of that review. A dismissal by a person withdraws it. The reviewbot
+Gitea's own automatic dismissal of that review. A dismissal by a person withdraws it, and an
+approver's latest review counts even when a person dismissed it: if the owner approves again after
+a carried approval and that newer approval (or a **Request changes**) is then dismissed by hand,
+the older approval does not come back, and the PR holds for a fresh Approve. Each approval skipped
+this way logs `<login>'s APPROVED review <id> at <commit> was dismissed, not by Gitea's push rule`;
+seeing that line for a dismissal nobody made by hand means Gitea reworded its dismissal text
+(`GITEA_AUTO_DISMISS_TEXT` in `reviewbot.py`). The reviewbot
 keeps a bare cache repository per repository under `/var/lib/reviewbot/git-cache` (fetching the PR
 head and the base branch with its own token; needs git 2.38 or later) and fails closed: a fetch
 or git error, a PR ref that does not match the API's head, or anything it cannot prove holds the PR

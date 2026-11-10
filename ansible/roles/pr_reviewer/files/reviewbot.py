@@ -2888,19 +2888,31 @@ def owner_approval_ok(repo, pr, head_sha, author, base_ref=None):
     # commits were pushed (branch protection "dismiss stale approvals", which cchifor/workbricks has
     # on) is still the approver's position at its commit; owner_approval_carries decides whether it
     # reaches this head. A dismissal by a person withdraws it, as before.
+    # With the rule on, `position` also records each approver's latest decisive review INCLUDING the
+    # ones a person dismissed: such a review grants nothing and objects to nothing, but it is still
+    # the approver's latest word, so an older approval behind it never carries (reviewer-claude and
+    # reviewer-codex on ailab#1699: approve at A, auto-dismissed by a merge of main, approve at B,
+    # B dismissed by hand, must hold; so must the same with a hand-dismissed REQUEST_CHANGES at B).
     carry = owner_approval_survives_main_merges(repo) and bool(base_ref)
     auto_dismissed = None
     latest = {}
+    position = {}
     for rv in iter_reviews(repo, pr):
         login = ((rv.get("user") or {}).get("login") or "").lower()
         if login not in allowed or rv.get("state") not in ("APPROVED", "REQUEST_CHANGES"):
             continue
+        position[login] = rv
         if rv.get("dismissed"):
             if not carry or rv.get("state") != "APPROVED":
                 continue
             if auto_dismissed is None:
                 auto_dismissed = _auto_dismissed_reviews(repo, pr)
             if rv.get("id") not in auto_dismissed:
+                # Withdrawn by a person, or Gitea reworded GITEA_AUTO_DISMISS_TEXT: say which
+                # review, so the second does not pass as the first in silence.
+                log(f"owner approval {repo}#{pr}: {login}'s APPROVED review {rv.get('id')} at "
+                    f"{(rv.get('commit_id') or '')[:9]} was dismissed, not by Gitea's push rule "
+                    f"(no matching timeline entry); it does not carry over")
                 continue
         latest[login] = rv
     if any(rv.get("state") == "REQUEST_CHANGES" for rv in latest.values()):
@@ -2911,10 +2923,12 @@ def owner_approval_ok(repo, pr, head_sha, author, base_ref=None):
     if not carry:
         return False
     # Every latest review left here is an APPROVED (an objection returned above), undismissed or
-    # dismissed by Gitea on a push. One AT this head is not this rule's case: nothing was merged
-    # since it.
-    for approved in sorted({rv.get("commit_id") or "" for rv in latest.values()} - {head_sha}):
-        login = ",".join(sorted(k for k, rv in latest.items() if rv.get("commit_id") == approved))
+    # dismissed by Gitea on a push. It carries only while it is still the approver's latest
+    # decisive review (`position`): a later one a person dismissed withdrew it. One AT this head is
+    # not this rule's case: nothing was merged since it.
+    carried = {k: rv for k, rv in latest.items() if position.get(k) is rv}
+    for approved in sorted({rv.get("commit_id") or "" for rv in carried.values()} - {head_sha}):
+        login = ",".join(sorted(k for k, rv in carried.items() if rv.get("commit_id") == approved))
         if owner_approval_carries(repo, pr, approved, head_sha, base_ref, login):
             return True
     return False
