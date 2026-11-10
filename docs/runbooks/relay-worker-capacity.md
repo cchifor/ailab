@@ -150,12 +150,23 @@ showed:
 Run 1 does not prove the VM was the cause. cp3 was already at 0.2–0.46 s from 14:40 to 14:55Z,
 when the VM was reading under 3 MB/s, and cp1 and cp2 spiked in the same hour. The limits
 therefore bound the worker's worst case rather than cure a measured cause:
-- The sustained values keep at least 2× headroom over every load that was harmless.
+- The sustained values keep at least 2× headroom over the sustained load that was harmless (soak
+  run 2).
 - They cap the thrash regime at well under half its observed peaks.
-- The bursts let image pulls and short build steps run at near-native speed.
+- The burst pool lasts one second. It absorbs spikes of up to about 300 MB written or 500 MB read,
+  and nothing longer.
+- Longer transfers run at the sustained rate, so they are throttled even when they would have been
+  harmless:
+  - a 1 GB image pull writes for about 8 s;
+  - S3's 19.5 GiB cache fill would take about 3.5 minutes; S3's writes ran at up to 579 MB/s.
 
-The cap also bounds the worst case on endurance. 100 MB/s of sustained writes is 8.6 TB a day;
-the capped S4 load wrote about 2.9 TB a day.
+  That is the cost of the guardrail. S3 showed only that minute-long write bursts were harmless;
+  nothing measured longer ones.
+
+The cap also bounds the worst case on endurance:
+- 100 MB/s of sustained writes is 8.6 TB a day.
+- Soak run 2's capped S4 Compose load averaged 33.4 MB/s, about 2.9 TB a day (record F12).
+- At its 44 MB/s peak it would be 3.8 TB a day.
 
 **What it does not do:**
 - The other heavy writers on the drive are unthrottled. These are the CI runners, which wrote up
