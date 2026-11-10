@@ -11,6 +11,74 @@ The worker's disk has no I/O limit; F12 is open ([Disk I/O limits](#disk-io-limi
 measured the capacity and confirmed nested KVM; the [feasibility runbook](relay-worker-kubevirt-feasibility.md)
 remains the acceptance gate.
 
+## Next stage: first researcher runtime
+
+**Status: planning only. No Relay installation, recovery generation, router connection, worker
+identity or enrollment exists. No app or cluster write is approved by the evidence below.** The
+KubeVirt feasibility spike is historical operational and test evidence; KubeVirt itself was removed
+afterwards.
+The `vm.kubevirt` and `vm.compose` binding entries record that spike's qualification, not a live
+installation or permission to admit ordinary work. The capacity, address and temporary Qwen stop
+were previously approved for the node and spike; Qwen was restored. Those approvals do not cover
+the Relay hub, database, router, installation or worker enrollment.
+
+The [operator's read-only live report](https://git.chifor.me/cchifor/ailab/pulls/1691#issuecomment-111597)
+was collected on 2026-11-10. Treat it as a point-in-time observation and recheck it before any
+change. It distinguishes the live system from the source tree and does not establish pending source
+or artifact pins:
+
+- The deployed hub was Relay v0.9.1 at source `a53a3ee8`, schema 56. Migration 057 and later are
+  absent, so the `infrastructure_installations`, `worker_tenant_controls`,
+  `worker_inference_restore_fences` and `worker_router_rotations` tables do not exist. The
+  deployment has neither `RELAY_INFRASTRUCTURE_INSTALLATIONS` nor
+  `RELAY_RECOVERY_GENERATION_FILE`. The workspace tenant is
+  `00000000-0000-4000-8000-000000000001`; its only enabled default channel is
+  `b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1`.
+- There is no recovery generation, router connection or Relay worker identity. The first
+  generation must therefore be initialized as a new generation after the reviewed hub upgrade;
+  there is no existing value to rotate or replace.
+- Router revision 2312 exposes the Codex-native `pool-codex` route. Its allowlist includes both
+  `gpt-6-luna` and `gpt-6-sol`, and three subscription seats are ready (one more needs
+  re-authentication). The first finite qualification is repository-free researcher work using
+  `gpt-6-luna`. `gpt-6-sol` is reserved for heavier work in a separate later scope, once its
+  prerequisites are ready. These are model choices, not a Relay connection or execution identity;
+  no identity currently exists.
+- `relay-worker-1` has about 23 GiB allocatable memory, ample CPU and disk headroom, and a live
+  `relay-gvisor` RuntimeClass. The report found `talos-agent-node-3` least-loaded among the agent
+  nodes; use it as the control-agent target only after a fresh read-only placement/headroom check.
+  Keep it outside the dedicated execution pool. The operator's network checks confirmed that
+  CoreDNS forwards to the Talos public resolvers and both public hostnames resolve through
+  Cloudflare from Relay. No DNS change is needed. Pin the complete Mozilla CA bundle from
+  `https://curl.se/ca/cacert.pem`, SHA-256
+  `427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285`; do not pin only the
+  currently served GTS root.
+
+Keep the implementation gated in this order. Record reviewed source commits and artifact digests
+when they exist; do not fill in or infer pins from the feasibility spike:
+
+1. Review and pin the Relay hub, installation and worker source, plus every runtime artifact. The
+   live report describes deployed source and observed state; it does not establish pending source
+   pins or authorize a deployment.
+2. Verify a recoverable database backup, then deploy the exact reviewed Relay release with all of
+   its required migrations, including migration 057 onward. Keep installation disabled; do not
+   create an installation against the live schema-56 hub.
+3. Provision the first recovery-generation file and generation as new, with an independently
+   recorded receipt. Only after the file exists, enable the installation and recovery settings
+   together as required by the reviewed release. Do not treat the absence of a row as an
+   already-created generation.
+4. Establish the reviewed router connection and worker identity for the repository-free researcher
+   using `gpt-6-luna`. Keep the scoped egress policy and enrollment limited to Relay, the router and
+   DNS; validate the control agent remains outside the execution pool.
+5. Run the finite, repository-free researcher qualification. Keep heavier `gpt-6-sol` work and
+   ordinary worker activation as separate later decisions, each gated on its own prerequisites and
+   qualification evidence.
+
+The current user request covers preparing the implementation and deployment outcome. Separately,
+the operator's bus-205 boundary requires direct owner confirmation to the operator's session for
+the exact privileged rollout. That confirmation is **pending** until the reviewed source, artifact
+pins and concrete apply/enrollment plan are ready. Obtain it before the first privileged write; the
+existing capacity and spike approvals do not substitute for it.
+
 The proposal allocates **vmid 4304, `relay-worker-1`, 192.168.0.52** on **ai-node3** with
 **12 vCPU, 24 GiB fixed RAM, 200 GiB local-lvm** and host CPU passthrough. It adds an independent
 OpenTofu map, Talos patch and `relay-gvisor` RuntimeClass. No resource iterates or changes the
