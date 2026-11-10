@@ -26,7 +26,7 @@
   "headroom": {
     "lightweight": {"cpu": "2", "memory": "4Gi", "ephemeral_storage": "10Gi"},
     "developer_vm": {"cpu": "5", "memory": "10Gi", "ephemeral_storage": "31Gi",
-      "_comment": "One 4 vCPU / 8 GiB developer VM with a 20 GiB cache disk. Measured in the spike (S2, s2-launcher-pod.json): the virt-launcher pod's effective scheduler request is 4.025 CPU, 8.57 GiB memory (8 GiB guest, 486 Mi KubeVirt overhead, 100 M of helper containers) and 30.09 GiB ephemeral storage. cpu and memory keep about 1 CPU and 1.4 GiB of margin; ephemeral storage is the measured request rounded up."}
+      "_comment": "One 4 vCPU / 8 GiB developer VM with a 20 GiB cache disk. Measured in the spike (S2, s2-launcher-pod.json): the virt-launcher pod's effective scheduler request is 4.025 CPU, 8.57 GiB memory (8 GiB guest, 486 Mi KubeVirt overhead, 100 M of helper containers) and 30.09 GiB ephemeral storage. The ephemeral figure is the VM spec's declared 30Gi plus KubeVirt's two fixed 50M containerDisk requests, not the image size, so an image refresh does not change it; a different VM shape or KubeVirt pin does. cpu and memory keep about 1 CPU and 1.4 GiB of margin; ephemeral storage is the request rounded up."}
   },
   "storage": {
     "workspace_storage_class": "local-path",

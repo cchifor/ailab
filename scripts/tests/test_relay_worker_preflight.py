@@ -145,7 +145,8 @@ class Positive(unittest.TestCase):
     def test_report_carries_the_binding_receipt(self):
         r = rwp.evaluate(with_pool(SNAP), pinned(BIND))
         self.assertEqual(r["capabilities"]["vm.kubevirt"],
-                         {"status": "qualified", "source": "binding", "receipt_sha256": SPIKE_RECEIPT})
+                         {"status": "qualified", "source": "binding", "receipt_sha256": SPIKE_RECEIPT,
+                          "qualified_pins": {k: BIND["pins"][k] for k in rwp.QUALIFICATION_PINS["vm.kubevirt"]}})
         self.assertEqual(r["capabilities"]["pod.gvisor"], {"status": "pending", "source": "binding"})
         self.assertEqual(r["qualification"], "not-established-by-preflight")
         self.assertNotIn("qualified", json.dumps(r["gates"]))
@@ -226,15 +227,17 @@ class Negative(unittest.TestCase):
         self.assertEqual(status(rwp.evaluate(SNAP, b), "storage.workspace_class"), "fail")
 
     def test_qualified_vm_capability_bound_to_its_pins(self):
-        for change in ({"kubevirt_version": "v1.9.2"}, {"kubevirt_operator_digest": DIGEST},
-                       {"kubevirt_version": None, "kubevirt_operator_digest": None}):
+        for change, expect in (({"kubevirt_version": "v1.9.2"}, ": qualified_pins.kubevirt_version "),
+                               ({"kubevirt_operator_digest": DIGEST}, ": qualified_pins.kubevirt_operator_digest "),
+                               ({"kubevirt_version": None, "kubevirt_operator_digest": None},
+                                ": pins.kubevirt_version is unset")):
             with self.subTest(change=change):
                 r = rwp.evaluate(SNAP, pinned(BIND, **change))
                 self.assertEqual(r["result"], "fail")
                 self.assertEqual(r["capabilities"], {})
                 for cap in ("vm.kubevirt", "vm.compose"):
-                    self.assertTrue(any(e.startswith(f"capability {cap}: qualified_pins.")
-                                        and "new qualification" in e for e in r["binding_errors"]), cap)
+                    self.assertTrue(any(e.startswith(f"capability {cap}{expect}") for e in r["binding_errors"]),
+                                    (cap, r["binding_errors"]))
 
     def test_qualified_vm_capability_without_pins_rejected(self):
         for qp in (None, "v1.9.1", []):

@@ -77,7 +77,10 @@ sha256sum "$SNAP" "$SNAP.report.json"
   marks a capability `qualified` without a 64-hex `receipt_sha256` of the live evidence record is
   rejected. So is a qualified `vm.kubevirt` or `vm.compose` whose `qualified_pins` do not equal the
   binding's `kubevirt_version` and `kubevirt_operator_digest`: a pin change needs a new
-  qualification. The report copies each qualified capability's `receipt_sha256`.
+  qualification. The report copies each qualified capability's `receipt_sha256` and `qualified_pins`.
+  The rule binds only the KubeVirt release. The binding is per installation: the context checks
+  already pin it to one cluster through `cluster.*`, and the version checks pin Kubernetes and
+  Cilium. A binding written for another cluster starts every capability at `pending`.
 - **Headroom:** this is the scheduler's view, allocatable minus the effective requests of
   non-terminal pods. Pod-level `spec.resources` and restartable init sidecars are accounted for.
   A malformed request makes the result `unknown`. It is not a measurement of load.

@@ -331,7 +331,10 @@ def validate_binding(b) -> list[str]:
                             f"{list(QUALIFICATION_PINS[cap])}, the pins the evidence was taken with")
                 continue
             for k in QUALIFICATION_PINS[cap]:
-                if not isinstance(pins.get(k), str) or qp.get(k) != pins.get(k):
+                if not isinstance(pins.get(k), str):
+                    errs.append(f"capability {cap}: pins.{k} is unset; a qualified {cap} needs it pinned "
+                                f"to qualified_pins.{k} {qp.get(k)!r}")
+                elif qp.get(k) != pins.get(k):
                     errs.append(f"capability {cap}: qualified_pins.{k} {qp.get(k)!r} != pins.{k} "
                                 f"{pins.get(k)!r}; a pin change needs a new qualification")
     return errs
@@ -686,7 +689,8 @@ def evaluate(snap: dict, b: dict) -> dict:
     gates = {g: {"status": _rollup([by.get(i, UNKNOWN) for i in ids]), "requires": ids}
              for g, ids in GATES.items()}
     caps = {k: {"status": v["status"], "source": "binding",
-                **({"receipt_sha256": v["receipt_sha256"]} if v["status"] == "qualified" else {})}
+                **({f: v[f] for f in ("receipt_sha256", "qualified_pins") if f in v}
+                   if v["status"] == "qualified" else {})}
             for k, v in b["capabilities"].items()}
     return {"schema": REPORT_SCHEMA, "context": snap.get("context"),
             "collected_at": snap.get("collected_at"), "result": _rollup(list(by.values())),
