@@ -130,13 +130,13 @@ Spike finding F12 asked for an I/O limit on the worker's disk that covers bandwi
 latency ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md#findings)).
 
 **The limits** are set in `local.relay_worker_disk_speed` in
-`kubernetes/infra/agent-nodes/relay-workers.tf`, and Proxmox writes them onto the drive line as
-`mbps_*` and `iops_*`:
+`kubernetes/infra/agent-nodes/relay-workers.tf`. Proxmox writes them onto the drive line as
+`mbps_*` and `iops_*`. Its "MB/s" are **MiB/s**: QEMU shows `bps-read` = 209715200.
 
 | | Sustained | Burst (QEMU's 1-second pool) |
 |---|---|---|
-| Read | 200 MB/s, 5000 IOPS | 500 MB/s, 10000 IOPS |
-| Write | 100 MB/s, 8000 IOPS | 300 MB/s, 12000 IOPS |
+| Read | 200 MiB/s, 5000 IOPS | 500 MiB/s, 10000 IOPS |
+| Write | 100 MiB/s, 8000 IOPS | 300 MiB/s, 12000 IOPS |
 
 **Why these numbers.** The guest's own `node_exporter` disk counters, at 1-minute resolution,
 showed:
@@ -153,18 +153,18 @@ therefore bound the worker's worst case rather than cure a measured cause:
 - The sustained values keep at least 2× headroom over the sustained load that was harmless (soak
   run 2).
 - They cap the thrash regime at well under half its observed peaks.
-- The burst pool lasts one second. It absorbs spikes of up to about 300 MB written or 500 MB read,
-  and nothing longer.
+- The burst pool lasts one second. It absorbs spikes of up to 300 MiB written or 500 MiB read
+  (12000 and 10000 operations), and nothing longer.
 - Longer transfers run at the sustained rate, so they are throttled even when they would have been
   harmless:
-  - a 1 GB image pull writes for about 8 s;
-  - S3's 19.5 GiB cache fill would take about 3.5 minutes; S3's writes ran at up to 579 MB/s.
+  - writing 1 GiB takes 7.2 s, as measured below;
+  - S3's 19.5 GiB cache fill would take about 3.3 minutes; S3's writes ran at up to 579 MB/s.
 
   That is the cost of the guardrail. S3 showed only that minute-long write bursts were harmless;
   nothing measured longer ones.
 
 The cap also bounds the worst case on endurance:
-- 100 MB/s of sustained writes is 8.6 TB a day.
+- 100 MiB/s of sustained writes is about 9.1 TB a day.
 - Soak run 2's capped S4 Compose load averaged 33.4 MB/s, about 2.9 TB a day (record F12).
 - At its 44 MB/s peak it would be 3.8 TB a day.
 
@@ -184,7 +184,34 @@ The cap also bounds the worst case on endurance:
 Proxmox applies a throttle change to the running VM through QEMU (`block_set_io_throttle`), so
 neither the VM nor the node restarts. To check what is live:
 - `qm config 4304` shows the drive options;
-- `info block` on the VM's monitor shows the live throttle.
+- `echo 'qom-get /objects/throttle-drive-scsi0 limits' | qm monitor 4304` shows the live
+  throttle.
+
+**Applied 2026-11-10 at 13:16Z** from #1704's reviewed plan, with bpg v0.121.0. The apply took 1 s:
+1 changed, 0 added, 0 destroyed. Checks:
+- **Config:** `qm config 4304` carries
+  `iops_rd=5000,iops_rd_max=10000,iops_wr=8000,iops_wr_max=12000,mbps_rd=200,mbps_rd_max=500,mbps_wr=100,mbps_wr_max=300`.
+  `qm pending` is empty, and the throttle group's live limits match, with 1-second burst lengths.
+- **No restart:** same QEMU pid (2083), Proxmox uptime kept counting, and the node's `bootID` is
+  unchanged (`2fd8d37c…`).
+- **A `dd` check** ran in a throwaway namespace on the node. The namespace enforced the restricted
+  Pod Security level, denied all ingress and egress, and was deleted afterwards. Each run used
+  O_DIRECT, a 1 GiB file and 160k 4 KiB operations. The throttled times match the model of the burst
+  pool first, then the sustained rate:
+
+  | Test | Uncapped (13:11Z) | Throttled (13:17Z) | Model |
+  |---|---|---|---|
+  | 1 MiB write | 1.9 GB/s | 7.24 s, 141 MB/s | (1024 − 300) / 100 = 7.24 s |
+  | 1 MiB read | 1.2 GB/s | 2.62 s, 391 MB/s | (1024 − 500) / 200 = 2.62 s |
+  | 4 KiB write | 10.3k IOPS | 18.50 s | (160k − 12k) / 8k = 18.5 s |
+  | 4 KiB read | 21.9k IOPS | 30.00 s | (160k − 10k) / 5k = 30 s |
+
+- **cp3 during the throttled run:** WAL fsync p99 7–8 ms and backend commit p99 7–12 ms. From
+  13:00 to 13:22Z there were no fsyncs over 1 s on cp3, no leader change, and no etcd or
+  control-plane alerts firing.
+- **Evidence:** raw evidence is outside git in
+  `C:\Users\chifo\work\home\evidence\relay-worker-disk-throttle\`. Its `SHA256SUMS` covers 16 files
+  and has digest `a805c54321601187ac8fedc3b1affa0523bbbede475bbe0b963b745931468495`.
 
 ## Pool rule: no workload before an egress policy
 

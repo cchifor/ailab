@@ -30,10 +30,10 @@ locals {
   # reached 1.28 GB/s and 18.4k IOPS of reads and 579 MB/s of writes. These limits bound that worst
   # case and keep at least 2x headroom over the sustained load the spike measured as harmless to cp3
   # (soak run 2: <=44 MB/s and <=3.8k IOPS of writes). *_burstable is QEMU's one-second burst pool,
-  # ~300 MB written or ~500 MB read; after it, long transfers (big image pulls, cache fills) run at
+  # 300 MiB written or 500 MiB read; after it, long transfers (big image pulls, cache fills) run at
   # the sustained rate. Proxmox applies a throttle change to the running VM; no restart.
   relay_worker_disk_speed = {
-    read                 = 200 # MB/s
+    read                 = 200 # Proxmox mbps_*: MiB/s
     read_burstable       = 500
     write                = 100
     write_burstable      = 300
