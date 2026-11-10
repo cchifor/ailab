@@ -65,9 +65,7 @@ Production worker activation remains a separate reviewed ceremony in
 [the independent authority runbook](relay-worker-budget-authority.md), including
 durability, recovery fencing and exact provider/runtime qualifications.
 
-## Persistent-state compatibility
-
-### Accepted initial rollout, 2026-11-10
+## Accepted initial rollout, 2026-11-10
 
 [Operator evidence](https://git.chifor.me/cchifor/ailab/pulls/1697#issuecomment-110646)
 records reviewer merge `354570499214d22efd82d6f6e2cee660b9e4481c` and passing
@@ -90,7 +88,7 @@ the retained backup. Target the current 2026-11-10 maintenance window after revi
 Record a delay/window change if needed. Cleanup requires its own acceptance and
 confirmation that this exact COMPLETE hash and first-capture time remain intact.
 
-### Storage behavior
+## Persistent-state compatibility
 
 The source diff adds bounded SQLite KV prefix reads; it adds no SQL table or
 schema-version migration. It does add durable values to the existing `kv` table:
@@ -433,9 +431,9 @@ The earlier dry-compose used an explicitly synthetic test digest; none was
 written to the deployment manifest. No live upgrade, downgrade, storage
 measurement, worker-budget activation or runtime qualification is claimed.
 
-For cleanup, all 17 acceptance-checker tests also pass with the final composition.
-A parsed-YAML comparison against the reviewed initial-rollout PR head
-`2390357511e649d79d5a31df007baca098f3356d` confirms the only manifest change is
+For cleanup, all 17 acceptance-checker tests also pass after joining the actual
+reviewer-merged main. A parsed-YAML comparison against the accepted live rollout
+commit `354570499214d22efd82d6f6e2cee660b9e4481c` confirms the only manifest change is
 removing `backup-before-worker-budgets`; every remaining field and resource,
 including the exact application pin, annotations, configuration and data PVC,
 is identical. The checker expects that pin with `init=[]` and no canary Job.
