@@ -35,6 +35,11 @@ spec:
         requests: { cpu: 10m, memory: 32Mi }
         limits: { memory: 64Mi }
     cainjector:
+      # cainjector watches every CRD. Under the old 128Mi limit it ran at about 95%, and KubeVirt's large
+      # CRDs pushed it over (docs/relay-workers/kubevirt-spike-record-2026-11-09.md, F15). On install its
+      # RSS reached ~103 MiB and it re-read its own code pages from cp3's disk (800-900 major faults/s,
+      # 2.2 GB/s) until it restarted; on removal it was OOM-killed. Otherwise its RSS was 69-86 MiB
+      # (2026-11-01 to 11-10). 256Mi covers that peak plus its code pages; 128Mi covers its working set.
       resources:
-        requests: { cpu: 10m, memory: 64Mi }
-        limits: { memory: 128Mi }
+        requests: { cpu: 10m, memory: 128Mi }
+        limits: { memory: 256Mi }
