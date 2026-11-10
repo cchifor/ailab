@@ -89,19 +89,23 @@ def render_workload_bundle(pins_path: pathlib.Path, evidence: dict, now: dt.date
     ev = gev.validate(evidence, launcher_image=launcher, now=now)
     if ev["guest_image"] != bundle["guest_candidate"]["image"]:
         raise ob.BundleError("evidence guest_image is not the pinned guest candidate")
-    docs = workload.render(ev, launcher, guest.cloud_init(bundle["compose_smoke_image"]["image"]))
+    kube_dns_ip = (bundle.get("cluster_dns") or {}).get("cluster_ip")
+    if kube_dns_ip is None:
+        raise ob.BundleError("pins lack kubevirt.spike_bundle.cluster_dns.cluster_ip (the kube-dns ClusterIP)")
+    docs = workload.render(ev, launcher, guest.cloud_init(bundle["compose_smoke_image"]["image"]), kube_dns_ip)
     text = dump(docs)
     meta = {"schema": METADATA_SCHEMA + "+workload", "status": "rendered-not-applied-not-qualified",
             "rendered_sha256": {"30-workload.yaml": hashlib.sha256(text.encode()).hexdigest()},
             "evidence_sha256": hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest(),
-            "guest_image": ev["guest_image"], "prep_image": launcher, "launcher_uid": ev["launcher_uid"]}
+            "guest_image": ev["guest_image"], "prep_image": launcher, "launcher_uid": ev["launcher_uid"],
+            "kube_dns_cluster_ip": kube_dns_ip}
     return {"30-workload.yaml": text, "workload-metadata.json": json.dumps(meta, indent=2, sort_keys=True) + "\n"}
 
 
 def _write(out_dir: pathlib.Path, files: dict[str, str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
-        (out_dir / name).write_text(text)
+        (out_dir / name).write_bytes(text.encode())  # LF on every OS: the printed SHA-256 is the file's
         print(f"{hashlib.sha256(text.encode()).hexdigest()}  {out_dir / name}")
 
 

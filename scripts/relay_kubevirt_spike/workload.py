@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import re
 
 from .operator_bundle import POOL_LABEL, BundleError, SPIKE_LABEL, dedicated_placement
@@ -12,6 +13,21 @@ FQDN = re.compile(r"^(\*\.)?([a-z0-9-]+\.)+[a-z]{2,}$")
 # Reviewed external destinations needed by the guest recipe: Ubuntu packages (qemu-guest-agent,
 # docker.io, docker-compose-v2) and the pinned smoke image on quay. Nothing on the estate.
 DEFAULT_EGRESS = ("archive.ubuntu.com", "security.ubuntu.com", "quay.io", "*.quay.io")
+# Guest traffic leaves the launcher through KubeVirt's masquerade NAT, and Cilium (kube-proxy
+# replacement, bpf-lb-sock=false) evaluates it against the UNtranslated kube-dns ClusterIP: the
+# toEndpoints kube-dns rule never matches it (operator spike, 2026-11-09). A /32 toCIDR rule on that
+# ClusterIP (pinned in runtime-pins.json, verified live before apply) gets its own identity and does.
+DENIED_NETS = tuple(ipaddress.ip_network(n) for n in ("192.168.0.0/23", "172.16.0.0/12", "100.64.0.0/10"))
+
+
+def check_kube_dns_ip(value) -> str:
+    try:
+        ip = ipaddress.IPv4Address(value)
+    except (ipaddress.AddressValueError, TypeError) as exc:
+        raise BundleError(f"cluster_dns.cluster_ip {value!r} is not an IPv4 address") from exc
+    if not ip.is_private or any(ip in n for n in DENIED_NETS):
+        raise BundleError(f"cluster_dns.cluster_ip {value} must be an in-cluster address outside the denied ranges")
+    return str(ip)
 # bash + coreutils + qemu-img only: those are what v1.9.1 rpm/BUILD.bazel launcherbase ships.
 PREP_SCRIPT = f"""set -eu
 img=/workspace/disk.img
@@ -37,7 +53,9 @@ def _restricted(uid: int) -> dict:
             "seccompProfile": {"type": "RuntimeDefault"}}
 
 
-def render(ev: dict, launcher_image: str, cloud_init: str, egress: tuple[str, ...] = DEFAULT_EGRESS) -> list[dict]:
+def render(ev: dict, launcher_image: str, cloud_init: str, kube_dns_ip: str,
+           egress: tuple[str, ...] = DEFAULT_EGRESS) -> list[dict]:
+    kube_dns_ip = check_kube_dns_ip(kube_dns_ip)
     for host in egress:
         if not FQDN.match(host) or host.endswith((".local", ".lan", "chifor.me")):
             raise BundleError(f"egress destination {host!r} is not a reviewed public FQDN")
@@ -47,9 +65,9 @@ def render(ev: dict, launcher_image: str, cloud_init: str, egress: tuple[str, ..
     prep_res = {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "64Mi"}
     docs = [
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NS, "labels": dict(SPIKE_LABEL) | {
-            # KubeVirt masquerade needs NET_ADMIN in virt-launcher, forbidden by baseline.
-            # This exception is scoped to the disposable spike namespace and dedicated pool.
-            "pod-security.kubernetes.io/enforce": "privileged",
+            # v1.9.1's generated launcher passes baseline (non-root, drop ALL + NET_BIND_SERVICE; no
+            # NET_ADMIN) and fails restricted only on seccompProfile: measured on the live launcher.
+            "pod-security.kubernetes.io/enforce": "baseline",
             "pod-security.kubernetes.io/warn": "restricted",
             "pod-security.kubernetes.io/audit": "restricted"}}},
         {"apiVersion": "v1", "kind": "ResourceQuota", "metadata": _meta("kv-spike-quota"), "spec": {"hard": {
@@ -66,6 +84,9 @@ def render(ev: dict, launcher_image: str, cloud_init: str, egress: tuple[str, ..
                   "egress": [
                       {"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "kube-system",
                                                         "k8s-app": "kube-dns"}}],
+                       "toPorts": [{"ports": [{"port": "53", "protocol": "ANY"}],
+                                    "rules": {"dns": [{"matchPattern": "*"}]}}]},
+                      {"toCIDR": [f"{kube_dns_ip}/32"],
                        "toPorts": [{"ports": [{"port": "53", "protocol": "ANY"}],
                                     "rules": {"dns": [{"matchPattern": "*"}]}}]},
                       {"toFQDNs": [{"matchPattern": h} if h.startswith("*") else {"matchName": h} for h in egress],

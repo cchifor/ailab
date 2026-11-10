@@ -76,7 +76,7 @@ class Fixture:
         b = pins["kubevirt"]["spike_bundle"]
         b["sources"] = [{"file": n, "sha256": hashlib.sha256(t.encode()).hexdigest()} for n, t in texts.items()]
         for n, t in texts.items():
-            (d / n).write_text(t)
+            (d / n).write_bytes(t.encode())  # exact bytes: write_text would add CRLF on Windows
         if mutate_pins:
             mutate_pins(pins)
         self.dir, self.pins = d, d / "pins.json"

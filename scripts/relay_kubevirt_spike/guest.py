@@ -16,12 +16,15 @@ def cloud_init(smoke_image: str) -> str:
     """Readiness = qemu-guest-agent + docker compose actually ran a pinned container, not VM Running."""
     if not DIGEST_IMAGE.match(smoke_image):
         raise BundleError("compose smoke image must be digest-pinned")
+    # Docker 29 (noble docker.io) defaults to the containerd image store, which keeps image content in
+    # /var/lib/containerd on the ~2.4 GiB root partition: the first real pull hit ENOSPC there
+    # (operator spike, 2026-11-09). The classic store keeps images under data-root on the cache disk.
     text = f"""#cloud-config
 package_update: true
 packages: [qemu-guest-agent, docker.io, docker-compose-v2]
 write_files:
   - path: /etc/docker/daemon.json
-    content: '{{"data-root": "/var/lib/docker-cache/docker"}}'
+    content: '{{"data-root": "/var/lib/docker-cache/docker", "features": {{"containerd-snapshotter": false}}}}'
   - path: /opt/relay-spike/compose.yaml
     content: |
       services:
