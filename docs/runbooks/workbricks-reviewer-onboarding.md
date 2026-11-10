@@ -37,7 +37,7 @@ lock line or moving an entry from red to green needs no owner there, and their g
 
 **An approval survives clean merges of `main` (owner decision, 2026-11-10: "Your Approve survives a
 conflict-free main merge that both bots re-approved").** For a repository set `true` in
-`owner_approval_survives_main_merges_by_repo` (only `cchifor/workbricks` by default), an owner's
+`owner_approval_survives_main_merges_by_repo` (empty by default; see below), an owner's
 approval at an earlier commit A also counts at the head H when every commit from H back to A,
 following first parents, is a two-parent merge whose second parent is already on the base branch
 and whose tree equals `git merge-tree --write-tree` of its two parents: no conflict resolved by
@@ -57,7 +57,12 @@ head and the base branch with its own token; needs git 2.38 or later) and fails 
 or git error, a PR ref that does not match the API's head, or anything it cannot prove holds the PR
 for a fresh Approve, as before. A carried approval logs `owner approval ...: <login>'s approval at
 <A> carried to <H> over clean merges of main: <merges>`; a refused one logs `no carry-over` and
-the reason.
+the reason. The timeline read needs `read:issue` on the reviewer token, which the reviewer
+tokens do not carry yet, so the role default leaves the rule off for every repository; enable it
+for `cchifor/workbricks` once they do (an owner credential step). The timeline is read only when
+the head has no direct owner Approve, and a failed read never fails the merge check: it logs
+`owner approval ...: cannot read the PR timeline: <status> ...` once, every dismissed approval
+counts as withdrawn, and a PR waiting on a carried approval holds for a fresh Approve.
 
 History:
 

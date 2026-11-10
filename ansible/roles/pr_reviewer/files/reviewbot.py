@@ -2894,34 +2894,41 @@ def owner_approval_ok(repo, pr, head_sha, author, base_ref=None):
     # reviewer-codex on ailab#1699: approve at A, auto-dismissed by a merge of main, approve at B,
     # B dismissed by hand, must hold; so must the same with a hand-dismissed REQUEST_CHANGES at B).
     carry = owner_approval_survives_main_merges(repo) and bool(base_ref)
-    auto_dismissed = None
-    latest = {}
-    position = {}
-    for rv in iter_reviews(repo, pr):
-        login = ((rv.get("user") or {}).get("login") or "").lower()
-        if login not in allowed or rv.get("state") not in ("APPROVED", "REQUEST_CHANGES"):
-            continue
-        position[login] = rv
-        if rv.get("dismissed"):
-            if not carry or rv.get("state") != "APPROVED":
-                continue
-            if auto_dismissed is None:
-                auto_dismissed = _auto_dismissed_reviews(repo, pr)
-            if rv.get("id") not in auto_dismissed:
-                # Withdrawn by a person, or Gitea reworded GITEA_AUTO_DISMISS_TEXT: say which
-                # review, so the second does not pass as the first in silence.
-                log(f"owner approval {repo}#{pr}: {login}'s APPROVED review {rv.get('id')} at "
-                    f"{(rv.get('commit_id') or '')[:9]} was dismissed, not by Gitea's push rule "
-                    f"(no matching timeline entry); it does not carry over")
-                continue
-        latest[login] = rv
-    if any(rv.get("state") == "REQUEST_CHANGES" for rv in latest.values()):
-        return False
-    if any(rv.get("commit_id") == head_sha and not rv.get("stale") and not rv.get("dismissed")
-           for rv in latest.values()):
+    reviews = [rv for rv in iter_reviews(repo, pr)
+               if ((rv.get("user") or {}).get("login") or "").lower() in allowed
+               and rv.get("state") in ("APPROVED", "REQUEST_CHANGES")]
+    # The timeline is read lazily: an undismissed approval at the head with no objection meets the
+    # gate without the carry-over rule, which only counts more approvals (the ones Gitea dismissed)
+    # and so cannot turn that into a hold; the timeline is not read for it. The reviewer bots' tokens lack
+    # read:issue, and reading it first made every merge check of such a PR fail on a 403
+    # (cchifor/workbricks#219, the regression from ailab#1699).
+    latest, _ = _owner_positions(repo, pr, reviews, None)
+    if _owner_direct_approval(latest, head_sha):
         return True
     if not carry:
         return False
+    auto_dismissed = set()
+    if any(rv.get("dismissed") and rv.get("state") == "APPROVED" for rv in reviews):
+        try:
+            auto_dismissed = _auto_dismissed_reviews(repo, pr)
+        except Exception as error:
+            # Fail safe, not shut: without the timeline no dismissal is proven Gitea's, so every
+            # dismissed approval counts as withdrawn (it does not carry), and the gate goes on.
+            if isinstance(error, urllib.error.HTTPError):
+                body = (error.read().decode(errors="replace") if error.fp else "")[:200]
+                detail = f"{error.code} {body}".strip()
+                if error.code == 403:
+                    detail += " (the reviewer token needs read:issue for the timeline)"
+            else:
+                detail = f"{type(error).__name__}: {error}"
+            log(f"owner approval {repo}#{pr}: cannot read the PR timeline: {detail}; dismissed "
+                f"approvals count as withdrawn and do not carry over")
+            auto_dismissed = None
+    latest, position = _owner_positions(repo, pr, reviews, auto_dismissed, carry=True)
+    if any(rv.get("state") == "REQUEST_CHANGES" for rv in latest.values()):
+        return False
+    if _owner_direct_approval(latest, head_sha):
+        return True
     # Every latest review left here is an APPROVED (an objection returned above), undismissed or
     # dismissed by Gitea on a push. It carries only while it is still the approver's latest
     # decisive review (`position`): a later one a person dismissed withdrew it. One AT this head is
@@ -2933,6 +2940,38 @@ def owner_approval_ok(repo, pr, head_sha, author, base_ref=None):
             return True
     return False
 
+
+def _owner_positions(repo, pr, reviews, auto_dismissed, carry=False):
+    """Each approver's latest decisive review (`latest`) and, with `carry`, their latest including
+    the ones a person dismissed (`position`); see owner_approval_ok. Without `carry` every
+    dismissed review counts for nothing. With it, an APPROVED whose id is in `auto_dismissed`
+    (Gitea's own dismissals) still counts; `auto_dismissed` None means the timeline could not be
+    read: every dismissal counts as a withdrawal, and the one line about it is already logged."""
+    latest = {}
+    position = {}
+    for rv in reviews:
+        login = ((rv.get("user") or {}).get("login") or "").lower()
+        position[login] = rv
+        if rv.get("dismissed"):
+            if not carry or rv.get("state") != "APPROVED" or auto_dismissed is None:
+                continue
+            if rv.get("id") not in auto_dismissed:
+                # Withdrawn by a person, or Gitea reworded GITEA_AUTO_DISMISS_TEXT: say which
+                # review, so the second does not pass as the first in silence.
+                log(f"owner approval {repo}#{pr}: {login}'s APPROVED review {rv.get('id')} at "
+                    f"{(rv.get('commit_id') or '')[:9]} was dismissed, not by Gitea's push rule "
+                    f"(no matching timeline entry); it does not carry over")
+                continue
+        latest[login] = rv
+    return latest, position
+
+
+def _owner_direct_approval(latest, head_sha):
+    """No approver objects, and one approved this head in a review nobody dismissed."""
+    if any(rv.get("state") == "REQUEST_CHANGES" for rv in latest.values()):
+        return False
+    return any(rv.get("commit_id") == head_sha and not rv.get("stale") and not rv.get("dismissed")
+               for rv in latest.values())
 
 # The owner's approval survives a conflict-free merge of the base branch (Workbricks owner,
 # 2026-11-10: "Your Approve survives a conflict-free main merge that both bots re-approved"). Each
@@ -2964,8 +3003,8 @@ def _auto_dismissed_reviews(repo, pr):
     (the review object says only `dismissed`, not by whom). Only an empty page ends the read:
     Gitea filters timeline entries after paging, so a page can come back short with more to follow
     (measured on workbricks#219: 41 entries, then 10). A timeline longer than the page cap yields
-    what was read: an approval whose dismissal was not found stays dismissed (fails closed). API
-    errors propagate, and maybe_merge holds the PR on them."""
+    what was read: an approval whose dismissal was not found stays dismissed (fails closed). Errors
+    propagate to owner_approval_ok, which then counts every dismissed approval as withdrawn."""
     ids = set()
     for page in range(1, 41):
         batch = api(f"/repos/{repo}/issues/{pr}/timeline?limit=50&page={page}")

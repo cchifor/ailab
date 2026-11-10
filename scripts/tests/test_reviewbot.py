@@ -5880,12 +5880,57 @@ class OwnerApprovalCarryOverTest(unittest.TestCase):
         owner = self._owner(head, dismissed=True, stale=False, id=300)
         self.assertEqual([], self._merge_gate(head, [owner], timeline=[self._dismissal(300)]))
 
-    def test_a_timeline_api_error_holds(self):
+    # The reviewer bots' tokens carry write:repository only, and Gitea serves /issues/<n>/timeline
+    # under read:issue: both bots logged this 403 on every sweep once the rule shipped (ailab#1699),
+    # and the failed merge check held cchifor/workbricks#219 although the owner had approved its
+    # head directly.
+    TIMELINE_403 = (b'{"message":"token does not have at least one of required scope(s), '
+                    b'required=[read:issue], token scope=write:repository","url":"x"}')
+
+    def _timeline_403(self):
+        return urllib.error.HTTPError("u", 403, "Forbidden", {}, io.BytesIO(self.TIMELINE_403))
+
+    def test_an_owner_approval_at_the_head_merges_without_reading_the_timeline(self):
+        # The owner's older approval was auto-dismissed by a merge of main and the owner approved
+        # the head again: the gate is met by that direct approval, so the timeline is not read and
+        # its 403 cannot hold the PR.
+        head = self.publish(self.merge("main"))
+        earlier = self._owner(self.approved, dismissed=True, id=300)
+        direct = self._owner(head, stale=False, id=301)
+        self.assertEqual([("/repos/o/r/pulls/7/merge", {"Do": "merge", "head_commit_id": head})],
+                         self._merge_gate(head, [earlier, direct],
+                                          timeline_error=self._timeline_403()))
+        self.assertEqual(0, self.timeline_reads)
+        self.assertFalse(any("merge check" in line for line in self.logs), self.logs)
+
+    def test_a_carried_approval_holds_on_a_timeline_403_without_failing_the_merge_check(self):
+        # The approval exists only at an earlier commit, Gitea dismissed it on the merge of main,
+        # and the timeline that would prove so cannot be read: the dismissal counts as a
+        # withdrawal, the PR holds for a fresh Approve, and one line names the scope problem.
         head = self.publish(self.merge("main"))
         owner = self._owner(self.approved, dismissed=True, id=300)
-        error = urllib.error.HTTPError("u", 500, "boom", {}, None)
-        self.assertEqual([], self._merge_gate(head, [owner], timeline_error=error))
-        self.assertTrue(any("merge check o/r#7 failed: 500" in line for line in self.logs))
+        self.assertEqual([], self._merge_gate(head, [owner], timeline_error=self._timeline_403()))
+        self.assertEqual(1, self.timeline_reads)
+        self.assertFalse(any("merge check" in line for line in self.logs), self.logs)
+        self.assertFalse(any("carried" in line for line in self.logs), self.logs)
+        timeline = [line for line in self.logs if "timeline" in line]
+        self.assertEqual(1, len(timeline), self.logs)
+        self.assertIn("owner approval o/r#7:", timeline[0])
+        self.assertIn("403", timeline[0])
+        self.assertIn("read:issue", timeline[0])
+        self.assertIn(f"merge o/r#7 held at {head[:9]}: owner approval", self.logs)
+
+    def test_a_timeline_read_error_holds_without_failing_the_merge_check(self):
+        head = self.publish(self.merge("main"))
+        owner = self._owner(self.approved, dismissed=True, id=300)
+        for error in (urllib.error.HTTPError("u", 500, "boom", {}, None),
+                      urllib.error.URLError("connection refused"), ValueError("bad json")):
+            with self.subTest(error=error):
+                self.logs.clear()
+                self.assertEqual([], self._merge_gate(head, [owner], timeline_error=error))
+                self.assertFalse(any("merge check" in line for line in self.logs), self.logs)
+                self.assertEqual(1, sum("timeline" in line for line in self.logs), self.logs)
+                self.assertIn(f"merge o/r#7 held at {head[:9]}: owner approval", self.logs)
 
     def test_maybe_merge_still_needs_both_personas_clean_at_the_head(self):
         head = self.publish(self.merge("main"))
@@ -5909,19 +5954,23 @@ class OwnerApprovalCarryOverTest(unittest.TestCase):
             self.assertEqual([], self._merge_gate(head, [self._owner(self.approved)], base=None))
         run.assert_not_called()
 
-    def test_role_enables_the_rule_for_workbricks_only_and_renders_it(self):
+    def test_role_leaves_the_rule_off_by_default_and_renders_an_override(self):
+        # Off until the reviewer tokens carry read:issue (the carry-over reads the PR timeline):
+        # a deploy must not re-enable a rule the bots' tokens cannot serve.
         import jinja2
 
         role = ROOT / "ansible" / "roles" / "pr_reviewer"
         defaults = AllowlistDefaultsTest._strict_yaml(
             (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
         key = "owner_approval_survives_main_merges_by_repo"
-        self.assertEqual({"cchifor/workbricks": True}, defaults["pr_reviewer_" + key])
+        self.assertEqual({}, defaults["pr_reviewer_" + key])
         source = (role / "templates" / "config.json.j2").read_text(encoding="utf-8")
         env = jinja2.Environment(undefined=jinja2.StrictUndefined)
         env.filters["to_json"] = json.dumps
         template = env.from_string(source)
-        self.assertEqual({"cchifor/workbricks": True}, json.loads(template.render(defaults))[key])
+        self.assertEqual({}, json.loads(template.render(defaults))[key])
+        enabled = dict(defaults, **{"pr_reviewer_" + key: {"cchifor/workbricks": True}})
+        self.assertEqual({"cchifor/workbricks": True}, json.loads(template.render(enabled))[key])
         env = jinja2.Environment()
         env.filters["to_json"] = json.dumps
         template = env.from_string(source)
