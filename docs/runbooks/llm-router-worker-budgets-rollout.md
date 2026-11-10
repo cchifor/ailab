@@ -67,6 +67,31 @@ durability, recovery fencing and exact provider/runtime qualifications.
 
 ## Persistent-state compatibility
 
+### Accepted initial rollout, 2026-11-10
+
+[Operator evidence](https://git.chifor.me/cchifor/ailab/pulls/1697#issuecomment-110646)
+records reviewer merge `354570499214d22efd82d6f6e2cee660b9e4481c` and passing
+[acceptance run 126901](https://git.chifor.me/cchifor/ailab/actions/runs/126901).
+The new pod `llm-router-7b59474cd8-k84xb` was Ready by 09:20:37Z with zero restarts;
+both init and application ran the pinned `61100143…` image and source 737d447b.
+The Recreate replacement gap was about two minutes.
+
+The retained generation is `/data/backups/pre-worker-budgets-20261109`.
+Its accepted COMPLETE SHA-256 is
+`283d5f6bdcc98646615668ed9353fbdfce481af903542d2ce8a6d1483ce237df`, with first
+capture `createdAt: 2026-11-10T09:19:31.786Z`. The SQLite copy is 312,598,528 bytes.
+Free space after capture was 1,535,778,816 bytes. The operator verified matching
+ordinary route sets and no failed/deferred requests across the before/after
+windows; worker-budget-authority remained the sole disabled plugin. No worker
+was created for acceptance.
+
+Cleanup owner is dev-worker-3; workstation's operator monitors Flux and verifies
+the retained backup. Target the current 2026-11-10 maintenance window after review.
+Record a delay/window change if needed. Cleanup requires its own acceptance and
+confirmation that this exact COMPLETE hash and first-capture time remain intact.
+
+### Storage behavior
+
 The source diff adds bounded SQLite KV prefix reads; it adds no SQL table or
 schema-version migration. It does add durable values to the existing `kv` table:
 
