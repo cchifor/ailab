@@ -161,6 +161,12 @@
       "compose_smoke_image": {
         "image": "quay.io/prometheus/busybox@sha256:c78ea71d5da0a24559fdc3a5eb49c04223e28dd6c6570c754395326f66d50728",
         "tag_checked": "quay.io/prometheus/busybox:glibc"
+      },
+      "cluster_dns": {
+        "_comment": "Guest DNS through KubeVirt masquerade reaches Cilium as this UNtranslated ClusterIP, so the spike egress policy allows DNS to it by /32 (operator spike, 2026-11-09). Cluster-specific: verify it equals the live kube-system/kube-dns Service before applying the workload (runbook).",
+        "service": "kube-system/kube-dns",
+        "cluster_ip": "10.96.0.10",
+        "checked_at": "2026-11-09"
       }
     }
   },

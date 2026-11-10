@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: relay-candidate-journal-tls
+  namespace: relay-candidate-journal
+spec:
+  secretName: relay-candidate-journal-tls
+  secretTemplate:
+    labels:
+      velero.io/exclude-from-backup: 'true'
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+  - relay-candidate-journal.relay-candidate-journal.svc
+  - relay-candidate-journal.relay-candidate-journal.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature]
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
