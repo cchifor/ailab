@@ -7,7 +7,7 @@ the address and the temporary Qwen stop for S7/S8. The KubeVirt spike ran on 202
 with a pass and one owner-accepted deviation ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md)).
 Qwen was restored afterwards. KubeVirt was removed after the spike and is **not** installed. The
 binding marks `vm.kubevirt` and `vm.compose` qualified (#1703); no other runtime is qualified.
-The worker's disk has QEMU I/O limits ([Disk I/O limits](#disk-io-limits)). The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
+The worker's disk has no I/O limit; F12 is open ([Disk I/O limits](#disk-io-limits)). The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
 measured the capacity and confirmed nested KVM; the [feasibility runbook](relay-worker-kubevirt-feasibility.md)
 remains the acceptance gate.
 
@@ -117,29 +117,27 @@ worker's OS disk.
 
 ## Disk I/O limits
 
-`relay-worker-1`'s only disk is a thin volume on ai-node3's `local-lvm`. That pool sits on the
-host's single NVMe: a consumer Kingston OM8TAP4 2 TB with no power-loss protection. These guests
-share the drive:
+**Status: none.** `relay-worker-1`'s disk has no I/O limit, and spike finding F12 is **open**.
+Limits were applied on 2026-11-10 at 13:16Z (#1704). The owner then decided not to carry them,
+and they were removed at 17:24Z the same day. The removal:
+- one in-place change, removing `disk.speed`;
+- `qm config 4304` back to its pre-#1704 drive line;
+- every QEMU throttle value at 0;
+- no restart: same QEMU pid, unchanged `bootID`.
+
+**The risk F12 describes.** `relay-worker-1`'s only disk is a thin volume on ai-node3's
+`local-lvm`. That pool sits on the host's single NVMe: a consumer Kingston OM8TAP4 2 TB with no
+power-loss protection. These guests share the drive:
 - `talos-cp3`, whose etcd needs low fsync latency;
 - `talos-agent-node-3`, which runs Relay and the router;
 - `ci-runner-3` and `ci-runner-6`;
 - the Qwen LXC (5003);
 - both reviewer VMs.
 
-Spike finding F12 asked for an I/O limit on the worker's disk that covers bandwidth as well as
-latency ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md#findings)).
+An I/O limit never replaced power-loss protection. The durable fix for etcd is still dedicated
+control-plane disks with it.
 
-**The limits** are set in `local.relay_worker_disk_speed` in
-`kubernetes/infra/agent-nodes/relay-workers.tf`. Proxmox writes them onto the drive line as
-`mbps_*` and `iops_*`. Its "MB/s" are **MiB/s**: QEMU shows `bps-read` = 209715200.
-
-| | Sustained | Burst (QEMU's 1-second pool) |
-|---|---|---|
-| Read | 200 MiB/s, 5000 IOPS | 500 MiB/s, 10000 IOPS |
-| Write | 100 MiB/s, 8000 IOPS | 300 MiB/s, 12000 IOPS |
-
-**Why these numbers.** The guest's own `node_exporter` disk counters, at 1-minute resolution,
-showed:
+The guest's `node_exporter` counters during the spike, at 1-minute resolution:
 
 | Load in the spike | Guest disk | cp3 WAL fsync p99 |
 |---|---|---|
@@ -147,71 +145,37 @@ showed:
 | S3 cache fill (two 1-minute direct-I/O bursts) | writes 454 and 579 MB/s | 8–15 ms |
 | Soak run 1 thrash (guest OOM loop, 15:40–16:25Z) | reads 138–866 MB/s and 4.0k–13k IOPS (5-minute means; peaks 1.28 GB/s and 18.4k IOPS) | 0.02–0.39 s |
 
-Run 1 does not prove the VM was the cause. cp3 was already at 0.2–0.46 s from 14:40 to 14:55Z,
-when the VM was reading under 3 MB/s, and cp1 and cp2 spiked in the same hour. The limits
-therefore bound the worker's worst case rather than cure a measured cause:
-- The sustained values keep at least 2× headroom over the sustained load that was harmless (soak
-  run 2).
-- They cap the thrash regime at well under half its observed peaks.
-- The burst pool lasts one second. It absorbs spikes of up to 300 MiB written or 500 MiB read
-  (12000 and 10000 operations), and nothing longer.
-- Longer transfers run at the sustained rate, so they are throttled even when they would have been
-  harmless:
-  - writing 1 GiB takes 7.2 s, as measured below;
-  - S3's 19.5 GiB cache fill would take about 3.3 minutes; S3's writes ran at up to 579 MB/s.
+Run 1 does not prove the VM caused cp3's latency:
+- cp3 was already at 0.2–0.46 s from 14:40 to 14:55Z, while the VM was reading under 3 MB/s.
+- cp1 and cp2 spiked in the same hour.
+- The CI runners, which share this drive and are unthrottled, wrote up to 37 MB/s each.
 
-  That is the cost of the guardrail. S3 showed only that minute-long write bursts were harmless;
-  nothing measured longer ones.
+Both leader changes during the spike began on other hosts: 2026-11-09 09:37Z on cp1 (ai-node1)
+and 20:34Z on cp2 (ai-node2).
 
-The cap also bounds the worst case on endurance:
-- 100 MiB/s of sustained writes is about 9.1 TB a day.
-- Soak run 2's capped S4 Compose load averaged 33.4 MB/s, about 2.9 TB a day (record F12).
-- At its 44 MB/s peak it would be 3.8 TB a day.
-
-**What it does not do:**
-- The other heavy writers on the drive are unthrottled. These are the CI runners, which wrote up
-  to 37 MB/s each (5-minute means) during run 1.
-- It does not replace power-loss protection. The durable fix for etcd is still dedicated CP disks.
-- The limit applies to the whole worker disk: the node's root, containerd, kubelet, `local-path`
-  PVs and every launcher's ephemeral storage share one budget.
-
-**Changing the limits:**
-1. Edit the local.
-2. Run `just agent-nodes-plan`. The plan must show only an in-place `disk.speed` update on
-   `relay-worker-1`.
-3. Apply.
-
-Proxmox applies a throttle change to the running VM through QEMU (`block_set_io_throttle`), so
-neither the VM nor the node restarts. To check what is live:
-- `qm config 4304` shows the drive options;
-- `echo 'qom-get /objects/throttle-drive-scsi0 limits' | qm monitor 4304` shows the live
-  throttle.
-
-**Applied 2026-11-10 at 13:16Z** from #1704's reviewed plan, with bpg v0.121.0. The apply took 1 s:
-1 changed, 0 added, 0 destroyed. Checks:
-- **Config:** `qm config 4304` carries
-  `iops_rd=5000,iops_rd_max=10000,iops_wr=8000,iops_wr_max=12000,mbps_rd=200,mbps_rd_max=500,mbps_wr=100,mbps_wr_max=300`.
-  `qm pending` is empty, and the throttle group's live limits match, with 1-second burst lengths.
-- **No restart:** same QEMU pid (2083), Proxmox uptime kept counting, and the node's `bootID` is
-  unchanged (`2fd8d37c…`).
-- **A `dd` check** ran in a throwaway namespace on the node. The namespace enforced the restricted
-  Pod Security level, denied all ingress and egress, and was deleted afterwards. Each run used
-  O_DIRECT, a 1 GiB file and 160k 4 KiB operations. The throttled times match the model of the burst
-  pool first, then the sustained rate:
-
-  | Test | Uncapped (13:11Z) | Throttled (13:17Z) | Model |
-  |---|---|---|---|
-  | 1 MiB write | 1.9 GB/s | 7.24 s, 141 MB/s | (1024 − 300) / 100 = 7.24 s |
-  | 1 MiB read | 1.2 GB/s | 2.62 s, 391 MB/s | (1024 − 500) / 200 = 2.62 s |
-  | 4 KiB write | 10.3k IOPS | 18.50 s | (160k − 12k) / 8k = 18.5 s |
-  | 4 KiB read | 21.9k IOPS | 30.00 s | (160k − 10k) / 5k = 30 s |
-
-- **cp3 during the throttled run:** WAL fsync p99 7–8 ms and backend commit p99 7–12 ms. From
-  13:00 to 13:22Z there were no fsyncs over 1 s on cp3, no leader change, and no etcd or
-  control-plane alerts firing.
-- **Evidence:** raw evidence is outside git in
-  `C:\Users\chifo\work\home\evidence\relay-worker-disk-throttle\`. Its `SHA256SUMS` covers 16 files
-  and has digest `a805c54321601187ac8fedc3b1affa0523bbbede475bbe0b963b745931468495`.
+**If limits are wanted later:**
+- **Where:** add a `speed { ... }` block inside the **existing** `disk` block of
+  `proxmox_virtual_environment_vm.relay_worker`. A second `disk` block would attach a second
+  drive.
+- **Attributes:** bpg's names are `read`, `read_burstable`, `write`, `write_burstable` (MiB/s),
+  and `iops_read`, `iops_read_burstable`, `iops_write`, `iops_write_burstable`. #1704's commit
+  `0d425d8e` has the full block.
+- **Plan:** it must show only an in-place `disk.speed` change on `relay-worker-1`.
+- **No restart:** Proxmox applies the change to the running VM through QEMU's
+  `block_set_io_throttle`, with the default hotplug.
+- **Units:** Proxmox's "MB/s" are **MiB/s**: `mbps_rd=200` gives QEMU `bps-read` = 209715200.
+- **Bursts:** the burst pool is fixed at 1 second, because bpg does not expose `*_max_length`. A
+  transfer of N therefore takes about (N − burst) / rate.
+- **Checking the live values:** run
+  `echo 'qom-get /objects/throttle-drive-scsi0 limits' | qm monitor 4304`.
+- **The 2026-11-10 run:** the limits were 200/100 MiB/s and 5000/8000 IOPS read/write, with bursts
+  of 500/300 MiB/s and 10000/12000 IOPS. The O_DIRECT `dd` timings matched that model exactly; for
+  example, a 1 GiB write took 7.24 s.
+- **Evidence:** outside git in `C:\Users\chifo\work\home\evidence\relay-worker-disk-throttle\`:
+  - the plan, apply, live checks and `dd` runs: `SHA256SUMS` over 16 files,
+    `a805c54321601187ac8fedc3b1affa0523bbbede475bbe0b963b745931468495`;
+  - the removal, in `removal-20261110\`: `SHA256SUMS` over 4 files,
+    `7e9ec10091ba2feb245e6f239d06caba120d94ee40b5c07ae40946f34e0662db`.
 
 ## Pool rule: no workload before an egress policy
 
