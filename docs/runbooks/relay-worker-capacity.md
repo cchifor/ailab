@@ -3,8 +3,10 @@
 Status: **capacity provisioned on 2026-11-08** by the operator. `relay-worker-1` is Ready; the DHCP
 pool starts at `.53`; both preflight gates pass. Evidence is in
 [Operator rollout record](#operator-rollout-record-2026-11-08). The owner approved the capacity,
-the address and the temporary Qwen stop for S7/S8. KubeVirt is **not** installed (that is spike
-step S1), and no runtime is qualified. The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
+the address and the temporary Qwen stop for S7/S8. The KubeVirt spike ran on 2026-11-09 and 10,
+with a pass and one owner-accepted deviation ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md)).
+Qwen was restored afterwards. KubeVirt was removed after the spike and is **not** installed. No
+runtime is qualified until a binding PR says so. The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
 measured the capacity and confirmed nested KVM; the [feasibility runbook](relay-worker-kubevirt-feasibility.md)
 remains the acceptance gate.
 

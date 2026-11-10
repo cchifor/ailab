@@ -1,16 +1,27 @@
-# Runbook: KubeVirt feasibility spike for Relay developer workers (operator-run, NOT yet run)
+# Runbook: KubeVirt feasibility spike for Relay developer workers (operator-run; run 2026-11-09 to 11-10)
 
-**Status as of 2026-11-09: dedicated node ready; operator-reported preflight pass (collector revision pending confirmation); runtime spike PENDING.**
-The operator provisioned `relay-worker-1` at `192.168.0.52` on ai-node3 with
-12 vCPU, 24 GiB memory and 200 GiB disk; DHCP now starts at `.53`, and existing dev workers
-are unchanged. The [rollout record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)
-supersedes the initial failed preflight retained below. Capacity PRs #1675, #1676 and #1681
-are merged; #1677 was closed as a duplicate of #1676. **S1 (KubeVirt installation) is next;
-S1–S9 and the eight-hour soak have no passing live evidence yet.** The operator owns the spike.
-Install and verify the prescribed namespace egress policy **before the first workload or VM**.
-Nothing here installs KubeVirt through Flux. The Relay KubeVirt renderer stays unbuilt until this spike
-produces a passing evidence record (Relay plan `docs/plans/2026-11-08-infrastructure-workers/plan.md`,
-phases 1 and 5).
+**Status as of 2026-11-10: the spike has run. Result: pass, with one deviation the owner accepted
+(the S8 soak). KubeVirt has been removed.**
+- **What ran:** the operator ran S1–S9 on `relay-worker-1` (`192.168.0.52`, ai-node3, 12 vCPU,
+  24 GiB memory, 200 GiB disk). Existing dev workers are unchanged.
+- **The record:** the [run record](../relay-workers/kubevirt-spike-record-2026-11-09.md) has the
+  pins, timings, high-water marks, findings F1–F15 and deviations D1–D5.
+- **Results:**
+  - S1–S7 and S9 pass.
+  - S8's 20 cycles pass. Neither soak run reached eight hours, and the owner accepted S8 on the
+    evidence of both (record D5).
+- **Afterwards:** KubeVirt was removed after S9. The node's labels and preflight match the pre-S1
+  state again.
+- **Next:** moving `vm.kubevirt` and `vm.compose` to `qualified` with `receipt_sha256` is a
+  separate binding PR. Fix cert-manager's cainjector headroom (record F15) before any KubeVirt
+  install. Nothing here installs KubeVirt through Flux. The Relay plan gates its KubeVirt
+  renderer on this evidence (`docs/plans/2026-11-08-infrastructure-workers/plan.md`, phases 1
+  and 5).
+- **History:** the [rollout record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)
+  supersedes the initial failed preflight retained below. Capacity PRs #1675, #1676 and #1681 are
+  merged; #1677 was closed as a duplicate of #1676.
+- **For any re-run:** the operator owns it. Install and verify the prescribed namespace egress
+  policy **before the first workload or VM**.
 
 This work is **new**. It does not revive the retired test pool (ADR 0037) or AgentForge (ADR 0041).
 Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea identities: no
@@ -22,8 +33,8 @@ Do not reuse their names, namespaces, node labels, LUNs, OpenBao paths or Gitea 
 |---|---|---|---|
 | Collector parsing, gate logic, fail-closed paths | anyone, offline | `python3 -m unittest scripts/tests/test_relay_worker_preflight.py` | passes (52 tests) |
 | Repo-derived estate against the example binding | anyone, offline | `evaluate` on `scripts/tests/fixtures/relay-worker-preflight/snapshot-repo-derived.json` (synthetic, from manifests) | `fail`: no dedicated pool; dedicated gVisor RuntimeClass absent; KubeVirt absent (candidate pinned separately); synthetic cluster UID differs from the live pin |
-| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **operator-reported pass, collected 2026-11-08 at 18:16:37 UTC** ([receipt](#passing-operator-evidence-2026-11-08)); collector head awaiting confirmation |
-| Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **not run** |
+| Live cluster preflight | operator with `admin@ai` read access | `collect` + `evaluate` | **operator-reported pass, collected 2026-11-08 at 18:16:37 UTC** ([receipt](#passing-operator-evidence-2026-11-08)). The latest run was on 2026-11-10 at 07:14:55 UTC, after KubeVirt was removed, with collector `main@f569080d`: both gates pass ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md#results)). |
+| Spike S1–S9 below | operator | KubeVirt, talosctl, Proxmox | **run 2026-11-09 to 11-10: pass with deviation D5** ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md)) |
 
 A dev-worker cannot run the live collector. Its `platform` identity is namespaced, cannot list
 nodes, and its helper must not be widened for this. In that context the collector reports
@@ -144,6 +155,9 @@ The full report digest and collector revision are evidence gaps, not values to r
 from abbreviations. Before S1, the operator must record them or collect a fresh report with
 its exact revision and full artifact hashes using the command above. The documented pass
 is the operator's prerequisite report; it is not a runtime qualification receipt.
+The [run record](../relay-workers/kubevirt-spike-record-2026-11-09.md) closes both gaps. It gives
+the full report digest, and the collector revision, `main@b81ba53b`, from the checkout's reflog.
+It also has fresh reports from before S1, after S1 and after the removal.
 
 ## Spike procedure (operator-owned; all objects in a throwaway namespace)
 
@@ -345,7 +359,9 @@ their own evidence.
 
 **Steps.** Record each step's outcome as `pass`, `fail` or `not-run`, with timestamps.
 
-1. **S1, install.** Apply the K1 manifests by digest. Wait for the KubeVirt CR to reach `Deployed`.
+1. **S1, install.** Before the apply, check `cert-manager-cainjector`'s memory headroom. It watches
+   CRDs, and KubeVirt's CRDs OOM-killed it at its 128 Mi limit on both install and removal
+   (record F15). Apply the K1 manifests by digest. Wait for the KubeVirt CR to reach `Deployed`.
    Re-run the collector:
    - `kubevirt.installed` must be `pass`;
    - `kubevirt.kvm_device` must be `pass` on the K0 node only;
@@ -414,6 +430,12 @@ their own evidence.
 8. **S8, soak.**
    - Run 20 create/boot/Compose/stop/delete cycles, then run the VM for 8 hours under sustained
      Compose load.
+   - Keep the load bounded, so the soak measures the platform and not an unbounded workload. Give
+     any cache a `maxmemory` and an eviction policy. On 2026-11-09 an uncapped Redis under
+     `redis-benchmark` grew about 2 GiB an hour and filled the 8 GiB guest after about 3.5 hours.
+   - Run the [alert watch](#abort-conditions-stop-and-clean-up) inside the soak loop, next to the
+     node, kubelet, guest and Relay/router checks. On 2026-11-09 pod and node checks alone missed an
+     abort condition for about 1 h 50 min.
    - Pass criteria:
      - no guest freeze;
      - no kubelet or containerd wedge;
@@ -428,7 +450,11 @@ their own evidence.
    - no `virt-launcher` pods remain.
 
    KubeVirt either stays, until a reviewed Flux PR adopts it, or is removed with its own pinned
-   manifests in reverse order. Either way, record the outcome.
+   manifests in reverse order. Either way, record the outcome. Removing it does not remove the
+   labels and annotations it wrote on the node. On 2026-11-10 there were 454 labels
+   (`*.node.kubevirt.io/*`, `kubevirt.io/*` and `cpumanager`) and two `kubevirt.io/*`
+   annotations. Remove the ones that were not in the pre-S1 snapshot, then check that the node's
+   labels match that snapshot.
 
 **Result.**
 - The spike passes only if S1–S9 all pass.
@@ -441,11 +467,38 @@ their own evidence.
 ## Abort conditions (stop and clean up)
 
 Stop the spike and run the cleanup if any of these happens:
-- any Relay, router or control-plane alert;
+- the alert watch below says stop;
+- a Relay or router pod is not `Running` and ready, or is scheduled on the dedicated node;
 - a kubelet NotReady that does not follow the planned S7 reset;
 - etcd not at 3/3;
 - the NAS reports iSCSI or NFS errors;
 - a teardown is stuck for more than 15 minutes.
+
+**Alert watch.** "Any control-plane alert" cannot be the trigger. cp1 and cp2 raise
+`etcdHighCommitDurations` most days (19 half-hour slots in the 7 days before 2026-11-09, with no
+spike running), so that rule would stop every run. Instead:
+1. Record the firing alerts when a step starts.
+2. During S7 and S8, query Prometheus every 5 minutes.
+3. Stop on any of these:
+   - `ControlPlaneRestartWave` firing. The planned S7 reset restarts the node's own DaemonSet
+     containers (cilium, cilium-envoy, trident-node, csi-nfs-node, node-exporter). That trips it
+     by design, so ignore it for 15 minutes after the reset.
+   - An etcd leader change: `increase(etcd_server_leader_changes_seen_total[10m]) > 0`.
+   - A new alert on the control-plane node that shares the dedicated node's Proxmox disk. For
+     `relay-worker-1` that is `talos-cp3`, on ai-node3's `local-lvm`, together with two CI
+     runners. Per-pod alerts don't count: they carry cp3's kubelet as `instance` only because the
+     pod runs there.
+4. Log every other new alert in the step's evidence.
+
+There are no Relay alert rules. The router's rules mostly report upstream providers' queues and
+quotas. Relay and router health is therefore the pod check above. The 2026-11-09 re-run used this
+watch (`scripts/alertwatch.py` in the evidence).
+
+**Known limit:** the leader-change condition cannot tell where a stall came from. A stall on cp2's
+disk, on ai-node2, stopped the re-run after 2 h 57 min while cp3 was healthy (record F14). Before
+the next soak, decide whether a leader change or restart wave counts only when the CP on the
+worker's disk lost leadership, or had a WAL fsync over 1 s in the same 10 minutes. See the
+[run record](../relay-workers/kubevirt-spike-record-2026-11-09.md) for why both soak runs stopped.
 
 While the dedicated node is down, KubeVirt's control plane is down with it (virt-api,
 virt-controller and virt-operator run only there): VMI status stays stale until the node
