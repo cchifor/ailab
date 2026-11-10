@@ -288,6 +288,18 @@ pr_reviewer_owner_approval_paths_by_repo:
     - scripts/guards/owner_approval.py
     - scripts/guards/check_test_locks.py
     - scripts/guards/check_milestones.py
+# Owner decision, 2026-11-10 ("Your Approve survives a conflict-free main merge that both bots
+# re-approved"): in these repos an owner's APPROVED at an earlier commit also counts at the current
+# head when every commit since it, following first parents, is a two-parent merge of a commit
+# already on the base branch whose tree is exactly the automatic `git merge-tree --write-tree` of
+# its parents - no conflict resolved by hand, no edit folded in. Nothing else relaxes: both personas
+# clean at the head, CI green, no `no-automerge`, no owner objection since. An approval Gitea itself
+# dismissed on the push (workbricks' protection dismisses stale approvals) still counts for this
+# rule; one dismissed by a person does not. The check runs in a bare cache repo per repo under
+# /var/lib/reviewbot/git-cache (needs git >= 2.38) and FAILS CLOSED: any doubt or error holds the
+# PR for a fresh Approve, as before. Only a literal `true` enables it.
+pr_reviewer_owner_approval_survives_main_merges_by_repo:
+  cchifor/workbricks: true
 # renovate-bot added 2026-09-09 (operator-directed): its PRs automerge on the SAME gate as
 # everyone else's — every persona clean at the current head, CI green, no `no-automerge`
 # label. Deliberately NOT added to pr_reviewer_pin_authors: the pin-lane rubric is written

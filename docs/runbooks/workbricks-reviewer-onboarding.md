@@ -11,7 +11,8 @@ configurable `owner_approval_label`) and have the owner click Gitea's **Approve*
 the current head; keep the label in place so CI can recognize the policy-change lane.
 Reviewbot then merges when every existing gate passes, including green CI and clean reviews
 from both personas. The approval must be `APPROVED`, match the current `commit_id`, and be
-neither dismissed nor stale; a new head requires a new approval. Each approver's latest decisive
+neither dismissed nor stale; a new head requires a new approval, except a clean merge of `main`
+where the repository opts in (below). Each approver's latest decisive
 review is what counts: a later **Request changes** withdraws an approval, and any approver still
 requesting changes holds the PR. Eligible logins are the
 global `owner_approvers` plus this repository's `owner_approvers_by_repo` entry (role variables
@@ -33,6 +34,24 @@ file name it cannot read, counts as touching a listed path. Waiting logs `owner 
 the CI definition and entry point, the denylist and its guard, and the guards that demand the
 label; `tests/locks.sha256` and `tests/milestones/registry.json` are left out, because appending a
 lock line or moving an entry from red to green needs no owner there, and their guards are listed.
+
+**An approval survives clean merges of `main` (owner decision, 2026-11-10: "Your Approve survives a
+conflict-free main merge that both bots re-approved").** For a repository set `true` in
+`owner_approval_survives_main_merges_by_repo` (only `cchifor/workbricks` by default), an owner's
+approval at an earlier commit A also counts at the head H when every commit from H back to A,
+following first parents, is a two-parent merge whose second parent is already on the base branch
+and whose tree equals `git merge-tree --write-tree` of its two parents: no conflict resolved by
+hand, no edit folded into the merge, no other commit. Every other gate still applies at H: both
+personas clean, CI green, no `no-automerge`, and no **Request changes** from an approver since.
+Workbricks' `main` protection dismisses stale approvals, so Gitea dismisses the owner's approval on
+the push of the merge; the reviewbot still counts it for this rule when the PR timeline shows
+Gitea's own automatic dismissal of that review. A dismissal by a person withdraws it. The reviewbot
+keeps a bare cache repository per repository under `/var/lib/reviewbot/git-cache` (fetching the PR
+head and the base branch with its own token; needs git 2.38 or later) and fails closed: a fetch
+or git error, a PR ref that does not match the API's head, or anything it cannot prove holds the PR
+for a fresh Approve, as before. A carried approval logs `owner approval ...: <login>'s approval at
+<A> carried to <H> over clean merges of main: <merges>`; a refused one logs `no carry-over` and
+the reason.
 
 History:
 

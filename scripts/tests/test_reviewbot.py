@@ -5505,6 +5505,383 @@ class OwnerApprovalMergeTest(unittest.TestCase):
                     self.assertEqual(value, config[key])
 
 
+class OwnerApprovalCarryOverTest(unittest.TestCase):
+    """Workbricks owner, 2026-11-10: "Your Approve survives a conflict-free main merge that both
+    bots re-approved." An owner's approval at commit A counts at head H only when every commit since A,
+    following first parents, is a two-parent merge of a commit already on main whose tree is exactly
+    the automatic merge of its parents. Real git repositories, a real fetch (from a local bare repo
+    standing in for Gitea, with the refs Gitea serves: refs/heads/main and refs/pull/7/head)."""
+
+    GIT_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+    def setUp(self):
+        # Many tests above replace subprocess.run process-wide without restoring it; this class
+        # needs the real one, for its fixtures and for the code under test.
+        patcher = mock.patch.object(subprocess, "run", _SUBPROCESS_RUN_AT_IMPORT)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = pathlib.Path(self.tmp.name)
+        (d / "bot").mkdir()
+        self.m = load(str(d / "bot"), automerge=True, merge_personas=["test", "peer"],
+                      merge_authors=["someone"], owner_approvers=["chifor"],
+                      owner_approval_survives_main_merges_by_repo={"o/r": True},
+                      owner_approval_git_cache=str(d / "cache"))
+        self.server = d / "server.git"
+        self.work = d / "work"
+        self.m._owner_carry_remote = lambda repo: str(self.server)
+        self.logs = []
+        self.m.log = lambda *a: self.logs.append(" ".join(str(x) for x in a))
+        self.git("init", "--quiet", "--bare", str(self.server), cwd=d)
+        self.git("init", "--quiet", "-b", "main", str(self.work), cwd=d)
+        self.commit(**{"a.txt": "a1\n", "b.txt": "b1\n", "c.txt": "c1\n"})
+        self.git("checkout", "--quiet", "-b", "feature")
+        self.approved = self.commit(**{"a.txt": "a2 (the PR's change)\n"})
+        self.git("checkout", "--quiet", "main")
+        self.commit(**{"b.txt": "b2 (main moved)\n"})
+        self.git("checkout", "--quiet", "feature")
+
+    def git(self, *args, cwd=None):
+        env = dict(os.environ, **self.GIT_ENV)
+        r = subprocess.run(["git", *args], cwd=cwd or self.work, env=env, capture_output=True,
+                           text=True)
+        if r.returncode:
+            raise AssertionError(f"fixture git {args} failed: {r.stderr}")
+        return r.stdout.strip()
+
+    def commit(self, **files):
+        for name, text in files.items():
+            (self.work / name).write_text(text, encoding="utf-8")
+        self.git("add", "--all")
+        self.git("commit", "--quiet", "-m", "change " + ",".join(sorted(files)))
+        return self.git("rev-parse", "HEAD")
+
+    def merge(self, *refs):
+        self.git("merge", "--quiet", "--no-ff", "--no-edit", *refs)
+        return self.git("rev-parse", "HEAD")
+
+    def publish(self, head=None):
+        """Push main and set the PR ref the way Gitea serves it."""
+        head = head or self.git("rev-parse", "HEAD")
+        self.git("push", "--quiet", "--force", str(self.server), "main:refs/heads/main",
+                 f"{head}:refs/pull/7/head")
+        return head
+
+    def carries(self, head, approved=None, base="main"):
+        return self.m.owner_approval_carries("o/r", 7, approved or self.approved, head, base,
+                                             "chifor")
+
+    def assert_refused(self, head, reason, approved=None):
+        self.assertFalse(self.carries(head, approved))
+        self.assertEqual(1, len(self.logs), self.logs)
+        self.assertIn("no carry-over", self.logs[0])
+        self.assertIn(reason, self.logs[0])
+
+    # ---- positive ----
+
+    def test_an_approval_carries_over_one_clean_merge_of_main(self):
+        head = self.publish(self.merge("main"))
+        self.assertTrue(self.carries(head))
+        self.assertEqual([f"owner approval o/r#7: chifor's approval at {self.approved[:9]} carried "
+                          f"to {head[:9]} over clean merges of main: {head[:9]}"], self.logs)
+
+    def test_an_approval_carries_over_two_clean_merges_of_main(self):
+        first = self.merge("main")
+        self.git("checkout", "--quiet", "main")
+        self.commit(**{"c.txt": "c2 (main moved again)\n"})
+        self.git("checkout", "--quiet", "feature")
+        head = self.publish(self.merge("main"))
+        self.assertTrue(self.carries(head))
+        self.assertIn(f"over clean merges of main: {head[:9]}, {first[:9]}", self.logs[0])
+        # The cache is reused on the next sweep: a second check fetches incrementally.
+        self.logs.clear()
+        self.assertTrue(self.carries(head))
+
+    def test_a_merge_of_an_older_main_commit_carries_over(self):
+        # Merging a commit that is on main but no longer its tip is still a merge of main.
+        head = self.publish(self.merge("main"))
+        self.git("checkout", "--quiet", "main")
+        self.commit(**{"c.txt": "c3\n"})
+        self.publish(head)
+        self.assertTrue(self.carries(head))
+
+    # ---- negatives: the approval does not carry over ----
+
+    def test_a_hand_resolved_conflict_does_not_carry_over(self):
+        self.git("checkout", "--quiet", "main")
+        self.commit(**{"a.txt": "a-main (conflicts with the PR)\n"})
+        self.git("checkout", "--quiet", "feature")
+        r = subprocess.run(["git", "merge", "--no-edit", "main"], cwd=self.work,
+                           env=dict(os.environ, **self.GIT_ENV), capture_output=True, text=True)
+        self.assertEqual(1, r.returncode, r.stderr)
+        (self.work / "a.txt").write_text("resolved by hand\n", encoding="utf-8")
+        self.git("add", "a.txt")
+        self.git("commit", "--quiet", "--no-edit")
+        head = self.publish()
+        self.assert_refused(head, f"{head[:9]} is not a conflict-free merge")
+
+    def test_an_edit_folded_into_a_clean_merge_does_not_carry_over(self):
+        self.git("merge", "--quiet", "--no-ff", "--no-commit", "main")
+        (self.work / "c.txt").write_text("an extra edit hidden in the merge\n", encoding="utf-8")
+        self.git("add", "c.txt")
+        self.git("commit", "--quiet", "--no-edit")
+        head = self.publish()
+        self.assert_refused(head, f"{head[:9]} differs from the automatic merge of its parents")
+
+    def test_a_merge_plus_an_extra_commit_does_not_carry_over(self):
+        self.merge("main")
+        head = self.publish(self.commit(**{"c.txt": "an extra commit\n"}))
+        self.assert_refused(head, f"{head[:9]} is not a merge")
+
+    def test_an_extra_commit_under_a_clean_merge_does_not_carry_over(self):
+        extra = self.commit(**{"c.txt": "an extra commit, then a merge on top\n"})
+        head = self.publish(self.merge("main"))
+        self.assert_refused(head, f"{extra[:9]} is not a merge")
+
+    def test_a_merge_whose_second_parent_is_not_on_main_does_not_carry_over(self):
+        self.git("checkout", "--quiet", "-b", "side", "main~1")
+        side = self.commit(**{"d.txt": "a branch that never reached main\n"})
+        self.git("checkout", "--quiet", "feature")
+        head = self.publish(self.merge("side"))
+        self.assert_refused(head, f"merges {side[:9]}, which is not on the base branch")
+
+    def test_an_approval_reached_only_through_a_second_parent_does_not_carry_over(self):
+        # A is an ancestor of H, but H is main merging the PR: first parent main, second parent
+        # the PR. The parent order is part of the rule.
+        self.git("checkout", "--quiet", "-b", "reverse", "main")
+        head = self.publish(self.merge("feature"))
+        self.assert_refused(head, f"merges {self.approved[:9]}, which is not on the base branch")
+
+    def test_an_octopus_merge_does_not_carry_over(self):
+        self.git("checkout", "--quiet", "-b", "side", "main~1")
+        self.commit(**{"d.txt": "d\n"})
+        self.git("checkout", "--quiet", "main")
+        self.merge("side")
+        self.commit(**{"e.txt": "e\n"})
+        self.git("checkout", "--quiet", "feature")
+        # Both merged heads are on main (b2 and side, the parents of main's merge) and neither
+        # reaches the other, so git keeps all three parents; the merge is clean.
+        head = self.publish(self.merge("main~1^1", "main~1^2"))
+        self.assertEqual(3, len(self.git("log", "-1", "--format=%P", head).split()))
+        self.assert_refused(head, f"{head[:9]} is an octopus merge")
+
+    def test_an_approved_commit_that_is_not_an_ancestor_does_not_carry_over(self):
+        # Twice: once with A absent from the cache (only what the head and main reach is
+        # fetched), once with A still in it from an earlier sweep.
+        for warm in (False, True):
+            with self.subTest(warm_cache=warm):
+                self.git("checkout", "--quiet", "-B", "feature", self.approved)
+                if warm:
+                    self.assertTrue(self.carries(self.publish(self.merge("main"))))
+                    self.git("reset", "--quiet", "--hard", self.approved)
+                self.git("rebase", "--quiet", "main")
+                head = self.publish()
+                self.logs.clear()
+                self.assert_refused(head, "the approved commit is not an ancestor of the head")
+                self.assertTrue(pathlib.Path(self.m._owner_carry_cache("o/r")).is_dir())
+
+    def test_too_many_merges_do_not_carry_over(self):
+        self.m.OWNER_CARRY_MAX_MERGES = 2
+        for i in range(3):
+            self.git("checkout", "--quiet", "main")
+            self.commit(**{"b.txt": f"b-{i}\n"})
+            self.git("checkout", "--quiet", "feature")
+            head = self.merge("main")
+        self.publish(head)
+        self.assert_refused(head, "more than 2 commits since the approval")
+
+    def test_a_pr_ref_serving_another_head_does_not_carry_over(self):
+        head = self.merge("main")
+        self.publish(self.approved)  # Gitea's refs/pull/7/head lags the API's head
+        self.assert_refused(head, f"is not {head[:9]}")
+
+    def test_a_git_error_does_not_carry_over_and_discards_the_cache(self):
+        head = self.publish(self.merge("main"))
+        self.assertTrue(self.carries(head))
+        cache = pathlib.Path(self.m._owner_carry_cache("o/r"))
+        self.assertTrue(cache.is_dir())
+        self.logs.clear()
+        self.m._owner_carry_remote = lambda repo: str(self.server) + "-missing"
+        self.assert_refused(head, "RuntimeError: git fetch exit")
+        self.assertFalse(cache.exists())
+
+    def test_git_missing_or_hanging_does_not_carry_over(self):
+        head = self.publish(self.merge("main"))
+        for error in (FileNotFoundError("git"), subprocess.TimeoutExpired("git", 300)):
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(self.m.subprocess, "run", side_effect=error):
+                self.logs.clear()
+                self.assert_refused(head, type(error).__name__)
+
+    def test_unknown_or_malformed_inputs_do_not_carry_over(self):
+        head = self.publish(self.merge("main"))
+        for approved, base in (("0" * 40, "main"), ("A" * 40, "main"), (None, "main"),
+                               (self.approved, "../main"), (self.approved, "-main"),
+                               (self.approved, ""), (self.approved, "nope")):
+            with self.subTest(approved=approved, base=base):
+                self.logs.clear()
+                self.assertFalse(self.m.owner_approval_carries("o/r", 7, approved, head, base))
+                self.assertEqual(1, len(self.logs))
+                self.assertIn("no carry-over", self.logs[0])
+
+    # ---- through owner_approval_ok and maybe_merge ----
+
+    def _merge_gate(self, head, reviews, api_error=None, base="main", timeline=(),
+                    timeline_error=None):
+        pr = {"state": "open", "draft": False, "mergeable": True, "user": {"login": "someone"},
+              "labels": [{"name": "owner-approval"}], "head": {"sha": head}}
+        if base:
+            pr["base"] = {"ref": base}
+        personas = [{"id": i, "user": {"login": "reviewer-" + p}, "state": "APPROVED",
+                     "commit_id": head, "dismissed": False, "stale": False,
+                     "body": f"<!-- review-bot:v1 persona={p} head={head} verdict=clean -->"}
+                    for i, p in enumerate(("test", "peer"), 1)]
+        posts = []
+
+        def api(path, method="GET", body=None, raw=False):
+            if method == "POST":
+                posts.append((path, body))
+                return {}
+            if path == "/repos/o/r/pulls/7":
+                return pr
+            if path.startswith("/repos/o/r/pulls/7/reviews?"):
+                if api_error:
+                    raise api_error
+                return personas + reviews
+            if path == f"/repos/o/r/commits/{head}/status":
+                return {"state": "success"}
+            if path.startswith("/repos/o/r/issues/7/timeline?"):
+                self.timeline_reads += 1
+                if timeline_error:
+                    raise timeline_error
+                # Gitea filters after paging: pages come back short with more to follow.
+                page = int(path.rsplit("page=", 1)[1])
+                return list(timeline[(page - 1) * 3:page * 3]) or None
+            unexpected.append(path)
+            raise AssertionError(f"unexpected call: {method} {path}")
+
+        unexpected = []
+        self.timeline_reads = 0
+        self.m.api = api
+        self.m.maybe_merge("o/r", 7)
+        self.assertEqual([], unexpected)
+        return posts
+
+    def _dismissal(self, review_id, body=None):
+        return {"type": "dismiss_review", "review_id": review_id, "user": {"login": "someone"},
+                "body": self.m.GITEA_AUTO_DISMISS_TEXT if body is None else body}
+
+    def _owner(self, commit, state="APPROVED", **kw):
+        return dict({"id": 100 + len(commit or ""), "user": {"login": "chifor"}, "state": state,
+                     "commit_id": commit, "dismissed": False, "stale": True}, **kw)
+
+    def test_maybe_merge_merges_on_a_carried_approval(self):
+        head = self.publish(self.merge("main"))
+        posts = self._merge_gate(head, [self._owner(self.approved)])
+        self.assertEqual([("/repos/o/r/pulls/7/merge", {"Do": "merge", "head_commit_id": head})],
+                         posts)
+
+    def test_maybe_merge_holds_when_the_config_is_off(self):
+        head = self.publish(self.merge("main"))
+        for config in ({}, {"o/r": False}, {"o/r": "true"}, {"o/other": True}, None):
+            with self.subTest(config=config), \
+                    mock.patch.object(self.m.subprocess, "run") as run:
+                self.m.CFG["owner_approval_survives_main_merges_by_repo"] = config
+                self.logs.clear()
+                self.assertEqual([], self._merge_gate(head, [self._owner(self.approved)]))
+                run.assert_not_called()
+                self.assertEqual([f"merge o/r#7 held at {head[:9]}: owner approval"], self.logs)
+
+    def test_maybe_merge_holds_on_an_owner_objection_since_the_approval(self):
+        head = self.publish(self.merge("main"))
+        reviews = [self._owner(self.approved),
+                   self._owner(head, state="REQUEST_CHANGES", id=200, stale=False)]
+        self.assertEqual([], self._merge_gate(head, reviews))
+
+    def test_an_approval_gitea_dismissed_on_the_push_carries_over(self):
+        # cchifor/workbricks dismisses stale approvals on every push: the merge of main that the
+        # rule is about is exactly such a push.
+        head = self.publish(self.merge("main"))
+        owner = self._owner(self.approved, dismissed=True, id=300)
+        timeline = ([{"type": "comment", "body": "x"}] * 4
+                    + [self._dismissal(299), self._dismissal(300)])
+        self.assertEqual([("/repos/o/r/pulls/7/merge", {"Do": "merge", "head_commit_id": head})],
+                         self._merge_gate(head, [owner], timeline=timeline))
+        # Short pages (3 entries, not 50) did not end the read: the dismissal was on page 2.
+        self.assertEqual(3, self.timeline_reads)
+
+    def test_an_approval_dismissed_by_a_person_does_not_carry_over(self):
+        head = self.publish(self.merge("main"))
+        owner = self._owner(self.approved, dismissed=True, id=300)
+        for timeline in ([], [self._dismissal(300, "withdrawn: I want to look again")],
+                         [self._dismissal(299)], [dict(self._dismissal(300), type="comment")]):
+            with self.subTest(timeline=timeline):
+                self.assertEqual([], self._merge_gate(head, [owner], timeline=timeline))
+
+    def test_a_dismissed_approval_is_ignored_when_the_config_is_off(self):
+        head = self.publish(self.merge("main"))
+        self.m.CFG["owner_approval_survives_main_merges_by_repo"] = {}
+        owner = self._owner(self.approved, dismissed=True, id=300)
+        self.assertEqual([], self._merge_gate(head, [owner], timeline=[self._dismissal(300)]))
+        self.assertEqual(0, self.timeline_reads)
+
+    def test_a_dismissed_approval_at_the_head_does_not_count(self):
+        head = self.publish(self.merge("main"))
+        owner = self._owner(head, dismissed=True, stale=False, id=300)
+        self.assertEqual([], self._merge_gate(head, [owner], timeline=[self._dismissal(300)]))
+
+    def test_a_timeline_api_error_holds(self):
+        head = self.publish(self.merge("main"))
+        owner = self._owner(self.approved, dismissed=True, id=300)
+        error = urllib.error.HTTPError("u", 500, "boom", {}, None)
+        self.assertEqual([], self._merge_gate(head, [owner], timeline_error=error))
+        self.assertTrue(any("merge check o/r#7 failed: 500" in line for line in self.logs))
+
+    def test_maybe_merge_still_needs_both_personas_clean_at_the_head(self):
+        head = self.publish(self.merge("main"))
+        pr_reviews = [self._owner(self.approved)]
+        original = self.m.persona_verdicts
+        self.m.persona_verdicts = lambda repo, pr, sha: {"test": "clean", "peer": "findings"}
+        try:
+            self.assertEqual([], self._merge_gate(head, pr_reviews))
+        finally:
+            self.m.persona_verdicts = original
+
+    def test_maybe_merge_holds_on_an_api_error(self):
+        head = self.publish(self.merge("main"))
+        error = urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
+        self.assertEqual([], self._merge_gate(head, [self._owner(self.approved)], api_error=error))
+        self.assertTrue(any("merge check o/r#7 failed: 502" in line for line in self.logs))
+
+    def test_maybe_merge_holds_without_a_base_ref(self):
+        head = self.publish(self.merge("main"))
+        with mock.patch.object(self.m.subprocess, "run") as run:
+            self.assertEqual([], self._merge_gate(head, [self._owner(self.approved)], base=None))
+        run.assert_not_called()
+
+    def test_role_enables_the_rule_for_workbricks_only_and_renders_it(self):
+        import jinja2
+
+        role = ROOT / "ansible" / "roles" / "pr_reviewer"
+        defaults = AllowlistDefaultsTest._strict_yaml(
+            (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
+        key = "owner_approval_survives_main_merges_by_repo"
+        self.assertEqual({"cchifor/workbricks": True}, defaults["pr_reviewer_" + key])
+        source = (role / "templates" / "config.json.j2").read_text(encoding="utf-8")
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        template = env.from_string(source)
+        self.assertEqual({"cchifor/workbricks": True}, json.loads(template.render(defaults))[key])
+        env = jinja2.Environment()
+        env.filters["to_json"] = json.dumps
+        template = env.from_string(source)
+        absent = {k: v for k, v in defaults.items() if k != "pr_reviewer_" + key}
+        self.assertEqual({}, json.loads(template.render(absent))[key])
+
+
 class OwnerApprovalPathsTest(unittest.TestCase):
     """A PR touching a repo's owner-only paths waits for the owner as if it carried the label."""
 
