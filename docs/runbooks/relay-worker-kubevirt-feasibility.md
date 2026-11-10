@@ -361,7 +361,19 @@ their own evidence.
 
 1. **S1, install.** Before the apply, check `cert-manager-cainjector`'s memory headroom. It watches
    CRDs, and KubeVirt's CRDs OOM-killed it at its 128 Mi limit on both install and removal
-   (record F15). Apply the K1 manifests by digest. Wait for the KubeVirt CR to reach `Deployed`.
+   ([record F15](../relay-workers/kubevirt-spike-record-2026-11-09.md#findings)).
+   The cert-manager HelmRelease raises its request to 128 Mi and
+   its limit to 512 Mi. Before installing KubeVirt, the operator must confirm Flux
+   has reconciled those values into the live cainjector Pod, its Deployment is
+   Ready and its restart count is stable. Record the Pod UID, memory request/limit,
+   working set and restart count. Record the peak working set during each change
+   so the memory limit can be confirmed or adjusted from measurements.
+   This configuration change alone does not prove
+   CRD-churn qualification: watch the same metrics and cp3's etcd fsync latency
+   through both install and removal. A cainjector OOM or memory-pressure restart
+   fails the step and requires investigation before proceeding. Use the existing
+   alert watch and abort conditions below; do not repeatedly retry the CRD apply.
+   Apply the K1 manifests by digest. Wait for the KubeVirt CR to reach `Deployed`.
    Re-run the collector:
    - `kubevirt.installed` must be `pass`;
    - `kubevirt.kvm_device` must be `pass` on the K0 node only;

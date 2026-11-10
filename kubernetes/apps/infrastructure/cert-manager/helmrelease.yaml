@@ -36,5 +36,7 @@ spec:
         limits: { memory: 64Mi }
     cainjector:
       resources:
-        requests: { cpu: 10m, memory: 64Mi }
-        limits: { memory: 128Mi }
+        # KubeVirt CRD install/removal exhausted 128Mi (spike record F15).
+        # Reserve the observed steady usage and leave room for informer bursts.
+        requests: { cpu: 10m, memory: 128Mi }
+        limits: { memory: 512Mi }
