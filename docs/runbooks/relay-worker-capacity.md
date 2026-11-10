@@ -134,6 +134,9 @@ power-loss protection. These guests share the drive:
 - the Qwen LXC (5003);
 - both reviewer VMs.
 
+An I/O limit never replaced power-loss protection. The durable fix for etcd is still dedicated
+control-plane disks with it.
+
 The guest's `node_exporter` counters during the spike, at 1-minute resolution:
 
 | Load in the spike | Guest disk | cp3 WAL fsync p99 |
@@ -151,8 +154,13 @@ Both leader changes during the spike began on other hosts: 2026-11-09 09:37Z on 
 and 20:34Z on cp2 (ai-node2).
 
 **If limits are wanted later:**
-- **Where:** add `disk { speed { ... } }` to `proxmox_virtual_environment_vm.relay_worker` and
-  plan. The plan must show only an in-place `disk.speed` change.
+- **Where:** add a `speed { ... }` block inside the **existing** `disk` block of
+  `proxmox_virtual_environment_vm.relay_worker`. A second `disk` block would attach a second
+  drive.
+- **Attributes:** bpg's names are `read`, `read_burstable`, `write`, `write_burstable` (MiB/s),
+  and `iops_read`, `iops_read_burstable`, `iops_write`, `iops_write_burstable`. #1704's commit
+  `0d425d8e` has the full block.
+- **Plan:** it must show only an in-place `disk.speed` change on `relay-worker-1`.
 - **No restart:** Proxmox applies the change to the running VM through QEMU's
   `block_set_io_throttle`, with the default hotplug.
 - **Units:** Proxmox's "MB/s" are **MiB/s**: `mbps_rd=200` gives QEMU `bps-read` = 209715200.
@@ -163,7 +171,11 @@ and 20:34Z on cp2 (ai-node2).
 - **The 2026-11-10 run:** the limits were 200/100 MiB/s and 5000/8000 IOPS read/write, with bursts
   of 500/300 MiB/s and 10000/12000 IOPS. The O_DIRECT `dd` timings matched that model exactly; for
   example, a 1 GiB write took 7.24 s.
-- **Evidence:** outside git in `C:\Users\chifo\work\home\evidence\relay-worker-disk-throttle\`.
+- **Evidence:** outside git in `C:\Users\chifo\work\home\evidence\relay-worker-disk-throttle\`:
+  - the plan, apply, live checks and `dd` runs: `SHA256SUMS` over 16 files,
+    `a805c54321601187ac8fedc3b1affa0523bbbede475bbe0b963b745931468495`;
+  - the removal, in `removal-20261110\`: `SHA256SUMS` over 4 files,
+    `7e9ec10091ba2feb245e6f239d06caba120d94ee40b5c07ae40946f34e0662db`.
 
 ## Pool rule: no workload before an egress policy
 
