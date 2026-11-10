@@ -94,6 +94,76 @@ class RolloutTest(unittest.TestCase):
             (folder / 'other-canary.yaml').write_text('')
             with self.assertRaisesRegex(ValueError, 'at most one'): rollout.expectation(root)
 
+    def test_init_expectation_excludes_nested_names_and_later_volumes(self):
+        init = '''      initContainers:
+        - name: backup-before-worker-budgets
+          image: IMAGE
+          env:
+            - name: ROUTER_DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+'''.replace('IMAGE', IMAGE)
+        containers = '      containers:\n        - name: router\n          image: ' + IMAGE + '\n'
+        volumes = '      volumes:\n        - name: data\n          emptyDir: {}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            folder = root / 'kubernetes/apps/apps/llm-router'
+            folder.mkdir(parents=True)
+            for blocks in (init + containers + volumes, containers + init + volumes):
+                with self.subTest(init_before_containers=blocks.startswith(init)):
+                    (folder / 'router.yaml').write_text(blocks)
+                    self.assertEqual(rollout.expectation(root), (IMAGE, ['backup-before-worker-budgets'], None))
+
+    def test_unpinned_init_image_is_not_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            folder = root / 'kubernetes/apps/apps/llm-router'
+            folder.mkdir(parents=True)
+            (folder / 'router.yaml').write_text('image: ' + IMAGE + '\nimage: VERIFIED_ROUTER_IMAGE_AT_SHA256\n')
+            with self.assertRaisesRegex(ValueError, 'digest-pinned router image'): rollout.expectation(root)
+
+    def test_commented_init_images_are_validated_with_horizontal_whitespace(self):
+        other = 'registry.chifor.me/llm-router/router@sha256:' + 'b' * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            folder = root / 'kubernetes/apps/apps/llm-router'
+            folder.mkdir(parents=True)
+            for value in (IMAGE + ' # verified', '"' + IMAGE + '"\t# verified', "'" + IMAGE + "' # verified"):
+                with self.subTest(accepted=value):
+                    (folder / 'router.yaml').write_text('image: ' + IMAGE + '\nimage\t: \t' + value + '\t\n')
+                    self.assertEqual(rollout.expectation(root), (IMAGE, [], None))
+            for value in ('old:latest # stale init', other + ' # mismatched init', ' # no value', '\n  ' + IMAGE):
+                with self.subTest(rejected=value):
+                    (folder / 'router.yaml').write_text('image: ' + IMAGE + '\nimage\t: \t' + value + '\n')
+                    with self.assertRaisesRegex(ValueError, 'digest-pinned router image'): rollout.expectation(root)
+
+    def test_quoted_image_keys_and_list_entries_cannot_hide_a_bad_image(self):
+        for key in ('"image"', "'image'", '- image'):
+            with self.subTest(key=key):
+                self.assertEqual(rollout.pinned_images(key + ': ' + IMAGE + ' # valid'), {IMAGE})
+                with self.assertRaisesRegex(ValueError, 'digest-pinned router image'):
+                    rollout.pinned_images('image: ' + IMAGE + '\n' + key + ': latest # invalid')
+
+    def test_canary_cannot_hide_commented_unpinned_or_mismatched_image(self):
+        other = 'registry.chifor.me/llm-router/router@sha256:' + 'b' * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            folder = root / 'kubernetes/apps/apps/llm-router'
+            folder.mkdir(parents=True)
+            (folder / 'router.yaml').write_text('image: ' + IMAGE + '\n')
+            canary = folder / 'fixture-canary.yaml'
+            prefix = 'metadata:\n  name: router-fixture\nimage: ' + IMAGE + ' # application\n'
+            canary.write_text(prefix)
+            self.assertEqual(rollout.expectation(root)[2], 'router-fixture')
+            for value in ('latest', other):
+                with self.subTest(value=value):
+                    canary.write_text(prefix + 'image: ' + value + ' # init\n')
+                    with self.assertRaisesRegex(ValueError, 'same pinned release'): rollout.expectation(root)
+
     def test_public_check_requires_authentication_refusal(self):
         for refused in (True, False):
             def fetch(request, **kwargs):

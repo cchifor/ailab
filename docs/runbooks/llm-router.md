@@ -4423,6 +4423,11 @@ the deployment.
 
 ## Availability release (2026-11-07)
 
+The next prepared release has a separate [worker-budget rollout and recovery
+runbook](llm-router-worker-budgets-rollout.md). Its KV accounting changes require
+a pre-start backup and stricter downgrade fencing; the historical availability
+release's no-restore guidance below does not apply to active worker budgets.
+
 Release `router-0.1.0-20261107-availability`: source `92c7c28a744e33963882a2dfea4b6fdc99d58a8c` (llm-router `main`),
 archive `router-0.1.0-20261107-availability.tar.gz`, SHA-256
 `88fa5726536f6af974ea51d2572d3e7d389d4cdace162407a4b84f239b153bdd`, Relay branch `release/router-20261107-availability`,
