@@ -5819,7 +5819,54 @@ class OwnerApprovalCarryOverTest(unittest.TestCase):
         for timeline in ([], [self._dismissal(300, "withdrawn: I want to look again")],
                          [self._dismissal(299)], [dict(self._dismissal(300), type="comment")]):
             with self.subTest(timeline=timeline):
+                self.logs.clear()
                 self.assertEqual([], self._merge_gate(head, [owner], timeline=timeline))
+                # One line tells a withdrawal from a Gitea that reworded its dismissal text.
+                self.assertIn(f"owner approval o/r#7: chifor's APPROVED review 300 at "
+                              f"{self.approved[:9]} was dismissed, not by Gitea's push rule",
+                              "\n".join(self.logs))
+
+    def test_a_later_approval_dismissed_by_a_person_withdraws_an_earlier_carried_one(self):
+        # reviewer-claude/reviewer-codex on ailab#1699: the owner approves at A, a clean merge of
+        # main dismisses it automatically, the owner approves at B, then withdraws that approval
+        # by dismissing it by hand. The withdrawal is the owner's latest position: the approval at
+        # A must not come back and carry to the head.
+        head = self.publish(self.merge("main"))
+        earlier = self._owner(self.approved, dismissed=True, id=300)
+        later = self._owner(head, dismissed=True, stale=False, id=301)
+        for withdrawal in ([self._dismissal(301, "withdrawn: I want to look again")], []):
+            with self.subTest(withdrawal=withdrawal):
+                self.logs.clear()
+                self.assertEqual([], self._merge_gate(head, [earlier, later],
+                                                      timeline=[self._dismissal(300)] + withdrawal))
+                self.assertFalse(any("carried" in line for line in self.logs), self.logs)
+
+    def test_a_later_objection_dismissed_by_a_person_does_not_revive_an_earlier_approval(self):
+        # Same shape with a REQUEST_CHANGES in place of the second approval: dismissing the
+        # objection lifts it, but the owner has not approved since, so A does not carry.
+        head = self.publish(self.merge("main"))
+        earlier = self._owner(self.approved, dismissed=True, id=300)
+        objection = self._owner(head, state="REQUEST_CHANGES", dismissed=True, stale=False, id=301)
+        self.assertEqual([], self._merge_gate(head, [earlier, objection],
+                                              timeline=[self._dismissal(300),
+                                                        self._dismissal(301, "fine")]))
+        self.assertFalse(any("carried" in line for line in self.logs), self.logs)
+
+    def test_a_later_approval_gitea_dismissed_carries_from_its_own_commit(self):
+        # The fix must not stop the rule itself: approve at A, merge (auto-dismissed), approve at
+        # B, merge again (auto-dismissed): B, the latest position, carries to the head.
+        first = self.merge("main")
+        self.git("checkout", "--quiet", "main")
+        self.commit(**{"c.txt": "c2 (main moved again)\n"})
+        self.git("checkout", "--quiet", "feature")
+        head = self.publish(self.merge("main"))
+        earlier = self._owner(self.approved, dismissed=True, id=300)
+        later = self._owner(first, dismissed=True, id=301)
+        self.assertEqual([("/repos/o/r/pulls/7/merge", {"Do": "merge", "head_commit_id": head})],
+                         self._merge_gate(head, [earlier, later],
+                                          timeline=[self._dismissal(300), self._dismissal(301)]))
+        self.assertIn(f"chifor's approval at {first[:9]} carried to {head[:9]}",
+                      "\n".join(self.logs))
 
     def test_a_dismissed_approval_is_ignored_when_the_config_is_off(self):
         head = self.publish(self.merge("main"))
