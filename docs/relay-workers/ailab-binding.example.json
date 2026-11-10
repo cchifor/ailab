@@ -44,7 +44,7 @@
       "receipt_sha256": "341ed1442af5eca864f5c075bea77e54f3a97b5ec341bac4dc219a59d5edfa18",
       "qualified_pins": {"kubevirt_version": "v1.9.1",
         "kubevirt_operator_digest": "sha256:a8adf7b772e9ce0bf7e2ce889910fc41ebadf552c9dbe843e9b86641e34f5df9"},
-      "_comment": "Spike S1-S3 and S5-S9 on relay-worker-1, 2026-11-09 to 11-10. receipt_sha256 is the digest of the evidence set's SHA256SUMS. S8 passed with deviation D5, accepted by the owner: neither soak run reached 8 hours. Before any install, check cert-manager's cainjector headroom (F15; its limit is raised in #1701). F12 (the worker's disk shares a control-plane node's NVMe): the disk has QEMU I/O limits, docs/runbooks/relay-worker-capacity.md#disk-io-limits. A change to either KubeVirt pin needs a new qualification."},
+      "_comment": "Spike S1-S3 and S5-S9 on relay-worker-1, 2026-11-09 to 11-10. receipt_sha256 is the digest of the evidence set's SHA256SUMS. S8 passed with deviation D5, accepted by the owner: neither soak run reached 8 hours. Before any install, check cert-manager's cainjector headroom (F15; its limit is raised in #1701). Open: F12 (the worker's disk shares a control-plane node's NVMe; no I/O limit, docs/runbooks/relay-worker-capacity.md#disk-io-limits). A change to either KubeVirt pin needs a new qualification."},
     "vm.compose": {"status": "qualified",
       "receipt_sha256": "341ed1442af5eca864f5c075bea77e54f3a97b5ec341bac4dc219a59d5edfa18",
       "qualified_pins": {"kubevirt_version": "v1.9.1",

@@ -21,8 +21,8 @@
     storage 30 Gi to 31 Gi).
   - Every other capability stays `pending` or `unsupported`.
 - **Before any KubeVirt install:** check cert-manager's cainjector headroom (record F15). #1701
-  raised its limit from 128 Mi to 256 Mi. For record F12 (disk I/O shared with cp3), the worker's
-  disk now has QEMU I/O limits ([capacity runbook](relay-worker-capacity.md#disk-io-limits)).
+  raised its limit from 128 Mi to 256 Mi. Record F12 (disk I/O shared with cp3) is open: the
+  worker's disk has no I/O limit ([capacity runbook](relay-worker-capacity.md#disk-io-limits)).
   Nothing here installs KubeVirt through Flux. The Relay plan gates its KubeVirt renderer on this
   evidence (`docs/plans/2026-11-08-infrastructure-workers/plan.md`, phases 1 and 5).
 - **History:** the [rollout record](relay-worker-capacity.md#operator-rollout-record-2026-11-08)

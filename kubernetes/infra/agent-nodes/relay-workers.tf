@@ -24,24 +24,6 @@ variable "relay_worker_nodes" {
 }
 
 locals {
-  # QEMU I/O limits on the worker's disk: spike record F12, docs/runbooks/relay-worker-capacity.md#disk-io-limits.
-  # ai-node3 has ONE NVMe, without power-loss protection, shared with talos-cp3 (etcd), agent-node-3
-  # (Relay, router), two CI runners, Qwen and the reviewer VMs. Uncapped, the spike's developer VM
-  # reached 1.28 GB/s and 18.4k IOPS of reads and 579 MB/s of writes. These limits bound that worst
-  # case and keep at least 2x headroom over the sustained load the spike measured as harmless to cp3
-  # (soak run 2: <=44 MB/s and <=3.8k IOPS of writes). *_burstable is QEMU's one-second burst pool,
-  # 300 MiB written or 500 MiB read; after it, long transfers (big image pulls, cache fills) run at
-  # the sustained rate. Proxmox applies a throttle change to the running VM; no restart.
-  relay_worker_disk_speed = {
-    read                 = 200 # Proxmox mbps_*: MiB/s
-    read_burstable       = 500
-    write                = 100
-    write_burstable      = 300
-    iops_read            = 5000
-    iops_read_burstable  = 10000
-    iops_write           = 8000
-    iops_write_burstable = 12000
-  }
   relay_worker_schematic = local.schematics.relay_workers
   relay_worker_image     = "talos-${var.talos_version}-relay-workers-${local.relay_worker_schematic}.raw"
   relay_worker_patches = {
@@ -81,16 +63,6 @@ resource "proxmox_virtual_environment_vm" "relay_worker" {
     file_format  = "raw"
     iothread     = true
     discard      = "on"
-    speed {
-      read                 = local.relay_worker_disk_speed.read
-      read_burstable       = local.relay_worker_disk_speed.read_burstable
-      write                = local.relay_worker_disk_speed.write
-      write_burstable      = local.relay_worker_disk_speed.write_burstable
-      iops_read            = local.relay_worker_disk_speed.iops_read
-      iops_read_burstable  = local.relay_worker_disk_speed.iops_read_burstable
-      iops_write           = local.relay_worker_disk_speed.iops_write
-      iops_write_burstable = local.relay_worker_disk_speed.iops_write_burstable
-    }
   }
   network_device { bridge = var.bridge }
   initialization {
