@@ -5,8 +5,9 @@ pool starts at `.53`; both preflight gates pass. Evidence is in
 [Operator rollout record](#operator-rollout-record-2026-11-08). The owner approved the capacity,
 the address and the temporary Qwen stop for S7/S8. The KubeVirt spike ran on 2026-11-09 and 10,
 with a pass and one owner-accepted deviation ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md)).
-Qwen was restored afterwards. KubeVirt was removed after the spike and is **not** installed. No
-runtime is qualified until a binding PR says so. The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
+Qwen was restored afterwards. KubeVirt was removed after the spike and is **not** installed. The
+binding marks `vm.kubevirt` and `vm.compose` qualified (#1703); no other runtime is qualified.
+The worker's disk has QEMU I/O limits ([Disk I/O limits](#disk-io-limits)). The [operator report](https://git.chifor.me/cchifor/ailab/pulls/1675#issuecomment-106374)
 measured the capacity and confirmed nested KVM; the [feasibility runbook](relay-worker-kubevirt-feasibility.md)
 remains the acceptance gate.
 
@@ -113,6 +114,66 @@ above destination. Do not overwrite a pre-existing destination without comparing
 Remove only this task's temporary files afterwards. Stage it as `local:import`; the existing
 `local` datastore must allow the `import` content type. No image is downloaded into git or a
 worker's OS disk.
+
+## Disk I/O limits
+
+`relay-worker-1`'s only disk is a thin volume on ai-node3's `local-lvm`. That pool sits on the
+host's single NVMe: a consumer Kingston OM8TAP4 2 TB with no power-loss protection. These guests
+share the drive:
+- `talos-cp3`, whose etcd needs low fsync latency;
+- `talos-agent-node-3`, which runs Relay and the router;
+- `ci-runner-3` and `ci-runner-6`;
+- the Qwen LXC (5003);
+- both reviewer VMs.
+
+Spike finding F12 asked for an I/O limit on the worker's disk that covers bandwidth as well as
+latency ([run record](../relay-workers/kubevirt-spike-record-2026-11-09.md#findings)).
+
+**The limits** are set in `local.relay_worker_disk_speed` in
+`kubernetes/infra/agent-nodes/relay-workers.tf`, and Proxmox writes them onto the drive line as
+`mbps_*` and `iops_*`:
+
+| | Sustained | Burst (QEMU's 1-second pool) |
+|---|---|---|
+| Read | 200 MB/s, 5000 IOPS | 500 MB/s, 10000 IOPS |
+| Write | 100 MB/s, 8000 IOPS | 300 MB/s, 12000 IOPS |
+
+**Why these numbers.** The guest's own `node_exporter` disk counters, at 1-minute resolution,
+showed:
+
+| Load in the spike | Guest disk | cp3 WAL fsync p99 |
+|---|---|---|
+| Soak run 2 (capped Compose load, 3 h) | writes ≤ 44 MB/s and ≤ 3.8k IOPS; reads ≤ 0.6k IOPS | 4–20 ms at 30-minute points (one 0.12 s) |
+| S3 cache fill (two 1-minute direct-I/O bursts) | writes 454 and 579 MB/s | 8–15 ms |
+| Soak run 1 thrash (guest OOM loop, 15:40–16:25Z) | reads 138–866 MB/s and 4.0k–13k IOPS (5-minute means; peaks 1.28 GB/s and 18.4k IOPS) | 0.02–0.39 s |
+
+Run 1 does not prove the VM was the cause. cp3 was already at 0.2–0.46 s from 14:40 to 14:55Z,
+when the VM was reading under 3 MB/s, and cp1 and cp2 spiked in the same hour. The limits
+therefore bound the worker's worst case rather than cure a measured cause:
+- The sustained values keep at least 2× headroom over every load that was harmless.
+- They cap the thrash regime at well under half its observed peaks.
+- The bursts let image pulls and short build steps run at near-native speed.
+
+The cap also bounds the worst case on endurance. 100 MB/s of sustained writes is 8.6 TB a day;
+the capped S4 load wrote about 2.9 TB a day.
+
+**What it does not do:**
+- The other heavy writers on the drive are unthrottled. These are the CI runners, which wrote up
+  to 37 MB/s each (5-minute means) during run 1.
+- It does not replace power-loss protection. The durable fix for etcd is still dedicated CP disks.
+- The limit applies to the whole worker disk: the node's root, containerd, kubelet, `local-path`
+  PVs and every launcher's ephemeral storage share one budget.
+
+**Changing the limits:**
+1. Edit the local.
+2. Run `just agent-nodes-plan`. The plan must show only an in-place `disk.speed` update on
+   `relay-worker-1`.
+3. Apply.
+
+Proxmox applies a throttle change to the running VM through QEMU (`block_set_io_throttle`), so
+neither the VM nor the node restarts. To check what is live:
+- `qm config 4304` shows the drive options;
+- `info block` on the VM's monitor shows the live throttle.
 
 ## Pool rule: no workload before an egress policy
 
