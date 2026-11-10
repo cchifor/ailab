@@ -24,6 +24,7 @@ import http.server
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -2863,8 +2864,13 @@ def merge_author_ok(repo, author):
     return a in allowed
 
 
-def owner_approval_ok(repo, pr, head_sha, author):
-    """An independent owner's live approval of this head, scoped to this repository."""
+def owner_approval_ok(repo, pr, head_sha, author, base_ref=None):
+    """An independent owner's live approval of this head, scoped to this repository.
+
+    Where the repo opts in (owner_approval_survives_main_merges_by_repo), an approval at an
+    earlier commit also counts at this head when everything since it is a clean merge of
+    `base_ref` (owner_approval_carries). The checks above that rule are unchanged: the latest
+    decisive review per approver, any objection holding the merge."""
     allowed = {x.lower() for x in (CFG.get("owner_approvers") or [])}
     allowed.update(x.lower() for x in
                    ((CFG.get("owner_approvers_by_repo") or {}).get(repo) or []))
@@ -2878,15 +2884,213 @@ def owner_approval_ok(repo, pr, head_sha, author):
     # REQUEST_CHANGES withdraws an approval at the same head, which Gitea leaves undismissed and
     # non-stale, clearing only `official`. COMMENT reviews take no position; dismissed ones count for
     # nothing. Any approver still objecting holds the merge, whatever another approver said.
+    # One exception, for the carry-over rule only: an APPROVED that Gitea itself dismissed when new
+    # commits were pushed (branch protection "dismiss stale approvals", which cchifor/workbricks has
+    # on) is still the approver's position at its commit; owner_approval_carries decides whether it
+    # reaches this head. A dismissal by a person withdraws it, as before.
+    # With the rule on, `position` also records each approver's latest decisive review INCLUDING the
+    # ones a person dismissed: such a review grants nothing and objects to nothing, but it is still
+    # the approver's latest word, so an older approval behind it never carries (reviewer-claude and
+    # reviewer-codex on ailab#1699: approve at A, auto-dismissed by a merge of main, approve at B,
+    # B dismissed by hand, must hold; so must the same with a hand-dismissed REQUEST_CHANGES at B).
+    carry = owner_approval_survives_main_merges(repo) and bool(base_ref)
+    auto_dismissed = None
     latest = {}
+    position = {}
     for rv in iter_reviews(repo, pr):
         login = ((rv.get("user") or {}).get("login") or "").lower()
-        if login in allowed and rv.get("state") in ("APPROVED", "REQUEST_CHANGES") \
-                and not rv.get("dismissed"):
-            latest[login] = rv
+        if login not in allowed or rv.get("state") not in ("APPROVED", "REQUEST_CHANGES"):
+            continue
+        position[login] = rv
+        if rv.get("dismissed"):
+            if not carry or rv.get("state") != "APPROVED":
+                continue
+            if auto_dismissed is None:
+                auto_dismissed = _auto_dismissed_reviews(repo, pr)
+            if rv.get("id") not in auto_dismissed:
+                # Withdrawn by a person, or Gitea reworded GITEA_AUTO_DISMISS_TEXT: say which
+                # review, so the second does not pass as the first in silence.
+                log(f"owner approval {repo}#{pr}: {login}'s APPROVED review {rv.get('id')} at "
+                    f"{(rv.get('commit_id') or '')[:9]} was dismissed, not by Gitea's push rule "
+                    f"(no matching timeline entry); it does not carry over")
+                continue
+        latest[login] = rv
     if any(rv.get("state") == "REQUEST_CHANGES" for rv in latest.values()):
         return False
-    return any(rv.get("commit_id") == head_sha and not rv.get("stale") for rv in latest.values())
+    if any(rv.get("commit_id") == head_sha and not rv.get("stale") and not rv.get("dismissed")
+           for rv in latest.values()):
+        return True
+    if not carry:
+        return False
+    # Every latest review left here is an APPROVED (an objection returned above), undismissed or
+    # dismissed by Gitea on a push. It carries only while it is still the approver's latest
+    # decisive review (`position`): a later one a person dismissed withdrew it. One AT this head is
+    # not this rule's case: nothing was merged since it.
+    carried = {k: rv for k, rv in latest.items() if position.get(k) is rv}
+    for approved in sorted({rv.get("commit_id") or "" for rv in carried.values()} - {head_sha}):
+        login = ",".join(sorted(k for k, rv in carried.items() if rv.get("commit_id") == approved))
+        if owner_approval_carries(repo, pr, approved, head_sha, base_ref, login):
+            return True
+    return False
+
+
+# The owner's approval survives a conflict-free merge of the base branch (Workbricks owner,
+# 2026-11-10: "Your Approve survives a conflict-free main merge that both bots re-approved"). Each
+# routine merge into main outdates every open owner-approval PR, and bringing one up to date with a
+# merge of main used to cost the owner a fresh Approve each time (cchifor/workbricks#219 was
+# re-approved 6 times that day). The bot keeps no checkout, so the check runs in a bare cache
+# repository per repo under the state directory, fetched with the bot's own PAT, holding only two
+# fixed refs (the PR head and the base branch). One lock serialises every use of the caches.
+OWNER_CARRY_LOCK = threading.Lock()
+OWNER_CARRY_MAX_MERGES = 20
+_SHA40 = re.compile(r"[0-9a-f]{40}")
+_REF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+
+def owner_approval_survives_main_merges(repo):
+    """Opt-in per repo, strictly: only a JSON `true` enables the carry-over."""
+    return (CFG.get("owner_approval_survives_main_merges_by_repo") or {}).get(repo) is True
+
+
+# Gitea's own text for the dismissal it makes on a push when branch protection dismisses stale
+# approvals (Gitea 1.27 services/pull/review.go, DismissApprovalReviews; hard-coded, not
+# translated). Dismissing a review by hand takes repository admin and carries its own message.
+GITEA_AUTO_DISMISS_TEXT = ("New commits pushed, approval review dismissed automatically according "
+                           "to repository settings")
+
+
+def _auto_dismissed_reviews(repo, pr):
+    """Ids of the reviews Gitea dismissed automatically on a push, read from the PR's timeline
+    (the review object says only `dismissed`, not by whom). Only an empty page ends the read:
+    Gitea filters timeline entries after paging, so a page can come back short with more to follow
+    (measured on workbricks#219: 41 entries, then 10). A timeline longer than the page cap yields
+    what was read: an approval whose dismissal was not found stays dismissed (fails closed). API
+    errors propagate, and maybe_merge holds the PR on them."""
+    ids = set()
+    for page in range(1, 41):
+        batch = api(f"/repos/{repo}/issues/{pr}/timeline?limit=50&page={page}")
+        if not batch:
+            break
+        ids.update(e.get("review_id") for e in batch
+                   if e.get("type") == "dismiss_review" and e.get("review_id")
+                   and (e.get("body") or "").strip() == GITEA_AUTO_DISMISS_TEXT)
+    return ids
+
+
+def _owner_carry_cache(repo):
+    root = CFG.get("owner_approval_git_cache") or os.path.join(
+        os.path.dirname(os.path.abspath(CFG["state_db"])), "git-cache")
+    return os.path.join(root, re.sub(r"[^A-Za-z0-9._-]", "_", repo.replace("/", "__")) + ".git")
+
+
+def _owner_carry_remote(repo):
+    return f"{CFG['gitea_url']}/{repo}.git"
+
+
+def _owner_carry_git(gitdir, *args, ok=(0,), timeout=60, auth=False):
+    """Run git against the cache with no user or system config: a stray merge.* or diff.*
+    setting in the service user's ~/.gitconfig must not change what an automatic merge is. The
+    PAT reaches git through GIT_CONFIG_* in the child's environment (readable only by this user),
+    never on its command line. Any exit status outside `ok` raises."""
+    env = {"PATH": os.environ.get("PATH") or "/usr/bin:/bin", "HOME": gitdir, "LC_ALL": "C",
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"}
+    if auth:
+        env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
+                    "GIT_CONFIG_VALUE_0": f"Authorization: token {PAT}"})
+    r = subprocess.run(["git", f"--git-dir={gitdir}", *args], capture_output=True, text=True,
+                       timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+    if r.returncode not in ok:
+        raise RuntimeError(f"git {args[0]} exit {r.returncode}: {(r.stderr or '').strip()[:200]}")
+    return r
+
+
+def _owner_carry_merges(gitdir, approved, head, base):
+    """The merges carrying an approval at `approved` to `head`, newest first; or (None, why).
+
+    Walks FIRST parents from `head` back to `approved`. Every commit on the way must be a
+    two-parent merge whose second parent is already on `base`, and whose tree is exactly the
+    automatic merge of its parents (`git merge-tree --write-tree`, git >= 2.38: exit 0 clean, 1
+    conflicted). A hand-resolved conflict, an edit folded into the merge, an ordinary commit, an
+    octopus or a merge of anything not on the base branch ends the walk."""
+    # The fetch brings only what the head and the base reach: an approved commit missing from
+    # the cache is not reachable from the head (a rebase, a force-push), and no error.
+    if _owner_carry_git(gitdir, "cat-file", "-e", approved, ok=(0, 1)).returncode or \
+            _owner_carry_git(gitdir, "merge-base", "--is-ancestor", approved, head,
+                             ok=(0, 1)).returncode:
+        return None, "the approved commit is not an ancestor of the head"
+    merges, cur = [], head
+    while cur != approved:
+        if len(merges) >= OWNER_CARRY_MAX_MERGES:
+            return None, f"more than {OWNER_CARRY_MAX_MERGES} commits since the approval"
+        fields = _owner_carry_git(gitdir, "log", "-1", "--format=%T %P", cur).stdout.split()
+        tree, parents = fields[0], fields[1:]
+        if len(parents) != 2:
+            return None, (f"{cur[:9]} is not a merge" if len(parents) < 2
+                          else f"{cur[:9]} is an octopus merge")
+        first, second = parents
+        if _owner_carry_git(gitdir, "merge-base", "--is-ancestor", second, base,
+                            ok=(0, 1)).returncode:
+            return None, f"{cur[:9]} merges {second[:9]}, which is not on the base branch"
+        r = _owner_carry_git(gitdir, "merge-tree", "--write-tree", "--no-messages", first, second,
+                             ok=(0, 1))
+        auto = (r.stdout.splitlines() or [""])[0].strip()
+        if r.returncode or not _SHA40.fullmatch(auto):
+            return None, f"{cur[:9]} is not a conflict-free merge"
+        if auto != tree:
+            return None, f"{cur[:9]} differs from the automatic merge of its parents"
+        merges.append(cur)
+        cur = first
+    return merges, ""
+
+
+def owner_approval_carries(repo, pr, approved, head, base_ref, login=""):
+    """True when `login`'s approval at `approved` also counts at `head`: everything since it is a
+    clean merge of the base branch (_owner_carry_merges). FAILS CLOSED: a malformed SHA or ref, a
+    fetch that fails or serves a different head, a git error or timeout - anything but a complete
+    proof returns False, which holds the merge for the owner exactly as before this rule. Any
+    error discards the cache, so a lock file or half-written ref left by a killed git cannot wedge
+    it; the next sweep fetches afresh. Logs one line either way."""
+    if not (_SHA40.fullmatch(approved or "") and _SHA40.fullmatch(head or "")
+            and _REF_NAME.fullmatch(base_ref or "") and ".." not in base_ref
+            and not base_ref.endswith((".lock", "/", "."))):
+        log(f"owner approval {repo}#{pr}: no carry-over from {str(approved)[:9]}: "
+            "unusable commit or base ref")
+        return False
+    gitdir = _owner_carry_cache(repo)
+    with OWNER_CARRY_LOCK:
+        try:
+            if not os.path.isfile(os.path.join(gitdir, "HEAD")):
+                shutil.rmtree(gitdir, ignore_errors=True)
+                os.makedirs(os.path.dirname(gitdir), mode=0o700, exist_ok=True)
+                _owner_carry_git(gitdir, "init", "--bare", "--quiet")
+            _owner_carry_git(gitdir, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                             "--force", _owner_carry_remote(repo),
+                             f"+refs/pull/{int(pr)}/head:refs/reviewbot/head",
+                             f"+refs/heads/{base_ref}:refs/reviewbot/base",
+                             timeout=300, auth=True)
+            fetched = _owner_carry_git(gitdir, "rev-parse", "--verify", "--quiet",
+                                       "refs/reviewbot/head^{commit}").stdout.strip()
+            if fetched != head:
+                log(f"owner approval {repo}#{pr}: no carry-over from {approved[:9]}: "
+                    f"fetched head {fetched[:9]} is not {head[:9]}")
+                return False
+            base = _owner_carry_git(gitdir, "rev-parse", "--verify", "--quiet",
+                                    "refs/reviewbot/base^{commit}").stdout.strip()
+            merges, why = _owner_carry_merges(gitdir, approved, head, base)
+        except Exception as e:
+            shutil.rmtree(gitdir, ignore_errors=True)
+            log(f"owner approval {repo}#{pr}: no carry-over from {approved[:9]}: "
+                f"{type(e).__name__}: {str(e)[:200]}")
+            return False
+    if not merges:
+        log(f"owner approval {repo}#{pr}: no carry-over from {approved[:9]} to {head[:9]}: "
+            f"{why or 'no merge since the approval'}")
+        return False
+    log(f"owner approval {repo}#{pr}: {login or 'owner'}'s approval at {approved[:9]} carried "
+        f"to {head[:9]} over clean merges of {base_ref}: "
+        + ", ".join(m[:9] for m in merges))
+    return True
 
 
 def owner_approval_paths(repo, pr, head_sha):
@@ -3025,7 +3229,8 @@ def maybe_merge(repo, pr):
         if owner_paths is None:
             log(f"merge {repo}#{pr} held at {head[:9]}: head moved while reading the diff")
             return
-        if (labelled or owner_paths) and not owner_approval_ok(repo, pr, head, author):
+        if (labelled or owner_paths) and not owner_approval_ok(
+                repo, pr, head, author, (d.get("base") or {}).get("ref")):
             log(f"merge {repo}#{pr} held at {head[:9]}: owner approval"
                 + ("" if labelled else
                    " (owner-only paths: " + ", ".join(_safe_path(p) for p in owner_paths[:5])
