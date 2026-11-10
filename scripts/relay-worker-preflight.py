@@ -11,9 +11,11 @@ Two steps, so the evaluation is testable offline and the evidence is inspectable
 
 What it is NOT: a qualification. Object presence (a CRD, a RuntimeClass, a node label, a KubeVirt
 CR in phase Deployed) proves that a prerequisite is visible, never that a capability works. The
-report therefore never emits `qualified`; capability status comes from the binding, and a binding
-that claims `qualified` without a receipt digest is rejected. Qualification is the live evidence
-in docs/runbooks/relay-worker-kubevirt-feasibility.md, recorded outside git, bound by digest.
+report therefore never derives `qualified` from what it sees; capability status is copied from the
+binding. A binding that claims `qualified` without a receipt digest is rejected, and so is a
+qualified VM capability whose `qualified_pins` differ from the binding's KubeVirt pins (a pin change
+needs a new qualification). Qualification is the live evidence in
+docs/runbooks/relay-worker-kubevirt-feasibility.md, recorded outside git, bound by digest.
 
 Fail closed: no --context = refusal; an unknown context, a mismatched API server, a forbidden or
 failed query = `unknown` (exit 2) — never `pass`. Exit 0 only when every preflight check passes;
@@ -42,6 +44,9 @@ SNAPSHOT_SCHEMA = "ailab.relay-worker-preflight-snapshot/v1"
 REPORT_SCHEMA = "ailab.relay-worker-preflight-report/v1"
 BINDING_SCHEMA = "ailab.relay-worker-binding/v1alpha1"
 CAPABILITY_STATUSES = {"pending", "unsupported", "qualified"}
+# A qualified capability that ran on KubeVirt is valid only for the pins its evidence was taken with.
+_KUBEVIRT_PINS = ("kubevirt_version", "kubevirt_operator_digest")
+QUALIFICATION_PINS = {"vm.kubevirt": _KUBEVIRT_PINS, "vm.compose": _KUBEVIRT_PINS}
 
 # name -> kubectl argv (appended after `kubectl --context <ctx>`). Only `get` and `version`.
 QUERIES: dict[str, list[str]] = {
@@ -319,6 +324,19 @@ def validate_binding(b) -> list[str]:
             errs.append(f"capability {cap}: status {sv!r} not in {sorted(CAPABILITY_STATUSES)}")
         if sv == "qualified" and not re.fullmatch(r"[0-9a-f]{64}", str(v.get("receipt_sha256", ""))):
             errs.append(f"capability {cap}: 'qualified' requires receipt_sha256 of live evidence")
+        if sv == "qualified" and cap in QUALIFICATION_PINS:
+            qp = v.get("qualified_pins")
+            if not isinstance(qp, dict):
+                errs.append(f"capability {cap}: 'qualified' requires qualified_pins "
+                            f"{list(QUALIFICATION_PINS[cap])}, the pins the evidence was taken with")
+                continue
+            for k in QUALIFICATION_PINS[cap]:
+                if not isinstance(pins.get(k), str):
+                    errs.append(f"capability {cap}: pins.{k} is unset; a qualified {cap} needs it pinned "
+                                f"to qualified_pins.{k} {qp.get(k)!r}")
+                elif qp.get(k) != pins.get(k):
+                    errs.append(f"capability {cap}: qualified_pins.{k} {qp.get(k)!r} != pins.{k} "
+                                f"{pins.get(k)!r}; a pin change needs a new qualification")
     return errs
 
 
@@ -670,13 +688,16 @@ def evaluate(snap: dict, b: dict) -> dict:
     by = {c["id"]: c["status"] for c in checks}
     gates = {g: {"status": _rollup([by.get(i, UNKNOWN) for i in ids]), "requires": ids}
              for g, ids in GATES.items()}
-    caps = {k: {"status": v["status"], "source": "binding"} for k, v in b["capabilities"].items()}
+    caps = {k: {"status": v["status"], "source": "binding",
+                **({f: v[f] for f in ("receipt_sha256", "qualified_pins") if f in v}
+                   if v["status"] == "qualified" else {})}
+            for k, v in b["capabilities"].items()}
     return {"schema": REPORT_SCHEMA, "context": snap.get("context"),
             "collected_at": snap.get("collected_at"), "result": _rollup(list(by.values())),
             "checks": checks, "gates": gates, "capabilities": caps,
             "qualification": "not-established-by-preflight",
-            "note": "pass = prerequisite visible; live evidence pending "
-                    "(docs/runbooks/relay-worker-kubevirt-feasibility.md)"}
+            "note": "pass = prerequisite visible, not a qualification; capability status comes from the "
+                    "binding and its evidence (docs/runbooks/relay-worker-kubevirt-feasibility.md)"}
 
 
 def exit_code(report: dict) -> int:
