@@ -96,28 +96,46 @@ def common(config, keys):
 
 
 def initialize(config):
-    commit = common(config, ['schema001', 'schema002', 'schema003', 'schema004', 'schema005'])
-    pins = [config['schema' + str(n).zfill(3)] for n in range(1, 6)]
-    sql = {str(n).zfill(3) + '.sql': pinned(pin, 262144) for n, pin in enumerate(pins, 1)}
-    if any(not re.search(r'^BEGIN;$', raw, re.M) or not re.search(r'^COMMIT;$', raw, re.M) for raw in sql.values()):
+    return database_job(config, 'initialize', list(range(1, 8)))
+
+
+def upgrade(config):
+    previous = config.get('fromVersion') if isinstance(config, dict) else None
+    if type(previous) is not int or previous not in (5, 6):
+        refuse('upgrade-version-invalid')
+    return database_job(config, 'upgrade', list(range(previous + 1, 8)))
+
+
+def database_job(config, action, numbers):
+    keys = ['schema' + str(n).zfill(3) for n in numbers]
+    commit = common(config, keys + (['fromVersion'] if action == 'upgrade' else []))
+    pins = [config[key] for key in keys]
+    sql = {str(n).zfill(3) + '.sql': pinned(pin, 262144) for n, pin in zip(numbers, pins)}
+    if any(len(re.findall(r'^BEGIN;$', raw, re.M)) != 1 or
+           len(re.findall(r'^COMMIT;$', raw, re.M)) != 1 for raw in sql.values()):
         refuse('schema-transaction-invalid')
-    script = (ROOT / 'initialize/initialize.sh').read_text()
+    filename = action + '.sh'
+    script = (ROOT / 'initialize' / filename).read_text()
     suffix = hashlib.sha256(''.join(pin['sha256'] for pin in pins).encode()).hexdigest()[:16]
-    schema_name, script_name = NAME + '-schema-' + suffix, NAME + '-init-' + hashlib.sha256(script.encode()).hexdigest()[:16]
+    schema_name, script_name = NAME + '-schema-' + suffix, NAME + '-' + action + '-' + hashlib.sha256(script.encode()).hexdigest()[:16]
     env = [{'name': 'PGDATA', 'value': '/var/lib/postgresql/data/pgdata'}] + [
-        {'name': 'SCHEMA_' + str(n).zfill(3) + '_SHA256', 'value': pin['sha256']} for n, pin in enumerate(pins, 1)]
+        {'name': 'SCHEMA_' + str(n).zfill(3) + '_SHA256', 'value': pin['sha256']} for n, pin in zip(numbers, pins)]
+    if action == 'upgrade':
+        env.append({'name': 'FROM_SCHEMA_VERSION', 'value': str(config['fromVersion'])})
     mounts = [{'name': n, 'mountPath': p} for n, p in [('database', '/var/lib/postgresql/data'), ('schema', '/schema'),
              ('script', '/initialize'), ('run', '/var/run/postgresql'), ('tmp', '/tmp')]]
-    job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata(NAME + '-initialize-once', DB_NS, commit),
+    job_name = NAME + ('-initialize-once' if action == 'initialize' else '-upgrade-' + str(config['fromVersion']) + '-to-7')
+    job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata(job_name, DB_NS, commit),
            'spec': {'suspend': True, 'backoffLimit': 0, 'activeDeadlineSeconds': 600,
-                    'template': {'metadata': {'labels': {'app': NAME + '-initialize'}}, 'spec': {
+                    'template': {'metadata': {'labels': {'app': NAME + '-' + action}}, 'spec': {
                         'restartPolicy': 'Never', 'automountServiceAccountToken': False,
                         'terminationGracePeriodSeconds': 120, 'affinity': AFFINITY,
+                        'tolerations': [{'key': 'dedicated', 'operator': 'Equal', 'value': 'agent', 'effect': 'NoSchedule'}],
                         'securityContext': {'runAsNonRoot': True, 'runAsUser': 70, 'runAsGroup': 70,
                                             'fsGroup': 70, 'fsGroupChangePolicy': 'OnRootMismatch',
                                             'seccompProfile': {'type': 'RuntimeDefault'}},
-                        'containers': [{'name': 'initialize', 'image': PG_IMAGE,
-                                        'command': ['/bin/sh', '/initialize/initialize.sh'], 'env': env,
+                        'containers': [{'name': action, 'image': PG_IMAGE,
+                                        'command': ['/bin/sh', '/initialize/' + filename], 'env': env,
                                         'securityContext': SECURITY, 'volumeMounts': mounts,
                                         'resources': {'requests': {'cpu': '250m', 'memory': '512Mi'},
                                                       'limits': {'cpu': '1', 'memory': '512Mi'}}}],
@@ -126,7 +144,12 @@ def initialize(config):
                                     {'name': 'script', 'configMap': {'name': script_name, 'defaultMode': 292}},
                                     {'name': 'run', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '16Mi'}},
                                     {'name': 'tmp', 'emptyDir': {'sizeLimit': '32Mi'}}]}}}}
-    return [cm(schema_name, DB_NS, sql, commit), cm(script_name, DB_NS, {'initialize.sh': script}, commit), job]
+    if action == 'upgrade':
+        # Never ask kubelet to repair group ownership/mode on retained data.
+        security = job['spec']['template']['spec']['securityContext']
+        security.pop('fsGroup')
+        security.pop('fsGroupChangePolicy')
+    return [cm(schema_name, DB_NS, sql, commit), cm(script_name, DB_NS, {filename: script}, commit), job]
 
 
 def service(config):
@@ -313,10 +336,10 @@ def presence(config):
 
 
 def main(args):
-    if len(args) != 3 or args[0] not in ('initialize', 'service', 'presence') or not sha(args[2]):
+    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'service', 'presence') or not sha(args[2]):
         refuse('usage-invalid')
     config = parse(pinned({'path': args[1], 'sha256': args[2]}))
-    items = {'initialize': initialize, 'service': service, 'presence': presence}[args[0]](config)
+    items = {'initialize': initialize, 'upgrade': upgrade, 'service': service, 'presence': presence}[args[0]](config)
     print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}, separators=(',', ':')))
 
 

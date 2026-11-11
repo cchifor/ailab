@@ -4,7 +4,10 @@ umask 077
 # Bypass docker-entrypoint.sh entirely: a new/lost/empty volume MUST NOT initialize.
 if [ ! -f "$PGDATA/PG_VERSION" ] || [ "$(cat "$PGDATA/PG_VERSION")" != 17 ] ||
    [ ! -f "$PGDATA/relay-provenance-journal-schema-version" ] ||
-   [ "$(cat "$PGDATA/relay-provenance-journal-schema-version")" != 5 ] ||
+   [ -L "$PGDATA/relay-provenance-journal-schema-version" ] ||
+   [ "$(cat "$PGDATA/relay-provenance-journal-schema-version")" != 7 ] ||
+   [ -e "$PGDATA/relay-provenance-journal-upgrade-pending" ] ||
+   [ -L "$PGDATA/relay-provenance-journal-upgrade-pending" ] ||
    [ -e "$PGDATA/standby.signal" ] || [ -e "$PGDATA/recovery.signal" ]; then
   echo 'Independent provenance journal database requires operator initialization or recovery review' >&2
   exit 78

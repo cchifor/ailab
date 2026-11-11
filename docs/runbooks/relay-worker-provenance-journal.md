@@ -12,8 +12,10 @@ volumes; verify its actual PV reclaim policy before creating it.
 
 Use a merged, reviewed Relay source commit that contains
 `deploy/worker-provenance-journal/001-provenance.sql` through
-`005-runtime-presence.sql`. The provisional B6m SQL 005 hash is not an
-activation pin. Review and record the exact five SHA256 values and the source
+`007-runtime-presence-open-lifecycle.sql`. SQL 006 supplies the signed presence
+ledger; SQL 007 repairs the open-execution versus closed-cleanup boundary.
+Earlier SQL files are unchanged. These migrations do not install a Node signer,
+independent witness or execution fence. Review and record all seven SHA256 values and the source
 commit. The initializer renderer input is a single root or operator-owned,
 single-link, non-group-writable regular JSON file:
 
@@ -25,20 +27,81 @@ single-link, non-group-writable regular JSON file:
   "schema002": {"path": "/absolute/002-router-runtime.sql", "sha256": "<64 hex>"},
   "schema003": {"path": "/absolute/003-cleanup-authority.sql", "sha256": "<64 hex>"},
   "schema004": {"path": "/absolute/004-cleanup-transitions.sql", "sha256": "<64 hex>"},
-  "schema005": {"path": "/absolute/005-runtime-presence.sql", "sha256": "<64 hex>"}
+  "schema005": {"path": "/absolute/005-runtime-presence.sql", "sha256": "<64 hex>"},
+  "schema006": {"path": "/absolute/006-runtime-presence-ledger.sql", "sha256": "<64 hex>"},
+  "schema007": {"path": "/absolute/007-runtime-presence-open-lifecycle.sql", "sha256": "<64 hex>"}
 }
 ```
 
 Render with `python3 -B kubernetes/optional/relay-provenance-journal/render.py
 initialize /absolute/initializer.json <initializer-json-sha256>`. JSON output
-is a Kubernetes list. The Job verifies all five SQL files before touching
+is a Kubernetes list. The Job verifies all seven SQL files before touching
 PGDATA, refuses any existing PGDATA, creates a fresh UTF8 `relay_provenance`
 database, applies each transaction in order, checks empty authority/history,
-cleanly stops PostgreSQL, and only then writes schema marker 5. An interrupted
+cleanly stops PostgreSQL, and only then writes schema marker 7. An interrupted
 attempt or absent marker requires attended inspection. Never reset a retained
 volume or rerun the Job against it. The runtime `start.sh` refuses missing or
 wrong marker/version, recovery signals, or unsafe PGDATA ownership/mode and
 does not initialize or repair data.
+
+## Upgrade a retained schema 5 or 6 database
+
+Use the separate `upgrade` renderer; never use initialization against retained
+data. It accepts `version: 1`, the exact reviewed `relaySourceCommit`,
+`fromVersion: 5` or `6`, and only the missing pinned SQL files. Schema 5 requires
+`schema006` and `schema007`; schema 6 requires only `schema007`. Each has the same
+absolute-path/raw-SHA256 shape as initialization. The target is always schema 7.
+SQL 007 is an **inactive-source migration**: original presence, ledger and ledger
+head tables must all be empty. It refuses existing evidence rather than
+reinterpreting it under the repaired lifecycle. Inventory this condition through
+the approved database client before scheduling maintenance. Existing presence
+history requires a separately reviewed migration; do not delete evidence to pass
+this guard. Other source history is preserved.
+
+```sh
+python3 -B kubernetes/optional/relay-provenance-journal/render.py \
+  upgrade /absolute/upgrade-render.json <upgrade-render-json-sha256>
+```
+
+The output contains immutable SQL/script ConfigMaps and a suspended Job with
+no automatic retry, service-account token or network listener. It mounts the
+existing database PVC. An authorized operator must first pause issuance, stop
+the source listeners and database StatefulSet, and verify that **all** other
+PVC consumers are gone. ReadWriteOnce does not provide this exclusion. Keep
+the new schema-7 startup guard installed while replicas remain zero, so an
+older startup script cannot reopen the database during maintenance. Preserve
+the independently reviewed recovery procedure and source history; this job
+does not create a backup or qualify a restore. Uncertain workers stay reserved.
+
+The Job validates every SQL pin before changing data, checks the exact old
+marker, PostgreSQL 17, UID 70, private directory mode, and absence of a running
+postmaster or recovery signal. It starts a Unix-socket-only PostgreSQL process
+with TLS disabled for that local maintenance listener. A read-only preflight
+requires the retained `postgres` role to be a superuser so row-level security
+cannot hide history, then checks presence tables and admission phases before any migration commits; known
+incompatible history exits after a clean stop, leaving the old marker and no
+upgrade latch. Retained PostgreSQL configuration and local authentication remain
+in force; review the existing peer/HBA settings and any custom includes before
+maintenance. A stale postmaster PID file or unclean shutdown needs attended
+recovery review first; do not delete the PID file to pass the guard.
+
+Once preflight passes, the Job persists `relay-provenance-journal-upgrade-pending`,
+applies the missing transactions in order, and stops PostgreSQL cleanly. Only then does it atomically
+replace the version marker with 7 and remove the pending latch. It does not
+initialize, chmod/chown or discard retained data.
+The upgrade Pod also omits `fsGroup` so kubelet cannot recursively repair the
+retained directory's permissions before the script checks them.
+
+Any interruption leaves the pending latch or old marker in place. The runtime
+and upgrade Job both refuse that state; do not clear the latch, rerun migrations,
+or change the version marker to manufacture success. Have the operator inspect
+which transactions committed and follow the reviewed recovery procedure. SQL 007
+also refuses inconsistent phase data instead of reopening a closed admission.
+After a successful Job is terminal and its Pod is gone, verify the exact schema
+and compatible source image before an attended database/listener restart.
+All committed manifests remain optional and inactive.
+
+## Database credentials
 
 Only after the suspended Job is explicitly run, terminal, and its Pod is gone
 may an operator set the database StatefulSet to one replica. ReadWriteOnce
@@ -108,7 +171,7 @@ The rendered Deployment never references the mutable issuance Secret.
 
 ## Runtime presence source listener
 
-After Relay B6m SQL 005 and the bounded
+After Relay SQL 001–007 and the compatible bounded
 `dist/scripts/serve-runtime-presence-source.js` are reviewed and published,
 render the separate `presence` mode. Its input has exact fields `version`,
 `relaySourceCommit`, `relayImage`, `tlsCertificate`, `clientCa`,
