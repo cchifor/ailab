@@ -62,6 +62,22 @@ recorded in that change:
    Add a `containerPort` named `retirement-https` at 8788 for inspection. Do
    not add this port to the public `llm-router` Service or edge proxy.
 
+`scripts/build-router-retirement-activation.py RECEIPT.json` prepares an
+offline Deployment patch after these inputs are ready. The v1 receipt names a
+digest-pinned `routerImage`, full `routerSourceCommit`, `release`,
+`materialSecret`, `budgetDeploymentDigest`, and
+every Secret key with its target path under `/etc/router/protected` and a
+`private` boolean. Its `serverConfig` and `sourceManifest` objects each carry
+`path`, `sha256`, and `localFile`; the script hashes those two nonsecret local
+files, checks the listener bind and referenced file mappings, and writes the
+patch to stdout. Review the output as a separate activation PR. The named
+Secret must already contain all mapped keys, including the three budget files
+`budget-dsn`, `budget-ca.pem`, and `budget-witness.json`. Keep Secret values out
+of the receipt, PR, and build log. The builder checks structure and pins; the
+operator still verifies that Secret contents, certificate custody, source SQL,
+backup, and paired recovery match the receipt before activation. The produced
+patch is not included in this Kustomization.
+
 ## Network boundary and checks
 
 `llm-router-retirement` selects only pods labeled `app: llm-router`, with a
