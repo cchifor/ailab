@@ -1,0 +1,46 @@
+# Preparatory private transport. The deployed Router image has no listener on
+# this port; activation requires the separately reviewed image, pinned files,
+# certificates, source SQL and recovery procedure in the runbook.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-router-retirement
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: llm-router
+    app.kubernetes.io/component: retirement-transport
+    app.kubernetes.io/part-of: llm-router
+spec:
+  type: ClusterIP
+  selector:
+    app: llm-router
+  ports:
+    - name: retirement-https
+      protocol: TCP
+      port: 8788
+      targetPort: 8788
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-router-retirement
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/part-of: llm-router
+spec:
+  podSelector:
+    matchLabels:
+      app: llm-router
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: relay
+          podSelector:
+            matchLabels:
+              app: relay
+      ports:
+        - protocol: TCP
+          port: 8788

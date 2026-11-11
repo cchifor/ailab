@@ -51,6 +51,18 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
+  # Dedicated mTLS transport to Router's private retirement listener. The
+  # listener remains disabled until its pinned files and release are deployed.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: llm-router
+      podSelector:
+        matchLabels:
+          app: llm-router
+    ports:
+    - protocol: TCP
+      port: 8788
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0
