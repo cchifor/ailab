@@ -9,6 +9,20 @@ and public runtime versions from Node status. Credential identity remains
 unknown. It discards all other API fields,
 including annotations, container environment, command lines, and tokens.
 
+Run from an operator workstation with a deliberately scoped kubeconfig and
+the exact target context. Supply only public names and tool paths:
+
+```sh
+python3 -I -B kubernetes/optional/relay-provenance-journal/observer-preflight.py \
+  --node NODE_NAME --namespace POD_NAMESPACE --pod POD_NAME \
+  --kubectl /ABSOLUTE/PATH/TO/kubectl \
+  --kubeconfig /ABSOLUTE/PATH/TO/scoped-kubeconfig \
+  --context EXACT_CONTEXT
+```
+
+Return only the one-line JSON report and the exit status. Do not send the
+kubeconfig, raw API objects, process environment, or credential plugin logs.
+
 The report always sets `readyForObserver: false`. Talos has no host shell. An
 outside-node API read cannot prove the CRI socket path or instance, verbose
 inspect PID schema, cgroup driver and namespace, host PID/proc and ptrace
