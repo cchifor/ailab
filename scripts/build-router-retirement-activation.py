@@ -152,6 +152,7 @@ def build(receipt):
                  "const src='/in/'+name,dst='/out/'+name;"
                  "fs.copyFileSync(src,dst);fs.chmodSync(dst,mode);}")
     env = [{"name": "ROUTER_DRAIN_MS", "value": "40000"},
+           {"name": "ROUTER_PROTECTED_FILES_DIR", "value": ROOT},
            {"name": "ROUTER_PROVENANCE_FILE", "value": receipt["sourceManifest"]["path"]},
            {"name": "ROUTER_PROVENANCE_SHA256", "value": receipt["sourceManifest"]["sha256"]},
            {"name": "ROUTER_RETIREMENT_SERVER_CONFIG_FILE", "value": receipt["serverConfig"]["path"]},

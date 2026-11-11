@@ -48,15 +48,18 @@ recorded in that change:
 6. Resolve file ownership under the Router pod's restricted security context
    before activation. It runs as uid 1000. A Kubernetes Secret file with mode
    `0400` is root owned and unreadable by Router; an `fsGroup` readable mode
-   such as `0440` is rejected for private keys. The current file reader accepts
-   a regular file owned by uid 0 or the process uid. A nonroot init container
+   such as `0440` is rejected for private keys. The protected Router follow-up
+   must explicitly accept process-owned files: its original root-only loader
+   rejects uid 1000. A nonroot init container
    can read projected inputs with mode `0444` in its own container, copy them
    into a memory backed `emptyDir` as uid 1000, set
    private files to `0400` and public files to `0444`, then mount only that
    prepared directory read only into Router. Validate the exact image's
-   ownership check and startup with this layout. Router's source design
-   document currently calls for root owned keys, so reconcile that wording
-   with the tested pod layout before approving activation.
+   ownership check and startup with this layout. The app container must have
+   no writable mount alias to the prepared files. Verify the exact image's
+    loader and the pod's read-only mount before approving activation.
+    `ROUTER_PROTECTED_FILES_DIR` must be the exact canonical mount path; the
+    process checks `/proc/self/mountinfo` before reading each uid-1000 file.
 7. Set `ROUTER_DRAIN_MS=40000` and keep
    `terminationGracePeriodSeconds >= 60`. The 40 second drain and 57 second
    watchdog are part of the private listener's refusal and recovery contract.
