@@ -61,7 +61,9 @@ class RendererTest(unittest.TestCase):
             config['schema' + str(n).zfill(3)] = self.file(str(n) + '.sql', 'BEGIN;\nCOMMIT;\n')
         output = self.render('initialize', config)
         self.assertEqual(output.returncode, 0, output.stderr)
-        objects = json.loads(output.stdout)
+        resource = json.loads(output.stdout)
+        self.assertEqual((resource['apiVersion'], resource['kind']), ('v1', 'List'))
+        objects = resource['items']
         job = objects[-1]
         self.assertTrue(job['spec']['suspend'])
         self.assertEqual(job['spec']['template']['spec']['containers'][0]['env'][-1]['name'], 'SCHEMA_005_SHA256')
@@ -72,7 +74,9 @@ class RendererTest(unittest.TestCase):
         config = self.service_config()
         output = self.render('service', config)
         self.assertEqual(output.returncode, 0, output.stderr)
-        objects = json.loads(output.stdout)
+        resource = json.loads(output.stdout)
+        self.assertEqual((resource['apiVersion'], resource['kind']), ('v1', 'List'))
+        objects = resource['items']
         deploy = objects[2]
         self.assertEqual(deploy['spec']['replicas'], 0)
         mounts = deploy['spec']['template']['spec']['containers'][0]['volumeMounts']

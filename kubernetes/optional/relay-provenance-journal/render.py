@@ -241,7 +241,8 @@ def main(args):
     if len(args) != 3 or args[0] not in ('initialize', 'service') or not sha(args[2]):
         refuse('usage-invalid')
     config = parse(pinned({'path': args[1], 'sha256': args[2]}))
-    print(json.dumps(initialize(config) if args[0] == 'initialize' else service(config), separators=(',', ':')))
+    items = initialize(config) if args[0] == 'initialize' else service(config)
+    print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}, separators=(',', ':')))
 
 
 if __name__ == '__main__':
