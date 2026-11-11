@@ -65,8 +65,16 @@ class ActivationMountTest(unittest.TestCase):
                              [{"name": "retirement-files", "mountPath": ROOT, "readOnly": True}])
             self.assertEqual({item["path"] for item in
                               spec["volumes"][0]["secret"]["items"]}, set(names))
-            self.assertTrue(all(item["path"].startswith(ROOT + "/")
-                                for item in receipt["files"]))
+            outside = {**receipt, "files": [{**receipt["files"][0],
+                                            "path": "/etc/router/outside/server.json"},
+                                           *receipt["files"][1:]]}
+            with self.assertRaisesRegex(SystemExit, "material paths must be under"):
+                MODULE.build(outside)
+            traversal = {**receipt, "files": [{**receipt["files"][0],
+                                              "path": ROOT + "/../server.json"},
+                                             *receipt["files"][1:]]}
+            with self.assertRaisesRegex(SystemExit, "safe filename"):
+                MODULE.build(traversal)
             self.assertEqual(spec["initContainers"][0]["volumeMounts"][1],
                              {"name": "retirement-files", "mountPath": "/out"})
 
