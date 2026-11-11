@@ -102,6 +102,9 @@ class RendererTest(unittest.TestCase):
         self.assertEqual(pod['containers'][0]['command'][-1], '/app/dist/scripts/serve-runtime-presence-source.js')
         self.assertEqual(pod['volumes'][1]['secret']['items'], [{'key': 'observer-dsn', 'path': 'observer-dsn'}])
         self.assertTrue(all('subPath' in m for m in pod['containers'][0]['volumeMounts']))
+        config['clientCa'] = self.file('new-client-ca.pem', 'new public ca')
+        rotated = json.loads(self.render('presence', config).stdout)['items']
+        self.assertNotEqual(items[0]['metadata']['name'], rotated[0]['metadata']['name'])
         config['clientCertSha256'] = '0' * 64
         self.assertEqual(self.render('presence', config).returncode, 78)
 

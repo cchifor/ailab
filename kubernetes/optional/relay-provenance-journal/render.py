@@ -263,7 +263,8 @@ def presence(config):
     public = {'tls.crt': pinned(config['tlsCertificate']), 'client-ca.pem': pinned(config['clientCa'])}
     name = 'relay-runtime-presence-source'
     base = '/run/relay-presence/'
-    cm_name = name + '-public-' + config['tlsCertificate']['sha256'][:16]
+    public_binding = hashlib.sha256((config['tlsCertificate']['sha256'] + config['clientCa']['sha256']).encode()).hexdigest()
+    cm_name = name + '-public-' + public_binding[:16]
     tls_secret = name + '-tls-' + config['tlsCertificate']['sha256'][:32]
     env = [{'name': k, 'value': v} for k, v in [
         ('RELAY_RUNTIME_PRESENCE_HOST', '0.0.0.0'), ('RELAY_RUNTIME_PRESENCE_PORT', '8443'),
