@@ -48,15 +48,19 @@ recorded in that change:
 6. Resolve file ownership under the Router pod's restricted security context
    before activation. It runs as uid 1000. A Kubernetes Secret file with mode
    `0400` is root owned and unreadable by Router; an `fsGroup` readable mode
-   such as `0440` is rejected for private keys. The current file reader accepts
-   a regular file owned by uid 0 or the process uid. A nonroot init container
+   such as `0440` is rejected for private keys. Router follow-up
+   [#176](https://git.chifor.me/cchifor/llm-router/pulls/176) adds the explicit
+   process-owned file opt-in; the original root-only loader rejects uid 1000.
+   A nonroot init container
    can read projected inputs with mode `0444` in its own container, copy them
    into a memory backed `emptyDir` as uid 1000, set
    private files to `0400` and public files to `0444`, then mount only that
    prepared directory read only into Router. Validate the exact image's
-   ownership check and startup with this layout. Router's source design
-   document currently calls for root owned keys, so reconcile that wording
-   with the tested pod layout before approving activation.
+   ownership check and startup with this layout. The app container must have
+   no writable mount alias to the prepared files. Verify the exact image's
+    loader and the pod's read-only mount before approving activation.
+    `ROUTER_PROTECTED_FILES_DIR` must be the exact canonical mount path; the
+    process checks `/proc/self/mountinfo` before reading each uid-1000 file.
 7. Set `ROUTER_DRAIN_MS=40000` and keep
    `terminationGracePeriodSeconds >= 60`. The 40 second drain and 57 second
    watchdog are part of the private listener's refusal and recovery contract.
@@ -71,7 +75,11 @@ every Secret key with its target path under `/etc/router/protected` and a
 `private` boolean. Its `serverConfig` and `sourceManifest` objects each carry
 `path`, `sha256`, and `localFile`; the script hashes those two nonsecret local
 files, checks the listener bind and referenced file mappings, and writes the
-patch to stdout. Review the output as a separate activation PR. The named
+patch to stdout. `python3 -m unittest scripts.tests.test_router_retirement_activation`
+checks that the generated Router container uses the same directory value for
+the environment variable and its sole read-only prepared volume mount, and
+that the receipt's material paths sit beneath it. Review the output as a
+separate activation PR. The named
 Secret must already contain all mapped keys, including the three budget files
 `budget-dsn`, `budget-ca.pem`, and `budget-witness.json`. Keep Secret values out
 of the receipt, PR, and build log. The builder checks structure and pins; the
