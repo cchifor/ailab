@@ -74,21 +74,29 @@ the independently reviewed recovery procedure and source history; this job
 does not create a backup or qualify a restore. Uncertain workers stay reserved.
 
 The Job validates every SQL pin before changing data, checks the exact old
-marker, PostgreSQL 17, UID 70, private directory mode, and absence of a running
+marker, PostgreSQL 17, UID 70, owner-only or owner/group-readable directory mode
+(700/750, optionally setgid), and absence of a running
 postmaster or recovery signal. It starts a Unix-socket-only PostgreSQL process
 with TLS disabled for that local maintenance listener. A read-only preflight
 requires the retained `postgres` role to be a superuser so row-level security
-cannot hide history, then checks presence tables and admission phases before any migration commits; known
+cannot hide history, then checks presence tables, admission phases and absence
+of the pending migrations' new objects before any migration commits; known
 incompatible history exits after a clean stop, leaving the old marker and no
 upgrade latch. Retained PostgreSQL configuration and local authentication remain
 in force; review the existing peer/HBA settings and any custom includes before
-maintenance. A stale postmaster PID file or unclean shutdown needs attended
+maintenance. A stale schema marker with already applied DDL is refused before
+the latch; inspect that drift rather than changing the marker to bypass it.
+A stale postmaster PID file or unclean shutdown needs attended
 recovery review first; do not delete the PID file to pass the guard.
 
 Once preflight passes, the Job persists `relay-provenance-journal-upgrade-pending`,
 applies the missing transactions in order, and stops PostgreSQL cleanly. Only then does it atomically
 replace the version marker with 7 and remove the pending latch. It does not
 initialize, chmod/chown or discard retained data.
+During migration execution, the shell waits on a background psql child so an
+INT/TERM signal promptly invokes fast PostgreSQL shutdown and aborts any active
+transaction. SIGKILL, host loss or a shutdown exceeding the Pod grace period can
+still leave an unclean database; the persistent latch continues to refuse use.
 The upgrade Pod also omits `fsGroup` so kubelet cannot recursively repair the
 retained directory's permissions before the script checks them.
 
