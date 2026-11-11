@@ -1,11 +1,12 @@
 # Runtime observer preflight (read-only, incomplete by design)
 
 `observer-preflight.py` runs on an operator workstation, outside Talos. It
-executes only `kubectl get node`, `kubectl get pod`, `kubectl auth whoami`, and,
-when a binary is supplied, `talosctl version`. The tool paths and exact Node,
+executes only `kubectl get node` and `kubectl get pod` with an explicit
+kubeconfig, context, and request timeout. The tool path and exact Node,
 namespace, and Pod names are explicit arguments. The collector emits a fixed
-JSON allowlist: credential identity, Pod and Node UIDs, Pod placement and
-Running state, and public runtime versions. It discards all other API fields,
+JSON allowlist: Pod and Node UIDs, Pod placement and running container state,
+and public runtime versions from Node status. Credential identity remains
+unknown. It discards all other API fields,
 including annotations, container environment, command lines, and tokens.
 
 The report always sets `readyForObserver: false`. Talos has no host shell. An

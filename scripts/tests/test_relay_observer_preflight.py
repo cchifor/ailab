@@ -16,31 +16,37 @@ class ObserverPreflightTest(unittest.TestCase):
     def test_allowlist_and_unknown_host_facts(self):
         with tempfile.TemporaryDirectory() as directory:
             kubectl = Path(directory) / 'kubectl'
+            kubeconfig = Path(directory) / 'kubeconfig'
+            kubeconfig.write_text('fixture credential path')
             kubectl.write_text('''#!/usr/bin/env python3
 import json, sys
 args = sys.argv[1:]
-if args[:2] == ['get', 'node']:
+if args[args.index('get') + 1] == 'node':
     value = {'kind':'Node','metadata':{'name':'worker-a','uid':'%s',
         'annotations':{'private':'DO-NOT-PRINT'}},
-        'status':{'nodeInfo':{'containerRuntimeVersion':'containerd://2.1.0'}}}
-elif args[:2] == ['get', 'pod']:
+        'status':{'nodeInfo':{'containerRuntimeVersion':'containerd://2.1.0',
+                             'osImage':'Talos (v1.11.2)'}}}
+else:
     value = {'kind':'Pod','metadata':{'name':'work-a','namespace':'research','uid':'%s'},
         'spec':{'nodeName':'worker-a','containers':[{'env':[{'value':'DO-NOT-PRINT'}]}]},
-        'status':{'phase':'Running'}}
-else:
-    value = {'kind':'SelfSubjectReview','status':{'userInfo':{'username':'operator-a'}}}
+        'status':{'phase':'Running','containerStatuses':[
+            {'name':'supervisor','ready':True,'restartCount':0,'state':{'running':{}}},
+            {'name':'harness','ready':True,'restartCount':0,'state':{'running':{}}}]}}
 print(json.dumps(value))
 ''' % (NODE_UID, POD_UID))
             kubectl.chmod(0o755)
             result = subprocess.run(['python3', '-B', str(SCRIPT), '--node', 'worker-a',
                                      '--namespace', 'research', '--pod', 'work-a',
-                                     '--kubectl', str(kubectl)], capture_output=True, text=True,
+                                     '--kubectl', str(kubectl), '--kubeconfig', str(kubeconfig),
+                                     '--context', 'admin@ai'], capture_output=True, text=True,
                                     timeout=20, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn('DO-NOT-PRINT', result.stdout)
             report = json.loads(result.stdout)
             self.assertEqual(report['nodeUid'], NODE_UID)
             self.assertEqual(report['podUid'], POD_UID)
+            self.assertEqual(report['talosVersion'], 'v1.11.2')
+            self.assertEqual(report['credentialIdentity'], 'unknown')
             self.assertTrue(report['podRunningOnNode'])
             self.assertEqual(report['criSocketPath'], 'unknown')
             self.assertEqual(report['checkpointFeatureAndRbac'], 'unknown')
