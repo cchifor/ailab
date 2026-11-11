@@ -48,9 +48,10 @@ recorded in that change:
 6. Resolve file ownership under the Router pod's restricted security context
    before activation. It runs as uid 1000. A Kubernetes Secret file with mode
    `0400` is root owned and unreadable by Router; an `fsGroup` readable mode
-   such as `0440` is rejected for private keys. The protected Router follow-up
-   must explicitly accept process-owned files: its original root-only loader
-   rejects uid 1000. A nonroot init container
+   such as `0440` is rejected for private keys. Router follow-up
+   [#176](https://git.chifor.me/cchifor/llm-router/pulls/176) adds the explicit
+   process-owned file opt-in; the original root-only loader rejects uid 1000.
+   A nonroot init container
    can read projected inputs with mode `0444` in its own container, copy them
    into a memory backed `emptyDir` as uid 1000, set
    private files to `0400` and public files to `0444`, then mount only that
@@ -74,7 +75,11 @@ every Secret key with its target path under `/etc/router/protected` and a
 `private` boolean. Its `serverConfig` and `sourceManifest` objects each carry
 `path`, `sha256`, and `localFile`; the script hashes those two nonsecret local
 files, checks the listener bind and referenced file mappings, and writes the
-patch to stdout. Review the output as a separate activation PR. The named
+patch to stdout. `python3 -m unittest scripts.tests.test_router_retirement_activation`
+checks that the generated Router container uses the same directory value for
+the environment variable and its sole read-only prepared volume mount, and
+that the receipt's material paths sit beneath it. Review the output as a
+separate activation PR. The named
 Secret must already contain all mapped keys, including the three budget files
 `budget-dsn`, `budget-ca.pem`, and `budget-witness.json`. Keep Secret values out
 of the receipt, PR, and build log. The builder checks structure and pins; the
