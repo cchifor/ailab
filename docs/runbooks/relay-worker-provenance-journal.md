@@ -99,6 +99,15 @@ transaction. SIGKILL, host loss or a shutdown exceeding the Pod grace period can
 still leave an unclean database; the persistent latch continues to refuse use.
 The upgrade Pod also omits `fsGroup` so kubelet cannot recursively repair the
 retained directory's permissions before the script checks them.
+The socket and temporary directories are Pod-private `emptyDir` volumes:
+[Kubernetes 1.35's emptyDir implementation](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/volume/emptydir/empty_dir.go)
+uses mode 0777 for disk directories and kernel tmpfs defaults for memory volumes.
+They remain writable by UID 70 without `fsGroup`; no root init container is needed
+or admitted by this namespace's Restricted Pod Security policy. Local schema 5/6
+upgrades and interrupted-migration checks also passed with root-owned scratch
+mounts (1777 for the socket directory and 0777 for `/tmp`), UID 70 and all
+capabilities dropped. This verifies the process/mount behavior, not a live
+Kubernetes deployment; verify the rendered Pod on the target before activation.
 
 Any interruption leaves the pending latch or old marker in place. The runtime
 and upgrade Job both refuse that state; do not clear the latch, rerun migrations,

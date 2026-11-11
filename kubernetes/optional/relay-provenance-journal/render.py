@@ -146,6 +146,9 @@ def database_job(config, action, numbers):
                                     {'name': 'tmp', 'emptyDir': {'sizeLimit': '32Mi'}}]}}}}
     if action == 'upgrade':
         # Never ask kubelet to repair group ownership/mode on retained data.
+        # Scratch uses emptyDir, not a PVC: kubelet setupDir uses 0777 and
+        # the memory volume uses tmpfs defaults, writable by UID 70 without
+        # fsGroup. A root/chown init container would violate Restricted PSA.
         security = job['spec']['template']['spec']['securityContext']
         security.pop('fsGroup')
         security.pop('fsGroupChangePolicy')
