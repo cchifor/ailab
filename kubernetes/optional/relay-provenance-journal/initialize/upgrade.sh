@@ -4,8 +4,9 @@ umask 077
 root=/var/lib/postgresql/data
 [ "$PGDATA" = "$root/pgdata" ] || exit 78
 case "${FROM_SCHEMA_VERSION:-}" in
-  5) migrations='006 007';;
-  6) migrations='007';;
+  5) migrations='006 007 008';;
+  6) migrations='007 008';;
+  7) migrations='008';;
   *) exit 78;;
 esac
 # Validate every pin before checking or changing retained data.
@@ -28,7 +29,7 @@ if [ ! -d "$PGDATA" ] || [ -L "$PGDATA" ] ||
    [ -e "$PGDATA/postmaster.pid" ] || [ -e "$pending" ] || [ -L "$pending" ] ||
    [ -e "$version.next" ] || [ -L "$version.next" ] ||
    [ -e "$PGDATA/standby.signal" ] || [ -e "$PGDATA/recovery.signal" ]; then
-  echo 'Provenance upgrade requires a stopped reviewed schema 5/6 database' >&2
+  echo 'Provenance upgrade requires a stopped reviewed schema 5/6/7 database' >&2
   exit 78
 fi
 [ "$(stat -c '%u' "$PGDATA")" = 70 ] || exit 78
@@ -42,6 +43,12 @@ superuser=$(psql -X -At -h /var/run/postgresql -U postgres -d relay_provenance -
 [ "$superuser" = t ] || exit 78
 # Refuse known incompatible history before schema 006 can commit. The offline
 # consumer fence and Unix-only listener prevent concurrent application writers.
+if [ "$FROM_SCHEMA_VERSION" = 7 ]; then
+  # 008 does not reinterpret presence evidence; preserve populated history.
+  check="SELECT to_regprocedure('worker_provenance.runtime_presence_admission_monotone()') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='worker_provenance.admissions'::regclass
+      AND conname='runtime_presence_cleanup_requires_closed')"
+else
 check='SELECT NOT EXISTS (SELECT 1 FROM worker_provenance.runtime_presence) AND NOT EXISTS (SELECT 1 FROM worker_provenance.admissions WHERE requires_runtime_presence AND cleanup_started AND NOT closed)'
 check="$check AND NOT EXISTS (
   SELECT 1 FROM pg_constraint WHERE conrelid='worker_provenance.admissions'::regclass
@@ -76,14 +83,33 @@ else
     )
   )"
 fi
+fi
 compatible=$(psql -X -At -h /var/run/postgresql -U postgres -d relay_provenance -v ON_ERROR_STOP=1 -c "$check")
 if [ "$compatible" != t ]; then
-  echo 'Provenance upgrade requires empty presence history, compatible phases and unapplied migration targets' >&2
+  echo 'Provenance upgrade requires compatible history, phases and migration prerequisites' >&2
+  exit 78
+fi
+# Source hashes match Relay008 at faa1148b; historical bodies are from2aae6c14.
+# The same exact known-source hashes are rechecked under locks by SQL008.
+# Refuse before 006/007 commit or a latch is created if installed code drifted.
+source_ok=$(psql -X -At -h /var/run/postgresql -U postgres -d relay_provenance -v ON_ERROR_STOP=1 <<'SQL'
+SELECT count(*)=2 AND bool_and(
+ p.proowner='relay_provenance_owner'::regrole AND p.prosecdef AND p.prorettype='jsonb'::regtype
+ AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex') IN (v.previous_digest,v.repaired_digest)
+) FROM (VALUES
+ ('transition','585207182af8ebd3142894a14006da7b046d9803576ee2a08d20af2d5f5a25c7','96f5fbc1440e80e791c628f08812790c3a1cb5255e7bd6efac8e0fba88472eb7'),
+ ('lookup','3a3b6055deb3486bd88a484790fe33767d1286ffe0f7f6be9f4c01a505fa657b','1e1314f11045c5f53603dc1da1a0a66f224d215d0e365c811bcecf71a6d2eef9')
+) AS v(name,previous_digest,repaired_digest)
+JOIN pg_proc p ON p.oid=to_regprocedure('worker_provenance.'||v.name||'(text,text,text)');
+SQL
+)
+if [ "$source_ok" != t ]; then
+  echo 'Provenance upgrade requires reviewed authority function history' >&2
   exit 78
 fi
 # This persistent latch prevents automatic startup or retry after interruption.
 # The operator must also fence every other PVC consumer; RWO is not that fence.
-(set -C; printf 'from=%s to=7\n' "$FROM_SCHEMA_VERSION" > "$pending")
+(set -C; printf 'from=%s to=8\n' "$FROM_SCHEMA_VERSION" > "$pending")
 sync
 for n in $migrations; do
   # Waiting on a background child lets POSIX sh handle TERM promptly. The EXIT
@@ -94,8 +120,8 @@ for n in $migrations; do
 done
 stop
 trap - EXIT INT TERM
-# Publish the new marker only after both transactions and clean shutdown.
-(set -C; printf '7\n' > "$version.next")
+# Publish the new marker only after all transactions and clean shutdown.
+(set -C; printf '8\n' > "$version.next")
 sync
 mv "$version.next" "$version"
 sync

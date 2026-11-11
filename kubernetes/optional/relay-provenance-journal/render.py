@@ -96,14 +96,14 @@ def common(config, keys):
 
 
 def initialize(config):
-    return database_job(config, 'initialize', list(range(1, 8)))
+    return database_job(config, 'initialize', list(range(1, 9)))
 
 
 def upgrade(config):
     previous = config.get('fromVersion') if isinstance(config, dict) else None
-    if type(previous) is not int or previous not in (5, 6):
+    if type(previous) is not int or previous not in (5, 6, 7):
         refuse('upgrade-version-invalid')
-    return database_job(config, 'upgrade', list(range(previous + 1, 8)))
+    return database_job(config, 'upgrade', list(range(previous + 1, 9)))
 
 
 def database_job(config, action, numbers):
@@ -124,7 +124,7 @@ def database_job(config, action, numbers):
         env.append({'name': 'FROM_SCHEMA_VERSION', 'value': str(config['fromVersion'])})
     mounts = [{'name': n, 'mountPath': p} for n, p in [('database', '/var/lib/postgresql/data'), ('schema', '/schema'),
              ('script', '/initialize'), ('run', '/var/run/postgresql'), ('tmp', '/tmp')]]
-    job_name = NAME + ('-initialize-once' if action == 'initialize' else '-upgrade-' + str(config['fromVersion']) + '-to-7')
+    job_name = NAME + ('-initialize-once' if action == 'initialize' else '-upgrade-' + str(config['fromVersion']) + '-to-8')
     job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata(job_name, DB_NS, commit),
            'spec': {'suspend': True, 'backoffLimit': 0, 'activeDeadlineSeconds': 600,
                     'template': {'metadata': {'labels': {'app': NAME + '-' + action}}, 'spec': {

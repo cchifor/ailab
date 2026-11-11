@@ -59,7 +59,7 @@ class RendererTest(unittest.TestCase):
 
     def test_suspended_initialization_and_preflight_pins(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT}
-        for n in range(1, 8):
+        for n in range(1, 9):
             config['schema' + str(n).zfill(3)] = self.file(str(n) + '.sql', 'BEGIN;\nCOMMIT;\n')
         output = self.render('initialize', config)
         self.assertEqual(output.returncode, 0, output.stderr)
@@ -68,21 +68,21 @@ class RendererTest(unittest.TestCase):
         objects = resource['items']
         job = objects[-1]
         self.assertTrue(job['spec']['suspend'])
-        self.assertEqual(job['spec']['template']['spec']['containers'][0]['env'][-1]['name'], 'SCHEMA_007_SHA256')
-        self.assertEqual(set(objects[0]['data']), {f'{n:03d}.sql' for n in range(1, 8)})
-        config['schema007']['sha256'] = HASH
+        self.assertEqual(job['spec']['template']['spec']['containers'][0]['env'][-1]['name'], 'SCHEMA_008_SHA256')
+        self.assertEqual(set(objects[0]['data']), {f'{n:03d}.sql' for n in range(1, 9)})
+        config['schema008']['sha256'] = HASH
         self.assertEqual(self.render('initialize', config).returncode, 78)
 
     def test_upgrade_pins_only_missing_migrations_and_stays_suspended(self):
-        for previous in (5, 6):
+        for previous in (5, 6, 7):
             with self.subTest(previous=previous):
                 config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': previous}
-                for n in range(previous + 1, 8):
+                for n in range(previous + 1, 9):
                     config[f'schema{n:03d}'] = self.file(f'{n:03d}.sql', 'BEGIN;\nCOMMIT;\n')
                 output = self.render('upgrade', config)
                 self.assertEqual(output.returncode, 0, output.stderr)
                 schema, script, job = json.loads(output.stdout)['items']
-                self.assertEqual(set(schema['data']), {f'{n:03d}.sql' for n in range(previous + 1, 8)})
+                self.assertEqual(set(schema['data']), {f'{n:03d}.sql' for n in range(previous + 1, 9)})
                 self.assertEqual(set(script['data']), {'upgrade.sh'})
                 self.assertTrue(job['spec']['suspend'])
                 self.assertEqual(job['spec']['backoffLimit'], 0)
@@ -97,18 +97,18 @@ class RendererTest(unittest.TestCase):
                 self.assertEqual(job['spec']['template']['metadata']['labels']['app'], 'relay-provenance-journal-upgrade')
                 self.assertEqual(pod['containers'][0]['command'], ['/bin/sh', '/initialize/upgrade.sh'])
                 self.assertEqual(pod['containers'][0]['env'][-1], {'name': 'FROM_SCHEMA_VERSION', 'value': str(previous)})
-                config['schema007']['sha256'] = HASH
+                config['schema008']['sha256'] = HASH
                 self.assertEqual(self.render('upgrade', config).returncode, 78)
 
     def test_upgrade_refuses_missing_extra_or_unsupported_inputs(self):
-        base = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 6,
-                'schema007': self.file('007.sql', 'BEGIN;\nCOMMIT;\n')}
-        for previous in (True, '6', 4, 7, None):
+        base = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 7,
+                'schema008': self.file('008.sql', 'BEGIN;\nCOMMIT;\n')}
+        for previous in (True, '7', 4, 8, None):
             self.assertEqual(self.render('upgrade', {**base, 'fromVersion': previous}).returncode, 78)
         self.assertEqual(self.render('upgrade', {**base, 'fromVersion': 5}).returncode, 78)
-        self.assertEqual(self.render('upgrade', {**base, 'schema006': base['schema007']}).returncode, 78)
+        self.assertEqual(self.render('upgrade', {**base, 'schema006': base['schema008']}).returncode, 78)
         multiple = self.file('multiple.sql', 'BEGIN;\nCOMMIT;\nBEGIN;\nCOMMIT;\n')
-        self.assertEqual(self.render('upgrade', {**base, 'schema007': multiple}).returncode, 78)
+        self.assertEqual(self.render('upgrade', {**base, 'schema008': multiple}).returncode, 78)
 
     def test_runtime_refuses_old_schema_or_pending_upgrade_before_postgres(self):
         data = self.dir / 'pgdata'
@@ -127,12 +127,12 @@ class RendererTest(unittest.TestCase):
         script = ROOT / 'kubernetes/optional/relay-provenance-journal/start.sh'
         def run():
             return subprocess.run(['sh', str(script)], env=env, text=True, capture_output=True).returncode
-        for previous in (5, 6):
+        for previous in (5, 6, 7):
             schema.write_text(str(previous) + '\n')
             self.assertEqual(run(), 78)
             self.assertFalse(marker.exists())
-        schema.write_text('7\n')
-        pending.write_text('from=6 to=7\n')
+        schema.write_text('8\n')
+        pending.write_text('from=7 to=8\n')
         self.assertEqual(run(), 78)
         self.assertFalse(marker.exists())
         pending.unlink()
@@ -149,11 +149,14 @@ class RendererTest(unittest.TestCase):
         sha.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 99\n')
         sha.chmod(0o755)
         env = dict(os.environ, PGDATA='/var/lib/postgresql/data/pgdata', FROM_SCHEMA_VERSION='5',
-                   SCHEMA_006_SHA256=HASH, SCHEMA_007_SHA256='invalid', PATH=str(self.dir) + ':/usr/bin:/bin')
+                   SCHEMA_006_SHA256=HASH, SCHEMA_007_SHA256=HASH, SCHEMA_008_SHA256=HASH,
+                   PATH=str(self.dir) + ':/usr/bin:/bin')
         script = ROOT / 'kubernetes/optional/relay-provenance-journal/initialize/upgrade.sh'
-        result = subprocess.run(['sh', str(script)], env=env, text=True, capture_output=True)
-        self.assertEqual(result.returncode, 78)
-        self.assertFalse(marker.exists())
+        for invalid in ('SCHEMA_006_SHA256', 'SCHEMA_007_SHA256', 'SCHEMA_008_SHA256'):
+            with self.subTest(invalid=invalid):
+                result = subprocess.run(['sh', str(script)], env={**env, invalid: 'invalid'}, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 78)
+                self.assertFalse(marker.exists())
 
     def test_listener_remains_inactive_and_uses_regular_file_mounts(self):
         config = self.service_config()
