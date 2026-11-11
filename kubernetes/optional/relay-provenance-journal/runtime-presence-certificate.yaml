@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: relay-runtime-presence-source-tls
+  namespace: relay-provenance-journal
+spec:
+  secretName: relay-runtime-presence-source-tls
+  secretTemplate:
+    labels:
+      velero.io/exclude-from-backup: 'true'
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+  - relay-runtime-presence-source.relay-provenance-journal.svc
+  - relay-runtime-presence-source.relay-provenance-journal.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature]
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: relay-provenance-journal-postgres-data
+  namespace: relay-provenance-journal-db
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: qnap-iscsi # Existing class: reclaimPolicy=Retain, ext4 block storage.
+  resources:
+    requests:
+      storage: 10Gi

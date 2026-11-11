@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: relay-provenance-journal-postgres-tls
+  namespace: relay-provenance-journal-db
+spec:
+  secretName: relay-provenance-journal-postgres-tls
+  secretTemplate:
+    labels:
+      velero.io/exclude-from-backup: "true"
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+  - relay-provenance-journal-postgres.relay-provenance-journal-db.svc
+  - relay-provenance-journal-postgres.relay-provenance-journal-db.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature]
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
