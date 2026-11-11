@@ -10,6 +10,7 @@ kind: Kustomization
 #   * The "edge" namespace label and the Cloudflare tunnel in edge-connector.
 resources:
   - router.yaml
+  - retirement-transport.yaml
   - edge.yaml
   - podmonitor.yaml # Prometheus scrape of the router's metrics port (rules: infrastructure/monitoring/llm-router-rules.yaml)
   - llm-router-oidc.sops.yaml # SOPS: Keycloak client secret, router_auth DB URL, break-glass token (llm-router#121)
