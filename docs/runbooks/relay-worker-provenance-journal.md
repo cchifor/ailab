@@ -106,6 +106,42 @@ Secret. The candidate journal snapshot helper was adapted here as
 certificate hash and key match and refuses terminal or regular-file output.
 The rendered Deployment never references the mutable issuance Secret.
 
+## Runtime presence source listener
+
+After Relay B6m SQL 005 and the bounded
+`dist/scripts/serve-runtime-presence-source.js` are reviewed and published,
+render the separate `presence` mode. Its input has exact fields `version`,
+`relaySourceCommit`, `relayImage`, `tlsCertificate`, `clientCa`,
+`operatorRootHex`, `clientCertSha256`, and `clients`. The image and source
+commit have the same receipt requirement as the cleanup listener. The two
+certificate/CA fields are pinned public file references as above; the two hex
+fields are public 64-character pins. `clients` selects only the qualified
+supervisor Pods that hold the pinned client certificate. Both source listener
+and cleanup listener start at zero replicas and have separate Services and
+NetworkPolicies.
+
+```sh
+python3 -B kubernetes/optional/relay-provenance-journal/render.py \
+  presence /absolute/presence-render.json <presence-render-json-sha256>
+```
+
+The presence renderer produces an applyable Kubernetes List with an immutable
+public ConfigMap, Service, zero-replica Deployment and scoped policy. The
+source uses the exact endpoint `/provenance/v1/runtime-presence`, TLS 1.3
+client authentication, a pinned client leaf fingerprint and a restricted
+observer login. Its runtime Secret is `relay-runtime-presence-source-runtime`
+with only `observer-dsn`. Its immutable TLS Secret is
+`relay-runtime-presence-source-tls-<first 32 certificate-hash hex>`, with only
+`tls.key`. Prepare that snapshot from the separate
+`relay-runtime-presence-source-tls` issuance Secret using
+`snapshot-runtime-presence-tls.py` in the same secret-to-secret pipe as the
+cleanup listener helper. The public leaf and client CA are single-file
+ConfigMap `subPath` mounts; private files are root-only 0400 Secret `subPath`
+mounts. The CLI receives only the fixed paths and public pins via environment
+variables. Before activation, verify the observer login has only
+`relay_provenance_observer` membership, client CA/leaf validity, exact client
+certificate fingerprint, and that wrong or missing clients are refused.
+
 Before activating one listener replica, verify signed authorization continuity,
 current witness, source login grants, TLS chain/hostname, actual image contents,
 database persistence, source topology and client identity. Recheck the served

@@ -6,6 +6,7 @@ resources:
 - storage.yaml
 - certificate.yaml
 - journal-certificate.yaml
+- runtime-presence-certificate.yaml
 - postgres.yaml
 - network-policy.yaml
 configMapGenerator:

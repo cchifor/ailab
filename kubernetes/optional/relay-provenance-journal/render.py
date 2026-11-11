@@ -237,11 +237,85 @@ def service(config):
     return [cm(cm_name, SERVICE_NS, public, commit), svc, deploy, policy]
 
 
+def presence(config):
+    commit = common(config, ['relayImage', 'tlsCertificate', 'clientCa', 'operatorRootHex',
+                             'clientCertSha256', 'clients'])
+    image = config['relayImage']
+    if not isinstance(image, str) or not re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}', image) or image.endswith('0' * 64):
+        refuse('image-pin-invalid')
+    if any(not sha(config[key]) for key in ('operatorRootHex', 'clientCertSha256')):
+        refuse('presence-pin-invalid')
+    clients = config['clients']
+    if not isinstance(clients, list) or not 1 <= len(clients) <= 8:
+        refuse('clients-invalid')
+    peers = []
+    for client in clients:
+        fields(client, ['namespace', 'podLabels'])
+        ns, labels = client['namespace'], client['podLabels']
+        if not isinstance(ns, str) or not re.fullmatch('[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', ns) or ns in (SERVICE_NS, DB_NS):
+            refuse('client-namespace-invalid')
+        if not isinstance(labels, dict) or not 1 <= len(labels) <= 4 or any(
+            not re.fullmatch('[a-zA-Z0-9._/-]{1,63}', k) or not isinstance(v, str) or
+            not re.fullmatch('[a-zA-Z0-9._-]{1,63}', v) for k, v in labels.items()):
+            refuse('client-labels-invalid')
+        peers.append({'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': ns}},
+                      'podSelector': {'matchLabels': labels}})
+    public = {'tls.crt': pinned(config['tlsCertificate']), 'client-ca.pem': pinned(config['clientCa'])}
+    name = 'relay-runtime-presence-source'
+    base = '/run/relay-presence/'
+    cm_name = name + '-public-' + config['tlsCertificate']['sha256'][:16]
+    tls_secret = name + '-tls-' + config['tlsCertificate']['sha256'][:32]
+    env = [{'name': k, 'value': v} for k, v in [
+        ('RELAY_RUNTIME_PRESENCE_HOST', '0.0.0.0'), ('RELAY_RUNTIME_PRESENCE_PORT', '8443'),
+        ('RELAY_RUNTIME_PRESENCE_DB_URL_FILE', base + 'observer-dsn'),
+        ('RELAY_RUNTIME_PRESENCE_TLS_CERT_FILE', base + 'tls.crt'),
+        ('RELAY_RUNTIME_PRESENCE_TLS_KEY_FILE', base + 'tls-key.pem'),
+        ('RELAY_RUNTIME_PRESENCE_TLS_CA_FILE', base + 'client-ca.pem'),
+        ('RELAY_RUNTIME_PRESENCE_OPERATOR_ROOT_HEX', config['operatorRootHex']),
+        ('RELAY_RUNTIME_PRESENCE_CLIENT_CERT_SHA256', config['clientCertSha256'])]]
+    mounts = [{'name': 'public', 'mountPath': base + f, 'subPath': f, 'readOnly': True} for f in public]
+    mounts += [{'name': 'runtime', 'mountPath': base + 'observer-dsn', 'subPath': 'observer-dsn', 'readOnly': True},
+               {'name': 'tls', 'mountPath': base + 'tls-key.pem', 'subPath': 'tls.key', 'readOnly': True}]
+    probe = ['node', '-e', "const s=require('node:net').connect({host:'127.0.0.1',port:8443});s.setTimeout(2000);s.on('connect',()=>{s.destroy();process.exit(0)});s.on('timeout',()=>process.exit(1));s.on('error',()=>process.exit(1));"]
+    deploy = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': metadata(name, SERVICE_NS, commit),
+              'spec': {'replicas': 0, 'strategy': {'type': 'Recreate'}, 'selector': {'matchLabels': {'app': name}},
+                       'template': {'metadata': {'labels': {'app': name}}, 'spec': {
+                           'automountServiceAccountToken': False, 'enableServiceLinks': False,
+                           'hostNetwork': False, 'hostPID': False, 'hostIPC': False,
+                           'securityContext': {'runAsUser': 0, 'runAsGroup': 0, 'seccompProfile': {'type': 'RuntimeDefault'}},
+                           'affinity': AFFINITY, 'containers': [{'name': 'presence', 'image': image,
+                               'command': ['node', '/app/dist/scripts/serve-runtime-presence-source.js'],
+                               'env': env, 'securityContext': SECURITY,
+                               'ports': [{'name': 'https', 'containerPort': 8443}],
+                               'readinessProbe': {'exec': {'command': probe}, 'timeoutSeconds': 3, 'periodSeconds': 5},
+                               'livenessProbe': {'exec': {'command': probe}, 'timeoutSeconds': 3, 'periodSeconds': 10},
+                               'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'},
+                                             'limits': {'cpu': '500m', 'memory': '256Mi'}}, 'volumeMounts': mounts}],
+                           'volumes': [{'name': 'public', 'configMap': {'name': cm_name, 'defaultMode': 292}},
+                                       {'name': 'runtime', 'secret': {'secretName': name + '-runtime', 'defaultMode': 256,
+                                           'items': [{'key': 'observer-dsn', 'path': 'observer-dsn'}]}},
+                                       {'name': 'tls', 'secret': {'secretName': tls_secret, 'defaultMode': 256,
+                                           'items': [{'key': 'tls.key', 'path': 'tls.key'}]}}]}}}}
+    svc = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': metadata(name, SERVICE_NS, commit),
+           'spec': {'selector': {'app': name}, 'ports': [{'name': 'https', 'port': 8443, 'targetPort': 'https'}]}}
+    policy = {'apiVersion': 'networking.k8s.io/v1', 'kind': 'NetworkPolicy',
+              'metadata': metadata('runtime-presence-clients-and-database', SERVICE_NS, commit),
+              'spec': {'podSelector': {'matchLabels': {'app': name}}, 'policyTypes': ['Ingress', 'Egress'],
+                       'ingress': [{'from': peers, 'ports': [{'protocol': 'TCP', 'port': 8443}]}],
+                       'egress': [{'to': [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': DB_NS}},
+                                           'podSelector': {'matchLabels': {'app': NAME + '-postgres'}}}],
+                                   'ports': [{'protocol': 'TCP', 'port': 5432}]},
+                                  {'to': [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'kube-system'}},
+                                           'podSelector': {'matchLabels': {'k8s-app': 'kube-dns'}}}],
+                                   'ports': [{'protocol': 'UDP', 'port': 53}, {'protocol': 'TCP', 'port': 53}]}]}}
+    return [cm(cm_name, SERVICE_NS, public, commit), svc, deploy, policy]
+
+
 def main(args):
-    if len(args) != 3 or args[0] not in ('initialize', 'service') or not sha(args[2]):
+    if len(args) != 3 or args[0] not in ('initialize', 'service', 'presence') or not sha(args[2]):
         refuse('usage-invalid')
     config = parse(pinned({'path': args[1], 'sha256': args[2]}))
-    items = initialize(config) if args[0] == 'initialize' else service(config)
+    items = {'initialize': initialize, 'service': service, 'presence': presence}[args[0]](config)
     print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}, separators=(',', ':')))
 
 

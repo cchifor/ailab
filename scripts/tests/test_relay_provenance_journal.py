@@ -85,6 +85,25 @@ class RendererTest(unittest.TestCase):
         config['clients'][0]['podLabels'] = {}
         self.assertEqual(self.render('service', config).returncode, 78)
 
+    def test_presence_source_requires_pins_and_observer_secret(self):
+        config = {'version': 1, 'relaySourceCommit': COMMIT,
+                  'relayImage': 'registry.example/relay@sha256:' + HASH,
+                  'tlsCertificate': self.file('presence-tls.crt', 'public leaf'),
+                  'clientCa': self.file('client-ca.pem', 'public ca'),
+                  'operatorRootHex': HASH, 'clientCertSha256': HASH,
+                  'clients': [{'namespace': 'strive-ailab', 'podLabels': {'app': 'relay-supervisor'}}]}
+        output = self.render('presence', config)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        items = json.loads(output.stdout)['items']
+        deploy = items[2]
+        self.assertEqual(deploy['spec']['replicas'], 0)
+        pod = deploy['spec']['template']['spec']
+        self.assertEqual(pod['containers'][0]['command'][-1], '/app/dist/scripts/serve-runtime-presence-source.js')
+        self.assertEqual(pod['volumes'][1]['secret']['items'], [{'key': 'observer-dsn', 'path': 'observer-dsn'}])
+        self.assertTrue(all('subPath' in m for m in pod['containers'][0]['volumeMounts']))
+        config['clientCertSha256'] = '0' * 64
+        self.assertEqual(self.render('presence', config).returncode, 78)
+
 
 if __name__ == '__main__':
     unittest.main()
