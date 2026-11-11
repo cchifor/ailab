@@ -12,14 +12,15 @@ volumes; verify its actual PV reclaim policy before creating it.
 
 Use a merged, reviewed Relay source commit that contains
 `deploy/worker-provenance-journal/001-provenance.sql` through
-`008-authority-completion.sql`. SQL 006 supplies the signed presence ledger;
+`009-original-pod-spec-commitment.sql`. SQL 006 supplies the signed presence ledger;
 SQL 007 repairs the open-execution versus closed-cleanup boundary. SQL 008 repairs
 lookup expiry after lock waits and exact backing replay for already installed
 databases; updated SQL 001 also contains those fixes for fresh installations.
-These migrations do not install a Node signer, independent witness or execution
-fence. Review and record all eight SHA256 values and the source
-commit. The initializer renderer input is a single root or operator-owned,
-single-link, non-group-writable regular JSON file:
+SQL 009 adds the prepared Pod spec commitment for new original Pod effects and
+does not rewrite existing immutable effects. These migrations do not install a
+Node signer, independent witness or execution fence. Review and record all nine
+SHA256 values and the source commit. The initializer renderer input is a single
+root or operator-owned, single-link, non-group-writable regular JSON file:
 
 ```json
 {
@@ -32,16 +33,17 @@ single-link, non-group-writable regular JSON file:
   "schema005": {"path": "/absolute/005-runtime-presence.sql", "sha256": "<64 hex>"},
   "schema006": {"path": "/absolute/006-runtime-presence-ledger.sql", "sha256": "<64 hex>"},
   "schema007": {"path": "/absolute/007-runtime-presence-open-lifecycle.sql", "sha256": "<64 hex>"},
-  "schema008": {"path": "/absolute/008-authority-completion.sql", "sha256": "<64 hex>"}
+  "schema008": {"path": "/absolute/008-authority-completion.sql", "sha256": "<64 hex>"},
+  "schema009": {"path": "/absolute/009-original-pod-spec-commitment.sql", "sha256": "<64 hex>"}
 }
 ```
 
 Render with `python3 -B kubernetes/optional/relay-provenance-journal/render.py
 initialize /absolute/initializer.json <initializer-json-sha256>`. JSON output
-is a Kubernetes list. The Job verifies all eight SQL files before touching
+is a Kubernetes list. The Job verifies all nine SQL files before touching
 PGDATA, refuses any existing PGDATA, creates a fresh UTF8 `relay_provenance`
 database, applies each transaction in order, checks empty authority/history,
-cleanly stops PostgreSQL, and only then writes schema marker 8. An interrupted
+cleanly stops PostgreSQL, and only then writes schema marker 9. An interrupted
 attempt or absent marker requires attended inspection. Never reset a retained
 volume or rerun the Job against it. The runtime `start.sh` refuses missing or
 wrong marker/version, recovery signals, or unsafe PGDATA ownership/mode and
@@ -75,7 +77,7 @@ no automatic retry, service-account token or network listener. It mounts the
 existing database PVC. An authorized operator must first pause issuance, stop
 the source listeners and database StatefulSet, and verify that **all** other
 PVC consumers are gone. ReadWriteOnce does not provide this exclusion. Keep
-the new schema-8 startup guard installed while replicas remain zero, so an
+the new schema-9 startup guard installed while replicas remain zero, so an
 older startup script cannot reopen the database during maintenance. Preserve
 the independently reviewed recovery procedure and source history; this job
 does not create a backup or qualify a restore. Uncertain workers stay reserved.
@@ -175,6 +177,63 @@ Record the exact full Relay source commit and both query results in the review
 evidence. Check the final merged commit again before rendering the upgrade
 bundle or creating a live maintenance Job; if 001 or 008 changed, regenerate
 and update both the previous and repaired digest columns first.
+
+## Upgrade a retained schema 8 database to schema 9
+
+This is a separate one-shot stage. Keep the existing schema 5/6/7 to schema 8
+upgrade unchanged; do not offer a direct 5/6/7 to 9 path. After that upgrade
+finishes, keep every consumer stopped and do not start the schema 8 runtime
+between stages. The schema 9 runtime startup guard accepts only marker 9.
+
+Before rendering, use the final merged Relay source pin that contains SQL 009
+and recheck both installed-function hashes against that exact source. The
+current Relay #352 candidate is `264b1265502900558628bbd1e39379971faa8e31`;
+it is not a merged or deployable pin. Recompute the SQL 009 file SHA-256 and
+the `transition`/`lookup` `prosrc` hashes from the final merged source before
+producing the renderer input or a maintenance Job.
+
+Pause new original Pod creation, stop the cleanup listeners and database, and
+verify every other consumer of the PVC is gone. Resolve all possibly-issued
+Pod-create requests under the existing uncertainty rules. Drain every
+`pod-create` effect in `reserved` or `armed` state and every admission with a
+non-null execution and `closed = false`. The renderer produces a suspended
+Job with `backoffLimit: 0`; its read-only preflight refuses these conditions
+before creating the persistent latch, and SQL 009 checks them again in its
+transaction. It also requires the exact post-008 authority function bodies
+and the pre-009 reserve schema.
+
+Use a renderer input with only the schema 009 pin and `fromVersion: 8`:
+
+```json
+{
+  "version": 1,
+  "relaySourceCommit": "<final reviewed 40-hex Relay commit>",
+  "fromVersion": 8,
+  "schema009": {"path": "/absolute/009-original-pod-spec-commitment.sql", "sha256": "<64 hex>"}
+}
+```
+
+```sh
+python3 -B kubernetes/optional/relay-provenance-journal/render.py \
+  upgrade9 /absolute/upgrade9-render.json <upgrade9-render-json-sha256>
+```
+
+The Job verifies the SQL pin, schema marker 8, PostgreSQL 17, UID 70, retained
+directory mode, and absence of a postmaster, recovery signal, version temp file
+or existing latch. It runs only SQL 009 and publishes marker 9 after the SQL
+transaction commits and PostgreSQL stops cleanly. SQL 009 is not replay-safe:
+never retry it automatically after an uncertain commit. Preserve the latch and
+old marker and require attended inspection and recovery. Existing closed and
+observed documents keep their exact bytes and remain inspectable; without the
+new commitment, they cannot establish live original Pod presence.
+
+Disposable PostgreSQL 17 checks passed for fresh 001–009 initialization, schema
+8→9 with closed legacy history preserved, and refusal of an open execution,
+reserved and armed Pod effects, SQL 009 already applied under marker 8, and a
+pending upgrade latch. These local runs used Relay #348 candidate
+`04e412f241c12c0d4a99a3aca7d2bb18f668274e` for SQL 001–008 and Relay #352
+candidate `264b1265502900558628bbd1e39379971faa8e31` for SQL 009. They do not
+qualify a merged source pin or a live maintenance Job.
 
 Any interruption leaves the pending latch or old marker in place. The runtime
 and upgrade Job both refuse that state; do not clear the latch, rerun migrations,
