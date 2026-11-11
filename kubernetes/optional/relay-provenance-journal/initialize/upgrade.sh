@@ -89,8 +89,8 @@ if [ "$compatible" != t ]; then
   echo 'Provenance upgrade requires compatible history, phases and migration prerequisites' >&2
   exit 78
 fi
-# Source hashes match Relay008 at faa1148b; historical bodies are from2aae6c14.
-# The same exact known-source hashes are rechecked under locks by SQL008.
+# Source hashes match candidate Relay 008 at ba496c1a; historical bodies are from 2aae6c14.
+# The same exact known-source hashes are rechecked under locks by SQL 008.
 # Refuse before 006/007 commit or a latch is created if installed code drifted.
 source_ok=$(psql -X -At -h /var/run/postgresql -U postgres -d relay_provenance -v ON_ERROR_STOP=1 <<'SQL'
 SELECT count(*)=2 AND bool_and(

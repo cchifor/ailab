@@ -61,7 +61,7 @@ reinterpreting it under the repaired lifecycle. Inventory this condition through
 the approved database client before scheduling maintenance. Existing presence
 history requires a separately reviewed migration; do not delete evidence to pass
 this guard. Other source history is preserved. A schema 7→8 upgrade does not
-reapply 007 or require empty presence history:008 preserves all data and grants.
+reapply 007 or require empty presence history because 008 preserves all data and grants.
 It accepts only the exact reviewed prior or repaired authority function bodies.
 An unrelated function rewrite requires investigation, not overwriting its hash.
 
@@ -88,9 +88,9 @@ with TLS disabled for that local maintenance listener. A read-only preflight
 requires the retained `postgres` role to be a superuser so row-level security
 cannot hide history. For schemas 5/6 it checks presence tables, admission phases
 and absence of 006/007 targets before any migration commits. For schema 7 it
-checks007 prerequisites without clearing history. Every upgrade checks the
+checks 007 prerequisites without clearing history. Every upgrade checks the
 exact SHA256, owner, security-definer flag and return type of both authority
-functions;008 repeats this check under exclusive locks. Known incompatible
+functions; 008 repeats this check under exclusive locks. Known incompatible
 history or function drift exits after a clean stop, leaving the old marker and
 no upgrade latch. Retained PostgreSQL configuration and local authentication remain
 in force; review the existing peer/HBA settings and any custom includes before
@@ -124,7 +124,57 @@ source-drift refusal, and interruption/retry checks. The old schemas used exact
 Relay source `2aae6c14`; schema 008 used `faa1148b`. Fresh initialization and
 7→8 also passed against the added output-hash checks at `ba496c1a`. This establishes local
 process/mount behavior, not live Kubernetes qualification; verify the rendered
-Pod on the target before activation.
+Pod on the target before activation. The corrected-source schema 5→8, 6→8,
+7→8 and 008 replay scenarios also passed against candidate Relay source
+`ba496c1a2e3601949c853382c102cabc19e52c3e`; each reported repaired digests
+`transition=96f5fbc1440e80e791c628f08812790c3a1cb5255e7bd6efac8e0fba88472eb7`
+and `lookup=1e1314f11045c5f53603dc1da1a0a66f224d215d0e365c811bcecf71a6d2eef9`.
+These candidate-source runs are not merged-source or deployment qualification.
+
+### Authority function digest generation
+
+The `previous_digest` and `repaired_digest` values in `upgrade.sh` are SHA-256
+hashes of PostgreSQL's stored `pg_proc.prosrc` text, encoded as UTF-8. Generate
+them against the exact Relay source pin that will be rendered, after that source
+has merged. Until the source merge is complete, `ba496c1a` is only the candidate
+pin used for local validation; do not render a live upgrade from it. The pin
+must include both `deploy/worker-provenance-journal/001-provenance.sql` and
+`008-authority-completion.sql`.
+
+In a disposable PostgreSQL 17 database, apply the selected 001 SQL and run the
+query below. For `previous_digest`, select 001 from the reviewed historical
+Relay source `2aae6c149a8ee092a10dacc9e9191bb21c8a3196`. For
+`repaired_digest`, select 001 from the final merged Relay source commit. Then
+apply 008 to a disposable schema-7 database and run the query again to confirm
+the installed post-migration bodies. The upgrade's `source_ok` preflight and
+SQL 008 both require these exact values, owner, security-definer flag and
+return type.
+
+```sh
+git -C "$RELAY_REPO" show "$RELAY_SOURCE_COMMIT:deploy/worker-provenance-journal/001-provenance.sql" > /tmp/001-provenance.sql
+psql -X -v ON_ERROR_STOP=1 -d relay_provenance -f /tmp/001-provenance.sql
+psql -X -At -v ON_ERROR_STOP=1 -d relay_provenance <<'SQL'
+SELECT p.proname,
+       encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') AS prosrc_sha256
+FROM pg_proc AS p
+WHERE p.oid IN (
+  to_regprocedure('worker_provenance.transition(text,text,text)'),
+  to_regprocedure('worker_provenance.lookup(text,text,text)')
+)
+ORDER BY p.proname;
+SQL
+```
+
+Run that block once with `RELAY_SOURCE_COMMIT` set to the historical source
+commit and once with it set to the final merged source commit. For the
+post-008 confirmation, apply the pinned 008 file to a complete schema-7 scratch
+database before running the query; do not apply only 008 to a database that
+lacks migrations 002–007.
+
+Record the exact full Relay source commit and both query results in the review
+evidence. Check the final merged commit again before rendering the upgrade
+bundle or creating a live maintenance Job; if 001 or 008 changed, regenerate
+and update both the previous and repaired digest columns first.
 
 Any interruption leaves the pending latch or old marker in place. The runtime
 and upgrade Job both refuse that state; do not clear the latch, rerun migrations,
