@@ -168,6 +168,7 @@ def build(receipt):
                     "command": ["node", "-e", init_code],
                     "env": [{"name": "FILE_MODES", "value": json.dumps(permissions, sort_keys=True)}],
                     "securityContext": {"allowPrivilegeEscalation": False,
+                                        "runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000,
                                         "readOnlyRootFilesystem": True,
                                         "capabilities": {"drop": ["ALL"]}},
                     "volumeMounts": [{"name": "retirement-secret", "mountPath": "/in", "readOnly": True},
