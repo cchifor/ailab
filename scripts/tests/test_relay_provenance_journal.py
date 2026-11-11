@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -103,6 +104,16 @@ class RendererTest(unittest.TestCase):
         self.assertTrue(all('subPath' in m for m in pod['containers'][0]['volumeMounts']))
         config['clientCertSha256'] = '0' * 64
         self.assertEqual(self.render('presence', config).returncode, 78)
+
+    def test_database_ingress_admits_both_source_listeners(self):
+        raw = (ROOT / 'kubernetes/optional/relay-provenance-journal/network-policy.yaml').read_text()
+        policies = list(yaml.safe_load_all(raw))
+        database = next(p for p in policies if p['metadata']['name'] == 'postgres-clients')
+        peers = database['spec']['ingress'][0]['from']
+        self.assertEqual({p['podSelector']['matchLabels']['app'] for p in peers},
+                         {'relay-provenance-journal', 'relay-runtime-presence-source'})
+        self.assertTrue(all(p['namespaceSelector']['matchLabels']['kubernetes.io/metadata.name'] ==
+                            'relay-provenance-journal' for p in peers))
 
 
 if __name__ == '__main__':
