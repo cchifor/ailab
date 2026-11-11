@@ -131,8 +131,10 @@ source uses the exact endpoint `/provenance/v1/runtime-presence`, TLS 1.3
 client authentication, a pinned client leaf fingerprint and a restricted
 observer login. Its runtime Secret is `relay-runtime-presence-source-runtime`
 with only `observer-dsn`. Its immutable TLS Secret is
-`relay-runtime-presence-source-tls-<first 32 certificate-hash hex>`, with only
-`tls.key`. Prepare that snapshot from the separate
+`relay-runtime-presence-source-tls-<first 32 certificate-hash hex>`, containing
+the matching `tls.crt` and `tls.key` pair; the Deployment mounts only the key
+from that immutable Secret and the independently pinned public certificate
+from the ConfigMap. Prepare that snapshot from the separate
 `relay-runtime-presence-source-tls` issuance Secret using
 `snapshot-runtime-presence-tls.py` in the same secret-to-secret pipe as the
 cleanup listener helper. The public leaf and client CA are single-file

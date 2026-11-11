@@ -1,6 +1,7 @@
 """Offline rendering contracts for the inactive provenance source."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -117,6 +118,21 @@ class RendererTest(unittest.TestCase):
                          {'relay-provenance-journal', 'relay-runtime-presence-source'})
         self.assertTrue(all(p['namespaceSelector']['matchLabels']['kubernetes.io/metadata.name'] ==
                             'relay-provenance-journal' for p in peers))
+
+    def test_initializer_refuses_missing_pin_before_hash_command(self):
+        marker = self.dir / 'hash-called'
+        for tool in ('sha256sum', 'mkdir'):
+            executable = self.dir / tool
+            executable.write_text('#!/bin/sh\nprintf called > "' + str(marker) + '"\nexit 99\n')
+            executable.chmod(0o755)
+        env = dict(os.environ, PGDATA='/var/lib/postgresql/data/pgdata',
+                   SCHEMA_001_SHA256='a' * 64, SCHEMA_002_SHA256='',
+                   PATH=str(self.dir) + ':/usr/bin:/bin')
+        script = ROOT / 'kubernetes/optional/relay-provenance-journal/initialize/initialize.sh'
+        result = subprocess.run(['sh', str(script)], env=env, text=True,
+                                capture_output=True, check=False)
+        self.assertEqual(result.returncode, 78)
+        self.assertFalse(marker.exists())
 
 
 if __name__ == '__main__':

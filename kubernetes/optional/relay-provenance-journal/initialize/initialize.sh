@@ -8,8 +8,13 @@ for n in 001 002 003 004 005; do
   eval "pin=\${SCHEMA_${n}_SHA256:-}"
   [ "${#pin}" = 64 ] || exit 78
   case "$pin" in *[!0-9a-f]*) exit 78;; esac
-  printf '%s  /schema/%s.sql\n' "$pin" "$n"
-done | sha256sum -c - >/dev/null
+done
+printf '%s  /schema/%s.sql\n' \
+  "$SCHEMA_001_SHA256" 001 \
+  "$SCHEMA_002_SHA256" 002 \
+  "$SCHEMA_003_SHA256" 003 \
+  "$SCHEMA_004_SHA256" 004 \
+  "$SCHEMA_005_SHA256" 005 | sha256sum -c - >/dev/null
 [ ! -e "$PGDATA" ] || { echo 'Provenance data already exists; refusing initialization' >&2; exit 78; }
 mkdir "$root/.initialization-started"
 initdb -D "$PGDATA" --username=postgres --auth-local=peer --auth-host=scram-sha-256 --data-checksums >/dev/null
