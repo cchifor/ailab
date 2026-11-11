@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: relay-provenance-journal-db
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: relay-provenance-journal
+  labels:
+    # Only the independent journal service lives here. Its reader requires root
+    # ownership and owner-only secret access, so UID 0 is necessary. No privilege,
+    # host access, Linux capabilities or service-account token is granted.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled

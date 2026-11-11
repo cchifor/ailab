@@ -1,0 +1,20 @@
+# Optional only: no live Flux inventory references this directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- namespace.yaml
+- storage.yaml
+- certificate.yaml
+- journal-certificate.yaml
+- postgres.yaml
+- network-policy.yaml
+configMapGenerator:
+- name: relay-provenance-journal-postgres
+  namespace: relay-provenance-journal-db
+  files: [start.sh, pg_hba.conf]
+labels:
+- pairs:
+    app.kubernetes.io/part-of: relay-provenance-journal
+    velero.io/exclude-from-backup: 'true'
+  includeSelectors: false
+  includeTemplates: true

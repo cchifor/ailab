@@ -1,0 +1,64 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: relay-provenance-journal-db}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: relay-provenance-journal}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: postgres-clients, namespace: relay-provenance-journal-db}
+spec:
+  podSelector:
+    matchLabels: {app: relay-provenance-journal-postgres}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: relay-provenance-journal}
+      podSelector:
+        matchLabels: {app: relay-provenance-journal}
+    ports: [{protocol: TCP, port: 5432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: operator-client, namespace: relay-provenance-journal-db}
+spec:
+  podSelector:
+    matchLabels: {relay.chifor.me/journal-operator-client: 'true'}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels: {app: relay-provenance-journal-postgres}
+    ports: [{protocol: TCP, port: 5432}]
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: postgres-operator, namespace: relay-provenance-journal-db}
+spec:
+  podSelector:
+    matchLabels: {app: relay-provenance-journal-postgres}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels: {relay.chifor.me/journal-operator-client: 'true'}
+    ports: [{protocol: TCP, port: 5432}]
