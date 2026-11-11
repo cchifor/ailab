@@ -1168,7 +1168,7 @@ spec:
           # chunk raises in the iteration on every version. The 1.108.0 notes' breaking-marked
           # changes (prompt_token_calculator removed, cerebras, Lens no longer bundled) touch nothing
           # this config uses.
-          image: ghcr.io/berriai/litellm:v1.108.4@sha256:17921779153960f086e2660994cc398fc76ed65c531765177803b9ae0a25d97a
+          image: ghcr.io/berriai/litellm:v1.108.5@sha256:008a5916c0a0ca6f4f6ad64969f6a4ef6f03ce885a639f3d97fd53665754ce48
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
