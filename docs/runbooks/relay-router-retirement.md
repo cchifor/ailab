@@ -50,7 +50,8 @@ recorded in that change:
    `0400` is root owned and unreadable by Router; an `fsGroup` readable mode
    such as `0440` is rejected for private keys. The current file reader accepts
    a regular file owned by uid 0 or the process uid. A nonroot init container
-   can copy projected input into a memory backed `emptyDir` as uid 1000, set
+   can read projected inputs with mode `0444` in its own container, copy them
+   into a memory backed `emptyDir` as uid 1000, set
    private files to `0400` and public files to `0444`, then mount only that
    prepared directory read only into Router. Validate the exact image's
    ownership check and startup with this layout. Router's source design
@@ -82,8 +83,10 @@ patch is not included in this Kustomization.
 
 `llm-router-retirement` selects only pods labeled `app: llm-router`, with a
 single TCP port 8788. The additive Router NetworkPolicy admits it only from
-pods labeled `app: relay` in namespace `relay`; Relay's egress policy permits
-only that destination and port. Kubernetes port forwarding by a sufficiently
+pods labeled `app: relay` in namespace `relay`; Relay's new egress rule permits
+that destination on port 8788. Its existing public egress rule is limited to
+TCP 443 and excludes RFC1918 ranges, so it does not cover this private port.
+Kubernetes port forwarding by a sufficiently
 privileged operator can bypass NetworkPolicy, so the listener still requires
 mTLS and the pinned client certificate. The existing public Router ingress
 remains limited to the edge proxy on 8787, and metrics ingress to Prometheus on

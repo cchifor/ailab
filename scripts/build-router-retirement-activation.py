@@ -140,7 +140,7 @@ def build(receipt):
             fail(f"{field} needs {leaf} in the Secret mapping")
     if not files[ROOT + "/budget-dsn"]["private"]:
         fail("budget DSN must be mapped as private")
-    mapping = [{"key": e["secretKey"], "name": e["path"].removeprefix(ROOT + "/")}
+    mapping = [{"key": e["secretKey"], "path": e["path"].removeprefix(ROOT + "/")}
                for e in entries]
     permissions = {e["path"].removeprefix(ROOT + "/"): (0o400 if e["private"] else 0o444)
                    for e in entries}
