@@ -109,6 +109,7 @@
     state: directory
     owner: "{{ item.name }}"
     group: "{{ item.name }}"
+  when: dev_worker_claude_synced_skills_off | length > 0
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
@@ -124,24 +125,30 @@
     dev_worker_claude_settings_skills is failed
     and 'file not found' not in (dev_worker_claude_settings_skills.msg | default('') | lower)
   changed_when: false
+  when: dev_worker_claude_synced_skills_off | length > 0
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
+# Written only when the merge changes the CONTENT: Claude Code saves settings.json in its own format, so a
+# byte comparison would rewrite (and reformat) the file on every run after the user changes a setting,
+# each rewrite a window in which a live session's concurrent edit could be lost.
 - name: Turn off the unused claude.ai-synced skills per user
   vars:
     dev_worker_current_settings: "{{ (item.1.content | b64decode | from_json) if item.1.content is defined else {} }}"
-  ansible.builtin.copy:
-    content: >-
+    dev_worker_merged_settings: >-
       {{ dev_worker_current_settings
          | combine({'skillOverrides': dict(dev_worker_claude_synced_skills_off | product(['off']))
-                                      | combine(dev_worker_current_settings.skillOverrides | default({}))})
-         | to_nice_json }}
+                                      | combine(dev_worker_current_settings.skillOverrides | default({}))}) }}
+  ansible.builtin.copy:
+    content: "{{ dev_worker_merged_settings | to_nice_json }}"
     dest: "{{ item.0.home }}/.claude/settings.json"
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
     mode: "0644"
-  when: dev_worker_claude_synced_skills_off | length > 0
+  when:
+    - dev_worker_claude_synced_skills_off | length > 0
+    - dev_worker_merged_settings != dev_worker_current_settings
   loop: "{{ dev_worker_users | zip(dev_worker_claude_settings_skills.results) | list }}"
   loop_control:
     label: "{{ item.0.name }}"

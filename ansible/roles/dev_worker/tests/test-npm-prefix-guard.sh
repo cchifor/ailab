@@ -233,6 +233,17 @@ else
 	bad "second run: rc=$rc changed='$(changed "$out")' npm calls: $(tr '\n' ';' <"$LOG")" "$out"
 fi
 
+# ---- 2b. a settings.json Claude Code re-saved in its own format, same content: not rewritten ------------
+python3 -c 'import json, sys; p = sys.argv[1]; d = json.load(open(p)); open(p, "w").write(json.dumps(d, indent=2))' \
+	"$T/home2/.claude/settings.json"
+before="$(cat "$T/home2/.claude/settings.json")"
+out="$(run)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(changed "$out")" = 0 ] && [ "$(cat "$T/home2/.claude/settings.json")" = "$before" ]; then
+	ok "a re-saved settings.json with the same content is not rewritten"
+else
+	bad "a re-saved settings.json was rewritten (rc=$rc changed='$(changed "$out")')" "$out"
+fi
+
 # ---- 4. a settings.json that exists but cannot be read stops the run and is left alone -------------------
 # Only `file not found` means "no settings yet". Here settings.json is a symlink to itself (ELOOP; even root
 # cannot read it): with every read failure ignored, the merge "succeeded" by replacing the link with a fresh
