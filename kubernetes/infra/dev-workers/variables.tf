@@ -216,7 +216,14 @@ variable "dev_worker_nodes" {
     # dev-worker-1's floor was raised to 16 GiB by hand outside tofu and codified on 2026-10-09 (operator
     # decision, found by the W6 root-disk plan: plans/2026-10-09-dev-worker-disk-hardening-plan.md).
     "dev-worker-1" = { node_name = "ai-node1", vm_id = 4201, ip = "192.168.0.8", hostname = "dev-worker-1", memory_floating_mib = 16384 }
-    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2" }
+    # dev-worker-2's floor 4 -> 8 GiB on 2026-11-12 (operator decision, an exception to the dev-worker
+    # freeze): the lazy qwen3.8-27b on ai-llm-2 (~23.5 GiB GTT + ~8 GiB RSS) loaded on ai-node2 at ~17:00Z,
+    # the node went past PVE's 80% auto-balloon threshold, and pvestatd shrank dw2 to its 4 GiB floor
+    # (3.7 GiB visible, 136 MiB free, 25 GB swapped in, 17M major faults): ping answered, SSH timed out in
+    # the banner exchange, node_exporter went down. Same signature as dev-worker-4's 2026-09-01 death
+    # below. Its working set is ~2.3 GiB used + ~1.6 GiB cache, plus build/test spikes. Hand-applied
+    # `qm set 4202 --balloon 8192` + monitor-inflate during the recovery; codified so every apply keeps it.
+    "dev-worker-2" = { node_name = "ai-node2", vm_id = 4202, ip = "192.168.0.9", hostname = "dev-worker-2", memory_floating_mib = 8192 }
     # Slot 3 = the VM that was dev-worker-4 until 2026-09-23 (vmid 4204, ai-node1), re-slotted by
     # `tofu state mv` (PR-C2, gate G3a-2) with its node1 12 GiB floor; its IP moved .11 -> .10 and its
     # hostname to dev-worker-3 IN-GUEST plus `qm set 4204 --ipconfig0` (initialization is
