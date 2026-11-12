@@ -946,12 +946,11 @@ def remove_deps(action, days, now, busy, binds, mounts, inventory=None):
     the fresh scan still finds, as the same inodes, and that inspect_dep still clears. The re-inspect
     matters: scan_worktree does not look inside dep dirs, and a checkout cloned into
     node_modules/a after the plan leaves node_modules' own inode and mtime unchanged (review, #1005).
-    With an Inventory: ready() first — a rebuild can take minutes, so every check here comes after
-    it — and recheck(dir, worktree) last, right before each removal: a dir another tree links into
-    stays. Returns how many were removed; None = nothing was (the whole worktree skipped, or every
-    dir linked)."""
-    if inventory:
-        inventory.ready()
+    With an Inventory, the CALLER runs inventory.ready() before taking the snapshots it passes in (a
+    rebuild can take minutes; nothing here may rebuild after them), and recheck(dir, worktree) runs
+    last, right before each removal: a dir another tree links into stays, and an inventory that
+    aged meanwhile refuses. Returns how many were removed; None = nothing was (the whole worktree
+    skipped, or every dir linked)."""
     w = scan_worktree(action.label, (now - timedelta(days=days)).timestamp())
     if w.last_activity is None or in_use(action.label, busy, binds):
         return None
@@ -1642,12 +1641,11 @@ def plan_worktrees(worktrees, days, merged_days, now, busy, claims, mounts, link
 def remove_worktree(action, days, merged_days, now, busy, claims, mounts, inventory=None):
     """Re-judge with the CALLER's fresh state right before removing — it may have been picked up,
     changed or replaced since the scan — then `git worktree remove` (no --force) as the owner.
-    With an Inventory: ready() before the re-judgement (a rebuild can take minutes) and
-    recheck(path, path) last, right before git. Returns None when it no longer qualifies (or
-    another tree links into it), else git's error text ("" = removed)."""
+    With an Inventory, the CALLER runs inventory.ready() before taking the snapshots it passes in
+    (nothing here may rebuild after them), and recheck(path, path) runs last, right before git: an
+    inventory that aged meanwhile refuses. Returns None when it no longer qualifies (or another
+    tree links into it), else git's error text ("" = removed)."""
     path = action.label
-    if inventory:
-        inventory.ready()
     try:
         st = os.lstat(path)
     except FileNotFoundError:

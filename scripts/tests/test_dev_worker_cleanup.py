@@ -1330,11 +1330,13 @@ class WorktreesTest(unittest.TestCase):
         ws = [cl.scan_worktree(stale, (self.now - timedelta(days=3)).timestamp())]
         plan, _ = cl.plan_worktrees(ws, 30, 3, self.now, set(), set(), set(), linked=inv.linked)
         self.assertEqual(self.rules(plan), [(stale, "stale")])
-        os.symlink(os.path.join(stale, "stale.py"), os.path.join(self.user, "uses-stale.py"))
+        link = os.path.join(self.user, "uses-stale.py")
+        os.symlink(os.path.join(stale, "stale.py"), link)
         clock[0] += cl.INDEX_MAX_AGE + 1
+        inv.ready()                                     # the caller's part, before its snapshots
         self.assertIsNone(cl.remove_worktree(plan[0], 30, 3, self.now, set(), set(), set(), inv))
         self.assertTrue(os.path.isdir(stale))
-        self.assertEqual([c for c, _ in inv.at_removal], [stale])
+        self.assertEqual(inv.at_removal, [(stale, f"linked from 1 path(s), e.g. {link}")])
 
     def test_a_process_that_starts_during_the_refresh_stops_the_worktree_removal(self):
         stale = self.worktree("stale")
@@ -1675,12 +1677,13 @@ class LinkGuardTest(unittest.TestCase):
         w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
         plan, _ = cl.plan_deps([w], 14, self.now, set(), set(), linked=inv.linked)
         self.assertEqual([a.ids for a in plan], [[self.nm]])
-        self.link(self.nm, self.consumer, "node_modules")
+        link = self.link(self.nm, self.consumer, "node_modules")
         clock[0] += cl.INDEX_MAX_AGE + 1
         with mock.patch("sys.stdout", io.StringIO()):
             failures, skipped = cl.execute(plan, plan, deps_days=14, inventory=inv)
         self.assertEqual((failures, skipped), (0, 1))
         self.assertTrue(os.path.isdir(self.nm))
+        self.assertEqual(inv.at_removal, [(self.nm, f"linked from 1 path(s), e.g. {link}")])
 
     def test_a_process_that_starts_during_the_refresh_stops_the_removal(self):
         # execute() must take its /proc and mount snapshots AFTER the (minutes-long) refresh.
@@ -1700,6 +1703,25 @@ class LinkGuardTest(unittest.TestCase):
                 mock.patch.object(cl, "busy_paths", side_effect=lambda: set(started)), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(cl.execute(plan, plan, deps_days=14, inventory=inv), (0, 1))
+        self.assertTrue(os.path.isdir(self.nm))
+
+    def test_an_index_that_ages_during_the_snapshots_refuses_and_is_never_rebuilt_after_them(self):
+        age_tree(self.src, 30)
+        clock = [1000.0]
+        inv = self.inventory(lambda: clock[0])
+        w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
+        plan, _ = cl.plan_deps([w], 14, self.now, set(), set(), linked=inv.linked)
+        walks = []
+
+        def slow_snapshot():
+            clock[0] += cl.INDEX_MAX_AGE + 1              # /proc and docker took too long
+            walks.append(inv.walks)
+            return set()
+        with mock.patch.object(cl, "busy_paths", side_effect=slow_snapshot), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(cl.execute(plan, plan, deps_days=14, inventory=inv), (0, 1))
+        self.assertEqual(inv.walks, walks[-1])                 # no walk after the snapshot
+        self.assertTrue(inv.at_removal[0][1].startswith("link inventory aged"))
         self.assertTrue(os.path.isdir(self.nm))
 
     def test_a_fresh_index_is_reused_within_its_age(self):
