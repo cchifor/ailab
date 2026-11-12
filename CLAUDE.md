@@ -52,22 +52,22 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 **`docs/network-plan.md` is the IPAM registry — read it before allocating ANY address.** The LAN is
 shared with the `cloudlab` GPU cluster (`.20`–`.22`, `.26`–`.28`), which is invisible to ailab tooling.
-Free static space: **none**. `.37`/`.39` went to the cloud1 CI runners cloud-ci-14/15 on 2026-10-12, `.51` was taken on 2026-10-27 for the edge VIP (ADR 0040) by moving the DHCP pool's start to `.52`, and `.52` on 2026-11-08 for `relay-worker-1` by moving it to `.53`. A Kubernetes node's address also goes into `kubernetes/edge/hostnames.yaml` `trusted_sources.exclude` (its pods egress as the node). The `Home` network is really a /23 (`192.168.0.0/23`). The next address needs a release or another pool shrink — see `docs/network-plan.md`.
+Free static space: **none**. A Kubernetes node's address also goes into `kubernetes/edge/hostnames.yaml` `trusted_sources.exclude` (its pods egress as the node). The `Home` network is really a /23 (`192.168.0.0/23`). The next address needs a release or another pool shrink — see `docs/network-plan.md`.
 
 | Role | IPs | vmid |
 |---|---|---|
 | Proxmox hosts | ai-node1/2/3 = .2 / .3 / .4 | — |
 | Talos CPs | .41 / .42 / .43 (API VIP .40:6443) | 4001–4003 |
 | GHA / Gitea CI runners | .14 / .15 / .16 / .17 / .18 | 4101–4105 |
-| CI runners (adopted into tofu 2026-09-07; `ci-runner-8`/.30/4108 retired 2026-09-12, `ci-runner-7`/.29/4107 retired 2026-09-16) | .19 / .31 / .23 | 4106, 4109, 4110 |
-| dev-workers `dev-worker-1..4` (**slot ≠ vmid** since the 2026-09-23 re-slot: dw3 = vmid 4204, dw4 = vmid 4205; 4206 retired 2026-09-21, 4203 on 2026-09-23 — `plans/2026-09-21-retire-dev-workers-3-6-plan.md`) | .8–.11 (user `c4`) | 4201, 4202, 4204, 4205 |
-| Agent nodes (Talos workers running llm-router, llm-router-edge and relay; built for AgentForge, ADR 0019, which ADR 0041 retired) | .47 / .48 / .49 | 4301–4303 |
-| Relay-worker pool: Talos worker `relay-worker-1` on ai-node3, 12 vCPU / 24 GiB fixed / 200 GiB, label `ailab.io/relay-worker-pool`, taint `dedicated=relay-worker`, gVisor schematic, RuntimeClass `relay-gvisor` (`infra/agent-nodes/relay-workers.tf`; `docs/runbooks/relay-worker-capacity.md`; KubeVirt spike `docs/runbooks/relay-worker-kubevirt-feasibility.md`) | .52 | 4304 |
+| CI runners | .19 / .31 / .23 | 4106, 4109, 4110 |
+| dev-workers `dev-worker-1..4` (**slot ≠ vmid**: dw3 = vmid 4204, dw4 = vmid 4205) | .8–.11 (user `c4`) | 4201, 4202, 4204, 4205 |
+| Agent nodes (Talos workers running llm-router, llm-router-edge and relay) | .47 / .48 / .49 | 4301–4303 |
+| Relay-worker pool: Talos worker `relay-worker-1` on ai-node3, label `ailab.io/relay-worker-pool`, taint `dedicated=relay-worker`, gVisor schematic, RuntimeClass `relay-gvisor` (`infra/agent-nodes/relay-workers.tf`; `docs/runbooks/relay-worker-capacity.md`; KubeVirt spike `docs/runbooks/relay-worker-kubevirt-feasibility.md`) | .52 | 4304 |
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
-| AI LLM LXCs (node2/node3; ai-llm-1 .44/5001 destroyed 2026-10-02) | .45 / .46 | 5002–5003 |
+| AI LLM LXCs (node2/node3) | .45 / .46 | 5002–5003 |
 | registry LXC (node1) | .36 | 5004 |
-| Edge ingress VIP (MetalLB pool `edge`, Caddy `edge-proxy`; reserved 2026-10-27, deployed from ADR 0040's P2, WAN 443 forwarded here from P3; `docs/standards/edge-ingress.md`) | .51 | — |
-| Cloud CI runner VMs (`cloud-ci-1..15` on **cloudlab** cloud1 ×5 / cloud2 ×3 / cloud3 ×7, all in service, `cloud-ci-6` included; on cloud1 all five are 6 vCPU / 12 GiB since 2026-11-07, when `cloud-ci-1/2` shrank from 8 vCPU / 24 GiB, ADR 0032 amendment 2026-11-06; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .29 / .37 / .39 (cloud1) · .13 / .44 / .50 (cloud2) · .34 / .35 / .30 / .5 / .6 / .7 / .12 (cloud3) | 6101–6115 |
+| Edge ingress VIP (MetalLB pool `edge`, Caddy `edge-proxy`; WAN 443 forwarded here; `docs/standards/edge-ingress.md`) | .51 | — |
+| Cloud CI runner VMs (`cloud-ci-1..15` on **cloudlab** cloud1 ×5 / cloud2 ×3 / cloud3 ×7; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .29 / .37 / .39 (cloud1) · .13 / .44 / .50 (cloud2) · .34 / .35 / .30 / .5 / .6 / .7 / .12 (cloud3) | 6101–6115 |
 | Cloud Windows 11 Pro VM `constantin-win-01` (**cloudlab** cloud3; RDP as `c4` with the `af/estate/cloudlab-win11` password, key-only SSH `ssh c4@192.168.0.38`; `../cloudlab/kubernetes/infra/windows-vm`) | .38 | 6201 |
 
 > **Renumbering a guest takes THREE edits**: the guest (netplan), the tofu variable, AND the Proxmox
