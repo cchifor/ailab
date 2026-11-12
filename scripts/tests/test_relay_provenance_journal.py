@@ -59,7 +59,7 @@ class RendererTest(unittest.TestCase):
 
     def test_suspended_initialization_and_preflight_pins(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT}
-        for n in range(1, 9):
+        for n in range(1, 10):
             config['schema' + str(n).zfill(3)] = self.file(str(n) + '.sql', 'BEGIN;\nCOMMIT;\n')
         output = self.render('initialize', config)
         self.assertEqual(output.returncode, 0, output.stderr)
@@ -68,8 +68,8 @@ class RendererTest(unittest.TestCase):
         objects = resource['items']
         job = objects[-1]
         self.assertTrue(job['spec']['suspend'])
-        self.assertEqual(job['spec']['template']['spec']['containers'][0]['env'][-1]['name'], 'SCHEMA_008_SHA256')
-        self.assertEqual(set(objects[0]['data']), {f'{n:03d}.sql' for n in range(1, 9)})
+        self.assertEqual(job['spec']['template']['spec']['containers'][0]['env'][-1]['name'], 'SCHEMA_009_SHA256')
+        self.assertEqual(set(objects[0]['data']), {f'{n:03d}.sql' for n in range(1, 10)})
         config['schema008']['sha256'] = HASH
         self.assertEqual(self.render('initialize', config).returncode, 78)
 
@@ -110,6 +110,28 @@ class RendererTest(unittest.TestCase):
         multiple = self.file('multiple.sql', 'BEGIN;\nCOMMIT;\nBEGIN;\nCOMMIT;\n')
         self.assertEqual(self.render('upgrade', {**base, 'schema008': multiple}).returncode, 78)
 
+    def test_schema9_upgrade_is_separate_one_shot_and_suspended(self):
+        config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 8,
+                  'schema009': self.file('009.sql', 'BEGIN;\nCOMMIT;\n')}
+        output = self.render('upgrade9', config)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        schema, script, job = json.loads(output.stdout)['items']
+        self.assertEqual(set(schema['data']), {'009.sql'})
+        self.assertEqual(set(script['data']), {'upgrade9.sh'})
+        self.assertEqual(job['metadata']['name'], 'relay-provenance-journal-upgrade-8-to-9')
+        self.assertTrue(job['spec']['suspend'])
+        self.assertEqual(job['spec']['backoffLimit'], 0)
+        pod = job['spec']['template']['spec']
+        self.assertEqual(pod['containers'][0]['command'], ['/bin/sh', '/initialize/upgrade9.sh'])
+        self.assertEqual(pod['containers'][0]['env'][-1], {'name': 'FROM_SCHEMA_VERSION', 'value': '8'})
+        self.assertNotIn('fsGroup', pod['securityContext'])
+        self.assertNotIn('fsGroupChangePolicy', pod['securityContext'])
+        for previous in (True, '8', 5, 6, 7, 9, None):
+            self.assertEqual(self.render('upgrade9', {**config, 'fromVersion': previous}).returncode, 78)
+        self.assertEqual(self.render('upgrade9', {**config, 'schema008': config['schema009']}).returncode, 78)
+        malformed = self.file('009-malformed.sql', 'BEGIN;\nCOMMIT;\nBEGIN;\nCOMMIT;\n')
+        self.assertEqual(self.render('upgrade9', {**config, 'schema009': malformed}).returncode, 78)
+
     def test_runtime_refuses_old_schema_or_pending_upgrade_before_postgres(self):
         data = self.dir / 'pgdata'
         data.mkdir()
@@ -127,12 +149,12 @@ class RendererTest(unittest.TestCase):
         script = ROOT / 'kubernetes/optional/relay-provenance-journal/start.sh'
         def run():
             return subprocess.run(['sh', str(script)], env=env, text=True, capture_output=True).returncode
-        for previous in (5, 6, 7):
+        for previous in (5, 6, 7, 8):
             schema.write_text(str(previous) + '\n')
             self.assertEqual(run(), 78)
             self.assertFalse(marker.exists())
-        schema.write_text('8\n')
-        pending.write_text('from=7 to=8\n')
+        schema.write_text('9\n')
+        pending.write_text('from=8 to=9\n')
         self.assertEqual(run(), 78)
         self.assertFalse(marker.exists())
         pending.unlink()
@@ -157,6 +179,18 @@ class RendererTest(unittest.TestCase):
                 result = subprocess.run(['sh', str(script)], env={**env, invalid: 'invalid'}, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 78)
                 self.assertFalse(marker.exists())
+
+    def test_schema9_upgrade_validates_009_pin_before_touching_retained_data(self):
+        marker = self.dir / 'hash-called-009'
+        sha = self.dir / 'sha256sum-009'
+        sha.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 99\n')
+        sha.chmod(0o755)
+        env = dict(os.environ, PGDATA='/var/lib/postgresql/data/pgdata', FROM_SCHEMA_VERSION='8',
+                   SCHEMA_009_SHA256=HASH, PATH=str(self.dir) + ':/usr/bin:/bin')
+        script = ROOT / 'kubernetes/optional/relay-provenance-journal/initialize/upgrade9.sh'
+        result = subprocess.run(['sh', str(script)], env={**env, 'SCHEMA_009_SHA256': 'invalid'}, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 78)
+        self.assertFalse(marker.exists())
 
     def test_listener_remains_inactive_and_uses_regular_file_mounts(self):
         config = self.service_config()

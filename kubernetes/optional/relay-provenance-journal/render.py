@@ -96,7 +96,7 @@ def common(config, keys):
 
 
 def initialize(config):
-    return database_job(config, 'initialize', list(range(1, 9)))
+    return database_job(config, 'initialize', list(range(1, 10)))
 
 
 def upgrade(config):
@@ -106,25 +106,35 @@ def upgrade(config):
     return database_job(config, 'upgrade', list(range(previous + 1, 9)))
 
 
+def upgrade9(config):
+    previous = config.get('fromVersion') if isinstance(config, dict) else None
+    if type(previous) is not int or previous != 8:
+        refuse('upgrade-version-invalid')
+    return database_job(config, 'upgrade9', [9])
+
+
 def database_job(config, action, numbers):
     keys = ['schema' + str(n).zfill(3) for n in numbers]
-    commit = common(config, keys + (['fromVersion'] if action == 'upgrade' else []))
+    is_upgrade = action in ('upgrade', 'upgrade9')
+    commit = common(config, keys + (['fromVersion'] if is_upgrade else []))
     pins = [config[key] for key in keys]
     sql = {str(n).zfill(3) + '.sql': pinned(pin, 262144) for n, pin in zip(numbers, pins)}
     if any(len(re.findall(r'^BEGIN;$', raw, re.M)) != 1 or
            len(re.findall(r'^COMMIT;$', raw, re.M)) != 1 for raw in sql.values()):
         refuse('schema-transaction-invalid')
-    filename = action + '.sh'
+    filename = ('upgrade9' if action == 'upgrade9' else action) + '.sh'
     script = (ROOT / 'initialize' / filename).read_text()
     suffix = hashlib.sha256(''.join(pin['sha256'] for pin in pins).encode()).hexdigest()[:16]
     schema_name, script_name = NAME + '-schema-' + suffix, NAME + '-' + action + '-' + hashlib.sha256(script.encode()).hexdigest()[:16]
     env = [{'name': 'PGDATA', 'value': '/var/lib/postgresql/data/pgdata'}] + [
         {'name': 'SCHEMA_' + str(n).zfill(3) + '_SHA256', 'value': pin['sha256']} for n, pin in zip(numbers, pins)]
-    if action == 'upgrade':
+    if is_upgrade:
         env.append({'name': 'FROM_SCHEMA_VERSION', 'value': str(config['fromVersion'])})
     mounts = [{'name': n, 'mountPath': p} for n, p in [('database', '/var/lib/postgresql/data'), ('schema', '/schema'),
              ('script', '/initialize'), ('run', '/var/run/postgresql'), ('tmp', '/tmp')]]
-    job_name = NAME + ('-initialize-once' if action == 'initialize' else '-upgrade-' + str(config['fromVersion']) + '-to-8')
+    job_name = NAME + ('-initialize-once' if action == 'initialize' else
+                       '-upgrade-8-to-9' if action == 'upgrade9' else
+                       '-upgrade-' + str(config['fromVersion']) + '-to-8')
     job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata(job_name, DB_NS, commit),
            'spec': {'suspend': True, 'backoffLimit': 0, 'activeDeadlineSeconds': 600,
                     'template': {'metadata': {'labels': {'app': NAME + '-' + action}}, 'spec': {
@@ -144,7 +154,7 @@ def database_job(config, action, numbers):
                                     {'name': 'script', 'configMap': {'name': script_name, 'defaultMode': 292}},
                                     {'name': 'run', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '16Mi'}},
                                     {'name': 'tmp', 'emptyDir': {'sizeLimit': '32Mi'}}]}}}}
-    if action == 'upgrade':
+    if is_upgrade:
         # Never ask kubelet to repair group ownership/mode on retained data.
         # Scratch uses emptyDir, not a PVC: kubelet setupDir uses 0777 and
         # the memory volume uses tmpfs defaults, writable by UID 70 without
@@ -339,10 +349,11 @@ def presence(config):
 
 
 def main(args):
-    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'service', 'presence') or not sha(args[2]):
+    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'upgrade9', 'service', 'presence') or not sha(args[2]):
         refuse('usage-invalid')
     config = parse(pinned({'path': args[1], 'sha256': args[2]}))
-    items = {'initialize': initialize, 'upgrade': upgrade, 'service': service, 'presence': presence}[args[0]](config)
+    items = {'initialize': initialize, 'upgrade': upgrade, 'upgrade9': upgrade9,
+             'service': service, 'presence': presence}[args[0]](config)
     print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}, separators=(',', ':')))
 
 

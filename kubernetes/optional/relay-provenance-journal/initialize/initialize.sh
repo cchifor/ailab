@@ -4,7 +4,7 @@ umask 077
 root=/var/lib/postgresql/data
 [ "$PGDATA" = "$root/pgdata" ] || exit 78
 # Verify every reviewed input before creating the data directory.
-for n in 001 002 003 004 005 006 007 008; do
+for n in 001 002 003 004 005 006 007 008 009; do
   eval "pin=\${SCHEMA_${n}_SHA256:-}"
   [ "${#pin}" = 64 ] || exit 78
   case "$pin" in *[!0-9a-f]*) exit 78;; esac
@@ -17,7 +17,8 @@ printf '%s  /schema/%s.sql\n' \
   "$SCHEMA_005_SHA256" 005 \
   "$SCHEMA_006_SHA256" 006 \
   "$SCHEMA_007_SHA256" 007 \
-  "$SCHEMA_008_SHA256" 008 | sha256sum -c - >/dev/null
+  "$SCHEMA_008_SHA256" 008 \
+  "$SCHEMA_009_SHA256" 009 | sha256sum -c - >/dev/null
 [ ! -e "$PGDATA" ] || { echo 'Provenance data already exists; refusing initialization' >&2; exit 78; }
 mkdir "$root/.initialization-started"
 initdb -D "$PGDATA" --username=postgres --auth-local=peer --auth-host=scram-sha-256 --data-checksums >/dev/null
@@ -29,7 +30,7 @@ psql -X -h /var/run/postgresql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL
 CREATE DATABASE relay_provenance;
 REVOKE ALL ON DATABASE relay_provenance FROM PUBLIC;
 SQL
-for n in 001 002 003 004 005 006 007 008; do
+for n in 001 002 003 004 005 006 007 008 009; do
   psql -X -h /var/run/postgresql -U postgres -d relay_provenance -v ON_ERROR_STOP=1 -f "/schema/$n.sql"
 done
 # SQL creates NOLOGIN purpose groups. No login or authority is installed.
@@ -45,5 +46,5 @@ END $$;
 SQL
 stop
 trap - EXIT INT TERM
-printf '8\n' > "$PGDATA/relay-provenance-journal-schema-version"
+printf '9\n' > "$PGDATA/relay-provenance-journal-schema-version"
 sync
