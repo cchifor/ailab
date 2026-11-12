@@ -1468,6 +1468,28 @@ Since 2026-10-09 the guard also:
 - names the filesystem that is still low when it ends **EXHAUSTED**, and logs its largest
   directories (`largest under …`, du depth 2) once an hour per filesystem.
 
+Since 2026-11-12 (`plans/2026-11-12-dev-worker-cleanup-gc-reflog-and-link-guard-plan.md`), the worktree
+and deps steps (`cleanup --worktrees` / `--deps`):
+- **judge idleness by reflog ENTRIES, not the reflog file.** `git gc` runs `git reflog expire --all`,
+  which rewrites every linked worktree's `logs/HEAD` at once. On dev-worker-3, 282 relay worktrees
+  carried the repack's second, so nothing was ever idle and the guard reported EXHAUSTED for 7 h while
+  10.9 GB of build output sat in idle worktrees.
+- **never remove what another tree symlinks into.** Agents share `node_modules` (whole or per package)
+  and `target/` between worktrees by symlink. One hand-run removal of such a source left 4,793 links
+  dangling. When there is a candidate, `cleanup` takes an inventory of every link under `/workspace`
+  and `/home` (always both, whatever `--deps-roots` says), and checks again right before each removal.
+  - A linked candidate is reported as `Not touching <dir>: linked from N path(s), e.g. <link>` or
+    `Kept worktree <path> — linked from …`.
+  - The last line of every run counts them: `Linked from other trees, not removed: …`.
+  - `Link inventory: N links (Xs)` gives its cost: seconds when warm, a few minutes cold.
+  - A consumer that names a dir by path in a file or a command is not protected.
+  - If the inventory cannot be completed, `cleanup` removes nothing from these two steps and exits 1.
+    The guard then counts a failed step (`DevWorkerDiskGuardFailing`), not EXHAUSTED.
+    `journalctl -u dev-worker-disk-guard | grep "link inventory incomplete"` names the path.
+- **Repair a removal that broke a consumer:** `npm ci` (or `cargo build`) in the dir's worktree from its
+  unchanged lockfile, using the agent's own toolchain (`/workspace/c4/.cache/node*`). For a worktree:
+  `git worktree add <path> <branch>` from the main clone.
+
 Every reclaim entrypoint shares one lock, `/run/lock/dev-worker-cleanup.lock` (`cleanup`, the
 guard's docker prunes through `flock -n`, the daily buildx/volume unit through `flock -w 900`): a
 held lock defers a step, it never runs two prunes at once. Each daily docker prune runs through
