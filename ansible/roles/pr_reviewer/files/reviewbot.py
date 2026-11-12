@@ -75,6 +75,48 @@ def review_marker(head_sha, verdict):
             f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} verdict={verdict} -->")
 
 
+# ── carried reviews (plans/2026-11-12-reviewbot-carry-and-fair-queue-plan.md, feature A) ────
+# A head whose PR diff is byte-identical to the diff this persona last reviewed clean is approved
+# again WITHOUT an LLM run: merging main into a PR (relay, llm-router and workbricks block
+# outdated branches and dismiss stale approvals) produces a new head with the PR's own change
+# untouched, and both personas used to re-review it from scratch to reach the same verdict.
+#
+# "Identical" is a FINGERPRINT, not the bare diff: the same bytes under different code or a
+# different exclusion/cap/guard/rubric policy can be a different reviewed input (a file excluded
+# when the source was reviewed may be read now). CARRY_EPOCH binds both, and changes on every
+# deploy of this file or edit of these keys, so each PR's next head after one is reviewed in full
+# once. No version number to remember to bump. The prompt and the lane rubrics live in this file,
+# so its bytes bind them. The model ladder and effort are DELIBERATELY not bound: the verdict is
+# the persona's, whichever of its tiers served it (reviewer-1 moves between fable and opus with
+# quota, review by review), and binding them would make a carry depend on which tier was free.
+CARRY_POLICY_KEYS =("persona", "exclude_globs", "doc_globs", "max_diff_bytes", "unattended_authors",
+                     "guarded_paths", "pin_authors", "dependency_authors")
+# The bot-authored line a carried review carries directly before the instance line and the marker.
+# An HTML comment cannot come from model text (parse_review rewrites `<!--`), and it is recognised
+# only at this fixed position, in a review marker_of() has already attributed to our own account.
+CARRIED_TAIL_RE = re.compile(r"<!-- review-bot-carried: from=([0-9a-f]{40}) -->\r?\n"
+                             r"<!-- review-bot-instance: [A-Za-z0-9._-]+ -->\r?\n"
+                             r"<!-- review-bot:v1 persona=\S+ head=[0-9a-f]{40} verdict=\S+ -->\s*\Z")
+# Upper bound on review pages read to find this persona's latest review: a carry needs the WHOLE
+# history (the latest word may be on the last page), so hitting the bound refuses the carry.
+CARRY_REVIEW_PAGES_MAX = 200
+# meta counter stamped on a job (jobs.verdict_seq) when it enters `posting` with its verdict.
+VERDICT_SEQ_KEY = "verdict_seq"
+
+
+def _carry_epoch():
+    try:
+        with open(os.path.abspath(__file__), "rb") as f:
+            source = f.read()
+    except OSError:
+        return None  # no epoch, no carry
+    policy = json.dumps({k: CFG.get(k) for k in CARRY_POLICY_KEYS}, sort_keys=True)
+    return hashlib.sha256(source + b"\0" + policy.encode("utf-8")).hexdigest()
+
+
+CARRY_EPOCH = _carry_epoch()
+
+
 EVENTS = {"pull_request", "pull_request_sync", "pull_request_label", "pull_request_review_request"}
 # `meta` key prefix for the per-repo last-sweep result (0 = swept clean, 1 = sweep incomplete).
 # A PREFIX rather than a fixed key list because the repo set is config, not code - write_metrics()
@@ -162,6 +204,23 @@ def db():
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
+    # Carried reviews: diff_digest is the review_fingerprint() of the head the job reviewed,
+    # carried_from the head the model actually read when this job carried a verdict instead of
+    # running it, verdict_seq the order in which verdicts were PRODUCED (a meta counter taken when
+    # a job enters `posting`; the row id is only the order heads were first queued, and a retried
+    # older head can produce its verdict after a newer one). No backfill: a NULL fingerprint is
+    # never a carry source.
+    # chunk_progress (fair queue): 1 only while the job's LAST outcome persisted a chunk part and
+    # nothing has claimed it since - the one state in which it keeps the worker.
+    for col, kind in (("diff_digest", "TEXT"), ("carried_from", "TEXT"), ("verdict_seq", "INTEGER"),
+                      ("chunk_progress", "INTEGER DEFAULT 0")):
+        if col not in cols:
+            try:
+                c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {kind}")
+                c.commit()
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
     return c
 
 
@@ -205,6 +264,24 @@ def record_gauge(key, value):
             c.close()
     except Exception as e:
         log(f"telemetry: gauge {key} failed: {e}")
+
+
+def _meta_int(c, key):
+    """A meta value as an integer (0 when absent or unparsable). meta.v is TEXT: compared as
+    strings, "10" sorts before "2". The caller holds db_lock and owns the connection."""
+    row = c.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+    if not row:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        pass
+    try:
+        # "12.0" (bump_meta's spelling) still reads; "inf"/"nan" must not raise OverflowError
+        # out of the claim, which would kill the only worker thread.
+        return int(float(row[0]))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def api(path, method="GET", body=None, raw=False):
@@ -3355,12 +3432,16 @@ def review_round(repo, pr):
     with zero reviews between them.
 
     Rows written before the verdict column existed have verdict IS NULL and are counted, since
-    at that time every done row was a real review."""
+    at that time every done row was a real review.
+
+    A CARRIED head (carried_from set) is not a new reading either: counting it would let a run of
+    main-merges buy the next real review the round-3 blockers-only ladder without anyone having
+    read anything new."""
     with db_lock:
         c = db()
         n = c.execute("SELECT COUNT(DISTINCT head_sha) FROM jobs WHERE repo=? AND pr=? "
                       "AND state='done' AND (verdict IS NULL OR verdict IN ('clean','findings')) "
-                      "AND (coverage IS NULL OR coverage='full')",
+                      "AND (coverage IS NULL OR coverage='full') AND carried_from IS NULL",
                       (repo, pr)).fetchone()[0]
         c.close()
     return n + 1
@@ -3376,6 +3457,10 @@ def convergence_context(repo, pr, head_sha, rnd):
         if not m:
             continue
         if m.group(1) == CFG["persona"]:
+            if CARRIED_TAIL_RE.search(rv.get("body") or ""):
+                # A carry notice says nothing the model wrote; the review it carried is the one
+                # whose nits and advisories the next real round should verify.
+                continue
             mine = (rv.get("body") or "")[:2500]  # keep the latest (oldest-first order)
         elif m.group(2) == head_sha:
             peer = (rv.get("body") or "")[:2500]
@@ -3399,6 +3484,175 @@ def convergence_context(repo, pr, head_sha, rnd):
     return ctx + "\n"
 
 
+def review_fingerprint(raw):
+    """What a carry compares: the PR's `.diff` bytes as fetched, bound to CARRY_EPOCH (this file's
+    bytes + the review-policy config). None when there is no epoch - nothing then ever matches."""
+    if not CARRY_EPOCH or not isinstance(raw, (bytes, bytearray)):
+        return None
+    h = hashlib.sha256(b"reviewbot-carry/v1\0" + CARRY_EPOCH.encode("ascii") + b"\0")
+    h.update(raw)
+    return "sha256:" + h.hexdigest()
+
+
+def all_reviews(repo, pr):
+    """EVERY review of the PR, ordered by review id, or an exception. iter_reviews() stops at ten
+    pages and at the first page shorter than 50 - fine for a context read, not for deciding which
+    review is a persona's LATEST word: a newer finding on page 11 (or behind a server-capped page
+    size) would be invisible. Paginates until an empty page, dedupes by id (pages shift while a
+    review lands), and refuses rather than return a truncated history."""
+    out = {}
+    for page in range(1, CARRY_REVIEW_PAGES_MAX + 1):
+        batch = api(f"/repos/{repo}/pulls/{pr}/reviews?limit=50&page={page}")
+        if not isinstance(batch, list):
+            raise ValueError("review listing is not a list")
+        if not batch:
+            return [out[k] for k in sorted(out)]
+        for rv in batch:
+            if not isinstance(rv, dict) or type(rv.get("id")) is not int:
+                raise ValueError("review listing has an entry without an integer id")
+            out[rv["id"]] = rv
+    raise ValueError(f"review listing exceeds {CARRY_REVIEW_PAGES_MAX} pages")
+
+
+def carry_source(repo, pr, head_sha, fingerprint, raw, coverage):
+    """Should this head get this persona's clean verdict again without an LLM run?
+    Returns (origin_head, None) to carry, or (None, reason); reason is None when there is nothing
+    worth logging (the PR has no earlier review of ours - its first review, the common case).
+
+    ALL of these, each closing a way a carry could approve what the persona never approved:
+    - no binary section: git names one only by ABBREVIATED blob hashes, which an author can grind a
+      collision for, so identical bytes would not mean identical content there;
+    - full coverage now (a clean source implies it; this keeps the claim local);
+    - a done, clean, full-coverage row of ours at another head with the SAME fingerprint;
+    - Gitea agrees that a review of that head is our LATEST word on the PR, read from the complete
+      history: a newer finding at any head - including one written by an earlier database, or by
+      another host of this persona - outranks the matching row;
+    - no LATER contrary verdict in OUR records, in any state: a findings review whose POST failed
+      (quarantined) or is unresolved never reached Gitea, and must still veto - that includes an
+      earlier attempt at THIS head. "Later" is verdict_seq, the order verdicts were produced in,
+      never the row id: a retried OLDER head can reach its verdict after a newer head's.
+    Any exception propagates; review_job() treats it as "no carry"."""
+    with db_lock:
+        c = db()
+        try:
+            prior = c.execute("SELECT 1 FROM jobs WHERE repo=? AND pr=? AND head_sha<>? "
+                              "AND state='done' LIMIT 1", (repo, pr, head_sha)).fetchone()
+            # Ordered so that, should one head ever hold two such rows, the newer one wins.
+            rows = {r[0]: r for r in c.execute(
+                "SELECT head_sha,verdict_seq,carried_from,updated FROM jobs WHERE repo=? AND pr=? "
+                "AND head_sha<>? AND state='done' AND verdict='clean' AND coverage='full' "
+                "AND diff_digest=? AND verdict_seq IS NOT NULL ORDER BY verdict_seq, id",
+                (repo, pr, head_sha, fingerprint))}
+            # A PR that has ever been through the chunk lane is never carried: that lane's
+            # verdicts live in its own receipts and markers, which neither the veto below nor
+            # marker_of() can read, and a lane rollback restores the old CARRY_EPOCH.
+            chunked = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='chunk_jobs'").fetchone() and c.execute(
+                "SELECT 1 FROM jobs WHERE repo=? AND pr=? AND id IN (SELECT job FROM chunk_jobs) "
+                "LIMIT 1", (repo, pr)).fetchone()
+        finally:
+            c.close()
+    if prior is None:
+        return None, None
+    if chunked:
+        return None, "the PR was reviewed through the chunk lane"
+    if BIN_MARKER_RE.search(raw):
+        return None, "the diff has a binary section"
+    if coverage != "full":
+        return None, f"coverage {coverage}"
+    if not fingerprint or not rows:
+        return None, "no clean review of an identical diff"
+    # Our account's LATEST review of any kind, not our latest v1 marker: a review this code cannot
+    # read (a chunk-lane marker, a future marker version) must stop the carry, not be looked past.
+    mine, latest_rv = f"reviewer-{CFG['persona']}", None
+    for rv in all_reviews(repo, pr):
+        if ((rv.get("user") or {}).get("login") or "") == mine:
+            latest_rv = rv
+    if latest_rv is None:
+        return None, "no review of ours in Gitea"
+    latest = marker_of(latest_rv)
+    if latest is None or latest.group(1) != CFG["persona"]:
+        return None, "our latest review carries no verdict marker this code reads"
+    src, verdict = latest.group(2), latest.group(3) or "findings"
+    if verdict != "clean":
+        return None, f"latest review is {verdict} at {src[:9]}"
+    if src not in rows:
+        return None, f"latest review at {src[:9]} was not of an identical diff"
+    _head, src_seq, origin, src_done_at = rows[src]
+    with db_lock:
+        c = db()
+        try:
+            # Two ways to be LATER. A higher verdict_seq; or a row touched at or after the source
+            # completed, whatever its sequence says: code that predates verdict_seq (before this
+            # deploy, or during a rollback to it) writes a verdict without one - leaving it NULL,
+            # or leaving a STALE older sequence on a row it re-reviews (reviewer-codex on ailab
+            # #1731). `updated` only ever moves later, so the error is on the conservative side,
+            # and findings from before the source (pre-deploy history included) do not block a
+            # PR's carries forever.
+            veto = c.execute("SELECT head_sha,verdict FROM jobs WHERE repo=? AND pr=? "
+                             "AND verdict IS NOT NULL AND verdict<>'clean' AND (verdict_seq>? "
+                             "OR COALESCE(updated,0)>=?) ORDER BY id DESC LIMIT 1",
+                             (repo, pr, src_seq, src_done_at or 0)).fetchone()
+        finally:
+            c.close()
+    if veto:
+        return None, f"later review {veto[1]} at {str(veto[0])[:9]}"
+    return origin or src, None
+
+
+def post_carried(job_id, repo, pr, head_sha, origin, fingerprint):
+    """Post the carried verdict through post_review(), like every review: the final head re-check,
+    the posting-disabled flag, the marker dedupe, the `posting` state and its ambiguous-POST
+    quarantine, then the merge check. APPROVED, as every clean verdict is: the update being carried
+    across auto-dismissed the earlier approval where branch protection dismisses stale ones."""
+    note = f"carried clean from {origin[:9]} (diff unchanged)"
+    body = (f"Carried forward from {origin[:9]}: this reviewer's review of that head was clean, and "
+            f"this pull request's diff at {head_sha[:9]} is byte-identical to the one it reviewed "
+            f"(for example, the base branch was merged in), so the model was not run again. It was "
+            f"not re-read against the updated base; CI runs on this head.\n\n"
+            f"<!-- review-bot-carried: from={origin} -->\n" + review_marker(head_sha, "clean"))
+    result = post_review(job_id, repo, pr, head_sha, body, "APPROVED", [], note,
+                         verdict="clean", coverage="full", fingerprint=fingerprint,
+                         carried_from=origin)
+    # Counted only when OUR post landed - not for a marker that appeared first, a moved head or
+    # a posting-disabled retry.
+    if result[0] == "done" and result[2] == note:
+        bump_meta("reviews_carried_total")
+    return result
+
+
+def record_rediscovered_carry(job_id, repo, pr, head_sha):
+    """A job that finds OUR review already at its head completes without posting, so its row
+    never gets the provenance post_review() writes. If that review is a carried one (the bot-
+    authored tail, in a review marker_of() attributes to us), record carried_from, or
+    review_round() would count a carry as a reading - e.g. after a database restored from before
+    the carry was posted. Returns False when the review or the row could not be read or written
+    (logged); the caller decides whether completing anyway is safe."""
+    try:
+        origin = None
+        # The COMPLETE history (all_reviews fails closed): the review being rediscovered is the
+        # newest at this head, exactly the one a truncated oldest-first listing would drop
+        # (reviewer-claude on ailab#1731).
+        for rv in all_reviews(repo, pr):
+            m = marker_of(rv)
+            if m and m.group(1) == CFG["persona"] and m.group(2) == head_sha:
+                tail = CARRIED_TAIL_RE.search(rv.get("body") or "")
+                origin = tail.group(1) if tail else None   # last match wins, as for markers
+        if origin:
+            with db_lock:
+                c = db()
+                try:
+                    c.execute("UPDATE jobs SET carried_from=COALESCE(carried_from,?) WHERE id=?",
+                              (origin, job_id))
+                    c.commit()
+                finally:
+                    c.close()
+        return True
+    except Exception as e:
+        log(f"carry {repo}#{pr} @ {head_sha[:9]}: provenance of the existing review unread: {e}")
+        return False
+
+
 def review_job(job_id, repo, pr, head_sha):
     if chunk_enabled(repo):
         return chunk_call("review_job", job_id, repo, pr, head_sha)
@@ -3409,9 +3663,28 @@ def review_job(job_id, repo, pr, head_sha):
         enqueue(repo, pr, d["moved_to"], "head-moved")
         return ("superseded", None, f"head moved to {d['moved_to'][:9]}")
     if existing_marker(repo, pr, head_sha):
+        # No model ran in this job, so the row's countability rests entirely on what is recorded
+        # about the review that is already there. This path completes unconditionally, as it
+        # always has - a retry here would loop forever on a history that stays unreadable
+        # (reviewer-claude on ailab#1731). Unreadable provenance instead marks a row that carries
+        # no verdict of its own `unread`, which review_round() does not count: at worst a real
+        # reading goes uncounted, which only keeps the ladder stricter.
+        if not record_rediscovered_carry(job_id, repo, pr, head_sha):
+            with db_lock:
+                c = db()
+                try:
+                    c.execute("UPDATE jobs SET verdict='unread' WHERE id=? AND verdict IS NULL",
+                              (job_id,))
+                    c.commit()
+                finally:
+                    c.close()
+            return ("done", None, "marker already present (provenance unread: not a counted round)")
         return ("done", None, "marker already present")
 
     diff_bytes = api(f"/repos/{repo}/pulls/{pr}.diff", raw=True)
+    # The bytes exactly as Gitea served them (merge base vs head), before textify rewrites any
+    # section: what a carried verdict is compared on (review_fingerprint).
+    raw = diff_bytes
     # Intake bound, before any parsing: a 3.4 MB corpus PR is already downloaded by the time we
     # get here, and there is no reason to hold an arbitrarily large payload in memory to decide
     # it is unreviewable.
@@ -3460,6 +3733,19 @@ def review_job(job_id, repo, pr, head_sha):
         if d2 and "moved_to" in d2:
             enqueue(repo, pr, d2["moved_to"], "head-moved")
         return ("superseded", None, "head moved during diff fetch")
+
+    # Computed and stored for every review, flag on or off, so turning the flag on finds sources.
+    fingerprint = review_fingerprint(raw)
+    if CFG.get("carry_clean_verdicts") and fingerprint:
+        try:
+            origin, why = carry_source(repo, pr, head_sha, fingerprint, raw, coverage)
+        except Exception as e:
+            # An optimisation never fails a job: anything unexpected means a full review.
+            origin, why = None, f"check failed: {str(e)[:150]}"
+        if origin:
+            return post_carried(job_id, repo, pr, head_sha, origin, fingerprint)
+        if why:
+            log(f"carry {repo}#{pr} @ {head_sha[:9]}: no ({why})")
 
     commentable = parse_hunks(diff)
     author = ((d.get("user") or {}).get("login") or "").lower()
@@ -3541,7 +3827,7 @@ def review_job(job_id, repo, pr, head_sha):
                        "APPROVED" if verdict == "clean" else "COMMENT", comments,
                        f"{len(comments)} inline / {len(demoted)} demoted / {verdict}"
                        + (f" / {len(dropped)} files excluded" if dropped else ""),
-                       verdict=verdict, coverage=coverage)
+                       verdict=verdict, coverage=coverage, fingerprint=fingerprint)
 
 
 def skip_body(head_sha, nbytes, why=None, dropped=None, total_files=0):
@@ -3565,10 +3851,31 @@ def skip_body(head_sha, nbytes, why=None, dropped=None, total_files=0):
 
 
 def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict=None,
-                coverage=None):
-    """The single mutation path: final eligibility + dedup checks, then ONE POST whose
-    ambiguous failure quarantines (never blind-retried). Shared by real reviews and by the
-    over-cap skip so both carry the same discipline."""
+                coverage=None, fingerprint=None, carried_from=None):
+    """The review mutation path: final eligibility + dedup checks, then ONE POST whose
+    ambiguous failure quarantines (never blind-retried). Shared by real reviews, by the
+    over-cap skip and by carried verdicts so all carry the same discipline.
+
+    The provenance (verdict, coverage, fingerprint, carried_from, verdict_seq) is recorded FIRST,
+    before any check below can return or raise: a verdict the model reached is a fact about this
+    persona's reading even when the head then moves, posting is disabled or Gitea fails to answer,
+    and carry_source() vetoes on it. It survives every later way a landed review reaches `done`
+    (a restart re-queue, a --requeue that finds the marker). All five are written every time, so a
+    retry that takes another path never inherits a stale value. `updated` is left alone here: for
+    a running job it dates the in-flight attempt (reviewbot_running_job_age_seconds)."""
+    with db_lock:
+        c = db()
+        try:
+            # verdict_seq: the order verdicts were produced in. One transaction with the row it
+            # stamps.
+            seq = _meta_int(c, VERDICT_SEQ_KEY) + 1
+            c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (VERDICT_SEQ_KEY, str(seq)))
+            c.execute("UPDATE jobs SET verdict=?, coverage=?, diff_digest=?, carried_from=?, "
+                      "verdict_seq=? WHERE id=?",
+                      (verdict, coverage, fingerprint, carried_from, seq, job_id))
+            c.commit()
+        finally:
+            c.close()
     # Final eligibility + dedup check immediately before the mutation.
     d3 = pr_ok(repo, pr, head_sha)
     if d3 is None or "moved_to" in d3:
@@ -3579,12 +3886,15 @@ def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict
         return ("retry", None, "posting disabled")
     rid = existing_marker(repo, pr, head_sha)
     if rid:
+        # The row already records THIS job's own reading (written above), so completing is safe
+        # even if the read below fails. When what landed is a carried review, it is marked as one:
+        # at worst that leaves a reading uncounted, which only keeps the ladder stricter.
+        record_rediscovered_carry(job_id, repo, pr, head_sha)
         return ("done", rid, "marker appeared before post")
 
     with db_lock:
         c = db()
-        c.execute("UPDATE jobs SET state='posting', verdict=?, coverage=?, updated=? "
-                  "WHERE id=?", (verdict, coverage, time.time(), job_id))
+        c.execute("UPDATE jobs SET state='posting', updated=? WHERE id=?", (time.time(), job_id))
         c.commit()
         c.close()
     try:
@@ -3688,7 +3998,8 @@ def write_metrics():
                 "'merge_blocked_seconds','merge_blocked_dependency_seconds',"
                 "'llm_primary_failed_total','llm_fallback_used_total',"
                 "'llm_seat_switches_total','llm_credscan_skipped_total',"
-                "'llm_model_switches_total','llm_upstream_busy_total')")}
+                "'llm_model_switches_total','llm_upstream_busy_total',"
+                "'reviews_carried_total','queue_fair_overrides_total')")}
             # SEPARATE read, deliberately: the dict above is an explicit key whitelist, so a new
             # metric added only to the (key, metric) render list below would export 0 forever.
             # The per-repo results are keyed by repo name, which is config - hence a prefix scan.
@@ -3826,6 +4137,12 @@ def write_metrics():
                             ("reviews_full_total", "reviewbot_reviews_full_total"),
                             ("reviews_partial_total", "reviewbot_reviews_partial_total"),
                             ("reviews_skipped_total", "reviewbot_reviews_skipped_total"),
+                            # Clean verdicts posted again for an unchanged diff, no LLM run.
+                            ("reviews_carried_total", "reviewbot_reviews_carried_total"),
+                            # Claims where queue_policy=fair served another repo than the
+                            # globally oldest job's.
+                            ("queue_fair_overrides_total",
+                             "reviewbot_queue_fair_overrides_total"),
                             ("findings_dropped_total", "reviewbot_findings_dropped_total"),
                             ("llm_timeouts_total", "reviewbot_llm_timeouts_total"),
                             ("llm_failures_total", "reviewbot_llm_failures_total"),
@@ -3985,6 +4302,64 @@ def metrics_ticker():
         time.sleep(15)
 
 
+# ── the queue policy (plans/2026-11-12-reviewbot-carry-and-fair-queue-plan.md, feature B) ────
+# `fifo` claims the globally oldest eligible job - one repository with a hundred stacked PRs then
+# holds a quota-bound single worker for hours (2026-11-12: relay was 84% of 575 jobs/day, and a
+# platform PR waited behind 30 of them). `fair` serves repositories round-robin: among the repos
+# with an eligible job, the one claimed from LEAST RECENTLY, then that repo's oldest eligible job.
+# "Last served" is a claim sequence number in `meta` (queue_served:<repo>), written in the claim's
+# own transaction: monotonic, so a clock step cannot re-order repos, and durable across restarts.
+CLAIM_COLUMNS = "id,repo,pr,head_sha,attempts,timeout_attempts,created,busy_attempts"
+QUEUE_POLICIES = ("fifo", "fair")
+QUEUE_SERVED_PREFIX = "queue_served:"
+QUEUE_SEQ_KEY = "queue_served_seq"
+
+
+def queue_policy():
+    """The configured policy; anything unknown is `fifo` (main() logs it once)."""
+    policy = CFG.get("queue_policy") or "fifo"
+    return policy if policy in QUEUE_POLICIES else "fifo"
+
+
+def claim_fair(c, now):
+    """Pick the job to claim under queue_policy=fair. The caller holds db_lock and commits.
+    Returns (row, fifo_row): fifo_row is the job FIFO would have claimed when it belongs to
+    another repository (for the override counter and log line), else None. Only the choice of
+    repository is new: eligibility is the FIFO query's own predicate, word for word.
+
+    An ACTIVE CHUNK SNAPSHOT keeps the worker: a queued job whose last outcome persisted a part
+    (jobs.chunk_progress=1, written by worker_once() for a "progress" result and cleared by every
+    claim and every other outcome) is claimed before the rotation, as FIFO always did by its old
+    `created`. The snapshot is bound to the base sha, so interleaving other repositories' reviews
+    between its parts would give the base time to move and restart it - over and over on a busy
+    base. Nothing else qualifies: a job waiting for the peer's handshake, backing off, re-queued by
+    a refresh, by --requeue or by startup recovery starts (or restarts) work and takes its turn,
+    or a few of them could hold the worker indefinitely."""
+    fifo = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state IN ('queued','retry') "
+                     "AND next_at<=? ORDER BY created LIMIT 1", (now,)).fetchone()
+    if fifo is None:
+        return None, None
+    row = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state='queued' AND chunk_progress=1 "
+                    "AND next_at<=? ORDER BY created, id LIMIT 1", (now,)).fetchone()
+    if row is None:
+        candidates = c.execute("SELECT repo, MIN(created) FROM jobs WHERE state IN "
+                               "('queued','retry') AND next_at<=? GROUP BY repo", (now,)).fetchall()
+        served = {repo: _meta_int(c, QUEUE_SERVED_PREFIX + str(repo)) for repo, _ in candidates}
+        # Least recently served first; never-served repos (0) before all others; equal stamps
+        # fall back to FIFO between repos, then to the name so the choice is deterministic.
+        repo = min(candidates, key=lambda r: (served[r[0]], r[1] or 0.0, str(r[0])))[0]
+        row = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE repo=? AND state IN "
+                        "('queued','retry') AND next_at<=? ORDER BY created, id LIMIT 1",
+                        (repo, now)).fetchone()
+    if row is None:
+        # Unreachable while repo is a non-NULL column; never let the policy strand eligible work.
+        row = fifo
+    seq = _meta_int(c, QUEUE_SEQ_KEY) + 1
+    c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (QUEUE_SEQ_KEY, str(seq)))
+    c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (QUEUE_SERVED_PREFIX + str(row[1]), str(seq)))
+    return row, (fifo if fifo[1] != row[1] else None)
+
+
 def worker_once():
     """One claim -> run -> persist cycle, returning the job id it handled (None if idle).
 
@@ -3996,19 +4371,31 @@ def worker_once():
     # would fail identically, and the guarantee has to hold for whoever claims work.
     if time.time() < RATE_LIMITED_UNTIL:
         return None
+    passed_over = None
     with db_lock:
         c = db()
-        row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts,created,"
-                        "busy_attempts FROM jobs WHERE state IN ('queued','retry') AND next_at<=? "
-                        "ORDER BY created LIMIT 1", (time.time(),)).fetchone()
+        if queue_policy() == "fair":
+            # One lock, one connection, one commit, as for FIFO: the served stamp is written in
+            # the claim's own transaction.
+            row, passed_over = claim_fair(c, time.time())
+        else:
+            row = c.execute("SELECT id,repo,pr,head_sha,attempts,timeout_attempts,created,"
+                            "busy_attempts FROM jobs WHERE state IN ('queued','retry') AND next_at<=? "
+                            "ORDER BY created LIMIT 1", (time.time(),)).fetchone()
         if row:
-            c.execute("UPDATE jobs SET state='running', updated=? WHERE id=?",
+            # chunk_progress is cleared by the claim: only this attempt's own outcome may set it
+            # again (fair queue - see claim_fair).
+            c.execute("UPDATE jobs SET state='running', chunk_progress=0, updated=? WHERE id=?",
                       (time.time(), row[0]))
             c.commit()
         c.close()
     if not row:
         return None
     jid, repo, pr, head_sha, attempts, timeouts, created, busy = row
+    if passed_over:
+        # Telemetry after the lock (bump_meta takes db_lock itself and never raises).
+        bump_meta("queue_fair_overrides_total")
+        log(f"queue: fair pick {repo}#{pr} ahead of fifo {passed_over[1]}#{passed_over[2]}")
     timeouts = timeouts or 0
     busy = busy or 0
     limited_until = 0.0
@@ -4076,9 +4463,9 @@ def worker_once():
         else:
             next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
         c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, busy_attempts=?, "
-                  "next_at=?, updated=?, review_id=?, note=? WHERE id=?",
+                  "next_at=?, updated=?, review_id=?, note=?, chunk_progress=? WHERE id=?",
                   (persisted_state, attempts, timeouts, busy_next, next_at, time.time(), rid, note,
-                   jid))
+                   1 if progressed else 0, jid))
         if persisted_state == "done":
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
                       (str(time.time()),))
@@ -4406,6 +4793,12 @@ def main():
         log(f"startup: quarantined {quarantined} ambiguous chunk publication(s)")
     if n:
         log(f"startup: re-queued {n} orphaned job(s)")
+    configured = CFG.get("queue_policy") or "fifo"
+    log(f"queue: policy={queue_policy()}"
+        + (f" (unknown queue_policy {configured!r}, using fifo)"
+           if configured not in QUEUE_POLICIES else "")
+        + f"; carry_clean_verdicts={bool(CFG.get('carry_clean_verdicts'))}"
+        + ("" if CARRY_EPOCH else " (no epoch: carry off)"))
     # Before any thread exists, so the rebind cannot race the worker or the ticker.
     resolve_seats()
     if len(SEATS) > 1:
