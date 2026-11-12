@@ -315,3 +315,14 @@ all ACCEPTED (one with a narrower fix than proposed), each with a mutant-killing
 3. (important) The entry-path rediscovery could fail its second read and still complete a
    countable row: it now returns `retry` (no attempt consumed). The final-check path needs no
    change - the early provenance write already records that job's own reading.
+
+## Reviewer bots on #1731, round 1 - dispositions
+
+- reviewer-codex (important): a rollback's pre-sequence code re-reviewing an already-sequenced row
+  leaves its stale `verdict_seq` - ACCEPTED: any non-clean row vetoes when its sequence is higher
+  OR it was touched at or after the source completed.
+- reviewer-claude (important): rediscovery read the truncating `iter_reviews()` - ACCEPTED:
+  `all_reviews()`.
+- reviewer-claude (nit): model/effort outside the epoch - intended (the verdict is the persona's,
+  whichever tier served it); now said in the code.
+- reviewer-claude (nit): the runbook named a miss reason the code never logs - fixed.
