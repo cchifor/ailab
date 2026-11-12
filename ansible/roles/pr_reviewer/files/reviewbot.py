@@ -207,7 +207,10 @@ def db():
     # a job enters `posting`; the row id is only the order heads were first queued, and a retried
     # older head can produce its verdict after a newer one). No backfill: a NULL fingerprint is
     # never a carry source.
-    for col, kind in (("diff_digest", "TEXT"), ("carried_from", "TEXT"), ("verdict_seq", "INTEGER")):
+    # chunk_progress (fair queue): 1 only while the job's LAST outcome persisted a chunk part and
+    # nothing has claimed it since - the one state in which it keeps the worker.
+    for col, kind in (("diff_digest", "TEXT"), ("carried_from", "TEXT"), ("verdict_seq", "INTEGER"),
+                      ("chunk_progress", "INTEGER DEFAULT 0")):
         if col not in cols:
             try:
                 c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {kind}")
@@ -3533,7 +3536,7 @@ def carry_source(repo, pr, head_sha, fingerprint, raw, coverage):
                               "AND state='done' LIMIT 1", (repo, pr, head_sha)).fetchone()
             # Ordered so that, should one head ever hold two such rows, the newer one wins.
             rows = {r[0]: r for r in c.execute(
-                "SELECT head_sha,verdict_seq,carried_from FROM jobs WHERE repo=? AND pr=? "
+                "SELECT head_sha,verdict_seq,carried_from,updated FROM jobs WHERE repo=? AND pr=? "
                 "AND head_sha<>? AND state='done' AND verdict='clean' AND coverage='full' "
                 "AND diff_digest=? AND verdict_seq IS NOT NULL ORDER BY verdict_seq, id",
                 (repo, pr, head_sha, fingerprint))}
@@ -3572,13 +3575,20 @@ def carry_source(repo, pr, head_sha, fingerprint, raw, coverage):
         return None, f"latest review is {verdict} at {src[:9]}"
     if src not in rows:
         return None, f"latest review at {src[:9]} was not of an identical diff"
-    _head, src_seq, origin = rows[src]
+    _head, src_seq, origin, src_done_at = rows[src]
     with db_lock:
         c = db()
         try:
+            # A non-clean verdict WITHOUT a sequence was written by code that predates it - before
+            # this deploy, or during a rollback to such code. It vetoes when its row was last
+            # touched at or after the source completed: `updated` only ever moves later, so the
+            # error is on the conservative side, and findings from before the deploy (older than
+            # any source with a sequence) do not block a PR's carries forever.
             veto = c.execute("SELECT head_sha,verdict FROM jobs WHERE repo=? AND pr=? "
-                             "AND verdict_seq>? AND verdict IS NOT NULL AND verdict<>'clean' "
-                             "ORDER BY verdict_seq DESC LIMIT 1", (repo, pr, src_seq)).fetchone()
+                             "AND verdict IS NOT NULL AND verdict<>'clean' AND (verdict_seq>? "
+                             "OR (verdict_seq IS NULL AND COALESCE(updated,0)>=?)) "
+                             "ORDER BY id DESC LIMIT 1",
+                             (repo, pr, src_seq, src_done_at or 0)).fetchone()
         finally:
             c.close()
     if veto:
@@ -3612,7 +3622,8 @@ def record_rediscovered_carry(job_id, repo, pr, head_sha):
     never gets the provenance post_review() writes. If that review is a carried one (the bot-
     authored tail, in a review marker_of() attributes to us), record carried_from, or
     review_round() would count a carry as a reading - e.g. after a database restored from before
-    the carry was posted. Best effort: a failure here only leaves the row as it was before."""
+    the carry was posted. Returns False when the review or the row could not be read or written
+    (logged); the caller decides whether completing anyway is safe."""
     try:
         origin = None
         for rv in iter_reviews(repo, pr):
@@ -3629,8 +3640,10 @@ def record_rediscovered_carry(job_id, repo, pr, head_sha):
                     c.commit()
                 finally:
                     c.close()
+        return True
     except Exception as e:
         log(f"carry {repo}#{pr} @ {head_sha[:9]}: provenance of the existing review unread: {e}")
+        return False
 
 
 def review_job(job_id, repo, pr, head_sha):
@@ -3643,7 +3656,11 @@ def review_job(job_id, repo, pr, head_sha):
         enqueue(repo, pr, d["moved_to"], "head-moved")
         return ("superseded", None, f"head moved to {d['moved_to'][:9]}")
     if existing_marker(repo, pr, head_sha):
-        record_rediscovered_carry(job_id, repo, pr, head_sha)
+        # No model ran in this job, so the row's countability rests entirely on what is recorded
+        # about the review that is already there. Unreadable: try again later rather than complete
+        # a row review_round() would count as a reading (no attempt is consumed).
+        if not record_rediscovered_carry(job_id, repo, pr, head_sha):
+            return ("retry", None, "marker already present; its provenance could not be read")
         return ("done", None, "marker already present")
 
     diff_bytes = api(f"/repos/{repo}/pulls/{pr}.diff", raw=True)
@@ -3851,8 +3868,9 @@ def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict
         return ("retry", None, "posting disabled")
     rid = existing_marker(repo, pr, head_sha)
     if rid:
-        # Whatever landed is what this head's row now stands for; if it is a carried review,
-        # say so, or review_round() would count it as a reading.
+        # The row already records THIS job's own reading (written above), so completing is safe
+        # even if the read below fails. When what landed is a carried review, it is marked as one:
+        # at worst that leaves a reading uncounted, which only keeps the ladder stricter.
         record_rediscovered_carry(job_id, repo, pr, head_sha)
         return ("done", rid, "marker appeared before post")
 
@@ -4291,22 +4309,20 @@ def claim_fair(c, now):
     another repository (for the override counter and log line), else None. Only the choice of
     repository is new: eligibility is the FIFO query's own predicate, word for word.
 
-    An ACTIVE CHUNK SNAPSHOT keeps the worker: a queued job holding a chunk_jobs receipt with
-    next_at=0 - what worker_once() writes when a part was just persisted ("progress") - is claimed
-    before the rotation, as FIFO always did by its old `created`. The snapshot is bound to the base
-    sha, so interleaving other repositories' reviews between its parts would give the base time to
-    move and restart it under a new snapshot - over and over on a busy base. A receipt alone is
-    not enough: a job WAITING for the peer's handshake (next_at=now+60) or backing off after a
-    failure joins the rotation, or a few of them polling could hold the worker indefinitely."""
+    An ACTIVE CHUNK SNAPSHOT keeps the worker: a queued job whose last outcome persisted a part
+    (jobs.chunk_progress=1, written by worker_once() for a "progress" result and cleared by every
+    claim and every other outcome) is claimed before the rotation, as FIFO always did by its old
+    `created`. The snapshot is bound to the base sha, so interleaving other repositories' reviews
+    between its parts would give the base time to move and restart it - over and over on a busy
+    base. Nothing else qualifies: a job waiting for the peer's handshake, backing off, re-queued by
+    a refresh, by --requeue or by startup recovery starts (or restarts) work and takes its turn,
+    or a few of them could hold the worker indefinitely."""
     fifo = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state IN ('queued','retry') "
                      "AND next_at<=? ORDER BY created LIMIT 1", (now,)).fetchone()
     if fifo is None:
         return None, None
-    row = None
-    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_jobs'").fetchone():
-        row = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state='queued' AND next_at=0 "
-                        "AND id IN (SELECT job FROM chunk_jobs) "
-                        "ORDER BY created, id LIMIT 1").fetchone()
+    row = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state='queued' AND chunk_progress=1 "
+                    "AND next_at<=? ORDER BY created, id LIMIT 1", (now,)).fetchone()
     if row is None:
         candidates = c.execute("SELECT repo, MIN(created) FROM jobs WHERE state IN "
                                "('queued','retry') AND next_at<=? GROUP BY repo", (now,)).fetchall()
@@ -4349,7 +4365,9 @@ def worker_once():
                             "busy_attempts FROM jobs WHERE state IN ('queued','retry') AND next_at<=? "
                             "ORDER BY created LIMIT 1", (time.time(),)).fetchone()
         if row:
-            c.execute("UPDATE jobs SET state='running', updated=? WHERE id=?",
+            # chunk_progress is cleared by the claim: only this attempt's own outcome may set it
+            # again (fair queue - see claim_fair).
+            c.execute("UPDATE jobs SET state='running', chunk_progress=0, updated=? WHERE id=?",
                       (time.time(), row[0]))
             c.commit()
         c.close()
@@ -4427,9 +4445,9 @@ def worker_once():
         else:
             next_at = limited_until or (time.time() + min(3600, 60 * 2 ** attempts))
         c.execute("UPDATE jobs SET state=?, attempts=?, timeout_attempts=?, busy_attempts=?, "
-                  "next_at=?, updated=?, review_id=?, note=? WHERE id=?",
+                  "next_at=?, updated=?, review_id=?, note=?, chunk_progress=? WHERE id=?",
                   (persisted_state, attempts, timeouts, busy_next, next_at, time.time(), rid, note,
-                   jid))
+                   1 if progressed else 0, jid))
         if persisted_state == "done":
             c.execute("INSERT OR REPLACE INTO meta VALUES('last_success',?)",
                       (str(time.time()),))

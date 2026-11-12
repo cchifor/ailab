@@ -7315,6 +7315,59 @@ class CarryCleanVerdictTest(unittest.TestCase):
         self.assertIsNone(c["carried_from"])
         self.assertTrue(any(f"later review findings at {self.A[:9]}" in line for line in self.logs))
 
+    def test_a_finding_without_a_sequence_still_vetoes_when_it_is_newer(self):
+        """codex, implementation review round 2: code that predates verdict_seq (a rollback) writes
+        a finding with NULL sequence. If it is newer than the source, it must still veto; one from
+        before the source (pre-deploy history) must not block the PR's carries forever."""
+        a = self._run(self.A, CARRY_DIFF)
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,verdict,coverage,note) "
+                  "VALUES('o/r',5,?,'done',?,?,'findings','full','pre-deploy')",
+                  (self.X, a["updated"] - 7200, a["updated"] - 3600))
+        c.commit()
+        c.close()
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual(self.A, b["carried_from"], "an OLDER sequence-less finding does not veto")
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,verdict,coverage,note) "
+                  "VALUES('o/r',5,?,'quarantined',?,?,'findings','full','ambiguous POST: x')",
+                  (self.X[:39] + "1", real_time.time(), real_time.time()))
+        c.commit()
+        c.close()
+        c2 = self._run(self.C, CARRY_DIFF)
+        self.assertIsNone(c2["carried_from"], "a NEWER sequence-less finding vetoes")
+        self.assertEqual(2, len(self.llm_calls))
+
+    def test_an_unreadable_rediscovery_retries_instead_of_completing(self):
+        """codex, implementation review round 2: if the second read fails, completing would leave
+        a countable row for a carry; the job retries (no attempt consumed) and completes later."""
+        self._run(self.A, CARRY_DIFF)
+        self._run(self.B, CARRY_DIFF)
+        c = self.m.db()
+        c.execute("DELETE FROM jobs WHERE head_sha=?", (self.B,))   # the restored database
+        c.commit()
+        c.close()
+        api, calls = self.m.api, []
+
+        def flaky(path, method="GET", body=None, raw=False):
+            if "/reviews?" in path and method == "GET":
+                calls.append(path)
+                if len(calls) == 2:                                  # rediscovery's own read
+                    raise urllib.error.URLError("reset")
+            return api(path, method, body, raw)
+        self.m.api = flaky
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual(("retry", 0), (b["state"], b["attempts"]))
+        self.assertIn("provenance could not be read", b["note"])
+        c = self.m.db()
+        c.execute("UPDATE jobs SET next_at=0 WHERE id=?", (b["id"],))
+        c.commit()
+        c.close()
+        self.assertIsNotNone(self.m.worker_once())
+        b = self._row(self.B)
+        self.assertEqual(("done", self.A), (b["state"], b["carried_from"]))
+        self.assertEqual(2, self.m.review_round("o/r", 5))
+
     def test_a_rediscovered_carried_review_keeps_its_provenance(self):
         """codex, plan round 2: a job that finds our carried review already at its head (a database
         restored from before the carry) must not count that head as a reading."""
@@ -7663,27 +7716,23 @@ class FairQueueTest(unittest.TestCase):
         m = self._load(queue_policy="fair")
         self._backlog(m)
         self._add(m, "o/c", 9, 104.0)
-        c = m.db()
-        cid = c.execute("SELECT id FROM jobs WHERE repo='o/c'").fetchone()[0]
-        c.execute("CREATE TABLE IF NOT EXISTS chunk_jobs(job INTEGER PRIMARY KEY, binding TEXT NOT NULL)")
-        c.execute("INSERT INTO chunk_jobs VALUES(?,'b')", (cid,))
-        c.commit()
-        c.close()
         parts = iter([("progress", None, "part 1"), ("progress", None, "part 2"), ("done", 1, "final")])
 
         def review_job(jid, repo, pr, head):
             self.order.append(f"{repo[2:]}{pr}")
             return next(parts) if repo == "o/c" else ("done", 1, "ok")
         m.review_job = review_job
-        self.assertEqual(["c9", "c9", "c9", "a1", "b1", "a2", "a3"], self._drain(m))
+        # c9 STARTS in its turn; once a part is persisted it runs to the end.
+        self.assertEqual(["a1", "b1", "c9", "c9", "c9", "a2", "a3"], self._drain(m))
 
-    def test_a_waiting_chunk_job_joins_the_rotation(self):
-        """codex, implementation review: a receipt is not activity. A job waiting for the peer's
-        handshake (next_at=now+60 once polled) takes its turn like any other, or a few of them
-        polling could hold the worker forever."""
+    def test_only_persisted_progress_keeps_the_worker(self):
+        """codex, implementation review rounds 1-2: neither a chunk receipt nor queued+next_at=0
+        is activity. A job waiting for the peer's handshake, or re-queued by a refresh, --requeue
+        or startup recovery, (re)starts work and takes its turn - several of them could otherwise
+        hold the worker indefinitely. Only the claim-cleared chunk_progress flag counts."""
         m = self._load(queue_policy="fair")
         self._backlog(m)
-        self._add(m, "o/c", 9, 104.0, next_at=real_time.time() - 1)    # due, but not progressing
+        self._add(m, "o/c", 9, 104.0)                       # queued, next_at=0, like a refresh
         c = m.db()
         cid = c.execute("SELECT id FROM jobs WHERE repo='o/c'").fetchone()[0]
         c.execute("CREATE TABLE IF NOT EXISTS chunk_jobs(job INTEGER PRIMARY KEY, binding TEXT NOT NULL)")
@@ -7691,6 +7740,33 @@ class FairQueueTest(unittest.TestCase):
         c.commit()
         c.close()
         self.assertEqual(["a1", "b1", "c9", "a2", "a3"], self._drain(m))
+        # A crash mid-part: the claim cleared the flag, so recovery does not jump the queue.
+        m2 = self._load(queue_policy="fair")
+        self.order.clear()
+        self._add(m2, "o/a", 4, 200.0)
+        self._add(m2, "o/c", 10, 201.0)
+        m2.review_job = lambda jid, repo, pr, head: (self.order.append(f"{repo[2:]}{pr}"),
+                                                     ("progress", None, "part"))[1]
+        self.assertIsNotNone(m2.worker_once())               # c10 (c served least recently)
+        c = m2.db()
+        self.assertEqual(1, c.execute("SELECT chunk_progress FROM jobs WHERE pr=10").fetchone()[0])
+        c.close()
+
+        def host_dies(jid, repo, pr, head):
+            raise KeyboardInterrupt                          # not an Exception: the row stays running
+        m2.review_job = host_dies
+        with self.assertRaises(KeyboardInterrupt):
+            m2.worker_once()                                 # c10 again: a part was just persisted
+        c = m2.db()
+        self.assertEqual(("running", 0), c.execute(
+            "SELECT state, chunk_progress FROM jobs WHERE pr=10").fetchone(), "the claim cleared it")
+        self.assertEqual((0, 1), m2.recover_startup_jobs(c))
+        c.commit()
+        c.close()
+        m2.review_job = lambda jid, repo, pr, head: (self.order.append(f"{repo[2:]}{pr}"),
+                                                     ("done", 1, "ok"))[1]
+        self._drain(m2)
+        self.assertEqual(["c10", "a4", "c10"], self.order)
 
     def test_a_malformed_stamp_cannot_kill_the_worker(self):
         """meta is plain text; "inf" would raise OverflowError out of the claim, past every
