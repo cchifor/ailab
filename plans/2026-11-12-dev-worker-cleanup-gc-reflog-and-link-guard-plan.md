@@ -1,5 +1,13 @@
 # Dev-worker cleanup: gc-proof idle detection and a cross-tree link guard
 
+## Codex Review
+
+- Shipping A+B together is correct. Descriptor-based reflog reads, cross-root inventory coverage and fail-closed traversal are useful improvements.
+- The empty-reflog justification and “newest surviving entry” claim exceed what the bounded parser proves. Resolution errors and ordinary directories traversed before `..` also need explicit handling.
+- The ancestor-above-worktree exception leaves a real consumer gap; the pushback incorrectly assumes later application access paths are inventoried.
+- The 120 s refresh needs precise scheduling and deletion-boundary semantics, particularly when a cold inventory itself takes 154 s.
+- The canary deployment restarts the daily prune timer. Timer isolation, complete deletion manifests, rollback recovery and disk-guard failure reporting need tightening before rollout.
+
 ## Context
 
 On 2026-11-12, `DevWorkerDiskFilling` (critical) fired for 7 h on dev-worker-3 (192.168.0.10). `/workspace` was at
@@ -59,9 +67,6 @@ checkout or commit writes them.
   - `ENOENT` returns 0, as today: a worktree created without a reflog has no reflog activity. Any other error, or a
     file that is not regular (FIFO, device, a symlink refused by `O_NOFOLLOW`), returns `None`.
 
-<!-- codex: Copying `read_line` is insufficient: its lstat/open race permits replacement after the type check, and O_NOFOLLOW protects only the final component of the user-controlled gitdir/logs path. Pin parent directories without following symlinks and fstat the opened descriptor before seeking or reading; obtain fallback metadata from that same descriptor. -->
-<!-- opus-pushback: Accepted the fstat-on-descriptor part (above). Not pinning parent components. The gitdir path comes from the worktree's own `.git` file, which only that tree's owner can write, and the result is only a timestamp that decides that same owner's tree. A redirected parent can make the owner's own tree look older or newer, which the owner can already do by editing it; it can neither read another user's data back nor touch another user's tree. `O_NONBLOCK` plus the regular-file fstat already rule out the FIFO hang and device opens. -->
-
 - **Parsing.**
   - A record is `<old-oid> <new-oid> <name> <<email>> <unix-ts> <+|-hhmm>`, then optionally `\t<message>`. The tab is
     omitted when there is no message.
@@ -75,12 +80,14 @@ checkout or commit writes them.
 - **Value.**
   - The result is the MAXIMUM timestamp over all valid complete records in the tail, not simply the last one.
     Committer dates are not monotonic, and a recent entry followed by an older-dated one must still count.
+<!-- codex: A recent entry followed by more than 64 KiB of older-dated entries is still missed, so this is not necessarily the newest surviving entry claimed below. Add that boundary case and either explicitly accept the bounded-tail limitation or use a conservative policy when the omitted prefix could contain newer activity. -->
   - If the LAST complete record is malformed, or no complete record fits in 64 KiB, fall back to the descriptor's
     mtime. That is conservative: the old behaviour. A malformed tail must never cause an older valid entry to be
     selected.
   - An empty file (size 0) returns 0. `reflog expire` empties a log only when every entry is past `gc.reflogExpire`
     (90 days) or `gc.reflogExpireUnreachable` (30 days), so the last HEAD movement is at least that old. Using the
     file's mtime here would keep the false freshness that A fixes. The index, `HEAD` and file mtimes still count.
+<!-- codex: The 90/30-day values are configurable defaults, and explicit expiry such as the planned `--expire=now` test can empty a recently active log; emptiness proves no minimum age. Either retain conservative freshness when that evidence is unavailable or explicitly accept the lost activity signal, and test aggressive expiry of recent entries rather than only already-idle fixtures. -->
   - A timestamp later than now plus 5 minutes is treated as now (fresh).
 - **What the value means.** It is the time of the newest surviving reflog entry. Expiry drops old entries but never
   changes the timestamps of the ones it keeps. Entry times are committer-identity times, so an owner can fake them
@@ -99,12 +106,14 @@ checkout or commit writes them.
 - **Coverage: everything below each root**, on the root's filesystem, at any depth, whoever owns it.
   - That includes dependency dirs and tool caches, walked in full.
   - Skipped: `.git` dirs (git's own bookkeeping) and the container roots (`container_roots()`).
+<!-- codex: `.git` also contains user-managed consumers such as `.git/hooks/pre-commit -> W/node_modules/tool`; skipping it can leave those links broken. Include such hook links or explicitly document this consumer exclusion in the safety guarantee. -->
   - Not covered: a consumer on ANOTHER filesystem mounted below a root. That is stated in the docstring.
   - Measured on dw3 (prototype, read-only): 3.9 M entries, 520 k dirs, 37.6 k links. 7 s warm, 154 s right after a
     page-cache drop.
 - **Traversal: descriptor-relative.**
   - Each dir is opened with `openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)` and listed with
     `scandir(fd)`. A dir swapped for a symlink fails the open instead of being followed.
+<!-- codex: With `scandir(fd)`, `DirEntry.path` is only the entry name, so keep an explicit absolute source path for comparisons and reporting while reading the discovered link with `readlink(name, dir_fd=parent_fd)`. Reopening that source by its reconstructed pathname would lose the traversal's protection against parent-directory swaps; reuse `open_dir_nofollow` to anchor inventory roots. -->
   - Entry types come from `d_type` (`DirEntry.is_symlink` and `is_dir(follow_symlinks=False)`), so there is no
     per-entry `stat`.
   - A dir whose `fstat` shows another device is not entered.
@@ -115,6 +124,7 @@ checkout or commit writes them.
   - Any other error leaves the index `incomplete`, holding the first few paths and errors. An incomplete index makes
     the run remove NOTHING from the deps and worktrees steps, and it says so:
     `link inventory incomplete (N errors, e.g. <path>: <err>): not removing anything`. Docker categories are unaffected.
+<!-- codex: Define a nonzero exit status for incomplete inventory even when it leaves an empty plan: otherwise `main()` returns success and disk-guard can report EXHAUSTED instead of a failed safety check. An incomplete execute-time refresh must stop all remaining deps/worktree removals without reusing the previous index, while allowing independent Docker actions to finish. -->
 
 #### Resolving each link
 
@@ -126,8 +136,10 @@ checkout or commit writes them.
 - **For each link it records the paths its resolution TRAVERSED:**
   - every symlink location met, including the link itself and any symlinked path component on the way;
   - the final path.
+<!-- codex: `consumer/link -> W/node_modules/../src` depends on the ordinary directory `W/node_modules`, but the listed records omit it and deleting it breaks the link. Record these ordinary traversal dependencies separately from terminal directory targets, applying only the into-candidate predicate to ordinary prefixes so recording `W` does not accidentally protect every sibling dependency. -->
 - **When resolution fails** (dangling tail, a loop, too many expansions, an error), it records what it traversed so far
   plus the unresolved remainder appended to the resolved prefix. Unresolved never counts as "references nothing".
+<!-- codex: An unresolved spelling after `EACCES`, `EIO` or another unexpected lookup error cannot reveal an unreadable intermediate symlink into a different candidate. Distinguish these failures from expected dangling/loop/expansion-limit outcomes and propagate them to the incomplete-inventory refusal, with injected `lstat` and `readlink` failures in tests. -->
   - Resolution reads link targets and checks existence and type with `lstat` and `readlink`. It never opens a
     target's contents.
 
@@ -141,7 +153,7 @@ worktree). The function returns the links not under `C` with a traversed path `T
 
 `under` compares on path-component boundaries, as it does today.
 
-<!-- codex: A link to an ancestor also exposes the candidate: consumer/repo -> source-worktree allows consumer/repo/node_modules to use a dependency that this predicate would delete. Conservatively protect descendants of linked directory targets as well, with component-boundary tests to avoid confusing sibling prefixes. -->
+<!-- codex: round-2: The broad-retention concern is valid, but inventory resolves link payloads, not later application access paths: `~/ws -> /workspace/c4` records only `/workspace/c4`, even when a consumer later uses `~/ws/repo/node_modules/x`. Either protect those ancestor targets or explicitly accept this consumer gap and narrow the guarantee; the claim that the later resolution is already recorded is incorrect. -->
 <!-- opus-pushback: Accepted for ancestors from C up to its worktree root W, the `consumer/repo -> source-worktree` case. Not for ancestors ABOVE W: a convenience link such as `~/ws -> /workspace/c4` or `~/work -> /workspace` would mark every candidate on the box as linked, and nothing would be reclaimed again. A consumer reaching C through such a link does it by a path whose resolution traverses that link and ends under C, and that resolution is already recorded. -->
 
 - A link inside `C` that points into `C` does not count.
@@ -154,6 +166,7 @@ worktree). The function returns the links not under `C` with a traversed path `T
   - `disk-guard` runs the worktrees and deps steps as SEPARATE `cleanup` processes, each with a plan scan and a fresh
     scan. A tick under pressure with candidates in both steps can therefore walk up to 4 times: about 30 s warm, about
     10 min worst case cold.
+<!-- codex: Four walks is only the initial planning/rescan cost, not a worst-case bound once execute-time refreshes are included. Measure the final implementation across many actions and cold scans, including refresh count and total ladder duration. -->
   - The guard's timer is `OnUnitInactiveSec`, so ticks never overlap. The step timeout is 2700 s.
   - The canary measures the whole ladder.
 - **Deps step:** `plan_deps` refuses a linked dep dir with `linked from N path(s), e.g. <first>`. The worktree's
@@ -164,17 +177,22 @@ worktree). The function returns the links not under `C` with a traversed path `T
   `Linked from other trees, not removed: N dep dir(s), M worktree(s) (e.g. <candidate> <- <link>)`. That puts it in the
   last 15 lines `disk-guard` keeps. A linked worktree is listed whatever its idle age, so a linked merged worktree is
   never retained silently.
+<!-- codex: Age-independent reporting conflicts with building the index only when an otherwise eligible candidate exists; define whether the report covers only runs that actually build an inventory. Emit the aggregate after execution as well as on dry-run/no-action exits, since more than 15 action lines would otherwise push a planning-time summary out of disk-guard's retained output. -->
 - **Freshness at execute time.** The index records its start time. `execute()` rebuilds it before an action when it is
   older than 120 s, and skips the action if the fresh index shows a link into it. Same as today, `still_planned` is
   all-or-nothing for a deps action: if one of its dirs gains a link in the fresh scan, the whole action is skipped this
   run. That is intended and tested.
+<!-- codex: A 154 s walk is already older than 120 s when it completes, so start-time scheduling can rebuild before every action or repeatedly rebuild without making progress. Use monotonic timestamps and define start versus completion semantics explicitly—for example, retain start time for the observation-age bound and completion time for refresh scheduling—and test a walk longer than the interval. -->
+<!-- codex: Checking only at entry to `execute()`'s action branch does not bound freshness at deletion: `remove_worktree` performs Git checks and a full inspection, and one deps action can inspect/delete several large directories. Recheck at each destructive boundary after expensive inspection, or include that additional unbounded delay in the stated guarantee and test a slow action. -->
 - **What is guaranteed, precisely.** There is no removal of a dir or worktree that a symlink on the inventoried
   filesystems resolved through when an index no older than 120 s plus one walk was taken.
   - What remains is a link created after that, to a candidate. Such a link would point to a dir that has already
     been, or is being, deleted.
+<!-- codex: The walk is not an atomic snapshot: a link can be created or retargeted after its directory was visited, including during the inventory, and remain valid for minutes before deletion begins. State the guarantee in terms of references actually observed in a completed inventory, with its coverage exclusions, and describe this whole race window rather than only links to already-deleted directories. -->
   - The consequences are bounded by what is eligible at all. Deps are regenerable (`npm ci`, `cargo build`). A whole
     worktree is eligible only if it is clean and merged, or clean with its HEAD on a forge branch, so it can be
     recovered from the forge. The docstring states this.
+<!-- codex: `judge_worktree` checks local remote-tracking refs and accepts squash-equivalent merges, so it does not prove that the exact HEAD is recoverable from the current forge. Describe recovery of source contents under those assumptions and the loss of the worktree-specific reflog, without adding a new live-network dependency to cleanup. -->
   - It does not rely on the atomic rename for consumer safety.
 
 ### Out of scope: capacity, measured afterwards
@@ -194,6 +212,8 @@ worktree). The function returns the links not under `C` with a traversed path `T
 
 ## Critical files
 
+<!-- codex: The requested scope includes `ansible/roles/dev_worker/files/disk-guard`, but this list specifies no caller change or caller tests. State whether cleanup's exit/output contract alone is sufficient or describe the required guard edit, and add `test_dev_worker_disk_guard.py` coverage for incomplete-inventory failure classification and retained summaries. -->
+
 - `ansible/roles/dev_worker/files/cleanup`
   - `reflog_time`, used by `scan_worktree`.
   - `link_index` (with its incomplete state), the resolver, and `linked_from`.
@@ -205,12 +225,14 @@ worktree). The function returns the links not under `C` with a traversed path `T
   - **Fixtures:** `WorktreesTest.age()` also rewrites the reflog ENTRY timestamps. Real git writes recent entries, so
     without this the existing stale and merged tests would stop producing candidates. Separate tests keep "recent git
     activity is fresh".
+<!-- codex: Also isolate `DEPS_ROOTS` in fixtures: the new union means passing a temporary `--deps-roots` no longer prevents CLI tests from scanning the runner's actual `/home` and `/workspace`. -->
   - **Real-git regression:**
     - a main clone and two linked worktrees with old-dated entries (`GIT_COMMITTER_DATE`);
     - `git reflog expire --all --expire=never --expire-unreachable=never`, then `git gc`;
     - assert every `logs/HEAD` mtime changed and the worktrees are still judged idle, by both the deps and the
       worktrees step;
     - then `--expire=now`: an empty reflog stays idle.
+<!-- codex: Pin expiry configuration during the retain-entries phase so the subsequent plain `git gc` cannot empty the fixtures and accidentally test only the empty-file branch. Set reflog mtimes explicitly old before the commands and assert the expected entries survive, avoiding timestamp-resolution-dependent assertions. -->
   - **Parser:**
     - recent entry first, then an older-dated one: max wins;
     - partial final record (no trailing `\n`): fresh;
@@ -243,6 +265,7 @@ worktree). The function returns the links not under `C` with a traversed path `T
       - a sibling with the same prefix (`node_modules2`);
     - loop: the traversed paths are recorded, and the walk terminates;
     - an inventory error removes nothing, with the message.
+<!-- codex: Exercise the safety mechanisms directly: swap an enumerated directory for a symlink before opening it, inject errors at directory open/scandir and link read, and distinguish ignored `ENOENT` from incomplete inventory. Add exact 40/41-expansion cases and assert descriptors are closed on error paths. -->
   - **Combined flags and execute:**
     - a worktree kept because it is linked still has its unlinked deps planned;
     - a link created after the scan, with an injected clock making the index older than 120 s: skipped;
@@ -253,17 +276,20 @@ worktree). The function returns the links not under `C` with a traversed path `T
 ## Verification
 
 1. **Unit tests** in `python:3.12` (with git): `python3 -m unittest discover -s scripts/tests -p "test_*.py"`.
+<!-- codex: The full discovery suite also imports PyYAML, which stock `python:3.12` does not provide; specify the test environment dependencies rather than only Git. Use verbose output to identify the Linux/Git tests that ran, since an aggregate skip count does not establish their execution. -->
    - Record the python and git versions.
    - Assert that `DepsTest` and `WorktreesTest` RAN, by test count and skips, not merely that the run passed.
 2. **CI (`script-tests.yaml`, the runner's own python and git):** check in the job log that the Linux and git suites
    ran (`skipped=` count), plus the PR's reviewbot reviews.
 3. **Canary on dw3. Stop conditions:** any unexpected deletion, any newly broken link, an incomplete inventory, or a
    ladder run over 15 min. On any of them: restore `cleanup.prev`, re-enable the timers, and stop the rollout.
+<!-- codex: Restoring the executable does not restore deleted targets or repair consumers; for unexpected deletion or broken links, recover and validate the affected paths before resuming automatic reclamation. Specify how an over-15-minute run is stopped and awaited before rollback so an already-running process cannot continue deleting with the old loaded code. -->
    1. `sudo systemctl stop dev-worker-disk-guard.timer dev-worker-deps-prune.timer`, then wait until neither service is
       active.
    2. Baseline: `sudo cp /usr/local/bin/cleanup /usr/local/bin/cleanup.prev`. Record the set of links on `/workspace`
       and `/home`, each with its resolved target (NUL-separated, outside the container roots).
    3. Deploy: `ansible-playbook dev-workers.yml -l dev-worker-3 --tags cleanup` from WSL with `ANSIBLE_CONFIG` set.
+<!-- codex: `tasks/cleanup.yml` explicitly sets `dev-worker-deps-prune.timer` to `started`, so this deployment undoes step 1 and its persistent timer may immediately launch cleanup. Keep timer activation suppressed throughout deployment and verify both services remain inactive before proceeding; if disk-guard changes, `--tags cleanup` alone also does not deploy that file. -->
    4. Dry runs:
       - the guard's EXACT step commands, with its actual `--deps-roots` (the worktrees step, then the deps step);
       - the daily timer's commands.
@@ -271,12 +297,16 @@ worktree). The function returns the links not under `C` with a traversed path `T
       - the known linked sources (`relay-workers/node_modules`, …) are reported as linked;
       - positive controls are still planned (an idle unlinked dep dir, or an eligible unlinked worktree), or there are
         none;
+<!-- codex: Allowing no positive control can pass a canary that refuses all reclamation, reproducing the operational failure this change is meant to fix. Require a controlled eligible unlinked fixture when natural candidates are absent, and verify its actual removal while a linked control survives. -->
       - there is no "incomplete";
       - the timings are recorded.
       Record the planned paths and the eligible bytes.
+<!-- codex: Capture a lossless manifest of full candidate paths and identities: the current rendered table groups entries and truncates paths even with `--all`. Compare actual removals against that manifest as a subset, accounting for legitimate execute-time skips; the later requirement for exact equality would incorrectly treat successful revalidation as a canary failure. -->
    5. A real run of the guard's exact commands.
+<!-- codex: Running only the worktrees/deps commands does not measure the whole ladder or exercise disk-guard's exit classification, output truncation and heartbeat integration. Include an actual guard invocation with the deployed service arguments and record its complete duration/results separately from the individual cleanup runs. -->
    6. Check:
       - every link that resolved in step 2 and still exists still resolves;
+<!-- codex: Use `lstat`/`lexists` to decide whether a symlink still exists: `exists` follows the target and would silently omit newly dangling links from this check. Preserve the original link text/identity as well as its resolved target so replacements and retargeting can be distinguished from cleanup damage. -->
       - what disappeared equals the recorded plan;
       - a consumer smoke test: `node -e "require.resolve('vitest')"` in one linked worktree.
    7. Re-enable both timers.
