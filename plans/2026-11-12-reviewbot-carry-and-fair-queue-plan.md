@@ -298,3 +298,20 @@ All five ACCEPTED and fixed in one commit, each with a test that a targeted muta
 4. (important) The final "marker appeared before post" path now records a carried review's
    provenance too.
 5. (nit) `_meta_int()` raised OverflowError on "inf", which would kill the worker thread.
+
+## Codex implementation review, round 2 - dispositions
+
+Round-1 fixes verified: 1, 2 and 5 closed; 3 and 4 partly, completed below. Three new findings,
+all ACCEPTED (one with a narrower fix than proposed), each with a mutant-killing test:
+
+1. (blocker) After a rollback to pre-`verdict_seq` code, a later finding has NULL sequence and was
+   invisible to the veto. Codex proposed vetoing on every NULL-sequence non-clean row; that would
+   block carries forever on every PR with pre-deploy findings history (most open relay PRs). Instead
+   such a row vetoes when its `updated` is at or after the source's completion - `updated` only
+   moves later, so the error is conservative.
+2. (important) `queued` + `next_at=0` is also written by a refresh, `--requeue` and startup
+   recovery: replaced by an explicit `jobs.chunk_progress` flag, set only by a "progress" outcome
+   and cleared by every claim and every other outcome.
+3. (important) The entry-path rediscovery could fail its second read and still complete a
+   countable row: it now returns `retry` (no attempt consumed). The final-check path needs no
+   change - the early provenance write already records that job's own reading.
