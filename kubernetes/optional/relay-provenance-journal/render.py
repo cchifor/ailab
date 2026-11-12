@@ -16,6 +16,11 @@ SERVICE_NS = NAME
 PUBLIC = '/run/relay-provenance/'
 ORIGIN = 'https://' + NAME + '.' + SERVICE_NS + '.svc:8443'
 PG_IMAGE = 'docker.io/library/postgres:17.11-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac'
+# Keep renderer pins consistent with initialize.sh and the matching upgrade script.
+REVIEWED_SCHEMA_SHA256 = {
+    'schema010': '86fd1612f0d9aac62902825d7e4fb290ac6c2c030f89d3e4a764a23230a125e1',
+    'schema011': '094e6639b07d497401f86ab6af5ccd14813238d2beb1d538bcd1ac7f105caebd',
+}
 SECURITY = {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
             'capabilities': {'drop': ['ALL']}, 'seccompProfile': {'type': 'RuntimeDefault'}}
 AFFINITY = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
@@ -96,7 +101,7 @@ def common(config, keys):
 
 
 def initialize(config):
-    return database_job(config, 'initialize', list(range(1, 11)))
+    return database_job(config, 'initialize', list(range(1, 12)))
 
 
 def upgrade(config):
@@ -120,11 +125,21 @@ def upgrade10(config):
     return database_job(config, 'upgrade10', [10])
 
 
+def upgrade11(config):
+    previous = config.get('fromVersion') if isinstance(config, dict) else None
+    if type(previous) is not int or previous != 10:
+        refuse('upgrade-version-invalid')
+    return database_job(config, 'upgrade11', [11])
+
+
 def database_job(config, action, numbers):
     keys = ['schema' + str(n).zfill(3) for n in numbers]
-    is_upgrade = action in ('upgrade', 'upgrade9', 'upgrade10')
+    is_upgrade = action in ('upgrade', 'upgrade9', 'upgrade10', 'upgrade11')
     commit = common(config, keys + (['fromVersion'] if is_upgrade else []))
     pins = [config[key] for key in keys]
+    for key, digest in REVIEWED_SCHEMA_SHA256.items():
+        if key in keys and config[key]['sha256'] != digest:
+            refuse(key + '-pin-mismatch')
     sql = {str(n).zfill(3) + '.sql': pinned(pin, 262144) for n, pin in zip(numbers, pins)}
     if any(len(re.findall(r'^BEGIN;$', raw, re.M)) != 1 or
            len(re.findall(r'^COMMIT;$', raw, re.M)) != 1 for raw in sql.values()):
@@ -142,6 +157,7 @@ def database_job(config, action, numbers):
     job_name = NAME + ('-initialize-once' if action == 'initialize' else
                        '-upgrade-8-to-9' if action == 'upgrade9' else
                        '-upgrade-9-to-10' if action == 'upgrade10' else
+                       '-upgrade-10-to-11' if action == 'upgrade11' else
                        '-upgrade-' + str(config['fromVersion']) + '-to-8')
     job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata(job_name, DB_NS, commit),
            'spec': {'suspend': True, 'backoffLimit': 0, 'activeDeadlineSeconds': 600,
@@ -357,10 +373,10 @@ def presence(config):
 
 
 def main(args):
-    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'upgrade9', 'upgrade10', 'service', 'presence') or not sha(args[2]):
+    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'upgrade9', 'upgrade10', 'upgrade11', 'service', 'presence') or not sha(args[2]):
         refuse('usage-invalid')
     config = parse(pinned({'path': args[1], 'sha256': args[2]}))
-    items = {'initialize': initialize, 'upgrade': upgrade, 'upgrade9': upgrade9, 'upgrade10': upgrade10,
+    items = {'initialize': initialize, 'upgrade': upgrade, 'upgrade9': upgrade9, 'upgrade10': upgrade10, 'upgrade11': upgrade11,
              'service': service, 'presence': presence}[args[0]](config)
     print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}, separators=(',', ':')))
 

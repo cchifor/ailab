@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 RENDER = ROOT / 'kubernetes/optional/relay-provenance-journal/render.py'
 COMMIT = 'a' * 40
 HASH = 'b' * 64
+REVIEWED010 = '86fd1612f0d9aac62902825d7e4fb290ac6c2c030f89d3e4a764a23230a125e1'
+REVIEWED011 = '094e6639b07d497401f86ab6af5ccd14813238d2beb1d538bcd1ac7f105caebd'
+FIXTURES = ROOT / 'scripts/tests/fixtures/relay-provenance-journal'
 
 
 class RendererTest(unittest.TestCase):
@@ -30,6 +33,13 @@ class RendererTest(unittest.TestCase):
         pin = self.file('input.json', json.dumps(config))
         return subprocess.run(['python3', '-B', str(RENDER), mode, pin['path'], pin['sha256']],
                               text=True, capture_output=True, check=False)
+
+    def reviewed(self, number):
+        path = FIXTURES / (number + '.sql')
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        expected = {'010': REVIEWED010, '011': REVIEWED011}[number]
+        self.assertEqual(digest, expected, 'fixture must match the reviewed SQL artifact')
+        return {'path': str(path), 'sha256': digest}
 
     def service_config(self):
         public = {key: self.file(key + '.txt', '{}') for key in ('policy', 'authorization', 'witness')}
@@ -59,8 +69,10 @@ class RendererTest(unittest.TestCase):
 
     def test_suspended_initialization_and_preflight_pins(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT}
-        for n in range(1, 11):
+        for n in range(1, 12):
             config['schema' + str(n).zfill(3)] = self.file(str(n) + '.sql', 'BEGIN;\nCOMMIT;\n')
+        config['schema010'] = self.reviewed('010')
+        config['schema011'] = self.reviewed('011')
         output = self.render('initialize', config)
         self.assertEqual(output.returncode, 0, output.stderr)
         resource = json.loads(output.stdout)
@@ -68,8 +80,8 @@ class RendererTest(unittest.TestCase):
         objects = resource['items']
         job = objects[-1]
         self.assertTrue(job['spec']['suspend'])
-        self.assertEqual(job['spec']['template']['spec']['containers'][0]['env'][-1]['name'], 'SCHEMA_010_SHA256')
-        self.assertEqual(set(objects[0]['data']), {f'{n:03d}.sql' for n in range(1, 11)})
+        self.assertEqual(job['spec']['template']['spec']['containers'][0]['env'][-1]['name'], 'SCHEMA_011_SHA256')
+        self.assertEqual(set(objects[0]['data']), {f'{n:03d}.sql' for n in range(1, 12)})
         config['schema008']['sha256'] = HASH
         self.assertEqual(self.render('initialize', config).returncode, 78)
 
@@ -149,11 +161,11 @@ class RendererTest(unittest.TestCase):
         script = ROOT / 'kubernetes/optional/relay-provenance-journal/start.sh'
         def run():
             return subprocess.run(['sh', str(script)], env=env, text=True, capture_output=True).returncode
-        for previous in (5, 6, 7, 8, 9):
+        for previous in (5, 6, 7, 8, 9, 10):
             schema.write_text(str(previous) + '\n')
             self.assertEqual(run(), 78)
             self.assertFalse(marker.exists())
-        schema.write_text('10\n')
+        schema.write_text('11\n')
         pending.write_text('from=9 to=10\n')
         self.assertEqual(run(), 78)
         self.assertFalse(marker.exists())
@@ -167,7 +179,7 @@ class RendererTest(unittest.TestCase):
 
     def test_schema10_upgrade_requires_exact_stage_and_preserves_maintenance_guards(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 9,
-                  'schema010': self.file('010.sql', 'BEGIN;\nCOMMIT;\n')}
+                  'schema010': self.reviewed('010')}
         output = self.render('upgrade10', config)
         self.assertEqual(output.returncode, 0, output.stderr)
         schema, script, job = json.loads(output.stdout)['items']
@@ -191,6 +203,25 @@ class RendererTest(unittest.TestCase):
         malformed = self.file('010-malformed.sql', 'BEGIN;\nCOMMIT;\nBEGIN;\nCOMMIT;\n')
         self.assertEqual(self.render('upgrade10', {**config, 'schema010': malformed}).returncode, 78)
 
+    def test_renderer_refuses_unreviewed_pins_before_producing_a_job(self):
+        for number, previous in [('010', 9), ('011', 10)]:
+            key = 'schema' + number
+            unreviewed = self.file(number + '-unreviewed.sql', 'BEGIN;\nCOMMIT;\n')
+            claimed = {'path': unreviewed['path'], 'sha256': self.reviewed(number)['sha256']}
+            config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': previous}
+            action = 'upgrade' + str(previous + 1)
+            for pin in (unreviewed, claimed):
+                with self.subTest(number=number, mode=action, pin=pin):
+                    self.assertEqual(self.render(action, {**config, key: pin}).returncode, 78)
+            initialize = {'version': 1, 'relaySourceCommit': COMMIT}
+            for n in range(1, 12):
+                label = str(n).zfill(3)
+                initialize['schema' + label] = self.reviewed(label) if n >= 10 else self.file(label + '.sql', 'BEGIN;\nCOMMIT;\n')
+            self.assertEqual(self.render('initialize', initialize).returncode, 0)
+            for pin in (unreviewed, claimed):
+                with self.subTest(number=number, mode='initialize', pin=pin):
+                    self.assertEqual(self.render('initialize', {**initialize, key: pin}).returncode, 78)
+
     def test_schema10_rejects_bad_pin_before_reading_retained_data(self):
         marker = self.dir / 'hash-called-010'
         sha = self.dir / 'sha256sum'
@@ -210,6 +241,55 @@ class RendererTest(unittest.TestCase):
         # A well-formed but unrelated SQL artifact is refused before hashing,
         # PostgreSQL startup or the persistent maintenance latch.
         result = subprocess.run(['sh', str(script)], env={**env, 'SCHEMA_010_SHA256': HASH},
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 78)
+        self.assertFalse(marker.exists())
+
+    def test_schema11_upgrade_requires_exact_stage_and_preserves_maintenance_guards(self):
+        config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 10,
+                  'schema011': self.reviewed('011')}
+        output = self.render('upgrade11', config)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        schema, script, job = json.loads(output.stdout)['items']
+        self.assertEqual(set(schema['data']), {'011.sql'})
+        self.assertEqual(set(script['data']), {'upgrade11.sh'})
+        self.assertEqual(job['metadata']['name'], 'relay-provenance-journal-upgrade-10-to-11')
+        self.assertTrue(job['spec']['suspend'])
+        self.assertEqual(job['spec']['backoffLimit'], 0)
+        pod = job['spec']['template']['spec']
+        self.assertEqual(pod['containers'][0]['command'], ['/bin/sh', '/initialize/upgrade11.sh'])
+        self.assertEqual(pod['containers'][0]['env'][-1], {'name': 'FROM_SCHEMA_VERSION', 'value': '10'})
+        self.assertNotIn('fsGroup', pod['securityContext'])
+        self.assertNotIn('fsGroupChangePolicy', pod['securityContext'])
+        self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertEqual(pod['restartPolicy'], 'Never')
+        for previous in (True, '10', 5, 6, 7, 8, 9, 11, None):
+            self.assertEqual(self.render('upgrade11', {**config, 'fromVersion': previous}).returncode, 78)
+        self.assertEqual(self.render('upgrade11', {**config, 'schema010': config['schema011']}).returncode, 78)
+        self.assertEqual(self.render('upgrade11', {**config, 'schema011': {'path': config['schema011']['path'],
+                                                                      'sha256': HASH}}).returncode, 78)
+        malformed = self.file('011-malformed.sql', 'BEGIN;\nCOMMIT;\nBEGIN;\nCOMMIT;\n')
+        self.assertEqual(self.render('upgrade11', {**config, 'schema011': malformed}).returncode, 78)
+
+    def test_schema11_rejects_bad_pin_before_reading_retained_data(self):
+        marker = self.dir / 'hash-called-011'
+        sha = self.dir / 'sha256sum'
+        sha.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 99\n')
+        sha.chmod(0o755)
+        env = dict(os.environ, PGDATA='/var/lib/postgresql/data/pgdata', FROM_SCHEMA_VERSION='10',
+                   SCHEMA_011_SHA256='invalid', PATH=str(self.dir) + ':/usr/bin:/bin')
+        script = ROOT / 'kubernetes/optional/relay-provenance-journal/initialize/upgrade11.sh'
+        result = subprocess.run(['sh', str(script)], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 78)
+        self.assertFalse(marker.exists())
+        for previous in ('', '9', '11'):
+            result = subprocess.run(['sh', str(script)], env={**env, 'FROM_SCHEMA_VERSION': previous,
+                                    'SCHEMA_011_SHA256': HASH}, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 78)
+            self.assertFalse(marker.exists())
+        # A well-formed but unrelated SQL artifact is refused before hashing,
+        # PostgreSQL startup or the persistent maintenance latch.
+        result = subprocess.run(['sh', str(script)], env={**env, 'SCHEMA_011_SHA256': HASH},
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 78)
         self.assertFalse(marker.exists())
