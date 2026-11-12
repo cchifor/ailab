@@ -37,13 +37,13 @@ superuser=$(psql -X -At -h /var/run/postgresql -U postgres -d relay_provenance -
 # Require the exact reviewed pre-010 or already-repaired presence functions.
 # SQL 010 replaces only these bodies and preserves all retained evidence.
 source_ok=$(psql -X -At -h /var/run/postgresql -U postgres -d relay_provenance -v ON_ERROR_STOP=1 <<'SQL'
-SELECT count(*)=2 AND bool_and(
+SELECT count(*)=2 AND bool_and((
  p.proowner='relay_provenance_owner'::regrole AND p.prosecdef
  AND p.prorettype=to_regtype(v.return_type)
  AND array_length(p.proconfig,1)=1
  AND regexp_replace(p.proconfig[1],'\s','','g')='search_path=pg_catalog,worker_provenance,pg_temp'
  AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex') IN (v.old_sha256,v.new_sha256)
-) AND EXISTS (
+) IS TRUE) AND EXISTS (
  SELECT 1 FROM pg_trigger WHERE tgrelid='worker_provenance.admissions'::regclass
  AND tgname='admission_runtime_presence_latch' AND NOT tgisinternal
  AND tgenabled='O' AND tgtype=7 AND tgqual IS NULL

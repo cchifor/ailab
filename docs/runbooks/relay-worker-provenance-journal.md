@@ -326,11 +326,12 @@ refused; a global server default alone cannot override role or client settings.
 Use an explicit `BEGIN ISOLATION LEVEL READ COMMITTED` for attended activation.
 Verify this with the exact selected source image before enabling issuance.
 
-Local validation passed 13 offline rendering/startup tests and eight disposable
+Local validation passed 13 offline rendering/startup tests and nine disposable
 PostgreSQL 17 Alpine scenarios: fresh initialization, retained-history upgrade,
 known preapplied SQL 010, pending-latch refusal, function-drift refusal,
-artifact-drift refusal, migration failure with the latch retained, and disabled
-trigger refusal. The failure case injects a local test event trigger into the
+artifact-drift refusal, migration failure with the latch retained, disabled
+trigger refusal, and NULL function-configuration refusal before the latch.
+The failure case injects a local test event trigger into the
 disposable database; no target database was changed. The retained-history rows
 are explicitly synthetic fixtures. These runs used Relay source candidate
 `8178be756622af49f88c6b85a15fa0f120150a02` and local PostgreSQL image
@@ -341,7 +342,8 @@ Job. Explicit Opus source reviews through LLM Router `pool-claude`
 `088a4d20-4401-4aee-aebf-f350921283a3`) ended ALIGNED for this inactive stage.
 The subsequent fresh-initializer artifact check and repeated final trigger check
 address its two optional consistency suggestions; the eight PostgreSQL scenarios
-were rerun afterward. Raw snapshots and logs are in
+were rerun afterward; the NULL-configuration refusal and successful upgrade were
+also checked after the reviewer-requested NULL handling correction. Raw snapshots and logs are in
 `/workspace/archive/relay-provenance-schema10-20261112` on dev-worker-3, subject to
 archive retention. No live Kubernetes writes were performed.
 
