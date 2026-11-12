@@ -317,20 +317,10 @@ spec:
                 ==
               count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"})
             )
+            # Counted == all accounts with a reading here, so the floor can count those: one copy of
+            # the exclusion, not two that could drift apart.
             and
-            count by (provider) (
-              (llm_router_account_limit_status{job="llm-router",status="limited"} == 1)
-              unless on (job, provider, account)
-              (
-                (sum by (job, provider, account) (increase(llm_router_requests_total{job="llm-router",status="complete"}[30m])) > 0)
-                unless on (job, provider, account)
-                max by (job, provider, account) (
-                  (llm_router_account_limit_used_percent{job="llm-router",model=""} >= 100)
-                  unless on (job, provider, account, window)
-                  ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
-                )
-              )
-            ) >= 2
+            count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"}) >= 2
           for: 5m
           labels: { severity: critical }
           annotations:

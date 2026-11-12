@@ -685,6 +685,12 @@ tests:
         values: "1x20"
       - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="limited"}'
         values: "1x20"
+      # Resets well after the evaluation: the expiry filter must keep these windows live (a
+      # flipped `<=` would drop them and hide the page).
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "1794535200x20"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "1794718800x20"
       - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
         values: "100x20"
       - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
