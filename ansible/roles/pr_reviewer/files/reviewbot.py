@@ -264,9 +264,17 @@ def _meta_int(c, key):
     """A meta value as an integer (0 when absent or unparsable). meta.v is TEXT: compared as
     strings, "10" sorts before "2". The caller holds db_lock and owns the connection."""
     row = c.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+    if not row:
+        return 0
     try:
-        return int(float(row[0])) if row else 0
+        return int(row[0])
     except (TypeError, ValueError):
+        pass
+    try:
+        # "12.0" (bump_meta's spelling) still reads; "inf"/"nan" must not raise OverflowError
+        # out of the claim, which would kill the only worker thread.
+        return int(float(row[0]))
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -3529,23 +3537,36 @@ def carry_source(repo, pr, head_sha, fingerprint, raw, coverage):
                 "AND head_sha<>? AND state='done' AND verdict='clean' AND coverage='full' "
                 "AND diff_digest=? AND verdict_seq IS NOT NULL ORDER BY verdict_seq, id",
                 (repo, pr, head_sha, fingerprint))}
+            # A PR that has ever been through the chunk lane is never carried: that lane's
+            # verdicts live in its own receipts and markers, which neither the veto below nor
+            # marker_of() can read, and a lane rollback restores the old CARRY_EPOCH.
+            chunked = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='chunk_jobs'").fetchone() and c.execute(
+                "SELECT 1 FROM jobs WHERE repo=? AND pr=? AND id IN (SELECT job FROM chunk_jobs) "
+                "LIMIT 1", (repo, pr)).fetchone()
         finally:
             c.close()
     if prior is None:
         return None, None
+    if chunked:
+        return None, "the PR was reviewed through the chunk lane"
     if BIN_MARKER_RE.search(raw):
         return None, "the diff has a binary section"
     if coverage != "full":
         return None, f"coverage {coverage}"
     if not fingerprint or not rows:
         return None, "no clean review of an identical diff"
-    latest = None
+    # Our account's LATEST review of any kind, not our latest v1 marker: a review this code cannot
+    # read (a chunk-lane marker, a future marker version) must stop the carry, not be looked past.
+    mine, latest_rv = f"reviewer-{CFG['persona']}", None
     for rv in all_reviews(repo, pr):
-        m = marker_of(rv)
-        if m and m.group(1) == CFG["persona"]:
-            latest = m
-    if latest is None:
+        if ((rv.get("user") or {}).get("login") or "") == mine:
+            latest_rv = rv
+    if latest_rv is None:
         return None, "no review of ours in Gitea"
+    latest = marker_of(latest_rv)
+    if latest is None or latest.group(1) != CFG["persona"]:
+        return None, "our latest review carries no verdict marker this code reads"
     src, verdict = latest.group(2), latest.group(3) or "findings"
     if verdict != "clean":
         return None, f"latest review is {verdict} at {src[:9]}"
@@ -3800,10 +3821,26 @@ def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict
     ambiguous failure quarantines (never blind-retried). Shared by real reviews, by the
     over-cap skip and by carried verdicts so all carry the same discipline.
 
-    The provenance (verdict, coverage, fingerprint, carried_from, verdict_seq) is written BEFORE
-    the POST, in the same UPDATE that enters `posting`, so every way a landed review reaches
-    `done` later - a restart re-queue or a --requeue that finds the marker - keeps it. All five are
-    written every time, so a retry that takes another path never inherits a stale value."""
+    The provenance (verdict, coverage, fingerprint, carried_from, verdict_seq) is recorded FIRST,
+    before any check below can return or raise: a verdict the model reached is a fact about this
+    persona's reading even when the head then moves, posting is disabled or Gitea fails to answer,
+    and carry_source() vetoes on it. It survives every later way a landed review reaches `done`
+    (a restart re-queue, a --requeue that finds the marker). All five are written every time, so a
+    retry that takes another path never inherits a stale value. `updated` is left alone here: for
+    a running job it dates the in-flight attempt (reviewbot_running_job_age_seconds)."""
+    with db_lock:
+        c = db()
+        try:
+            # verdict_seq: the order verdicts were produced in. One transaction with the row it
+            # stamps.
+            seq = _meta_int(c, VERDICT_SEQ_KEY) + 1
+            c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (VERDICT_SEQ_KEY, str(seq)))
+            c.execute("UPDATE jobs SET verdict=?, coverage=?, diff_digest=?, carried_from=?, "
+                      "verdict_seq=? WHERE id=?",
+                      (verdict, coverage, fingerprint, carried_from, seq, job_id))
+            c.commit()
+        finally:
+            c.close()
     # Final eligibility + dedup check immediately before the mutation.
     d3 = pr_ok(repo, pr, head_sha)
     if d3 is None or "moved_to" in d3:
@@ -3814,17 +3851,14 @@ def post_review(job_id, repo, pr, head_sha, body, event, comments, note, verdict
         return ("retry", None, "posting disabled")
     rid = existing_marker(repo, pr, head_sha)
     if rid:
+        # Whatever landed is what this head's row now stands for; if it is a carried review,
+        # say so, or review_round() would count it as a reading.
+        record_rediscovered_carry(job_id, repo, pr, head_sha)
         return ("done", rid, "marker appeared before post")
 
     with db_lock:
         c = db()
-        # verdict_seq: the order verdicts were produced in, for carry_source()'s veto. One
-        # transaction with the row it stamps.
-        seq = _meta_int(c, VERDICT_SEQ_KEY) + 1
-        c.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (VERDICT_SEQ_KEY, str(seq)))
-        c.execute("UPDATE jobs SET state='posting', verdict=?, coverage=?, diff_digest=?, "
-                  "carried_from=?, verdict_seq=?, updated=? WHERE id=?",
-                  (verdict, coverage, fingerprint, carried_from, seq, time.time(), job_id))
+        c.execute("UPDATE jobs SET state='posting', updated=? WHERE id=?", (time.time(), job_id))
         c.commit()
         c.close()
     try:
@@ -4257,20 +4291,22 @@ def claim_fair(c, now):
     another repository (for the override counter and log line), else None. Only the choice of
     repository is new: eligibility is the FIFO query's own predicate, word for word.
 
-    An ACTIVE CHUNK SNAPSHOT keeps the worker: an eligible job holding a chunk_jobs receipt (it
-    has bound a snapshot and requeues itself after every persisted part) is claimed before the
-    rotation, as FIFO always did by its old `created`. The snapshot is bound to the base sha, so
-    interleaving other repositories' reviews between its parts would give the base time to move
-    and restart it under a new snapshot - over and over on a busy base."""
+    An ACTIVE CHUNK SNAPSHOT keeps the worker: a queued job holding a chunk_jobs receipt with
+    next_at=0 - what worker_once() writes when a part was just persisted ("progress") - is claimed
+    before the rotation, as FIFO always did by its old `created`. The snapshot is bound to the base
+    sha, so interleaving other repositories' reviews between its parts would give the base time to
+    move and restart it under a new snapshot - over and over on a busy base. A receipt alone is
+    not enough: a job WAITING for the peer's handshake (next_at=now+60) or backing off after a
+    failure joins the rotation, or a few of them polling could hold the worker indefinitely."""
     fifo = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state IN ('queued','retry') "
                      "AND next_at<=? ORDER BY created LIMIT 1", (now,)).fetchone()
     if fifo is None:
         return None, None
     row = None
     if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_jobs'").fetchone():
-        row = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state IN ('queued','retry') "
-                        "AND next_at<=? AND id IN (SELECT job FROM chunk_jobs) "
-                        "ORDER BY created, id LIMIT 1", (now,)).fetchone()
+        row = c.execute(f"SELECT {CLAIM_COLUMNS} FROM jobs WHERE state='queued' AND next_at=0 "
+                        "AND id IN (SELECT job FROM chunk_jobs) "
+                        "ORDER BY created, id LIMIT 1").fetchone()
     if row is None:
         candidates = c.execute("SELECT repo, MIN(created) FROM jobs WHERE state IN "
                                "('queued','retry') AND next_at<=? GROUP BY repo", (now,)).fetchall()

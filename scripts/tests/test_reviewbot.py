@@ -7120,6 +7120,7 @@ class CarryCleanVerdictTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.diffs, self.reviews, self.posts, self.llm_calls, self.logs = {}, [], [], [], []
         self.findings, self.head, self.post_fails, self.page_size = [], None, False, 50
+        self.during_llm = None
         self.m = self._load(carry_clean_verdicts=True)
 
     def _load(self, **overrides):
@@ -7133,6 +7134,9 @@ class CarryCleanVerdictTest(unittest.TestCase):
 
     def _llm(self, title, desc, diff, rubric=""):
         self.llm_calls.append(diff)
+        if self.during_llm:
+            self.during_llm()               # something happens while the model runs
+            self.during_llm = None
         return {"summary": "looks fine", "findings": [dict(f) for f in self.findings]}
 
     def _api(self, path, method="GET", body=None, raw=False):
@@ -7325,6 +7329,71 @@ class CarryCleanVerdictTest(unittest.TestCase):
                          (b["state"], b["note"], b["carried_from"]))
         self.assertEqual(1, len(self.llm_calls))
         self.assertEqual(2, self.m.review_round("o/r", 5))
+
+    def test_a_finding_overtaken_by_a_push_before_posting_still_vetoes(self):
+        """codex, implementation review: the model reached a finding at B, then the head moved
+        before the POST. The finding was never posted, but it is this persona's latest reading."""
+        self._run(self.A, CARRY_DIFF)
+
+        def push():
+            self.head = self.X
+            self.diffs[self.X] = CARRY_DIFF_2
+        self.during_llm = push
+        b = self._run(self.B, CARRY_DIFF_2, findings=[FINDING])
+        self.assertEqual(("superseded", "findings"), (b["state"], b["verdict"]))
+        self.assertIsNotNone(b["verdict_seq"])
+        c = self._run(self.C, CARRY_DIFF)
+        self.assertIsNone(c["carried_from"])
+        self.assertTrue(any(f"later review findings at {self.B[:9]}" in line for line in self.logs))
+
+    def test_a_finding_held_by_disabled_posting_still_vetoes(self):
+        self._run(self.A, CARRY_DIFF)
+        flag = pathlib.Path(self.m.CFG["posting_disable_flag"])
+        self.during_llm = lambda: flag.write_text("", encoding="utf-8")
+        b = self._run(self.B, CARRY_DIFF_2, findings=[FINDING])
+        self.assertEqual(("retry", "findings"), (b["state"], b["verdict"]))
+        flag.unlink()
+        c = self._run(self.C, CARRY_DIFF)
+        self.assertIsNone(c["carried_from"])
+        self.assertEqual(3, len(self.llm_calls))
+
+    def test_a_carried_review_that_lands_at_the_final_check_keeps_its_provenance(self):
+        """codex, implementation review: our carried review appears between the entry check and
+        the final pre-POST check; the job completes on it and must not count as a reading."""
+        self._run(self.A, CARRY_DIFF)
+
+        def carried_lands():
+            self.reviews.append({"id": 8000, "user": {"login": "reviewer-test"}, "state": "APPROVED",
+                                 "commit_id": self.B,
+                                 "body": f"x\n\n<!-- review-bot-carried: from={self.A} -->\n"
+                                         + self.m.review_marker(self.B, "clean")})
+        self.during_llm = carried_lands
+        b = self._run(self.B, CARRY_DIFF_2)
+        self.assertEqual(("done", "marker appeared before post", self.A),
+                         (b["state"], b["note"], b["carried_from"]))
+        self.assertEqual(2, self.m.review_round("o/r", 5))
+
+    def test_our_latest_review_without_a_readable_marker_stops_the_carry(self):
+        """A chunk-lane marker (or any future marker version) by our account is a review this code
+        cannot read; it must stop the carry, not be looked past to an older clean one."""
+        self._run(self.A, CARRY_DIFF)
+        self.reviews.append({"id": 9000, "user": {"login": "reviewer-test"}, "state": "COMMENT",
+                             "commit_id": self.X, "body": "Complete-review snapshot ...\n\n"
+                                                          "<!-- review-bot:v2 opaque -->"})
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertTrue(any("our latest review carries no verdict marker" in line for line in self.logs))
+
+    def test_a_pr_reviewed_through_the_chunk_lane_is_never_carried(self):
+        a = self._run(self.A, CARRY_DIFF)
+        c = self.m.db()
+        c.execute("CREATE TABLE IF NOT EXISTS chunk_jobs(job INTEGER PRIMARY KEY, binding TEXT NOT NULL)")
+        c.execute("INSERT INTO chunk_jobs VALUES(?,'b')", (a["id"],))
+        c.commit()
+        c.close()
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertTrue(any("reviewed through the chunk lane" in line for line in self.logs))
 
     def test_a_failed_carry_post_is_an_ambiguous_quarantine_with_its_provenance(self):
         self._run(self.A, CARRY_DIFF)
@@ -7607,6 +7676,38 @@ class FairQueueTest(unittest.TestCase):
             return next(parts) if repo == "o/c" else ("done", 1, "ok")
         m.review_job = review_job
         self.assertEqual(["c9", "c9", "c9", "a1", "b1", "a2", "a3"], self._drain(m))
+
+    def test_a_waiting_chunk_job_joins_the_rotation(self):
+        """codex, implementation review: a receipt is not activity. A job waiting for the peer's
+        handshake (next_at=now+60 once polled) takes its turn like any other, or a few of them
+        polling could hold the worker forever."""
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        self._add(m, "o/c", 9, 104.0, next_at=real_time.time() - 1)    # due, but not progressing
+        c = m.db()
+        cid = c.execute("SELECT id FROM jobs WHERE repo='o/c'").fetchone()[0]
+        c.execute("CREATE TABLE IF NOT EXISTS chunk_jobs(job INTEGER PRIMARY KEY, binding TEXT NOT NULL)")
+        c.execute("INSERT INTO chunk_jobs VALUES(?,'b')", (cid,))
+        c.commit()
+        c.close()
+        self.assertEqual(["a1", "b1", "c9", "a2", "a3"], self._drain(m))
+
+    def test_a_malformed_stamp_cannot_kill_the_worker(self):
+        """meta is plain text; "inf" would raise OverflowError out of the claim, past every
+        handler, and end the only worker thread."""
+        m = self._load(queue_policy="fair")
+        c = m.db()
+        for v in ("inf", "nan", "abc", "1e400"):
+            c.execute("INSERT OR REPLACE INTO meta VALUES('t',?)", (v,))
+            self.assertEqual(0, m._meta_int(c, "t"), v)
+        for v, want in (("12", 12), ("12.0", 12), (str(2 ** 62), 2 ** 62)):
+            c.execute("INSERT OR REPLACE INTO meta VALUES('t',?)", (v,))
+            self.assertEqual(want, m._meta_int(c, "t"), v)
+        c.execute("INSERT OR REPLACE INTO meta VALUES('queue_served:o/a','inf')")
+        c.commit()
+        c.close()
+        self._backlog(m)
+        self.assertEqual(["a1", "b1", "a2", "a3"], self._drain(m))
 
     def test_an_unknown_policy_runs_fifo(self):
         m = self._load(queue_policy="round-robin")
