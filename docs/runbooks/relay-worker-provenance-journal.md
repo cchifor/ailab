@@ -12,13 +12,15 @@ volumes; verify its actual PV reclaim policy before creating it.
 
 Use a merged, reviewed Relay source commit that contains
 `deploy/worker-provenance-journal/001-provenance.sql` through
-`009-original-pod-spec-commitment.sql`. SQL 006 supplies the signed presence ledger;
+`010-runtime-presence-latch-isolation.sql`. SQL 006 supplies the signed presence ledger;
 SQL 007 repairs the open-execution versus closed-cleanup boundary. SQL 008 repairs
 lookup expiry after lock waits and exact backing replay for already installed
 databases; updated SQL 001 also contains those fixes for fresh installations.
 SQL 009 adds the prepared Pod spec commitment for new original Pod effects and
-does not rewrite existing immutable effects. These migrations do not install a
-Node signer, independent witness or execution fence. Review and record all nine
+does not rewrite existing immutable effects. SQL 010 requires fresh READ COMMITTED
+snapshots for both runtime-presence activation and admission latching. These
+migrations do not install a Node signer, independent witness or execution fence.
+Review and record all ten
 SHA256 values and the source commit. The initializer renderer input is a single
 root or operator-owned, single-link, non-group-writable regular JSON file:
 
@@ -34,16 +36,17 @@ root or operator-owned, single-link, non-group-writable regular JSON file:
   "schema006": {"path": "/absolute/006-runtime-presence-ledger.sql", "sha256": "<64 hex>"},
   "schema007": {"path": "/absolute/007-runtime-presence-open-lifecycle.sql", "sha256": "<64 hex>"},
   "schema008": {"path": "/absolute/008-authority-completion.sql", "sha256": "<64 hex>"},
-  "schema009": {"path": "/absolute/009-original-pod-spec-commitment.sql", "sha256": "<64 hex>"}
+  "schema009": {"path": "/absolute/009-original-pod-spec-commitment.sql", "sha256": "<64 hex>"},
+  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "<64 hex>"}
 }
 ```
 
 Render with `python3 -B kubernetes/optional/relay-provenance-journal/render.py
 initialize /absolute/initializer.json <initializer-json-sha256>`. JSON output
-is a Kubernetes list. The Job verifies all nine SQL files before touching
+is a Kubernetes list. The Job verifies all ten SQL files before touching
 PGDATA, refuses any existing PGDATA, creates a fresh UTF8 `relay_provenance`
 database, applies each transaction in order, checks empty authority/history,
-cleanly stops PostgreSQL, and only then writes schema marker 9. An interrupted
+cleanly stops PostgreSQL, and only then writes schema marker 10. An interrupted
 attempt or absent marker requires attended inspection. Never reset a retained
 volume or rerun the Job against it. The runtime `start.sh` refuses missing or
 wrong marker/version, recovery signals, or unsafe PGDATA ownership/mode and
@@ -77,7 +80,7 @@ no automatic retry, service-account token or network listener. It mounts the
 existing database PVC. An authorized operator must first pause issuance, stop
 the source listeners and database StatefulSet, and verify that **all** other
 PVC consumers are gone. ReadWriteOnce does not provide this exclusion. Keep
-the new schema-9 startup guard installed while replicas remain zero, so an
+the new schema-10 startup guard installed while replicas remain zero, so an
 older startup script cannot reopen the database during maintenance. Preserve
 the independently reviewed recovery procedure and source history; this job
 does not create a backup or qualify a restore. Uncertain workers stay reserved.
@@ -183,7 +186,8 @@ and update both the previous and repaired digest columns first.
 This is a separate one-shot stage. Keep the existing schema 5/6/7 to schema 8
 upgrade unchanged; do not offer a direct 5/6/7 to 9 path. After that upgrade
 finishes, keep every consumer stopped and do not start the schema 8 runtime
-between stages. The schema 9 runtime startup guard accepts only marker 9.
+between stages. Continue through the separate 9→10 stage before restarting;
+the current runtime startup guard accepts only marker 10.
 
 Before rendering, use the final merged Relay source pin that contains SQL 009
 and recheck both installed-function hashes against that exact source. The
@@ -241,8 +245,105 @@ or change the version marker to manufacture success. Have the operator inspect
 which transactions committed and follow the reviewed recovery procedure. SQL 007
 also refuses inconsistent phase data instead of reopening a closed admission.
 After a successful Job is terminal and its Pod is gone, verify the exact schema
-and compatible source image before an attended database/listener restart.
+and continue through 9→10 before an attended database/listener restart with the
+compatible source image. Do not restart at the intermediate marker 8 or 9.
 All committed manifests remain optional and inactive.
+
+## Upgrade a retained schema 9 database to schema 10
+
+SQL 010 repairs both sides of runtime-presence activation serialization. A
+REPEATABLE READ or SERIALIZABLE transaction could retain a stale snapshot while
+waiting for the policy row lock; both activation and admission latching now
+require READ COMMITTED. This migration replaces only two function bodies. It
+preserves admissions, effects, presence evidence, source authority and grants.
+
+Keep all consumers stopped through the existing 5/6/7→8, 8→9 and this 9→10
+sequence. Use a final merged, reviewed Relay commit containing
+`010-runtime-presence-latch-isolation.sql` and record its raw SHA256. The script
+binds its expected function bodies to the exact SQL file digest
+`86fd1612f0d9aac62902825d7e4fb290ac6c2c030f89d3e4a764a23230a125e1` and refuses a
+different artifact before starting PostgreSQL. If the final merged SQL differs,
+update these pins through a reviewed repository change; do not edit the script
+while rendering a live Job. Do not use an unmerged candidate as a live release
+pin. Fresh initialization enforces this same SQL 010 artifact pin.
+
+```json
+{
+  "version": 1,
+  "relaySourceCommit": "<final reviewed 40-hex Relay commit>",
+  "fromVersion": 9,
+  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "<64 hex>"}
+}
+```
+
+```sh
+python3 -B kubernetes/optional/relay-provenance-journal/render.py \
+  upgrade10 /absolute/upgrade10-render.json <upgrade10-render-json-sha256>
+```
+
+This renders an inactive suspended Job with no retry, token or network listener.
+As for the earlier stages, an authorized operator stops every source/database
+consumer and excludes concurrent PVC users before starting maintenance. The Job
+requires marker 9, safe retained PGDATA, PostgreSQL 17 and no pending latch. It
+checks the two installed function signatures, owner, return types, search paths,
+security-definer flags and exact bodies, and verifies the enabled admission
+latch trigger before creating the persistent latch. Only the
+reviewed pre-010 or already-repaired bodies are accepted. Function drift leaves
+the old marker and no new latch, after a clean local PostgreSQL shutdown.
+
+After pin verification and preflight, the Job persists `from=9 to=10`, applies
+SQL 010, and checks the corrected function bodies and unchanged function
+configuration, return types and ACLs before stopping PostgreSQL.
+Only then does it atomically publish marker 10 and remove the latch. SQL 010 is
+idempotent and a known already-applied body under marker 9 is supported when
+there is no pending latch. This does not authorize automatic retries: SQL
+failure, a failed final function check, interruption, or an existing pending
+latch requires attended investigation. Keep the marker and latch as evidence;
+never clear them to manufacture success. All manifests remain outside Flux
+inventory and all runtime replicas remain zero.
+
+Generate and compare the presence-function digests with this read-only query
+against a disposable database initialized from the exact reviewed 001–009
+source, then against the same database after SQL 010. The installed marker-9
+preflight must match one of those reviewed bodies. SQL 005 is the last definition
+of these functions before SQL 010; SQL 006–009 do not replace them.
+
+```sql
+SELECT p.oid::regprocedure AS signature,
+       encode(sha256(convert_to(p.prosrc,'UTF8')),'hex') AS prosrc_sha256
+FROM pg_proc p
+WHERE p.oid IN (
+  'worker_provenance.latch_runtime_presence_requirement()'::regprocedure,
+  'worker_provenance.activate_runtime_presence_policy(text,text)'::regprocedure)
+ORDER BY 1;
+```
+
+Before activation, inspect database/role `default_transaction_isolation` settings
+and the source client's transaction setup through the operator's existing client.
+Admission insertion and `activate_runtime_presence_policy` must run in READ
+COMMITTED transactions. Explicit REPEATABLE READ or SERIALIZABLE callers remain
+refused; a global server default alone cannot override role or client settings.
+Use an explicit `BEGIN ISOLATION LEVEL READ COMMITTED` for attended activation.
+Verify this with the exact selected source image before enabling issuance.
+
+Local validation passed 13 offline rendering/startup tests and eight disposable
+PostgreSQL 17 Alpine scenarios: fresh initialization, retained-history upgrade,
+known preapplied SQL 010, pending-latch refusal, function-drift refusal,
+artifact-drift refusal, migration failure with the latch retained, and disabled
+trigger refusal. The failure case injects a local test event trigger into the
+disposable database; no target database was changed. The retained-history rows
+are explicitly synthetic fixtures. These runs used Relay source candidate
+`8178be756622af49f88c6b85a15fa0f120150a02` and local PostgreSQL image
+`sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0`.
+They do not qualify a merged source, the deployment image or a live maintenance
+Job. Explicit Opus source reviews through LLM Router `pool-claude`
+(`aafc078a-2186-4944-a5db-78dd3deac593`, then
+`088a4d20-4401-4aee-aebf-f350921283a3`) ended ALIGNED for this inactive stage.
+The subsequent fresh-initializer artifact check and repeated final trigger check
+address its two optional consistency suggestions; the eight PostgreSQL scenarios
+were rerun afterward. Raw snapshots and logs are in
+`/workspace/archive/relay-provenance-schema10-20261112` on dev-worker-3, subject to
+archive retention. No live Kubernetes writes were performed.
 
 ## Database credentials
 
@@ -314,7 +415,7 @@ The rendered Deployment never references the mutable issuance Secret.
 
 ## Runtime presence source listener
 
-After Relay SQL 001–008 and the compatible bounded
+After Relay SQL 001–010 and the compatible bounded
 `dist/scripts/serve-runtime-presence-source.js` are reviewed and published,
 render the separate `presence` mode. Its input has exact fields `version`,
 `relaySourceCommit`, `relayImage`, `tlsCertificate`, `clientCa`,
